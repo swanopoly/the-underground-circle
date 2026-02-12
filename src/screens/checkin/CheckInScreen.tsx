@@ -81,6 +81,7 @@ export default function CheckInScreen({ route }: any) {
       user_id: user.id,
       circle_id: circleId,
       content: content.trim(),
+      check_in_date: new Date().toISOString().split('T')[0],
     });
 
     setLoading(false);
