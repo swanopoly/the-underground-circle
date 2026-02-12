@@ -1,7 +1,6 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { Text } from 'react-native';
 import CirclesScreen from '../screens/circles/CirclesScreen';
 import CreateCircleScreen from '../screens/circles/CreateCircleScreen';
 import JoinCircleScreen from '../screens/circles/JoinCircleScreen';
@@ -13,7 +12,12 @@ const CirclesStack = createNativeStackNavigator();
 
 function CirclesNavigator() {
   return (
-    <CirclesStack.Navigator screenOptions={{ headerShown: false }}>
+    <CirclesStack.Navigator
+      screenOptions={{
+        headerShown: false,
+        contentStyle: { backgroundColor: '#0a0a0a' },
+      }}
+    >
       <CirclesStack.Screen name="CirclesList" component={CirclesScreen} />
       <CirclesStack.Screen name="CreateCircle" component={CreateCircleScreen} />
       <CirclesStack.Screen name="JoinCircle" component={JoinCircleScreen} />
@@ -48,7 +52,6 @@ export default function MainNavigator() {
         name="Circles"
         component={CirclesNavigator}
         options={{
-          tabBarIcon: ({ color }) => <Text style={{ fontSize: 22, color }}>⭕</Text>,
           tabBarLabel: 'CIRCLES',
         }}
       />
@@ -56,7 +59,6 @@ export default function MainNavigator() {
         name="Profile"
         component={ProfileScreen}
         options={{
-          tabBarIcon: ({ color }) => <Text style={{ fontSize: 22, color }}>👤</Text>,
           tabBarLabel: 'PROFILE',
         }}
       />
