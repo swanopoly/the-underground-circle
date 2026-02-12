@@ -5,7 +5,7 @@ import { supabase } from '../lib/supabase';
 import CirclesScreen from '../screens/circles/CirclesScreen';
 import CreateCircleScreen from '../screens/circles/CreateCircleScreen';
 import JoinCircleScreen from '../screens/circles/JoinCircleScreen';
-import CheckInScreen from '../screens/checkin/CheckInScreen';
+import CircleDetailScreen from '../screens/circles/CircleDetailScreen';
 import ProfileScreen from '../screens/profile/ProfileScreen';
 import ConnectWalletScreen from '../screens/wallet/ConnectWalletScreen';
 import WalletDashboard from '../screens/wallet/WalletDashboard';
@@ -24,7 +24,7 @@ function CirclesNavigator() {
       <CirclesStack.Screen name="CirclesList" component={CirclesScreen} />
       <CirclesStack.Screen name="CreateCircle" component={CreateCircleScreen} />
       <CirclesStack.Screen name="JoinCircle" component={JoinCircleScreen} />
-      <CirclesStack.Screen name="CircleDetail" component={CheckInScreen} />
+      <CirclesStack.Screen name="CircleDetail" component={CircleDetailScreen} />
     </CirclesStack.Navigator>
   );
 }
