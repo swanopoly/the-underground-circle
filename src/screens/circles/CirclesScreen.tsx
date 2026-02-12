@@ -7,6 +7,7 @@ import {
   StyleSheet,
   RefreshControl,
   Alert,
+  Platform,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { Circle } from '../../types';
