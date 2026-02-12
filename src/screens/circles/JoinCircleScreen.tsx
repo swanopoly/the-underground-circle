@@ -3,33 +3,38 @@ import {
   View,
   Text,
   TextInput,
-  TouchableOpacity,
   StyleSheet,
-  Alert,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
+  useWindowDimensions,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { showAlert } from '../../lib/alert';
+import Button from '../../components/Button';
 
 export default function JoinCircleScreen({ navigation }: any) {
   const [code, setCode] = useState('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const { width } = useWindowDimensions();
+  const isWide = width > 500;
 
   const handleJoin = async () => {
+    setError('');
     if (!code.trim()) {
-      Alert.alert('Enter an invite code');
+      setError('Enter an invite code');
       return;
     }
 
     setLoading(true);
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) {
-      Alert.alert('Not logged in');
+      setError('Not logged in');
       setLoading(false);
       return;
     }
 
-    // Find circle by invite code
     const { data: circle, error: findError } = await supabase
       .from('circles')
       .select('*, circle_members(count)')
@@ -37,20 +42,18 @@ export default function JoinCircleScreen({ navigation }: any) {
       .single();
 
     if (findError || !circle) {
-      Alert.alert('Invalid code', 'No circle found with that code.');
+      setError('No circle found with that code.');
       setLoading(false);
       return;
     }
 
-    // Check if full
     const memberCount = circle.circle_members?.[0]?.count || 0;
     if (memberCount >= circle.max_members) {
-      Alert.alert('Circle is full', 'This circle has reached its max members.');
+      setError('This circle is full.');
       setLoading(false);
       return;
     }
 
-    // Check if already a member
     const { data: existing } = await supabase
       .from('circle_members')
       .select('id')
@@ -59,12 +62,11 @@ export default function JoinCircleScreen({ navigation }: any) {
       .single();
 
     if (existing) {
-      Alert.alert('Already in', 'You\'re already in this circle.');
+      setError("You're already in this circle.");
       setLoading(false);
       return;
     }
 
-    // Join
     const { error: joinError } = await supabase.from('circle_members').insert({
       circle_id: circle.id,
       user_id: user.id,
@@ -73,13 +75,12 @@ export default function JoinCircleScreen({ navigation }: any) {
 
     setLoading(false);
     if (joinError) {
-      Alert.alert('Error', joinError.message);
+      setError(joinError.message);
       return;
     }
 
-    Alert.alert('You\'re in!', `Welcome to ${circle.name}.`, [
-      { text: 'LET\'S GO', onPress: () => navigation.goBack() },
-    ]);
+    showAlert("You're in!", `Welcome to ${circle.name}.`);
+    navigation.goBack();
   };
 
   return (
@@ -88,33 +89,48 @@ export default function JoinCircleScreen({ navigation }: any) {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <View style={styles.inner}>
-        <Text style={styles.title}>JOIN A</Text>
-        <Text style={styles.titleBold}>CIRCLE</Text>
-        <Text style={styles.subtitle}>Got an invite code? Enter it below.</Text>
+        <View style={[styles.card, isWide && styles.cardWide]}>
+          <View style={styles.headerSection}>
+            <View style={styles.logoCircle}>
+              <Text style={styles.logoText}>⟶</Text>
+            </View>
+            <Text style={styles.title}>JOIN A</Text>
+            <Text style={styles.titleBold}>CIRCLE</Text>
+            <Text style={styles.subtitle}>Got an invite code? Enter it below.</Text>
+          </View>
 
-        <TextInput
-          style={styles.input}
-          placeholder="Invite code"
-          placeholderTextColor="#666"
-          value={code}
-          onChangeText={setCode}
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
+          {error ? (
+            <View style={styles.errorBox}>
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+          ) : null}
 
-        <TouchableOpacity
-          style={[styles.button, loading && styles.buttonDisabled]}
-          onPress={handleJoin}
-          disabled={loading}
-        >
-          <Text style={styles.buttonText}>
-            {loading ? 'JOINING...' : 'JOIN'}
-          </Text>
-        </TouchableOpacity>
+          <View style={styles.form}>
+            <Text style={styles.inputLabel}>INVITE CODE</Text>
+            <TextInput
+              style={styles.codeInput}
+              placeholder="e.g. a1b2c3d4"
+              placeholderTextColor="#444"
+              value={code}
+              onChangeText={setCode}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
 
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Text style={styles.cancelText}>Cancel</Text>
-        </TouchableOpacity>
+            <Button
+              title={loading ? 'JOINING...' : 'JOIN'}
+              onPress={handleJoin}
+              loading={loading}
+              disabled={loading}
+            />
+          </View>
+
+          <View style={styles.divider} />
+
+          <Pressable onPress={() => navigation.goBack()} style={styles.cancelButton}>
+            <Text style={styles.cancelText}>Cancel</Text>
+          </Pressable>
+        </View>
       </View>
     </KeyboardAvoidingView>
   );
@@ -128,61 +144,107 @@ const styles = StyleSheet.create({
   inner: {
     flex: 1,
     justifyContent: 'center',
-    paddingHorizontal: 32,
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  card: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: '#111',
+    borderRadius: 16,
+    padding: 32,
+    borderWidth: 1,
+    borderColor: '#222',
+  },
+  cardWide: {
+    padding: 40,
+  },
+  headerSection: {
+    alignItems: 'center',
+    marginBottom: 28,
+  },
+  logoCircle: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    borderWidth: 2,
+    borderColor: '#fff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  logoText: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '900',
   },
   title: {
-    color: '#fff',
-    fontSize: 18,
+    color: '#666',
+    fontSize: 13,
     letterSpacing: 6,
     textAlign: 'center',
   },
   titleBold: {
     color: '#fff',
-    fontSize: 36,
+    fontSize: 28,
     fontWeight: '900',
-    letterSpacing: 4,
+    letterSpacing: 3,
     textAlign: 'center',
   },
   subtitle: {
-    color: '#888',
-    fontSize: 14,
+    color: '#555',
+    fontSize: 13,
     textAlign: 'center',
-    marginTop: 8,
-    marginBottom: 40,
+    marginTop: 10,
     fontStyle: 'italic',
   },
-  input: {
-    backgroundColor: '#1a1a1a',
+  errorBox: {
+    backgroundColor: '#2a1515',
     borderWidth: 1,
-    borderColor: '#333',
-    borderRadius: 8,
+    borderColor: '#4a2020',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 16,
+  },
+  errorText: {
+    color: '#ff6666',
+    fontSize: 13,
+    textAlign: 'center',
+  },
+  form: {
+    marginBottom: 24,
+  },
+  inputLabel: {
+    color: '#666',
+    fontSize: 11,
+    letterSpacing: 2,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  codeInput: {
+    backgroundColor: '#0a0a0a',
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    borderRadius: 10,
     padding: 16,
     color: '#fff',
     fontSize: 20,
-    marginBottom: 24,
+    marginBottom: 20,
     textAlign: 'center',
     letterSpacing: 4,
     fontWeight: '700',
   },
-  button: {
-    backgroundColor: '#fff',
-    borderRadius: 8,
-    padding: 16,
-    alignItems: 'center',
+  divider: {
+    height: 1,
+    backgroundColor: '#222',
     marginBottom: 16,
   },
-  buttonDisabled: {
-    opacity: 0.5,
-  },
-  buttonText: {
-    color: '#0a0a0a',
-    fontSize: 16,
-    fontWeight: '800',
-    letterSpacing: 2,
+  cancelButton: {
+    alignItems: 'center',
+    padding: 8,
   },
   cancelText: {
-    color: '#666',
-    textAlign: 'center',
+    color: '#555',
     fontSize: 14,
   },
 });
