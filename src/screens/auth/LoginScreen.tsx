@@ -5,7 +5,6 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  Alert,
   KeyboardAvoidingView,
   Platform,
   useWindowDimensions,
@@ -16,18 +15,20 @@ export default function LoginScreen({ navigation }: any) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
   const { width } = useWindowDimensions();
   const isWide = width > 500;
 
   const handleLogin = async () => {
+    setError('');
     if (!email || !password) {
-      Alert.alert('Fill in both fields');
+      setError('Fill in both fields');
       return;
     }
     setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
     setLoading(false);
-    if (error) Alert.alert('Error', error.message);
+    if (signInError) setError(signInError.message);
   };
 
   return (
@@ -46,6 +47,12 @@ export default function LoginScreen({ navigation }: any) {
             <Text style={styles.titleBold}>CIRCLE</Text>
             <Text style={styles.subtitle}>Built for people who actually work.</Text>
           </View>
+
+          {error ? (
+            <View style={styles.errorBox}>
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+          ) : null}
 
           <View style={styles.form}>
             <Text style={styles.inputLabel}>EMAIL</Text>
@@ -155,6 +162,19 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 10,
     fontStyle: 'italic',
+  },
+  errorBox: {
+    backgroundColor: '#2a1515',
+    borderWidth: 1,
+    borderColor: '#4a2020',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 16,
+  },
+  errorText: {
+    color: '#ff6666',
+    fontSize: 13,
+    textAlign: 'center',
   },
   form: {
     marginBottom: 24,

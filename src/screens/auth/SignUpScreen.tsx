@@ -5,43 +5,45 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  Alert,
   KeyboardAvoidingView,
   Platform,
   useWindowDimensions,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { showAlert } from '../../lib/alert';
 
 export default function SignUpScreen({ navigation }: any) {
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
   const { width } = useWindowDimensions();
   const isWide = width > 500;
 
   const handleSignUp = async () => {
+    setError('');
     if (!username || !email || !password) {
-      Alert.alert('Fill in everything');
+      setError('Fill in everything');
       return;
     }
     if (password.length < 6) {
-      Alert.alert('Password needs at least 6 characters');
+      setError('Password needs at least 6 characters');
       return;
     }
     setLoading(true);
-    const { error } = await supabase.auth.signUp({
+    const { error: signUpError } = await supabase.auth.signUp({
       email,
       password,
       options: { data: { username, display_name: username } },
     });
     setLoading(false);
-    if (error) {
-      Alert.alert('Error', error.message);
-    } else {
-      Alert.alert('Welcome to the Circle', 'Check your email to verify, then log in.');
-      navigation.navigate('Login');
+    if (signUpError) {
+      setError(signUpError.message);
+      return;
     }
+    showAlert('Welcome to the Circle', 'Check your email to verify, then log in.');
+    navigation.navigate('Login');
   };
 
   return (
@@ -59,6 +61,12 @@ export default function SignUpScreen({ navigation }: any) {
             <Text style={styles.titleBold}>CIRCLE</Text>
             <Text style={styles.subtitle}>No spectators. Only grinders.</Text>
           </View>
+
+          {error ? (
+            <View style={styles.errorBox}>
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+          ) : null}
 
           <View style={styles.form}>
             <Text style={styles.inputLabel}>USERNAME</Text>
@@ -176,6 +184,19 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 10,
     fontStyle: 'italic',
+  },
+  errorBox: {
+    backgroundColor: '#2a1515',
+    borderWidth: 1,
+    borderColor: '#4a2020',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 16,
+  },
+  errorText: {
+    color: '#ff6666',
+    fontSize: 13,
+    textAlign: 'center',
   },
   form: {
     marginBottom: 24,
