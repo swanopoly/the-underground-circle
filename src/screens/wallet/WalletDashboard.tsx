@@ -3,35 +3,52 @@ import {
   View,
   Text,
   StyleSheet,
-  ScrollView,
-  RefreshControl,
-  TouchableOpacity,
-  Image,
-  useWindowDimensions,
   Platform,
   ActivityIndicator,
+  Pressable,
 } from 'react-native';
+import PageContainer from '../../components/PageContainer';
+import Card from '../../components/Card';
 
 interface TokenBalance {
   symbol: string;
   name: string;
   balance: string;
   usdValue: string;
+  icon: string;
 }
 
-interface NFT {
-  name: string;
-  image: string;
-  collection: string;
+function TokenCard({ token }: { token: TokenBalance }) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <Pressable
+      onHoverIn={() => setHovered(true)}
+      onHoverOut={() => setHovered(false)}
+      style={[styles.tokenCard, hovered && styles.tokenCardHovered]}
+    >
+      <View style={styles.tokenLeft}>
+        <View style={styles.tokenIcon}>
+          <Text style={styles.tokenIconText}>{token.icon}</Text>
+        </View>
+        <View>
+          <Text style={styles.tokenName}>{token.name}</Text>
+          <Text style={styles.tokenSymbol}>{token.symbol}</Text>
+        </View>
+      </View>
+      <View style={styles.tokenRight}>
+        <Text style={styles.tokenBalance}>{token.balance}</Text>
+        <Text style={styles.tokenUsd}>{token.usdValue}</Text>
+      </View>
+    </Pressable>
+  );
 }
 
 export default function WalletDashboard({ walletAddress, chain }: { walletAddress: string; chain: string }) {
   const [tokens, setTokens] = useState<TokenBalance[]>([]);
-  const [nfts, setNfts] = useState<NFT[]>([]);
   const [totalValue, setTotalValue] = useState('0.00');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const { width } = useWindowDimensions();
 
   const fetchBalances = async () => {
     try {
@@ -54,7 +71,6 @@ export default function WalletDashboard({ walletAddress, chain }: { walletAddres
       const prices = await response.json();
       const ethPrice = prices.ethereum?.usd || 0;
 
-      // Get ETH balance via public RPC
       const balanceHex = await jsonRpc('https://eth.llamarpc.com', 'eth_getBalance', [walletAddress, 'latest']);
       const balanceWei = parseInt(balanceHex, 16);
       const balanceEth = balanceWei / 1e18;
@@ -65,6 +81,7 @@ export default function WalletDashboard({ walletAddress, chain }: { walletAddres
         name: 'Ethereum',
         balance: balanceEth.toFixed(4),
         usdValue: `$${usdValue}`,
+        icon: '⟠',
       }]);
       setTotalValue(usdValue);
     } catch (e) {
@@ -90,6 +107,7 @@ export default function WalletDashboard({ walletAddress, chain }: { walletAddres
         name: 'Solana',
         balance: balanceSol.toFixed(4),
         usdValue: `$${usdValue}`,
+        icon: '◎',
       }]);
       setTotalValue(usdValue);
     } catch (e) {
@@ -130,71 +148,66 @@ export default function WalletDashboard({ walletAddress, chain }: { walletAddres
   }
 
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.content}
-      refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#fff" />
-      }
-    >
-      {/* Portfolio Value */}
-      <View style={styles.portfolioCard}>
-        <Text style={styles.portfolioLabel}>PORTFOLIO VALUE</Text>
-        <Text style={styles.portfolioValue}>${totalValue}</Text>
-        <View style={styles.addressBadge}>
-          <Text style={styles.addressChain}>{chain === 'ethereum' ? '⟠ ETH' : '◎ SOL'}</Text>
-          <Text style={styles.addressText}>{shortenAddress(walletAddress)}</Text>
-        </View>
+    <View style={styles.outerContainer}>
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>WALLET</Text>
       </View>
 
-      {/* Token Balances */}
-      <Text style={styles.sectionTitle}>TOKENS</Text>
-      {tokens.length === 0 ? (
-        <View style={styles.emptyCard}>
-          <Text style={styles.emptyText}>No tokens found</Text>
-        </View>
-      ) : (
-        tokens.map((token, i) => (
-          <View key={i} style={styles.tokenCard}>
-            <View style={styles.tokenLeft}>
-              <View style={styles.tokenIcon}>
-                <Text style={styles.tokenIconText}>
-                  {token.symbol === 'ETH' ? '⟠' : '◎'}
-                </Text>
-              </View>
-              <View>
-                <Text style={styles.tokenName}>{token.name}</Text>
-                <Text style={styles.tokenSymbol}>{token.symbol}</Text>
-              </View>
-            </View>
-            <View style={styles.tokenRight}>
-              <Text style={styles.tokenBalance}>{token.balance}</Text>
-              <Text style={styles.tokenUsd}>{token.usdValue}</Text>
-            </View>
+      <PageContainer refreshing={refreshing} onRefresh={onRefresh}>
+        {/* Portfolio Card */}
+        <Card style={styles.portfolioCard}>
+          <Text style={styles.portfolioLabel}>PORTFOLIO VALUE</Text>
+          <Text style={styles.portfolioValue}>${totalValue}</Text>
+          <View style={styles.addressBadge}>
+            <Text style={styles.addressChain}>{chain === 'ethereum' ? '⟠ ETH' : '◎ SOL'}</Text>
+            <Text style={styles.addressText}>{shortenAddress(walletAddress)}</Text>
           </View>
-        ))
-      )}
+        </Card>
 
-      {/* NFTs Section */}
-      <Text style={styles.sectionTitle}>NFTs</Text>
-      <View style={styles.emptyCard}>
-        <Text style={styles.emptyText}>NFT display coming soon</Text>
-        <Text style={styles.emptySubtext}>We're building this next 🔥</Text>
-      </View>
-    </ScrollView>
+        {/* Tokens */}
+        <Text style={styles.sectionTitle}>TOKENS</Text>
+        {tokens.length === 0 ? (
+          <Card style={styles.emptyCard}>
+            <Text style={styles.emptyText}>No tokens found</Text>
+          </Card>
+        ) : (
+          tokens.map((token, i) => <TokenCard key={i} token={token} />)
+        )}
+
+        {/* NFTs */}
+        <Text style={[styles.sectionTitle, { marginTop: 24 }]}>NFTs</Text>
+        <Card style={styles.emptyCard}>
+          <View style={styles.nftPlaceholder}>
+            <Text style={styles.nftEmoji}>🖼️</Text>
+            <Text style={styles.emptyText}>NFT gallery coming soon</Text>
+            <Text style={styles.emptySubtext}>We're building this next 🔥</Text>
+          </View>
+        </Card>
+      </PageContainer>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  outerContainer: {
     flex: 1,
     backgroundColor: '#0a0a0a',
   },
-  content: {
-    padding: 20,
-    maxWidth: 500,
+  header: {
+    paddingTop: 60,
+    paddingBottom: 20,
+    paddingHorizontal: 24,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a1a',
+    maxWidth: 480,
     alignSelf: 'center',
     width: '100%',
+  },
+  headerTitle: {
+    color: '#fff',
+    fontSize: 22,
+    fontWeight: '900',
+    letterSpacing: 3,
   },
   loadingContainer: {
     flex: 1,
@@ -203,18 +216,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   loadingText: {
-    color: '#666',
+    color: '#555',
     marginTop: 12,
     fontSize: 14,
   },
   portfolioCard: {
-    backgroundColor: '#111',
-    borderRadius: 16,
-    padding: 28,
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#222',
-    marginBottom: 28,
+    padding: 28,
+    marginBottom: 24,
   },
   portfolioLabel: {
     color: '#666',
@@ -225,19 +234,21 @@ const styles = StyleSheet.create({
   },
   portfolioValue: {
     color: '#fff',
-    fontSize: 40,
+    fontSize: 42,
     fontWeight: '900',
     letterSpacing: 1,
     marginBottom: 16,
   },
   addressBadge: {
     flexDirection: 'row',
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#0a0a0a',
     borderRadius: 20,
     paddingVertical: 6,
     paddingHorizontal: 14,
     alignItems: 'center',
     gap: 8,
+    borderWidth: 1,
+    borderColor: '#222',
   },
   addressChain: {
     color: '#888',
@@ -258,7 +269,7 @@ const styles = StyleSheet.create({
   },
   tokenCard: {
     backgroundColor: '#111',
-    borderRadius: 12,
+    borderRadius: 14,
     padding: 16,
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -266,6 +277,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#222',
     marginBottom: 8,
+    ...(Platform.OS === 'web' ? { transition: 'all 0.2s ease', cursor: 'pointer' } as any : {}),
+  },
+  tokenCardHovered: {
+    borderColor: '#444',
+    backgroundColor: '#161616',
+    ...(Platform.OS === 'web' ? { transform: [{ translateY: -1 }] } : {}),
   },
   tokenLeft: {
     flexDirection: 'row',
@@ -273,9 +290,9 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   tokenIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
     backgroundColor: '#1a1a2e',
     justifyContent: 'center',
     alignItems: 'center',
@@ -289,7 +306,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   tokenSymbol: {
-    color: '#666',
+    color: '#555',
     fontSize: 12,
     marginTop: 2,
   },
@@ -302,18 +319,21 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   tokenUsd: {
-    color: '#666',
+    color: '#555',
     fontSize: 12,
     marginTop: 2,
   },
   emptyCard: {
-    backgroundColor: '#111',
-    borderRadius: 12,
-    padding: 24,
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#222',
-    marginBottom: 20,
+    padding: 24,
+    marginBottom: 8,
+  },
+  nftPlaceholder: {
+    alignItems: 'center',
+  },
+  nftEmoji: {
+    fontSize: 32,
+    marginBottom: 12,
   },
   emptyText: {
     color: '#555',
