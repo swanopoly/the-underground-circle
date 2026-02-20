@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { showAlert } from '../../lib/alert';
+import { validateUsername, validateEmail, validatePassword, sanitizeString, LENGTH_LIMITS } from '../../lib/validation';
 
 export default function SignUpScreen({ navigation }: any) {
   const [username, setUsername] = useState('');
@@ -23,19 +24,42 @@ export default function SignUpScreen({ navigation }: any) {
 
   const handleSignUp = async () => {
     setError('');
-    if (!username || !email || !password) {
+    
+    // Sanitize and validate inputs
+    const sanitizedUsername = sanitizeString(username, LENGTH_LIMITS.username.max);
+    const sanitizedEmail = sanitizeString(email, LENGTH_LIMITS.email.max).toLowerCase();
+    
+    if (!sanitizedUsername || !sanitizedEmail || !password) {
       setError('Fill in everything');
       return;
     }
-    if (password.length < 6) {
-      setError('Password needs at least 6 characters');
+
+    // Validate username
+    const usernameValidation = validateUsername(sanitizedUsername);
+    if (!usernameValidation.isValid) {
+      setError(usernameValidation.error!);
       return;
     }
+
+    // Validate email
+    const emailValidation = validateEmail(sanitizedEmail);
+    if (!emailValidation.isValid) {
+      setError(emailValidation.error!);
+      return;
+    }
+
+    // Validate password
+    const passwordValidation = validatePassword(password);
+    if (!passwordValidation.isValid) {
+      setError(passwordValidation.error!);
+      return;
+    }
+    
     setLoading(true);
     const { error: signUpError } = await supabase.auth.signUp({
-      email,
+      email: sanitizedEmail,
       password,
-      options: { data: { username, display_name: username } },
+      options: { data: { username: sanitizedUsername, display_name: sanitizedUsername } },
     });
     setLoading(false);
     if (signUpError) {
@@ -75,8 +99,9 @@ export default function SignUpScreen({ navigation }: any) {
               placeholder="your_name"
               placeholderTextColor="#444"
               value={username}
-              onChangeText={setUsername}
+              onChangeText={(text) => setUsername(text.slice(0, LENGTH_LIMITS.username.max))}
               autoCapitalize="none"
+              maxLength={LENGTH_LIMITS.username.max}
             />
             <Text style={styles.inputLabel}>EMAIL</Text>
             <TextInput
@@ -84,9 +109,10 @@ export default function SignUpScreen({ navigation }: any) {
               placeholder="you@email.com"
               placeholderTextColor="#444"
               value={email}
-              onChangeText={setEmail}
+              onChangeText={(text) => setEmail(text.slice(0, LENGTH_LIMITS.email.max))}
               autoCapitalize="none"
               keyboardType="email-address"
+              maxLength={LENGTH_LIMITS.email.max}
             />
             <Text style={styles.inputLabel}>PASSWORD</Text>
             <TextInput
@@ -94,8 +120,9 @@ export default function SignUpScreen({ navigation }: any) {
               placeholder="••••••••"
               placeholderTextColor="#444"
               value={password}
-              onChangeText={setPassword}
+              onChangeText={(text) => setPassword(text.slice(0, LENGTH_LIMITS.password.max))}
               secureTextEntry
+              maxLength={LENGTH_LIMITS.password.max}
             />
 
             <TouchableOpacity

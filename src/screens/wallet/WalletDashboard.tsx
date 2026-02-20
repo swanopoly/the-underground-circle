@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,342 +6,1358 @@ import {
   Platform,
   ActivityIndicator,
   Pressable,
+  TextInput,
+  ScrollView,
+  Modal,
+  Alert,
 } from 'react-native';
+import { supabase } from '../../lib/supabase';
+import { fetchMarketData, MarketData, MarketItem } from '../../lib/marketData';
+import {
+  sendETH, sendSOL, connectWallet, removeWalletFromProfile, saveWalletToProfile,
+  verifyWalletOwnership, shortenAddress, getExplorerUrl, getAddressExplorerUrl,
+  isValidEthereumAddress, isValidSolanaAddress, getMemberByUsername,
+  CryptoChain, WalletInfo, MultiWallet, loadSavedWallets, getConnectedWallets,
+  fetchTokenBalances, fetchNFTs, fetchTransactionHistory, getSwapQuote, getStakeAccounts, getTopValidators,
+  aggregatePortfolio, formatTokenAmount, formatUSD, formatPercent, checkScamAddress, validateTransactionAmount, previewTransaction,
+  CHAIN_CONFIGS,
+} from '../../lib/crypto';
+import type { Chain, Token, NFT, Transaction, StakeAccount, Portfolio } from '../../types';
 import PageContainer from '../../components/PageContainer';
 import Card from '../../components/Card';
 
-interface TokenBalance {
-  symbol: string;
-  name: string;
-  balance: string;
-  usdValue: string;
-  icon: string;
+// ─── Types & Constants ───────────────────────────────────────────────────────
+
+type ActiveTab = 'portfolio' | 'assets' | 'nfts' | 'activity' | 'swap' | 'stake' | 'market';
+type ActivePanel = null | 'send' | 'receive';
+
+const TABS = [
+  { id: 'portfolio' as const, label: 'Portfolio', icon: '📊' },
+  { id: 'assets' as const, label: 'Assets', icon: '💰' },
+  { id: 'nfts' as const, label: 'NFTs', icon: '🖼️' },
+  { id: 'activity' as const, label: 'Activity', icon: '📜' },
+  { id: 'swap' as const, label: 'Swap', icon: '🔄' },
+  { id: 'stake' as const, label: 'Stake', icon: '🏦' },
+  { id: 'market' as const, label: 'Market', icon: '📈' },
+];
+
+// ─── Sub-Components ──────────────────────────────────────────────────────────
+
+function TabBar({ activeTab, onTabChange }: { activeTab: ActiveTab; onTabChange: (tab: ActiveTab) => void }) {
+  return (
+    <View style={s.tabBar}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.tabScrollContent}>
+        {TABS.map(tab => (
+          <Pressable
+            key={tab.id}
+            onPress={() => onTabChange(tab.id)}
+            style={[s.tab, activeTab === tab.id && s.tabActive]}
+          >
+            <Text style={s.tabIcon}>{tab.icon}</Text>
+            <Text style={[s.tabLabel, activeTab === tab.id && s.tabLabelActive]}>{tab.label}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+    </View>
+  );
 }
 
-function TokenCard({ token }: { token: TokenBalance }) {
-  const [hovered, setHovered] = useState(false);
-
+function ChainSelector({ 
+  chains, selectedChain, onSelect, wallets 
+}: { 
+  chains: Chain[]; 
+  selectedChain: Chain; 
+  onSelect: (chain: Chain) => void;
+  wallets: MultiWallet;
+}) {
   return (
-    <Pressable
-      onHoverIn={() => setHovered(true)}
-      onHoverOut={() => setHovered(false)}
-      style={[styles.tokenCard, hovered && styles.tokenCardHovered]}
-    >
-      <View style={styles.tokenLeft}>
-        <View style={styles.tokenIcon}>
-          <Text style={styles.tokenIconText}>{token.icon}</Text>
+    <View style={s.chainSelector}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+        {chains.map(chain => {
+          const config = CHAIN_CONFIGS[chain];
+          const wallet = wallets[chain as keyof MultiWallet];
+          const isConnected = !!wallet;
+          
+          return (
+            <Pressable
+              key={chain}
+              onPress={() => onSelect(chain)}
+              style={[
+                s.chainChip,
+                selectedChain === chain && s.chainChipActive,
+                !isConnected && s.chainChipDisabled,
+              ]}
+            >
+              <Text style={s.chainChipIcon}>{config.icon}</Text>
+              <Text style={[s.chainChipText, selectedChain === chain && s.chainChipTextActive]}>
+                {config.name}
+              </Text>
+              {isConnected && <View style={[s.chainDot, { backgroundColor: config.color }]} />}
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+}
+
+function TokenRow({ token, onPress }: { token: Token; onPress: () => void }) {
+  const config = CHAIN_CONFIGS[token.chain];
+  const changeColor = (token.change24h || 0) >= 0 ? '#10b981' : '#ef4444';
+  
+  return (
+    <Pressable onPress={onPress} style={s.tokenRow}>
+      <View style={s.tokenLeft}>
+        <View style={[s.tokenIcon, { backgroundColor: config.color + '20' }]}>
+          <Text style={s.tokenIconText}>{token.isNative ? config.icon : token.symbol[0]}</Text>
         </View>
         <View>
-          <Text style={styles.tokenName}>{token.name}</Text>
-          <Text style={styles.tokenSymbol}>{token.symbol}</Text>
+          <Text style={s.tokenName}>{token.name}</Text>
+          <Text style={s.tokenSymbol}>{token.symbol} · {config.name}</Text>
         </View>
       </View>
-      <View style={styles.tokenRight}>
-        <Text style={styles.tokenBalance}>{token.balance}</Text>
-        <Text style={styles.tokenUsd}>{token.usdValue}</Text>
+      <View style={s.tokenRight}>
+        <Text style={s.tokenBalance}>{formatTokenAmount(token.balance || '0')}</Text>
+        <View style={s.tokenMeta}>
+          <Text style={s.tokenUsd}>{formatUSD(token.usdValue || 0)}</Text>
+          {token.change24h !== undefined && (
+            <Text style={[s.tokenChange, { color: changeColor }]}>
+              {formatPercent(token.change24h)}
+            </Text>
+          )}
+        </View>
       </View>
     </Pressable>
   );
 }
 
-export default function WalletDashboard({ walletAddress, chain }: { walletAddress: string; chain: string }) {
-  const [tokens, setTokens] = useState<TokenBalance[]>([]);
-  const [totalValue, setTotalValue] = useState('0.00');
-  const [loading, setLoading] = useState(true);
+function NFTCard({ nft, onPress }: { nft: NFT; onPress: () => void }) {
+  return (
+    <Pressable onPress={onPress} style={s.nftCard}>
+      <View style={s.nftImageContainer}>
+        {nft.image ? (
+          <View style={s.nftPlaceholder}>
+            <Text style={s.nftPlaceholderText}>🖼️</Text>
+          </View>
+        ) : (
+          <View style={s.nftPlaceholder}>
+            <Text style={s.nftPlaceholderText}>🎨</Text>
+          </View>
+        )}
+      </View>
+      <Text style={s.nftName} numberOfLines={1}>{nft.name}</Text>
+      <Text style={s.nftCollection} numberOfLines={1}>{nft.collection || 'Unknown'}</Text>
+    </Pressable>
+  );
+}
+
+function TransactionRow({ tx, onPress }: { tx: Transaction; onPress: () => void }) {
+  const config = CHAIN_CONFIGS[tx.chain];
+  const isOutgoing = tx.type === 'send';
+  const typeIcon = {
+    send: '↗️', receive: '↙️', swap: '🔄', stake: '🏦', unstake: '🔄', mint: '✨', burn: '🔥', approve: '✅'
+  }[tx.type] || '📄';
+  
+  return (
+    <Pressable onPress={onPress} style={s.txRow}>
+      <View style={[s.txIcon, { backgroundColor: config.color + '20' }]}>
+        <Text style={s.txIconText}>{typeIcon}</Text>
+      </View>
+      <View style={s.txContent}>
+        <Text style={s.txLabel}>
+          {tx.type === 'send' ? 'Sent' : tx.type === 'receive' ? 'Received' : tx.type} {formatTokenAmount(tx.amount)} {tx.token.symbol}
+        </Text>
+        <Text style={s.txMeta}>
+          {isOutgoing ? `To ${shortenAddress(tx.to)}` : `From ${shortenAddress(tx.from)}`} · {config.name}
+        </Text>
+        <Text style={s.txTime}>{new Date(tx.timestamp).toLocaleDateString()}</Text>
+      </View>
+      <View style={s.txRight}>
+        <View style={[s.txStatus, tx.status === 'confirmed' && s.txStatusConfirmed]}>
+          <Text style={s.txStatusText}>
+            {tx.status === 'confirmed' ? '✅' : tx.status === 'pending' ? '⏳' : '❌'}
+          </Text>
+        </View>
+        <Text style={s.txArrow}>→</Text>
+      </View>
+    </Pressable>
+  );
+}
+
+function SectionLoader({ label }: { label?: string }) {
+  return (
+    <View style={{ padding: 32, alignItems: 'center' }}>
+      <ActivityIndicator size="small" color="#22d3ee" />
+      {label && <Text style={{ color: '#444', fontSize: 11, marginTop: 8, letterSpacing: 1, textTransform: 'uppercase' }}>{label}</Text>}
+    </View>
+  );
+}
+
+// ─── Main Dashboard ──────────────────────────────────────────────────────────
+
+export default function WalletDashboard({
+  walletAddress, chain, onDisconnect,
+}: {
+  walletAddress: string; chain: string; onDisconnect?: () => void;
+}) {
+  // Core state
+  const [wallets, setWallets] = useState<MultiWallet>({ ethereum: null, solana: null });
+  const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
+  const [loading, setLoading] = useState(true); // only for initial wallet detection
   const [refreshing, setRefreshing] = useState(false);
+  const [activeTab, setActiveTab] = useState<ActiveTab>('portfolio');
+  const [selectedChain, setSelectedChain] = useState<Chain>('ethereum');
 
-  const fetchBalances = async () => {
-    try {
-      if (chain === 'ethereum') {
-        await fetchEthBalances();
-      } else if (chain === 'solana') {
-        await fetchSolBalances();
-      }
-    } catch (e) {
-      console.error('Failed to fetch balances:', e);
+  // Per-section loading states
+  const [portfolioLoading, setPortfolioLoading] = useState(false);
+  const [tokensLoading, setTokensLoading] = useState(false);
+  const [nftsLoading, setNftsLoading] = useState(false);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [stakeLoading, setStakeLoading] = useState(false);
+  const [validatorsLoading, setValidatorsLoading] = useState(false);
+  const [marketLoading, setMarketLoading] = useState(false);
+
+  // Data state
+  const [tokens, setTokens] = useState<Token[]>([]);
+  const [nfts, setNFTs] = useState<NFT[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [stakeAccounts, setStakeAccounts] = useState<StakeAccount[]>([]);
+  const [validators, setValidators] = useState<Array<{ address: string; name: string; apy: number; commission: number }>>([]);
+  const [marketData, setMarketData] = useState<MarketData | null>(null);
+
+  // UI state
+  const [activePanel, setActivePanel] = useState<ActivePanel>(null);
+  const [connectingChain, setConnectingChain] = useState<Chain | null>(null);
+  const [selectedToken, setSelectedToken] = useState<Token | null>(null);
+  const [selectedNFT, setSelectedNFT] = useState<NFT | null>(null);
+  const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
+
+  // Send state
+  const [sendChain, setSendChain] = useState<Chain>('ethereum');
+  const [sendTo, setSendTo] = useState('');
+  const [sendAmount, setSendAmount] = useState('');
+  const [sending, setSending] = useState(false);
+  const [sendResult, setSendResult] = useState<{ success: boolean; message: string; txHash?: string } | null>(null);
+
+  // Receive state
+  const [receiveChain, setReceiveChain] = useState<Chain>('ethereum');
+
+  // Swap state
+  const [swapTokenIn, setSwapTokenIn] = useState<Token | null>(null);
+  const [swapTokenOut, setSwapTokenOut] = useState<Token | null>(null);
+  const [swapAmount, setSwapAmount] = useState('');
+  const [swapQuote, setSwapQuote] = useState<any>(null);
+
+  const connectedChains = Object.keys(wallets).filter(chain => wallets[chain as keyof MultiWallet]) as Chain[];
+  const hasAnyWallet = connectedChains.length > 0;
+
+  // ─── Load & Refresh Data ─────────────────────────────────────────────────────
+
+  const loadWallets = useCallback(async () => {
+    // Run saved + browser wallet detection in parallel with individual timeouts
+    const [saved, browser] = await Promise.all([
+      loadSavedWallets().catch(() => ({ ethereum: null, solana: null } as MultiWallet)),
+      getConnectedWallets().catch(() => ({ ethereum: null, solana: null } as MultiWallet)),
+    ]);
+    const merged: MultiWallet = {
+      ethereum: saved.ethereum || browser.ethereum,
+      solana: saved.solana || browser.solana,
+    };
+    setWallets(merged);
+
+    // Set defaults
+    const chains = Object.keys(merged).filter(c => merged[c as keyof MultiWallet]) as Chain[];
+    if (chains.length > 0) {
+      setSelectedChain(chains[0]);
+      setSendChain(chains[0]);
+      setReceiveChain(chains[0]);
     }
-    setLoading(false);
-  };
 
-  const fetchEthBalances = async () => {
-    try {
-      const response = await fetch(
-        `https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd`
-      );
-      const prices = await response.json();
-      const ethPrice = prices.ethereum?.usd || 0;
+    return merged;
+  }, []);
 
-      const balanceHex = await jsonRpc('https://eth.llamarpc.com', 'eth_getBalance', [walletAddress, 'latest']);
-      const balanceWei = parseInt(balanceHex, 16);
-      const balanceEth = balanceWei / 1e18;
-      const usdValue = (balanceEth * ethPrice).toFixed(2);
+  const loadPortfolioData = useCallback(async (w?: MultiWallet) => {
+    const currentWallets = w || wallets;
+    const walletAddresses: Record<Chain, string> = {} as any;
+    if (currentWallets.ethereum) walletAddresses.ethereum = currentWallets.ethereum.address;
+    if (currentWallets.solana) walletAddresses.solana = currentWallets.solana.address;
 
-      setTokens([{
-        symbol: 'ETH',
-        name: 'Ethereum',
-        balance: balanceEth.toFixed(4),
-        usdValue: `$${usdValue}`,
-        icon: '⟠',
-      }]);
-      setTotalValue(usdValue);
-    } catch (e) {
-      console.error('ETH fetch error:', e);
+    // Portfolio (tokens + NFTs) — independent section
+    setPortfolioLoading(true);
+    setTokensLoading(true);
+    setNftsLoading(true);
+    aggregatePortfolio(walletAddresses)
+      .then(portfolioData => {
+        setPortfolio(portfolioData);
+        setTokens(portfolioData.tokens);
+        setNFTs(portfolioData.nfts);
+      })
+      .catch(e => console.error('Portfolio fetch failed:', e))
+      .finally(() => {
+        setPortfolioLoading(false);
+        setTokensLoading(false);
+        setNftsLoading(false);
+      });
+
+    // Stake accounts — independent
+    if (currentWallets.solana) {
+      setStakeLoading(true);
+      getStakeAccounts(currentWallets.solana.address)
+        .then(setStakeAccounts)
+        .catch(e => console.warn('Stake accounts failed (non-blocking):', e))
+        .finally(() => setStakeLoading(false));
     }
-  };
 
-  const fetchSolBalances = async () => {
-    try {
-      const response = await fetch(
-        `https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd`
-      );
-      const prices = await response.json();
-      const solPrice = prices.solana?.usd || 0;
-
-      const balanceResult = await jsonRpc('https://api.mainnet-beta.solana.com', 'getBalance', [walletAddress]);
-      const balanceLamports = balanceResult?.value || 0;
-      const balanceSol = balanceLamports / 1e9;
-      const usdValue = (balanceSol * solPrice).toFixed(2);
-
-      setTokens([{
-        symbol: 'SOL',
-        name: 'Solana',
-        balance: balanceSol.toFixed(4),
-        usdValue: `$${usdValue}`,
-        icon: '◎',
-      }]);
-      setTotalValue(usdValue);
-    } catch (e) {
-      console.error('SOL fetch error:', e);
+    // Transaction history — independent
+    const txChain = currentWallets[selectedChain] ? selectedChain :
+      (Object.keys(walletAddresses) as Chain[])[0];
+    if (txChain && currentWallets[txChain as keyof MultiWallet]) {
+      setActivityLoading(true);
+      fetchTransactionHistory(currentWallets[txChain as keyof MultiWallet]!.address, txChain)
+        .then(setTransactions)
+        .catch(e => console.error('Tx history failed:', e))
+        .finally(() => setActivityLoading(false));
     }
-  };
+  }, [wallets, selectedChain]);
 
-  const jsonRpc = async (url: string, method: string, params: any[]) => {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-    });
-    const data = await res.json();
-    return data.result;
-  };
+  const loadMarketData = useCallback(async () => {
+    setMarketLoading(true);
+    fetchMarketData()
+      .then(setMarketData)
+      .catch(e => console.error('Market data failed:', e))
+      .finally(() => setMarketLoading(false));
+  }, []);
+
+  // Auto-refresh market data every 60s when on market tab
+  useEffect(() => {
+    if (activeTab !== 'market') return;
+    loadMarketData();
+    const interval = setInterval(loadMarketData, 60000);
+    return () => clearInterval(interval);
+  }, [activeTab, loadMarketData]);
+
+  const loadValidators = useCallback(async () => {
+    setValidatorsLoading(true);
+    getTopValidators()
+      .then(setValidators)
+      .catch(e => console.error('Validators failed:', e))
+      .finally(() => setValidatorsLoading(false));
+  }, []);
 
   useEffect(() => {
-    fetchBalances();
-  }, [walletAddress, chain]);
+    (async () => {
+      // Step 1: Detect wallets (fast — with timeouts already in getConnectedWallets)
+      const w = await loadWallets();
+      // Show the UI immediately after wallet detection
+      setLoading(false);
+
+      // Step 2: Fire off all data fetches in parallel (non-blocking)
+      loadPortfolioData(w);
+      loadValidators();
+    })();
+  }, []);
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await fetchBalances();
-    setRefreshing(false);
+    const w = await loadWallets();
+    loadPortfolioData(w);
+    loadValidators();
+    // Clear refreshing after a short delay since data loads async
+    setTimeout(() => setRefreshing(false), 1500);
   };
 
-  const shortenAddress = (addr: string) =>
-    `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+  // ─── Chain Management ────────────────────────────────────────────────────────
+
+  const handleChainSelect = (chain: Chain) => {
+    setSelectedChain(chain);
+    
+    // Load chain-specific data
+    if (wallets[chain as keyof MultiWallet]) {
+      fetchTransactionHistory(wallets[chain as keyof MultiWallet]!.address, chain)
+        .then(setTransactions)
+        .catch(console.error);
+    }
+  };
+
+  const handleConnect = async (chain: Chain) => {
+    const type = chain === 'ethereum' ? 'metamask' : 'phantom';
+    setConnectingChain(chain);
+
+    try {
+      const w = await connectWallet(type);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Not authenticated');
+
+      const verify = await verifyWalletOwnership(w.address, w.chain, user.id);
+      if (!verify.success) throw new Error(verify.error || 'Verification failed');
+
+      await saveWalletToProfile(w.address, w.chain, user.id);
+      const updated = { ...wallets, [w.chain]: w };
+      setWallets(updated);
+      await loadPortfolioData(updated);
+    } catch (e: any) {
+      console.error('Connect failed:', e);
+      Alert.alert('Connection Failed', e.message);
+    }
+
+    setConnectingChain(null);
+  };
+
+  const handleDisconnect = async (chain: Chain) => {
+    await removeWalletFromProfile(chain as CryptoChain);
+    const updated = { ...wallets, [chain]: null };
+    setWallets(updated);
+
+    if (!updated.ethereum && !updated.solana) {
+      if (onDisconnect) onDisconnect();
+    } else {
+      await loadPortfolioData(updated);
+    }
+  };
+
+  // ─── Send Functionality ──────────────────────────────────────────────────────
+
+  const handleSend = async () => {
+    if (!sendTo.trim() || !sendAmount.trim()) return;
+    const amount = parseFloat(sendAmount);
+    if (isNaN(amount) || amount <= 0) {
+      setSendResult({ success: false, message: 'Enter a valid amount' });
+      return;
+    }
+
+    const senderWallet = wallets[sendChain as keyof MultiWallet];
+    if (!senderWallet) {
+      setSendResult({ success: false, message: `Connect your ${sendChain} wallet first` });
+      return;
+    }
+
+    // Security checks
+    const scamCheck = checkScamAddress(sendTo);
+    if (scamCheck.isScam) {
+      setSendResult({ success: false, message: `Security Warning: ${scamCheck.reason}` });
+      return;
+    }
+
+    const tokenBalance = tokens.find(t => t.chain === sendChain && t.isNative)?.raw || 0;
+    const validation = validateTransactionAmount(amount, tokenBalance, sendChain as CryptoChain);
+    if (!validation.valid) {
+      setSendResult({ success: false, message: validation.warning || 'Invalid amount' });
+      return;
+    }
+
+    setSending(true);
+    setSendResult(null);
+
+    let toAddress = sendTo.trim();
+    if (!toAddress.startsWith('0x') && !toAddress.match(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/)) {
+      const member = await getMemberByUsername(toAddress.replace('@', ''));
+      if (member?.wallet_address) {
+        toAddress = member.wallet_address;
+      } else {
+        setSendResult({ success: false, message: `Can't find wallet for @${toAddress}` });
+        setSending(false);
+        return;
+      }
+    }
+
+    const symbol = sendChain === 'solana' ? 'SOL' : 'ETH';
+    const result = sendChain === 'ethereum'
+      ? await sendETH(toAddress, amount, true)
+      : await sendSOL(toAddress, amount, true);
+
+    if (result.success) {
+      setSendResult({ 
+        success: true, 
+        message: `Sent ${amount} ${symbol} to ${shortenAddress(toAddress)}`, 
+        txHash: result.txHash 
+      });
+      setSendTo('');
+      setSendAmount('');
+      setTimeout(() => loadPortfolioData(), 3000);
+    } else {
+      setSendResult({ success: false, message: result.error || 'Transaction failed' });
+    }
+    setSending(false);
+  };
+
+  // ─── Render Methods ──────────────────────────────────────────────────────────
+
+  const renderPortfolioTab = () => (
+    <View>
+      {/* Total Portfolio Value */}
+      <Card style={s.portfolioCard}>
+        <Text style={s.portfolioLabel}>TOTAL PORTFOLIO</Text>
+        {portfolioLoading && !portfolio ? (
+          <SectionLoader label="Loading portfolio" />
+        ) : null}
+        <Text style={s.portfolioValue}>{formatUSD(portfolio?.totalValue || 0)}</Text>
+        <View style={s.portfolioChange}>
+          <Text style={[
+            s.portfolioChangeText,
+            { color: (portfolio?.change24h || 0) >= 0 ? '#10b981' : '#ef4444' }
+          ]}>
+            {formatPercent(portfolio?.change24h || 0)} (24h)
+          </Text>
+        </View>
+        
+        {/* Mini chart placeholder */}
+        <View style={s.chartPlaceholder}>
+          <Text style={s.chartPlaceholderText}>📈 Chart coming soon</Text>
+        </View>
+        
+        {/* Connected wallets */}
+        <View style={s.walletBadges}>
+          {connectedChains.map(chain => {
+            const config = CHAIN_CONFIGS[chain];
+            const wallet = wallets[chain as keyof MultiWallet]!;
+            return (
+              <View key={chain} style={s.badgePill}>
+                <Text style={s.badgePillIcon}>{config.icon}</Text>
+                <Text style={s.badgePillText}>{shortenAddress(wallet.address)}</Text>
+              </View>
+            );
+          })}
+        </View>
+      </Card>
+
+      {/* Quick Actions */}
+      <View style={s.actionsRow}>
+        <Pressable 
+          style={s.actionBtn}
+          onPress={() => setActivePanel(activePanel === 'send' ? null : 'send')}
+        >
+          <View style={[s.actionBtnIcon, { backgroundColor: '#22d3ee20' }]}>
+            <Text style={s.actionBtnEmoji}>↗️</Text>
+          </View>
+          <Text style={s.actionBtnLabel}>SEND</Text>
+        </Pressable>
+        
+        <Pressable 
+          style={s.actionBtn}
+          onPress={() => setActivePanel(activePanel === 'receive' ? null : 'receive')}
+        >
+          <View style={[s.actionBtnIcon, { backgroundColor: '#10b98120' }]}>
+            <Text style={s.actionBtnEmoji}>↙️</Text>
+          </View>
+          <Text style={s.actionBtnLabel}>RECEIVE</Text>
+        </Pressable>
+        
+        <Pressable 
+          style={s.actionBtn}
+          onPress={() => setActiveTab('swap')}
+        >
+          <View style={[s.actionBtnIcon, { backgroundColor: '#f59e0b20' }]}>
+            <Text style={s.actionBtnEmoji}>🔄</Text>
+          </View>
+          <Text style={s.actionBtnLabel}>SWAP</Text>
+        </Pressable>
+        
+        <Pressable 
+          style={s.actionBtn}
+          onPress={() => setActiveTab('stake')}
+        >
+          <View style={[s.actionBtnIcon, { backgroundColor: '#8b5cf620' }]}>
+            <Text style={s.actionBtnEmoji}>🏦</Text>
+          </View>
+          <Text style={s.actionBtnLabel}>STAKE</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+
+  const renderAssetsTab = () => (
+    <View>
+      <ChainSelector 
+        chains={['solana', 'ethereum', 'polygon', 'base']}
+        selectedChain={selectedChain}
+        onSelect={handleChainSelect}
+        wallets={wallets}
+      />
+      
+      <View style={s.assetsHeader}>
+        <Text style={s.sectionTitle}>TOKENS</Text>
+        <Pressable style={s.addTokenBtn}>
+          <Text style={s.addTokenText}>+ ADD TOKEN</Text>
+        </Pressable>
+      </View>
+
+      {tokensLoading ? (
+        <SectionLoader label="Loading tokens" />
+      ) : tokens.filter(t => t.chain === selectedChain).length === 0 ? (
+        <Card style={s.emptyCard}>
+          <Text style={s.emptyText}>No tokens found</Text>
+          <Text style={s.emptySubtext}>Connect a wallet to see your tokens</Text>
+        </Card>
+      ) : (
+        tokens
+          .filter(t => t.chain === selectedChain)
+          .map((token, i) => (
+            <TokenRow 
+              key={`${token.chain}-${token.address}-${i}`} 
+              token={token} 
+              onPress={() => setSelectedToken(token)} 
+            />
+          ))
+      )}
+    </View>
+  );
+
+  const renderNFTsTab = () => (
+    <View>
+      <ChainSelector 
+        chains={['solana', 'ethereum', 'polygon', 'base']}
+        selectedChain={selectedChain}
+        onSelect={handleChainSelect}
+        wallets={wallets}
+      />
+      
+      <Text style={s.sectionTitle}>NFT COLLECTION</Text>
+      
+      {nftsLoading ? (
+        <SectionLoader label="Loading NFTs" />
+      ) : nfts.filter(n => n.chain === selectedChain).length === 0 ? (
+        <Card style={s.emptyCard}>
+          <Text style={s.emptyIcon}>🖼️</Text>
+          <Text style={s.emptyText}>No NFTs found</Text>
+          <Text style={s.emptySubtext}>Your NFTs will appear here</Text>
+        </Card>
+      ) : (
+        <View style={s.nftGrid}>
+          {nfts
+            .filter(n => n.chain === selectedChain)
+            .map((nft, i) => (
+              <NFTCard 
+                key={`${nft.chain}-${nft.mint}-${i}`} 
+                nft={nft} 
+                onPress={() => setSelectedNFT(nft)} 
+              />
+            ))}
+        </View>
+      )}
+    </View>
+  );
+
+  const renderActivityTab = () => (
+    <View>
+      <ChainSelector 
+        chains={['solana', 'ethereum', 'polygon', 'base']}
+        selectedChain={selectedChain}
+        onSelect={handleChainSelect}
+        wallets={wallets}
+      />
+      
+      <Text style={s.sectionTitle}>TRANSACTION HISTORY</Text>
+      
+      {activityLoading ? (
+        <SectionLoader label="Loading transactions" />
+      ) : transactions.filter(tx => tx.chain === selectedChain).length === 0 ? (
+        <Card style={s.emptyCard}>
+          <Text style={s.emptyIcon}>📜</Text>
+          <Text style={s.emptyText}>No transactions yet</Text>
+          <Text style={s.emptySubtext}>Your activity will appear here</Text>
+        </Card>
+      ) : (
+        transactions
+          .filter(tx => tx.chain === selectedChain)
+          .map((tx, i) => (
+            <TransactionRow 
+              key={`${tx.chain}-${tx.hash}-${i}`} 
+              tx={tx} 
+              onPress={() => setSelectedTx(tx)} 
+            />
+          ))
+      )}
+    </View>
+  );
+
+  const renderSwapTab = () => (
+    <View>
+      <Card style={s.swapCard}>
+        <Text style={s.swapTitle}>🔄 TOKEN SWAP</Text>
+        
+        {/* Swap interface placeholder */}
+        <View style={s.swapInterface}>
+          <View style={s.swapInputContainer}>
+            <Text style={s.swapLabel}>FROM</Text>
+            <Pressable style={s.swapTokenSelector}>
+              <Text style={s.swapTokenText}>Select Token</Text>
+              <Text style={s.swapTokenArrow}>↓</Text>
+            </Pressable>
+            <TextInput
+              style={s.swapAmountInput}
+              placeholder="0.00"
+              placeholderTextColor="#444"
+              value={swapAmount}
+              onChangeText={setSwapAmount}
+              keyboardType="numeric"
+            />
+          </View>
+          
+          <View style={s.swapArrowContainer}>
+            <Pressable style={s.swapArrowBtn}>
+              <Text style={s.swapArrowText}>⇅</Text>
+            </Pressable>
+          </View>
+          
+          <View style={s.swapInputContainer}>
+            <Text style={s.swapLabel}>TO</Text>
+            <Pressable style={s.swapTokenSelector}>
+              <Text style={s.swapTokenText}>Select Token</Text>
+              <Text style={s.swapTokenArrow}>↓</Text>
+            </Pressable>
+            <TextInput
+              style={s.swapAmountInput}
+              placeholder="0.00"
+              placeholderTextColor="#444"
+              editable={false}
+            />
+          </View>
+        </View>
+
+        {selectedChain === 'solana' ? (
+          <View style={s.swapInfo}>
+            <Text style={s.swapInfoText}>✨ Powered by Jupiter</Text>
+            <Text style={s.swapInfoSubtext}>Best rates across Solana DEXs</Text>
+          </View>
+        ) : (
+          <View style={s.comingSoonBox}>
+            <Text style={s.comingSoonText}>🚧 Coming Soon</Text>
+            <Text style={s.comingSoonSubtext}>EVM swaps in development</Text>
+          </View>
+        )}
+        
+        <Pressable 
+          style={[s.swapBtn, selectedChain !== 'solana' && s.swapBtnDisabled]} 
+          disabled={selectedChain !== 'solana'}
+        >
+          <Text style={s.swapBtnText}>
+            {selectedChain === 'solana' ? 'PREVIEW SWAP' : 'COMING SOON'}
+          </Text>
+        </Pressable>
+      </Card>
+    </View>
+  );
+
+  const renderStakeTab = () => (
+    <View>
+      <Card style={s.stakeCard}>
+        <Text style={s.stakeTitle}>🏦 SOL STAKING</Text>
+        
+        {connectedChains.includes('solana') ? (
+          <View>
+            {/* Current stakes */}
+            <View style={s.stakeSection}>
+              <Text style={s.stakeSectionTitle}>YOUR STAKES</Text>
+              {stakeLoading ? (
+                <SectionLoader label="Loading stakes" />
+              ) : stakeAccounts.length === 0 ? (
+                <Text style={s.stakeEmptyText}>No active stakes</Text>
+              ) : (
+                stakeAccounts.map((stake, i) => (
+                  <View key={i} style={s.stakeRow}>
+                    <View>
+                      <Text style={s.stakeAmount}>{stake.amount} SOL</Text>
+                      <Text style={s.stakeValidator}>{stake.validatorName || shortenAddress(stake.validator)}</Text>
+                    </View>
+                    <View>
+                      <Text style={s.stakeRewards}>+{stake.rewards} SOL</Text>
+                      <Text style={s.stakeStatus}>{stake.status.toUpperCase()}</Text>
+                    </View>
+                  </View>
+                ))
+              )}
+            </View>
+
+            {/* Validators */}
+            <View style={s.stakeSection}>
+              <Text style={s.stakeSectionTitle}>TOP VALIDATORS</Text>
+              {validatorsLoading ? (
+                <SectionLoader label="Loading validators" />
+              ) : validators.map((validator, i) => (
+                <View key={i} style={s.validatorRow}>
+                  <View>
+                    <Text style={s.validatorName}>{validator.name}</Text>
+                    <Text style={s.validatorAddress}>{shortenAddress(validator.address)}</Text>
+                  </View>
+                  <View>
+                    <Text style={s.validatorAPY}>{validator.apy.toFixed(1)}% APY</Text>
+                    <Text style={s.validatorCommission}>{validator.commission}% fee</Text>
+                  </View>
+                  <Pressable style={s.stakeSmallBtn}>
+                    <Text style={s.stakeSmallBtnText}>STAKE</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </View>
+          </View>
+        ) : (
+          <View style={s.comingSoonBox}>
+            <Text style={s.comingSoonText}>🔌 Connect Phantom</Text>
+            <Text style={s.comingSoonSubtext}>Connect your Solana wallet to stake SOL</Text>
+            <Pressable 
+              style={s.connectBtn} 
+              onPress={() => handleConnect('solana')}
+            >
+              <Text style={s.connectBtnText}>CONNECT PHANTOM</Text>
+            </Pressable>
+          </View>
+        )}
+      </Card>
+    </View>
+  );
+
+  const renderMarketRow = (item: MarketItem, index: number) => {
+    const changeColor = item.change24h >= 0 ? '#10b981' : '#ef4444';
+    const changePrefix = item.change24h >= 0 ? '+' : '';
+    const icon = item.type === 'crypto' ? '🪙' : '📊';
+
+    return (
+      <View key={`${item.type}-${item.symbol}-${index}`} style={s.marketRow}>
+        <View style={s.marketRowLeft}>
+          <View style={[s.marketIcon, { backgroundColor: item.change24h >= 0 ? '#10b98115' : '#ef444415' }]}>
+            <Text style={s.marketIconText}>{icon}</Text>
+          </View>
+          <View>
+            <Text style={s.marketSymbol}>{item.symbol}</Text>
+            <Text style={s.marketName} numberOfLines={1}>{item.name}</Text>
+          </View>
+        </View>
+        <View style={s.marketRowRight}>
+          <Text style={s.marketPrice}>${item.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</Text>
+          <View style={[s.marketChangeBadge, { backgroundColor: changeColor + '18' }]}>
+            <Text style={[s.marketChangeText, { color: changeColor }]}>
+              {changePrefix}{item.change24h.toFixed(2)}%
+            </Text>
+          </View>
+        </View>
+      </View>
+    );
+  };
+
+  const renderMarketSection = (title: string, items: MarketItem[]) => (
+    <View style={s.marketSection}>
+      <Text style={s.marketSectionTitle}>{title}</Text>
+      {items.length === 0 ? (
+        <Card style={s.emptyCard}>
+          <Text style={s.emptyText}>No data available</Text>
+        </Card>
+      ) : (
+        items.map((item, i) => renderMarketRow(item, i))
+      )}
+    </View>
+  );
+
+  const renderMarketTab = () => (
+    <View>
+      {marketLoading && !marketData ? (
+        <SectionLoader label="Loading market data" />
+      ) : marketData ? (
+        <View>
+          {renderMarketSection('🔥 TOP CRYPTO', marketData.crypto)}
+          {renderMarketSection('📊 TOP STOCKS', marketData.stocks)}
+          {renderMarketSection('🚀 TOP GAINERS', marketData.gainers)}
+          {renderMarketSection('📉 TOP LOSERS', marketData.losers)}
+        </View>
+      ) : (
+        <Card style={s.emptyCard}>
+          <Text style={s.emptyIcon}>📈</Text>
+          <Text style={s.emptyText}>Market data unavailable</Text>
+          <Text style={s.emptySubtext}>Pull to refresh or try again later</Text>
+        </Card>
+      )}
+    </View>
+  );
+
+  const renderSendPanel = () => (
+    <Card style={s.panelCard}>
+      <Text style={s.panelTitle}>↗️ SEND CRYPTO</Text>
+
+      <Text style={s.inputLabel}>SEND FROM</Text>
+      <ChainSelector 
+        chains={connectedChains}
+        selectedChain={sendChain}
+        onSelect={setSendChain}
+        wallets={wallets}
+      />
+
+      <Text style={s.inputLabel}>TO (username or address)</Text>
+      <TextInput 
+        style={s.panelInput} 
+        placeholder="@username or address" 
+        placeholderTextColor="#444"
+        value={sendTo} 
+        onChangeText={setSendTo} 
+        autoCapitalize="none" 
+      />
+
+      <Text style={s.inputLabel}>AMOUNT</Text>
+      <TextInput 
+        style={s.panelInput} 
+        placeholder="0.00" 
+        placeholderTextColor="#444"
+        value={sendAmount} 
+        onChangeText={setSendAmount} 
+        keyboardType="numeric" 
+      />
+
+      <View style={s.quickRow}>
+        {['0.001', '0.01', '0.1', '0.5', '1'].map(amt => (
+          <Pressable 
+            key={amt} 
+            onPress={() => setSendAmount(amt)}
+            style={[s.quickChip, sendAmount === amt && s.quickChipActive]}
+          >
+            <Text style={[s.quickChipText, sendAmount === amt && s.quickChipTextActive]}>
+              {amt}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+
+      {sendResult && (
+        <View style={[s.resultBox, sendResult.success ? s.resultSuccess : s.resultError]}>
+          <Text style={s.resultText}>{sendResult.success ? '✅' : '❌'} {sendResult.message}</Text>
+          {sendResult.txHash && (
+            <Pressable onPress={() => {
+              if (Platform.OS === 'web') {
+                window.open(getExplorerUrl(sendResult.txHash!, sendChain as CryptoChain), '_blank');
+              }
+            }}>
+              <Text style={s.resultLink}>View Explorer →</Text>
+            </Pressable>
+          )}
+        </View>
+      )}
+
+      <Pressable 
+        onPress={handleSend}
+        disabled={!sendTo.trim() || !sendAmount.trim() || sending}
+        style={[s.primaryBtn, (!sendTo.trim() || !sendAmount.trim() || sending) && s.primaryBtnDisabled]}
+      >
+        <Text style={s.primaryBtnText}>
+          {sending ? 'CONFIRMING...' : 'SEND'}
+        </Text>
+      </Pressable>
+    </Card>
+  );
+
+  const renderReceivePanel = () => {
+    const activeWallet = wallets[receiveChain as keyof MultiWallet];
+    
+    return (
+      <Card style={s.panelCard}>
+        <Text style={s.panelTitle}>↙️ RECEIVE CRYPTO</Text>
+
+        <ChainSelector 
+          chains={connectedChains}
+          selectedChain={receiveChain}
+          onSelect={setReceiveChain}
+          wallets={wallets}
+        />
+
+        {activeWallet && (
+          <View>
+            <View style={s.qrPlaceholder}>
+              <Text style={s.qrPlaceholderText}>📱</Text>
+              <Text style={s.qrPlaceholderSubtext}>QR Code</Text>
+              <Text style={s.qrPlaceholderSubtext}>Coming Soon</Text>
+            </View>
+
+            <View style={s.fullAddressBox}>
+              <Text style={s.fullAddressLabel}>{CHAIN_CONFIGS[receiveChain].name.toUpperCase()} ADDRESS</Text>
+              <Text style={s.fullAddressText} selectable>{activeWallet.address}</Text>
+            </View>
+
+            <Pressable 
+              onPress={() => {
+                if (Platform.OS === 'web') {
+                  navigator.clipboard?.writeText(activeWallet.address);
+                }
+              }} 
+              style={s.copyBtn}
+            >
+              <Text style={s.copyBtnText}>📋 COPY ADDRESS</Text>
+            </Pressable>
+
+            <View style={s.receiveWarning}>
+              <Text style={s.receiveWarningText}>
+                ⚠️ Only send <Text style={{ fontWeight: '800' }}>{CHAIN_CONFIGS[receiveChain].name}</Text> tokens to this address.
+              </Text>
+            </View>
+          </View>
+        )}
+      </Card>
+    );
+  };
+
+  // ─── Main Render ─────────────────────────────────────────────────────────────
 
   if (loading) {
     return (
-      <View style={styles.loadingContainer}>
+      <View style={s.loadingContainer}>
         <ActivityIndicator size="large" color="#fff" />
-        <Text style={styles.loadingText}>Loading wallet...</Text>
+        <Text style={s.loadingText}>Loading wallet...</Text>
       </View>
     );
   }
 
   return (
-    <View style={styles.outerContainer}>
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>WALLET</Text>
+    <View style={s.container}>
+      {/* Header */}
+      <View style={s.header}>
+        <Text style={s.headerTitle}>WALLET</Text>
+        <View style={s.headerMeta}>
+          <Text style={s.headerValue}>{formatUSD(portfolio?.totalValue || 0)}</Text>
+          <Text style={[
+            s.headerChange,
+            { color: (portfolio?.change24h || 0) >= 0 ? '#10b981' : '#ef4444' }
+          ]}>
+            {formatPercent(portfolio?.change24h || 0)}
+          </Text>
+        </View>
       </View>
 
+      {/* Tab Navigation */}
+      <TabBar activeTab={activeTab} onTabChange={setActiveTab} />
+
+      {/* Content */}
       <PageContainer refreshing={refreshing} onRefresh={onRefresh}>
-        {/* Portfolio Card */}
-        <Card style={styles.portfolioCard}>
-          <Text style={styles.portfolioLabel}>PORTFOLIO VALUE</Text>
-          <Text style={styles.portfolioValue}>${totalValue}</Text>
-          <View style={styles.addressBadge}>
-            <Text style={styles.addressChain}>{chain === 'ethereum' ? '⟠ ETH' : '◎ SOL'}</Text>
-            <Text style={styles.addressText}>{shortenAddress(walletAddress)}</Text>
-          </View>
-        </Card>
+        {activeTab === 'portfolio' && renderPortfolioTab()}
+        {activeTab === 'assets' && renderAssetsTab()}
+        {activeTab === 'nfts' && renderNFTsTab()}
+        {activeTab === 'activity' && renderActivityTab()}
+        {activeTab === 'swap' && renderSwapTab()}
+        {activeTab === 'stake' && renderStakeTab()}
+        {activeTab === 'market' && renderMarketTab()}
 
-        {/* Tokens */}
-        <Text style={styles.sectionTitle}>TOKENS</Text>
-        {tokens.length === 0 ? (
-          <Card style={styles.emptyCard}>
-            <Text style={styles.emptyText}>No tokens found</Text>
-          </Card>
-        ) : (
-          tokens.map((token, i) => <TokenCard key={i} token={token} />)
+        {/* Send/Receive Panels */}
+        {activePanel === 'send' && renderSendPanel()}
+        {activePanel === 'receive' && renderReceivePanel()}
+
+        {/* Disconnect */}
+        {hasAnyWallet && (
+          <View style={s.signOutSection}>
+            <Pressable onPress={() => {
+              if (onDisconnect) onDisconnect();
+            }} style={s.signOutBtn}>
+              <Text style={s.signOutText}>⏏ DISCONNECT ALL WALLETS</Text>
+            </Pressable>
+            <Text style={s.signOutHint}>Your funds stay safe</Text>
+          </View>
         )}
-
-        {/* NFTs */}
-        <Text style={[styles.sectionTitle, { marginTop: 24 }]}>NFTs</Text>
-        <Card style={styles.emptyCard}>
-          <View style={styles.nftPlaceholder}>
-            <Text style={styles.nftEmoji}>🖼️</Text>
-            <Text style={styles.emptyText}>NFT gallery coming soon</Text>
-            <Text style={styles.emptySubtext}>We're building this next 🔥</Text>
-          </View>
-        </Card>
       </PageContainer>
+
+      {/* Modals for token/NFT/tx details */}
+      {/* These would be implemented as full modals in production */}
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  outerContainer: {
-    flex: 1,
-    backgroundColor: '#0a0a0a',
-  },
+// ─── Styles ──────────────────────────────────────────────────────────────────
+
+const s = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  
+  // Header
   header: {
-    paddingTop: 60,
-    paddingBottom: 20,
-    paddingHorizontal: 24,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
-    maxWidth: 480,
-    alignSelf: 'center',
-    width: '100%',
+    paddingTop: 60, paddingBottom: 16, paddingHorizontal: 24,
+    borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    maxWidth: 480, alignSelf: 'center', width: '100%',
   },
-  headerTitle: {
-    color: '#fff',
-    fontSize: 22,
-    fontWeight: '900',
-    letterSpacing: 3,
+  headerTitle: { color: '#fff', fontSize: 22, fontWeight: '900', letterSpacing: 3 },
+  headerMeta: { alignItems: 'flex-end' },
+  headerValue: { color: '#fff', fontSize: 18, fontWeight: '700' },
+  headerChange: { fontSize: 12, marginTop: 2 },
+
+  // Loading
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  loadingText: { color: '#555', marginTop: 12, fontSize: 14 },
+
+  // Tab bar
+  tabBar: { borderBottomWidth: 1, borderBottomColor: '#1a1a1a' },
+  tabScrollContent: { paddingHorizontal: 16, gap: 4, flexGrow: 1, justifyContent: 'center' },
+  tab: {
+    paddingHorizontal: 16, paddingVertical: 12, alignItems: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  loadingContainer: {
-    flex: 1,
-    backgroundColor: '#0a0a0a',
-    justifyContent: 'center',
-    alignItems: 'center',
+  tabActive: { borderBottomWidth: 2, borderBottomColor: '#22d3ee' },
+  tabIcon: { fontSize: 16, marginBottom: 4 },
+  tabLabel: { color: '#666', fontSize: 10, fontWeight: '700', letterSpacing: 1 },
+  tabLabelActive: { color: '#22d3ee' },
+
+  // Chain selector
+  chainSelector: { marginBottom: 16 },
+  chainChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: 16, paddingVertical: 8, marginRight: 8,
+    backgroundColor: '#111', borderRadius: 20, borderWidth: 1, borderColor: '#222',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  loadingText: {
-    color: '#555',
-    marginTop: 12,
-    fontSize: 14,
+  chainChipActive: { borderColor: '#22d3ee', backgroundColor: '#0a1515' },
+  chainChipDisabled: { opacity: 0.4 },
+  chainChipIcon: { fontSize: 16 },
+  chainChipText: { color: '#888', fontSize: 12, fontWeight: '600' },
+  chainChipTextActive: { color: '#22d3ee' },
+  chainDot: { width: 6, height: 6, borderRadius: 3 },
+
+  // Portfolio
+  portfolioCard: { alignItems: 'center', padding: 32, marginBottom: 24 },
+  portfolioLabel: { color: '#666', fontSize: 11, letterSpacing: 2, fontWeight: '700', marginBottom: 8 },
+  portfolioValue: { color: '#fff', fontSize: 48, fontWeight: '900', letterSpacing: 1, marginBottom: 8 },
+  portfolioChange: { marginBottom: 20 },
+  portfolioChangeText: { fontSize: 14, fontWeight: '600' },
+  chartPlaceholder: {
+    width: '100%', height: 60, backgroundColor: '#0a0a0a', borderRadius: 8,
+    justifyContent: 'center', alignItems: 'center', marginBottom: 20,
+    borderWidth: 1, borderColor: '#1a1a1a',
   },
-  portfolioCard: {
-    alignItems: 'center',
-    padding: 28,
-    marginBottom: 24,
+  chartPlaceholderText: { color: '#444', fontSize: 12 },
+  walletBadges: { flexDirection: 'row', gap: 8, flexWrap: 'wrap', justifyContent: 'center' },
+  badgePill: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: '#0a0a0a', borderRadius: 16, paddingVertical: 6, paddingHorizontal: 12,
+    borderWidth: 1, borderColor: '#222',
   },
-  portfolioLabel: {
-    color: '#666',
-    fontSize: 11,
-    letterSpacing: 2,
-    fontWeight: '700',
-    marginBottom: 8,
+  badgePillIcon: { fontSize: 12 },
+  badgePillText: { color: '#888', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+
+  // Actions
+  actionsRow: { flexDirection: 'row', gap: 8, marginBottom: 24 },
+  actionBtn: {
+    flex: 1, alignItems: 'center', gap: 8, padding: 16,
+    backgroundColor: '#111', borderRadius: 12, borderWidth: 1, borderColor: '#1a1a1a',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  portfolioValue: {
-    color: '#fff',
-    fontSize: 42,
-    fontWeight: '900',
-    letterSpacing: 1,
-    marginBottom: 16,
+  actionBtnIcon: { width: 32, height: 32, borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
+  actionBtnEmoji: { fontSize: 16 },
+  actionBtnLabel: { color: '#888', fontSize: 10, fontWeight: '700', letterSpacing: 1 },
+
+  // Assets
+  assetsHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  addTokenBtn: { 
+    paddingHorizontal: 12, paddingVertical: 6, backgroundColor: '#1a1a2e', borderRadius: 8,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  addressBadge: {
-    flexDirection: 'row',
-    backgroundColor: '#0a0a0a',
-    borderRadius: 20,
-    paddingVertical: 6,
-    paddingHorizontal: 14,
-    alignItems: 'center',
-    gap: 8,
-    borderWidth: 1,
-    borderColor: '#222',
+  addTokenText: { color: '#7c8fff', fontSize: 10, fontWeight: '700', letterSpacing: 1 },
+
+  tokenRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: '#111', borderRadius: 12, padding: 16, marginBottom: 8,
+    borderWidth: 1, borderColor: '#1a1a1a',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  addressChain: {
-    color: '#888',
-    fontSize: 12,
-    fontWeight: '700',
+  tokenLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
+  tokenIcon: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
+  tokenIconText: { fontSize: 16, color: '#fff', fontWeight: '700' },
+  tokenName: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  tokenSymbol: { color: '#666', fontSize: 11, marginTop: 2 },
+  tokenRight: { alignItems: 'flex-end' },
+  tokenBalance: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  tokenMeta: { alignItems: 'flex-end', gap: 2 },
+  tokenUsd: { color: '#888', fontSize: 12 },
+  tokenChange: { fontSize: 11, fontWeight: '600' },
+
+  // NFTs
+  nftGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  nftCard: {
+    width: '48%', backgroundColor: '#111', borderRadius: 12, padding: 12,
+    borderWidth: 1, borderColor: '#1a1a1a',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  addressText: {
-    color: '#555',
-    fontSize: 12,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  sectionTitle: {
-    color: '#666',
-    fontSize: 12,
-    letterSpacing: 2,
-    fontWeight: '700',
-    marginBottom: 12,
-  },
-  tokenCard: {
-    backgroundColor: '#111',
-    borderRadius: 14,
-    padding: 16,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#222',
-    marginBottom: 8,
-    ...(Platform.OS === 'web' ? { transition: 'all 0.2s ease', cursor: 'pointer' } as any : {}),
-  },
-  tokenCardHovered: {
-    borderColor: '#444',
-    backgroundColor: '#161616',
-    ...(Platform.OS === 'web' ? { transform: [{ translateY: -1 }] } : {}),
-  },
-  tokenLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  tokenIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: '#1a1a2e',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  tokenIconText: {
-    fontSize: 20,
-  },
-  tokenName: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  tokenSymbol: {
-    color: '#555',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  tokenRight: {
-    alignItems: 'flex-end',
-  },
-  tokenBalance: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  tokenUsd: {
-    color: '#555',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  emptyCard: {
-    alignItems: 'center',
-    padding: 24,
-    marginBottom: 8,
-  },
+  nftImageContainer: { aspectRatio: 1, marginBottom: 8, borderRadius: 8, overflow: 'hidden' },
   nftPlaceholder: {
-    alignItems: 'center',
+    flex: 1, backgroundColor: '#0a0a0a', justifyContent: 'center', alignItems: 'center',
+    borderWidth: 1, borderColor: '#222',
   },
-  nftEmoji: {
-    fontSize: 32,
-    marginBottom: 12,
+  nftPlaceholderText: { fontSize: 24 },
+  nftName: { color: '#fff', fontSize: 12, fontWeight: '700', marginBottom: 2 },
+  nftCollection: { color: '#666', fontSize: 10 },
+
+  // Transactions
+  txRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: '#111', borderRadius: 12, padding: 14, marginBottom: 8,
+    borderWidth: 1, borderColor: '#1a1a1a',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  emptyText: {
-    color: '#555',
-    fontSize: 14,
+  txIcon: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+  txIconText: { fontSize: 14 },
+  txContent: { flex: 1 },
+  txLabel: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  txMeta: { color: '#666', fontSize: 11, marginTop: 2 },
+  txTime: { color: '#444', fontSize: 10, marginTop: 2 },
+  txRight: { alignItems: 'center', gap: 4 },
+  txStatus: { width: 20, height: 20, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
+  txStatusConfirmed: { backgroundColor: '#10b98120' },
+  txStatusText: { fontSize: 10 },
+  txArrow: { color: '#444', fontSize: 16 },
+
+  // Swap
+  swapCard: { padding: 20, marginBottom: 24 },
+  swapTitle: { color: '#fff', fontSize: 16, fontWeight: '800', letterSpacing: 2, marginBottom: 20 },
+  swapInterface: { gap: 16, marginBottom: 16 },
+  swapInputContainer: { gap: 8 },
+  swapLabel: { color: '#666', fontSize: 10, fontWeight: '700', letterSpacing: 1 },
+  swapTokenSelector: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: '#0a0a0a', borderRadius: 10, padding: 14, borderWidth: 1, borderColor: '#222',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  emptySubtext: {
-    color: '#444',
-    fontSize: 12,
-    marginTop: 4,
+  swapTokenText: { color: '#888', fontSize: 14 },
+  swapTokenArrow: { color: '#666', fontSize: 16 },
+  swapAmountInput: {
+    backgroundColor: '#0a0a0a', borderRadius: 10, padding: 14, color: '#fff',
+    fontSize: 16, borderWidth: 1, borderColor: '#222',
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
+  swapArrowContainer: { alignItems: 'center' },
+  swapArrowBtn: {
+    width: 32, height: 32, borderRadius: 16, backgroundColor: '#1a1a1a',
+    justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#333',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  swapArrowText: { color: '#888', fontSize: 14 },
+  swapInfo: { alignItems: 'center', padding: 12, backgroundColor: '#0d1a0d', borderRadius: 8, marginBottom: 16 },
+  swapInfoText: { color: '#4a9a4a', fontSize: 12, fontWeight: '600' },
+  swapInfoSubtext: { color: '#2a6a2a', fontSize: 10, marginTop: 2 },
+  swapBtn: {
+    backgroundColor: '#22d3ee', borderRadius: 12, paddingVertical: 16, alignItems: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  swapBtnDisabled: { backgroundColor: '#1a1a1a', opacity: 0.5 },
+  swapBtnText: { color: '#0a0a0a', fontSize: 14, fontWeight: '800', letterSpacing: 2 },
+
+  // Stake
+  stakeCard: { padding: 20, marginBottom: 24 },
+  stakeTitle: { color: '#fff', fontSize: 16, fontWeight: '800', letterSpacing: 2, marginBottom: 20 },
+  stakeSection: { marginBottom: 20 },
+  stakeSectionTitle: { color: '#666', fontSize: 11, letterSpacing: 2, fontWeight: '700', marginBottom: 12 },
+  stakeEmptyText: { color: '#444', fontSize: 14, textAlign: 'center', padding: 20 },
+  stakeRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: '#0a0a0a', borderRadius: 10, padding: 12, marginBottom: 8,
+    borderWidth: 1, borderColor: '#222',
+  },
+  stakeAmount: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  stakeValidator: { color: '#666', fontSize: 11, marginTop: 2 },
+  stakeRewards: { color: '#10b981', fontSize: 13, fontWeight: '600', textAlign: 'right' },
+  stakeStatus: { color: '#666', fontSize: 10, textAlign: 'right', marginTop: 2 },
+  validatorRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: '#0a0a0a', borderRadius: 10, padding: 12, marginBottom: 8,
+    borderWidth: 1, borderColor: '#222',
+  },
+  validatorName: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  validatorAddress: { color: '#666', fontSize: 10, marginTop: 2, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  validatorAPY: { color: '#10b981', fontSize: 12, fontWeight: '700', textAlign: 'right' },
+  validatorCommission: { color: '#888', fontSize: 10, textAlign: 'right', marginTop: 2 },
+  stakeSmallBtn: {
+    backgroundColor: '#1a2e1a', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  stakeSmallBtnText: { color: '#4a9a4a', fontSize: 10, fontWeight: '700', letterSpacing: 1 },
+
+  // Coming Soon
+  comingSoonBox: {
+    alignItems: 'center', padding: 32, backgroundColor: '#0a0a0a', borderRadius: 12,
+    borderWidth: 1, borderColor: '#222', marginBottom: 16,
+  },
+  comingSoonText: { color: '#888', fontSize: 16, marginBottom: 4 },
+  comingSoonSubtext: { color: '#444', fontSize: 12, textAlign: 'center', marginBottom: 16 },
+  connectBtn: {
+    backgroundColor: '#9945FF', borderRadius: 10, paddingHorizontal: 20, paddingVertical: 12,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  connectBtnText: { color: '#fff', fontSize: 12, fontWeight: '800', letterSpacing: 1 },
+
+  // Panels
+  panelCard: { padding: 20, marginBottom: 24 },
+  panelTitle: { color: '#fff', fontSize: 14, fontWeight: '800', letterSpacing: 2, marginBottom: 16 },
+  inputLabel: { color: '#555', fontSize: 10, fontWeight: '700', letterSpacing: 1.5, marginBottom: 6, marginTop: 8 },
+  panelInput: {
+    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#222', borderRadius: 10,
+    padding: 14, color: '#fff', fontSize: 15, marginBottom: 8,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+  },
+  quickRow: { flexDirection: 'row', gap: 6, marginBottom: 12, flexWrap: 'wrap' },
+  quickChip: {
+    paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8,
+    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#222',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  quickChipActive: { borderColor: '#22d3ee', backgroundColor: '#0a1515' },
+  quickChipText: { color: '#666', fontSize: 12, fontWeight: '700' },
+  quickChipTextActive: { color: '#22d3ee' },
+  resultBox: { borderRadius: 10, padding: 12, marginBottom: 12 },
+  resultSuccess: { backgroundColor: '#0d1f0d', borderWidth: 1, borderColor: '#1a3a1a' },
+  resultError: { backgroundColor: '#1f0d0d', borderWidth: 1, borderColor: '#3a1a1a' },
+  resultText: { color: '#ccc', fontSize: 13 },
+  resultLink: { color: '#22d3ee', fontSize: 12, marginTop: 6, fontWeight: '600' },
+  primaryBtn: {
+    backgroundColor: '#22d3ee', borderRadius: 12, paddingVertical: 14, alignItems: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  primaryBtnDisabled: { backgroundColor: '#1a2a2a', opacity: 0.5 },
+  primaryBtnText: { color: '#0a0a0a', fontSize: 14, fontWeight: '800', letterSpacing: 2 },
+
+  // Receive
+  qrPlaceholder: {
+    aspectRatio: 1, backgroundColor: '#0a0a0a', borderRadius: 12, marginBottom: 16,
+    justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#222',
+  },
+  qrPlaceholderText: { fontSize: 48, marginBottom: 8 },
+  qrPlaceholderSubtext: { color: '#444', fontSize: 12 },
+  fullAddressBox: {
+    backgroundColor: '#0a0a0a', borderRadius: 12, padding: 16, marginBottom: 12,
+    borderWidth: 1, borderColor: '#222',
+  },
+  fullAddressLabel: { color: '#555', fontSize: 10, letterSpacing: 2, fontWeight: '700', marginBottom: 8 },
+  fullAddressText: {
+    color: '#fff', fontSize: 13, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 20,
+  },
+  copyBtn: {
+    backgroundColor: '#1a2e1a', borderRadius: 12, paddingVertical: 14, alignItems: 'center',
+    borderWidth: 1, borderColor: '#2a3e2a', marginBottom: 12,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  copyBtnText: { color: '#4a9a4a', fontSize: 13, fontWeight: '700', letterSpacing: 1 },
+  receiveWarning: {
+    backgroundColor: '#1f1a0d', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#3a2e1a',
+  },
+  receiveWarningText: { color: '#b89a4a', fontSize: 12, lineHeight: 18 },
+
+  // Common
+  sectionTitle: { color: '#666', fontSize: 12, letterSpacing: 2, fontWeight: '700', marginBottom: 16 },
+  emptyCard: { alignItems: 'center', padding: 32, marginBottom: 8 },
+  emptyIcon: { fontSize: 48, marginBottom: 12 },
+  emptyText: { color: '#555', fontSize: 14, marginBottom: 4 },
+  emptySubtext: { color: '#444', fontSize: 12 },
+  signOutSection: { marginTop: 32, marginBottom: 40, alignItems: 'center' },
+  signOutBtn: {
+    paddingVertical: 14, paddingHorizontal: 32, borderRadius: 12,
+    backgroundColor: '#1a1111', borderWidth: 1, borderColor: '#2e1a1a',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  signOutText: { color: '#cc4444', fontSize: 12, fontWeight: '700', letterSpacing: 1 },
+  signOutHint: { color: '#444', fontSize: 11, textAlign: 'center', marginTop: 10 },
+
+  // Market
+  marketSection: { marginBottom: 24 },
+  marketSectionTitle: { color: '#888', fontSize: 13, fontWeight: '800', letterSpacing: 1.5, marginBottom: 12 },
+  marketRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: '#111', borderRadius: 12, padding: 14, marginBottom: 8,
+    borderWidth: 1, borderColor: '#1a1a1a',
+  },
+  marketRowLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
+  marketIcon: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+  marketIconText: { fontSize: 16 },
+  marketSymbol: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  marketName: { color: '#555', fontSize: 11, marginTop: 1, maxWidth: 120 },
+  marketRowRight: { alignItems: 'flex-end', gap: 4 },
+  marketPrice: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  marketChangeBadge: { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
+  marketChangeText: { fontSize: 11, fontWeight: '700' },
 });

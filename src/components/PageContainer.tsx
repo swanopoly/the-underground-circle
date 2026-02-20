@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, ScrollView, StyleSheet, RefreshControl } from 'react-native';
+import { View, ScrollView, StyleSheet, RefreshControl, useWindowDimensions } from 'react-native';
 
 interface PageContainerProps {
   children: React.ReactNode;
@@ -7,13 +7,20 @@ interface PageContainerProps {
   refreshing?: boolean;
   onRefresh?: () => void;
   centered?: boolean;
+  wide?: boolean;
 }
 
-export default function PageContainer({ children, scrollable = true, refreshing, onRefresh, centered }: PageContainerProps) {
+export default function PageContainer({ children, scrollable = true, refreshing, onRefresh, centered, wide }: PageContainerProps) {
+  const { width } = useWindowDimensions();
+  const isDesktop = width > 768;
+  const maxW = wide ? (isDesktop ? 960 : undefined) : (isDesktop ? 640 : 480);
+
+  const innerStyle = [styles.inner, maxW ? { maxWidth: maxW } : undefined];
+
   if (!scrollable) {
     return (
       <View style={[styles.container, centered && styles.centered]}>
-        <View style={styles.inner}>{children}</View>
+        <View style={innerStyle}>{children}</View>
       </View>
     );
   }
@@ -28,7 +35,7 @@ export default function PageContainer({ children, scrollable = true, refreshing,
         ) : undefined
       }
     >
-      <View style={styles.inner}>{children}</View>
+      <View style={innerStyle}>{children}</View>
     </ScrollView>
   );
 }
@@ -48,9 +55,9 @@ const styles = StyleSheet.create({
   inner: {
     width: '100%',
     maxWidth: 480,
-    alignSelf: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 32,
+    alignSelf: 'center' as const,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 28,
   },
 });

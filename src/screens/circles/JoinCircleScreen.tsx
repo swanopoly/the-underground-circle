@@ -12,6 +12,7 @@ import {
 import { supabase } from '../../lib/supabase';
 import { showAlert } from '../../lib/alert';
 import Button from '../../components/Button';
+import { awardXP, getXPForAction } from '../../lib/gamification';
 
 export default function JoinCircleScreen({ navigation }: any) {
   const [code, setCode] = useState('');
@@ -78,6 +79,9 @@ export default function JoinCircleScreen({ navigation }: any) {
       setError(joinError.message);
       return;
     }
+
+    // Award XP for joining a circle
+    awardXP(user.id, getXPForAction('circle_join'), 'circle_join', { circle_id: circle.id }).catch(console.error);
 
     showAlert("You're in!", `Welcome to ${circle.name}.`);
     navigation.goBack();

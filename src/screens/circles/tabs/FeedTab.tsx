@@ -13,6 +13,7 @@ import {
 import { supabase } from '../../../lib/supabase';
 import { showAlert } from '../../../lib/alert';
 import Button from '../../../components/Button';
+import { awardXP, getXPForAction } from '../../../lib/gamification';
 
 const PRIORITY_COLORS: any = {
   low: '#555',
@@ -43,30 +44,51 @@ export default function FeedTab({ circleId }: { circleId: string }) {
   const [members, setMembers] = useState<any[]>([]);
 
   const fetchTasks = useCallback(async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) setCurrentUserId(user.id);
+    try {
+      const { data: { user }, error: userError } = await supabase.auth.getUser();
+      if (userError) {
+        console.error('Error getting user:', userError);
+        return;
+      }
+      if (user) setCurrentUserId(user.id);
 
-    let query = supabase
-      .from('tasks')
-      .select('*, creator:profiles!tasks_created_by_fkey(username, display_name), assignee:profiles!tasks_assigned_to_fkey(username, display_name)')
-      .eq('circle_id', circleId)
-      .order('created_at', { ascending: false });
+      let query = supabase
+        .from('tasks')
+        .select('*, creator:profiles!tasks_created_by_fkey(username, display_name), assignee:profiles!tasks_assigned_to_fkey(username, display_name)')
+        .eq('circle_id', circleId)
+        .order('created_at', { ascending: false })
+        .limit(50);
 
-    if (filter === 'mine' && user) {
-      query = query.or(`assigned_to.eq.${user.id},created_by.eq.${user.id}`);
-    } else if (filter !== 'all') {
-      query = query.eq('status', filter);
+      if (filter === 'mine' && user) {
+        query = query.or(`assigned_to.eq.${user.id},created_by.eq.${user.id}`);
+      } else if (filter !== 'all') {
+        query = query.eq('status', filter);
+      }
+
+      const { data, error } = await query;
+      if (error) {
+        console.error('Error fetching tasks:', error);
+        showAlert('Error', 'Failed to load tasks');
+        return;
+      }
+      setTasks(data || []);
+
+      // Fetch members for assignment
+      const { data: memberData, error: memberError } = await supabase
+        .from('circle_members')
+        .select('user:profiles(id, username, display_name)')
+        .eq('circle_id', circleId)
+        .limit(50);
+      
+      if (memberError) {
+        console.error('Error fetching members:', memberError);
+      } else {
+        setMembers((memberData || []).map((m: any) => m.user));
+      }
+    } catch (err) {
+      console.error('Unexpected error in fetchTasks:', err);
+      showAlert('Error', 'Something went wrong loading tasks');
     }
-
-    const { data } = await query;
-    setTasks(data || []);
-
-    // Fetch members for assignment
-    const { data: memberData } = await supabase
-      .from('circle_members')
-      .select('user:profiles(id, username, display_name)')
-      .eq('circle_id', circleId);
-    setMembers((memberData || []).map((m: any) => m.user));
   }, [circleId, filter]);
 
   useEffect(() => {
@@ -78,6 +100,12 @@ export default function FeedTab({ circleId }: { circleId: string }) {
       status,
       completed_at: status === 'done' ? new Date().toISOString() : null,
     }).eq('id', taskId);
+
+    // Award XP when task is marked done
+    if (status === 'done' && currentUserId) {
+      awardXP(currentUserId, getXPForAction('task_complete'), 'task_complete', { task_id: taskId }).catch(console.error);
+    }
+
     fetchTasks();
   };
 
@@ -413,7 +441,7 @@ const styles = StyleSheet.create({
     padding: 14,
     borderBottomWidth: 1,
     borderBottomColor: '#1a1a1a',
-    maxWidth: 580,
+    maxWidth: 860,
     alignSelf: 'center',
     width: '100%',
   },
@@ -426,7 +454,7 @@ const styles = StyleSheet.create({
     padding: 12,
     paddingHorizontal: 16,
     gap: 6,
-    maxWidth: 580,
+    maxWidth: 860,
     alignSelf: 'center',
     width: '100%',
     flexWrap: 'wrap',
@@ -446,7 +474,7 @@ const styles = StyleSheet.create({
   chipTextActive: { color: '#fff' },
   list: {
     padding: 16,
-    maxWidth: 580,
+    maxWidth: 860,
     alignSelf: 'center',
     width: '100%',
   },
@@ -490,7 +518,7 @@ const styles = StyleSheet.create({
     padding: 16,
     borderTopWidth: 1,
     borderTopColor: '#1a1a1a',
-    maxWidth: 580,
+    maxWidth: 860,
     alignSelf: 'center',
     width: '100%',
   },
@@ -513,7 +541,7 @@ const styles = StyleSheet.create({
   },
   modalCard: {
     width: '90%',
-    maxWidth: 420,
+    maxWidth: 700,
     backgroundColor: '#111',
     borderRadius: 16,
     padding: 28,

@@ -1,0 +1,278 @@
+import React, { useState } from 'react';
+import { View, Text, TextInput, StyleSheet, Pressable, Platform, ScrollView } from 'react-native';
+import {
+  OfficeAgent,
+  WHITEBOARD_MODES,
+  STATUS_COLORS,
+} from '../../../../lib/officeAgents';
+
+interface Props {
+  editable?: boolean;
+  notes?: string[];
+  onNotesChange?: (notes: string[]) => void;
+  agents?: OfficeAgent[];
+}
+
+export default function Whiteboard({ editable, notes = [], onNotesChange, agents = [] }: Props) {
+  const [modeIndex, setModeIndex] = useState(0);
+  const [editing, setEditing] = useState(false);
+  const [noteText, setNoteText] = useState('');
+  const mode = WHITEBOARD_MODES[modeIndex];
+
+  const cycleMode = () => {
+    if (editing) return;
+    setModeIndex((prev) => (prev + 1) % WHITEBOARD_MODES.length);
+  };
+
+  const addNote = () => {
+    if (noteText.trim() && onNotesChange) {
+      onNotesChange([noteText.trim(), ...notes].slice(0, 8));
+      setNoteText('');
+    }
+  };
+
+  return (
+    <View style={styles.board}>
+      <Pressable
+        onPress={cycleMode}
+        onLongPress={() => editable && setEditing(!editing)}
+        style={[styles.frame, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+      >
+        {/* Header */}
+        <View style={styles.header}>
+          <Text style={styles.headerIcon}>{editing ? '✏️' : mode.icon}</Text>
+          <Text style={styles.headerText}>{editing ? 'NOTES' : mode.label}</Text>
+          {editable && (
+            <Pressable onPress={() => setEditing(!editing)} style={styles.editBtn}>
+              <Text style={styles.editBtnText}>{editing ? 'VIEW' : 'EDIT'}</Text>
+            </Pressable>
+          )}
+          {!editing && <Text style={styles.headerHint}>TAP TO CYCLE</Text>}
+        </View>
+
+        {/* Content */}
+        <View style={styles.content}>
+          {editing ? (
+            <NotesView notes={notes} noteText={noteText} setNoteText={setNoteText} addNote={addNote} />
+          ) : (
+            <>
+              {mode.key === 'status' && <StatusView agents={agents} />}
+              {mode.key === 'activity' && <ActivityView agents={agents} />}
+              {mode.key === 'metrics' && <MetricsView agents={agents} />}
+              {mode.key === 'tasks' && <TasksView />}
+            </>
+          )}
+        </View>
+
+        {/* Mode dots */}
+        {!editing && (
+          <View style={styles.dots}>
+            {WHITEBOARD_MODES.map((_, i) => (
+              <View key={i} style={[styles.dot, i === modeIndex && styles.dotActive]} />
+            ))}
+          </View>
+        )}
+      </Pressable>
+
+      {/* Marker tray */}
+      <View style={styles.tray}>
+        {['#ef4444', '#22c55e', '#3b82f6', '#eab308', '#ec4899'].map((c, i) => (
+          <View key={i} style={[styles.marker, { backgroundColor: c }]} />
+        ))}
+      </View>
+    </View>
+  );
+}
+
+function NotesView({ notes, noteText, setNoteText, addNote }: {
+  notes: string[]; noteText: string; setNoteText: (t: string) => void; addNote: () => void;
+}) {
+  return (
+    <View style={styles.notesContainer}>
+      <View style={styles.noteInputRow}>
+        <TextInput
+          style={styles.noteInput}
+          value={noteText}
+          onChangeText={setNoteText}
+          onSubmitEditing={addNote}
+          placeholder="Add a note..."
+          placeholderTextColor="#999"
+          maxLength={80}
+        />
+        <Pressable onPress={addNote} style={styles.noteAddBtn}>
+          <Text style={styles.noteAddText}>+</Text>
+        </Pressable>
+      </View>
+      {notes.map((note, i) => (
+        <Text key={i} style={styles.noteItem} numberOfLines={1}>• {note}</Text>
+      ))}
+    </View>
+  );
+}
+
+function StatusView({ agents }: { agents: OfficeAgent[] }) {
+  if (agents.length === 0) return <Text style={styles.emptyText}>Connect OpenClaw to see agents</Text>;
+  return (
+    <ScrollView style={styles.statusScroll} showsVerticalScrollIndicator={false}>
+      <View style={styles.statusList}>
+        {agents.map((a) => (
+          <View key={a.id} style={styles.statusRow}>
+            <View style={[styles.statusDot, { backgroundColor: STATUS_COLORS[a.status] }]} />
+            <Text style={styles.statusName} numberOfLines={1}>{a.name}</Text>
+            <Text style={styles.statusActivity} numberOfLines={1}>{a.activity}</Text>
+            <Text style={styles.statusLabel}>{a.status.toUpperCase()}</Text>
+          </View>
+        ))}
+      </View>
+    </ScrollView>
+  );
+}
+
+function ActivityView({ agents }: { agents: OfficeAgent[] }) {
+  const activities = agents
+    .filter((a) => a.status !== 'offline')
+    .flatMap((a) => a.recentActions.slice(0, 2).map((act) => ({ agent: a.name, action: act, color: a.color })))
+    .slice(0, 8);
+  if (activities.length === 0) return <Text style={styles.emptyText}>No recent activity</Text>;
+  return (
+    <View style={styles.activityList}>
+      {activities.map((item, i) => (
+        <View key={i} style={styles.activityRow}>
+          <View style={[styles.activityDot, { backgroundColor: item.color }]} />
+          <Text style={[styles.activityAgent, { color: item.color }]}>{item.agent}</Text>
+          <Text style={styles.activityAction} numberOfLines={1}>{item.action}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function MetricsView({ agents }: { agents: OfficeAgent[] }) {
+  const totalMessages = agents.reduce((sum, a) => sum + a.messagesProcessed, 0);
+  const activeCount = agents.filter((a) => a.status === 'active').length;
+  const totalTokens = agents.reduce((sum, a) => sum + a.tokensUsed, 0);
+  const totalCost = agents.reduce((sum, a) => sum + a.costToday, 0);
+  const metrics = [
+    { label: 'SESSIONS', value: agents.length.toString(), color: '#6366f1' },
+    { label: 'ACTIVE', value: `${activeCount}/${agents.length}`, color: '#22c55e' },
+    { label: 'MESSAGES', value: totalMessages.toLocaleString(), color: '#f59e0b' },
+    { label: 'COST TODAY', value: `$${totalCost.toFixed(2)}`, color: '#ef4444' },
+    { label: 'TOKENS', value: totalTokens > 0 ? `${(totalTokens / 1000).toFixed(0)}K` : '—', color: '#ec4899' },
+    { label: 'STATUS', value: agents.length > 0 ? 'LIVE' : 'OFFLINE', color: agents.length > 0 ? '#22c55e' : '#6b7280' },
+  ];
+  return (
+    <View style={styles.metricsGrid}>
+      {metrics.map((m, i) => (
+        <View key={i} style={styles.metricBox}>
+          <Text style={[styles.metricValue, { color: m.color }]}>{m.value}</Text>
+          <Text style={styles.metricLabel}>{m.label}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function TasksView() {
+  const tasks = [
+    { text: 'Ship Office MVP', status: '✓', color: '#22c55e' },
+    { text: 'Connect OpenClaw API', status: '▶', color: '#6366f1' },
+    { text: 'DAO Treasury module', status: '○', color: '#555' },
+    { text: 'Agent customization', status: '▶', color: '#f59e0b' },
+    { text: 'Review check-ins', status: '✓', color: '#22c55e' },
+    { text: 'Research habits paper', status: '○', color: '#555' },
+  ];
+  return (
+    <View style={styles.taskList}>
+      {tasks.map((t, i) => (
+        <View key={i} style={styles.taskRow}>
+          <Text style={[styles.taskStatus, { color: t.color }]}>{t.status}</Text>
+          <Text style={[styles.taskText, t.status === '✓' && styles.taskDone]}>{t.text}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  board: { position: 'absolute', left: 20, top: 8, right: 20, zIndex: 5 },
+  frame: {
+    width: '100%' as any,
+    height: 160,
+    backgroundColor: '#f5f5f0',
+    borderWidth: 2,
+    borderColor: '#8B7355',
+    borderRadius: 2,
+    padding: 8,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#ddd',
+    paddingBottom: 4,
+    marginBottom: 4,
+  },
+  headerIcon: { fontSize: 11 },
+  headerText: {
+    fontSize: 10, fontWeight: '800', fontFamily: 'monospace', color: '#333', letterSpacing: 1.5,
+  },
+  headerHint: {
+    fontSize: 6, color: '#bbb', fontFamily: 'monospace', marginLeft: 'auto', letterSpacing: 0.5,
+  },
+  editBtn: {
+    marginLeft: 'auto',
+    backgroundColor: '#e8e8e0',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 3,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  editBtnText: { fontSize: 6, fontWeight: '800', color: '#555', fontFamily: 'monospace', letterSpacing: 0.5 },
+  content: { flex: 1 },
+  emptyText: { fontSize: 9, color: '#999', fontFamily: 'monospace', fontStyle: 'italic', textAlign: 'center', marginTop: 8 },
+  dots: { flexDirection: 'row', justifyContent: 'center', gap: 5, marginTop: 3 },
+  dot: { width: 5, height: 5, borderRadius: 2.5, backgroundColor: '#ccc' },
+  dotActive: { backgroundColor: '#333' },
+  tray: { flexDirection: 'row', justifyContent: 'center', gap: 6, marginTop: 4 },
+  marker: { width: 5, height: 18, borderRadius: 1 },
+  // Notes
+  notesContainer: { gap: 3 },
+  noteInputRow: { flexDirection: 'row', gap: 4, marginBottom: 2 },
+  noteInput: {
+    flex: 1, backgroundColor: '#eee', borderRadius: 3, paddingHorizontal: 6, paddingVertical: 2,
+    fontSize: 7, fontFamily: 'monospace', color: '#333',
+  },
+  noteAddBtn: {
+    width: 18, height: 18, borderRadius: 3, backgroundColor: '#6366f1',
+    alignItems: 'center', justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  noteAddText: { color: '#fff', fontSize: 10, fontWeight: '800' },
+  noteItem: { fontSize: 7, color: '#555', fontFamily: 'monospace' },
+  // Status
+  statusScroll: { flex: 1 },
+  statusList: { gap: 2 },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  statusDot: { width: 5, height: 5, borderRadius: 2.5 },
+  statusName: { fontSize: 8, color: '#333', fontFamily: 'monospace', fontWeight: '700', width: 65 },
+  statusActivity: { fontSize: 7, color: '#888', fontFamily: 'monospace', flex: 1 },
+  statusLabel: { fontSize: 6, color: '#aaa', fontFamily: 'monospace', fontWeight: '600', width: 42, textAlign: 'right' },
+  // Activity
+  activityList: { gap: 2 },
+  activityRow: { flexDirection: 'row', gap: 5, alignItems: 'center' },
+  activityDot: { width: 4, height: 4, borderRadius: 2 },
+  activityAgent: { fontSize: 7, fontWeight: '800', fontFamily: 'monospace', width: 60 },
+  activityAction: { fontSize: 7, color: '#555', fontFamily: 'monospace', flex: 1 },
+  // Metrics
+  metricsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, justifyContent: 'center' },
+  metricBox: { alignItems: 'center', width: '30%' as any, paddingVertical: 2 },
+  metricValue: { fontSize: 12, fontWeight: '900', fontFamily: 'monospace' },
+  metricLabel: { fontSize: 5.5, color: '#888', fontFamily: 'monospace', letterSpacing: 0.5 },
+  // Tasks
+  taskList: { gap: 2 },
+  taskRow: { flexDirection: 'row', gap: 6, alignItems: 'center' },
+  taskStatus: { fontSize: 9, fontWeight: '700', width: 14, textAlign: 'center' },
+  taskText: { fontSize: 8, color: '#333', fontFamily: 'monospace', flex: 1 },
+  taskDone: { color: '#aaa', textDecorationLine: 'line-through' },
+});

@@ -8,6 +8,7 @@ import {
   Alert,
   Platform,
   Pressable,
+  Image,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { Circle } from '../../types';
@@ -25,8 +26,14 @@ function CircleCard({ item, onPress }: { item: Circle; onPress: () => void }) {
     >
       <View style={styles.circleHeader}>
         <View style={styles.circleNameRow}>
-          <View style={styles.circleAvatar}>
-            <Text style={styles.circleAvatarText}>{item.name.charAt(0).toUpperCase()}</Text>
+          <View style={[styles.circleAvatar, item.accent_color ? { backgroundColor: item.accent_color + '25' } : null]}>
+            {item.circle_image_url ? (
+              <Image source={{ uri: item.circle_image_url }} style={{ width: 38, height: 38, borderRadius: 19 }} />
+            ) : item.icon && item.icon !== '⭕' ? (
+              <Text style={{ fontSize: 20 }}>{item.icon}</Text>
+            ) : (
+              <Text style={styles.circleAvatarText}>{item.name.charAt(0).toUpperCase()}</Text>
+            )}
           </View>
           <View>
             <Text style={styles.circleName}>{item.name}</Text>
@@ -35,8 +42,15 @@ function CircleCard({ item, onPress }: { item: Circle; onPress: () => void }) {
             )}
           </View>
         </View>
-        <View style={styles.memberBadge}>
-          <Text style={styles.memberCount}>{item.member_count}/{item.max_members}</Text>
+        <View style={styles.badgeRow}>
+          {item.verification_badges && item.verification_badges.length > 0 && (
+            <View style={styles.verificationBadge}>
+              <Text style={styles.verificationIcon}>✓</Text>
+            </View>
+          )}
+          <View style={styles.memberBadge}>
+            <Text style={styles.memberCount}>{item.member_count}/{item.max_members}</Text>
+          </View>
         </View>
       </View>
       <View style={styles.circleFooter}>
@@ -52,26 +66,83 @@ export default function CirclesScreen({ navigation }: any) {
   const [refreshing, setRefreshing] = useState(false);
 
   const fetchCircles = useCallback(async () => {
-    const { data: memberships } = await supabase
-      .from('circle_members')
-      .select('circle_id');
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        setCircles([]);
+        return;
+      }
 
-    if (!memberships?.length) {
-      setCircles([]);
-      return;
+      // First try the optimized function from our migration
+      const { data: optimizedData, error: funcError } = await supabase
+        .rpc('get_user_circles', { user_uuid: user.id });
+
+      if (!funcError && optimizedData) {
+        const formatted = optimizedData.map((c: any) => ({
+          id: c.id,
+          name: c.name,
+          description: c.description,
+          invite_code: c.invite_code,
+          max_members: c.max_members,
+          created_by: c.created_by,
+          created_at: c.created_at,
+          member_count: Number(c.member_count) || 0,
+          user_role: c.user_role,
+          icon: c.icon,
+          accent_color: c.accent_color,
+          circle_image_url: c.circle_image_url,
+          // Mock verification status based on circle age and activity
+          verification_badges: c.created_at && new Date(c.created_at) < new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) && c.member_count >= 5 
+            ? ['activity_verified'] 
+            : [],
+        }));
+        setCircles(formatted);
+        return;
+      }
+
+      // Fallback to manual query with user filtering
+      const { data: memberships, error: membershipError } = await supabase
+        .from('circle_members')
+        .select('circle_id')
+        .eq('user_id', user.id)
+        .limit(50);
+
+      if (membershipError) {
+        console.error('Error fetching memberships:', membershipError);
+        Alert.alert('Error', 'Failed to fetch your circles');
+        return;
+      }
+
+      if (!memberships?.length) {
+        setCircles([]);
+        return;
+      }
+
+      const circleIds = memberships.map((m) => m.circle_id);
+      const { data, error } = await supabase
+        .from('circles')
+        .select(`
+          *,
+          circle_members!inner(count)
+        `)
+        .in('id', circleIds)
+        .limit(50);
+
+      if (error) {
+        console.error('Error fetching circles:', error);
+        Alert.alert('Error', 'Failed to load circle details');
+        return;
+      }
+
+      const formatted = (data || []).map((c: any) => ({
+        ...c,
+        member_count: c.circle_members?.[0]?.count || 0,
+      }));
+      setCircles(formatted);
+    } catch (err) {
+      console.error('Unexpected error:', err);
+      Alert.alert('Error', 'Something went wrong loading your circles');
     }
-
-    const circleIds = memberships.map((m) => m.circle_id);
-    const { data } = await supabase
-      .from('circles')
-      .select('*, circle_members(count)')
-      .in('id', circleIds);
-
-    const formatted = (data || []).map((c: any) => ({
-      ...c,
-      member_count: c.circle_members?.[0]?.count || 0,
-    }));
-    setCircles(formatted);
   }, []);
 
   useEffect(() => {
@@ -215,6 +286,26 @@ const styles = StyleSheet.create({
     color: '#666',
     fontSize: 12,
     marginTop: 2,
+  },
+  badgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  verificationBadge: {
+    backgroundColor: '#0d4f0c',
+    borderRadius: 10,
+    width: 20,
+    height: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#16a34a',
+  },
+  verificationIcon: {
+    color: '#22c55e',
+    fontSize: 12,
+    fontWeight: '900',
   },
   memberBadge: {
     backgroundColor: '#1a1a1a',
