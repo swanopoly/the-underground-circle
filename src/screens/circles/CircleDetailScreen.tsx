@@ -16,11 +16,21 @@ import MembersTab from './tabs/MembersTab';
 import DiscordTab from './tabs/DiscordTab';
 import ChallengesTab from './tabs/ChallengesTab';
 import DigestTab from './tabs/DigestTab';
-import OfficeTab from './tabs/OfficeTab';
+import OfficeTab, { AgentStats } from './tabs/OfficeTab';
 import { Circle } from '../../types';
 
-const TABS = ['CHAT', 'OFFICE', 'FEED', 'CHALLENGES', 'MEMBERS', 'DIGEST', 'DISCORD'] as const;
-type Tab = typeof TABS[number];
+const TAB_META: { key: string; label: string; icon: string }[] = [
+  { key: 'CHAT', label: 'Chat', icon: '💬' },
+  { key: 'OFFICE', label: 'Office', icon: '🏢' },
+  { key: 'FEED', label: 'Feed', icon: '📋' },
+  { key: 'CHALLENGES', label: 'Challenges', icon: '🏆' },
+  { key: 'MEMBERS', label: 'Members', icon: '👥' },
+  { key: 'DIGEST', label: 'Digest', icon: '📊' },
+  { key: 'DISCORD', label: 'Discord', icon: '🎮' },
+];
+
+const TABS = TAB_META.map(t => t.key) as readonly string[];
+type Tab = string;
 
 export default function CircleDetailScreen({ route, navigation }: any) {
   const { circleId, circleName } = route.params;
@@ -28,11 +38,11 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   const [circle, setCircle] = useState<Circle | null>(null);
   const [memberCount, setMemberCount] = useState(0);
   const [activeStreakCount, setActiveStreakCount] = useState(0);
-  const [menuOpen, setMenuOpen] = useState(false);
   const { width: winW } = useWindowDimensions();
   const isMobile = winW < 700;
   const [onlineMembers, setOnlineMembers] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [agentStats, setAgentStats] = useState<AgentStats>({ agentCount: 0, sessionCount: 0, costToday: 0, costWeek: 0, tokens: 0 });
 
   useEffect(() => {
     loadCircleData();
@@ -92,7 +102,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
             <BackButton onPress={() => navigation.goBack()} accentColor={accentColor} />
 
             <View style={styles.circleIdentity}>
-              <Text style={styles.circleName}>
+              <Text style={styles.circleName} numberOfLines={1}>
                 {(circle?.name || circleName)?.toUpperCase()}
               </Text>
               <View style={[styles.typeBadge, { backgroundColor: accentColor + '18', borderColor: accentColor + '40' }]}>
@@ -105,6 +115,8 @@ export default function CircleDetailScreen({ route, navigation }: any) {
             <Pressable
               onPress={() => navigation.navigate('CircleSettings', { circleId })}
               style={styles.gearBtn}
+              accessibilityLabel="Circle settings"
+              accessibilityRole="button"
             >
               <Text style={styles.gearText}>⚙️</Text>
             </Pressable>
@@ -123,22 +135,22 @@ export default function CircleDetailScreen({ route, navigation }: any) {
               </View>
               <View style={styles.statDivider} />
               <View style={styles.stat}>
-                <Text style={styles.statNum}>🤖 —</Text>
+                <Text style={styles.statNum}>🤖 {agentStats.agentCount || '—'}</Text>
                 <Text style={styles.statLbl}>Agents</Text>
               </View>
               <View style={styles.statDivider} />
               <View style={styles.stat}>
-                <Text style={styles.statNum}>—</Text>
+                <Text style={styles.statNum}>{agentStats.sessionCount || '—'}</Text>
                 <Text style={styles.statLbl}>Sessions</Text>
               </View>
               <View style={styles.statDivider} />
               <View style={styles.stat}>
-                <Text style={[styles.statNum, { color: '#555' }]}>$—</Text>
+                <Text style={[styles.statNum, { color: agentStats.costToday > 0 ? '#22c55e' : '#888' }]}>${agentStats.costToday > 0 ? agentStats.costToday.toFixed(2) : '—'}</Text>
                 <Text style={styles.statLbl}>Cost Today</Text>
               </View>
               <View style={styles.statDivider} />
               <View style={styles.stat}>
-                <Text style={styles.statNum}>$—</Text>
+                <Text style={styles.statNum}>${agentStats.costWeek > 0 ? agentStats.costWeek.toFixed(2) : '—'}</Text>
                 <Text style={styles.statLbl}>Cost This Week</Text>
               </View>
               <View style={styles.statDivider} />
@@ -148,79 +160,44 @@ export default function CircleDetailScreen({ route, navigation }: any) {
               </View>
               <View style={styles.statDivider} />
               <View style={styles.stat}>
-                <Text style={styles.statNum}>—</Text>
+                <Text style={styles.statNum}>{agentStats.tokens > 0 ? (agentStats.tokens > 1000 ? `${(agentStats.tokens / 1000).toFixed(0)}K` : agentStats.tokens) : '—'}</Text>
                 <Text style={styles.statLbl}>Tokens</Text>
               </View>
               <View style={styles.statDivider} />
               <View style={styles.stat}>
-                <Text style={[styles.statNum, { color: '#555' }]}>⚙️ Connect</Text>
-                <Text style={styles.statLbl}>in Office tab</Text>
+                <Text style={[styles.statNum, { color: agentStats.agentCount > 0 ? '#22c55e' : '#888' }]}>{agentStats.agentCount > 0 ? '● Live' : '⚙️ Connect'}</Text>
+                <Text style={styles.statLbl}>{agentStats.agentCount > 0 ? 'OpenClaw' : 'in Office tab'}</Text>
               </View>
             </ScrollView>
           )}
 
-          {/* Tab Bar — desktop: full row, mobile: active tab + hamburger */}
-          {isMobile ? (
-            <View style={styles.mobileTabRow}>
-              <Text style={[styles.mobileActiveTab, { color: accentColor }]}>{activeTab}</Text>
-              <Pressable
-                onPress={() => setMenuOpen(!menuOpen)}
-                style={[styles.hamburger, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              >
-                <Text style={styles.hamburgerText}>{menuOpen ? '✕' : '☰'}</Text>
-              </Pressable>
-            </View>
-          ) : (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.tabBar}
-            >
-              {TABS.map((tab) => (
-                <TabButton
-                  key={tab}
-                  label={tab}
-                  active={activeTab === tab}
-                  accentColor={accentColor}
-                  onPress={() => setActiveTab(tab)}
-                />
-              ))}
-            </ScrollView>
-          )}
+          {/* Tab Bar — horizontal scrollable pills on both mobile and desktop */}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={isMobile ? styles.tabBarMobile : styles.tabBar}
+          >
+            {TAB_META.map((tab) => (
+              <TabPill
+                key={tab.key}
+                icon={tab.icon}
+                label={tab.label}
+                active={activeTab === tab.key}
+                accentColor={accentColor}
+                isMobile={isMobile}
+                onPress={() => setActiveTab(tab.key)}
+              />
+            ))}
+          </ScrollView>
         </View>
       </View>
-
-      {/* Mobile tab dropdown */}
-      {isMobile && menuOpen && (
-        <View style={styles.mobileMenu}>
-          {TABS.map((tab) => (
-            <Pressable
-              key={tab}
-              onPress={() => { setActiveTab(tab); setMenuOpen(false); }}
-              style={[
-                styles.mobileMenuItem,
-                activeTab === tab && { backgroundColor: accentColor + '15', borderLeftColor: accentColor, borderLeftWidth: 3 },
-                Platform.OS === 'web' && { cursor: 'pointer' } as any,
-              ]}
-            >
-              <Text style={[
-                styles.mobileMenuText,
-                activeTab === tab && { color: accentColor, fontWeight: '800' },
-              ]}>
-                {tab === 'CHAT' ? '💬' : tab === 'OFFICE' ? '🏢' : tab === 'FEED' ? '📰' :
-                 tab === 'CHALLENGES' ? '🏆' : tab === 'MEMBERS' ? '👥' : tab === 'DIGEST' ? '📊' : '🎮'} {tab}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-      )}
 
       {/* Content — keep tabs mounted so state persists */}
       <View style={[styles.tabContent, activeTab !== 'CHAT' && styles.hiddenTab]}>
         <ChatTab circleId={circleId} accentColor={accentColor} />
       </View>
       <View style={[styles.tabContent, activeTab !== 'OFFICE' && styles.hiddenTab]}>
-        <OfficeTab circleId={circleId} accentColor={accentColor} />
+        <OfficeTab circleId={circleId} accentColor={accentColor} onAgentStats={setAgentStats} />
       </View>
       <View style={[styles.tabContent, activeTab !== 'FEED' && styles.hiddenTab]}>
         <FeedTab circleId={circleId} />
@@ -241,7 +218,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   );
 }
 
-// ─── Back Button with hover ──────────────────────────────────────────────────
+// ─── Back Button ──────────────────────────────────────────────────
 
 function BackButton({ onPress, accentColor }: { onPress: () => void; accentColor: string }) {
   const [hovered, setHovered] = useState(false);
@@ -255,16 +232,18 @@ function BackButton({ onPress, accentColor }: { onPress: () => void; accentColor
         styles.backBtn,
         hovered && { backgroundColor: accentColor + '20', borderColor: accentColor + '60' },
       ]}
+      accessibilityLabel="Go back"
+      accessibilityRole="button"
     >
       <Text style={[styles.backText, hovered && { color: accentColor }]}>←</Text>
     </Pressable>
   );
 }
 
-// ─── Tab Button with hover + underline ───────────────────────────────────────
+// ─── Tab Pill ───────────────────────────────────────────────────────
 
-function TabButton({ label, active, accentColor, onPress }: {
-  label: string; active: boolean; accentColor: string; onPress: () => void;
+function TabPill({ icon, label, active, accentColor, isMobile, onPress }: {
+  icon: string; label: string; active: boolean; accentColor: string; isMobile: boolean; onPress: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
 
@@ -274,16 +253,20 @@ function TabButton({ label, active, accentColor, onPress }: {
       onHoverIn={() => setHovered(true)}
       onHoverOut={() => setHovered(false)}
       style={[
-        styles.tab,
-        active && { borderBottomColor: accentColor },
-        hovered && !active && { borderBottomColor: '#333', backgroundColor: '#ffffff06' },
+        styles.tabPill,
+        active && { backgroundColor: accentColor + '20', borderColor: accentColor + '60' },
+        hovered && !active && { backgroundColor: '#ffffff08', borderColor: '#333' },
+        isMobile && styles.tabPillMobile,
       ]}
+      accessibilityRole="tab"
+      accessibilityLabel={label}
+      accessibilityState={{ selected: active }}
     >
+      <Text style={styles.tabPillIcon}>{icon}</Text>
       <Text style={[
-        styles.tabText,
-        { color: active ? accentColor : '#555' },
+        styles.tabPillText,
+        { color: active ? accentColor : '#888' },
         active && { fontWeight: '800' },
-        hovered && !active && { color: '#888' },
       ]}>
         {label}
       </Text>
@@ -299,8 +282,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#0a0a0a',
   },
   loadingText: {
-    color: '#333',
-    fontSize: 12,
+    color: '#888',
+    fontSize: 14,
     fontWeight: '700',
     letterSpacing: 2,
   },
@@ -323,24 +306,24 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 12,
+    paddingHorizontal: 16,
     paddingBottom: 10,
     gap: 10,
   },
 
   // Back
   backBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: '#ffffff08',
     justifyContent: 'center',
     alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.2s ease' } as any : {}),
   },
   backText: {
-    color: '#666',
-    fontSize: 17,
+    color: '#888',
+    fontSize: 20,
   },
 
   // Circle Identity — centered
@@ -359,13 +342,13 @@ const styles = StyleSheet.create({
     flexShrink: 1,
   },
   typeBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
     borderRadius: 8,
     borderWidth: 1,
   },
   typeText: {
-    fontSize: 9,
+    fontSize: 10,
     fontWeight: '700',
     letterSpacing: 0.5,
   },
@@ -394,8 +377,8 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   statLbl: {
-    color: '#555',
-    fontSize: 9,
+    color: '#888',
+    fontSize: 10,
     letterSpacing: 0.3,
     textAlign: 'center',
   },
@@ -403,17 +386,6 @@ const styles = StyleSheet.create({
     width: 1,
     height: 28,
     backgroundColor: '#ffffff0a',
-  },
-  onlineWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-  },
-  onlineDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#22c55e',
   },
 
   // Icon Bubble
@@ -429,82 +401,61 @@ const styles = StyleSheet.create({
     fontSize: 18,
   },
   gearBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: '#ffffff08',
     justifyContent: 'center',
     alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.2s ease' } as any : {}),
   },
   gearText: {
-    fontSize: 14,
+    fontSize: 16,
   },
 
-  // Tab Bar — centered, spacious
+  // Tab Bar — desktop: centered, spacious
   tabBar: {
     flexDirection: 'row',
     justifyContent: 'center',
     paddingHorizontal: 16,
-    gap: 4,
+    paddingVertical: 8,
+    gap: 6,
     flexGrow: 1,
   },
-  tab: {
-    paddingVertical: 12,
-    paddingHorizontal: 18,
-    alignItems: 'center',
-    borderBottomWidth: 2,
-    borderBottomColor: 'transparent',
-    ...(Platform.OS === 'web' ? { transition: 'all 0.2s ease', cursor: 'pointer' } as any : {}),
-  },
-  tabText: {
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 1,
+
+  // Tab Bar — mobile: scrollable with padding
+  tabBarMobile: {
+    flexDirection: 'row',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    gap: 8,
   },
 
-  // Mobile tab row
-  mobileTabRow: {
+  // Tab pill style (replaces old underline tabs and hamburger menu)
+  tabPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
+    justifyContent: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    minHeight: 44,
+    gap: 6,
+    ...(Platform.OS === 'web' ? { transition: 'all 0.2s ease', cursor: 'pointer' } as any : {}),
+  },
+  tabPillMobile: {
+    paddingHorizontal: 14,
     paddingVertical: 10,
   },
-  mobileActiveTab: {
+  tabPillIcon: {
+    fontSize: 16,
+  },
+  tabPillText: {
     fontSize: 13,
-    fontWeight: '800',
-    letterSpacing: 2,
-  },
-  hamburger: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: '#ffffff08',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  hamburgerText: {
-    color: '#888',
-    fontSize: 18,
-  },
-  mobileMenu: {
-    backgroundColor: '#0d0d12',
-    borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
-    paddingVertical: 4,
-    zIndex: 100,
-  },
-  mobileMenuItem: {
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-  },
-  mobileMenuText: {
-    fontSize: 13,
-    color: '#777',
-    fontFamily: 'monospace',
     fontWeight: '600',
-    letterSpacing: 1,
+    letterSpacing: 0.5,
   },
 
   // Tab content

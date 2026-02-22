@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { Text } from 'react-native';
+import { View, Text, Platform } from 'react-native';
 import { supabase } from '../lib/supabase';
 import CirclesScreen from '../screens/circles/CirclesScreen';
 import CreateCircleScreen from '../screens/circles/CreateCircleScreen';
@@ -102,6 +102,42 @@ function WalletScreen() {
   );
 }
 
+function TabIcon({ emoji, label, focused, color }: { emoji: string; label: string; focused: boolean; color: string }) {
+  return (
+    <View style={{
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingTop: 6,
+      minWidth: 64,
+      minHeight: 48,
+    }}
+    accessibilityRole="tab"
+    accessibilityLabel={label}
+    accessibilityState={{ selected: focused }}
+    >
+      {focused && (
+        <View style={{
+          position: 'absolute',
+          top: 2,
+          width: 48,
+          height: 40,
+          borderRadius: 12,
+          backgroundColor: color === '#fff' ? '#ffffff18' : color + '18',
+        }} />
+      )}
+      <Text style={{ fontSize: 22, marginBottom: 2 }}>{emoji}</Text>
+      <Text style={{
+        fontSize: 11,
+        fontWeight: focused ? '800' : '600',
+        letterSpacing: 1,
+        color: focused ? '#fff' : '#888',
+      }}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
 export default function MainNavigator() {
   return (
     <Tab.Navigator
@@ -111,42 +147,43 @@ export default function MainNavigator() {
           backgroundColor: '#0a0a0a',
           borderTopColor: '#1a1a1a',
           borderTopWidth: 1,
-          paddingTop: 8,
-          paddingBottom: 8,
-          height: 60,
+          paddingTop: 4,
+          paddingBottom: Platform.OS === 'ios' ? 24 : 8,
+          height: Platform.OS === 'ios' ? 88 : 72,
         },
         tabBarActiveTintColor: '#fff',
-        tabBarInactiveTintColor: '#555',
-        tabBarLabelStyle: {
-          fontSize: 10,
-          fontWeight: '700',
-          letterSpacing: 1,
-        },
-        tabBarIcon: () => null,
+        tabBarInactiveTintColor: '#888',
+        tabBarShowLabel: false,
       }}
     >
       <Tab.Screen
         name="Circles"
         component={CirclesNavigator}
         options={{
-          tabBarLabel: 'CIRCLES',
-          tabBarIcon: ({ color }) => <Text style={{ fontSize: 18 }}>⭕</Text>,
+          tabBarIcon: ({ focused, color }) => (
+            <TabIcon emoji="⭕" label="CIRCLES" focused={focused} color={color} />
+          ),
+          tabBarAccessibilityLabel: 'Circles tab',
         }}
       />
       <Tab.Screen
         name="Wallet"
         component={WalletScreen}
         options={{
-          tabBarLabel: 'WALLET',
-          tabBarIcon: ({ color }) => <Text style={{ fontSize: 18 }}>💰</Text>,
+          tabBarIcon: ({ focused, color }) => (
+            <TabIcon emoji="💰" label="WALLET" focused={focused} color={color} />
+          ),
+          tabBarAccessibilityLabel: 'Wallet tab',
         }}
       />
       <Tab.Screen
         name="Profile"
         component={ProfileNavigator}
         options={{
-          tabBarLabel: 'PROFILE',
-          tabBarIcon: ({ color }) => <Text style={{ fontSize: 18 }}>👤</Text>,
+          tabBarIcon: ({ focused, color }) => (
+            <TabIcon emoji="👤" label="PROFILE" focused={focused} color={color} />
+          ),
+          tabBarAccessibilityLabel: 'Profile tab',
         }}
       />
     </Tab.Navigator>

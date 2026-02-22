@@ -22,6 +22,12 @@ import {
   getCircleDiscordConfig, getCachedChannels, getChannelMessages,
   buildDiscordContext, isTextChannel, CircleDiscordConfig,
 } from '../../../lib/discord';
+import {
+  createQuickPoll, createYesNoProposal, getProposals, castVote, resolveProposal,
+  pinMessage, unpinMessage, getPinnedMessages,
+} from '../../../lib/governance';
+import ProposalCard from '../../../components/ProposalCard';
+import { Proposal, PinnedMessage } from '../../../types';
 
 const REACTIONS_LIST = ['🔥', '💪', '👊', '💯', '⚡', '🎯'];
 const SWANBOT_ID = 'swanbot';
@@ -33,6 +39,7 @@ const QUICK_PROMPTS = [
   { label: '🎮 Play a Game', text: 'play a game' },
   { label: '📊 Status', text: 'status' },
   { label: '🔥 My Streak', text: 'my streak' },
+  { label: '🗳️ Vote', text: '/proposals' },
   { label: '💸 Send Crypto', text: '__SEND_CRYPTO__' },
   { label: '⚔️ Challenge', text: 'challenge a member' },
 ];
@@ -99,6 +106,17 @@ const PROMPT_CATEGORIES = [
       { label: 'Discord Activity', desc: 'What\'s happening on Discord', text: 'what\'s happening on discord' },
       { label: 'Icebreaker', desc: 'Get to know your circle', text: 'icebreaker' },
       { label: 'Shoutout', desc: 'Hype up a member', text: 'shoutout' },
+    ],
+  },
+  {
+    title: '🗳️ GOVERNANCE (DAO)',
+    color: '#8b5cf6',
+    prompts: [
+      { label: 'Create Proposal', desc: 'Put something to a vote', text: '/propose ' },
+      { label: 'Quick Poll', desc: 'Ask the crew a question', text: '/poll ' },
+      { label: 'Active Votes', desc: 'See open proposals & polls', text: '/proposals' },
+      { label: 'Pinned Messages', desc: 'See important pinned msgs', text: '/pins' },
+      { label: 'Search Chat', desc: 'Find old messages', text: '/search ' },
     ],
   },
   {
@@ -273,6 +291,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [particles, setParticles] = useState<{ id: string; x: number; y: number; color: string }[]>([]);
   const [messageDensity, setMessageDensity] = useState<'compact' | 'cozy'>('cozy');
   const [isFirstVisit, setIsFirstVisit] = useState(false);
+  const [proposals, setProposals] = useState<Proposal[]>([]);
+  const [pinnedMessages, setPinnedMessages] = useState<PinnedMessage[]>([]);
+  const [showPinned, setShowPinned] = useState(false);
+  const [showCreateProposal, setShowCreateProposal] = useState(false);
+  const [showCreatePoll, setShowCreatePoll] = useState(false);
   
   const flatListRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
@@ -371,8 +394,78 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
     } catch (e) { /* no discord */ }
 
+    // Load proposals and pinned messages
+    try {
+      const props = await getProposals(circleId, 'active');
+      setProposals(props);
+      const pins = await getPinnedMessages(circleId);
+      setPinnedMessages(pins);
+    } catch (e) { /* tables may not exist yet */ }
+
     setLoaded(true);
   };
+
+  // ─── Realtime subscription — see other members' messages live ──────────
+
+  useEffect(() => {
+    if (!circleId || !currentUserId) return;
+
+    const channel = supabase
+      .channel(`circle-chat-${circleId}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages',
+        filter: `circle_id=eq.${circleId}`,
+      }, (payload: any) => {
+        const newMsg = payload.new;
+        // Skip messages we sent ourselves (already in local state)
+        if (newMsg.user_id === currentUserId) return;
+
+        const msg: ChatMessage = {
+          id: newMsg.id,
+          dbId: newMsg.id,
+          content: newMsg.is_bot 
+            ? (newMsg.content || '').replace(/^🦢 \*\*SwanBot:\*\* /, '') 
+            : newMsg.content,
+          isBot: newMsg.is_bot || false,
+          isUser: false,
+          userName: newMsg.is_bot ? 'SwanBot 🦢' : 'Circle Member',
+          timestamp: new Date(newMsg.created_at),
+          reactions: newMsg.reactions || {},
+          replyTo: null,
+          isCheckIn: (newMsg.content || '').toLowerCase().includes('checked in'),
+          isAchievement: (newMsg.content || '').toLowerCase().includes('achievement'),
+        };
+
+        // Try to resolve the sender's name
+        if (!newMsg.is_bot) {
+          supabase.from('profiles')
+            .select('display_name, username')
+            .eq('id', newMsg.user_id)
+            .single()
+            .then(({ data }) => {
+              if (data) {
+                setMessages(prev => prev.map(m => 
+                  m.id === msg.id ? { ...m, userName: data.display_name || data.username || 'Unknown' } : m
+                ));
+              }
+            });
+        }
+
+        setMessages(prev => {
+          // Dedup: skip if we already have this message
+          if (prev.some(m => m.dbId === newMsg.id)) return prev;
+          return [...prev, msg];
+        });
+        animateNewMessage(msg.id);
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [circleId, currentUserId]);
 
   // Auto-scroll with animation
   useEffect(() => {
@@ -434,23 +527,34 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       setTimeout(() => triggerParticleEffect(200, 300, isAchievement), 300);
     }
 
-    // Persist to Supabase
+    // Persist to Supabase with retry
     if (currentUserId) {
-      supabase.from('messages').insert({
-        circle_id: circleId,
-        user_id: currentUserId,
-        content,
-        reactions: {},
-        is_bot: false,
-      }).select('id').single().then(
-        ({ data, error }) => {
-          if (error) console.error('Error persisting message:', error.message);
-          else if (data) {
-            // Update local message with DB id
+      const persistMessage = async (attempt = 0) => {
+        try {
+          const { data, error } = await supabase.from('messages').insert({
+            circle_id: circleId,
+            user_id: currentUserId,
+            content,
+            reactions: {},
+            is_bot: false,
+          }).select('id').single();
+
+          if (error) {
+            console.error('Error persisting message (attempt', attempt + 1, '):', error.message);
+            if (attempt < 2) {
+              setTimeout(() => persistMessage(attempt + 1), 1000 * (attempt + 1));
+            }
+          } else if (data) {
             setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, dbId: data.id } : m));
           }
+        } catch (e) {
+          console.error('Unexpected error persisting:', e);
+          if (attempt < 2) {
+            setTimeout(() => persistMessage(attempt + 1), 1000 * (attempt + 1));
+          }
         }
-      );
+      };
+      persistMessage();
     }
 
     return msg;
@@ -470,18 +574,27 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     setMessages(prev => [...prev, msg]);
     animateNewMessage(msg.id);
 
-    // Persist
+    // Persist bot message with retry
     if (currentUserId) {
-      supabase.from('messages').insert({
-        circle_id: circleId,
-        user_id: currentUserId,
-        content: `🦢 **SwanBot:** ${content}`,
-        reactions: {},
-        is_bot: true,
-      }).then(
-        () => {}, 
-        (err) => console.error('Error persisting bot message:', err)
-      );
+      const persistBot = async (attempt = 0) => {
+        try {
+          const { error } = await supabase.from('messages').insert({
+            circle_id: circleId,
+            user_id: currentUserId,
+            content: `🦢 **SwanBot:** ${content}`,
+            reactions: {},
+            is_bot: true,
+          });
+          if (error) {
+            console.error('Error persisting bot message (attempt', attempt + 1, '):', error.message);
+            if (attempt < 2) setTimeout(() => persistBot(attempt + 1), 1000 * (attempt + 1));
+          }
+        } catch (e) {
+          console.error('Unexpected error persisting bot msg:', e);
+          if (attempt < 2) setTimeout(() => persistBot(attempt + 1), 1000 * (attempt + 1));
+        }
+      };
+      persistBot();
     }
   };
 
@@ -584,6 +697,91 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     setReplyTo(null);
     setExpandedCategory(null);
 
+    // ─── Governance commands ───────────────────────────────────────
+    const lowerContent = content.toLowerCase().trim();
+
+    // /poll "Question" "Option A" "Option B" ...
+    if (lowerContent.startsWith('/poll ') || lowerContent.startsWith('poll ')) {
+      const pollText = content.replace(/^\/?poll\s+/i, '');
+      const parts = pollText.match(/"([^"]+)"/g);
+      if (parts && parts.length >= 3) {
+        const question = parts[0].replace(/"/g, '');
+        const options = parts.slice(1).map(p => p.replace(/"/g, ''));
+        handleCreatePoll(question, options);
+      } else {
+        // Try simple format: /poll Question? Option1, Option2, Option3
+        const qMark = pollText.indexOf('?');
+        if (qMark > 0) {
+          const question = pollText.slice(0, qMark + 1).trim();
+          const options = pollText.slice(qMark + 1).split(',').map(o => o.trim()).filter(Boolean);
+          if (options.length >= 2) handleCreatePoll(question, options);
+          else addBotMessage('📊 Usage: /poll Question? Option1, Option2, Option3');
+        } else {
+          addBotMessage('📊 Usage: /poll "Question" "Option A" "Option B"\n\nOr: /poll Question? Option1, Option2, Option3');
+        }
+      }
+      return;
+    }
+
+    // /propose Title | Description
+    if (lowerContent.startsWith('/propose ') || lowerContent.startsWith('propose ')) {
+      const propText = content.replace(/^\/?propose\s+/i, '');
+      const [title, ...descParts] = propText.split('|');
+      handleCreateProposal(title.trim(), descParts.join('|').trim() || undefined);
+      return;
+    }
+
+    // /vote — show active proposals
+    if (lowerContent === '/vote' || lowerContent === '/votes' || lowerContent === '/proposals') {
+      const props = await getProposals(circleId, 'active');
+      setProposals(props);
+      if (props.length === 0) {
+        addBotMessage('🗳️ No active proposals. Create one with /propose or /poll!');
+      } else {
+        addBotMessage(`🗳️ **${props.length} active proposal${props.length > 1 ? 's' : ''}** — scroll up to vote!`);
+      }
+      return;
+    }
+
+    // /pin (reply to pin, or pin last message)
+    if (lowerContent === '/pin') {
+      const lastMsg = [...messages].reverse().find(m => m.dbId && !m.isBot);
+      if (lastMsg?.dbId) {
+        handlePinMessage(lastMsg.dbId);
+      } else {
+        addBotMessage('📌 No message to pin. Messages need to be saved first.');
+      }
+      return;
+    }
+
+    // /pins — show pinned messages
+    if (lowerContent === '/pins' || lowerContent === '/pinned') {
+      setShowPinned(!showPinned);
+      return;
+    }
+
+    // /search query
+    if (lowerContent.startsWith('/search ')) {
+      const query = content.slice(8).trim();
+      if (!query) { addBotMessage('🔍 Usage: /search keyword'); return; }
+      const { data: results } = await supabase
+        .from('messages')
+        .select('content, created_at, user:profiles!user_id(display_name)')
+        .eq('circle_id', circleId)
+        .ilike('content', `%${query}%`)
+        .order('created_at', { ascending: false })
+        .limit(10);
+      if (results && results.length > 0) {
+        const lines = results.map((r: any) =>
+          `[${new Date(r.created_at).toLocaleDateString()}] ${(r.user as any)?.display_name || 'Unknown'}: ${r.content.slice(0, 80)}`
+        );
+        addBotMessage(`🔍 Found ${results.length} result${results.length > 1 ? 's' : ''} for "${query}":\n\n${lines.join('\n')}`);
+      } else {
+        addBotMessage(`🔍 No messages found for "${query}"`);
+      }
+      return;
+    }
+
     // Only trigger SwanBot if mentioned or if it's a quick prompt command
     const shouldTriggerBot = 
       /(@swanbot|@swan\b)/i.test(content) ||
@@ -624,6 +822,62 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
   };
 
+  // ─── Governance Handlers ─────────────────────────────────────────────────
+
+  const handleCreatePoll = async (question: string, options: string[]) => {
+    const result = await createQuickPoll(circleId, question, options);
+    if (result.ok && result.proposal) {
+      addBotMessage(`📊 **Poll created:** "${question}"\n\nOptions: ${options.map((o, i) => `\n${i + 1}. ${o}`).join('')}\n\nVote now! 🗳️`);
+      const props = await getProposals(circleId, 'active');
+      setProposals(props);
+    } else {
+      addBotMessage(`❌ Failed to create poll: ${result.error}`);
+    }
+    setShowCreatePoll(false);
+  };
+
+  const handleCreateProposal = async (title: string, description?: string) => {
+    const result = await createYesNoProposal(circleId, title, description);
+    if (result.ok && result.proposal) {
+      addBotMessage(`📜 **Proposal created:** "${title}"\n\n${description || ''}\n\nVote YES or NO! Every member gets one vote. ⚖️`);
+      const props = await getProposals(circleId, 'active');
+      setProposals(props);
+    } else {
+      addBotMessage(`❌ Failed to create proposal: ${result.error}`);
+    }
+    setShowCreateProposal(false);
+  };
+
+  const handleVote = async (proposalId: string, vote: string) => {
+    const result = await castVote(proposalId, vote);
+    if (result.ok) {
+      // Refresh proposals
+      const props = await getProposals(circleId, 'active');
+      setProposals(props);
+    } else {
+      addBotMessage(`❌ Vote failed: ${result.error}`);
+    }
+  };
+
+  const handleResolve = async (proposalId: string) => {
+    const result = await resolveProposal(proposalId);
+    if (result.ok) {
+      addBotMessage(`⚡ **Vote finalized:** ${result.status === 'passed' ? '✅ PASSED' : '❌ FAILED'}`);
+      const props = await getProposals(circleId, 'active');
+      setProposals(props);
+    }
+  };
+
+  const handlePinMessage = async (messageId: string) => {
+    const msg = messages.find(m => m.dbId === messageId || m.id === messageId);
+    const result = await pinMessage(circleId, messageId);
+    if (result.ok) {
+      addBotMessage(`📌 Message pinned!`);
+      const pins = await getPinnedMessages(circleId);
+      setPinnedMessages(pins);
+    }
+  };
+
   // ─── Reactions ────────────────────────────────────────────────────────────
 
   const toggleReaction = (messageId: string, emoji: string) => {
@@ -643,6 +897,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return { ...msg, reactions };
     }));
     setShowReactions(null);
+  };
+
+  // ─── Delete Message ───────────────────────────────────────────────────
+
+  const deleteMessage = async (messageId: string, dbId?: string) => {
+    // Remove from local state immediately
+    setMessages(prev => prev.filter(m => m.id !== messageId));
+    // Delete from Supabase if persisted
+    if (dbId) {
+      await supabase.from('messages').delete().eq('id', dbId);
+    }
   };
 
   // ─── Input & Mentions ────────────────────────────────────────────────────
@@ -735,6 +1000,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           onToggleReactions={() => setShowReactions(showReactions === item.id ? null : item.id)}
           onReply={() => { setReplyTo(item); inputRef.current?.focus(); }}
           onReaction={(emoji: string) => toggleReaction(item.id, emoji)}
+          onDelete={item.isUser ? () => deleteMessage(item.id, item.dbId) : undefined}
           renderContent={renderContent}
           accentColor={accentColor}
           messageDensity={messageDensity}
@@ -879,6 +1145,52 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
       {messages.length === 0 ? renderEmptyState() : (
         <>
+          {/* Pinned messages banner */}
+          {pinnedMessages.length > 0 && (
+            <Pressable
+              onPress={() => setShowPinned(!showPinned)}
+              style={[styles.pinnedBanner, { borderColor: accentColor + '30' },
+                Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={styles.pinnedBannerIcon}>📌</Text>
+              <Text style={styles.pinnedBannerText}>
+                {pinnedMessages.length} pinned message{pinnedMessages.length > 1 ? 's' : ''}
+              </Text>
+              <Text style={styles.pinnedBannerChevron}>{showPinned ? '▾' : '▸'}</Text>
+            </Pressable>
+          )}
+
+          {showPinned && pinnedMessages.length > 0 && (
+            <View style={styles.pinnedList}>
+              {pinnedMessages.map(pin => (
+                <View key={pin.id} style={styles.pinnedItem}>
+                  <Text style={styles.pinnedItemText} numberOfLines={2}>{pin.message_content || '(message)'}</Text>
+                  <Text style={styles.pinnedItemMeta}>pinned by {pin.pinned_by_name || 'member'}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {/* Active proposals */}
+          {proposals.length > 0 && (
+            <View style={styles.proposalSection}>
+              <Text style={styles.proposalSectionTitle}>🗳️ ACTIVE VOTES</Text>
+              {proposals.slice(0, 3).map(p => (
+                <ProposalCard
+                  key={p.id}
+                  proposal={p}
+                  currentUserId={currentUserId || ''}
+                  accentColor={accentColor}
+                  onVote={handleVote}
+                  onResolve={handleResolve}
+                />
+              ))}
+              {proposals.length > 3 && (
+                <Text style={styles.moreProposals}>+{proposals.length - 3} more — type /proposals to see all</Text>
+              )}
+            </View>
+          )}
+
           <FlatList
             ref={flatListRef}
             data={messages}
@@ -1168,7 +1480,7 @@ function TipCard({ tip, delay, accentColor }: { tip: string; delay: number; acce
 
 function MessageRow({
   item, consecutive, reactionEntries, currentUserId,
-  showReactions, onToggleReactions, onReply, onReaction, renderContent, accentColor, messageDensity,
+  showReactions, onToggleReactions, onReply, onReaction, onDelete, renderContent, accentColor, messageDensity,
 }: any) {
   const [hovered, setHovered] = useState(false);
 
@@ -1243,6 +1555,11 @@ function MessageRow({
             <Pressable onPress={onReply} style={styles.hoverBtn}>
               <Text style={styles.hoverBtnText}>↩</Text>
             </Pressable>
+            {onDelete && (
+              <Pressable onPress={onDelete} style={styles.hoverBtn}>
+                <Text style={[styles.hoverBtnText, { color: '#ef4444' }]}>🗑</Text>
+              </Pressable>
+            )}
           </View>
         )}
       </View>
@@ -1950,6 +2267,34 @@ const styles = StyleSheet.create({
   },
   tipAccent: { width: 3, height: '100%', borderRadius: 2, marginRight: 12 },
   tipText: { color: '#888', fontSize: 13, lineHeight: 18, flex: 1 },
+
+  // Pinned messages
+  pinnedBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1,
+    backgroundColor: '#0d0d14',
+  },
+  pinnedBannerIcon: { fontSize: 14 },
+  pinnedBannerText: { flex: 1, fontSize: 13, color: '#888', fontWeight: '600' },
+  pinnedBannerChevron: { fontSize: 12, color: '#666' },
+  pinnedList: { paddingHorizontal: 16, paddingBottom: 8, backgroundColor: '#0d0d14', gap: 6 },
+  pinnedItem: {
+    backgroundColor: '#111118', borderRadius: 8, padding: 10,
+    borderLeftWidth: 3, borderLeftColor: '#eab308',
+  },
+  pinnedItemText: { fontSize: 13, color: '#ccc', lineHeight: 18 },
+  pinnedItemMeta: { fontSize: 11, color: '#666', marginTop: 4 },
+
+  // Proposal section
+  proposalSection: {
+    paddingHorizontal: 16, paddingVertical: 8, gap: 8,
+    borderBottomWidth: 1, borderBottomColor: '#1a1a2e',
+  },
+  proposalSectionTitle: {
+    fontSize: 11, fontWeight: '800', color: '#888',
+    fontFamily: 'monospace', letterSpacing: 1.5,
+  },
+  moreProposals: { fontSize: 12, color: '#666', fontFamily: 'monospace', textAlign: 'center', paddingVertical: 4 },
 
   // Enhanced messages
   messageList: { padding: 16, maxWidth: 860, alignSelf: 'center', width: '100%', flexGrow: 1, paddingTop: 16 },

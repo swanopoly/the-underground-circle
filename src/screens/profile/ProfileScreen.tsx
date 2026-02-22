@@ -292,6 +292,37 @@ export default function ProfileScreen({ navigation }: any) {
                   {levelInfo.title.toUpperCase()}
                 </Text>
               </View>
+              
+              {/* XP Progress Bar */}
+              <View style={styles.xpContainer}>
+                <View style={styles.xpHeader}>
+                  <Text style={[styles.levelLabel, { color: levelColor }]}>
+                    Level {levelInfo.level}
+                  </Text>
+                  <Text style={styles.xpText}>
+                    {fmt(xp)} / {fmt(nextLevelXP)} XP
+                  </Text>
+                </View>
+                <View style={styles.progressBarContainer}>
+                  <View style={styles.progressBarBg}>
+                    <Animated.View 
+                      style={[
+                        styles.progressBarFill, 
+                        { width: xpBarWidth, backgroundColor: levelColor }
+                      ]} 
+                    />
+                  </View>
+                  <Text style={styles.progressPercent}>
+                    {Math.round(levelInfo.progress * 100)}%
+                  </Text>
+                </View>
+                {levelInfo.level < 100 && (
+                  <Text style={styles.nextLevelText}>
+                    {fmt(nextLevelXP - xp)} XP to Level {levelInfo.level + 1}
+                  </Text>
+                )}
+              </View>
+              
               <Text style={styles.memberSince}>
                 Member since {profile?.created_at ? new Date(profile.created_at).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '...'}
               </Text>
@@ -987,4 +1018,60 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   inviteButton: { minHeight: 40, paddingHorizontal: 20 },
+
+  // XP Progress Bar
+  xpContainer: {
+    marginVertical: 16,
+    paddingHorizontal: 4,
+  },
+  xpHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  levelLabel: {
+    fontSize: 16,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
+  xpText: {
+    color: '#888',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  progressBarContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  progressBarBg: {
+    flex: 1,
+    height: 8,
+    backgroundColor: '#1a1a1a',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginRight: 12,
+  },
+  progressBarFill: {
+    height: '100%',
+    borderRadius: 4,
+    shadowColor: 'rgba(255,255,255,0.3)',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 4,
+  },
+  progressPercent: {
+    color: '#666',
+    fontSize: 10,
+    fontWeight: '700',
+    minWidth: 32,
+    textAlign: 'right',
+  },
+  nextLevelText: {
+    color: '#555',
+    fontSize: 11,
+    textAlign: 'center',
+    fontWeight: '500',
+  },
 });

@@ -14,6 +14,12 @@ export interface OpenClawSession {
   lastActivity?: string;
   messageCount?: number;
   lastMessages?: Array<{ role: string; content: string; timestamp?: string }>;
+  // Enriched from session_status
+  totalCost?: number;
+  totalInputTokens?: number;
+  totalOutputTokens?: number;
+  turns?: number;
+  uptime?: string;
 }
 
 export interface OpenClawSessionStatus {
@@ -179,6 +185,54 @@ export async function sendMessageToSession(
   }
 }
 
+export interface CronJob {
+  id: string;
+  name?: string;
+  enabled: boolean;
+  schedule?: any;
+  payload?: any;
+  delivery?: any;
+  sessionTarget?: string;
+  lastRun?: string;
+  nextRun?: string;
+}
+
+export async function listCronJobs(config: OpenClawConfig): Promise<{ ok: boolean; jobs: CronJob[] }> {
+  try {
+    const res = await fetch(`${config.endpoint}/tools/invoke`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.token}`,
+      },
+      body: JSON.stringify({ tool: 'cron', parameters: { action: 'list', includeDisabled: true } }),
+    });
+    const data = await res.json();
+    // The response has content[0].text which is a text summary, and details with structured data
+    if (data?.result?.details?.jobs) {
+      return { ok: true, jobs: data.result.details.jobs };
+    }
+    // Try parsing from text content
+    if (data?.result?.content?.[0]?.text) {
+      const text = data.result.content[0].text;
+      const jobs: CronJob[] = [];
+      // Parse lines like: "1. **job-name** (id) - enabled/disabled - schedule"
+      const lines = text.split('\n');
+      for (const line of lines) {
+        const match = line.match(/\*\*(.+?)\*\*.*?`([a-f0-9-]+)`/);
+        if (match) {
+          const enabled = !line.toLowerCase().includes('disabled');
+          jobs.push({ id: match[2], name: match[1], enabled });
+        }
+      }
+      return { ok: true, jobs };
+    }
+    return { ok: false, jobs: [] };
+  } catch {
+    return { ok: false, jobs: [] };
+  }
+}
+
 export async function sendAgentTask(
   config: OpenClawConfig,
   task: string,
@@ -193,21 +247,93 @@ export async function listAgents(
   try {
     const result = await invokeToolRaw(config, 'agents_list', {});
     if (!result.ok) return { ok: false, error: result.error?.message };
-    // Result is typically an array of agent ids
-    const agents = Array.isArray(result.result) ? result.result : [];
+    // Extract agent ids from nested result
+    const raw = result.result;
+    let agents: string[] = [];
+    if (Array.isArray(raw)) agents = raw;
+    else if (raw?.details) agents = Array.isArray(raw.details) ? raw.details : [];
+    else if (raw?.content?.[0]?.text) {
+      try { const parsed = JSON.parse(raw.content[0].text); agents = Array.isArray(parsed) ? parsed : []; } catch {}
+    }
     return { ok: true, agents };
   } catch (e: any) {
     return { ok: false, error: e.message };
   }
 }
 
-export async function listCronJobs(
+export async function spawnSubAgent(
   config: OpenClawConfig,
-): Promise<{ ok: boolean; jobs?: any[]; error?: string }> {
+  task: string,
+  model?: string,
+): Promise<{ ok: boolean; reply?: string; error?: string }> {
   try {
-    const result = await invokeToolRaw(config, 'cron', { action: 'list' });
+    const params: any = { task };
+    if (model) params.model = model;
+    const result = await invokeToolRaw(config, 'sessions_spawn', params);
     if (!result.ok) return { ok: false, error: result.error?.message };
-    return { ok: true, jobs: Array.isArray(result.result) ? result.result : [] };
+    const text = result.result?.content?.[0]?.text || JSON.stringify(result.result);
+    return { ok: true, reply: text };
+  } catch (e: any) {
+    return { ok: false, error: e.message };
+  }
+}
+
+export async function manageCronJob(
+  config: OpenClawConfig,
+  action: 'run' | 'update' | 'remove',
+  jobId: string,
+  patch?: any,
+): Promise<{ ok: boolean; reply?: string; error?: string }> {
+  try {
+    const params: any = { action, jobId };
+    if (action === 'update' && patch) params.patch = patch;
+    if (action === 'run') params.runMode = 'force';
+    const result = await invokeToolRaw(config, 'cron', params);
+    if (!result.ok) return { ok: false, error: result.error?.message };
+    const text = result.result?.content?.[0]?.text || 'Done';
+    return { ok: true, reply: text };
+  } catch (e: any) {
+    return { ok: false, error: e.message };
+  }
+}
+
+export async function searchMemory(
+  config: OpenClawConfig,
+  query: string,
+): Promise<{ ok: boolean; reply?: string; error?: string }> {
+  try {
+    const result = await invokeToolRaw(config, 'memory_search', { query, maxResults: 5 });
+    if (!result.ok) return { ok: false, error: result.error?.message };
+    const text = result.result?.content?.[0]?.text || JSON.stringify(result.result);
+    return { ok: true, reply: text };
+  } catch (e: any) {
+    return { ok: false, error: e.message };
+  }
+}
+
+export async function sendSessionMessage(
+  config: OpenClawConfig,
+  sessionKey: string,
+  message: string,
+): Promise<{ ok: boolean; reply?: string; error?: string }> {
+  try {
+    const result = await invokeToolRaw(config, 'sessions_send', { sessionKey, message });
+    if (!result.ok) return { ok: false, error: result.error?.message };
+    const text = result.result?.content?.[0]?.text || 'Message sent';
+    return { ok: true, reply: text };
+  } catch (e: any) {
+    return { ok: false, error: e.message };
+  }
+}
+
+export async function listSubAgents(
+  config: OpenClawConfig,
+): Promise<{ ok: boolean; reply?: string; error?: string }> {
+  try {
+    const result = await invokeToolRaw(config, 'subagents', { action: 'list' });
+    if (!result.ok) return { ok: false, error: result.error?.message };
+    const text = result.result?.content?.[0]?.text || JSON.stringify(result.result);
+    return { ok: true, reply: text };
   } catch (e: any) {
     return { ok: false, error: e.message };
   }
@@ -230,24 +356,46 @@ export async function runWebSearch(
 
 function parseSessionsList(raw: any): OpenClawSession[] {
   if (!raw) return [];
-  // The result can be a string (formatted) or structured data
+
+  // OpenClaw /tools/invoke returns { content: [...], details: { sessions: [...] } }
+  if (raw.details?.sessions) {
+    return parseSessionsList(raw.details.sessions);
+  }
+  // Or it might be nested in content[0].text as JSON string
+  if (raw.content && Array.isArray(raw.content)) {
+    const textBlock = raw.content.find((c: any) => c.type === 'text' && c.text);
+    if (textBlock) {
+      try {
+        const parsed = JSON.parse(textBlock.text);
+        if (parsed.sessions) return parseSessionsList(parsed.sessions);
+      } catch {}
+    }
+  }
   if (typeof raw === 'string') {
-    // Try to parse session lines from formatted output
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed.sessions) return parseSessionsList(parsed.sessions);
+    } catch {}
     return parseSessionsFromText(raw);
+  }
+  if (raw.sessions && Array.isArray(raw.sessions)) {
+    return parseSessionsList(raw.sessions);
   }
   if (Array.isArray(raw)) {
     return raw.map((s: any) => ({
       sessionKey: s.sessionKey || s.key || '',
       kind: s.kind || 'unknown',
-      agentId: s.agentId || s.agent || undefined,
+      agentId: s.agentId || s.agent || s.displayName || undefined,
       model: s.model || undefined,
-      lastActivity: s.lastActivity || undefined,
-      messageCount: s.messageCount || s.messages || undefined,
-      lastMessages: s.lastMessages || [],
+      lastActivity: s.updatedAt ? new Date(s.updatedAt).toISOString() : s.lastActivity || undefined,
+      messageCount: s.totalTokens || s.messageCount || undefined,
+      lastMessages: (s.messages || []).map((m: any) => ({
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content :
+          Array.isArray(m.content) ? m.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('') : '',
+        timestamp: m.timestamp ? new Date(m.timestamp).toISOString() : undefined,
+      })),
     }));
-  }
-  if (raw.sessions && Array.isArray(raw.sessions)) {
-    return parseSessionsList(raw.sessions);
   }
   return [];
 }
@@ -270,7 +418,17 @@ function parseSessionsFromText(text: string): OpenClawSession[] {
 
 function parseSessionStatus(raw: any, sessionKey: string): OpenClawSessionStatus {
   if (!raw) return { sessionKey };
-  if (typeof raw === 'object') {
+
+  // Extract the status text from the API response
+  let text = '';
+  if (typeof raw === 'string') {
+    text = raw;
+  } else if (raw.details?.statusText) {
+    text = raw.details.statusText;
+  } else if (raw.content?.[0]?.text) {
+    text = raw.content[0].text;
+  } else if (typeof raw === 'object') {
+    // Fallback: try direct fields
     return {
       sessionKey,
       model: raw.model || raw.currentModel || undefined,
@@ -281,7 +439,42 @@ function parseSessionStatus(raw: any, sessionKey: string): OpenClawSessionStatus
       uptime: raw.uptime || undefined,
     };
   }
-  return { sessionKey };
+
+  if (!text) return { sessionKey };
+
+  // Parse the emoji-formatted status text
+  const result: OpenClawSessionStatus = { sessionKey };
+
+  // Model: 🧠 Model: anthropic/claude-opus-4-6
+  const modelMatch = text.match(/Model:\s*([^\s·]+)/);
+  if (modelMatch) result.model = modelMatch[1];
+
+  // Tokens: 🧮 Tokens: 7 in / 447 out
+  const tokensMatch = text.match(/Tokens:\s*([\d.]+[kKmM]?)\s*in\s*\/\s*([\d.]+[kKmM]?)\s*out/);
+  if (tokensMatch) {
+    result.totalInputTokens = parseTokenCount(tokensMatch[1]);
+    result.totalOutputTokens = parseTokenCount(tokensMatch[2]);
+  }
+
+  // Context: 📚 Context: 174k/200k (87%)
+  const contextMatch = text.match(/Context:\s*([\d.]+[kKmM]?)\/([\d.]+[kKmM]?)/);
+
+  // Cost: 💰 Cost: $1.23 (if present)
+  const costMatch = text.match(/Cost:\s*\$?([\d.]+)/);
+  if (costMatch) result.totalCost = parseFloat(costMatch[1]);
+
+  // Session: 🧵 Session: agent:main:main • updated just now
+  const uptimeMatch = text.match(/updated\s+(.+?)$/m);
+  if (uptimeMatch) result.uptime = uptimeMatch[1].trim();
+
+  return result;
+}
+
+function parseTokenCount(s: string): number {
+  const num = parseFloat(s);
+  if (s.toLowerCase().endsWith('k')) return Math.round(num * 1000);
+  if (s.toLowerCase().endsWith('m')) return Math.round(num * 1000000);
+  return Math.round(num);
 }
 
 function parseHistory(raw: any): Array<{ role: string; content: string }> {
@@ -328,7 +521,27 @@ export class OpenClawPoller {
   private async poll() {
     const result = await listSessions(this.config);
     if (result.ok && result.sessions) {
-      this.onUpdate({ sessions: result.sessions, timestamp: Date.now() });
+      // Enrich sessions with cost/token data from session_status
+      const enriched = await Promise.all(
+        result.sessions.map(async (s) => {
+          try {
+            const statusResult = await getSessionStatus(this.config, s.sessionKey);
+            if (statusResult.ok && statusResult.status) {
+              return {
+                ...s,
+                totalCost: statusResult.status.totalCost,
+                totalInputTokens: statusResult.status.totalInputTokens,
+                totalOutputTokens: statusResult.status.totalOutputTokens,
+                turns: statusResult.status.turns,
+                uptime: statusResult.status.uptime,
+                model: statusResult.status.model || s.model,
+              };
+            }
+          } catch {}
+          return s;
+        })
+      );
+      this.onUpdate({ sessions: enriched, timestamp: Date.now() });
     }
   }
 }

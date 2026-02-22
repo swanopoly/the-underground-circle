@@ -5,15 +5,18 @@ import {
   WHITEBOARD_MODES,
   STATUS_COLORS,
 } from '../../../../lib/officeAgents';
+import { CronJob } from '../../../../lib/openclawService';
 
 interface Props {
   editable?: boolean;
   notes?: string[];
   onNotesChange?: (notes: string[]) => void;
   agents?: OfficeAgent[];
+  statusHistory?: Array<OfficeAgent[]>;
+  cronJobs?: CronJob[];
 }
 
-export default function Whiteboard({ editable, notes = [], onNotesChange, agents = [] }: Props) {
+export default function Whiteboard({ editable, notes = [], onNotesChange, agents = [], statusHistory = [], cronJobs = [] }: Props) {
   const [modeIndex, setModeIndex] = useState(0);
   const [editing, setEditing] = useState(false);
   const [noteText, setNoteText] = useState('');
@@ -60,6 +63,8 @@ export default function Whiteboard({ editable, notes = [], onNotesChange, agents
               {mode.key === 'activity' && <ActivityView agents={agents} />}
               {mode.key === 'metrics' && <MetricsView agents={agents} />}
               {mode.key === 'tasks' && <TasksView />}
+              {mode.key === 'history' && <StatusHistoryView history={statusHistory} />}
+              {mode.key === 'cron' && <CronJobsView jobs={cronJobs} />}
             </>
           )}
         </View>
@@ -118,8 +123,8 @@ function StatusView({ agents }: { agents: OfficeAgent[] }) {
         {agents.map((a) => (
           <View key={a.id} style={styles.statusRow}>
             <View style={[styles.statusDot, { backgroundColor: STATUS_COLORS[a.status] }]} />
-            <Text style={styles.statusName} numberOfLines={1}>{a.name}</Text>
-            <Text style={styles.statusActivity} numberOfLines={1}>{a.activity}</Text>
+            <Text style={styles.statusName}>{a.name}</Text>
+            <Text style={styles.statusActivity}>{a.activity}</Text>
             <Text style={styles.statusLabel}>{a.status.toUpperCase()}</Text>
           </View>
         ))}
@@ -193,6 +198,50 @@ function TasksView() {
   );
 }
 
+function StatusHistoryView({ history }: { history: Array<OfficeAgent[]> }) {
+  if (history.length === 0) return <Text style={styles.emptyText}>No status history yet — check back after a poll cycle</Text>;
+  return (
+    <ScrollView style={styles.historyScroll} showsVerticalScrollIndicator={false}>
+      {[...history].reverse().map((snapshot, i) => (
+        <View key={i} style={styles.historySnapshot}>
+          <Text style={styles.historyTimestamp}>SNAPSHOT {history.length - i}</Text>
+          {snapshot.map((a) => (
+            <View key={a.id} style={styles.historyAgentRow}>
+              <View style={[styles.historyDot, { backgroundColor: STATUS_COLORS[a.status] }]} />
+              <Text style={styles.historyAgentName}>{a.name}</Text>
+              <Text style={styles.historyAgentStatus}>{a.status.toUpperCase()}</Text>
+            </View>
+          ))}
+        </View>
+      ))}
+    </ScrollView>
+  );
+}
+
+function CronJobsView({ jobs }: { jobs: CronJob[] }) {
+  if (jobs.length === 0) return <Text style={styles.emptyText}>No cron jobs found</Text>;
+  const enabled = jobs.filter(j => j.enabled);
+  const disabled = jobs.filter(j => !j.enabled);
+  const sorted = [...enabled, ...disabled];
+  return (
+    <ScrollView style={styles.cronScroll} showsVerticalScrollIndicator={false}>
+      <Text style={styles.cronSummary}>{enabled.length} active / {disabled.length} paused</Text>
+      {sorted.map((job) => {
+        const sched = job.schedule?.expr || job.schedule?.kind || '';
+        return (
+          <View key={job.id} style={styles.cronRow}>
+            <View style={[styles.cronDot, { backgroundColor: job.enabled ? '#22c55e' : '#6b7280' }]} />
+            <Text style={[styles.cronName, !job.enabled && styles.cronDisabled]} numberOfLines={1}>
+              {job.name || job.id.slice(0, 8)}
+            </Text>
+            <Text style={styles.cronSchedule} numberOfLines={1}>{sched}</Text>
+          </View>
+        );
+      })}
+    </ScrollView>
+  );
+}
+
 const styles = StyleSheet.create({
   board: { position: 'absolute', left: 20, top: 8, right: 20, zIndex: 5 },
   frame: {
@@ -255,9 +304,9 @@ const styles = StyleSheet.create({
   statusList: { gap: 2 },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   statusDot: { width: 5, height: 5, borderRadius: 2.5 },
-  statusName: { fontSize: 8, color: '#333', fontFamily: 'monospace', fontWeight: '700', width: 65 },
+  statusName: { fontSize: 8, color: '#333', fontFamily: 'monospace', fontWeight: '700', flex: 0.3 },
   statusActivity: { fontSize: 7, color: '#888', fontFamily: 'monospace', flex: 1 },
-  statusLabel: { fontSize: 6, color: '#aaa', fontFamily: 'monospace', fontWeight: '600', width: 42, textAlign: 'right' },
+  statusLabel: { fontSize: 6, color: '#aaa', fontFamily: 'monospace', fontWeight: '600', flex: 0.2, textAlign: 'right' },
   // Activity
   activityList: { gap: 2 },
   activityRow: { flexDirection: 'row', gap: 5, alignItems: 'center' },
@@ -275,4 +324,20 @@ const styles = StyleSheet.create({
   taskStatus: { fontSize: 9, fontWeight: '700', width: 14, textAlign: 'center' },
   taskText: { fontSize: 8, color: '#333', fontFamily: 'monospace', flex: 1 },
   taskDone: { color: '#aaa', textDecorationLine: 'line-through' },
+  // History
+  historyScroll: { flex: 1 },
+  historySnapshot: { marginBottom: 6, paddingBottom: 4, borderBottomWidth: 1, borderBottomColor: '#e8e8e0' },
+  historyTimestamp: { fontSize: 6, color: '#aaa', fontFamily: 'monospace', fontWeight: '700', marginBottom: 2, letterSpacing: 0.5 },
+  historyAgentRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 1 },
+  historyDot: { width: 4, height: 4, borderRadius: 2 },
+  historyAgentName: { fontSize: 7, color: '#333', fontFamily: 'monospace', flex: 1 },
+  historyAgentStatus: { fontSize: 6, color: '#888', fontFamily: 'monospace', fontWeight: '600' },
+  // Cron
+  cronScroll: { flex: 1 },
+  cronSummary: { fontSize: 7, color: '#999', fontFamily: 'monospace', fontWeight: '700', marginBottom: 3, letterSpacing: 0.5 },
+  cronRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 2 },
+  cronDot: { width: 5, height: 5, borderRadius: 2.5 },
+  cronName: { fontSize: 7, color: '#333', fontFamily: 'monospace', fontWeight: '600', flex: 1 },
+  cronDisabled: { color: '#999', textDecorationLine: 'line-through' },
+  cronSchedule: { fontSize: 6, color: '#888', fontFamily: 'monospace' },
 });

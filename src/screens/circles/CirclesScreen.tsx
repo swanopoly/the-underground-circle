@@ -240,11 +240,12 @@ const styles = StyleSheet.create({
   },
   circleCard: {
     backgroundColor: '#111',
-    borderRadius: 14,
-    padding: 18,
-    marginBottom: 10,
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 12,
     borderWidth: 1,
     borderColor: '#222',
+    minHeight: 48,
     ...(Platform.OS === 'web' ? { transition: 'all 0.2s ease', cursor: 'pointer' } as any : {}),
   },
   circleCardHovered: {
@@ -265,27 +266,28 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   circleAvatar: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     backgroundColor: '#1a1a2e',
     justifyContent: 'center',
     alignItems: 'center',
   },
   circleAvatarText: {
     color: '#fff',
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: '800',
   },
   circleName: {
     color: '#fff',
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: '700',
   },
   circleDesc: {
-    color: '#666',
-    fontSize: 12,
+    color: '#999',
+    fontSize: 13,
     marginTop: 2,
+    lineHeight: 18,
   },
   badgeRow: {
     flexDirection: 'row',
@@ -314,8 +316,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
   },
   memberCount: {
-    color: '#888',
-    fontSize: 12,
+    color: '#aaa',
+    fontSize: 13,
     fontWeight: '700',
   },
   circleFooter: {

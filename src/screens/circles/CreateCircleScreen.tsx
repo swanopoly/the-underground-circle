@@ -732,10 +732,9 @@ const styles = StyleSheet.create({
   },
   colorOptionSelected: {
     borderColor: '#fff',
-    shadowColor: '#fff',
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 5,
+    ...(Platform.OS === 'web'
+      ? { boxShadow: '0 0 8px rgba(255,255,255,0.3)' }
+      : { shadowColor: '#fff', shadowOpacity: 0.3, shadowRadius: 8, elevation: 5 }),
   },
   checkInPicker: {
     gap: 8,

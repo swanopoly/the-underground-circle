@@ -1,11 +1,13 @@
-import React, { useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, Animated, Pressable } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, Text, TextInput, StyleSheet, Animated, Pressable, Platform } from 'react-native';
 import { OfficeAgent, STATUS_COLORS } from '../../../../lib/officeAgents';
+import { PROVIDER_META } from '../../../../lib/connectionManager';
 
 interface Props {
   agent: OfficeAgent | null;
   onClose: () => void;
   isDesktop?: boolean;
+  onRenameAgent?: (agentId: string, newName: string) => void;
 }
 
 function formatTokens(n: number): string {
@@ -14,14 +16,16 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-export default function AgentPanel({ agent, onClose, isDesktop }: Props) {
+export default function AgentPanel({ agent, onClose, isDesktop, onRenameAgent }: Props) {
   const slideAnim = useRef(new Animated.Value(400)).current;
+  const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState('');
 
   useEffect(() => {
     if (agent) {
       Animated.spring(slideAnim, {
         toValue: 0,
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
         tension: 80,
         friction: 12,
       }).start();
@@ -29,7 +33,7 @@ export default function AgentPanel({ agent, onClose, isDesktop }: Props) {
       Animated.timing(slideAnim, {
         toValue: 400,
         duration: 200,
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       }).start();
     }
   }, [agent]);
@@ -57,8 +61,50 @@ export default function AgentPanel({ agent, onClose, isDesktop }: Props) {
               {agent.name.charAt(0)}
             </Text>
           </View>
-          <View>
-            <Text style={styles.name}>{agent.name}</Text>
+          <View style={{ flex: 1 }}>
+            {editing ? (
+              <View style={styles.renameRow}>
+                <TextInput
+                  style={styles.renameInput}
+                  value={editName}
+                  onChangeText={setEditName}
+                  autoFocus
+                  onSubmitEditing={() => {
+                    if (editName.trim() && onRenameAgent) {
+                      onRenameAgent(agent.id, editName.trim());
+                    }
+                    setEditing(false);
+                  }}
+                />
+                <Pressable
+                  onPress={() => {
+                    if (editName.trim() && onRenameAgent) {
+                      onRenameAgent(agent.id, editName.trim());
+                    }
+                    setEditing(false);
+                  }}
+                  style={[styles.renameSaveBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <Text style={styles.renameSaveText}>✓</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setEditing(false)}
+                  style={[styles.renameCancelBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <Text style={styles.renameCancelText}>✕</Text>
+                </Pressable>
+              </View>
+            ) : (
+              <Pressable
+                onPress={() => { setEditName(agent.name); setEditing(true); }}
+                style={[Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              >
+                <View style={styles.nameRow}>
+                  <Text style={styles.name}>{agent.name}</Text>
+                  <Text style={styles.renameHint}>✏️</Text>
+                </View>
+              </Pressable>
+            )}
             <View style={styles.roleRow}>
               <Text style={styles.role}>{agent.role}</Text>
               <View style={styles.modelBadge}>
@@ -71,6 +117,13 @@ export default function AgentPanel({ agent, onClose, isDesktop }: Props) {
           <View style={[styles.statusDotSmall, { backgroundColor: statusColor }]} />
           <Text style={[styles.statusText, { color: statusColor }]}>{agent.status.toUpperCase()}</Text>
         </View>
+      </View>
+
+      {/* Connection source */}
+      <View style={styles.connectionRow}>
+        <Text style={styles.connectionIcon}>{PROVIDER_META[agent.providerType]?.icon || '📡'}</Text>
+        <Text style={[styles.connectionName, { color: PROVIDER_META[agent.providerType]?.color || '#888' }]}>{agent.connectionName}</Text>
+        <Text style={styles.connectionType}>{PROVIDER_META[agent.providerType]?.label || agent.providerType}</Text>
       </View>
 
       {/* Current activity */}
@@ -188,6 +241,63 @@ const styles = StyleSheet.create({
     color: '#eee',
     fontFamily: 'monospace',
   },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  renameHint: {
+    fontSize: 10,
+    opacity: 0.4,
+  },
+  renameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  renameInput: {
+    flex: 1,
+    backgroundColor: '#0a0a10',
+    borderWidth: 1,
+    borderColor: '#6366f1',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    color: '#eee',
+    fontFamily: 'monospace',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  renameSaveBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 6,
+    backgroundColor: '#22c55e20',
+    borderWidth: 1,
+    borderColor: '#22c55e40',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  renameSaveText: {
+    color: '#22c55e',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  renameCancelBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 6,
+    backgroundColor: '#ef444420',
+    borderWidth: 1,
+    borderColor: '#ef444440',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  renameCancelText: {
+    color: '#ef4444',
+    fontSize: 12,
+    fontWeight: '800',
+  },
   roleRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -233,6 +343,14 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontFamily: 'monospace',
   },
+  // Connection source
+  connectionRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    marginBottom: 10, paddingHorizontal: 4,
+  },
+  connectionIcon: { fontSize: 12 },
+  connectionName: { fontSize: 10, fontWeight: '700', fontFamily: 'monospace' },
+  connectionType: { fontSize: 9, color: '#555', fontFamily: 'monospace' },
   // Activity bar
   activityBar: {
     flexDirection: 'row',

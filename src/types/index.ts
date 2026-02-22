@@ -323,6 +323,62 @@ export interface GasEstimate {
 
 // ─── Photon Proof Types ────────────────────────────────────────────────
 
+// ─── DAO Governance Types ────────────────────────────────────────────
+
+export type ProposalType = 'general' | 'rule_change' | 'spending' | 'challenge' | 'member_action' | 'poll';
+export type ProposalStatus = 'active' | 'passed' | 'failed' | 'expired';
+
+export interface Proposal {
+  id: string;
+  circle_id: string;
+  created_by: string;
+  title: string;
+  description?: string;
+  proposal_type: ProposalType;
+  status: ProposalStatus;
+  options: { label: string }[];
+  quorum_pct: number;
+  pass_pct: number;
+  expires_at?: string;
+  resolved_at?: string;
+  metadata?: Record<string, any>;
+  created_at: string;
+  // Joined
+  creator?: User;
+  votes?: ProposalVote[];
+  vote_summary?: VoteSummary;
+}
+
+export interface ProposalVote {
+  id: string;
+  proposal_id: string;
+  user_id: string;
+  vote: string; // 'yes' | 'no' | 'abstain' | option index
+  created_at: string;
+  user?: User;
+}
+
+export interface VoteSummary {
+  total: number;
+  yes: number;
+  no: number;
+  abstain: number;
+  options: Record<string, number>; // for polls: { "0": 3, "1": 5 }
+  quorum_met: boolean;
+  passed: boolean;
+  member_count: number;
+}
+
+export interface PinnedMessage {
+  id: string;
+  circle_id: string;
+  message_id: string;
+  pinned_by: string;
+  created_at: string;
+  message_content?: string;
+  pinned_by_name?: string;
+}
+
 export interface PhotonProof {
   id: string;
   user_id: string;
