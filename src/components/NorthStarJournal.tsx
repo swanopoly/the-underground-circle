@@ -10,7 +10,7 @@ import {
   Platform,
   ScrollView
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { storage } from '../lib/storage';
 import { supabase } from '../lib/supabase';
 
 interface NorthStarEntry {
@@ -39,7 +39,7 @@ export const NorthStarJournal: React.FC<Props> = ({ onComplete, isBlocking = tru
   const checkTodayCompletion = async () => {
     try {
       const today = new Date().toISOString().split('T')[0];
-      const stored = await AsyncStorage.getItem(`north-star-${today}`);
+      const stored = await storage.getItem(`north-star-${today}`);
       if (stored) {
         setHasCompletedToday(true);
       }
@@ -66,7 +66,7 @@ export const NorthStarJournal: React.FC<Props> = ({ onComplete, isBlocking = tru
 
       // Save to local storage
       const today = new Date().toISOString().split('T')[0];
-      await AsyncStorage.setItem(`north-star-${today}`, JSON.stringify(entry));
+      await storage.setItem(`north-star-${today}`, JSON.stringify(entry));
 
       // Save to Supabase
       const { data: { user } } = await supabase.auth.getUser();

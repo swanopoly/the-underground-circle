@@ -1,4 +1,4 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { storage } from './storage';
 
 export type ProviderType = 'openclaw' | 'claude-code' | 'generic-agent';
 
@@ -31,7 +31,7 @@ export function generateId(): string {
 
 export async function loadConnections(): Promise<AgentConnection[]> {
   try {
-    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    const raw = await storage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const connections = JSON.parse(raw) as AgentConnection[];
     // Reset status on load
@@ -42,5 +42,5 @@ export async function loadConnections(): Promise<AgentConnection[]> {
 export async function saveConnections(connections: AgentConnection[]): Promise<void> {
   // Save without volatile status fields
   const toSave = connections.map(({ status, error, sessionCount, agentIds, ...rest }) => rest);
-  await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+  await storage.setItem(STORAGE_KEY, JSON.stringify(toSave));
 }
