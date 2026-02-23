@@ -1,6 +1,32 @@
 // Office Customization System
 import { AgentStatus } from './officeAgents';
 
+// ─── Office Floors ───────────────────────────────────────────────────────────
+
+export interface OfficeFloor {
+  id: string;
+  name: string;
+  themeId: string;
+  agentIds: string[]; // which agents are assigned to this floor
+  furniture: FurnitureItem[];
+  order: number; // for sorting floors
+}
+
+export function createDefaultFloor(id: string, name: string, themeId: string, order: number): OfficeFloor {
+  return {
+    id,
+    name,
+    themeId,
+    agentIds: [],
+    furniture: [],
+    order,
+  };
+}
+
+export const DEFAULT_FLOORS: OfficeFloor[] = [
+  createDefaultFloor('floor_1', '1F - Main', 'underground', 0),
+];
+
 // ─── Office Themes ───────────────────────────────────────────────────────────
 
 export interface OfficeTheme {

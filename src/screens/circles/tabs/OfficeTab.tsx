@@ -13,6 +13,7 @@ import OfficeChat, { OfficeCommand } from './office/OfficeChat';
 import { OfficeAgent, sessionsToAgents } from '../../../lib/officeAgents';
 import {
   OFFICE_THEMES, AgentAppearance, FurnitureItem, FURNITURE_CATALOG,
+  OfficeFloor, DEFAULT_FLOORS, createDefaultFloor,
 } from '../../../lib/officeConfig';
 import {
   verifyBot, getChat, TelegramPoller, TelegramMessage,
@@ -29,6 +30,8 @@ import CostDashboard from '../../../components/CostDashboard';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
+const STORAGE_KEY_FLOORS = '@office_floors';
+const STORAGE_KEY_CURRENT_FLOOR = '@office_current_floor';
 
 export interface AgentStats {
   agentCount: number;
@@ -47,11 +50,9 @@ interface Props {
 export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props) {
   const [selectedAgent, setSelectedAgent] = useState<OfficeAgent | null>(null);
   const [showCustomize, setShowCustomize] = useState(false);
-  const [themeId, setThemeId] = useState('underground');
   const [appearances, setAppearances] = useState<Record<string, AgentAppearance>>({});
   const [editMode, setEditMode] = useState(false);
   const [placingType, setPlacingType] = useState<string | null>(null);
-  const [furniture, setFurniture] = useState<FurnitureItem[]>([]);
   const [whiteboardNotes, setWhiteboardNotes] = useState<string[]>([]);
   const [chatMinimized, setChatMinimized] = useState(false);
   const [chatVisible, setChatVisible] = useState(false);
@@ -59,6 +60,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
   const [viewMode, setViewMode] = useState<'office' | 'cost'>('office'); // Toggle between views
+
+  // ─── Multi-floor state ──────────────────────────────
+  const [floors, setFloors] = useState<OfficeFloor[]>(DEFAULT_FLOORS);
+  const [currentFloorId, setCurrentFloorId] = useState<string>('floor_1');
 
   // ─── Multi-connection state ──────────────────────────────
   const [connections, setConnections] = useState<AgentConnection[]>([]);
@@ -247,6 +252,21 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           }
         }
       } catch {}
+
+      // Load floors
+      try {
+        const floorsRaw = await storage.getItem(STORAGE_KEY_FLOORS);
+        if (floorsRaw) {
+          const loadedFloors = JSON.parse(floorsRaw) as OfficeFloor[];
+          if (loadedFloors.length > 0) setFloors(loadedFloors);
+        }
+      } catch {}
+
+      // Load current floor
+      try {
+        const currentFloorRaw = await storage.getItem(STORAGE_KEY_CURRENT_FLOOR);
+        if (currentFloorRaw) setCurrentFloorId(currentFloorRaw);
+      } catch {}
     })();
   }, [connectOne]);
 
@@ -261,7 +281,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   const { width: winW } = useWindowDimensions();
   const isDesktop = winW > 900;
-  const theme = OFFICE_THEMES[themeId] || OFFICE_THEMES.underground;
 
   // Derive agents from ALL connected sessions
   const connectedConns = connections.filter(c => c.status === 'connected');
@@ -338,17 +357,24 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   const handleFloorPress = (x: number, y: number) => {
     if (!editMode || !placingType) return;
-    setFurniture(prev => [...prev, { id: `f_${Date.now()}`, type: placingType as any, x, y }]);
+    const newFurniture = { id: `f_${Date.now()}`, type: placingType as any, x, y };
+    const updated = floors.map(f => 
+      f.id === currentFloorId ? { ...f, furniture: [...f.furniture, newFurniture] } : f
+    );
+    saveFloors(updated);
     setPlacingType(null);
   };
 
   const handleFurniturePress = (id: string) => {
     if (!editMode) return;
-    setFurniture(prev => prev.filter(f => f.id !== id));
+    const updated = floors.map(f =>
+      f.id === currentFloorId ? { ...f, furniture: f.furniture.filter(item => item.id !== id) } : f
+    );
+    saveFloors(updated);
   };
 
   const handleCommand = (cmd: OfficeCommand) => {
-    if (cmd.type === 'theme') setThemeId(cmd.value);
+    if (cmd.type === 'theme') handleChangeFloorTheme(currentFloorId, cmd.value);
     if (cmd.type === 'info') {
       const agent = agents.find(a => a.name === cmd.query);
       if (agent) setSelectedAgent(agent);
@@ -364,6 +390,53 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       setSelectedAgent(prev => prev ? { ...prev, name: newName } : null);
     }
   }, [agentNames, selectedAgent]);
+
+  // ─── Floor management ──────────────────────────────
+  
+  const saveFloors = useCallback((updatedFloors: OfficeFloor[]) => {
+    setFloors(updatedFloors);
+    storage.setItem(STORAGE_KEY_FLOORS, JSON.stringify(updatedFloors)).catch(() => {});
+  }, []);
+
+  const handleAddFloor = useCallback(() => {
+    const nextNum = floors.length + 1;
+    const newFloor = createDefaultFloor(
+      `floor_${Date.now()}`,
+      `${nextNum}F - New Floor`,
+      'underground',
+      floors.length
+    );
+    saveFloors([...floors, newFloor]);
+  }, [floors, saveFloors]);
+
+  const handleDeleteFloor = useCallback((floorId: string) => {
+    if (floors.length <= 1) return; // Keep at least one floor
+    const updated = floors.filter(f => f.id !== floorId).map((f, i) => ({ ...f, order: i }));
+    saveFloors(updated);
+    if (currentFloorId === floorId) {
+      setCurrentFloorId(updated[0].id);
+      storage.setItem(STORAGE_KEY_CURRENT_FLOOR, updated[0].id).catch(() => {});
+    }
+  }, [floors, currentFloorId, saveFloors]);
+
+  const handleRenameFloor = useCallback((floorId: string, newName: string) => {
+    const updated = floors.map(f => f.id === floorId ? { ...f, name: newName } : f);
+    saveFloors(updated);
+  }, [floors, saveFloors]);
+
+  const handleChangeFloorTheme = useCallback((floorId: string, themeId: string) => {
+    const updated = floors.map(f => f.id === floorId ? { ...f, themeId } : f);
+    saveFloors(updated);
+  }, [floors, saveFloors]);
+
+  const handleSwitchFloor = useCallback((floorId: string) => {
+    setCurrentFloorId(floorId);
+    storage.setItem(STORAGE_KEY_CURRENT_FLOOR, floorId).catch(() => {});
+  }, []);
+
+  // Get current floor data
+  const currentFloor = floors.find(f => f.id === currentFloorId) || floors[0];
+  const currentTheme = OFFICE_THEMES[currentFloor.themeId] || OFFICE_THEMES.underground;
 
   return (
     <View style={styles.container}>
@@ -432,6 +505,36 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </View>
       </View>
 
+      {/* Floor Selector */}
+      {viewMode === 'office' && (
+        <View style={styles.floorBar}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.floorList}>
+            {floors.sort((a, b) => a.order - b.order).map((floor) => (
+              <Pressable
+                key={floor.id}
+                onPress={() => handleSwitchFloor(floor.id)}
+                style={[
+                  styles.floorChip,
+                  floor.id === currentFloorId && styles.floorChipActive,
+                  Platform.OS === 'web' && { cursor: 'pointer' } as any
+                ]}
+              >
+                <Text style={[styles.floorChipText, floor.id === currentFloorId && styles.floorChipTextActive]}>
+                  {floor.name}
+                </Text>
+                <View style={[styles.floorThemeDot, { backgroundColor: OFFICE_THEMES[floor.themeId]?.accentGlow || '#6366f1' }]} />
+              </Pressable>
+            ))}
+            <Pressable
+              onPress={handleAddFloor}
+              style={[styles.floorAddBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={styles.floorAddBtnText}>+ FLOOR</Text>
+            </Pressable>
+          </ScrollView>
+        </View>
+      )}
+
       {/* Edit toolbar */}
       {viewMode === 'office' && editMode && (
         <View style={styles.editToolbar}>
@@ -451,8 +554,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               </Pressable>
             ))}
           </ScrollView>
-          {furniture.length > 0 && (
-            <Pressable onPress={() => setFurniture([])} style={styles.clearBtn}>
+          {currentFloor.furniture.length > 0 && (
+            <Pressable onPress={() => {
+              const updated = floors.map(f => f.id === currentFloorId ? { ...f, furniture: [] } : f);
+              saveFloors(updated);
+            }} style={styles.clearBtn}>
               <Text style={styles.clearBtnText}>CLEAR ALL</Text>
             </Pressable>
           )}
@@ -529,8 +635,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                 <View style={[styles.officeScaleOuter, { height: scaledH, width: needsHScroll ? FLOOR_W * officeScale : '100%' as any }]}>
                   <View style={[styles.officeWrapper, { width: FLOOR_W, height: FLOOR_H, transform: [{ scale: officeScale }] }]}>
                     <OfficeFloor
-                      theme={theme}
-                      furniture={furniture}
+                      theme={currentTheme}
+                      furniture={currentFloor.furniture}
                       onFloorPress={editMode ? handleFloorPress : undefined}
                       onFurniturePress={editMode ? handleFurniturePress : undefined}
                     />
@@ -628,8 +734,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       <CustomizePanel
         visible={showCustomize}
         onClose={() => setShowCustomize(false)}
-        currentTheme={themeId}
-        onThemeChange={setThemeId}
+        currentTheme={currentFloor.themeId}
+        onThemeChange={(theme) => handleChangeFloorTheme(currentFloorId, theme)}
         agents={agents}
         appearances={appearances}
         onAppearanceChange={(id, a) => setAppearances(prev => ({ ...prev, [id]: a }))}
@@ -683,6 +789,38 @@ const styles = StyleSheet.create({
   },
   iconBtnText: { fontSize: 18 },
   tgBadge: { fontSize: 10, marginRight: 2 },
+
+  // Floor selector
+  floorBar: {
+    paddingHorizontal: 12, paddingVertical: 8,
+    borderBottomWidth: 1, borderBottomColor: '#1a1a2e', backgroundColor: '#08080d',
+  },
+  floorList: { gap: 6, flexDirection: 'row', alignItems: 'center' },
+  floorChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 12, paddingVertical: 6,
+    borderRadius: 8, borderWidth: 1, borderColor: '#1a1a2e', backgroundColor: '#0a0a10',
+  },
+  floorChipActive: {
+    borderColor: '#6366f160', backgroundColor: '#6366f115',
+  },
+  floorChipText: {
+    fontSize: 11, color: '#888', fontFamily: 'monospace', fontWeight: '600',
+  },
+  floorChipTextActive: {
+    color: '#fff', fontWeight: '700',
+  },
+  floorThemeDot: {
+    width: 6, height: 6, borderRadius: 3,
+  },
+  floorAddBtn: {
+    paddingHorizontal: 12, paddingVertical: 6,
+    borderRadius: 8, borderWidth: 1, borderColor: '#22c55e40', backgroundColor: '#22c55e10',
+  },
+  floorAddBtnText: {
+    fontSize: 9, color: '#22c55e', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1,
+  },
+
   editToolbar: {
     paddingHorizontal: 12, paddingVertical: 8,
     borderBottomWidth: 1, borderBottomColor: '#1a1a2e', backgroundColor: '#0a0a12',
