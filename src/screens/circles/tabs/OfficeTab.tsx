@@ -3,7 +3,7 @@ import {
   View, Text, StyleSheet, ScrollView, Pressable,
   useWindowDimensions, Platform,
 } from 'react-native';
-import OfficeFloor, { DESK_POSITIONS, FLOOR_W, FLOOR_H } from './office/OfficeFloor';
+import OfficeFloorView, { DESK_POSITIONS, FLOOR_W, FLOOR_H } from './office/OfficeFloor';
 import PixelAgent from './office/PixelAgent';
 import ServerRack from './office/ServerRack';
 import Whiteboard from './office/Whiteboard';
@@ -23,7 +23,7 @@ import {
   testConnection, listAgents, listCronJobs, CronJob,
 } from '../../../lib/openclawService';
 import {
-  AgentConnection, loadConnections, saveConnections, migrateFromLegacy, PROVIDER_META,
+  AgentConnection, loadConnections, saveConnections, PROVIDER_META,
 } from '../../../lib/connectionManager';
 import { storage } from '../../../lib/storage';
 import CostDashboard from '../../../components/CostDashboard';
@@ -223,12 +223,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     if (initRef.current) return;
     initRef.current = true;
     (async () => {
-      // Load connections (or migrate from legacy single-connection)
-      let conns = await loadConnections();
-      if (conns.length === 0) {
-        const migrated = await migrateFromLegacy();
-        if (migrated) conns = [migrated];
-      }
+      // Load connections
+      const conns = await loadConnections();
       setConnections(conns);
 
       // Auto-connect all enabled connections
@@ -634,7 +630,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               <ScrollView horizontal={needsHScroll} scrollEnabled={needsHScroll} showsHorizontalScrollIndicator={needsHScroll}>
                 <View style={[styles.officeScaleOuter, { height: scaledH, width: needsHScroll ? FLOOR_W * officeScale : '100%' as any }]}>
                   <View style={[styles.officeWrapper, { width: FLOOR_W, height: FLOOR_H, transform: [{ scale: officeScale }] }]}>
-                    <OfficeFloor
+                    <OfficeFloorView
                       theme={currentTheme}
                       furniture={currentFloor.furniture}
                       onFloorPress={editMode ? handleFloorPress : undefined}
