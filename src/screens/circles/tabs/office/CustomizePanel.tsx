@@ -418,10 +418,10 @@ export default function CustomizePanel({
                   {newProvider === 'openclaw' && (
                     <View style={styles.connectInfo}>
                       <Text style={styles.connectInfoTitle}>OpenClaw Setup</Text>
-                      <Text style={styles.connectInfoText}>1. Run `openclaw gateway start` on your machine</Text>
-                      <Text style={styles.connectInfoText}>2. Default port: 18789</Text>
+                      <Text style={styles.connectInfoText}>1. Run CORS proxy: node openclaw-proxy.js</Text>
+                      <Text style={styles.connectInfoText}>2. Default port: 18790 (proxy adds CORS headers)</Text>
                       <Text style={styles.connectInfoText}>3. Find token in ~/.openclaw/openclaw.json</Text>
-                      <Text style={styles.connectInfoText}>4. For remote: ensure port is accessible</Text>
+                      <Text style={styles.connectInfoText}>4. Gateway runs on port 18789 internally</Text>
                     </View>
                   )}
 

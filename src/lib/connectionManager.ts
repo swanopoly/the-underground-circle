@@ -18,7 +18,7 @@ export interface AgentConnection {
 }
 
 export const PROVIDER_META: Record<ProviderType, { icon: string; label: string; color: string; defaultEndpoint: string }> = {
-  'openclaw': { icon: '🐾', label: 'OpenClaw', color: '#6366f1', defaultEndpoint: 'http://localhost:18789' },
+  'openclaw': { icon: '🐾', label: 'OpenClaw', color: '#6366f1', defaultEndpoint: 'http://localhost:18790' },
   'claude-code': { icon: '🤖', label: 'Claude Code', color: '#f59e0b', defaultEndpoint: 'http://localhost:8080' },
   'generic-agent': { icon: '⚡', label: 'Generic Agent', color: '#10b981', defaultEndpoint: 'https://' },
 };

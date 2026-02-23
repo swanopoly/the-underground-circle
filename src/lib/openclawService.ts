@@ -2,7 +2,7 @@
 // Connects to a user's OpenClaw instance to get real agent data
 
 export interface OpenClawConfig {
-  endpoint: string;  // e.g. http://localhost:18789
+  endpoint: string;  // e.g. http://localhost:18790 (CORS proxy)
   token: string;     // gateway auth token
 }
 
