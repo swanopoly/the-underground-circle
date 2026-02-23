@@ -1119,7 +1119,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // ─── Main Return ─────────────────────────────────────────────────────────
 
   if (!loaded) {
-    return <View style={{ flex: 1, backgroundColor: '#0a0a0a' }} />;
+    return (
+      <View style={styles.loadingContainer}>
+        <View style={styles.loadingPulse}>
+          <Text style={[styles.loadingText, { color: accentColor }]}>LOADING CHAT</Text>
+          <TypingDots />
+        </View>
+      </View>
+    );
   }
 
   return (
