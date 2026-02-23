@@ -2,7 +2,7 @@
 // Displays time-sensitive social triggers to drive user engagement
 
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Animated } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Animated, Platform } from 'react-native';
 import { MomentumAlert, useMomentumAlerts } from '../lib/momentumAlerts';
 import { useAuth } from '../hooks/useAuth';
 
@@ -29,7 +29,7 @@ export function MomentumAlertBanner({ userCircleIds, onAlertAction }: MomentumAl
       Animated.timing(fadeAnim, {
         toValue: 1,
         duration: 300,
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       }).start();
     } else {
       fadeAnim.setValue(0);
@@ -50,7 +50,7 @@ export function MomentumAlertBanner({ userCircleIds, onAlertAction }: MomentumAl
     Animated.timing(fadeAnim, {
       toValue: 0,
       duration: 200,
-      useNativeDriver: true,
+      useNativeDriver: Platform.OS !== 'web',
     }).start(() => {
       dismissAlert(topAlert.id);
     });
