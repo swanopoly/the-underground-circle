@@ -32,6 +32,8 @@ const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
 const STORAGE_KEY_FLOORS = '@office_floors';
 const STORAGE_KEY_CURRENT_FLOOR = '@office_current_floor';
+const STORAGE_KEY_APPEARANCES = '@office_appearances';
+const STORAGE_KEY_WHITEBOARD_NOTES = '@office_whiteboard_notes';
 
 export interface AgentStats {
   agentCount: number;
@@ -263,6 +265,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         const currentFloorRaw = await storage.getItem(STORAGE_KEY_CURRENT_FLOOR);
         if (currentFloorRaw) setCurrentFloorId(currentFloorRaw);
       } catch {}
+
+      // Load agent appearances
+      try {
+        const appearancesRaw = await storage.getItem(STORAGE_KEY_APPEARANCES);
+        if (appearancesRaw) setAppearances(JSON.parse(appearancesRaw));
+      } catch {}
+
+      // Load whiteboard notes
+      try {
+        const notesRaw = await storage.getItem(STORAGE_KEY_WHITEBOARD_NOTES);
+        if (notesRaw) setWhiteboardNotes(JSON.parse(notesRaw));
+      } catch {}
     })();
   }, [connectOne]);
 
@@ -291,7 +305,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     indexOffset += connAgents.length;
   }
   // Apply custom names
-  const agents = rawAgents.map(a => agentNames[a.id] ? { ...a, name: agentNames[a.id] } : a);
+  const allAgents = rawAgents.map(a => agentNames[a.id] ? { ...a, name: agentNames[a.id] } : a);
+
+  // Filter agents for current floor only
+  const agents = allAgents.filter(a => currentFloor.agentIds.includes(a.id));
 
   // Aggregate all sessions for cost dashboard
   const allSessions: OpenClawSession[] = [];
@@ -300,25 +317,56 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     allSessions.push(...sessions);
   }
 
+  // Auto-assign new agents to first floor
+  useEffect(() => {
+    if (allAgents.length === 0 || floors.length === 0) return;
+    
+    const allAgentIds = allAgents.map(a => a.id);
+    const assignedIds = new Set(floors.flatMap(f => f.agentIds));
+    const unassignedIds = allAgentIds.filter(id => !assignedIds.has(id));
+    
+    if (unassignedIds.length > 0) {
+      // Assign unassigned agents to the first floor
+      const updated = floors.map((f, i) => 
+        i === 0 ? { ...f, agentIds: [...f.agentIds, ...unassignedIds] } : f
+      );
+      saveFloors(updated);
+    }
+  }, [allAgents.length, floors, saveFloors]);
+
   // Update status history when agents change
   useEffect(() => {
-    if (agents.length > 0) {
-      setStatusHistory(prev => [...prev, agents].slice(-10));
+    if (allAgents.length > 0) {
+      setStatusHistory(prev => [...prev, allAgents].slice(-10));
     }
   }, [sessionsTick]);
 
-  // Push agent stats to parent
+  // Push agent stats to parent (use allAgents for accurate totals)
   useEffect(() => {
     if (onAgentStats) {
       onAgentStats({
-        agentCount: agents.length,
-        sessionCount: agents.filter(a => a.status === 'active').length,
-        costToday: agents.reduce((s, a) => s + a.costToday, 0),
-        costWeek: agents.reduce((s, a) => s + a.costWeek, 0),
-        tokens: agents.reduce((s, a) => s + a.tokensUsed, 0),
+        agentCount: allAgents.length,
+        sessionCount: allAgents.filter(a => a.status === 'active').length,
+        costToday: allAgents.reduce((s, a) => s + a.costToday, 0),
+        costWeek: allAgents.reduce((s, a) => s + a.costWeek, 0),
+        tokens: allAgents.reduce((s, a) => s + a.tokensUsed, 0),
       });
     }
   }, [sessionsTick, agentNames, onAgentStats]);
+
+  // Save appearances when changed
+  useEffect(() => {
+    if (Object.keys(appearances).length > 0) {
+      storage.setItem(STORAGE_KEY_APPEARANCES, JSON.stringify(appearances)).catch(() => {});
+    }
+  }, [appearances]);
+
+  // Save whiteboard notes when changed
+  useEffect(() => {
+    if (whiteboardNotes.length > 0) {
+      storage.setItem(STORAGE_KEY_WHITEBOARD_NOTES, JSON.stringify(whiteboardNotes)).catch(() => {});
+    }
+  }, [whiteboardNotes]);
 
   // Fetch cron jobs from all connected OpenClaw instances
   const connectedCount = connections.filter(c => c.status === 'connected').length;
@@ -465,7 +513,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                 <View key={c.id} style={[styles.connMiniDot, { backgroundColor: PROVIDER_META[c.provider].color }]} />
               ))}
               <Text style={styles.titleStatText}>
-                {anyConnected ? `${agents.length} live` : 'OFFICE'}
+                {anyConnected ? `${allAgents.length} live` : 'OFFICE'}
               </Text>
               {telegramConnected && <Text style={styles.tgBadge}>✈️</Text>}
             </View>
@@ -489,7 +537,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                   {connections.length > 0 ? `${connectedCount}/${connections.length} connected` : '0 connected'}
                 </Text>
                 <Text style={styles.titleStatText}>
-                  {agents.length > 0 ? `${agents.length} agents` : ''}
+                  {allAgents.length > 0 ? `${allAgents.length} agents` : ''}
                 </Text>
               </View>
             </>
@@ -572,7 +620,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         {/* Mobile: Card-based agent list */}
         {!isDesktop ? (
           <ScrollView style={styles.mobileAgentScroll} showsVerticalScrollIndicator={true} contentContainerStyle={styles.mobileAgentList}>
-            {agents.length === 0 ? (
+            {allAgents.length === 0 ? (
               <View style={styles.mobileEmpty}>
                 <Text style={styles.mobileEmptyIcon}>🔗</Text>
                 <Text style={styles.mobileEmptyTitle}>No agents connected</Text>
@@ -587,7 +635,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                 </Pressable>
               </View>
             ) : (
-              agents.map((agent) => {
+              allAgents.map((agent) => {
                 const statusColor = agent.status === 'active' ? '#22c55e' : agent.status === 'idle' ? '#eab308' : agent.status === 'error' ? '#ef4444' : '#6b7280';
                 const isSelected = selectedAgent?.id === agent.id;
                 return (
@@ -636,8 +684,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                       onFloorPress={editMode ? handleFloorPress : undefined}
                       onFurniturePress={editMode ? handleFurniturePress : undefined}
                     />
-                    <Whiteboard editable={editMode} notes={whiteboardNotes} onNotesChange={setWhiteboardNotes} agents={agents} statusHistory={statusHistory} cronJobs={cronJobs} />
-                    <ServerRack agents={agents} />
+                    <Whiteboard editable={editMode} notes={whiteboardNotes} onNotesChange={setWhiteboardNotes} agents={allAgents} statusHistory={statusHistory} cronJobs={cronJobs} />
+                    <ServerRack agents={allAgents} />
                     {agents.length === 0 && (
                       <View style={styles.emptyOverlay}>
                         <Text style={styles.emptyIcon}>🔗</Text>
@@ -669,7 +717,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             {!editMode && (
               <View style={styles.quickBar}>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickBarInner}>
-                  {agents.map((agent) => (
+                  {allAgents.map((agent) => (
                     <Pressable
                       key={agent.id}
                       onPress={() => handleAgentPress(agent)}
@@ -709,7 +757,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               onCommand={handleCommand}
               minimized={chatMinimized}
               onToggle={() => setChatMinimized(!chatMinimized)}
-              agents={agents}
+              agents={allAgents}
               connections={connections}
               getConnectionConfig={getConnectionConfig}
               telegramConfig={telegramConnected ? telegramConfig : null}
@@ -732,7 +780,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         onClose={() => setShowCustomize(false)}
         currentTheme={currentFloor.themeId}
         onThemeChange={(theme) => handleChangeFloorTheme(currentFloorId, theme)}
-        agents={agents}
+        agents={allAgents}
         appearances={appearances}
         onAppearanceChange={(id, a) => setAppearances(prev => ({ ...prev, [id]: a }))}
         connections={connections}
