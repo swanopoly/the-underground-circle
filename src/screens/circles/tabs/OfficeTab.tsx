@@ -24,7 +24,8 @@ import {
 import {
   AgentConnection, loadConnections, saveConnections, migrateFromLegacy, PROVIDER_META,
 } from '../../../lib/connectionManager';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { storage } from '../../../lib/storage';
+import CostDashboard from '../../../components/CostDashboard';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -57,6 +58,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [statusHistory, setStatusHistory] = useState<Array<OfficeAgent[]>>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
+  const [viewMode, setViewMode] = useState<'office' | 'cost'>('office'); // Toggle between views
 
   // ─── Multi-connection state ──────────────────────────────
   const [connections, setConnections] = useState<AgentConnection[]>([]);
@@ -195,7 +197,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     setTelegramConnected(true);
     setTelegramConnecting(false);
 
-    AsyncStorage.setItem(STORAGE_KEY_TELEGRAM, JSON.stringify({
+    storage.setItem(STORAGE_KEY_TELEGRAM, JSON.stringify({
       botToken: botToken.trim(), chatId: chatId.trim(),
     })).catch(() => {});
   }, [telegramConfig]);
@@ -231,13 +233,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
       // Load custom agent names
       try {
-        const namesRaw = await AsyncStorage.getItem(STORAGE_KEY_AGENT_NAMES);
+        const namesRaw = await storage.getItem(STORAGE_KEY_AGENT_NAMES);
         if (namesRaw) setAgentNames(JSON.parse(namesRaw));
       } catch {}
 
       // Load Telegram config
       try {
-        const tgRaw = await AsyncStorage.getItem(STORAGE_KEY_TELEGRAM);
+        const tgRaw = await storage.getItem(STORAGE_KEY_TELEGRAM);
         if (tgRaw) {
           const tg = JSON.parse(tgRaw);
           if (tg.botToken || tg.chatId) {
@@ -349,7 +351,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const handleRenameAgent = useCallback((agentId: string, newName: string) => {
     const updated = { ...agentNames, [agentId]: newName };
     setAgentNames(updated);
-    AsyncStorage.setItem(STORAGE_KEY_AGENT_NAMES, JSON.stringify(updated)).catch(() => {});
+    storage.setItem(STORAGE_KEY_AGENT_NAMES, JSON.stringify(updated)).catch(() => {});
     // Update selected agent if it's the one being renamed
     if (selectedAgent?.id === agentId) {
       setSelectedAgent(prev => prev ? { ...prev, name: newName } : null);
@@ -362,14 +364,25 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       <View style={styles.titleBar}>
         <View style={styles.titleInner}>
           <Pressable
-            onPress={() => { setEditMode(!editMode); setPlacingType(null); }}
-            style={[styles.modeBtn, editMode && styles.modeBtnActive,
+            onPress={() => setViewMode(viewMode === 'office' ? 'cost' : 'office')}
+            style={[styles.modeBtn, viewMode === 'cost' && styles.modeBtnActive,
               Platform.OS === 'web' && { cursor: 'pointer' } as any]}
           >
-            <Text style={[styles.modeBtnText, editMode && styles.modeBtnTextActive]}>
-              {editMode ? '✓' : '🔧'}
+            <Text style={[styles.modeBtnText, viewMode === 'cost' && styles.modeBtnTextActive]}>
+              {viewMode === 'cost' ? '💰' : '📊'}
             </Text>
           </Pressable>
+          {viewMode === 'office' && (
+            <Pressable
+              onPress={() => { setEditMode(!editMode); setPlacingType(null); }}
+              style={[styles.modeBtn, editMode && styles.modeBtnActive,
+                Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={[styles.modeBtnText, editMode && styles.modeBtnTextActive]}>
+                {editMode ? '✓' : '🔧'}
+              </Text>
+            </Pressable>
+          )}
           {!isDesktop ? (
             <View style={styles.titleCenterMobile}>
               {connectedConns.map(c => (
@@ -413,7 +426,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       </View>
 
       {/* Edit toolbar */}
-      {editMode && (
+      {viewMode === 'office' && editMode && (
         <View style={styles.editToolbar}>
           <Text style={styles.editLabel}>
             {placingType ? `TAP FLOOR TO PLACE ${placingType.toUpperCase()}` : 'SELECT ITEM:'}
@@ -439,8 +452,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </View>
       )}
 
-      {/* Office viewport */}
-      <View style={styles.mainContent}>
+      {/* Main Content - Switch between Office and Cost views */}
+      {viewMode === 'cost' ? (
+        <CostDashboard
+          sessions={allSessions}
+          accentColor={accentColor}
+        />
+      ) : (
+        <View style={styles.mainContent}>
         {/* Mobile: Card-based agent list */}
         {!isDesktop ? (
           <ScrollView style={styles.mobileAgentScroll} showsVerticalScrollIndicator={true} contentContainerStyle={styles.mobileAgentList}>
@@ -591,6 +610,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           </View>
         )}
       </View>
+      )}
 
       {/* Agent detail panel */}
       {!editMode && (
