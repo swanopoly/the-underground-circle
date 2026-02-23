@@ -172,10 +172,47 @@ Research Agent ──> Summarize Agent ──> Slack
 
 ---
 
+### 10. Multiple Office Floors ⭐⭐⭐⭐
+**Why:** Scalability visualization + organize agents by team/project
+
+**Build:**
+```
+┌─ FLOOR SELECTOR ──────────────────────────┐
+│ [1F] Engineering    (8 agents) 🏭         │
+│ [2F] Marketing      (5 agents) 📢  ← YOU  │
+│ [3F] Research       (3 agents) 🔬         │
+│                                            │
+│ + Add Floor                                │
+└────────────────────────────────────────────┘
+```
+
+**Features:**
+- Create/rename/delete floors
+- Each floor has its own theme (underground, sunset, neon, forest, etc.)
+- Distribute agents across floors (manual assignment)
+- Floor switcher in top nav
+- Show active floor badge
+- Agent panel shows "Floor: 2F Marketing"
+
+**Data structure:**
+```typescript
+interface OfficeFloor {
+  id: string;
+  name: string;
+  themeId: string;
+  agentIds: string[]; // which agents live here
+  furniture: FurnitureItem[];
+}
+```
+
+**Time:** 1.5 days
+
+---
+
 ## 🎨 TIER 3: POLISH (Week 3)
 *These make it feel premium*
 
-### 10. Landing Page & Waitlist ⭐⭐⭐⭐⭐
+### 11. Landing Page & Waitlist ⭐⭐⭐⭐⭐
 **Why:** Can't get users without this
 
 **Build:**
@@ -189,7 +226,7 @@ Research Agent ──> Summarize Agent ──> Slack
 
 ---
 
-### 11. Onboarding Flow ⭐⭐⭐⭐
+### 12. Onboarding Flow ⭐⭐⭐⭐
 **Why:** First 5 minutes = retention
 
 **Build:**
@@ -203,7 +240,7 @@ Research Agent ──> Summarize Agent ──> Slack
 
 ---
 
-### 12. Dark/Light Theme Toggle ⭐⭐⭐
+### 13. Dark/Light Theme Toggle ⭐⭐⭐
 **Why:** Devs love dark mode, execs love light mode
 
 **Build:**
