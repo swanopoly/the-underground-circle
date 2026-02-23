@@ -278,6 +278,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // Apply custom names
   const agents = rawAgents.map(a => agentNames[a.id] ? { ...a, name: agentNames[a.id] } : a);
 
+  // Aggregate all sessions for cost dashboard
+  const allSessions: OpenClawSession[] = [];
+  for (const conn of connectedConns) {
+    const sessions = sessionsRef.current.get(conn.id) || [];
+    allSessions.push(...sessions);
+  }
+
   // Update status history when agents change
   useEffect(() => {
     if (agents.length > 0) {
