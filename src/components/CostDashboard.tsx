@@ -1,6 +1,6 @@
 // Cost Analytics Dashboard - The #1 fundable feature
 import React, { useMemo } from 'react';
-import { View, Text, StyleSheet, ScrollView, Pressable } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Pressable, Platform } from 'react-native';
 import { OpenClawSession } from '../lib/openclawService';
 
 interface CostData {
@@ -21,10 +21,89 @@ interface Props {
 }
 
 export default function CostDashboard({ sessions, accentColor = '#6366f1' }: Props) {
-  const costData = useMemo(() => calculateCostData(sessions), [sessions]);
+  const [dateRange, setDateRange] = React.useState<7 | 30 | 90>(30);
+  const costData = useMemo(() => calculateCostData(sessions, dateRange), [sessions, dateRange]);
+
+  // Empty state
+  if (sessions.length === 0) {
+    return (
+      <View style={styles.emptyContainer}>
+        <Text style={styles.emptyIcon}>📊</Text>
+        <Text style={styles.emptyTitle}>No Agent Data Yet</Text>
+        <Text style={styles.emptyText}>
+          Connect your agents to see cost analytics, spending trends, and optimization insights.
+        </Text>
+      </View>
+    );
+  }
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+      {/* Header with controls */}
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>COST ANALYTICS</Text>
+        <View style={styles.headerControls}>
+          {/* Date Range Selector */}
+          <View style={styles.dateRangeSelector}>
+            {[7, 30, 90].map(days => (
+              <Pressable
+                key={days}
+                onPress={() => setDateRange(days as 7 | 30 | 90)}
+                style={[
+                  styles.dateRangeBtn,
+                  dateRange === days && [styles.dateRangeBtnActive, { borderColor: accentColor }],
+                  Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                ]}
+              >
+                <Text style={[
+                  styles.dateRangeBtnText,
+                  dateRange === days && [styles.dateRangeBtnTextActive, { color: accentColor }],
+                ]}>
+                  {days}d
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          
+          {/* Export Button */}
+          <Pressable
+            style={[styles.exportBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            onPress={() => {
+              // TODO: Implement CSV export
+              alert('Export feature coming soon!');
+            }}
+          >
+            <Text style={styles.exportBtnText}>📥 EXPORT</Text>
+          </Pressable>
+        </View>
+      </View>
+
+      {/* Total Summary Banner */}
+      <View style={[styles.summaryBanner, { borderLeftColor: accentColor }]}>
+        <View style={styles.summaryRow}>
+          <View style={styles.summaryItem}>
+            <Text style={styles.summaryLabel}>Total Sessions</Text>
+            <Text style={[styles.summaryValue, { color: accentColor }]}>
+              {sessions.length}
+            </Text>
+          </View>
+          <View style={styles.summaryDivider} />
+          <View style={styles.summaryItem}>
+            <Text style={styles.summaryLabel}>Avg Cost/Session</Text>
+            <Text style={[styles.summaryValue, { color: accentColor }]}>
+              ${sessions.length > 0 ? (costData.month / sessions.length).toFixed(3) : '0.00'}
+            </Text>
+          </View>
+          <View style={styles.summaryDivider} />
+          <View style={styles.summaryItem}>
+            <Text style={styles.summaryLabel}>Total Tokens</Text>
+            <Text style={[styles.summaryValue, { color: accentColor }]}>
+              {formatTokenCount(sessions.reduce((sum, s) => sum + (s.totalInputTokens || 0) + (s.totalOutputTokens || 0), 0))}
+            </Text>
+          </View>
+        </View>
+      </View>
+
       {/* Overview Cards */}
       <View style={styles.overviewGrid}>
         <CostCard
@@ -49,7 +128,7 @@ export default function CostDashboard({ sessions, accentColor = '#6366f1' }: Pro
 
       {/* Chart Section */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>DAILY SPEND (LAST 30 DAYS)</Text>
+        <Text style={styles.sectionTitle}>DAILY SPEND (LAST {dateRange} DAYS)</Text>
         <View style={styles.chartContainer}>
           <MiniBarChart data={costData.dailyHistory} accentColor={accentColor} />
         </View>
@@ -127,8 +206,8 @@ function MiniBarChart({ data, accentColor }: {
                 style={[
                   styles.bar,
                   {
-                    height: `${heightPercent}%`,
-                    backgroundColor: isToday ? accentColor : `${accentColor}60`,
+                    height: heightPercent + '%',
+                    backgroundColor: isToday ? accentColor : accentColor + '60',
                   },
                 ]}
               />
@@ -181,7 +260,7 @@ function SpenderRow({ name, cost, percentage, sessions, rank, accentColor }: {
         <View
           style={[
             styles.spenderBarFill,
-            { width: `${percentage}%`, backgroundColor: accentColor },
+            { width: percentage + '%', backgroundColor: accentColor },
           ]}
         />
       </View>
@@ -211,9 +290,17 @@ function InsightCard({ type, text }: {
   );
 }
 
+// ─── Helper Functions ────────────────────────────────────
+
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1000000) return (tokens / 1000000).toFixed(1) + 'M';
+  if (tokens >= 1000) return (tokens / 1000).toFixed(1) + 'K';
+  return tokens.toString();
+}
+
 // ─── Data Calculation ────────────────────────────────────
 
-function calculateCostData(sessions: OpenClawSession[]): CostData {
+function calculateCostData(sessions: OpenClawSession[], dateRange: 7 | 30 | 90 = 30): CostData {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
@@ -261,9 +348,9 @@ function calculateCostData(sessions: OpenClawSession[]): CostData {
   const weekChange = lastWeekCost > 0 ? ((thisWeekCost - lastWeekCost) / lastWeekCost) * 100 : 0;
   const monthChange = lastMonthCost > 0 ? ((thisMonthCost - lastMonthCost) / lastMonthCost) * 100 : 0;
 
-  // Build daily history (last 30 days)
+  // Build daily history (last N days based on dateRange)
   const dailyHistory: Array<{ date: string; cost: number }> = [];
-  for (let i = 29; i >= 0; i--) {
+  for (let i = dateRange - 1; i >= 0; i--) {
     const d = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
     const dateKey = d.toISOString().split('T')[0];
     dailyHistory.push({ date: dateKey, cost: dailyCosts[dateKey] || 0 });
@@ -335,6 +422,127 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0a0a0a',
     padding: 16,
+  },
+
+  // Empty State
+  emptyContainer: {
+    flex: 1,
+    backgroundColor: '#0a0a0a',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 32,
+  },
+  emptyIcon: {
+    fontSize: 64,
+    marginBottom: 16,
+  },
+  emptyTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#fff',
+    marginBottom: 8,
+  },
+  emptyText: {
+    fontSize: 14,
+    color: '#888',
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+
+  // Header
+  header: {
+    marginBottom: 20,
+  },
+  headerTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#fff',
+    letterSpacing: 2,
+    marginBottom: 12,
+  },
+  headerControls: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+
+  // Date Range Selector
+  dateRangeSelector: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  dateRangeBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#333',
+    backgroundColor: '#1a1a1a',
+  },
+  dateRangeBtnActive: {
+    backgroundColor: '#1a1a1a',
+    borderWidth: 2,
+  },
+  dateRangeBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#666',
+  },
+  dateRangeBtnTextActive: {
+    fontWeight: '800',
+  },
+
+  // Export Button
+  exportBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 6,
+    backgroundColor: '#1a1a1a',
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  exportBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#888',
+    letterSpacing: 1,
+  },
+
+  // Summary Banner
+  summaryBanner: {
+    backgroundColor: '#1a1a1a',
+    borderWidth: 1,
+    borderColor: '#333',
+    borderLeftWidth: 3,
+    borderRadius: 8,
+    padding: 16,
+    marginBottom: 20,
+  },
+  summaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    alignItems: 'center',
+  },
+  summaryItem: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  summaryLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#666',
+    letterSpacing: 1,
+    marginBottom: 6,
+    textTransform: 'uppercase',
+  },
+  summaryValue: {
+    fontSize: 22,
+    fontWeight: '800',
+  },
+  summaryDivider: {
+    width: 1,
+    height: 40,
+    backgroundColor: '#333',
   },
 
   // Overview Grid
