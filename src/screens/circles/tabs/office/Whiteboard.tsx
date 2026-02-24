@@ -123,8 +123,10 @@ function StatusView({ agents }: { agents: OfficeAgent[] }) {
         {agents.map((a) => (
           <View key={a.id} style={styles.statusRow}>
             <View style={[styles.statusDot, { backgroundColor: STATUS_COLORS[a.status] }]} />
-            <Text style={styles.statusName}>{a.name}</Text>
-            <Text style={styles.statusActivity}>{a.activity}</Text>
+            <View style={styles.statusInfo}>
+              <Text style={styles.statusName}>{a.name}</Text>
+              <Text style={styles.statusActivity} numberOfLines={2}>{a.activity}</Text>
+            </View>
             <Text style={styles.statusLabel}>{a.status.toUpperCase()}</Text>
           </View>
         ))}
@@ -301,12 +303,13 @@ const styles = StyleSheet.create({
   noteItem: { fontSize: 7, color: '#555', fontFamily: 'monospace' },
   // Status
   statusScroll: { flex: 1 },
-  statusList: { gap: 2 },
-  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  statusDot: { width: 5, height: 5, borderRadius: 2.5 },
-  statusName: { fontSize: 8, color: '#333', fontFamily: 'monospace', fontWeight: '700', flex: 0.3 },
-  statusActivity: { fontSize: 7, color: '#888', fontFamily: 'monospace', flex: 1 },
-  statusLabel: { fontSize: 6, color: '#aaa', fontFamily: 'monospace', fontWeight: '600', flex: 0.2, textAlign: 'right' },
+  statusList: { gap: 4 },
+  statusRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 6, paddingVertical: 2 },
+  statusDot: { width: 5, height: 5, borderRadius: 2.5, marginTop: 2 },
+  statusInfo: { flex: 1, gap: 1 },
+  statusName: { fontSize: 8, color: '#333', fontFamily: 'monospace', fontWeight: '700' },
+  statusActivity: { fontSize: 7, color: '#888', fontFamily: 'monospace', lineHeight: 10 },
+  statusLabel: { fontSize: 6, color: '#aaa', fontFamily: 'monospace', fontWeight: '600', minWidth: 40, textAlign: 'right', marginTop: 2 },
   // Activity
   activityList: { gap: 2 },
   activityRow: { flexDirection: 'row', gap: 5, alignItems: 'center' },
