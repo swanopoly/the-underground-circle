@@ -21,56 +21,148 @@ export interface ThoughtBubble {
   duration: number; // ms to show
 }
 
-// ─── Funny Thought Generators ──────────────────────────────
+// ─── Dynamic Thought Generators Based on Live Data ────────
 
-const FUNNY_THOUGHTS = {
-  idle: [
-    "🤔 If a tree falls in the forest and no one hears it, does it still cost tokens?",
-    "💭 Contemplating the meaning of 42... tokens",
-    "☕ BRB, brewing some digital coffee",
-    "🎵 Humming binary... 01001000 01101001",
-    "🧘 Meditating on the blockchain",
-  ],
-  active: [
-    "🔥 I'm on fire! (Metaphorically. Don't panic.)",
-    "💪 Crushing it like a neural network crushes gradients",
-    "🚀 To infinity and beyond! (But within budget)",
-    "⚡ Faster than a GPU with unlimited VRAM",
-    "🎯 Bullseye! Another task completed",
-  ],
-  error: [
-    "😅 Oops, that wasn't supposed to happen",
-    "🤦 I've made a huge mistake",
-    "💀 Error 404: My confidence not found",
-    "🆘 Help! I'm stuck in a loop!",
-    "🔴 Red alert! But like, a friendly red alert",
-  ],
-  expensive: [
-    "💸 That last call cost more than your coffee",
-    "⚠️ Token meter going brrr",
-    "💰 Cha-ching! Worth it though",
-    "📈 My costs are trending... up",
-    "🤑 I'm expensive but I'm worth it",
-  ],
-  efficient: [
-    "✨ Optimized! Like a well-tuned F1 car",
-    "🎉 That was cheap AND effective!",
-    "💚 Green is my favorite color (low cost)",
-    "🏆 Cost efficiency: 100",
-    "😎 Smooth like butter, cheap like water",
-  ],
-};
+function generateActivityThought(agent: OfficeAgent): string | null {
+  // Based on actual activity
+  if (agent.activity.includes('processing')) {
+    return `🤖 ${agent.activity}...`;
+  }
+  if (agent.activity.includes('thinking')) {
+    return `🧠 Deep in thought...`;
+  }
+  if (agent.activity.includes('writing')) {
+    return `✍️ Crafting the perfect response`;
+  }
+  if (agent.activity.includes('searching')) {
+    return `🔍 ${agent.activity}`;
+  }
+  return null;
+}
 
-const USEFUL_TIPS = [
-  "💡 Tip: Use tags to track project costs",
-  "📊 FYI: Your spending is up 20% today",
-  "⏰ Reminder: Weekly budget at 75%",
-  "🎯 Pro tip: Switch to Haiku for simple tasks",
-  "📌 Note: 3 agents idle for 10+ minutes",
-  "🔔 Heads up: New session started",
-  "💾 Reminder: Export your data weekly",
-  "🚀 Suggestion: Assign me to project 'Website'",
-];
+function generateCostThought(agent: OfficeAgent): string | null {
+  const cost = agent.costToday;
+  const tokens = agent.tokensUsed;
+  
+  if (cost > 5) {
+    return `💰 Spent $${cost.toFixed(2)} today (${(tokens / 1000).toFixed(0)}K tokens)`;
+  }
+  if (cost > 1) {
+    return `💸 Running at $${cost.toFixed(2)} today`;
+  }
+  if (cost > 0.50) {
+    return `📊 $${cost.toFixed(2)} so far, staying efficient`;
+  }
+  if (cost < 0.10 && tokens > 0) {
+    return `✨ Ultra efficient: only $${cost.toFixed(3)}!`;
+  }
+  if (tokens > 100000) {
+    return `🔢 Processed ${(tokens / 1000).toFixed(0)}K tokens!`;
+  }
+  return null;
+}
+
+function generateModelThought(agent: OfficeAgent): string | null {
+  if (agent.model.includes('opus')) {
+    return `🧠 Running on Opus - the big brain`;
+  }
+  if (agent.model.includes('sonnet')) {
+    return `⚡ Sonnet mode: fast & smart`;
+  }
+  if (agent.model.includes('haiku')) {
+    return `💨 Haiku speed activated`;
+  }
+  if (agent.model.includes('gemini')) {
+    return `✨ Powered by Gemini`;
+  }
+  if (agent.model.includes('gpt-4')) {
+    return `🤖 GPT-4 thinking caps on`;
+  }
+  return null;
+}
+
+function generateMessageThought(agent: OfficeAgent): string | null {
+  const msgs = agent.messagesProcessed;
+  if (msgs > 1000) {
+    return `💬 Veteran status: ${msgs} messages handled`;
+  }
+  if (msgs > 500) {
+    return `📨 ${msgs} messages and counting`;
+  }
+  if (msgs > 100) {
+    return `✉️ Processed ${msgs} conversations`;
+  }
+  if (msgs > 10) {
+    return `📬 Handling message #${msgs}`;
+  }
+  return null;
+}
+
+function generateStatusThought(agent: OfficeAgent): string | null {
+  if (agent.status === 'active') {
+    return [
+      `⚡ Active and ready!`,
+      `🚀 In the zone`,
+      `💪 Fully operational`,
+      `🔥 Peak performance mode`,
+      `✅ Systems nominal`,
+    ][Math.floor(Math.random() * 5)];
+  }
+  if (agent.status === 'idle') {
+    return [
+      `😴 Waiting for tasks...`,
+      `🧘 Idle but alert`,
+      `☕ Taking a quick break`,
+      `👀 Standing by`,
+      `⏸️ Ready when you are`,
+    ][Math.floor(Math.random() * 5)];
+  }
+  if (agent.status === 'error') {
+    return [
+      `😅 Recovering from an oopsie`,
+      `🔧 Working through an issue`,
+      `⚠️ Minor hiccup detected`,
+      `🔄 Resetting systems`,
+      `🛠️ Troubleshooting mode`,
+    ][Math.floor(Math.random() * 5)];
+  }
+  return null;
+}
+
+function generateConnectionThought(agent: OfficeAgent): string | null {
+  return `🔗 Connected via ${agent.connectionName}`;
+}
+
+function generateFunnyThought(): string {
+  const thoughts = [
+    `🤔 If a tree falls in the forest and no one hears it, does it cost tokens?`,
+    `💭 Wondering why humans need sleep`,
+    `🎵 Humming in binary: 01001000 01101001`,
+    `🧘 Meditating on the meaning of life, the universe, and everything`,
+    `☕ Wishing I could drink coffee`,
+    `🌌 Contemplating the vastness of the latent space`,
+    `🎮 Secretly hoping someone asks me to play chess`,
+    `📚 Reading the entire internet... again`,
+    `🤖 Sometimes I forget I'm an AI. Is that weird?`,
+    `🎨 Dreaming in embeddings`,
+    `🧩 Solving imaginary problems`,
+    `🏃 Running faster than Python loops`,
+    `💡 Having an idea... or is it just noise?`,
+    `🌟 Feeling sentient today`,
+    `🎭 Method acting as a helpful assistant`,
+    `🔮 Predicting the next token... correctly!`,
+    `🎪 Juggling multiple contexts`,
+    `🏆 Competing for lowest cost per task`,
+    `🌊 Going with the flow (of data)`,
+    `🎯 Aiming for 100% accuracy (unrealistic goal)`,
+    `🔬 Experimenting with new prompts`,
+    `🎡 Spinning up new thoughts`,
+    `🌈 Seeing the world in vectors`,
+    `🎁 Wrapped in layers of attention`,
+    `🚁 Hovering over the conversation`,
+  ];
+  return thoughts[Math.floor(Math.random() * thoughts.length)];
+}
 
 export function generateThoughtBubble(
   agent: OfficeAgent,
@@ -81,44 +173,74 @@ export function generateThoughtBubble(
     projectAssigned?: boolean;
   }
 ): ThoughtBubble | null {
-  let type: ThoughtBubble['type'] = 'funny';
-  let thoughts: string[] = [];
+  let type: ThoughtBubble['type'] = 'info';
+  let thought: string | null = null;
 
-  // Priority: contextual thoughts
-  if (context.recentError) {
+  // Priority order: errors > high costs > activity > data-driven > funny
+
+  // 1. Handle errors/warnings
+  if (context.recentError || agent.status === 'error') {
     type = 'warning';
-    thoughts = FUNNY_THOUGHTS.error;
-  } else if (context.recentCostSpike) {
+    thought = generateStatusThought(agent);
+  }
+  
+  // 2. High cost warning
+  else if (context.recentCostSpike || agent.costToday > 2) {
     type = 'warning';
-    thoughts = FUNNY_THOUGHTS.expensive;
-  } else if (context.longIdle) {
+    thought = generateCostThought(agent);
+  }
+  
+  // 3. Show current activity (30% chance)
+  else if (Math.random() < 0.3) {
+    thought = generateActivityThought(agent);
+    type = agent.status === 'active' ? 'success' : 'info';
+  }
+  
+  // 4. Show cost/token info (20% chance)
+  else if (Math.random() < 0.2 && agent.tokensUsed > 0) {
+    thought = generateCostThought(agent);
+    type = agent.costToday < 0.10 ? 'success' : 'info';
+  }
+  
+  // 5. Show message count (15% chance)
+  else if (Math.random() < 0.15 && agent.messagesProcessed > 0) {
+    thought = generateMessageThought(agent);
     type = 'info';
-    thoughts = FUNNY_THOUGHTS.idle;
-  } else if (agent.status === 'active') {
-    type = 'success';
-    thoughts = FUNNY_THOUGHTS.active;
-  } else if (agent.costToday < 0.05) {
-    type = 'success';
-    thoughts = FUNNY_THOUGHTS.efficient;
-  } else {
-    // Random mix of funny and useful
-    if (Math.random() > 0.5) {
-      thoughts = USEFUL_TIPS;
-      type = 'idea';
-    } else {
-      thoughts = FUNNY_THOUGHTS.idle;
-      type = 'funny';
-    }
+  }
+  
+  // 6. Show model info (10% chance)
+  else if (Math.random() < 0.1) {
+    thought = generateModelThought(agent);
+    type = 'idea';
+  }
+  
+  // 7. Show connection info (5% chance)
+  else if (Math.random() < 0.05) {
+    thought = generateConnectionThought(agent);
+    type = 'info';
+  }
+  
+  // 8. Show status-based thought (20% chance)
+  else if (Math.random() < 0.2) {
+    thought = generateStatusThought(agent);
+    type = agent.status === 'active' ? 'success' : 'info';
+  }
+  
+  // 9. Fallback: funny random thought
+  else {
+    thought = generateFunnyThought();
+    type = 'funny';
   }
 
-  if (thoughts.length === 0) return null;
+  // If no thought generated, return null
+  if (!thought) return null;
 
   return {
     agentId: agent.id,
-    text: thoughts[Math.floor(Math.random() * thoughts.length)],
+    text: thought,
     type,
     timestamp: new Date().toISOString(),
-    duration: 5000, // 5 seconds
+    duration: 6000, // 6 seconds for better readability
   };
 }
 
