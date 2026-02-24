@@ -341,6 +341,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
             onPress={() => handleAction('standup')}
             color="#8b5cf6"
             disabled={!hasAgents}
+            tooltip="Start daily standup: ask all agents what they're working on and any blockers"
           />
           
           <PixelButton
@@ -349,6 +350,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
             onPress={() => handleAction('sync')}
             color="#3b82f6"
             disabled={!hasAgents}
+            tooltip="Sync project status with team: task progress, blockers, and cost breakdown"
           />
           
           <PixelButton
@@ -357,6 +359,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
             onPress={() => handleAction('assign')}
             color="#22c55e"
             disabled={!hasAgents}
+            tooltip="Auto-assign unassigned tasks to best-fit agents based on workload and expertise"
           />
           
           <PixelButton
@@ -365,6 +368,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
             onPress={() => handleAction('chat')}
             color="#ec4899"
             disabled={!hasAgents}
+            tooltip="Start a new multi-agent conversation on a specific topic"
           />
           
           <PixelButton
@@ -373,6 +377,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
             onPress={() => handleAction('broadcast')}
             color="#f59e0b"
             disabled={!hasAgents}
+            tooltip="Send an announcement or message to all active agents at once"
           />
           
           <PixelButton
@@ -382,6 +387,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
             color="#ef4444"
             disabled={!hasAgents}
             badge={blockedTasksCount > 0 ? blockedTasksCount : undefined}
+            tooltip="Coordinate help for blocked tasks: notify team of tasks that need support"
           />
           
           <PixelButton
@@ -390,6 +396,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
             onPress={() => handleAction('status')}
             color="#10b981"
             disabled={!hasAgents}
+            tooltip="Quick status check: see all active agents, their status, and daily costs"
           />
         </ScrollView>
       </View>

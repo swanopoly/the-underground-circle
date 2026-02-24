@@ -10,6 +10,7 @@ interface Props {
   disabled?: boolean;
   size?: 'small' | 'medium' | 'large';
   badge?: string | number;
+  tooltip?: string;
 }
 
 export default function PixelButton({
@@ -20,8 +21,10 @@ export default function PixelButton({
   disabled = false,
   size = 'medium',
   badge,
+  tooltip,
 }: Props) {
   const [pressed, setPressed] = useState(false);
+  const [hovered, setHovered] = useState(false);
 
   const sizeStyles = {
     small: {
@@ -47,25 +50,30 @@ export default function PixelButton({
   const currentSize = sizeStyles[size];
 
   return (
-    <Pressable
-      onPress={onPress}
-      onPressIn={() => setPressed(true)}
-      onPressOut={() => setPressed(false)}
-      disabled={disabled}
-      style={[
-        styles.button,
-        currentSize.button,
-        {
-          backgroundColor: disabled ? '#333' : pressed ? color : color + 'dd',
-          borderColor: color,
-          borderBottomColor: pressed ? color + '66' : color,
-          borderRightColor: pressed ? color + '66' : color,
-          transform: pressed ? [{ translateY: 2 }] : [{ translateY: 0 }],
-        },
-        disabled && styles.disabled,
-        Platform.OS === 'web' && !disabled && { cursor: 'pointer' } as any,
-      ]}
-    >
+    <View style={{ position: 'relative' }}>
+      <Pressable
+        onPress={onPress}
+        onPressIn={() => setPressed(true)}
+        onPressOut={() => setPressed(false)}
+        disabled={disabled}
+        {...(Platform.OS === 'web' && {
+          onMouseEnter: () => setHovered(true),
+          onMouseLeave: () => setHovered(false),
+        })}
+        style={[
+          styles.button,
+          currentSize.button,
+          {
+            backgroundColor: disabled ? '#333' : pressed ? color : color + 'dd',
+            borderColor: color,
+            borderBottomColor: pressed ? color + '66' : color,
+            borderRightColor: pressed ? color + '66' : color,
+            transform: pressed ? [{ translateY: 2 }] : [{ translateY: 0 }],
+          },
+          disabled && styles.disabled,
+          Platform.OS === 'web' && !disabled && { cursor: 'pointer' } as any,
+        ]}
+      >
       {badge !== undefined && (
         <View style={[styles.badge, currentSize.badge, { backgroundColor: '#ef4444' }]}>
           <Text style={[styles.badgeText, { fontSize: currentSize.badge.fontSize }]}>
@@ -85,6 +93,14 @@ export default function PixelButton({
         {label}
       </Text>
     </Pressable>
+
+    {/* Tooltip on hover (web only) */}
+    {tooltip && hovered && Platform.OS === 'web' && (
+      <View style={styles.tooltip}>
+        <Text style={styles.tooltipText}>{tooltip}</Text>
+      </View>
+    )}
+  </View>
   );
 }
 
@@ -136,5 +152,32 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '900',
     fontFamily: 'monospace',
+  },
+  tooltip: {
+    position: 'absolute',
+    bottom: '100%',
+    left: '50%',
+    transform: [{ translateX: '-50%' }],
+    marginBottom: 8,
+    backgroundColor: '#1a1a2e',
+    borderWidth: 1,
+    borderColor: '#6366f1',
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    maxWidth: 200,
+    zIndex: 1000,
+    // Arrow
+    shadowColor: '#6366f1',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+  } as any,
+  tooltipText: {
+    color: '#fff',
+    fontSize: 11,
+    fontFamily: 'monospace',
+    textAlign: 'center',
+    lineHeight: 14,
   },
 });
