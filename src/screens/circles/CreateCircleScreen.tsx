@@ -171,7 +171,7 @@ export default function CreateCircleScreen({ navigation }: any) {
   // Form state
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [maxMembers, setMaxMembers] = useState(8);
+  const [maxMembers, setMaxMembers] = useState(12);
   const [icon, setIcon] = useState('✨');
   const [accentColor, setAccentColor] = useState('#6366f1');
   const [checkInFormat, setCheckInFormat] = useState<CheckInFormat>({ type: 'text', label: 'Daily Check-in' });
@@ -424,7 +424,7 @@ export default function CreateCircleScreen({ navigation }: any) {
 
             <Text style={styles.inputLabel}>MAX MEMBERS</Text>
             <View style={styles.memberPicker}>
-              {[3, 4, 5, 6, 7, 8].map((n) => (
+              {[3, 4, 5, 6, 8, 10, 12].map((n) => (
                 <MemberOption
                   key={n}
                   value={n}
