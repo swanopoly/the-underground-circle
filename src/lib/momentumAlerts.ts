@@ -252,7 +252,6 @@ class MomentumAlertsSystem {
     });
 
     // TODO: Integrate with push notifications service
-    console.log(`🔔 Alert for ${userId}:`, alert.title);
   }
 
   private wasDuringPeakHours(timestamp: Date): boolean {

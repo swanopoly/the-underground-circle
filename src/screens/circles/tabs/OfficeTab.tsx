@@ -201,8 +201,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     const toReconnect = connections.filter(c => c.enabled && c.status !== 'connected' && c.status !== 'connecting');
     
     if (toReconnect.length > 0) {
-      console.log(`🔌 Reconnecting ${toReconnect.length} connection${toReconnect.length !== 1 ? 's' : ''}:`, 
-        toReconnect.map(c => c.name).join(', '));
       toReconnect.forEach(conn => connectOne(conn));
     }
   }, [connections, connectOne]);
@@ -429,8 +427,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         
         // Step 4: Save snapshot to cache
         await takeSnapshot(fullyEnriched, sessionTags);
-        
-        console.log(`✅ Enriched ${fullyEnriched.length} agents with full identity restoration`);
       } catch (error) {
         console.error('Failed to enrich agents:', error);
         setEnrichedAgents(allAgents);

@@ -369,7 +369,6 @@ export default function CheckInScreen({ route, navigation }: any) {
     try {
       // TODO: Replace with actual Supabase call when table exists
       // For now, just show a success message and award XP
-      console.log(`Validating proof for check-in ${checkInId}: ${isValid ? 'VALID' : 'INVALID'}`);
       
       // Award XP for participating in validation
       await awardXP(currentUserId, 5, 'proof_validation', { 

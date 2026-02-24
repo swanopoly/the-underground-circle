@@ -912,7 +912,6 @@ export async function fetchTransactionHistory(address: string, chain: Chain, lim
     } else {
       // EVM chains - simplified implementation
       // In production, you'd use services like Etherscan API, Alchemy, or Moralis
-      console.log(`Transaction history for ${chain} not yet implemented`);
     }
   } catch (error) {
     console.error(`Failed to fetch transaction history for ${chain}:`, error);
@@ -998,7 +997,6 @@ export async function getSwapQuote(
       };
     } else {
       // EVM chains - would integrate with 1inch, 0x, etc.
-      console.log(`Swap quotes for ${chain} not yet implemented`);
       return null;
     }
   } catch (error) {
@@ -1036,7 +1034,6 @@ export async function fetchNFTs(address: string, chain: Chain): Promise<NFT[]> {
       }
     } else {
       // EVM chains - would use Alchemy NFT API, Moralis, etc.
-      console.log(`NFT fetching for ${chain} not yet implemented`);
     }
   } catch (error) {
     console.error(`Failed to fetch NFTs for ${chain}:`, error);

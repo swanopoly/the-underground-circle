@@ -217,8 +217,6 @@ export async function enrichAgentsWithCache(agents: OfficeAgent[]): Promise<Offi
       const snapshotTokens = todaySnapshot?.tokens[agent.id] || 0;
       const maxTokens = Math.max(cachedTokens, freshTokens, snapshotTokens);
       
-      console.log(`💰 Agent ${agent.name}: cached=$${cachedCost.toFixed(4)}, fresh=$${freshCost.toFixed(4)}, using=$${maxCost.toFixed(4)}`);
-      
       return {
         ...agent,
         costToday: maxCost,
@@ -227,7 +225,6 @@ export async function enrichAgentsWithCache(agents: OfficeAgent[]): Promise<Offi
       };
     }
     
-    console.log(`🆕 Agent ${agent.name}: no cache, using fresh=$${agent.costToday.toFixed(4)}`);
     return agent;
   });
 }
@@ -264,8 +261,6 @@ export async function takeSnapshot(
   await updateSessionCache(sessions);
   await recordDailyCosts(agents);
   
-  console.log(`💾 Saved snapshot: ${agents.length} agents, total: $${agents.reduce((sum, a) => sum + a.costToday, 0).toFixed(4)}`);
-  
   // Also save tags separately
   if (sessionTags) {
     await saveSessionTags(sessionTags);
@@ -283,7 +278,6 @@ export async function enrichSessionsWithCache(
     const cached = cache.get(session.sessionKey);
     
     if (!cached) {
-      console.log(`🆕 Session ${session.sessionKey}: no cache, using fresh=$${(session.totalCost || 0).toFixed(4)}`);
       return session;
     }
     
@@ -291,8 +285,6 @@ export async function enrichSessionsWithCache(
     const cachedCost = cached.totalCost || 0;
     const freshCost = session.totalCost || 0;
     const maxCost = Math.max(cachedCost, freshCost);
-    
-    console.log(`💰 Session ${session.sessionKey}: cached=$${cachedCost.toFixed(4)}, fresh=$${freshCost.toFixed(4)}, using=$${maxCost.toFixed(4)}`);
     
     return {
       ...session,
@@ -302,8 +294,6 @@ export async function enrichSessionsWithCache(
       turns: Math.max(session.turns || 0, cached.turns),
     };
   });
-  
-  console.log(`📊 Enriched ${enriched.length} sessions, total: $${enriched.reduce((sum, s) => sum + (s.totalCost || 0), 0).toFixed(4)}`);
   
   return enriched;
 }

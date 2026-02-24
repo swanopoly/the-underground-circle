@@ -138,11 +138,8 @@ export async function restoreAgentIdentity(agent: OfficeAgent): Promise<OfficeAg
   const identity = identities.get(sessionKey);
   
   if (!identity) {
-    console.log(`🆕 New agent detected: ${sessionKey}`);
     return agent;
   }
-  
-  console.log(`🔄 Restoring agent identity: ${sessionKey} (first seen: ${new Date(identity.firstSeen).toLocaleDateString()})`);
   
   // Restore all persistent data
   return {
@@ -196,7 +193,6 @@ export async function getAllAgentStats(): Promise<AgentIdentity[]> {
 
 export async function renameAgent(sessionKey: string, newName: string): Promise<void> {
   await updateAgentIdentity(sessionKey, { customName: newName });
-  console.log(`✏️ Renamed agent ${sessionKey} → ${newName}`);
 }
 
 // ─── Customize Agent Appearance ────────────────────────────
@@ -206,7 +202,6 @@ export async function customizeAgent(
   appearance: { skin?: string; eyes?: string; outfit?: string }
 ): Promise<void> {
   await updateAgentIdentity(sessionKey, { appearance });
-  console.log(`🎨 Customized agent ${sessionKey}:`, appearance);
 }
 
 // ─── Get All Session Keys ──────────────────────────────────
@@ -231,7 +226,6 @@ export async function cleanupOldAgents(daysOld: number = 90): Promise<number> {
   }
   
   await saveAgentIdentities(identities);
-  console.log(`🧹 Cleaned up ${cleaned} agents not seen in ${daysOld} days`);
   return cleaned;
 }
 
@@ -248,7 +242,6 @@ export async function importAgentIdentities(jsonData: string): Promise<number> {
     const data = JSON.parse(jsonData);
     const identities = new Map(Object.entries(data));
     await saveAgentIdentities(identities);
-    console.log(`📥 Imported ${identities.size} agent identities`);
     return identities.size;
   } catch (error) {
     console.error('Failed to import agent identities:', error);

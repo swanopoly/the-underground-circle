@@ -295,7 +295,6 @@ export default function CustomizePanel({
                       <Pressable
                         onPress={() => {
                           const toReconnect = connections.filter(c => c.enabled && c.status !== 'connected' && c.status !== 'connecting');
-                          console.log(`🔌 Reconnecting ${toReconnect.length} connection${toReconnect.length !== 1 ? 's' : ''}...`);
                           toReconnect.forEach(c => onConnectConnection(c.id));
                         }}
                         style={styles.quickConnectBtn}
