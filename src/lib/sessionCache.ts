@@ -201,18 +201,33 @@ export async function enrichAgentsWithCache(agents: OfficeAgent[]): Promise<Offi
   const todaySnapshot = dailyCosts.find(s => s.date === today);
 
   return agents.map(agent => {
-    const cached = cache.get(agent.id);
+    // Extract sessionKey from agent.id (format: "connectionId::sessionKey")
+    const sessionKey = agent.id.includes('::') ? agent.id.split('::')[1] : agent.id;
+    const cached = cache.get(sessionKey);
     
     if (cached) {
-      // Restore cached data
+      // CRITICAL: Always use MAX of cached vs fresh to prevent data loss
+      const cachedCost = cached.totalCost || 0;
+      const freshCost = agent.costToday || 0;
+      const snapshotCost = todaySnapshot?.costs[agent.id] || 0;
+      const maxCost = Math.max(cachedCost, freshCost, snapshotCost);
+      
+      const cachedTokens = cached.totalTokens || 0;
+      const freshTokens = agent.tokensUsed || 0;
+      const snapshotTokens = todaySnapshot?.tokens[agent.id] || 0;
+      const maxTokens = Math.max(cachedTokens, freshTokens, snapshotTokens);
+      
+      console.log(`💰 Agent ${agent.name}: cached=$${cachedCost.toFixed(4)}, fresh=$${freshCost.toFixed(4)}, using=$${maxCost.toFixed(4)}`);
+      
       return {
         ...agent,
-        costToday: todaySnapshot?.costs[agent.id] || cached.totalCost || agent.costToday,
-        tokensUsed: todaySnapshot?.tokens[agent.id] || cached.totalTokens || agent.tokensUsed,
-        // Keep fresh API data for status, model, etc.
+        costToday: maxCost,
+        tokensUsed: maxTokens,
+        // Keep fresh API data for status, model, activity
       };
     }
     
+    console.log(`🆕 Agent ${agent.name}: no cache, using fresh=$${agent.costToday.toFixed(4)}`);
     return agent;
   });
 }
@@ -225,11 +240,13 @@ export async function takeSnapshot(
 ): Promise<void> {
   // Save current agent states to cache
   const sessions: CachedSession[] = agents.map(agent => {
+    // Extract sessionKey from agent.id
+    const sessionKey = agent.id.includes('::') ? agent.id.split('::')[1] : agent.id;
     const tags = sessionTags?.get(agent.id);
     const tagKeys = tags?.map((t: any) => t.key) || [];
     
     return {
-      sessionKey: agent.id,
+      sessionKey, // Use extracted sessionKey as cache key
       agentId: agent.id,
       connectionId: agent.connectionId,
       lastUpdate: Date.now(),
@@ -247,6 +264,8 @@ export async function takeSnapshot(
   await updateSessionCache(sessions);
   await recordDailyCosts(agents);
   
+  console.log(`💾 Saved snapshot: ${agents.length} agents, total: $${agents.reduce((sum, a) => sum + a.costToday, 0).toFixed(4)}`);
+  
   // Also save tags separately
   if (sessionTags) {
     await saveSessionTags(sessionTags);
@@ -260,22 +279,33 @@ export async function enrichSessionsWithCache(
 ): Promise<any[]> {
   const cache = await loadSessionCache();
   
-  return sessions.map(session => {
+  const enriched = sessions.map(session => {
     const cached = cache.get(session.sessionKey);
     
     if (!cached) {
+      console.log(`🆕 Session ${session.sessionKey}: no cache, using fresh=$${(session.totalCost || 0).toFixed(4)}`);
       return session;
     }
     
-    // Merge: use MAX of cached vs fresh to prevent data loss
+    // CRITICAL: Always use MAX of cached vs fresh to prevent data loss
+    const cachedCost = cached.totalCost || 0;
+    const freshCost = session.totalCost || 0;
+    const maxCost = Math.max(cachedCost, freshCost);
+    
+    console.log(`💰 Session ${session.sessionKey}: cached=$${cachedCost.toFixed(4)}, fresh=$${freshCost.toFixed(4)}, using=$${maxCost.toFixed(4)}`);
+    
     return {
       ...session,
-      totalCost: Math.max(session.totalCost || 0, cached.totalCost),
+      totalCost: maxCost,
       totalInputTokens: Math.max(session.totalInputTokens || 0, cached.inputTokens),
       totalOutputTokens: Math.max(session.totalOutputTokens || 0, cached.outputTokens),
       turns: Math.max(session.turns || 0, cached.turns),
     };
   });
+  
+  console.log(`📊 Enriched ${enriched.length} sessions, total: $${enriched.reduce((sum, s) => sum + (s.totalCost || 0), 0).toFixed(4)}`);
+  
+  return enriched;
 }
 
 // ─── Tag Management ────────────────────────────────────────

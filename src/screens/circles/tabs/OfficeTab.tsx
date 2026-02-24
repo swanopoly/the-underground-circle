@@ -405,13 +405,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       try {
         const enriched = await enrichAgentsWithCache(allAgents);
         setEnrichedAgents(enriched);
+        
+        // Save immediately to cache (don't wait for 30s interval)
+        await takeSnapshot(enriched, sessionTags);
       } catch (error) {
         console.error('Failed to enrich agents:', error);
         setEnrichedAgents(allAgents);
       }
     };
     doEnrich();
-  }, [sessionsTick, agentNames]);
+  }, [sessionsTick, agentNames, sessionTags]);
 
   // Enrich sessions for Cost Dashboard
   useEffect(() => {
