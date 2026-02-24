@@ -75,6 +75,7 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
   }
 
   return (
+    <>
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
       {/* Header with controls */}
       <View style={styles.header}>

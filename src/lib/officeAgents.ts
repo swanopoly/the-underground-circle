@@ -140,3 +140,25 @@ export const WHITEBOARD_MODES: { key: WhiteboardMode; icon: string; label: strin
   { key: 'history', icon: '⏳', label: 'STATUS HISTORY' },
   { key: 'cron', icon: '⏰', label: 'CRON JOBS' },
 ];
+
+/**
+ * Calculate simple daily performance score for Agent of the Day
+ * Score ranges from 0-100 based on status, messages, and cost efficiency
+ */
+export function calculateDailyScore(agent: OfficeAgent): number {
+  let score = 0;
+  
+  // Points for being active (40 points max)
+  if (agent.status === 'active') score += 40;
+  else if (agent.status === 'idle') score += 20;
+  
+  // Points for messages processed (30 points max, capped at 15 messages)
+  score += Math.min(30, agent.messagesProcessed * 2);
+  
+  // Points for cost efficiency (30 points max)
+  // Lower cost = higher score. $0.50/day = 30 points, $5/day = 0 points
+  const costScore = Math.max(0, 30 - (agent.costToday * 6));
+  score += costScore;
+  
+  return Math.min(100, Math.round(score));
+}

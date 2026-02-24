@@ -68,6 +68,9 @@ export default function CustomizePanel({
   const [newName, setNewName] = useState('');
   const [newEndpoint, setNewEndpoint] = useState('');
   const [newToken, setNewToken] = useState('');
+  const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
+  const [showToken, setShowToken] = useState(false);
+  const [visibleTokenIds, setVisibleTokenIds] = useState<Set<string>>(new Set());
 
   if (!visible) return null;
 
@@ -86,6 +89,8 @@ export default function CustomizePanel({
     setNewName('');
     setNewEndpoint('');
     setNewToken('');
+    setEditingConnectionId(null);
+    setShowToken(false);
   };
 
   const handlePickProvider = (provider: ProviderType) => {
@@ -96,19 +101,47 @@ export default function CustomizePanel({
     setAddStep('form');
   };
 
+  const handleEditConnection = (conn: AgentConnection) => {
+    setEditingConnectionId(conn.id);
+    setNewProvider(conn.provider);
+    setNewName(conn.name);
+    setNewEndpoint(conn.endpoint);
+    setNewToken(conn.token || '');
+    setAddStep('form');
+  };
+
   const handleSaveConnection = () => {
     if (!newName.trim() || !newEndpoint.trim()) return;
-    const conn: AgentConnection = {
-      id: generateId(),
-      name: newName.trim(),
-      provider: newProvider,
-      endpoint: newEndpoint.trim(),
-      token: newToken.trim(),
-      enabled: true,
-      status: 'disconnected',
-      color: PROVIDER_META[newProvider].color,
-    };
-    onAddConnection(conn);
+    
+    if (editingConnectionId) {
+      // Edit mode: upsert via onAddConnection (handles replace by ID)
+      const oldConn = connections.find(c => c.id === editingConnectionId);
+      const conn: AgentConnection = {
+        id: editingConnectionId,
+        name: newName.trim(),
+        provider: newProvider,
+        endpoint: newEndpoint.trim(),
+        token: newToken.trim(),
+        enabled: oldConn?.enabled ?? true,
+        status: 'disconnected',
+        color: PROVIDER_META[newProvider].color,
+      };
+      onAddConnection(conn);
+    } else {
+      // Add mode: create new connection
+      const conn: AgentConnection = {
+        id: generateId(),
+        name: newName.trim(),
+        provider: newProvider,
+        endpoint: newEndpoint.trim(),
+        token: newToken.trim(),
+        enabled: true,
+        status: 'disconnected',
+        color: PROVIDER_META[newProvider].color,
+      };
+      onAddConnection(conn);
+    }
+    
     resetAddForm();
   };
 
@@ -315,6 +348,23 @@ export default function CustomizePanel({
                               </View>
                             </View>
                             <Text style={styles.connCardEndpoint} numberOfLines={1}>{conn.endpoint}</Text>
+                            {conn.token ? (
+                              <Pressable
+                                onPress={() => setVisibleTokenIds(prev => {
+                                  const next = new Set(prev);
+                                  next.has(conn.id) ? next.delete(conn.id) : next.add(conn.id);
+                                  return next;
+                                })}
+                                style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}
+                              >
+                                <Text style={{ color: '#666', fontSize: 11 }}>
+                                  🔑 {visibleTokenIds.has(conn.id) ? conn.token : '••••••••••••'}
+                                </Text>
+                                <Text style={{ color: '#6366f1', fontSize: 10, marginLeft: 6 }}>
+                                  {visibleTokenIds.has(conn.id) ? 'HIDE' : 'SHOW'}
+                                </Text>
+                              </Pressable>
+                            ) : null}
                           </View>
                         </View>
 
@@ -352,6 +402,12 @@ export default function CustomizePanel({
                               <Text style={[styles.connActionText, { color: meta.color }]}>CONNECT</Text>
                             </Pressable>
                           )}
+                          <Pressable
+                            onPress={() => handleEditConnection(conn)}
+                            style={[styles.connActionBtn, { backgroundColor: '#3b82f620', borderColor: '#3b82f640' }]}
+                          >
+                            <Text style={[styles.connActionText, { color: '#3b82f6' }]}>✏️ EDIT</Text>
+                          </Pressable>
                           <Pressable
                             onPress={() => onRemoveConnection(conn.id)}
                             style={[styles.connActionBtn, styles.connActionRemove]}
@@ -414,7 +470,7 @@ export default function CustomizePanel({
                   <View style={[styles.formHeader, { borderColor: PROVIDER_META[newProvider].color + '30' }]}>
                     <Text style={styles.formHeaderIcon}>{PROVIDER_META[newProvider].icon}</Text>
                     <Text style={[styles.formHeaderText, { color: PROVIDER_META[newProvider].color }]}>
-                      NEW {PROVIDER_META[newProvider].label.toUpperCase()} CONNECTION
+                      {editingConnectionId ? 'EDIT' : 'NEW'} {PROVIDER_META[newProvider].label.toUpperCase()} CONNECTION
                     </Text>
                   </View>
 
@@ -439,14 +495,19 @@ export default function CustomizePanel({
                     autoCorrect={false}
                   />
 
-                  <Text style={styles.inputLabel}>Auth Token</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <Text style={styles.inputLabel}>Auth Token</Text>
+                    <Pressable onPress={() => setShowToken(!showToken)}>
+                      <Text style={{ color: '#6366f1', fontSize: 12 }}>{showToken ? '🙈 HIDE' : '👁️ SHOW'}</Text>
+                    </Pressable>
+                  </View>
                   <TextInput
                     style={styles.input}
                     value={newToken}
                     onChangeText={setNewToken}
                     placeholder="your auth token"
                     placeholderTextColor="#666"
-                    secureTextEntry
+                    secureTextEntry={!showToken}
                     autoCapitalize="none"
                   />
 
@@ -456,16 +517,25 @@ export default function CustomizePanel({
                       (!newName.trim() || !newEndpoint.trim()) && { opacity: 0.4 }]}
                     disabled={!newName.trim() || !newEndpoint.trim()}
                   >
-                    <Text style={styles.saveConnBtnText}>💾 SAVE & CONNECT</Text>
+                    <Text style={styles.saveConnBtnText}>
+                      {editingConnectionId ? '💾 UPDATE CONNECTION' : '💾 SAVE & CONNECT'}
+                    </Text>
                   </Pressable>
 
-                  {newProvider === 'openclaw' && (
+                  {editingConnectionId && (
+                    <View style={[styles.connectInfo, { borderColor: '#f59e0b30' }]}>
+                      <Text style={[styles.connectInfoTitle, { color: '#f59e0b' }]}>⚠️ Editing Connection</Text>
+                      <Text style={styles.connectInfoText}>After updating, you'll need to reconnect to apply changes.</Text>
+                    </View>
+                  )}
+
+                  {newProvider === 'openclaw' && !editingConnectionId && (
                     <View style={styles.connectInfo}>
                       <Text style={styles.connectInfoTitle}>OpenClaw Setup</Text>
-                      <Text style={styles.connectInfoText}>1. Run CORS proxy: node openclaw-proxy.js</Text>
-                      <Text style={styles.connectInfoText}>2. Default port: 18790 (proxy adds CORS headers)</Text>
+                      <Text style={styles.connectInfoText}>1. Your gateway is on port 18789 (use proxy port 18790)</Text>
+                      <Text style={styles.connectInfoText}>2. No proxy needed - direct connection works</Text>
                       <Text style={styles.connectInfoText}>3. Find token in ~/.openclaw/openclaw.json</Text>
-                      <Text style={styles.connectInfoText}>4. Gateway runs on port 18789 internally</Text>
+                      <Text style={styles.connectInfoText}>4. Use http://localhost:18790 as endpoint (CORS proxy)</Text>
                     </View>
                   )}
 

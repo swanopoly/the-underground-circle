@@ -40,6 +40,7 @@ import {
 import BudgetAlertBanner from '../../../components/BudgetAlertBanner';
 import { calculatePeriodCosts } from '../../../lib/costCalculations';
 import OfficeActionPanel from '../../../components/OfficeActionPanel';
+import FarmHealthDashboard from '../../../components/FarmHealthDashboard';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -76,7 +77,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [enrichedAgents, setEnrichedAgents] = useState<OfficeAgent[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
-  const [viewMode, setViewMode] = useState<'office' | 'cost' | 'tags' | 'metrics'>('office'); // Toggle between views
+  const [viewMode, setViewMode] = useState<'office' | 'cost' | 'tags' | 'metrics' | 'farm'>('office'); // Toggle between views
   const [sessionTags, setSessionTags] = useState<Map<string, SessionTag[]>>(new Map());
   const [budgetConfig, setBudgetConfig] = useState<BudgetConfig>({ enabled: false });
   const [budgetAlertsDismissed, setBudgetAlertsDismissed] = useState(false);
@@ -164,19 +165,27 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   }, []);
 
   const handleAddConnection = useCallback(async (conn: AgentConnection) => {
-    const updated = [...connections, conn];
-    setConnections(updated);
-    await saveConnections(updated);
+    setConnections(prev => {
+      // Upsert: replace if same ID exists (edit mode), otherwise append
+      const exists = prev.some(c => c.id === conn.id);
+      const updated = exists
+        ? prev.map(c => c.id === conn.id ? conn : c)
+        : [...prev, conn];
+      saveConnections(updated);
+      return updated;
+    });
     // Auto-connect
     connectOne(conn);
-  }, [connections, connectOne]);
+  }, [connectOne]);
 
   const handleRemoveConnection = useCallback(async (id: string) => {
     disconnectOne(id);
-    const updated = connections.filter(c => c.id !== id);
-    setConnections(updated);
-    await saveConnections(updated);
-  }, [connections, disconnectOne]);
+    setConnections(prev => {
+      const updated = prev.filter(c => c.id !== id);
+      saveConnections(updated);
+      return updated;
+    });
+  }, [disconnectOne]);
 
   const handleConnectConnection = useCallback((id: string) => {
     const conn = connections.find(c => c.id === id);
@@ -687,6 +696,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               🏆
             </Text>
           </Pressable>
+          <Pressable
+            onPress={() => {
+              setViewMode(viewMode === 'farm' ? 'office' : 'farm');
+            }}
+            style={[styles.modeBtn, viewMode === 'farm' && styles.modeBtnActive,
+              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={[styles.modeBtnText, viewMode === 'farm' && styles.modeBtnTextActive]}>
+              🏥
+            </Text>
+          </Pressable>
           {viewMode === 'office' && (
             <Pressable
               onPress={() => { setEditMode(!editMode); setPlacingType(null); }}
@@ -826,7 +846,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </View>
       )}
 
-      {/* Main Content - Switch between Office, Cost, Tags, and Metrics views */}
+      {/* Main Content - Switch between Office, Cost, Tags, Metrics, and Farm views */}
       {viewMode === 'cost' ? (
         <CostDashboard
           sessions={enrichedSessions}
@@ -841,6 +861,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         />
       ) : viewMode === 'metrics' ? (
         <AgentPerformanceMetrics
+          agents={enrichedAgents}
+          sessions={enrichedSessions}
+          accentColor={accentColor}
+        />
+      ) : viewMode === 'farm' ? (
+        <FarmHealthDashboard
           agents={enrichedAgents}
           sessions={enrichedSessions}
           accentColor={accentColor}

@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { View, Text, TextInput, StyleSheet, Pressable, Platform, ScrollView } from 'react-native';
 import {
   OfficeAgent,
   WHITEBOARD_MODES,
   STATUS_COLORS,
+  calculateDailyScore,
 } from '../../../../lib/officeAgents';
 import { CronJob } from '../../../../lib/openclawService';
 
@@ -116,9 +117,68 @@ function NotesView({ notes, noteText, setNoteText, addNote }: {
 }
 
 function StatusView({ agents }: { agents: OfficeAgent[] }) {
+  // Find Agent of the Day
+  const agentOfTheDay = useMemo(() => {
+    if (agents.length === 0) return null;
+    
+    // Calculate scores for all agents
+    const scores = agents.map(agent => ({
+      agent,
+      score: calculateDailyScore(agent),
+    }));
+    
+    // Sort by score (highest first)
+    scores.sort((a, b) => b.score - a.score);
+    
+    // Return top agent
+    return scores[0];
+  }, [agents]);
+
   if (agents.length === 0) return <Text style={styles.emptyText}>Connect OpenClaw to see agents</Text>;
+  
+  const activeCount = agents.filter(a => a.status === 'active').length;
+  const idleCount = agents.filter(a => a.status === 'idle').length;
+  const errorCount = agents.filter(a => a.status === 'error').length;
+
   return (
     <ScrollView style={styles.statusScroll} showsVerticalScrollIndicator={false}>
+      {/* Agent of the Day */}
+      {agentOfTheDay && (
+        <View style={styles.agentOfDaySection}>
+          <Text style={styles.agentOfDayTitle}>🌟 AGENT OF THE DAY</Text>
+          <View style={[styles.agentOfDayCard, { borderColor: agentOfTheDay.agent.color + '60' }]}>
+            <View style={[styles.agentOfDayAvatar, { backgroundColor: agentOfTheDay.agent.color + '30' }]}>
+              <Text style={[styles.agentOfDayAvatarText, { color: agentOfTheDay.agent.color }]}>
+                {agentOfTheDay.agent.name.charAt(0)}
+              </Text>
+            </View>
+            <View style={styles.agentOfDayInfo}>
+              <Text style={styles.agentOfDayName}>{agentOfTheDay.agent.name}</Text>
+              <Text style={styles.agentOfDayRole}>{agentOfTheDay.agent.role}</Text>
+              <Text style={styles.agentOfDayStats}>
+                {agentOfTheDay.agent.messagesProcessed} msgs · ${agentOfTheDay.agent.costToday.toFixed(2)}
+              </Text>
+            </View>
+            <View style={styles.agentOfDayScore}>
+              <Text style={[styles.agentOfDayScoreValue, { color: agentOfTheDay.agent.color }]}>
+                {agentOfTheDay.score}
+              </Text>
+              <Text style={styles.agentOfDayScoreLabel}>SCORE</Text>
+            </View>
+          </View>
+        </View>
+      )}
+
+      {/* Team Stats Summary */}
+      <View style={styles.teamSummary}>
+        <Text style={styles.teamSummaryLine}>🟢 Active: {activeCount}</Text>
+        <Text style={styles.teamSummaryLine}>🟡 Idle: {idleCount}</Text>
+        {errorCount > 0 && (
+          <Text style={[styles.teamSummaryLine, { color: '#ef4444' }]}>🔴 Errors: {errorCount}</Text>
+        )}
+      </View>
+
+      {/* Agent List */}
       <View style={styles.statusList}>
         {agents.map((a) => (
           <View key={a.id} style={styles.statusRow}>
@@ -303,6 +363,23 @@ const styles = StyleSheet.create({
   noteItem: { fontSize: 7, color: '#555', fontFamily: 'monospace' },
   // Status
   statusScroll: { flex: 1 },
+  agentOfDaySection: { marginBottom: 6, paddingBottom: 4, borderBottomWidth: 1, borderBottomColor: '#ddd' },
+  agentOfDayTitle: { fontSize: 6, color: '#888', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5, marginBottom: 3 },
+  agentOfDayCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    padding: 5, backgroundColor: '#fafaf8', borderRadius: 4, borderWidth: 1,
+  },
+  agentOfDayAvatar: { width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  agentOfDayAvatarText: { fontSize: 10, fontWeight: '800', fontFamily: 'monospace' },
+  agentOfDayInfo: { flex: 1 },
+  agentOfDayName: { fontSize: 8, fontWeight: '700', color: '#333', fontFamily: 'monospace' },
+  agentOfDayRole: { fontSize: 6, color: '#666', fontFamily: 'monospace' },
+  agentOfDayStats: { fontSize: 5, color: '#999', fontFamily: 'monospace', marginTop: 1 },
+  agentOfDayScore: { alignItems: 'center' },
+  agentOfDayScoreValue: { fontSize: 14, fontWeight: '800', fontFamily: 'monospace' },
+  agentOfDayScoreLabel: { fontSize: 5, color: '#666', fontWeight: '700', fontFamily: 'monospace', letterSpacing: 0.3 },
+  teamSummary: { marginBottom: 4, paddingBottom: 3, borderBottomWidth: 1, borderBottomColor: '#eee' },
+  teamSummaryLine: { fontSize: 7, color: '#555', fontFamily: 'monospace', lineHeight: 11 },
   statusList: { gap: 4 },
   statusRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 6, paddingVertical: 2 },
   statusDot: { width: 5, height: 5, borderRadius: 2.5, marginTop: 2 },

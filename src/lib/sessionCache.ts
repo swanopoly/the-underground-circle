@@ -1,5 +1,5 @@
 // Session Cache - Persistent storage for agent session data
-import { getItem, setItem } from './storage';
+import { storage } from './storage';
 import { OfficeAgent } from './officeAgents';
 
 const STORAGE_KEY_SESSION_CACHE = '@office_session_cache';
@@ -31,7 +31,7 @@ export interface DailyCostSnapshot {
 
 export async function loadSessionCache(): Promise<Map<string, CachedSession>> {
   try {
-    const raw = await getItem(STORAGE_KEY_SESSION_CACHE);
+    const raw = await storage.getItem(STORAGE_KEY_SESSION_CACHE);
     if (!raw) return new Map();
     const data = JSON.parse(raw);
     return new Map(Object.entries(data));
@@ -44,7 +44,7 @@ export async function loadSessionCache(): Promise<Map<string, CachedSession>> {
 export async function saveSessionCache(cache: Map<string, CachedSession>): Promise<void> {
   try {
     const obj = Object.fromEntries(cache.entries());
-    await setItem(STORAGE_KEY_SESSION_CACHE, JSON.stringify(obj));
+    await storage.setItem(STORAGE_KEY_SESSION_CACHE, JSON.stringify(obj));
   } catch (error) {
     console.error('Failed to save session cache:', error);
   }
@@ -82,14 +82,14 @@ export async function getCachedSession(sessionKey: string): Promise<CachedSessio
 }
 
 export async function clearSessionCache(): Promise<void> {
-  await setItem(STORAGE_KEY_SESSION_CACHE, JSON.stringify({}));
+  await storage.setItem(STORAGE_KEY_SESSION_CACHE, JSON.stringify({}));
 }
 
 // ─── Daily Cost Tracking ───────────────────────────────────
 
 export async function loadDailyCosts(): Promise<DailyCostSnapshot[]> {
   try {
-    const raw = await getItem(STORAGE_KEY_DAILY_COSTS);
+    const raw = await storage.getItem(STORAGE_KEY_DAILY_COSTS);
     if (!raw) return [];
     return JSON.parse(raw);
   } catch (error) {
@@ -106,7 +106,7 @@ export async function saveDailyCosts(snapshots: DailyCostSnapshot[]): Promise<vo
     const cutoffStr = cutoff.toISOString().split('T')[0];
     
     const filtered = snapshots.filter(s => s.date >= cutoffStr);
-    await setItem(STORAGE_KEY_DAILY_COSTS, JSON.stringify(filtered));
+    await storage.setItem(STORAGE_KEY_DAILY_COSTS, JSON.stringify(filtered));
   } catch (error) {
     console.error('Failed to save daily costs:', error);
   }
@@ -320,7 +320,7 @@ export async function saveSessionTags(tags: Map<string, any[]>): Promise<void> {
         obj[sessionKey] = tagList;
       }
     });
-    await setItem(STORAGE_KEY_TAGS, JSON.stringify(obj));
+    await storage.setItem(STORAGE_KEY_TAGS, JSON.stringify(obj));
   } catch (error) {
     console.error('Failed to save session tags:', error);
   }
@@ -328,7 +328,7 @@ export async function saveSessionTags(tags: Map<string, any[]>): Promise<void> {
 
 export async function loadSessionTags(): Promise<Map<string, any[]>> {
   try {
-    const raw = await getItem(STORAGE_KEY_TAGS);
+    const raw = await storage.getItem(STORAGE_KEY_TAGS);
     if (!raw) return new Map();
     const obj = JSON.parse(raw);
     const map = new Map();
