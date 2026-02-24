@@ -253,6 +253,31 @@ export async function takeSnapshot(
   }
 }
 
+// ─── Enrich OpenClaw Sessions ──────────────────────────────
+
+export async function enrichSessionsWithCache(
+  sessions: any[] // OpenClawSession[] but avoiding circular import
+): Promise<any[]> {
+  const cache = await loadSessionCache();
+  
+  return sessions.map(session => {
+    const cached = cache.get(session.sessionKey);
+    
+    if (!cached) {
+      return session;
+    }
+    
+    // Merge: use MAX of cached vs fresh to prevent data loss
+    return {
+      ...session,
+      totalCost: Math.max(session.totalCost || 0, cached.totalCost),
+      totalInputTokens: Math.max(session.totalInputTokens || 0, cached.inputTokens),
+      totalOutputTokens: Math.max(session.totalOutputTokens || 0, cached.outputTokens),
+      turns: Math.max(session.turns || 0, cached.turns),
+    };
+  });
+}
+
 // ─── Tag Management ────────────────────────────────────────
 
 const STORAGE_KEY_TAGS = '@session_tags_backup';

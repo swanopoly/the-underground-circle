@@ -15,7 +15,7 @@ import {
   OFFICE_THEMES, AgentAppearance, FurnitureItem, FURNITURE_CATALOG,
   OfficeFloor, DEFAULT_FLOORS, createDefaultFloor,
 } from '../../../lib/officeConfig';
-import { enrichAgentsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
+import { enrichAgentsWithCache, enrichSessionsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
 import {
   verifyBot, getChat, TelegramPoller, TelegramMessage,
 } from '../../../lib/telegramService';
@@ -80,6 +80,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [budgetAlertsDismissed, setBudgetAlertsDismissed] = useState(false);
   const [actionResult, setActionResult] = useState<string>('');
   const [showActionResult, setShowActionResult] = useState(false);
+  const [enrichedSessions, setEnrichedSessions] = useState<OpenClawSession[]>([]);
 
   // ─── Multi-floor state ──────────────────────────────
   const [floors, setFloors] = useState<OfficeFloor[]>(DEFAULT_FLOORS);
@@ -369,13 +370,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // Filter agents for current floor only (with safety check)
   const agents = displayAgents.filter(a => currentFloor?.agentIds?.includes(a.id));
 
-  // Aggregate all sessions for cost dashboard
-  const allSessions: OpenClawSession[] = [];
-  for (const conn of connectedConns) {
-    const sessions = sessionsRef.current.get(conn.id) || [];
-    allSessions.push(...sessions);
-  }
-
   // Auto-assign new agents to first floor
   useEffect(() => {
     if (displayAgents.length === 0 || floors.length === 0) return;
@@ -418,6 +412,22 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     };
     doEnrich();
   }, [sessionsTick, agentNames]);
+
+  // Enrich sessions for Cost Dashboard
+  useEffect(() => {
+    const allSessions: OpenClawSession[] = [];
+    for (const conn of connectedConns) {
+      const sessions = sessionsRef.current.get(conn.id) || [];
+      allSessions.push(...sessions);
+    }
+
+    enrichSessionsWithCache(allSessions).then(enriched => {
+      setEnrichedSessions(enriched);
+    }).catch(err => {
+      console.error('Failed to enrich sessions:', err);
+      setEnrichedSessions(allSessions); // Fallback to raw sessions
+    });
+  }, [sessionsTick, connectedConns]);
 
   // Periodic snapshot save (every 30 seconds)
   useEffect(() => {
@@ -599,7 +609,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   }, []);
 
   // Calculate budget alerts using real session costs
-  const periodCosts = calculatePeriodCosts(allSessions);
+  const periodCosts = calculatePeriodCosts(enrichedSessions);
   const budgetAlerts = calculateBudgetAlerts(
     budgetConfig,
     periodCosts.today,
@@ -776,7 +786,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       {/* Main Content - Switch between Office, Cost, and Tags views */}
       {viewMode === 'cost' ? (
         <CostDashboard
-          sessions={allSessions}
+          sessions={enrichedSessions}
           accentColor={accentColor}
         />
       ) : viewMode === 'tags' ? (
