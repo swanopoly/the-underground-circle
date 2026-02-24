@@ -17,6 +17,8 @@ import DiscordTab from './tabs/DiscordTab';
 import ChallengesTab from './tabs/ChallengesTab';
 import DigestTab from './tabs/DigestTab';
 import OfficeTab, { AgentStats } from './tabs/OfficeTab';
+import WalletTab from './tabs/WalletTab';
+import ProfileTab from './tabs/ProfileTab';
 import { Circle } from '../../types';
 
 const TAB_META: { key: string; label: string; icon: string }[] = [
@@ -27,6 +29,8 @@ const TAB_META: { key: string; label: string; icon: string }[] = [
   { key: 'MEMBERS', label: 'Members', icon: '👥' },
   { key: 'DIGEST', label: 'Digest', icon: '📊' },
   { key: 'DISCORD', label: 'Discord', icon: '🎮' },
+  { key: 'WALLET', label: 'Wallet', icon: '💰' },
+  { key: 'PROFILE', label: 'Profile', icon: '👤' },
 ];
 
 const TABS = TAB_META.map(t => t.key) as readonly string[];
@@ -213,6 +217,12 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       </View>
       <View style={[styles.tabContent, activeTab !== 'DISCORD' && styles.hiddenTab]}>
         <DiscordTab circleId={circleId} />
+      </View>
+      <View style={[styles.tabContent, activeTab !== 'WALLET' && styles.hiddenTab]}>
+        <WalletTab circleId={circleId} />
+      </View>
+      <View style={[styles.tabContent, activeTab !== 'PROFILE' && styles.hiddenTab]}>
+        <ProfileTab circleId={circleId} navigation={navigation} />
       </View>
     </View>
   );
