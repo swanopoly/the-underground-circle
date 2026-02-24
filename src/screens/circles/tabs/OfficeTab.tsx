@@ -421,13 +421,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       allSessions.push(...sessions);
     }
 
+    if (allSessions.length === 0) {
+      setEnrichedSessions([]);
+      return;
+    }
+
     enrichSessionsWithCache(allSessions).then(enriched => {
       setEnrichedSessions(enriched);
     }).catch(err => {
       console.error('Failed to enrich sessions:', err);
       setEnrichedSessions(allSessions); // Fallback to raw sessions
     });
-  }, [sessionsTick, connectedConns]);
+  }, [sessionsTick]); // Only re-run when sessions actually update
 
   // Periodic snapshot save (every 30 seconds)
   useEffect(() => {
