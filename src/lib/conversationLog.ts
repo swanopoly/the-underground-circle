@@ -1,5 +1,5 @@
 // Conversation Log - Track messages sent to and from agents
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getItem, setItem, removeItem } from './storage';
 
 const STORAGE_KEY = '@office_conversation_log';
 
@@ -29,7 +29,7 @@ export interface ConversationThread {
 
 export async function loadConversationLog(): Promise<ConversationMessage[]> {
   try {
-    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    const raw = await getItem(STORAGE_KEY);
     if (!raw) return [];
     return JSON.parse(raw);
   } catch (error) {
@@ -40,7 +40,7 @@ export async function loadConversationLog(): Promise<ConversationMessage[]> {
 
 export async function saveConversationLog(messages: ConversationMessage[]): Promise<void> {
   try {
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
+    await setItem(STORAGE_KEY, JSON.stringify(messages));
   } catch (error) {
     console.error('Failed to save conversation log:', error);
   }
@@ -85,7 +85,7 @@ export async function getMessagesByConversation(conversationId: string): Promise
 }
 
 export async function clearConversationLog(): Promise<void> {
-  await AsyncStorage.removeItem(STORAGE_KEY);
+  await removeItem(STORAGE_KEY);
 }
 
 // ─── Conversation Threading ────────────────────────────────

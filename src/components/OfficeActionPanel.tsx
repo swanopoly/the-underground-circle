@@ -575,8 +575,8 @@ const styles = StyleSheet.create({
     borderColor: '#6366f1',
     borderRadius: 12,
     padding: 20,
-    width: '100%',
-    maxWidth: 400,
+    minWidth: 300,
+    maxWidth: 500,
     gap: 12,
   },
   modalTitle: {
