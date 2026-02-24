@@ -29,14 +29,22 @@ export default function SessionTagsDashboard({ agents, sessionTags }: Props) {
   const [sortBy, setSortBy] = useState<SortBy>('cost');
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
+  // Helper: Extract sessionKey from agent.id (format: "connectionId::sessionKey")
+  const getSessionKey = (agentId: string) => {
+    const parts = agentId.split('::');
+    return parts.length > 1 ? parts[1] : agentId;
+  };
+
   // Calculate tag statistics
   const taggedAgents = agents.filter(a => {
-    const tags = sessionTags.get(a.id);
+    const sessionKey = getSessionKey(a.id);
+    const tags = sessionTags.get(sessionKey);
     return tags && tags.length > 0;
   });
 
   const untaggedAgents = agents.filter(a => {
-    const tags = sessionTags.get(a.id);
+    const sessionKey = getSessionKey(a.id);
+    const tags = sessionTags.get(sessionKey);
     return !tags || tags.length === 0;
   });
 
@@ -51,7 +59,8 @@ export default function SessionTagsDashboard({ agents, sessionTags }: Props) {
     if (groupBy === 'agent') {
       // Group by individual agent
       taggedAgents.forEach(agent => {
-        const tags = sessionTags.get(agent.id) || [];
+        const sessionKey = getSessionKey(agent.id);
+        const tags = sessionTags.get(sessionKey) || [];
         const tagLabels = tags.map(t => t.label).join(', ') || 'Untagged';
         
         groupMap.set(agent.id, {
@@ -67,7 +76,8 @@ export default function SessionTagsDashboard({ agents, sessionTags }: Props) {
     } else if (groupBy === 'category') {
       // Group by tag category
       taggedAgents.forEach(agent => {
-        const tags = sessionTags.get(agent.id) || [];
+        const sessionKey = getSessionKey(agent.id);
+        const tags = sessionTags.get(sessionKey) || [];
         
         tags.forEach(tag => {
           const category = tag.key.split(':')[0] as TagCategory;
@@ -98,7 +108,8 @@ export default function SessionTagsDashboard({ agents, sessionTags }: Props) {
     } else {
       // Group by specific tag category (project, client, team)
       taggedAgents.forEach(agent => {
-        const tags = sessionTags.get(agent.id) || [];
+        const sessionKey = getSessionKey(agent.id);
+        const tags = sessionTags.get(sessionKey) || [];
         
         const relevantTags = tags.filter(t => t.key.startsWith(`${groupBy}:`));
         
@@ -324,7 +335,8 @@ export default function SessionTagsDashboard({ agents, sessionTags }: Props) {
                 {isExpanded && (
                   <View style={styles.agentList}>
                     {group.agents.map(agent => {
-                      const tags = sessionTags.get(agent.id) || [];
+                      const sessionKey = getSessionKey(agent.id);
+                      const tags = sessionTags.get(sessionKey) || [];
                       const agentPercent = group.totalCost > 0 
                         ? (agent.costToday / group.totalCost) * 100 
                         : 0;
