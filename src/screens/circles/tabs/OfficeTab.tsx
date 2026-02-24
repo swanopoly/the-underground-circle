@@ -166,6 +166,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     disconnectOne(id);
   }, [disconnectOne]);
 
+  const handleReconnectAll = useCallback(() => {
+    // Reconnect all enabled connections that aren't already connected
+    connections
+      .filter(c => c.enabled && c.status !== 'connected' && c.status !== 'connecting')
+      .forEach(conn => connectOne(conn));
+  }, [connections, connectOne]);
+
   const getConnectionConfig = useCallback((id: string): OpenClawConfig | null => {
     const conn = connections.find(c => c.id === id && c.status === 'connected');
     if (!conn) return null;
@@ -544,6 +551,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               </View>
             </>
           )}
+          {/* Reconnect All button (show when there are disconnected enabled connections) */}
+          {connections.some(c => c.enabled && c.status !== 'connected' && c.status !== 'connecting') && (
+            <Pressable
+              onPress={handleReconnectAll}
+              style={[styles.reconnectBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={styles.reconnectBtnText}>🔌</Text>
+            </Pressable>
+          )}
           <Pressable onPress={() => setShowCustomize(true)} style={[styles.iconBtn,
             Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
             <Text style={styles.iconBtnText}>{'⚙️'}</Text>
@@ -842,6 +858,12 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   iconBtnText: { fontSize: 18 },
+  reconnectBtn: {
+    width: 44, height: 44, borderRadius: 10, backgroundColor: '#6366f115',
+    borderWidth: 1, borderColor: '#6366f140', alignItems: 'center', justifyContent: 'center', marginLeft: 6,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  reconnectBtnText: { fontSize: 16 },
   tgBadge: { fontSize: 10, marginRight: 2 },
 
   // Floor selector

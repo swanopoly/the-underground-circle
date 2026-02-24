@@ -251,7 +251,27 @@ export default function CustomizePanel({
             <View style={styles.section}>
               {addStep === 'list' && (
                 <>
-                  <Text style={styles.sectionTitle}>CONNECTIONS</Text>
+                  <View style={styles.sectionHeaderRow}>
+                    <Text style={styles.sectionTitle}>CONNECTIONS</Text>
+                    {connections.some(c => c.enabled && c.status !== 'connected') && (
+                      <Pressable
+                        onPress={() => {
+                          connections
+                            .filter(c => c.enabled && c.status !== 'connected')
+                            .forEach(c => onConnectConnection(c.id));
+                        }}
+                        style={styles.quickConnectBtn}
+                      >
+                        <Text style={styles.quickConnectText}>🔌 RECONNECT ALL</Text>
+                      </Pressable>
+                    )}
+                  </View>
+
+                  {connections.length > 0 && (
+                    <Text style={styles.connectionHint}>
+                      💡 Connections marked "Auto-Connect" will reconnect when you open the Office
+                    </Text>
+                  )}
 
                   {connections.length === 0 && (
                     <View style={styles.connectInfo}>
@@ -271,7 +291,14 @@ export default function CustomizePanel({
                         <View style={styles.connCardHeader}>
                           <Text style={styles.connProviderIcon}>{meta.icon}</Text>
                           <View style={styles.connCardInfo}>
-                            <Text style={[styles.connCardName, { color: conn.status === 'connected' ? meta.color : '#aaa' }]}>{conn.name}</Text>
+                            <View style={styles.connCardNameRow}>
+                              <Text style={[styles.connCardName, { color: conn.status === 'connected' ? meta.color : '#aaa' }]}>{conn.name}</Text>
+                              {conn.enabled && (
+                                <View style={styles.autoConnectBadge}>
+                                  <Text style={styles.autoConnectText}>AUTO</Text>
+                                </View>
+                              )}
+                            </View>
                             <Text style={styles.connCardEndpoint} numberOfLines={1}>{conn.endpoint}</Text>
                           </View>
                           <View style={[styles.connStatusDot, { backgroundColor: statusColor }]} />
@@ -570,6 +597,21 @@ const styles = StyleSheet.create({
     fontSize: 9, fontWeight: '800', color: '#555', fontFamily: 'monospace',
     letterSpacing: 1.5, marginTop: 8,
   },
+  sectionHeaderRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8,
+  },
+  quickConnectBtn: {
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8,
+    backgroundColor: '#6366f120', borderWidth: 1, borderColor: '#6366f140',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  quickConnectText: {
+    fontSize: 9, color: '#6366f1', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1,
+  },
+  connectionHint: {
+    fontSize: 9, color: '#888', fontFamily: 'monospace', fontStyle: 'italic',
+    marginBottom: 12, lineHeight: 14,
+  },
 
   // Theme
   themeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
@@ -619,7 +661,15 @@ const styles = StyleSheet.create({
   connCardHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   connProviderIcon: { fontSize: 20 },
   connCardInfo: { flex: 1, gap: 2 },
+  connCardNameRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   connCardName: { fontSize: 12, fontWeight: '800', fontFamily: 'monospace', color: '#aaa' },
+  autoConnectBadge: {
+    paddingHorizontal: 5, paddingVertical: 2, borderRadius: 4,
+    backgroundColor: '#22c55e20', borderWidth: 1, borderColor: '#22c55e40',
+  },
+  autoConnectText: {
+    fontSize: 7, color: '#22c55e', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5,
+  },
   connCardEndpoint: { fontSize: 9, color: '#555', fontFamily: 'monospace' },
   connStatusDot: { width: 8, height: 8, borderRadius: 4 },
   connCardStats: { flexDirection: 'row', gap: 12, paddingLeft: 30 },
