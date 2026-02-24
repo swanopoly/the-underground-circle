@@ -1,6 +1,24 @@
 {
   "name": "the-underground-circle",
   "version": "1.0.0",
+  "description": "Social accountability circles with AI agents, crypto wallets, and gamification",
+  "author": "Chris Swanson",
+  "license": "MIT",
+  "homepage": "https://app.chrisswanson.xyz",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/swanopoly/the-underground-circle"
+  },
+  "keywords": [
+    "social",
+    "accountability",
+    "circles",
+    "ai-agents",
+    "crypto",
+    "gamification",
+    "react-native",
+    "expo"
+  ],
   "main": "index.ts",
   "scripts": {
     "start": "expo start",
