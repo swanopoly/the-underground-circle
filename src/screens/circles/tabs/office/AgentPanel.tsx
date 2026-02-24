@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, TextInput, StyleSheet, Animated, Pressable, Platform } from 'react-native';
+import { View, Text, TextInput, StyleSheet, Animated, Pressable, Platform, ScrollView } from 'react-native';
 import { OfficeAgent, STATUS_COLORS } from '../../../../lib/officeAgents';
 import { PROVIDER_META } from '../../../../lib/connectionManager';
 import { SessionTag } from '../../../../lib/sessionTags';
@@ -65,6 +65,7 @@ export default function AgentPanel({
         <View style={styles.handle} />
       </Pressable>
 
+      <ScrollView style={styles.scrollContent} showsVerticalScrollIndicator={false}>
       {/* Agent header */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
@@ -196,6 +197,7 @@ export default function AgentPanel({
           </View>
         ))}
       </View>
+      </ScrollView>
     </Animated.View>
   );
 }
@@ -233,6 +235,9 @@ const styles = StyleSheet.create({
     height: 4,
     backgroundColor: '#333',
     borderRadius: 2,
+  },
+  scrollContent: {
+    flex: 1,
   },
   // Header
   header: {
