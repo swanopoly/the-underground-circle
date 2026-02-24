@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -8,6 +8,8 @@ import {
   Animated,
   useWindowDimensions,
   ScrollView,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import ChatTab from './tabs/ChatTab';
@@ -175,24 +177,14 @@ export default function CircleDetailScreen({ route, navigation }: any) {
             </ScrollView>
           )}
 
-          {/* Tab Bar — horizontal scrollable pills on both mobile and desktop */}
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={isMobile ? styles.tabBarMobile : styles.tabBar}
-          >
-            {TAB_META.map((tab) => (
-              <TabPill
-                key={tab.key}
-                icon={tab.icon}
-                label={tab.label}
-                active={activeTab === tab.key}
-                accentColor={accentColor}
-                isMobile={isMobile}
-                onPress={() => setActiveTab(tab.key)}
-              />
-            ))}
-          </ScrollView>
+          {/* Tab Bar — horizontal scrollable pills with arrow indicators */}
+          <TabBarScroller
+            tabs={TAB_META}
+            activeTab={activeTab}
+            accentColor={accentColor}
+            isMobile={isMobile}
+            onTabPress={setActiveTab}
+          />
         </View>
       </View>
 
@@ -281,6 +273,90 @@ function TabPill({ icon, label, active, accentColor, isMobile, onPress }: {
         {label}
       </Text>
     </Pressable>
+  );
+}
+
+// ─── Tab Bar Scroller ────────────────────────────────────────────────────────
+
+function TabBarScroller({ tabs, activeTab, accentColor, isMobile, onTabPress }: {
+  tabs: typeof TAB_META;
+  activeTab: string;
+  accentColor: string;
+  isMobile: boolean;
+  onTabPress: (key: string) => void;
+}) {
+  const scrollRef = useRef<ScrollView>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(true);
+  const scrollX = useRef(0);
+  const contentW = useRef(0);
+  const containerW = useRef(0);
+
+  const updateArrows = useCallback(() => {
+    setCanScrollLeft(scrollX.current > 4);
+    setCanScrollRight(scrollX.current + containerW.current < contentW.current - 4);
+  }, []);
+
+  const handleScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    scrollX.current = e.nativeEvent.contentOffset.x;
+    containerW.current = e.nativeEvent.layoutMeasurement.width;
+    contentW.current = e.nativeEvent.contentSize.width;
+    updateArrows();
+  }, [updateArrows]);
+
+  const scrollBy = useCallback((delta: number) => {
+    const next = Math.max(0, scrollX.current + delta);
+    scrollRef.current?.scrollTo({ x: next, animated: true });
+  }, []);
+
+  return (
+    <View style={styles.tabBarWrapper}>
+      {/* Left arrow */}
+      {!isMobile && canScrollLeft && (
+        <Pressable
+          onPress={() => scrollBy(-200)}
+          style={[styles.tabArrow, styles.tabArrowLeft]}
+        >
+          <Text style={styles.tabArrowText}>‹</Text>
+        </Pressable>
+      )}
+
+      <ScrollView
+        ref={scrollRef}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
+        contentContainerStyle={isMobile ? styles.tabBarMobile : styles.tabBar}
+        style={styles.tabBarScroll}
+      >
+        {tabs.map((tab) => (
+          <TabPill
+            key={tab.key}
+            icon={tab.icon}
+            label={tab.label}
+            active={activeTab === tab.key}
+            accentColor={accentColor}
+            isMobile={isMobile}
+            onPress={() => onTabPress(tab.key)}
+          />
+        ))}
+      </ScrollView>
+
+      {/* Right arrow */}
+      {!isMobile && canScrollRight && (
+        <Pressable
+          onPress={() => scrollBy(200)}
+          style={[styles.tabArrow, styles.tabArrowRight]}
+        >
+          <Text style={styles.tabArrowText}>›</Text>
+        </Pressable>
+      )}
+
+      {/* Fade hints */}
+      {!isMobile && canScrollLeft && <View style={[styles.tabFade, styles.tabFadeLeft]} pointerEvents="none" />}
+      {!isMobile && canScrollRight && <View style={[styles.tabFade, styles.tabFadeRight]} pointerEvents="none" />}
+    </View>
   );
 }
 
@@ -423,14 +499,22 @@ const styles = StyleSheet.create({
     fontSize: 16,
   },
 
-  // Tab Bar — desktop: centered, spacious
+  // Tab Bar wrapper with arrows
+  tabBarWrapper: {
+    position: 'relative' as any,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  tabBarScroll: {
+    flex: 1,
+  },
+
+  // Tab Bar — desktop
   tabBar: {
     flexDirection: 'row',
-    justifyContent: 'center',
     paddingHorizontal: 16,
     paddingVertical: 8,
     gap: 6,
-    flexGrow: 1,
   },
 
   // Tab Bar — mobile: scrollable with padding
@@ -439,6 +523,42 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 8,
     gap: 8,
+  },
+
+  // Arrow buttons
+  tabArrow: {
+    width: 28,
+    height: 36,
+    alignItems: 'center' as any,
+    justifyContent: 'center' as any,
+    backgroundColor: '#0a0a0a',
+    zIndex: 10,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  tabArrowLeft: {},
+  tabArrowRight: {},
+  tabArrowText: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#888',
+  },
+
+  // Fade gradients on edges
+  tabFade: {
+    position: 'absolute' as any,
+    top: 0,
+    bottom: 0,
+    width: 24,
+    zIndex: 5,
+    pointerEvents: 'none' as any,
+  },
+  tabFadeLeft: {
+    left: 28,
+    ...(Platform.OS === 'web' ? { background: 'linear-gradient(to right, #0a0a0a, transparent)' } as any : {}),
+  },
+  tabFadeRight: {
+    right: 28,
+    ...(Platform.OS === 'web' ? { background: 'linear-gradient(to left, #0a0a0a, transparent)' } as any : {}),
   },
 
   // Tab pill style (replaces old underline tabs and hamburger menu)
