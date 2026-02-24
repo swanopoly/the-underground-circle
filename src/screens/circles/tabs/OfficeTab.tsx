@@ -35,6 +35,7 @@ import {
 } from '../../../lib/budgetAlerts';
 import BudgetAlertBanner from '../../../components/BudgetAlertBanner';
 import { calculatePeriodCosts } from '../../../lib/costCalculations';
+import OfficeActionPanel from '../../../components/OfficeActionPanel';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -73,6 +74,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [sessionTags, setSessionTags] = useState<Map<string, SessionTag[]>>(new Map());
   const [budgetConfig, setBudgetConfig] = useState<BudgetConfig>({ enabled: false });
   const [budgetAlertsDismissed, setBudgetAlertsDismissed] = useState(false);
+  const [actionResult, setActionResult] = useState<string>('');
+  const [showActionResult, setShowActionResult] = useState(false);
 
   // ─── Multi-floor state ──────────────────────────────
   const [floors, setFloors] = useState<OfficeFloor[]>(DEFAULT_FLOORS);
@@ -524,6 +527,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     setSessionTags(updated);
   }, [sessionTags]);
 
+  // ─── Action panel handlers ──────────────────────────────
+
+  const handleActionResult = useCallback((message: string) => {
+    setActionResult(message);
+    setShowActionResult(true);
+    // Auto-hide after 5 seconds
+    setTimeout(() => {
+      setShowActionResult(false);
+    }, 5000);
+  }, []);
+
   // ─── Budget handlers ──────────────────────────────
 
   const handleBudgetConfigChange = useCallback(async (config: BudgetConfig) => {
@@ -825,6 +839,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           </>
         )}
 
+        {/* Action Panel - Quick collaboration buttons */}
+        {!editMode && anyConnected && (
+          <OfficeActionPanel
+            agents={allAgents}
+            getConfig={getConnectionConfig}
+            onResult={handleActionResult}
+          />
+        )}
+
         {/* Chat toggle */}
         <Pressable
           onPress={() => setChatVisible(!chatVisible)}
@@ -866,6 +889,19 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           onAddSessionTag={handleAddSessionTag}
           onRemoveSessionTag={handleRemoveSessionTag}
         />
+      )}
+
+      {/* Action Result Toast */}
+      {showActionResult && (
+        <View style={styles.actionResultToast}>
+          <Pressable
+            onPress={() => setShowActionResult(false)}
+            style={[styles.toastClose, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={styles.toastCloseText}>✕</Text>
+          </Pressable>
+          <Text style={styles.actionResultText}>{actionResult}</Text>
+        </View>
       )}
 
       {/* Customization panel */}
@@ -1071,4 +1107,47 @@ const styles = StyleSheet.create({
   },
   chatToggleText: { fontSize: 13, color: '#888', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1 },
   chatPane: { minHeight: 240 },
+
+  // Action Result Toast
+  actionResultToast: {
+    position: 'absolute',
+    bottom: 280,
+    left: 12,
+    right: 12,
+    backgroundColor: '#0d0d14',
+    borderWidth: 2,
+    borderColor: '#6366f1',
+    borderRadius: 12,
+    padding: 16,
+    zIndex: 1000,
+    shadowColor: '#6366f1',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 10,
+  },
+  toastClose: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#ffffff10',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1001,
+  },
+  toastCloseText: {
+    fontSize: 12,
+    color: '#999',
+    fontWeight: '700',
+  },
+  actionResultText: {
+    fontSize: 12,
+    color: '#fff',
+    fontFamily: 'monospace',
+    lineHeight: 18,
+    paddingRight: 32,
+  },
 });
