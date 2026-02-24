@@ -1,8 +1,20 @@
 // Cost Analytics Dashboard - The #1 fundable feature
-import React, { useMemo, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, Pressable, Platform } from 'react-native';
+import React, { useMemo, useEffect, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, Pressable, Platform, Modal } from 'react-native';
 import { OpenClawSession } from '../lib/openclawService';
 import { storage } from '../lib/storage';
+import { OfficeAgent } from '../lib/officeAgents';
+import { SessionTag } from '../lib/sessionTags';
+import {
+  generateExportData,
+  exportToCSV,
+  exportToJSON,
+  exportToJSONWithSummary,
+  downloadFile,
+  copyToClipboard,
+  generateFilename,
+  getMimeType,
+} from '../lib/dataExport';
 
 interface CostData {
   today: number;
@@ -18,13 +30,17 @@ interface CostData {
 
 interface Props {
   sessions: OpenClawSession[];
+  agents: OfficeAgent[];
+  sessionTags: Map<string, SessionTag[]>;
   accentColor?: string;
 }
 
 const STORAGE_KEY_DATE_RANGE = '@cost_dashboard_date_range';
 
-export default function CostDashboard({ sessions, accentColor = '#6366f1' }: Props) {
-  const [dateRange, setDateRange] = React.useState<7 | 30 | 90>(30);
+export default function CostDashboard({ sessions, agents, sessionTags, accentColor = '#6366f1' }: Props) {
+  const [dateRange, setDateRange] = useState<7 | 30 | 90>(30);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportStatus, setExportStatus] = useState<string>('');
   const costData = useMemo(() => calculateCostData(sessions, dateRange), [sessions, dateRange]);
 
   // Load saved date range preference on mount
@@ -89,10 +105,7 @@ export default function CostDashboard({ sessions, accentColor = '#6366f1' }: Pro
           {/* Export Button */}
           <Pressable
             style={[styles.exportBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-            onPress={() => {
-              // TODO: Implement CSV export
-              alert('Export feature coming soon!');
-            }}
+            onPress={() => setShowExportModal(true)}
           >
             <Text style={styles.exportBtnText}>📥 EXPORT</Text>
           </Pressable>
@@ -177,7 +190,147 @@ export default function CostDashboard({ sessions, accentColor = '#6366f1' }: Pro
         </View>
       )}
     </ScrollView>
+
+    {/* Export Modal */}
+    <Modal
+      visible={showExportModal}
+      transparent
+      animationType="fade"
+      onRequestClose={() => setShowExportModal(false)}
+    >
+      <Pressable
+        style={styles.modalOverlay}
+        onPress={() => setShowExportModal(false)}
+      >
+        <Pressable
+          style={styles.modalContent}
+          onPress={e => e.stopPropagation()}
+        >
+          <Text style={styles.modalTitle}>📥 EXPORT DATA</Text>
+          <Text style={styles.modalDesc}>
+            Export {agents.length} agents and {sessions.length} sessions
+          </Text>
+
+          {exportStatus !== '' && (
+            <Text style={styles.exportStatus}>{exportStatus}</Text>
+          )}
+
+          <View style={styles.exportButtons}>
+            <Pressable
+              onPress={() => handleExport('csv')}
+              style={[styles.exportOptionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={styles.exportOptionIcon}>📄</Text>
+              <Text style={styles.exportOptionLabel}>CSV</Text>
+              <Text style={styles.exportOptionDesc}>Spreadsheet format</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => handleExport('json')}
+              style={[styles.exportOptionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={styles.exportOptionIcon}>📋</Text>
+              <Text style={styles.exportOptionLabel}>JSON</Text>
+              <Text style={styles.exportOptionDesc}>Developer format</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => handleExport('json-summary')}
+              style={[styles.exportOptionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={styles.exportOptionIcon}>📊</Text>
+              <Text style={styles.exportOptionLabel}>JSON + Summary</Text>
+              <Text style={styles.exportOptionDesc}>With totals</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => handleCopyToClipboard()}
+              style={[styles.exportOptionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={styles.exportOptionIcon}>📋</Text>
+              <Text style={styles.exportOptionLabel}>Copy CSV</Text>
+              <Text style={styles.exportOptionDesc}>To clipboard</Text>
+            </Pressable>
+          </View>
+
+          <Pressable
+            onPress={() => setShowExportModal(false)}
+            style={[styles.modalCloseBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={styles.modalCloseBtnText}>✕ CLOSE</Text>
+          </Pressable>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  </>
   );
+
+  // ─── Export Handlers ───────────────────────────────────
+
+  async function handleExport(format: 'csv' | 'json' | 'json-summary') {
+    try {
+      setExportStatus('Generating export...');
+      
+      const exportData = generateExportData(agents, sessions, sessionTags);
+      let content: string;
+      let mimeType: string;
+      let filename: string;
+
+      switch (format) {
+        case 'csv':
+          content = exportToCSV(exportData);
+          mimeType = getMimeType('csv');
+          filename = generateFilename('csv');
+          break;
+        case 'json':
+          content = exportToJSON(exportData);
+          mimeType = getMimeType('json');
+          filename = generateFilename('json');
+          break;
+        case 'json-summary':
+          content = exportToJSONWithSummary(exportData);
+          mimeType = getMimeType('json');
+          filename = generateFilename('json');
+          break;
+      }
+
+      downloadFile(content, filename, mimeType);
+      setExportStatus(`✅ Downloaded ${filename}`);
+      
+      setTimeout(() => {
+        setExportStatus('');
+        setShowExportModal(false);
+      }, 2000);
+    } catch (error) {
+      setExportStatus(`❌ Export failed: ${error}`);
+      setTimeout(() => setExportStatus(''), 3000);
+    }
+  }
+
+  async function handleCopyToClipboard() {
+    try {
+      setExportStatus('Copying to clipboard...');
+      
+      const exportData = generateExportData(agents, sessions, sessionTags);
+      const content = exportToCSV(exportData);
+      
+      const success = await copyToClipboard(content);
+      
+      if (success) {
+        setExportStatus('✅ Copied to clipboard!');
+        setTimeout(() => {
+          setExportStatus('');
+          setShowExportModal(false);
+        }, 2000);
+      } else {
+        setExportStatus('❌ Failed to copy');
+        setTimeout(() => setExportStatus(''), 3000);
+      }
+    } catch (error) {
+      setExportStatus(`❌ Copy failed: ${error}`);
+      setTimeout(() => setExportStatus(''), 3000);
+    }
+  }
 }
 
 // ─── Cost Card Component ─────────────────────────────────
@@ -733,5 +886,79 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '500',
     lineHeight: 18,
+  },
+
+  // Export Modal
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: '#00000080',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContent: {
+    backgroundColor: '#0d0d14',
+    borderWidth: 2,
+    borderColor: '#6366f1',
+    borderRadius: 12,
+    padding: 20,
+    minWidth: 300,
+    maxWidth: 500,
+    gap: 16,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#fff',
+    letterSpacing: 1,
+  },
+  modalDesc: {
+    fontSize: 13,
+    color: '#888',
+  },
+  exportStatus: {
+    fontSize: 13,
+    color: '#22c55e',
+    textAlign: 'center',
+    padding: 8,
+    backgroundColor: '#22c55e15',
+    borderRadius: 6,
+  },
+  exportButtons: {
+    gap: 12,
+  },
+  exportOptionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 14,
+    backgroundColor: '#1a1a2e',
+    borderWidth: 1,
+    borderColor: '#333',
+    borderRadius: 8,
+    gap: 12,
+  },
+  exportOptionIcon: {
+    fontSize: 24,
+  },
+  exportOptionLabel: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  exportOptionDesc: {
+    fontSize: 11,
+    color: '#888',
+  },
+  modalCloseBtn: {
+    padding: 12,
+    backgroundColor: '#333',
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  modalCloseBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#fff',
   },
 });

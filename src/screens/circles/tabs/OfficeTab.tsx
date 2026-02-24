@@ -830,6 +830,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       {viewMode === 'cost' ? (
         <CostDashboard
           sessions={enrichedSessions}
+          agents={enrichedAgents}
+          sessionTags={sessionTags}
           accentColor={accentColor}
         />
       ) : viewMode === 'tags' ? (
