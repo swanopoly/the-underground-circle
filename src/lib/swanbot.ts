@@ -55,7 +55,7 @@ async function callSwanBotAI(message: string, circleId: string, userId: string, 
 
 // ─── Gemini Fallback ─────────────────────────────────────────────────────────
 
-const GEMINI_API_KEY = 'AIzaSyBDMkKrkuD7s-H3fT5krGm-OoWP5kfYR8o';
+const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY || '';
 const GEMINI_MODEL = 'gemini-2.0-flash';
 
 async function callGemini(
