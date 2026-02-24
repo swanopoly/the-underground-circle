@@ -94,13 +94,13 @@ export default function PixelButton({
       </Text>
     </Pressable>
 
-    {/* Tooltip on hover (web only) */}
-    {tooltip && hovered && Platform.OS === 'web' && (
-      <View style={styles.tooltip}>
-        <Text style={styles.tooltipText}>{tooltip}</Text>
-      </View>
-    )}
-  </View>
+      {/* Tooltip on hover (web only) */}
+      {tooltip && hovered && Platform.OS === 'web' && (
+        <View style={styles.tooltip}>
+          <Text style={styles.tooltipText}>{tooltip}</Text>
+        </View>
+      )}
+    </View>
   );
 }
 
