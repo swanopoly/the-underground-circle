@@ -11,7 +11,7 @@ import {
 } from '../../../../lib/openclawService';
 import { AgentConnection, PROVIDER_META } from '../../../../lib/connectionManager';
 import { sendMessage as sendTgMessage, TelegramMessage } from '../../../../lib/telegramService';
-import { getItem, setItem } from '../../../../lib/storage';
+import { storage } from '../../../../lib/storage';
 import OfficeActionPanel from '../../../../components/OfficeActionPanel';
 
 const STORAGE_KEY_CHAT_HISTORY = '@office_terminal_history';
@@ -226,6 +226,7 @@ export default function OfficeChat({
   agents = [],
   connections, getConnectionConfig,
   telegramConfig, telegramConnected, telegramMessages,
+  onActionResult,
 }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([DEFAULT_MESSAGE]);
   const [input, setInput] = useState('');
@@ -240,7 +241,7 @@ export default function OfficeChat({
   useEffect(() => {
     const loadHistory = async () => {
       try {
-        const saved = await getItem(STORAGE_KEY_CHAT_HISTORY);
+        const saved = await storage.getItem(STORAGE_KEY_CHAT_HISTORY);
         if (saved) {
           const parsed = JSON.parse(saved);
           // Convert timestamp strings back to Date objects
@@ -251,7 +252,7 @@ export default function OfficeChat({
           setMessages(restored);
         }
 
-        const savedCommands = await getItem('@office_command_history');
+        const savedCommands = await storage.getItem('@office_command_history');
         if (savedCommands) {
           setCommandHistory(JSON.parse(savedCommands));
         }
@@ -266,7 +267,7 @@ export default function OfficeChat({
   useEffect(() => {
     const saveHistory = async () => {
       try {
-        await setItem(STORAGE_KEY_CHAT_HISTORY, JSON.stringify(messages));
+        await storage.setItem(STORAGE_KEY_CHAT_HISTORY, JSON.stringify(messages));
       } catch (error) {
         console.error('Failed to save chat history:', error);
       }
@@ -325,7 +326,7 @@ export default function OfficeChat({
     const newHistory = [...commandHistory.filter(c => c !== text), text].slice(-50); // Keep last 50
     setCommandHistory(newHistory);
     setHistoryIndex(-1);
-    await setItem('@office_command_history', JSON.stringify(newHistory));
+    await storage.setItem('@office_command_history', JSON.stringify(newHistory));
     
     setInput('');
     addMsg(text, true);
