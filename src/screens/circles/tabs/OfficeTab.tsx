@@ -71,8 +71,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [placingType, setPlacingType] = useState<string | null>(null);
   const [whiteboardNotes, setWhiteboardNotes] = useState<string[]>([]);
   const [chatMinimized, setChatMinimized] = useState(false);
-  const [chatVisible, setChatVisible] = useState(false);
-  const [chatFullscreen, setChatFullscreen] = useState(false);
+  const [terminalSize, setTerminalSize] = useState<'closed' | 'half' | 'full'>('closed');
   const [statusHistory, setStatusHistory] = useState<Array<OfficeAgent[]>>([]);
   const [enrichedAgents, setEnrichedAgents] = useState<OfficeAgent[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
@@ -1072,18 +1071,42 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           </>
         )}
 
-        {/* Chat toggle */}
-        <Pressable
-          onPress={() => setChatVisible(!chatVisible)}
-          style={[styles.chatToggle, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          accessibilityRole="button"
-          accessibilityLabel={chatVisible ? 'Hide chat' : 'Show chat'}
-        >
-          <Text style={styles.chatToggleText}>
-            {chatVisible ? '▼ HIDE TERMINAL' : '▲ TERMINAL'}
-          </Text>
-        </Pressable>
-        {chatVisible && !chatFullscreen && (
+        {/* Terminal toggle bar */}
+        <View style={styles.chatToggle}>
+          <View style={styles.terminalBar}>
+            <Pressable
+              onPress={() => setTerminalSize(terminalSize === 'closed' ? 'half' : 'closed')}
+              style={[styles.terminalBarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              accessibilityRole="button"
+              accessibilityLabel={terminalSize === 'closed' ? 'Open terminal' : 'Close terminal'}
+            >
+              <Text style={styles.chatToggleText}>
+                {terminalSize === 'closed' ? '▲ TERMINAL' : '▼ HIDE'}
+              </Text>
+            </Pressable>
+            {terminalSize !== 'closed' && (
+              <View style={styles.terminalSizeButtons}>
+                <Pressable
+                  onPress={() => setTerminalSize('half')}
+                  style={[styles.terminalSizeBtn, terminalSize === 'half' && styles.terminalSizeBtnActive,
+                    Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <Text style={[styles.terminalSizeBtnText, terminalSize === 'half' && styles.terminalSizeBtnTextActive]}>▬</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setTerminalSize('full')}
+                  style={[styles.terminalSizeBtn, terminalSize === 'full' && styles.terminalSizeBtnActive,
+                    Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <Text style={[styles.terminalSizeBtnText, terminalSize === 'full' && styles.terminalSizeBtnTextActive]}>⬜</Text>
+                </Pressable>
+              </View>
+            )}
+          </View>
+        </View>
+
+        {/* Terminal - half size */}
+        {terminalSize === 'half' && (
           <View style={styles.chatPane}>
             <OfficeChat
               circleId={circleId}
@@ -1091,7 +1114,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               minimized={chatMinimized}
               onToggle={() => setChatMinimized(!chatMinimized)}
               fullscreen={false}
-              onFullscreenToggle={() => setChatFullscreen(true)}
+              onFullscreenToggle={() => setTerminalSize('full')}
               agents={displayAgents}
               connections={connections}
               getConnectionConfig={getConnectionConfig}
@@ -1103,8 +1126,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           </View>
         )}
         
-        {/* Fullscreen terminal overlay */}
-        {chatFullscreen && (
+        {/* Terminal - fullscreen overlay */}
+        {terminalSize === 'full' && (
           <View style={styles.terminalFullscreen}>
             <OfficeChat
               circleId={circleId}
@@ -1112,7 +1135,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               minimized={false}
               onToggle={() => {}}
               fullscreen={true}
-              onFullscreenToggle={() => setChatFullscreen(false)}
+              onFullscreenToggle={() => setTerminalSize('half')}
               agents={displayAgents}
               connections={connections}
               getConnectionConfig={getConnectionConfig}
@@ -1349,12 +1372,35 @@ const styles = StyleSheet.create({
   quickName: { fontSize: 9, color: '#666', fontFamily: 'monospace', fontWeight: '600' },
   quickCost: { fontSize: 8, color: '#444', fontFamily: 'monospace' },
   chatToggle: {
-    borderTopWidth: 1, borderTopColor: '#1a1a2e', paddingVertical: 12,
-    alignItems: 'center', backgroundColor: '#0a0a12', minHeight: 48,
-    justifyContent: 'center',
+    borderTopWidth: 1, borderTopColor: '#1a1a2e',
+    backgroundColor: '#0a0a12',
+  },
+  terminalBar: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    paddingVertical: 8, paddingHorizontal: 12, gap: 12,
+  },
+  terminalBarBtn: {
+    paddingVertical: 4, paddingHorizontal: 12,
   },
   chatToggleText: { fontSize: 13, color: '#888', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1 },
-  chatPane: { minHeight: 240 },
+  terminalSizeButtons: {
+    flexDirection: 'row', gap: 4,
+  },
+  terminalSizeBtn: {
+    width: 32, height: 28, borderRadius: 6,
+    backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a2e',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  terminalSizeBtnActive: {
+    borderColor: '#6366f1', backgroundColor: '#6366f115',
+  },
+  terminalSizeBtnText: {
+    fontSize: 12, color: '#555',
+  },
+  terminalSizeBtnTextActive: {
+    color: '#6366f1',
+  },
+  chatPane: { height: 320 },
 
   // Action Result Toast
   actionResultToast: {
