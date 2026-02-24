@@ -73,7 +73,7 @@ export async function getUserXP(userId: string): Promise<UserXP | null> {
   const { data, error } = await supabase
     .from('user_xp')
     .select('*')
-    .eq('id', userId)
+    .eq('user_id', userId)
     .single();
   if (error) return null;
   return data as UserXP;
@@ -326,8 +326,8 @@ export async function getLeaderboard(
 
     const { data } = await supabase
       .from('user_xp')
-      .select('id, total_xp, level, title')
-      .in('id', userIds)
+      .select('user_id, total_xp, level, title')
+      .in('user_id', userIds)
       .order('total_xp', { ascending: false })
       .limit(limit);
 
@@ -340,23 +340,23 @@ export async function getLeaderboard(
 
     const profileMap = new Map((profiles || []).map((p: any) => [p.id, p]));
     return (data || []).map((d: any) => ({
-      user_id: d.id,
+      user_id: d.user_id,
       total_xp: d.total_xp,
       level: d.level,
       title: d.title,
-      username: profileMap.get(d.id)?.username || '',
-      display_name: profileMap.get(d.id)?.display_name || '',
+      username: profileMap.get(d.user_id)?.username || '',
+      display_name: profileMap.get(d.user_id)?.display_name || '',
     }));
   }
 
   const { data } = await supabase
     .from('user_xp')
-    .select('id, total_xp, level, title')
+    .select('user_id, total_xp, level, title')
     .order('total_xp', { ascending: false })
     .limit(limit);
 
   if (!data?.length) return [];
-  const userIds = data.map((d: any) => d.id);
+  const userIds = data.map((d: any) => d.user_id);
   const { data: profiles } = await supabase
     .from('profiles')
     .select('id, username, display_name')
@@ -365,12 +365,12 @@ export async function getLeaderboard(
 
   const profileMap = new Map((profiles || []).map((p: any) => [p.id, p]));
   return data.map((d: any) => ({
-    user_id: d.id,
+    user_id: d.user_id,
     total_xp: d.total_xp,
     level: d.level,
     title: d.title,
-    username: profileMap.get(d.id)?.username || '',
-    display_name: profileMap.get(d.id)?.display_name || '',
+    username: profileMap.get(d.user_id)?.username || '',
+    display_name: profileMap.get(d.user_id)?.display_name || '',
   }));
 }
 
