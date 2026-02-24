@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, FlatList, StyleSheet, Pressable, Platform,
 } from 'react-native';
+import type { NativeSyntheticEvent, TextInputKeyPressEventData } from 'react-native';
 import { OfficeAgent } from '../../../../lib/officeAgents';
 import {
   OpenClawConfig, listSessions, getSessionStatus, getSessionHistory,
@@ -223,9 +224,13 @@ export default function OfficeChat({
   const [messages, setMessages] = useState<ChatMessage[]>([DEFAULT_MESSAGE]);
   const [input, setInput] = useState('');
   const [processing, setProcessing] = useState(false);
+  const [commandHistory, setCommandHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
   const listRef = useRef<FlatList>(null);
+  const inputRef = useRef<TextInput>(null);
 
-  // Load chat history on mount
+  // Load chat history and command history on mount
   useEffect(() => {
     const loadHistory = async () => {
       try {
@@ -238,6 +243,11 @@ export default function OfficeChat({
             timestamp: new Date(m.timestamp),
           }));
           setMessages(restored);
+        }
+
+        const savedCommands = await getItem('@office_command_history');
+        if (savedCommands) {
+          setCommandHistory(JSON.parse(savedCommands));
         }
       } catch (error) {
         console.error('Failed to load chat history:', error);
@@ -269,9 +279,48 @@ export default function OfficeChat({
 
   const anyConnected = connections?.some(c => c.status === 'connected') || false;
 
+  const scrollToBottom = () => {
+    listRef.current?.scrollToEnd({ animated: true });
+    setShowScrollBtn(false);
+  };
+
+  const handleKeyPress = (e: any) => {
+    if (Platform.OS !== 'web') return;
+    
+    // Up arrow - previous command
+    if (e.nativeEvent.key === 'ArrowUp') {
+      e.preventDefault();
+      if (commandHistory.length > 0) {
+        const newIndex = historyIndex < commandHistory.length - 1 ? historyIndex + 1 : historyIndex;
+        setHistoryIndex(newIndex);
+        setInput(commandHistory[commandHistory.length - 1 - newIndex]);
+      }
+    }
+    
+    // Down arrow - next command
+    if (e.nativeEvent.key === 'ArrowDown') {
+      e.preventDefault();
+      if (historyIndex > 0) {
+        const newIndex = historyIndex - 1;
+        setHistoryIndex(newIndex);
+        setInput(commandHistory[commandHistory.length - 1 - newIndex]);
+      } else if (historyIndex === 0) {
+        setHistoryIndex(-1);
+        setInput('');
+      }
+    }
+  };
+
   const sendMessage = async () => {
     if (!input.trim() || processing) return;
     const text = input.trim();
+    
+    // Add to command history
+    const newHistory = [...commandHistory.filter(c => c !== text), text].slice(-50); // Keep last 50
+    setCommandHistory(newHistory);
+    setHistoryIndex(-1);
+    await setItem('@office_command_history', JSON.stringify(newHistory));
+    
     setInput('');
     addMsg(text, true);
 
@@ -626,35 +675,63 @@ export default function OfficeChat({
         </Pressable>
       </View>
 
-      <FlatList
-        ref={listRef}
-        data={messages}
-        keyExtractor={m => m.id}
-        style={styles.messageList}
-        contentContainerStyle={styles.messageContent}
-        renderItem={({ item }) => (
-          <View style={[styles.msgRow, item.isUser && styles.msgRowUser]}>
-            {!item.isUser && <Text style={styles.msgAgent}>{item.agent}</Text>}
-            <View style={[styles.msgBubble, item.isUser ? styles.msgBubbleUser : styles.msgBubbleBot,
-              item.agent === 'System' && styles.msgBubbleOC,
-              item.agent === 'Telegram' && styles.msgBubbleTG,
-            ]}>
-              <Text style={[styles.msgText, item.isUser && styles.msgTextUser]}>{item.text}</Text>
+      <View style={{ flex: 1, position: 'relative' }}>
+        <FlatList
+          ref={listRef}
+          data={messages}
+          keyExtractor={m => m.id}
+          style={styles.messageList}
+          contentContainerStyle={styles.messageContent}
+          onScroll={(e) => {
+            const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
+            const isNearBottom = layoutMeasurement.height + contentOffset.y >= contentSize.height - 50;
+            setShowScrollBtn(!isNearBottom);
+          }}
+          scrollEventThrottle={400}
+          renderItem={({ item }) => (
+            <View style={[styles.msgRow, item.isUser && styles.msgRowUser]}>
+              {!item.isUser && <Text style={styles.msgAgent}>{item.agent}</Text>}
+              <View style={[styles.msgBubble, item.isUser ? styles.msgBubbleUser : styles.msgBubbleBot,
+                item.agent === 'System' && styles.msgBubbleOC,
+                item.agent === 'Telegram' && styles.msgBubbleTG,
+              ]}>
+                <Text style={[styles.msgText, item.isUser && styles.msgTextUser]} selectable>
+                  {item.text}
+                </Text>
+              </View>
             </View>
-          </View>
+          )}
+        />
+        
+        {/* Scroll to bottom button */}
+        {showScrollBtn && (
+          <Pressable
+            onPress={scrollToBottom}
+            style={[styles.scrollBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={styles.scrollBtnText}>↓</Text>
+          </Pressable>
         )}
-      />
+      </View>
 
       <View style={styles.inputRow}>
         <TextInput
+          ref={inputRef}
           style={styles.input}
           value={input}
-          onChangeText={setInput}
+          onChangeText={(text) => {
+            setInput(text);
+            setHistoryIndex(-1); // Reset history navigation on manual input
+          }}
           onSubmitEditing={sendMessage}
-          placeholder={processing ? 'Working...' : 'Type a command... (try "help")'}
+          onKeyPress={handleKeyPress}
+          placeholder={processing ? 'Working...' : 'Type a command... (↑↓ for history, "help" for commands)'}
           placeholderTextColor="#666"
           returnKeyType="send"
           editable={!processing}
+          autoCapitalize="none"
+          autoCorrect={false}
+          autoComplete="off"
         />
         <Pressable
           onPress={sendMessage}
@@ -727,4 +804,27 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   sendText: { color: '#fff', fontSize: 14, fontWeight: '800' },
+  scrollBtn: {
+    position: 'absolute',
+    bottom: 12,
+    right: 12,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#6366f1',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+    borderWidth: 2,
+    borderColor: '#8b5cf6',
+  },
+  scrollBtnText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '800',
+  },
 });
