@@ -30,6 +30,7 @@ import {
 import { storage } from '../../../lib/storage';
 import CostDashboard from '../../../components/CostDashboard';
 import SessionTagsDashboard from '../../../components/SessionTagsDashboard';
+import AgentPerformanceMetrics from '../../../components/AgentPerformanceMetrics';
 import {
   SessionTag, loadSessionTags, addSessionTag, removeSessionTag,
 } from '../../../lib/sessionTags';
@@ -75,7 +76,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [enrichedAgents, setEnrichedAgents] = useState<OfficeAgent[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
-  const [viewMode, setViewMode] = useState<'office' | 'cost' | 'tags'>('office'); // Toggle between views
+  const [viewMode, setViewMode] = useState<'office' | 'cost' | 'tags' | 'metrics'>('office'); // Toggle between views
   const [sessionTags, setSessionTags] = useState<Map<string, SessionTag[]>>(new Map());
   const [budgetConfig, setBudgetConfig] = useState<BudgetConfig>({ enabled: false });
   const [budgetAlertsDismissed, setBudgetAlertsDismissed] = useState(false);
@@ -675,6 +676,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               🏷️
             </Text>
           </Pressable>
+          <Pressable
+            onPress={() => {
+              setViewMode(viewMode === 'metrics' ? 'office' : 'metrics');
+            }}
+            style={[styles.modeBtn, viewMode === 'metrics' && styles.modeBtnActive,
+              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={[styles.modeBtnText, viewMode === 'metrics' && styles.modeBtnTextActive]}>
+              🏆
+            </Text>
+          </Pressable>
           {viewMode === 'office' && (
             <Pressable
               onPress={() => { setEditMode(!editMode); setPlacingType(null); }}
@@ -814,7 +826,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </View>
       )}
 
-      {/* Main Content - Switch between Office, Cost, and Tags views */}
+      {/* Main Content - Switch between Office, Cost, Tags, and Metrics views */}
       {viewMode === 'cost' ? (
         <CostDashboard
           sessions={enrichedSessions}
@@ -824,6 +836,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         <SessionTagsDashboard
           agents={displayAgents}
           sessionTags={sessionTags}
+        />
+      ) : viewMode === 'metrics' ? (
+        <AgentPerformanceMetrics
+          agents={enrichedAgents}
+          sessions={enrichedSessions}
+          accentColor={accentColor}
         />
       ) : (
         <View style={styles.mainContent}>
