@@ -5,6 +5,7 @@ import { Session } from '@supabase/supabase-js';
 import { supabase } from './src/lib/supabase';
 import AuthNavigator from './src/navigation/AuthNavigator';
 import MainNavigator from './src/navigation/MainNavigator';
+import ErrorBoundary from './src/components/ErrorBoundary';
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -52,10 +53,12 @@ export default function App() {
   }
 
   return (
-    <NavigationContainer>
-      <StatusBar barStyle="light-content" />
-      {session ? <MainNavigator /> : <AuthNavigator />}
-    </NavigationContainer>
+    <ErrorBoundary>
+      <NavigationContainer>
+        <StatusBar barStyle="light-content" />
+        {session ? <MainNavigator /> : <AuthNavigator />}
+      </NavigationContainer>
+    </ErrorBoundary>
   );
 }
 
