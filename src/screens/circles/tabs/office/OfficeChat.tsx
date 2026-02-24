@@ -129,12 +129,64 @@ async function processLocalCommand(text: string, agents: OfficeAgent[], connecti
     return { response: `🤖 Agent Roster\n\n${lines.join('\n')}`, command: { type: 'agents' } };
   }
 
+  // Conversation log commands
+  if (lower === 'log' || lower === 'conversation log' || lower === 'messages') {
+    const { getRecentMessages, formatMessageForTerminal } = await import('../../../../lib/conversationLog');
+    const messages = await getRecentMessages(30);
+    
+    if (messages.length === 0) {
+      return { response: '📝 Conversation Log\n\nNo messages yet. Use Quick Actions to start conversations with agents!' };
+    }
+
+    const formatted = messages.map(formatMessageForTerminal).join('\n');
+    return { response: `📝 Recent Conversations (${messages.length})\n\n${formatted}\n\nTip: Use "log [agent]" to filter, "threads" to view grouped` };
+  }
+
+  if (lower.startsWith('log ')) {
+    const agentQuery = text.slice(4).trim().toLowerCase();
+    const matchedAgent = agents.find(a => a.name.toLowerCase().includes(agentQuery) || a.id.toLowerCase().includes(agentQuery));
+    
+    if (!matchedAgent) {
+      return { response: `❌ Agent not found: "${agentQuery}"\n\nTry: ${agents.map(a => a.name).join(', ')}` };
+    }
+
+    const { getMessagesByAgent, formatMessageForTerminal } = await import('../../../../lib/conversationLog');
+    const messages = await getMessagesByAgent(matchedAgent.id, 30);
+    
+    if (messages.length === 0) {
+      return { response: `📝 ${matchedAgent.name} Log\n\nNo messages yet with this agent.` };
+    }
+
+    const formatted = messages.map(formatMessageForTerminal).join('\n');
+    return { response: `📝 ${matchedAgent.name} (${messages.length} messages)\n\n${formatted}` };
+  }
+
+  if (lower === 'threads' || lower === 'conversations') {
+    const { getRecentMessages, groupMessagesByConversation, formatThreadSummary } = await import('../../../../lib/conversationLog');
+    const messages = await getRecentMessages(200);
+    const threads = groupMessagesByConversation(messages);
+    
+    if (threads.length === 0) {
+      return { response: '📋 Conversation Threads\n\nNo conversations yet. Start chatting with agents!' };
+    }
+
+    const formatted = threads.slice(0, 20).map(formatThreadSummary).join('\n');
+    return { response: `📋 Active Threads (${threads.length})\n\n${formatted}\n\nUse "log [agent]" to see specific conversation` };
+  }
+
+  if (lower === 'clear log' || lower === 'clear messages') {
+    const { clearConversationLog } = await import('../../../../lib/conversationLog');
+    await clearConversationLog();
+    return { response: '🗑️ Conversation log cleared!' };
+  }
+
   if (lower === 'help' || lower === '?') {
     const { getCollaborationHelp } = await import('../../../../lib/officeChatCommands');
     const { getAdvancedHelp } = await import('../../../../lib/advancedChatCommands');
     return {
       response: `🏢 Office Commands\n\n` +
         `LOCAL:\n• status — Office overview\n• agents — List all agents\n• connections — List all connections\n• agent [name] — Agent details\n• costs — Cost breakdown\n• theme [name] — Change theme\n\n` +
+        `CONVERSATIONS:\n• log — Recent messages\n• log [agent] — Filter by agent\n• threads — Conversation threads\n• clear log — Clear history\n\n` +
         `AGENT COMMANDS:\n• ask [question] — Ask default agent\n• task [message] — Send task to default agent\n• task @[name] [message] — Route to connection/agent\n• spawn [task] — Launch background sub-agent\n• subagents — List running sub-agents\n• msg [session] [text] — Message a session\n• broadcast [msg] — Send to all channels\n\n` +
         `${getCollaborationHelp()}\n\n` +
         `${getAdvancedHelp()}\n\n` +

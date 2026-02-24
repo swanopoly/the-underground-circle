@@ -11,6 +11,7 @@ import {
   getBlockedTasks, createTask, suggestAgentForTask, assignTaskToAgent,
   getProjectStatus,
 } from '../lib/agentCollaboration';
+import { addConversationMessage } from '../lib/conversationLog';
 
 interface Props {
   agents: OfficeAgent[];
@@ -99,7 +100,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
 
     addMessageToConversation(conv.id, 'user', standupMsg);
 
-    // Send to all agents
+    // Send to all agents and log conversations
     const deliveredTo: string[] = [];
     for (const agent of activeAgents) {
       const config = getConfig(agent.connectionId);
@@ -113,11 +114,24 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
           agents,
           []
         );
-        if (result.ok) deliveredTo.push(agent.name);
+        if (result.ok) {
+          deliveredTo.push(agent.name);
+          // Log outgoing message
+          await addConversationMessage({
+            direction: 'outgoing',
+            agentId: agent.id,
+            agentName: agent.name,
+            agentColor: agent.color,
+            message: standupMsg,
+            actionType: 'standup',
+            conversationId: conv.id,
+            sessionKey,
+          });
+        }
       }
     }
 
-    onResult(`🌅 Daily Standup Started!\nConversation: ${conv.id}\nDelivered to: ${deliveredTo.join(', ')}`);
+    onResult(`🌅 Daily Standup Started!\nConversation: ${conv.id}\nDelivered to: ${deliveredTo.join(', ')}\n\nTip: Type "log" in terminal to see conversations`);
   };
 
   const executeProjectSync = async () => {
@@ -155,11 +169,23 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
           agents,
           projects
         );
-        if (result.ok) deliveredTo.push(agent.name);
+        if (result.ok) {
+          deliveredTo.push(agent.name);
+          // Log outgoing message
+          await addConversationMessage({
+            direction: 'outgoing',
+            agentId: agent.id,
+            agentName: agent.name,
+            agentColor: agent.color,
+            message: syncMsg,
+            actionType: 'sync',
+            sessionKey,
+          });
+        }
       }
     }
 
-    onResult(`📊 Project synced to team!\nDelivered to: ${deliveredTo.join(', ')}`);
+    onResult(`📊 Project synced to team!\nDelivered to: ${deliveredTo.join(', ')}\n\nType "log" to view conversations`);
   };
 
   const executeQuickAssign = async () => {
@@ -184,25 +210,38 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
         const bestAgent = suggestions[0];
         await assignTaskToAgent(task.id, bestAgent.id);
         
-        // Notify agent
+        const assignMsg = `New task assigned: "${task.title}"\n\n${task.description}\n\nPriority: ${task.priority}`;
+        
+        // Notify agent and log
         const config = getConfig(bestAgent.connectionId);
         if (config) {
           const sessionKey = bestAgent.id.includes('::') ? bestAgent.id.split('::')[1] : bestAgent.id;
           await sendContextualMessage(
             config,
             sessionKey,
-            `New task assigned: "${task.title}"\n\n${task.description}\n\nPriority: ${task.priority}`,
+            assignMsg,
             { taskId: task.id, projectId: task.projectId },
             agents,
             projects
           );
+          
+          // Log outgoing message
+          await addConversationMessage({
+            direction: 'outgoing',
+            agentId: bestAgent.id,
+            agentName: bestAgent.name,
+            agentColor: bestAgent.color,
+            message: assignMsg,
+            actionType: 'assign',
+            sessionKey,
+          });
         }
         
         assigned.push(`${task.title} → ${bestAgent.name}`);
       }
     }
 
-    onResult(`🎯 Quick Assign Complete!\n\n${assigned.join('\n')}`);
+    onResult(`🎯 Quick Assign Complete!\n\n${assigned.join('\n')}\n\nType "log" to see agent conversations`);
   };
 
   const executeTeamChat = async () => {
@@ -222,10 +261,22 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
       return;
     }
 
+    // Log to each agent before sending
+    for (const agent of activeAgents) {
+      await addConversationMessage({
+        direction: 'outgoing',
+        agentId: agent.id,
+        agentName: agent.name,
+        agentColor: agent.color,
+        message: inputValue,
+        actionType: 'broadcast',
+      });
+    }
+
     const result = await broadcastMessage(activeAgents, getConfig, inputValue);
     
     if (result.ok) {
-      onResult(`📢 Broadcast sent to ${result.deliveredTo?.length || 0} agents!\n\n"${inputValue}"`);
+      onResult(`📢 Broadcast sent to ${result.deliveredTo?.length || 0} agents!\n\n"${inputValue}"\n\nType "log" to see conversations`);
     } else {
       onResult(`❌ Broadcast failed: ${result.error}`);
     }
@@ -245,10 +296,22 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
       blockedTasks.slice(0, 3).map(t => `• ${t.title}\n  Reason: ${t.blockedReason || 'Unknown'}`).join('\n\n') +
       `\n\nWho can help unblock these?`;
 
+    // Log to each agent
+    for (const agent of activeAgents) {
+      await addConversationMessage({
+        direction: 'outgoing',
+        agentId: agent.id,
+        agentName: agent.name,
+        agentColor: agent.color,
+        message: helpMsg,
+        actionType: 'help',
+      });
+    }
+
     const result = await broadcastMessage(activeAgents, getConfig, helpMsg);
 
     if (result.ok) {
-      onResult(`🆘 Help request sent!\n${blockedTasks.length} blocked tasks need team support`);
+      onResult(`🆘 Help request sent!\n${blockedTasks.length} blocked tasks need team support\n\nType "log" to track responses`);
     } else {
       onResult(`❌ Failed to coordinate: ${result.error}`);
     }
