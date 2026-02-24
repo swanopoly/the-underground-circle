@@ -671,16 +671,21 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // ─── Terminal resize handlers ──────────────────────────────
 
   const handleResizeStart = useCallback((e: any) => {
-    e.preventDefault();
+    // Prevent default only if it exists (web-only)
+    if (e.preventDefault) e.preventDefault();
     setIsDraggingResize(true);
-    const clientY = e.clientY || (e.touches && e.touches[0]?.clientY) || 0;
+    
+    // Get Y position - try nativeEvent for React Native, fallback to web events
+    const clientY = e.nativeEvent?.pageY || e.clientY || (e.touches && e.touches[0]?.clientY) || 0;
     dragStartY.current = clientY;
     dragStartHeight.current = terminalHeight;
   }, [terminalHeight]);
 
   const handleResizeMove = useCallback((e: any) => {
     if (!isDraggingResize) return;
-    const clientY = e.clientY || (e.touches && e.touches[0]?.clientY) || 0;
+    
+    // Get Y position - try nativeEvent for React Native, fallback to web events
+    const clientY = e.nativeEvent?.pageY || e.clientY || (e.touches && e.touches[0]?.clientY) || 0;
     const delta = dragStartY.current - clientY; // Dragging up increases height
     const newHeight = Math.max(MIN_TERMINAL_HEIGHT, Math.min(MAX_TERMINAL_HEIGHT, dragStartHeight.current + delta));
     setTerminalHeight(newHeight);
@@ -697,7 +702,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   useEffect(() => {
     if (!isDraggingResize) return;
     
-    if (Platform.OS === 'web') {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
       window.addEventListener('mousemove', handleResizeMove);
       window.addEventListener('mouseup', handleResizeEnd);
       window.addEventListener('touchmove', handleResizeMove);
