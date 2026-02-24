@@ -522,25 +522,34 @@ export class OpenClawPoller {
     const result = await listSessions(this.config);
     if (result.ok && result.sessions) {
       // Enrich sessions with cost/token data from session_status
-      const enriched = await Promise.all(
-        result.sessions.map(async (s) => {
-          try {
-            const statusResult = await getSessionStatus(this.config, s.sessionKey);
-            if (statusResult.ok && statusResult.status) {
-              return {
-                ...s,
-                totalCost: statusResult.status.totalCost,
-                totalInputTokens: statusResult.status.totalInputTokens,
-                totalOutputTokens: statusResult.status.totalOutputTokens,
-                turns: statusResult.status.turns,
-                uptime: statusResult.status.uptime,
-                model: statusResult.status.model || s.model,
-              };
-            }
-          } catch {}
-          return s;
-        })
-      );
+      // Limit concurrent enrichment calls to prevent API overload
+      const MAX_CONCURRENT = 10;
+      const enriched: OpenClawSession[] = [];
+      
+      for (let i = 0; i < result.sessions.length; i += MAX_CONCURRENT) {
+        const batch = result.sessions.slice(i, i + MAX_CONCURRENT);
+        const batchEnriched = await Promise.all(
+          batch.map(async (s) => {
+            try {
+              const statusResult = await getSessionStatus(this.config, s.sessionKey);
+              if (statusResult.ok && statusResult.status) {
+                return {
+                  ...s,
+                  totalCost: statusResult.status.totalCost,
+                  totalInputTokens: statusResult.status.totalInputTokens,
+                  totalOutputTokens: statusResult.status.totalOutputTokens,
+                  turns: statusResult.status.turns,
+                  uptime: statusResult.status.uptime,
+                  model: statusResult.status.model || s.model,
+                };
+              }
+            } catch {}
+            return s;
+          })
+        );
+        enriched.push(...batchEnriched);
+      }
+      
       this.onUpdate({ sessions: enriched, timestamp: Date.now() });
     }
   }

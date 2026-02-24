@@ -253,12 +253,12 @@ export default function CustomizePanel({
                 <>
                   <View style={styles.sectionHeaderRow}>
                     <Text style={styles.sectionTitle}>CONNECTIONS</Text>
-                    {connections.some(c => c.enabled && c.status !== 'connected') && (
+                    {connections.some(c => c.enabled && c.status !== 'connected' && c.status !== 'connecting') && (
                       <Pressable
                         onPress={() => {
-                          connections
-                            .filter(c => c.enabled && c.status !== 'connected')
-                            .forEach(c => onConnectConnection(c.id));
+                          const toReconnect = connections.filter(c => c.enabled && c.status !== 'connected' && c.status !== 'connecting');
+                          console.log(`🔌 Reconnecting ${toReconnect.length} connection${toReconnect.length !== 1 ? 's' : ''}...`);
+                          toReconnect.forEach(c => onConnectConnection(c.id));
                         }}
                         style={styles.quickConnectBtn}
                       >
@@ -298,10 +298,19 @@ export default function CustomizePanel({
                                   <Text style={styles.autoConnectText}>AUTO</Text>
                                 </View>
                               )}
+                              <View style={[styles.statusBadge, {
+                                backgroundColor: conn.status === 'connected' ? '#22c55e20'
+                                  : conn.status === 'connecting' ? '#eab30820'
+                                  : conn.status === 'error' ? '#ef444420' : '#33333320'
+                              }]}>
+                                <View style={[styles.connStatusDot, { backgroundColor: statusColor }]} />
+                                <Text style={[styles.statusBadgeText, { color: statusColor }]}>
+                                  {conn.status.toUpperCase()}
+                                </Text>
+                              </View>
                             </View>
                             <Text style={styles.connCardEndpoint} numberOfLines={1}>{conn.endpoint}</Text>
                           </View>
-                          <View style={[styles.connStatusDot, { backgroundColor: statusColor }]} />
                         </View>
 
                         {conn.status === 'connected' && (
@@ -312,7 +321,10 @@ export default function CustomizePanel({
                         )}
 
                         {conn.error && (
-                          <Text style={styles.connCardError}>❌ {conn.error}</Text>
+                          <View style={styles.connCardErrorBox}>
+                            <Text style={styles.connCardErrorIcon}>⚠️</Text>
+                            <Text style={styles.connCardError}>{conn.error}</Text>
+                          </View>
                         )}
 
                         <View style={styles.connCardActions}>
@@ -671,10 +683,24 @@ const styles = StyleSheet.create({
     fontSize: 7, color: '#22c55e', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5,
   },
   connCardEndpoint: { fontSize: 9, color: '#555', fontFamily: 'monospace' },
-  connStatusDot: { width: 8, height: 8, borderRadius: 4 },
+  statusBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4,
+  },
+  statusBadgeText: {
+    fontSize: 7, fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5,
+  },
+  connStatusDot: { width: 6, height: 6, borderRadius: 3 },
   connCardStats: { flexDirection: 'row', gap: 12, paddingLeft: 30 },
   connCardStat: { fontSize: 9, color: '#666', fontFamily: 'monospace' },
-  connCardError: { fontSize: 9, color: '#ef4444', fontFamily: 'monospace', paddingLeft: 30 },
+  connCardErrorBox: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingLeft: 30, paddingRight: 8, paddingVertical: 6,
+    backgroundColor: '#ef444410', borderLeftWidth: 2, borderLeftColor: '#ef4444',
+    borderRadius: 4,
+  },
+  connCardErrorIcon: { fontSize: 12 },
+  connCardError: { fontSize: 9, color: '#ef4444', fontFamily: 'monospace', flex: 1 },
   connCardActions: { flexDirection: 'row', gap: 6, paddingLeft: 30 },
   connActionBtn: {
     paddingHorizontal: 14, paddingVertical: 10, borderRadius: 8, borderWidth: 1,

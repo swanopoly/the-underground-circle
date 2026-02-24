@@ -1,7 +1,8 @@
 // Cost Analytics Dashboard - The #1 fundable feature
-import React, { useMemo } from 'react';
+import React, { useMemo, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, Platform } from 'react-native';
 import { OpenClawSession } from '../lib/openclawService';
+import { storage } from '../lib/storage';
 
 interface CostData {
   today: number;
@@ -20,9 +21,29 @@ interface Props {
   accentColor?: string;
 }
 
+const STORAGE_KEY_DATE_RANGE = '@cost_dashboard_date_range';
+
 export default function CostDashboard({ sessions, accentColor = '#6366f1' }: Props) {
   const [dateRange, setDateRange] = React.useState<7 | 30 | 90>(30);
   const costData = useMemo(() => calculateCostData(sessions, dateRange), [sessions, dateRange]);
+
+  // Load saved date range preference on mount
+  useEffect(() => {
+    storage.getItem(STORAGE_KEY_DATE_RANGE).then(saved => {
+      if (saved) {
+        const parsed = parseInt(saved);
+        if (parsed === 7 || parsed === 30 || parsed === 90) {
+          setDateRange(parsed);
+        }
+      }
+    }).catch(() => {});
+  }, []);
+
+  // Save date range when changed
+  const handleDateRangeChange = (range: 7 | 30 | 90) => {
+    setDateRange(range);
+    storage.setItem(STORAGE_KEY_DATE_RANGE, range.toString()).catch(() => {});
+  };
 
   // Empty state
   if (sessions.length === 0) {
@@ -48,7 +69,7 @@ export default function CostDashboard({ sessions, accentColor = '#6366f1' }: Pro
             {[7, 30, 90].map(days => (
               <Pressable
                 key={days}
-                onPress={() => setDateRange(days as 7 | 30 | 90)}
+                onPress={() => handleDateRangeChange(days as 7 | 30 | 90)}
                 style={[
                   styles.dateRangeBtn,
                   dateRange === days && [styles.dateRangeBtnActive, { borderColor: accentColor }],

@@ -168,9 +168,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   const handleReconnectAll = useCallback(() => {
     // Reconnect all enabled connections that aren't already connected
-    connections
-      .filter(c => c.enabled && c.status !== 'connected' && c.status !== 'connecting')
-      .forEach(conn => connectOne(conn));
+    const toReconnect = connections.filter(c => c.enabled && c.status !== 'connected' && c.status !== 'connecting');
+    
+    if (toReconnect.length > 0) {
+      console.log(`🔌 Reconnecting ${toReconnect.length} connection${toReconnect.length !== 1 ? 's' : ''}:`, 
+        toReconnect.map(c => c.name).join(', '));
+      toReconnect.forEach(conn => connectOne(conn));
+    }
   }, [connections, connectOne]);
 
   const getConnectionConfig = useCallback((id: string): OpenClawConfig | null => {
