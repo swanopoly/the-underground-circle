@@ -1,4 +1,4 @@
-// Simple CORS proxy for OpenClaw Gateway
+// CORS proxy for OpenClaw Gateway with error handling
 // Run: node openclaw-proxy.js
 // Then use http://localhost:18790 as your endpoint in the app
 
@@ -34,12 +34,36 @@ const server = http.createServer((req, res) => {
   });
 
   proxyReq.on('error', (err) => {
-    console.error('Proxy error:', err);
-    res.writeHead(502);
-    res.end('Bad Gateway');
+    console.error('Proxy error:', err.message);
+    if (!res.headersSent) {
+      res.writeHead(502);
+      res.end(JSON.stringify({ error: 'Gateway unreachable' }));
+    }
+  });
+
+  req.on('error', (err) => {
+    console.error('Request error:', err.message);
   });
 
   req.pipe(proxyReq);
+});
+
+// Error handlers
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`❌ Port ${PROXY_PORT} is already in use`);
+    process.exit(1);
+  } else {
+    console.error('Server error:', err.message);
+  }
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err.message);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
 });
 
 server.listen(PROXY_PORT, () => {
