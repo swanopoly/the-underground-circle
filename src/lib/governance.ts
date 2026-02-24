@@ -46,7 +46,7 @@ export async function createProposal(params: {
 export async function getProposals(circleId: string, status?: string): Promise<Proposal[]> {
   let query = supabase
     .from('proposals')
-    .select('*, creator:profiles!created_by(username, display_name)')
+    .select('*')
     .eq('circle_id', circleId)
     .order('created_at', { ascending: false });
 
@@ -81,7 +81,7 @@ export async function getProposals(circleId: string, status?: string): Promise<P
 export async function getProposal(proposalId: string): Promise<Proposal | null> {
   const { data, error } = await supabase
     .from('proposals')
-    .select('*, creator:profiles!created_by(username, display_name)')
+    .select('*')
     .eq('id', proposalId)
     .single();
 

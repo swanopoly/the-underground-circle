@@ -10,7 +10,13 @@ import type { Chain, ChainConfig, Token, NFT, Transaction, SwapQuote, StakeAccou
 
 // ─── Constants & Chain Configs ──────────────────────────────────────────────
 
-export const SOLANA_RPC_ENDPOINT = 'https://api.mainnet-beta.solana.com';
+// Solana RPC with fallback chain - free public endpoints get rate-limited quickly
+const SOLANA_RPC_ENDPOINTS = [
+  'https://solana-mainnet.g.alchemy.com/v2/demo',
+  'https://rpc.ankr.com/solana',
+  'https://api.mainnet-beta.solana.com',
+];
+export const SOLANA_RPC_ENDPOINT = SOLANA_RPC_ENDPOINTS[0];
 export const MAX_ETH_AMOUNT = 10; // Maximum ETH per transaction
 export const MAX_SOL_AMOUNT = 100; // Maximum SOL per transaction
 
@@ -22,7 +28,7 @@ export const CHAIN_CONFIGS = {
     symbol: 'SOL',
     icon: '◎',
     color: '#9945FF',
-    rpcUrl: 'https://api.mainnet-beta.solana.com',
+    rpcUrl: SOLANA_RPC_ENDPOINT,
     explorerUrl: 'https://solscan.io',
     nativeCurrency: {
       name: 'Solana',
@@ -1265,27 +1271,40 @@ function fetchWithTimeout(url: string, options: RequestInit, ms: number): Promis
 // ─── JSON-RPC Helper ────────────────────────────────────────────────────────
 
 async function jsonRpc(url: string, method: string, params: any[], timeoutMs = 5000): Promise<any> {
-  try {
-    const response = await fetchWithTimeout(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-    }, timeoutMs);
+  // Build list of URLs to try: the provided URL first, then Solana fallbacks if it's a Solana endpoint
+  const isSolana = SOLANA_RPC_ENDPOINTS.some(ep => url.includes(new URL(ep).hostname));
+  const urls = isSolana ? SOLANA_RPC_ENDPOINTS : [url];
+  
+  let lastError: Error | null = null;
+  for (const rpcUrl of urls) {
+    try {
+      const response = await fetchWithTimeout(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+      }, timeoutMs);
 
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      if (!response.ok) {
+        lastError = new Error(`HTTP ${response.status}: ${response.statusText}`);
+        continue; // Try next endpoint
+      }
+
+      const data = await response.json();
+      
+      if (data.error) {
+        lastError = new Error(data.error.message || 'RPC error');
+        continue;
+      }
+
+      return data.result;
+    } catch (error) {
+      lastError = error as Error;
+      continue; // Try next endpoint
     }
-
-    const data = await response.json();
-    
-    if (data.error) {
-      throw new Error(data.error.message || 'RPC error');
-    }
-
-    return data.result;
-  } catch (error) {
-    console.error(`JSON-RPC error for ${method}:`, error);
-    throw error;
+  }
+  
+  console.error(`JSON-RPC error for ${method} (all endpoints failed):`, lastError);
+  throw lastError;
   }
 }
 

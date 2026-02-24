@@ -80,8 +80,8 @@ export async function getUserXP(userId: string): Promise<UserXP | null> {
       .from('user_xp')
       .select('*')
       .eq('user_id', userId)
-      .single();
-    if (error) return null;
+      .maybeSingle();
+    if (error || !data) return null;
     return data as UserXP;
   } catch (error) {
     console.error('getUserXP exception:', error);
