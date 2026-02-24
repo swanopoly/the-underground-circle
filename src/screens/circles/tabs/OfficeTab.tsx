@@ -463,7 +463,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     const interval = setInterval(async () => {
       try {
         await takeSnapshot(enrichedAgents, sessionTags);
-        console.log('💾 Session snapshot saved (including tags)');
       } catch (error) {
         console.error('Failed to save snapshot:', error);
       }
@@ -572,8 +571,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     if (selectedAgent?.id === agentId) {
       setSelectedAgent(prev => prev ? { ...prev, name: newName } : null);
     }
-    
-    console.log(`✏️ Renamed agent ${sessionKey} → ${newName} (persisted to identity store)`);
   }, [agentNames, selectedAgent]);
 
   // ─── Floor action handlers ──────────────────────────────
