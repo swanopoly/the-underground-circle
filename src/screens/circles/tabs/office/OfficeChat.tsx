@@ -68,7 +68,7 @@ function findConnectionByName(
     || connections.find(c => c.name.toLowerCase().includes(lower));
 }
 
-function processLocalCommand(text: string, agents: OfficeAgent[], connections?: AgentConnection[]): { response: string; command?: OfficeCommand } | null {
+async function processLocalCommand(text: string, agents: OfficeAgent[], connections?: AgentConnection[]): Promise<{ response: string; command?: OfficeCommand } | null> {
   const lower = text.toLowerCase().trim();
 
   if (lower === 'status' || lower === 'office status') {
@@ -177,7 +177,7 @@ export default function OfficeChat({
     addMsg(text, true);
 
     // Try local commands first
-    const local = processLocalCommand(text, agents, connections);
+    const local = await processLocalCommand(text, agents, connections);
     if (local) {
       addMsg(local.response, false, 'Office AI');
       if (local.command && onCommand) onCommand(local.command);
