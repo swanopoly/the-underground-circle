@@ -74,6 +74,71 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
     );
   }
 
+
+  async function handleExport(format: 'csv' | 'json' | 'json-summary') {
+    try {
+      setExportStatus('Generating export...');
+      
+      const exportData = generateExportData(agents, sessions, sessionTags);
+      let content: string;
+      let mimeType: string;
+      let filename: string;
+
+      switch (format) {
+        case 'csv':
+          content = exportToCSV(exportData);
+          mimeType = getMimeType('csv');
+          filename = generateFilename('csv');
+          break;
+        case 'json':
+          content = exportToJSON(exportData);
+          mimeType = getMimeType('json');
+          filename = generateFilename('json');
+          break;
+        case 'json-summary':
+          content = exportToJSONWithSummary(exportData);
+          mimeType = getMimeType('json');
+          filename = generateFilename('json');
+          break;
+      }
+
+      downloadFile(content, filename, mimeType);
+      setExportStatus(`✅ Downloaded ${filename}`);
+      
+      setTimeout(() => {
+        setExportStatus('');
+        setShowExportModal(false);
+      }, 2000);
+    } catch (error) {
+      setExportStatus(`❌ Export failed: ${error}`);
+      setTimeout(() => setExportStatus(''), 3000);
+    }
+  }
+
+  async function handleCopyToClipboard() {
+    try {
+      setExportStatus('Copying to clipboard...');
+      
+      const exportData = generateExportData(agents, sessions, sessionTags);
+      const content = exportToCSV(exportData);
+      
+      const success = await copyToClipboard(content);
+      
+      if (success) {
+        setExportStatus('✅ Copied to clipboard!');
+        setTimeout(() => {
+          setExportStatus('');
+          setShowExportModal(false);
+        }, 2000);
+      } else {
+        setExportStatus('❌ Failed to copy');
+        setTimeout(() => setExportStatus(''), 3000);
+      }
+    } catch (error) {
+      setExportStatus(`❌ Copy failed: ${error}`);
+      setTimeout(() => setExportStatus(''), 3000);
+    }
+  }
   return (
     <>
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
@@ -265,73 +330,7 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
     </Modal>
   </>
   );
-
   // ─── Export Handlers ───────────────────────────────────
-
-  async function handleExport(format: 'csv' | 'json' | 'json-summary') {
-    try {
-      setExportStatus('Generating export...');
-      
-      const exportData = generateExportData(agents, sessions, sessionTags);
-      let content: string;
-      let mimeType: string;
-      let filename: string;
-
-      switch (format) {
-        case 'csv':
-          content = exportToCSV(exportData);
-          mimeType = getMimeType('csv');
-          filename = generateFilename('csv');
-          break;
-        case 'json':
-          content = exportToJSON(exportData);
-          mimeType = getMimeType('json');
-          filename = generateFilename('json');
-          break;
-        case 'json-summary':
-          content = exportToJSONWithSummary(exportData);
-          mimeType = getMimeType('json');
-          filename = generateFilename('json');
-          break;
-      }
-
-      downloadFile(content, filename, mimeType);
-      setExportStatus(`✅ Downloaded ${filename}`);
-      
-      setTimeout(() => {
-        setExportStatus('');
-        setShowExportModal(false);
-      }, 2000);
-    } catch (error) {
-      setExportStatus(`❌ Export failed: ${error}`);
-      setTimeout(() => setExportStatus(''), 3000);
-    }
-  }
-
-  async function handleCopyToClipboard() {
-    try {
-      setExportStatus('Copying to clipboard...');
-      
-      const exportData = generateExportData(agents, sessions, sessionTags);
-      const content = exportToCSV(exportData);
-      
-      const success = await copyToClipboard(content);
-      
-      if (success) {
-        setExportStatus('✅ Copied to clipboard!');
-        setTimeout(() => {
-          setExportStatus('');
-          setShowExportModal(false);
-        }, 2000);
-      } else {
-        setExportStatus('❌ Failed to copy');
-        setTimeout(() => setExportStatus(''), 3000);
-      }
-    } catch (error) {
-      setExportStatus(`❌ Copy failed: ${error}`);
-      setTimeout(() => setExportStatus(''), 3000);
-    }
-  }
 }
 
 // ─── Cost Card Component ─────────────────────────────────
