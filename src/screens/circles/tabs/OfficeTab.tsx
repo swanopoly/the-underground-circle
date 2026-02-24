@@ -847,6 +847,52 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </View>
       )}
 
+      {/* Connections Bar - always visible when connections exist */}
+      {connections.length > 0 && viewMode === 'office' && (
+        <View style={styles.connectionsBar}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.connectionsBarInner}>
+            {connections.map(conn => {
+              const isLocal = conn.endpoint.includes('localhost') || conn.endpoint.includes('127.0.0.1');
+              const isProduction = typeof window !== 'undefined' && !window.location.hostname.includes('localhost');
+              const skipped = isProduction && isLocal;
+              const statusColor = conn.status === 'connected' ? '#22c55e'
+                : conn.status === 'connecting' ? '#eab308'
+                : conn.status === 'error' ? '#ef4444'
+                : skipped ? '#f59e0b'
+                : '#6b7280';
+              const statusLabel = skipped ? 'local only'
+                : conn.status === 'connected' ? `${conn.sessionCount ?? 0} sessions`
+                : conn.status === 'connecting' ? 'connecting...'
+                : conn.status === 'error' ? 'error'
+                : 'offline';
+              return (
+                <Pressable
+                  key={conn.id}
+                  onPress={() => {
+                    if (skipped || conn.status === 'disconnected' || conn.status === 'error') {
+                      setShowCustomize(true);
+                    }
+                  }}
+                  style={[styles.connectionChip, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <View style={[styles.connectionChipDot, { backgroundColor: PROVIDER_META[conn.provider].color }]} />
+                  <View style={[styles.connectionChipStatus, { backgroundColor: statusColor }]} />
+                  <Text style={styles.connectionChipName} numberOfLines={1}>{conn.name}</Text>
+                  <Text style={[styles.connectionChipLabel, { color: statusColor }]}>{statusLabel}</Text>
+                  {skipped && <Text style={styles.connectionChipLocal}>🏠</Text>}
+                </Pressable>
+              );
+            })}
+            <Pressable
+              onPress={() => setShowCustomize(true)}
+              style={[styles.connectionAddChip, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={styles.connectionAddChipText}>+</Text>
+            </Pressable>
+          </ScrollView>
+        </View>
+      )}
+
       {/* Main Content - Switch between Office, Cost, Tags, Metrics, and Farm views */}
       {viewMode === 'cost' ? (
         <CostDashboard
@@ -1288,6 +1334,29 @@ const styles = StyleSheet.create({
   floorAddBtnText: {
     fontSize: 9, color: '#22c55e', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1,
   },
+
+  // Connections bar
+  connectionsBar: {
+    paddingHorizontal: 12, paddingVertical: 6,
+    borderBottomWidth: 1, borderBottomColor: '#1a1a2e', backgroundColor: '#08080d',
+  },
+  connectionsBarInner: { gap: 8, flexDirection: 'row', alignItems: 'center' },
+  connectionChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: 8, borderWidth: 1, borderColor: '#1a1a2e', backgroundColor: '#0d0d14',
+  },
+  connectionChipDot: { width: 6, height: 6, borderRadius: 3 },
+  connectionChipStatus: { width: 5, height: 5, borderRadius: 3 },
+  connectionChipName: { fontSize: 11, color: '#ccc', fontFamily: 'monospace', fontWeight: '600', maxWidth: 120 },
+  connectionChipLabel: { fontSize: 9, fontFamily: 'monospace', fontWeight: '600' },
+  connectionChipLocal: { fontSize: 10, marginLeft: 2 },
+  connectionAddChip: {
+    width: 28, height: 28, borderRadius: 14, borderWidth: 1,
+    borderColor: '#22c55e40', backgroundColor: '#22c55e10',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  connectionAddChipText: { fontSize: 14, color: '#22c55e', fontWeight: '700' },
 
   editToolbar: {
     paddingHorizontal: 12, paddingVertical: 8,
