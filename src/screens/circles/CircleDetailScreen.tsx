@@ -22,6 +22,7 @@ import OfficeTab, { AgentStats } from './tabs/OfficeTab';
 import WalletTab from './tabs/WalletTab';
 import ProfileTab from './tabs/ProfileTab';
 import { Circle } from '../../types';
+import ErrorBoundary from '../../components/ErrorBoundary';
 
 const TAB_META: { key: string; label: string; icon: string }[] = [
   { key: 'CHAT', label: 'Chat', icon: '💬' },
@@ -190,31 +191,49 @@ export default function CircleDetailScreen({ route, navigation }: any) {
 
       {/* Content — keep tabs mounted so state persists */}
       <View style={[styles.tabContent, activeTab !== 'CHAT' && styles.hiddenTab]}>
-        <ChatTab circleId={circleId} accentColor={accentColor} />
+        <ErrorBoundary>
+          <ChatTab circleId={circleId} accentColor={accentColor} />
+        </ErrorBoundary>
       </View>
       <View style={[styles.tabContent, activeTab !== 'OFFICE' && styles.hiddenTab]}>
-        <OfficeTab circleId={circleId} accentColor={accentColor} onAgentStats={setAgentStats} />
+        <ErrorBoundary>
+          <OfficeTab circleId={circleId} accentColor={accentColor} onAgentStats={setAgentStats} />
+        </ErrorBoundary>
       </View>
       <View style={[styles.tabContent, activeTab !== 'FEED' && styles.hiddenTab]}>
-        <FeedTab circleId={circleId} />
+        <ErrorBoundary>
+          <FeedTab circleId={circleId} />
+        </ErrorBoundary>
       </View>
       <View style={[styles.tabContent, activeTab !== 'CHALLENGES' && styles.hiddenTab]}>
-        <ChallengesTab circleId={circleId} />
+        <ErrorBoundary>
+          <ChallengesTab circleId={circleId} />
+        </ErrorBoundary>
       </View>
       <View style={[styles.tabContent, activeTab !== 'MEMBERS' && styles.hiddenTab]}>
-        <MembersTab circleId={circleId} />
+        <ErrorBoundary>
+          <MembersTab circleId={circleId} />
+        </ErrorBoundary>
       </View>
       <View style={[styles.tabContent, activeTab !== 'DIGEST' && styles.hiddenTab]}>
-        <DigestTab circleId={circleId} />
+        <ErrorBoundary>
+          <DigestTab circleId={circleId} />
+        </ErrorBoundary>
       </View>
       <View style={[styles.tabContent, activeTab !== 'DISCORD' && styles.hiddenTab]}>
-        <DiscordTab circleId={circleId} />
+        <ErrorBoundary>
+          <DiscordTab circleId={circleId} />
+        </ErrorBoundary>
       </View>
       <View style={[styles.tabContent, activeTab !== 'WALLET' && styles.hiddenTab]}>
-        <WalletTab circleId={circleId} />
+        <ErrorBoundary>
+          <WalletTab circleId={circleId} />
+        </ErrorBoundary>
       </View>
       <View style={[styles.tabContent, activeTab !== 'PROFILE' && styles.hiddenTab]}>
-        <ProfileTab circleId={circleId} navigation={navigation} />
+        <ErrorBoundary>
+          <ProfileTab circleId={circleId} navigation={navigation} />
+        </ErrorBoundary>
       </View>
     </View>
   );

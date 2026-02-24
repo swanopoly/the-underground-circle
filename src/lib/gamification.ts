@@ -56,54 +56,75 @@ export async function awardXP(
   eventType: string,
   metadata: Record<string, any> = {}
 ): Promise<{ total_xp: number; level: number } | null> {
-  const { data, error } = await supabase.rpc('award_xp', {
-    p_user_id: userId,
-    p_amount: amount,
-    p_event_type: eventType,
-    p_metadata: metadata,
-  });
-  if (error) {
-    console.error('awardXP error:', error);
+  try {
+    const { data, error } = await supabase.rpc('award_xp', {
+      p_user_id: userId,
+      p_amount: amount,
+      p_event_type: eventType,
+      p_metadata: metadata,
+    });
+    if (error) {
+      console.error('awardXP error:', error);
+      return null;
+    }
+    return data as { total_xp: number; level: number };
+  } catch (error) {
+    console.error('awardXP exception:', error);
     return null;
   }
-  return data as { total_xp: number; level: number };
 }
 
 export async function getUserXP(userId: string): Promise<UserXP | null> {
-  const { data, error } = await supabase
-    .from('user_xp')
-    .select('*')
-    .eq('user_id', userId)
-    .single();
-  if (error) return null;
-  return data as UserXP;
+  try {
+    const { data, error } = await supabase
+      .from('user_xp')
+      .select('*')
+      .eq('user_id', userId)
+      .single();
+    if (error) return null;
+    return data as UserXP;
+  } catch (error) {
+    console.error('getUserXP exception:', error);
+    return null;
+  }
 }
 
 export async function getUserAchievements(userId: string): Promise<UserAchievement[]> {
-  const { data, error } = await supabase
-    .from('user_achievements')
-    .select('*, achievement:achievements(*)')
-    .eq('user_id', userId)
-    .limit(50);
-  if (error) return [];
-  return (data || []) as UserAchievement[];
+  try {
+    const { data, error } = await supabase
+      .from('user_achievements')
+      .select('*, achievement:achievements(*)')
+      .eq('user_id', userId)
+      .limit(50);
+    if (error) return [];
+    return (data || []) as UserAchievement[];
+  } catch (error) {
+    console.error('getUserAchievements exception:', error);
+    return [];
+  }
 }
 
 export async function getAllAchievements(): Promise<Achievement[]> {
-  const { data, error } = await supabase
-    .from('achievements')
-    .select('*')
-    .limit(50);
-  if (error) return [];
-  return (data || []) as Achievement[];
+  try {
+    const { data, error } = await supabase
+      .from('achievements')
+      .select('*')
+      .limit(50);
+    if (error) return [];
+    return (data || []) as Achievement[];
+  } catch (error) {
+    console.error('getAllAchievements exception:', error);
+    return [];
+  }
 }
 
 export async function checkAndUnlockAchievements(userId: string): Promise<UserAchievement[]> {
-  const [allAchievements, userAchievements, userXP] = await Promise.all([
-    getAllAchievements(),
-    getUserAchievements(userId),
-    getUserXP(userId),
-  ]);
+  try {
+    const [allAchievements, userAchievements, userXP] = await Promise.all([
+      getAllAchievements(),
+      getUserAchievements(userId),
+      getUserXP(userId),
+    ]);
 
   const unlockedIds = new Set(userAchievements.map((ua) => ua.achievement_id));
   const newlyUnlocked: UserAchievement[] = [];
@@ -204,6 +225,10 @@ export async function checkAndUnlockAchievements(userId: string): Promise<UserAc
   }
 
   return newlyUnlocked;
+  } catch (error) {
+    console.error('checkAndUnlockAchievements exception:', error);
+    return [];
+  }
 }
 
 export async function vote(
@@ -313,7 +338,8 @@ export async function getLeaderboard(
   circleId?: string,
   limit: number = 20
 ): Promise<{ user_id: string; total_xp: number; level: number; title: string; username: string; display_name: string }[]> {
-  if (circleId) {
+  try {
+    if (circleId) {
     // Get members of circle first
     const { data: members } = await supabase
       .from('circle_members')
@@ -372,15 +398,24 @@ export async function getLeaderboard(
     username: profileMap.get(d.user_id)?.username || '',
     display_name: profileMap.get(d.user_id)?.display_name || '',
   }));
+  } catch (error) {
+    console.error('getLeaderboard exception:', error);
+    return [];
+  }
 }
 
 export async function getRecentXPEvents(userId: string, limit: number = 10): Promise<XPEvent[]> {
-  const { data, error } = await supabase
-    .from('xp_events')
-    .select('*')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false })
-    .limit(limit);
-  if (error) return [];
-  return (data || []) as XPEvent[];
+  try {
+    const { data, error } = await supabase
+      .from('xp_events')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) return [];
+    return (data || []) as XPEvent[];
+  } catch (error) {
+    console.error('getRecentXPEvents exception:', error);
+    return [];
+  }
 }

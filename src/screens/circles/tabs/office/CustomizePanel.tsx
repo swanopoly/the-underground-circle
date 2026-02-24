@@ -509,6 +509,12 @@ export default function CustomizePanel({
                     secureTextEntry={!showToken}
                     autoCapitalize="none"
                   />
+                  
+                  <View style={styles.securityWarning}>
+                    <Text style={styles.securityWarningText}>
+                      ⚠️ Tokens are stored locally in your browser. Keep your device secure.
+                    </Text>
+                  </View>
 
                   <Pressable
                     onPress={handleSaveConnection}
@@ -918,6 +924,22 @@ const styles = StyleSheet.create({
   },
   connectInfoTitle: { fontSize: 10, color: '#888', fontFamily: 'monospace', fontWeight: '700', marginBottom: 4 },
   connectInfoText: { fontSize: 10, color: '#555', fontFamily: 'monospace' },
+  
+  // Security warning
+  securityWarning: {
+    backgroundColor: '#2a1a1510',
+    borderRadius: 6,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#f59e0b30',
+    marginTop: 8,
+  },
+  securityWarningText: {
+    fontSize: 11,
+    color: '#f59e0b',
+    fontFamily: 'monospace',
+    textAlign: 'center',
+  },
 
   // Budget
   budgetToggle: {

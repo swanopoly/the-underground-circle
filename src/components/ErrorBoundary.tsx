@@ -10,12 +10,13 @@ interface State {
   hasError: boolean;
   error?: Error;
   errorInfo?: ErrorInfo;
+  showDetails: boolean;
 }
 
 export default class ErrorBoundary extends Component<Props, State> {
   constructor(props: Props) {
     super(props);
-    this.state = { hasError: false };
+    this.state = { hasError: false, showDetails: false };
   }
 
   static getDerivedStateFromError(error: Error): State {
@@ -31,7 +32,11 @@ export default class ErrorBoundary extends Component<Props, State> {
   }
 
   handleReset = () => {
-    this.setState({ hasError: false, error: undefined, errorInfo: undefined });
+    this.setState({ hasError: false, error: undefined, errorInfo: undefined, showDetails: false });
+  };
+
+  toggleDetails = () => {
+    this.setState({ showDetails: !this.state.showDetails });
   };
 
   render() {
@@ -50,12 +55,32 @@ export default class ErrorBoundary extends Component<Props, State> {
             <Text style={styles.subtitle}>
               An unexpected error occurred. The app has been recovered.
             </Text>
-            {__DEV__ && this.state.error && (
-              <View style={styles.debugContainer}>
-                <Text style={styles.debugTitle}>Debug Info:</Text>
-                <Text style={styles.debugText} numberOfLines={5}>
-                  {this.state.error.toString()}
+            {this.state.error && (
+              <TouchableOpacity 
+                style={styles.detailsToggle} 
+                onPress={this.toggleDetails}
+              >
+                <Text style={styles.detailsToggleText}>
+                  {this.state.showDetails ? '▼' : '▶'} Error Details
                 </Text>
+              </TouchableOpacity>
+            )}
+            {this.state.showDetails && this.state.error && (
+              <View style={styles.debugContainer}>
+                <Text style={styles.debugTitle}>Error Stack:</Text>
+                <Text style={styles.debugText}>
+                  {this.state.error.toString()}
+                  {'\n\n'}
+                  {this.state.error.stack}
+                </Text>
+                {this.state.errorInfo && (
+                  <>
+                    <Text style={styles.debugTitle}>Component Stack:</Text>
+                    <Text style={styles.debugText}>
+                      {this.state.errorInfo.componentStack}
+                    </Text>
+                  </>
+                )}
               </View>
             )}
             <TouchableOpacity style={styles.button} onPress={this.handleReset}>
@@ -114,23 +139,43 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     marginBottom: 24,
   },
+  detailsToggle: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginBottom: 16,
+    backgroundColor: '#1a1a1a',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  detailsToggleText: {
+    color: '#888',
+    fontSize: 12,
+    fontWeight: '600',
+    fontFamily: 'monospace',
+    textAlign: 'center',
+  },
   debugContainer: {
     backgroundColor: '#0a0a0a',
     borderRadius: 8,
     padding: 12,
     width: '100%',
     marginBottom: 24,
+    maxHeight: 200,
   },
   debugTitle: {
     color: '#ff6666',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '700',
-    marginBottom: 8,
+    marginBottom: 6,
+    marginTop: 8,
+    fontFamily: 'monospace',
   },
   debugText: {
     color: '#999',
-    fontSize: 11,
+    fontSize: 10,
     fontFamily: 'monospace',
+    lineHeight: 14,
   },
   button: {
     backgroundColor: '#fff',

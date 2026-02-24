@@ -882,14 +882,41 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               <View style={styles.mobileEmpty}>
                 <Text style={styles.mobileEmptyIcon}>🔗</Text>
                 <Text style={styles.mobileEmptyTitle}>No agents connected</Text>
-                <Text style={styles.mobileEmptyText}>Tap ⚙️ → Connections to add your agent endpoints</Text>
-                {typeof window !== 'undefined' && !window.location.hostname.includes('localhost') && (
-                  <View style={{ marginTop: 12, padding: 12, backgroundColor: '#1a1a2e', borderRadius: 8, borderWidth: 1, borderColor: '#333' }}>
-                    <Text style={{ color: '#888', fontSize: 11, textAlign: 'center' }}>
-                      💡 The Office dashboard connects to local AI agents. Run OpenClaw locally or use a remote endpoint.
-                    </Text>
-                  </View>
-                )}
+                {(() => {
+                  const isProduction = typeof window !== 'undefined' && !window.location.hostname.includes('localhost');
+                  const hasLocalhost = connections.some(c => c.endpoint.includes('localhost') || c.endpoint.includes('127.0.0.1'));
+                  const hasOnlyLocalhost = connections.length > 0 && connections.every(c => c.endpoint.includes('localhost') || c.endpoint.includes('127.0.0.1'));
+                  
+                  if (isProduction && hasOnlyLocalhost) {
+                    // User has connections, but they're all localhost (skipped on production)
+                    return (
+                      <>
+                        <Text style={styles.mobileEmptyText}>Your saved connections use localhost and can't be reached from this domain.</Text>
+                        <View style={{ marginTop: 12, padding: 12, backgroundColor: '#1a1a2e', borderRadius: 8, borderWidth: 1, borderColor: '#333' }}>
+                          <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '700', marginBottom: 6 }}>💡 The Office connects to LOCAL AI agents</Text>
+                          <Text style={{ color: '#888', fontSize: 11, marginBottom: 4 }}>Your connections work when running on localhost, but production can't access them due to browser security (CSP).</Text>
+                        </View>
+                      </>
+                    );
+                  } else if (isProduction) {
+                    // Production, no connections or some non-localhost
+                    return (
+                      <>
+                        <Text style={styles.mobileEmptyText}>The Office dashboard connects to your local AI agents</Text>
+                        <View style={{ marginTop: 12, padding: 12, backgroundColor: '#1a1a2e', borderRadius: 8, borderWidth: 1, borderColor: '#333' }}>
+                          <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '700', marginBottom: 8 }}>📋 Setup Guide</Text>
+                          <Text style={{ color: '#888', fontSize: 11, marginBottom: 4 }}>1️⃣ Install OpenClaw on your computer</Text>
+                          <Text style={{ color: '#888', fontSize: 11, marginBottom: 4 }}>2️⃣ Run it locally (it starts a server)</Text>
+                          <Text style={{ color: '#888', fontSize: 11, marginBottom: 4 }}>3️⃣ Tap ⚙️ → Connections to add endpoint</Text>
+                          <Text style={{ color: '#666', fontSize: 10, marginTop: 6, fontStyle: 'italic' }}>Or use a remote OpenClaw/agent endpoint</Text>
+                        </View>
+                      </>
+                    );
+                  } else {
+                    // Localhost
+                    return <Text style={styles.mobileEmptyText}>Tap ⚙️ → Connections to add your agent endpoints</Text>;
+                  }
+                })()}
                 <Pressable
                   onPress={() => setShowCustomize(true)}
                   style={[styles.mobileEmptyBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
@@ -955,15 +982,48 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                       <View style={styles.emptyOverlay}>
                         <Text style={styles.emptyIcon}>🔗</Text>
                         <Text style={styles.emptyTitle}>No agents connected</Text>
-                        <Text style={styles.emptyText}>Tap ⚙️ → Connections to add your agent endpoints</Text>
-                        <Text style={styles.emptySub}>Supports OpenClaw, Claude Code, and generic APIs</Text>
-                        {typeof window !== 'undefined' && !window.location.hostname.includes('localhost') && (
-                          <View style={{ marginTop: 12, padding: 12, backgroundColor: '#1a1a2e', borderRadius: 8, borderWidth: 1, borderColor: '#333' }}>
-                            <Text style={{ color: '#888', fontSize: 11, textAlign: 'center' }}>
-                              💡 The Office dashboard connects to local AI agents. Run OpenClaw locally or use a remote endpoint.
-                            </Text>
-                          </View>
-                        )}
+                        {(() => {
+                          const isProduction = typeof window !== 'undefined' && !window.location.hostname.includes('localhost');
+                          const hasLocalhost = connections.some(c => c.endpoint.includes('localhost') || c.endpoint.includes('127.0.0.1'));
+                          const hasOnlyLocalhost = connections.length > 0 && connections.every(c => c.endpoint.includes('localhost') || c.endpoint.includes('127.0.0.1'));
+                          
+                          if (isProduction && hasOnlyLocalhost) {
+                            // User has connections, but they're all localhost (skipped on production)
+                            return (
+                              <>
+                                <Text style={styles.emptyText}>Your saved connections use localhost and can't be reached from this domain.</Text>
+                                <View style={{ marginTop: 16, padding: 16, backgroundColor: '#1a1a2e', borderRadius: 8, borderWidth: 1, borderColor: '#333', maxWidth: 500 }}>
+                                  <Text style={{ color: '#22c55e', fontSize: 13, fontWeight: '700', marginBottom: 8, textAlign: 'center' }}>💡 The Office connects to LOCAL AI agents</Text>
+                                  <Text style={{ color: '#888', fontSize: 12, textAlign: 'center' }}>
+                                    Your connections work when running on localhost, but production can't access them due to browser security (CSP).
+                                  </Text>
+                                </View>
+                              </>
+                            );
+                          } else if (isProduction) {
+                            // Production, no connections or some non-localhost
+                            return (
+                              <>
+                                <Text style={styles.emptyText}>The Office dashboard connects to your local AI agents</Text>
+                                <View style={{ marginTop: 16, padding: 16, backgroundColor: '#1a1a2e', borderRadius: 8, borderWidth: 1, borderColor: '#333', maxWidth: 500 }}>
+                                  <Text style={{ color: '#22c55e', fontSize: 13, fontWeight: '700', marginBottom: 12, textAlign: 'center' }}>📋 Setup Guide</Text>
+                                  <Text style={{ color: '#888', fontSize: 12, marginBottom: 6 }}>1️⃣ Install OpenClaw on your computer</Text>
+                                  <Text style={{ color: '#888', fontSize: 12, marginBottom: 6 }}>2️⃣ Run it locally (it starts a server)</Text>
+                                  <Text style={{ color: '#888', fontSize: 12, marginBottom: 6 }}>3️⃣ Click ⚙️ → Connections to add endpoint</Text>
+                                  <Text style={{ color: '#666', fontSize: 11, marginTop: 8, textAlign: 'center', fontStyle: 'italic' }}>Or use a remote OpenClaw/agent endpoint</Text>
+                                </View>
+                              </>
+                            );
+                          } else {
+                            // Localhost
+                            return (
+                              <>
+                                <Text style={styles.emptyText}>Click ⚙️ → Connections to add your agent endpoints</Text>
+                                <Text style={styles.emptySub}>Supports OpenClaw, Claude Code, and generic APIs</Text>
+                              </>
+                            );
+                          }
+                        })()}
                       </View>
                     )}
                     {agents.map((agent, i) => {
