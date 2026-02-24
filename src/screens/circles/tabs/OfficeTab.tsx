@@ -67,6 +67,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [whiteboardNotes, setWhiteboardNotes] = useState<string[]>([]);
   const [chatMinimized, setChatMinimized] = useState(false);
   const [chatVisible, setChatVisible] = useState(false);
+  const [chatFullscreen, setChatFullscreen] = useState(false);
   const [statusHistory, setStatusHistory] = useState<Array<OfficeAgent[]>>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
@@ -859,13 +860,35 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             {chatVisible ? '▼ HIDE TERMINAL' : '▲ TERMINAL'}
           </Text>
         </Pressable>
-        {chatVisible && (
+        {chatVisible && !chatFullscreen && (
           <View style={styles.chatPane}>
             <OfficeChat
               circleId={circleId}
               onCommand={handleCommand}
               minimized={chatMinimized}
               onToggle={() => setChatMinimized(!chatMinimized)}
+              fullscreen={false}
+              onFullscreenToggle={() => setChatFullscreen(true)}
+              agents={allAgents}
+              connections={connections}
+              getConnectionConfig={getConnectionConfig}
+              telegramConfig={telegramConnected ? telegramConfig : null}
+              telegramConnected={telegramConnected}
+              telegramMessages={telegramMessages}
+            />
+          </View>
+        )}
+        
+        {/* Fullscreen terminal overlay */}
+        {chatFullscreen && (
+          <View style={styles.terminalFullscreen}>
+            <OfficeChat
+              circleId={circleId}
+              onCommand={handleCommand}
+              minimized={false}
+              onToggle={() => {}}
+              fullscreen={true}
+              onFullscreenToggle={() => setChatFullscreen(false)}
               agents={allAgents}
               connections={connections}
               getConnectionConfig={getConnectionConfig}
@@ -1149,5 +1172,14 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
     lineHeight: 18,
     paddingRight: 32,
+  },
+  terminalFullscreen: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 2000,
+    backgroundColor: '#000',
   },
 });

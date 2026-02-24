@@ -43,6 +43,8 @@ interface Props {
   onCommand?: (cmd: OfficeCommand) => void;
   minimized?: boolean;
   onToggle?: () => void;
+  fullscreen?: boolean;
+  onFullscreenToggle?: () => void;
   agents?: OfficeAgent[];
   // Multi-connection support
   connections?: AgentConnection[];
@@ -217,6 +219,7 @@ async function processLocalCommand(text: string, agents: OfficeAgent[], connecti
 
 export default function OfficeChat({
   circleId, onCommand, minimized, onToggle,
+  fullscreen = false, onFullscreenToggle,
   agents = [],
   connections, getConnectionConfig,
   telegramConfig, telegramConnected, telegramMessages,
@@ -660,8 +663,8 @@ export default function OfficeChat({
   const connectedCount = connections?.filter(c => c.status === 'connected').length || 0;
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
+    <View style={[styles.container, fullscreen && styles.containerFullscreen]}>
+      <View style={[styles.header, fullscreen && styles.headerFullscreen]}>
         <Text style={styles.headerIcon}>{'💬'}</Text>
         <Text style={styles.headerTitle}>OFFICE TERMINAL</Text>
         {connectedCount > 0 && (
@@ -670,9 +673,16 @@ export default function OfficeChat({
           </View>
         )}
         {telegramConnected && <Text style={styles.connIcon}>✈️</Text>}
-        <Pressable onPress={onToggle} style={[styles.minimizeBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-          <Text style={styles.minimizeBtnText}>—</Text>
-        </Pressable>
+        {onFullscreenToggle && (
+          <Pressable onPress={onFullscreenToggle} style={[styles.fullscreenBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+            <Text style={styles.fullscreenBtnText}>{fullscreen ? '⛶' : '⛶'}</Text>
+          </Pressable>
+        )}
+        {!fullscreen && (
+          <Pressable onPress={onToggle} style={[styles.minimizeBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+            <Text style={styles.minimizeBtnText}>—</Text>
+          </Pressable>
+        )}
       </View>
 
       <View style={{ flex: 1, position: 'relative' }}>
@@ -750,6 +760,23 @@ const styles = StyleSheet.create({
     backgroundColor: '#0a0a12', borderWidth: 1, borderColor: '#1a1a2e',
     borderRadius: 12, overflow: 'hidden', flex: 1, minHeight: 200,
   },
+  containerFullscreen: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 0,
+    borderWidth: 0,
+    backgroundColor: '#000',
+    zIndex: 3000,
+  },
+  headerFullscreen: {
+    backgroundColor: '#0d0d14',
+    borderBottomWidth: 2,
+    borderBottomColor: '#6366f1',
+    paddingVertical: 12,
+  },
   minimized: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: '#0a0a12', borderWidth: 1, borderColor: '#1a1a2e',
@@ -778,6 +805,12 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   minimizeBtnText: { color: '#666', fontSize: 14, fontWeight: '800' },
+  fullscreenBtn: {
+    width: 24, height: 24, borderRadius: 6, backgroundColor: '#6366f115',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: '#6366f130',
+  },
+  fullscreenBtnText: { color: '#6366f1', fontSize: 12, fontWeight: '800' },
   messageList: { flex: 1 },
   messageContent: { padding: 10, gap: 8 },
   msgRow: { gap: 2 },

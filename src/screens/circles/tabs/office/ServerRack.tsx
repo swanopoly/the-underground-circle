@@ -69,23 +69,41 @@ export default function ServerRack({ agents = [] }: { agents?: OfficeAgent[] }) 
         <ServerUnit label="DB" leds={['#3b82f6', '#22c55e', '#eab308']} delay={800} />
         <ServerUnit label="CDN" leds={['#22c55e', '#3b82f6', '#22c55e']} delay={1200} />
 
-        {/* Stats panel */}
-        <View style={styles.statsPanel}>
-          <View style={styles.statRow}>
-            <Text style={styles.statLabel}>NODES</Text>
-            <Text style={[styles.statValue, { color: '#22c55e' }]}>{activeCount} UP</Text>
-          </View>
-          <View style={styles.statRow}>
-            <Text style={styles.statLabel}>COST</Text>
-            <Text style={[styles.statValue, { color: '#f59e0b' }]}>${totalCost.toFixed(2)}</Text>
-          </View>
-          <View style={styles.statRow}>
-            <Text style={styles.statLabel}>TOKENS</Text>
-            <Text style={[styles.statValue, { color: '#6366f1' }]}>{(totalTokens / 1000).toFixed(0)}K</Text>
-          </View>
-          <View style={styles.statRow}>
-            <Text style={styles.statLabel}>REGION</Text>
-            <Text style={[styles.statValue, { color: '#3b82f6' }]}>US-E1</Text>
+        {/* Virtual Machine Display Screen */}
+        <View style={styles.vmScreen}>
+          <View style={styles.screenBezel}>
+            <View style={styles.screenDisplay}>
+              <View style={styles.screenHeader}>
+                <Text style={styles.screenTitle}>◆ VIRTUAL MACHINE</Text>
+                <BlinkingLED color="#22c55e" delay={100} size={2} />
+              </View>
+              <View style={styles.terminalLines}>
+                <Text style={styles.termLine}>
+                  <Text style={styles.termPrompt}>$</Text>
+                  <Text style={styles.termCmd}> nodes -status</Text>
+                </Text>
+                <Text style={styles.termOutput}>→ {activeCount}/{agents.length} online</Text>
+                <Text style={styles.termLine}>
+                  <Text style={styles.termPrompt}>$</Text>
+                  <Text style={styles.termCmd}> cost -today</Text>
+                </Text>
+                <Text style={styles.termOutput}>→ ${totalCost.toFixed(3)}</Text>
+                <Text style={styles.termLine}>
+                  <Text style={styles.termPrompt}>$</Text>
+                  <Text style={styles.termCmd}> tokens -count</Text>
+                </Text>
+                <Text style={styles.termOutput}>→ {(totalTokens / 1000).toFixed(1)}K</Text>
+                <Text style={styles.termLine}>
+                  <Text style={styles.termPrompt}>$</Text>
+                  <Text style={styles.termCmd}> region</Text>
+                </Text>
+                <Text style={styles.termOutput}>→ aws-us-e1</Text>
+                <Text style={[styles.termLine, { marginTop: 2 }]}>
+                  <Text style={styles.termPrompt}>$</Text>
+                  <Text style={styles.termCursor}>_</Text>
+                </Text>
+              </View>
+            </View>
           </View>
         </View>
 
@@ -188,29 +206,67 @@ const styles = StyleSheet.create({
     borderWidth: 0.5,
     borderColor: '#1a1a2e',
   },
-  // Stats panel
-  statsPanel: {
-    backgroundColor: '#06060e',
+  // Virtual Machine Screen
+  vmScreen: {
+    backgroundColor: '#000',
     borderWidth: 1,
     borderColor: '#1a1a2e',
     borderRadius: 2,
-    padding: 4,
-    gap: 2,
   },
-  statRow: {
+  screenBezel: {
+    padding: 2,
+    backgroundColor: '#0a0a12',
+  },
+  screenDisplay: {
+    backgroundColor: '#000',
+    borderWidth: 1,
+    borderColor: '#111',
+    borderRadius: 1,
+    padding: 3,
+    minHeight: 60,
+  },
+  screenHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    paddingBottom: 2,
+    borderBottomWidth: 0.5,
+    borderBottomColor: '#22c55e40',
+    marginBottom: 2,
   },
-  statLabel: {
+  screenTitle: {
     fontSize: 5,
-    color: '#444',
+    color: '#22c55e',
     fontFamily: 'monospace',
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  terminalLines: {
+    gap: 1,
+  },
+  termLine: {
+    fontSize: 4,
+    fontFamily: 'monospace',
+    color: '#22c55e',
+    lineHeight: 6,
+  },
+  termPrompt: {
+    color: '#6366f1',
+    fontWeight: '800',
+  },
+  termCmd: {
+    color: '#888',
     fontWeight: '600',
   },
-  statValue: {
-    fontSize: 6,
+  termOutput: {
+    fontSize: 4,
     fontFamily: 'monospace',
+    color: '#22c55e',
+    lineHeight: 6,
+    paddingLeft: 4,
+  },
+  termCursor: {
+    color: '#22c55e',
     fontWeight: '800',
   },
   // Power bar
