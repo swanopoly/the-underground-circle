@@ -20,26 +20,30 @@ class ServiceManager {
   start() {
     if (this.stopping) return;
 
-    console.log(`\n🚀 Starting ${this.name}...`);
+    const now = Date.now();
+    const timeStr = new Date(now).toLocaleTimeString();
+    console.log(`\n[${timeStr}] 🚀 Starting ${this.name}...`);
     
     this.process = spawn(this.command, this.args, {
-      stdio: 'inherit',
+      stdio: ['ignore', 'inherit', 'inherit'], // stdin ignored, stdout/stderr inherited
       shell: true,
       cwd: __dirname,
     });
 
     this.process.on('exit', (code, signal) => {
+      const exitTime = new Date().toLocaleTimeString();
+      
       if (this.stopping) {
-        console.log(`✓ ${this.name} stopped gracefully`);
+        console.log(`[${exitTime}] ✓ ${this.name} stopped gracefully`);
         return;
       }
 
-      console.log(`\n⚠️  ${this.name} exited (code: ${code}, signal: ${signal})`);
+      console.log(`\n[${exitTime}] ⚠️  ${this.name} exited (code: ${code}, signal: ${signal})`);
 
       // Check restart rate
-      const now = Date.now();
-      this.restarts = this.restarts.filter(t => now - t < RESTART_WINDOW);
-      this.restarts.push(now);
+      const restartNow = Date.now();
+      this.restarts = this.restarts.filter(t => restartNow - t < RESTART_WINDOW);
+      this.restarts.push(restartNow);
 
       if (this.restarts.length > MAX_RESTARTS) {
         console.error(`\n❌ ${this.name} crashed ${MAX_RESTARTS} times in ${RESTART_WINDOW / 1000}s`);
@@ -48,16 +52,24 @@ class ServiceManager {
       }
 
       console.log(`   Restarting in ${RESTART_DELAY / 1000}s... (attempt ${this.restarts.length}/${MAX_RESTARTS})`);
-      setTimeout(() => this.start(), RESTART_DELAY);
+      this.restartTimer = setTimeout(() => {
+        this.restartTimer = null;
+        this.start();
+      }, RESTART_DELAY);
     });
 
     this.process.on('error', (err) => {
-      console.error(`\n❌ ${this.name} error:`, err.message);
+      const errTime = new Date().toLocaleTimeString();
+      console.error(`\n[${errTime}] ❌ ${this.name} error:`, err.message);
     });
   }
 
   stop() {
     this.stopping = true;
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
     if (this.process) {
       console.log(`\n⏹  Stopping ${this.name}...`);
       this.process.kill('SIGTERM');
