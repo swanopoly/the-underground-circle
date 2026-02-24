@@ -307,8 +307,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // Apply custom names
   const allAgents = rawAgents.map(a => agentNames[a.id] ? { ...a, name: agentNames[a.id] } : a);
 
-  // Filter agents for current floor only
-  const agents = allAgents.filter(a => currentFloor.agentIds.includes(a.id));
+  // Filter agents for current floor only (with safety check)
+  const agents = allAgents.filter(a => currentFloor?.agentIds?.includes(a.id));
 
   // Aggregate all sessions for cost dashboard
   const allSessions: OpenClawSession[] = [];
@@ -478,9 +478,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     storage.setItem(STORAGE_KEY_CURRENT_FLOOR, floorId).catch(() => {});
   }, []);
 
-  // Get current floor data
-  const currentFloor = floors.find(f => f.id === currentFloorId) || floors[0];
-  const currentTheme = OFFICE_THEMES[currentFloor.themeId] || OFFICE_THEMES.underground;
+  // Get current floor data with safety checks
+  const currentFloor = floors.find(f => f.id === currentFloorId) || floors[0] || DEFAULT_FLOORS[0];
+  const currentTheme = OFFICE_THEMES[currentFloor?.themeId] || OFFICE_THEMES.underground;
 
   return (
     <View style={styles.container}>
@@ -553,22 +553,30 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       {viewMode === 'office' && (
         <View style={styles.floorBar}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.floorList}>
-            {floors.sort((a, b) => a.order - b.order).map((floor) => (
-              <Pressable
-                key={floor.id}
-                onPress={() => handleSwitchFloor(floor.id)}
-                style={[
-                  styles.floorChip,
-                  floor.id === currentFloorId && styles.floorChipActive,
-                  Platform.OS === 'web' && { cursor: 'pointer' } as any
-                ]}
-              >
-                <Text style={[styles.floorChipText, floor.id === currentFloorId && styles.floorChipTextActive]}>
-                  {floor.name}
-                </Text>
-                <View style={[styles.floorThemeDot, { backgroundColor: OFFICE_THEMES[floor.themeId]?.accentGlow || '#6366f1' }]} />
-              </Pressable>
-            ))}
+            {floors.sort((a, b) => a.order - b.order).map((floor) => {
+              const floorAgentCount = allAgents.filter(a => floor.agentIds?.includes(a.id)).length;
+              return (
+                <Pressable
+                  key={floor.id}
+                  onPress={() => handleSwitchFloor(floor.id)}
+                  style={[
+                    styles.floorChip,
+                    floor.id === currentFloorId && styles.floorChipActive,
+                    Platform.OS === 'web' && { cursor: 'pointer' } as any
+                  ]}
+                >
+                  <Text style={[styles.floorChipText, floor.id === currentFloorId && styles.floorChipTextActive]}>
+                    {floor.name}
+                  </Text>
+                  {floorAgentCount > 0 && (
+                    <View style={styles.floorAgentBadge}>
+                      <Text style={styles.floorAgentBadgeText}>{floorAgentCount}</Text>
+                    </View>
+                  )}
+                  <View style={[styles.floorThemeDot, { backgroundColor: OFFICE_THEMES[floor.themeId]?.accentGlow || '#6366f1' }]} />
+                </Pressable>
+              );
+            })}
             <Pressable
               onPress={handleAddFloor}
               style={[styles.floorAddBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
@@ -856,6 +864,21 @@ const styles = StyleSheet.create({
   },
   floorThemeDot: {
     width: 6, height: 6, borderRadius: 3,
+  },
+  floorAgentBadge: {
+    backgroundColor: '#22c55e20',
+    borderRadius: 8,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    minWidth: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  floorAgentBadgeText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#22c55e',
+    fontFamily: 'monospace',
   },
   floorAddBtn: {
     paddingHorizontal: 12, paddingVertical: 6,
