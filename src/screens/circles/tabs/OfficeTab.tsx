@@ -34,6 +34,7 @@ import {
   BudgetConfig, loadBudgetConfig, saveBudgetConfig, calculateBudgetAlerts,
 } from '../../../lib/budgetAlerts';
 import BudgetAlertBanner from '../../../components/BudgetAlertBanner';
+import { calculatePeriodCosts } from '../../../lib/costCalculations';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -531,12 +532,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     setBudgetAlertsDismissed(false); // Re-show alerts when config changes
   }, []);
 
-  // Calculate budget alerts
+  // Calculate budget alerts using real session costs
+  const periodCosts = calculatePeriodCosts(allSessions);
   const budgetAlerts = calculateBudgetAlerts(
     budgetConfig,
-    allAgents.reduce((sum, a) => sum + a.costToday, 0),
-    allAgents.reduce((sum, a) => sum + a.costWeek, 0),
-    allAgents.reduce((sum, a) => sum + (a.costToday * 30), 0) // Rough monthly estimate
+    periodCosts.today,
+    periodCosts.week,
+    periodCosts.month
   );
 
   return (
