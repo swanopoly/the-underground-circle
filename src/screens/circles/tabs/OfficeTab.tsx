@@ -48,6 +48,11 @@ const STORAGE_KEY_FLOORS = '@office_floors';
 const STORAGE_KEY_CURRENT_FLOOR = '@office_current_floor';
 const STORAGE_KEY_APPEARANCES = '@office_appearances';
 const STORAGE_KEY_WHITEBOARD_NOTES = '@office_whiteboard_notes';
+const STORAGE_KEY_TERMINAL_HEIGHT = '@office_terminal_height';
+
+const MIN_TERMINAL_HEIGHT = 150;
+const MAX_TERMINAL_HEIGHT = 600;
+const DEFAULT_TERMINAL_HEIGHT = 300;
 
 export interface AgentStats {
   agentCount: number;
@@ -84,6 +89,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [actionResult, setActionResult] = useState<string>('');
   const [showActionResult, setShowActionResult] = useState(false);
   const [enrichedSessions, setEnrichedSessions] = useState<OpenClawSession[]>([]);
+
+  // ─── Terminal resize state ──────────────────────────────
+  const [terminalHeight, setTerminalHeight] = useState(DEFAULT_TERMINAL_HEIGHT);
+  const [isDraggingResize, setIsDraggingResize] = useState(false);
+  const dragStartY = useRef(0);
+  const dragStartHeight = useRef(0);
 
   // ─── Multi-floor state ──────────────────────────────
   const [floors, setFloors] = useState<OfficeFloor[]>(DEFAULT_FLOORS);
@@ -324,6 +335,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       try {
         const notesRaw = await storage.getItem(STORAGE_KEY_WHITEBOARD_NOTES);
         if (notesRaw) setWhiteboardNotes(JSON.parse(notesRaw));
+      } catch {}
+
+      // Load terminal height
+      try {
+        const heightRaw = await storage.getItem(STORAGE_KEY_TERMINAL_HEIGHT);
+        if (heightRaw) setTerminalHeight(parseInt(heightRaw, 10));
       } catch {}
 
       // Load session tags from both sources and merge
@@ -650,6 +667,50 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     await saveBudgetConfig(config);
     setBudgetAlertsDismissed(false); // Re-show alerts when config changes
   }, []);
+
+  // ─── Terminal resize handlers ──────────────────────────────
+
+  const handleResizeStart = useCallback((e: any) => {
+    e.preventDefault();
+    setIsDraggingResize(true);
+    const clientY = e.clientY || (e.touches && e.touches[0]?.clientY) || 0;
+    dragStartY.current = clientY;
+    dragStartHeight.current = terminalHeight;
+  }, [terminalHeight]);
+
+  const handleResizeMove = useCallback((e: any) => {
+    if (!isDraggingResize) return;
+    const clientY = e.clientY || (e.touches && e.touches[0]?.clientY) || 0;
+    const delta = dragStartY.current - clientY; // Dragging up increases height
+    const newHeight = Math.max(MIN_TERMINAL_HEIGHT, Math.min(MAX_TERMINAL_HEIGHT, dragStartHeight.current + delta));
+    setTerminalHeight(newHeight);
+  }, [isDraggingResize]);
+
+  const handleResizeEnd = useCallback(() => {
+    if (!isDraggingResize) return;
+    setIsDraggingResize(false);
+    // Save height to storage
+    storage.setItem(STORAGE_KEY_TERMINAL_HEIGHT, terminalHeight.toString()).catch(() => {});
+  }, [isDraggingResize, terminalHeight]);
+
+  // Attach global mouse/touch listeners for resize
+  useEffect(() => {
+    if (!isDraggingResize) return;
+    
+    if (Platform.OS === 'web') {
+      window.addEventListener('mousemove', handleResizeMove);
+      window.addEventListener('mouseup', handleResizeEnd);
+      window.addEventListener('touchmove', handleResizeMove);
+      window.addEventListener('touchend', handleResizeEnd);
+      
+      return () => {
+        window.removeEventListener('mousemove', handleResizeMove);
+        window.removeEventListener('mouseup', handleResizeEnd);
+        window.removeEventListener('touchmove', handleResizeMove);
+        window.removeEventListener('touchend', handleResizeEnd);
+      };
+    }
+  }, [isDraggingResize, handleResizeMove, handleResizeEnd]);
 
   // Calculate budget alerts using real session costs
   const periodCosts = calculatePeriodCosts(enrichedSessions);
@@ -1024,7 +1085,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           </Text>
         </Pressable>
         {chatVisible && !chatFullscreen && (
-          <View style={styles.chatPane}>
+          <View style={[styles.chatPane, { height: terminalHeight }]}>
+            {/* Resize handle */}
+            <Pressable
+              onPressIn={handleResizeStart}
+              style={[
+                styles.resizeHandle,
+                isDraggingResize && styles.resizeHandleActive,
+                Platform.OS === 'web' && { cursor: 'ns-resize' } as any
+              ]}
+            >
+              <View style={styles.resizeHandleBar} />
+            </Pressable>
             <OfficeChat
               circleId={circleId}
               onCommand={handleCommand}
@@ -1294,7 +1366,32 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   chatToggleText: { fontSize: 13, color: '#888', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1 },
-  chatPane: { minHeight: 240 },
+  chatPane: { 
+    position: 'relative',
+    minHeight: MIN_TERMINAL_HEIGHT,
+    maxHeight: MAX_TERMINAL_HEIGHT,
+  },
+  resizeHandle: {
+    position: 'absolute' as any,
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 16,
+    zIndex: 100,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'transparent',
+    ...(Platform.OS === 'web' ? { cursor: 'ns-resize' } as any : {}),
+  },
+  resizeHandleActive: {
+    backgroundColor: '#6366f110',
+  },
+  resizeHandleBar: {
+    width: 48,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#333',
+  },
 
   // Action Result Toast
   actionResultToast: {
