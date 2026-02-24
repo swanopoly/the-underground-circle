@@ -15,7 +15,7 @@ import {
   OFFICE_THEMES, AgentAppearance, FurnitureItem, FURNITURE_CATALOG,
   OfficeFloor, DEFAULT_FLOORS, createDefaultFloor,
 } from '../../../lib/officeConfig';
-import { enrichAgentsWithCache, takeSnapshot } from '../../../lib/sessionCache';
+import { enrichAgentsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
 import {
   verifyBot, getChat, TelegramPoller, TelegramMessage,
 } from '../../../lib/telegramService';
@@ -28,6 +28,7 @@ import {
 } from '../../../lib/connectionManager';
 import { storage } from '../../../lib/storage';
 import CostDashboard from '../../../components/CostDashboard';
+import SessionTagsDashboard from '../../../components/SessionTagsDashboard';
 import {
   SessionTag, loadSessionTags, addSessionTag, removeSessionTag,
 } from '../../../lib/sessionTags';
@@ -73,7 +74,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [enrichedAgents, setEnrichedAgents] = useState<OfficeAgent[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
-  const [viewMode, setViewMode] = useState<'office' | 'cost'>('office'); // Toggle between views
+  const [viewMode, setViewMode] = useState<'office' | 'cost' | 'tags'>('office'); // Toggle between views
   const [sessionTags, setSessionTags] = useState<Map<string, SessionTag[]>>(new Map());
   const [budgetConfig, setBudgetConfig] = useState<BudgetConfig>({ enabled: false });
   const [budgetAlertsDismissed, setBudgetAlertsDismissed] = useState(false);
@@ -306,8 +307,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         if (notesRaw) setWhiteboardNotes(JSON.parse(notesRaw));
       } catch {}
 
-      // Load session tags
-      loadSessionTags().then(setSessionTags);
+      // Load session tags from both sources and merge
+      Promise.all([
+        loadSessionTags(),
+        loadCachedTags()
+      ]).then(([primaryTags, cachedTags]) => {
+        // Merge: primary tags take precedence
+        const merged = new Map(cachedTags);
+        primaryTags.forEach((tags, key) => {
+          merged.set(key, tags);
+        });
+        setSessionTags(merged);
+      });
 
       // Load budget config
       loadBudgetConfig().then(setBudgetConfig);
@@ -414,8 +425,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     
     const interval = setInterval(async () => {
       try {
-        await takeSnapshot(enrichedAgents);
-        console.log('💾 Session snapshot saved');
+        await takeSnapshot(enrichedAgents, sessionTags);
+        console.log('💾 Session snapshot saved (including tags)');
       } catch (error) {
         console.error('Failed to save snapshot:', error);
       }
@@ -602,12 +613,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       <View style={styles.titleBar}>
         <View style={styles.titleInner}>
           <Pressable
-            onPress={() => setViewMode(viewMode === 'office' ? 'cost' : 'office')}
-            style={[styles.modeBtn, viewMode === 'cost' && styles.modeBtnActive,
+            onPress={() => {
+              if (viewMode === 'office') setViewMode('cost');
+              else if (viewMode === 'cost') setViewMode('tags');
+              else setViewMode('office');
+            }}
+            style={[styles.modeBtn, viewMode !== 'office' && styles.modeBtnActive,
               Platform.OS === 'web' && { cursor: 'pointer' } as any]}
           >
-            <Text style={[styles.modeBtnText, viewMode === 'cost' && styles.modeBtnTextActive]}>
-              {viewMode === 'cost' ? '💰' : '📊'}
+            <Text style={[styles.modeBtnText, viewMode !== 'office' && styles.modeBtnTextActive]}>
+              {viewMode === 'office' ? '📊' : viewMode === 'cost' ? '🏷️' : '🏢'}
             </Text>
           </Pressable>
           {viewMode === 'office' && (
@@ -749,11 +764,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </View>
       )}
 
-      {/* Main Content - Switch between Office and Cost views */}
+      {/* Main Content - Switch between Office, Cost, and Tags views */}
       {viewMode === 'cost' ? (
         <CostDashboard
           sessions={allSessions}
           accentColor={accentColor}
+        />
+      ) : viewMode === 'tags' ? (
+        <SessionTagsDashboard
+          agents={displayAgents}
+          sessionTags={sessionTags}
         />
       ) : (
         <View style={styles.mainContent}>

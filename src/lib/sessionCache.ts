@@ -18,6 +18,7 @@ export interface CachedSession {
   model?: string;
   status?: string;
   lastActivity?: number;
+  tags?: string[]; // Store tag keys
 }
 
 export interface DailyCostSnapshot {
@@ -218,22 +219,70 @@ export async function enrichAgentsWithCache(agents: OfficeAgent[]): Promise<Offi
 
 // ─── Periodic Snapshot ─────────────────────────────────────
 
-export async function takeSnapshot(agents: OfficeAgent[]): Promise<void> {
+export async function takeSnapshot(
+  agents: OfficeAgent[],
+  sessionTags?: Map<string, any[]>
+): Promise<void> {
   // Save current agent states to cache
-  const sessions: CachedSession[] = agents.map(agent => ({
-    sessionKey: agent.id,
-    agentId: agent.id,
-    connectionId: agent.connectionId,
-    lastUpdate: Date.now(),
-    totalCost: agent.costToday,
-    totalTokens: agent.tokensUsed,
-    inputTokens: 0, // Would need to track this separately
-    outputTokens: 0,
-    turns: 0,
-    model: agent.model,
-    status: agent.status,
-  }));
+  const sessions: CachedSession[] = agents.map(agent => {
+    const tags = sessionTags?.get(agent.id);
+    const tagKeys = tags?.map((t: any) => t.key) || [];
+    
+    return {
+      sessionKey: agent.id,
+      agentId: agent.id,
+      connectionId: agent.connectionId,
+      lastUpdate: Date.now(),
+      totalCost: agent.costToday,
+      totalTokens: agent.tokensUsed,
+      inputTokens: 0, // Would need to track this separately
+      outputTokens: 0,
+      turns: 0,
+      model: agent.model,
+      status: agent.status,
+      tags: tagKeys.length > 0 ? tagKeys : undefined,
+    };
+  });
 
   await updateSessionCache(sessions);
   await recordDailyCosts(agents);
+  
+  // Also save tags separately
+  if (sessionTags) {
+    await saveSessionTags(sessionTags);
+  }
+}
+
+// ─── Tag Management ────────────────────────────────────────
+
+const STORAGE_KEY_TAGS = '@session_tags_backup';
+
+export async function saveSessionTags(tags: Map<string, any[]>): Promise<void> {
+  try {
+    const obj: any = {};
+    tags.forEach((tagList, sessionKey) => {
+      if (tagList && tagList.length > 0) {
+        obj[sessionKey] = tagList;
+      }
+    });
+    await setItem(STORAGE_KEY_TAGS, JSON.stringify(obj));
+  } catch (error) {
+    console.error('Failed to save session tags:', error);
+  }
+}
+
+export async function loadSessionTags(): Promise<Map<string, any[]>> {
+  try {
+    const raw = await getItem(STORAGE_KEY_TAGS);
+    if (!raw) return new Map();
+    const obj = JSON.parse(raw);
+    const map = new Map();
+    Object.entries(obj).forEach(([key, value]) => {
+      map.set(key, value);
+    });
+    return map;
+  } catch (error) {
+    console.error('Failed to load session tags:', error);
+    return new Map();
+  }
 }
