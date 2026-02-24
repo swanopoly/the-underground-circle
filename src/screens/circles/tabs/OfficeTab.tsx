@@ -16,6 +16,7 @@ import {
   OfficeFloor, DEFAULT_FLOORS, createDefaultFloor,
 } from '../../../lib/officeConfig';
 import { enrichAgentsWithCache, enrichSessionsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
+import { restoreAllAgents, recordAgentActivity, renameAgent as renameAgentIdentity } from '../../../lib/agentIdentity';
 import {
   verifyBot, getChat, TelegramPoller, TelegramMessage,
 } from '../../../lib/telegramService';
@@ -394,7 +395,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     }
   }, [enrichedAgents]);
 
-  // Enrich agents with cached data
+  // Enrich agents with cached data + restore identity
   useEffect(() => {
     const doEnrich = async () => {
       if (allAgents.length === 0) {
@@ -403,11 +404,23 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       }
       
       try {
-        const enriched = await enrichAgentsWithCache(allAgents);
-        setEnrichedAgents(enriched);
+        // Step 1: Enrich with session cache (costs/tokens from current session)
+        const cacheEnriched = await enrichAgentsWithCache(allAgents);
         
-        // Save immediately to cache (don't wait for 30s interval)
-        await takeSnapshot(enriched, sessionTags);
+        // Step 2: Restore persistent identity (all-time data, custom names, etc.)
+        const fullyEnriched = await restoreAllAgents(cacheEnriched);
+        
+        setEnrichedAgents(fullyEnriched);
+        
+        // Step 3: Record activity for each agent (updates identity store)
+        for (const agent of fullyEnriched) {
+          await recordAgentActivity(agent);
+        }
+        
+        // Step 4: Save snapshot to cache
+        await takeSnapshot(fullyEnriched, sessionTags);
+        
+        console.log(`✅ Enriched ${fullyEnriched.length} agents with full identity restoration`);
       } catch (error) {
         console.error('Failed to enrich agents:', error);
         setEnrichedAgents(allAgents);
@@ -537,14 +550,24 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     }
   };
 
-  const handleRenameAgent = useCallback((agentId: string, newName: string) => {
+  const handleRenameAgent = useCallback(async (agentId: string, newName: string) => {
+    // Extract sessionKey from agentId
+    const sessionKey = agentId.includes('::') ? agentId.split('::')[1] : agentId;
+    
+    // Save to agent identity system (persistent across reconnections)
+    await renameAgentIdentity(sessionKey, newName);
+    
+    // Also update legacy agentNames for backward compatibility
     const updated = { ...agentNames, [agentId]: newName };
     setAgentNames(updated);
     storage.setItem(STORAGE_KEY_AGENT_NAMES, JSON.stringify(updated)).catch(() => {});
+    
     // Update selected agent if it's the one being renamed
     if (selectedAgent?.id === agentId) {
       setSelectedAgent(prev => prev ? { ...prev, name: newName } : null);
     }
+    
+    console.log(`✏️ Renamed agent ${sessionKey} → ${newName} (persisted to identity store)`);
   }, [agentNames, selectedAgent]);
 
   // ─── Floor action handlers ──────────────────────────────
