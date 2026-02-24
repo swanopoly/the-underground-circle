@@ -27,6 +27,9 @@ import {
 } from '../../../lib/connectionManager';
 import { storage } from '../../../lib/storage';
 import CostDashboard from '../../../components/CostDashboard';
+import {
+  SessionTag, loadSessionTags, addSessionTag, removeSessionTag,
+} from '../../../lib/sessionTags';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -62,6 +65,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
   const [viewMode, setViewMode] = useState<'office' | 'cost'>('office'); // Toggle between views
+  const [sessionTags, setSessionTags] = useState<Map<string, SessionTag[]>>(new Map());
 
   // ─── Multi-floor state ──────────────────────────────
   const [floors, setFloors] = useState<OfficeFloor[]>(DEFAULT_FLOORS);
@@ -288,6 +292,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         const notesRaw = await storage.getItem(STORAGE_KEY_WHITEBOARD_NOTES);
         if (notesRaw) setWhiteboardNotes(JSON.parse(notesRaw));
       } catch {}
+
+      // Load session tags
+      loadSessionTags().then(setSessionTags);
     })();
   }, [connectOne]);
 
@@ -494,6 +501,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     setCurrentFloorId(floorId);
     storage.setItem(STORAGE_KEY_CURRENT_FLOOR, floorId).catch(() => {});
   }, []);
+
+  // ─── Session tagging handlers ──────────────────────────────
+
+  const handleAddSessionTag = useCallback(async (sessionKey: string, tag: SessionTag) => {
+    const updated = await addSessionTag(sessionKey, tag, sessionTags);
+    setSessionTags(updated);
+  }, [sessionTags]);
+
+  const handleRemoveSessionTag = useCallback(async (sessionKey: string, tagKey: string) => {
+    const updated = await removeSessionTag(sessionKey, tagKey, sessionTags);
+    setSessionTags(updated);
+  }, [sessionTags]);
 
   return (
     <View style={styles.container}>
@@ -801,7 +820,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
       {/* Agent detail panel */}
       {!editMode && (
-        <AgentPanel agent={selectedAgent} onClose={() => setSelectedAgent(null)} isDesktop={isDesktop} onRenameAgent={handleRenameAgent} />
+        <AgentPanel
+          agent={selectedAgent}
+          onClose={() => setSelectedAgent(null)}
+          isDesktop={isDesktop}
+          onRenameAgent={handleRenameAgent}
+          sessionTags={sessionTags}
+          onAddSessionTag={handleAddSessionTag}
+          onRemoveSessionTag={handleRemoveSessionTag}
+        />
       )}
 
       {/* Customization panel */}

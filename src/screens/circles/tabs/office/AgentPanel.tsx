@@ -2,12 +2,17 @@ import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TextInput, StyleSheet, Animated, Pressable, Platform } from 'react-native';
 import { OfficeAgent, STATUS_COLORS } from '../../../../lib/officeAgents';
 import { PROVIDER_META } from '../../../../lib/connectionManager';
+import { SessionTag } from '../../../../lib/sessionTags';
+import SessionTagInput from '../../../../components/SessionTagInput';
 
 interface Props {
   agent: OfficeAgent | null;
   onClose: () => void;
   isDesktop?: boolean;
   onRenameAgent?: (agentId: string, newName: string) => void;
+  sessionTags?: Map<string, SessionTag[]>;
+  onAddSessionTag?: (sessionKey: string, tag: SessionTag) => void;
+  onRemoveSessionTag?: (sessionKey: string, tagKey: string) => void;
 }
 
 function formatTokens(n: number): string {
@@ -16,7 +21,10 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-export default function AgentPanel({ agent, onClose, isDesktop, onRenameAgent }: Props) {
+export default function AgentPanel({
+  agent, onClose, isDesktop, onRenameAgent,
+  sessionTags, onAddSessionTag, onRemoveSessionTag
+}: Props) {
   const slideAnim = useRef(new Animated.Value(400)).current;
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState('');
@@ -41,6 +49,10 @@ export default function AgentPanel({ agent, onClose, isDesktop, onRenameAgent }:
   if (!agent) return null;
 
   const statusColor = STATUS_COLORS[agent.status];
+  
+  // Extract sessionKey from agent.id (format: connectionId::sessionKey)
+  const sessionKey = agent.id.includes('::') ? agent.id.split('::')[1] : agent.id;
+  const currentTags = sessionTags?.get(sessionKey) || [];
 
   return (
     <Animated.View style={[
@@ -132,6 +144,19 @@ export default function AgentPanel({ agent, onClose, isDesktop, onRenameAgent }:
         <Text style={styles.activityValue}>{agent.activity}</Text>
       </View>
 
+      {/* Session Tags */}
+      {onAddSessionTag && onRemoveSessionTag && (
+        <View style={styles.tagsSection}>
+          <Text style={styles.tagsSectionTitle}>SESSION TAGS</Text>
+          <SessionTagInput
+            sessionKey={sessionKey}
+            currentTags={currentTags}
+            onAddTag={(tag) => onAddSessionTag(sessionKey, tag)}
+            onRemoveTag={(tagKey) => onRemoveSessionTag(sessionKey, tagKey)}
+          />
+        </View>
+      )}
+
       {/* Cost + Performance grid */}
       <View style={styles.gridRow}>
         <View style={styles.gridCard}>
@@ -188,7 +213,7 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 16,
     paddingHorizontal: 20,
     paddingBottom: 24,
-    maxHeight: 420,
+    maxHeight: 560,
   },
   panelDesktop: {
     maxWidth: 560,
@@ -439,5 +464,21 @@ const styles = StyleSheet.create({
     color: '#555',
     fontFamily: 'monospace',
     flex: 1,
+  },
+  // Tags section
+  tagsSection: {
+    gap: 6,
+    marginVertical: 12,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: '#1a1a2e',
+  },
+  tagsSectionTitle: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#444',
+    fontFamily: 'monospace',
+    letterSpacing: 1.5,
   },
 });
