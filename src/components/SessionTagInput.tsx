@@ -9,6 +9,7 @@ import {
   SessionTag, TAG_CATEGORIES, TagCategory,
   parseTagString, createTag, loadTagSuggestions,
 } from '../lib/sessionTags';
+import SessionTagsHelp from './SessionTagsHelp';
 
 interface Props {
   sessionKey: string;
@@ -21,6 +22,7 @@ export default function SessionTagInput({ sessionKey, currentTags, onAddTag, onR
   const [input, setInput] = useState('');
   const [suggestions, setSuggestions] = useState<SessionTag[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
 
   // Load suggestions on mount
   useEffect(() => {
@@ -64,6 +66,19 @@ export default function SessionTagInput({ sessionKey, currentTags, onAddTag, onR
 
   return (
     <View style={styles.container}>
+      <SessionTagsHelp visible={showHelp} onClose={() => setShowHelp(false)} />
+      
+      {/* Header with Help Button */}
+      <View style={styles.headerRow}>
+        <Text style={styles.headerTitle}>🏷️ Session Tags</Text>
+        <Pressable
+          onPress={() => setShowHelp(true)}
+          style={[styles.helpBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        >
+          <Text style={styles.helpBtnText}>?</Text>
+        </Pressable>
+      </View>
+
       {/* Current Tags */}
       {currentTags.length > 0 && (
         <View style={styles.tagsRow}>
@@ -142,9 +157,17 @@ export default function SessionTagInput({ sessionKey, currentTags, onAddTag, onR
       )}
 
       {/* Help Text */}
-      <Text style={styles.helpText}>
-        💡 Format: category:value (e.g., "project:website", "client:acme", "priority:high")
-      </Text>
+      <View style={styles.helpBox}>
+        <Text style={styles.helpText}>
+          💡 <Text style={styles.helpBold}>Format:</Text> category:value
+        </Text>
+        <Text style={styles.helpExample}>
+          Examples: project:website-redesign, client:acme-corp, priority:high
+        </Text>
+        <Text style={styles.helpCta}>
+          Click <Text style={styles.helpCtaLink}>?</Text> above for detailed guide with real-world examples!
+        </Text>
+      </View>
     </View>
   );
 }
@@ -152,6 +175,34 @@ export default function SessionTagInput({ sessionKey, currentTags, onAddTag, onR
 const styles = StyleSheet.create({
   container: {
     gap: 8,
+  },
+
+  // Header
+  headerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  headerTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#888',
+    fontFamily: 'monospace',
+    letterSpacing: 0.5,
+  },
+  helpBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#6366f1',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  helpBtnText: {
+    fontSize: 12,
+    color: '#fff',
+    fontWeight: '800',
   },
 
   // Current tags
@@ -284,11 +335,41 @@ const styles = StyleSheet.create({
   },
 
   // Help
+  helpBox: {
+    backgroundColor: '#6366f115',
+    padding: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#6366f130',
+    gap: 4,
+  },
   helpText: {
+    fontSize: 10,
+    color: '#999',
+    fontFamily: 'monospace',
+    lineHeight: 14,
+  },
+  helpBold: {
+    fontWeight: '700',
+    color: '#6366f1',
+  },
+  helpExample: {
     fontSize: 9,
     color: '#666',
     fontFamily: 'monospace',
+    lineHeight: 13,
+    paddingLeft: 12,
+  },
+  helpCta: {
+    fontSize: 9,
+    color: '#888',
+    fontFamily: 'monospace',
     fontStyle: 'italic',
-    lineHeight: 14,
+    lineHeight: 13,
+    marginTop: 2,
+  },
+  helpCtaLink: {
+    color: '#6366f1',
+    fontWeight: '700',
   },
 });
