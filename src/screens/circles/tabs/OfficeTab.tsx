@@ -289,8 +289,19 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     };
   }, []);
 
+  // ─── Floor management (must be defined before useEffects that use it) ──────
+  
+  const saveFloors = useCallback((updatedFloors: OfficeFloor[]) => {
+    setFloors(updatedFloors);
+    storage.setItem(STORAGE_KEY_FLOORS, JSON.stringify(updatedFloors)).catch(() => {});
+  }, []);
+
   const { width: winW } = useWindowDimensions();
   const isDesktop = winW > 900;
+
+  // Get current floor data with safety checks (must be before agent filtering)
+  const currentFloor = floors.find(f => f.id === currentFloorId) || floors[0] || DEFAULT_FLOORS[0];
+  const currentTheme = OFFICE_THEMES[currentFloor?.themeId] || OFFICE_THEMES.underground;
 
   // Derive agents from ALL connected sessions
   const connectedConns = connections.filter(c => c.status === 'connected');
@@ -435,12 +446,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     }
   }, [agentNames, selectedAgent]);
 
-  // ─── Floor management ──────────────────────────────
-  
-  const saveFloors = useCallback((updatedFloors: OfficeFloor[]) => {
-    setFloors(updatedFloors);
-    storage.setItem(STORAGE_KEY_FLOORS, JSON.stringify(updatedFloors)).catch(() => {});
-  }, []);
+  // ─── Floor action handlers ──────────────────────────────
 
   const handleAddFloor = useCallback(() => {
     const nextNum = floors.length + 1;
@@ -477,10 +483,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     setCurrentFloorId(floorId);
     storage.setItem(STORAGE_KEY_CURRENT_FLOOR, floorId).catch(() => {});
   }, []);
-
-  // Get current floor data with safety checks
-  const currentFloor = floors.find(f => f.id === currentFloorId) || floors[0] || DEFAULT_FLOORS[0];
-  const currentTheme = OFFICE_THEMES[currentFloor?.themeId] || OFFICE_THEMES.underground;
 
   return (
     <View style={styles.container}>
