@@ -17,11 +17,12 @@ interface Props {
   agents: OfficeAgent[];
   getConfig: (connectionId: string) => OpenClawConfig | null;
   onResult: (message: string) => void;
+  compact?: boolean; // Use smaller button sizes
 }
 
 type ActionType = 'standup' | 'sync' | 'assign' | 'chat' | 'broadcast' | 'help' | 'status';
 
-export default function OfficeActionPanel({ agents, getConfig, onResult }: Props) {
+export default function OfficeActionPanel({ agents, getConfig, onResult, compact = false }: Props) {
   const [showModal, setShowModal] = useState(false);
   const [currentAction, setCurrentAction] = useState<ActionType | null>(null);
   const [inputValue, setInputValue] = useState('');
@@ -31,6 +32,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
   const activeAgents = agents.filter(a => a.status === 'active' || a.status === 'idle');
   const hasAgents = activeAgents.length > 0;
   const blockedTasksCount = 0; // Will be calculated when needed
+  const buttonSize = compact ? 'small' : 'medium';
 
   const handleAction = async (action: ActionType) => {
     if (!hasAgents) {
@@ -390,8 +392,8 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
 
   return (
     <>
-      <View style={styles.container}>
-        <Text style={styles.title}>⚡ QUICK ACTIONS</Text>
+      <View style={[styles.container, compact && styles.containerCompact]}>
+        {!compact && <Text style={styles.title}>⚡ QUICK ACTIONS</Text>}
         
         <ScrollView
           horizontal
@@ -404,6 +406,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
             onPress={() => handleAction('standup')}
             color="#8b5cf6"
             disabled={!hasAgents}
+            size={buttonSize}
             tooltip="Start daily standup: ask all agents what they're working on and any blockers"
           />
           
@@ -413,6 +416,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
             onPress={() => handleAction('sync')}
             color="#3b82f6"
             disabled={!hasAgents}
+            size={buttonSize}
             tooltip="Sync project status with team: task progress, blockers, and cost breakdown"
           />
           
@@ -422,6 +426,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
             onPress={() => handleAction('assign')}
             color="#22c55e"
             disabled={!hasAgents}
+            size={buttonSize}
             tooltip="Auto-assign unassigned tasks to best-fit agents based on workload and expertise"
           />
           
@@ -431,6 +436,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
             onPress={() => handleAction('chat')}
             color="#ec4899"
             disabled={!hasAgents}
+            size={buttonSize}
             tooltip="Start a new multi-agent conversation on a specific topic"
           />
           
@@ -440,6 +446,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
             onPress={() => handleAction('broadcast')}
             color="#f59e0b"
             disabled={!hasAgents}
+            size={buttonSize}
             tooltip="Send an announcement or message to all active agents at once"
           />
           
@@ -450,6 +457,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
             color="#ef4444"
             disabled={!hasAgents}
             badge={blockedTasksCount > 0 ? blockedTasksCount : undefined}
+            size={buttonSize}
             tooltip="Coordinate help for blocked tasks: notify team of tasks that need support"
           />
           
@@ -459,6 +467,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult }: Props
             onPress={() => handleAction('status')}
             color="#10b981"
             disabled={!hasAgents}
+            size={buttonSize}
             tooltip="Quick status check: see all active agents, their status, and daily costs"
           />
         </ScrollView>
@@ -546,6 +555,12 @@ const styles = StyleSheet.create({
     borderTopColor: '#1a1a2e',
     paddingVertical: 8,
     paddingHorizontal: 12,
+  },
+  containerCompact: {
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+    backgroundColor: 'transparent',
+    borderTopWidth: 0,
   },
   title: {
     fontSize: 9,

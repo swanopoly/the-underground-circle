@@ -950,15 +950,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           </>
         )}
 
-        {/* Action Panel - Quick collaboration buttons */}
-        {!editMode && anyConnected && (
-          <OfficeActionPanel
-            agents={displayAgents}
-            getConfig={getConnectionConfig}
-            onResult={handleActionResult}
-          />
-        )}
-
         {/* Chat toggle */}
         <Pressable
           onPress={() => setChatVisible(!chatVisible)}
@@ -985,6 +976,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               telegramConfig={telegramConnected ? telegramConfig : null}
               telegramConnected={telegramConnected}
               telegramMessages={telegramMessages}
+              onActionResult={handleActionResult}
             />
           </View>
         )}
@@ -1005,6 +997,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               telegramConfig={telegramConnected ? telegramConfig : null}
               telegramConnected={telegramConnected}
               telegramMessages={telegramMessages}
+              onActionResult={handleActionResult}
             />
           </View>
         )}

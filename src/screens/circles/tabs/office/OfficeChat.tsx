@@ -12,6 +12,7 @@ import {
 import { AgentConnection, PROVIDER_META } from '../../../../lib/connectionManager';
 import { sendMessage as sendTgMessage, TelegramMessage } from '../../../../lib/telegramService';
 import { getItem, setItem } from '../../../../lib/storage';
+import OfficeActionPanel from '../../../../components/OfficeActionPanel';
 
 const STORAGE_KEY_CHAT_HISTORY = '@office_terminal_history';
 const DEFAULT_MESSAGE: ChatMessage = {
@@ -53,6 +54,8 @@ interface Props {
   telegramConfig?: { botToken: string; chatId: string } | null;
   telegramConnected?: boolean;
   telegramMessages?: TelegramMessage[];
+  // Quick Actions
+  onActionResult?: (message: string) => void;
 }
 
 // Get the first connected OpenClaw config
@@ -685,6 +688,18 @@ export default function OfficeChat({
         )}
       </View>
 
+      {/* Quick Actions - Compact version */}
+      {agents && agents.length > 0 && getConnectionConfig && onActionResult && (
+        <View style={styles.quickActionsBar}>
+          <OfficeActionPanel
+            agents={agents}
+            getConfig={getConnectionConfig}
+            onResult={onActionResult}
+            compact={true}
+          />
+        </View>
+      )}
+
       <View style={{ flex: 1, position: 'relative' }}>
         <FlatList
           ref={listRef}
@@ -811,6 +826,13 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#6366f130',
   },
   fullscreenBtnText: { color: '#6366f1', fontSize: 12, fontWeight: '800' },
+  quickActionsBar: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a2e',
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    backgroundColor: '#08080e',
+  },
   messageList: { flex: 1 },
   messageContent: { padding: 10, gap: 8 },
   msgRow: { gap: 2 },
