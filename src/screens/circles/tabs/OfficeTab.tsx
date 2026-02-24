@@ -614,15 +614,24 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         <View style={styles.titleInner}>
           <Pressable
             onPress={() => {
-              if (viewMode === 'office') setViewMode('cost');
-              else if (viewMode === 'cost') setViewMode('tags');
-              else setViewMode('office');
+              setViewMode(viewMode === 'cost' ? 'office' : 'cost');
             }}
-            style={[styles.modeBtn, viewMode !== 'office' && styles.modeBtnActive,
+            style={[styles.modeBtn, viewMode === 'cost' && styles.modeBtnActive,
               Platform.OS === 'web' && { cursor: 'pointer' } as any]}
           >
-            <Text style={[styles.modeBtnText, viewMode !== 'office' && styles.modeBtnTextActive]}>
-              {viewMode === 'office' ? '📊' : viewMode === 'cost' ? '🏷️' : '🏢'}
+            <Text style={[styles.modeBtnText, viewMode === 'cost' && styles.modeBtnTextActive]}>
+              📊
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              setViewMode(viewMode === 'tags' ? 'office' : 'tags');
+            }}
+            style={[styles.modeBtn, viewMode === 'tags' && styles.modeBtnActive,
+              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={[styles.modeBtnText, viewMode === 'tags' && styles.modeBtnTextActive]}>
+              🏷️
             </Text>
           </Pressable>
           {viewMode === 'office' && (
