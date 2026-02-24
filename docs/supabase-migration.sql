@@ -192,6 +192,56 @@ CREATE TRIGGER update_agents_bots_updated_at
   EXECUTE FUNCTION update_updated_at_column();
 
 -- ============================================================================
+-- Create messages table (for circle chat)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS messages (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  circle_id UUID NOT NULL,
+  user_id UUID NOT NULL,
+  content TEXT NOT NULL,
+  reactions JSONB DEFAULT '{}',
+  is_bot BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT fk_circle FOREIGN KEY (circle_id) REFERENCES circles(id) ON DELETE CASCADE,
+  CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE
+);
+
+-- Enable RLS
+ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies for messages
+CREATE POLICY "Users can view messages in their circles"
+  ON messages FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM circle_members
+      WHERE circle_members.circle_id = messages.circle_id
+      AND circle_members.user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Users can create messages in their circles"
+  ON messages FOR INSERT
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM circle_members
+      WHERE circle_members.circle_id = messages.circle_id
+      AND circle_members.user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Users can delete their own messages"
+  ON messages FOR DELETE
+  USING (auth.uid() = user_id);
+
+-- Create indexes for performance
+CREATE INDEX IF NOT EXISTS idx_messages_circle_id ON messages(circle_id);
+CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);
+CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_circle_created ON messages(circle_id, created_at DESC);
+
+-- ============================================================================
 -- Grant necessary permissions (if needed)
 -- ============================================================================
 
@@ -204,6 +254,7 @@ GRANT ALL ON user_xp TO authenticated;
 GRANT ALL ON agents_bots TO authenticated;
 GRANT ALL ON friends TO authenticated;
 GRANT ALL ON integrations TO authenticated;
+GRANT ALL ON messages TO authenticated;
 
 -- ============================================================================
 -- Done!
@@ -219,4 +270,6 @@ SELECT 'agents_bots', COUNT(*) FROM agents_bots
 UNION ALL
 SELECT 'friends', COUNT(*) FROM friends
 UNION ALL
-SELECT 'integrations', COUNT(*) FROM integrations;
+SELECT 'integrations', COUNT(*) FROM integrations
+UNION ALL
+SELECT 'messages', COUNT(*) FROM messages;

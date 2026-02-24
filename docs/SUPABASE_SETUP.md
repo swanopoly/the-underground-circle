@@ -35,6 +35,7 @@ These errors break Profile tab features (Friends, Agents, Integrations, XP/Gamif
    agents_bots   | 0
    friends       | 0
    integrations  | 0
+   messages      | 0
    ```
 
 ### Step 4: Verify Tables Exist
@@ -44,6 +45,7 @@ Go to **Database → Tables** in Supabase sidebar and confirm:
 - ✅ `agents_bots`
 - ✅ `friends`
 - ✅ `integrations`
+- ✅ `messages`
 - ✅ `profiles` (should now have wallet columns)
 
 ### Step 5: Test the Live App
@@ -78,6 +80,12 @@ Go to **Database → Tables** in Supabase sidebar and confirm:
 - Discord, Twitter, GitHub, Spotify, etc.
 - Stores encrypted tokens for OAuth
 - Powers the Integrations screen
+
+**`messages`** — Circle chat messages
+- Real-time chat for each circle
+- Supports reactions, bot messages
+- Synced via Supabase Realtime
+- Powers the Chat tab
 
 ### Columns Added to `profiles`
 
