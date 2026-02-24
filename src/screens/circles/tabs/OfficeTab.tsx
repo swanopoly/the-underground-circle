@@ -85,9 +85,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [showActionResult, setShowActionResult] = useState(false);
   const [enrichedSessions, setEnrichedSessions] = useState<OpenClawSession[]>([]);
 
-  // ─── Terminal resize state (disabled for stability) ──────────────────────────────
-  const [terminalHeight] = useState(DEFAULT_TERMINAL_HEIGHT);
-
   // ─── Multi-floor state ──────────────────────────────
   const [floors, setFloors] = useState<OfficeFloor[]>(DEFAULT_FLOORS);
   const [currentFloorId, setCurrentFloorId] = useState<string>('floor_1');
