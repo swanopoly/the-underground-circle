@@ -268,9 +268,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       const conns = await loadConnections();
       setConnections(conns);
 
-      // Auto-connect all enabled connections
+      // Auto-connect all enabled connections (skip localhost on production)
+      const isProduction = typeof window !== 'undefined' && !window.location.hostname.includes('localhost');
       for (const conn of conns) {
-        if (conn.enabled) connectOne(conn);
+        if (conn.enabled) {
+          // Skip localhost endpoints on production
+          const isLocalhost = conn.endpoint.includes('localhost') || conn.endpoint.includes('127.0.0.1');
+          if (isProduction && isLocalhost) {
+            console.log(`Skipping localhost connection "${conn.name}" on production`);
+            continue;
+          }
+          connectOne(conn);
+        }
       }
 
       // Load custom agent names
@@ -874,6 +883,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                 <Text style={styles.mobileEmptyIcon}>🔗</Text>
                 <Text style={styles.mobileEmptyTitle}>No agents connected</Text>
                 <Text style={styles.mobileEmptyText}>Tap ⚙️ → Connections to add your agent endpoints</Text>
+                {typeof window !== 'undefined' && !window.location.hostname.includes('localhost') && (
+                  <View style={{ marginTop: 12, padding: 12, backgroundColor: '#1a1a2e', borderRadius: 8, borderWidth: 1, borderColor: '#333' }}>
+                    <Text style={{ color: '#888', fontSize: 11, textAlign: 'center' }}>
+                      💡 The Office dashboard connects to local AI agents. Run OpenClaw locally or use a remote endpoint.
+                    </Text>
+                  </View>
+                )}
                 <Pressable
                   onPress={() => setShowCustomize(true)}
                   style={[styles.mobileEmptyBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
@@ -941,6 +957,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                         <Text style={styles.emptyTitle}>No agents connected</Text>
                         <Text style={styles.emptyText}>Tap ⚙️ → Connections to add your agent endpoints</Text>
                         <Text style={styles.emptySub}>Supports OpenClaw, Claude Code, and generic APIs</Text>
+                        {typeof window !== 'undefined' && !window.location.hostname.includes('localhost') && (
+                          <View style={{ marginTop: 12, padding: 12, backgroundColor: '#1a1a2e', borderRadius: 8, borderWidth: 1, borderColor: '#333' }}>
+                            <Text style={{ color: '#888', fontSize: 11, textAlign: 'center' }}>
+                              💡 The Office dashboard connects to local AI agents. Run OpenClaw locally or use a remote endpoint.
+                            </Text>
+                          </View>
+                        )}
                       </View>
                     )}
                     {agents.map((agent, i) => {
