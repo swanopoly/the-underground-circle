@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, FlatList, StyleSheet, Pressable, Platform,
 } from 'react-native';
@@ -10,6 +10,16 @@ import {
 } from '../../../../lib/openclawService';
 import { AgentConnection, PROVIDER_META } from '../../../../lib/connectionManager';
 import { sendMessage as sendTgMessage, TelegramMessage } from '../../../../lib/telegramService';
+import { getItem, setItem } from '../../../../lib/storage';
+
+const STORAGE_KEY_CHAT_HISTORY = '@office_terminal_history';
+const DEFAULT_MESSAGE: ChatMessage = {
+  id: '0',
+  text: '🏢 Office Terminal ready. Type "help" for commands.',
+  isUser: false,
+  agent: 'System',
+  timestamp: new Date(),
+};
 
 interface ChatMessage {
   id: string;
@@ -180,13 +190,17 @@ async function processLocalCommand(text: string, agents: OfficeAgent[], connecti
     return { response: '🗑️ Conversation log cleared!' };
   }
 
+  if (lower === 'clear' || lower === 'clear history' || lower === 'clear terminal') {
+    return { response: '🗑️', command: { type: 'clear' } };
+  }
+
   if (lower === 'help' || lower === '?') {
     const { getCollaborationHelp } = await import('../../../../lib/officeChatCommands');
     const { getAdvancedHelp } = await import('../../../../lib/advancedChatCommands');
     return {
       response: `🏢 Office Commands\n\n` +
         `LOCAL:\n• status — Office overview\n• agents — List all agents\n• connections — List all connections\n• agent [name] — Agent details\n• costs — Cost breakdown\n• theme [name] — Change theme\n\n` +
-        `CONVERSATIONS:\n• log — Recent messages\n• log [agent] — Filter by agent\n• threads — Conversation threads\n• clear log — Clear history\n\n` +
+        `CONVERSATIONS:\n• log — Recent messages\n• log [agent] — Filter by agent\n• threads — Conversation threads\n• clear log — Clear conversation log\n• clear — Clear terminal history\n\n` +
         `AGENT COMMANDS:\n• ask [question] — Ask default agent\n• task [message] — Send task to default agent\n• task @[name] [message] — Route to connection/agent\n• spawn [task] — Launch background sub-agent\n• subagents — List running sub-agents\n• msg [session] [text] — Message a session\n• broadcast [msg] — Send to all channels\n\n` +
         `${getCollaborationHelp()}\n\n` +
         `${getAdvancedHelp()}\n\n` +
@@ -206,12 +220,45 @@ export default function OfficeChat({
   connections, getConnectionConfig,
   telegramConfig, telegramConnected, telegramMessages,
 }: Props) {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    { id: '0', text: '🏢 Office Terminal ready. Type "help" for commands.', isUser: false, agent: 'System', timestamp: new Date() },
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>([DEFAULT_MESSAGE]);
   const [input, setInput] = useState('');
   const [processing, setProcessing] = useState(false);
   const listRef = useRef<FlatList>(null);
+
+  // Load chat history on mount
+  useEffect(() => {
+    const loadHistory = async () => {
+      try {
+        const saved = await getItem(STORAGE_KEY_CHAT_HISTORY);
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          // Convert timestamp strings back to Date objects
+          const restored = parsed.map((m: any) => ({
+            ...m,
+            timestamp: new Date(m.timestamp),
+          }));
+          setMessages(restored);
+        }
+      } catch (error) {
+        console.error('Failed to load chat history:', error);
+      }
+    };
+    loadHistory();
+  }, []);
+
+  // Save chat history whenever messages change
+  useEffect(() => {
+    const saveHistory = async () => {
+      try {
+        await setItem(STORAGE_KEY_CHAT_HISTORY, JSON.stringify(messages));
+      } catch (error) {
+        console.error('Failed to save chat history:', error);
+      }
+    };
+    if (messages.length > 0) {
+      saveHistory();
+    }
+  }, [messages]);
 
   const addMsg = (text: string, isUser: boolean, agent?: string) => {
     const msg: ChatMessage = { id: `${Date.now()}_${Math.random()}`, text, isUser, agent, timestamp: new Date() };
@@ -231,6 +278,13 @@ export default function OfficeChat({
     // Try local commands first
     const local = await processLocalCommand(text, agents, connections);
     if (local) {
+      // Handle clear command specially
+      if (local.command?.type === 'clear') {
+        setMessages([DEFAULT_MESSAGE]);
+        addMsg('Terminal cleared!', false, 'System');
+        return;
+      }
+      
       addMsg(local.response, false, 'Office AI');
       if (local.command && onCommand) onCommand(local.command);
       return;
