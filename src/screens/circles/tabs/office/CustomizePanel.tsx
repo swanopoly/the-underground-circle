@@ -11,8 +11,9 @@ import { OfficeAgent } from '../../../../lib/officeAgents';
 import {
   AgentConnection, ProviderType, PROVIDER_META, generateId,
 } from '../../../../lib/connectionManager';
+import { BudgetConfig } from '../../../../lib/budgetAlerts';
 
-type Tab = 'theme' | 'agents' | 'connections' | 'telegram';
+type Tab = 'theme' | 'agents' | 'connections' | 'telegram' | 'budget';
 
 export interface TelegramConfig {
   botToken: string;
@@ -43,6 +44,9 @@ interface Props {
   onTelegramDisconnect: () => void;
   telegramError: string | null;
   telegramConnecting: boolean;
+  // Budget
+  budgetConfig: BudgetConfig;
+  onBudgetConfigChange: (config: BudgetConfig) => void;
 }
 
 type AddStep = 'list' | 'pick-provider' | 'form';
@@ -53,6 +57,7 @@ export default function CustomizePanel({
   connections, onAddConnection, onRemoveConnection, onConnectConnection, onDisconnectConnection,
   telegramConfig, onTelegramConfigChange, telegramConnected, telegramBotName,
   telegramChatTitle, onTelegramConnect, onTelegramDisconnect, telegramError, telegramConnecting,
+  budgetConfig, onBudgetConfigChange,
 }: Props) {
   const [tab, setTab] = useState<Tab>('theme');
   const [selectedAgentId, setSelectedAgentId] = useState(agents[0]?.id || '');
@@ -120,14 +125,14 @@ export default function CustomizePanel({
 
         {/* Tabs */}
         <View style={styles.tabs}>
-          {(['theme', 'agents', 'connections', 'telegram'] as Tab[]).map(t => (
+          {(['theme', 'agents', 'connections', 'telegram', 'budget'] as Tab[]).map(t => (
             <Pressable
               key={t}
               onPress={() => { setTab(t); if (t !== 'connections') resetAddForm(); }}
               style={[styles.tab, tab === t && styles.tabActive]}
             >
               <Text style={[styles.tabText, tab === t && styles.tabTextActive]}>
-                {t === 'theme' ? '🎨' : t === 'agents' ? '🤖' : t === 'connections' ? '🔗' : '✈️'}
+                {t === 'theme' ? '🎨' : t === 'agents' ? '🤖' : t === 'connections' ? '🔗' : t === 'telegram' ? '✈️' : '💰'}
                 {' '}{t === 'connections' ? 'Connect' : t.charAt(0).toUpperCase() + t.slice(1)}
                 {t === 'connections' && connections.length > 0 ? ` (${connectedCount}/${connections.length})` : ''}
               </Text>
@@ -569,6 +574,74 @@ export default function CustomizePanel({
               </View>
             </View>
           )}
+
+          {/* ─── Budget Tab ─── */}
+          {tab === 'budget' && (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>BUDGET LIMITS</Text>
+              
+              <View style={styles.budgetToggle}>
+                <Text style={styles.budgetToggleLabel}>Enable Budget Alerts</Text>
+                <Pressable
+                  onPress={() => onBudgetConfigChange({ ...budgetConfig, enabled: !budgetConfig.enabled })}
+                  style={[styles.toggle, budgetConfig.enabled && styles.toggleActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <View style={[styles.toggleKnob, budgetConfig.enabled && styles.toggleKnobActive]} />
+                </Pressable>
+              </View>
+
+              {budgetConfig.enabled && (
+                <>
+                  <Text style={styles.inputLabel}>Daily Budget (USD)</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={budgetConfig.daily?.toString() || ''}
+                    onChangeText={(v) => {
+                      const num = parseFloat(v) || undefined;
+                      onBudgetConfigChange({ ...budgetConfig, daily: num });
+                    }}
+                    placeholder="50.00"
+                    placeholderTextColor="#666"
+                    keyboardType="numeric"
+                  />
+
+                  <Text style={styles.inputLabel}>Weekly Budget (USD)</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={budgetConfig.weekly?.toString() || ''}
+                    onChangeText={(v) => {
+                      const num = parseFloat(v) || undefined;
+                      onBudgetConfigChange({ ...budgetConfig, weekly: num });
+                    }}
+                    placeholder="300.00"
+                    placeholderTextColor="#666"
+                    keyboardType="numeric"
+                  />
+
+                  <Text style={styles.inputLabel}>Monthly Budget (USD)</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={budgetConfig.monthly?.toString() || ''}
+                    onChangeText={(v) => {
+                      const num = parseFloat(v) || undefined;
+                      onBudgetConfigChange({ ...budgetConfig, monthly: num });
+                    }}
+                    placeholder="1000.00"
+                    placeholderTextColor="#666"
+                    keyboardType="numeric"
+                  />
+                </>
+              )}
+
+              <View style={styles.connectInfo}>
+                <Text style={styles.connectInfoTitle}>How It Works</Text>
+                <Text style={styles.connectInfoText}>📊 Set spending limits for daily, weekly, or monthly periods</Text>
+                <Text style={styles.connectInfoText}>⚠️ Get alerts at 50%, 75%, 90%, and 100% of budget</Text>
+                <Text style={styles.connectInfoText}>🚨 Banner appears at top of Office when approaching limits</Text>
+                <Text style={styles.connectInfoText}>💡 Helps avoid surprise bills and optimize agent usage</Text>
+              </View>
+            </View>
+          )}
         </ScrollView>
       </View>
     </View>
@@ -776,4 +849,39 @@ const styles = StyleSheet.create({
   },
   connectInfoTitle: { fontSize: 10, color: '#888', fontFamily: 'monospace', fontWeight: '700', marginBottom: 4 },
   connectInfoText: { fontSize: 10, color: '#555', fontFamily: 'monospace' },
+
+  // Budget
+  budgetToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+  },
+  budgetToggleLabel: {
+    fontSize: 12,
+    color: '#ddd',
+    fontFamily: 'monospace',
+    fontWeight: '700',
+  },
+  toggle: {
+    width: 48,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#333',
+    padding: 2,
+    justifyContent: 'center',
+  },
+  toggleActive: {
+    backgroundColor: '#22c55e40',
+  },
+  toggleKnob: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#666',
+  },
+  toggleKnobActive: {
+    backgroundColor: '#22c55e',
+    transform: [{ translateX: 20 }],
+  },
 });

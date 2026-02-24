@@ -30,6 +30,10 @@ import CostDashboard from '../../../components/CostDashboard';
 import {
   SessionTag, loadSessionTags, addSessionTag, removeSessionTag,
 } from '../../../lib/sessionTags';
+import {
+  BudgetConfig, loadBudgetConfig, saveBudgetConfig, calculateBudgetAlerts,
+} from '../../../lib/budgetAlerts';
+import BudgetAlertBanner from '../../../components/BudgetAlertBanner';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -66,6 +70,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
   const [viewMode, setViewMode] = useState<'office' | 'cost'>('office'); // Toggle between views
   const [sessionTags, setSessionTags] = useState<Map<string, SessionTag[]>>(new Map());
+  const [budgetConfig, setBudgetConfig] = useState<BudgetConfig>({ enabled: false });
+  const [budgetAlertsDismissed, setBudgetAlertsDismissed] = useState(false);
 
   // ─── Multi-floor state ──────────────────────────────
   const [floors, setFloors] = useState<OfficeFloor[]>(DEFAULT_FLOORS);
@@ -295,6 +301,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
       // Load session tags
       loadSessionTags().then(setSessionTags);
+
+      // Load budget config
+      loadBudgetConfig().then(setBudgetConfig);
     })();
   }, [connectOne]);
 
@@ -514,6 +523,22 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     setSessionTags(updated);
   }, [sessionTags]);
 
+  // ─── Budget handlers ──────────────────────────────
+
+  const handleBudgetConfigChange = useCallback(async (config: BudgetConfig) => {
+    setBudgetConfig(config);
+    await saveBudgetConfig(config);
+    setBudgetAlertsDismissed(false); // Re-show alerts when config changes
+  }, []);
+
+  // Calculate budget alerts
+  const budgetAlerts = calculateBudgetAlerts(
+    budgetConfig,
+    allAgents.reduce((sum, a) => sum + a.costToday, 0),
+    allAgents.reduce((sum, a) => sum + a.costWeek, 0),
+    allAgents.reduce((sum, a) => sum + (a.costToday * 30), 0) // Rough monthly estimate
+  );
+
   return (
     <View style={styles.container}>
       {/* Title bar */}
@@ -589,6 +614,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           </Pressable>
         </View>
       </View>
+
+      {/* Budget Alerts */}
+      {!budgetAlertsDismissed && budgetAlerts.length > 0 && (
+        <BudgetAlertBanner
+          alerts={budgetAlerts}
+          onDismiss={() => setBudgetAlertsDismissed(true)}
+          onConfigure={() => setShowCustomize(true)}
+        />
+      )}
 
       {/* Floor Selector */}
       {viewMode === 'office' && (
@@ -854,6 +888,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         onTelegramDisconnect={handleTelegramDisconnect}
         telegramError={telegramError}
         telegramConnecting={telegramConnecting}
+        budgetConfig={budgetConfig}
+        onBudgetConfigChange={handleBudgetConfigChange}
       />
     </View>
   );
