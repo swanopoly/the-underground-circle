@@ -789,6 +789,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                             appearance={appearances[agent.id]}
                             onPress={() => handleAgentPress(agent)}
                             selected={selectedAgent?.id === agent.id}
+                            showThoughts={!editMode} // Show thoughts when not in edit mode
                           />
                         </View>
                       );

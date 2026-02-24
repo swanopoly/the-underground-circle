@@ -1,7 +1,9 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, Animated, Pressable, Platform } from 'react-native';
 import { OfficeAgent, STATUS_COLORS } from '../../../../lib/officeAgents';
 import { AgentAppearance, DEFAULT_APPEARANCE } from '../../../../lib/officeConfig';
+import ThoughtBubble from '../../../../components/ThoughtBubble';
+import { ThoughtBubble as ThoughtData, generateThoughtBubble } from '../../../../lib/agentMessaging';
 
 interface Props {
   agent: OfficeAgent;
@@ -9,12 +11,16 @@ interface Props {
   onPress: () => void;
   selected: boolean;
   scale?: number;
+  showThoughts?: boolean; // Enable thought bubbles
 }
 
-export default function PixelAgent({ agent, appearance, onPress, selected, scale = 1 }: Props) {
+export default function PixelAgent({ agent, appearance, onPress, selected, scale = 1, showThoughts = false }: Props) {
   const a = appearance || { ...DEFAULT_APPEARANCE, shirtColor: agent.color, hairColor: agent.color };
   const bobAnim = useRef(new Animated.Value(0)).current;
   const glowAnim = useRef(new Animated.Value(0.3)).current;
+  const [currentThought, setCurrentThought] = useState<ThoughtData | null>(null);
+  const lastCost = useRef(agent.costToday);
+  const lastStatus = useRef(agent.status);
 
   useEffect(() => {
     if (agent.status === 'active' || agent.status === 'idle') {
@@ -42,6 +48,50 @@ export default function PixelAgent({ agent, appearance, onPress, selected, scale
     }
   }, [agent.status]);
 
+  // Thought bubble generation
+  useEffect(() => {
+    if (!showThoughts || currentThought) return;
+
+    // Check for events
+    const costSpike = agent.costToday > lastCost.current + 0.10; // $0.10 spike
+    const statusChanged = agent.status !== lastStatus.current;
+    const longIdle = agent.status === 'idle';
+
+    lastCost.current = agent.costToday;
+    lastStatus.current = agent.status;
+
+    // Random thoughts every 15-45 seconds
+    const minDelay = 15000;
+    const maxDelay = 45000;
+    const delay = Math.random() * (maxDelay - minDelay) + minDelay;
+
+    const timer = setTimeout(() => {
+      const thought = generateThoughtBubble(agent, {
+        recentCostSpike: costSpike,
+        recentError: agent.status === 'error',
+        longIdle,
+      });
+      
+      if (thought) {
+        setCurrentThought(thought);
+      }
+    }, delay);
+
+    // Immediate thought on events
+    if (statusChanged || costSpike) {
+      const thought = generateThoughtBubble(agent, {
+        recentCostSpike: costSpike,
+        recentError: agent.status === 'error',
+        longIdle,
+      });
+      if (thought) {
+        setCurrentThought(thought);
+      }
+    }
+
+    return () => clearTimeout(timer);
+  }, [agent.costToday, agent.status, showThoughts, currentThought]);
+
   const statusColor = STATUS_COLORS[agent.status];
   const isOffline = agent.status === 'offline';
   const PX = 2.5 * scale;
@@ -49,6 +99,14 @@ export default function PixelAgent({ agent, appearance, onPress, selected, scale
   return (
     <Pressable onPress={onPress} style={Platform.OS === 'web' ? { cursor: 'pointer' } as any : undefined}>
       <Animated.View style={[styles.container, { transform: [{ translateY: bobAnim }] }]}>
+        {/* Thought bubble */}
+        {showThoughts && currentThought && (
+          <ThoughtBubble
+            thought={currentThought}
+            onDismiss={() => setCurrentThought(null)}
+          />
+        )}
+        
         {selected && <View style={[styles.selectionRing, { borderColor: agent.color }]} />}
 
         {/* Status dot */}

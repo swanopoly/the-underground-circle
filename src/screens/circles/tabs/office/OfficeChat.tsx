@@ -130,10 +130,12 @@ function processLocalCommand(text: string, agents: OfficeAgent[], connections?: 
   }
 
   if (lower === 'help' || lower === '?') {
+    const { getCollaborationHelp } = await import('../../../../lib/officeChatCommands');
     return {
       response: `🏢 Office Commands\n\n` +
         `LOCAL:\n• status — Office overview\n• agents — List all agents\n• connections — List all connections\n• agent [name] — Agent details\n• costs — Cost breakdown\n• theme [name] — Change theme\n\n` +
         `AGENT COMMANDS:\n• ask [question] — Ask default agent\n• task [message] — Send task to default agent\n• task @[name] [message] — Route to connection/agent\n• spawn [task] — Launch background sub-agent\n• subagents — List running sub-agents\n• msg [session] [text] — Message a session\n• broadcast [msg] — Send to all channels\n\n` +
+        `${getCollaborationHelp()}\n\n` +
         `SESSION & DATA:\n• sessions — All sessions (all connections)\n• session [key] — Session details\n• history [key] — Message history\n• memory [query] — Search agent memory\n• search [query] — Web search\n\n` +
         `CRON JOBS:\n• cron — List all jobs\n• cron run [id] — Run job now\n• cron enable/disable [id]\n\n` +
         `INTEGRATIONS:\n• agents-live — List real agent IDs\n• tg [message] — Send to Telegram\n• tg-feed — Recent Telegram messages`,
@@ -177,6 +179,16 @@ export default function OfficeChat({
       addMsg(local.response, false, 'Office AI');
       if (local.command && onCommand) onCommand(local.command);
       return;
+    }
+
+    // Try collaboration commands (project management + messaging)
+    if (anyConnected && getConnectionConfig) {
+      const { processCollaborationCommand } = await import('../../../../lib/officeChatCommands');
+      const collab = await processCollaborationCommand(text, agents, connections || [], getConnectionConfig);
+      if (collab) {
+        addMsg(collab.response, false, collab.success ? 'Office AI' : 'Error');
+        return;
+      }
     }
 
     const lower = text.toLowerCase();
