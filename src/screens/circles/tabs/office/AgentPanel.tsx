@@ -78,16 +78,17 @@ export default function AgentPanel({
     }
   }, [agent]);
 
+  // Extract sessionKey early so hooks always run in same order
+  const sessionKey = agent
+    ? (agent.sessionKey || (agent.id.includes('::') ? agent.id.split('::')[1] : agent.id))
+    : undefined;
+
+  const control = useAgentControl(circleId, sessionKey);
+
   if (!agent) return null;
 
   const statusColor = STATUS_COLORS[agent.status];
-  
-  // Extract sessionKey from agent.id (format: connectionId::sessionKey)
-  const sessionKey = agent.sessionKey || (agent.id.includes('::') ? agent.id.split('::')[1] : agent.id);
-  const currentTags = sessionTags?.get(sessionKey) || [];
-
-  // eslint-disable-next-line react-hooks/rules-of-hooks
-  const control = useAgentControl(circleId, sessionKey);
+  const currentTags = sessionTags?.get(sessionKey!) || [];
 
   return (
     <Animated.View style={[
