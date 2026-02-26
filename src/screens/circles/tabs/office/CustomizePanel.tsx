@@ -71,6 +71,8 @@ export default function CustomizePanel({
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
   const [showToken, setShowToken] = useState(false);
   const [visibleTokenIds, setVisibleTokenIds] = useState<Set<string>>(new Set());
+  const [showRemoteControl, setShowRemoteControl] = useState(false);
+
 
   if (!visible) return null;
 
@@ -377,7 +379,22 @@ export default function CustomizePanel({
                         {conn.error && (
                           <View style={styles.connCardErrorBox}>
                             <Text style={styles.connCardErrorIcon}>⚠️</Text>
-                            <Text style={styles.connCardError}>{conn.error}</Text>
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.connCardError}>{conn.error}</Text>
+                              {conn.error.includes('localhost') || conn.error.includes('CORS') ? (
+                                <Text style={{ color: '#f59e0b', fontSize: 10, marginTop: 3 }}>
+                                  💡 Try: node openclaw-proxy.js
+                                </Text>
+                              ) : conn.error.includes('refused') || conn.error.includes('reach') ? (
+                                <Text style={{ color: '#f59e0b', fontSize: 10, marginTop: 3 }}>
+                                  💡 Try: openclaw gateway start
+                                </Text>
+                              ) : conn.error.includes('auth') || conn.error.includes('token') ? (
+                                <Text style={{ color: '#f59e0b', fontSize: 10, marginTop: 3 }}>
+                                  💡 Check token in ~/.openclaw/openclaw.json
+                                </Text>
+                              ) : null}
+                            </View>
                           </View>
                         )}
 
@@ -398,7 +415,9 @@ export default function CustomizePanel({
                               onPress={() => onConnectConnection(conn.id)}
                               style={[styles.connActionBtn, { backgroundColor: meta.color + '20', borderColor: meta.color + '40' }]}
                             >
-                              <Text style={[styles.connActionText, { color: meta.color }]}>CONNECT</Text>
+                              <Text style={[styles.connActionText, { color: meta.color }]}>
+                                {conn.status === 'error' ? '↻ RECONNECT' : 'CONNECT'}
+                              </Text>
                             </Pressable>
                           )}
                           <Pressable
@@ -452,7 +471,7 @@ export default function CustomizePanel({
                         <Text style={styles.providerIcon}>{meta.icon}</Text>
                         <View style={styles.providerInfo}>
                           <Text style={[styles.providerName, { color: meta.color }]}>{meta.label}</Text>
-                          <Text style={styles.providerDesc}>{meta.description}</Text>
+                          <Text style={styles.providerDesc}>{meta.label}</Text>
                         </View>
                       </Pressable>
                     );
@@ -542,6 +561,38 @@ export default function CustomizePanel({
                       <Text style={styles.connectInfoText}>3. Find token in ~/.openclaw/openclaw.json</Text>
                       <Text style={styles.connectInfoText}>4. Use http://localhost:18790 as endpoint (CORS proxy)</Text>
                     </View>
+                  )}
+
+                  {/* ─── Claude Code Remote Control ─── */}
+                  {(newProvider === 'openclaw' || newProvider === 'claude-code') && !editingConnectionId && (
+                    <>
+                      <Pressable
+                        onPress={() => setShowRemoteControl(v => !v)}
+                        style={styles.collapsibleHeader}
+                      >
+                        <Text style={styles.collapsibleHeaderText}>🖥️ Claude Code Remote Control</Text>
+                        <Text style={styles.collapsibleChevron}>{showRemoteControl ? '▼' : '▶'}</Text>
+                      </Pressable>
+                      {showRemoteControl && (
+                        <View style={styles.collapsibleBody}>
+                          <Text style={styles.connectInfoText}>Start a remote session from your terminal:</Text>
+                          <Text style={styles.codeSnippet}>  claude remote-control</Text>
+                          <Text style={styles.connectInfoText}>Or from inside an existing session:</Text>
+                          <Text style={styles.codeSnippet}>  /remote-control  (or /rc)</Text>
+                          <Text style={[styles.connectInfoText, { marginTop: 6 }]}>Your session stays on your machine. Pick it up from:</Text>
+                          <Text style={styles.connectInfoText}>• claude.ai/code</Text>
+                          <Text style={styles.connectInfoText}>• Claude iOS / Android app</Text>
+                          <Text style={styles.connectInfoText}>• Scan the QR code shown in your terminal</Text>
+                          <Text style={[styles.connectInfoText, { marginTop: 6, color: '#6366f1' }]}>
+                            Enable for all sessions: run /config inside Claude Code → set "Enable Remote Control for all sessions" to true
+                          </Text>
+                        </View>
+                      )}
+
+                      <Text style={[styles.connectInfoText, { color: '#3f3f46', fontSize: 10, marginTop: 4 }]}>
+                        💡 Tip: set <Text style={{ fontFamily: 'monospace' }}>CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1</Text> for parallel agent runs
+                      </Text>
+                    </>
                   )}
 
                   {newProvider === 'claude-code' && (
@@ -918,6 +969,22 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   connectBtnText: { color: '#fff', fontSize: 12, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
+  collapsibleHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: '#1a1a2e', borderRadius: 4, paddingHorizontal: 8, paddingVertical: 6,
+    marginTop: 6,
+  },
+  collapsibleHeaderText: { fontSize: 10, color: '#6366f1', fontFamily: 'monospace', fontWeight: '700', flex: 1 },
+  collapsibleChevron: { fontSize: 9, color: '#6366f1', marginLeft: 4 },
+  collapsibleBody: {
+    backgroundColor: '#12122a', borderRadius: 4, padding: 8, marginTop: 2,
+    borderLeftWidth: 2, borderLeftColor: '#6366f1',
+  },
+  codeSnippet: {
+    fontSize: 10, color: '#a5b4fc', fontFamily: 'monospace',
+    backgroundColor: '#0d0d1f', borderRadius: 3, paddingHorizontal: 6, paddingVertical: 3,
+    marginVertical: 3,
+  },
   connectInfo: {
     backgroundColor: '#0a0a10', borderRadius: 8, padding: 12, borderWidth: 1,
     borderColor: '#1a1a2e', marginTop: 8, gap: 4,

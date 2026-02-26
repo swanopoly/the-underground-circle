@@ -295,7 +295,7 @@ export default function CheckInScreen({ route, navigation }: any) {
   const handleCheckIn = async () => {
     const sanitizedContent = content.trim();
     if (!sanitizedContent) {
-      showAlert('What did you do today?', "Don't leave it blank.");
+      showAlert('What did your AI work on today?', "Don't leave it blank.");
       return;
     }
 
@@ -406,7 +406,7 @@ export default function CheckInScreen({ route, navigation }: any) {
         <View style={styles.checkInBox}>
           <TextInput
             style={styles.checkInInput}
-            placeholder="What did you DO today?"
+            placeholder="What did you ship / create / complete today?"
             placeholderTextColor="#444"
             value={content}
             onChangeText={setContent}

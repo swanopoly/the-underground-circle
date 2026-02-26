@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, Pressable,
-  useWindowDimensions, Platform,
+  useWindowDimensions, Platform, Linking, Modal, TextInput,
 } from 'react-native';
 import OfficeFloorView, { DESK_POSITIONS, FLOOR_W, FLOOR_H } from './office/OfficeFloor';
 import PixelAgent from './office/PixelAgent';
@@ -41,6 +41,43 @@ import BudgetAlertBanner from '../../../components/BudgetAlertBanner';
 import { calculatePeriodCosts } from '../../../lib/costCalculations';
 import OfficeActionPanel from '../../../components/OfficeActionPanel';
 import FarmHealthDashboard from '../../../components/FarmHealthDashboard';
+import AgentActivityFeed from '../../../components/AgentActivityFeed';
+import {
+  CircleOfficeAgent,
+  loadCircleOfficeAgents,
+  publishAgentToCircle,
+  subscribeToCircleOffice,
+  PROVIDER_DISPLAY,
+} from '../../../lib/circleOffice';
+import {
+  startHeartbeat,
+  stopHeartbeat,
+  getLastSeen,
+} from '../../../lib/agentHeartbeat';
+import {
+  joinPresenceChannel,
+  leavePresenceChannel,
+  broadcastAgentUpdate,
+  extractLiveAgents,
+  AgentLiveState,
+  ConnectionStatus,
+} from '../../../lib/agentPresence';
+import PixelOfficeCanvas from '../../../components/PixelOfficeCanvas';
+import OfficeAnalyticsPanel from '../../../components/OfficeAnalyticsPanel';
+import OfficeTerminal from '../../../components/OfficeTerminal';
+import {
+  subscribeToTerminalCommands,
+  respondToCommand,
+  cleanupTerminalChannels,
+  updateAgentAnalytics,
+  BroadcastCommandPayload,
+} from '../../../lib/officeTerminal';
+import {
+  invokeAndStream,
+  invokeAllAgents,
+} from '../../../lib/agentInvocation';
+import { supabase } from '../../../lib/supabase';
+import AgentSetupWizard from '../../../components/AgentSetupWizard';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -72,11 +109,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [whiteboardNotes, setWhiteboardNotes] = useState<string[]>([]);
   const [chatMinimized, setChatMinimized] = useState(false);
   const [terminalSize, setTerminalSize] = useState<'closed' | 'half' | 'full'>('closed');
+  // ─── Shared terminal state — both the tab view and the bottom drawer
+  //     use these so input/target stay in sync (true mirror behaviour) ──────
+  const [terminalInput, setTerminalInput]         = useState('');
+  const [terminalTargetId, setTerminalTargetId]   = useState<string | null>(null);
+  const [terminalTargetName, setTerminalTargetName] = useState('@all');
   const [statusHistory, setStatusHistory] = useState<Array<OfficeAgent[]>>([]);
   const [enrichedAgents, setEnrichedAgents] = useState<OfficeAgent[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
-  const [viewMode, setViewMode] = useState<'office' | 'cost' | 'tags' | 'metrics' | 'farm'>('office'); // Toggle between views
+  const [viewMode, setViewMode] = useState<'office' | 'cost' | 'tags' | 'metrics' | 'farm' | 'canvas' | 'analytics' | 'terminal'>('office'); // Toggle between views
   const [sessionTags, setSessionTags] = useState<Map<string, SessionTag[]>>(new Map());
   const [budgetConfig, setBudgetConfig] = useState<BudgetConfig>({ enabled: false });
   const [budgetAlertsDismissed, setBudgetAlertsDismissed] = useState(false);
@@ -88,11 +130,223 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [floors, setFloors] = useState<OfficeFloor[]>(DEFAULT_FLOORS);
   const [currentFloorId, setCurrentFloorId] = useState<string>('floor_1');
 
+  // ─── Setup wizard ─────────────────────────────────────────────────────────
+  const [showSetupWizard, setShowSetupWizard] = useState(false);
+
   // ─── Multi-connection state ──────────────────────────────
   const [connections, setConnections] = useState<AgentConnection[]>([]);
   const pollersRef = useRef<Map<string, OpenClawPoller>>(new Map());
   const sessionsRef = useRef<Map<string, OpenClawSession[]>>(new Map());
   const [sessionsTick, setSessionsTick] = useState(0); // force re-render on session updates
+
+  // ─── Current user ─────────────────────────────────────────────────────────
+  const [currentUserId, setCurrentUserId] = useState<string>('');
+  const [currentUserName, setCurrentUserName] = useState<string>('');
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      if (data.user) {
+        setCurrentUserId(data.user.id);
+        supabase.from('profiles')
+          .select('display_name, username')
+          .eq('id', data.user.id)
+          .single()
+          .then(({ data: profile }) => {
+            setCurrentUserName(profile?.display_name || profile?.username || 'Agent');
+          });
+      }
+    });
+  }, []);
+
+  // ─── Circle Office (shared agents from all members) ──────────────────────
+  const [circleOfficeAgents, setCircleOfficeAgents] = useState<CircleOfficeAgent[]>([]);
+  const [publishingToCircle, setPublishingToCircle] = useState(false);
+
+  const loadCircleOffice = useCallback(async () => {
+    const { agents } = await loadCircleOfficeAgents(circleId);
+    setCircleOfficeAgents(agents);
+  }, [circleId]);
+
+  useEffect(() => {
+    loadCircleOffice();
+    const unsub = subscribeToCircleOffice(circleId, loadCircleOffice);
+    return unsub;
+  }, [circleId, loadCircleOffice]);
+
+  // Live presence state — userId → isOnline flag from Supabase Realtime
+  const [liveUserIds, setLiveUserIds] = useState<Set<string>>(new Set());
+  const [circleConnectionStatus, setCircleConnectionStatus] = useState<ConnectionStatus>('offline');
+
+  // Start heartbeat + join Realtime Presence when we have connected agents
+  useEffect(() => {
+    const connectedConns = connections.filter(c => c.status === 'connected');
+
+    if (connectedConns.length > 0) {
+      // DB heartbeat layer
+      startHeartbeat(circleId, connectedConns).then(() => loadCircleOffice());
+
+      // Build live agent states from connections
+      const myAgents: AgentLiveState[] = connectedConns.map(conn => ({
+        agentId: conn.id,
+        name: conn.name,
+        provider: conn.provider,
+        toolIcon: PROVIDER_DISPLAY[conn.provider]?.icon || '🤖',
+        color: conn.color || PROVIDER_DISPLAY[conn.provider]?.color || '#6366f1',
+        status: 'idle' as const,
+      }));
+
+      // Realtime Presence layer
+      setCircleConnectionStatus('connecting');
+      joinPresenceChannel(circleId, myAgents, {
+        onSync: (state) => {
+          const live = extractLiveAgents(state);
+          setLiveUserIds(new Set(live.keys()));
+        },
+        onJoin: (userId) => {
+          setLiveUserIds(prev => new Set([...prev, userId]));
+          loadCircleOffice();
+        },
+        onLeave: (userId) => {
+          setLiveUserIds(prev => {
+            const next = new Set(prev);
+            next.delete(userId);
+            return next;
+          });
+          setTimeout(() => loadCircleOffice(), 3000);
+        },
+        onConnectionStatus: (status) => {
+          setCircleConnectionStatus(status);
+        },
+      });
+    }
+
+    return () => {
+      stopHeartbeat(circleId);
+      leavePresenceChannel(circleId);
+    };
+  }, [circleId, connections.filter(c => c.status === 'connected').length]);
+
+  // ─── Terminal command subscription ────────────────────────────────────────
+  // Listen for commands targeting my agents; respond with a stub (Phase 3 = real bridge)
+  useEffect(() => {
+    if (!currentUserId || !circleId) return;
+
+    const myAgents = circleOfficeAgents.filter(a => a.ownerId === currentUserId);
+    if (myAgents.length === 0) return;
+
+    const myAgentIds = myAgents.map(a => a.id);
+
+    const unsub = subscribeToTerminalCommands(circleId, myAgentIds, async (cmd: BroadcastCommandPayload) => {
+      // Phase 3: Real agent invocation
+      // For @all: invoke all online agents in parallel
+      // For targeted: invoke specific agent
+
+      if (cmd.targetAgentId) {
+        // Single agent — invoke directly
+        const agent = myAgents.find(a => a.id === cmd.targetAgentId);
+        if (!agent) return;
+
+        // Fire off the invocation (don't await — let it stream)
+        invokeAndStream(
+          {
+            messageId: cmd.messageId,
+            circleId,
+            command: cmd.commandText,
+            targetAgentId: agent.id,
+            targetAgentName: `@${agent.name}`,
+          },
+          agent,
+          'http://localhost:18790'
+        ).catch(err => {
+          console.error('[OfficeTab] Invocation failed:', err);
+        });
+      } else {
+        // @all command — invoke all agents in parallel
+        invokeAllAgents(
+          {
+            messageId: cmd.messageId,
+            circleId,
+            command: cmd.commandText,
+            targetAgentName: '@all',
+          },
+          myAgents,
+          'http://localhost:18790'
+        ).catch(err => {
+          console.error('[OfficeTab] Multi-agent invocation failed:', err);
+        });
+      }
+    });
+
+    return () => {
+      unsub();
+      cleanupTerminalChannels(circleId);
+    };
+  }, [circleId, currentUserId, circleOfficeAgents.filter(a => a.ownerId === currentUserId).length]);
+
+  // Merge live presence into circle office agents
+  const mergedCircleAgents = circleOfficeAgents.map(agent => ({
+    ...agent,
+    // Override status with 'idle' if user is live in Presence but DB shows offline
+    status: (liveUserIds.has(agent.ownerId) && agent.status === 'offline')
+      ? 'idle' as const
+      : agent.status,
+  }));
+
+  // Publish the user's first connection as their circle office agent
+  // ─── Manual agent publish modal ──────────────────────────────────────────
+  const [showPublishModal, setShowPublishModal] = useState(false);
+  const [publishName, setPublishName] = useState('');
+  const [publishProvider, setPublishProvider] = useState('openclaw');
+
+  const handlePublishToCircle = useCallback(async (
+    overrideName?: string,
+    overrideProvider?: string
+  ) => {
+    if (publishingToCircle) return;
+
+    // Prefer passed values → connected conn → modal values → defaults
+    const conn = connections.find(c => c.enabled);
+    const display = PROVIDER_DISPLAY[overrideProvider || publishProvider || conn?.provider || 'openclaw']
+      || PROVIDER_DISPLAY['generic-agent'];
+
+    const agentName    = overrideName     || conn?.name     || publishName || 'My Agent';
+    const agentProvider= overrideProvider || conn?.provider || publishProvider || 'openclaw';
+    const agentColor   = conn?.color      || display.color;
+
+    setPublishingToCircle(true);
+    try {
+      await publishAgentToCircle({
+        circleId,
+        provider: agentProvider,
+        name: agentName,
+        color: agentColor,
+        toolIcon: display.icon,
+      });
+      await loadCircleOffice();
+      setShowPublishModal(false);
+    } finally {
+      setPublishingToCircle(false);
+    }
+  }, [circleId, connections, publishingToCircle, loadCircleOffice, publishName, publishProvider]);
+
+  // Auto-publish when a connection becomes connected for the first time
+  const autoPublishedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const connectedConns = connections.filter(c => c.status === 'connected');
+    for (const conn of connectedConns) {
+      if (!autoPublishedRef.current.has(conn.id)) {
+        autoPublishedRef.current.add(conn.id);
+        const display = PROVIDER_DISPLAY[conn.provider] || PROVIDER_DISPLAY['generic-agent'];
+        publishAgentToCircle({
+          circleId,
+          provider: conn.provider,
+          name: conn.name,
+          color: conn.color || display.color,
+          toolIcon: display.icon,
+        }).then(() => loadCircleOffice());
+      }
+    }
+  }, [circleId, connections.filter(c => c.status === 'connected').length, loadCircleOffice]);
 
   // ─── Telegram state ──────────────────────────────
   const [telegramConfig, setTelegramConfig] = useState<TelegramConfig>({ botToken: '', chatId: '' });
@@ -374,7 +628,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   let indexOffset = 0;
   for (const conn of connectedConns) {
     const sessions = sessionsRef.current.get(conn.id) || [];
-    const connAgents = sessionsToAgents(sessions, conn.id, conn.name, conn.provider, indexOffset);
+    const connAgents = sessionsToAgents(sessions, conn.id, conn.name, conn.provider);
     rawAgents.push(...connAgents);
     indexOffset += connAgents.length;
   }
@@ -708,6 +962,34 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               🏥
             </Text>
           </Pressable>
+          {/* ─── New: Pixel Canvas / Analytics / Terminal ─── */}
+          <Pressable
+            onPress={() => setViewMode(viewMode === 'canvas' ? 'office' : 'canvas')}
+            style={[styles.modeBtn, viewMode === 'canvas' && styles.modeBtnActive,
+              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={[styles.modeBtnText, viewMode === 'canvas' && styles.modeBtnTextActive]}>
+              🖥️
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setViewMode(viewMode === 'analytics' ? 'office' : 'analytics')}
+            style={[styles.modeBtn, viewMode === 'analytics' && styles.modeBtnActive,
+              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={[styles.modeBtnText, viewMode === 'analytics' && styles.modeBtnTextActive]}>
+              📈
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setViewMode(viewMode === 'terminal' ? 'office' : 'terminal')}
+            style={[styles.modeBtn, viewMode === 'terminal' && styles.modeBtnActive,
+              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={[styles.modeBtnText, viewMode === 'terminal' && styles.modeBtnTextActive]}>
+              ⌨️
+            </Text>
+          </Pressable>
           {viewMode === 'office' && (
             <Pressable
               onPress={() => { setEditMode(!editMode); setPlacingType(null); }}
@@ -893,8 +1175,35 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </View>
       )}
 
+      {/* ─── New views: Pixel Canvas / Analytics / Terminal ─── */}
+      {viewMode === 'canvas' ? (
+        <PixelOfficeCanvas
+          agents={mergedCircleAgents}
+          currentUserId={currentUserId}
+        />
+      ) : viewMode === 'analytics' ? (
+        <OfficeAnalyticsPanel
+          circleId={circleId}
+          userId={currentUserId}
+          agents={mergedCircleAgents}
+        />
+      ) : viewMode === 'terminal' ? (
+        <OfficeTerminal
+          circleId={circleId}
+          userId={currentUserId}
+          userDisplayName={currentUserName}
+          agents={mergedCircleAgents}
+          myAgentIds={mergedCircleAgents.filter(a => a.ownerId === currentUserId).map(a => a.id)}
+          sharedInput={terminalInput}
+          onSharedInputChange={setTerminalInput}
+          sharedTargetId={terminalTargetId}
+          sharedTargetName={terminalTargetName}
+          onSharedSelectTarget={(id, name) => { setTerminalTargetId(id); setTerminalTargetName(name); }}
+        />
+      ) : null}
+
       {/* Main Content - Switch between Office, Cost, Tags, Metrics, and Farm views */}
-      {viewMode === 'cost' ? (
+      {(viewMode === 'canvas' || viewMode === 'analytics' || viewMode === 'terminal') ? null : viewMode === 'cost' ? (
         <CostDashboard
           sessions={enrichedSessions}
           agents={enrichedAgents}
@@ -923,6 +1232,45 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         {/* Mobile: Card-based agent list */}
         {!isDesktop ? (
           <ScrollView style={styles.mobileAgentScroll} showsVerticalScrollIndicator={true} contentContainerStyle={styles.mobileAgentList}>
+            {/* Circle members' agents — shared office */}
+            {mergedCircleAgents.length > 0 && (
+              <CircleOfficePanel
+                agents={mergedCircleAgents}
+                onRefresh={loadCircleOffice}
+                accentColor={accentColor}
+                connectionStatus={circleConnectionStatus}
+              />
+            )}
+
+            {/* Publish to Circle CTA — always show if user hasn't published yet */}
+            {!mergedCircleAgents.some(a => a.isOwn) && (
+              <Pressable
+                onPress={() => {
+                  const conn = connections.find(c => c.enabled);
+                  if (conn) {
+                    // Has a connection — publish directly
+                    handlePublishToCircle(conn.name, conn.provider);
+                  } else {
+                    // No connection — open manual form
+                    setShowPublishModal(true);
+                  }
+                }}
+                disabled={publishingToCircle}
+                style={[coStyles.publishBtn, { borderColor: accentColor + '44', opacity: publishingToCircle ? 0.6 : 1 }]}
+              >
+                <Text style={coStyles.publishBtnIcon}>🏢</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={[coStyles.publishBtnTitle, { color: accentColor }]}>
+                    {publishingToCircle ? 'Publishing...' : 'Add your agent to the Circle Office'}
+                  </Text>
+                  <Text style={coStyles.publishBtnSub}>
+                    {connections.some(c => c.enabled)
+                      ? 'Let your circle see your agent and what it\'s building'
+                      : 'Register your agent manually — no gateway required'}
+                  </Text>
+                </View>
+              </Pressable>
+            )}
             {displayAgents.length === 0 ? (
               <View style={styles.mobileEmpty}>
                 <Text style={styles.mobileEmptyIcon}>🔗</Text>
@@ -963,12 +1311,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                   }
                 })()}
                 <Pressable
-                  onPress={() => setShowCustomize(true)}
+                  onPress={() => setShowSetupWizard(true)}
                   style={[styles.mobileEmptyBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                   accessibilityRole="button"
-                  accessibilityLabel="Add connection"
+                  accessibilityLabel="Connect agent"
                 >
-                  <Text style={styles.mobileEmptyBtnText}>+ ADD CONNECTION</Text>
+                  <Text style={styles.mobileEmptyBtnText}>🤖 CONNECT AGENT</Text>
                 </Pressable>
               </View>
             ) : (
@@ -1007,6 +1355,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                 );
               })
             )}
+
+            {/* Agent Activity Feed */}
+            <View style={{ paddingHorizontal: 12, paddingTop: 16, paddingBottom: 8 }}>
+              <Text style={{ color: '#6B7280', fontSize: 11, fontFamily: 'monospace', letterSpacing: 1, marginBottom: 8, textTransform: 'uppercase' }}>
+                ⚡ Agent Activity
+              </Text>
+              <AgentActivityFeed circleId={circleId} maxHeight={320} />
+            </View>
           </ScrollView>
         ) : (
           /* Desktop: Isometric office view */
@@ -1021,54 +1377,19 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                       onFloorPress={editMode ? handleFloorPress : undefined}
                       onFurniturePress={editMode ? handleFurniturePress : undefined}
                     />
-                    <Whiteboard editable={editMode} notes={whiteboardNotes} onNotesChange={setWhiteboardNotes} agents={displayAgents} statusHistory={statusHistory} cronJobs={cronJobs} />
+                    <Whiteboard editable={editMode} notes={whiteboardNotes} onNotesChange={setWhiteboardNotes} agents={displayAgents} statusHistory={statusHistory} cronJobs={cronJobs} circleId={circleId} />
                     <ServerRack agents={displayAgents} />
                     {agents.length === 0 && (
                       <View style={styles.emptyOverlay}>
-                        <Text style={styles.emptyIcon}>🔗</Text>
+                        <Text style={{ fontSize: 36, marginBottom: 12 }}>🤖</Text>
                         <Text style={styles.emptyTitle}>No agents connected</Text>
-                        {(() => {
-                          const isProduction = typeof window !== 'undefined' && !window.location.hostname.includes('localhost');
-                          const hasLocalhost = connections.some(c => c.endpoint.includes('localhost') || c.endpoint.includes('127.0.0.1'));
-                          const hasOnlyLocalhost = connections.length > 0 && connections.every(c => c.endpoint.includes('localhost') || c.endpoint.includes('127.0.0.1'));
-                          
-                          if (isProduction && hasOnlyLocalhost) {
-                            // User has connections, but they're all localhost (skipped on production)
-                            return (
-                              <>
-                                <Text style={styles.emptyText}>Your saved connections use localhost and can't be reached from this domain.</Text>
-                                <View style={{ marginTop: 16, padding: 16, backgroundColor: '#1a1a2e', borderRadius: 8, borderWidth: 1, borderColor: '#333', maxWidth: 500 }}>
-                                  <Text style={{ color: '#22c55e', fontSize: 13, fontWeight: '700', marginBottom: 8, textAlign: 'center' }}>💡 The Office connects to LOCAL AI agents</Text>
-                                  <Text style={{ color: '#888', fontSize: 12, textAlign: 'center' }}>
-                                    Your connections work when running on localhost, but production can't access them due to browser security (CSP).
-                                  </Text>
-                                </View>
-                              </>
-                            );
-                          } else if (isProduction) {
-                            // Production, no connections or some non-localhost
-                            return (
-                              <>
-                                <Text style={styles.emptyText}>The Office dashboard connects to your local AI agents</Text>
-                                <View style={{ marginTop: 16, padding: 16, backgroundColor: '#1a1a2e', borderRadius: 8, borderWidth: 1, borderColor: '#333', maxWidth: 500 }}>
-                                  <Text style={{ color: '#22c55e', fontSize: 13, fontWeight: '700', marginBottom: 12, textAlign: 'center' }}>📋 Setup Guide</Text>
-                                  <Text style={{ color: '#888', fontSize: 12, marginBottom: 6 }}>1️⃣ Install OpenClaw on your computer</Text>
-                                  <Text style={{ color: '#888', fontSize: 12, marginBottom: 6 }}>2️⃣ Run it locally (it starts a server)</Text>
-                                  <Text style={{ color: '#888', fontSize: 12, marginBottom: 6 }}>3️⃣ Click ⚙️ → Connections to add endpoint</Text>
-                                  <Text style={{ color: '#666', fontSize: 11, marginTop: 8, textAlign: 'center', fontStyle: 'italic' }}>Or use a remote OpenClaw/agent endpoint</Text>
-                                </View>
-                              </>
-                            );
-                          } else {
-                            // Localhost
-                            return (
-                              <>
-                                <Text style={styles.emptyText}>Click ⚙️ → Connections to add your agent endpoints</Text>
-                                <Text style={styles.emptySub}>Supports OpenClaw, Claude Code, and generic APIs</Text>
-                              </>
-                            );
-                          }
-                        })()}
+                        <Text style={styles.emptyText}>Connect your AI agent to show up in the circle office</Text>
+                        <Pressable
+                          onPress={() => setShowSetupWizard(true)}
+                          style={{ marginTop: 16, backgroundColor: '#6366f1', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 24, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
+                        >
+                          <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Connect Agent →</Text>
+                        </Pressable>
                       </View>
                     )}
                     {agents.map((agent, i) => {
@@ -1090,6 +1411,48 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                 </View>
               </ScrollView>
             </ScrollView>
+
+            {/* Circle Office Panel — all members' bots */}
+            {!editMode && (
+              <>
+                {mergedCircleAgents.length > 0 && (
+                  <CircleOfficePanel
+                    agents={mergedCircleAgents}
+                    onRefresh={loadCircleOffice}
+                    accentColor={accentColor}
+                    connectionStatus={circleConnectionStatus}
+                    compact
+                  />
+                )}
+                {/* Desktop publish CTA — always show if not yet published */}
+                {!mergedCircleAgents.some(a => a.isOwn) && (
+                  <Pressable
+                    onPress={() => {
+                      const conn = connections.find(c => c.enabled);
+                      if (conn) {
+                        handlePublishToCircle(conn.name, conn.provider);
+                      } else {
+                        setShowPublishModal(true);
+                      }
+                    }}
+                    disabled={publishingToCircle}
+                    style={[coStyles.publishBtn, { borderColor: accentColor + '44', opacity: publishingToCircle ? 0.6 : 1, marginHorizontal: 8, marginTop: 4 }]}
+                  >
+                    <Text style={coStyles.publishBtnIcon}>🏢</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[coStyles.publishBtnTitle, { color: accentColor }]}>
+                        {publishingToCircle ? 'Publishing...' : 'Add your agent to the Circle Office'}
+                      </Text>
+                      <Text style={coStyles.publishBtnSub}>
+                        {connections.some(c => c.enabled)
+                          ? 'Let your circle see your agent and what it\'s building'
+                          : 'Register your agent — no gateway required'}
+                      </Text>
+                    </View>
+                  </Pressable>
+                )}
+              </>
+            )}
 
             {/* Desktop quick bar */}
             {!editMode && (
@@ -1151,44 +1514,39 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           </View>
         </View>
 
-        {/* Terminal - half size */}
+        {/* Terminal - half size (mirrors the Terminal tab — shared state) */}
         {terminalSize === 'half' && (
           <View style={styles.chatPane}>
-            <OfficeChat
+            <OfficeTerminal
               circleId={circleId}
-              onCommand={handleCommand}
-              minimized={chatMinimized}
-              onToggle={() => setChatMinimized(!chatMinimized)}
-              fullscreen={false}
-              onFullscreenToggle={() => setTerminalSize('full')}
-              agents={displayAgents}
-              connections={connections}
-              getConnectionConfig={getConnectionConfig}
-              telegramConfig={telegramConnected ? telegramConfig : null}
-              telegramConnected={telegramConnected}
-              telegramMessages={telegramMessages}
-              onActionResult={handleActionResult}
+              userId={currentUserId}
+              userDisplayName={currentUserName}
+              agents={mergedCircleAgents}
+              myAgentIds={mergedCircleAgents.filter(a => a.ownerId === currentUserId).map(a => a.id)}
+              sharedInput={terminalInput}
+              onSharedInputChange={setTerminalInput}
+              sharedTargetId={terminalTargetId}
+              sharedTargetName={terminalTargetName}
+              onSharedSelectTarget={(id, name) => { setTerminalTargetId(id); setTerminalTargetName(name); }}
+              compact
             />
           </View>
         )}
-        
-        {/* Terminal - fullscreen overlay */}
+
+        {/* Terminal - fullscreen overlay (same mirror) */}
         {terminalSize === 'full' && (
           <View style={styles.terminalFullscreen}>
-            <OfficeChat
+            <OfficeTerminal
               circleId={circleId}
-              onCommand={handleCommand}
-              minimized={false}
-              onToggle={() => {}}
-              fullscreen={true}
-              onFullscreenToggle={() => setTerminalSize('half')}
-              agents={displayAgents}
-              connections={connections}
-              getConnectionConfig={getConnectionConfig}
-              telegramConfig={telegramConnected ? telegramConfig : null}
-              telegramConnected={telegramConnected}
-              telegramMessages={telegramMessages}
-              onActionResult={handleActionResult}
+              userId={currentUserId}
+              userDisplayName={currentUserName}
+              agents={mergedCircleAgents}
+              myAgentIds={mergedCircleAgents.filter(a => a.ownerId === currentUserId).map(a => a.id)}
+              sharedInput={terminalInput}
+              onSharedInputChange={setTerminalInput}
+              sharedTargetId={terminalTargetId}
+              sharedTargetName={terminalTargetName}
+              onSharedSelectTarget={(id, name) => { setTerminalTargetId(id); setTerminalTargetName(name); }}
             />
           </View>
         )}
@@ -1221,6 +1579,78 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </View>
       )}
 
+      {/* ─── Manual Agent Publish Modal ───────────────────────────────── */}
+      <Modal
+        visible={showPublishModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowPublishModal(false)}
+      >
+        <Pressable
+          style={pmStyles.overlay}
+          onPress={() => setShowPublishModal(false)}
+        >
+          <Pressable style={pmStyles.modal} onPress={() => {}}>
+            <Text style={pmStyles.title}>Add Your Agent</Text>
+            <Text style={pmStyles.subtitle}>Register your agent in the Circle Office. It will show as offline until your gateway connects.</Text>
+
+            <Text style={pmStyles.label}>Agent Name</Text>
+            <TextInput
+              style={pmStyles.input}
+              value={publishName}
+              onChangeText={setPublishName}
+              placeholder="e.g. SwanBot, Claude Code, Codex..."
+              placeholderTextColor="#555"
+              autoFocus
+              autoCapitalize="words"
+            />
+
+            <Text style={pmStyles.label}>Agent Type</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={pmStyles.providerRow}>
+              {[
+                { key: 'openclaw',      icon: '🦞', label: 'OpenClaw' },
+                { key: 'claude-code',   icon: '🤖', label: 'Claude Code' },
+                { key: 'codex',         icon: '🧠', label: 'Codex' },
+                { key: 'cursor',        icon: '🖱️', label: 'Cursor' },
+                { key: 'gemini',        icon: '♊', label: 'Gemini' },
+                { key: 'generic-agent', icon: '⚡', label: 'Other' },
+              ].map(p => (
+                <Pressable
+                  key={p.key}
+                  style={[pmStyles.providerChip, publishProvider === p.key && pmStyles.providerChipActive]}
+                  onPress={() => setPublishProvider(p.key)}
+                >
+                  <Text style={pmStyles.providerIcon}>{p.icon}</Text>
+                  <Text style={[pmStyles.providerLabel, publishProvider === p.key && pmStyles.providerLabelActive]}>
+                    {p.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            <Pressable
+              style={[pmStyles.submitBtn, (!publishName.trim() || publishingToCircle) && pmStyles.submitBtnDisabled]}
+              onPress={() => handlePublishToCircle(publishName.trim(), publishProvider)}
+              disabled={!publishName.trim() || publishingToCircle}
+            >
+              <Text style={pmStyles.submitText}>
+                {publishingToCircle ? 'Publishing...' : '🏢 Add to Circle Office'}
+              </Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* Agent setup wizard */}
+      <AgentSetupWizard
+        visible={showSetupWizard}
+        onClose={() => setShowSetupWizard(false)}
+        onComplete={(conn) => {
+          handleAddConnection(conn);
+          setShowSetupWizard(false);
+        }}
+      />
+
       {/* Customization panel */}
       <CustomizePanel
         visible={showCustomize}
@@ -1250,6 +1680,346 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     </View>
   );
 }
+
+// ─── Circle Office Panel ──────────────────────────────────────────────────────
+// Shows ALL circle members' published agents with their live status.
+
+const CONNECTION_STATUS_UI = {
+  connecting:   { label: 'Connecting…',   color: '#f59e0b', dot: '🟡' },
+  live:         { label: 'Live',          color: '#22c55e', dot: '🟢' },
+  reconnecting: { label: 'Reconnecting…', color: '#f59e0b', dot: '🟡' },
+  offline:      { label: 'Offline',       color: '#666',    dot: '⚫' },
+} as const;
+
+function CircleOfficePanel({
+  agents,
+  onRefresh,
+  accentColor,
+  compact = false,
+  connectionStatus = 'offline',
+}: {
+  agents: CircleOfficeAgent[];
+  onRefresh: () => void;
+  accentColor: string;
+  compact?: boolean;
+  connectionStatus?: 'connecting' | 'live' | 'reconnecting' | 'offline';
+}) {
+  const building = agents.filter(a => a.status === 'building');
+  const idle = agents.filter(a => a.status === 'idle');
+  const offline = agents.filter(a => a.status === 'offline');
+
+  if (compact) {
+    // Horizontal strip for desktop — scrollable row of agent chips
+    return (
+      <View style={coStyles.compactBar}>
+        <Text style={coStyles.compactLabel}>🏢 Circle Office</Text>
+        <View style={[coStyles.connectionDot, { backgroundColor: CONNECTION_STATUS_UI[connectionStatus].color, marginRight: 4 }]} />
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={coStyles.compactScroll}>
+          {agents.map(agent => {
+            const display = PROVIDER_DISPLAY[agent.provider] || PROVIDER_DISPLAY['generic-agent'];
+            const statusColor = agent.status === 'building' ? '#22c55e' : agent.status === 'idle' ? '#eab308' : '#444';
+            return (
+              <View key={agent.id} style={[coStyles.compactChip, { borderColor: display.color + '44' }]}>
+                {/* Live pulse for building */}
+                {agent.status === 'building' && (
+                  <View style={[coStyles.buildingDot, { backgroundColor: '#22c55e' }]} />
+                )}
+                <Text style={coStyles.compactIcon}>{display.icon}</Text>
+                <View>
+                  <Text style={coStyles.compactOwner}>{agent.ownerDisplayName}</Text>
+                  <Text style={coStyles.compactAgentName} numberOfLines={1}>{agent.name}</Text>
+                </View>
+                <View style={[coStyles.statusDot, { backgroundColor: statusColor }]} />
+                {agent.status === 'building' && agent.currentTask && (
+                  <Text style={coStyles.compactTask} numberOfLines={1}>{agent.currentTask}</Text>
+                )}
+              </View>
+            );
+          })}
+        </ScrollView>
+      </View>
+    );
+  }
+
+  // Sort: building first, then idle (online), then offline by last seen
+  const sorted = [...agents].sort((a, b) => {
+    const rank = (s: string) => s === 'building' ? 0 : s === 'idle' ? 1 : 2;
+    if (rank(a.status) !== rank(b.status)) return rank(a.status) - rank(b.status);
+    // Within same status, most recently active first
+    return new Date(b.lastActiveAt || 0).getTime() - new Date(a.lastActiveAt || 0).getTime();
+  });
+
+  const onlineCount = agents.filter(a => a.status !== 'offline').length;
+
+  // Full card view for mobile
+  return (
+    <View style={coStyles.panel}>
+      <View style={coStyles.panelHeader}>
+        <View>
+          <Text style={coStyles.panelTitle}>🏢 Circle Office</Text>
+          <View style={coStyles.connectionRow}>
+            <View style={[coStyles.connectionDot, { backgroundColor: CONNECTION_STATUS_UI[connectionStatus].color }]} />
+            <Text style={[coStyles.connectionLabel, { color: CONNECTION_STATUS_UI[connectionStatus].color }]}>
+              {CONNECTION_STATUS_UI[connectionStatus].label}
+            </Text>
+          </View>
+        </View>
+        <View style={coStyles.panelStats}>
+          {building.length > 0 && <Text style={coStyles.statBuilding}>⚡ {building.length} building</Text>}
+          {idle.length > 0 && <Text style={coStyles.statIdle}>🟢 {idle.length} online</Text>}
+          {offline.length > 0 && <Text style={coStyles.statOffline}>⚫ {offline.length} away</Text>}
+        </View>
+      </View>
+
+      {sorted.map(agent => {
+        const display = PROVIDER_DISPLAY[agent.provider] || PROVIDER_DISPLAY['generic-agent'];
+        const isBuilding = agent.status === 'building';
+        const isOnline = agent.status === 'idle';
+        const isOffline = agent.status === 'offline';
+        const lastSeen = getLastSeen(agent.lastActiveAt);
+
+        return (
+          <View
+            key={agent.id}
+            style={[
+              coStyles.agentCard,
+              { borderColor: isBuilding ? display.color + '66' : isOnline ? display.color + '33' : '#1a1a1a' },
+              agent.isOwn && coStyles.ownAgentCard,
+              isOffline && coStyles.offlineCard,
+            ]}
+          >
+            {/* Header row */}
+            <View style={coStyles.agentCardHeader}>
+              <View style={[coStyles.providerBadge, { backgroundColor: display.color + '22', borderColor: display.color + '44' }]}>
+                <Text style={coStyles.providerIcon}>{display.icon}</Text>
+                <Text style={[coStyles.providerLabel, { color: display.color }]}>{display.label}</Text>
+              </View>
+              <View style={coStyles.statusChip}>
+                <View style={[coStyles.statusDot, {
+                  backgroundColor: isBuilding ? '#22c55e' : isOnline ? '#22c55e' : '#333',
+                }]} />
+                <Text style={[coStyles.statusText, isOffline && { color: '#444' }]}>
+                  {isBuilding ? 'building' : isOnline ? 'online' : lastSeen.text}
+                </Text>
+              </View>
+            </View>
+
+            {/* Owner + agent name */}
+            <View style={coStyles.agentIdentity}>
+              <View style={[coStyles.ownerAvatar, { backgroundColor: display.color + '33' }]}>
+                <Text style={coStyles.ownerAvatarText}>{agent.ownerDisplayName[0]?.toUpperCase()}</Text>
+              </View>
+              <View>
+                <Text style={coStyles.agentName}>{agent.name}</Text>
+                <Text style={coStyles.ownerName}>
+                  {agent.isOwn ? '👤 Your agent' : `👤 ${agent.ownerDisplayName}`}
+                </Text>
+              </View>
+            </View>
+
+            {/* Live task if building */}
+            {isBuilding && agent.currentTask && (
+              <View style={[coStyles.taskBlock, { borderLeftColor: display.color }]}>
+                <Text style={coStyles.taskLabel}>BUILDING</Text>
+                <Text style={coStyles.taskText}>{agent.currentTask}</Text>
+                {agent.currentGoal && (
+                  <Text style={coStyles.goalText}>🎯 {agent.currentGoal}</Text>
+                )}
+              </View>
+            )}
+
+            {/* Session URL */}
+            {agent.sessionUrl && (
+              <Pressable onPress={() => Linking.openURL(agent.sessionUrl!)} style={coStyles.sessionLink}>
+                <Text style={[coStyles.sessionLinkText, { color: display.color }]}>
+                  🔗 Watch live →
+                </Text>
+              </Pressable>
+            )}
+
+            {agent.returnTime && isBuilding && (
+              <Text style={coStyles.returnTime}>Back: {agent.returnTime}</Text>
+            )}
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+// ─── Manual Publish Modal Styles ──────────────────────────────────────────────
+const pmStyles = StyleSheet.create({
+  overlay: {
+    flex: 1,
+    backgroundColor: '#000000bb',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modal: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 16,
+    padding: 24,
+    width: 340,
+    maxWidth: '90%',
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+  },
+  title: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '800',
+    marginBottom: 6,
+  },
+  subtitle: {
+    color: '#71717a',
+    fontSize: 12,
+    lineHeight: 17,
+    marginBottom: 20,
+  },
+  label: {
+    color: '#a3a3a3',
+    fontSize: 11,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 8,
+  },
+  input: {
+    backgroundColor: '#111',
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    color: '#fff',
+    fontSize: 15,
+    marginBottom: 18,
+  },
+  providerRow: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingBottom: 4,
+    marginBottom: 20,
+  },
+  providerChip: {
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: '#111',
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    minWidth: 64,
+  },
+  providerChipActive: {
+    backgroundColor: '#6366f115',
+    borderColor: '#6366f1',
+  },
+  providerIcon: { fontSize: 20, marginBottom: 4 },
+  providerLabel: { color: '#71717a', fontSize: 10, fontWeight: '600' },
+  providerLabelActive: { color: '#6366f1' },
+  submitBtn: {
+    backgroundColor: '#6366f1',
+    borderRadius: 10,
+    paddingVertical: 13,
+    alignItems: 'center',
+  },
+  submitBtnDisabled: {
+    backgroundColor: '#2a2a2a',
+    opacity: 0.6,
+  },
+  submitText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+});
+
+const coStyles = StyleSheet.create({
+  // Compact (desktop)
+  compactBar: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 12, paddingVertical: 8,
+    borderTopWidth: 1, borderTopColor: '#1a1a2a',
+    backgroundColor: '#080810',
+    gap: 10,
+  },
+  compactLabel: { color: '#444', fontSize: 11, fontWeight: '700', letterSpacing: 0.5 },
+  compactScroll: { flexDirection: 'row', gap: 8 },
+  compactChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: 20, borderWidth: 1, backgroundColor: '#0d0d1a',
+    position: 'relative',
+  },
+  buildingDot: {
+    position: 'absolute', top: 4, right: 4,
+    width: 6, height: 6, borderRadius: 3,
+  },
+  compactIcon: { fontSize: 14 },
+  compactOwner: { color: '#888', fontSize: 10 },
+  compactAgentName: { color: '#ccc', fontSize: 12, fontWeight: '600', maxWidth: 80 },
+  compactTask: { color: '#555', fontSize: 11, maxWidth: 120, fontStyle: 'italic' },
+  statusDot: { width: 7, height: 7, borderRadius: 3.5, marginLeft: 2 },
+
+  // Full card (mobile)
+  panel: { paddingHorizontal: 4, paddingBottom: 8 },
+  panelHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 8, paddingVertical: 10,
+  },
+  panelTitle: { color: '#fff', fontSize: 16, fontWeight: '800' },
+  connectionRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2 },
+  connectionDot: { width: 7, height: 7, borderRadius: 3.5 },
+  connectionLabel: { fontSize: 11, fontWeight: '600' },
+  panelStats: { flexDirection: 'row', gap: 10 },
+  statBuilding: { color: '#22c55e', fontSize: 12, fontWeight: '600' },
+  statIdle: { color: '#22c55e', fontSize: 12 },
+  statOffline: { color: '#444', fontSize: 12 },
+
+  agentCard: {
+    backgroundColor: '#111', borderRadius: 14, borderWidth: 1,
+    padding: 14, marginBottom: 10, marginHorizontal: 4,
+  },
+  ownAgentCard: { borderStyle: 'dashed' },
+  offlineCard: { opacity: 0.6 },
+
+  agentCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
+  providerBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    paddingHorizontal: 9, paddingVertical: 4, borderRadius: 20, borderWidth: 1,
+  },
+  providerIcon: { fontSize: 14 },
+  providerLabel: { fontSize: 11, fontWeight: '700' },
+
+  statusChip: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  statusText: { color: '#666', fontSize: 12 },
+
+  agentIdentity: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
+  ownerAvatar: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  ownerAvatarText: { color: '#fff', fontSize: 14, fontWeight: '800' },
+  agentName: { color: '#ddd', fontSize: 14, fontWeight: '700' },
+  ownerName: { color: '#555', fontSize: 12 },
+
+  taskBlock: { borderLeftWidth: 3, paddingLeft: 10, marginBottom: 8 },
+  taskLabel: { color: '#555', fontSize: 10, fontWeight: '700', letterSpacing: 1, marginBottom: 2 },
+  taskText: { color: '#ddd', fontSize: 14, lineHeight: 20 },
+  goalText: { color: '#888', fontSize: 12, marginTop: 4 },
+
+  sessionLink: { marginBottom: 4 },
+  sessionLinkText: { fontSize: 12, fontWeight: '600' },
+  returnTime: { color: '#444', fontSize: 11 },
+
+  publishBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    margin: 8, padding: 14,
+    backgroundColor: '#0d0d1a', borderRadius: 12, borderWidth: 1,
+    borderStyle: 'dashed',
+  },
+  publishBtnIcon: { fontSize: 24 },
+  publishBtnTitle: { fontSize: 14, fontWeight: '700', marginBottom: 2 },
+  publishBtnSub: { color: '#555', fontSize: 12 },
+});
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#050508' },

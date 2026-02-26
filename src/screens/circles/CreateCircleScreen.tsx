@@ -140,6 +140,51 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     check_in_format: { type: 'photo', label: 'Creative Work' },
     tags: ['creative', 'art', 'music']
   },
+  // ─── AI-Era Circles ──────────────────────────────────────────────────
+  {
+    id: 'builder',
+    name: 'Builder',
+    emoji: '🚀',
+    category: 'AI Builder',
+    description: 'Developers using Claude Code, OpenClaw, or any AI coding agent to ship software',
+    accent_color: '#6366f1',
+    suggested_names: ['Ship It Circle', 'Builder Squad', 'The Code Crew', 'Agent Army'],
+    check_in_format: { type: 'text', label: "What did your AI build today?" },
+    tags: ['builder', 'developer', 'claude-code', 'openclaw', 'ai-coding']
+  },
+  {
+    id: 'creator',
+    name: 'Creator',
+    emoji: '✍️',
+    category: 'AI Creator',
+    description: 'Content creators, marketers, and writers using AI tools to create and publish',
+    accent_color: '#f97316',
+    suggested_names: ['Create & Ship', 'Content Circle', 'The Creators', 'Publish Squad'],
+    check_in_format: { type: 'text', label: "What did you create or publish today?" },
+    tags: ['creator', 'content', 'marketing', 'writing', 'cowork']
+  },
+  {
+    id: 'operator',
+    name: 'Operator',
+    emoji: '💼',
+    category: 'AI Business',
+    description: 'Business owners and operators using AI (Claude Cowork, ChatGPT, etc.) to run and grow their business',
+    accent_color: '#22c55e',
+    suggested_names: ['Operators Circle', 'Business Builders', 'The Operators', 'Revenue Circle'],
+    check_in_format: { type: 'text', label: "What did your AI handle for your business today?" },
+    tags: ['business', 'operator', 'cowork', 'revenue', 'ai-tools']
+  },
+  {
+    id: 'researcher',
+    name: 'Researcher',
+    emoji: '🔬',
+    category: 'AI Research',
+    description: 'Analysts, researchers, and knowledge workers using AI to research, synthesize, and decide',
+    accent_color: '#06b6d4',
+    suggested_names: ['Research Circle', 'The Analysts', 'Deep Dive Crew', 'Signal Squad'],
+    check_in_format: { type: 'text', label: "What did you learn or ship from your research today?" },
+    tags: ['research', 'analysis', 'knowledge-work', 'cowork']
+  },
   {
     id: 'custom',
     name: 'Custom',
@@ -161,7 +206,8 @@ const ACCENT_COLORS = [
 
 const CIRCLE_ICONS = [
   '🔥', '💪', '🎯', '⚡', '🚀', '💎', '⭐', '🏆', '💯', '🎨',
-  '📚', '🧠', '❤️', '🌟', '💰', '⏰', '🍳', '🙏', '🎮', '✨'
+  '📚', '🧠', '❤️', '🌟', '💰', '⏰', '🍳', '🙏', '🎮', '✨',
+  '🖥️', '👥', '✍️', '💼', '🔬', '🤖', '🐾', '📡', '🛠️', '🌐'
 ];
 
 export default function CreateCircleScreen({ navigation }: any) {

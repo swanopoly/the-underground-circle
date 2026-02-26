@@ -1305,7 +1305,6 @@ async function jsonRpc(url: string, method: string, params: any[], timeoutMs = 5
   
   console.error(`JSON-RPC error for ${method} (all endpoints failed):`, lastError);
   throw lastError;
-  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

@@ -1,5 +1,7 @@
 // OpenClaw Gateway API client for the Office Dashboard
 // Connects to a user's OpenClaw instance to get real agent data
+import { estimateCostWithCache } from './modelPricing';
+import { diagnoseConnection, DiagnosticResult } from './connectionDiagnostics';
 
 export interface OpenClawConfig {
   endpoint: string;  // e.g. http://localhost:18790 (CORS proxy)
@@ -18,6 +20,8 @@ export interface OpenClawSession {
   totalCost?: number;
   totalInputTokens?: number;
   totalOutputTokens?: number;
+  cachedTokens?: number;   // cumulative cached input tokens (for accurate billing)
+  newTokens?: number;      // cumulative non-cached input tokens
   turns?: number;
   uptime?: string;
 }
@@ -25,9 +29,11 @@ export interface OpenClawSession {
 export interface OpenClawSessionStatus {
   sessionKey: string;
   model?: string;
-  totalInputTokens?: number;
-  totalOutputTokens?: number;
-  totalCost?: number;
+  totalInputTokens?: number;   // latest-turn input tokens
+  totalOutputTokens?: number;  // latest-turn output tokens
+  cachedTokens?: number;       // cumulative cached input tokens (session total, 10% price)
+  newTokens?: number;          // cumulative non-cached input tokens (session total, full price)
+  totalCost?: number;          // computed from cache-aware token math
   turns?: number;
   uptime?: string;
 }
@@ -98,6 +104,7 @@ export async function testConnection(config: OpenClawConfig): Promise<{
   ok: boolean;
   error?: string;
   sessions?: OpenClawSession[];
+  diagnostic?: DiagnosticResult;
 }> {
   try {
     const result = await invokeToolRaw(config, 'sessions_list', {
@@ -105,13 +112,16 @@ export async function testConnection(config: OpenClawConfig): Promise<{
       messageLimit: 1,
     });
     if (!result.ok) {
-      return { ok: false, error: result.error?.message || 'Failed to connect' };
+      // Run diagnostics to get an actionable error
+      const diagnostic = await diagnoseConnection(config.endpoint, config.token);
+      return { ok: false, error: diagnostic.message, diagnostic };
     }
-    // Parse sessions from result
     const sessions = parseSessionsList(result.result);
     return { ok: true, sessions };
   } catch (e: any) {
-    return { ok: false, error: e.message || 'Network error' };
+    // Run diagnostics to get an actionable error
+    const diagnostic = await diagnoseConnection(config.endpoint, config.token);
+    return { ok: false, error: diagnostic.message, diagnostic };
   }
 }
 
@@ -449,19 +459,36 @@ function parseSessionStatus(raw: any, sessionKey: string): OpenClawSessionStatus
   const modelMatch = text.match(/Model:\s*([^\s·]+)/);
   if (modelMatch) result.model = modelMatch[1];
 
-  // Tokens: 🧮 Tokens: 7 in / 447 out
+  // Tokens: 🧮 Tokens: 7 in / 447 out  (latest turn — not cumulative)
   const tokensMatch = text.match(/Tokens:\s*([\d.]+[kKmM]?)\s*in\s*\/\s*([\d.]+[kKmM]?)\s*out/);
   if (tokensMatch) {
-    result.totalInputTokens = parseTokenCount(tokensMatch[1]);
+    result.totalInputTokens  = parseTokenCount(tokensMatch[1]);
     result.totalOutputTokens = parseTokenCount(tokensMatch[2]);
   }
 
-  // Context: 📚 Context: 174k/200k (87%)
-  const contextMatch = text.match(/Context:\s*([\d.]+[kKmM]?)\/([\d.]+[kKmM]?)/);
+  // Cache: 🗄️ Cache: 89% hit · 1.4m cached, 167k new
+  // "cached" = prompt-cache hits (billed at ~10% of input rate)
+  // "new"    = non-cached tokens    (billed at full input rate)
+  // These are CUMULATIVE for the session — use them for accurate cost calculation
+  const cacheMatch = text.match(/Cache:.*?([\d.]+[kKmM]?)\s*cached,\s*([\d.]+[kKmM]?)\s*new/);
+  if (cacheMatch) {
+    result.cachedTokens = parseTokenCount(cacheMatch[1]);
+    result.newTokens    = parseTokenCount(cacheMatch[2]);
+  }
 
-  // Cost: 💰 Cost: $1.23 (if present)
+  // Cost: 💰 Cost: $1.23  (explicit cost line — use if present)
   const costMatch = text.match(/Cost:\s*\$?([\d.]+)/);
-  if (costMatch) result.totalCost = parseFloat(costMatch[1]);
+  if (costMatch) {
+    result.totalCost = parseFloat(costMatch[1]);
+  } else if (result.model && (result.cachedTokens != null || result.newTokens != null)) {
+    // No explicit cost — compute from cache-aware tokens + model pricing
+    result.totalCost = estimateCostWithCache(
+      result.model,
+      result.cachedTokens   ?? 0,
+      result.newTokens      ?? 0,
+      result.totalOutputTokens ?? 0,
+    );
+  }
 
   // Session: 🧵 Session: agent:main:main • updated just now
   const uptimeMatch = text.match(/updated\s+(.+?)$/m);
@@ -535,12 +562,14 @@ export class OpenClawPoller {
               if (statusResult.ok && statusResult.status) {
                 return {
                   ...s,
-                  totalCost: statusResult.status.totalCost,
+                  totalCost:        statusResult.status.totalCost,
                   totalInputTokens: statusResult.status.totalInputTokens,
-                  totalOutputTokens: statusResult.status.totalOutputTokens,
-                  turns: statusResult.status.turns,
-                  uptime: statusResult.status.uptime,
-                  model: statusResult.status.model || s.model,
+                  totalOutputTokens:statusResult.status.totalOutputTokens,
+                  cachedTokens:     statusResult.status.cachedTokens,
+                  newTokens:        statusResult.status.newTokens,
+                  turns:            statusResult.status.turns,
+                  uptime:           statusResult.status.uptime,
+                  model:            statusResult.status.model || s.model,
                 };
               }
             } catch {}

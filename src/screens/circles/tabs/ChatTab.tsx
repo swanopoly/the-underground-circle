@@ -27,6 +27,7 @@ import {
   pinMessage, unpinMessage, getPinnedMessages,
 } from '../../../lib/governance';
 import ProposalCard from '../../../components/ProposalCard';
+import StepAwayCard from '../../../components/StepAwayCard';
 import { Proposal, PinnedMessage } from '../../../types';
 
 const REACTIONS_LIST = ['🔥', '💪', '👊', '💯', '⚡', '🎯'];
@@ -1206,6 +1207,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             contentContainerStyle={styles.messageList}
           />
           
+          {/* Step Away / Remote Control Handoff */}
+          {currentUserId && (
+            <View style={styles.stepAwayRow}>
+              <StepAwayCard
+                circleId={circleId}
+                userId={currentUserId}
+                userName={currentUserName}
+                onPost={async (_type, content) => {
+                  await sendMessage(content);
+                }}
+              />
+            </View>
+          )}
+
           {/* Enhanced quick bar */}
           <EnhancedQuickBar
             onPromptPress={sendMessage}
@@ -2117,6 +2132,113 @@ function EnhancedSendInputButton({ onPress, disabled, accentColor }: any) {
   );
 }
 
+// ─── Who's Building Banner ────────────────────────────────────────────────────
+// Ambient live indicator: shows who's in a step-away session right now
+
+const TOOL_COLORS: Record<string, string> = {
+  'claude-code': '#6366f1', 'cowork': '#22c55e', 'openclaw': '#f59e0b',
+  'codex': '#10a37f', 'gemini': '#4285f4', 'cursor': '#8b5cf6', 'other': '#06b6d4',
+};
+const TOOL_ICONS: Record<string, string> = {
+  'claude-code': '💻', 'cowork': '💼', 'openclaw': '🐾',
+  'codex': '🧠', 'gemini': '♊', 'cursor': '🎯', 'other': '🤖',
+};
+
+function WhosBuildingBanner({ circleId, accentColor }: { circleId: string; accentColor: string }) {
+  const [sessions, setSessions] = useState<{ userName: string; tool: string; elapsed: string }[]>([]);
+
+  const load = useCallback(async () => {
+    const since = new Date(Date.now() - 12 * 3600 * 1000).toISOString();
+    const { data } = await supabase
+      .from('messages')
+      .select('content, user_id, created_at, user:profiles(display_name, username)')
+      .eq('circle_id', circleId)
+      .eq('is_bot', false)
+      .gte('created_at', since)
+      .order('created_at', { ascending: true });
+
+    if (!data) return;
+    const stepAways = data.filter(m => m.content?.includes('STEPPING AWAY'));
+    const baks = new Set(
+      data.filter(m => m.content?.includes('BACK AT KEYBOARD')).map(m => m.user_id)
+    );
+    // Find open sessions: step-away with no subsequent BAK
+    const open: { userName: string; tool: string; elapsed: string }[] = [];
+    const seen = new Set<string>();
+    for (const m of [...stepAways].reverse()) {
+      if (seen.has(m.user_id)) continue;
+      seen.add(m.user_id);
+      // Check if BAK was after this step-away
+      const bakAfter = data.find(b =>
+        b.user_id === m.user_id &&
+        b.content?.includes('BACK AT KEYBOARD') &&
+        b.created_at > m.created_at
+      );
+      if (!bakAfter) {
+        const toolLine = m.content?.split('\n')[0] || '';
+        let tool = 'other';
+        if (toolLine.includes('Claude Code')) tool = 'claude-code';
+        else if (toolLine.includes('Cowork')) tool = 'cowork';
+        else if (toolLine.includes('OpenClaw')) tool = 'openclaw';
+        else if (toolLine.includes('Codex')) tool = 'codex';
+        else if (toolLine.includes('Gemini')) tool = 'gemini';
+        else if (toolLine.includes('Cursor')) tool = 'cursor';
+
+        const ms = Date.now() - new Date(m.created_at).getTime();
+        const mins = Math.floor(ms / 60000);
+        const elapsed = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h`;
+        const userName = (m as any).user?.display_name || (m as any).user?.username || '?';
+        open.push({ userName, tool, elapsed });
+      }
+    }
+    setSessions(open);
+  }, [circleId]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const t = setInterval(load, 60000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  if (sessions.length === 0) return null;
+
+  return (
+    <View style={warRoomBannerStyles.banner}>
+      <Text style={warRoomBannerStyles.label}>⚡ Building now</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+        {sessions.map((s, i) => {
+          const color = TOOL_COLORS[s.tool] || '#555';
+          const icon = TOOL_ICONS[s.tool] || '🤖';
+          return (
+            <View key={i} style={[warRoomBannerStyles.chip, { borderColor: color + '55', backgroundColor: color + '11' }]}>
+              <View style={[warRoomBannerStyles.dot, { backgroundColor: color }]} />
+              <Text style={warRoomBannerStyles.chipText}>{icon} {s.userName}</Text>
+              <Text style={warRoomBannerStyles.chipTime}>{s.elapsed}</Text>
+            </View>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+}
+
+const warRoomBannerStyles = StyleSheet.create({
+  banner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: 12, paddingVertical: 8,
+    maxWidth: 860, alignSelf: 'center', width: '100%',
+  },
+  label: { color: '#555', fontSize: 11, fontWeight: '700', letterSpacing: 0.5 },
+  chip: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    paddingHorizontal: 10, paddingVertical: 5,
+    borderRadius: 20, borderWidth: 1,
+  },
+  dot: { width: 6, height: 6, borderRadius: 3 },
+  chipText: { color: '#aaa', fontSize: 12, fontWeight: '600' },
+  chipTime: { color: '#555', fontSize: 11 },
+});
+
 // ─── Enhanced Styles ─────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
@@ -2422,6 +2544,15 @@ const styles = StyleSheet.create({
   replyIndicatorAccent: { width: 3, height: 16, borderRadius: 2 },
   replyIndicatorName: { fontSize: 12, fontWeight: '700' },
   replyIndicatorText: { color: '#555', fontSize: 12, flex: 1 },
+
+  // Step Away row
+  stepAwayRow: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    maxWidth: 860,
+    alignSelf: 'center',
+    width: '100%',
+  },
 
   // Enhanced UI components
   enhancedQuickBar: {

@@ -348,7 +348,7 @@ export default function PhotonProofCheck({ circleId, onProofComplete, onCancel }
 
       <View style={styles.tips}>
         <Text style={styles.tipsTitle}>💡 Pro Tips:</Text>
-        <Text style={styles.tipText">• Best results: outdoor natural light</Text>
+        <Text style={styles.tipText}>• Best results: outdoor natural light</Text>
         <Text style={styles.tipText}>• Near a bright window works too</Text>
         <Text style={styles.tipText}>• Avoid artificial indoor lighting</Text>
       </View>

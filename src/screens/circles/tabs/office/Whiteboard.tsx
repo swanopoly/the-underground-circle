@@ -1,5 +1,7 @@
-import React, { useState, useMemo } from 'react';
-import { View, Text, TextInput, StyleSheet, Pressable, Platform, ScrollView } from 'react-native';
+import React, { useState, useMemo, useEffect } from 'react';
+import {
+  View, Text, TextInput, StyleSheet, Pressable, Platform, ScrollView,
+} from 'react-native';
 import {
   OfficeAgent,
   WHITEBOARD_MODES,
@@ -7,6 +9,7 @@ import {
   calculateDailyScore,
 } from '../../../../lib/officeAgents';
 import { CronJob } from '../../../../lib/openclawService';
+import { useAgentActivity, AgentActivity } from '../../../../services/agentActivityLogger';
 
 interface Props {
   editable?: boolean;
@@ -15,17 +18,64 @@ interface Props {
   agents?: OfficeAgent[];
   statusHistory?: Array<OfficeAgent[]>;
   cronJobs?: CronJob[];
+  circleId?: string | null;
 }
 
-export default function Whiteboard({ editable, notes = [], onNotesChange, agents = [], statusHistory = [], cronJobs = [] }: Props) {
+const SOURCE_ICONS: Record<string, string> = {
+  discord: '🎮',
+  webchat: '💻',
+  cron: '⏰',
+  system: '⚙️',
+};
+
+const TYPE_ICONS: Record<string, { icon: string; color: string }> = {
+  task_started:    { icon: '▶', color: '#F59E0B' },
+  task_completed:  { icon: '✓', color: '#10B981' },
+  task_failed:     { icon: '✗', color: '#EF4444' },
+  message_in:      { icon: '↓', color: '#6366f1' },
+  message_out:     { icon: '↑', color: '#6366f1' },
+  tool_call:       { icon: '⚡', color: '#ec4899' },
+};
+
+function timeAgo(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+function formatDate(dateStr: string): string {
+  return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+export default function Whiteboard({
+  editable, notes = [], onNotesChange,
+  agents = [], statusHistory = [], cronJobs = [], circleId,
+}: Props) {
   const [modeIndex, setModeIndex] = useState(0);
   const [editing, setEditing] = useState(false);
   const [noteText, setNoteText] = useState('');
   const mode = WHITEBOARD_MODES[modeIndex];
 
+  const { activities } = useAgentActivity(circleId ?? null);
+
+  // Running tasks = started but no matching completed/failed
+  const runningTasks = useMemo(() => {
+    const map = new Map<string, AgentActivity>();
+    for (const a of [...activities].reverse()) {
+      if (a.activity_type === 'task_started') map.set(a.title, a);
+      if (a.activity_type === 'task_completed' || a.activity_type === 'task_failed') map.delete(a.title);
+    }
+    return Array.from(map.values());
+  }, [activities]);
+
   const cycleMode = () => {
     if (editing) return;
-    setModeIndex((prev) => (prev + 1) % WHITEBOARD_MODES.length);
+    setModeIndex(i => (i + 1) % WHITEBOARD_MODES.length);
   };
 
   const addNote = () => {
@@ -46,26 +96,30 @@ export default function Whiteboard({ editable, notes = [], onNotesChange, agents
         <View style={styles.header}>
           <Text style={styles.headerIcon}>{editing ? '✏️' : mode.icon}</Text>
           <Text style={styles.headerText}>{editing ? 'NOTES' : mode.label}</Text>
+          {runningTasks.length > 0 && !editing && (
+            <View style={styles.runningBadge}>
+              <View style={styles.runningDot} />
+              <Text style={styles.runningCount}>{runningTasks.length} live</Text>
+            </View>
+          )}
           {editable && (
-            <Pressable onPress={() => setEditing(!editing)} style={styles.editBtn}>
+            <Pressable onPress={() => setEditing(v => !v)} style={styles.editBtn}>
               <Text style={styles.editBtnText}>{editing ? 'VIEW' : 'EDIT'}</Text>
             </Pressable>
           )}
-          {!editing && <Text style={styles.headerHint}>TAP TO CYCLE</Text>}
+          {!editing && <Text style={styles.headerHint}>TAP</Text>}
         </View>
 
-        {/* Content */}
+        {/* Content — fixed height, always scrollable */}
         <View style={styles.content}>
           {editing ? (
             <NotesView notes={notes} noteText={noteText} setNoteText={setNoteText} addNote={addNote} />
           ) : (
             <>
-              {mode.key === 'status' && <StatusView agents={agents} />}
-              {mode.key === 'activity' && <ActivityView agents={agents} />}
-              {mode.key === 'metrics' && <MetricsView agents={agents} />}
-              {mode.key === 'tasks' && <TasksView />}
-              {mode.key === 'history' && <StatusHistoryView history={statusHistory} />}
-              {mode.key === 'cron' && <CronJobsView jobs={cronJobs} />}
+              {mode.key === 'overview'   && <OverviewView agents={agents} activities={activities} />}
+              {mode.key === 'activity'   && <ActivityView agents={agents} statusHistory={statusHistory} activities={activities} />}
+              {mode.key === 'ops'        && <OpsView cronJobs={cronJobs} activities={activities} />}
+              {mode.key === 'agent_log'  && <AgentLogView activities={activities} runningTasks={runningTasks} />}
             </>
           )}
         </View>
@@ -90,14 +144,285 @@ export default function Whiteboard({ editable, notes = [], onNotesChange, agents
   );
 }
 
+// ── SLIDE 1: OVERVIEW (status + metrics merged) ───────────────────────────
+
+function OverviewView({ agents, activities }: { agents: OfficeAgent[]; activities: AgentActivity[] }) {
+  const activeCount  = agents.filter(a => a.status === 'active').length;
+  const idleCount    = agents.filter(a => a.status === 'idle').length;
+  const errorCount   = agents.filter(a => a.status === 'error').length;
+  const totalCost    = agents.reduce((s, a) => s + a.costToday, 0);
+  const totalMsgs    = agents.reduce((s, a) => s + a.messagesProcessed, 0);
+  const totalTokens  = agents.reduce((s, a) => s + a.tokensUsed, 0);
+  const todayLogs    = activities.filter(a => {
+    const d = new Date(a.created_at);
+    const now = new Date();
+    return d.getDate() === now.getDate() && d.getMonth() === now.getMonth();
+  }).length;
+
+  const best = useMemo(() => {
+    if (!agents.length) return null;
+    return [...agents].sort((a, b) => calculateDailyScore(b) - calculateDailyScore(a))[0];
+  }, [agents]);
+
+  return (
+    <ScrollView style={s.scroll} showsVerticalScrollIndicator={false} onStartShouldSetResponder={() => true}>
+      {/* Metrics row */}
+      <View style={s.metricsRow}>
+        <Metric label="ACTIVE"   value={`${activeCount}/${agents.length}`} color="#22c55e" />
+        <Metric label="MSGS"     value={totalMsgs.toLocaleString()}         color="#f59e0b" />
+        <Metric label="COST"     value={`$${totalCost.toFixed(2)}`}         color="#ef4444" />
+        <Metric label="TOKENS"   value={totalTokens > 0 ? `${(totalTokens/1000).toFixed(0)}K` : '—'} color="#ec4899" />
+        <Metric label="LOGGED"   value={String(todayLogs)}                   color="#6366f1" />
+        <Metric label="IDLE"     value={String(idleCount)}                   color="#6b7280" />
+      </View>
+
+      {/* Agent of the day */}
+      {best && (
+        <View style={s.aotdRow}>
+          <Text style={s.aotdLabel}>🌟 {best.name}</Text>
+          <Text style={s.aotdRole}>{best.role}</Text>
+          <Text style={[s.aotdScore, { color: best.color }]}>{calculateDailyScore(best)}</Text>
+        </View>
+      )}
+
+      {/* Status list */}
+      {agents.length === 0
+        ? <Text style={s.empty}>Connect OpenClaw to see agents</Text>
+        : agents.map(a => (
+          <View key={a.id} style={s.statusRow}>
+            <View style={[s.dot5, { backgroundColor: STATUS_COLORS[a.status] }]} />
+            <Text style={s.agentName}>{a.name}</Text>
+            <Text style={s.agentActivity} numberOfLines={1}>{a.activity}</Text>
+            <Text style={s.agentStatus}>{a.status.toUpperCase()}</Text>
+          </View>
+        ))
+      }
+    </ScrollView>
+  );
+}
+
+function Metric({ label, value, color }: { label: string; value: string; color: string }) {
+  return (
+    <View style={s.metricBox}>
+      <Text style={[s.metricVal, { color }]}>{value}</Text>
+      <Text style={s.metricLabel}>{label}</Text>
+    </View>
+  );
+}
+
+// ── SLIDE 2: ACTIVITY (live actions + status history) ─────────────────────
+
+function ActivityView({
+  agents, statusHistory, activities,
+}: { agents: OfficeAgent[]; statusHistory: Array<OfficeAgent[]>; activities: AgentActivity[] }) {
+  // Merge local agent actions + Supabase activity into one feed
+  const localActions = agents
+    .filter(a => a.status !== 'offline')
+    .flatMap(a => a.recentActions.slice(0, 2).map(act => ({
+      key: `local-${a.id}-${act}`,
+      icon: '📡',
+      agent: a.name,
+      color: a.color,
+      text: act,
+      time: '',
+    })));
+
+  const remoteActions = activities.slice(0, 20).map(a => ({
+    key: a.id,
+    icon: SOURCE_ICONS[a.source] ?? '📡',
+    agent: a.agent_name,
+    color: TYPE_ICONS[a.activity_type]?.color ?? '#888',
+    text: a.title,
+    time: timeAgo(a.created_at),
+  }));
+
+  const merged = [...localActions, ...remoteActions].slice(0, 25);
+
+  return (
+    <ScrollView style={s.scroll} showsVerticalScrollIndicator={false} onStartShouldSetResponder={() => true}>
+      {merged.length === 0
+        ? <Text style={s.empty}>No activity yet</Text>
+        : merged.map(item => (
+          <View key={item.key} style={s.actRow}>
+            <Text style={s.actIcon}>{item.icon}</Text>
+            <Text style={[s.actAgent, { color: item.color }]}>{item.agent}</Text>
+            <Text style={s.actText} numberOfLines={1}>{item.text}</Text>
+            {!!item.time && <Text style={s.actTime}>{item.time}</Text>}
+          </View>
+        ))
+      }
+
+      {/* Status history snapshots */}
+      {statusHistory.length > 0 && (
+        <>
+          <Text style={s.sectionDivider}>── SNAPSHOTS ──</Text>
+          {[...statusHistory].reverse().slice(0, 5).map((snap, i) => (
+            <View key={i} style={s.snapBlock}>
+              <Text style={s.snapLabel}>#{statusHistory.length - i}</Text>
+              {snap.map(a => (
+                <View key={a.id} style={s.snapRow}>
+                  <View style={[s.dot4, { backgroundColor: STATUS_COLORS[a.status] }]} />
+                  <Text style={s.snapName}>{a.name}</Text>
+                  <Text style={s.snapStatus}>{a.status.toUpperCase()}</Text>
+                </View>
+              ))}
+            </View>
+          ))}
+        </>
+      )}
+    </ScrollView>
+  );
+}
+
+// ── SLIDE 3: OPS (tasks + cron) ───────────────────────────────────────────
+
+function OpsView({ cronJobs, activities }: { cronJobs: CronJob[]; activities: AgentActivity[] }) {
+  const enabled  = cronJobs.filter(j => j.enabled);
+  const disabled = cronJobs.filter(j => !j.enabled);
+  const sorted   = [...enabled, ...disabled];
+
+  // Recent cron completions from Supabase
+  const cronLogs = activities.filter(a => a.source === 'cron').slice(0, 8);
+
+  const tasks = [
+    { text: 'Agent Activity Feed',    done: true },
+    { text: 'Whiteboard Audit Log',   done: true },
+    { text: 'Discord Integration',    done: true },
+    { text: 'Push Notifications',     done: false },
+    { text: 'DAO Treasury Module',    done: false },
+  ];
+
+  return (
+    <ScrollView style={s.scroll} showsVerticalScrollIndicator={false} onStartShouldSetResponder={() => true}>
+      {/* Task checklist */}
+      <Text style={s.sectionLabel}>TASKS</Text>
+      {tasks.map((t, i) => (
+        <View key={i} style={s.taskRow}>
+          <Text style={[s.taskIcon, { color: t.done ? '#22c55e' : '#555' }]}>{t.done ? '✓' : '○'}</Text>
+          <Text style={[s.taskText, t.done && s.taskDone]}>{t.text}</Text>
+        </View>
+      ))}
+
+      {/* Cron jobs */}
+      {sorted.length > 0 && (
+        <>
+          <Text style={s.sectionLabel}>CRON  {enabled.length} on / {disabled.length} off</Text>
+          {sorted.map(job => (
+            <View key={job.id} style={s.cronRow}>
+              <View style={[s.dot4, { backgroundColor: job.enabled ? '#22c55e' : '#6b7280' }]} />
+              <Text style={[s.cronName, !job.enabled && s.cronOff]} numberOfLines={1}>
+                {job.name || job.id.slice(0, 10)}
+              </Text>
+              <Text style={s.cronSched}>{job.schedule?.expr || job.schedule?.kind || ''}</Text>
+            </View>
+          ))}
+        </>
+      )}
+
+      {/* Recent cron logs from Supabase */}
+      {cronLogs.length > 0 && (
+        <>
+          <Text style={s.sectionLabel}>RECENT CRON RUNS</Text>
+          {cronLogs.map(a => (
+            <View key={a.id} style={s.cronLogRow}>
+              <Text style={[s.cronLogIcon, {
+                color: a.status === 'completed' ? '#10B981' : a.status === 'failed' ? '#EF4444' : '#F59E0B'
+              }]}>
+                {a.status === 'completed' ? '✓' : a.status === 'failed' ? '✗' : '▶'}
+              </Text>
+              <Text style={s.cronLogTitle} numberOfLines={1}>{a.source_detail || a.title}</Text>
+              <Text style={s.actTime}>{timeAgo(a.created_at)}</Text>
+            </View>
+          ))}
+        </>
+      )}
+    </ScrollView>
+  );
+}
+
+// ── SLIDE 4: AGENT LOG (live + full scrollable audit by agent) ────────────
+
+function AgentLogView({
+  activities, runningTasks,
+}: { activities: AgentActivity[]; runningTasks: AgentActivity[] }) {
+  const agents = useMemo(() => {
+    const names = new Set(activities.map(a => a.agent_name));
+    return ['All', ...Array.from(names)];
+  }, [activities]);
+
+  const [selected, setSelected] = useState('All');
+
+  const filtered = selected === 'All'
+    ? activities
+    : activities.filter(a => a.agent_name === selected);
+
+  return (
+    <View style={{ flex: 1 }}>
+      {/* Agent filter tabs */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.tabRow} onStartShouldSetResponder={() => true}>
+        {agents.map(name => (
+          <Pressable
+            key={name}
+            onPress={(e) => { e.stopPropagation?.(); setSelected(name); }}
+            style={[s.tab, selected === name && s.tabActive]}
+          >
+            <Text style={[s.tabText, selected === name && s.tabTextActive]}>{name}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+
+      {/* Live tasks banner */}
+      {runningTasks.length > 0 && (
+        <View style={s.liveBanner}>
+          <View style={s.liveDot} />
+          <Text style={s.liveText} numberOfLines={1}>
+            {runningTasks[0].title}
+          </Text>
+          <Text style={s.liveTime}>{timeAgo(runningTasks[0].created_at)}</Text>
+        </View>
+      )}
+
+      {/* Full log */}
+      <ScrollView style={s.scroll} showsVerticalScrollIndicator={false} onStartShouldSetResponder={() => true}>
+        {filtered.length === 0
+          ? <Text style={s.empty}>No activity logged</Text>
+          : filtered.map(a => {
+            const ti = TYPE_ICONS[a.activity_type] ?? { icon: '·', color: '#888' };
+            const srcIcon = SOURCE_ICONS[a.source] ?? '📡';
+            const dateLabel = formatDate(a.created_at);
+            return (
+              <View key={a.id} style={s.logRow}>
+                <Text style={s.logSrc}>{srcIcon}</Text>
+                <View style={s.logContent}>
+                  <Text style={s.logTitle} numberOfLines={2}>{a.title}</Text>
+                  {a.body && <Text style={s.logBody} numberOfLines={1}>{a.body}</Text>}
+                  <Text style={s.logMeta}>
+                    {a.agent_name}{a.source_detail ? ` · ${a.source_detail}` : ''} · {dateLabel}
+                  </Text>
+                </View>
+                <View style={s.logRight}>
+                  <Text style={[s.logTypeIcon, { color: ti.color }]}>{ti.icon}</Text>
+                  <Text style={s.actTime}>{timeAgo(a.created_at)}</Text>
+                </View>
+              </View>
+            );
+          })
+        }
+      </ScrollView>
+    </View>
+  );
+}
+
+// ── NOTES (edit mode) ────────────────────────────────────────────────────
+
 function NotesView({ notes, noteText, setNoteText, addNote }: {
   notes: string[]; noteText: string; setNoteText: (t: string) => void; addNote: () => void;
 }) {
   return (
-    <View style={styles.notesContainer}>
-      <View style={styles.noteInputRow}>
+    <View style={s.notesWrap}>
+      <View style={s.noteInputRow}>
         <TextInput
-          style={styles.noteInput}
+          style={s.noteInput}
           value={noteText}
           onChangeText={setNoteText}
           onSubmitEditing={addNote}
@@ -105,204 +430,20 @@ function NotesView({ notes, noteText, setNoteText, addNote }: {
           placeholderTextColor="#999"
           maxLength={80}
         />
-        <Pressable onPress={addNote} style={styles.noteAddBtn}>
-          <Text style={styles.noteAddText}>+</Text>
+        <Pressable onPress={addNote} style={s.noteAdd}>
+          <Text style={s.noteAddText}>+</Text>
         </Pressable>
       </View>
-      {notes.map((note, i) => (
-        <Text key={i} style={styles.noteItem} numberOfLines={1}>• {note}</Text>
-      ))}
-    </View>
-  );
-}
-
-function StatusView({ agents }: { agents: OfficeAgent[] }) {
-  // Find Agent of the Day
-  const agentOfTheDay = useMemo(() => {
-    if (agents.length === 0) return null;
-    
-    // Calculate scores for all agents
-    const scores = agents.map(agent => ({
-      agent,
-      score: calculateDailyScore(agent),
-    }));
-    
-    // Sort by score (highest first)
-    scores.sort((a, b) => b.score - a.score);
-    
-    // Return top agent
-    return scores[0];
-  }, [agents]);
-
-  if (agents.length === 0) return <Text style={styles.emptyText}>Connect OpenClaw to see agents</Text>;
-  
-  const activeCount = agents.filter(a => a.status === 'active').length;
-  const idleCount = agents.filter(a => a.status === 'idle').length;
-  const errorCount = agents.filter(a => a.status === 'error').length;
-
-  return (
-    <ScrollView style={styles.statusScroll} showsVerticalScrollIndicator={false}>
-      {/* Agent of the Day */}
-      {agentOfTheDay && (
-        <View style={styles.agentOfDaySection}>
-          <Text style={styles.agentOfDayTitle}>🌟 AGENT OF THE DAY</Text>
-          <View style={[styles.agentOfDayCard, { borderColor: agentOfTheDay.agent.color + '60' }]}>
-            <View style={[styles.agentOfDayAvatar, { backgroundColor: agentOfTheDay.agent.color + '30' }]}>
-              <Text style={[styles.agentOfDayAvatarText, { color: agentOfTheDay.agent.color }]}>
-                {agentOfTheDay.agent.name.charAt(0)}
-              </Text>
-            </View>
-            <View style={styles.agentOfDayInfo}>
-              <Text style={styles.agentOfDayName}>{agentOfTheDay.agent.name}</Text>
-              <Text style={styles.agentOfDayRole}>{agentOfTheDay.agent.role}</Text>
-              <Text style={styles.agentOfDayStats}>
-                {agentOfTheDay.agent.messagesProcessed} msgs · ${agentOfTheDay.agent.costToday.toFixed(2)}
-              </Text>
-            </View>
-            <View style={styles.agentOfDayScore}>
-              <Text style={[styles.agentOfDayScoreValue, { color: agentOfTheDay.agent.color }]}>
-                {agentOfTheDay.score}
-              </Text>
-              <Text style={styles.agentOfDayScoreLabel}>SCORE</Text>
-            </View>
-          </View>
-        </View>
-      )}
-
-      {/* Team Stats Summary */}
-      <View style={styles.teamSummary}>
-        <Text style={styles.teamSummaryLine}>🟢 Active: {activeCount}</Text>
-        <Text style={styles.teamSummaryLine}>🟡 Idle: {idleCount}</Text>
-        {errorCount > 0 && (
-          <Text style={[styles.teamSummaryLine, { color: '#ef4444' }]}>🔴 Errors: {errorCount}</Text>
-        )}
-      </View>
-
-      {/* Agent List */}
-      <View style={styles.statusList}>
-        {agents.map((a) => (
-          <View key={a.id} style={styles.statusRow}>
-            <View style={[styles.statusDot, { backgroundColor: STATUS_COLORS[a.status] }]} />
-            <View style={styles.statusInfo}>
-              <Text style={styles.statusName}>{a.name}</Text>
-              <Text style={styles.statusActivity} numberOfLines={2}>{a.activity}</Text>
-            </View>
-            <Text style={styles.statusLabel}>{a.status.toUpperCase()}</Text>
-          </View>
+      <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}>
+        {notes.map((note, i) => (
+          <Text key={i} style={s.noteItem} numberOfLines={1}>• {note}</Text>
         ))}
-      </View>
-    </ScrollView>
-  );
-}
-
-function ActivityView({ agents }: { agents: OfficeAgent[] }) {
-  const activities = agents
-    .filter((a) => a.status !== 'offline')
-    .flatMap((a) => a.recentActions.slice(0, 2).map((act) => ({ agent: a.name, action: act, color: a.color })))
-    .slice(0, 8);
-  if (activities.length === 0) return <Text style={styles.emptyText}>No recent activity</Text>;
-  return (
-    <View style={styles.activityList}>
-      {activities.map((item, i) => (
-        <View key={i} style={styles.activityRow}>
-          <View style={[styles.activityDot, { backgroundColor: item.color }]} />
-          <Text style={[styles.activityAgent, { color: item.color }]}>{item.agent}</Text>
-          <Text style={styles.activityAction} numberOfLines={1}>{item.action}</Text>
-        </View>
-      ))}
+      </ScrollView>
     </View>
   );
 }
 
-function MetricsView({ agents }: { agents: OfficeAgent[] }) {
-  const totalMessages = agents.reduce((sum, a) => sum + a.messagesProcessed, 0);
-  const activeCount = agents.filter((a) => a.status === 'active').length;
-  const totalTokens = agents.reduce((sum, a) => sum + a.tokensUsed, 0);
-  const totalCost = agents.reduce((sum, a) => sum + a.costToday, 0);
-  const metrics = [
-    { label: 'SESSIONS', value: agents.length.toString(), color: '#6366f1' },
-    { label: 'ACTIVE', value: `${activeCount}/${agents.length}`, color: '#22c55e' },
-    { label: 'MESSAGES', value: totalMessages.toLocaleString(), color: '#f59e0b' },
-    { label: 'COST TODAY', value: `$${totalCost.toFixed(2)}`, color: '#ef4444' },
-    { label: 'TOKENS', value: totalTokens > 0 ? `${(totalTokens / 1000).toFixed(0)}K` : '—', color: '#ec4899' },
-    { label: 'STATUS', value: agents.length > 0 ? 'LIVE' : 'OFFLINE', color: agents.length > 0 ? '#22c55e' : '#6b7280' },
-  ];
-  return (
-    <View style={styles.metricsGrid}>
-      {metrics.map((m, i) => (
-        <View key={i} style={styles.metricBox}>
-          <Text style={[styles.metricValue, { color: m.color }]}>{m.value}</Text>
-          <Text style={styles.metricLabel}>{m.label}</Text>
-        </View>
-      ))}
-    </View>
-  );
-}
-
-function TasksView() {
-  const tasks = [
-    { text: 'Ship Office MVP', status: '✓', color: '#22c55e' },
-    { text: 'Connect OpenClaw API', status: '▶', color: '#6366f1' },
-    { text: 'DAO Treasury module', status: '○', color: '#555' },
-    { text: 'Agent customization', status: '▶', color: '#f59e0b' },
-    { text: 'Review check-ins', status: '✓', color: '#22c55e' },
-    { text: 'Research habits paper', status: '○', color: '#555' },
-  ];
-  return (
-    <View style={styles.taskList}>
-      {tasks.map((t, i) => (
-        <View key={i} style={styles.taskRow}>
-          <Text style={[styles.taskStatus, { color: t.color }]}>{t.status}</Text>
-          <Text style={[styles.taskText, t.status === '✓' && styles.taskDone]}>{t.text}</Text>
-        </View>
-      ))}
-    </View>
-  );
-}
-
-function StatusHistoryView({ history }: { history: Array<OfficeAgent[]> }) {
-  if (history.length === 0) return <Text style={styles.emptyText}>No status history yet — check back after a poll cycle</Text>;
-  return (
-    <ScrollView style={styles.historyScroll} showsVerticalScrollIndicator={false}>
-      {[...history].reverse().map((snapshot, i) => (
-        <View key={i} style={styles.historySnapshot}>
-          <Text style={styles.historyTimestamp}>SNAPSHOT {history.length - i}</Text>
-          {snapshot.map((a) => (
-            <View key={a.id} style={styles.historyAgentRow}>
-              <View style={[styles.historyDot, { backgroundColor: STATUS_COLORS[a.status] }]} />
-              <Text style={styles.historyAgentName}>{a.name}</Text>
-              <Text style={styles.historyAgentStatus}>{a.status.toUpperCase()}</Text>
-            </View>
-          ))}
-        </View>
-      ))}
-    </ScrollView>
-  );
-}
-
-function CronJobsView({ jobs }: { jobs: CronJob[] }) {
-  if (jobs.length === 0) return <Text style={styles.emptyText}>No cron jobs found</Text>;
-  const enabled = jobs.filter(j => j.enabled);
-  const disabled = jobs.filter(j => !j.enabled);
-  const sorted = [...enabled, ...disabled];
-  return (
-    <ScrollView style={styles.cronScroll} showsVerticalScrollIndicator={false}>
-      <Text style={styles.cronSummary}>{enabled.length} active / {disabled.length} paused</Text>
-      {sorted.map((job) => {
-        const sched = job.schedule?.expr || job.schedule?.kind || '';
-        return (
-          <View key={job.id} style={styles.cronRow}>
-            <View style={[styles.cronDot, { backgroundColor: job.enabled ? '#22c55e' : '#6b7280' }]} />
-            <Text style={[styles.cronName, !job.enabled && styles.cronDisabled]} numberOfLines={1}>
-              {job.name || job.id.slice(0, 8)}
-            </Text>
-            <Text style={styles.cronSchedule} numberOfLines={1}>{sched}</Text>
-          </View>
-        );
-      })}
-    </ScrollView>
-  );
-}
+// ── STYLES ────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   board: { position: 'absolute', left: 20, top: 8, right: 20, zIndex: 5 },
@@ -314,110 +455,133 @@ const styles = StyleSheet.create({
     borderColor: '#8B7355',
     borderRadius: 2,
     padding: 8,
+    overflow: 'hidden',
   },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    borderBottomWidth: 1,
-    borderBottomColor: '#ddd',
-    paddingBottom: 4,
-    marginBottom: 4,
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    borderBottomWidth: 1, borderBottomColor: '#ddd',
+    paddingBottom: 3, marginBottom: 3,
   },
   headerIcon: { fontSize: 11 },
-  headerText: {
-    fontSize: 10, fontWeight: '800', fontFamily: 'monospace', color: '#333', letterSpacing: 1.5,
+  headerText: { fontSize: 10, fontWeight: '800', fontFamily: 'monospace', color: '#333', letterSpacing: 1.5 },
+  headerHint: { fontSize: 6, color: '#bbb', fontFamily: 'monospace', marginLeft: 'auto' },
+  runningBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    backgroundColor: '#F59E0B22', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 4,
   },
-  headerHint: {
-    fontSize: 6, color: '#bbb', fontFamily: 'monospace', marginLeft: 'auto', letterSpacing: 0.5,
-  },
+  runningDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: '#F59E0B' },
+  runningCount: { fontSize: 6, color: '#F59E0B', fontWeight: '800', fontFamily: 'monospace' },
   editBtn: {
-    marginLeft: 'auto',
-    backgroundColor: '#e8e8e0',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 3,
+    marginLeft: 4, backgroundColor: '#e8e8e0',
+    paddingHorizontal: 5, paddingVertical: 1, borderRadius: 3,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  editBtnText: { fontSize: 6, fontWeight: '800', color: '#555', fontFamily: 'monospace', letterSpacing: 0.5 },
-  content: { flex: 1 },
-  emptyText: { fontSize: 9, color: '#999', fontFamily: 'monospace', fontStyle: 'italic', textAlign: 'center', marginTop: 8 },
-  dots: { flexDirection: 'row', justifyContent: 'center', gap: 5, marginTop: 3 },
+  editBtnText: { fontSize: 6, fontWeight: '800', color: '#555', fontFamily: 'monospace' },
+  content: { flex: 1, overflow: 'hidden' },
+  dots: { flexDirection: 'row', justifyContent: 'center', gap: 5, marginTop: 2 },
   dot: { width: 5, height: 5, borderRadius: 2.5, backgroundColor: '#ccc' },
   dotActive: { backgroundColor: '#333' },
   tray: { flexDirection: 'row', justifyContent: 'center', gap: 6, marginTop: 4 },
   marker: { width: 5, height: 18, borderRadius: 1 },
+});
+
+// Short-named inner styles to keep things tight
+const s = StyleSheet.create({
+  scroll: { flex: 1 },
+  empty: { fontSize: 8, color: '#999', fontFamily: 'monospace', fontStyle: 'italic', textAlign: 'center', marginTop: 8 },
+  sectionLabel: { fontSize: 6, color: '#aaa', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5, marginTop: 5, marginBottom: 2 },
+  sectionDivider: { fontSize: 6, color: '#bbb', fontFamily: 'monospace', textAlign: 'center', marginVertical: 4 },
+
+  // Metrics
+  metricsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 3, marginBottom: 4 },
+  metricBox: { alignItems: 'center', width: '30%' as any },
+  metricVal: { fontSize: 11, fontWeight: '900', fontFamily: 'monospace' },
+  metricLabel: { fontSize: 5, color: '#888', fontFamily: 'monospace', letterSpacing: 0.3 },
+
+  // Agent of the day
+  aotdRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 3, paddingBottom: 3, borderBottomWidth: 1, borderBottomColor: '#eee' },
+  aotdLabel: { fontSize: 7, color: '#333', fontFamily: 'monospace', fontWeight: '700', flex: 1 },
+  aotdRole: { fontSize: 6, color: '#888', fontFamily: 'monospace' },
+  aotdScore: { fontSize: 11, fontWeight: '900', fontFamily: 'monospace' },
+
+  // Status rows
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 2 },
+  dot5: { width: 5, height: 5, borderRadius: 2.5 },
+  dot4: { width: 4, height: 4, borderRadius: 2 },
+  agentName: { fontSize: 7, color: '#333', fontFamily: 'monospace', fontWeight: '700', width: 50 },
+  agentActivity: { fontSize: 7, color: '#888', fontFamily: 'monospace', flex: 1 },
+  agentStatus: { fontSize: 5, color: '#aaa', fontFamily: 'monospace', fontWeight: '600' },
+
+  // Activity
+  actRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginBottom: 2 },
+  actIcon: { fontSize: 8, width: 12 },
+  actAgent: { fontSize: 7, fontWeight: '800', fontFamily: 'monospace', width: 44 },
+  actText: { fontSize: 7, color: '#555', fontFamily: 'monospace', flex: 1 },
+  actTime: { fontSize: 6, color: '#aaa', fontFamily: 'monospace' },
+
+  // Snapshots
+  snapBlock: { marginBottom: 3, paddingBottom: 2, borderBottomWidth: 1, borderBottomColor: '#eee' },
+  snapLabel: { fontSize: 6, color: '#bbb', fontFamily: 'monospace', fontWeight: '700', marginBottom: 1 },
+  snapRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginBottom: 1 },
+  snapName: { fontSize: 6, color: '#555', fontFamily: 'monospace', flex: 1 },
+  snapStatus: { fontSize: 5, color: '#aaa', fontFamily: 'monospace', fontWeight: '600' },
+
+  // Ops
+  taskRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 2 },
+  taskIcon: { fontSize: 8, fontWeight: '700', width: 10 },
+  taskText: { fontSize: 7, color: '#333', fontFamily: 'monospace', flex: 1 },
+  taskDone: { color: '#bbb', textDecorationLine: 'line-through' },
+  cronRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 2 },
+  cronName: { fontSize: 7, color: '#333', fontFamily: 'monospace', fontWeight: '600', flex: 1 },
+  cronOff: { color: '#aaa', textDecorationLine: 'line-through' },
+  cronSched: { fontSize: 6, color: '#888', fontFamily: 'monospace' },
+  cronLogRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 2 },
+  cronLogIcon: { fontSize: 8, fontWeight: '800', width: 10 },
+  cronLogTitle: { fontSize: 7, color: '#555', fontFamily: 'monospace', flex: 1 },
+
+  // Agent log
+  tabRow: { maxHeight: 18, marginBottom: 3 },
+  tab: {
+    paddingHorizontal: 5, paddingVertical: 2, borderRadius: 3,
+    backgroundColor: '#e8e8e0', marginRight: 3,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  tabActive: { backgroundColor: '#333' },
+  tabText: { fontSize: 6, color: '#555', fontFamily: 'monospace', fontWeight: '700' },
+  tabTextActive: { color: '#fff' },
+  liveBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: '#F59E0B11', borderRadius: 3, padding: 3, marginBottom: 3,
+    borderWidth: 1, borderColor: '#F59E0B33',
+  },
+  liveDot: { width: 5, height: 5, borderRadius: 2.5, backgroundColor: '#F59E0B' },
+  liveText: { fontSize: 7, color: '#333', fontFamily: 'monospace', fontWeight: '700', flex: 1 },
+  liveTime: { fontSize: 6, color: '#F59E0B', fontFamily: 'monospace' },
+  logRow: {
+    flexDirection: 'row', gap: 4, marginBottom: 3,
+    paddingBottom: 3, borderBottomWidth: 1, borderBottomColor: '#eee',
+  },
+  logSrc: { fontSize: 8, width: 11, marginTop: 1 },
+  logContent: { flex: 1, gap: 1 },
+  logTitle: { fontSize: 7, color: '#333', fontFamily: 'monospace', fontWeight: '600' },
+  logBody: { fontSize: 6, color: '#888', fontFamily: 'monospace' },
+  logMeta: { fontSize: 5.5, color: '#bbb', fontFamily: 'monospace' },
+  logRight: { alignItems: 'flex-end', gap: 2 },
+  logTypeIcon: { fontSize: 8, fontWeight: '800' },
+
   // Notes
-  notesContainer: { gap: 3 },
-  noteInputRow: { flexDirection: 'row', gap: 4, marginBottom: 2 },
+  notesWrap: { flex: 1 },
+  noteInputRow: { flexDirection: 'row', gap: 4, marginBottom: 3 },
   noteInput: {
-    flex: 1, backgroundColor: '#eee', borderRadius: 3, paddingHorizontal: 6, paddingVertical: 2,
+    flex: 1, backgroundColor: '#eee', borderRadius: 3,
+    paddingHorizontal: 6, paddingVertical: 2,
     fontSize: 7, fontFamily: 'monospace', color: '#333',
   },
-  noteAddBtn: {
+  noteAdd: {
     width: 18, height: 18, borderRadius: 3, backgroundColor: '#6366f1',
     alignItems: 'center', justifyContent: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   noteAddText: { color: '#fff', fontSize: 10, fontWeight: '800' },
-  noteItem: { fontSize: 7, color: '#555', fontFamily: 'monospace' },
-  // Status
-  statusScroll: { flex: 1 },
-  agentOfDaySection: { marginBottom: 6, paddingBottom: 4, borderBottomWidth: 1, borderBottomColor: '#ddd' },
-  agentOfDayTitle: { fontSize: 6, color: '#888', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5, marginBottom: 3 },
-  agentOfDayCard: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    padding: 5, backgroundColor: '#fafaf8', borderRadius: 4, borderWidth: 1,
-  },
-  agentOfDayAvatar: { width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
-  agentOfDayAvatarText: { fontSize: 10, fontWeight: '800', fontFamily: 'monospace' },
-  agentOfDayInfo: { flex: 1 },
-  agentOfDayName: { fontSize: 8, fontWeight: '700', color: '#333', fontFamily: 'monospace' },
-  agentOfDayRole: { fontSize: 6, color: '#666', fontFamily: 'monospace' },
-  agentOfDayStats: { fontSize: 5, color: '#999', fontFamily: 'monospace', marginTop: 1 },
-  agentOfDayScore: { alignItems: 'center' },
-  agentOfDayScoreValue: { fontSize: 14, fontWeight: '800', fontFamily: 'monospace' },
-  agentOfDayScoreLabel: { fontSize: 5, color: '#666', fontWeight: '700', fontFamily: 'monospace', letterSpacing: 0.3 },
-  teamSummary: { marginBottom: 4, paddingBottom: 3, borderBottomWidth: 1, borderBottomColor: '#eee' },
-  teamSummaryLine: { fontSize: 7, color: '#555', fontFamily: 'monospace', lineHeight: 11 },
-  statusList: { gap: 4 },
-  statusRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 6, paddingVertical: 2 },
-  statusDot: { width: 5, height: 5, borderRadius: 2.5, marginTop: 2 },
-  statusInfo: { flex: 1, gap: 1 },
-  statusName: { fontSize: 8, color: '#333', fontFamily: 'monospace', fontWeight: '700' },
-  statusActivity: { fontSize: 7, color: '#888', fontFamily: 'monospace', lineHeight: 10 },
-  statusLabel: { fontSize: 6, color: '#aaa', fontFamily: 'monospace', fontWeight: '600', minWidth: 40, textAlign: 'right', marginTop: 2 },
-  // Activity
-  activityList: { gap: 2 },
-  activityRow: { flexDirection: 'row', gap: 5, alignItems: 'center' },
-  activityDot: { width: 4, height: 4, borderRadius: 2 },
-  activityAgent: { fontSize: 7, fontWeight: '800', fontFamily: 'monospace', width: 60 },
-  activityAction: { fontSize: 7, color: '#555', fontFamily: 'monospace', flex: 1 },
-  // Metrics
-  metricsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, justifyContent: 'center' },
-  metricBox: { alignItems: 'center', width: '30%' as any, paddingVertical: 2 },
-  metricValue: { fontSize: 12, fontWeight: '900', fontFamily: 'monospace' },
-  metricLabel: { fontSize: 5.5, color: '#888', fontFamily: 'monospace', letterSpacing: 0.5 },
-  // Tasks
-  taskList: { gap: 2 },
-  taskRow: { flexDirection: 'row', gap: 6, alignItems: 'center' },
-  taskStatus: { fontSize: 9, fontWeight: '700', width: 14, textAlign: 'center' },
-  taskText: { fontSize: 8, color: '#333', fontFamily: 'monospace', flex: 1 },
-  taskDone: { color: '#aaa', textDecorationLine: 'line-through' },
-  // History
-  historyScroll: { flex: 1 },
-  historySnapshot: { marginBottom: 6, paddingBottom: 4, borderBottomWidth: 1, borderBottomColor: '#e8e8e0' },
-  historyTimestamp: { fontSize: 6, color: '#aaa', fontFamily: 'monospace', fontWeight: '700', marginBottom: 2, letterSpacing: 0.5 },
-  historyAgentRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 1 },
-  historyDot: { width: 4, height: 4, borderRadius: 2 },
-  historyAgentName: { fontSize: 7, color: '#333', fontFamily: 'monospace', flex: 1 },
-  historyAgentStatus: { fontSize: 6, color: '#888', fontFamily: 'monospace', fontWeight: '600' },
-  // Cron
-  cronScroll: { flex: 1 },
-  cronSummary: { fontSize: 7, color: '#999', fontFamily: 'monospace', fontWeight: '700', marginBottom: 3, letterSpacing: 0.5 },
-  cronRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 2 },
-  cronDot: { width: 5, height: 5, borderRadius: 2.5 },
-  cronName: { fontSize: 7, color: '#333', fontFamily: 'monospace', fontWeight: '600', flex: 1 },
-  cronDisabled: { color: '#999', textDecorationLine: 'line-through' },
-  cronSchedule: { fontSize: 6, color: '#888', fontFamily: 'monospace' },
+  noteItem: { fontSize: 7, color: '#555', fontFamily: 'monospace', marginBottom: 2 },
 });

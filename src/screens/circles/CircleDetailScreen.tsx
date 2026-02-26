@@ -21,6 +21,7 @@ import DigestTab from './tabs/DigestTab';
 import OfficeTab, { AgentStats } from './tabs/OfficeTab';
 import WalletTab from './tabs/WalletTab';
 import ProfileTab from './tabs/ProfileTab';
+
 import { Circle } from '../../types';
 import ErrorBoundary from '../../components/ErrorBoundary';
 
@@ -195,6 +196,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
           <ChatTab circleId={circleId} accentColor={accentColor} />
         </ErrorBoundary>
       </View>
+
       <View style={[styles.tabContent, activeTab !== 'OFFICE' && styles.hiddenTab]}>
         <ErrorBoundary>
           <OfficeTab circleId={circleId} accentColor={accentColor} onAgentStats={setAgentStats} />
