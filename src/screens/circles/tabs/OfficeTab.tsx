@@ -642,8 +642,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // Use enriched agents if available (has cached costs/tokens), fallback to fresh agents
   const displayAgents = enrichedAgents.length > 0 ? enrichedAgents : allAgents;
 
-  // Filter agents for current floor only (with safety check)
-  const agents = displayAgents.filter(a => currentFloor?.agentIds?.includes(a.id));
+  // Filter agents for current floor — but if none are assigned yet, show all on current floor
+  const floorFilteredAgents = displayAgents.filter(a => currentFloor?.agentIds?.includes(a.id));
+  const agents = floorFilteredAgents.length > 0 ? floorFilteredAgents : displayAgents;
 
   // Auto-assign new agents to first floor
   useEffect(() => {
@@ -654,9 +655,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     const unassignedIds = allAgentIds.filter(id => !assignedIds.has(id));
     
     if (unassignedIds.length > 0) {
-      // Assign unassigned agents to the first floor
-      const updated = floors.map((f, i) => 
-        i === 0 ? { ...f, agentIds: [...f.agentIds, ...unassignedIds] } : f
+      // Assign unassigned agents to current floor
+      const updated = floors.map((f) => 
+        f.id === currentFloorId ? { ...f, agentIds: [...f.agentIds, ...unassignedIds] } : f
       );
       saveFloors(updated);
     }
