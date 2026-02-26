@@ -1068,26 +1068,37 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.floorList}>
             {floors.sort((a, b) => a.order - b.order).map((floor) => {
               const floorAgentCount = displayAgents.filter(a => floor.agentIds?.includes(a.id)).length;
+              const isActive = floor.id === currentFloorId;
               return (
-                <Pressable
-                  key={floor.id}
-                  onPress={() => handleSwitchFloor(floor.id)}
-                  style={[
-                    styles.floorChip,
-                    floor.id === currentFloorId && styles.floorChipActive,
-                    Platform.OS === 'web' && { cursor: 'pointer' } as any
-                  ]}
-                >
-                  <Text style={[styles.floorChipText, floor.id === currentFloorId && styles.floorChipTextActive]}>
-                    {floor.name}
-                  </Text>
-                  {floorAgentCount > 0 && (
-                    <View style={styles.floorAgentBadge}>
-                      <Text style={styles.floorAgentBadgeText}>{floorAgentCount}</Text>
-                    </View>
+                <View key={floor.id} style={styles.floorChipWrap}>
+                  <Pressable
+                    onPress={() => handleSwitchFloor(floor.id)}
+                    style={[
+                      styles.floorChip,
+                      isActive && styles.floorChipActive,
+                      Platform.OS === 'web' && { cursor: 'pointer' } as any
+                    ]}
+                  >
+                    <Text style={[styles.floorChipText, isActive && styles.floorChipTextActive]}>
+                      {floor.name}
+                    </Text>
+                    {floorAgentCount > 0 && (
+                      <View style={styles.floorAgentBadge}>
+                        <Text style={styles.floorAgentBadgeText}>{floorAgentCount}</Text>
+                      </View>
+                    )}
+                    <View style={[styles.floorThemeDot, { backgroundColor: OFFICE_THEMES[floor.themeId]?.accentGlow || '#6366f1' }]} />
+                  </Pressable>
+                  {/* Delete button — only show in edit mode and when >1 floor */}
+                  {editMode && floors.length > 1 && (
+                    <Pressable
+                      onPress={() => handleDeleteFloor(floor.id)}
+                      style={[styles.floorDeleteBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                    >
+                      <Text style={styles.floorDeleteBtnText}>✕</Text>
+                    </Pressable>
                   )}
-                  <View style={[styles.floorThemeDot, { backgroundColor: OFFICE_THEMES[floor.themeId]?.accentGlow || '#6366f1' }]} />
-                </Pressable>
+                </View>
               );
             })}
             <Pressable
@@ -1103,30 +1114,51 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       {/* Edit toolbar */}
       {viewMode === 'office' && editMode && (
         <View style={styles.editToolbar}>
-          <Text style={styles.editLabel}>
-            {placingType ? `TAP FLOOR TO PLACE ${placingType.toUpperCase()}` : 'SELECT ITEM:'}
-          </Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.editItems}>
-            {FURNITURE_CATALOG.filter(f => !['desk', 'whiteboard', 'server'].includes(f.type)).map(item => (
-              <Pressable
-                key={item.type}
-                onPress={() => setPlacingType(placingType === item.type ? null : item.type)}
-                style={[styles.editItem, placingType === item.type && styles.editItemActive,
-                  Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              >
-                <Text style={styles.editItemIcon}>{item.icon}</Text>
-                <Text style={styles.editItemName}>{item.name}</Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-          {currentFloor.furniture.length > 0 && (
-            <Pressable onPress={() => {
-              const updated = floors.map(f => f.id === currentFloorId ? { ...f, furniture: [] } : f);
-              saveFloors(updated);
-            }} style={styles.clearBtn}>
-              <Text style={styles.clearBtnText}>CLEAR ALL</Text>
-            </Pressable>
-          )}
+          <View style={styles.editToolbarHeader}>
+            <Text style={styles.editLabel}>
+              {placingType ? `TAP FLOOR — PLACING: ${placingType.toUpperCase()}` : 'ADD TO OFFICE'}
+            </Text>
+            <View style={styles.editToolbarActions}>
+              {placingType && (
+                <Pressable onPress={() => setPlacingType(null)} style={[styles.editActionBtn, { borderColor: '#f59e0b55' }]}>
+                  <Text style={[styles.editActionBtnText, { color: '#f59e0b' }]}>CANCEL</Text>
+                </Pressable>
+              )}
+              {currentFloor.furniture.length > 0 && (
+                <Pressable onPress={() => {
+                  const updated = floors.map(f => f.id === currentFloorId ? { ...f, furniture: [] } : f);
+                  saveFloors(updated);
+                }} style={[styles.editActionBtn, { borderColor: '#ef444455' }]}>
+                  <Text style={[styles.editActionBtnText, { color: '#ef4444' }]}>CLEAR ALL</Text>
+                </Pressable>
+              )}
+            </View>
+          </View>
+
+          {/* Category rows */}
+          {(['work', 'lounge', 'tech', 'decor'] as const).map(cat => {
+            const items = FURNITURE_CATALOG.filter(f => f.category === cat && !['desk'].includes(f.type));
+            if (items.length === 0) return null;
+            return (
+              <View key={cat} style={styles.editCategoryRow}>
+                <Text style={styles.editCategoryLabel}>{cat.toUpperCase()}</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.editItems}>
+                  {items.map(item => (
+                    <Pressable
+                      key={item.type}
+                      onPress={() => setPlacingType(placingType === item.type ? null : item.type as any)}
+                      style={[styles.editItem, placingType === item.type && styles.editItemActive,
+                        Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                    >
+                      <Text style={styles.editItemIcon}>{item.icon}</Text>
+                      <Text style={styles.editItemName}>{item.name}</Text>
+                      {item.description ? <Text style={styles.editItemDesc} numberOfLines={1}>{item.description}</Text> : null}
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </View>
+            );
+          })}
         </View>
       )}
 
@@ -1378,6 +1410,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                     <OfficeFloorView
                       theme={currentTheme}
                       furniture={currentFloor.furniture}
+                      editMode={editMode}
                       onFloorPress={editMode ? handleFloorPress : undefined}
                       onFurniturePress={editMode ? handleFurniturePress : undefined}
                     />
@@ -2146,6 +2179,16 @@ const styles = StyleSheet.create({
   editItemActive: { borderColor: '#6366f160', backgroundColor: '#6366f115' },
   editItemIcon: { fontSize: 16 },
   editItemName: { fontSize: 7, color: '#666', fontFamily: 'monospace', fontWeight: '600' },
+  editItemDesc: { fontSize: 5.5, color: '#999', fontFamily: 'monospace', maxWidth: 60, textAlign: 'center' },
+  editToolbarHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
+  editToolbarActions: { flexDirection: 'row', gap: 6 },
+  editActionBtn: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 4, borderWidth: 1, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
+  editActionBtnText: { fontSize: 8, fontWeight: '700', fontFamily: 'monospace' },
+  editCategoryRow: { marginBottom: 6 },
+  editCategoryLabel: { fontSize: 6, color: '#888', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5, marginBottom: 4 },
+  floorChipWrap: { flexDirection: 'row', alignItems: 'center', marginRight: 4 },
+  floorDeleteBtn: { marginLeft: -2, marginRight: 6, width: 14, height: 14, borderRadius: 7, backgroundColor: '#ef444422', borderWidth: 1, borderColor: '#ef444444', alignItems: 'center', justifyContent: 'center', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
+  floorDeleteBtnText: { fontSize: 7, color: '#ef4444', fontWeight: '800', lineHeight: 14 },
   clearBtn: {
     marginTop: 6, paddingVertical: 4, paddingHorizontal: 10, borderRadius: 4,
     backgroundColor: '#ef444420', alignSelf: 'flex-start',

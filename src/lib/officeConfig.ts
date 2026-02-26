@@ -165,7 +165,11 @@ export const DEFAULT_APPEARANCE: AgentAppearance = {
 
 // ─── Office Layout ───────────────────────────────────────────────────────────
 
-export type FurnitureType = 'desk' | 'plant' | 'couch' | 'lamp' | 'bookshelf' | 'whiteboard' | 'server' | 'coffee' | 'watercooler' | 'arcade';
+export type FurnitureType =
+  | 'desk' | 'plant' | 'couch' | 'lamp' | 'bookshelf' | 'whiteboard'
+  | 'server' | 'coffee' | 'watercooler' | 'arcade'
+  | 'tv' | 'pingtable' | 'snackbar' | 'neonsign' | 'rug'
+  | 'safe' | 'trophy' | 'standingdesk' | 'beanbag' | 'printer' | 'clock' | 'window';
 
 export interface FurnitureItem {
   id: string;
@@ -173,19 +177,46 @@ export interface FurnitureItem {
   x: number;
   y: number;
   rotation?: number;
+  label?: string; // custom label (e.g. neon sign text)
 }
 
-export const FURNITURE_CATALOG: { type: FurnitureType; name: string; icon: string; width: number; height: number }[] = [
-  { type: 'desk', name: 'Desk', icon: '🖥️', width: 100, height: 50 },
-  { type: 'plant', name: 'Plant', icon: '🌿', width: 30, height: 40 },
-  { type: 'couch', name: 'Couch', icon: '🛋️', width: 80, height: 40 },
-  { type: 'lamp', name: 'Floor Lamp', icon: '💡', width: 20, height: 50 },
-  { type: 'bookshelf', name: 'Bookshelf', icon: '📚', width: 60, height: 40 },
-  { type: 'whiteboard', name: 'Whiteboard', icon: '📋', width: 120, height: 60 },
-  { type: 'server', name: 'Server Rack', icon: '🖲️', width: 50, height: 60 },
-  { type: 'coffee', name: 'Coffee Machine', icon: '☕', width: 30, height: 30 },
-  { type: 'watercooler', name: 'Water Cooler', icon: '🚰', width: 20, height: 35 },
-  { type: 'arcade', name: 'Arcade Machine', icon: '🕹️', width: 30, height: 50 },
+export interface FurnitureCatalogEntry {
+  type: FurnitureType;
+  name: string;
+  icon: string;
+  width: number;
+  height: number;
+  category: 'work' | 'lounge' | 'decor' | 'tech';
+  description: string;
+}
+
+export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
+  // Work
+  { type: 'desk',        name: 'Desk',           icon: '🖥',  width: 100, height: 50,  category: 'work',   description: 'Standard workstation' },
+  { type: 'standingdesk',name: 'Standing Desk',  icon: '📐',  width: 90,  height: 55,  category: 'work',   description: 'Ergonomic standing desk' },
+  { type: 'whiteboard',  name: 'Whiteboard',     icon: '📋',  width: 120, height: 60,  category: 'work',   description: 'Planning board' },
+  { type: 'printer',     name: 'Printer',        icon: '🖨',  width: 40,  height: 30,  category: 'work',   description: 'Network printer' },
+  { type: 'server',      name: 'Server Rack',    icon: '🗄',  width: 50,  height: 60,  category: 'tech',   description: 'Hosts all the agents' },
+  // Lounge
+  { type: 'couch',       name: 'Couch',          icon: '🛋',  width: 80,  height: 40,  category: 'lounge', description: 'Chill zone seating' },
+  { type: 'beanbag',     name: 'Bean Bag',       icon: '⬡',   width: 35,  height: 35,  category: 'lounge', description: 'Low-key seating' },
+  { type: 'pingtable',   name: 'Ping Pong',      icon: '🏓',  width: 100, height: 50,  category: 'lounge', description: 'Team ping pong table' },
+  { type: 'snackbar',    name: 'Snack Bar',      icon: '🍕',  width: 70,  height: 40,  category: 'lounge', description: 'Keep the team fueled' },
+  { type: 'arcade',      name: 'Arcade',         icon: '🕹',  width: 30,  height: 50,  category: 'lounge', description: 'Retro arcade machine' },
+  // Tech & decor
+  { type: 'tv',          name: 'Big Screen TV',  icon: '📺',  width: 80,  height: 50,  category: 'tech',   description: 'Dashboard display' },
+  { type: 'coffee',      name: 'Coffee Machine', icon: '☕',  width: 30,  height: 30,  category: 'lounge', description: 'Fuel for the grind' },
+  { type: 'watercooler', name: 'Water Cooler',   icon: '💧',  width: 20,  height: 35,  category: 'lounge', description: 'Hydration station' },
+  // Decor
+  { type: 'plant',       name: 'Plant',          icon: '🌿',  width: 30,  height: 40,  category: 'decor',  description: 'Adds life to the office' },
+  { type: 'lamp',        name: 'Floor Lamp',     icon: '💡',  width: 20,  height: 50,  category: 'decor',  description: 'Mood lighting' },
+  { type: 'bookshelf',   name: 'Bookshelf',      icon: '📚',  width: 60,  height: 40,  category: 'decor',  description: 'Knowledge hub' },
+  { type: 'rug',         name: 'Rug',            icon: '⬜',  width: 80,  height: 50,  category: 'decor',  description: 'Defines a space' },
+  { type: 'neonsign',    name: 'Neon Sign',      icon: '✦',   width: 60,  height: 25,  category: 'decor',  description: 'Custom neon text' },
+  { type: 'trophy',      name: 'Trophy Shelf',   icon: '🏆',  width: 50,  height: 40,  category: 'decor',  description: 'Show your wins' },
+  { type: 'safe',        name: 'Safe',           icon: '🔒',  width: 30,  height: 35,  category: 'tech',   description: 'Secure vault' },
+  { type: 'clock',       name: 'Wall Clock',     icon: '🕐',  width: 25,  height: 25,  category: 'decor',  description: 'Always be on time' },
+  { type: 'window',      name: 'Window',         icon: '🪟',  width: 60,  height: 40,  category: 'decor',  description: 'Let the light in' },
 ];
 
 // ─── OpenClaw Connection ─────────────────────────────────────────────────────
