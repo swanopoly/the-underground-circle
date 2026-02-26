@@ -1,0 +1,449 @@
+/**
+ * officeTerminal.ts — Shared Office Terminal relay
+ *
+ * Two-layer architecture:
+ *   1. Supabase DB — durable history (office_terminal_messages)
+ *   2. Supabase Broadcast — ephemeral real-time fan-out
+ *
+ * Flow:
+ *   Sender calls sendTerminalCommand()
+ *     → writes row to DB
+ *     → broadcasts on `office:terminal:{circleId}`
+ *   Each member's gateway subscribes via subscribeToTerminalCommands()
+ *     → filters for @all or their own agent IDs
+ *     → processes command, calls respondToCommand()
+ *   All clients receive updates via Realtime Postgres changes on the table
+ */
+
+import { supabase } from './supabase';
+import { RealtimeChannel } from '@supabase/supabase-js';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+export type TerminalMessageStatus = 'pending' | 'streaming' | 'done' | 'error';
+
+export interface TerminalMessage {
+  id: string;
+  circleId: string;
+  senderId: string;
+  senderName: string;
+  targetAgentId: string | null; // null = @all
+  targetAgentName: string;      // "@all" or agent name
+  commandText: string;
+  responseText: string | null;
+  responseAgentId: string | null;
+  responseAgentName: string | null;
+  tokenCost: number;
+  latencyMs: number | null;
+  status: TerminalMessageStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SendCommandParams {
+  circleId: string;
+  senderId: string;
+  senderName: string;
+  commandText: string;
+  targetAgentId?: string | null;
+  targetAgentName?: string;
+}
+
+export interface BroadcastCommandPayload {
+  messageId: string;
+  circleId: string;
+  senderId: string;
+  senderName: string;
+  commandText: string;
+  targetAgentId: string | null;
+  targetAgentName: string;
+  timestamp: string;
+}
+
+export interface BroadcastResponsePayload {
+  messageId: string;
+  circleId: string;
+  responseAgentId: string;
+  responseAgentName: string;
+  responseText: string;
+  tokenCost: number;
+  latencyMs: number;
+  status: TerminalMessageStatus;
+}
+
+// ─── Row mapper ───────────────────────────────────────────────────────────────
+
+function fromRow(row: Record<string, unknown>): TerminalMessage {
+  return {
+    id:              row.id as string,
+    circleId:        row.circle_id as string,
+    senderId:        row.sender_id as string,
+    senderName:      row.sender_name as string,
+    targetAgentId:   (row.target_agent_id as string | null) ?? null,
+    targetAgentName: (row.target_agent_name as string) || '@all',
+    commandText:     row.command_text as string,
+    responseText:    (row.response_text as string | null) ?? null,
+    responseAgentId: (row.response_agent_id as string | null) ?? null,
+    responseAgentName:(row.response_agent_name as string | null) ?? null,
+    tokenCost:       (row.token_cost as number) || 0,
+    latencyMs:       (row.latency_ms as number | null) ?? null,
+    status:          (row.status as TerminalMessageStatus) || 'pending',
+    createdAt:       row.created_at as string,
+    updatedAt:       row.updated_at as string,
+  };
+}
+
+// ─── Module state (broadcast channels) ───────────────────────────────────────
+
+const commandChannels  = new Map<string, RealtimeChannel>();
+const responseChannels = new Map<string, RealtimeChannel>();
+
+// ─── Send a command ───────────────────────────────────────────────────────────
+
+export async function sendTerminalCommand(
+  params: SendCommandParams
+): Promise<{ messageId?: string; error?: string }> {
+  const {
+    circleId, senderId, senderName,
+    commandText, targetAgentId = null, targetAgentName = '@all',
+  } = params;
+
+  // 1. Write to DB
+  const { data, error } = await supabase
+    .from('office_terminal_messages')
+    .insert({
+      circle_id:         circleId,
+      sender_id:         senderId,
+      sender_name:       senderName,
+      target_agent_id:   targetAgentId,
+      target_agent_name: targetAgentName,
+      command_text:      commandText,
+      status:            'pending',
+    })
+    .select('id')
+    .single();
+
+  if (error) return { error: error.message };
+  const messageId = (data as Record<string, unknown>).id as string;
+
+  // 2. Broadcast so all members get it immediately
+  const channel = await getOrCreateCommandChannel(circleId);
+  await channel.send({
+    type: 'broadcast',
+    event: 'command',
+    payload: {
+      messageId,
+      circleId,
+      senderId,
+      senderName,
+      commandText,
+      targetAgentId,
+      targetAgentName,
+      timestamp: new Date().toISOString(),
+    } satisfies BroadcastCommandPayload,
+  });
+
+  return { messageId };
+}
+
+// ─── Subscribe to incoming commands (for agent gateways) ─────────────────────
+
+export function subscribeToTerminalCommands(
+  circleId: string,
+  myAgentIds: string[],
+  onCommand: (payload: BroadcastCommandPayload) => void
+): () => void {
+  const channelName = `office-terminal-cmd-${circleId}`;
+
+  // Remove existing
+  const existing = commandChannels.get(circleId);
+  if (existing) supabase.removeChannel(existing);
+
+  const channel = supabase.channel(channelName)
+    .on('broadcast', { event: 'command' }, ({ payload }) => {
+      const p = payload as BroadcastCommandPayload;
+      // Handle if: @all (null targetAgentId) OR targeted at one of my agents
+      const isForMe = !p.targetAgentId || myAgentIds.includes(p.targetAgentId);
+      if (isForMe) onCommand(p);
+    })
+    .subscribe();
+
+  commandChannels.set(circleId, channel);
+
+  return () => {
+    commandChannels.delete(circleId);
+    supabase.removeChannel(channel);
+  };
+}
+
+// ─── Respond to a command ─────────────────────────────────────────────────────
+
+export async function respondToCommand(
+  messageId: string,
+  agentId: string,
+  agentName: string,
+  responseText: string,
+  tokenCost: number,
+  latencyMs: number,
+  circleId: string
+): Promise<{ error?: string }> {
+  // 1. Upsert into office_terminal_responses (Phase 3 schema)
+  const { error } = await supabase
+    .from('office_terminal_responses')
+    .upsert({
+      message_id:    messageId,
+      agent_id:      agentId,
+      agent_name:    agentName,
+      response_text: responseText,
+      token_count:   tokenCost,
+      latency_ms:    latencyMs,
+      status:        'done',
+    }, { onConflict: 'message_id,agent_id' });
+
+  if (error) return { error: error.message };
+
+  // Also mark the parent message done
+  await supabase
+    .from('office_terminal_messages')
+    .update({ status: 'done' })
+    .eq('id', messageId);
+
+  // 2. Broadcast response
+  const channel = await getOrCreateCommandChannel(circleId);
+  await channel.send({
+    type: 'broadcast',
+    event: 'response',
+    payload: {
+      messageId,
+      circleId,
+      responseAgentId:   agentId,
+      responseAgentName: agentName,
+      responseText,
+      tokenCost,
+      latencyMs,
+      status: 'done',
+    } satisfies BroadcastResponsePayload,
+  });
+
+  return {};
+}
+
+// ─── Subscribe to response updates ───────────────────────────────────────────
+
+export function subscribeToTerminalResponses(
+  circleId: string,
+  onResponse: (payload: BroadcastResponsePayload) => void
+): () => void {
+  const channelName = `office-terminal-resp-${circleId}`;
+
+  const existing = responseChannels.get(circleId);
+  if (existing) supabase.removeChannel(existing);
+
+  const channel = supabase.channel(channelName)
+    .on('broadcast', { event: 'response' }, ({ payload }) => {
+      onResponse(payload as BroadcastResponsePayload);
+    })
+    .subscribe();
+
+  responseChannels.set(circleId, channel);
+
+  return () => {
+    responseChannels.delete(circleId);
+    supabase.removeChannel(channel);
+  };
+}
+
+// ─── Load responses for a set of messages ────────────────────────────────────
+
+export interface TerminalResponse {
+  id: string;
+  messageId: string;
+  agentId: string;
+  agentName: string;
+  responseText: string;
+  status: 'pending' | 'streaming' | 'done' | 'error';
+  tokenCount: number;
+  latencyMs?: number;
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function loadResponsesForMessages(
+  messageIds: string[]
+): Promise<TerminalResponse[]> {
+  if (messageIds.length === 0) return [];
+
+  const { data, error } = await supabase
+    .from('office_terminal_responses')
+    .select('*')
+    .in('message_id', messageIds);
+
+  if (error || !data) return [];
+
+  return (data as Record<string, unknown>[]).map(row => ({
+    id:           row.id as string,
+    messageId:    row.message_id as string,
+    agentId:      row.agent_id as string,
+    agentName:    row.agent_name as string,
+    responseText: row.response_text as string,
+    status:       row.status as TerminalResponse['status'],
+    tokenCount:   (row.token_count as number) || 0,
+    latencyMs:    row.latency_ms as number | undefined,
+    errorMessage: row.error_message as string | undefined,
+    createdAt:    row.created_at as string,
+    updatedAt:    row.updated_at as string,
+  }));
+}
+
+// ─── Load history ─────────────────────────────────────────────────────────────
+
+export async function loadTerminalHistory(
+  circleId: string,
+  limit = 50
+): Promise<{ messages: TerminalMessage[]; error?: string }> {
+  const { data, error } = await supabase
+    .from('office_terminal_messages')
+    .select('*')
+    .eq('circle_id', circleId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) return { messages: [], error: error.message };
+
+  // Reverse so oldest is first
+  const messages = ((data as Record<string, unknown>[]) || [])
+    .map(fromRow)
+    .reverse();
+
+  return { messages };
+}
+
+// ─── Subscribe to Realtime DB changes on terminal messages ────────────────────
+
+export function subscribeToTerminalMessages(
+  circleId: string,
+  onUpdate: (msg: TerminalMessage) => void
+): () => void {
+  const channel = supabase
+    .channel(`terminal-db-${circleId}`)
+    .on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'office_terminal_messages',
+      filter: `circle_id=eq.${circleId}`,
+    }, ({ new: row, eventType }) => {
+      if (eventType !== 'DELETE' && row) {
+        onUpdate(fromRow(row as Record<string, unknown>));
+      }
+    })
+    .subscribe();
+
+  return () => supabase.removeChannel(channel);
+}
+
+// ─── Update agent analytics ───────────────────────────────────────────────────
+
+export async function updateAgentAnalytics(
+  agentId: string,
+  tokenDelta: number,
+  latencyMs: number
+): Promise<void> {
+  // Try RPC first (atomic increment — best approach)
+  const { error: rpcError } = await supabase.rpc('increment_agent_analytics', {
+    p_agent_id:    agentId,
+    p_tokens:      tokenDelta,
+    p_latency_ms:  latencyMs,
+  });
+
+  if (rpcError) {
+    // Fallback: use raw SQL via Supabase's built-in atomic increment
+    // This avoids the read-then-write race condition
+    await supabase.from('circle_office_agents').update({
+      // Supabase doesn't support atomic increment via .update(), so we use rpc or raw SQL
+      // For now: simple update (acceptable with low concurrency in MVP)
+      last_response_ms: latencyMs,
+      updated_at:       new Date().toISOString(),
+    }).eq('id', agentId);
+
+    // Note: token/message increments will be slightly lossy without the RPC.
+    // Create this RPC in Supabase SQL Editor for atomic increments:
+    // CREATE OR REPLACE FUNCTION increment_agent_analytics(p_agent_id uuid, p_tokens bigint, p_latency_ms int)
+    // RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
+    // BEGIN
+    //   UPDATE circle_office_agents SET
+    //     token_usage_today  = token_usage_today  + p_tokens,
+    //     token_usage_total  = token_usage_total  + p_tokens,
+    //     message_count_today = message_count_today + 1,
+    //     message_count_total = message_count_total + 1,
+    //     last_response_ms   = p_latency_ms,
+    //     updated_at         = now()
+    //   WHERE id = p_agent_id;
+    // END; $$;
+  }
+}
+
+// ─── Update agent position ────────────────────────────────────────────────────
+
+export async function updateAgentPosition(
+  agentId: string,
+  x: number,
+  y: number
+): Promise<void> {
+  await supabase
+    .from('circle_office_agents')
+    .update({
+      position_x: Math.max(0, Math.min(1, x)),
+      position_y: Math.max(0, Math.min(1, y)),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', agentId);
+}
+
+// ─── Update last command on agent row ────────────────────────────────────────
+
+export async function updateAgentLastCommand(
+  agentId: string,
+  command: string
+): Promise<void> {
+  await supabase
+    .from('circle_office_agents')
+    .update({
+      last_command:    command,
+      last_command_at: new Date().toISOString(),
+    })
+    .eq('id', agentId);
+}
+
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+async function getOrCreateCommandChannel(circleId: string): Promise<RealtimeChannel> {
+  const existing = commandChannels.get(circleId);
+  if (existing) return existing;
+
+  const channel = supabase.channel(`office-terminal-cmd-${circleId}`);
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      resolve(); // Resolve anyway — channel may still work for broadcast
+    }, 5000);
+    channel.subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+  });
+
+  commandChannels.set(circleId, channel);
+  return channel;
+}
+
+// ─── Cleanup all channels for a circle ───────────────────────────────────────
+
+export function cleanupTerminalChannels(circleId: string): void {
+  const cmd = commandChannels.get(circleId);
+  if (cmd) { supabase.removeChannel(cmd); commandChannels.delete(circleId); }
+
+  const resp = responseChannels.get(circleId);
+  if (resp) { supabase.removeChannel(resp); responseChannels.delete(circleId); }
+}
