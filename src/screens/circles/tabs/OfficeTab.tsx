@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, Pressable,
+  View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator,
   useWindowDimensions, Platform, Linking, Modal, TextInput,
 } from 'react-native';
 import OfficeFloorView, { DESK_POSITIONS, FLOOR_W, FLOOR_H } from './office/OfficeFloor';
@@ -530,16 +530,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       const conns = await loadConnections();
       setConnections(conns);
 
-      // Auto-connect all enabled connections (skip localhost on production)
-      const isProduction = typeof window !== 'undefined' && !window.location.hostname.includes('localhost');
+      // Auto-connect all enabled connections
+      // NOTE: We always attempt localhost connections — when the user browses from
+      // their own machine, localhost in the browser points to their local proxy.
       for (const conn of conns) {
         if (conn.enabled) {
-          // Skip localhost endpoints on production
-          const isLocalhost = conn.endpoint.includes('localhost') || conn.endpoint.includes('127.0.0.1');
-          if (isProduction && isLocalhost) {
-            console.log(`Skipping localhost connection "${conn.name}" on production`);
-            continue;
-          }
           connectOne(conn);
         }
       }
@@ -1337,42 +1332,55 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             )}
             {displayAgents.length === 0 ? (
               <View style={styles.mobileEmpty}>
-                <Text style={styles.mobileEmptyIcon}>🔗</Text>
-                <Text style={styles.mobileEmptyTitle}>No agents connected</Text>
                 {(() => {
-                  const isProduction = typeof window !== 'undefined' && !window.location.hostname.includes('localhost');
-                  const hasLocalhost = connections.some(c => c.endpoint.includes('localhost') || c.endpoint.includes('127.0.0.1'));
-                  const hasOnlyLocalhost = connections.length > 0 && connections.every(c => c.endpoint.includes('localhost') || c.endpoint.includes('127.0.0.1'));
-                  
-                  if (isProduction && hasOnlyLocalhost) {
-                    // User has connections, but they're all localhost (skipped on production)
+                  const connectingConns = connections.filter(c => c.status === 'connecting');
+                  const errorConns = connections.filter(c => c.status === 'error');
+                  const savedConns = connections.filter(c => c.enabled);
+
+                  if (connectingConns.length > 0) {
                     return (
                       <>
-                        <Text style={styles.mobileEmptyText}>Your saved connections use localhost and can't be reached from this domain.</Text>
-                        <View style={{ marginTop: 12, padding: 12, backgroundColor: '#1a1a2e', borderRadius: 8, borderWidth: 1, borderColor: '#333' }}>
-                          <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '700', marginBottom: 6 }}>💡 The Office connects to LOCAL AI agents</Text>
-                          <Text style={{ color: '#888', fontSize: 11, marginBottom: 4 }}>Your connections work when running on localhost, but production can't access them due to browser security (CSP).</Text>
-                        </View>
+                        <ActivityIndicator color="#6366f1" size="large" style={{ marginBottom: 16 }} />
+                        <Text style={styles.mobileEmptyTitle}>Connecting...</Text>
+                        <Text style={styles.mobileEmptyText}>
+                          Reaching {connectingConns[0].name}
+                        </Text>
                       </>
                     );
-                  } else if (isProduction) {
-                    // Production, no connections or some non-localhost
-                    return (
-                      <>
-                        <Text style={styles.mobileEmptyText}>The Office dashboard connects to your local AI agents</Text>
-                        <View style={{ marginTop: 12, padding: 12, backgroundColor: '#1a1a2e', borderRadius: 8, borderWidth: 1, borderColor: '#333' }}>
-                          <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '700', marginBottom: 8 }}>📋 Setup Guide</Text>
-                          <Text style={{ color: '#888', fontSize: 11, marginBottom: 4 }}>1️⃣ Install OpenClaw on your computer</Text>
-                          <Text style={{ color: '#888', fontSize: 11, marginBottom: 4 }}>2️⃣ Run it locally (it starts a server)</Text>
-                          <Text style={{ color: '#888', fontSize: 11, marginBottom: 4 }}>3️⃣ Tap ⚙️ → Connections to add endpoint</Text>
-                          <Text style={{ color: '#666', fontSize: 10, marginTop: 6, fontStyle: 'italic' }}>Or use a remote OpenClaw/agent endpoint</Text>
-                        </View>
-                      </>
-                    );
-                  } else {
-                    // Localhost
-                    return <Text style={styles.mobileEmptyText}>Tap ⚙️ → Connections to add your agent endpoints</Text>;
                   }
+                  if (errorConns.length > 0 && savedConns.length > 0) {
+                    return (
+                      <>
+                        <Text style={styles.mobileEmptyIcon}>⚠️</Text>
+                        <Text style={styles.mobileEmptyTitle}>Connection failed</Text>
+                        {errorConns.map(c => (
+                          <View key={c.id} style={{ marginBottom: 8, padding: 10, backgroundColor: '#1a0a0a', borderRadius: 8, borderWidth: 1, borderColor: '#ef444430', width: '100%' }}>
+                            <Text style={{ color: '#ef4444', fontSize: 11, fontWeight: '700', fontFamily: 'monospace' }}>{c.name}</Text>
+                            <Text style={{ color: '#888', fontSize: 10, fontFamily: 'monospace', marginTop: 2 }}>{c.error || 'Could not reach endpoint'}</Text>
+                            <Text style={{ color: '#555', fontSize: 9, fontFamily: 'monospace', marginTop: 2 }}>{c.endpoint}</Text>
+                          </View>
+                        ))}
+                        <Text style={{ color: '#555', fontSize: 11, fontFamily: 'monospace', textAlign: 'center', marginBottom: 8 }}>
+                          Make sure OpenClaw is running and the CORS proxy is active
+                        </Text>
+                        <Pressable
+                          onPress={() => savedConns.forEach(c => connectOne(c))}
+                          style={[{ backgroundColor: '#6366f120', borderWidth: 1, borderColor: '#6366f140', borderRadius: 8, paddingHorizontal: 20, paddingVertical: 10, marginBottom: 12 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                        >
+                          <Text style={{ color: '#6366f1', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' }}>↻ RETRY CONNECTION</Text>
+                        </Pressable>
+                      </>
+                    );
+                  }
+                  return (
+                    <>
+                      <Text style={styles.mobileEmptyIcon}>🤖</Text>
+                      <Text style={styles.mobileEmptyTitle}>No agents connected</Text>
+                      <Text style={styles.mobileEmptyText}>
+                        Connect your AI agent to show up in the circle office
+                      </Text>
+                    </>
+                  );
                 })()}
                 <Pressable
                   onPress={() => setShowSetupWizard(true)}
@@ -1380,7 +1388,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                   accessibilityRole="button"
                   accessibilityLabel="Connect agent"
                 >
-                  <Text style={styles.mobileEmptyBtnText}>🤖 CONNECT AGENT</Text>
+                  <Text style={styles.mobileEmptyBtnText}>CONNECT AGENT →</Text>
                 </Pressable>
               </View>
             ) : (
@@ -1446,15 +1454,38 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                     <ServerRack agents={displayAgents} />
                     {agents.length === 0 && (
                       <View style={styles.emptyOverlay}>
-                        <Text style={{ fontSize: 36, marginBottom: 12 }}>🤖</Text>
-                        <Text style={styles.emptyTitle}>No agents connected</Text>
-                        <Text style={styles.emptyText}>Connect your AI agent to show up in the circle office</Text>
-                        <Pressable
-                          onPress={() => setShowSetupWizard(true)}
-                          style={{ marginTop: 16, backgroundColor: '#6366f1', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 24, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
-                        >
-                          <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Connect Agent →</Text>
-                        </Pressable>
+                        {connections.filter(c => c.status === 'connecting').length > 0 ? (
+                          <>
+                            <ActivityIndicator color="#6366f1" size="large" style={{ marginBottom: 12 }} />
+                            <Text style={styles.emptyTitle}>Connecting agents...</Text>
+                          </>
+                        ) : connections.filter(c => c.status === 'error').length > 0 ? (
+                          <>
+                            <Text style={{ fontSize: 28, marginBottom: 8 }}>⚠️</Text>
+                            <Text style={styles.emptyTitle}>Connection failed</Text>
+                            <Text style={styles.emptyText}>
+                              {connections.find(c => c.status === 'error')?.error || 'Could not reach agent endpoint'}
+                            </Text>
+                            <Pressable
+                              onPress={() => connections.filter(c => c.enabled).forEach(c => connectOne(c))}
+                              style={{ marginTop: 12, backgroundColor: '#6366f120', borderWidth: 1, borderColor: '#6366f140', borderRadius: 8, paddingVertical: 8, paddingHorizontal: 20, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
+                            >
+                              <Text style={{ color: '#6366f1', fontWeight: '700', fontSize: 12, fontFamily: 'monospace' }}>↻ RETRY</Text>
+                            </Pressable>
+                          </>
+                        ) : (
+                          <>
+                            <Text style={{ fontSize: 36, marginBottom: 12 }}>🤖</Text>
+                            <Text style={styles.emptyTitle}>No agents connected</Text>
+                            <Text style={styles.emptyText}>Connect your AI agent to show up in the circle office</Text>
+                            <Pressable
+                              onPress={() => setShowSetupWizard(true)}
+                              style={{ marginTop: 16, backgroundColor: '#6366f1', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 24, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
+                            >
+                              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Connect Agent →</Text>
+                            </Pressable>
+                          </>
+                        )}
                       </View>
                     )}
                     {agents.map((agent, i) => {
