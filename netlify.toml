@@ -22,7 +22,7 @@
     X-Content-Type-Options = "nosniff"
     X-XSS-Protection = "1; mode=block"
     Referrer-Policy = "strict-origin-when-cross-origin"
-    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.mainnet-beta.solana.com https://api.devnet.solana.com https://*.infura.io https://*.alchemy.com https://*.quicknode.pro https://generativelanguage.googleapis.com https://api.openai.com; frame-src 'self';"
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.mainnet-beta.solana.com https://api.devnet.solana.com https://solana-rpc.publicnode.com https://rpc.ankr.com https://*.infura.io https://*.alchemy.com https://*.quicknode.pro https://generativelanguage.googleapis.com https://api.openai.com https://api.coinbase.com https://api.coingecko.com; frame-src 'self';"
 
 # Cache static assets
 [[headers]]
