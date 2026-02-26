@@ -29,7 +29,7 @@ interface ConnectedWallet extends WalletInfo {
   type: 'metamask' | 'phantom';
 }
 
-export default function ConnectWalletScreen({ onComplete }: { onComplete: () => void }) {
+export default function ConnectWalletScreen({ onComplete, skipAutoDetect }: { onComplete: () => void; skipAutoDetect?: boolean }) {
   // Core state
   const [step, setStep] = useState<OnboardingStep>('welcome');
   const [loading, setLoading] = useState(false);
@@ -50,16 +50,22 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
   const isWide = width > 500;
 
   useEffect(() => {
-    checkExistingConnections();
+    // Only pre-fill detected wallets for display — never auto-advance to chain-select
+    // User must always explicitly choose to connect
+    if (!skipAutoDetect) {
+      checkExistingConnections();
+    }
   }, []);
 
   const checkExistingConnections = async () => {
     const wallets: ConnectedWallet[] = [];
     
-    // Check MetaMask
-    if (Platform.OS === 'web' && (window as any).ethereum) {
+    // Check MetaMask — skip Phantom's injected ethereum provider
+    const eth = Platform.OS === 'web' ? (window as any).ethereum : null;
+    const isRealMetaMask = eth && eth.isMetaMask && !eth.isPhantom && !eth._isPhantom;
+    if (isRealMetaMask) {
       try {
-        const accounts = await (window as any).ethereum.request({ method: 'eth_accounts' });
+        const accounts = await eth.request({ method: 'eth_accounts' });
         if (accounts?.[0]) {
           wallets.push({
             address: accounts[0],
@@ -87,11 +93,7 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
     }
     
     setConnectedWallets(wallets);
-    
-    // If we have wallets, skip to verification/complete
-    if (wallets.length > 0) {
-      setStep('chain-select');
-    }
+    // Never auto-advance — user must explicitly click connect
   };
 
   const generateSeedPhrase = () => {
@@ -122,8 +124,10 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
       const chain: CryptoChain = type === 'metamask' ? 'ethereum' : 'solana';
       
       if (Platform.OS === 'web') {
-        if (type === 'metamask' && !(window as any).ethereum) {
-          throw new Error('MetaMask not detected. Please install the browser extension.');
+        const eth = (window as any).ethereum;
+        const isRealMetaMask = eth && eth.isMetaMask && !eth.isPhantom && !eth._isPhantom;
+        if (type === 'metamask' && !isRealMetaMask) {
+          throw new Error('MetaMask not detected. Please install the MetaMask browser extension. (Phantom\'s built-in Ethereum provider is not MetaMask)');
         }
         if (type === 'phantom' && !(window as any).solana?.isPhantom) {
           throw new Error('Phantom not detected. Please install the browser extension.');
@@ -224,7 +228,7 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
     <Card style={[s.card, isWide && s.cardWide]}>
       <View style={s.header}>
         <View style={s.walletIcon}>
-          <Text style={s.walletIconText}>🔐</Text>
+          <Text style={s.walletIconText}>◈</Text>
         </View>
         <Text style={s.title}>WELCOME TO</Text>
         <Text style={s.titleBold}>WEB3 WALLET</Text>
@@ -235,7 +239,7 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
 
       <View style={s.featuresList}>
         <View style={s.featureItem}>
-          <Text style={s.featureIcon}>🔒</Text>
+          <Text style={s.featureIcon}>–</Text>
           <View>
             <Text style={s.featureTitle}>Secure & Private</Text>
             <Text style={s.featureDesc}>Your keys, your crypto. Self-custody.</Text>
@@ -243,7 +247,7 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
         </View>
         
         <View style={s.featureItem}>
-          <Text style={s.featureIcon}>⚡</Text>
+          <Text style={s.featureIcon}>–</Text>
           <View>
             <Text style={s.featureTitle}>Multi-Chain Support</Text>
             <Text style={s.featureDesc}>Ethereum, Solana, Polygon, Base</Text>
@@ -251,7 +255,7 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
         </View>
         
         <View style={s.featureItem}>
-          <Text style={s.featureIcon}>🎯</Text>
+          <Text style={s.featureIcon}>–</Text>
           <View>
             <Text style={s.featureTitle}>DeFi Ready</Text>
             <Text style={s.featureDesc}>Swap, stake, and manage NFTs</Text>
@@ -279,14 +283,14 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
 
       <View style={s.methodOptions}>
         <TouchableOpacity style={s.methodCard} onPress={() => setStep('connect-wallet')}>
-          <Text style={s.methodIcon}>🔗</Text>
+          <Text style={s.methodIcon}>→</Text>
           <Text style={s.methodTitle}>Connect Existing</Text>
           <Text style={s.methodDesc}>Link MetaMask, Phantom, or other wallet</Text>
           <Text style={s.methodBadge}>RECOMMENDED</Text>
         </TouchableOpacity>
 
         <TouchableOpacity style={s.methodCard} onPress={() => setStep('import-seed')}>
-          <Text style={s.methodIcon}>📝</Text>
+          <Text style={s.methodIcon}>→</Text>
           <Text style={s.methodTitle}>Import Wallet</Text>
           <Text style={s.methodDesc}>Restore with your 12/24 word seed phrase</Text>
         </TouchableOpacity>
@@ -331,7 +335,7 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
           disabled={loading}
         >
           <View style={s.walletButtonInner}>
-            <Text style={s.walletEmoji}>🦊</Text>
+            <Text style={s.walletEmoji}>M</Text>
             <View style={s.walletInfo}>
               <Text style={s.walletName}>MetaMask</Text>
               <Text style={s.walletChain}>Ethereum · EVM Chains · 100M+ users</Text>
@@ -351,7 +355,7 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
           disabled={loading}
         >
           <View style={s.walletButtonInner}>
-            <Text style={s.walletEmoji}>👻</Text>
+            <Text style={s.walletEmoji}>P</Text>
             <View style={s.walletInfo}>
               <Text style={s.walletName}>Phantom</Text>
               <Text style={s.walletChain}>Solana · SPL Tokens · Fast & cheap</Text>
@@ -366,14 +370,14 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
         </TouchableOpacity>
 
         <View style={s.comingSoonCard}>
-          <Text style={s.comingSoonIcon}>🔗</Text>
+          <Text style={s.comingSoonIcon}>→</Text>
           <Text style={s.comingSoonText}>WalletConnect</Text>
           <Text style={s.comingSoonBadge}>COMING SOON</Text>
         </View>
       </View>
 
       <View style={s.securityNotice}>
-        <Text style={s.securityIcon}>🔒</Text>
+        <Text style={s.securityIcon}>–</Text>
         <Text style={s.securityText}>
           We'll ask you to sign a message to verify wallet ownership. This is free and secure.
         </Text>
@@ -462,15 +466,15 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
 
       <View style={s.backupInstructions}>
         <View style={s.instructionItem}>
-          <Text style={s.instructionIcon}>✍️</Text>
+          <Text style={s.instructionIcon}>1.</Text>
           <Text style={s.instructionText}>Write these words on paper</Text>
         </View>
         <View style={s.instructionItem}>
-          <Text style={s.instructionIcon}>🔒</Text>
+          <Text style={s.instructionIcon}>–</Text>
           <Text style={s.instructionText}>Store in a safe place</Text>
         </View>
         <View style={s.instructionItem}>
-          <Text style={s.instructionIcon}>👥</Text>
+          <Text style={s.instructionIcon}>2.</Text>
           <Text style={s.instructionText}>Never share with anyone</Text>
         </View>
       </View>
@@ -559,7 +563,7 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
           {connectedWallets.map((wallet, i) => (
             <View key={i} style={s.connectedWalletCard}>
               <Text style={s.connectedWalletIcon}>
-                {wallet.type === 'metamask' ? '🦊' : '👻'}
+                {wallet.type === 'metamask' ? 'M' : 'P'}
               </Text>
               <View style={s.connectedWalletInfo}>
                 <Text style={s.connectedWalletName}>
@@ -610,7 +614,7 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
 
       {/* Best practices */}
       <View style={s.bestPractices}>
-        <Text style={s.bestPracticesTitle}>🛡️ Security Best Practices</Text>
+        <Text style={s.bestPracticesTitle}>Security Best Practices</Text>
         <Text style={s.bestPracticesText}>
           • Always verify recipient addresses before sending{'\n'}
           • Start with small amounts when trying new services{'\n'}
@@ -621,6 +625,13 @@ export default function ConnectWalletScreen({ onComplete }: { onComplete: () => 
 
       <TouchableOpacity style={s.primaryButton} onPress={handleFinish}>
         <Text style={s.primaryButtonText}>CONTINUE TO WALLET</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity style={s.backButton} onPress={() => {
+        setConnectedWallets([]);
+        setStep('welcome');
+      }}>
+        <Text style={s.backText}>Use a different wallet</Text>
       </TouchableOpacity>
     </Card>
   );

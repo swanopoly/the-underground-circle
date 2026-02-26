@@ -110,3 +110,37 @@ main().catch(err => {
   process.stderr.write(`[openclaw-activity-hook] FATAL: ${err.message}\n`);
   process.exit(1);
 });
+
+// ─── Project Room logging (optional) ────────────────────────────────────────
+// If ACTIVITY_ROOM_ID is set, also logs to project_room_activity
+async function logToRoom(payload) {
+  const roomId = process.env.ACTIVITY_ROOM_ID;
+  const circleId = process.env.ACTIVITY_CIRCLE_ID;
+  if (!roomId || !circleId) return;
+
+  const body = JSON.stringify({
+    room_id: roomId,
+    circle_id: circleId,
+    agent_session_key: payload.agent_session_key || 'swanbot-main',
+    agent_name: payload.agent_name || 'SwanBot',
+    activity_type: payload.activity_type || 'task_completed',
+    title: payload.title,
+    body: payload.body || null,
+    metadata: payload.metadata || {},
+  });
+
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/project_room_activity`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Prefer': 'return=minimal',
+    },
+    body,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    process.stderr.write(`[openclaw-activity-hook] Room log failed ${res.status}: ${text}\n`);
+  }
+}

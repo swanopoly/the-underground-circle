@@ -30,6 +30,7 @@ import {
 import { storage } from '../../../lib/storage';
 import CostDashboard from '../../../components/CostDashboard';
 import SessionTagsDashboard from '../../../components/SessionTagsDashboard';
+import ProjectRoomsPanel from '../../../components/ProjectRoomsPanel';
 import AgentPerformanceMetrics from '../../../components/AgentPerformanceMetrics';
 import {
   SessionTag, loadSessionTags, addSessionTag, removeSessionTag,
@@ -1211,10 +1212,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           accentColor={accentColor}
         />
       ) : viewMode === 'tags' ? (
-        <SessionTagsDashboard
-          agents={displayAgents}
-          sessionTags={sessionTags}
-        />
+        <View style={{ flex: 1, padding: 16, gap: 16 }}>
+          <ProjectRoomsPanel circleId={circleId} />
+          <SessionTagsDashboard
+            agents={displayAgents}
+            sessionTags={sessionTags}
+          />
+        </View>
       ) : viewMode === 'metrics' ? (
         <AgentPerformanceMetrics
           agents={enrichedAgents}

@@ -32,13 +32,13 @@ type ActiveTab = 'portfolio' | 'assets' | 'nfts' | 'activity' | 'swap' | 'stake'
 type ActivePanel = null | 'send' | 'receive';
 
 const TABS = [
-  { id: 'portfolio' as const, label: 'Portfolio', icon: '📊' },
-  { id: 'assets' as const, label: 'Assets', icon: '💰' },
-  { id: 'nfts' as const, label: 'NFTs', icon: '🖼️' },
-  { id: 'activity' as const, label: 'Activity', icon: '📜' },
-  { id: 'swap' as const, label: 'Swap', icon: '🔄' },
-  { id: 'stake' as const, label: 'Stake', icon: '🏦' },
-  { id: 'market' as const, label: 'Market', icon: '📈' },
+  { id: 'portfolio' as const, label: 'Portfolio', icon: '◈' },
+  { id: 'assets' as const, label: 'Assets', icon: '◇' },
+  { id: 'nfts' as const, label: 'NFTs', icon: '▣' },
+  { id: 'activity' as const, label: 'Activity', icon: '≡' },
+  { id: 'swap' as const, label: 'Swap', icon: '⇄' },
+  { id: 'stake' as const, label: 'Stake', icon: '⬡' },
+  { id: 'market' as const, label: 'Market', icon: '▲' },
 ];
 
 // ─── Sub-Components ──────────────────────────────────────────────────────────
@@ -137,11 +137,11 @@ function NFTCard({ nft, onPress }: { nft: NFT; onPress: () => void }) {
       <View style={s.nftImageContainer}>
         {nft.image ? (
           <View style={s.nftPlaceholder}>
-            <Text style={s.nftPlaceholderText}>🖼️</Text>
+            <Text style={s.nftPlaceholderText}>NFT</Text>
           </View>
         ) : (
           <View style={s.nftPlaceholder}>
-            <Text style={s.nftPlaceholderText}>🎨</Text>
+            <Text style={s.nftPlaceholderText}>ART</Text>
           </View>
         )}
       </View>
@@ -155,8 +155,8 @@ function TransactionRow({ tx, onPress }: { tx: Transaction; onPress: () => void 
   const config = CHAIN_CONFIGS[tx.chain];
   const isOutgoing = tx.type === 'send';
   const typeIcon = {
-    send: '↗️', receive: '↙️', swap: '🔄', stake: '🏦', unstake: '🔄', mint: '✨', burn: '🔥', approve: '✅'
-  }[tx.type] || '📄';
+    send: '↗', receive: '↙', swap: '⇄', stake: '⬡', unstake: '⬡', mint: '+', burn: '×', approve: '✓'
+  }[tx.type] || '·';
   
   return (
     <Pressable onPress={onPress} style={s.txRow}>
@@ -175,7 +175,7 @@ function TransactionRow({ tx, onPress }: { tx: Transaction; onPress: () => void 
       <View style={s.txRight}>
         <View style={[s.txStatus, tx.status === 'confirmed' && s.txStatusConfirmed]}>
           <Text style={s.txStatusText}>
-            {tx.status === 'confirmed' ? '✅' : tx.status === 'pending' ? '⏳' : '❌'}
+            {tx.status === 'confirmed' ? '✓' : tx.status === 'pending' ? '…' : '✗'}
           </Text>
         </View>
         <Text style={s.txArrow}>→</Text>
@@ -200,13 +200,17 @@ export default function WalletDashboard({
 }: {
   walletAddress: string; chain: string; onDisconnect?: () => void;
 }) {
-  // Core state
-  const [wallets, setWallets] = useState<MultiWallet>({ ethereum: null, solana: null });
+  // Core state — pre-seed from props so data loads immediately without waiting for extension
+  const initialWallets: MultiWallet = {
+    ethereum: chain === 'ethereum' ? { address: walletAddress, chain: 'ethereum', connected: true } : null,
+    solana: chain === 'solana' ? { address: walletAddress, chain: 'solana', connected: true } : null,
+  };
+  const [wallets, setWallets] = useState<MultiWallet>(initialWallets);
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
   const [loading, setLoading] = useState(true); // only for initial wallet detection
   const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>('portfolio');
-  const [selectedChain, setSelectedChain] = useState<Chain>('ethereum');
+  const [selectedChain, setSelectedChain] = useState<Chain>((chain as Chain) || 'ethereum');
 
   // Per-section loading states
   const [portfolioLoading, setPortfolioLoading] = useState(false);
@@ -254,18 +258,17 @@ export default function WalletDashboard({
   // ─── Load & Refresh Data ─────────────────────────────────────────────────────
 
   const loadWallets = useCallback(async () => {
-    // Run saved + browser wallet detection in parallel with individual timeouts
-    const [saved, browser] = await Promise.all([
-      loadSavedWallets().catch(() => ({ ethereum: null, solana: null } as MultiWallet)),
-      getConnectedWallets().catch(() => ({ ethereum: null, solana: null } as MultiWallet)),
-    ]);
+    // Props are the source of truth (already read from Supabase by WalletTab).
+    // Only use browser detection to pick up additional wallets not yet in Supabase.
+    const browser = await getConnectedWallets().catch(() => ({ ethereum: null, solana: null } as MultiWallet));
+
     const merged: MultiWallet = {
-      ethereum: saved.ethereum || browser.ethereum,
-      solana: saved.solana || browser.solana,
+      // Props win — never override with null from browser detection
+      ethereum: initialWallets.ethereum || browser.ethereum,
+      solana: initialWallets.solana || browser.solana,
     };
     setWallets(merged);
 
-    // Set defaults
     const chains = Object.keys(merged).filter(c => merged[c as keyof MultiWallet]) as Chain[];
     if (chains.length > 0) {
       setSelectedChain(chains[0]);
@@ -502,7 +505,7 @@ export default function WalletDashboard({
         
         {/* Mini chart placeholder */}
         <View style={s.chartPlaceholder}>
-          <Text style={s.chartPlaceholderText}>📈 Chart coming soon</Text>
+          <Text style={s.chartPlaceholderText}>Chart coming soon</Text>
         </View>
         
         {/* Connected wallets */}
@@ -527,7 +530,7 @@ export default function WalletDashboard({
           onPress={() => setActivePanel(activePanel === 'send' ? null : 'send')}
         >
           <View style={[s.actionBtnIcon, { backgroundColor: '#22d3ee20' }]}>
-            <Text style={s.actionBtnEmoji}>↗️</Text>
+            <Text style={[s.actionBtnEmoji, { color: '#22d3ee' }]}>↗</Text>
           </View>
           <Text style={s.actionBtnLabel}>SEND</Text>
         </Pressable>
@@ -537,7 +540,7 @@ export default function WalletDashboard({
           onPress={() => setActivePanel(activePanel === 'receive' ? null : 'receive')}
         >
           <View style={[s.actionBtnIcon, { backgroundColor: '#10b98120' }]}>
-            <Text style={s.actionBtnEmoji}>↙️</Text>
+            <Text style={[s.actionBtnEmoji, { color: '#10b981' }]}>↙</Text>
           </View>
           <Text style={s.actionBtnLabel}>RECEIVE</Text>
         </Pressable>
@@ -547,7 +550,7 @@ export default function WalletDashboard({
           onPress={() => setActiveTab('swap')}
         >
           <View style={[s.actionBtnIcon, { backgroundColor: '#f59e0b20' }]}>
-            <Text style={s.actionBtnEmoji}>🔄</Text>
+            <Text style={[s.actionBtnEmoji, { color: '#f59e0b' }]}>⇄</Text>
           </View>
           <Text style={s.actionBtnLabel}>SWAP</Text>
         </Pressable>
@@ -557,7 +560,7 @@ export default function WalletDashboard({
           onPress={() => setActiveTab('stake')}
         >
           <View style={[s.actionBtnIcon, { backgroundColor: '#8b5cf620' }]}>
-            <Text style={s.actionBtnEmoji}>🏦</Text>
+            <Text style={[s.actionBtnEmoji, { color: '#8b5cf6' }]}>⬡</Text>
           </View>
           <Text style={s.actionBtnLabel}>STAKE</Text>
         </Pressable>
@@ -617,7 +620,7 @@ export default function WalletDashboard({
         <SectionLoader label="Loading NFTs" />
       ) : nfts.filter(n => n.chain === selectedChain).length === 0 ? (
         <Card style={s.emptyCard}>
-          <Text style={s.emptyIcon}>🖼️</Text>
+          
           <Text style={s.emptyText}>No NFTs found</Text>
           <Text style={s.emptySubtext}>Your NFTs will appear here</Text>
         </Card>
@@ -652,7 +655,7 @@ export default function WalletDashboard({
         <SectionLoader label="Loading transactions" />
       ) : transactions.filter(tx => tx.chain === selectedChain).length === 0 ? (
         <Card style={s.emptyCard}>
-          <Text style={s.emptyIcon}>📜</Text>
+          
           <Text style={s.emptyText}>No transactions yet</Text>
           <Text style={s.emptySubtext}>Your activity will appear here</Text>
         </Card>
@@ -673,7 +676,7 @@ export default function WalletDashboard({
   const renderSwapTab = () => (
     <View>
       <Card style={s.swapCard}>
-        <Text style={s.swapTitle}>🔄 TOKEN SWAP</Text>
+        <Text style={s.swapTitle}>TOKEN SWAP</Text>
         
         {/* Swap interface placeholder */}
         <View style={s.swapInterface}>
@@ -716,12 +719,12 @@ export default function WalletDashboard({
 
         {selectedChain === 'solana' ? (
           <View style={s.swapInfo}>
-            <Text style={s.swapInfoText}>✨ Powered by Jupiter</Text>
+            <Text style={s.swapInfoText}>Powered by Jupiter</Text>
             <Text style={s.swapInfoSubtext}>Best rates across Solana DEXs</Text>
           </View>
         ) : (
           <View style={s.comingSoonBox}>
-            <Text style={s.comingSoonText}>🚧 Coming Soon</Text>
+            <Text style={s.comingSoonText}>Coming Soon</Text>
             <Text style={s.comingSoonSubtext}>EVM swaps in development</Text>
           </View>
         )}
@@ -741,7 +744,7 @@ export default function WalletDashboard({
   const renderStakeTab = () => (
     <View>
       <Card style={s.stakeCard}>
-        <Text style={s.stakeTitle}>🏦 SOL STAKING</Text>
+        <Text style={s.stakeTitle}>SOL STAKING</Text>
         
         {connectedChains.includes('solana') ? (
           <View>
@@ -792,7 +795,7 @@ export default function WalletDashboard({
           </View>
         ) : (
           <View style={s.comingSoonBox}>
-            <Text style={s.comingSoonText}>🔌 Connect Phantom</Text>
+            <Text style={s.comingSoonText}>Connect Phantom</Text>
             <Text style={s.comingSoonSubtext}>Connect your Solana wallet to stake SOL</Text>
             <Pressable 
               style={s.connectBtn} 
@@ -809,13 +812,13 @@ export default function WalletDashboard({
   const renderMarketRow = (item: MarketItem, index: number) => {
     const changeColor = item.change24h >= 0 ? '#10b981' : '#ef4444';
     const changePrefix = item.change24h >= 0 ? '+' : '';
-    const icon = item.type === 'crypto' ? '🪙' : '📊';
+    
 
     return (
       <View key={`${item.type}-${item.symbol}-${index}`} style={s.marketRow}>
         <View style={s.marketRowLeft}>
           <View style={[s.marketIcon, { backgroundColor: item.change24h >= 0 ? '#10b98115' : '#ef444415' }]}>
-            <Text style={s.marketIconText}>{icon}</Text>
+            <Text style={s.marketIconText}>{item.symbol[0]}</Text>
           </View>
           <View>
             <Text style={s.marketSymbol}>{item.symbol}</Text>
@@ -853,14 +856,14 @@ export default function WalletDashboard({
         <SectionLoader label="Loading market data" />
       ) : marketData ? (
         <View>
-          {renderMarketSection('🔥 TOP CRYPTO', marketData.crypto)}
-          {renderMarketSection('📊 TOP STOCKS', marketData.stocks)}
-          {renderMarketSection('🚀 TOP GAINERS', marketData.gainers)}
-          {renderMarketSection('📉 TOP LOSERS', marketData.losers)}
+          {renderMarketSection('TOP CRYPTO', marketData.crypto)}
+          {renderMarketSection('TOP STOCKS', marketData.stocks)}
+          {renderMarketSection('TOP GAINERS', marketData.gainers)}
+          {renderMarketSection('TOP LOSERS', marketData.losers)}
         </View>
       ) : (
         <Card style={s.emptyCard}>
-          <Text style={s.emptyIcon}>📈</Text>
+          
           <Text style={s.emptyText}>Market data unavailable</Text>
           <Text style={s.emptySubtext}>Pull to refresh or try again later</Text>
         </Card>
@@ -870,7 +873,7 @@ export default function WalletDashboard({
 
   const renderSendPanel = () => (
     <Card style={s.panelCard}>
-      <Text style={s.panelTitle}>↗️ SEND CRYPTO</Text>
+      <Text style={s.panelTitle}>SEND</Text>
 
       <Text style={s.inputLabel}>SEND FROM</Text>
       <ChainSelector 
@@ -916,7 +919,7 @@ export default function WalletDashboard({
 
       {sendResult && (
         <View style={[s.resultBox, sendResult.success ? s.resultSuccess : s.resultError]}>
-          <Text style={s.resultText}>{sendResult.success ? '✅' : '❌'} {sendResult.message}</Text>
+          <Text style={s.resultText}>{sendResult.success ? '' : ''} {sendResult.message}</Text>
           {sendResult.txHash && (
             <Pressable onPress={() => {
               if (Platform.OS === 'web') {
@@ -946,7 +949,7 @@ export default function WalletDashboard({
     
     return (
       <Card style={s.panelCard}>
-        <Text style={s.panelTitle}>↙️ RECEIVE CRYPTO</Text>
+        <Text style={s.panelTitle}>RECEIVE</Text>
 
         <ChainSelector 
           chains={connectedChains}
@@ -958,7 +961,7 @@ export default function WalletDashboard({
         {activeWallet && (
           <View>
             <View style={s.qrPlaceholder}>
-              <Text style={s.qrPlaceholderText}>📱</Text>
+              <Text style={s.qrPlaceholderText}>QR</Text>
               <Text style={s.qrPlaceholderSubtext}>QR Code</Text>
               <Text style={s.qrPlaceholderSubtext}>Coming Soon</Text>
             </View>
@@ -976,12 +979,12 @@ export default function WalletDashboard({
               }} 
               style={s.copyBtn}
             >
-              <Text style={s.copyBtnText}>📋 COPY ADDRESS</Text>
+              <Text style={s.copyBtnText}>COPY ADDRESS</Text>
             </Pressable>
 
             <View style={s.receiveWarning}>
               <Text style={s.receiveWarningText}>
-                ⚠️ Only send <Text style={{ fontWeight: '800' }}>{CHAIN_CONFIGS[receiveChain].name}</Text> tokens to this address.
+                Only send <Text style={{ fontWeight: '800' }}>{CHAIN_CONFIGS[receiveChain].name}</Text> tokens to this address.
               </Text>
             </View>
           </View>
@@ -1037,12 +1040,28 @@ export default function WalletDashboard({
         {/* Disconnect */}
         {hasAnyWallet && (
           <View style={s.signOutSection}>
-            <Pressable onPress={() => {
+            <Pressable onPress={async () => {
+              // Disconnect browser extensions first so ConnectWalletScreen doesn't re-detect them
+              try {
+                if (Platform.OS === 'web') {
+                  if ((window as any).solana?.isPhantom) {
+                    await (window as any).solana.disconnect().catch(() => {});
+                  }
+                  if ((window as any).ethereum) {
+                    // MetaMask doesn't have a programmatic disconnect — clear cached accounts
+                    // by requesting permissions reset (best-effort)
+                    (window as any).ethereum.request({
+                      method: 'wallet_revokePermissions',
+                      params: [{ eth_accounts: {} }],
+                    }).catch(() => {});
+                  }
+                }
+              } catch {}
               if (onDisconnect) onDisconnect();
             }} style={s.signOutBtn}>
-              <Text style={s.signOutText}>⏏ DISCONNECT ALL WALLETS</Text>
+              <Text style={s.signOutText}>DISCONNECT ALL WALLETS</Text>
             </Pressable>
-            <Text style={s.signOutHint}>Your funds stay safe</Text>
+            <Text style={s.signOutHint}>Your funds stay safe. Reconnect anytime.</Text>
           </View>
         )}
       </PageContainer>

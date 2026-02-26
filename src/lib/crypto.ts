@@ -12,9 +12,9 @@ import type { Chain, ChainConfig, Token, NFT, Transaction, SwapQuote, StakeAccou
 
 // Solana RPC with fallback chain - free public endpoints get rate-limited quickly
 const SOLANA_RPC_ENDPOINTS = [
-  'https://solana-mainnet.g.alchemy.com/v2/demo',
-  'https://rpc.ankr.com/solana',
+  'https://solana-rpc.publicnode.com',
   'https://api.mainnet-beta.solana.com',
+  'https://rpc.ankr.com/solana',
 ];
 export const SOLANA_RPC_ENDPOINT = SOLANA_RPC_ENDPOINTS[0];
 export const MAX_ETH_AMOUNT = 10; // Maximum ETH per transaction
@@ -365,11 +365,13 @@ export async function getConnectedWallets(): Promise<MultiWallet> {
   const result: MultiWallet = { ethereum: null, solana: null };
   if (Platform.OS !== 'web') return result;
 
-  // Check MetaMask (with timeout)
-  if ((window as any).ethereum) {
+  // Check MetaMask — must be MetaMask specifically, NOT Phantom's injected ethereum provider
+  const eth = (window as any).ethereum;
+  const isRealMetaMask = eth && eth.isMetaMask && !eth.isPhantom && !eth._isPhantom;
+  if (isRealMetaMask) {
     try {
       const accounts: any = await withTimeout(
-        (window as any).ethereum.request({ method: 'eth_accounts' }),
+        eth.request({ method: 'eth_accounts' }),
         3000, 'MetaMask eth_accounts',
       );
       if (accounts?.[0]) {
@@ -787,41 +789,58 @@ export async function fetchTokenPrice(tokenId: string): Promise<PriceData> {
     return cached.data;
   }
 
+  // Map coingecko IDs to Coinbase symbols for fallback
+  const coinbaseSymbols: Record<string, string> = {
+    solana: 'SOL',
+    ethereum: 'ETH',
+    'matic-network': 'MATIC',
+    bitcoin: 'BTC',
+  };
+
+  // Try CoinGecko first (10s timeout — free tier can be slow)
   try {
     const response = await fetchWithTimeout(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${tokenId}&vs_currencies=usd&include_24hr_change=true&include_market_cap=true&include_24hr_vol=true`,
+      `https://api.coingecko.com/api/v3/simple/price?ids=${tokenId}&vs_currencies=usd&include_24hr_change=true`,
       {},
-      3000,
+      10000,
     );
     const data = await response.json();
-    
     const tokenData = data[tokenId];
-    if (!tokenData) {
-      throw new Error(`Price data not found for ${tokenId}`);
+    if (tokenData?.usd) {
+      const priceData: PriceData = {
+        current: tokenData.usd,
+        change24h: tokenData.usd_24h_change || 0,
+        lastUpdated: new Date().toISOString(),
+      };
+      priceCache.set(tokenId, { data: priceData, expires: Date.now() + PRICE_CACHE_TTL });
+      return priceData;
     }
+  } catch {}
 
-    const priceData: PriceData = {
-      current: tokenData.usd || 0,
-      change24h: tokenData.usd_24h_change || 0,
-      marketCap: tokenData.usd_market_cap,
-      volume24h: tokenData.usd_24h_vol,
-      lastUpdated: new Date().toISOString(),
-    };
-
-    priceCache.set(tokenId, {
-      data: priceData,
-      expires: Date.now() + PRICE_CACHE_TTL,
-    });
-
-    return priceData;
-  } catch (error) {
-    console.error(`Failed to fetch price for ${tokenId}:`, error);
-    return {
-      current: 0,
-      change24h: 0,
-      lastUpdated: new Date().toISOString(),
-    };
+  // Fallback: Coinbase API (reliable, CORS-friendly)
+  const symbol = coinbaseSymbols[tokenId];
+  if (symbol) {
+    try {
+      const response = await fetchWithTimeout(
+        `https://api.coinbase.com/v2/prices/${symbol}-USD/spot`,
+        {},
+        8000,
+      );
+      const data = await response.json();
+      if (data?.data?.amount) {
+        const priceData: PriceData = {
+          current: parseFloat(data.data.amount),
+          change24h: 0,
+          lastUpdated: new Date().toISOString(),
+        };
+        priceCache.set(tokenId, { data: priceData, expires: Date.now() + PRICE_CACHE_TTL });
+        return priceData;
+      }
+    } catch {}
   }
+
+  console.error(`Failed to fetch price for ${tokenId} from all sources`);
+  return { current: 0, change24h: 0, lastUpdated: new Date().toISOString() };
 }
 
 export async function fetchMultipleTokenPrices(tokenIds: string[]): Promise<Record<string, PriceData>> {
@@ -1199,8 +1218,8 @@ export async function aggregatePortfolio(wallets: Record<Chain, string>): Promis
   const results = await Promise.allSettled(
     entries.map(async ([chain, address]) => {
       const [tokens, nfts] = await Promise.all([
-        withTimeout(fetchTokenBalances(address, chain), 5000, `${chain} tokens`).catch(() => [] as Token[]),
-        withTimeout(fetchNFTs(address, chain), 5000, `${chain} NFTs`).catch(() => [] as NFT[]),
+        withTimeout(fetchTokenBalances(address, chain), 15000, `${chain} tokens`).catch(() => [] as Token[]),
+        withTimeout(fetchNFTs(address, chain), 15000, `${chain} NFTs`).catch(() => [] as NFT[]),
       ]);
       return { chain, tokens, nfts };
     })

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, Platform } from 'react-native';
 import { supabase } from '../../../lib/supabase';
 import ConnectWalletScreen from '../../wallet/ConnectWalletScreen';
 import WalletDashboard from '../../wallet/WalletDashboard';
@@ -12,12 +12,15 @@ export default function WalletTab({ circleId }: Props) {
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [walletChain, setWalletChain] = useState<string>('ethereum');
   const [loading, setLoading] = useState(true);
+  // When true, render ConnectWalletScreen in "fresh" mode (skip auto-detection)
+  const [forceDisconnected, setForceDisconnected] = useState(false);
 
   useEffect(() => {
     checkWallet();
   }, []);
 
   const checkWallet = async () => {
+    setForceDisconnected(false);
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) { setLoading(false); return; }
@@ -27,8 +30,7 @@ export default function WalletTab({ circleId }: Props) {
         .eq('id', user.id)
         .single();
       if (data) {
-        // Check any wallet address (legacy or chain-specific)
-        const addr = data.wallet_address || data.wallet_address_eth || data.wallet_address_sol;
+        const addr = data.wallet_address_sol || data.wallet_address_eth || data.wallet_address;
         const chain = data.wallet_chain || (data.wallet_address_sol ? 'solana' : 'ethereum');
         if (addr) {
           setWalletAddress(addr);
@@ -43,23 +45,41 @@ export default function WalletTab({ circleId }: Props) {
 
   const handleDisconnect = async () => {
     try {
+      // 1. Disconnect browser wallet extensions first
+      if (Platform.OS === 'web') {
+        try {
+          if ((window as any).solana?.isPhantom) {
+            await (window as any).solana.disconnect();
+          }
+        } catch {}
+        try {
+          if ((window as any).ethereum) {
+            await (window as any).ethereum.request({
+              method: 'wallet_revokePermissions',
+              params: [{ eth_accounts: {} }],
+            });
+          }
+        } catch {}
+      }
+
+      // 2. Clear Supabase
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-      
-      await supabase
-        .from('profiles')
-        .update({ 
-          wallet_address: null, 
+      if (user) {
+        await supabase.from('profiles').update({
+          wallet_address: null,
           wallet_chain: null,
           wallet_address_eth: null,
           wallet_address_sol: null,
-        })
-        .eq('id', user.id);
-      
+        }).eq('id', user.id);
+      }
+
+      // 3. Set forceDisconnected so ConnectWalletScreen skips auto-detection
+      setForceDisconnected(true);
       setWalletAddress(null);
       setWalletChain('ethereum');
     } catch (error) {
       console.error('Error disconnecting wallet:', error);
+      setWalletAddress(null);
     }
   };
 
@@ -72,10 +92,14 @@ export default function WalletTab({ circleId }: Props) {
   }
 
   if (!walletAddress) {
-    return <ConnectWalletScreen onComplete={() => checkWallet()} />;
+    return (
+      <ConnectWalletScreen
+        onComplete={() => checkWallet()}
+        skipAutoDetect={forceDisconnected}
+      />
+    );
   }
 
-  // Full wallet dashboard with all features
   return (
     <WalletDashboard
       walletAddress={walletAddress}
