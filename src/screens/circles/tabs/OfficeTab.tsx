@@ -1452,14 +1452,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                     />
                     <Whiteboard editable={editMode} notes={whiteboardNotes} onNotesChange={setWhiteboardNotes} agents={displayAgents} statusHistory={statusHistory} cronJobs={cronJobs} circleId={circleId} />
                     <ServerRack agents={displayAgents} />
-                    {agents.length === 0 && (
+                    {displayAgents.length === 0 && !anyConnected && connections.filter(c => c.status === 'connecting').length === 0 && (
                       <View style={styles.emptyOverlay}>
-                        {connections.filter(c => c.status === 'connecting').length > 0 ? (
-                          <>
-                            <ActivityIndicator color="#6366f1" size="large" style={{ marginBottom: 12 }} />
-                            <Text style={styles.emptyTitle}>Connecting agents...</Text>
-                          </>
-                        ) : connections.filter(c => c.status === 'error').length > 0 ? (
+                        {connections.filter(c => c.status === 'error').length > 0 ? (
                           <>
                             <Text style={{ fontSize: 28, marginBottom: 8 }}>⚠️</Text>
                             <Text style={styles.emptyTitle}>Connection failed</Text>
