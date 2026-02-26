@@ -4,6 +4,8 @@ import { OfficeAgent, STATUS_COLORS } from '../../../../lib/officeAgents';
 import { PROVIDER_META } from '../../../../lib/connectionManager';
 import { SessionTag } from '../../../../lib/sessionTags';
 import SessionTagInput from '../../../../components/SessionTagInput';
+import AgentKillSwitch from '../../../../components/AgentKillSwitch';
+import { useAgentControl } from '../../../../services/hitlService';
 
 interface Props {
   agent: OfficeAgent | null;
@@ -13,6 +15,7 @@ interface Props {
   sessionTags?: Map<string, SessionTag[]>;
   onAddSessionTag?: (sessionKey: string, tag: SessionTag) => void;
   onRemoveSessionTag?: (sessionKey: string, tagKey: string) => void;
+  circleId?: string;
 }
 
 function formatTokens(n: number): string {
@@ -52,7 +55,7 @@ function cacheHitPct(cachedTokens: number, totalInputTokens: number): string {
 
 export default function AgentPanel({
   agent, onClose, isDesktop, onRenameAgent,
-  sessionTags, onAddSessionTag, onRemoveSessionTag
+  sessionTags, onAddSessionTag, onRemoveSessionTag, circleId,
 }: Props) {
   const slideAnim = useRef(new Animated.Value(400)).current;
   const [editing, setEditing] = useState(false);
@@ -80,8 +83,11 @@ export default function AgentPanel({
   const statusColor = STATUS_COLORS[agent.status];
   
   // Extract sessionKey from agent.id (format: connectionId::sessionKey)
-  const sessionKey = agent.id.includes('::') ? agent.id.split('::')[1] : agent.id;
+  const sessionKey = agent.sessionKey || (agent.id.includes('::') ? agent.id.split('::')[1] : agent.id);
   const currentTags = sessionTags?.get(sessionKey) || [];
+
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  const control = useAgentControl(circleId, sessionKey);
 
   return (
     <Animated.View style={[
@@ -267,6 +273,16 @@ export default function AgentPanel({
           <Text style={styles.noActivity}>No recent activity</Text>
         )}
       </View>
+      {/* Kill switch / controls */}
+      {circleId && (
+        <AgentKillSwitch
+          control={control}
+          circleId={circleId}
+          sessionKey={sessionKey}
+          agentName={agent.name}
+        />
+      )}
+
       </ScrollView>
     </Animated.View>
   );

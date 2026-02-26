@@ -43,6 +43,11 @@ import { calculatePeriodCosts } from '../../../lib/costCalculations';
 import OfficeActionPanel from '../../../components/OfficeActionPanel';
 import FarmHealthDashboard from '../../../components/FarmHealthDashboard';
 import AgentActivityFeed from '../../../components/AgentActivityFeed';
+import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
+import SharedMemoryPanel from '../../../components/SharedMemoryPanel';
+import { useAgentApprovals } from '../../../services/hitlService';
+import ByoaPanel from './office/ByoaPanel';
+import AgentTemplates from './office/AgentTemplates';
 import {
   CircleOfficeAgent,
   loadCircleOfficeAgents,
@@ -104,6 +109,9 @@ interface Props {
 export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props) {
   const [selectedAgent, setSelectedAgent] = useState<OfficeAgent | null>(null);
   const [showCustomize, setShowCustomize] = useState(false);
+  const [showByoa, setShowByoa] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
+  const pendingApprovals = useAgentApprovals(circleId);
   const [appearances, setAppearances] = useState<Record<string, AgentAppearance>>({});
   const [editMode, setEditMode] = useState(false);
   const [placingType, setPlacingType] = useState<string | null>(null);
@@ -1053,6 +1061,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </View>
       </View>
 
+      {/* HITL Approval Banner */}
+      <HitlApprovalBanner approvals={pendingApprovals} circleId={circleId} />
+
       {/* Budget Alerts */}
       {!budgetAlertsDismissed && budgetAlerts.length > 0 && (
         <BudgetAlertBanner
@@ -1244,13 +1255,30 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           accentColor={accentColor}
         />
       ) : viewMode === 'tags' ? (
-        <View style={{ flex: 1, padding: 16, gap: 16 }}>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 16 }}>
+          {/* BYOA + Deploy buttons */}
+          <View style={{ flexDirection: 'row', gap: 10, marginBottom: 4 }}>
+            <Pressable
+              style={styles.tagsActionBtn}
+              onPress={() => setShowTemplates(true)}
+            >
+              <Text style={styles.tagsActionBtnText}>+ DEPLOY AGENT</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.tagsActionBtn, styles.tagsActionBtnSecondary]}
+              onPress={() => setShowByoa(true)}
+            >
+              <Text style={[styles.tagsActionBtnText, styles.tagsActionBtnTextSecondary]}>BYOA SETUP</Text>
+            </Pressable>
+          </View>
+          {/* Shared Memory */}
+          <SharedMemoryPanel circleId={circleId} />
           <ProjectRoomsPanel circleId={circleId} />
           <SessionTagsDashboard
             agents={displayAgents}
             sessionTags={sessionTags}
           />
-        </View>
+        </ScrollView>
       ) : viewMode === 'metrics' ? (
         <AgentPerformanceMetrics
           agents={enrichedAgents}
@@ -1600,6 +1628,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           sessionTags={sessionTags}
           onAddSessionTag={handleAddSessionTag}
           onRemoveSessionTag={handleRemoveSessionTag}
+          circleId={circleId}
         />
       )}
 
@@ -1676,6 +1705,23 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             </Pressable>
           </Pressable>
         </Pressable>
+      </Modal>
+
+      {/* BYOA Panel Modal */}
+      <Modal visible={showByoa} animationType="slide" presentationStyle="pageSheet">
+        <ByoaPanel
+          circleId={circleId}
+          onClose={() => setShowByoa(false)}
+        />
+      </Modal>
+
+      {/* Agent Templates Modal */}
+      <Modal visible={showTemplates} animationType="slide" presentationStyle="pageSheet">
+        <AgentTemplates
+          circleId={circleId}
+          onClose={() => setShowTemplates(false)}
+          onDeployed={() => setShowTemplates(false)}
+        />
       </Modal>
 
       {/* Agent setup wizard */}
@@ -2082,6 +2128,27 @@ const styles = StyleSheet.create({
   modeBtnActive: { borderColor: '#22c55e40', backgroundColor: '#22c55e15' },
   modeBtnText: { fontSize: 10, color: '#666', fontFamily: 'monospace', fontWeight: '700' },
   modeBtnTextActive: { color: '#22c55e' },
+  tagsActionBtn: {
+    flex: 1,
+    backgroundColor: '#00FF9C18',
+    borderWidth: 1,
+    borderColor: '#00FF9C40',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  tagsActionBtnSecondary: {
+    backgroundColor: '#6366f118',
+    borderColor: '#6366f140',
+  },
+  tagsActionBtnText: {
+    color: '#00FF9C',
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    letterSpacing: 0.5,
+  },
+  tagsActionBtnTextSecondary: { color: '#6366f1' },
   iconBtn: {
     width: 44, height: 44, borderRadius: 10, backgroundColor: '#111118',
     borderWidth: 1, borderColor: '#1a1a2e', alignItems: 'center', justifyContent: 'center', marginLeft: 6,
