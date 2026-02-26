@@ -21,6 +21,35 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
+function formatRelativeTime(iso?: string): string {
+  if (!iso) return 'unknown';
+  const diff = Date.now() - new Date(iso).getTime();
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return 'just now';
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function formatMsgTime(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const diff = Date.now() - d.getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const h = Math.floor(mins / 60);
+  if (h < 24) return `${h}h ago`;
+  return d.toLocaleDateString();
+}
+
+function cacheHitPct(cachedTokens: number, totalInputTokens: number): string {
+  if (!totalInputTokens) return '—';
+  return Math.round((cachedTokens / totalInputTokens) * 100) + '%';
+}
+
 export default function AgentPanel({
   agent, onClose, isDesktop, onRenameAgent,
   sessionTags, onAddSessionTag, onRemoveSessionTag
@@ -158,6 +187,12 @@ export default function AgentPanel({
         </View>
       )}
 
+      {/* Session identity row */}
+      <View style={styles.sessionKeyRow}>
+        <Text style={styles.sessionKeyLabel}>SESSION</Text>
+        <Text style={styles.sessionKeyValue}>{agent.sessionKey || agent.id.split('::')[1] || agent.id}</Text>
+      </View>
+
       {/* Cost + Performance grid */}
       <View style={styles.gridRow}>
         <View style={styles.gridCard}>
@@ -165,37 +200,72 @@ export default function AgentPanel({
           <Text style={styles.gridLabel}>Cost Today</Text>
         </View>
         <View style={styles.gridCard}>
-          <Text style={styles.gridValue}>${agent.costWeek.toFixed(2)}</Text>
-          <Text style={styles.gridLabel}>This Week</Text>
-        </View>
-        <View style={styles.gridCard}>
           <Text style={[styles.gridValue, { color: '#6366f1' }]}>{formatTokens(agent.tokensUsed)}</Text>
-          <Text style={styles.gridLabel}>Tokens Used</Text>
+          <Text style={styles.gridLabel}>Total Tokens</Text>
         </View>
         <View style={styles.gridCard}>
-          <Text style={styles.gridValue}>{agent.messagesProcessed.toLocaleString()}</Text>
-          <Text style={styles.gridLabel}>Messages</Text>
+          <Text style={styles.gridValue}>{agent.turns || agent.messagesProcessed || '—'}</Text>
+          <Text style={styles.gridLabel}>Turns</Text>
         </View>
         <View style={styles.gridCard}>
-          <Text style={styles.gridValue}>{agent.uptimeHours}h</Text>
+          <Text style={styles.gridValue}>{formatTokens(agent.inputTokens)}</Text>
+          <Text style={styles.gridLabel}>Input Tokens</Text>
+        </View>
+        <View style={styles.gridCard}>
+          <Text style={styles.gridValue}>{formatTokens(agent.outputTokens)}</Text>
+          <Text style={styles.gridLabel}>Output Tokens</Text>
+        </View>
+        <View style={styles.gridCard}>
+          <Text style={[styles.gridValue, { color: '#f59e0b' }]}>
+            {cacheHitPct(agent.cachedTokens, agent.inputTokens)}
+          </Text>
+          <Text style={styles.gridLabel}>Cache Hit</Text>
+        </View>
+        <View style={styles.gridCard}>
+          <Text style={styles.gridValue}>{formatTokens(agent.cachedTokens)}</Text>
+          <Text style={styles.gridLabel}>Cached Tokens</Text>
+        </View>
+        <View style={styles.gridCard}>
+          <Text style={styles.gridValue}>{agent.uptime || formatRelativeTime(agent.lastActive)}</Text>
           <Text style={styles.gridLabel}>Uptime</Text>
         </View>
         <View style={styles.gridCard}>
-          <Text style={styles.gridValue}>{agent.lastActive}</Text>
+          <Text style={styles.gridValue}>{formatRelativeTime(agent.lastActive)}</Text>
           <Text style={styles.gridLabel}>Last Active</Text>
         </View>
       </View>
 
-      {/* Recent actions */}
+      {/* Activity log — real messages with real timestamps */}
       <View style={styles.actionsSection}>
         <Text style={styles.actionsTitle}>ACTIVITY LOG</Text>
-        {agent.recentActions.map((action, i) => (
-          <View key={i} style={styles.actionRow}>
-            <Text style={styles.actionTime}>{i === 0 ? 'just now' : `${i * 3 + 1}m ago`}</Text>
-            <View style={[styles.actionDot, { backgroundColor: i === 0 ? agent.color : '#333' }]} />
-            <Text style={[styles.actionText, i === 0 && { color: '#ccc' }]}>{action}</Text>
-          </View>
-        ))}
+        {agent.recentMessages.length > 0 ? (
+          [...agent.recentMessages].reverse().map((msg, i) => (
+            <View key={i} style={styles.actionRow}>
+              <Text style={styles.actionTime}>{formatMsgTime(msg.timestamp)}</Text>
+              <View style={[styles.actionDot, {
+                backgroundColor: msg.role === 'assistant' ? agent.color : '#555',
+              }]} />
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.actionRole, {
+                  color: msg.role === 'assistant' ? agent.color : '#666',
+                }]}>{msg.role.toUpperCase()}</Text>
+                <Text style={[styles.actionText, i === 0 && { color: '#ccc' }]} numberOfLines={2}>
+                  {msg.content}
+                </Text>
+              </View>
+            </View>
+          ))
+        ) : agent.recentActions.length > 0 ? (
+          agent.recentActions.map((action, i) => (
+            <View key={i} style={styles.actionRow}>
+              <Text style={styles.actionTime}>—</Text>
+              <View style={[styles.actionDot, { backgroundColor: i === 0 ? agent.color : '#333' }]} />
+              <Text style={[styles.actionText, i === 0 && { color: '#ccc' }]}>{action}</Text>
+            </View>
+          ))
+        ) : (
+          <Text style={styles.noActivity}>No recent activity</Text>
+        )}
       </View>
       </ScrollView>
     </Animated.View>
@@ -435,9 +505,31 @@ const styles = StyleSheet.create({
     marginTop: 2,
     letterSpacing: 0.3,
   },
+  // Session key
+  sessionKeyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+    paddingHorizontal: 4,
+  },
+  sessionKeyLabel: {
+    fontSize: 9,
+    color: '#444',
+    fontFamily: 'monospace',
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
+  sessionKeyValue: {
+    fontSize: 9,
+    color: '#555',
+    fontFamily: 'monospace',
+    flex: 1,
+  },
   // Activity log
   actionsSection: {
     gap: 5,
+    marginBottom: 8,
   },
   actionsTitle: {
     fontSize: 9,
@@ -449,26 +541,44 @@ const styles = StyleSheet.create({
   },
   actionRow: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: 8,
+    marginBottom: 6,
   },
   actionTime: {
     fontSize: 8,
     color: '#333',
     fontFamily: 'monospace',
-    width: 46,
+    width: 52,
     textAlign: 'right',
+    paddingTop: 2,
   },
   actionDot: {
     width: 4,
     height: 4,
     borderRadius: 2,
+    marginTop: 4,
+  },
+  actionRole: {
+    fontSize: 7,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+    marginBottom: 1,
   },
   actionText: {
-    fontSize: 11,
+    fontSize: 10,
     color: '#555',
     fontFamily: 'monospace',
     flex: 1,
+    lineHeight: 14,
+  },
+  noActivity: {
+    fontSize: 10,
+    color: '#333',
+    fontFamily: 'monospace',
+    fontStyle: 'italic',
+    paddingLeft: 12,
   },
   // Tags section
   tagsSection: {

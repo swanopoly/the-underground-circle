@@ -14,11 +14,19 @@ export interface OfficeAgent {
   activity: string;
   messagesProcessed: number;
   uptimeHours: number;
+  uptime: string;           // human-readable uptime from session_status (e.g. "3h ago")
   lastActive: string;
   recentActions: string[];
+  recentMessages: Array<{ role: string; content: string; timestamp?: string }>;
   costToday: number;
   costWeek: number;
   tokensUsed: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  newTokens: number;
+  turns: number;
+  sessionKey: string;
   model: string;
   connectionId: string;
   connectionName: string;
@@ -61,10 +69,12 @@ export function sessionsToAgents(
     color: AGENT_COLORS[i % AGENT_COLORS.length],
     deskIndex: i,
     activity: inferActivity(s),
-    messagesProcessed: s.messageCount || 0,
+    messagesProcessed: s.turns || s.messageCount || 0,
     uptimeHours: 0,
-    lastActive: s.lastActivity || 'unknown',
+    uptime: s.uptime || '',
+    lastActive: s.lastActivity || '',
     recentActions: extractRecentActions(s),
+    recentMessages: s.lastMessages || [],
     // Use explicit cost if provided, else cache-aware calculation, else simple estimate
     costToday: s.totalCost
       ?? (s.cachedTokens != null || s.newTokens != null
@@ -72,6 +82,12 @@ export function sessionsToAgents(
           : estimateCost(s.model, s.totalInputTokens ?? 0, s.totalOutputTokens ?? 0)),
     costWeek: 0,
     tokensUsed: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
+    inputTokens: s.totalInputTokens || 0,
+    outputTokens: s.totalOutputTokens || 0,
+    cachedTokens: s.cachedTokens || 0,
+    newTokens: s.newTokens || 0,
+    turns: s.turns || s.messageCount || 0,
+    sessionKey: s.sessionKey,
     model: s.model || 'unknown',
     connectionId,
     connectionName,
