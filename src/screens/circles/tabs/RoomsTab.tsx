@@ -102,8 +102,7 @@ interface LiveAgent {
   id: string;
   name: string;
   status: string;
-  model: string | null;
-  owner_user_id: string | null;
+  owner_id: string | null;
   owner_display_name: string | null;
   color: string | null;
   tool_icon: string | null;
@@ -1313,7 +1312,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   useEffect(() => {
     const query = () =>
       supabase.from('circle_office_agents')
-        .select('id, name, status, model, owner_user_id, color, tool_icon, owner_display_name, current_task, circle_id')
+        .select('id, name, status, owner_id, color, tool_icon, owner_display_name, current_task, circle_id')
         .neq('status', 'offline')
         .order('status')
         .limit(100)
@@ -1426,7 +1425,6 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
                         {agent.tool_icon ? `${agent.tool_icon} ` : ''}{agent.name}
                       </Text>
                       {agent.owner_display_name && <Text style={chatSt.agentChipOwner}>@{agent.owner_display_name}</Text>}
-                      {agent.model && <Text style={chatSt.agentChipModel}>{agent.model.split('/').pop()}</Text>}
                       {agent.current_task && <Text style={chatSt.agentChipTask} numberOfLines={1}>{agent.current_task}</Text>}
                     </View>
                     {isSelected && <Text style={{ color: agentColor, fontSize: 12, marginLeft: 4 }}>✓</Text>}
