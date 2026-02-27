@@ -1416,7 +1416,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             taskPrompt.trim(),
             targetName ? `\nTarget file: ${targetName}` : '',
             fileContent ? `\n\n--- FILE: ${targetName} ---\n${fileContent}${fileContent.length >= 12000 ? '\n...[truncated]' : ''}\n---` : '',
-            `\n\nIMPORTANT: You are working inside a Room task. Post your complete response in markdown. Do NOT use tools or try to write files.`,
+            `\n\nIMPORTANT: You are working inside a Room task. Your code output will be written directly to the target file. Put the COMPLETE file content in a single fenced code block with the language tag. Do NOT include explanations outside the code block. Do NOT use tools or try to write files yourself.`,
           ].join('');
 
           const agentRef = { id: selectedAgent.id, name: selectedAgent.name };
@@ -1464,15 +1464,50 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             };
             const reply = await pollResult();
 
-            // Extract code from the response and write it to the target file
-            if (targetName && reply !== 'Task timed out waiting for agent response.') {
-              const codeMatch = reply.match(/```(?:\w+)?\n([\s\S]+?)```/);
-              if (codeMatch) {
-                const newCode = codeMatch[1].trim();
-                await supabase.from('room_files')
-                  .update({ content: newCode, size_bytes: newCode.length, updated_at: new Date().toISOString() })
-                  .eq('room_id', roomId)
-                  .eq('name', targetName);
+            // Extract code blocks from response and write to room files
+            if (reply !== 'Task timed out waiting for agent response.') {
+              const codeBlockRegex = /```(\w+)?\n([\s\S]+?)```/g;
+              let match;
+              const codeBlocks: { lang: string; code: string }[] = [];
+              while ((match = codeBlockRegex.exec(reply)) !== null) {
+                codeBlocks.push({ lang: match[1] || '', code: match[2].trim() });
+              }
+
+              if (codeBlocks.length > 0 && targetName) {
+                // Primary code block → update target file
+                const primaryCode = codeBlocks[0].code;
+                const lang = codeBlocks[0].lang || 'text';
+
+                // Detect file extension from language
+                const langToExt: Record<string, string> = {
+                  html: '.html', css: '.css', js: '.js', javascript: '.js',
+                  ts: '.ts', typescript: '.ts', tsx: '.tsx', jsx: '.jsx',
+                  json: '.json', python: '.py', py: '.py', sql: '.sql',
+                  md: '.md', markdown: '.md', yaml: '.yaml', yml: '.yaml',
+                  sh: '.sh', bash: '.sh', xml: '.xml', txt: '.txt',
+                };
+
+                // Try to update existing file first
+                const { data: updated } = await supabase.from('room_files')
+                  .update({ content: primaryCode, size_bytes: primaryCode.length, updated_at: new Date().toISOString() })
+                  .eq('room_id', roomId).eq('name', targetName)
+                  .select('id').maybeSingle();
+
+                // If no file was updated (doesn't exist), create it
+                if (!updated) {
+                  const ext = langToExt[lang] || '';
+                  const fileName = targetName.includes('.') ? targetName : targetName + ext;
+                  const { data: { user: u } } = await supabase.auth.getUser();
+                  await supabase.from('room_files').insert({
+                    room_id: roomId,
+                    name: fileName,
+                    folder: '/',
+                    file_type: lang || 'text',
+                    content: primaryCode,
+                    size_bytes: primaryCode.length,
+                    created_by: u?.id || null,
+                  });
+                }
               }
             }
 
