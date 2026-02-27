@@ -61,11 +61,11 @@ export default function ThoughtBubble({ thought, onDismiss }: Props) {
 const styles = StyleSheet.create({
   container: {
     position: 'absolute',
-    bottom: 50, // Above agent sprite
-    left: -15,
+    bottom: 110,
+    left: -20,
     zIndex: 100,
-    minWidth: 120,
-    maxWidth: 160,
+    minWidth: 130,
+    maxWidth: 170,
   },
   bubble: {
     backgroundColor: '#0a0a10ee',
