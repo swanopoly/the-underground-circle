@@ -13,9 +13,11 @@ interface Props {
   scale?: number;
   showThoughts?: boolean; // Enable thought bubbles
   dancing?: boolean; // Badge celebration dance
+  xp?: number;       // current XP points
+  xpNext?: number;   // XP needed for next badge
 }
 
-export default function PixelAgent({ agent, appearance, onPress, selected, scale = 1, showThoughts = false, dancing = false }: Props) {
+export default function PixelAgent({ agent, appearance, onPress, selected, scale = 1, showThoughts = false, dancing = false, xp = 0, xpNext = 100 }: Props) {
   const a = appearance || { ...DEFAULT_APPEARANCE, shirtColor: agent.color, hairColor: agent.color };
   const bobAnim = useRef(new Animated.Value(0)).current;
   const glowAnim = useRef(new Animated.Value(0.3)).current;
@@ -247,6 +249,11 @@ export default function PixelAgent({ agent, appearance, onPress, selected, scale
         <View style={styles.nameContainer}>
           <Text style={[styles.name, { color: agent.color }]} numberOfLines={1}>{agent.name}</Text>
         </View>
+
+        {/* XP bar */}
+        <View style={styles.xpBarOuter}>
+          <View style={[styles.xpBarFill, { width: `${Math.min(100, xpNext > 0 ? (xp / xpNext) * 100 : 0)}%`, backgroundColor: agent.color }]} />
+        </View>
       </Animated.View>
     </Pressable>
   );
@@ -414,4 +421,17 @@ const styles = StyleSheet.create({
     letterSpacing: 0.3,
   },
   offlineOpacity: { opacity: 0.4 },
+  xpBarOuter: {
+    width: 40,
+    height: 3,
+    backgroundColor: '#1a1a2e',
+    borderRadius: 2,
+    marginTop: 2,
+    overflow: 'hidden',
+  },
+  xpBarFill: {
+    height: '100%',
+    borderRadius: 2,
+    opacity: 0.8,
+  },
 });

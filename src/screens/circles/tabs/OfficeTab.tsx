@@ -86,8 +86,8 @@ import { supabase } from '../../../lib/supabase';
 import AgentSetupWizard from '../../../components/AgentSetupWizard';
 import BadgeCelebration from '../../../components/BadgeCelebration';
 import RewardsPanel from '../../../components/RewardsPanel';
-import { useAgentPointsTracker } from '../../../services/rewardService';
-import { Badge } from '../../../lib/badges';
+import { useAgentPointsTracker, useUserRewards } from '../../../services/rewardService';
+import { Badge, getNextBadge } from '../../../lib/badges';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -658,6 +658,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const displayAgents = enrichedAgents.length > 0 ? enrichedAgents : allAgents;
 
   // ─── Reward tracking — award points as agent turns accumulate ──────────
+  const { points: userPoints } = useUserRewards(userId);
+  const userXp = userPoints?.lifetime_points ?? 0;
+  const nextBadge = getNextBadge(userXp);
+  const xpNext = nextBadge?.pointsRequired ?? 100;
+
   const _primaryAgent = displayAgents[0];
   useAgentPointsTracker(
     userId,
@@ -1530,6 +1535,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                             selected={selectedAgent?.id === agent.id}
                             showThoughts={!editMode}
                             dancing={dancingAgentId === 'all' || dancingAgentId === agent.id}
+                            xp={userXp}
+                            xpNext={xpNext}
                           />
                         </View>
                       );
