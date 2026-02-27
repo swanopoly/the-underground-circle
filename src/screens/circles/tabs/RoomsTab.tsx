@@ -108,6 +108,7 @@ interface LiveAgent {
   color: string | null;
   tool_icon: string | null;
   current_task: string | null;
+  circle_id: string | null;
 }
 
 interface PlaygroundVariant {
@@ -1308,21 +1309,30 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     return () => { supabase.removeChannel(ch); };
   }, [roomId]);
 
-  // Load live agents — prefer circle-scoped, fall back to any online agent
+  // Load live agents — all non-offline agents, prefer same circle first
   useEffect(() => {
-    const query = () => {
-      let q = supabase.from('circle_office_agents')
-        .select('id, name, status, model, owner_user_id, color, tool_icon, owner_display_name, current_task')
-        .neq('status', 'offline').order('status').limit(50);
-      if (circleId) q = q.eq('circle_id', circleId);
-      return q.then(({ data }) => setLiveAgents(data || []));
-    };
+    const query = () =>
+      supabase.from('circle_office_agents')
+        .select('id, name, status, model, owner_user_id, color, tool_icon, owner_display_name, current_task, circle_id')
+        .neq('status', 'offline')
+        .order('status')
+        .limit(100)
+        .then(({ data }) => {
+          if (!data) return;
+          // Sort: same circle first, then others
+          const sorted = [...data].sort((a, b) => {
+            const aMatch = a.circle_id === circleId ? 0 : 1;
+            const bMatch = b.circle_id === circleId ? 0 : 1;
+            return aMatch - bMatch;
+          });
+          setLiveAgents(sorted);
+        });
     query();
     const ch = supabase.channel(`chat_agents_${roomId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'circle_office_agents' }, query)
       .subscribe();
     return () => { supabase.removeChannel(ch); };
-  }, [circleId]);
+  }, [roomId, circleId]);
 
   // Load room files for targeting
   useEffect(() => {
