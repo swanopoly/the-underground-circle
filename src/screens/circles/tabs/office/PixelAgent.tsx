@@ -109,33 +109,28 @@ export default function PixelAgent({ agent, appearance, onPress, selected, scale
     lastCost.current = agent.costToday;
     lastStatus.current = agent.status;
 
-    // Random thoughts every 15-45 seconds
-    const minDelay = 15000;
-    const maxDelay = 45000;
+    // Random thoughts every 8-20 seconds — agents are proactive
+    const minDelay = 8000;
+    const maxDelay = 20000;
     const delay = Math.random() * (maxDelay - minDelay) + minDelay;
 
+    const thoughtCtx = {
+      recentCostSpike: costSpike,
+      recentError: agent.status === 'error',
+      longIdle,
+      xp,
+      xpNext,
+    };
+
     const timer = setTimeout(() => {
-      const thought = generateThoughtBubble(agent, {
-        recentCostSpike: costSpike,
-        recentError: agent.status === 'error',
-        longIdle,
-      });
-      
-      if (thought) {
-        setCurrentThought(thought);
-      }
+      const thought = generateThoughtBubble(agent, thoughtCtx);
+      if (thought) setCurrentThought(thought);
     }, delay);
 
-    // Immediate thought on events
+    // Immediate thought on meaningful events
     if (statusChanged || costSpike) {
-      const thought = generateThoughtBubble(agent, {
-        recentCostSpike: costSpike,
-        recentError: agent.status === 'error',
-        longIdle,
-      });
-      if (thought) {
-        setCurrentThought(thought);
-      }
+      const thought = generateThoughtBubble(agent, thoughtCtx);
+      if (thought) setCurrentThought(thought);
     }
 
     return () => clearTimeout(timer);

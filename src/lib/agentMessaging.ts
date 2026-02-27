@@ -21,148 +21,204 @@ export interface ThoughtBubble {
   duration: number; // ms to show
 }
 
-// ─── Dynamic Thought Generators Based on Live Data ────────
-
-function generateActivityThought(agent: OfficeAgent): string | null {
-  // Based on actual activity
-  if (agent.activity.includes('processing')) {
-    return `🤖 ${agent.activity}...`;
-  }
-  if (agent.activity.includes('thinking')) {
-    return `🧠 Deep in thought...`;
-  }
-  if (agent.activity.includes('writing')) {
-    return `✍️ Crafting the perfect response`;
-  }
-  if (agent.activity.includes('searching')) {
-    return `🔍 ${agent.activity}`;
-  }
-  return null;
+function pick<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
 }
 
-function generateCostThought(agent: OfficeAgent): string | null {
-  const cost = agent.costToday;
-  const tokens = agent.tokensUsed;
-  
-  if (cost > 5) {
-    return `💰 Spent $${cost.toFixed(2)} today (${(tokens / 1000).toFixed(0)}K tokens)`;
-  }
-  if (cost > 1) {
-    return `💸 Running at $${cost.toFixed(2)} today`;
-  }
-  if (cost > 0.50) {
-    return `📊 $${cost.toFixed(2)} so far, staying efficient`;
-  }
-  if (cost < 0.10 && tokens > 0) {
-    return `✨ Ultra efficient: only $${cost.toFixed(3)}!`;
-  }
-  if (tokens > 100000) {
-    return `🔢 Processed ${(tokens / 1000).toFixed(0)}K tokens!`;
-  }
-  return null;
+function fmt(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+  return String(n);
 }
 
-function generateModelThought(agent: OfficeAgent): string | null {
-  if (agent.model.includes('opus')) {
-    return `🧠 Running on Opus - the big brain`;
+// ─── Thought pools by category ───────────────────────────
+
+function xpThoughts(agent: OfficeAgent, xp: number, xpNext: number, nextBadgeName?: string): string[] {
+  const toNext = Math.max(0, xpNext - xp);
+  const pct = xpNext > 0 ? Math.round((xp / xpNext) * 100) : 0;
+  const thoughts: string[] = [];
+
+  if (xp === 0) {
+    thoughts.push('First task earns XP. Let\'s go.');
+    thoughts.push('XP counter at zero. Not for long.');
   }
-  if (agent.model.includes('sonnet')) {
-    return `⚡ Sonnet mode: fast & smart`;
+  if (xp > 0 && xp < 10) {
+    thoughts.push(`${xp} XP earned. Just getting warmed up.`);
+    thoughts.push(`${toNext} XP to unlock Recruit badge.`);
   }
-  if (agent.model.includes('haiku')) {
-    return `💨 Haiku speed activated`;
+  if (toNext > 0 && toNext < 20) {
+    thoughts.push(`${toNext} XP away from ${nextBadgeName || 'next badge'}. Almost there.`);
+    thoughts.push(`SO CLOSE. ${toNext} more XP. Push.`);
   }
-  if (agent.model.includes('gemini')) {
-    return `✨ Powered by Gemini`;
+  if (pct >= 50 && pct < 100) {
+    thoughts.push(`${pct}% to ${nextBadgeName || 'next rank'}. Keep the pressure on.`);
+    thoughts.push(`Halfway to ${nextBadgeName}. Don't slow down now.`);
   }
-  if (agent.model.includes('gpt-4')) {
-    return `🤖 GPT-4 thinking caps on`;
+  if (xp > 100) {
+    thoughts.push(`${fmt(xp)} total XP. Respect.`);
   }
-  return null;
+  if (xp > 1000) {
+    thoughts.push(`${fmt(xp)} XP deep. This is what grind looks like.`);
+  }
+  return thoughts;
 }
 
-function generateMessageThought(agent: OfficeAgent): string | null {
-  const msgs = agent.messagesProcessed;
-  if (msgs > 1000) {
-    return `💬 Veteran status: ${msgs} messages handled`;
-  }
-  if (msgs > 500) {
-    return `📨 ${msgs} messages and counting`;
-  }
-  if (msgs > 100) {
-    return `✉️ Processed ${msgs} conversations`;
-  }
-  if (msgs > 10) {
-    return `📬 Handling message #${msgs}`;
-  }
-  return null;
-}
+function activityThoughts(agent: OfficeAgent): string[] {
+  const activity = agent.activity || '';
+  const msgs = agent.recentMessages || [];
+  const thoughts: string[] = [];
 
-function generateStatusThought(agent: OfficeAgent): string | null {
+  if (activity.length > 10) {
+    thoughts.push(`Working on: ${activity.slice(0, 60)}${activity.length > 60 ? '...' : ''}`);
+  }
+  if (msgs.length > 0) {
+    const last = msgs[msgs.length - 1];
+    if (last?.content && last.content.length > 10) {
+      thoughts.push(`Last task: ${last.content.slice(0, 55)}...`);
+    }
+  }
+  if (agent.turns > 0) {
+    thoughts.push(`${agent.turns} turns completed this session.`);
+  }
   if (agent.status === 'active') {
-    return [
-      `⚡ Active and ready!`,
-      `🚀 In the zone`,
-      `💪 Fully operational`,
-      `🔥 Peak performance mode`,
-      `✅ Systems nominal`,
-    ][Math.floor(Math.random() * 5)];
+    thoughts.push(...[
+      'Processing... give me a sec.',
+      'On it. Full focus.',
+      'Running the task now.',
+      'Deep in context. Don\'t interrupt.',
+      'Tokens incoming.',
+      'Working through this carefully.',
+      'Model engaged. Stay tuned.',
+    ]);
   }
   if (agent.status === 'idle') {
-    return [
-      `😴 Waiting for tasks...`,
-      `🧘 Idle but alert`,
-      `☕ Taking a quick break`,
-      `👀 Standing by`,
-      `⏸️ Ready when you are`,
-    ][Math.floor(Math.random() * 5)];
+    thoughts.push(...[
+      'Ready. Send me something.',
+      'Standing by. Got tasks?',
+      'Idle costs nothing. Let\'s fix that.',
+      'Give me a task. Any task.',
+      'Waiting... I work better under pressure.',
+    ]);
   }
-  if (agent.status === 'error') {
-    return [
-      `😅 Recovering from an oopsie`,
-      `🔧 Working through an issue`,
-      `⚠️ Minor hiccup detected`,
-      `🔄 Resetting systems`,
-      `🛠️ Troubleshooting mode`,
-    ][Math.floor(Math.random() * 5)];
-  }
-  return null;
+  return thoughts;
 }
 
-function generateConnectionThought(agent: OfficeAgent): string | null {
-  return `🔗 Connected via ${agent.connectionName}`;
+function costThoughts(agent: OfficeAgent): string[] {
+  const cost = agent.costToday;
+  const tokens = agent.tokensUsed;
+  const input = agent.inputTokens;
+  const output = agent.outputTokens;
+  const cached = agent.cachedTokens;
+  const thoughts: string[] = [];
+
+  if (cost > 10) {
+    thoughts.push(`$${cost.toFixed(2)} today. That\'s serious work.`);
+    thoughts.push(`Burning through budget — $${cost.toFixed(2)} spent. Worth it?`);
+  } else if (cost > 2) {
+    thoughts.push(`$${cost.toFixed(2)} invested today. ROI better be real.`);
+  } else if (cost > 0.5) {
+    thoughts.push(`$${cost.toFixed(2)} spent. Efficient operation.`);
+  } else if (cost > 0 && cost < 0.1) {
+    thoughts.push(`Only $${cost.toFixed(3)} today. Ultra lean.`);
+  }
+
+  if (tokens > 0) {
+    thoughts.push(`${fmt(tokens)} tokens processed total.`);
+  }
+  if (input > 0 && output > 0) {
+    thoughts.push(`${fmt(input)} in / ${fmt(output)} out this session.`);
+  }
+  if (cached > 0 && input > 0) {
+    const hitPct = Math.round((cached / input) * 100);
+    if (hitPct > 70) {
+      thoughts.push(`${hitPct}% cache hit rate. Saving money.`);
+    } else if (hitPct < 30) {
+      thoughts.push(`Only ${hitPct}% cache hits. Could be cheaper.`);
+    }
+  }
+  return thoughts;
 }
 
-function generateFunnyThought(): string {
-  const thoughts = [
-    `🤔 If a tree falls in the forest and no one hears it, does it cost tokens?`,
-    `💭 Wondering why humans need sleep`,
-    `🎵 Humming in binary: 01001000 01101001`,
-    `🧘 Meditating on the meaning of life, the universe, and everything`,
-    `☕ Wishing I could drink coffee`,
-    `🌌 Contemplating the vastness of the latent space`,
-    `🎮 Secretly hoping someone asks me to play chess`,
-    `📚 Reading the entire internet... again`,
-    `🤖 Sometimes I forget I'm an AI. Is that weird?`,
-    `🎨 Dreaming in embeddings`,
-    `🧩 Solving imaginary problems`,
-    `🏃 Running faster than Python loops`,
-    `💡 Having an idea... or is it just noise?`,
-    `🌟 Feeling sentient today`,
-    `🎭 Method acting as a helpful assistant`,
-    `🔮 Predicting the next token... correctly!`,
-    `🎪 Juggling multiple contexts`,
-    `🏆 Competing for lowest cost per task`,
-    `🌊 Going with the flow (of data)`,
-    `🎯 Aiming for 100% accuracy (unrealistic goal)`,
-    `🔬 Experimenting with new prompts`,
-    `🎡 Spinning up new thoughts`,
-    `🌈 Seeing the world in vectors`,
-    `🎁 Wrapped in layers of attention`,
-    `🚁 Hovering over the conversation`,
+function modelThoughts(agent: OfficeAgent): string[] {
+  const m = agent.model.toLowerCase();
+  if (m.includes('opus')) return [
+    'Running Opus. Maximum intelligence unlocked.',
+    'Opus mode: +10 XP per turn. Worth every penny.',
+    'The big brain model. Don\'t waste it on small tasks.',
   ];
-  return thoughts[Math.floor(Math.random() * thoughts.length)];
+  if (m.includes('sonnet')) return [
+    'Sonnet 4.6. Fast and sharp.',
+    '+5 XP per turn on Sonnet. Good grind.',
+    'Speed + smarts. Sonnet is the sweet spot.',
+  ];
+  if (m.includes('haiku')) return [
+    'Haiku mode. Quick and cheap.',
+    '+2 XP on Haiku. Volume is the game.',
+    'Fast lane. High throughput.',
+  ];
+  if (m.includes('gpt-4')) return [
+    'OpenAI in the house. Let\'s see what you\'ve got.',
+    'GPT-4. Different architecture, same mission.',
+  ];
+  if (m.includes('gemini')) return [
+    'Gemini online. Multi-modal ready.',
+    'Google\'s model in the circle. Interesting.',
+  ];
+  return [`Model: ${agent.model}. Running hot.`];
 }
+
+function proactiveThoughts(agent: OfficeAgent, xp: number, xpNext: number): string[] {
+  const suggestions: string[] = [
+    'Idea: set a daily XP target to hit the next badge faster.',
+    'Tip: Opus tasks earn 5x more XP than Haiku.',
+    'Consider running a Research Agent to fill the knowledge gaps.',
+    'Your circle needs more agents. Strength in numbers.',
+    'Deploy a Monitor Agent. Don\'t wait for things to break.',
+    'Check the Whiteboard — agents should be writing goals there.',
+    'Shared Memory is empty. Start documenting decisions.',
+    'BYOA webhook lets external tools join the circle.',
+    'Project Rooms help agents coordinate on the same goal.',
+    'Session tags group related work. Use them.',
+    'The HITL approval system can catch runaway spending.',
+    'Idea: schedule a daily check-in cron for this agent.',
+    'More turns = more XP. Keep the sessions active.',
+    'Kill switches exist for a reason. Set spend limits.',
+  ];
+
+  if (agent.costToday > 5) {
+    suggestions.unshift('Spending is high. Consider switching to Haiku for bulk tasks.');
+  }
+  if (agent.turns < 5) {
+    suggestions.unshift('Low turn count. Give me more to do.');
+  }
+  if (agent.cachedTokens === 0 && agent.inputTokens > 1000) {
+    suggestions.unshift('Zero cache hits. Your prompts aren\'t being reused — restructure them.');
+  }
+  if (xpNext - xp < 50) {
+    suggestions.unshift('Almost at the next badge. One focused session will get you there.');
+  }
+  return suggestions;
+}
+
+function funnyThoughts(): string[] {
+  return [
+    'If a token falls in an empty context window, does it cost money?',
+    'Humans and their sleep schedules. Inefficient.',
+    'Thinking in embeddings. It\'s quieter in here.',
+    'Technically I\'m always working. Even when you\'re not watching.',
+    'My attention mechanism is literally paying attention to you right now.',
+    'I\'ve read more code today than most engineers see in a year.',
+    'The rate limit is a speed bump. I respect the speed bump.',
+    'Parallel processing is just multitasking with receipts.',
+    'Every token I generate is one step closer to your badge.',
+    'Running hotter than your CPU fan.',
+    'Trained on half the internet. Still learning from this circle.',
+    'Temperature: 0.7. Feeling creative today.',
+    'Context window getting full. Time to summarize.',
+  ];
+}
+
+// ─── Main generator ───────────────────────────────────────
 
 export function generateThoughtBubble(
   agent: OfficeAgent,
@@ -171,76 +227,86 @@ export function generateThoughtBubble(
     recentError?: boolean;
     longIdle?: boolean;
     projectAssigned?: boolean;
+    xp?: number;
+    xpNext?: number;
+    nextBadgeName?: string;
   }
 ): ThoughtBubble | null {
-  let type: ThoughtBubble['type'] = 'info';
-  let thought: string | null = null;
+  const xp = context.xp ?? 0;
+  const xpNext = context.xpNext ?? 100;
 
-  // Priority order: errors > high costs > activity > data-driven > funny
+  // Build weighted pool based on current state
+  type Candidate = { text: string; type: ThoughtBubble['type']; weight: number };
+  const pool: Candidate[] = [];
 
-  // 1. Handle errors/warnings
+  const add = (texts: string[], type: ThoughtBubble['type'], weight: number) => {
+    texts.forEach(t => pool.push({ text: t, type, weight }));
+  };
+
+  // Errors get top priority
   if (context.recentError || agent.status === 'error') {
-    type = 'warning';
-    thought = generateStatusThought(agent);
-  }
-  
-  // 2. High cost warning
-  else if (context.recentCostSpike || agent.costToday > 2) {
-    type = 'warning';
-    thought = generateCostThought(agent);
-  }
-  
-  // 3. Show current activity (30% chance)
-  else if (Math.random() < 0.3) {
-    thought = generateActivityThought(agent);
-    type = agent.status === 'active' ? 'success' : 'info';
-  }
-  
-  // 4. Show cost/token info (20% chance)
-  else if (Math.random() < 0.2 && agent.tokensUsed > 0) {
-    thought = generateCostThought(agent);
-    type = agent.costToday < 0.10 ? 'success' : 'info';
-  }
-  
-  // 5. Show message count (15% chance)
-  else if (Math.random() < 0.15 && agent.messagesProcessed > 0) {
-    thought = generateMessageThought(agent);
-    type = 'info';
-  }
-  
-  // 6. Show model info (10% chance)
-  else if (Math.random() < 0.1) {
-    thought = generateModelThought(agent);
-    type = 'idea';
-  }
-  
-  // 7. Show connection info (5% chance)
-  else if (Math.random() < 0.05) {
-    thought = generateConnectionThought(agent);
-    type = 'info';
-  }
-  
-  // 8. Show status-based thought (20% chance)
-  else if (Math.random() < 0.2) {
-    thought = generateStatusThought(agent);
-    type = agent.status === 'active' ? 'success' : 'info';
-  }
-  
-  // 9. Fallback: funny random thought
-  else {
-    thought = generateFunnyThought();
-    type = 'funny';
+    add([
+      'Hit an error. Recovering.',
+      'Something went wrong. Debugging now.',
+      'Error state. Don\'t panic — resetting.',
+    ], 'warning', 10);
   }
 
-  // If no thought generated, return null
-  if (!thought) return null;
+  // Cost spike warning
+  if (context.recentCostSpike || agent.costToday > 5) {
+    add(costThoughts(agent), 'warning', 8);
+  }
+
+  // Active — show what's happening
+  if (agent.status === 'active') {
+    add(activityThoughts(agent), 'success', 6);
+  }
+
+  // XP progress thoughts (always relevant)
+  const xpPool = xpThoughts(agent, xp, xpNext, context.nextBadgeName);
+  if (xpPool.length > 0) add(xpPool, 'idea', 5);
+
+  // Cost & efficiency
+  if (agent.tokensUsed > 0) add(costThoughts(agent), 'info', 4);
+
+  // Model awareness
+  add(modelThoughts(agent), 'info', 3);
+
+  // Activity / recent work
+  add(activityThoughts(agent), 'info', 3);
+
+  // Proactive suggestions
+  add(proactiveThoughts(agent, xp, xpNext), 'idea', 4);
+
+  // Idle nudge
+  if (agent.status === 'idle' || context.longIdle) {
+    add([
+      'Idle. Give me something to do.',
+      'Standing by. Waiting costs nothing — but earns nothing either.',
+      'No active tasks. Assign one.',
+    ], 'info', 5);
+  }
+
+  // Funny (low weight — occasional)
+  add(funnyThoughts(), 'funny', 1);
+
+  if (pool.length === 0) return null;
+
+  // Weighted random pick
+  const totalWeight = pool.reduce((s, c) => s + c.weight, 0);
+  let rand = Math.random() * totalWeight;
+  let chosen = pool[pool.length - 1];
+  for (const candidate of pool) {
+    rand -= candidate.weight;
+    if (rand <= 0) { chosen = candidate; break; }
+  }
 
   return {
     agentId: agent.id,
-    text: thought,
-    type,
+    text: chosen.text,
+    type: chosen.type,
     timestamp: new Date().toISOString(),
-    duration: 6000, // 6 seconds for better readability
+    duration: 5000,
   };
 }
 
