@@ -10,6 +10,8 @@ import {
 } from '../../../../lib/officeAgents';
 import { CronJob } from '../../../../lib/openclawService';
 import { useAgentActivity, AgentActivity } from '../../../../services/agentActivityLogger';
+import { supabase } from '../../../../lib/supabase';
+import { BADGES, getEarnedBadges, getNextBadge, formatPoints, Badge } from '../../../../lib/badges';
 
 interface Props {
   editable?: boolean;
@@ -144,36 +146,173 @@ export default function Whiteboard({
   );
 }
 
-// ── SLIDE 1: OVERVIEW (status + metrics merged) ───────────────────────────
+// ── XP / LEVEL CALC ──────────────────────────────────────────────────────
+
+// ── REAL REWARD SYSTEM HOOK ───────────────────────────────────────────────
+// Pulls lifetime_points from user_points table and maps against badge thresholds.
+// XP flows generously from every agent turn + action.
+// Badges are the hard part — milestone monuments, not participation trophies.
+
+interface RewardState {
+  lifetimeXP: number;
+  currentBadge: Badge | null;
+  nextBadge: Badge | null;
+  progressPct: number;   // 0-100 toward next badge
+  earnedCount: number;
+  totalBadges: number;
+}
+
+function useRewardState(): RewardState {
+  const [lifetimeXP, setLifetimeXP] = useState(0);
+  const [earnedCount, setEarnedCount] = useState(0);
+
+  useEffect(() => {
+    let sub: any;
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!user) return;
+      // Initial fetch
+      supabase.from('user_points').select('lifetime_points').eq('user_id', user.id).single()
+        .then(({ data }) => { if (data) setLifetimeXP(data.lifetime_points ?? 0); });
+      supabase.from('user_badges').select('badge_id', { count: 'exact', head: true }).eq('user_id', user.id)
+        .then(({ count }) => setEarnedCount(count ?? 0));
+      // Realtime updates
+      sub = supabase.channel('wb_rewards_' + user.id)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'user_points', filter: `user_id=eq.${user.id}` },
+          (p: any) => { if (p.new?.lifetime_points != null) setLifetimeXP(p.new.lifetime_points); })
+        .subscribe();
+    });
+    return () => { if (sub) supabase.removeChannel(sub); };
+  }, []);
+
+  const earned = getEarnedBadges(lifetimeXP);
+  const currentBadge = earned.length ? earned[earned.length - 1] : null;
+  const nextBadge    = getNextBadge(lifetimeXP) ?? null;
+
+  let progressPct = 0;
+  if (nextBadge) {
+    const tierStart = currentBadge?.pointsRequired ?? 0;
+    const tierEnd   = nextBadge.pointsRequired;
+    progressPct = Math.min(100, Math.round(((lifetimeXP - tierStart) / (tierEnd - tierStart)) * 100));
+  } else {
+    progressPct = 100; // max badge earned
+  }
+
+  return {
+    lifetimeXP,
+    currentBadge,
+    nextBadge,
+    progressPct,
+    earnedCount: earned.length,
+    totalBadges: BADGES.length,
+  };
+}
+
+// ── SLIDE 1: OVERVIEW (status + metrics + live XP bar) ───────────────────
 
 function OverviewView({ agents, activities }: { agents: OfficeAgent[]; activities: AgentActivity[] }) {
+  const reward = useRewardState();
+
+  const now = new Date();
+  const todayActs = activities.filter(a => {
+    const d = new Date(a.created_at);
+    return d.getDate() === now.getDate() && d.getMonth() === now.getMonth();
+  });
+
   const activeCount  = agents.filter(a => a.status === 'active').length;
   const idleCount    = agents.filter(a => a.status === 'idle').length;
   const errorCount   = agents.filter(a => a.status === 'error').length;
   const totalCost    = agents.reduce((s, a) => s + a.costToday, 0);
   const totalMsgs    = agents.reduce((s, a) => s + a.messagesProcessed, 0);
   const totalTokens  = agents.reduce((s, a) => s + a.tokensUsed, 0);
-  const todayLogs    = activities.filter(a => {
-    const d = new Date(a.created_at);
-    const now = new Date();
-    return d.getDate() === now.getDate() && d.getMonth() === now.getMonth();
-  }).length;
+
+  const todayCompleted = todayActs.filter(a => a.activity_type === 'task_completed').length;
+  const todayFailed    = todayActs.filter(a => a.activity_type === 'task_failed').length;
+  const todayTools     = todayActs.filter(a => a.activity_type === 'tool_call').length;
+  const successRate    = todayCompleted + todayFailed > 0
+    ? Math.round((todayCompleted / (todayCompleted + todayFailed)) * 100)
+    : null;
+
+  const health = useMemo(() => {
+    let h = 50;
+    if (agents.length) h += (activeCount / agents.length) * 30;
+    if (errorCount > 0) h -= errorCount * 10;
+    if (successRate !== null) h += (successRate - 50) * 0.2;
+    return Math.max(0, Math.min(100, Math.round(h)));
+  }, [agents, activeCount, errorCount, successRate]);
+
+  const healthColor = health >= 75 ? '#16a34a' : health >= 45 ? '#b45309' : '#dc2626';
+  const healthLabel = health >= 75 ? 'HEALTHY' : health >= 45 ? 'FAIR' : 'AT RISK';
 
   const best = useMemo(() => {
     if (!agents.length) return null;
     return [...agents].sort((a, b) => calculateDailyScore(b) - calculateDailyScore(a))[0];
   }, [agents]);
 
+  // Badge tier color — map light/unreadable colors to readable equivalents on the whiteboard
+  const BADGE_COLOR_REMAP: Record<string, string> = {
+    '#ffd700': '#b45309',   // gold → dark amber
+    '#e5e4e2': '#6366f1',   // platinum (near-white) → indigo
+    '#c0c0c0': '#475569',   // silver → slate
+  };
+  const rawBadgeColor = reward.currentBadge?.color ?? '#6366f1';
+  const badgeColor = BADGE_COLOR_REMAP[rawBadgeColor] ?? rawBadgeColor;
+
   return (
     <ScrollView style={s.scroll} showsVerticalScrollIndicator={false} onStartShouldSetResponder={() => true}>
+
+      {/* ── XP / Badge Progress Bar ─────────────────────────────────────── */}
+      <View style={s.xpBlock}>
+        <View style={s.xpTopRow}>
+          {/* Current rank */}
+          <Text style={[s.xpCurrentRank, { color: badgeColor }]}>
+            {reward.currentBadge ? reward.currentBadge.name.toUpperCase() : 'UNRANKED'}
+          </Text>
+          {/* Total XP */}
+          <Text style={s.xpTotal}>{formatPoints(reward.lifetimeXP)} XP</Text>
+          {/* Badges earned */}
+          <Text style={s.xpBadgeCount}>{reward.earnedCount}/{reward.totalBadges} 🏅</Text>
+        </View>
+        {/* Progress bar toward next badge */}
+        <View style={s.xpTrack}>
+          <View style={[s.xpFill, { width: `${reward.progressPct}%` as any, backgroundColor: badgeColor }]} />
+        </View>
+        <View style={s.xpBottomRow}>
+          <Text style={s.xpPct}>{reward.progressPct}%</Text>
+          {reward.nextBadge && (
+            <Text style={s.xpNextLabel}>
+              → {reward.nextBadge.name.toUpperCase()} @ {formatPoints(reward.nextBadge.pointsRequired)}
+            </Text>
+          )}
+          {!reward.nextBadge && (
+            <Text style={[s.xpNextLabel, { color: '#00FF9C' }]}>MAX RANK ACHIEVED</Text>
+          )}
+        </View>
+      </View>
+
+      {/* Health + today row */}
+      <View style={s.healthRow}>
+        <View style={[s.healthBadge, { borderColor: healthColor }]}>
+          <Text style={[s.healthLabel, { color: healthColor }]}>{healthLabel}</Text>
+          <Text style={[s.healthScore, { color: healthColor }]}>{health}</Text>
+        </View>
+        <View style={s.todayStats}>
+          <Text style={s.todayStat}>✓ <Text style={{ color: '#22c55e' }}>{todayCompleted}</Text></Text>
+          <Text style={s.todayStat}>✗ <Text style={{ color: '#ef4444' }}>{todayFailed}</Text></Text>
+          <Text style={s.todayStat}>⚡ <Text style={{ color: '#ec4899' }}>{todayTools}</Text></Text>
+          {successRate !== null && (
+            <Text style={s.todayStat}>🎯 <Text style={{ color: '#6366f1' }}>{successRate}%</Text></Text>
+          )}
+        </View>
+      </View>
+
       {/* Metrics row */}
       <View style={s.metricsRow}>
         <Metric label="ACTIVE"   value={`${activeCount}/${agents.length}`} color="#22c55e" />
-        <Metric label="MSGS"     value={totalMsgs.toLocaleString()}         color="#f59e0b" />
+        <Metric label="MSGS"     value={totalMsgs.toLocaleString()}         color="#b45309" />
         <Metric label="COST"     value={`$${totalCost.toFixed(2)}`}         color="#ef4444" />
         <Metric label="TOKENS"   value={totalTokens > 0 ? `${(totalTokens/1000).toFixed(0)}K` : '—'} color="#ec4899" />
-        <Metric label="LOGGED"   value={String(todayLogs)}                   color="#6366f1" />
         <Metric label="IDLE"     value={String(idleCount)}                   color="#6b7280" />
+        <Metric label="ERR"      value={String(errorCount)}                  color="#ef4444" />
       </View>
 
       {/* Agent of the day */}
@@ -274,34 +413,73 @@ function ActivityView({
   );
 }
 
-// ── SLIDE 3: OPS (tasks + cron) ───────────────────────────────────────────
+// ── SLIDE 3: OPS (real stats + cron) ─────────────────────────────────────
 
 function OpsView({ cronJobs, activities }: { cronJobs: CronJob[]; activities: AgentActivity[] }) {
   const enabled  = cronJobs.filter(j => j.enabled);
   const disabled = cronJobs.filter(j => !j.enabled);
   const sorted   = [...enabled, ...disabled];
 
-  // Recent cron completions from Supabase
-  const cronLogs = activities.filter(a => a.source === 'cron').slice(0, 8);
+  const cronLogs = activities.filter(a => a.source === 'cron').slice(0, 6);
 
-  const tasks = [
-    { text: 'Agent Activity Feed',    done: true },
-    { text: 'Whiteboard Audit Log',   done: true },
-    { text: 'Discord Integration',    done: true },
-    { text: 'Push Notifications',     done: false },
-    { text: 'DAO Treasury Module',    done: false },
-  ];
+  // ── Real Ops Stats ──
+  const completed  = activities.filter(a => a.activity_type === 'task_completed').length;
+  const failed     = activities.filter(a => a.activity_type === 'task_failed').length;
+  const toolCalls  = activities.filter(a => a.activity_type === 'tool_call').length;
+  const totalTasks = completed + failed;
+  const successPct = totalTasks > 0 ? Math.round((completed / totalTasks) * 100) : null;
+
+  // Busiest agent
+  const agentCounts: Record<string, number> = {};
+  for (const a of activities) agentCounts[a.agent_name] = (agentCounts[a.agent_name] ?? 0) + 1;
+  const busiestAgent = Object.entries(agentCounts).sort((a, b) => b[1] - a[1])[0];
+
+  // Uptime from first activity
+  const oldest = activities.length ? activities[activities.length - 1] : null;
+  let uptimeStr = '—';
+  if (oldest) {
+    const diff = Date.now() - new Date(oldest.created_at).getTime();
+    const h = Math.floor(diff / 3600000);
+    const m = Math.floor((diff % 3600000) / 60000);
+    uptimeStr = h > 0 ? `${h}h ${m}m` : `${m}m`;
+  }
+
+  // Error rate by source
+  const errorsBySource: Record<string, number> = {};
+  for (const a of activities.filter(x => x.activity_type === 'task_failed')) {
+    errorsBySource[a.source] = (errorsBySource[a.source] ?? 0) + 1;
+  }
 
   return (
     <ScrollView style={s.scroll} showsVerticalScrollIndicator={false} onStartShouldSetResponder={() => true}>
-      {/* Task checklist */}
-      <Text style={s.sectionLabel}>TASKS</Text>
-      {tasks.map((t, i) => (
-        <View key={i} style={s.taskRow}>
-          <Text style={[s.taskIcon, { color: t.done ? '#22c55e' : '#555' }]}>{t.done ? '✓' : '○'}</Text>
-          <Text style={[s.taskText, t.done && s.taskDone]}>{t.text}</Text>
+
+      {/* Live Stats grid */}
+      <Text style={s.sectionLabel}>OPS METRICS</Text>
+      <View style={s.opsGrid}>
+        <OpsMetric label="COMPLETED"  value={String(completed)}  color="#22c55e" />
+        <OpsMetric label="FAILED"     value={String(failed)}     color="#ef4444" />
+        <OpsMetric label="TOOL CALLS" value={String(toolCalls)}  color="#ec4899" />
+        <OpsMetric label="SUCCESS"    value={successPct !== null ? `${successPct}%` : '—'} color="#6366f1" />
+        <OpsMetric label="UPTIME"     value={uptimeStr}          color="#b45309" />
+        <OpsMetric label="LOG SIZE"   value={String(activities.length)} color="#6b7280" />
+      </View>
+
+      {/* Busiest agent + error breakdown */}
+      {busiestAgent && (
+        <View style={s.opsInfoRow}>
+          <Text style={s.opsInfoLabel}>🔥 TOP AGENT</Text>
+          <Text style={s.opsInfoVal}>{busiestAgent[0]}</Text>
+          <Text style={s.opsInfoCount}>{busiestAgent[1]} events</Text>
         </View>
-      ))}
+      )}
+      {Object.keys(errorsBySource).length > 0 && (
+        <View style={s.opsInfoRow}>
+          <Text style={s.opsInfoLabel}>⚠ ERRORS BY SOURCE</Text>
+          {Object.entries(errorsBySource).map(([src, cnt]) => (
+            <Text key={src} style={s.opsErrItem}>{src}: {cnt}</Text>
+          ))}
+        </View>
+      )}
 
       {/* Cron jobs */}
       {sorted.length > 0 && (
@@ -337,6 +515,15 @@ function OpsView({ cronJobs, activities }: { cronJobs: CronJob[]; activities: Ag
         </>
       )}
     </ScrollView>
+  );
+}
+
+function OpsMetric({ label, value, color }: { label: string; value: string; color: string }) {
+  return (
+    <View style={s.opsMetricBox}>
+      <Text style={[s.opsMetricVal, { color }]}>{value}</Text>
+      <Text style={s.opsMetricLabel}>{label}</Text>
+    </View>
   );
 }
 
@@ -568,6 +755,40 @@ const s = StyleSheet.create({
   logMeta: { fontSize: 5.5, color: '#bbb', fontFamily: 'monospace' },
   logRight: { alignItems: 'flex-end', gap: 2 },
   logTypeIcon: { fontSize: 8, fontWeight: '800' },
+
+  // XP Block
+  xpBlock: { marginBottom: 4, backgroundColor: '#f0f0ec', borderRadius: 3, padding: 4, borderWidth: 1, borderColor: '#e0e0d8' },
+  xpTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 },
+  xpCurrentRank: { fontSize: 7, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
+  xpTotal: { fontSize: 7, fontWeight: '700', fontFamily: 'monospace', color: '#555' },
+  xpBadgeCount: { fontSize: 7, fontFamily: 'monospace', color: '#888' },
+  xpTrack: { height: 6, backgroundColor: '#ddd', borderRadius: 3, overflow: 'hidden', marginBottom: 2 },
+  xpFill: { height: '100%' as any, borderRadius: 3 },
+  xpBottomRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  xpPct: { fontSize: 6, fontWeight: '800', fontFamily: 'monospace', color: '#888' },
+  xpNextLabel: { fontSize: 6, fontFamily: 'monospace', color: '#aaa', fontStyle: 'italic' },
+
+  // Health
+  healthRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 3 },
+  healthBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    borderWidth: 1, borderRadius: 3, paddingHorizontal: 4, paddingVertical: 1,
+  },
+  healthLabel: { fontSize: 6, fontWeight: '800', fontFamily: 'monospace' },
+  healthScore: { fontSize: 10, fontWeight: '900', fontFamily: 'monospace' },
+  todayStats: { flexDirection: 'row', gap: 6, flex: 1, flexWrap: 'wrap' },
+  todayStat: { fontSize: 7, fontFamily: 'monospace', color: '#555' },
+
+  // OPS grid
+  opsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 3, marginBottom: 4 },
+  opsMetricBox: { alignItems: 'center', width: '30%' as any },
+  opsMetricVal: { fontSize: 11, fontWeight: '900', fontFamily: 'monospace' },
+  opsMetricLabel: { fontSize: 5, color: '#888', fontFamily: 'monospace', letterSpacing: 0.3 },
+  opsInfoRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 3, flexWrap: 'wrap' },
+  opsInfoLabel: { fontSize: 6, fontWeight: '800', fontFamily: 'monospace', color: '#aaa' },
+  opsInfoVal: { fontSize: 7, fontWeight: '700', fontFamily: 'monospace', color: '#333' },
+  opsInfoCount: { fontSize: 6, fontFamily: 'monospace', color: '#888' },
+  opsErrItem: { fontSize: 6, fontFamily: 'monospace', color: '#ef4444', marginLeft: 4 },
 
   // Notes
   notesWrap: { flex: 1 },

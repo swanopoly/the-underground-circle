@@ -15,6 +15,19 @@ export interface Badge {
   color: string;           // primary accent color
 }
 
+// ─── BADGE PHILOSOPHY ────────────────────────────────────────────────────
+// XP is earned generously — every agent task, turn, check-in, and event
+// flows into your lifetime total. Badges, however, are monuments.
+// Even a power user burning 100M tokens/day should need WEEKS to hit Gold,
+// and MONTHS to touch Platinum. Legendary is reserved for the truly obsessed.
+//
+// Rough targets for a heavy user (~125,000 pts/day):
+//   Bronze complete  →  a few days
+//   Silver complete  →  2-3 weeks
+//   Gold complete    →  3-6 months
+//   Platinum         →  1-2 years
+//   Legendary        →  multi-year grind
+
 export const BADGES: Badge[] = [
   // ─── BRONZE TIER ─────────────────────────────────────────────────────────
   {
@@ -22,7 +35,7 @@ export const BADGES: Badge[] = [
     name: 'Recruit',
     description: 'First steps into the Underground',
     lore: '"Every legend starts somewhere. Yours starts here."',
-    pointsRequired: 10,
+    pointsRequired: 500,
     tier: 'bronze',
     icon: '⚡',
     shape: 'hexagon',
@@ -33,7 +46,7 @@ export const BADGES: Badge[] = [
     name: 'Private',
     description: 'Survived the first week',
     lore: '"You answered the call. Now the real work begins."',
-    pointsRequired: 50,
+    pointsRequired: 5_000,
     tier: 'bronze',
     icon: '🛡',
     shape: 'hexagon',
@@ -44,7 +57,7 @@ export const BADGES: Badge[] = [
     name: 'Corporal',
     description: 'Learning the field',
     lore: '"Two steps ahead. You\'re beginning to understand the mission."',
-    pointsRequired: 150,
+    pointsRequired: 25_000,
     tier: 'bronze',
     icon: '🎯',
     shape: 'hexagon',
@@ -55,7 +68,7 @@ export const BADGES: Badge[] = [
     name: 'Sergeant',
     description: 'Proven under fire',
     lore: '"Your agents move with purpose. The Circle takes notice."',
-    pointsRequired: 400,
+    pointsRequired: 100_000,
     tier: 'bronze',
     icon: '⚔️',
     shape: 'shield',
@@ -67,7 +80,7 @@ export const BADGES: Badge[] = [
     name: 'Staff Sergeant',
     description: 'Commanding the field',
     lore: '"You\'ve earned the right to lead. Don\'t waste it."',
-    pointsRequired: 1000,
+    pointsRequired: 350_000,
     tier: 'silver',
     icon: '🔱',
     shape: 'shield',
@@ -78,7 +91,7 @@ export const BADGES: Badge[] = [
     name: 'Gunnery Sergeant',
     description: 'Master of sustained operations',
     lore: '"Relentless. Precise. The machines answer to you now."',
-    pointsRequired: 2500,
+    pointsRequired: 1_000_000,
     tier: 'silver',
     icon: '💠',
     shape: 'shield',
@@ -89,7 +102,7 @@ export const BADGES: Badge[] = [
     name: 'Master Sergeant',
     description: 'Elite operator',
     lore: '"The Underground speaks your name in hushed tones."',
-    pointsRequired: 5000,
+    pointsRequired: 3_000_000,
     tier: 'silver',
     icon: '🌀',
     shape: 'star',
@@ -101,7 +114,7 @@ export const BADGES: Badge[] = [
     name: 'Warrant Officer',
     description: 'Technical supremacy',
     lore: '"Beyond rank. Beyond title. Your work speaks for itself."',
-    pointsRequired: 10000,
+    pointsRequired: 8_000_000,
     tier: 'gold',
     icon: '👁',
     shape: 'star',
@@ -112,7 +125,7 @@ export const BADGES: Badge[] = [
     name: 'Lieutenant',
     description: 'Commanding the digital battlefield',
     lore: '"You don\'t just use AI. You direct it. Shape it. Weaponize it."',
-    pointsRequired: 25000,
+    pointsRequired: 20_000_000,
     tier: 'gold',
     icon: '🔥',
     shape: 'star',
@@ -123,7 +136,7 @@ export const BADGES: Badge[] = [
     name: 'Commander',
     description: 'Architect of the machine',
     lore: '"They said it couldn\'t be done at this scale. They were wrong."',
-    pointsRequired: 50000,
+    pointsRequired: 50_000_000,
     tier: 'gold',
     icon: '⚜️',
     shape: 'diamond',
@@ -135,7 +148,7 @@ export const BADGES: Badge[] = [
     name: 'Captain',
     description: 'Leading the vanguard',
     lore: '"The future bends to operators like you."',
-    pointsRequired: 100000,
+    pointsRequired: 125_000_000,
     tier: 'platinum',
     icon: '🌟',
     shape: 'diamond',
@@ -146,7 +159,7 @@ export const BADGES: Badge[] = [
     name: 'Major',
     description: 'Strategic dominance',
     lore: '"Your circle is a force multiplier. The old world has no answer for this."',
-    pointsRequired: 250000,
+    pointsRequired: 300_000_000,
     tier: 'platinum',
     icon: '💫',
     shape: 'diamond',
@@ -158,7 +171,7 @@ export const BADGES: Badge[] = [
     name: 'Spartan',
     description: 'Chosen. Augmented. Unstoppable.',
     lore: '"There are builders. There are operators. And then there is you."',
-    pointsRequired: 500000,
+    pointsRequired: 750_000_000,
     tier: 'legendary',
     icon: '🏆',
     shape: 'circle',
@@ -169,7 +182,7 @@ export const BADGES: Badge[] = [
     name: 'Demon',
     description: 'They fear what you\'ve become',
     lore: '"The Covenant called the Master Chief \'Demon\'. Now they call you the same."',
-    pointsRequired: 1000000,
+    pointsRequired: 2_000_000_000,
     tier: 'legendary',
     icon: '👾',
     shape: 'circle',
@@ -197,13 +210,14 @@ export function getEarnedBadges(currentPoints: number): Badge[] {
   return BADGES.filter(b => b.pointsRequired <= currentPoints);
 }
 
-// Points earned per model tier per turn
+// Points earned per model per turn — generous by design.
+// XP should flow naturally from every agent task. Badges are what's hard.
 export function getPointsForModel(model: string): number {
   const m = model.toLowerCase();
-  if (m.includes('opus') || m.includes('gpt-4') || m.includes('gemini-ultra')) return 10;
-  if (m.includes('sonnet') || m.includes('gpt-4o') || m.includes('claude-3-5')) return 5;
-  if (m.includes('haiku') || m.includes('flash') || m.includes('mini')) return 2;
-  return 3; // default
+  if (m.includes('opus') || m.includes('gpt-4') || m.includes('gemini-ultra')) return 25;
+  if (m.includes('sonnet') || m.includes('gpt-4o') || m.includes('claude-3-5')) return 15;
+  if (m.includes('haiku') || m.includes('flash') || m.includes('mini')) return 8;
+  return 10; // default
 }
 
 export function formatPoints(n: number): string {

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, Animated, Pressable, Platform } from 'react-native';
+import { View, Text, StyleSheet, Animated, Pressable, Platform, Easing } from 'react-native';
 import { OfficeAgent, STATUS_COLORS } from '../../../../lib/officeAgents';
 import { AgentAppearance, DEFAULT_APPEARANCE } from '../../../../lib/officeConfig';
 import ThoughtBubble from '../../../../components/ThoughtBubble';
@@ -247,13 +247,168 @@ export default function PixelAgent({ agent, appearance, onPress, selected, scale
         </View>
 
         {/* XP bar */}
-        <View style={styles.xpBarOuter}>
-          <View style={[styles.xpBarFill, { width: `${Math.min(100, xpNext > 0 ? (xp / xpNext) * 100 : 0)}%`, backgroundColor: agent.color }]} />
-        </View>
+        <XPBar xp={xp} xpNext={xpNext} color={agent.color} />
       </Animated.View>
     </Pressable>
   );
 }
+
+// ── XP BAR ───────────────────────────────────────────────────────────────
+
+function XPBar({ xp, xpNext, color }: { xp: number; xpNext: number; color: string }) {
+  const pct = Math.min(100, xpNext > 0 ? Math.round((xp / xpNext) * 100) : 0);
+  const isFull = pct >= 100;
+
+  // Pulse glow animation always running
+  const pulseAnim = useRef(new Animated.Value(0)).current;
+  // Rainbow shift for full bar (web only via CSS, native via hue cycle)
+  const rainbowAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 1, duration: 900, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+        Animated.timing(pulseAnim, { toValue: 0, duration: 900, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      ])
+    ).start();
+  }, []);
+
+  useEffect(() => {
+    if (!isFull) return;
+    Animated.loop(
+      Animated.timing(rainbowAnim, { toValue: 1, duration: 2000, easing: Easing.linear, useNativeDriver: false })
+    ).start();
+    return () => rainbowAnim.stopAnimation();
+  }, [isFull]);
+
+  // Glow opacity: stronger when full
+  const glowOpacity = pulseAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: isFull ? [0.7, 1] : [0.2, 0.55],
+  });
+
+  // For non-web: animate fill color through rainbow segments when full
+  const fillColor = isFull
+    ? rainbowAnim.interpolate({
+        inputRange: [0, 0.17, 0.33, 0.5, 0.67, 0.83, 1],
+        outputRange: ['#ff0080', '#ff8c00', '#ffe600', '#00ff88', '#00cfff', '#a855f7', '#ff0080'],
+      })
+    : color;
+
+  // Glow color behind bar when full
+  const glowColor = isFull ? '#ffffff' : color;
+
+  if (Platform.OS === 'web') {
+    // Web: inject a CSS keyframe animation for true rainbow gradient
+    const styleId = 'xp-rainbow-style';
+    if (isFull && !document.getElementById(styleId)) {
+      const style = document.createElement('style');
+      style.id = styleId;
+      style.textContent = `
+        @keyframes xp-rainbow {
+          0%   { background-position: 0% 50%; }
+          100% { background-position: 200% 50%; }
+        }
+        .xp-fill-rainbow {
+          background: linear-gradient(90deg, #ff0080, #ff8c00, #ffe600, #00ff88, #00cfff, #a855f7, #ff0080);
+          background-size: 200% 100%;
+          animation: xp-rainbow 1.8s linear infinite;
+        }
+        .xp-fill-rainbow-glow {
+          box-shadow: 0 0 6px 2px rgba(255,255,255,0.8), 0 0 12px 4px rgba(168,85,247,0.6);
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    return (
+      <View style={xpStyles.outer}>
+        {/* Glow behind the track */}
+        {pct > 0 && (
+          <Animated.View style={[
+            xpStyles.glow,
+            {
+              width: `${pct}%` as any,
+              backgroundColor: glowColor,
+              opacity: glowOpacity,
+            },
+          ]} />
+        )}
+        {/* Track */}
+        <View style={xpStyles.track}>
+          {pct > 0 && (
+            <View
+              style={[
+                xpStyles.fill,
+                isFull ? { width: '100%' } : { width: `${pct}%` as any, backgroundColor: color },
+              ] as any}
+              // @ts-ignore web-only className
+              className={isFull ? 'xp-fill-rainbow xp-fill-rainbow-glow' : undefined}
+            />
+          )}
+        </View>
+        {/* XP label */}
+        <Text style={[xpStyles.label, isFull && xpStyles.labelFull]}>
+          {isFull ? '✦ MAX ✦' : `${pct}%`}
+        </Text>
+      </View>
+    );
+  }
+
+  // Native
+  return (
+    <View style={xpStyles.outer}>
+      {pct > 0 && (
+        <Animated.View style={[xpStyles.glow, { width: `${pct}%` as any, backgroundColor: glowColor, opacity: glowOpacity }]} />
+      )}
+      <View style={xpStyles.track}>
+        {pct > 0 && (
+          <Animated.View style={[xpStyles.fill, { width: `${pct}%` as any, backgroundColor: fillColor as any }]} />
+        )}
+      </View>
+      <Text style={[xpStyles.label, isFull && xpStyles.labelFull]}>
+        {isFull ? '✦ MAX ✦' : `${pct}%`}
+      </Text>
+    </View>
+  );
+}
+
+const xpStyles = StyleSheet.create({
+  outer: { width: 44, alignItems: 'flex-start', marginTop: 3 },
+  glow: {
+    position: 'absolute',
+    top: 2,
+    left: 0,
+    height: 5,
+    borderRadius: 3,
+    // blur not supported natively, but opacity pulse creates the effect
+  },
+  track: {
+    width: 44,
+    height: 5,
+    backgroundColor: '#111827',
+    borderRadius: 3,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#2d3748',
+  },
+  fill: {
+    height: '100%',
+    borderRadius: 2,
+  },
+  label: {
+    fontSize: 5,
+    fontFamily: 'monospace',
+    fontWeight: '700',
+    color: '#6b7280',
+    marginTop: 1,
+    alignSelf: 'center',
+  },
+  labelFull: {
+    color: '#a855f7',
+    fontSize: 6,
+  },
+});
 
 const PX = 2.5;
 
@@ -417,17 +572,5 @@ const styles = StyleSheet.create({
     letterSpacing: 0.3,
   },
   offlineOpacity: { opacity: 0.4 },
-  xpBarOuter: {
-    width: 40,
-    height: 3,
-    backgroundColor: '#1a1a2e',
-    borderRadius: 2,
-    marginTop: 2,
-    overflow: 'hidden',
-  },
-  xpBarFill: {
-    height: '100%',
-    borderRadius: 2,
-    opacity: 0.8,
-  },
+
 });

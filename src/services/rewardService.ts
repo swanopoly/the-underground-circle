@@ -24,57 +24,47 @@ export async function awardPoints(
   reason: string,
   metadata?: Record<string, any>,
 ): Promise<{ newTotal: number; newBadges: Badge[] }> {
-  // Upsert user_points
-  const { data: existing } = await supabase
-    .from('user_points')
-    .select('total_points, lifetime_points')
-    .eq('user_id', userId)
-    .single();
-
-  const prevTotal = existing?.lifetime_points ?? 0;
-  const newTotal = (existing?.total_points ?? 0) + points;
-  const newLifetime = prevTotal + points;
-
-  await supabase.from('user_points').upsert(
-    {
-      user_id: userId,
-      total_points: newTotal,
-      lifetime_points: newLifetime,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: 'user_id' },
-  );
-
-  // Log transaction
-  await supabase.from('points_transactions').insert({
-    user_id: userId,
-    points,
-    reason,
-    metadata: metadata || {},
+  // Single atomic DB call — no more JS read→calculate→write race condition.
+  // The Postgres function handles the increment and audit trail atomically.
+  const { data, error } = await supabase.rpc('award_points', {
+    p_user_id:  userId,
+    p_amount:   points,
+    p_reason:   reason,
+    p_metadata: metadata ?? {},
   });
 
-  // Check for newly earned badges
+  if (error) {
+    console.error('awardPoints RPC error — falling back to direct upsert:', error);
+    // Fallback: best-effort direct upsert (still better than silently losing XP)
+    await supabase.from('user_points').upsert(
+      { user_id: userId, total_points: points, lifetime_points: points, updated_at: new Date().toISOString() },
+      { onConflict: 'user_id' },
+    );
+    return { newTotal: points, newBadges: [] };
+  }
+
+  const newLifetime: number = Array.isArray(data) ? (data[0]?.new_lifetime ?? 0) : (data?.new_lifetime ?? 0);
+
+  // Check for newly unlocked badges (client-side, non-critical — DB already has the points)
   const { data: alreadyEarned } = await supabase
-    .from('user_badges')
-    .select('badge_id')
-    .eq('user_id', userId);
+    .from('user_badges').select('badge_id').eq('user_id', userId);
 
   const earnedIds = new Set((alreadyEarned || []).map((b: any) => b.badge_id));
   const newBadges: Badge[] = [];
 
   for (const badge of BADGES) {
     if (!earnedIds.has(badge.id) && newLifetime >= badge.pointsRequired) {
-      await supabase.from('user_badges').insert({
+      const { error: badgeErr } = await supabase.from('user_badges').insert({
         user_id: userId,
         badge_id: badge.id,
         earned_at: new Date().toISOString(),
         points_at_earn: newLifetime,
       });
-      newBadges.push(badge);
+      if (!badgeErr) newBadges.push(badge);
     }
   }
 
-  return { newTotal, newBadges };
+  return { newTotal: newLifetime, newBadges };
 }
 
 export async function awardAgentTurnPoints(

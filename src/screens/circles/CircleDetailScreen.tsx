@@ -21,6 +21,7 @@ import DigestTab from './tabs/DigestTab';
 import OfficeTab, { AgentStats } from './tabs/OfficeTab';
 import WalletTab from './tabs/WalletTab';
 import ProfileTab from './tabs/ProfileTab';
+import RoomsTab from './tabs/RoomsTab';
 
 import { Circle } from '../../types';
 import ErrorBoundary from '../../components/ErrorBoundary';
@@ -28,6 +29,7 @@ import ErrorBoundary from '../../components/ErrorBoundary';
 const TAB_META: { key: string; label: string; icon: string }[] = [
   { key: 'CHAT', label: 'Chat', icon: '💬' },
   { key: 'OFFICE', label: 'Office', icon: '🏢' },
+  { key: 'ROOMS', label: 'Rooms', icon: '🏠' },
   { key: 'FEED', label: 'Feed', icon: '📋' },
   { key: 'CHALLENGES', label: 'Challenges', icon: '🏆' },
   { key: 'MEMBERS', label: 'Members', icon: '👥' },
@@ -200,6 +202,11 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       <View style={[styles.tabContent, activeTab !== 'OFFICE' && styles.hiddenTab]}>
         <ErrorBoundary>
           <OfficeTab circleId={circleId} accentColor={accentColor} onAgentStats={setAgentStats} />
+        </ErrorBoundary>
+      </View>
+      <View style={[styles.tabContent, activeTab !== 'ROOMS' && styles.hiddenTab]}>
+        <ErrorBoundary>
+          <RoomsTab circleId={circleId} accentColor={accentColor} />
         </ErrorBoundary>
       </View>
       <View style={[styles.tabContent, activeTab !== 'FEED' && styles.hiddenTab]}>

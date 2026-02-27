@@ -65,7 +65,7 @@ export function useAgentActivity(circleId: string | null) {
       .select('*')
       .eq('circle_id', circleId)
       .order('created_at', { ascending: false })
-      .limit(50);
+      .limit(500);
     if (!error && data) {
       setActivities(data as AgentActivity[]);
     }
@@ -88,7 +88,7 @@ export function useAgentActivity(circleId: string | null) {
           filter: `circle_id=eq.${circleId}`,
         },
         (payload) => {
-          setActivities((prev) => [payload.new as AgentActivity, ...prev].slice(0, 50));
+          setActivities((prev) => [payload.new as AgentActivity, ...prev].slice(0, 500));
         }
       )
       .subscribe();

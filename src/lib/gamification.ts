@@ -1,17 +1,24 @@
 import { supabase } from './supabase';
 import { UserXP, Achievement, UserAchievement, XPEvent } from '../types';
 
-// XP amounts for each action
+// XP amounts for each user action — generous by design.
+// Agents and users should feel XP flowing constantly.
+// Badges, not XP, are what's hard to earn.
 const XP_AMOUNTS: Record<string, number> = {
-  daily_login: 10,
-  check_in: 25,
-  task_complete: 30,
-  circle_join: 50,
-  circle_create: 75,
-  upvote_received: 5,
+  daily_login:     50,
+  check_in:        150,
+  task_complete:   300,
+  circle_join:     500,
+  circle_create:   1_000,
+  upvote_received: 25,
+  streak_7day:     2_000,
+  streak_30day:    10_000,
+  badge_earned:    5_000,   // bonus XP for unlocking a badge
 };
 
-// Title thresholds by level
+// Titles map to XP level (level = floor(sqrt(xp/50)) + 1).
+// These stay separate from badge ranks — you level up often,
+// you earn badges rarely.
 const TITLES: [number, string][] = [
   [50, 'Underground King'],
   [40, 'Underground Boss'],
@@ -20,8 +27,8 @@ const TITLES: [number, string][] = [
   [20, 'Elite'],
   [15, 'Veteran'],
   [10, 'Hustler'],
-  [5, 'Grinder'],
-  [1, 'Recruit'],
+  [5,  'Grinder'],
+  [1,  'Recruit'],
 ];
 
 export function getXPForAction(action: string): number {
