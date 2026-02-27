@@ -1283,7 +1283,19 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   const [roomFiles, setRoomFiles]  = useState<{ id: string; name: string }[]>([]);
   const [taskPrompt, setTaskPrompt] = useState('');
   const [assigning, setAssigning]  = useState(false);
+  const [agentConnections, setAgentConnections] = useState<any[]>([]);
   const scrollRef = useRef<ScrollView>(null);
+
+  // Load agent connections from local storage (user's own OpenClaw instances)
+  useEffect(() => {
+    (async () => {
+      try {
+        const { loadConnections } = await import('../../../lib/connectionManager');
+        const conns = await loadConnections();
+        setAgentConnections(conns.filter((c: any) => c.enabled));
+      } catch {}
+    })();
+  }, []);
 
   // Load messages + subscribe to new ones
   useEffect(() => {
@@ -1383,22 +1395,92 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         .update({ current_task: `[Room] ${taskPrompt.trim().slice(0, 120)}`, status: 'building' })
         .eq('id', selectedAgent.id);
 
-      // 3. Fire off the edge function to actually execute the task
-      // This runs async — the chat will update via realtime when the result comes in
+      // 3. Route through the user's own OpenClaw agent connection
       if (taskId) {
-        supabase.functions.invoke('room-task-executor', {
-          body: {
-            taskId,
-            roomId,
-            prompt: taskPrompt.trim(),
-            fileName: targetName,
-            fileContent,
-            agentName: selectedAgent.name,
-            agentId: selectedAgent.id,
-          },
-        }).then(({ error }) => {
-          if (error) console.error('Task executor error:', error);
-        }).catch(err => console.error('Task executor failed:', err));
+        const conn = agentConnections.find((c: any) => c.status === 'connected') || agentConnections[0];
+        if (conn?.endpoint && conn?.token) {
+          // Build the task message with file context
+          const fullPrompt = [
+            taskPrompt.trim(),
+            targetName ? `\nTarget file: ${targetName}` : '',
+            fileContent ? `\n\n--- FILE: ${targetName} ---\n${fileContent}${fileContent.length >= 12000 ? '\n...[truncated]' : ''}\n---` : '',
+            '\nRespond with your analysis/changes. If you modify the file, include the full updated code in a fenced code block.',
+          ].join('');
+
+          // Call the user's OpenClaw agent via chat completions
+          fetch(`${conn.endpoint}/v1/chat/completions`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${conn.token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: `openclaw:main`,
+              messages: [{ role: 'user', content: fullPrompt }],
+            }),
+          }).then(async (res) => {
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            const reply = data.choices?.[0]?.message?.content || 'Task completed — no output returned.';
+
+            // Post the agent's response to room_messages
+            await supabase.from('room_messages').insert({
+              room_id: roomId,
+              agent_name: selectedAgent.name,
+              content: reply,
+              message_type: 'agent_output',
+              metadata: { task_reply: true, task_id: taskId, status: 'done' },
+            });
+
+            // Mark original task as done
+            await supabase.from('room_messages')
+              .update({ metadata: { task: true, agent_id: selectedAgent.id, target_file: targetName, prompt: taskPrompt.trim(), status: 'done' } })
+              .eq('id', taskId);
+
+            // Reset agent status
+            await supabase.from('circle_office_agents')
+              .update({ status: 'idle', current_task: null })
+              .eq('id', selectedAgent.id);
+
+            // Log usage
+            await supabase.from('room_usage').insert({
+              room_id: roomId, user_id: user?.id || null,
+              agent_name: selectedAgent.name, event_type: 'agent_task',
+              metadata: { task_id: taskId, file: targetName },
+            });
+          }).catch(async (err) => {
+            console.error('Agent task execution failed:', err);
+            // Post error message
+            await supabase.from('room_messages').insert({
+              room_id: roomId,
+              agent_name: 'System',
+              content: `⚠️ Task failed: ${err.message}\n\nMake sure your agent is connected in the Office tab.`,
+              message_type: 'system',
+              metadata: { task_reply: true, task_id: taskId, error: true },
+            });
+            // Mark as error
+            await supabase.from('room_messages')
+              .update({ metadata: { task: true, agent_id: selectedAgent.id, target_file: targetName, prompt: taskPrompt.trim(), status: 'error' } })
+              .eq('id', taskId);
+            await supabase.from('circle_office_agents')
+              .update({ status: 'idle', current_task: null })
+              .eq('id', selectedAgent.id);
+          });
+        } else {
+          // No agent connection — mark as error immediately
+          await supabase.from('room_messages').insert({
+            room_id: roomId,
+            agent_name: 'System',
+            content: '⚠️ No agent connection found. Go to the **Office** tab and connect your agent first.',
+            message_type: 'system',
+            metadata: { task_reply: true, task_id: taskId, error: true },
+          });
+          if (taskId) {
+            await supabase.from('room_messages')
+              .update({ metadata: { task: true, agent_id: selectedAgent.id, target_file: targetName, prompt: taskPrompt.trim(), status: 'error' } })
+              .eq('id', taskId);
+          }
+        }
       }
 
       setTaskPrompt(''); setSelectedFile(''); setSelectedAgent(null); setShowAssign(false);
@@ -1618,7 +1700,12 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor }: { msg: Roo
         <Text style={{color:'#ccc',fontSize:12,lineHeight:18}}>{isTask ? msg.metadata?.prompt || msg.content : msg.content}</Text>
         {isTask && msg.metadata?.status === 'pending' && (
           <Text style={{color:'#555',fontSize:10,marginTop:4,fontStyle:'italic'}}>
-            → Agent has been notified. Check the Office tab to see it pick up the task.
+            → Running on your connected agent...
+          </Text>
+        )}
+        {isTask && msg.metadata?.status === 'error' && (
+          <Text style={{color:'#ef4444',fontSize:10,marginTop:4,fontStyle:'italic'}}>
+            → Failed. Check your agent connection in the Office tab.
           </Text>
         )}
       </View>
