@@ -25,8 +25,7 @@ export default function PixelAgent({ agent, appearance, onPress, selected, scale
   const danceY = useRef(new Animated.Value(0)).current;
   const danceRotate = useRef(new Animated.Value(0)).current;
   const danceScale = useRef(new Animated.Value(1)).current;
-  const workX = useRef(new Animated.Value(0)).current;
-  const workRotate = useRef(new Animated.Value(0)).current;
+
   const [currentThought, setCurrentThought] = useState<ThoughtData | null>(null);
   const lastCost = useRef(agent.costToday);
   const lastStatus = useRef(agent.status);
@@ -98,30 +97,6 @@ export default function PixelAgent({ agent, appearance, onPress, selected, scale
     }
   }, [agent.status]);
 
-  // Working wiggle — subtle side sway when agent is active (doing a task)
-  useEffect(() => {
-    if (agent.status === 'active' && !dancing) {
-      const loop = Animated.loop(
-        Animated.sequence([
-          Animated.timing(workX, { toValue: -3, duration: 300, useNativeDriver: true }),
-          Animated.timing(workRotate, { toValue: -4, duration: 300, useNativeDriver: true }),
-          Animated.timing(workX, { toValue: 3, duration: 300, useNativeDriver: true }),
-          Animated.timing(workRotate, { toValue: 4, duration: 300, useNativeDriver: true }),
-          Animated.timing(workX, { toValue: -2, duration: 250, useNativeDriver: true }),
-          Animated.timing(workRotate, { toValue: -2, duration: 250, useNativeDriver: true }),
-          Animated.timing(workX, { toValue: 0, duration: 200, useNativeDriver: true }),
-          Animated.timing(workRotate, { toValue: 0, duration: 200, useNativeDriver: true }),
-          Animated.delay(800 + Math.random() * 1200),
-        ]),
-      );
-      loop.start();
-      return () => loop.stop();
-    } else {
-      workX.setValue(0);
-      workRotate.setValue(0);
-    }
-  }, [agent.status, dancing]);
-
   // Thought bubble generation
   useEffect(() => {
     if (!showThoughts || currentThought) return;
@@ -174,9 +149,9 @@ export default function PixelAgent({ agent, appearance, onPress, selected, scale
     <Pressable onPress={onPress} style={Platform.OS === 'web' ? { cursor: 'pointer' } as any : undefined}>
       <Animated.View style={[styles.container, {
           transform: [
-            { translateX: dancing ? danceX : workX },
+            { translateX: danceX },
             { translateY: Animated.add(bobAnim, danceY) },
-            { rotate: (dancing ? danceRotate : workRotate).interpolate({ inputRange: [-360, 360], outputRange: ['-360deg', '360deg'] }) },
+            { rotate: danceRotate.interpolate({ inputRange: [-360, 360], outputRange: ['-360deg', '360deg'] }) },
             { scale: danceScale },
           ],
         }]}>
