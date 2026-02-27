@@ -61,7 +61,7 @@ export default function ThoughtBubble({ thought, onDismiss }: Props) {
 const styles = StyleSheet.create({
   container: {
     position: 'absolute',
-    bottom: 110,
+    bottom: 80,
     left: -20,
     zIndex: 100,
     minWidth: 130,
