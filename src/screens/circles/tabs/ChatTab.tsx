@@ -2301,12 +2301,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     borderWidth: 2,
     borderColor: '#6366f1',
-    ...(Platform.OS === 'web' ? {
-      animationName: 'float',
-      animationDuration: '3s',
-      animationTimingFunction: 'ease-in-out',
-      animationIterationCount: 'infinite',
-    } : {}),
+    ...(Platform.OS === 'web' ? { className: 'bot-float-anim' } as any : {}),
   } as any,
   heroBotEmoji: { fontSize: 36 },
   heroTitle: { fontSize: 24, fontWeight: '900', letterSpacing: 4, marginBottom: 8 },
@@ -2318,11 +2313,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 20,
     borderWidth: 1,
-    ...(Platform.OS === 'web' ? {
-      animationName: 'pulse',
-      animationDuration: '2s',
-      animationIterationCount: 'infinite',
-    } : {}),
+    ...(Platform.OS === 'web' ? { className: 'bot-pulse-anim' } as any : {}),
   } as any,
   activityText: { color: '#888', fontSize: 12, fontWeight: '600' },
 
@@ -2819,7 +2810,7 @@ const styles = StyleSheet.create({
   sendText: { fontSize: 20, fontWeight: '800' },
 });
 
-// Add keyframes for web animations
+// Add keyframes + animation classes for web
 if (Platform.OS === 'web') {
   const style = document.createElement('style');
   style.textContent = `
@@ -2827,6 +2818,12 @@ if (Platform.OS === 'web') {
       0%, 100% { transform: translateY(0px); }
       50% { transform: translateY(-10px); }
     }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    .bot-float-anim { animation: float 3s ease-in-out infinite; }
+    .bot-pulse-anim { animation: pulse 2s ease-in-out infinite; }
   `;
   document.head.appendChild(style);
 }
