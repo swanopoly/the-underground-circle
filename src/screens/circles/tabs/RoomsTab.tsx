@@ -1353,20 +1353,15 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     setAssigning(true);
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      // Resolve the file to attach: explicit pick > active open file
       const targetName = selectedFile || activeFile?.name || null;
       const filePart = targetName ? ` on \`${targetName}\`` : '';
-      // Embed file content for context — prioritise explicitly selected file
-      const contextFile = selectedFile
-        ? null  // we only have the name; content would need a separate fetch — omit body, just name
-        : activeFile ?? null;
-      const fileContext = contextFile
-        ? `\n\n--- FILE: ${contextFile.name} ---\n${contextFile.content.slice(0, 8000)}${contextFile.content.length > 8000 ? '\n...[truncated]' : ''}\n---`
-        : '';
+      const contextFile = selectedFile ? null : activeFile ?? null;
+      const fileContent = contextFile?.content?.slice(0, 12000) || null;
 
-      const msgContent = `@${selectedAgent.name}${filePart}: ${taskPrompt.trim()}${fileContext}`;
+      const msgContent = `@${selectedAgent.name}${filePart}: ${taskPrompt.trim()}`;
 
-      await supabase.from('room_messages').insert({
+      // 1. Insert the task message (shows as PENDING in chat)
+      const { data: inserted } = await supabase.from('room_messages').insert({
         room_id: roomId,
         user_id: user?.id || null,
         agent_name: selectedAgent.name,
@@ -1379,22 +1374,39 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           prompt: taskPrompt.trim(),
           status: 'pending',
         },
-      });
-      // Update agent's current_task so it's visible in the Office
+      }).select('id').single();
+
+      const taskId = inserted?.id;
+
+      // 2. Update agent's current_task in the Office
       await supabase.from('circle_office_agents')
-        .update({ current_task: `[Room: ${roomId.slice(0,8)}] ${taskPrompt.trim().slice(0, 120)}`, status: 'building' })
+        .update({ current_task: `[Room] ${taskPrompt.trim().slice(0, 120)}`, status: 'building' })
         .eq('id', selectedAgent.id);
 
-      await supabase.from('room_usage').insert({
-        room_id: roomId, user_id: user?.id || null,
-        agent_name: selectedAgent.name, event_type: 'agent_task',
-        metadata: { prompt: taskPrompt.trim(), file: targetName },
-      });
+      // 3. Fire off the edge function to actually execute the task
+      // This runs async — the chat will update via realtime when the result comes in
+      if (taskId) {
+        supabase.functions.invoke('room-task-executor', {
+          body: {
+            taskId,
+            roomId,
+            prompt: taskPrompt.trim(),
+            fileName: targetName,
+            fileContent,
+            agentName: selectedAgent.name,
+            agentId: selectedAgent.id,
+          },
+        }).then(({ error }) => {
+          if (error) console.error('Task executor error:', error);
+        }).catch(err => console.error('Task executor failed:', err));
+      }
+
       setTaskPrompt(''); setSelectedFile(''); setSelectedAgent(null); setShowAssign(false);
     } finally { setAssigning(false); }
   };
 
-  // Subscribe to task status updates (when agent posts a reply, mark task done)
+  // Subscribe to task status updates — when the edge function posts a reply
+  // with task_reply: true, flip the original task's PENDING badge to DONE
   useEffect(() => {
     const ch = supabase.channel(`task_status_${roomId}`)
       .on('postgres_changes', {
@@ -1402,14 +1414,22 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         filter: `room_id=eq.${roomId}`,
       }, payload => {
         const msg = payload.new as RoomMessage;
-        // If agent posted a non-task reply, look for pending tasks to mark done
-        if (msg.message_type === 'agent_output' && !msg.metadata?.task) {
+        if (msg.metadata?.task_reply && msg.metadata?.task_id) {
+          // Edge function posted a reply — mark the original task as done
           setMessages(prev => prev.map(m =>
-            m.metadata?.task && m.metadata?.status === 'pending' && m.agent_name === msg.agent_name
+            m.id === msg.metadata.task_id
               ? { ...m, metadata: { ...m.metadata, status: 'done' } }
               : m
           ));
         }
+      })
+      .on('postgres_changes', {
+        event: 'UPDATE', schema: 'public', table: 'room_messages',
+        filter: `room_id=eq.${roomId}`,
+      }, payload => {
+        // Also handle direct status updates on existing messages
+        const updated = payload.new as RoomMessage;
+        setMessages(prev => prev.map(m => m.id === updated.id ? { ...m, metadata: updated.metadata } : m));
       })
       .subscribe();
     return () => { supabase.removeChannel(ch); };
