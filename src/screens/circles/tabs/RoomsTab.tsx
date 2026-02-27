@@ -1395,82 +1395,91 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         .update({ current_task: `[Room] ${taskPrompt.trim().slice(0, 120)}`, status: 'building' })
         .eq('id', selectedAgent.id);
 
-      // 3. Route through the user's own OpenClaw agent connection
+      // 3. Route through the user's own OpenClaw agent via /tools/invoke → sessions_spawn
       if (taskId) {
         const conn = agentConnections.find((c: any) => c.status === 'connected') || agentConnections[0];
         if (conn?.endpoint && conn?.token) {
-          // Build the task message with file context
           const fullPrompt = [
             taskPrompt.trim(),
             targetName ? `\nTarget file: ${targetName}` : '',
             fileContent ? `\n\n--- FILE: ${targetName} ---\n${fileContent}${fileContent.length >= 12000 ? '\n...[truncated]' : ''}\n---` : '',
-            '\nRespond with your analysis/changes. If you modify the file, include the full updated code in a fenced code block.',
+            `\n\nIMPORTANT: You are working inside a Room task. Post your complete response in markdown. Do NOT use tools or try to write files.`,
           ].join('');
 
-          // Call the user's OpenClaw agent via chat completions
-          fetch(`${conn.endpoint}/v1/chat/completions`, {
+          const agentRef = { id: selectedAgent.id, name: selectedAgent.name };
+          fetch(`${conn.endpoint}/tools/invoke`, {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${conn.token}`,
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              model: `openclaw:main`,
-              messages: [{ role: 'user', content: fullPrompt }],
+              tool: 'sessions_spawn',
+              args: { task: fullPrompt, mode: 'run', runTimeoutSeconds: 120, model: 'anthropic/claude-haiku-4-5' },
             }),
           }).then(async (res) => {
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
-            const reply = data.choices?.[0]?.message?.content || 'Task completed — no output returned.';
+            if (!data.ok) throw new Error(data.error?.message || 'sessions_spawn failed');
+            const childKey = data.result?.details?.childSessionKey;
+            if (!childKey) throw new Error('No child session key returned');
 
-            // Post the agent's response to room_messages
+            // Poll for the sub-agent's response
+            const pollResult = async (): Promise<string> => {
+              for (let i = 0; i < 30; i++) {
+                await new Promise(r => setTimeout(r, 4000));
+                try {
+                  const hRes = await fetch(`${conn.endpoint}/tools/invoke`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${conn.token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tool: 'sessions_history', args: { sessionKey: childKey, limit: 5, includeTools: false } }),
+                  });
+                  if (!hRes.ok) continue;
+                  const hData = await hRes.json();
+                  if (!hData.ok) continue;
+                  const msgs = hData.result?.details?.messages;
+                  if (Array.isArray(msgs)) {
+                    const ast = msgs.filter((m: any) => m.role === 'assistant').pop();
+                    if (ast) {
+                      const txt = typeof ast.content === 'string' ? ast.content : ast.content?.[0]?.text || '';
+                      if (txt) return txt;
+                    }
+                  }
+                } catch {}
+              }
+              return 'Task timed out waiting for agent response.';
+            };
+            const reply = await pollResult();
+
             await supabase.from('room_messages').insert({
-              room_id: roomId,
-              agent_name: selectedAgent.name,
-              content: reply,
+              room_id: roomId, agent_name: agentRef.name, content: reply,
               message_type: 'agent_output',
               metadata: { task_reply: true, task_id: taskId, status: 'done' },
             });
-
-            // Mark original task as done
             await supabase.from('room_messages')
-              .update({ metadata: { task: true, agent_id: selectedAgent.id, target_file: targetName, prompt: taskPrompt.trim(), status: 'done' } })
+              .update({ metadata: { task: true, agent_id: agentRef.id, target_file: targetName, prompt: taskPrompt.trim(), status: 'done' } })
               .eq('id', taskId);
-
-            // Reset agent status
             await supabase.from('circle_office_agents')
-              .update({ status: 'idle', current_task: null })
-              .eq('id', selectedAgent.id);
-
-            // Log usage
-            await supabase.from('room_usage').insert({
-              room_id: roomId, user_id: user?.id || null,
-              agent_name: selectedAgent.name, event_type: 'agent_task',
-              metadata: { task_id: taskId, file: targetName },
-            });
+              .update({ status: 'idle', current_task: null }).eq('id', agentRef.id);
           }).catch(async (err) => {
             console.error('Agent task execution failed:', err);
-            // Post error message
+            const agentRef = { id: selectedAgent.id, name: selectedAgent.name };
             await supabase.from('room_messages').insert({
-              room_id: roomId,
-              agent_name: 'System',
+              room_id: roomId, agent_name: 'System',
               content: `⚠️ Task failed: ${err.message}\n\nMake sure your agent is connected in the Office tab.`,
               message_type: 'system',
               metadata: { task_reply: true, task_id: taskId, error: true },
             });
-            // Mark as error
             await supabase.from('room_messages')
-              .update({ metadata: { task: true, agent_id: selectedAgent.id, target_file: targetName, prompt: taskPrompt.trim(), status: 'error' } })
+              .update({ metadata: { task: true, agent_id: agentRef.id, target_file: targetName, prompt: taskPrompt.trim(), status: 'error' } })
               .eq('id', taskId);
             await supabase.from('circle_office_agents')
-              .update({ status: 'idle', current_task: null })
-              .eq('id', selectedAgent.id);
+              .update({ status: 'idle', current_task: null }).eq('id', agentRef.id);
           });
         } else {
-          // No agent connection — mark as error immediately
+          // No agent connection
           await supabase.from('room_messages').insert({
-            room_id: roomId,
-            agent_name: 'System',
+            room_id: roomId, agent_name: 'System',
             content: '⚠️ No agent connection found. Go to the **Office** tab and connect your agent first.',
             message_type: 'system',
             metadata: { task_reply: true, task_id: taskId, error: true },
