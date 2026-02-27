@@ -602,6 +602,19 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
       .order('folder').order('name');
     if (data) {
       setFiles(data);
+      // Sync open tabs with latest file content from DB (e.g. after agent writes)
+      setOpenTabs(prev => prev.map(tab => {
+        const updated = data.find((f: any) => f.id === tab.id);
+        if (updated && updated.content !== tab.content) {
+          // Only update if user hasn't made local edits
+          setEditingContent(ec => {
+            if (ec[tab.id] !== undefined && ec[tab.id] !== tab.content) return ec; // user has edits, don't overwrite
+            const n = { ...ec }; delete n[tab.id]; return n;
+          });
+          return { ...tab, content: updated.content, size_bytes: updated.size_bytes, updated_at: updated.updated_at };
+        }
+        return tab;
+      }));
       // Seed initial tab from legacy content if no files yet
       if (data.length === 0 && room.content) {
         const seed: RoomFile = {
@@ -1451,10 +1464,22 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             };
             const reply = await pollResult();
 
+            // Extract code from the response and write it to the target file
+            if (targetName && reply !== 'Task timed out waiting for agent response.') {
+              const codeMatch = reply.match(/```(?:\w+)?\n([\s\S]+?)```/);
+              if (codeMatch) {
+                const newCode = codeMatch[1].trim();
+                await supabase.from('room_files')
+                  .update({ content: newCode, size_bytes: newCode.length, updated_at: new Date().toISOString() })
+                  .eq('room_id', roomId)
+                  .eq('name', targetName);
+              }
+            }
+
             await supabase.from('room_messages').insert({
               room_id: roomId, agent_name: agentRef.name, content: reply,
               message_type: 'agent_output',
-              metadata: { task_reply: true, task_id: taskId, status: 'done' },
+              metadata: { task_reply: true, task_id: taskId, status: 'done', file_updated: !!targetName },
             });
             await supabase.from('room_messages')
               .update({ metadata: { task: true, agent_id: agentRef.id, target_file: targetName, prompt: taskPrompt.trim(), status: 'done' } })
