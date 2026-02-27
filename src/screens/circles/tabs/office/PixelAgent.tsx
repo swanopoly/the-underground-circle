@@ -12,15 +12,61 @@ interface Props {
   selected: boolean;
   scale?: number;
   showThoughts?: boolean; // Enable thought bubbles
+  dancing?: boolean; // Badge celebration dance
 }
 
-export default function PixelAgent({ agent, appearance, onPress, selected, scale = 1, showThoughts = false }: Props) {
+export default function PixelAgent({ agent, appearance, onPress, selected, scale = 1, showThoughts = false, dancing = false }: Props) {
   const a = appearance || { ...DEFAULT_APPEARANCE, shirtColor: agent.color, hairColor: agent.color };
   const bobAnim = useRef(new Animated.Value(0)).current;
   const glowAnim = useRef(new Animated.Value(0.3)).current;
+  const danceX = useRef(new Animated.Value(0)).current;
+  const danceY = useRef(new Animated.Value(0)).current;
+  const danceRotate = useRef(new Animated.Value(0)).current;
+  const danceScale = useRef(new Animated.Value(1)).current;
   const [currentThought, setCurrentThought] = useState<ThoughtData | null>(null);
   const lastCost = useRef(agent.costToday);
   const lastStatus = useRef(agent.status);
+
+  // Dance animation — triggered by badge earn
+  useEffect(() => {
+    if (!dancing) {
+      danceX.setValue(0);
+      danceY.setValue(0);
+      danceRotate.setValue(0);
+      danceScale.setValue(1);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.parallel([
+          Animated.timing(danceX, { toValue: -8, duration: 120, useNativeDriver: true }),
+          Animated.timing(danceY, { toValue: -10, duration: 120, useNativeDriver: true }),
+          Animated.timing(danceRotate, { toValue: -15, duration: 120, useNativeDriver: true }),
+          Animated.timing(danceScale, { toValue: 1.15, duration: 120, useNativeDriver: true }),
+        ]),
+        Animated.parallel([
+          Animated.timing(danceX, { toValue: 8, duration: 120, useNativeDriver: true }),
+          Animated.timing(danceY, { toValue: -4, duration: 120, useNativeDriver: true }),
+          Animated.timing(danceRotate, { toValue: 15, duration: 120, useNativeDriver: true }),
+          Animated.timing(danceScale, { toValue: 1.2, duration: 120, useNativeDriver: true }),
+        ]),
+        Animated.parallel([
+          Animated.timing(danceX, { toValue: -6, duration: 100, useNativeDriver: true }),
+          Animated.timing(danceY, { toValue: -12, duration: 100, useNativeDriver: true }),
+          Animated.timing(danceRotate, { toValue: -10, duration: 100, useNativeDriver: true }),
+          Animated.timing(danceScale, { toValue: 1.1, duration: 100, useNativeDriver: true }),
+        ]),
+        Animated.parallel([
+          Animated.timing(danceX, { toValue: 0, duration: 150, useNativeDriver: true }),
+          Animated.timing(danceY, { toValue: 0, duration: 150, useNativeDriver: true }),
+          Animated.timing(danceRotate, { toValue: 0, duration: 150, useNativeDriver: true }),
+          Animated.timing(danceScale, { toValue: 1, duration: 150, useNativeDriver: true }),
+        ]),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [dancing]);
 
   useEffect(() => {
     if (agent.status === 'active' || agent.status === 'idle') {
@@ -98,7 +144,14 @@ export default function PixelAgent({ agent, appearance, onPress, selected, scale
 
   return (
     <Pressable onPress={onPress} style={Platform.OS === 'web' ? { cursor: 'pointer' } as any : undefined}>
-      <Animated.View style={[styles.container, { transform: [{ translateY: bobAnim }] }]}>
+      <Animated.View style={[styles.container, {
+          transform: [
+            { translateX: danceX },
+            { translateY: Animated.add(bobAnim, danceY) },
+            { rotate: danceRotate.interpolate({ inputRange: [-360, 360], outputRange: ['-360deg', '360deg'] }) },
+            { scale: danceScale },
+          ],
+        }]}>
         {/* Thought bubble */}
         {showThoughts && currentThought && (
           <ThoughtBubble

@@ -84,6 +84,10 @@ import {
 } from '../../../lib/agentInvocation';
 import { supabase } from '../../../lib/supabase';
 import AgentSetupWizard from '../../../components/AgentSetupWizard';
+import BadgeCelebration from '../../../components/BadgeCelebration';
+import RewardsPanel from '../../../components/RewardsPanel';
+import { useAgentPointsTracker } from '../../../services/rewardService';
+import { Badge } from '../../../lib/badges';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -111,7 +115,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [showCustomize, setShowCustomize] = useState(false);
   const [showByoa, setShowByoa] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
+  const [showRewards, setShowRewards] = useState(false);
+  const [celebrationBadge, setCelebrationBadge] = useState<Badge | null>(null);
+  const [dancingAgentId, setDancingAgentId] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | undefined>();
   const pendingApprovals = useAgentApprovals(circleId);
+
+  // Load user ID for rewards
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data: { user } }) => setUserId(user?.id));
+  }, []);
+
+
   const [appearances, setAppearances] = useState<Record<string, AgentAppearance>>({});
   const [editMode, setEditMode] = useState(false);
   const [placingType, setPlacingType] = useState<string | null>(null);
@@ -642,6 +657,21 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // Use enriched agents if available (has cached costs/tokens), fallback to fresh agents
   const displayAgents = enrichedAgents.length > 0 ? enrichedAgents : allAgents;
 
+  // ─── Reward tracking — award points as agent turns accumulate ──────────
+  const _primaryAgent = displayAgents[0];
+  useAgentPointsTracker(
+    userId,
+    _primaryAgent?.turns ?? _primaryAgent?.messagesProcessed ?? 0,
+    _primaryAgent?.model ?? 'unknown',
+    (newBadges) => {
+      if (newBadges.length > 0) {
+        setCelebrationBadge(newBadges[0]);
+        setDancingAgentId('all');
+        setTimeout(() => setDancingAgentId(null), 5000);
+      }
+    },
+  );
+
   // Filter agents for current floor — but if none are assigned yet, show all on current floor
   const floorFilteredAgents = displayAgents.filter(a => currentFloor?.agentIds?.includes(a.id));
   const agents = floorFilteredAgents.length > 0 ? floorFilteredAgents : displayAgents;
@@ -1050,6 +1080,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               <Text style={styles.reconnectBtnText}>🔌</Text>
             </Pressable>
           )}
+          <Pressable onPress={() => setShowRewards(true)} style={[styles.iconBtn,
+            Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+            <Text style={styles.iconBtnText}>🏆</Text>
+          </Pressable>
           <Pressable onPress={() => setShowCustomize(true)} style={[styles.iconBtn,
             Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
             <Text style={styles.iconBtnText}>{'⚙️'}</Text>
@@ -1494,7 +1528,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                             appearance={appearances[agent.id]}
                             onPress={() => handleAgentPress(agent)}
                             selected={selectedAgent?.id === agent.id}
-                            showThoughts={!editMode} // Show thoughts when not in edit mode
+                            showThoughts={!editMode}
+                            dancing={dancingAgentId === 'all' || dancingAgentId === agent.id}
                           />
                         </View>
                       );
@@ -1733,6 +1768,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/* Rewards Panel Modal */}
+      <Modal visible={showRewards} animationType="slide" presentationStyle="pageSheet">
+        <RewardsPanel onClose={() => setShowRewards(false)} />
+      </Modal>
+
+      {/* Badge celebration overlay — rendered outside Modal so it covers everything */}
+      <BadgeCelebration
+        badge={celebrationBadge}
+        onDismiss={() => setCelebrationBadge(null)}
+      />
 
       {/* BYOA Panel Modal */}
       <Modal visible={showByoa} animationType="slide" presentationStyle="pageSheet">
