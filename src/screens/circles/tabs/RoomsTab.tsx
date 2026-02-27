@@ -1380,6 +1380,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           status: 'pending',
         },
       });
+      // Update agent's current_task so it's visible in the Office
+      await supabase.from('circle_office_agents')
+        .update({ current_task: `[Room: ${roomId.slice(0,8)}] ${taskPrompt.trim().slice(0, 120)}`, status: 'building' })
+        .eq('id', selectedAgent.id);
+
       await supabase.from('room_usage').insert({
         room_id: roomId, user_id: user?.id || null,
         agent_name: selectedAgent.name, event_type: 'agent_task',
@@ -1388,6 +1393,27 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       setTaskPrompt(''); setSelectedFile(''); setSelectedAgent(null); setShowAssign(false);
     } finally { setAssigning(false); }
   };
+
+  // Subscribe to task status updates (when agent posts a reply, mark task done)
+  useEffect(() => {
+    const ch = supabase.channel(`task_status_${roomId}`)
+      .on('postgres_changes', {
+        event: 'INSERT', schema: 'public', table: 'room_messages',
+        filter: `room_id=eq.${roomId}`,
+      }, payload => {
+        const msg = payload.new as RoomMessage;
+        // If agent posted a non-task reply, look for pending tasks to mark done
+        if (msg.message_type === 'agent_output' && !msg.metadata?.task) {
+          setMessages(prev => prev.map(m =>
+            m.metadata?.task && m.metadata?.status === 'pending' && m.agent_name === msg.agent_name
+              ? { ...m, metadata: { ...m.metadata, status: 'done' } }
+              : m
+          ));
+        }
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [roomId]);
 
   const STATUS_COLOR: Record<string, string> = { active: '#22c55e', idle: '#f59e0b', error: '#ef4444', offline: '#6b7280' };
 
@@ -1559,10 +1585,22 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor }: { msg: Roo
             <Text style={{color:'#a5b4fc',fontSize:9,fontWeight:'800',letterSpacing:0.5}}>TASK</Text>
           </View>}
           {targetFile && <Text style={{color:'#a5b4fc',fontSize:10,fontFamily:MONO}}>→ {targetFile}</Text>}
-          {status && <Text style={{color:status==='pending'?'#f59e0b':status==='done'?'#22c55e':'#ef4444',fontSize:9,fontWeight:'700',marginLeft:'auto' as any}}>{status.toUpperCase()}</Text>}
+          {status && (
+            <Text style={{
+              color: status==='pending' ? '#f59e0b' : status==='done' ? '#22c55e' : '#ef4444',
+              fontSize: 9, fontWeight: '800', marginLeft: 'auto' as any,
+            }}>
+              {status === 'pending' ? '⏳ PENDING' : status === 'done' ? '✓ DONE' : '✗ ERROR'}
+            </Text>
+          )}
           <Text style={{color:'#444',fontSize:10}}>{time}</Text>
         </View>
         <Text style={{color:'#ccc',fontSize:12,lineHeight:18}}>{isTask ? msg.metadata?.prompt || msg.content : msg.content}</Text>
+        {isTask && msg.metadata?.status === 'pending' && (
+          <Text style={{color:'#555',fontSize:10,marginTop:4,fontStyle:'italic'}}>
+            → Agent has been notified. Check the Office tab to see it pick up the task.
+          </Text>
+        )}
       </View>
     );
   }
@@ -2068,7 +2106,7 @@ const cvSt = StyleSheet.create({
   stickyText: {
     color: '#1a1a1a', fontSize: 13, lineHeight: 20, flex: 1,
     textAlignVertical: 'top', minHeight: 90,
-    ...(Platform.OS === 'web' ? { outline: 'none', resize: 'none', background: 'transparent', border: 'none' } as any : {}),
+    ...(Platform.OS === 'web' ? { outlineWidth: 0, outlineStyle: 'none', resize: 'none', backgroundColor: 'transparent', borderWidth: 0 } as any : {}),
   },
   dragHandle: {
     position: 'absolute', bottom: 4, right: 6,
