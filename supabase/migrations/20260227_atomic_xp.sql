@@ -62,9 +62,9 @@ DECLARE
   v_title  text;
 BEGIN
   -- Atomic upsert
-  INSERT INTO user_xp (id, total_xp, level, title, updated_at)
+  INSERT INTO user_xp (user_id, total_xp, level, title, updated_at)
   VALUES (p_user_id, p_amount, 1, 'Recruit', now())
-  ON CONFLICT (id) DO UPDATE
+  ON CONFLICT (user_id) DO UPDATE
     SET total_xp   = user_xp.total_xp + p_amount,
         updated_at = now();
 
@@ -73,7 +73,7 @@ BEGIN
   VALUES (p_user_id, p_amount, p_event_type, p_metadata);
 
   -- Recalculate level & title
-  SELECT ux.total_xp INTO v_total FROM user_xp ux WHERE ux.id = p_user_id;
+  SELECT ux.total_xp INTO v_total FROM user_xp ux WHERE ux.user_id = p_user_id;
   v_level := LEAST(FLOOR(SQRT(v_total::float / 50))::int + 1, 100);
   v_title := CASE
     WHEN v_level >= 50 THEN 'Underground King'
@@ -87,7 +87,7 @@ BEGIN
     ELSE 'Recruit'
   END;
 
-  UPDATE user_xp SET level = v_level, title = v_title WHERE id = p_user_id;
+  UPDATE user_xp SET level = v_level, title = v_title WHERE user_id = p_user_id;
 
   RETURN QUERY SELECT v_total, v_level;
 END;
@@ -105,9 +105,9 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
 BEGIN
-  INSERT INTO user_xp (id, total_xp, grind_karma, level, title, updated_at)
+  INSERT INTO user_xp (user_id, total_xp, grind_karma, level, title, updated_at)
   VALUES (NEW.user_id, 0, NEW.lifetime_points, 1, 'Recruit', now())
-  ON CONFLICT (id) DO UPDATE
+  ON CONFLICT (user_id) DO UPDATE
     SET grind_karma = NEW.lifetime_points,
         updated_at  = now();
   RETURN NEW;

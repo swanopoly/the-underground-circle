@@ -1355,7 +1355,7 @@ function EnhancedPromptCard({ label, onPress, accentColor, delay }: {
           <div style={{
             position: 'absolute',
             inset: 0,
-            background: `linear-gradient(135deg, ${accentColor}20, transparent)`,
+            backgroundImage: `linear-gradient(135deg, ${accentColor}20, transparent)`,
             borderRadius: 12,
             pointerEvents: 'none',
           }} />
@@ -2290,7 +2290,7 @@ const styles = StyleSheet.create({
   emptyContainer: { padding: 20, maxWidth: 860, alignSelf: 'center', width: '100%' },
   heroSection: { alignItems: 'center', paddingTop: 40, paddingBottom: 20 },
   heroSectionWeb: Platform.OS === 'web' ? {
-    background: 'radial-gradient(circle at center, rgba(99, 102, 241, 0.1), transparent 70%)',
+    backgroundImage: 'radial-gradient(circle at center, rgba(99, 102, 241, 0.1), transparent 70%)',
   } as any : {},
   heroBotAvatar: {
     width: 80,
@@ -2302,7 +2302,10 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#6366f1',
     ...(Platform.OS === 'web' ? {
-      animation: 'float 3s ease-in-out infinite',
+      animationName: 'float',
+      animationDuration: '3s',
+      animationTimingFunction: 'ease-in-out',
+      animationIterationCount: 'infinite',
     } : {}),
   } as any,
   heroBotEmoji: { fontSize: 36 },
@@ -2316,7 +2319,9 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     borderWidth: 1,
     ...(Platform.OS === 'web' ? {
-      animation: 'pulse 2s infinite',
+      animationName: 'pulse',
+      animationDuration: '2s',
+      animationIterationCount: 'infinite',
     } : {}),
   } as any,
   activityText: { color: '#888', fontSize: 12, fontWeight: '600' },

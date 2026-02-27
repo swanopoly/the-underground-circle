@@ -733,7 +733,7 @@ const styles = StyleSheet.create({
   xpBarFill: {
     height: '100%', borderRadius: 4,
     backgroundColor: '#6366f1',
-    ...(Platform.OS === 'web' ? { background: 'linear-gradient(90deg, #6366f1, #a855f7)' } as any : {}),
+    ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(90deg, #6366f1, #a855f7)' } as any : {}),
   },
   xpTotal: { color: '#555', fontSize: 10, letterSpacing: 2, fontWeight: '700', marginTop: 8, textAlign: 'center' },
 

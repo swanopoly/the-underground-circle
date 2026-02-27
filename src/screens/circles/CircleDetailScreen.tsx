@@ -582,11 +582,11 @@ const styles = StyleSheet.create({
   },
   tabFadeLeft: {
     left: 28,
-    ...(Platform.OS === 'web' ? { background: 'linear-gradient(to right, #0a0a0a, transparent)' } as any : {}),
+    ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(to right, #0a0a0a, transparent)' } as any : {}),
   },
   tabFadeRight: {
     right: 28,
-    ...(Platform.OS === 'web' ? { background: 'linear-gradient(to left, #0a0a0a, transparent)' } as any : {}),
+    ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(to left, #0a0a0a, transparent)' } as any : {}),
   },
 
   // Tab pill style (replaces old underline tabs and hamburger menu)
