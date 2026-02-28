@@ -32,7 +32,6 @@ const TAB_META: { key: string; label: string; icon: string }[] = [
   { key: 'FEED', label: 'Feed', icon: '📋' },
   { key: 'CHALLENGES', label: 'Challenges', icon: '🏆' },
   { key: 'MEMBERS', label: 'Members', icon: '👥' },
-  { key: 'DIGEST', label: 'Digest', icon: '📊' },
   { key: 'DISCORD', label: 'Discord', icon: '🎮' },
   { key: 'WALLET', label: 'Wallet', icon: '💰' },
   { key: 'PROFILE', label: 'Profile', icon: '👤' },
