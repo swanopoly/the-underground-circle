@@ -17,7 +17,6 @@ import FeedTab from './tabs/FeedTab';
 import MembersTab from './tabs/MembersTab';
 import DiscordTab from './tabs/DiscordTab';
 import ChallengesTab from './tabs/ChallengesTab';
-import DigestTab from './tabs/DigestTab';
 import OfficeTab, { AgentStats } from './tabs/OfficeTab';
 import WalletTab from './tabs/WalletTab';
 import ProfileTab from './tabs/ProfileTab';
@@ -224,11 +223,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
           <MembersTab circleId={circleId} />
         </ErrorBoundary>
       </View>
-      <View style={[styles.tabContent, activeTab !== 'DIGEST' && styles.hiddenTab]}>
-        <ErrorBoundary>
-          <DigestTab circleId={circleId} />
-        </ErrorBoundary>
-      </View>
+
       <View style={[styles.tabContent, activeTab !== 'DISCORD' && styles.hiddenTab]}>
         <ErrorBoundary>
           <DiscordTab circleId={circleId} />
@@ -404,7 +399,7 @@ const styles = StyleSheet.create({
 
   // Header
   header: {
-    paddingTop: Platform.OS === 'web' ? 16 : 56,
+    paddingTop: Platform.OS === 'web' ? 6 : 44,
     borderBottomWidth: 1,
     borderBottomColor: '#1a1a1a',
     width: '100%',
@@ -421,7 +416,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 16,
-    paddingBottom: 10,
+    paddingBottom: 4,
     gap: 10,
   },
 

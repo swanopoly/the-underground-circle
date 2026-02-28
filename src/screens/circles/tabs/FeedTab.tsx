@@ -14,6 +14,7 @@ import { supabase } from '../../../lib/supabase';
 import { showAlert } from '../../../lib/alert';
 import Button from '../../../components/Button';
 import { awardXP, getXPForAction } from '../../../lib/gamification';
+import { generateNudge, getProgressInsight } from '../../../lib/coach';
 
 const PRIORITY_COLORS: any = {
   low: '#555',
@@ -42,6 +43,39 @@ export default function FeedTab({ circleId }: { circleId: string }) {
   const [filter, setFilter] = useState<string>('all');
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [members, setMembers] = useState<any[]>([]);
+
+  // ── Digest state ──────────────────────────────────────────────────────────
+  const [showDigest, setShowDigest] = useState(true);
+  const [digest, setDigest] = useState<{
+    todayCheckIns: any[]; activeMembers: number; tasksCompleted: number;
+    mvp: { name: string; xp: number } | null; streakAtRisk: any[];
+    nudge: string | null; insight: string;
+  } | null>(null);
+
+  const today = new Date().toISOString().split('T')[0];
+
+  const fetchDigest = useCallback(async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    try {
+      const [checkInRes, xpRes, taskRes] = await Promise.all([
+        supabase.from('check_ins').select('user_id, content, created_at, profiles(username, display_name)')
+          .eq('circle_id', circleId).gte('created_at', today + 'T00:00:00').order('created_at', { ascending: false }).limit(20),
+        supabase.from('user_xp').select('user_id, total_xp, profiles(username, display_name)')
+          .eq('circle_id', circleId).order('total_xp', { ascending: false }).limit(10),
+        supabase.from('tasks').select('id').eq('circle_id', circleId).eq('status', 'done').gte('completed_at', today + 'T00:00:00'),
+      ]);
+      const todayCheckIns = checkInRes.data || [];
+      const activeMembers = new Set(todayCheckIns.map((c: any) => c.user_id)).size;
+      const mvpRaw = xpRes.data?.[0];
+      const mvp = mvpRaw ? { name: (mvpRaw.profiles as any)?.display_name || (mvpRaw.profiles as any)?.username || 'Unknown', xp: mvpRaw.total_xp } : null;
+      const nudge = await generateNudge(user.id).catch(() => null);
+      const insight = await getProgressInsight(user.id).catch(() => '');
+      setDigest({ todayCheckIns, activeMembers, tasksCompleted: taskRes.data?.length || 0, mvp, streakAtRisk: [], nudge, insight });
+    } catch {}
+  }, [circleId, today]);
+
+  useEffect(() => { fetchDigest(); }, [fetchDigest]);
 
   const fetchTasks = useCallback(async () => {
     try {
@@ -121,6 +155,69 @@ export default function FeedTab({ circleId }: { circleId: string }) {
 
   return (
     <View style={styles.container}>
+      {/* ── Digest Panel ────────────────────────────────────────────────────── */}
+      <Pressable onPress={() => setShowDigest(p => !p)} style={digestStyles.header}>
+        <Text style={digestStyles.title}>📊 DAILY DIGEST</Text>
+        <Text style={digestStyles.toggle}>{showDigest ? '▲' : '▼'}</Text>
+      </Pressable>
+      {showDigest && (
+        <View style={digestStyles.body}>
+          {digest ? (
+            <View style={digestStyles.grid}>
+              <View style={digestStyles.stat}>
+                <Text style={digestStyles.statNum}>{digest.todayCheckIns.length}</Text>
+                <Text style={digestStyles.statLbl}>Check-ins Today</Text>
+              </View>
+              <View style={digestStyles.divider} />
+              <View style={digestStyles.stat}>
+                <Text style={digestStyles.statNum}>{digest.activeMembers}</Text>
+                <Text style={digestStyles.statLbl}>Active Members</Text>
+              </View>
+              <View style={digestStyles.divider} />
+              <View style={digestStyles.stat}>
+                <Text style={digestStyles.statNum}>{digest.tasksCompleted}</Text>
+                <Text style={digestStyles.statLbl}>Tasks Done Today</Text>
+              </View>
+              {digest.mvp && (<>
+                <View style={digestStyles.divider} />
+                <View style={digestStyles.stat}>
+                  <Text style={[digestStyles.statNum, { color: '#f59e0b' }]}>🏆 {digest.mvp.name}</Text>
+                  <Text style={digestStyles.statLbl}>{digest.mvp.xp.toLocaleString()} XP · MVP</Text>
+                </View>
+              </>)}
+            </View>
+          ) : (
+            <Text style={digestStyles.loading}>Loading digest...</Text>
+          )}
+          {digest?.nudge ? (
+            <View style={digestStyles.nudgeBox}>
+              <Text style={digestStyles.nudgeText}>💡 {digest.nudge}</Text>
+            </View>
+          ) : null}
+          {digest?.insight ? (
+            <View style={digestStyles.insightBox}>
+              <Text style={digestStyles.insightText}>📈 {digest.insight}</Text>
+            </View>
+          ) : null}
+          {digest?.todayCheckIns && digest.todayCheckIns.length > 0 && (
+            <View style={digestStyles.checkinsBox}>
+              <Text style={digestStyles.checkinsTitle}>Today's Check-ins</Text>
+              {digest.todayCheckIns.slice(0, 3).map((c: any, i: number) => (
+                <View key={i} style={digestStyles.checkinRow}>
+                  <Text style={digestStyles.checkinName}>
+                    {(c.profiles as any)?.display_name || (c.profiles as any)?.username || 'Member'}
+                  </Text>
+                  <Text style={digestStyles.checkinContent} numberOfLines={1}>{c.content}</Text>
+                </View>
+              ))}
+              {digest.todayCheckIns.length > 3 && (
+                <Text style={digestStyles.moreText}>+{digest.todayCheckIns.length - 3} more</Text>
+              )}
+            </View>
+          )}
+        </View>
+      )}
+
       {/* Stats Bar */}
       <View style={styles.statsBar}>
         <View style={styles.statItem}>
@@ -430,6 +527,29 @@ function AssignChip({ label, active, onPress }: any) {
     </Pressable>
   );
 }
+
+const digestStyles = StyleSheet.create({
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 8, backgroundColor: '#0d0d12', borderBottomWidth: 1, borderBottomColor: '#1a1a2e' },
+  title: { color: '#6366f1', fontSize: 10, fontWeight: '800', letterSpacing: 2 },
+  toggle: { color: '#444', fontSize: 12 },
+  body: { backgroundColor: '#080810', borderBottomWidth: 1, borderBottomColor: '#1a1a2e', paddingBottom: 10 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 16, paddingTop: 10, gap: 4, alignItems: 'center' },
+  stat: { alignItems: 'center', paddingHorizontal: 12, paddingVertical: 6 },
+  statNum: { color: '#fff', fontSize: 16, fontWeight: '900' },
+  statLbl: { color: '#555', fontSize: 9, letterSpacing: 1, fontWeight: '700', marginTop: 2 },
+  divider: { width: 1, height: 28, backgroundColor: '#1a1a2e' },
+  loading: { color: '#444', fontSize: 11, padding: 12, textAlign: 'center' },
+  nudgeBox: { marginHorizontal: 16, marginTop: 8, backgroundColor: '#6366f110', borderRadius: 8, padding: 10, borderWidth: 1, borderColor: '#6366f130' },
+  nudgeText: { color: '#a5b4fc', fontSize: 12, lineHeight: 18 },
+  insightBox: { marginHorizontal: 16, marginTop: 6, backgroundColor: '#22c55e10', borderRadius: 8, padding: 10, borderWidth: 1, borderColor: '#22c55e30' },
+  insightText: { color: '#86efac', fontSize: 12, lineHeight: 18 },
+  checkinsBox: { marginHorizontal: 16, marginTop: 8 },
+  checkinsTitle: { color: '#444', fontSize: 9, fontWeight: '800', letterSpacing: 2, marginBottom: 6 },
+  checkinRow: { flexDirection: 'row', gap: 8, paddingVertical: 4, borderTopWidth: 1, borderTopColor: '#111' },
+  checkinName: { color: '#888', fontSize: 11, fontWeight: '700', minWidth: 80 },
+  checkinContent: { color: '#555', fontSize: 11, flex: 1 },
+  moreText: { color: '#444', fontSize: 10, marginTop: 4 },
+});
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
