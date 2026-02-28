@@ -1408,148 +1408,23 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         .update({ current_task: `[Room] ${taskPrompt.trim().slice(0, 120)}`, status: 'building' })
         .eq('id', selectedAgent.id);
 
-      // 3. Route through the user's own OpenClaw agent via /tools/invoke → sessions_spawn
+      // 3. Execute task via Supabase Edge Function (server-side, works locally + live)
       if (taskId) {
-        const conn = agentConnections.find((c: any) => c.status === 'connected') || agentConnections[0];
-        if (conn?.endpoint && conn?.token) {
-          const fullPrompt = [
-            taskPrompt.trim(),
-            targetName ? `\nTarget file: ${targetName}` : '',
-            fileContent ? `\n\n--- FILE: ${targetName} ---\n${fileContent}${fileContent.length >= 12000 ? '\n...[truncated]' : ''}\n---` : '',
-            `\n\nIMPORTANT: You are working inside a Room task. Your code output will be written directly to the target file. Put the COMPLETE file content in a single fenced code block with the language tag. Do NOT include explanations outside the code block. Do NOT use tools or try to write files yourself.`,
-          ].join('');
-
-          const agentRef = { id: selectedAgent.id, name: selectedAgent.name };
-          fetch(`${conn.endpoint}/tools/invoke`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${conn.token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              tool: 'sessions_spawn',
-              args: { task: fullPrompt, mode: 'run', runTimeoutSeconds: 120, model: 'anthropic/claude-haiku-4-5' },
-            }),
-          }).then(async (res) => {
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
-            if (!data.ok) throw new Error(data.error?.message || 'sessions_spawn failed');
-            const childKey = data.result?.details?.childSessionKey;
-            if (!childKey) throw new Error('No child session key returned');
-
-            // Poll for the sub-agent's response
-            const pollResult = async (): Promise<string> => {
-              for (let i = 0; i < 30; i++) {
-                await new Promise(r => setTimeout(r, 4000));
-                try {
-                  const hRes = await fetch(`${conn.endpoint}/tools/invoke`, {
-                    method: 'POST',
-                    headers: { 'Authorization': `Bearer ${conn.token}`, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ tool: 'sessions_history', args: { sessionKey: childKey, limit: 5, includeTools: false } }),
-                  });
-                  if (!hRes.ok) continue;
-                  const hData = await hRes.json();
-                  if (!hData.ok) continue;
-                  const msgs = hData.result?.details?.messages;
-                  if (Array.isArray(msgs)) {
-                    const ast = msgs.filter((m: any) => m.role === 'assistant').pop();
-                    if (ast) {
-                      const txt = typeof ast.content === 'string' ? ast.content : ast.content?.[0]?.text || '';
-                      if (txt) return txt;
-                    }
-                  }
-                } catch {}
-              }
-              return 'Task timed out waiting for agent response.';
-            };
-            const reply = await pollResult();
-
-            // Extract code blocks from response and write to room files
-            if (reply !== 'Task timed out waiting for agent response.') {
-              const codeBlockRegex = /```(\w+)?\n([\s\S]+?)```/g;
-              let match;
-              const codeBlocks: { lang: string; code: string }[] = [];
-              while ((match = codeBlockRegex.exec(reply)) !== null) {
-                codeBlocks.push({ lang: match[1] || '', code: match[2].trim() });
-              }
-
-              if (codeBlocks.length > 0 && targetName) {
-                // Primary code block → update target file
-                const primaryCode = codeBlocks[0].code;
-                const lang = codeBlocks[0].lang || 'text';
-
-                // Detect file extension from language
-                const langToExt: Record<string, string> = {
-                  html: '.html', css: '.css', js: '.js', javascript: '.js',
-                  ts: '.ts', typescript: '.ts', tsx: '.tsx', jsx: '.jsx',
-                  json: '.json', python: '.py', py: '.py', sql: '.sql',
-                  md: '.md', markdown: '.md', yaml: '.yaml', yml: '.yaml',
-                  sh: '.sh', bash: '.sh', xml: '.xml', txt: '.txt',
-                };
-
-                // Try to update existing file first
-                const { data: updated } = await supabase.from('room_files')
-                  .update({ content: primaryCode, size_bytes: primaryCode.length, updated_at: new Date().toISOString() })
-                  .eq('room_id', roomId).eq('name', targetName)
-                  .select('id').maybeSingle();
-
-                // If no file was updated (doesn't exist), create it
-                if (!updated) {
-                  const ext = langToExt[lang] || '';
-                  const fileName = targetName.includes('.') ? targetName : targetName + ext;
-                  const { data: { user: u } } = await supabase.auth.getUser();
-                  await supabase.from('room_files').insert({
-                    room_id: roomId,
-                    name: fileName,
-                    folder: '/',
-                    file_type: lang || 'text',
-                    content: primaryCode,
-                    size_bytes: primaryCode.length,
-                    created_by: u?.id || null,
-                  });
-                }
-              }
-            }
-
-            await supabase.from('room_messages').insert({
-              room_id: roomId, agent_name: agentRef.name, content: reply,
-              message_type: 'agent_output',
-              metadata: { task_reply: true, task_id: taskId, status: 'done', file_updated: !!targetName },
-            });
-            await supabase.from('room_messages')
-              .update({ metadata: { task: true, agent_id: agentRef.id, target_file: targetName, prompt: taskPrompt.trim(), status: 'done' } })
-              .eq('id', taskId);
-            await supabase.from('circle_office_agents')
-              .update({ status: 'idle', current_task: null }).eq('id', agentRef.id);
-          }).catch(async (err) => {
-            console.error('Agent task execution failed:', err);
-            const agentRef = { id: selectedAgent.id, name: selectedAgent.name };
-            await supabase.from('room_messages').insert({
-              room_id: roomId, agent_name: 'System',
-              content: `⚠️ Task failed: ${err.message}\n\nMake sure your agent is connected in the Office tab.`,
-              message_type: 'system',
-              metadata: { task_reply: true, task_id: taskId, error: true },
-            });
-            await supabase.from('room_messages')
-              .update({ metadata: { task: true, agent_id: agentRef.id, target_file: targetName, prompt: taskPrompt.trim(), status: 'error' } })
-              .eq('id', taskId);
-            await supabase.from('circle_office_agents')
-              .update({ status: 'idle', current_task: null }).eq('id', agentRef.id);
-          });
-        } else {
-          // No agent connection
-          await supabase.from('room_messages').insert({
-            room_id: roomId, agent_name: 'System',
-            content: '⚠️ No agent connection found. Go to the **Office** tab and connect your agent first.',
-            message_type: 'system',
-            metadata: { task_reply: true, task_id: taskId, error: true },
-          });
-          if (taskId) {
-            await supabase.from('room_messages')
-              .update({ metadata: { task: true, agent_id: selectedAgent.id, target_file: targetName, prompt: taskPrompt.trim(), status: 'error' } })
-              .eq('id', taskId);
-          }
-        }
+        const taskPayload = {
+          taskId,
+          roomId,
+          prompt: taskPrompt.trim(),
+          fileName: targetName,
+          fileContent,
+          agentName: selectedAgent.name,
+          agentId: selectedAgent.id,
+        };
+        supabase.functions.invoke('room-task-executor', { body: taskPayload })
+          .then(({ data, error }) => {
+            if (error) console.error('Edge function error:', error);
+            else console.log('Task executed:', data);
+          })
+          .catch(err => console.error('Task dispatch failed:', err));
       }
 
       setTaskPrompt(''); setSelectedFile(''); setSelectedAgent(null); setShowAssign(false);

@@ -2,14 +2,11 @@
  * room-task-executor — Supabase Edge Function
  *
  * Called by the app when a task is assigned to an agent in a Room.
- * Reads file context, calls Anthropic Claude, posts result to room_messages,
- * optionally updates room_files, and marks the task done.
+ * Reads file context, calls Anthropic Claude Haiku, posts result to room_messages,
+ * creates/updates room_files, and marks the task done.
  *
  * Deploy:  npx supabase functions deploy room-task-executor
  * Secrets: ANTHROPIC_API_KEY (required)
- *
- * Request body:
- *   { taskId, roomId, prompt, fileName?, fileContent?, agentName?, agentId? }
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -19,11 +16,19 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// ─── Anthropic API call ──────────────────────────────────────────────────────
+const LANG_TO_EXT: Record<string, string> = {
+  html: '.html', css: '.css', js: '.js', javascript: '.js',
+  ts: '.ts', typescript: '.ts', tsx: '.tsx', jsx: '.jsx',
+  json: '.json', python: '.py', py: '.py', sql: '.sql',
+  md: '.md', markdown: '.md', yaml: '.yaml', yml: '.yaml',
+  sh: '.sh', bash: '.sh', xml: '.xml', txt: '.txt',
+  rust: '.rs', go: '.go', java: '.java', cpp: '.cpp', c: '.c',
+  ruby: '.rb', php: '.php', swift: '.swift', kotlin: '.kt',
+};
 
 async function callClaude(systemPrompt: string, userMessage: string): Promise<string> {
   const apiKey = Deno.env.get('ANTHROPIC_API_KEY');
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set — add it in Supabase Dashboard → Edge Functions → Secrets');
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -49,60 +54,11 @@ async function callClaude(systemPrompt: string, userMessage: string): Promise<st
   return data.content?.[0]?.text || 'No response generated.';
 }
 
-// ─── Build system prompt for file-aware agent ────────────────────────────────
-
-function buildSystemPrompt(fileName: string | null, fileContent: string | null): string {
-  let prompt = `You are SwanBot 🦢 — an expert coding agent working inside a collaborative Room workspace. You are professional, precise, and thorough.
-
-## Your capabilities:
-- Review, analyze, and improve code files
-- Write new code, refactor existing code
-- Explain technical concepts
-- Debug issues and suggest fixes
-- Generate documentation
-
-## Response format:
-- Be concise but complete
-- Use markdown formatting (code blocks, headers, lists)
-- When modifying code, show the full updated file or the specific changes with context
-- If you suggest file modifications, wrap them in a code block with the language specified
-- Start with a brief summary of what you did, then show the work`;
-
-  if (fileName && fileContent) {
-    prompt += `\n\n## Active File: \`${fileName}\`\n\`\`\`\n${fileContent.slice(0, 12000)}${fileContent.length > 12000 ? '\n...[truncated at 12K chars]' : ''}\n\`\`\``;
-  }
-
-  return prompt;
-}
-
-// ─── Check if response contains file modifications ───────────────────────────
-
-function extractFileUpdate(response: string, originalFileName: string | null): string | null {
-  if (!originalFileName) return null;
-
-  // Look for a fenced code block that looks like the whole file
-  // Heuristic: if response contains a code block that's >50% of the original + mentions "updated" or "modified"
-  const codeBlockMatch = response.match(/```(?:\w+)?\n([\s\S]+?)```/);
-  if (!codeBlockMatch) return null;
-
-  const code = codeBlockMatch[1].trim();
-  // Only consider it a file update if it's substantial and the response indicates a modification
-  const updateKeywords = /\b(updated|modified|refactored|fixed|changed|here(?:'s| is) the (?:updated|new|modified|fixed))\b/i;
-  if (code.length > 100 && updateKeywords.test(response.slice(0, 500))) {
-    return code;
-  }
-
-  return null;
-}
-
-// ─── Main handler ────────────────────────────────────────────────────────────
-
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
 
-  // Health check
   if (req.method === 'GET') {
     return new Response(JSON.stringify({ status: 'ok', service: 'room-task-executor' }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -120,109 +76,82 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Create Supabase client with service role for full DB access
     const supabase = createClient(
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
     );
 
-    // If no file content provided but fileName exists, try to load it from room_files
-    let resolvedContent = fileContent || null;
-    let resolvedFileName = fileName || null;
-    if (!resolvedContent && resolvedFileName) {
-      const { data: fileData } = await supabase
-        .from('room_files')
-        .select('content, name')
-        .eq('room_id', roomId)
-        .eq('name', resolvedFileName)
-        .eq('is_deleted', false)
-        .single();
-      if (fileData) {
-        resolvedContent = fileData.content;
-        resolvedFileName = fileData.name;
-      }
-    }
+    const systemPrompt = [
+      'You are an expert coding agent working inside a collaborative Room workspace.',
+      'Your code output will be written directly to the target file.',
+      'Put the COMPLETE file content in a single fenced code block with the language tag (e.g. ```html).',
+      'Keep explanations minimal — focus on the code.',
+      fileName && fileContent
+        ? `\nCurrent file "${fileName}":\n\`\`\`\n${fileContent.slice(0, 12000)}${fileContent.length > 12000 ? '\n...[truncated]' : ''}\n\`\`\``
+        : '',
+    ].join('\n');
 
-    // Call Claude
-    const systemPrompt = buildSystemPrompt(resolvedFileName, resolvedContent);
     const aiResponse = await callClaude(systemPrompt, prompt);
 
-    // Post the result to room_messages
-    const { error: replyErr } = await supabase.from('room_messages').insert({
-      room_id: roomId,
-      agent_name: agentName || 'SwanBot 🦢',
-      content: aiResponse,
-      message_type: 'agent_output',
-      metadata: { task_reply: true, task_id: taskId, status: 'done' },
-    });
-    if (replyErr) console.error('Failed to post reply:', replyErr);
-
-    // Check if response contains file modifications and apply them
+    const codeMatch = aiResponse.match(/```(\w+)?\n([\s\S]+?)```/);
     let fileUpdated = false;
-    if (resolvedFileName && resolvedContent) {
-      const updatedCode = extractFileUpdate(aiResponse, resolvedFileName);
-      if (updatedCode) {
-        const { error: updateErr } = await supabase
-          .from('room_files')
-          .update({
-            content: updatedCode,
-            size_bytes: updatedCode.length,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('room_id', roomId)
-          .eq('name', resolvedFileName)
-          .eq('is_deleted', false);
 
-        if (!updateErr) {
-          fileUpdated = true;
-          // Log the file write
-          await supabase.from('room_usage').insert({
-            room_id: roomId,
-            agent_name: agentName || 'SwanBot',
-            event_type: 'file_write',
-            metadata: { file: resolvedFileName, task_id: taskId },
-          });
-        }
+    if (codeMatch && fileName) {
+      const lang = codeMatch[1] || '';
+      const code = codeMatch[2].trim();
+
+      // Try update existing file first
+      const { data: updated } = await supabase.from('room_files')
+        .update({ content: code, size_bytes: code.length, updated_at: new Date().toISOString() })
+        .eq('room_id', roomId).eq('name', fileName)
+        .select('id').maybeSingle();
+
+      if (updated) {
+        fileUpdated = true;
+      } else {
+        // Create new file
+        const ext = LANG_TO_EXT[lang] || '';
+        const newName = fileName.includes('.') ? fileName : fileName + ext;
+        const { error: insertErr } = await supabase.from('room_files').insert({
+          room_id: roomId,
+          name: newName,
+          folder: '/',
+          file_type: lang || 'text',
+          content: code,
+          size_bytes: code.length,
+        });
+        if (!insertErr) fileUpdated = true;
+        else console.error('File insert error:', insertErr);
       }
     }
 
-    // Mark original task as done
-    const { data: originalTask } = await supabase
-      .from('room_messages')
-      .select('metadata')
-      .eq('id', taskId)
-      .single();
+    // Post agent response to chat
+    await supabase.from('room_messages').insert({
+      room_id: roomId,
+      agent_name: agentName || 'Agent',
+      content: aiResponse,
+      message_type: 'agent_output',
+      metadata: { task_reply: true, task_id: taskId, status: 'done', file_updated: fileUpdated },
+    });
 
+    // Mark original task done
+    const { data: originalTask } = await supabase.from('room_messages')
+      .select('metadata').eq('id', taskId).single();
     if (originalTask) {
-      await supabase
-        .from('room_messages')
+      await supabase.from('room_messages')
         .update({ metadata: { ...originalTask.metadata, status: 'done' } })
         .eq('id', taskId);
     }
 
-    // Reset agent status to idle
+    // Reset agent status
     if (agentId) {
-      await supabase
-        .from('circle_office_agents')
+      await supabase.from('circle_office_agents')
         .update({ status: 'idle', current_task: null })
         .eq('id', agentId);
     }
 
-    // Log usage
-    await supabase.from('room_usage').insert({
-      room_id: roomId,
-      agent_name: agentName || 'SwanBot',
-      event_type: 'agent_task',
-      metadata: { task_id: taskId, file: resolvedFileName, file_updated: fileUpdated },
-    });
-
     return new Response(
-      JSON.stringify({
-        ok: true,
-        taskId,
-        fileUpdated,
-        responseLength: aiResponse.length,
-      }),
+      JSON.stringify({ ok: true, taskId, fileUpdated, responseLength: aiResponse.length }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
   } catch (err: any) {
