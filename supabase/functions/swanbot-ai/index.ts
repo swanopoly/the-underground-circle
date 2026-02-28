@@ -1,5 +1,5 @@
 // SwanBot AI — Supabase Edge Function
-// Gathers circle context, sends to OpenAI, returns intelligent response
+// Gathers circle context, sends to Claude, returns intelligent response
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
 
@@ -227,38 +227,38 @@ The app has built-in crypto wallets (MetaMask for ETH, Phantom for SOL). Users c
   return prompt;
 }
 
-// ─── Call OpenAI ──────────────────────────────────────────────────────────────
+// ─── Call Claude ──────────────────────────────────────────────────────────────
 
-async function callOpenAI(systemPrompt: string, userMessage: string): Promise<string> {
-  const apiKey = Deno.env.get("OPENAI_API_KEY");
+async function callClaude(systemPrompt: string, userMessage: string): Promise<string> {
+  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
   if (!apiKey) {
-    throw new Error("OPENAI_API_KEY not set");
+    throw new Error("ANTHROPIC_API_KEY not set");
   }
 
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: "gpt-4o-mini",
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 1024,
+      system: systemPrompt,
       messages: [
-        { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
       ],
-      temperature: 0.7,
-      max_tokens: 500,
     }),
   });
 
   if (!response.ok) {
     const err = await response.text();
-    throw new Error(`OpenAI API error: ${response.status} — ${err}`);
+    throw new Error(`Claude API error: ${response.status} — ${err}`);
   }
 
   const data = await response.json();
-  return data.choices?.[0]?.message?.content || "Something went wrong. Try again.";
+  return data.content?.[0]?.text || "Something went wrong. Try again.";
 }
 
 // ─── Main Handler ────────────────────────────────────────────────────────────
@@ -290,8 +290,8 @@ Deno.serve(async (req: Request) => {
     // Build the system prompt with all context
     const systemPrompt = buildSystemPrompt(context);
 
-    // Call OpenAI
-    const aiResponse = await callOpenAI(systemPrompt, message);
+    // Call Claude
+    const aiResponse = await callClaude(systemPrompt, message);
 
     return new Response(
       JSON.stringify({ response: aiResponse }),
