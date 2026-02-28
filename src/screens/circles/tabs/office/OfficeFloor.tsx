@@ -306,10 +306,27 @@ export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorP
     gridLines.push(<View key={`h${i}`} style={[s.gridH, { top: i * GRID_SIZE, backgroundColor: theme.gridColor }]} />);
   }
 
+  const floorRef = React.useRef<any>(null);
+
   const handlePress = (e: any) => {
     if (!onFloorPress) return;
-    const { locationX, locationY } = e.nativeEvent;
-    if (locationX && locationY) {
+    // Web: use getBoundingClientRect for accurate coordinates
+    if (Platform.OS === 'web' && floorRef.current) {
+      const rect = floorRef.current.getBoundingClientRect?.();
+      if (rect) {
+        const clientX = e.nativeEvent?.clientX ?? e.clientX;
+        const clientY = e.nativeEvent?.clientY ?? e.clientY;
+        const rawX = clientX - rect.left;
+        const rawY = clientY - rect.top;
+        const x = Math.round(rawX / GRID_SIZE) * GRID_SIZE;
+        const y = Math.round(rawY / GRID_SIZE) * GRID_SIZE;
+        onFloorPress(x, y);
+        return;
+      }
+    }
+    // Native fallback
+    const { locationX, locationY } = e.nativeEvent || {};
+    if (locationX != null && locationY != null) {
       const x = Math.round(locationX / GRID_SIZE) * GRID_SIZE;
       const y = Math.round(locationY / GRID_SIZE) * GRID_SIZE;
       onFloorPress(x, y);
@@ -317,7 +334,7 @@ export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorP
   };
 
   return (
-    <Pressable onPress={handlePress} style={[s.floor, { backgroundColor: theme.floorColor }]}>
+    <Pressable ref={floorRef} onPress={handlePress} style={[s.floor, { backgroundColor: theme.floorColor }]}>
       {gridLines}
 
       {/* Walls */}
