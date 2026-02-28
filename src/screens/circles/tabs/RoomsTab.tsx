@@ -1613,6 +1613,130 @@ const chatSt = StyleSheet.create({
   agentChipTask: { color: '#888', fontSize: 9, marginTop: 1, fontStyle: 'italic' },
 });
 
+// ─── 3D Agent Thinking Animation ───────────────────────────────────────────
+function AgentThinkingLoader() {
+  const [frame, setFrame] = React.useState(0);
+  React.useEffect(() => {
+    const id = setInterval(() => setFrame(f => f + 1), 80);
+    return () => clearInterval(id);
+  }, []);
+
+  const phrases = [
+    'Analyzing code...',
+    'Thinking deeply...',
+    'Crafting solution...',
+    'Writing code...',
+    'Almost there...',
+  ];
+  const phrase = phrases[Math.floor(frame / 25) % phrases.length];
+
+  // 3D rotating cube built from Unicode blocks
+  const cubeFrames = [
+    ['  ┌──┐  ', '  │▓▓│  ', '  └──┘  '],
+    [' ┌───┐  ', ' │ ▓▓│  ', ' └───┘  '],
+    ['┌────┐  ', '│  ▓▓│  ', '└────┘  '],
+    [' ┌───┐  ', ' │▓▓ │  ', ' └───┘  '],
+    ['  ┌──┐  ', '  │▓▓│  ', '  └──┘  '],
+    ['  ┌───┐ ', '  │▓▓ │ ', '  └───┘ '],
+    ['  ┌────┐', '  │▓▓  │', '  └────┘'],
+    ['  ┌───┐ ', '  │ ▓▓│ ', '  └───┘ '],
+  ];
+  const cubeFrame = cubeFrames[frame % cubeFrames.length];
+
+  // Bouncing dots
+  const dotCount = 5;
+  const dots = Array.from({ length: dotCount }, (_, i) => {
+    const offset = (frame * 3 + i * 40) % 360;
+    const y = Math.sin((offset * Math.PI) / 180) * 6;
+    const scale = 0.6 + Math.cos((offset * Math.PI) / 180) * 0.4;
+    const colors = ['#6366f1', '#8b5cf6', '#a855f7', '#c084fc', '#e879f9'];
+    return { y, scale, color: colors[i] };
+  });
+
+  if (Platform.OS === 'web') {
+    // Inject keyframe styles once
+    React.useEffect(() => {
+      if (document.getElementById('agent-thinking-css')) return;
+      const style = document.createElement('style');
+      style.id = 'agent-thinking-css';
+      style.textContent = `
+        @keyframes agentCubeSpin {
+          0% { transform: perspective(60px) rotateY(0deg) rotateX(10deg); }
+          100% { transform: perspective(60px) rotateY(360deg) rotateX(10deg); }
+        }
+        @keyframes agentPulseGlow {
+          0%, 100% { opacity: 0.4; }
+          50% { opacity: 1; }
+        }
+        @keyframes agentDotBounce {
+          0%, 100% { transform: translateY(0px) scale(0.8); }
+          50% { transform: translateY(-8px) scale(1.2); }
+        }
+        .agent-cube {
+          width: 24px; height: 24px;
+          background: linear-gradient(135deg, #6366f1, #a855f7);
+          border-radius: 4px;
+          animation: agentCubeSpin 2s linear infinite;
+          box-shadow: 0 0 12px rgba(99,102,241,0.5);
+        }
+        .agent-dot {
+          width: 6px; height: 6px; border-radius: 50%;
+          animation: agentDotBounce 1.2s ease-in-out infinite;
+        }
+      `;
+      document.head.appendChild(style);
+    }, []);
+
+    return (
+      <View style={{ marginTop: 8, padding: 12, backgroundColor: '#6366f108', borderRadius: 8, borderWidth: 1, borderColor: '#6366f120' }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+          {/* 3D spinning cube */}
+          <View style={{ width: 24, height: 24 }} {...{ className: 'agent-cube' } as any} />
+
+          {/* Bouncing dots */}
+          <View style={{ flexDirection: 'row', gap: 4, alignItems: 'center' }}>
+            {dots.map((dot, i) => (
+              <View
+                key={i}
+                {...{ className: 'agent-dot' } as any}
+                style={{
+                  width: 6, height: 6, borderRadius: 3,
+                  backgroundColor: dot.color,
+                  animationDelay: `${i * 0.15}s`,
+                } as any}
+              />
+            ))}
+          </View>
+
+          {/* Status text */}
+          <Text style={{ color: '#a5b4fc', fontSize: 11, fontWeight: '600', fontStyle: 'italic' }}>
+            {phrase}
+          </Text>
+        </View>
+
+        {/* Progress bar */}
+        <View style={{ marginTop: 8, height: 3, backgroundColor: '#6366f115', borderRadius: 2, overflow: 'hidden' }}>
+          <View style={{
+            height: 3, borderRadius: 2,
+            backgroundColor: '#6366f1',
+            width: `${Math.min(95, (frame % 120) / 120 * 100)}%` as any,
+          }} />
+        </View>
+      </View>
+    );
+  }
+
+  // Native fallback — ASCII art cube + dots
+  return (
+    <View style={{ marginTop: 8, padding: 10, backgroundColor: '#6366f108', borderRadius: 8, borderWidth: 1, borderColor: '#6366f120' }}>
+      <Text style={{ color: '#6366f1', fontSize: 10, fontFamily: MONO, lineHeight: 12 }}>
+        {cubeFrame.join('\n')}
+      </Text>
+      <Text style={{ color: '#a5b4fc', fontSize: 11, fontWeight: '600', marginTop: 4 }}>{phrase}</Text>
+    </View>
+  );
+}
+
 const MsgBubble = React.memo(function MsgBubble({ msg, accentColor }: { msg: RoomMessage; accentColor: string }) {
   const time = new Date(msg.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
   if (msg.message_type==='edit_event')
@@ -1642,11 +1766,7 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor }: { msg: Roo
           <Text style={{color:'#444',fontSize:10}}>{time}</Text>
         </View>
         <Text style={{color:'#ccc',fontSize:12,lineHeight:18}}>{isTask ? msg.metadata?.prompt || msg.content : msg.content}</Text>
-        {isTask && msg.metadata?.status === 'pending' && (
-          <Text style={{color:'#555',fontSize:10,marginTop:4,fontStyle:'italic'}}>
-            → Running on your connected agent...
-          </Text>
-        )}
+        {isTask && msg.metadata?.status === 'pending' && <AgentThinkingLoader />}
         {isTask && msg.metadata?.status === 'error' && (
           <Text style={{color:'#ef4444',fontSize:10,marginTop:4,fontStyle:'italic'}}>
             → Failed. Check your agent connection in the Office tab.
