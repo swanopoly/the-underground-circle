@@ -429,6 +429,7 @@ export interface FurnitureItem {
   nftImageUrl?: string;
   nftName?: string;
   nftChain?: 'solana' | 'ethereum';
+  imageSource?: 'upload' | 'nft';
 }
 
 export interface FurnitureCatalogEntry {
@@ -468,7 +469,7 @@ export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
   { type: 'safe',        name: 'Safe',           icon: '🔒',  width: 30,  height: 35,  category: 'tech',   description: 'Secure vault' },
   { type: 'clock',       name: 'Wall Clock',     icon: '🕐',  width: 25,  height: 25,  category: 'decor',  description: 'Always be on time' },
   { type: 'window',      name: 'Window',         icon: '🪟',  width: 60,  height: 40,  category: 'decor',  description: 'Let the light in' },
-  { type: 'nft_frame',   name: 'NFT Frame',      icon: '🖼',  width: 80,  height: 80,  category: 'decor',  description: 'Display your NFT' },
+  { type: 'nft_frame',   name: 'Image / NFT',    icon: '🖼',  width: 80,  height: 80,  category: 'decor',  description: 'Upload image or display NFT' },
 ];
 
 // ─── OpenClaw Connection ─────────────────────────────────────────────────────

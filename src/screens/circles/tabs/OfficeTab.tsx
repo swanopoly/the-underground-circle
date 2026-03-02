@@ -186,11 +186,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [floors, setFloors] = useState<OfficeFloor[]>(DEFAULT_FLOORS);
   const [currentFloorId, setCurrentFloorId] = useState<string>('floor_1');
 
-  // ─── NFT picker state ────────────────────────────────────────────────────
+  // ─── Image / NFT picker state ───────────────────────────────────────────
   const [nftPickerVisible, setNftPickerVisible] = useState(false);
   const [nftPickerTargetId, setNftPickerTargetId] = useState<string | null>(null);
   const [userNfts, setUserNfts] = useState<NFT[]>([]);
   const [nftsLoading, setNftsLoading] = useState(false);
+  const [imagePickerTab, setImagePickerTab] = useState<'upload' | 'nft'>('upload');
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // ─── Setup wizard ─────────────────────────────────────────────────────────
   const [showSetupWizard, setShowSetupWizard] = useState(false);
@@ -1017,7 +1019,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     if (item?.type === 'nft_frame' && selectedFurnitureId !== id) {
       setNftPickerTargetId(id);
       setSelectedFurnitureId(id);
-      loadUserNfts();
+      setImagePickerTab('upload');
       setNftPickerVisible(true);
       return;
     }
@@ -1072,12 +1074,74 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             nftImageUrl: nft?.image,
             nftName: nft?.name,
             nftChain: nft?.chain as any,
+            imageSource: nft ? 'nft' as const : undefined,
           } : item
         ),
       } : f
     ));
     setNftPickerVisible(false);
     setNftPickerTargetId(null);
+  };
+
+  // ── Image upload handlers ─────────────────────────────────────────────────
+
+  const resizeImageToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new (window as any).Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const MAX = 200;
+          let w = img.width, h = img.height;
+          if (w > h) { if (w > MAX) { h = h * (MAX / w); w = MAX; } }
+          else { if (h > MAX) { w = w * (MAX / h); h = MAX; } }
+          canvas.width = w;
+          canvas.height = h;
+          canvas.getContext('2d')!.drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL('image/jpeg', 0.8));
+        };
+        img.onerror = reject;
+        img.src = e.target?.result as string;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleImageUpload = (base64: string, name?: string) => {
+    if (!nftPickerTargetId) return;
+    setFloors(prev => prev.map(f =>
+      f.id === currentFloorId ? {
+        ...f,
+        furniture: f.furniture.map(item =>
+          item.id === nftPickerTargetId ? {
+            ...item,
+            nftMint: undefined,
+            nftImageUrl: base64,
+            nftName: name || 'Uploaded Image',
+            nftChain: undefined,
+            imageSource: 'upload' as const,
+          } : item
+        ),
+      } : f
+    ));
+    setNftPickerVisible(false);
+    setNftPickerTargetId(null);
+  };
+
+  const handleFileInputChange = async (event: any) => {
+    const file = event.target?.files?.[0];
+    if (!file) return;
+    if (!file.type?.startsWith('image/')) return;
+    if (file.size > 5 * 1024 * 1024) return;
+    try {
+      const base64 = await resizeImageToBase64(file);
+      handleImageUpload(base64, file.name?.replace(/\.[^/.]+$/, ''));
+    } catch (err) {
+      console.error('Failed to process image:', err);
+    }
+    event.target.value = '';
   };
 
   const handleFurnitureMove = (id: string, x: number, y: number) => {
@@ -2097,51 +2161,99 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         userEmail={userEmail}
       />
 
-      {/* NFT Picker Modal */}
+      {/* Image / NFT Picker Modal */}
       <Modal visible={nftPickerVisible} animationType="fade" transparent>
         <View style={nftStyles.overlay}>
           <View style={nftStyles.card}>
             <View style={nftStyles.header}>
-              <Text style={nftStyles.headerText}>SELECT NFT</Text>
+              <Text style={nftStyles.headerText}>SET IMAGE</Text>
               <Pressable onPress={() => { setNftPickerVisible(false); setNftPickerTargetId(null); }} style={nftStyles.closeBtn}>
                 <Text style={nftStyles.closeText}>✕</Text>
               </Pressable>
             </View>
-            {nftsLoading ? (
-              <View style={nftStyles.emptyState}>
-                <ActivityIndicator color="#6366f1" size="large" />
-                <Text style={nftStyles.emptyText}>Loading NFTs...</Text>
+
+            {/* Tab Switcher */}
+            <View style={imgPickerStyles.tabRow}>
+              <Pressable
+                onPress={() => setImagePickerTab('upload')}
+                style={[imgPickerStyles.tab, imagePickerTab === 'upload' && imgPickerStyles.tabActive, Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}]}
+              >
+                <Text style={[imgPickerStyles.tabText, imagePickerTab === 'upload' && imgPickerStyles.tabTextActive]}>
+                  📁  UPLOAD IMAGE
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => { setImagePickerTab('nft'); loadUserNfts(); }}
+                style={[imgPickerStyles.tab, imagePickerTab === 'nft' && imgPickerStyles.tabActive, Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}]}
+              >
+                <Text style={[imgPickerStyles.tabText, imagePickerTab === 'nft' && imgPickerStyles.tabTextActive]}>
+                  💎  CONNECT NFT
+                </Text>
+              </Pressable>
+            </View>
+
+            {/* Upload Tab */}
+            {imagePickerTab === 'upload' && (
+              <View style={imgPickerStyles.uploadArea}>
+                <Text style={{ fontSize: 40 }}>📤</Text>
+                <Text style={imgPickerStyles.uploadTitle}>Upload an image</Text>
+                <Text style={imgPickerStyles.uploadHint}>JPG, PNG, GIF, or WebP — max 5 MB</Text>
+                <Pressable
+                  onPress={() => {
+                    if (Platform.OS === 'web') {
+                      (fileInputRef.current as any)?.click();
+                    }
+                  }}
+                  style={[imgPickerStyles.uploadBtn, Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}]}
+                >
+                  <Text style={imgPickerStyles.uploadBtnText}>CHOOSE FILE</Text>
+                </Pressable>
               </View>
-            ) : userNfts.length === 0 ? (
-              <View style={nftStyles.emptyState}>
-                <Text style={nftStyles.emptyIcon}>🖼</Text>
-                <Text style={nftStyles.emptyText}>No NFTs found</Text>
-                <Text style={nftStyles.emptyHint}>Connect a wallet with NFTs in the Wallet tab.</Text>
-              </View>
-            ) : (
-              <ScrollView style={nftStyles.grid} contentContainerStyle={nftStyles.gridContent}>
-                {userNfts.map(nft => (
-                  <Pressable key={nft.mint} onPress={() => handleNftSelect(nft)} style={nftStyles.nftCard}>
-                    {nft.image ? (
-                      <Image source={{ uri: nft.image }} style={nftStyles.nftImage} resizeMode="cover" />
-                    ) : (
-                      <View style={[nftStyles.nftImage, { backgroundColor: '#1a1a2e', alignItems: 'center', justifyContent: 'center' }]}>
-                        <Text style={{ fontSize: 24 }}>🖼</Text>
-                      </View>
-                    )}
-                    <Text style={nftStyles.nftName} numberOfLines={1}>{nft.name}</Text>
-                    {nft.collection && <Text style={nftStyles.nftCollection} numberOfLines={1}>{nft.collection}</Text>}
-                  </Pressable>
-                ))}
-              </ScrollView>
             )}
-            {/* Clear NFT from frame button */}
+
+            {/* NFT Tab */}
+            {imagePickerTab === 'nft' && (
+              <>
+                {nftsLoading ? (
+                  <View style={nftStyles.emptyState}>
+                    <ActivityIndicator color="#6366f1" size="large" />
+                    <Text style={nftStyles.emptyText}>Loading NFTs...</Text>
+                  </View>
+                ) : userNfts.length === 0 ? (
+                  <View style={nftStyles.emptyState}>
+                    <Text style={nftStyles.emptyIcon}>🖼</Text>
+                    <Text style={nftStyles.emptyText}>No NFTs found</Text>
+                    <Text style={nftStyles.emptyHint}>Connect a wallet with NFTs in your profile.</Text>
+                  </View>
+                ) : (
+                  <ScrollView style={nftStyles.grid} contentContainerStyle={nftStyles.gridContent}>
+                    {userNfts.map(nft => (
+                      <Pressable key={nft.mint} onPress={() => handleNftSelect(nft)} style={nftStyles.nftCard}>
+                        {nft.image ? (
+                          <Image source={{ uri: nft.image }} style={nftStyles.nftImage} resizeMode="cover" />
+                        ) : (
+                          <View style={[nftStyles.nftImage, { backgroundColor: '#1a1a2e', alignItems: 'center', justifyContent: 'center' }]}>
+                            <Text style={{ fontSize: 24 }}>🖼</Text>
+                          </View>
+                        )}
+                        <Text style={nftStyles.nftName} numberOfLines={1}>{nft.name}</Text>
+                        {nft.collection && <Text style={nftStyles.nftCollection} numberOfLines={1}>{nft.collection}</Text>}
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                )}
+              </>
+            )}
+
+            {/* Remove image/NFT from frame */}
             {nftPickerTargetId && (() => {
               const currentFloor = floors.find(f => f.id === currentFloorId);
               const item = currentFloor?.furniture.find(f => f.id === nftPickerTargetId);
               if (item?.nftImageUrl) return (
                 <Pressable onPress={() => handleNftSelect(null)} style={nftStyles.clearBtn}>
-                  <Text style={nftStyles.clearText}>REMOVE NFT FROM FRAME</Text>
+                  <Text style={nftStyles.clearText}>
+                    {item.imageSource === 'upload' ? 'REMOVE IMAGE FROM FRAME' : 'REMOVE NFT FROM FRAME'}
+                  </Text>
                 </Pressable>
               );
               return null;
@@ -2149,6 +2261,19 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           </View>
         </View>
       </Modal>
+
+      {/* Hidden file input for web image upload */}
+      {Platform.OS === 'web' && (
+        <View style={{ position: 'absolute', width: 0, height: 0, overflow: 'hidden' }}>
+          <input
+            ref={fileInputRef as any}
+            type="file"
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={handleFileInputChange}
+          />
+        </View>
+      )}
     </View>
   );
 }
@@ -2512,6 +2637,19 @@ const nftStyles = StyleSheet.create({
   nftCollection: { color: '#555', fontSize: 7, fontFamily: 'monospace', textAlign: 'center' },
   clearBtn: { margin: 12, padding: 10, backgroundColor: '#1a1a2e', borderRadius: 8, alignItems: 'center' },
   clearText: { color: '#ef4444', fontSize: 10, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
+});
+
+const imgPickerStyles = StyleSheet.create({
+  tabRow: { flexDirection: 'row', borderBottomWidth: 1, borderColor: '#1a1a2e' },
+  tab: { flex: 1, paddingVertical: 10, alignItems: 'center', backgroundColor: '#0a0a10' },
+  tabActive: { backgroundColor: '#0d0d14', borderBottomWidth: 2, borderBottomColor: '#6366f1' },
+  tabText: { color: '#555', fontSize: 10, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
+  tabTextActive: { color: '#eee' },
+  uploadArea: { padding: 40, alignItems: 'center', gap: 12 },
+  uploadTitle: { color: '#ccc', fontSize: 14, fontFamily: 'monospace', fontWeight: '700' },
+  uploadHint: { color: '#555', fontSize: 10, fontFamily: 'monospace', textAlign: 'center' },
+  uploadBtn: { marginTop: 8, paddingHorizontal: 24, paddingVertical: 10, backgroundColor: '#6366f1', borderRadius: 8 },
+  uploadBtnText: { color: '#fff', fontSize: 11, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
 });
 
 const styles = StyleSheet.create({
