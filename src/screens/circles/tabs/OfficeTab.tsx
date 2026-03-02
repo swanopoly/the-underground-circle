@@ -98,6 +98,7 @@ import { Badge, getNextBadge } from '../../../lib/badges';
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
 const STORAGE_KEY_FLOORS = '@office_floors';
+const STORAGE_KEY_FLOORS_TS = '@office_floors_updated_at';
 const STORAGE_KEY_CURRENT_FLOOR = '@office_current_floor';
 const STORAGE_KEY_APPEARANCES = '@office_appearances';
 const STORAGE_KEY_WHITEBOARD_NOTES = '@office_whiteboard_notes';
@@ -613,18 +614,20 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         }
       } catch {}
 
-      // Load floors — localStorage + Supabase merge (remote wins)
+      // Load floors — localStorage + Supabase merge (newest wins by timestamp)
       let localFloors: OfficeFloor[] = [];
       let localCurrentFloorId = '';
+      let localUpdatedAt = 0;
       try {
         const floorsRaw = await storage.getItem(STORAGE_KEY_FLOORS);
         if (floorsRaw) {
           const loadedFloors = JSON.parse(floorsRaw) as OfficeFloor[];
           if (loadedFloors.length > 0) {
             localFloors = loadedFloors;
-            setFloors(loadedFloors);
           }
         }
+        const tsRaw = await storage.getItem(STORAGE_KEY_FLOORS_TS);
+        if (tsRaw) localUpdatedAt = parseInt(tsRaw, 10) || 0;
       } catch {}
 
       // Load current floor
@@ -632,12 +635,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         const currentFloorRaw = await storage.getItem(STORAGE_KEY_CURRENT_FLOOR);
         if (currentFloorRaw) {
           localCurrentFloorId = currentFloorRaw;
-          setCurrentFloorId(currentFloorRaw);
         }
       } catch {}
 
-      // Try merging floors from Supabase (remote wins)
+      // Try loading from Supabase — compare timestamps, newest wins
       // Column may not exist yet — detect and disable future attempts
+      let bestFloors = localFloors;
+      let bestFloorId = localCurrentFloorId;
       try {
         const { data: { user: floorUser } } = await supabase.auth.getUser();
         if (floorUser && _profileHasOfficeLayout) {
@@ -645,14 +649,31 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           if (layoutErr) {
             _profileHasOfficeLayout = false;
           } else {
-            const remote = layoutData?.office_layout as { floors?: OfficeFloor[]; currentFloorId?: string } | null;
+            const remote = layoutData?.office_layout as { floors?: OfficeFloor[]; currentFloorId?: string; updatedAt?: number } | null;
             if (remote?.floors && remote.floors.length > 0) {
-              setFloors(remote.floors);
-              if (remote.currentFloorId) setCurrentFloorId(remote.currentFloorId);
+              const remoteUpdatedAt = remote.updatedAt || 0;
+              // Use remote only if it has a strictly newer timestamp
+              // If timestamps match or are both missing, prefer whichever has more furniture
+              let useRemote = false;
+              if (remoteUpdatedAt > localUpdatedAt) {
+                useRemote = true;
+              } else if (remoteUpdatedAt === localUpdatedAt) {
+                const localItems = localFloors.reduce((n, f) => n + (f.furniture?.length || 0), 0);
+                const remoteItems = remote.floors.reduce((n, f) => n + (f.furniture?.length || 0), 0);
+                if (remoteItems > localItems) useRemote = true;
+              }
+              if (useRemote) {
+                bestFloors = remote.floors;
+                bestFloorId = remote.currentFloorId || localCurrentFloorId;
+              }
             }
           }
         }
       } catch {}
+
+      // Apply the winning data
+      if (bestFloors.length > 0) setFloors(bestFloors);
+      if (bestFloorId) setCurrentFloorId(bestFloorId);
 
       // Floors are now loaded — enable persistence useEffect
       floorsInitializedRef.current = true;
@@ -746,16 +767,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   // ─── Floor management (must be defined before useEffects that use it) ──────
 
-  // Auto-persist floors to localStorage whenever they change (skip initial default)
+  // Auto-persist floors to localStorage + Supabase whenever they change
   useEffect(() => {
     if (!floorsInitializedRef.current) return; // skip first render with defaults
+    const now = Date.now();
     storage.setItem(STORAGE_KEY_FLOORS, JSON.stringify(floors)).catch(() => {});
+    storage.setItem(STORAGE_KEY_FLOORS_TS, now.toString()).catch(() => {});
     // Async push to Supabase (skip if column doesn't exist)
     if (_profileHasOfficeLayout) {
       supabase.auth.getUser().then(({ data: { user } }) => {
         if (user) {
           supabase.from('profiles').update({
-            office_layout: { floors, currentFloorId }
+            office_layout: { floors, currentFloorId, updatedAt: now }
           }).eq('id', user.id).then(({ error }) => {
             if (error) _profileHasOfficeLayout = false;
           }).catch(() => { _profileHasOfficeLayout = false; });
