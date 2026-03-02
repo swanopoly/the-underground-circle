@@ -398,7 +398,7 @@ const styles = StyleSheet.create({
 
   // Header
   header: {
-    paddingTop: Platform.OS === 'web' ? 6 : 44,
+    paddingTop: Platform.OS === 'web' ? 4 : 44,
     borderBottomWidth: 1,
     borderBottomColor: '#1a1a1a',
     width: '100%',
@@ -414,16 +414,16 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 16,
-    paddingBottom: 4,
-    gap: 10,
+    paddingHorizontal: 10,
+    paddingBottom: 2,
+    gap: 6,
   },
 
   // Back
   backBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     backgroundColor: '#ffffff08',
     justifyContent: 'center',
     alignItems: 'center',
@@ -431,7 +431,7 @@ const styles = StyleSheet.create({
   },
   backText: {
     color: '#888',
-    fontSize: 20,
+    fontSize: 16,
   },
 
   // Circle Identity — centered
@@ -440,23 +440,23 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 10,
+    gap: 6,
   },
   circleName: {
     color: '#fff',
-    fontSize: 17,
+    fontSize: 14,
     fontWeight: '700',
     letterSpacing: 0.5,
     flexShrink: 1,
   },
   typeBadge: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 8,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
     borderWidth: 1,
   },
   typeText: {
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '700',
     letterSpacing: 0.5,
   },
@@ -465,60 +465,61 @@ const styles = StyleSheet.create({
   statsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-evenly',
-    gap: 16,
-    paddingVertical: 14,
-    paddingHorizontal: 24,
-    marginHorizontal: 16,
+    justifyContent: 'center',
+    flexGrow: 1,
+    gap: 10,
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+    marginHorizontal: 10,
     backgroundColor: '#ffffff04',
-    borderRadius: 12,
-    marginBottom: 8,
+    borderRadius: 8,
+    marginBottom: 4,
   },
   stat: {
     alignItems: 'center',
-    gap: 3,
-    minWidth: 50,
+    gap: 2,
+    minWidth: 40,
   },
   statNum: {
     color: '#ccc',
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: '700',
   },
   statLbl: {
     color: '#888',
-    fontSize: 10,
+    fontSize: 9,
     letterSpacing: 0.3,
     textAlign: 'center',
   },
   statDivider: {
     width: 1,
-    height: 28,
+    height: 20,
     backgroundColor: '#ffffff0a',
   },
 
   // Icon Bubble
   iconBubble: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
+    width: 28,
+    height: 28,
+    borderRadius: 8,
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1,
   },
   iconText: {
-    fontSize: 18,
+    fontSize: 14,
   },
   gearBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     backgroundColor: '#ffffff08',
     justifyContent: 'center',
     alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.2s ease' } as any : {}),
   },
   gearText: {
-    fontSize: 16,
+    fontSize: 14,
   },
 
   // Tab Bar wrapper with arrows
@@ -526,6 +527,7 @@ const styles = StyleSheet.create({
     position: 'relative' as any,
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
   },
   tabBarScroll: {
     flex: 1,
@@ -534,23 +536,27 @@ const styles = StyleSheet.create({
   // Tab Bar — desktop
   tabBar: {
     flexDirection: 'row',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    gap: 6,
+    justifyContent: 'center',
+    flexGrow: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    gap: 4,
   },
 
   // Tab Bar — mobile: scrollable with padding
   tabBarMobile: {
     flexDirection: 'row',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    gap: 8,
+    justifyContent: 'center',
+    flexGrow: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    gap: 4,
   },
 
   // Arrow buttons
   tabArrow: {
-    width: 28,
-    height: 36,
+    width: 24,
+    height: 28,
     alignItems: 'center' as any,
     justifyContent: 'center' as any,
     backgroundColor: '#0a0a0a',
@@ -560,7 +566,7 @@ const styles = StyleSheet.create({
   tabArrowLeft: {},
   tabArrowRight: {},
   tabArrowText: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '700',
     color: '#888',
   },
@@ -570,16 +576,16 @@ const styles = StyleSheet.create({
     position: 'absolute' as any,
     top: 0,
     bottom: 0,
-    width: 24,
+    width: 20,
     zIndex: 5,
     pointerEvents: 'none' as any,
   },
   tabFadeLeft: {
-    left: 28,
+    left: 24,
     ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(to right, #0a0a0a, transparent)' } as any : {}),
   },
   tabFadeRight: {
-    right: 28,
+    right: 24,
     ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(to left, #0a0a0a, transparent)' } as any : {}),
   },
 
@@ -588,26 +594,26 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 22,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: 'transparent',
-    minHeight: 44,
-    gap: 6,
+    minHeight: 28,
+    gap: 4,
     ...(Platform.OS === 'web' ? { transition: 'all 0.2s ease', cursor: 'pointer' } as any : {}),
   },
   tabPillMobile: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
   },
   tabPillIcon: {
-    fontSize: 16,
+    fontSize: 13,
   },
   tabPillText: {
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: '600',
-    letterSpacing: 0.5,
+    letterSpacing: 0.3,
   },
 
   // Tab content

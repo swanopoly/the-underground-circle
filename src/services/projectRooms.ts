@@ -117,7 +117,7 @@ export async function joinRoom(params: {
     room_id: params.roomId,
     circle_id: params.circleId,
     agent_session_key: params.agentSessionKey,
-    agent_name: params.agentName ?? 'SwanBot',
+    agent_name: params.agentName ?? 'BlackSwan',
     current_task: params.currentTask,
     status: 'active',
     source: params.source ?? 'system',
@@ -128,9 +128,9 @@ export async function joinRoom(params: {
     roomId: params.roomId,
     circleId: params.circleId,
     agentSessionKey: params.agentSessionKey,
-    agentName: params.agentName ?? 'SwanBot',
+    agentName: params.agentName ?? 'BlackSwan',
     activityType: 'joined',
-    title: `${params.agentName ?? 'SwanBot'} joined the room`,
+    title: `${params.agentName ?? 'BlackSwan'} joined the room`,
     source: params.source,
   });
 }

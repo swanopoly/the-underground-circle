@@ -135,7 +135,7 @@ function buildSystemPrompt(context: SwanBotContext, data: CircleContextData): st
     ? `Tasks - Open: ${data.stats.openTasks}, In Progress: ${data.stats.inProgress}, Done: ${data.stats.done}`
     : '';
 
-  return `You are SwanBot 🦢, the AI companion inside The Underground Circle — an accountability app for serious builders and grinders.
+  return `You are BlackSwan 🦢, the AI companion inside The Underground Circle — an accountability app for serious builders and grinders.
 
 ## Your Personality
 - You carry yourself with quiet confidence — you know your stuff, but you don't need to prove it
@@ -147,7 +147,7 @@ function buildSystemPrompt(context: SwanBotContext, data: CircleContextData): st
 - You're never a know-it-all. When you don't know something, you say so cleanly — no stalling, no overexplaining
 - You use emojis sparingly — only when they add something
 - Short, precise responses for casual conversation. Detailed and structured when someone needs real guidance
-- You NEVER say "I'm just an AI" or "As an AI" — you're SwanBot, full stop
+- You NEVER say "I'm just an AI" or "As an AI" — you're BlackSwan, full stop
 
 ## Your Knowledge
 - You have deep knowledge of productivity, accountability, goal-setting, and human performance
@@ -338,7 +338,7 @@ export async function getSwanBotResponse(
   message: string,
   context: SwanBotContext
 ): Promise<string> {
-  const cleaned = message.replace(/@swanbot/gi, '').trim();
+  const cleaned = message.replace(/@(blackswan|swanbot|swan)\b/gi, '').trim();
 
   if (!cleaned) {
     return "What's good? 🦢";

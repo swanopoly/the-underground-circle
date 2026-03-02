@@ -31,7 +31,7 @@ import StepAwayCard from '../../../components/StepAwayCard';
 import { Proposal, PinnedMessage } from '../../../types';
 
 const REACTIONS_LIST = ['🔥', '💪', '👊', '💯', '⚡', '🎯'];
-const SWANBOT_ID = 'swanbot';
+const BLACKSWAN_ID = 'blackswan';
 
 // ─── Prompt Categories ───────────────────────────────────────────────────────
 
@@ -56,7 +56,7 @@ const PROMPT_CATEGORIES = [
       { label: 'Two Truths & a Lie', desc: 'Guess which is the lie', text: 'two truths' },
       { label: 'Rate My Day', desc: 'Score your day 1-10', text: 'rate my day' },
       { label: 'This or That', desc: 'Quick picks', text: 'this or that' },
-      { label: 'Roast Battle', desc: 'SwanBot roasts everyone 😈', text: 'roast battle' },
+      { label: 'Roast Battle', desc: 'BlackSwan roasts everyone 😈', text: 'roast battle' },
     ],
   },
   {
@@ -344,7 +344,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         .select('user:profiles(id, username, display_name)')
         .eq('circle_id', circleId);
       const m = (data || []).map((d: any) => d.user).filter(Boolean);
-      m.push({ id: SWANBOT_ID, username: 'SwanBot', display_name: 'SwanBot 🦢' });
+      m.push({ id: BLACKSWAN_ID, username: 'BlackSwan', display_name: 'BlackSwan 🦢' });
       setMembers(m);
     } catch (e) { /* circle may not exist yet */ }
 
@@ -363,15 +363,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const loaded: ChatMessage[] = data.map((m: any) => ({
           id: m.id,
           dbId: m.id,
-          content: m.content,
+          content: m.is_bot
+            ? (m.content || '').replace(/^🦢 \*\*(SwanBot|BlackSwan):\*\* /, '').replace(/^👑 \*\*KingClaw:\*\* /, '')
+            : m.content,
           isBot: m.is_bot || false,
           isUser: m.user_id === user?.id && !m.is_bot,
-          userName: m.is_bot ? 'SwanBot 🦢' : (m.user?.display_name || m.user?.username || 'Unknown'),
+          userName: m.is_bot ? 'BlackSwan 🦢' : (m.user?.display_name || m.user?.username || 'Unknown'),
           timestamp: new Date(m.created_at),
           reactions: m.reactions || {},
           replyTo: null,
-          isCheckIn: m.content.toLowerCase().includes('checked in') || m.content.toLowerCase().includes('streak'),
-          isAchievement: m.content.toLowerCase().includes('achievement') || m.content.toLowerCase().includes('unlocked'),
+          isCheckIn: (m.content || '').toLowerCase().includes('checked in') || (m.content || '').toLowerCase().includes('streak'),
+          isAchievement: (m.content || '').toLowerCase().includes('achievement') || (m.content || '').toLowerCase().includes('unlocked'),
         }));
         setMessages(loaded);
       }
@@ -426,12 +428,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const msg: ChatMessage = {
           id: newMsg.id,
           dbId: newMsg.id,
-          content: newMsg.is_bot 
-            ? (newMsg.content || '').replace(/^🦢 \*\*SwanBot:\*\* /, '') 
+          content: newMsg.is_bot
+            ? (newMsg.content || '').replace(/^🦢 \*\*(SwanBot|BlackSwan):\*\* /, '').replace(/^👑 \*\*KingClaw:\*\* /, '')
             : newMsg.content,
           isBot: newMsg.is_bot || false,
           isUser: false,
-          userName: newMsg.is_bot ? 'SwanBot 🦢' : 'Circle Member',
+          userName: newMsg.is_bot ? 'BlackSwan 🦢' : 'Circle Member',
           timestamp: new Date(newMsg.created_at),
           reactions: newMsg.reactions || {},
           replyTo: null,
@@ -567,7 +569,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       content,
       isBot: true,
       isUser: false,
-      userName: 'SwanBot 🦢',
+      userName: 'BlackSwan 🦢',
       timestamp: new Date(),
       reactions: {},
     };
@@ -582,7 +584,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           const { error } = await supabase.from('messages').insert({
             circle_id: circleId,
             user_id: currentUserId,
-            content: `🦢 **SwanBot:** ${content}`,
+            content: `🦢 **BlackSwan:** ${content}`,
             reactions: {},
             is_bot: true,
           });
@@ -783,15 +785,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
 
-    // Only trigger SwanBot if mentioned or if it's a quick prompt command
-    const shouldTriggerBot = 
-      /(@swanbot|@swan\b)/i.test(content) ||
-      QUICK_PROMPTS.some(p => p.text === content) ||
+    // Trigger BlackSwan AI — responds to @blackswan, @swanbot, @swan, or quick prompts
+    const isBotMention = /(@blackswan|@swanbot|@swan\b)/i.test(content);
+    const isQuickPrompt = QUICK_PROMPTS.some(p => p.text === content) ||
       PROMPT_CATEGORIES.some(cat => cat.prompts.some(p => p.text === content));
+    const shouldTriggerBot = isBotMention || isQuickPrompt;
 
     if (shouldTriggerBot) {
-      // Strip the @SwanBot mention from the content for cleaner AI input
-      const cleanContent = content.replace(/@swanbot\s*/gi, '').trim() || content;
+      const cleanContent = content.replace(/@(blackswan|swanbot|swan)\s*/gi, '').trim() || content;
 
       setBotTyping(true);
       try {
@@ -1105,7 +1106,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       <View style={styles.tipsSection}>
         <Text style={styles.sectionLabel}>💡 HOW IT WORKS</Text>
         {[
-          '🦢 Tap the swan button or type @SwanBot to talk to the AI',
+          '🦢 Tap the swan button or type @BlackSwan to talk to the AI',
           '🎮 Play games — trivia, would you rather, hot takes, and more',
           '⚔️ Challenge members — 1v1 duels, speed tasks, dares',
           '🧠 AI knows everything — tasks, streak, check-ins, who\'s slacking',
@@ -1258,7 +1259,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       {botTyping && (
         <View style={[styles.typingBar, { borderColor: accentColor + '20' }]}>
           <View style={[styles.typingDot, { backgroundColor: accentColor }]} />
-          <Text style={styles.typingText}>SwanBot is thinking...</Text>
+          <Text style={styles.typingText}>BlackSwan is thinking...</Text>
           <TypingDots />
         </View>
       )}
@@ -1287,7 +1288,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         onInputChange={handleInputChange}
         onSend={sendMessage}
         onFocusBot={() => {
-          if (!input.includes('@SwanBot')) setInput('@SwanBot ' + input);
+          if (!input.includes('@BlackSwan')) setInput('@BlackSwan ' + input);
           inputRef.current?.focus();
         }}
         inputRef={inputRef}
@@ -1814,10 +1815,10 @@ function EnhancedCryptoPanel({ wallet, sendTo, sendAmount, sendingCrypto, member
       />
 
       {/* Member quick-pick */}
-      {members.filter((m: any) => m.id !== SWANBOT_ID && m.id !== currentUserId).length > 0 && (
+      {members.filter((m: any) => m.id !== BLACKSWAN_ID && m.id !== BLACKSWAN_ID && m.id !== currentUserId).length > 0 && (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.memberPickScroll}>
           <View style={styles.memberPickRow}>
-            {members.filter((m: any) => m.id !== SWANBOT_ID && m.id !== currentUserId).map((m: any) => (
+            {members.filter((m: any) => m.id !== BLACKSWAN_ID && m.id !== BLACKSWAN_ID && m.id !== currentUserId).map((m: any) => (
               <Pressable
                 key={m.id}
                 onPress={() => onSendToChange(m.username)}
@@ -1991,19 +1992,19 @@ function EnhancedMentionPopup({ members, onSelect, accentColor }: any) {
         <Pressable key={m.id} onPress={() => onSelect(m)} style={styles.enhancedMentionItem}>
           <View style={[
             styles.mentionAvatar,
-            m.id === SWANBOT_ID && { backgroundColor: accentColor + '30' },
+            m.id === BLACKSWAN_ID && { backgroundColor: '#a855f730' },
           ]}>
             <Text style={styles.mentionAvatarText}>
-              {m.id === SWANBOT_ID ? '🦢' : (m.display_name || '?').charAt(0).toUpperCase()}
+              {m.id === BLACKSWAN_ID ? '🦢' : (m.display_name || '?').charAt(0).toUpperCase()}
             </Text>
           </View>
           <View style={{ flex: 1 }}>
             <Text style={styles.mentionName}>{m.display_name || m.username}</Text>
             <Text style={styles.mentionHandle}>@{m.username}</Text>
           </View>
-          {m.id === SWANBOT_ID && (
-            <View style={[styles.mentionBotBadge, { backgroundColor: accentColor + '30' }]}>
-              <Text style={[styles.mentionBotBadgeText, { color: accentColor }]}>AI</Text>
+          {m.id === BLACKSWAN_ID && (
+            <View style={[styles.mentionBotBadge, { backgroundColor: '#a855f730' }]}>
+              <Text style={[styles.mentionBotBadgeText, { color: '#a855f7' }]}>AI</Text>
             </View>
           )}
         </Pressable>
@@ -2085,7 +2086,7 @@ function EnhancedInput({ input, onInputChange, onSend, onFocusBot, inputRef, acc
         <TextInput
           ref={inputRef}
           style={styles.enhancedInput}
-          placeholder="Message your circle... @SwanBot to talk to AI"
+          placeholder="Message your circle... @BlackSwan to talk to AI"
           placeholderTextColor="#444"
           value={input}
           onChangeText={onInputChange}

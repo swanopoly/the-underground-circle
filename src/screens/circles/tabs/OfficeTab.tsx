@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator,
+  View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Image,
   useWindowDimensions, Platform, Linking, Modal, TextInput,
 } from 'react-native';
 import OfficeFloorView, { DESK_POSITIONS, FLOOR_W, FLOOR_H } from './office/OfficeFloor';
@@ -10,11 +10,12 @@ import Whiteboard from './office/Whiteboard';
 import AgentPanel from './office/AgentPanel';
 import CustomizePanel, { TelegramConfig } from './office/CustomizePanel';
 import OfficeChat, { OfficeCommand } from './office/OfficeChat';
-import { OfficeAgent, sessionsToAgents } from '../../../lib/officeAgents';
+import { OfficeAgent, DEFAULT_AGENT, sessionsToAgents } from '../../../lib/officeAgents';
 import {
   OFFICE_THEMES, AgentAppearance, FurnitureItem, FURNITURE_CATALOG,
-  OfficeFloor, DEFAULT_FLOORS, createDefaultFloor,
+  OfficeFloor, DEFAULT_FLOORS, createDefaultFloor, OfficeTheme, UC_AGENT_APPEARANCE,
 } from '../../../lib/officeConfig';
+import { useCustomThemes, customThemeToOfficeTheme, CUSTOM_THEME_PREFIX, CustomThemeRecord } from '../../../services/customThemes';
 import { enrichAgentsWithCache, enrichSessionsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
 import { restoreAllAgents, recordAgentActivity, renameAgent as renameAgentIdentity } from '../../../lib/agentIdentity';
 import {
@@ -83,6 +84,8 @@ import {
   invokeAllAgents,
 } from '../../../lib/agentInvocation';
 import { supabase } from '../../../lib/supabase';
+import { fetchNFTs } from '../../../lib/crypto';
+import { NFT } from '../../../types';
 import AgentSetupWizard from '../../../components/AgentSetupWizard';
 import BadgeCelebration from '../../../components/BadgeCelebration';
 import RewardsPanel from '../../../components/RewardsPanel';
@@ -95,6 +98,11 @@ const STORAGE_KEY_FLOORS = '@office_floors';
 const STORAGE_KEY_CURRENT_FLOOR = '@office_current_floor';
 const STORAGE_KEY_APPEARANCES = '@office_appearances';
 const STORAGE_KEY_WHITEBOARD_NOTES = '@office_whiteboard_notes';
+
+// Track whether Supabase profile columns exist (migrations may not be run yet)
+// Once a write fails with 400, stop retrying to avoid console spam
+let _profileHasOfficeLayout = true;
+let _profileHasAgentAppearance = true;
 
 export interface AgentStats {
   agentCount: number;
@@ -121,15 +129,32 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [userId, setUserId] = useState<string | undefined>();
   const pendingApprovals = useAgentApprovals(circleId);
 
+  // Load custom themes from Supabase
+  const { themes: customThemeRecords, refresh: refreshCustomThemes } = useCustomThemes(circleId);
+  const customThemeLookup = React.useMemo(() => {
+    const map: Record<string, OfficeTheme> = {};
+    for (const rec of customThemeRecords) {
+      const resolved = customThemeToOfficeTheme(rec);
+      map[resolved.id] = resolved;
+    }
+    return map;
+  }, [customThemeRecords]);
+
+  const resolveTheme = useCallback((themeId: string): OfficeTheme => {
+    return OFFICE_THEMES[themeId] || customThemeLookup[themeId] || OFFICE_THEMES.underground;
+  }, [customThemeLookup]);
+
   // Load user ID for rewards
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => setUserId(user?.id));
+    supabase.auth.getUser().then(({ data: { user } }) => setUserId(user?.id)).catch(() => {});
   }, []);
 
 
   const [appearances, setAppearances] = useState<Record<string, AgentAppearance>>({});
+  const [connectionsCollapsed, setConnectionsCollapsed] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [placingType, setPlacingType] = useState<string | null>(null);
+  const [selectedFurnitureId, setSelectedFurnitureId] = useState<string | null>(null);
   const [whiteboardNotes, setWhiteboardNotes] = useState<string[]>([]);
   const [chatMinimized, setChatMinimized] = useState(false);
   const [terminalSize, setTerminalSize] = useState<'closed' | 'half' | 'full'>('closed');
@@ -153,6 +178,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // ─── Multi-floor state ──────────────────────────────
   const [floors, setFloors] = useState<OfficeFloor[]>(DEFAULT_FLOORS);
   const [currentFloorId, setCurrentFloorId] = useState<string>('floor_1');
+
+  // ─── NFT picker state ────────────────────────────────────────────────────
+  const [nftPickerVisible, setNftPickerVisible] = useState(false);
+  const [nftPickerTargetId, setNftPickerTargetId] = useState<string | null>(null);
+  const [userNfts, setUserNfts] = useState<NFT[]>([]);
+  const [nftsLoading, setNftsLoading] = useState(false);
 
   // ─── Setup wizard ─────────────────────────────────────────────────────────
   const [showSetupWizard, setShowSetupWizard] = useState(false);
@@ -536,6 +567,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   // ─── Load saved connections on mount ──────────────────────────────
 
+  const floorsInitializedRef = useRef(false);
   const initRef = useRef(false);
   useEffect(() => {
     if (initRef.current) return;
@@ -571,26 +603,75 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         }
       } catch {}
 
-      // Load floors
+      // Load floors — localStorage + Supabase merge (remote wins)
+      let localFloors: OfficeFloor[] = [];
+      let localCurrentFloorId = '';
       try {
         const floorsRaw = await storage.getItem(STORAGE_KEY_FLOORS);
         if (floorsRaw) {
           const loadedFloors = JSON.parse(floorsRaw) as OfficeFloor[];
-          if (loadedFloors.length > 0) setFloors(loadedFloors);
+          if (loadedFloors.length > 0) {
+            localFloors = loadedFloors;
+            setFloors(loadedFloors);
+          }
         }
       } catch {}
 
       // Load current floor
       try {
         const currentFloorRaw = await storage.getItem(STORAGE_KEY_CURRENT_FLOOR);
-        if (currentFloorRaw) setCurrentFloorId(currentFloorRaw);
+        if (currentFloorRaw) {
+          localCurrentFloorId = currentFloorRaw;
+          setCurrentFloorId(currentFloorRaw);
+        }
       } catch {}
 
-      // Load agent appearances
+      // Try merging floors from Supabase (remote wins)
+      // Column may not exist yet — detect and disable future attempts
+      try {
+        const { data: { user: floorUser } } = await supabase.auth.getUser();
+        if (floorUser && _profileHasOfficeLayout) {
+          const { data: layoutData, error: layoutErr } = await supabase.from('profiles').select('office_layout').eq('id', floorUser.id).single();
+          if (layoutErr) {
+            _profileHasOfficeLayout = false;
+          } else {
+            const remote = layoutData?.office_layout as { floors?: OfficeFloor[]; currentFloorId?: string } | null;
+            if (remote?.floors && remote.floors.length > 0) {
+              setFloors(remote.floors);
+              if (remote.currentFloorId) setCurrentFloorId(remote.currentFloorId);
+            }
+          }
+        }
+      } catch {}
+
+      // Floors are now loaded — enable persistence useEffect
+      floorsInitializedRef.current = true;
+
+      // Load agent appearances — Supabase + localStorage merge
+      // Column may not exist yet — detect and disable future attempts
       try {
         const appearancesRaw = await storage.getItem(STORAGE_KEY_APPEARANCES);
-        if (appearancesRaw) setAppearances(JSON.parse(appearancesRaw));
-      } catch {}
+        const local = appearancesRaw ? JSON.parse(appearancesRaw) : {};
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user && _profileHasAgentAppearance) {
+          const { data, error: appErr } = await supabase.from('profiles').select('agent_appearance').eq('id', user.id).single();
+          if (appErr) {
+            _profileHasAgentAppearance = false;
+            if (Object.keys(local).length > 0) setAppearances(local);
+          } else {
+            const remote = data?.agent_appearance || {};
+            const merged = { ...local, ...remote };
+            setAppearances(merged);
+          }
+        } else if (Object.keys(local).length > 0) {
+          setAppearances(local);
+        }
+      } catch {
+        try {
+          const appearancesRaw = await storage.getItem(STORAGE_KEY_APPEARANCES);
+          if (appearancesRaw) setAppearances(JSON.parse(appearancesRaw));
+        } catch {}
+      }
 
       // Load whiteboard notes
       try {
@@ -626,18 +707,41 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   }, []);
 
   // ─── Floor management (must be defined before useEffects that use it) ──────
-  
-  const saveFloors = useCallback((updatedFloors: OfficeFloor[]) => {
-    setFloors(updatedFloors);
-    storage.setItem(STORAGE_KEY_FLOORS, JSON.stringify(updatedFloors)).catch(() => {});
-  }, []);
+
+  // Auto-persist floors to localStorage whenever they change (skip initial default)
+  useEffect(() => {
+    if (!floorsInitializedRef.current) return; // skip first render with defaults
+    storage.setItem(STORAGE_KEY_FLOORS, JSON.stringify(floors)).catch(() => {});
+    // Async push to Supabase (skip if column doesn't exist)
+    if (_profileHasOfficeLayout) {
+      supabase.auth.getUser().then(({ data: { user } }) => {
+        if (user) {
+          supabase.from('profiles').update({
+            office_layout: { floors, currentFloorId }
+          }).eq('id', user.id).then(({ error }) => {
+            if (error) _profileHasOfficeLayout = false;
+          }).catch(() => { _profileHasOfficeLayout = false; });
+        }
+      }).catch(() => {});
+    }
+  }, [floors, currentFloorId]);
 
   const { width: winW } = useWindowDimensions();
   const isDesktop = winW > 900;
 
   // Get current floor data with safety checks (must be before agent filtering)
-  const currentFloor = floors.find(f => f.id === currentFloorId) || floors[0] || DEFAULT_FLOORS[0];
-  const currentTheme = OFFICE_THEMES[currentFloor?.themeId] || OFFICE_THEMES.underground;
+  const matchedFloor = floors.find(f => f.id === currentFloorId);
+  const currentFloor = matchedFloor || floors[0] || DEFAULT_FLOORS[0];
+  const currentTheme = resolveTheme(currentFloor?.themeId || 'underground');
+
+  // Fix stale currentFloorId that doesn't match any floor
+  useEffect(() => {
+    if (!matchedFloor && floors.length > 0) {
+      const correctId = floors[0].id;
+      setCurrentFloorId(correctId);
+      storage.setItem(STORAGE_KEY_CURRENT_FLOOR, correctId).catch(() => {});
+    }
+  }, [matchedFloor, floors]);
 
   // Derive agents from ALL connected sessions
   const connectedConns = connections.filter(c => c.status === 'connected');
@@ -655,7 +759,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const allAgents = rawAgents.map(a => agentNames[a.id] ? { ...a, name: agentNames[a.id] } : a);
 
   // Use enriched agents if available (has cached costs/tokens), fallback to fresh agents
-  const displayAgents = enrichedAgents.length > 0 ? enrichedAgents : allAgents;
+  const userAgents = enrichedAgents.length > 0 ? enrichedAgents : allAgents;
+  // Always include the default UC Agent alongside user agents
+  const displayAgents = [DEFAULT_AGENT, ...userAgents];
+
+  // Resolve appearance — UC Agent has a built-in appearance, user agents use stored appearances
+  const getAppearance = (agent: OfficeAgent) =>
+    agent.id === DEFAULT_AGENT.id ? (appearances[agent.name] || UC_AGENT_APPEARANCE) : appearances[agent.name];
 
   // ─── Reward tracking — award points as agent turns accumulate ──────────
   const { points: userPoints } = useUserRewards(userId);
@@ -681,22 +791,27 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const floorFilteredAgents = displayAgents.filter(a => currentFloor?.agentIds?.includes(a.id));
   const agents = floorFilteredAgents.length > 0 ? floorFilteredAgents : displayAgents;
 
-  // Auto-assign new agents to first floor
+  // Auto-assign new agents to first floor (runs only when agent count changes)
+  const prevAgentCountRef = useRef(0);
   useEffect(() => {
     if (displayAgents.length === 0 || floors.length === 0) return;
-    
+    if (displayAgents.length === prevAgentCountRef.current) return;
+    prevAgentCountRef.current = displayAgents.length;
+
     const allAgentIds = displayAgents.map(a => a.id);
     const assignedIds = new Set(floors.flatMap(f => f.agentIds));
     const unassignedIds = allAgentIds.filter(id => !assignedIds.has(id));
-    
+
     if (unassignedIds.length > 0) {
-      // Assign unassigned agents to current floor
-      const updated = floors.map((f) => 
-        f.id === currentFloorId ? { ...f, agentIds: [...f.agentIds, ...unassignedIds] } : f
-      );
-      saveFloors(updated);
+      setFloors(prev => {
+        const targetFloorId = prev.some(f => f.id === currentFloorId) ? currentFloorId : prev[0].id;
+        return prev.map((f) =>
+          f.id === targetFloorId ? { ...f, agentIds: [...f.agentIds, ...unassignedIds] } : f
+        );
+      });
     }
-  }, [displayAgents.length, floors, saveFloors]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayAgents.length]);
 
   // Update status history when agents change
   useEffect(() => {
@@ -786,10 +901,20 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     }
   }, [enrichedAgents, onAgentStats]);
 
-  // Save appearances when changed
+  // Save appearances when changed — localStorage + Supabase
   useEffect(() => {
     if (Object.keys(appearances).length > 0) {
       storage.setItem(STORAGE_KEY_APPEARANCES, JSON.stringify(appearances)).catch(() => {});
+      // Async push to Supabase (skip if column doesn't exist)
+      if (_profileHasAgentAppearance) {
+        supabase.auth.getUser().then(({ data: { user } }) => {
+          if (user) {
+            supabase.from('profiles').update({ agent_appearance: appearances }).eq('id', user.id).then(({ error }) => {
+              if (error) _profileHasAgentAppearance = false;
+            }).catch(() => { _profileHasAgentAppearance = false; });
+          }
+        }).catch(() => {});
+      }
     }
   }, [appearances]);
 
@@ -832,25 +957,99 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   };
 
   const handleFloorPress = (x: number, y: number) => {
-    if (!editMode || !placingType) return;
+    if (!editMode) return;
+    // If something is selected and user taps floor, deselect
+    if (selectedFurnitureId) { setSelectedFurnitureId(null); return; }
+    if (!placingType) return;
     const newFurniture = { id: `f_${Date.now()}`, type: placingType as any, x, y };
-    const updated = floors.map(f => 
+    setFloors(prev => prev.map(f =>
       f.id === currentFloorId ? { ...f, furniture: [...f.furniture, newFurniture] } : f
-    );
-    saveFloors(updated);
+    ));
     setPlacingType(null);
   };
 
   const handleFurniturePress = (id: string) => {
     if (!editMode) return;
-    const updated = floors.map(f =>
-      f.id === currentFloorId ? { ...f, furniture: f.furniture.filter(item => item.id !== id) } : f
-    );
-    saveFloors(updated);
+    // Check if it's an NFT frame — open picker on first tap
+    const currentFloor = floors.find(f => f.id === currentFloorId);
+    const item = currentFloor?.furniture.find(f => f.id === id);
+    if (item?.type === 'nft_frame' && selectedFurnitureId !== id) {
+      setNftPickerTargetId(id);
+      setSelectedFurnitureId(id);
+      loadUserNfts();
+      setNftPickerVisible(true);
+      return;
+    }
+    if (selectedFurnitureId === id) {
+      // Second tap on selected item = delete it
+      setFloors(prev => prev.map(f =>
+        f.id === currentFloorId ? { ...f, furniture: f.furniture.filter(item => item.id !== id) } : f
+      ));
+      setSelectedFurnitureId(null);
+    } else {
+      // First tap = select it (shows delete button + enables drag)
+      setSelectedFurnitureId(id);
+    }
+  };
+
+  const loadUserNfts = async () => {
+    setNftsLoading(true);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { setNftsLoading(false); return; }
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('wallet_address_eth, wallet_address_sol')
+        .eq('id', user.id)
+        .single();
+      if (!profile) { setNftsLoading(false); return; }
+      const allNfts: NFT[] = [];
+      if (profile.wallet_address_sol) {
+        const solNfts = await fetchNFTs(profile.wallet_address_sol, 'solana');
+        allNfts.push(...solNfts);
+      }
+      if (profile.wallet_address_eth) {
+        const ethNfts = await fetchNFTs(profile.wallet_address_eth, 'ethereum');
+        allNfts.push(...ethNfts);
+      }
+      setUserNfts(allNfts);
+    } catch (err) {
+      console.error('Failed to load NFTs:', err);
+    }
+    setNftsLoading(false);
+  };
+
+  const handleNftSelect = (nft: NFT | null) => {
+    if (!nftPickerTargetId) return;
+    setFloors(prev => prev.map(f =>
+      f.id === currentFloorId ? {
+        ...f,
+        furniture: f.furniture.map(item =>
+          item.id === nftPickerTargetId ? {
+            ...item,
+            nftMint: nft?.mint,
+            nftImageUrl: nft?.image,
+            nftName: nft?.name,
+            nftChain: nft?.chain as any,
+          } : item
+        ),
+      } : f
+    ));
+    setNftPickerVisible(false);
+    setNftPickerTargetId(null);
+  };
+
+  const handleFurnitureMove = (id: string, x: number, y: number) => {
+    setFloors(prev => prev.map(f =>
+      f.id === currentFloorId ? {
+        ...f,
+        furniture: f.furniture.map(item => item.id === id ? { ...item, x, y } : item),
+      } : f
+    ));
   };
 
   const handleCommand = (cmd: OfficeCommand) => {
-    if (cmd.type === 'theme') handleChangeFloorTheme(currentFloorId, cmd.value);
+    if (cmd.type === 'theme') handleChangeFloorTheme(currentFloor.id, cmd.value);
     if (cmd.type === 'info') {
       const agent = agents.find(a => a.name === cmd.query);
       if (agent) setSelectedAgent(agent);
@@ -878,39 +1077,42 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // ─── Floor action handlers ──────────────────────────────
 
   const handleAddFloor = useCallback(() => {
-    const nextNum = floors.length + 1;
-    const newFloor = createDefaultFloor(
-      `floor_${Date.now()}`,
-      `${nextNum}F - New Floor`,
-      'underground',
-      floors.length
-    );
-    saveFloors([...floors, newFloor]);
-  }, [floors, saveFloors]);
+    setFloors(prev => {
+      const nextNum = prev.length + 1;
+      const newFloor = createDefaultFloor(
+        `floor_${Date.now()}`,
+        `${nextNum}F - New Floor`,
+        'underground',
+        prev.length
+      );
+      return [...prev, newFloor];
+    });
+  }, []);
 
   const handleDeleteFloor = useCallback((floorId: string) => {
-    if (floors.length <= 1) return; // Keep at least one floor
-    const updated = floors.filter(f => f.id !== floorId).map((f, i) => ({ ...f, order: i }));
-    saveFloors(updated);
-    if (currentFloorId === floorId) {
-      setCurrentFloorId(updated[0].id);
-      storage.setItem(STORAGE_KEY_CURRENT_FLOOR, updated[0].id).catch(() => {});
-    }
-  }, [floors, currentFloorId, saveFloors]);
+    setFloors(prev => {
+      if (prev.length <= 1) return prev;
+      const updated = prev.filter(f => f.id !== floorId).map((f, i) => ({ ...f, order: i }));
+      if (currentFloorId === floorId) {
+        setCurrentFloorId(updated[0].id);
+        storage.setItem(STORAGE_KEY_CURRENT_FLOOR, updated[0].id).catch(() => {});
+      }
+      return updated;
+    });
+  }, [currentFloorId]);
 
   const handleRenameFloor = useCallback((floorId: string, newName: string) => {
-    const updated = floors.map(f => f.id === floorId ? { ...f, name: newName } : f);
-    saveFloors(updated);
-  }, [floors, saveFloors]);
+    setFloors(prev => prev.map(f => f.id === floorId ? { ...f, name: newName } : f));
+  }, []);
 
   const handleChangeFloorTheme = useCallback((floorId: string, themeId: string) => {
-    const updated = floors.map(f => f.id === floorId ? { ...f, themeId } : f);
-    saveFloors(updated);
-  }, [floors, saveFloors]);
+    setFloors(prev => prev.map(f => f.id === floorId ? { ...f, themeId } : f));
+  }, []);
 
   const handleSwitchFloor = useCallback((floorId: string) => {
     setCurrentFloorId(floorId);
     storage.setItem(STORAGE_KEY_CURRENT_FLOOR, floorId).catch(() => {});
+    // Supabase sync handled by floors persistence useEffect
   }, []);
 
   // ─── Session tagging handlers ──────────────────────────────
@@ -1032,7 +1234,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           </Pressable>
           {viewMode === 'office' && (
             <Pressable
-              onPress={() => { setEditMode(!editMode); setPlacingType(null); }}
+              onPress={() => { setEditMode(!editMode); setPlacingType(null); setSelectedFurnitureId(null); }}
               style={[styles.modeBtn, editMode && styles.modeBtnActive,
                 Platform.OS === 'web' && { cursor: 'pointer' } as any]}
             >
@@ -1043,18 +1245,19 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           )}
           {!isDesktop ? (
             <View style={styles.titleCenterMobile}>
+              <Text style={{ fontSize: 14 }}>🏢</Text>
               {connectedConns.map(c => (
                 <View key={c.id} style={[styles.connMiniDot, { backgroundColor: PROVIDER_META[c.provider].color }]} />
               ))}
               <Text style={styles.titleStatText}>
-                {anyConnected ? `${displayAgents.length} live` : 'OFFICE'}
+                {anyConnected ? `${userAgents.length} live` : 'OFFICE'}
               </Text>
               {telegramConnected && <Text style={styles.tgBadge}>✈️</Text>}
             </View>
           ) : (
             <>
               <View style={styles.titleCenter}>
-                <Text style={styles.titleIcon}>{'🏢'}</Text>
+                <Text style={{ fontSize: 16 }}>🏢</Text>
                 <Text style={styles.titleText}>THE OFFICE</Text>
               </View>
               <View style={styles.titleRight}>
@@ -1071,7 +1274,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                   {connections.length > 0 ? `${connectedCount}/${connections.length} connected` : '0 connected'}
                 </Text>
                 <Text style={styles.titleStatText}>
-                  {displayAgents.length > 0 ? `${displayAgents.length} agents` : ''}
+                  {userAgents.length > 0 ? `${userAgents.length} agents` : ''}
                 </Text>
               </View>
             </>
@@ -1112,7 +1315,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       {viewMode === 'office' && (
         <View style={styles.floorBar}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.floorList}>
-            {floors.sort((a, b) => a.order - b.order).map((floor) => {
+            {[...floors].sort((a, b) => a.order - b.order).map((floor) => {
               const floorAgentCount = displayAgents.filter(a => floor.agentIds?.includes(a.id)).length;
               const isActive = floor.id === currentFloorId;
               return (
@@ -1133,7 +1336,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                         <Text style={styles.floorAgentBadgeText}>{floorAgentCount}</Text>
                       </View>
                     )}
-                    <View style={[styles.floorThemeDot, { backgroundColor: OFFICE_THEMES[floor.themeId]?.accentGlow || '#6366f1' }]} />
+                    <View style={[styles.floorThemeDot, { backgroundColor: resolveTheme(floor.themeId).accentGlow }]} />
                   </Pressable>
                   {/* Delete button — only show in edit mode and when >1 floor */}
                   {editMode && floors.length > 1 && (
@@ -1162,7 +1365,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         <View style={styles.editToolbar}>
           <View style={styles.editToolbarHeader}>
             <Text style={styles.editLabel}>
-              {placingType ? `TAP FLOOR — PLACING: ${placingType.toUpperCase()}` : 'ADD TO OFFICE'}
+              {placingType ? `TAP FLOOR — PLACING: ${placingType.toUpperCase()}` : selectedFurnitureId ? 'DRAG TO MOVE · TAP DELETE TO REMOVE' : 'SELECT ITEM BELOW, TAP TO PLACE · DRAG TO MOVE'}
             </Text>
             <View style={styles.editToolbarActions}>
               {placingType && (
@@ -1172,8 +1375,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               )}
               {currentFloor.furniture.length > 0 && (
                 <Pressable onPress={() => {
-                  const updated = floors.map(f => f.id === currentFloorId ? { ...f, furniture: [] } : f);
-                  saveFloors(updated);
+                  setFloors(prev => prev.map(f => f.id === currentFloorId ? { ...f, furniture: [] } : f));
                 }} style={[styles.editActionBtn, { borderColor: '#ef444455' }]}>
                   <Text style={[styles.editActionBtnText, { color: '#ef4444' }]}>CLEAR ALL</Text>
                 </Pressable>
@@ -1208,10 +1410,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </View>
       )}
 
-      {/* Connections Bar - always visible when connections exist */}
+      {/* Connections Bar - collapsible */}
       {connections.length > 0 && viewMode === 'office' && (
         <View style={styles.connectionsBar}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.connectionsBarInner}>
+          <Pressable onPress={() => setConnectionsCollapsed(!connectionsCollapsed)} style={styles.connectionsToggle}>
+            <Text style={styles.connectionsToggleText}>{connectionsCollapsed ? '▶' : '▼'} {connections.filter(c => c.status === 'connected').length}/{connections.length}</Text>
+          </Pressable>
+          {!connectionsCollapsed && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.connectionsBarInner}>
             {connections.map(conn => {
               const isLocal = conn.endpoint.includes('localhost') || conn.endpoint.includes('127.0.0.1');
               const isProduction = typeof window !== 'undefined' && !window.location.hostname.includes('localhost');
@@ -1250,7 +1455,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             >
               <Text style={styles.connectionAddChipText}>+</Text>
             </Pressable>
-          </ScrollView>
+          </ScrollView>}
         </View>
       )}
 
@@ -1370,7 +1575,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                 </View>
               </Pressable>
             )}
-            {displayAgents.length === 0 ? (
+            {userAgents.length === 0 ? (
               <View style={styles.mobileEmpty}>
                 {(() => {
                   const connectingConns = connections.filter(c => c.status === 'connecting');
@@ -1414,7 +1619,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                   }
                   return (
                     <>
-                      <Text style={styles.mobileEmptyIcon}>🤖</Text>
+                      <Text style={{ fontSize: 48, marginBottom: 8 }}>🤖</Text>
                       <Text style={styles.mobileEmptyTitle}>No agents connected</Text>
                       <Text style={styles.mobileEmptyText}>
                         Connect your AI agent to show up in the circle office
@@ -1489,10 +1694,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                       editMode={editMode}
                       onFloorPress={editMode ? handleFloorPress : undefined}
                       onFurniturePress={editMode ? handleFurniturePress : undefined}
+                      onFurnitureMove={editMode ? handleFurnitureMove : undefined}
+                      selectedFurnitureId={editMode ? selectedFurnitureId : null}
                     />
-                    <Whiteboard editable={editMode} notes={whiteboardNotes} onNotesChange={setWhiteboardNotes} agents={displayAgents} statusHistory={statusHistory} cronJobs={cronJobs} circleId={circleId} />
+                    <Whiteboard editable={editMode} notes={whiteboardNotes} onNotesChange={setWhiteboardNotes} agents={displayAgents} statusHistory={statusHistory} cronJobs={cronJobs} circleId={circleId} connectedCount={connections.filter(c => c.status === 'connected').length} totalConnections={connections.length} />
                     <ServerRack agents={displayAgents} />
-                    {displayAgents.length === 0 && !anyConnected && connections.filter(c => c.status === 'connecting').length === 0 && (
+                    {userAgents.length === 0 && !anyConnected && connections.filter(c => c.status === 'connecting').length === 0 && (
                       <View style={styles.emptyOverlay}>
                         {connections.filter(c => c.status === 'error').length > 0 ? (
                           <>
@@ -1510,7 +1717,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                           </>
                         ) : (
                           <>
-                            <Text style={{ fontSize: 36, marginBottom: 12 }}>🤖</Text>
+                            <Text style={{ fontSize: 56, marginBottom: 8 }}>🤖</Text>
                             <Text style={styles.emptyTitle}>No agents connected</Text>
                             <Text style={styles.emptyText}>Connect your AI agent to show up in the circle office</Text>
                             <Pressable
@@ -1530,7 +1737,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                         <View key={agent.id} style={[styles.agentPosition, { left: pos.x - 2, top: pos.y - 50 }]}>
                           <PixelAgent
                             agent={agent}
-                            appearance={appearances[agent.id]}
+                            appearance={getAppearance(agent)}
+                            environmentType={currentTheme.environmentType}
                             onPress={() => handleAgentPress(agent)}
                             selected={selectedAgent?.id === agent.id}
                             showThoughts={!editMode}
@@ -1698,6 +1906,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           onAddSessionTag={handleAddSessionTag}
           onRemoveSessionTag={handleRemoveSessionTag}
           circleId={circleId}
+          appearances={appearances}
+          onAppearanceChange={(id, a) => setAppearances(prev => ({ ...prev, [id]: a }))}
+          environmentType={currentTheme.environmentType}
         />
       )}
 
@@ -1734,7 +1945,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               style={pmStyles.input}
               value={publishName}
               onChangeText={setPublishName}
-              placeholder="e.g. SwanBot, Claude Code, Codex..."
+              placeholder="e.g. BlackSwan, Claude Code, Codex..."
               placeholderTextColor="#555"
               autoFocus
               autoCapitalize="words"
@@ -1819,7 +2030,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         visible={showCustomize}
         onClose={() => setShowCustomize(false)}
         currentTheme={currentFloor.themeId}
-        onThemeChange={(theme) => handleChangeFloorTheme(currentFloorId, theme)}
+        onThemeChange={(theme) => handleChangeFloorTheme(currentFloor.id, theme)}
         agents={displayAgents}
         appearances={appearances}
         onAppearanceChange={(id, a) => setAppearances(prev => ({ ...prev, [id]: a }))}
@@ -1839,7 +2050,63 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         telegramConnecting={telegramConnecting}
         budgetConfig={budgetConfig}
         onBudgetConfigChange={handleBudgetConfigChange}
+        customThemes={customThemeRecords}
+        onCustomThemesRefresh={refreshCustomThemes}
+        circleId={circleId}
       />
+
+      {/* NFT Picker Modal */}
+      <Modal visible={nftPickerVisible} animationType="fade" transparent>
+        <View style={nftStyles.overlay}>
+          <View style={nftStyles.card}>
+            <View style={nftStyles.header}>
+              <Text style={nftStyles.headerText}>SELECT NFT</Text>
+              <Pressable onPress={() => { setNftPickerVisible(false); setNftPickerTargetId(null); }} style={nftStyles.closeBtn}>
+                <Text style={nftStyles.closeText}>✕</Text>
+              </Pressable>
+            </View>
+            {nftsLoading ? (
+              <View style={nftStyles.emptyState}>
+                <ActivityIndicator color="#6366f1" size="large" />
+                <Text style={nftStyles.emptyText}>Loading NFTs...</Text>
+              </View>
+            ) : userNfts.length === 0 ? (
+              <View style={nftStyles.emptyState}>
+                <Text style={nftStyles.emptyIcon}>🖼</Text>
+                <Text style={nftStyles.emptyText}>No NFTs found</Text>
+                <Text style={nftStyles.emptyHint}>Connect a wallet with NFTs in the Wallet tab.</Text>
+              </View>
+            ) : (
+              <ScrollView style={nftStyles.grid} contentContainerStyle={nftStyles.gridContent}>
+                {userNfts.map(nft => (
+                  <Pressable key={nft.mint} onPress={() => handleNftSelect(nft)} style={nftStyles.nftCard}>
+                    {nft.image ? (
+                      <Image source={{ uri: nft.image }} style={nftStyles.nftImage} resizeMode="cover" />
+                    ) : (
+                      <View style={[nftStyles.nftImage, { backgroundColor: '#1a1a2e', alignItems: 'center', justifyContent: 'center' }]}>
+                        <Text style={{ fontSize: 24 }}>🖼</Text>
+                      </View>
+                    )}
+                    <Text style={nftStyles.nftName} numberOfLines={1}>{nft.name}</Text>
+                    {nft.collection && <Text style={nftStyles.nftCollection} numberOfLines={1}>{nft.collection}</Text>}
+                  </Pressable>
+                ))}
+              </ScrollView>
+            )}
+            {/* Clear NFT from frame button */}
+            {nftPickerTargetId && (() => {
+              const currentFloor = floors.find(f => f.id === currentFloorId);
+              const item = currentFloor?.furniture.find(f => f.id === nftPickerTargetId);
+              if (item?.nftImageUrl) return (
+                <Pressable onPress={() => handleNftSelect(null)} style={nftStyles.clearBtn}>
+                  <Text style={nftStyles.clearText}>REMOVE NFT FROM FRAME</Text>
+                </Pressable>
+              );
+              return null;
+            })()}
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -2184,25 +2451,46 @@ const coStyles = StyleSheet.create({
   publishBtnSub: { color: '#555', fontSize: 12 },
 });
 
+const nftStyles = StyleSheet.create({
+  overlay: { flex: 1, backgroundColor: '#00000088', justifyContent: 'center', alignItems: 'center' },
+  card: { width: 380, maxHeight: 500, backgroundColor: '#0d0d14', borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 16, overflow: 'hidden' },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderColor: '#1a1a2e' },
+  headerText: { color: '#eee', fontSize: 14, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 2 },
+  closeBtn: { padding: 6 },
+  closeText: { color: '#666', fontSize: 16 },
+  emptyState: { padding: 40, alignItems: 'center', gap: 12 },
+  emptyIcon: { fontSize: 40 },
+  emptyText: { color: '#888', fontSize: 14, fontFamily: 'monospace', fontWeight: '700' },
+  emptyHint: { color: '#555', fontSize: 11, fontFamily: 'monospace', textAlign: 'center', lineHeight: 16 },
+  grid: { maxHeight: 380 },
+  gridContent: { flexDirection: 'row', flexWrap: 'wrap', padding: 8, gap: 8 },
+  nftCard: { width: '30%' as any, backgroundColor: '#111', borderRadius: 8, borderWidth: 1, borderColor: '#1a1a2e', overflow: 'hidden', padding: 4, alignItems: 'center' },
+  nftImage: { width: '100%' as any, aspectRatio: 1, borderRadius: 6 },
+  nftName: { color: '#ccc', fontSize: 9, fontFamily: 'monospace', fontWeight: '700', marginTop: 4, textAlign: 'center' },
+  nftCollection: { color: '#555', fontSize: 7, fontFamily: 'monospace', textAlign: 'center' },
+  clearBtn: { margin: 12, padding: 10, backgroundColor: '#1a1a2e', borderRadius: 8, alignItems: 'center' },
+  clearText: { color: '#ef4444', fontSize: 10, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
+});
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#050508' },
   titleBar: {
-    alignItems: 'center', paddingHorizontal: 12, paddingVertical: 8,
+    alignItems: 'center', paddingHorizontal: 8, paddingVertical: 2,
     borderBottomWidth: 1, borderBottomColor: '#1a1a2e',
   },
-  titleInner: { flexDirection: 'row', alignItems: 'center', width: '100%', gap: 8 },
-  titleCenter: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
-  titleCenterMobile: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
-  titleRight: { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  titleIcon: { fontSize: 14 },
-  titleText: { fontSize: 12, fontWeight: '900', color: '#888', fontFamily: 'monospace', letterSpacing: 3 },
-  onlineIndicator: { width: 6, height: 6, borderRadius: 3 },
-  connMiniDot: { width: 5, height: 5, borderRadius: 3 },
-  titleStatText: { fontSize: 13, color: '#888', fontFamily: 'monospace' },
+  titleInner: { flexDirection: 'row', alignItems: 'center', width: '100%', gap: 3 },
+  titleCenter: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
+  titleCenterMobile: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4 },
+  titleRight: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  titleIcon: { fontSize: 12 },
+  titleText: { fontSize: 10, fontWeight: '900', color: '#888', fontFamily: 'monospace', letterSpacing: 2 },
+  onlineIndicator: { width: 5, height: 5, borderRadius: 2.5 },
+  connMiniDot: { width: 4, height: 4, borderRadius: 2 },
+  titleStatText: { fontSize: 10, color: '#888', fontFamily: 'monospace' },
   modeBtn: {
-    paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8,
+    paddingHorizontal: 6, paddingVertical: 4, borderRadius: 6,
     borderWidth: 1, borderColor: '#1a1a2e', backgroundColor: '#0a0a10',
-    minWidth: 44, minHeight: 44, alignItems: 'center' as any, justifyContent: 'center' as any,
+    minWidth: 28, minHeight: 28, alignItems: 'center' as any, justifyContent: 'center' as any,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   modeBtnActive: { borderColor: '#22c55e40', backgroundColor: '#22c55e15' },
@@ -2230,29 +2518,29 @@ const styles = StyleSheet.create({
   },
   tagsActionBtnTextSecondary: { color: '#6366f1' },
   iconBtn: {
-    width: 44, height: 44, borderRadius: 10, backgroundColor: '#111118',
-    borderWidth: 1, borderColor: '#1a1a2e', alignItems: 'center', justifyContent: 'center', marginLeft: 6,
+    width: 30, height: 30, borderRadius: 7, backgroundColor: '#111118',
+    borderWidth: 1, borderColor: '#1a1a2e', alignItems: 'center', justifyContent: 'center', marginLeft: 3,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  iconBtnText: { fontSize: 18 },
+  iconBtnText: { fontSize: 14 },
   reconnectBtn: {
-    width: 44, height: 44, borderRadius: 10, backgroundColor: '#6366f115',
-    borderWidth: 1, borderColor: '#6366f140', alignItems: 'center', justifyContent: 'center', marginLeft: 6,
+    width: 30, height: 30, borderRadius: 7, backgroundColor: '#6366f115',
+    borderWidth: 1, borderColor: '#6366f140', alignItems: 'center', justifyContent: 'center', marginLeft: 3,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  reconnectBtnText: { fontSize: 16 },
-  tgBadge: { fontSize: 10, marginRight: 2 },
+  reconnectBtnText: { fontSize: 13 },
+  tgBadge: { fontSize: 9, marginRight: 1 },
 
   // Floor selector
   floorBar: {
-    paddingHorizontal: 12, paddingVertical: 8,
+    paddingHorizontal: 8, paddingVertical: 2,
     borderBottomWidth: 1, borderBottomColor: '#1a1a2e', backgroundColor: '#08080d',
   },
-  floorList: { gap: 6, flexDirection: 'row', alignItems: 'center' },
+  floorList: { gap: 4, flexDirection: 'row', alignItems: 'center' },
   floorChip: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 12, paddingVertical: 6,
-    borderRadius: 8, borderWidth: 1, borderColor: '#1a1a2e', backgroundColor: '#0a0a10',
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 8, paddingVertical: 3,
+    borderRadius: 6, borderWidth: 1, borderColor: '#1a1a2e', backgroundColor: '#0a0a10',
   },
   floorChipActive: {
     borderColor: '#6366f160', backgroundColor: '#6366f115',
@@ -2291,10 +2579,13 @@ const styles = StyleSheet.create({
 
   // Connections bar
   connectionsBar: {
-    paddingHorizontal: 12, paddingVertical: 6,
+    paddingHorizontal: 12, paddingVertical: 4,
     borderBottomWidth: 1, borderBottomColor: '#1a1a2e', backgroundColor: '#08080d',
+    flexDirection: 'row', alignItems: 'center',
   },
-  connectionsBarInner: { gap: 8, flexDirection: 'row', alignItems: 'center' },
+  connectionsToggle: { paddingRight: 8, paddingVertical: 2 },
+  connectionsToggleText: { fontSize: 9, color: '#666', fontFamily: 'monospace', fontWeight: '600' },
+  connectionsBarInner: { gap: 8, flexDirection: 'row', alignItems: 'center', flex: 1 },
   connectionChip: {
     flexDirection: 'row', alignItems: 'center', gap: 5,
     paddingHorizontal: 10, paddingVertical: 6,

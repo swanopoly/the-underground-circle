@@ -1,3 +1,4 @@
+import './src/lib/animationPatch'; // Must be first — patches Animated.loop for web
 import React, { useState, useEffect, useRef } from 'react';
 import { StatusBar, View, Text, StyleSheet, Animated, Platform } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
@@ -60,13 +61,23 @@ export default function App() {
       ])
     ).start();
 
+    // Hard timeout — never stay on splash for more than 5 seconds
+    const timeout = setTimeout(() => {
+      setNavReady(true);
+      setLoading(false);
+    }, 5000);
+
     loadNavState().then((state) => {
       setInitialNavState(state);
+      setNavReady(true);
+    }).catch(() => {
       setNavReady(true);
     });
 
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
+      setLoading(false);
+    }).catch(() => {
       setLoading(false);
     });
 
@@ -74,7 +85,10 @@ export default function App() {
       setSession(session);
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      subscription.unsubscribe();
+      clearTimeout(timeout);
+    };
   }, []);
 
   if (loading || !navReady) {
@@ -88,10 +102,14 @@ export default function App() {
     );
   }
 
+  // Only use saved nav state if it looks valid (has routes array)
+  const validNavState = initialNavState && typeof initialNavState === 'object' && 'routes' in initialNavState
+    ? initialNavState as any : undefined;
+
   return (
     <ErrorBoundary>
       <NavigationContainer
-        initialState={session ? initialNavState : undefined}
+        initialState={session ? validNavState : undefined}
         onStateChange={(state) => {
           if (state && session) saveNavState(state);
         }}

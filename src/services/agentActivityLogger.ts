@@ -40,7 +40,7 @@ export interface LogActivityParams {
 export async function logActivity(params: LogActivityParams): Promise<void> {
   const { error } = await supabase.from('agent_activity').insert({
     circle_id: params.circle_id,
-    agent_name: params.agent_name ?? 'SwanBot',
+    agent_name: params.agent_name ?? 'BlackSwan',
     source: params.source,
     source_detail: params.source_detail,
     activity_type: params.activity_type,

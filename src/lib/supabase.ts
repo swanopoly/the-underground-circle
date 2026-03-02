@@ -1,4 +1,4 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -28,11 +28,22 @@ if (Platform.OS === 'web') {
   storage = AsyncStorage;
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  auth: {
-    storage,
-    autoRefreshToken: true,
-    persistSession: true,
-    detectSessionInUrl: false,
-  },
-});
+// Deduplicate across HMR reloads — prevents "concurrent storage key" warning
+const _global = globalThis as any;
+if (!_global.__supabaseClient) {
+  _global.__supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+      storage,
+      autoRefreshToken: true,
+      persistSession: true,
+      detectSessionInUrl: false,
+      flowType: 'implicit',
+      // Disable navigator.locks on web — prevents AbortError from GoTrueClient
+      lock: Platform.OS === 'web'
+        ? async (_name: string, _acquireTimeout: number, fn: () => Promise<any>) => await fn()
+        : undefined,
+    },
+  });
+}
+
+export const supabase: SupabaseClient = _global.__supabaseClient;

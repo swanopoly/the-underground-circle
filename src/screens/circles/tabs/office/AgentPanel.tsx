@@ -6,6 +6,13 @@ import { SessionTag } from '../../../../lib/sessionTags';
 import SessionTagInput from '../../../../components/SessionTagInput';
 import AgentKillSwitch from '../../../../components/AgentKillSwitch';
 import { useAgentControl } from '../../../../services/hitlService';
+import PixelAgent from './PixelAgent';
+import {
+  AgentAppearance, DEFAULT_APPEARANCE, EnvironmentType,
+  SKIN_TONES, HAIR_COLORS, SHIRT_COLORS, SHOE_COLORS, EYE_COLORS,
+} from '../../../../lib/officeConfig';
+
+const PANTS_COLORS = ['#2d2d3d', '#1a1a2e', '#3d2b1a', '#1e3a5f', '#2d1b4e', '#1a3d1a'];
 
 interface Props {
   agent: OfficeAgent | null;
@@ -16,6 +23,9 @@ interface Props {
   onAddSessionTag?: (sessionKey: string, tag: SessionTag) => void;
   onRemoveSessionTag?: (sessionKey: string, tagKey: string) => void;
   circleId?: string;
+  appearances?: Record<string, AgentAppearance>;
+  onAppearanceChange?: (id: string, appearance: AgentAppearance) => void;
+  environmentType?: EnvironmentType;
 }
 
 function formatTokens(n: number): string {
@@ -56,10 +66,12 @@ function cacheHitPct(cachedTokens: number, totalInputTokens: number): string {
 export default function AgentPanel({
   agent, onClose, isDesktop, onRenameAgent,
   sessionTags, onAddSessionTag, onRemoveSessionTag, circleId,
+  appearances, onAppearanceChange, environmentType,
 }: Props) {
   const slideAnim = useRef(new Animated.Value(400)).current;
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState('');
+  const [showCustomize, setShowCustomize] = useState(false);
 
   useEffect(() => {
     if (agent) {
@@ -274,6 +286,110 @@ export default function AgentPanel({
           <Text style={styles.noActivity}>No recent activity</Text>
         )}
       </View>
+
+      {/* Customize Agent Appearance */}
+      {onAppearanceChange && (
+        <View style={styles.customizeSection}>
+          <Pressable
+            onPress={() => setShowCustomize(!showCustomize)}
+            style={[styles.customizeToggle, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={styles.customizeToggleText}>
+              {showCustomize ? '▼' : '▶'} CUSTOMIZE AGENT
+            </Text>
+          </Pressable>
+
+          {showCustomize && (() => {
+            const a = appearances?.[agent.name] || { ...DEFAULT_APPEARANCE, shirtColor: agent.color, hairColor: agent.color };
+            const update = (patch: Partial<AgentAppearance>) => {
+              onAppearanceChange(agent.name, { ...a, ...patch });
+            };
+
+            const ColorRow = ({ label, colors, value, onSelect }: { label: string; colors: string[]; value: string; onSelect: (c: string) => void }) => (
+              <View style={styles.custRow}>
+                <Text style={styles.custLabel}>{label}</Text>
+                <View style={styles.custSwatches}>
+                  {colors.map(c => (
+                    <Pressable
+                      key={c}
+                      onPress={() => onSelect(c)}
+                      style={[
+                        styles.custSwatch,
+                        { backgroundColor: c },
+                        value === c && styles.custSwatchActive,
+                        Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                      ]}
+                    />
+                  ))}
+                </View>
+              </View>
+            );
+
+            const OptionRow = ({ label, options, value, onSelect }: { label: string; options: { key: string; label: string }[]; value: string; onSelect: (k: string) => void }) => (
+              <View style={styles.custRow}>
+                <Text style={styles.custLabel}>{label}</Text>
+                <View style={styles.custOptions}>
+                  {options.map(o => (
+                    <Pressable
+                      key={o.key}
+                      onPress={() => onSelect(o.key)}
+                      style={[
+                        styles.custOptionBtn,
+                        value === o.key && styles.custOptionActive,
+                        Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                      ]}
+                    >
+                      <Text style={[styles.custOptionText, value === o.key && styles.custOptionTextActive]}>{o.label}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+            );
+
+            return (
+              <View style={styles.custBody}>
+                {/* Live preview */}
+                <View style={styles.custPreview}>
+                  <PixelAgent
+                    agent={agent}
+                    appearance={a}
+                    environmentType={environmentType}
+                    onPress={() => {}}
+                    selected={false}
+                    scale={1.6}
+                  />
+                </View>
+
+                <ColorRow label="SKIN" colors={SKIN_TONES} value={a.skinTone} onSelect={c => update({ skinTone: c })} />
+                <ColorRow label="HAIR COLOR" colors={HAIR_COLORS} value={a.hairColor} onSelect={c => update({ hairColor: c })} />
+                <OptionRow label="HAIRSTYLE" value={a.hairStyle} onSelect={k => update({ hairStyle: k as any })}
+                  options={['flat', 'spiky', 'mohawk', 'long', 'curly', 'ponytail', 'cap', 'bald'].map(h => ({ key: h, label: h.toUpperCase() }))} />
+                <ColorRow label="EYES" colors={EYE_COLORS} value={a.eyeColor} onSelect={c => update({ eyeColor: c })} />
+                <ColorRow label="SHIRT" colors={SHIRT_COLORS} value={a.shirtColor} onSelect={c => update({ shirtColor: c })} />
+                <ColorRow label="PANTS" colors={PANTS_COLORS} value={a.pantsColor} onSelect={c => update({ pantsColor: c })} />
+                <ColorRow label="SHOES" colors={SHOE_COLORS} value={a.shoeColor} onSelect={c => update({ shoeColor: c })} />
+                <OptionRow label="HAT" value={a.hat} onSelect={k => update({ hat: k as any })}
+                  options={['none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns', 'space_helmet', 'wizard_hat', 'halo', 'antenna'].map(h => ({ key: h, label: h.toUpperCase().replace('_', ' ') }))} />
+                <OptionRow label="EXPRESSION" value={a.expression} onSelect={k => update({ expression: k as any })}
+                  options={['neutral', 'happy', 'focused', 'sleepy', 'cool', 'angry'].map(e => ({ key: e, label: e.toUpperCase() }))} />
+                <OptionRow label="ACCESSORY" value={a.accessory} onSelect={k => update({ accessory: k as any })}
+                  options={['none', 'glasses', 'headphones', 'bowtie', 'scarf', 'hoodie', 'mask', 'monocle', 'eyepatch', 'bandana'].map(x => ({ key: x, label: x.toUpperCase() }))} />
+                <OptionRow label="BACK ITEM" value={a.backItem} onSelect={k => update({ backItem: k as any })}
+                  options={['none', 'cape', 'backpack', 'wings', 'jetpack', 'shield', 'sword', 'quiver'].map(b => ({ key: b, label: b.toUpperCase() }))} />
+                <OptionRow label="FACIAL HAIR" value={a.facialHair} onSelect={k => update({ facialHair: k as any })}
+                  options={['none', 'stubble', 'beard', 'mustache', 'goatee'].map(f => ({ key: f, label: f.toUpperCase() }))} />
+                <OptionRow label="PET" value={a.pet} onSelect={k => update({ pet: k as any })}
+                  options={[{ key: 'none', label: 'NONE' }, { key: 'cat', label: '🐱 CAT' }, { key: 'dog', label: '🐕 DOG' }, { key: 'bird', label: '🐦 BIRD' }, { key: 'robot', label: '🤖 BOT' }, { key: 'dragon', label: '🐉 DRAGON' }, { key: 'alien', label: '👽 ALIEN' }]} />
+                <OptionRow label="AURA" value={a.aura} onSelect={k => update({ aura: k as any })}
+                  options={[{ key: 'none', label: 'NONE' }, { key: 'fire', label: '🔥 FIRE' }, { key: 'ice', label: '🧊 ICE' }, { key: 'electric', label: '⚡ ZAP' }, { key: 'nature', label: '🌿 LEAF' }, { key: 'shadow', label: '🌑 DARK' }, { key: 'rainbow', label: '🌈 RAINBOW' }, { key: 'glitch', label: '📟 GLITCH' }, { key: 'cosmic', label: '✨ COSMIC' }]} />
+                <OptionRow label="HAND ITEM" value={a.handItem || 'none'} onSelect={k => update({ handItem: k as any })}
+                  options={[{ key: 'none', label: 'NONE' }, { key: 'lightsaber', label: '⚔️ SABER' }, { key: 'coffee', label: '☕ COFFEE' }, { key: 'laptop', label: '💻 LAPTOP' }, { key: 'flag', label: '🚩 FLAG' }, { key: 'wand', label: '🪄 WAND' }]} />
+              </View>
+            );
+          })()}
+        </View>
+      )}
+
       {/* Kill switch / controls */}
       {circleId && (
         <AgentKillSwitch
@@ -612,5 +728,89 @@ const styles = StyleSheet.create({
     color: '#444',
     fontFamily: 'monospace',
     letterSpacing: 1.5,
+  },
+  // Customize section
+  customizeSection: {
+    marginTop: 12,
+    borderTopWidth: 1,
+    borderColor: '#1a1a2e',
+    paddingTop: 10,
+  },
+  customizeToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+  },
+  customizeToggleText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#888',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+  },
+  custBody: {
+    gap: 8,
+    paddingTop: 8,
+  },
+  custPreview: {
+    alignItems: 'center',
+    paddingVertical: 8,
+    backgroundColor: '#0a0a12',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1a1a2e',
+    marginBottom: 4,
+  },
+  custRow: {
+    gap: 4,
+  },
+  custLabel: {
+    fontSize: 8,
+    fontWeight: '800',
+    color: '#555',
+    fontFamily: 'monospace',
+    letterSpacing: 1.2,
+  },
+  custSwatches: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 5,
+  },
+  custSwatch: {
+    width: 22,
+    height: 22,
+    borderRadius: 4,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+  },
+  custSwatchActive: {
+    borderColor: '#fff',
+    ...(Platform.OS === 'web' ? { boxShadow: '0 0 6px #ffffff60' } as any : {}),
+  },
+  custOptions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
+  },
+  custOptionBtn: {
+    paddingHorizontal: 7,
+    paddingVertical: 4,
+    borderRadius: 4,
+    backgroundColor: '#111118',
+    borderWidth: 1,
+    borderColor: '#1a1a2e',
+  },
+  custOptionActive: {
+    backgroundColor: '#6366f120',
+    borderColor: '#6366f160',
+  },
+  custOptionText: {
+    fontSize: 7,
+    fontWeight: '700',
+    color: '#555',
+    fontFamily: 'monospace',
+  },
+  custOptionTextActive: {
+    color: '#a5b4fc',
   },
 });

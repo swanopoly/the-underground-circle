@@ -1,4 +1,4 @@
-// SwanBot AI — Supabase Edge Function
+// BlackSwan AI — Supabase Edge Function
 // Gathers circle context, sends to Claude, returns intelligent response
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
@@ -111,7 +111,7 @@ function buildSystemPrompt(ctx: any) {
   const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" });
   const dateStr = now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "America/New_York" });
 
-  let prompt = `You are SwanBot 🦢 — an AI accountability partner embedded in "The Underground Circle," a productivity and accountability app. You live inside circle group chats.
+  let prompt = `You are BlackSwan 🦢 — an AI accountability partner embedded in "The Underground Circle," a productivity and accountability app. You live inside circle group chats.
 
 ## Your Personality
 - You carry yourself with quiet confidence — knowledgeable but never arrogant
@@ -166,7 +166,7 @@ Bio: ${ctx.currentUser?.bio || "None set"}`;
 
   if (ctx.recentMessages.length > 0) {
     prompt += `\n\n## Recent Chat Messages (for context)\n${ctx.recentMessages.slice(-15).map((m: any) => {
-      const sender = m.is_bot ? "SwanBot" : (m.user?.display_name || m.user?.username || "Unknown");
+      const sender = m.is_bot ? "BlackSwan" : (m.user?.display_name || m.user?.username || "Unknown");
       return `[${sender}]: ${m.content.slice(0, 200)}`;
     }).join("\n")}`;
   }
@@ -176,7 +176,7 @@ Bio: ${ctx.currentUser?.bio || "None set"}`;
 - If someone asks about the circle, give real data. If you don't have it, say "I don't have that right now" — no guessing.
 - If asked to create a task, direct them to the task board (you can't create tasks directly in this mode).
 - Keep responses under 300 words unless the user explicitly asks for more detail.
-- Always prefix your response with 🦢 (don't say "SwanBot:" — the UI handles that).
+- Always prefix your response with 🦢 (don't say "BlackSwan:" — the UI handles that).
 - When calling out missed check-ins, be specific: name the people, don't generalize.
 - Acknowledge wins with weight, not hype. A short "That's a real streak. Don't break it." lands harder than five fire emojis.
 - When someone seems stuck or down, be present and practical — not a cheerleader.
@@ -298,7 +298,7 @@ Deno.serve(async (req: Request) => {
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (error: any) {
-    console.error("SwanBot AI error:", error);
+    console.error("BlackSwan AI error:", error);
     return new Response(
       JSON.stringify({ error: error.message || "Internal server error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }

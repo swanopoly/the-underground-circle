@@ -282,7 +282,7 @@ export function getCollaborationHelp(): string {
     `• messages — View message history\n` +
     `\n` +
     `Example: "project create website Build new site"\n` +
-    `         "project assign project_123 @SwanBot"\n` +
-    `         "msg @SwanBot Start working on the homepage"\n` +
+    `         "project assign project_123 @BlackSwan"\n` +
+    `         "msg @BlackSwan Start working on the homepage"\n` +
     `         "msg @all Daily standup in 5 minutes!"`;
 }

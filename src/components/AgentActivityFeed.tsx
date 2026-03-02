@@ -87,7 +87,7 @@ export default function AgentActivityFeed({ circleId, maxHeight = 400 }: Props) 
     return (
       <View style={styles.centered}>
         <Text style={styles.emptyIcon}>🦢</Text>
-        <Text style={styles.emptyText}>SwanBot is standing by...</Text>
+        <Text style={styles.emptyText}>BlackSwan is standing by...</Text>
         <Pressable onPress={refresh} style={styles.refreshBtn}>
           <Text style={styles.refreshText}>Refresh</Text>
         </Pressable>

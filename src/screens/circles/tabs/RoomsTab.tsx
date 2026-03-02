@@ -17,7 +17,7 @@ import {
   Image, Alert,
 } from 'react-native';
 import { supabase } from '../../../lib/supabase';
-
+import { getSwanBotResponse as getAIResponse } from '../../../lib/swanbot';
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface Room {
@@ -1367,10 +1367,39 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   const send = async () => {
     if (!input.trim()) return;
     const { data: { user } } = await supabase.auth.getUser();
+    const content = input.trim();
     await supabase.from('room_messages').insert({
-      room_id: roomId, user_id: user?.id || null, content: input.trim(), message_type: 'chat',
+      room_id: roomId, user_id: user?.id || null, content, message_type: 'chat',
     });
     setInput('');
+
+    // BlackSwan responds to @blackswan or @swanbot mentions in room chat
+    if (/@(blackswan|swanbot|swan)\b/i.test(content)) {
+      const cleanContent = content.replace(/@(blackswan|swanbot|swan)\s*/gi, '').trim() || content;
+      try {
+        const response = await getAIResponse(cleanContent, {
+          userId: user?.id || 'anonymous',
+          circleId,
+        });
+        await supabase.from('room_messages').insert({
+          room_id: roomId,
+          user_id: null,
+          agent_name: 'BlackSwan',
+          content: response,
+          message_type: 'agent_output',
+          metadata: { bot: true, bot_name: 'BlackSwan' },
+        });
+      } catch {
+        await supabase.from('room_messages').insert({
+          room_id: roomId,
+          user_id: null,
+          agent_name: 'BlackSwan',
+          content: 'Something went wrong. Try again.',
+          message_type: 'agent_output',
+          metadata: { bot: true, bot_name: 'BlackSwan' },
+        });
+      }
+    }
   };
 
   const assignToAgent = async () => {
@@ -1690,8 +1719,7 @@ function AgentThinkingLoader() {
     return (
       <View style={{ marginTop: 8, padding: 12, backgroundColor: '#6366f108', borderRadius: 8, borderWidth: 1, borderColor: '#6366f120' }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-          {/* 3D spinning cube */}
-          <View style={{ width: 24, height: 24 }} {...{ className: 'agent-cube' } as any} />
+          <Text style={{ fontSize: 20 }}>🧠</Text>
 
           {/* Bouncing dots */}
           <View style={{ flexDirection: 'row', gap: 4, alignItems: 'center' }}>

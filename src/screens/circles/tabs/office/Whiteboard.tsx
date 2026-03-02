@@ -21,6 +21,8 @@ interface Props {
   statusHistory?: Array<OfficeAgent[]>;
   cronJobs?: CronJob[];
   circleId?: string | null;
+  connectedCount?: number;
+  totalConnections?: number;
 }
 
 const SOURCE_ICONS: Record<string, string> = {
@@ -57,6 +59,7 @@ function formatDate(dateStr: string): string {
 export default function Whiteboard({
   editable, notes = [], onNotesChange,
   agents = [], statusHistory = [], cronJobs = [], circleId,
+  connectedCount = 0, totalConnections = 0,
 }: Props) {
   const [modeIndex, setModeIndex] = useState(0);
   const [editing, setEditing] = useState(false);
@@ -118,7 +121,7 @@ export default function Whiteboard({
             <NotesView notes={notes} noteText={noteText} setNoteText={setNoteText} addNote={addNote} />
           ) : (
             <>
-              {mode.key === 'overview'   && <OverviewView agents={agents} activities={activities} />}
+              {mode.key === 'overview'   && <OverviewView agents={agents} activities={activities} runningTasks={runningTasks} cronJobs={cronJobs} connectedCount={connectedCount} totalConnections={totalConnections} />}
               {mode.key === 'activity'   && <ActivityView agents={agents} statusHistory={statusHistory} activities={activities} />}
               {mode.key === 'ops'        && <OpsView cronJobs={cronJobs} activities={activities} />}
               {mode.key === 'agent_log'  && <AgentLogView activities={activities} runningTasks={runningTasks} />}
@@ -207,9 +210,34 @@ function useRewardState(): RewardState {
   };
 }
 
-// ── SLIDE 1: OVERVIEW (status + metrics + live XP bar) ───────────────────
+// ── SLIDE 1: OVERVIEW (comprehensive status dashboard) ───────────────────
 
-function OverviewView({ agents, activities }: { agents: OfficeAgent[]; activities: AgentActivity[] }) {
+// Mini sparkline — 6 bars for the last 6 hours of activity
+function ActivitySparkline({ activities }: { activities: AgentActivity[] }) {
+  const now = Date.now();
+  const buckets = [0, 0, 0, 0, 0, 0];
+  for (const a of activities) {
+    const hoursAgo = Math.floor((now - new Date(a.created_at).getTime()) / 3600000);
+    if (hoursAgo >= 0 && hoursAgo < 6) buckets[5 - hoursAgo]++;
+  }
+  const max = Math.max(1, ...buckets);
+  return (
+    <View style={s.sparkWrap}>
+      <Text style={s.sparkLabel}>6H</Text>
+      {buckets.map((v, i) => (
+        <View key={i} style={s.sparkCol}>
+          <View style={[s.sparkBar, { height: Math.max(1, (v / max) * 12), backgroundColor: v > 0 ? '#6366f1' : '#ddd' }]} />
+        </View>
+      ))}
+      <Text style={s.sparkLabel}>NOW</Text>
+    </View>
+  );
+}
+
+function OverviewView({ agents, activities, runningTasks = [], cronJobs = [], connectedCount = 0, totalConnections = 0 }: {
+  agents: OfficeAgent[]; activities: AgentActivity[]; runningTasks?: AgentActivity[]; cronJobs?: CronJob[];
+  connectedCount?: number; totalConnections?: number;
+}) {
   const reward = useRewardState();
 
   const now = new Date();
@@ -221,6 +249,7 @@ function OverviewView({ agents, activities }: { agents: OfficeAgent[]; activitie
   const activeCount  = agents.filter(a => a.status === 'active').length;
   const idleCount    = agents.filter(a => a.status === 'idle').length;
   const errorCount   = agents.filter(a => a.status === 'error').length;
+  const offlineCount = agents.filter(a => a.status === 'offline').length;
   const totalCost    = agents.reduce((s, a) => s + a.costToday, 0);
   const totalMsgs    = agents.reduce((s, a) => s + a.messagesProcessed, 0);
   const totalTokens  = agents.reduce((s, a) => s + a.tokensUsed, 0);
@@ -228,9 +257,27 @@ function OverviewView({ agents, activities }: { agents: OfficeAgent[]; activitie
   const todayCompleted = todayActs.filter(a => a.activity_type === 'task_completed').length;
   const todayFailed    = todayActs.filter(a => a.activity_type === 'task_failed').length;
   const todayTools     = todayActs.filter(a => a.activity_type === 'tool_call').length;
+  const todayMsgsIn   = todayActs.filter(a => a.activity_type === 'message_in').length;
+  const todayMsgsOut  = todayActs.filter(a => a.activity_type === 'message_out').length;
   const successRate    = todayCompleted + todayFailed > 0
     ? Math.round((todayCompleted / (todayCompleted + todayFailed)) * 100)
     : null;
+
+  // Hourly activity rate
+  const oneHourAgo = Date.now() - 3600000;
+  const lastHourActs = activities.filter(a => new Date(a.created_at).getTime() > oneHourAgo).length;
+  const fiveMinAgo = Date.now() - 300000;
+  const last5MinActs = activities.filter(a => new Date(a.created_at).getTime() > fiveMinAgo).length;
+
+  // Uptime from first activity
+  const oldest = activities.length ? activities[activities.length - 1] : null;
+  let uptimeStr = '—';
+  if (oldest) {
+    const diff = Date.now() - new Date(oldest.created_at).getTime();
+    const h = Math.floor(diff / 3600000);
+    const m = Math.floor((diff % 3600000) / 60000);
+    uptimeStr = h > 0 ? `${h}h ${m}m` : `${m}m`;
+  }
 
   const health = useMemo(() => {
     let h = 50;
@@ -241,81 +288,124 @@ function OverviewView({ agents, activities }: { agents: OfficeAgent[]; activitie
   }, [agents, activeCount, errorCount, successRate]);
 
   const healthColor = health >= 75 ? '#16a34a' : health >= 45 ? '#b45309' : '#dc2626';
-  const healthLabel = health >= 75 ? 'HEALTHY' : health >= 45 ? 'FAIR' : 'AT RISK';
+  const healthLabel = health >= 75 ? 'OK' : health >= 45 ? '!!' : '!!';
 
   const best = useMemo(() => {
     if (!agents.length) return null;
     return [...agents].sort((a, b) => calculateDailyScore(b) - calculateDailyScore(a))[0];
   }, [agents]);
 
-  // Badge tier color — map light/unreadable colors to readable equivalents on the whiteboard
+  // Top agents by cost
+  const topCostAgents = useMemo(() => {
+    return [...agents].filter(a => a.costToday > 0).sort((a, b) => b.costToday - a.costToday).slice(0, 3);
+  }, [agents]);
+
+  // Recent activities (last 5)
+  const recentActs = activities.slice(0, 5);
+
+  // Enabled cron count
+  const enabledCrons = cronJobs.filter(j => j.enabled).length;
+
+  // Per-agent activity counts
+  const agentActCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const a of todayActs) counts[a.agent_name] = (counts[a.agent_name] ?? 0) + 1;
+    return counts;
+  }, [todayActs]);
+
+  // Badge tier color
   const BADGE_COLOR_REMAP: Record<string, string> = {
-    '#ffd700': '#b45309',   // gold → dark amber
-    '#e5e4e2': '#6366f1',   // platinum (near-white) → indigo
-    '#c0c0c0': '#475569',   // silver → slate
+    '#ffd700': '#b45309',
+    '#e5e4e2': '#6366f1',
+    '#c0c0c0': '#475569',
   };
   const rawBadgeColor = reward.currentBadge?.color ?? '#6366f1';
   const badgeColor = BADGE_COLOR_REMAP[rawBadgeColor] ?? rawBadgeColor;
 
+  // Pulse state text
+  const pulseText = last5MinActs > 5 ? 'HIGH ACTIVITY' : last5MinActs > 0 ? 'ACTIVE' : activeCount > 0 ? 'MONITORING' : agents.length > 0 ? 'IDLE' : 'STANDBY';
+  const pulseColor = last5MinActs > 5 ? '#22c55e' : last5MinActs > 0 ? '#6366f1' : '#6b7280';
+
+  // Time display
+  const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+  const dateStr = now.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
   return (
     <ScrollView style={s.scroll} showsVerticalScrollIndicator={false} onStartShouldSetResponder={() => true}>
 
-      {/* ── XP / Badge Progress Bar ─────────────────────────────────────── */}
-      <View style={s.xpBlock}>
-        <View style={s.xpTopRow}>
-          {/* Current rank */}
-          <Text style={[s.xpCurrentRank, { color: badgeColor }]}>
+      {/* ── Row 1: XP + health + pulse + time ─── */}
+      <View style={s.topRow}>
+        <View style={[s.healthPill, { borderColor: healthColor }]}>
+          <Text style={[s.healthScore, { color: healthColor }]}>{health}</Text>
+          <Text style={[s.healthLabel, { color: healthColor }]}>{healthLabel}</Text>
+        </View>
+        <View style={[s.xpInline, { borderColor: badgeColor + '40' }]}>
+          <Text style={[s.xpRankInline, { color: badgeColor }]}>
             {reward.currentBadge ? reward.currentBadge.name.toUpperCase() : 'UNRANKED'}
           </Text>
-          {/* Total XP */}
-          <Text style={s.xpTotal}>{formatPoints(reward.lifetimeXP)} XP</Text>
-          {/* Badges earned */}
-          <Text style={s.xpBadgeCount}>{reward.earnedCount}/{reward.totalBadges} 🏅</Text>
+          <View style={s.xpTrackInline}>
+            <View style={[s.xpFill, { width: `${reward.progressPct}%` as any, backgroundColor: badgeColor }]} />
+          </View>
+          <Text style={s.xpValInline}>{formatPoints(reward.lifetimeXP)}</Text>
         </View>
-        {/* Progress bar toward next badge */}
-        <View style={s.xpTrack}>
-          <View style={[s.xpFill, { width: `${reward.progressPct}%` as any, backgroundColor: badgeColor }]} />
+        <View style={s.pulseWrap}>
+          <View style={[s.pulseDot, { backgroundColor: pulseColor }]} />
+          <Text style={[s.pulseText, { color: pulseColor }]}>{pulseText}</Text>
         </View>
-        <View style={s.xpBottomRow}>
-          <Text style={s.xpPct}>{reward.progressPct}%</Text>
-          {reward.nextBadge && (
-            <Text style={s.xpNextLabel}>
-              → {reward.nextBadge.name.toUpperCase()} @ {formatPoints(reward.nextBadge.pointsRequired)}
-            </Text>
-          )}
-          {!reward.nextBadge && (
-            <Text style={[s.xpNextLabel, { color: '#00FF9C' }]}>MAX RANK ACHIEVED</Text>
-          )}
+        <Text style={s.timeText}>{timeStr}</Text>
+      </View>
+
+      {/* ── Row 2: Agent counts + connections + crons + live tasks ─── */}
+      <View style={s.countsRow}>
+        <Text style={s.countItem}>🟢 <Text style={{ color: '#22c55e' }}>{activeCount}</Text></Text>
+        <Text style={s.countItem}>🟡 <Text style={{ color: '#eab308' }}>{idleCount}</Text></Text>
+        <Text style={s.countItem}>🔴 <Text style={{ color: '#ef4444' }}>{errorCount}</Text></Text>
+        <Text style={s.countItem}>⚫ <Text style={{ color: '#6b7280' }}>{offlineCount}</Text></Text>
+        <View style={s.countDivider} />
+        <Text style={s.countItem}>🔌 {connectedCount}/{totalConnections || 0}</Text>
+        {enabledCrons > 0 && <Text style={s.countItem}>⏰ {enabledCrons}</Text>}
+        {runningTasks.length > 0 && (
+          <View style={s.liveChip}>
+            <View style={s.liveDotSmall} />
+            <Text style={s.liveChipText}>{runningTasks.length} LIVE</Text>
+          </View>
+        )}
+        <Text style={s.countItemRight}>{dateStr}</Text>
+      </View>
+
+      {/* ── Row 3: Dense 3×3 metrics grid ─── */}
+      <View style={s.gridBlock}>
+        <View style={s.gridRow}>
+          <Metric label="COST"    value={`$${totalCost.toFixed(2)}`}  color="#ef4444" />
+          <Metric label="TOKENS"  value={totalTokens > 0 ? `${(totalTokens/1000).toFixed(0)}K` : '0'} color="#ec4899" />
+          <Metric label="MSGS"    value={String(totalMsgs)}           color="#b45309" />
+        </View>
+        <View style={s.gridRow}>
+          <Metric label="✓ DONE"  value={String(todayCompleted)}      color="#22c55e" />
+          <Metric label="✗ FAIL"  value={String(todayFailed)}         color="#ef4444" />
+          <Metric label="⚡ TOOL"  value={String(todayTools)}           color="#ec4899" />
+        </View>
+        <View style={s.gridRow}>
+          <Metric label="RATE"    value={successRate !== null ? `${successRate}%` : '—'} color="#6366f1" />
+          <Metric label="/HR"     value={String(lastHourActs)}        color="#6366f1" />
+          <Metric label="UPTIME"  value={uptimeStr}                   color="#b45309" />
         </View>
       </View>
 
-      {/* Health + today row */}
-      <View style={s.healthRow}>
-        <View style={[s.healthBadge, { borderColor: healthColor }]}>
-          <Text style={[s.healthLabel, { color: healthColor }]}>{healthLabel}</Text>
-          <Text style={[s.healthScore, { color: healthColor }]}>{health}</Text>
-        </View>
-        <View style={s.todayStats}>
-          <Text style={s.todayStat}>✓ <Text style={{ color: '#22c55e' }}>{todayCompleted}</Text></Text>
-          <Text style={s.todayStat}>✗ <Text style={{ color: '#ef4444' }}>{todayFailed}</Text></Text>
-          <Text style={s.todayStat}>⚡ <Text style={{ color: '#ec4899' }}>{todayTools}</Text></Text>
-          {successRate !== null && (
-            <Text style={s.todayStat}>🎯 <Text style={{ color: '#6366f1' }}>{successRate}%</Text></Text>
-          )}
-        </View>
-      </View>
+      {/* ── Row 4: Activity sparkline (always visible) ─── */}
+      <ActivitySparkline activities={activities} />
 
-      {/* Metrics row */}
-      <View style={s.metricsRow}>
-        <Metric label="ACTIVE"   value={`${activeCount}/${agents.length}`} color="#22c55e" />
-        <Metric label="MSGS"     value={totalMsgs.toLocaleString()}         color="#b45309" />
-        <Metric label="COST"     value={`$${totalCost.toFixed(2)}`}         color="#ef4444" />
-        <Metric label="TOKENS"   value={totalTokens > 0 ? `${(totalTokens/1000).toFixed(0)}K` : '—'} color="#ec4899" />
-        <Metric label="IDLE"     value={String(idleCount)}                   color="#6b7280" />
-        <Metric label="ERR"      value={String(errorCount)}                  color="#ef4444" />
-      </View>
+      {/* ── Running tasks ─── */}
+      {runningTasks.length > 0 && runningTasks.slice(0, 2).map(t => (
+        <View key={t.id} style={s.runTaskRow}>
+          <View style={s.liveDotSmall} />
+          <Text style={s.runTaskAgent}>{t.agent_name}</Text>
+          <Text style={s.runTaskTitle} numberOfLines={1}>{t.title}</Text>
+          <Text style={s.actTime}>{timeAgo(t.created_at)}</Text>
+        </View>
+      ))}
 
-      {/* Agent of the day */}
+      {/* ── Agent roster ─── */}
       {best && (
         <View style={s.aotdRow}>
           <Text style={s.aotdLabel}>🌟 {best.name}</Text>
@@ -323,26 +413,86 @@ function OverviewView({ agents, activities }: { agents: OfficeAgent[]; activitie
           <Text style={[s.aotdScore, { color: best.color }]}>{calculateDailyScore(best)}</Text>
         </View>
       )}
+      {agents.length > 0 ? agents.map(a => (
+        <View key={a.id} style={s.statusRow}>
+          <View style={[s.dot4, { backgroundColor: STATUS_COLORS[a.status] }]} />
+          <Text style={s.agentName} numberOfLines={1}>{a.name}</Text>
+          <Text style={s.agentActivity} numberOfLines={1}>{a.activity || '—'}</Text>
+          <Text style={s.agentEvt}>{agentActCounts[a.name] ?? 0}</Text>
+          {a.costToday > 0 && <Text style={s.agentCost}>${a.costToday.toFixed(2)}</Text>}
+          <Text style={s.agentStatus}>{a.status.toUpperCase()}</Text>
+        </View>
+      )) : (
+        <View style={s.emptyBlock}>
+          <Text style={s.emptyTitle}>NO AGENTS CONNECTED</Text>
+          <Text style={s.emptyHint}>⚙️ Open Customize → Connections</Text>
+          <Text style={s.emptyHint}>🔌 Add OpenClaw or webhook endpoint</Text>
+          <Text style={s.emptyHint}>📡 Agents appear here once live</Text>
+        </View>
+      )}
 
-      {/* Status list */}
-      {agents.length === 0
-        ? <Text style={s.empty}>Connect OpenClaw to see agents</Text>
-        : agents.map(a => (
-          <View key={a.id} style={s.statusRow}>
-            <View style={[s.dot5, { backgroundColor: STATUS_COLORS[a.status] }]} />
-            <Text style={s.agentName}>{a.name}</Text>
-            <Text style={s.agentActivity} numberOfLines={1}>{a.activity}</Text>
-            <Text style={s.agentStatus}>{a.status.toUpperCase()}</Text>
+      {/* ── Cost breakdown bars ─── */}
+      {topCostAgents.length > 0 && (
+        <View style={s.costBarWrap}>
+          {topCostAgents.map(a => {
+            const pct = totalCost > 0 ? Math.round((a.costToday / totalCost) * 100) : 0;
+            return (
+              <View key={a.id} style={s.costBarRow}>
+                <Text style={[s.costBarName, { color: a.color }]}>{a.name}</Text>
+                <View style={s.costBarTrack}>
+                  <View style={[s.costBarFill, { width: `${pct}%` as any, backgroundColor: a.color }]} />
+                </View>
+                <Text style={s.costBarVal}>{pct}%</Text>
+              </View>
+            );
+          })}
+        </View>
+      )}
+
+      {/* ── Recent activity (always shows — even if empty) ─── */}
+      <Text style={s.sectionLabel}>LATEST ACTIVITY</Text>
+      {recentActs.length > 0 ? recentActs.map(a => {
+        const ti = TYPE_ICONS[a.activity_type] ?? { icon: '·', color: '#888' };
+        return (
+          <View key={a.id} style={s.recentRow}>
+            <Text style={[s.recentIcon, { color: ti.color }]}>{ti.icon}</Text>
+            <Text style={s.recentAgent}>{a.agent_name}</Text>
+            <Text style={s.recentTitle} numberOfLines={1}>{a.title}</Text>
+            <Text style={s.actTime}>{timeAgo(a.created_at)}</Text>
           </View>
-        ))
-      }
+        );
+      }) : (
+        <Text style={s.emptyInline}>No activity recorded yet — connect an agent to begin</Text>
+      )}
+
+      {/* ── Next badge target (always shows) ─── */}
+      <View style={s.badgeTarget}>
+        {reward.nextBadge ? (
+          <Text style={s.badgeTargetText}>
+            {reward.earnedCount}/{reward.totalBadges} badges · {reward.progressPct}% → {reward.nextBadge.name.toUpperCase()} @ {formatPoints(reward.nextBadge.pointsRequired)} XP
+          </Text>
+        ) : (
+          <Text style={[s.badgeTargetText, { color: '#16a34a' }]}>
+            {reward.earnedCount}/{reward.totalBadges} badges · ALL RANKS ACHIEVED · {formatPoints(reward.lifetimeXP)} XP
+          </Text>
+        )}
+      </View>
+
+      {/* ── Message flow ─── */}
+      {(todayMsgsIn > 0 || todayMsgsOut > 0) && (
+        <View style={s.msgFlowRow}>
+          <Text style={s.msgFlowItem}>↓ IN <Text style={{ color: '#6366f1' }}>{todayMsgsIn}</Text></Text>
+          <Text style={s.msgFlowItem}>↑ OUT <Text style={{ color: '#6366f1' }}>{todayMsgsOut}</Text></Text>
+          <Text style={s.msgFlowItem}>NET <Text style={{ color: '#888' }}>{todayMsgsIn + todayMsgsOut}</Text></Text>
+        </View>
+      )}
     </ScrollView>
   );
 }
 
 function Metric({ label, value, color }: { label: string; value: string; color: string }) {
   return (
-    <View style={s.metricBox}>
+    <View style={s.metricCell}>
       <Text style={[s.metricVal, { color }]}>{value}</Text>
       <Text style={s.metricLabel}>{label}</Text>
     </View>
@@ -633,21 +783,21 @@ function NotesView({ notes, noteText, setNoteText, addNote }: {
 // ── STYLES ────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  board: { position: 'absolute', left: 20, top: 8, right: 20, zIndex: 5 },
+  board: { position: 'absolute', left: 20, top: 6, right: 20, zIndex: 5 },
   frame: {
     width: '100%' as any,
-    height: 160,
+    height: 120,
     backgroundColor: '#f5f5f0',
     borderWidth: 2,
     borderColor: '#8B7355',
     borderRadius: 2,
-    padding: 8,
+    padding: 5,
     overflow: 'hidden',
   },
   header: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
+    flexDirection: 'row', alignItems: 'center', gap: 4,
     borderBottomWidth: 1, borderBottomColor: '#ddd',
-    paddingBottom: 3, marginBottom: 3,
+    paddingBottom: 2, marginBottom: 2,
   },
   headerIcon: { fontSize: 11 },
   headerText: { fontSize: 10, fontWeight: '800', fontFamily: 'monospace', color: '#333', letterSpacing: 1.5 },
@@ -665,39 +815,112 @@ const styles = StyleSheet.create({
   },
   editBtnText: { fontSize: 6, fontWeight: '800', color: '#555', fontFamily: 'monospace' },
   content: { flex: 1, overflow: 'hidden' },
-  dots: { flexDirection: 'row', justifyContent: 'center', gap: 5, marginTop: 2 },
-  dot: { width: 5, height: 5, borderRadius: 2.5, backgroundColor: '#ccc' },
+  dots: { flexDirection: 'row', justifyContent: 'center', gap: 4, marginTop: 1 },
+  dot: { width: 4, height: 4, borderRadius: 2, backgroundColor: '#ccc' },
   dotActive: { backgroundColor: '#333' },
-  tray: { flexDirection: 'row', justifyContent: 'center', gap: 6, marginTop: 4 },
-  marker: { width: 5, height: 18, borderRadius: 1 },
+  tray: { flexDirection: 'row', justifyContent: 'center', gap: 5, marginTop: 2 },
+  marker: { width: 4, height: 14, borderRadius: 1 },
 });
 
 // Short-named inner styles to keep things tight
 const s = StyleSheet.create({
   scroll: { flex: 1 },
   empty: { fontSize: 8, color: '#999', fontFamily: 'monospace', fontStyle: 'italic', textAlign: 'center', marginTop: 8 },
-  sectionLabel: { fontSize: 6, color: '#aaa', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5, marginTop: 5, marginBottom: 2 },
+  sectionLabel: { fontSize: 5, color: '#aaa', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5, marginTop: 2, marginBottom: 1 },
   sectionDivider: { fontSize: 6, color: '#bbb', fontFamily: 'monospace', textAlign: 'center', marginVertical: 4 },
 
-  // Metrics
-  metricsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 3, marginBottom: 4 },
-  metricBox: { alignItems: 'center', width: '30%' as any },
-  metricVal: { fontSize: 11, fontWeight: '900', fontFamily: 'monospace' },
-  metricLabel: { fontSize: 5, color: '#888', fontFamily: 'monospace', letterSpacing: 0.3 },
+  // Top row — health + XP + pulse + time
+  topRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginBottom: 1 },
+  healthPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 1,
+    borderWidth: 1, borderRadius: 3, paddingHorizontal: 2, paddingVertical: 0,
+  },
+  healthScore: { fontSize: 7, fontWeight: '900', fontFamily: 'monospace' },
+  healthLabel: { fontSize: 4, fontWeight: '800', fontFamily: 'monospace' },
+  xpInline: {
+    flexDirection: 'row', alignItems: 'center', gap: 2, flex: 1,
+    backgroundColor: '#f0f0ec', borderRadius: 2, paddingHorizontal: 2, paddingVertical: 1,
+    borderWidth: 1,
+  },
+  xpRankInline: { fontSize: 5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.5 },
+  xpTrackInline: { flex: 1, height: 3, backgroundColor: '#ddd', borderRadius: 1.5, overflow: 'hidden' },
+  xpFill: { height: '100%' as any, borderRadius: 1.5 },
+  xpValInline: { fontSize: 5, fontWeight: '700', fontFamily: 'monospace', color: '#555' },
+  pulseWrap: { flexDirection: 'row', alignItems: 'center', gap: 2 },
+  pulseDot: { width: 3, height: 3, borderRadius: 1.5 },
+  pulseText: { fontSize: 4.5, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 0.3 },
+  timeText: { fontSize: 5, color: '#aaa', fontFamily: 'monospace', fontWeight: '700' },
+
+  // Counts row
+  countsRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginBottom: 1, flexWrap: 'wrap' },
+  countItem: { fontSize: 5.5, color: '#888', fontFamily: 'monospace', fontWeight: '600' },
+  countItemRight: { fontSize: 5, color: '#bbb', fontFamily: 'monospace', marginLeft: 'auto' },
+  countDivider: { width: 1, height: 6, backgroundColor: '#ddd' },
+  liveChip: { flexDirection: 'row', alignItems: 'center', gap: 2, backgroundColor: '#F59E0B15', paddingHorizontal: 3, paddingVertical: 0, borderRadius: 2 },
+  liveDotSmall: { width: 3, height: 3, borderRadius: 1.5, backgroundColor: '#F59E0B' },
+  liveChipText: { fontSize: 4.5, color: '#F59E0B', fontWeight: '800', fontFamily: 'monospace' },
+
+  // Grid block — 3×3
+  gridBlock: { marginBottom: 1, backgroundColor: '#f8f8f4', borderRadius: 2, padding: 2, borderWidth: 1, borderColor: '#eee' },
+  gridRow: { flexDirection: 'row' },
+  metricCell: { flex: 1, alignItems: 'center', paddingVertical: 1 },
+  metricVal: { fontSize: 8, fontWeight: '900', fontFamily: 'monospace' },
+  metricLabel: { fontSize: 4, color: '#888', fontFamily: 'monospace', letterSpacing: 0.3 },
+
+  // Sparkline
+  sparkWrap: { flexDirection: 'row', alignItems: 'flex-end', gap: 1, marginBottom: 1, paddingVertical: 1 },
+  sparkLabel: { fontSize: 4, color: '#bbb', fontFamily: 'monospace', fontWeight: '700' },
+  sparkCol: { flex: 1, alignItems: 'center', justifyContent: 'flex-end', height: 12 },
+  sparkBar: { width: '80%' as any, borderRadius: 0.5, minHeight: 1 },
 
   // Agent of the day
-  aotdRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 3, paddingBottom: 3, borderBottomWidth: 1, borderBottomColor: '#eee' },
-  aotdLabel: { fontSize: 7, color: '#333', fontFamily: 'monospace', fontWeight: '700', flex: 1 },
-  aotdRole: { fontSize: 6, color: '#888', fontFamily: 'monospace' },
-  aotdScore: { fontSize: 11, fontWeight: '900', fontFamily: 'monospace' },
+  aotdRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginBottom: 1, paddingBottom: 1, borderBottomWidth: 1, borderBottomColor: '#eee' },
+  aotdLabel: { fontSize: 5.5, color: '#333', fontFamily: 'monospace', fontWeight: '700', flex: 1 },
+  aotdRole: { fontSize: 5, color: '#888', fontFamily: 'monospace' },
+  aotdScore: { fontSize: 8, fontWeight: '900', fontFamily: 'monospace' },
 
   // Status rows
-  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 2 },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 2, marginBottom: 1 },
   dot5: { width: 5, height: 5, borderRadius: 2.5 },
-  dot4: { width: 4, height: 4, borderRadius: 2 },
-  agentName: { fontSize: 7, color: '#333', fontFamily: 'monospace', fontWeight: '700', width: 50 },
-  agentActivity: { fontSize: 7, color: '#888', fontFamily: 'monospace', flex: 1 },
-  agentStatus: { fontSize: 5, color: '#aaa', fontFamily: 'monospace', fontWeight: '600' },
+  dot4: { width: 3, height: 3, borderRadius: 1.5 },
+  agentName: { fontSize: 5.5, color: '#333', fontFamily: 'monospace', fontWeight: '700', width: 40 },
+  agentActivity: { fontSize: 5, color: '#888', fontFamily: 'monospace', flex: 1 },
+  agentEvt: { fontSize: 5, color: '#6366f1', fontFamily: 'monospace', fontWeight: '600', width: 10, textAlign: 'right' },
+  agentCost: { fontSize: 5, color: '#ef4444', fontFamily: 'monospace', fontWeight: '600' },
+  agentStatus: { fontSize: 4, color: '#aaa', fontFamily: 'monospace', fontWeight: '600' },
+
+  // Empty state
+  emptyBlock: { paddingVertical: 3, gap: 2 },
+  emptyTitle: { fontSize: 6, color: '#888', fontFamily: 'monospace', fontWeight: '800', textAlign: 'center' },
+  emptyHint: { fontSize: 5.5, color: '#aaa', fontFamily: 'monospace' },
+  emptyInline: { fontSize: 5, color: '#bbb', fontFamily: 'monospace', fontStyle: 'italic', marginBottom: 1 },
+
+  // Running tasks
+  runTaskRow: { flexDirection: 'row', alignItems: 'center', gap: 2, marginBottom: 1 },
+  runTaskAgent: { fontSize: 5.5, color: '#F59E0B', fontFamily: 'monospace', fontWeight: '700', width: 36 },
+  runTaskTitle: { fontSize: 5, color: '#555', fontFamily: 'monospace', flex: 1 },
+
+  // Cost bars
+  costBarWrap: { marginBottom: 1 },
+  costBarRow: { flexDirection: 'row', alignItems: 'center', gap: 2, marginBottom: 1 },
+  costBarName: { fontSize: 4.5, fontFamily: 'monospace', fontWeight: '700', width: 32 },
+  costBarTrack: { flex: 1, height: 2.5, backgroundColor: '#e8e8e0', borderRadius: 1, overflow: 'hidden' },
+  costBarFill: { height: '100%' as any, borderRadius: 1 },
+  costBarVal: { fontSize: 4.5, color: '#888', fontFamily: 'monospace', fontWeight: '600', width: 18, textAlign: 'right' },
+
+  // Recent activity
+  recentRow: { flexDirection: 'row', alignItems: 'center', gap: 2, marginBottom: 1 },
+  recentIcon: { fontSize: 5.5, fontWeight: '800', width: 7 },
+  recentAgent: { fontSize: 4.5, fontWeight: '700', fontFamily: 'monospace', color: '#555', width: 32 },
+  recentTitle: { fontSize: 4.5, color: '#888', fontFamily: 'monospace', flex: 1 },
+
+  // Badge target
+  badgeTarget: { marginTop: 1, paddingTop: 1, borderTopWidth: 1, borderTopColor: '#eee' },
+  badgeTargetText: { fontSize: 4.5, color: '#aaa', fontFamily: 'monospace', textAlign: 'center' },
+
+  // Message flow
+  msgFlowRow: { flexDirection: 'row', gap: 6, marginTop: 1 },
+  msgFlowItem: { fontSize: 5, color: '#888', fontFamily: 'monospace', fontWeight: '600' },
 
   // Activity
   actRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginBottom: 2 },
@@ -756,28 +979,6 @@ const s = StyleSheet.create({
   logRight: { alignItems: 'flex-end', gap: 2 },
   logTypeIcon: { fontSize: 8, fontWeight: '800' },
 
-  // XP Block
-  xpBlock: { marginBottom: 4, backgroundColor: '#f0f0ec', borderRadius: 3, padding: 4, borderWidth: 1, borderColor: '#e0e0d8' },
-  xpTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 },
-  xpCurrentRank: { fontSize: 7, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
-  xpTotal: { fontSize: 7, fontWeight: '700', fontFamily: 'monospace', color: '#555' },
-  xpBadgeCount: { fontSize: 7, fontFamily: 'monospace', color: '#888' },
-  xpTrack: { height: 6, backgroundColor: '#ddd', borderRadius: 3, overflow: 'hidden', marginBottom: 2 },
-  xpFill: { height: '100%' as any, borderRadius: 3 },
-  xpBottomRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  xpPct: { fontSize: 6, fontWeight: '800', fontFamily: 'monospace', color: '#888' },
-  xpNextLabel: { fontSize: 6, fontFamily: 'monospace', color: '#aaa', fontStyle: 'italic' },
-
-  // Health
-  healthRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 3 },
-  healthBadge: {
-    flexDirection: 'row', alignItems: 'center', gap: 3,
-    borderWidth: 1, borderRadius: 3, paddingHorizontal: 4, paddingVertical: 1,
-  },
-  healthLabel: { fontSize: 6, fontWeight: '800', fontFamily: 'monospace' },
-  healthScore: { fontSize: 10, fontWeight: '900', fontFamily: 'monospace' },
-  todayStats: { flexDirection: 'row', gap: 6, flex: 1, flexWrap: 'wrap' },
-  todayStat: { fontSize: 7, fontFamily: 'monospace', color: '#555' },
 
   // OPS grid
   opsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 3, marginBottom: 4 },

@@ -8,7 +8,6 @@ import {
 } from 'react-native';
 import { Badge, TIER_COLORS } from '../lib/badges';
 import HaloBadge from './HaloBadge';
-
 interface Props {
   badge: Badge | null;
   onDismiss: () => void;

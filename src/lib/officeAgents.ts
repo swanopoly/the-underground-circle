@@ -50,6 +50,36 @@ const AGENT_COLORS = [
 // Empty default — no mock data
 export const OFFICE_AGENTS: OfficeAgent[] = [];
 
+// Default agent provided by the app — always present in the office
+export const DEFAULT_AGENT: OfficeAgent = {
+  id: 'default::blackswan',
+  name: 'BlackSwan',
+  role: 'Circle AI',
+  status: 'idle',
+  color: '#a855f7',
+  deskIndex: 0,
+  activity: 'Watching the circle',
+  messagesProcessed: 0,
+  uptimeHours: 0,
+  uptime: 'always on',
+  lastActive: new Date().toISOString(),
+  recentActions: [],
+  recentMessages: [],
+  costToday: 0,
+  costWeek: 0,
+  tokensUsed: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  cachedTokens: 0,
+  newTokens: 0,
+  turns: 0,
+  sessionKey: 'blackswan',
+  model: 'claude-haiku-4-5',
+  connectionId: 'default',
+  connectionName: 'The Underground Circle',
+  providerType: 'generic-agent',
+};
+
 // Pricing is centralized in modelPricing.ts — single source of truth
 import { MODEL_PRICING, estimateCost, estimateCostWithCache } from './modelPricing';
 export { MODEL_PRICING } from './modelPricing';

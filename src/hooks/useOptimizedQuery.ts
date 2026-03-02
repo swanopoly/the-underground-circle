@@ -145,6 +145,8 @@ export function useUserCircles() {
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
       setUserId(user?.id || null);
+    }).catch(() => {
+      setUserId(null);
     });
   }, []);
 

@@ -1,7 +1,7 @@
 # CLAUDE.md — The Underground Circle
 
 > Comprehensive project context for AI agents (Claude Code, OpenClaw, Codex, etc.)
-> Last updated: 2026-02-28
+> Last updated: 2026-03-01 (v3 — agent customization, Supabase persistence, gamified pixel agents)
 
 ---
 
@@ -52,11 +52,12 @@ EXPO_PUBLIC_GEMINI_API_KEY=<key>
 ## Dev Commands
 
 ```bash
-npm run web      # Web dev server (localhost:8081)
-npm run start    # Expo dev server (all platforms)
-npm run build    # Production web build (expo export --platform web)
-npm run dev      # Custom dev script (start-dev.js)
-npm run proxy    # OpenClaw CORS/WS proxy on port 18790
+npm run web              # Web dev server (localhost:8081)
+npm run start            # Expo dev server (all platforms)
+npm run build            # Production web build (expo export --platform web)
+npm run dev              # Custom dev script (start-dev.js)
+npm run proxy            # OpenClaw CORS/WS proxy on port 18790
+npm run generate-sprites # Generate pixel art PNGs for office themes
 ```
 
 ---
@@ -103,7 +104,8 @@ src/
     #   ServicesPanel        Persists to room_services
     #   TasksPanel           Persists to room_tasks
   lib/
-    supabase.ts              # Platform-aware client (localStorage web / AsyncStorage native)
+    animationPatch.ts        # MUST be first import in App.tsx — disables Animated.loop on web, forces useNativeDriver:false
+    supabase.ts              # Platform-aware client (globalThis singleton, no-op lock on web)
     agents.ts                # Agent management
     openclawService.ts       # OpenClaw integration
     gamification.ts          # XP, levels, badges, challenges
@@ -114,6 +116,8 @@ src/
     circleOffice.ts          # CRUD for circle_office_agents + full CircleOfficeAgent type
     officeTerminal.ts        # Supabase Broadcast relay (commands + responses)
     officeAgents.ts          # MODEL_PRICING lookup table for cost tracking
+    officeConfig.ts          # OfficeTheme, EnvironmentType, OFFICE_THEMES, furniture catalog, AgentAppearance (14 props)
+    themeBackgrounds.ts      # Static require() map: EnvironmentType → PNG sprite
   hooks/
     useAuth.ts
     useOptimizedQuery.ts
@@ -126,14 +130,23 @@ src/
     projectRooms.ts          # Full CRUD + Realtime hooks for project rooms
     rewardService.ts         # awardPoints, useUserRewards, useAgentPointsTracker
     sharedMemory.ts          # getMemoryDoc, updateMemoryDoc, getMemoryHistory, useMemoryDoc
+    customThemes.ts          # Custom theme CRUD + useCustomThemes() hook
   types/                     # TypeScript type definitions
 scripts/
   openclaw-activity-hook.js  # Node.js hook — posts to agent_activity table
   openclaw-proxy.js          # HTTP + WebSocket CORS proxy (port 18790)
+  generate-theme-sprites.js  # Generates pixel art PNGs for office themes (uses @napi-rs/canvas)
+  screens/circles/tabs/office/
+    OfficeFloor.tsx          # ~2500 lines, pixel art floor rendering, drag-to-move furniture
+    CustomizePanel.tsx       # ~1200 lines, theme + agent customization (14 properties)
+    AgentPanel.tsx           # ~815 lines, agent detail popup + inline customize section
+    PixelAgent.tsx           # ~1600 lines, animated pixel art agent with gamified life
+assets/
+  themes/                    # 12 generated pixel art PNGs (office, ship, castle, station, submarine, mansion, lair, cabin, arctic, cyber, garden, temple)
 supabase/
   functions/
     room-task-executor/      # Edge function: picks up pending tasks, marks done, resets agent status
-    swanbot-ai/              # AI response edge function
+    swanbot-ai/              # BlackSwan AI response edge function
   migrations/
     20260225_circle_office.sql          # circle_office_agents table ✅ run
     20260225_office_cron_sweeper.sql    # pg_cron sweeper ⚠️ NOT YET RUN
@@ -143,6 +156,9 @@ supabase/
     20260227_room_files.sql             # room_files, room_secrets, room_usage ✅ run
     20260227_room_messages.sql          # room_messages, room_services, room_tasks ✅ run
     20260227_atomic_xp.sql              # award_points RPC, award_xp RPC, sync_points_to_xp trigger ✅ run
+    20260228_custom_themes.sql          # user_custom_themes table + RLS ⚠️ NOT YET RUN
+    20260301_agent_appearances.sql      # profiles.agent_appearance JSONB column ⚠️ NOT YET RUN
+    20260301_office_layout.sql          # profiles.office_layout JSONB column ⚠️ NOT YET RUN
 ```
 
 ---
@@ -182,13 +198,30 @@ supabase/
 - `points_transactions` — ledger
 - `user_badges` — earned badges
 
+### Custom Themes
+- `user_custom_themes` — id, user_id, circle_id, name, environment_type, colors (jsonb), is_shared
+  - RLS: users read own + shared themes in their circles; manage only their own
+  - Theme IDs in frontend prefixed with `custom_` (e.g. `custom_{uuid}`)
+  - ⚠️ Migration NOT YET RUN — run `20260228_custom_themes.sql` in Supabase SQL Editor
+
 ### Profiles
-- `profiles` — display_name, username
+- `profiles` — display_name, username, agent_appearance (JSONB), office_layout (JSONB)
+  - `agent_appearance` — `Record<agentName, AgentAppearance>` (14 properties per agent, keyed by agent.name)
+  - `office_layout` — `{ floors: OfficeFloor[], currentFloorId: string }` (full floor/furniture state)
   - ⚠️ No `email` column — use `auth.users` for email
+  - ⚠️ `agent_appearance` and `office_layout` columns require migrations NOT YET RUN
 
 ---
 
 ## Architecture Notes
+
+### Web Platform Stability (Critical — DO NOT REVERT)
+1. **`src/lib/animationPatch.ts`** — Imported FIRST in `App.tsx`. Patches `Animated.loop` to return no-op on web (prevents "Maximum update depth exceeded" from infinite re-renders). Also forces `useNativeDriver: false` globally on web since there is no native animation driver.
+2. **Supabase no-op lock on web** — `supabase.ts` passes `lock: async (_name, _acquireTimeout, fn) => await fn()` to auth config on web. Without this, GoTrueClient uses `navigator.locks` API which causes `AbortError` that breaks `getUser()`/`getSession()`, preventing circles from loading.
+3. **Supabase HMR singleton** — `supabase.ts` stores client on `globalThis.__supabaseClient` to prevent duplicate client on hot module reload (causes "concurrent storage key" warning and undefined behavior).
+4. **OfficeTab useEffect guard** — Auto-assign agents useEffect uses `prevAgentCountRef` to only run when agent count changes. Without this guard, `floors` in deps → `saveFloors` → `setFloors` → infinite re-render loop.
+5. **PixelAgent breathing direction** — Body uses `scaleX` (NOT `scaleY`) for breathing animation. `scaleY` pushes legs/shoes/belt down on every animation frame.
+6. **`.catch()` handlers on auth calls** — All `supabase.auth.getUser()` and `getSession()` calls MUST have `.catch()` to prevent unhandled promise rejections that cascade to crash.
 
 ### Auth
 - Supabase Auth with session persistence
@@ -259,6 +292,62 @@ Uses `MODEL_PRICING` lookup table — longest-key match, strips `anthropic/`/`go
 Positions stored as 0.0–1.0 floats (% of canvas size — universal across screen sizes).
 `getOrCreateCommandChannel` has 5s timeout to prevent hangs.
 
+### Office Theme System
+- **12 environment types:** `office | ship | castle | station | submarine | mansion | lair | cabin | arctic | cyber | garden | temple`
+- **12 built-in themes** in `OFFICE_THEMES` (officeConfig.ts), each with 13 color properties + environmentType
+- **PNG sprite backgrounds:** Pre-generated pixel art PNGs (900x680px, 4px pixel grid) in `assets/themes/`
+- **Rendering:** OfficeFloor.tsx uses `<Image>` sprite when available, falls back to View-based rendering for custom themes
+- **Custom themes:** Stored in Supabase `user_custom_themes` table (colors as JSONB), IDs prefixed with `custom_`
+- **Theme resolution** (OfficeTab.tsx): `OFFICE_THEMES[id] || customThemeLookup[id] || OFFICE_THEMES.underground`
+- **Sprite generator:** `scripts/generate-theme-sprites.js` uses `@napi-rs/canvas` (prebuilt binaries, no system deps)
+- **Metro bundler:** Requires static `require()` strings for images — solved with `themeBackgrounds.ts` registry
+
+### Agent Customization & Persistence
+- **AgentAppearance** has 14 properties: skinTone, hairStyle, hairColor, shirtColor, pantsColor, shoeColor, accessory, hat, expression, backItem, eyeColor, facialHair, pet, aura
+- **Appearances keyed by `agent.name`** (NOT `agent.id`) — stable across reconnections
+- **Dual persistence:** localStorage (fast) + Supabase `profiles.agent_appearance` JSONB (durable, remote wins)
+- **Office layouts:** localStorage + Supabase `profiles.office_layout` JSONB (floors + furniture + currentFloorId)
+- **Inline customization:** AgentPanel popup includes collapsible CUSTOMIZE section with live preview
+- **Full customization:** CustomizePanel has complete agent editor with 14 categories
+
+### Pixel Agent (PixelAgent.tsx ~1600 lines)
+- **PX unit:** `2.5 * scale` — base pixel unit for all measurements
+- **Container:** 60x92px, alignItems: 'center'
+- **Body proportions:** Head PX*7, body PX*7 wide × PX*5 tall, neck PX*4, legs PX*2.8 each (gap PX*0.7), shoes PX*3 each (gap PX*0.7)
+- **Breathing:** `scaleX: breatheAnim` (1 → 1.04) — chest expands sideways, NOT vertically
+- **Borders:** 1px solid `#1e1b4b30` on head and body (not sub-pixel PX*0.2)
+- **Active glow:** Pulsing colored backlight behind working agents (synced to breathe/glow anims)
+- **Shoe details:** Toe cap highlight + 1.5px sole
+- **Eye blinking:** Periodic 3-6s blink cycle with occasional double-blinks
+- **Typing animation:** Arm wiggle when agent status is active/building (opposite-phase L/R arms)
+- **Idle look-around:** Subtle head shift when idle (lookAnim -1.5px to +1.5px)
+- **Mood indicator:** Floating emoji bubble (fire/lightning/checkmark/zzz/muscle) reacts to status/cost changes
+- **Floating text:** Cost changes (-$0.xxx) and status changes (+BUILD) float up and fade
+- **Action particles:** 3 colored dots float above agent when building
+- **Press feedback:** Spring squeeze on tap (0.9x scale)
+- **Thought bubbles:** Data-driven from agent context (XP, cost, status, idle time)
+- **Dance animation:** Triggered on badge earn (5s loop, side-to-side + rotation + scale)
+
+### Furniture Management
+- **Drag-to-move:** Pointer events via DOM addEventListener (not React props — RN Web limitation)
+- **Scale-aware:** Accounts for office transform scale in drag calculations
+- **Grid snapping:** 16px grid for consistent placement
+- **Select-then-delete:** First tap selects (blue outline), DELETE button appears, tap to confirm
+
+### BlackSwan AI (Default Agent)
+- **Single default agent** throughout the app: "BlackSwan" (id: `default::blackswan`)
+- Always at desk position 0 in office, always in `displayAgents`
+- Edge function: `supabase/functions/swanbot-ai/index.ts` (name kept for backwards compat)
+- Client lib: `src/lib/swanbot.ts` (exports `getSwanBotResponse`)
+- Model: `claude-haiku-4-5-20251001` via Anthropic API
+- Context: circle info, members, streaks, check-ins, tasks, recent 30 messages
+- Personality: confident, dry wit, direct accountability partner
+- Triggers: `@blackswan`, `@swanbot`, `@swan`, or quick prompts (all routed to same handler)
+- Connected to: circle chat (ChatTab), room chat (RoomsTab), office (OfficeTab)
+- Default appearance: `UC_AGENT_APPEARANCE` in officeConfig.ts
+- All responses prefixed with 🦢 emoji, persisted as `🦢 **BlackSwan:** {content}`
+- Max 1024 tokens output, system prompt built dynamically from full circle context
+
 ---
 
 ## Features Shipped
@@ -269,8 +358,26 @@ Positions stored as 0.0–1.0 floats (% of canvas size — universal across scre
 - Office Analytics — token usage, cost, turns per agent (real data)
 - Office Terminal — @all/@agent dispatch via Supabase Broadcast
 - 23 furniture items across 4 categories (Work, Lounge, Tech, Decor)
+- Drag-to-move furniture with grid snapping + select-then-delete UX
 - Floor management — add/remove floors, can't delete last floor
-- Agent XP bar — 40px wide, 3px tall, fills to next badge rank
+- Agent XP bar — 44px wide, 5px tall, rainbow gradient when full
+- 12 themed environments: Office, Ship, Castle, Station, Submarine, Mansion, Lair, Cabin, Arctic, Cyber, Garden, Temple
+- 12 PNG sprite backgrounds (generated via `scripts/generate-theme-sprites.js`)
+- Custom theme editor: create, edit, delete, share custom color themes with circle
+- Theme resolution: built-in → custom (from Supabase) → fallback to underground
+- Office layout persistence: localStorage + Supabase `profiles.office_layout`
+- Agent customization: 14 properties (skin, hair, eyes, clothes, facial hair, pet, aura, etc.)
+- Agent appearance persistence: localStorage + Supabase `profiles.agent_appearance` (keyed by agent.name)
+- BlackSwan default agent: always at desk 0, `DEFAULT_AGENT` in officeAgents.ts
+- Gamified pixel agents: blinking eyes, typing animation, mood indicators, floating cost text
+
+### BlackSwan AI (Edge Function)
+- Supabase Edge Function at `supabase/functions/swanbot-ai/`
+- Uses Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) via Anthropic API
+- Gathers full circle context: members, streaks, check-ins, tasks, recent chat
+- Personality: confident, dry wit, direct, accountability-focused
+- Games/social: trivia, hot takes, roast battles, challenges, MVP of the week
+- Crypto awareness: wallet status, tipping, bounties
 
 ### HITL Kill Switches
 - Floating amber approval banner with countdown timer
@@ -325,7 +432,10 @@ Overview | Activity | Ops | Agent Log
 
 | Issue | Priority | Status |
 |---|---|---|
-| pg_cron sweeper SQL | High | ⚠️ NOT run — SQL above |
+| pg_cron sweeper SQL | High | ⚠️ NOT run — SQL in Architecture Notes section |
+| custom_themes migration SQL | High | ⚠️ NOT run — `20260228_custom_themes.sql` |
+| agent_appearances migration SQL | High | ⚠️ NOT run — `20260301_agent_appearances.sql` |
+| office_layout migration SQL | High | ⚠️ NOT run — `20260301_office_layout.sql` |
 | room-task-executor edge function | High | ⚠️ NOT deployed — needs `npx supabase login` |
 | award_points RPC 400 | Medium | May need points_transactions confirmed |
 | circle_office_agents upsert 400 | Medium | AgentPanel bug |
@@ -337,20 +447,19 @@ Overview | Activity | Ops | Agent Log
 ## Recent Git History
 
 ```
+9af5a21  feat: switch swanbot-ai from OpenAI to Claude + expand CLAUDE.md
+08d7566  docs: add CLAUDE.md with project overview and architecture
+188d054  feat: fix furniture placement + 8 new office themes
+6620440  fix: fully remove Digest tab from nav
+a0f5dec  feat: compact header + merge Feed & Digest into one tab
+c6e4787  feat: 3D animated loader while agent is thinking
 48c2373  fix: animation CSS classes, room-task-executor edge function
-cd7f07c  thought bubble position bottom 80
 5ee6c7d  thought bubbles: data-driven (XP, cost, cache hit %, suggestions)
-3ddb50b  remove wiggle animation
 ba8a778  agent XP bar under name
 46a6869  Halo reward system (8 files ~1900 lines)
-5dd81a5  hooks order fix (useAgentControl before early return)
-93139e8  floor filter fix + auto-assign to currentFloor
-5beafec  agent connection fix (remove localhost skip bug)
-f814cc0  agent card real data (uptimeHours, turns, tokens, cache hit %)
 66241f5  HITL + BYOA + AgentTemplates + SharedMemory (10 files ~1900 lines)
 8663e7d  nav state persistence (uc_nav_state_v1)
 1d4488c  wallet fixes + project rooms + whiteboard + agent activity feed
-d1d7251  CSP: publicnode, ankr, coinbase, coingecko
 0b7adb0  office: remove floor, 23 furniture items, category toolbar
 ```
 
@@ -365,6 +474,10 @@ d1d7251  CSP: publicnode, ankr, coinbase, coingecko
 - ArrowScrollView → `style` applies to outer wrapper, `scrollStyle` to inner ScrollView
 - CSS gotchas: `backgroundImage` not `background`; `outlineWidth`/`outlineStyle` not `outline`; use CSS class injection for animation
 - Known safe-to-ignore TS errors: `ProfileScreen.tsx`, `OfficeChat.tsx`, `PhotonProofCheck.tsx`, `CostDashboard.tsx`
+- Agent appearances → keyed by `agent.name` (NOT `agent.id`) — `agent.id` format is `${connId}::${sessionKey}` which changes on reconnect
+- Pointer events on RN Web → use `useEffect` + `el.addEventListener('pointerdown')` (NOT React `onPointerDown` prop — doesn't work on View)
+- `Animated.loop` on web → globally disabled via `animationPatch.ts` (returns no-op). All animation loops in the codebase work despite this because non-loop animations (sequence, timing, spring) are unaffected
+- `supabase.auth.getUser()` / `getSession()` → ALWAYS add `.catch()` handler. Without it, AbortErrors from auth propagate and crash components
 
 ---
 

@@ -184,7 +184,7 @@ export default function WarRoomTab({ circleId, accentColor = '#6366f1' }: {
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
       setCurrentUserId(data.user?.id || null);
-    });
+    }).catch(() => {});
   }, []);
 
   // ─── Load Data ───────────────────────────────────────────────────────────

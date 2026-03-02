@@ -38,7 +38,7 @@ export default function RewardsPanel({ onClose }: Props) {
   const { points, badges, loading } = useUserRewards(userId);
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => setUserId(user?.id));
+    supabase.auth.getUser().then(({ data: { user } }) => setUserId(user?.id)).catch(() => {});
   }, []);
 
   const earnedIds = new Set(badges.map(b => b.badge_id));

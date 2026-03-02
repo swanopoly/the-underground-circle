@@ -74,7 +74,7 @@ export default function SwanBotScreen({ navigation }: any) {
     // Welcome message
     const hour = new Date().getHours();
     const greeting = hour < 12 ? 'Morning' : hour < 18 ? 'Afternoon' : 'Evening';
-    addBotMessage(`${greeting}, ${profile?.display_name || 'fam'}. 🦢\n\nI'm **SwanBot** — your AI accountability partner. I can help with tasks, check your streak, manage your circle, or just give you a push.\n\n${userCircles.length > 0 ? `Active circle: **${userCircles[0].name}**` : 'Join a circle to unlock full features.'}\n\nType **help** to see all commands.`);
+    addBotMessage(`${greeting}, ${profile?.display_name || 'fam'}. 🦢\n\nI'm **BlackSwan** — your AI accountability partner. I can help with tasks, check your streak, manage your circle, or just give you a push.\n\n${userCircles.length > 0 ? `Active circle: **${userCircles[0].name}**` : 'Join a circle to unlock full features.'}\n\nType **help** to see all commands.`);
   };
 
   const addBotMessage = (content: string) => {
@@ -213,7 +213,7 @@ export default function SwanBotScreen({ navigation }: any) {
           <View style={styles.botAvatarSmall}>
             <Text style={{ fontSize: 10 }}>🦢</Text>
           </View>
-          <Text style={styles.typingText}>SwanBot is thinking...</Text>
+          <Text style={styles.typingText}>BlackSwan is thinking...</Text>
         </View>
       )}
 
@@ -238,7 +238,7 @@ export default function SwanBotScreen({ navigation }: any) {
           <TextInput
             ref={inputRef}
             style={styles.input}
-            placeholder="Ask SwanBot anything..."
+            placeholder="Ask BlackSwan anything..."
             placeholderTextColor="#444"
             value={input}
             onChangeText={setInput}

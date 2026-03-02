@@ -1,17 +1,25 @@
 import React, { useState } from 'react';
 import {
-  View, Text, StyleSheet, Pressable, ScrollView, TextInput, Platform,
+  View, Text, StyleSheet, Pressable, ScrollView, TextInput, Platform, Modal,
 } from 'react-native';
 import {
-  OFFICE_THEMES,
+  OFFICE_THEMES, OfficeTheme,
   SKIN_TONES, HAIR_COLORS, SHIRT_COLORS,
+  PANTS_COLORS, SHOE_COLORS, EYE_COLORS,
   AgentAppearance, DEFAULT_APPEARANCE,
+  EnvironmentType, ENVIRONMENT_OPTIONS,
+  THEME_COLOR_PROPERTIES, COLOR_SWATCHES,
 } from '../../../../lib/officeConfig';
 import { OfficeAgent } from '../../../../lib/officeAgents';
+import PixelAgent from './PixelAgent';
 import {
   AgentConnection, ProviderType, PROVIDER_META, generateId,
 } from '../../../../lib/connectionManager';
 import { BudgetConfig } from '../../../../lib/budgetAlerts';
+import {
+  CustomThemeRecord, saveCustomTheme, deleteCustomTheme,
+  CUSTOM_THEME_PREFIX, customThemeToOfficeTheme,
+} from '../../../../services/customThemes';
 
 type Tab = 'theme' | 'agents' | 'connections' | 'telegram' | 'budget';
 
@@ -47,6 +55,10 @@ interface Props {
   // Budget
   budgetConfig: BudgetConfig;
   onBudgetConfigChange: (config: BudgetConfig) => void;
+  // Custom themes
+  customThemes?: CustomThemeRecord[];
+  onCustomThemesRefresh?: () => void;
+  circleId?: string;
 }
 
 type AddStep = 'list' | 'pick-provider' | 'form';
@@ -58,9 +70,10 @@ export default function CustomizePanel({
   telegramConfig, onTelegramConfigChange, telegramConnected, telegramBotName,
   telegramChatTitle, onTelegramConnect, onTelegramDisconnect, telegramError, telegramConnecting,
   budgetConfig, onBudgetConfigChange,
+  customThemes = [], onCustomThemesRefresh, circleId,
 }: Props) {
   const [tab, setTab] = useState<Tab>('theme');
-  const [selectedAgentId, setSelectedAgentId] = useState(agents[0]?.id || '');
+  const [selectedAgentId, setSelectedAgentId] = useState(agents[0]?.name || '');
 
   // Add connection state
   const [addStep, setAddStep] = useState<AddStep>('list');
@@ -73,15 +86,73 @@ export default function CustomizePanel({
   const [visibleTokenIds, setVisibleTokenIds] = useState<Set<string>>(new Set());
   const [showRemoteControl, setShowRemoteControl] = useState(false);
 
+  // Custom theme editor state
+  const [showThemeEditor, setShowThemeEditor] = useState(false);
+  const [editingThemeId, setEditingThemeId] = useState<string | null>(null);
+  const [editorName, setEditorName] = useState('My Theme');
+  const [editorEnv, setEditorEnv] = useState<EnvironmentType>('office');
+  const [editorColors, setEditorColors] = useState<Record<string, string>>({});
+  const [editorShared, setEditorShared] = useState(false);
+  const [editorSaving, setEditorSaving] = useState(false);
 
-  if (!visible) return null;
+  const openNewThemeEditor = () => {
+    setEditingThemeId(null);
+    setEditorName('My Theme');
+    setEditorEnv('office');
+    setEditorColors({});
+    setEditorShared(false);
+    setShowThemeEditor(true);
+  };
 
-  const selectedAgent = agents.find(a => a.id === selectedAgentId);
-  const currentAppearance = appearances[selectedAgentId] || {
+  const openEditThemeEditor = (rec: CustomThemeRecord) => {
+    setEditingThemeId(rec.id);
+    setEditorName(rec.name);
+    setEditorEnv(rec.environment_type);
+    setEditorColors(rec.colors as Record<string, string>);
+    setEditorShared(rec.is_shared);
+    setShowThemeEditor(true);
+  };
+
+  const handleSaveCustomTheme = async () => {
+    setEditorSaving(true);
+    const result = await saveCustomTheme({
+      id: editingThemeId || undefined,
+      name: editorName,
+      environment_type: editorEnv,
+      colors: editorColors,
+      circle_id: circleId || null,
+      is_shared: editorShared,
+    });
+    setEditorSaving(false);
+    if (result) {
+      setShowThemeEditor(false);
+      onCustomThemesRefresh?.();
+      onThemeChange(CUSTOM_THEME_PREFIX + result.id);
+    }
+  };
+
+  const handleDeleteCustomTheme = async (id: string) => {
+    const ok = await deleteCustomTheme(id);
+    if (ok) {
+      onCustomThemesRefresh?.();
+      if (currentTheme === CUSTOM_THEME_PREFIX + id) {
+        onThemeChange('underground');
+      }
+    }
+  };
+
+  const getEditorPreviewTheme = (): OfficeTheme => {
+    const base = Object.values(OFFICE_THEMES).find(t => t.environmentType === editorEnv) || OFFICE_THEMES.underground;
+    return { ...base, id: 'preview', name: editorName, ...editorColors };
+  };
+
+
+  const selectedAgent = agents.find(a => a.name === selectedAgentId);
+  const currentAppearance = visible ? (appearances[selectedAgentId] || {
     ...DEFAULT_APPEARANCE,
     shirtColor: selectedAgent?.color || '#6366f1',
     hairColor: selectedAgent?.color || '#1a1a1a',
-  };
+  }) : DEFAULT_APPEARANCE;
 
   const connectedCount = connections.filter(c => c.status === 'connected').length;
 
@@ -148,8 +219,9 @@ export default function CustomizePanel({
   };
 
   return (
-    <View style={styles.overlay}>
-      <View style={styles.panel}>
+    <Modal visible={visible} animationType="fade" transparent onRequestClose={() => { onClose(); resetAddForm(); }}>
+      <View style={styles.overlay}>
+        <View style={styles.panel}>
         {/* Header */}
         <View style={styles.header}>
           <Text style={styles.title}>⚙️ CUSTOMIZE OFFICE</Text>
@@ -179,9 +251,9 @@ export default function CustomizePanel({
           {/* ─── Theme Tab ─── */}
           {tab === 'theme' && (
             <View style={styles.section}>
-              <Text style={styles.sectionTitle}>OFFICE THEME</Text>
+              <Text style={styles.sectionTitle}>BUILT-IN THEMES</Text>
               <View style={styles.themeGrid}>
-                {Object.values(OFFICE_THEMES).map(theme => (
+                {Object.values(OFFICE_THEMES).filter(t => t.environmentType !== 'office').map(theme => (
                   <Pressable
                     key={theme.id}
                     onPress={() => onThemeChange(theme.id)}
@@ -197,6 +269,171 @@ export default function CustomizePanel({
                   </Pressable>
                 ))}
               </View>
+
+              {/* ─── Custom Themes ─── */}
+              <Text style={[styles.sectionTitle, { marginTop: 16 }]}>YOUR THEMES</Text>
+              {customThemes.length > 0 && (
+                <View style={styles.themeGrid}>
+                  {customThemes.map(rec => {
+                    const resolved = customThemeToOfficeTheme(rec);
+                    const isActive = currentTheme === resolved.id;
+                    return (
+                      <Pressable
+                        key={rec.id}
+                        onPress={() => onThemeChange(resolved.id)}
+                        style={[styles.themeCard, isActive && { borderColor: resolved.accentGlow }]}
+                      >
+                        <View style={styles.themePreview}>
+                          <View style={[styles.themeFloor, { backgroundColor: resolved.floorColor }]} />
+                          <View style={[styles.themeWall, { backgroundColor: resolved.wallColor }]} />
+                          <View style={[styles.themeAccent, { backgroundColor: resolved.accentGlow }]} />
+                        </View>
+                        <Text style={[styles.themeName, isActive && { color: resolved.accentGlow }]}>
+                          {rec.name}
+                        </Text>
+                        {isActive && <Text style={styles.themeCheck}>✓</Text>}
+                        {rec.is_shared && (
+                          <Text style={styles.cteSharedBadge}>SHARED</Text>
+                        )}
+                        {/* Edit / Delete buttons */}
+                        <View style={styles.cteCardActions}>
+                          <Pressable onPress={() => openEditThemeEditor(rec)} style={styles.cteSmallBtn}>
+                            <Text style={styles.cteSmallBtnText}>Edit</Text>
+                          </Pressable>
+                          <Pressable onPress={() => handleDeleteCustomTheme(rec.id)} style={[styles.cteSmallBtn, styles.cteDeleteBtn]}>
+                            <Text style={[styles.cteSmallBtnText, { color: '#ef4444' }]}>Del</Text>
+                          </Pressable>
+                        </View>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              )}
+
+              {/* Create button */}
+              {!showThemeEditor && (
+                <Pressable onPress={openNewThemeEditor} style={styles.cteCreateBtn}>
+                  <Text style={styles.cteCreateBtnText}>+ CREATE CUSTOM THEME</Text>
+                </Pressable>
+              )}
+
+              {/* ─── Theme Editor ─── */}
+              {showThemeEditor && (
+                <View style={styles.cteEditor}>
+                  <Text style={styles.sectionTitle}>
+                    {editingThemeId ? 'EDIT THEME' : 'NEW THEME'}
+                  </Text>
+
+                  {/* Theme name */}
+                  <Text style={styles.inputLabel}>THEME NAME</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={editorName}
+                    onChangeText={setEditorName}
+                    placeholder="My Custom Theme"
+                    placeholderTextColor="#444"
+                  />
+
+                  {/* Environment type picker */}
+                  <Text style={[styles.inputLabel, { marginTop: 12 }]}>ENVIRONMENT</Text>
+                  <View style={styles.cteEnvRow}>
+                    {ENVIRONMENT_OPTIONS.map(opt => (
+                      <Pressable
+                        key={opt.value}
+                        onPress={() => setEditorEnv(opt.value)}
+                        style={[styles.cteEnvChip, editorEnv === opt.value && styles.cteEnvChipActive]}
+                      >
+                        <Text style={styles.cteEnvIcon}>{opt.icon}</Text>
+                        <Text style={[styles.cteEnvLabel, editorEnv === opt.value && { color: '#ddd' }]}>
+                          {opt.label}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+
+                  {/* Color properties grouped by category */}
+                  {(['floor', 'walls', 'furniture', 'window'] as const).map(group => (
+                    <View key={group} style={{ marginTop: 12 }}>
+                      <Text style={styles.sectionTitle}>{group.toUpperCase()} COLORS</Text>
+                      {THEME_COLOR_PROPERTIES.filter(p => p.group === group).map(prop => {
+                        const preview = getEditorPreviewTheme();
+                        const currentVal = (editorColors[prop.key] || preview[prop.key]) as string;
+                        const swatches = COLOR_SWATCHES[group] || [];
+                        return (
+                          <View key={prop.key} style={styles.cteColorRow}>
+                            <Text style={styles.cteColorLabel}>{prop.label}</Text>
+                            <View style={[styles.cteCurrentColor, { backgroundColor: currentVal }]} />
+                            <View style={styles.cteSwatchRow}>
+                              {swatches.map((color, i) => (
+                                <Pressable
+                                  key={i}
+                                  onPress={() => setEditorColors(prev => ({ ...prev, [prop.key]: color }))}
+                                  style={[
+                                    styles.cteSwatch,
+                                    { backgroundColor: color },
+                                    currentVal === color && styles.cteSwatchActive,
+                                  ]}
+                                />
+                              ))}
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  ))}
+
+                  {/* Mini preview */}
+                  <Text style={[styles.inputLabel, { marginTop: 12 }]}>PREVIEW</Text>
+                  <View style={styles.cteMiniPreview}>
+                    {(() => {
+                      const p = getEditorPreviewTheme();
+                      return (
+                        <>
+                          <View style={[styles.cteMiniFloor, { backgroundColor: p.floorColor }]} />
+                          <View style={[styles.cteMiniWall, { backgroundColor: p.wallColor, borderBottomColor: p.wallBorder }]} />
+                          <View style={[styles.cteMiniWindow, { backgroundColor: p.windowSkyColor, borderColor: p.wallBorder }]}>
+                            <View style={{ flex: 1, backgroundColor: p.windowCityColor, position: 'absolute', bottom: 0, left: 0, right: 0, height: 12 }} />
+                          </View>
+                          <View style={[styles.cteMiniDesk, { backgroundColor: p.deskColor, borderColor: p.deskBorder }]} />
+                          <View style={[styles.cteMiniChair, { backgroundColor: p.chairColor, borderColor: p.chairBorder }]} />
+                          <View style={[styles.cteMiniRug, { backgroundColor: p.rugColor, borderColor: p.rugBorder }]} />
+                          <View style={[styles.cteMiniAccent, { backgroundColor: p.accentGlow }]} />
+                        </>
+                      );
+                    })()}
+                  </View>
+
+                  {/* Share toggle */}
+                  <View style={[styles.budgetToggle, { marginTop: 12 }]}>
+                    <Text style={styles.budgetToggleLabel}>Share with circle</Text>
+                    <Pressable
+                      onPress={() => setEditorShared(!editorShared)}
+                      style={[styles.toggle, editorShared && styles.toggleActive]}
+                    >
+                      <View style={[styles.toggleKnob, editorShared && styles.toggleKnobActive]} />
+                    </Pressable>
+                  </View>
+
+                  {/* Save / Cancel */}
+                  <View style={styles.cteActionRow}>
+                    <Pressable
+                      onPress={() => setShowThemeEditor(false)}
+                      style={[styles.cteActionBtn, styles.cteCancelBtn]}
+                    >
+                      <Text style={styles.cteActionBtnText}>Cancel</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={handleSaveCustomTheme}
+                      disabled={editorSaving || !editorName.trim()}
+                      style={[styles.cteActionBtn, styles.cteSaveBtn, editorSaving && { opacity: 0.5 }]}
+                    >
+                      <Text style={[styles.cteActionBtnText, { color: '#fff' }]}>
+                        {editorSaving ? 'Saving...' : editingThemeId ? 'Update' : 'Save'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
+              )}
             </View>
           )}
 
@@ -208,10 +445,10 @@ export default function CustomizePanel({
                 {agents.map(agent => (
                   <Pressable
                     key={agent.id}
-                    onPress={() => setSelectedAgentId(agent.id)}
-                    style={[styles.agentChip, selectedAgentId === agent.id && { borderColor: agent.color, backgroundColor: agent.color + '15' }]}
+                    onPress={() => setSelectedAgentId(agent.name)}
+                    style={[styles.agentChip, selectedAgentId === agent.name && { borderColor: agent.color, backgroundColor: agent.color + '15' }]}
                   >
-                    <Text style={[styles.agentChipText, selectedAgentId === agent.id && { color: agent.color }]}>
+                    <Text style={[styles.agentChipText, selectedAgentId === agent.name && { color: agent.color }]}>
                       {agent.name}
                     </Text>
                   </Pressable>
@@ -220,6 +457,17 @@ export default function CustomizePanel({
 
               {selectedAgent && (
                 <>
+                  {/* Live preview */}
+                  <View style={styles.previewRow}>
+                    <PixelAgent
+                      agent={selectedAgent}
+                      appearance={currentAppearance}
+                      onPress={() => {}}
+                      selected={false}
+                      scale={1.8}
+                    />
+                  </View>
+
                   <Text style={styles.sectionTitle}>SKIN TONE</Text>
                   <View style={styles.colorRow}>
                     {SKIN_TONES.map(color => (
@@ -236,7 +484,7 @@ export default function CustomizePanel({
                   </View>
                   <Text style={styles.sectionTitle}>HAIR STYLE</Text>
                   <View style={styles.optionRow}>
-                    {(['flat', 'spiky', 'mohawk', 'long', 'bald'] as const).map(style => (
+                    {(['flat', 'spiky', 'mohawk', 'long', 'curly', 'ponytail', 'cap', 'bald'] as const).map(style => (
                       <Pressable key={style} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, hairStyle: style })}
                         style={[styles.optionBtn, currentAppearance.hairStyle === style && styles.optionBtnActive]}>
                         <Text style={[styles.optionText, currentAppearance.hairStyle === style && styles.optionTextActive]}>{style.toUpperCase()}</Text>
@@ -250,36 +498,133 @@ export default function CustomizePanel({
                         style={[styles.colorSwatch, { backgroundColor: color }, currentAppearance.shirtColor === color && styles.swatchActive]} />
                     ))}
                   </View>
+                  <Text style={styles.sectionTitle}>PANTS COLOR</Text>
+                  <View style={styles.colorRow}>
+                    {PANTS_COLORS.map(color => (
+                      <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, pantsColor: color })}
+                        style={[styles.colorSwatch, { backgroundColor: color }, currentAppearance.pantsColor === color && styles.swatchActive]} />
+                    ))}
+                  </View>
+                  <Text style={styles.sectionTitle}>SHOE COLOR</Text>
+                  <View style={styles.colorRow}>
+                    {SHOE_COLORS.map(color => (
+                      <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, shoeColor: color })}
+                        style={[styles.colorSwatch, { backgroundColor: color }, (currentAppearance.shoeColor || '#1a1a1a') === color && styles.swatchActive]} />
+                    ))}
+                  </View>
                   <Text style={styles.sectionTitle}>ACCESSORY</Text>
                   <View style={styles.optionRow}>
-                    {(['none', 'glasses', 'headphones', 'bowtie'] as const).map(acc => (
-                      <Pressable key={acc} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, accessory: acc })}
-                        style={[styles.optionBtn, currentAppearance.accessory === acc && styles.optionBtnActive]}>
-                        <Text style={[styles.optionText, currentAppearance.accessory === acc && styles.optionTextActive]}>
-                          {acc === 'none' ? 'NONE' : acc === 'glasses' ? '👓' : acc === 'headphones' ? '🎧' : '🎀'}
-                        </Text>
-                      </Pressable>
-                    ))}
+                    {(['none', 'glasses', 'headphones', 'bowtie', 'scarf', 'hoodie', 'mask', 'monocle', 'eyepatch', 'bandana'] as const).map(acc => {
+                      const labels: Record<string, string> = { none: 'NONE', glasses: '👓', headphones: '🎧', bowtie: '🎀', scarf: '🧣', hoodie: '🧥', mask: '😷', monocle: '🧐', eyepatch: '🏴‍☠️', bandana: '🥷' };
+                      return (
+                        <Pressable key={acc} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, accessory: acc })}
+                          style={[styles.optionBtn, currentAppearance.accessory === acc && styles.optionBtnActive]}>
+                          <Text style={[styles.optionText, currentAppearance.accessory === acc && styles.optionTextActive]}>
+                            {labels[acc]}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
                   </View>
                   <Text style={styles.sectionTitle}>HAT</Text>
                   <View style={styles.optionRow}>
-                    {(['none', 'cap', 'tophat', 'beanie', 'crown'] as const).map(hat => (
-                      <Pressable key={hat} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, hat: hat })}
-                        style={[styles.optionBtn, currentAppearance.hat === hat && styles.optionBtnActive]}>
-                        <Text style={[styles.optionText, currentAppearance.hat === hat && styles.optionTextActive]}>
-                          {hat === 'none' ? 'NONE' : hat === 'cap' ? '🧢' : hat === 'tophat' ? '🎩' : hat === 'beanie' ? '🧶' : '👑'}
-                        </Text>
-                      </Pressable>
-                    ))}
+                    {(['none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns', 'space_helmet', 'wizard_hat', 'halo', 'antenna'] as const).map(hat => {
+                      const labels: Record<string, string> = { none: 'NONE', cap: '🧢', tophat: '🎩', beanie: '🧶', crown: '👑', helmet: '⛑️', horns: '😈', space_helmet: '🪖 SPACE', wizard_hat: '🧙 WIZARD', halo: '😇 HALO', antenna: '👽 ANTENNA' };
+                      return (
+                        <Pressable key={hat} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, hat: hat })}
+                          style={[styles.optionBtn, currentAppearance.hat === hat && styles.optionBtnActive]}>
+                          <Text style={[styles.optionText, currentAppearance.hat === hat && styles.optionTextActive]}>
+                            {labels[hat]}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
                   </View>
                   <Text style={styles.sectionTitle}>EXPRESSION</Text>
                   <View style={styles.optionRow}>
-                    {(['neutral', 'happy', 'focused', 'sleepy', 'cool'] as const).map(expr => (
+                    {(['neutral', 'happy', 'focused', 'sleepy', 'cool', 'angry'] as const).map(expr => (
                       <Pressable key={expr} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, expression: expr })}
                         style={[styles.optionBtn, currentAppearance.expression === expr && styles.optionBtnActive]}>
                         <Text style={[styles.optionText, currentAppearance.expression === expr && styles.optionTextActive]}>{expr.toUpperCase()}</Text>
                       </Pressable>
                     ))}
+                  </View>
+                  <Text style={styles.sectionTitle}>BACK ITEM</Text>
+                  <View style={styles.optionRow}>
+                    {(['none', 'cape', 'backpack', 'wings', 'jetpack', 'shield', 'sword', 'quiver'] as const).map(item => {
+                      const labels: Record<string, string> = { none: 'NONE', cape: '🦸 CAPE', backpack: '🎒 PACK', wings: '🪽 WINGS', jetpack: '🚀 JETPACK', shield: '🛡️ SHIELD', sword: '⚔️ SWORD', quiver: '🏹 QUIVER' };
+                      return (
+                        <Pressable key={item} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, backItem: item })}
+                          style={[styles.optionBtn, (currentAppearance.backItem || 'none') === item && styles.optionBtnActive]}>
+                          <Text style={[styles.optionText, (currentAppearance.backItem || 'none') === item && styles.optionTextActive]}>
+                            {labels[item]}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                  <Text style={styles.sectionTitle}>EYE COLOR</Text>
+                  <View style={styles.colorRow}>
+                    {EYE_COLORS.map(color => (
+                      <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, eyeColor: color })}
+                        style={[styles.colorSwatch, { backgroundColor: color }, (currentAppearance.eyeColor || '#1a1a1a') === color && styles.swatchActive]} />
+                    ))}
+                  </View>
+                  <Text style={styles.sectionTitle}>FACIAL HAIR</Text>
+                  <View style={styles.optionRow}>
+                    {(['none', 'stubble', 'beard', 'mustache', 'goatee'] as const).map(fh => {
+                      const labels: Record<string, string> = { none: 'NONE', stubble: '🔘 STUBBLE', beard: '🧔 BEARD', mustache: '👨 STACHE', goatee: '🐐 GOATEE' };
+                      return (
+                        <Pressable key={fh} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, facialHair: fh })}
+                          style={[styles.optionBtn, (currentAppearance.facialHair || 'none') === fh && styles.optionBtnActive]}>
+                          <Text style={[styles.optionText, (currentAppearance.facialHair || 'none') === fh && styles.optionTextActive]}>
+                            {labels[fh]}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                  <Text style={styles.sectionTitle}>PET</Text>
+                  <View style={styles.optionRow}>
+                    {(['none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien'] as const).map(pet => {
+                      const labels: Record<string, string> = { none: 'NONE', cat: '🐱 CAT', dog: '🐕 DOG', bird: '🐦 BIRD', robot: '🤖 ROBOT', dragon: '🐉 DRAGON', alien: '👽 ALIEN' };
+                      return (
+                        <Pressable key={pet} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, pet: pet })}
+                          style={[styles.optionBtn, (currentAppearance.pet || 'none') === pet && styles.optionBtnActive]}>
+                          <Text style={[styles.optionText, (currentAppearance.pet || 'none') === pet && styles.optionTextActive]}>
+                            {labels[pet]}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                  <Text style={styles.sectionTitle}>AURA</Text>
+                  <View style={styles.optionRow}>
+                    {(['none', 'fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow', 'glitch', 'cosmic'] as const).map(aura => {
+                      const labels: Record<string, string> = { none: 'NONE', fire: '🔥 FIRE', ice: '🧊 ICE', electric: '⚡ BOLT', nature: '🌿 LEAF', shadow: '🌑 SHADOW', rainbow: '🌈 RAINBOW', glitch: '📟 GLITCH', cosmic: '✨ COSMIC' };
+                      return (
+                        <Pressable key={aura} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, aura: aura })}
+                          style={[styles.optionBtn, (currentAppearance.aura || 'none') === aura && styles.optionBtnActive]}>
+                          <Text style={[styles.optionText, (currentAppearance.aura || 'none') === aura && styles.optionTextActive]}>
+                            {labels[aura]}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                  <Text style={styles.sectionTitle}>HAND ITEM</Text>
+                  <View style={styles.optionRow}>
+                    {(['none', 'lightsaber', 'coffee', 'laptop', 'flag', 'wand'] as const).map(item => {
+                      const labels: Record<string, string> = { none: 'NONE', lightsaber: '⚔️ SABER', coffee: '☕ COFFEE', laptop: '💻 LAPTOP', flag: '🚩 FLAG', wand: '🪄 WAND' };
+                      return (
+                        <Pressable key={item} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, handItem: item })}
+                          style={[styles.optionBtn, (currentAppearance.handItem || 'none') === item && styles.optionBtnActive]}>
+                          <Text style={[styles.optionText, (currentAppearance.handItem || 'none') === item && styles.optionTextActive]}>
+                            {labels[item]}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
                   </View>
                 </>
               )}
@@ -771,13 +1116,14 @@ export default function CustomizePanel({
         </ScrollView>
       </View>
     </View>
+    </Modal>
   );
 }
 
 const styles = StyleSheet.create({
   overlay: {
-    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-    backgroundColor: '#00000080', zIndex: 200, justifyContent: 'center', alignItems: 'center',
+    flex: 1,
+    backgroundColor: '#00000080', justifyContent: 'center', alignItems: 'center',
   },
   panel: {
     backgroundColor: '#0d0d14', borderWidth: 1, borderColor: '#1a1a2e',
@@ -802,7 +1148,7 @@ const styles = StyleSheet.create({
   tabActive: { borderBottomWidth: 2, borderBottomColor: '#6366f1' },
   tabText: { fontSize: 12, color: '#888', fontFamily: 'monospace', fontWeight: '600' },
   tabTextActive: { color: '#ddd' },
-  body: { padding: 16 },
+  body: { flex: 1, padding: 16 },
   section: { gap: 10 },
   sectionTitle: {
     fontSize: 9, fontWeight: '800', color: '#555', fontFamily: 'monospace',
@@ -846,6 +1192,12 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   agentChipText: { fontSize: 10, color: '#666', fontFamily: 'monospace', fontWeight: '600' },
+
+  // Agent preview
+  previewRow: {
+    alignItems: 'center', justifyContent: 'center', paddingVertical: 8,
+    marginBottom: 4, backgroundColor: '#0a0a10', borderRadius: 8, borderWidth: 1, borderColor: '#1a1a2e',
+  },
 
   // Colors & options
   colorRow: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
@@ -1041,5 +1393,106 @@ const styles = StyleSheet.create({
   toggleKnobActive: {
     backgroundColor: '#22c55e',
     transform: [{ translateX: 20 }],
+  },
+
+  // Custom Theme Editor
+  cteSharedBadge: {
+    position: 'absolute', top: 4, left: 6, fontSize: 7, color: '#22c55e',
+    fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5,
+  },
+  cteCardActions: {
+    flexDirection: 'row', gap: 4, marginTop: 4,
+  },
+  cteSmallBtn: {
+    paddingHorizontal: 8, paddingVertical: 3, borderRadius: 4,
+    backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#1a1a2e',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  cteDeleteBtn: { borderColor: '#ef444430' },
+  cteSmallBtnText: {
+    fontSize: 8, color: '#888', fontFamily: 'monospace', fontWeight: '700',
+  },
+  cteCreateBtn: {
+    borderWidth: 1, borderColor: '#6366f140', borderStyle: 'dashed' as any,
+    borderRadius: 10, paddingVertical: 12, alignItems: 'center',
+    backgroundColor: '#6366f108', marginTop: 8,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  cteCreateBtnText: {
+    fontSize: 11, color: '#6366f1', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1,
+  },
+  cteEditor: {
+    marginTop: 12, padding: 12, backgroundColor: '#0a0a10',
+    borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 10, gap: 4,
+  },
+  cteEnvRow: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4,
+  },
+  cteEnvChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 8, paddingVertical: 5, borderRadius: 8,
+    borderWidth: 1, borderColor: '#1a1a2e', backgroundColor: '#06060a',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  cteEnvChipActive: { borderColor: '#6366f1', backgroundColor: '#6366f120' },
+  cteEnvIcon: { fontSize: 12 },
+  cteEnvLabel: { fontSize: 9, color: '#666', fontFamily: 'monospace', fontWeight: '700' },
+  cteColorRow: {
+    marginTop: 6, gap: 4,
+  },
+  cteColorLabel: {
+    fontSize: 9, color: '#666', fontFamily: 'monospace', fontWeight: '700',
+  },
+  cteCurrentColor: {
+    width: 24, height: 12, borderRadius: 3, borderWidth: 1, borderColor: '#333',
+  },
+  cteSwatchRow: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 4,
+  },
+  cteSwatch: {
+    width: 20, height: 20, borderRadius: 4, borderWidth: 1.5, borderColor: 'transparent',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  cteSwatchActive: { borderColor: '#fff' },
+  cteMiniPreview: {
+    width: '100%' as any, height: 100, borderRadius: 6, overflow: 'hidden',
+    position: 'relative', marginTop: 4, backgroundColor: '#000',
+  },
+  cteMiniFloor: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
+  cteMiniWall: {
+    position: 'absolute', top: 0, left: 0, right: 0, height: 30,
+    borderBottomWidth: 1,
+  },
+  cteMiniWindow: {
+    position: 'absolute', top: 5, right: 20, width: 30, height: 18,
+    borderWidth: 1, borderRadius: 1, overflow: 'hidden',
+  },
+  cteMiniDesk: {
+    position: 'absolute', top: 45, left: 20, width: 40, height: 14,
+    borderWidth: 1, borderRadius: 1,
+  },
+  cteMiniChair: {
+    position: 'absolute', top: 58, left: 28, width: 16, height: 8,
+    borderWidth: 1, borderRadius: 2,
+  },
+  cteMiniRug: {
+    position: 'absolute', bottom: 15, left: '30%' as any, width: '40%' as any, height: 14,
+    borderWidth: 1, borderRadius: 1, opacity: 0.5,
+  },
+  cteMiniAccent: {
+    position: 'absolute', bottom: 5, left: '35%' as any, width: '30%' as any, height: 3,
+    borderRadius: 1,
+  },
+  cteActionRow: {
+    flexDirection: 'row', gap: 8, marginTop: 12,
+  },
+  cteActionBtn: {
+    flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  cteCancelBtn: { backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#1a1a2e' },
+  cteSaveBtn: { backgroundColor: '#6366f1' },
+  cteActionBtnText: {
+    fontSize: 12, color: '#888', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1,
   },
 });
