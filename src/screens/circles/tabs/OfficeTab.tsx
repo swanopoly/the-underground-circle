@@ -195,6 +195,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [imagePickerTab, setImagePickerTab] = useState<'upload' | 'nft'>('upload');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // ─── Sticky note editor state ───────────────────────────────────────────
+  const [stickyEditorVisible, setStickyEditorVisible] = useState(false);
+  const [stickyEditorTargetId, setStickyEditorTargetId] = useState<string | null>(null);
+  const [stickyTab, setStickyTab] = useState<'write' | 'draw' | 'gif'>('write');
+  const [stickyText, setStickyText] = useState('');
+  const [stickyColor, setStickyColor] = useState('#fef08a');
+  const [stickyGifUrl, setStickyGifUrl] = useState('');
+  const [stickyGifSearch, setStickyGifSearch] = useState('');
+  const stickyCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const stickyDrawingRef = useRef(false);
+
   // ─── Setup wizard ─────────────────────────────────────────────────────────
   const [showSetupWizard, setShowSetupWizard] = useState(false);
 
@@ -1036,14 +1047,26 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   const handleFurniturePress = (id: string) => {
     if (!editMode) return;
-    // Check if it's an NFT frame — open picker on first tap
     const currentFloor = floors.find(f => f.id === currentFloorId);
     const item = currentFloor?.furniture.find(f => f.id === id);
+    // Check if it's an NFT frame — open picker on first tap
     if (item?.type === 'nft_frame' && selectedFurnitureId !== id) {
       setNftPickerTargetId(id);
       setSelectedFurnitureId(id);
       setImagePickerTab('upload');
       setNftPickerVisible(true);
+      return;
+    }
+    // Sticky note — open editor on first tap
+    if (item?.type === 'stickynote' && selectedFurnitureId !== id) {
+      setStickyEditorTargetId(id);
+      setSelectedFurnitureId(id);
+      setStickyText(item.noteText || '');
+      setStickyColor(item.noteColor || '#fef08a');
+      setStickyGifUrl(item.noteGifUrl || '');
+      setStickyGifSearch('');
+      setStickyTab('write');
+      setStickyEditorVisible(true);
       return;
     }
     if (selectedFurnitureId === id) {
@@ -1165,6 +1188,83 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       console.error('Failed to process image:', err);
     }
     event.target.value = '';
+  };
+
+  // ── Sticky note save ─────────────────────────────────────────────────────
+
+  const handleStickyNoteSave = () => {
+    if (!stickyEditorTargetId) return;
+    // Grab drawing from canvas if on draw tab
+    let drawingData: string | undefined;
+    if (stickyTab === 'draw' && stickyCanvasRef.current) {
+      const canvas = stickyCanvasRef.current;
+      // Check if canvas has any content (not all white)
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const hasContent = imgData.data.some((v, i) => i % 4 === 3 && v > 0); // check alpha
+        if (hasContent) drawingData = canvas.toDataURL('image/png');
+      }
+    }
+    setFloors(prev => prev.map(f =>
+      f.id === currentFloorId ? {
+        ...f,
+        furniture: f.furniture.map(item =>
+          item.id === stickyEditorTargetId ? {
+            ...item,
+            noteText: stickyText || undefined,
+            noteColor: stickyColor,
+            noteDrawing: drawingData || (stickyTab !== 'draw' ? item.noteDrawing : undefined),
+            noteGifUrl: stickyGifUrl || undefined,
+          } : item
+        ),
+      } : f
+    ));
+    setStickyEditorVisible(false);
+    setStickyEditorTargetId(null);
+  };
+
+  const initStickyCanvas = (canvas: HTMLCanvasElement | null) => {
+    if (!canvas || stickyCanvasRef.current === canvas) return;
+    stickyCanvasRef.current = canvas;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // Load existing drawing if any
+    const currentFloor = floors.find(f => f.id === currentFloorId);
+    const item = currentFloor?.furniture.find(f => f.id === stickyEditorTargetId);
+    if (item?.noteDrawing) {
+      const img = new (window as any).Image();
+      img.onload = () => ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      img.src = item.noteDrawing;
+    }
+    // Set up drawing
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#1a1a1a';
+    let drawing = false;
+    let lastX = 0, lastY = 0;
+    canvas.onpointerdown = (e) => {
+      drawing = true;
+      const rect = canvas.getBoundingClientRect();
+      lastX = (e.clientX - rect.left) * (canvas.width / rect.width);
+      lastY = (e.clientY - rect.top) * (canvas.height / rect.height);
+    };
+    canvas.onpointermove = (e) => {
+      if (!drawing) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+      ctx.beginPath();
+      ctx.moveTo(lastX, lastY);
+      ctx.lineTo(x, y);
+      ctx.stroke();
+      lastX = x;
+      lastY = y;
+    };
+    canvas.onpointerup = () => { drawing = false; };
+    canvas.onpointerleave = () => { drawing = false; };
   };
 
   const handleFurnitureMove = (id: string, x: number, y: number) => {
@@ -2285,6 +2385,117 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </View>
       </Modal>
 
+      {/* ── Sticky Note Editor Modal ────────────────────────────────────── */}
+      <Modal visible={stickyEditorVisible} animationType="fade" transparent>
+        <View style={nftStyles.overlay}>
+          <View style={[nftStyles.card, { maxWidth: 420, maxHeight: 520 }]}>
+            <View style={nftStyles.header}>
+              <Text style={nftStyles.headerText}>STICKY NOTE</Text>
+              <Pressable onPress={() => { setStickyEditorVisible(false); setStickyEditorTargetId(null); }} style={nftStyles.closeBtn}>
+                <Text style={nftStyles.closeText}>✕</Text>
+              </Pressable>
+            </View>
+
+            {/* Color picker row */}
+            <View style={stickyStyles.colorRow}>
+              {['#fef08a', '#fca5a5', '#86efac', '#93c5fd', '#c4b5fd', '#fdba74', '#f9a8d4', '#ffffff'].map(c => (
+                <Pressable
+                  key={c}
+                  onPress={() => setStickyColor(c)}
+                  style={[stickyStyles.colorDot, { backgroundColor: c }, stickyColor === c && stickyStyles.colorDotActive,
+                    Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}]}
+                />
+              ))}
+            </View>
+
+            {/* Tab Switcher */}
+            <View style={imgPickerStyles.tabRow}>
+              {(['write', 'draw', 'gif'] as const).map(t => (
+                <Pressable
+                  key={t}
+                  onPress={() => setStickyTab(t)}
+                  style={[imgPickerStyles.tab, stickyTab === t && imgPickerStyles.tabActive, Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}]}
+                >
+                  <Text style={[imgPickerStyles.tabText, stickyTab === t && imgPickerStyles.tabTextActive]}>
+                    {t === 'write' ? '✏️  WRITE' : t === 'draw' ? '🎨  DRAW' : '🎞  GIF'}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+
+            {/* Write tab */}
+            {stickyTab === 'write' && (
+              <View style={stickyStyles.writeArea}>
+                <TextInput
+                  value={stickyText}
+                  onChangeText={setStickyText}
+                  placeholder="Type your note..."
+                  placeholderTextColor="#666"
+                  multiline
+                  style={[stickyStyles.textInput, { backgroundColor: stickyColor }]}
+                  maxLength={500}
+                />
+              </View>
+            )}
+
+            {/* Draw tab */}
+            {stickyTab === 'draw' && Platform.OS === 'web' && (
+              <View style={stickyStyles.drawArea}>
+                <View style={[stickyStyles.canvasWrap, { backgroundColor: stickyColor }]}>
+                  <canvas
+                    ref={(el: any) => initStickyCanvas(el)}
+                    width={300}
+                    height={200}
+                    style={{ width: '100%', height: '100%', touchAction: 'none', cursor: 'crosshair', borderRadius: 4 } as any}
+                  />
+                </View>
+                <Pressable
+                  onPress={() => {
+                    if (stickyCanvasRef.current) {
+                      const ctx = stickyCanvasRef.current.getContext('2d');
+                      if (ctx) ctx.clearRect(0, 0, stickyCanvasRef.current.width, stickyCanvasRef.current.height);
+                    }
+                  }}
+                  style={[stickyStyles.clearDrawBtn, Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}]}
+                >
+                  <Text style={stickyStyles.clearDrawText}>CLEAR DRAWING</Text>
+                </Pressable>
+              </View>
+            )}
+
+            {/* GIF tab */}
+            {stickyTab === 'gif' && (
+              <View style={stickyStyles.gifArea}>
+                <TextInput
+                  value={stickyGifUrl}
+                  onChangeText={setStickyGifUrl}
+                  placeholder="Paste a GIF URL..."
+                  placeholderTextColor="#666"
+                  style={stickyStyles.gifInput}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                {stickyGifUrl ? (
+                  <View style={[stickyStyles.gifPreview, { backgroundColor: stickyColor }]}>
+                    <Image source={{ uri: stickyGifUrl }} style={stickyStyles.gifImage} resizeMode="contain" />
+                  </View>
+                ) : (
+                  <View style={stickyStyles.gifHint}>
+                    <Text style={{ fontSize: 32 }}>🎞</Text>
+                    <Text style={stickyStyles.gifHintText}>Paste a GIF URL from Giphy, Tenor, etc.</Text>
+                  </View>
+                )}
+              </View>
+            )}
+
+            {/* Save button */}
+            <Pressable onPress={handleStickyNoteSave} style={[stickyStyles.saveBtn, Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}]}>
+              <Text style={stickyStyles.saveBtnText}>SAVE NOTE</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
       {/* Hidden file input for web image upload */}
       {Platform.OS === 'web' && (
         <View style={{ position: 'absolute', width: 0, height: 0, overflow: 'hidden' }}>
@@ -2673,6 +2884,41 @@ const imgPickerStyles = StyleSheet.create({
   uploadHint: { color: '#555', fontSize: 10, fontFamily: 'monospace', textAlign: 'center' },
   uploadBtn: { marginTop: 8, paddingHorizontal: 24, paddingVertical: 10, backgroundColor: '#6366f1', borderRadius: 8 },
   uploadBtnText: { color: '#fff', fontSize: 11, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
+});
+
+const stickyStyles = StyleSheet.create({
+  colorRow: { flexDirection: 'row', justifyContent: 'center', gap: 8, paddingVertical: 10, borderBottomWidth: 1, borderColor: '#1a1a2e' },
+  colorDot: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: '#333' },
+  colorDotActive: { borderColor: '#fff', borderWidth: 3 },
+  writeArea: { padding: 12, flex: 1 },
+  textInput: {
+    minHeight: 140, borderRadius: 6, padding: 12,
+    color: '#1a1a1a', fontSize: 14, fontFamily: 'monospace',
+    textAlignVertical: 'top',
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+  },
+  drawArea: { padding: 12, alignItems: 'center', gap: 8 },
+  canvasWrap: { width: '100%' as any, height: 200, borderRadius: 6, overflow: 'hidden' },
+  clearDrawBtn: {
+    paddingHorizontal: 16, paddingVertical: 6, borderRadius: 6,
+    borderWidth: 1, borderColor: '#333', backgroundColor: '#0a0a10',
+  },
+  clearDrawText: { color: '#888', fontSize: 9, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
+  gifArea: { padding: 12, gap: 10 },
+  gifInput: {
+    backgroundColor: '#0d0d14', borderWidth: 1, borderColor: '#222',
+    borderRadius: 8, padding: 10, color: '#ddd', fontSize: 12, fontFamily: 'monospace',
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+  },
+  gifPreview: { height: 150, borderRadius: 6, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  gifImage: { width: '100%' as any, height: '100%' as any },
+  gifHint: { height: 120, alignItems: 'center', justifyContent: 'center', gap: 8 },
+  gifHintText: { color: '#555', fontSize: 10, fontFamily: 'monospace', textAlign: 'center' },
+  saveBtn: {
+    margin: 12, paddingVertical: 12, borderRadius: 8, backgroundColor: '#6366f1',
+    alignItems: 'center',
+  },
+  saveBtnText: { color: '#fff', fontSize: 12, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
 });
 
 const styles = StyleSheet.create({

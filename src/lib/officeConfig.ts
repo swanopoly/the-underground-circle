@@ -415,7 +415,7 @@ export type FurnitureType =
   | 'server' | 'coffee' | 'watercooler' | 'arcade'
   | 'tv' | 'pingtable' | 'snackbar' | 'neonsign' | 'rug'
   | 'safe' | 'trophy' | 'standingdesk' | 'beanbag' | 'printer' | 'clock' | 'window'
-  | 'nft_frame';
+  | 'nft_frame' | 'stickynote';
 
 export interface FurnitureItem {
   id: string;
@@ -430,6 +430,11 @@ export interface FurnitureItem {
   nftName?: string;
   nftChain?: 'solana' | 'ethereum';
   imageSource?: 'upload' | 'nft';
+  // Sticky note data
+  noteText?: string;
+  noteColor?: string;       // bg color of the sticky note
+  noteDrawing?: string;     // base64 PNG of the drawing
+  noteGifUrl?: string;      // GIF URL
 }
 
 export interface FurnitureCatalogEntry {
@@ -470,6 +475,7 @@ export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
   { type: 'clock',       name: 'Wall Clock',     icon: '🕐',  width: 25,  height: 25,  category: 'decor',  description: 'Always be on time' },
   { type: 'window',      name: 'Window',         icon: '🪟',  width: 60,  height: 40,  category: 'decor',  description: 'Let the light in' },
   { type: 'nft_frame',   name: 'Image / NFT',    icon: '🖼',  width: 80,  height: 80,  category: 'decor',  description: 'Upload image or display NFT' },
+  { type: 'stickynote',  name: 'Sticky Note',    icon: '📝',  width: 100, height: 100, category: 'work',   description: 'Write, draw, or add GIFs' },
 ];
 
 // ─── OpenClaw Connection ─────────────────────────────────────────────────────

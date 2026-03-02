@@ -7,6 +7,15 @@ const GRID_SIZE = 16;
 export const FLOOR_W = 900;
 export const FLOOR_H = 970;
 
+// Darken a hex color for sticky note fold shadow
+function darkenColor(hex: string): string {
+  const c = hex.replace('#', '');
+  const r = Math.max(0, parseInt(c.slice(0, 2), 16) - 30);
+  const g = Math.max(0, parseInt(c.slice(2, 4), 16) - 30);
+  const b = Math.max(0, parseInt(c.slice(4, 6), 16) - 30);
+  return `rgb(${r},${g},${b})`;
+}
+
   // Advanced Volumetric FX injected
   const renderAtmospherics = () => {
     return (
@@ -2567,6 +2576,27 @@ function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme) {
           )}
         </View>
       );
+    case 'stickynote': {
+      const bgColor = item.noteColor || '#fef08a';
+      const hasContent = !!(item.noteText || item.noteDrawing || item.noteGifUrl);
+      return (
+        <View style={[s.fStickyNote, { backgroundColor: bgColor }]}>
+          <View style={[s.fStickyFold, { backgroundColor: bgColor, borderBottomColor: darkenColor(bgColor) }]} />
+          {item.noteGifUrl ? (
+            <Image source={{ uri: item.noteGifUrl }} style={s.fStickyGif} resizeMode="cover" />
+          ) : item.noteDrawing ? (
+            <Image source={{ uri: item.noteDrawing }} style={s.fStickyDrawingImg} resizeMode="contain" />
+          ) : item.noteText ? (
+            <Text style={s.fStickyText} numberOfLines={5}>{item.noteText}</Text>
+          ) : (
+            <View style={s.fStickyEmpty}>
+              <Text style={s.fStickyEmptyIcon}>📝</Text>
+              <Text style={s.fStickyEmptyText}>TAP TO EDIT</Text>
+            </View>
+          )}
+        </View>
+      );
+    }
     default:
       return <Text style={{ fontSize: 20 }}>📦</Text>;
   }
@@ -2593,10 +2623,13 @@ export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorP
       if (rect) {
         const clientX = e.nativeEvent?.clientX ?? e.clientX;
         const clientY = e.nativeEvent?.clientY ?? e.clientY;
-        const rawX = clientX - rect.left;
-        const rawY = clientY - rect.top;
-        const x = Math.round(rawX / GRID_SIZE) * GRID_SIZE;
-        const y = Math.round(rawY / GRID_SIZE) * GRID_SIZE;
+        // rect is in screen space (includes parent scale transform)
+        // Divide by scale to convert screen coords → floor-local coords
+        const scale = rect.width / FLOOR_W || 1;
+        const rawX = (clientX - rect.left) / scale;
+        const rawY = (clientY - rect.top) / scale;
+        const x = Math.max(0, Math.min(FLOOR_W - 20, Math.round(rawX / GRID_SIZE) * GRID_SIZE));
+        const y = Math.max(0, Math.min(FLOOR_H - 20, Math.round(rawY / GRID_SIZE) * GRID_SIZE));
         onFloorPress(x, y);
         return;
       }
@@ -2790,4 +2823,15 @@ const s = StyleSheet.create({
   fNftPlaceholder: { alignItems: 'center', justifyContent: 'center', gap: 2 },
   fNftPlaceholderIcon: { fontSize: 18 },
   fNftPlaceholderText: { color: '#555', fontSize: 6, fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1 },
+  // Sticky Note
+  fStickyNote: { width: 90, height: 90, borderRadius: 2, padding: 6, position: 'relative',
+    ...(Platform.OS === 'web' ? { boxShadow: '2px 3px 6px rgba(0,0,0,0.25)' } as any : { elevation: 4 }),
+  },
+  fStickyFold: { position: 'absolute', top: 0, right: 0, width: 14, height: 14, borderBottomLeftRadius: 6, borderBottomWidth: 1, zIndex: 2 },
+  fStickyText: { color: '#1a1a1a', fontSize: 7, fontFamily: 'monospace', lineHeight: 10, flex: 1 },
+  fStickyGif: { width: '100%' as any, height: '100%' as any, borderRadius: 2 },
+  fStickyDrawingImg: { width: '100%' as any, height: '100%' as any, borderRadius: 2 },
+  fStickyEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 2 },
+  fStickyEmptyIcon: { fontSize: 16 },
+  fStickyEmptyText: { color: '#666', fontSize: 6, fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1 },
 });
