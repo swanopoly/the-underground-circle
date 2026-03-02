@@ -2558,14 +2558,7 @@ function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme) {
       return (
         <View style={[s.fNftFrame, { borderColor: theme.accentGlow }]}>
           {item.nftImageUrl ? (
-            <>
-              <Image source={{ uri: item.nftImageUrl }} style={s.fNftImage} resizeMode="cover" />
-              {item.nftName && (
-                <View style={s.fNftNameplate}>
-                  <Text style={s.fNftNameText} numberOfLines={1}>{item.nftName}</Text>
-                </View>
-              )}
-            </>
+            <Image source={{ uri: item.nftImageUrl }} style={s.fNftImage} resizeMode="cover" />
           ) : (
             <View style={s.fNftPlaceholder}>
               <Text style={s.fNftPlaceholderIcon}>🖼</Text>
