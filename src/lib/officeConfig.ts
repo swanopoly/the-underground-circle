@@ -354,14 +354,14 @@ export interface AgentAppearance {
   pantsColor: string;
   shoeColor: string;
   accessory: 'none' | 'glasses' | 'headphones' | 'bowtie' | 'scarf' | 'hoodie' | 'mask' | 'monocle' | 'eyepatch' | 'bandana';
-  hat: 'none' | 'cap' | 'tophat' | 'beanie' | 'crown' | 'helmet' | 'horns' | 'space_helmet' | 'wizard_hat' | 'halo' | 'antenna';
+  hat: 'none' | 'cap' | 'tophat' | 'beanie' | 'crown' | 'helmet' | 'horns' | 'space_helmet' | 'wizard_hat' | 'halo' | 'antenna' | 'crab_helmet';
   expression: 'neutral' | 'happy' | 'focused' | 'sleepy' | 'cool' | 'angry';
-  backItem: 'none' | 'cape' | 'backpack' | 'wings' | 'jetpack' | 'shield' | 'sword' | 'quiver';
+  backItem: 'none' | 'cape' | 'backpack' | 'wings' | 'jetpack' | 'shield' | 'sword' | 'quiver' | 'crab_shell';
   eyeColor: string;
   facialHair: 'none' | 'stubble' | 'beard' | 'mustache' | 'goatee';
-  pet: 'none' | 'cat' | 'dog' | 'bird' | 'robot' | 'dragon' | 'alien';
+  pet: 'none' | 'cat' | 'dog' | 'bird' | 'robot' | 'dragon' | 'alien' | 'crab';
   aura: 'none' | 'fire' | 'ice' | 'electric' | 'nature' | 'shadow' | 'rainbow' | 'glitch' | 'cosmic';
-  handItem: 'none' | 'lightsaber' | 'coffee' | 'laptop' | 'flag' | 'wand';
+  handItem: 'none' | 'lightsaber' | 'coffee' | 'laptop' | 'flag' | 'wand' | 'crab_claws';
 }
 
 export const SKIN_TONES = ['#f5d0a9', '#e8b88a', '#c68642', '#8d5524', '#4a2c0a', '#f5e6cc'];

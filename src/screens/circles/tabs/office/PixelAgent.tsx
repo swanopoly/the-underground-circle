@@ -483,6 +483,18 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             <View style={styles.antennaBobble} />
           </View>
         )}
+        {a.hat === 'crab_helmet' && (
+          <View style={styles.crabHelmet}>
+            <View style={styles.crabHelmetShell} />
+            <View style={styles.crabHelmetHighlight} />
+            <View style={styles.crabHelmetEyeStalkL} />
+            <View style={styles.crabHelmetEyeStalkR} />
+            <View style={[styles.crabHelmetEye, { left: PX * 0.5 }]} />
+            <View style={[styles.crabHelmetEye, { right: PX * 0.5 }]} />
+            <View style={styles.crabHelmetClawL} />
+            <View style={styles.crabHelmetClawR} />
+          </View>
+        )}
 
         {/* Theme headgear (only when user has no hat) */}
         {showThemeHeadgear && outfit.headgear === 'bandana' && (
@@ -744,6 +756,14 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             <View style={styles.quiverArrow3} />
           </View>
         )}
+        {a.backItem === 'crab_shell' && (
+          <View style={styles.crabBackShell}>
+            <View style={styles.crabBackShellInner} />
+            <View style={styles.crabBackShellRidge1} />
+            <View style={styles.crabBackShellRidge2} />
+            <View style={styles.crabBackShellRidge3} />
+          </View>
+        )}
 
         {/* Neck */}
         <View style={[styles.neck, { backgroundColor: a.skinTone }]}>
@@ -873,6 +893,13 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
               <View style={styles.handWandSpark2} />
               <View style={styles.handWandSpark3} />
               <View style={styles.handWandStick} />
+            </View>
+          )}
+          {(a.handItem || 'none') === 'crab_claws' && (
+            <View style={styles.handCrabClaws}>
+              <View style={styles.handCrabArm} />
+              <View style={styles.handCrabClawTop} />
+              <View style={styles.handCrabClawBot} />
             </View>
           )}
         </Animated.View>
@@ -1060,6 +1087,41 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             <Animated.View style={[styles.alienAntennaTipR, { opacity: auraFlicker }]} />
             <View style={styles.alienLegL} />
             <View style={styles.alienLegR} />
+          </Animated.View>
+        )}
+
+        {/* Crab pet */}
+        {(a.pet || 'none') === 'crab' && (
+          <Animated.View style={[styles.petCrab, { transform: [{ translateY: petBounce }] }]}>
+            {/* Shell body */}
+            <View style={styles.crabShell}>
+              <View style={styles.crabShellHighlight} />
+              <View style={styles.crabShellPattern1} />
+              <View style={styles.crabShellPattern2} />
+            </View>
+            {/* Eye stalks */}
+            <View style={styles.crabEyeStalkL} />
+            <View style={styles.crabEyeStalkR} />
+            <View style={[styles.crabEye, styles.crabEyeL]} />
+            <View style={[styles.crabEye, styles.crabEyeR]} />
+            <View style={[styles.crabPupil, styles.crabPupilL]} />
+            <View style={[styles.crabPupil, styles.crabPupilR]} />
+            {/* Claws */}
+            <Animated.View style={[styles.crabClawL, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-8deg', '8deg'] }) }] }]}>
+              <View style={styles.crabClawPincerTop} />
+              <View style={styles.crabClawPincerBot} />
+            </Animated.View>
+            <Animated.View style={[styles.crabClawR, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['8deg', '-8deg'] }) }] }]}>
+              <View style={styles.crabClawPincerTop} />
+              <View style={styles.crabClawPincerBot} />
+            </Animated.View>
+            {/* Legs */}
+            <View style={styles.crabLeg1L} />
+            <View style={styles.crabLeg2L} />
+            <View style={styles.crabLeg3L} />
+            <View style={styles.crabLeg1R} />
+            <View style={styles.crabLeg2R} />
+            <View style={styles.crabLeg3R} />
           </Animated.View>
         )}
 
@@ -2350,5 +2412,163 @@ const styles = StyleSheet.create({
     width: PX * 0.3, height: PX * 0.3, backgroundColor: '#fde68a60',
     borderRadius: PX * 0.15,
   },
+
+  // ── Crab Claws (hand item) ─────────────────────────────────────────
+  handCrabClaws: { position: 'absolute', right: -PX * 2.5, bottom: PX * 0.5, zIndex: 3, alignItems: 'center' as const },
+  handCrabArm: { width: PX * 0.6, height: PX * 2, backgroundColor: '#ef4444', borderRadius: 1, transform: [{ rotate: '-10deg' }] },
+  handCrabClawTop: {
+    position: 'absolute', top: -PX * 0.8, left: -PX * 0.6,
+    width: PX * 1.5, height: PX * 0.7, backgroundColor: '#ef4444',
+    borderTopLeftRadius: PX * 0.8, borderTopRightRadius: PX * 0.3,
+    transform: [{ rotate: '-20deg' }],
+  },
+  handCrabClawBot: {
+    position: 'absolute', top: -PX * 0.1, left: -PX * 0.6,
+    width: PX * 1.5, height: PX * 0.7, backgroundColor: '#dc2626',
+    borderBottomLeftRadius: PX * 0.8, borderBottomRightRadius: PX * 0.3,
+    transform: [{ rotate: '10deg' }],
+  },
+
+  // ── Crab Helmet (hat) ──────────────────────────────────────────────
+  crabHelmet: { alignItems: 'center' as const, marginBottom: -8, zIndex: 5, width: PX * 10, height: PX * 5 },
+  crabHelmetShell: {
+    position: 'absolute', bottom: 0, left: PX * 1, right: PX * 1,
+    height: PX * 3.5, backgroundColor: '#ef4444',
+    borderTopLeftRadius: PX * 4, borderTopRightRadius: PX * 4,
+    borderWidth: 1, borderColor: '#b91c1c',
+  },
+  crabHelmetHighlight: {
+    position: 'absolute', bottom: PX * 1.5, left: PX * 2.5,
+    width: PX * 3, height: PX * 1.2, backgroundColor: '#f87171',
+    borderRadius: PX * 1, opacity: 0.5,
+  },
+  crabHelmetEyeStalkL: {
+    position: 'absolute', bottom: PX * 3, left: PX * 1.5,
+    width: PX * 0.4, height: PX * 1.5, backgroundColor: '#ef4444',
+    transform: [{ rotate: '-15deg' }],
+  },
+  crabHelmetEyeStalkR: {
+    position: 'absolute', bottom: PX * 3, right: PX * 1.5,
+    width: PX * 0.4, height: PX * 1.5, backgroundColor: '#ef4444',
+    transform: [{ rotate: '15deg' }],
+  },
+  crabHelmetEye: {
+    position: 'absolute', bottom: PX * 4.2,
+    width: PX * 0.8, height: PX * 0.8, backgroundColor: '#1a1a1a',
+    borderRadius: PX * 0.4,
+  },
+  crabHelmetClawL: {
+    position: 'absolute', bottom: PX * 0.5, left: 0,
+    width: PX * 1.2, height: PX * 1.5, backgroundColor: '#dc2626',
+    borderRadius: PX * 0.6, transform: [{ rotate: '10deg' }],
+  },
+  crabHelmetClawR: {
+    position: 'absolute', bottom: PX * 0.5, right: 0,
+    width: PX * 1.2, height: PX * 1.5, backgroundColor: '#dc2626',
+    borderRadius: PX * 0.6, transform: [{ rotate: '-10deg' }],
+  },
+
+  // ── Crab Shell (back item) ─────────────────────────────────────────
+  crabBackShell: {
+    position: 'absolute', top: PX * 1, left: PX * 0.5, right: PX * 0.5,
+    height: PX * 6, backgroundColor: '#ef4444',
+    borderRadius: PX * 3, zIndex: -1,
+    borderWidth: 1, borderColor: '#b91c1c',
+  },
+  crabBackShellInner: {
+    position: 'absolute', top: PX * 1, left: PX * 1, right: PX * 1,
+    height: PX * 3, backgroundColor: '#f87171',
+    borderRadius: PX * 2, opacity: 0.4,
+  },
+  crabBackShellRidge1: {
+    position: 'absolute', top: PX * 1.5, left: PX * 0.8, right: PX * 0.8,
+    height: PX * 0.3, backgroundColor: '#dc2626', borderRadius: 1, opacity: 0.5,
+  },
+  crabBackShellRidge2: {
+    position: 'absolute', top: PX * 2.5, left: PX * 0.5, right: PX * 0.5,
+    height: PX * 0.3, backgroundColor: '#dc2626', borderRadius: 1, opacity: 0.4,
+  },
+  crabBackShellRidge3: {
+    position: 'absolute', top: PX * 3.5, left: PX * 0.8, right: PX * 0.8,
+    height: PX * 0.3, backgroundColor: '#dc2626', borderRadius: 1, opacity: 0.3,
+  },
+
+  // ── Crab Pet ───────────────────────────────────────────────────────
+  petCrab: { position: 'absolute', bottom: 14, right: -10, width: PX * 8, height: PX * 5.5, zIndex: -1 },
+  crabShell: {
+    position: 'absolute', bottom: PX * 1, left: PX * 1.5,
+    width: PX * 3.5, height: PX * 2.2, backgroundColor: '#ef4444',
+    borderTopLeftRadius: PX * 1.8, borderTopRightRadius: PX * 1.8,
+    borderBottomLeftRadius: PX * 0.5, borderBottomRightRadius: PX * 0.5,
+    borderWidth: 0.5, borderColor: '#b91c1c',
+  },
+  crabShellHighlight: {
+    position: 'absolute', top: PX * 0.3, left: PX * 0.5,
+    width: PX * 1.8, height: PX * 0.8, backgroundColor: '#f87171',
+    borderRadius: PX * 0.5, opacity: 0.5,
+  },
+  crabShellPattern1: {
+    position: 'absolute', top: PX * 0.8, left: PX * 0.3, right: PX * 0.3,
+    height: PX * 0.2, backgroundColor: '#dc2626', borderRadius: 1, opacity: 0.4,
+  },
+  crabShellPattern2: {
+    position: 'absolute', top: PX * 1.3, left: PX * 0.5, right: PX * 0.5,
+    height: PX * 0.2, backgroundColor: '#dc2626', borderRadius: 1, opacity: 0.3,
+  },
+  // Eyes
+  crabEyeStalkL: {
+    position: 'absolute', bottom: PX * 2.8, left: PX * 2,
+    width: PX * 0.3, height: PX * 1, backgroundColor: '#ef4444',
+    transform: [{ rotate: '-10deg' }],
+  },
+  crabEyeStalkR: {
+    position: 'absolute', bottom: PX * 2.8, left: PX * 4,
+    width: PX * 0.3, height: PX * 1, backgroundColor: '#ef4444',
+    transform: [{ rotate: '10deg' }],
+  },
+  crabEye: {
+    position: 'absolute', bottom: PX * 3.6,
+    width: PX * 0.6, height: PX * 0.6, backgroundColor: '#fef3c7',
+    borderRadius: PX * 0.3, borderWidth: 0.5, borderColor: '#1a1a1a',
+  },
+  crabEyeL: { left: PX * 1.7 },
+  crabEyeR: { left: PX * 3.7 },
+  crabPupil: {
+    position: 'absolute', bottom: PX * 3.7,
+    width: PX * 0.3, height: PX * 0.3, backgroundColor: '#1a1a1a',
+    borderRadius: PX * 0.15,
+  },
+  crabPupilL: { left: PX * 1.85 },
+  crabPupilR: { left: PX * 3.85 },
+  // Claws
+  crabClawL: {
+    position: 'absolute', bottom: PX * 1.5, left: -PX * 0.5,
+    width: PX * 2, height: PX * 1.5,
+    transformOrigin: 'right center',
+  },
+  crabClawR: {
+    position: 'absolute', bottom: PX * 1.5, right: PX * 0.5,
+    width: PX * 2, height: PX * 1.5,
+    transformOrigin: 'left center',
+  },
+  crabClawPincerTop: {
+    position: 'absolute', top: 0, left: 0,
+    width: PX * 1.8, height: PX * 0.7, backgroundColor: '#ef4444',
+    borderTopLeftRadius: PX * 1, borderTopRightRadius: PX * 0.3,
+    borderWidth: 0.5, borderColor: '#b91c1c',
+  },
+  crabClawPincerBot: {
+    position: 'absolute', bottom: 0, left: 0,
+    width: PX * 1.8, height: PX * 0.7, backgroundColor: '#dc2626',
+    borderBottomLeftRadius: PX * 1, borderBottomRightRadius: PX * 0.3,
+    borderWidth: 0.5, borderColor: '#991b1b',
+  },
+  // Legs
+  crabLeg1L: { position: 'absolute', bottom: PX * 0.2, left: PX * 1.2, width: PX * 1.5, height: PX * 0.3, backgroundColor: '#ef4444', borderRadius: 1, transform: [{ rotate: '-25deg' }] },
+  crabLeg2L: { position: 'absolute', bottom: PX * 0.6, left: PX * 0.8, width: PX * 1.5, height: PX * 0.3, backgroundColor: '#ef4444', borderRadius: 1, transform: [{ rotate: '-15deg' }] },
+  crabLeg3L: { position: 'absolute', bottom: PX * 1, left: PX * 0.5, width: PX * 1.3, height: PX * 0.3, backgroundColor: '#ef4444', borderRadius: 1, transform: [{ rotate: '-5deg' }] },
+  crabLeg1R: { position: 'absolute', bottom: PX * 0.2, right: PX * 0.5, width: PX * 1.5, height: PX * 0.3, backgroundColor: '#dc2626', borderRadius: 1, transform: [{ rotate: '25deg' }] },
+  crabLeg2R: { position: 'absolute', bottom: PX * 0.6, right: PX * 0.2, width: PX * 1.5, height: PX * 0.3, backgroundColor: '#dc2626', borderRadius: 1, transform: [{ rotate: '15deg' }] },
+  crabLeg3R: { position: 'absolute', bottom: PX * 1, right: 0, width: PX * 1.3, height: PX * 0.3, backgroundColor: '#dc2626', borderRadius: 1, transform: [{ rotate: '5deg' }] },
 
 });

@@ -551,8 +551,8 @@ export default function CustomizePanel({
                   </View>
                   <Text style={styles.sectionTitle}>HAT</Text>
                   <View style={styles.optionRow}>
-                    {(['none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns', ...(isOwner ? ['space_helmet'] as const : []), 'wizard_hat', 'halo', 'antenna'] as const).map(hat => {
-                      const labels: Record<string, string> = { none: 'NONE', cap: '🧢', tophat: '🎩', beanie: '🧶', crown: '👑', helmet: '⛑️', horns: '😈', space_helmet: '🚀 SPACE', wizard_hat: '🧙 WIZARD', halo: '😇 HALO', antenna: '👽 ANTENNA' };
+                    {(['none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns', ...(isOwner ? ['space_helmet'] as const : []), 'wizard_hat', 'halo', 'antenna', 'crab_helmet'] as const).map(hat => {
+                      const labels: Record<string, string> = { none: 'NONE', cap: '🧢', tophat: '🎩', beanie: '🧶', crown: '👑', helmet: '⛑️', horns: '😈', space_helmet: '🚀 SPACE', wizard_hat: '🧙 WIZARD', halo: '😇 HALO', antenna: '👽 ANTENNA', crab_helmet: '🦀 CRAB' };
                       return (
                         <Pressable key={hat} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, hat: hat })}
                           style={[styles.optionBtn, currentAppearance.hat === hat && styles.optionBtnActive]}>
@@ -574,8 +574,8 @@ export default function CustomizePanel({
                   </View>
                   <Text style={styles.sectionTitle}>BACK ITEM</Text>
                   <View style={styles.optionRow}>
-                    {(['none', 'cape', 'backpack', 'wings', 'jetpack', 'shield', 'sword', 'quiver'] as const).map(item => {
-                      const labels: Record<string, string> = { none: 'NONE', cape: '🦸 CAPE', backpack: '🎒 PACK', wings: '🪽 WINGS', jetpack: '🚀 JETPACK', shield: '🛡️ SHIELD', sword: '⚔️ SWORD', quiver: '🏹 QUIVER' };
+                    {(['none', 'cape', 'backpack', 'wings', 'jetpack', 'shield', 'sword', 'quiver', 'crab_shell'] as const).map(item => {
+                      const labels: Record<string, string> = { none: 'NONE', cape: '🦸 CAPE', backpack: '🎒 PACK', wings: '🪽 WINGS', jetpack: '🚀 JETPACK', shield: '🛡️ SHIELD', sword: '⚔️ SWORD', quiver: '🏹 QUIVER', crab_shell: '🦀 SHELL' };
                       return (
                         <Pressable key={item} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, backItem: item })}
                           style={[styles.optionBtn, (currentAppearance.backItem || 'none') === item && styles.optionBtnActive]}>
@@ -609,8 +609,8 @@ export default function CustomizePanel({
                   </View>
                   <Text style={styles.sectionTitle}>PET</Text>
                   <View style={styles.optionRow}>
-                    {(['none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien'] as const).map(pet => {
-                      const labels: Record<string, string> = { none: 'NONE', cat: '🐱 CAT', dog: '🐕 DOG', bird: '🐦 BIRD', robot: '🤖 ROBOT', dragon: '🐉 DRAGON', alien: '👽 ALIEN' };
+                    {(['none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab'] as const).map(pet => {
+                      const labels: Record<string, string> = { none: 'NONE', cat: '🐱 CAT', dog: '🐕 DOG', bird: '🐦 BIRD', robot: '🤖 ROBOT', dragon: '🐉 DRAGON', alien: '👽 ALIEN', crab: '🦀 CRAB' };
                       return (
                         <Pressable key={pet} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, pet: pet })}
                           style={[styles.optionBtn, (currentAppearance.pet || 'none') === pet && styles.optionBtnActive]}>
@@ -637,8 +637,8 @@ export default function CustomizePanel({
                   </View>
                   <Text style={styles.sectionTitle}>HAND ITEM</Text>
                   <View style={styles.optionRow}>
-                    {(['none', ...(isOwner ? ['lightsaber'] as const : []), 'coffee', 'laptop', 'flag', 'wand'] as const).map(item => {
-                      const labels: Record<string, string> = { none: 'NONE', lightsaber: '⚡ SABER', coffee: '☕ COFFEE', laptop: '💻 LAPTOP', flag: '🚩 FLAG', wand: '🪄 WAND' };
+                    {(['none', ...(isOwner ? ['lightsaber'] as const : []), 'coffee', 'laptop', 'flag', 'wand', 'crab_claws'] as const).map(item => {
+                      const labels: Record<string, string> = { none: 'NONE', lightsaber: '⚡ SABER', coffee: '☕ COFFEE', laptop: '💻 LAPTOP', flag: '🚩 FLAG', wand: '🪄 WAND', crab_claws: '🦀 CLAWS' };
                       return (
                         <Pressable key={item} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, handItem: item })}
                           style={[styles.optionBtn, (currentAppearance.handItem || 'none') === item && styles.optionBtnActive]}>
