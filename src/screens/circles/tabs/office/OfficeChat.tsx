@@ -11,17 +11,26 @@ import {
 } from '../../../../lib/openclawService';
 import { AgentConnection, PROVIDER_META } from '../../../../lib/connectionManager';
 import { sendMessage as sendTgMessage, TelegramMessage } from '../../../../lib/telegramService';
+import { detectClaudeCodeBridge, execBridgeCommand } from '../../../../lib/claudeCodeDetector';
 import { storage } from '../../../../lib/storage';
 import OfficeActionPanel from '../../../../components/OfficeActionPanel';
 
 const STORAGE_KEY_CHAT_HISTORY = '@office_terminal_history';
 const DEFAULT_MESSAGE: ChatMessage = {
   id: '0',
-  text: '🏢 Office Terminal ready. Type "help" for commands.',
+  text: '🏢 Office Terminal ready. Type "help" for commands.\n\n  @agent message  — talk to an agent\n  $ command       — run shell command\n  help            — all commands',
   isUser: false,
   agent: 'System',
   timestamp: new Date(),
 };
+
+// Timeout wrapper for async operations
+function withTimeout<T>(promise: Promise<T>, ms: number, label = 'Operation'): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)),
+  ]);
+}
 
 interface ChatMessage {
   id: string;
@@ -37,7 +46,8 @@ export type OfficeCommand =
   | { type: 'info'; query: string }
   | { type: 'status' }
   | { type: 'costs' }
-  | { type: 'agents' };
+  | { type: 'agents' }
+  | { type: 'clear' };
 
 interface Props {
   circleId: string;
@@ -205,6 +215,7 @@ async function processLocalCommand(text: string, agents: OfficeAgent[], connecti
     const { getAdvancedHelp } = await import('../../../../lib/advancedChatCommands');
     return {
       response: `🏢 Office Commands\n\n` +
+        `QUICK:\n• @agent message — Talk to an agent directly\n• $ command — Run a shell command (via bridge)\n• sh command — Same as $ command\n\n` +
         `LOCAL:\n• status — Office overview\n• agents — List all agents\n• connections — List all connections\n• agent [name] — Agent details\n• costs — Cost breakdown\n• theme [name] — Change theme\n\n` +
         `CONVERSATIONS:\n• log — Recent messages\n• log [agent] — Filter by agent\n• threads — Conversation threads\n• clear log — Clear conversation log\n• clear — Clear terminal history\n\n` +
         `AGENT COMMANDS:\n• ask [question] — Ask default agent\n• task [message] — Send task to default agent\n• task @[name] [message] — Route to connection/agent\n• spawn [task] — Launch background sub-agent\n• subagents — List running sub-agents\n• msg [session] [text] — Message a session\n• broadcast [msg] — Send to all channels\n\n` +
@@ -212,8 +223,8 @@ async function processLocalCommand(text: string, agents: OfficeAgent[], connecti
         `${getAdvancedHelp()}\n\n` +
         `SESSION & DATA:\n• sessions — All sessions (all connections)\n• session [key] — Session details\n• history [key] — Message history\n• memory [query] — Search agent memory\n• search [query] — Web search\n\n` +
         `CRON JOBS:\n• cron — List all jobs\n• cron run [id] — Run job now\n• cron enable/disable [id]\n\n` +
-        `INTEGRATIONS:\n• agents-live — List real agent IDs\n• tg [message] — Send to Telegram\n• tg-feed — Recent Telegram messages\n\n` +
-        `Type "help tasks", "help projects", or "help collaboration" for detailed guides.`,
+        `SHELL (requires bridge):\n• $ ls -la — Run any shell command\n• > pwd — Same as $ prefix\n• Start bridge: node scripts/claude-bridge.js\n\n` +
+        `INTEGRATIONS:\n• agents-live — List real agent IDs\n• tg [message] — Send to Telegram\n• tg-feed — Recent Telegram messages`,
     };
   }
 
@@ -234,8 +245,17 @@ export default function OfficeChat({
   const [commandHistory, setCommandHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
+  const [bridgeOnline, setBridgeOnline] = useState(false);
   const listRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
+
+  // Detect bridge on mount and periodically
+  useEffect(() => {
+    const check = () => detectClaudeCodeBridge().then(setBridgeOnline);
+    check();
+    const iv = setInterval(check, 30000);
+    return () => clearInterval(iv);
+  }, []);
 
   // Load chat history and command history on mount
   useEffect(() => {
@@ -321,76 +341,158 @@ export default function OfficeChat({
   const sendMessage = async () => {
     if (!input.trim() || processing) return;
     const text = input.trim();
-    
+
     // Add to command history
-    const newHistory = [...commandHistory.filter(c => c !== text), text].slice(-50); // Keep last 50
+    const newHistory = [...commandHistory.filter(c => c !== text), text].slice(-50);
     setCommandHistory(newHistory);
     setHistoryIndex(-1);
     await storage.setItem('@office_command_history', JSON.stringify(newHistory));
-    
+
     setInput('');
     addMsg(text, true);
 
     // Try local commands first
     const local = await processLocalCommand(text, agents, connections);
     if (local) {
-      // Handle clear command specially
       if (local.command?.type === 'clear') {
         setMessages([DEFAULT_MESSAGE]);
         addMsg('Terminal cleared!', false, 'System');
         return;
       }
-      
       addMsg(local.response, false, 'Office AI');
       if (local.command && onCommand) onCommand(local.command);
       return;
     }
 
-    // Try collaboration commands (project management + messaging)
-    if (anyConnected && getConnectionConfig) {
-      const { processCollaborationCommand } = await import('../../../../lib/officeChatCommands');
-      const collab = await processCollaborationCommand(text, agents, connections || [], getConnectionConfig);
-      if (collab) {
-        addMsg(collab.response, false, collab.success ? 'Office AI' : 'Error');
+    const lower = text.toLowerCase();
+
+    // ─── Shell commands: $ command, > command, sh command, shell command ───
+    const shellMatch = text.match(/^(?:\$|>|sh |shell )\s*(.*)/s);
+    if (shellMatch) {
+      const cmd = shellMatch[1].trim();
+      if (!cmd) { addMsg('Usage: $ <command>  (e.g. $ ls -la)', false, 'System'); return; }
+      if (!bridgeOnline) {
+        addMsg('❌ Bridge not running. Start it with:\n  node scripts/claude-bridge.js', false, 'System');
         return;
       }
+      setProcessing(true);
+      addMsg(`⏳ Running: ${cmd}`, false, 'Shell');
+      try {
+        const result = await withTimeout(execBridgeCommand(cmd), 35000, 'Shell command');
+        if (result.ok) {
+          const output = (result.stdout || '').trim();
+          const errOut = (result.stderr || '').trim();
+          const combined = [output, errOut && `stderr: ${errOut}`].filter(Boolean).join('\n') || '(no output)';
+          addMsg(combined, false, 'Shell');
+        } else {
+          addMsg(`❌ ${result.error || 'Command failed'}`, false, 'Shell');
+        }
+      } catch (e: any) {
+        addMsg(`❌ ${e.message || 'Shell error'}`, false, 'Shell');
+      } finally {
+        setProcessing(false);
+      }
+      return;
+    }
+
+    // ─── @agent message shorthand ─────────────────────────────────────────
+    const atMatch = text.match(/^@(\S+)\s+([\s\S]*)/);
+    if (atMatch) {
+      const target = atMatch[1];
+      const msg = atMatch[2].trim();
+      if (!msg) { addMsg(`Usage: @${target} <message>`, false, 'System'); return; }
+
+      // Find matching connection or agent
+      const matchedConn = findConnectionByName(connections, target);
+      let targetCfg: OpenClawConfig | null = null;
+      let targetName = target;
+      let agentId = 'main';
+
+      if (matchedConn && getConnectionConfig) {
+        targetCfg = getConnectionConfig(matchedConn.id);
+        targetName = matchedConn.name;
+      } else {
+        // Try default connection with target as agentId
+        const defaultConn = getDefaultConfig(connections, getConnectionConfig);
+        if (defaultConn) {
+          targetCfg = defaultConn.config;
+          targetName = defaultConn.conn.name;
+          agentId = target;
+        }
+      }
+
+      if (!targetCfg) {
+        addMsg(`❌ No connection for @${target}. Check ⚙️ → Connections.`, false, 'System');
+        return;
+      }
+
+      setProcessing(true);
+      addMsg(`⏳ Sending to ${targetName} (${agentId})...`, false, 'System');
+      try {
+        const result = await withTimeout(sendAgentTask(targetCfg, msg, agentId), 30000, 'Agent response');
+        if (result.ok) {
+          addMsg(`${result.reply || '(no response)'}`, false, targetName);
+        } else {
+          addMsg(`❌ ${result.error || 'Failed'}`, false, 'System');
+        }
+      } catch (e: any) {
+        addMsg(`❌ ${e.message || 'Request failed'}`, false, 'System');
+      } finally {
+        setProcessing(false);
+      }
+      return;
+    }
+
+    // Try collaboration commands (project management + messaging)
+    if (anyConnected && getConnectionConfig) {
+      try {
+        const { processCollaborationCommand } = await import('../../../../lib/officeChatCommands');
+        const collab = await processCollaborationCommand(text, agents, connections || [], getConnectionConfig);
+        if (collab) {
+          addMsg(collab.response, false, collab.success ? 'Office AI' : 'Error');
+          return;
+        }
+      } catch {}
     }
 
     // Try advanced commands (tasks, conversations, coordination)
     if (anyConnected && getConnectionConfig) {
-      const { processAdvancedCommands } = await import('../../../../lib/advancedChatCommands');
-      const advanced = await processAdvancedCommands(text, agents, connections || [], getConnectionConfig);
-      if (advanced) {
-        addMsg(advanced.response, false, advanced.success ? 'Office AI' : 'Error');
-        return;
-      }
+      try {
+        const { processAdvancedCommands } = await import('../../../../lib/advancedChatCommands');
+        const advanced = await processAdvancedCommands(text, agents, connections || [], getConnectionConfig);
+        if (advanced) {
+          addMsg(advanced.response, false, advanced.success ? 'Office AI' : 'Error');
+          return;
+        }
+      } catch {}
     }
 
-    const lower = text.toLowerCase();
-
-    // ─── Multi-connection commands ─────────────────
+    // ─── Multi-connection commands (all wrapped in try/finally) ────────────
     if (anyConnected && getConnectionConfig) {
       const defaultConn = getDefaultConfig(connections, getConnectionConfig);
 
-      // sessions — show from all connections
+      // sessions
       if (lower === 'sessions' || lower === 'list sessions') {
         setProcessing(true);
-        addMsg('⏳ Fetching sessions from all connections...', false, 'System');
-        const allLines: string[] = [];
-        for (const conn of (connections || []).filter(c => c.status === 'connected')) {
-          const cfg = getConnectionConfig(conn.id);
-          if (!cfg) continue;
-          const result = await listSessions(cfg);
-          if (result.ok && result.sessions) {
-            const meta = PROVIDER_META[conn.provider];
-            allLines.push(`\n${meta.icon} ${conn.name}:`);
-            result.sessions.forEach(s => {
-              allLines.push(`  • ${s.sessionKey} [${s.kind}]${s.agentId ? ` agent:${s.agentId}` : ''}${s.model ? ` (${s.model})` : ''}`);
-            });
+        try {
+          addMsg('⏳ Fetching sessions...', false, 'System');
+          const allLines: string[] = [];
+          for (const conn of (connections || []).filter(c => c.status === 'connected')) {
+            const cfg = getConnectionConfig(conn.id);
+            if (!cfg) continue;
+            const result = await withTimeout(listSessions(cfg), 15000, 'Sessions');
+            if (result.ok && result.sessions) {
+              const meta = PROVIDER_META[conn.provider];
+              allLines.push(`\n${meta.icon} ${conn.name}:`);
+              result.sessions.forEach(s => {
+                allLines.push(`  • ${s.sessionKey} [${s.kind}]${s.agentId ? ` agent:${s.agentId}` : ''}${s.model ? ` (${s.model})` : ''}`);
+              });
+            }
           }
-        }
-        addMsg(`📡 Sessions${allLines.join('\n') || '\nNo active sessions'}`, false, 'System');
-        setProcessing(false);
+          addMsg(`📡 Sessions${allLines.join('\n') || '\nNo active sessions'}`, false, 'System');
+        } catch (e: any) {
+          addMsg(`❌ ${e.message || 'Failed'}`, false, 'System');
+        } finally { setProcessing(false); }
         return;
       }
 
@@ -398,18 +500,18 @@ export default function OfficeChat({
       if (lower.startsWith('session ') && defaultConn) {
         const key = text.slice(8).trim();
         setProcessing(true);
-        addMsg(`⏳ Getting status for ${key}...`, false, 'System');
-        const result = await getSessionStatus(defaultConn.config, key);
-        if (result.ok && result.status) {
-          const s = result.status;
-          addMsg(
-            `📊 Session: ${s.sessionKey}\nModel: ${s.model || 'unknown'}\nTurns: ${s.turns || '?'}\nInput: ${s.totalInputTokens?.toLocaleString() || '?'}\nOutput: ${s.totalOutputTokens?.toLocaleString() || '?'}\nCost: ${s.totalCost != null ? `$${s.totalCost.toFixed(4)}` : '?'}`,
-            false, defaultConn.conn.name
-          );
-        } else {
-          addMsg(`❌ ${result.error || 'Failed'}`, false, 'System');
-        }
-        setProcessing(false);
+        try {
+          addMsg(`⏳ Getting status for ${key}...`, false, 'System');
+          const result = await withTimeout(getSessionStatus(defaultConn.config, key), 15000, 'Session status');
+          if (result.ok && result.status) {
+            const s = result.status;
+            addMsg(`📊 Session: ${s.sessionKey}\nModel: ${s.model || 'unknown'}\nTurns: ${s.turns || '?'}\nInput: ${s.totalInputTokens?.toLocaleString() || '?'}\nOutput: ${s.totalOutputTokens?.toLocaleString() || '?'}\nCost: ${s.totalCost != null ? `$${s.totalCost.toFixed(4)}` : '?'}`, false, defaultConn.conn.name);
+          } else {
+            addMsg(`❌ ${result.error || 'Failed'}`, false, 'System');
+          }
+        } catch (e: any) {
+          addMsg(`❌ ${e.message || 'Failed'}`, false, 'System');
+        } finally { setProcessing(false); }
         return;
       }
 
@@ -417,20 +519,21 @@ export default function OfficeChat({
       if (lower.startsWith('history ') && defaultConn) {
         const key = text.slice(8).trim();
         setProcessing(true);
-        const result = await getSessionHistory(defaultConn.config, key);
-        if (result.ok && result.messages) {
-          const lines = result.messages.slice(-8).map(m =>
-            `[${m.role}] ${m.content.slice(0, 120)}${m.content.length > 120 ? '...' : ''}`
-          );
-          addMsg(`📝 Last ${lines.length} messages:\n\n${lines.join('\n\n')}`, false, defaultConn.conn.name);
-        } else {
-          addMsg(`❌ ${result.error || 'Failed'}`, false, 'System');
-        }
-        setProcessing(false);
+        try {
+          const result = await withTimeout(getSessionHistory(defaultConn.config, key), 15000, 'History');
+          if (result.ok && result.messages) {
+            const lines = result.messages.slice(-8).map(m => `[${m.role}] ${m.content.slice(0, 120)}${m.content.length > 120 ? '...' : ''}`);
+            addMsg(`📝 Last ${lines.length} messages:\n\n${lines.join('\n\n')}`, false, defaultConn.conn.name);
+          } else {
+            addMsg(`❌ ${result.error || 'Failed'}`, false, 'System');
+          }
+        } catch (e: any) {
+          addMsg(`❌ ${e.message || 'Failed'}`, false, 'System');
+        } finally { setProcessing(false); }
         return;
       }
 
-      // task — route to specific connection by @name or default
+      // task @name message
       if (lower.startsWith('task ')) {
         const taskText = text.slice(5).trim();
         let targetCfg = defaultConn?.config;
@@ -438,34 +541,25 @@ export default function OfficeChat({
         let agentId = 'main';
         let taskMsg = taskText;
 
-        const atMatch = taskText.match(/^@(\S+)\s+(.*)/s);
-        if (atMatch) {
-          const target = atMatch[1];
-          taskMsg = atMatch[2];
-          // Try matching connection name first
-          const matchedConn = findConnectionByName(connections, target);
-          if (matchedConn && getConnectionConfig(matchedConn.id)) {
-            targetCfg = getConnectionConfig(matchedConn.id)!;
-            targetName = matchedConn.name;
-          } else {
-            agentId = target;
-          }
+        const taskAt = taskText.match(/^@(\S+)\s+(.*)/s);
+        if (taskAt) {
+          const tgt = taskAt[1];
+          taskMsg = taskAt[2];
+          const mc = findConnectionByName(connections, tgt);
+          if (mc && getConnectionConfig(mc.id)) { targetCfg = getConnectionConfig(mc.id)!; targetName = mc.name; }
+          else { agentId = tgt; }
         }
 
-        if (!targetCfg) {
-          addMsg('❌ No connected endpoint. Add a connection in ⚙️.', false, 'System');
-          return;
-        }
+        if (!targetCfg) { addMsg('❌ No connected endpoint. Add a connection in ⚙️.', false, 'System'); return; }
 
         setProcessing(true);
-        addMsg(`⏳ Sending to ${targetName} (${agentId})...`, false, 'System');
-        const result = await sendAgentTask(targetCfg, taskMsg, agentId);
-        if (result.ok) {
-          addMsg(`✅ Response:\n\n${result.reply || '(no response)'}`, false, targetName);
-        } else {
-          addMsg(`❌ ${result.error || 'Task failed'}`, false, 'System');
-        }
-        setProcessing(false);
+        try {
+          addMsg(`⏳ Sending to ${targetName} (${agentId})...`, false, 'System');
+          const result = await withTimeout(sendAgentTask(targetCfg, taskMsg, agentId), 30000, 'Agent task');
+          addMsg(result.ok ? `✅ Response:\n\n${result.reply || '(no response)'}` : `❌ ${result.error || 'Task failed'}`, false, result.ok ? targetName : 'System');
+        } catch (e: any) {
+          addMsg(`❌ ${e.message || 'Task failed'}`, false, 'System');
+        } finally { setProcessing(false); }
         return;
       }
 
@@ -473,14 +567,13 @@ export default function OfficeChat({
       if (lower.startsWith('ask ') && defaultConn) {
         const question = text.slice(4).trim();
         setProcessing(true);
-        addMsg(`⏳ Asking ${defaultConn.conn.name}...`, false, 'System');
-        const result = await sendAgentTask(defaultConn.config, question, 'main');
-        if (result.ok) {
-          addMsg(`💬 ${result.reply || '(no response)'}`, false, defaultConn.conn.name);
-        } else {
-          addMsg(`❌ ${result.error || 'Failed'}`, false, 'System');
-        }
-        setProcessing(false);
+        try {
+          addMsg(`⏳ Asking ${defaultConn.conn.name}...`, false, 'System');
+          const result = await withTimeout(sendAgentTask(defaultConn.config, question, 'main'), 30000, 'Agent');
+          addMsg(result.ok ? `💬 ${result.reply || '(no response)'}` : `❌ ${result.error || 'Failed'}`, false, result.ok ? defaultConn.conn.name : 'System');
+        } catch (e: any) {
+          addMsg(`❌ ${e.message || 'Failed'}`, false, 'System');
+        } finally { setProcessing(false); }
         return;
       }
 
@@ -488,23 +581,25 @@ export default function OfficeChat({
       if (lower.startsWith('spawn ') && defaultConn) {
         const taskText = text.slice(6).trim();
         setProcessing(true);
-        addMsg(`⏳ Spawning sub-agent: "${taskText.slice(0, 60)}..."`, false, 'System');
-        const result = await spawnSubAgent(defaultConn.config, taskText);
-        if (result.ok) {
-          addMsg(`🚀 Sub-agent spawned!\n\n${result.reply || '(launched)'}`, false, defaultConn.conn.name);
-        } else {
-          addMsg(`❌ ${result.error || 'Spawn failed'}`, false, 'System');
-        }
-        setProcessing(false);
+        try {
+          addMsg(`⏳ Spawning sub-agent: "${taskText.slice(0, 60)}..."`, false, 'System');
+          const result = await withTimeout(spawnSubAgent(defaultConn.config, taskText), 30000, 'Spawn');
+          addMsg(result.ok ? `🚀 Sub-agent spawned!\n\n${result.reply || '(launched)'}` : `❌ ${result.error || 'Spawn failed'}`, false, result.ok ? defaultConn.conn.name : 'System');
+        } catch (e: any) {
+          addMsg(`❌ ${e.message || 'Spawn failed'}`, false, 'System');
+        } finally { setProcessing(false); }
         return;
       }
 
       // subagents
       if ((lower === 'subagents' || lower === 'sub-agents' || lower === 'spawns') && defaultConn) {
         setProcessing(true);
-        const result = await listSubAgents(defaultConn.config);
-        addMsg(result.ok ? `🚀 Sub-agents:\n\n${result.reply || 'None running'}` : `❌ ${result.error || 'Failed'}`, false, defaultConn.conn.name);
-        setProcessing(false);
+        try {
+          const result = await withTimeout(listSubAgents(defaultConn.config), 15000, 'Subagents');
+          addMsg(result.ok ? `🚀 Sub-agents:\n\n${result.reply || 'None running'}` : `❌ ${result.error || 'Failed'}`, false, defaultConn.conn.name);
+        } catch (e: any) {
+          addMsg(`❌ ${e.message || 'Failed'}`, false, 'System');
+        } finally { setProcessing(false); }
         return;
       }
 
@@ -512,46 +607,51 @@ export default function OfficeChat({
       if (lower.startsWith('search ') && defaultConn) {
         const query = text.slice(7).trim();
         setProcessing(true);
-        addMsg(`🔍 Searching: "${query}"...`, false, 'System');
-        const result = await runWebSearch(defaultConn.config, query);
-        if (result.ok && result.results) {
-          const lines = result.results.slice(0, 5).map((r: any) =>
-            `• ${r.title || 'No title'}\n  ${r.url || ''}\n  ${(r.description || '').slice(0, 100)}`
-          );
-          addMsg(`🔍 Results:\n\n${lines.join('\n\n') || 'No results'}`, false, 'System');
-        } else {
-          addMsg(`❌ ${result.error || 'Search failed'}`, false, 'System');
-        }
-        setProcessing(false);
+        try {
+          addMsg(`🔍 Searching: "${query}"...`, false, 'System');
+          const result = await withTimeout(runWebSearch(defaultConn.config, query), 15000, 'Search');
+          if (result.ok && result.results) {
+            const lines = result.results.slice(0, 5).map((r: any) => `• ${r.title || 'No title'}\n  ${r.url || ''}\n  ${(r.description || '').slice(0, 100)}`);
+            addMsg(`🔍 Results:\n\n${lines.join('\n\n') || 'No results'}`, false, 'System');
+          } else {
+            addMsg(`❌ ${result.error || 'Search failed'}`, false, 'System');
+          }
+        } catch (e: any) {
+          addMsg(`❌ ${e.message || 'Search failed'}`, false, 'System');
+        } finally { setProcessing(false); }
         return;
       }
 
       // cron
       if (lower === 'cron' || lower === 'cron list' || lower === 'jobs') {
         setProcessing(true);
-        const allJobs: string[] = [];
-        for (const conn of (connections || []).filter(c => c.status === 'connected' && c.provider === 'openclaw')) {
-          const cfg = getConnectionConfig(conn.id);
-          if (!cfg) continue;
-          const result = await listCronJobs(cfg);
-          if (result.ok && result.jobs) {
-            allJobs.push(`\n${PROVIDER_META[conn.provider].icon} ${conn.name}:`);
-            result.jobs.forEach((j: any) => {
-              allJobs.push(`  • ${j.name || j.jobId || 'unnamed'} [${j.enabled !== false ? '✅' : '⏸'}]`);
-            });
+        try {
+          const allJobs: string[] = [];
+          for (const conn of (connections || []).filter(c => c.status === 'connected' && c.provider === 'openclaw')) {
+            const cfg = getConnectionConfig(conn.id);
+            if (!cfg) continue;
+            const result = await withTimeout(listCronJobs(cfg), 15000, 'Cron');
+            if (result.ok && result.jobs) {
+              allJobs.push(`\n${PROVIDER_META[conn.provider].icon} ${conn.name}:`);
+              result.jobs.forEach((j: any) => { allJobs.push(`  • ${j.name || j.jobId || 'unnamed'} [${j.enabled !== false ? '✅' : '⏸'}]`); });
+            }
           }
-        }
-        addMsg(`⏰ Cron Jobs${allJobs.join('\n') || '\nNo jobs'}`, false, 'System');
-        setProcessing(false);
+          addMsg(`⏰ Cron Jobs${allJobs.join('\n') || '\nNo jobs'}`, false, 'System');
+        } catch (e: any) {
+          addMsg(`❌ ${e.message || 'Failed'}`, false, 'System');
+        } finally { setProcessing(false); }
         return;
       }
 
       // agents-live
       if ((lower === 'agents-live' || lower === 'live agents') && defaultConn) {
         setProcessing(true);
-        const result = await listAgents(defaultConn.config);
-        addMsg(result.ok ? `🤖 Available agents: ${result.agents?.join(', ') || 'none'}` : `❌ ${result.error || 'Failed'}`, false, defaultConn.conn.name);
-        setProcessing(false);
+        try {
+          const result = await withTimeout(listAgents(defaultConn.config), 15000, 'Agents');
+          addMsg(result.ok ? `🤖 Available agents: ${result.agents?.join(', ') || 'none'}` : `❌ ${result.error || 'Failed'}`, false, defaultConn.conn.name);
+        } catch (e: any) {
+          addMsg(`❌ ${e.message || 'Failed'}`, false, 'System');
+        } finally { setProcessing(false); }
         return;
       }
 
@@ -561,15 +661,18 @@ export default function OfficeChat({
         const action = parts[1].toLowerCase();
         const jobId = parts.slice(2).join(' ').trim();
         setProcessing(true);
-        if (action === 'run') {
-          const result = await manageCronJob(defaultConn.config, 'run', jobId);
-          addMsg(result.ok ? `✅ ${result.reply}` : `❌ ${result.error}`, false, defaultConn.conn.name);
-        } else {
-          const enabled = action === 'enable';
-          const result = await manageCronJob(defaultConn.config, 'update', jobId, { enabled });
-          addMsg(result.ok ? `✅ Job ${enabled ? 'enabled' : 'disabled'}` : `❌ ${result.error}`, false, defaultConn.conn.name);
-        }
-        setProcessing(false);
+        try {
+          if (action === 'run') {
+            const result = await withTimeout(manageCronJob(defaultConn.config, 'run', jobId), 15000, 'Cron run');
+            addMsg(result.ok ? `✅ ${result.reply}` : `❌ ${result.error}`, false, defaultConn.conn.name);
+          } else {
+            const enabled = action === 'enable';
+            const result = await withTimeout(manageCronJob(defaultConn.config, 'update', jobId, { enabled }), 15000, 'Cron update');
+            addMsg(result.ok ? `✅ Job ${enabled ? 'enabled' : 'disabled'}` : `❌ ${result.error}`, false, defaultConn.conn.name);
+          }
+        } catch (e: any) {
+          addMsg(`❌ ${e.message || 'Failed'}`, false, 'System');
+        } finally { setProcessing(false); }
         return;
       }
 
@@ -577,9 +680,12 @@ export default function OfficeChat({
       if ((lower.startsWith('memory ') || lower.startsWith('recall ') || lower.startsWith('remember ')) && defaultConn) {
         const query = text.replace(/^(memory|recall|remember)\s+/i, '').trim();
         setProcessing(true);
-        const result = await searchMemory(defaultConn.config, query);
-        addMsg(result.ok ? `🧠 Memory:\n\n${result.reply || 'Nothing found'}` : `❌ ${result.error || 'Failed'}`, false, defaultConn.conn.name);
-        setProcessing(false);
+        try {
+          const result = await withTimeout(searchMemory(defaultConn.config, query), 15000, 'Memory');
+          addMsg(result.ok ? `🧠 Memory:\n\n${result.reply || 'Nothing found'}` : `❌ ${result.error || 'Failed'}`, false, defaultConn.conn.name);
+        } catch (e: any) {
+          addMsg(`❌ ${e.message || 'Failed'}`, false, 'System');
+        } finally { setProcessing(false); }
         return;
       }
 
@@ -591,9 +697,12 @@ export default function OfficeChat({
         const sessionKey = rest.slice(0, spaceIdx);
         const message = rest.slice(spaceIdx + 1).trim();
         setProcessing(true);
-        const result = await sendSessionMessage(defaultConn.config, sessionKey, message);
-        addMsg(result.ok ? `✅ ${result.reply}` : `❌ ${result.error || 'Failed'}`, false, defaultConn.conn.name);
-        setProcessing(false);
+        try {
+          const result = await withTimeout(sendSessionMessage(defaultConn.config, sessionKey, message), 15000, 'Message');
+          addMsg(result.ok ? `✅ ${result.reply}` : `❌ ${result.error || 'Failed'}`, false, defaultConn.conn.name);
+        } catch (e: any) {
+          addMsg(`❌ ${e.message || 'Failed'}`, false, 'System');
+        } finally { setProcessing(false); }
         return;
       }
 
@@ -601,20 +710,25 @@ export default function OfficeChat({
       if (lower.startsWith('broadcast ')) {
         const broadcastMsg = text.slice(10).trim();
         setProcessing(true);
-        addMsg(`📢 Broadcasting: "${broadcastMsg}"`, false, 'System');
-        const results: string[] = [];
-        for (const conn of (connections || []).filter(c => c.status === 'connected')) {
-          const cfg = getConnectionConfig(conn.id);
-          if (!cfg) continue;
-          const r = await sendAgentTask(cfg, broadcastMsg, 'main');
-          results.push(r.ok ? `✅ ${conn.name}` : `❌ ${conn.name}`);
-        }
-        if (telegramConnected && telegramConfig?.botToken && telegramConfig?.chatId) {
-          const tgResult = await sendTgMessage(telegramConfig.botToken, telegramConfig.chatId, broadcastMsg);
-          results.push(tgResult.ok ? '✅ Telegram' : '❌ Telegram');
-        }
-        addMsg(`📢 Broadcast results:\n${results.join('\n')}`, false, 'System');
-        setProcessing(false);
+        try {
+          addMsg(`📢 Broadcasting: "${broadcastMsg}"`, false, 'System');
+          const results: string[] = [];
+          for (const conn of (connections || []).filter(c => c.status === 'connected')) {
+            const cfg = getConnectionConfig(conn.id);
+            if (!cfg) continue;
+            try {
+              const r = await withTimeout(sendAgentTask(cfg, broadcastMsg, 'main'), 15000, 'Broadcast');
+              results.push(r.ok ? `✅ ${conn.name}` : `❌ ${conn.name}`);
+            } catch { results.push(`❌ ${conn.name} (timeout)`); }
+          }
+          if (telegramConnected && telegramConfig?.botToken && telegramConfig?.chatId) {
+            const tgResult = await sendTgMessage(telegramConfig.botToken, telegramConfig.chatId, broadcastMsg);
+            results.push(tgResult.ok ? '✅ Telegram' : '❌ Telegram');
+          }
+          addMsg(`📢 Broadcast results:\n${results.join('\n')}`, false, 'System');
+        } catch (e: any) {
+          addMsg(`❌ ${e.message || 'Broadcast failed'}`, false, 'System');
+        } finally { setProcessing(false); }
         return;
       }
     }
@@ -625,9 +739,10 @@ export default function OfficeChat({
         const msg = text.slice(3).trim();
         if (!telegramConfig.chatId) { addMsg('❌ No chat ID configured.', false, 'Telegram'); return; }
         setProcessing(true);
-        const result = await sendTgMessage(telegramConfig.botToken, telegramConfig.chatId, msg);
-        addMsg(result.ok ? `✈️ Sent: "${msg}"` : `❌ ${result.error || 'Send failed'}`, false, 'Telegram');
-        setProcessing(false);
+        try {
+          const result = await sendTgMessage(telegramConfig.botToken, telegramConfig.chatId, msg);
+          addMsg(result.ok ? `✈️ Sent: "${msg}"` : `❌ ${result.error || 'Send failed'}`, false, 'Telegram');
+        } finally { setProcessing(false); }
         return;
       }
       if (lower === 'tg-feed' || lower === 'telegram feed') {
@@ -671,6 +786,12 @@ export default function OfficeChat({
       <View style={[styles.header, fullscreen && styles.headerFullscreen]}>
         <Text style={styles.headerIcon}>{'💬'}</Text>
         <Text style={styles.headerTitle}>OFFICE TERMINAL</Text>
+        {bridgeOnline && (
+          <View style={{ backgroundColor: '#22c55e20', borderRadius: 8, paddingHorizontal: 6, paddingVertical: 1, borderWidth: 1, borderColor: '#22c55e30', flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+            <View style={{ width: 5, height: 5, borderRadius: 2.5, backgroundColor: '#22c55e' }} />
+            <Text style={{ fontSize: 8, color: '#22c55e', fontFamily: 'monospace', fontWeight: '800' }}>SH</Text>
+          </View>
+        )}
         {connectedCount > 0 && (
           <View style={styles.connCountBadge}>
             <Text style={styles.connCountText}>{connectedCount}</Text>
@@ -720,6 +841,7 @@ export default function OfficeChat({
               <View style={[styles.msgBubble, item.isUser ? styles.msgBubbleUser : styles.msgBubbleBot,
                 item.agent === 'System' && styles.msgBubbleOC,
                 item.agent === 'Telegram' && styles.msgBubbleTG,
+                item.agent === 'Shell' && styles.msgBubbleShell,
               ]}>
                 <Text style={[styles.msgText, item.isUser && styles.msgTextUser]} selectable>
                   {item.text}
@@ -844,6 +966,7 @@ const styles = StyleSheet.create({
   msgBubbleUser: { backgroundColor: '#6366f1', alignSelf: 'flex-end' },
   msgBubbleOC: { borderColor: '#6366f140' },
   msgBubbleTG: { borderColor: '#0088cc40' },
+  msgBubbleShell: { borderColor: '#22c55e40', backgroundColor: '#0a1210' },
   msgText: { fontSize: 14, color: '#ccc', fontFamily: 'monospace', lineHeight: 20 },
   msgTextUser: { color: '#fff' },
   inputRow: {

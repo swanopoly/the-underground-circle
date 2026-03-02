@@ -96,6 +96,29 @@ export class ClaudeCodePoller {
   }
 }
 
+// ── Execute shell command via bridge ─────────────────────────────────────────
+
+export async function execBridgeCommand(
+  command: string,
+): Promise<{ ok: boolean; stdout?: string; stderr?: string; code?: number; error?: string }> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 35000);
+    const res = await fetch(`${BRIDGE_URL}/exec`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    return await res.json();
+  } catch (e: any) {
+    if (e.name === 'AbortError') return { ok: false, error: 'Command timed out' };
+    return { ok: false, error: e.message || 'Bridge not reachable' };
+  }
+}
+
 // ── Convert bridge sessions to OfficeAgent[] ─────────────────────────────────
 
 function inferBridgeStatus(s: ClaudeCodeSession): AgentStatus {

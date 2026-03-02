@@ -10,6 +10,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { exec } = require('child_process');
 
 const PORT = 7778;
 const CLAUDE_DIR = path.join(os.homedir(), '.claude', 'projects');
@@ -198,8 +199,44 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ── POST /exec — run a shell command ─────────────────────────────────────
+  if (url === '/exec' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      let command;
+      try {
+        const parsed = JSON.parse(body);
+        command = parsed.command;
+      } catch {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON body. Expected { "command": "..." }' }));
+        return;
+      }
+      if (!command || typeof command !== 'string') {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Missing "command" field' }));
+        return;
+      }
+      exec(command, { timeout: 30000, maxBuffer: 1024 * 1024, shell: true }, (err, stdout, stderr) => {
+        res.writeHead(200, CORS);
+        if (err && err.killed) {
+          res.end(JSON.stringify({ ok: false, error: 'Command timed out (30s)' }));
+        } else {
+          res.end(JSON.stringify({
+            ok: !err || err.code === 0,
+            stdout: stdout || '',
+            stderr: stderr || '',
+            code: err ? err.code || 1 : 0,
+          }));
+        }
+      });
+    });
+    return;
+  }
+
   res.writeHead(404, CORS);
-  res.end(JSON.stringify({ error: 'Not found. Use /health or /sessions' }));
+  res.end(JSON.stringify({ error: 'Not found. Use /health, /sessions, or POST /exec' }));
 });
 
 server.on('error', (err) => {
@@ -218,6 +255,7 @@ server.listen(PORT, () => {
   console.log(`  Scanning ${CLAUDE_DIR}`);
   console.log(`  Found ${cachedSessions.length} active session(s)\n`);
   console.log(`  Endpoints:`);
-  console.log(`    GET /health   — Bridge status`);
-  console.log(`    GET /sessions — Active Claude Code sessions\n`);
+  console.log(`    GET  /health   — Bridge status`);
+  console.log(`    GET  /sessions — Active Claude Code sessions`);
+  console.log(`    POST /exec     — Run a shell command\n`);
 });
