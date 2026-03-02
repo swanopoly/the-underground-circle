@@ -18,7 +18,7 @@ import OfficeActionPanel from '../../../../components/OfficeActionPanel';
 const STORAGE_KEY_CHAT_HISTORY = '@office_terminal_history';
 const DEFAULT_MESSAGE: ChatMessage = {
   id: '0',
-  text: '🏢 Office Terminal ready. Type "help" for commands.\n\n  @agent message  — talk to an agent\n  $ command       — run shell command\n  help            — all commands',
+  text: '🏢 Office Terminal ready. Type "help" for commands.\n\n  swan            — talk to BlackSwan AI\n  @agent message  — talk to an agent\n  $ command       — run shell command\n  help            — all commands',
   isUser: false,
   agent: 'System',
   timestamp: new Date(),
@@ -92,6 +92,163 @@ function findConnectionByName(
   const lower = name.toLowerCase();
   return connections.find(c => c.name.toLowerCase() === lower)
     || connections.find(c => c.name.toLowerCase().includes(lower));
+}
+
+// ─── BlackSwan Local AI ──────────────────────────────────────────────────────
+// Always available — no external connection needed. Provides office insights,
+// system info, and a helpful personality.
+
+const SWAN_GREETINGS = [
+  '👽 Greetings, operator. BlackSwan is online and scanning the perimeter.',
+  '👽 *holographic flicker* — What do you need? I see all.',
+  '👽 BlackSwan here. The cosmic frequencies are strong today.',
+  '👽 Transmission received. How can I assist the circle?',
+  '👽 *alien hum* — Ready for directives.',
+];
+const SWAN_FORTUNES = [
+  '🔮 The stars say: your next deployment will go smoothly.',
+  '🔮 Cosmic alignment suggests: now is the time to refactor.',
+  '🔮 A strange signal approaches... it whispers: "ship it."',
+  '🔮 The void reveals: your test coverage needs attention.',
+  '🔮 Interstellar wisdom: the bug is always in the code you didn\'t write.',
+  '🔮 The nebula shifts: a collaborator will bring unexpected insight.',
+  '🔮 Alien frequencies detect: momentum is building in your circle.',
+  '🔮 Transmission from deep space: take a break, then crush it.',
+];
+
+function processBlackSwanCommand(
+  input: string,
+  agents: OfficeAgent[],
+  connections: AgentConnection[],
+): string {
+  const lower = input.toLowerCase().trim();
+
+  // No subcommand — greeting
+  if (!lower) {
+    return SWAN_GREETINGS[Math.floor(Math.random() * SWAN_GREETINGS.length)];
+  }
+
+  // Help
+  if (lower === 'help' || lower === '?') {
+    return `👽 BlackSwan Commands\n\n` +
+      `  swan             — Talk to BlackSwan\n` +
+      `  swan status      — Office analysis\n` +
+      `  swan scan        — Deep scan all agents\n` +
+      `  swan agents      — Agent roster + health\n` +
+      `  swan costs       — Cost breakdown\n` +
+      `  swan fortune     — Cosmic prediction\n` +
+      `  swan connections — Connection health\n` +
+      `  swan time        — Current time + uptime\n` +
+      `  swan tips        — Office optimization tips\n` +
+      `  swan whoami      — Your profile info\n` +
+      `  @BlackSwan <msg> — Chat with BlackSwan\n\n` +
+      `💡 BlackSwan runs locally — no external API needed.`;
+  }
+
+  // Fortune
+  if (lower === 'fortune' || lower === 'predict' || lower === '8ball') {
+    return SWAN_FORTUNES[Math.floor(Math.random() * SWAN_FORTUNES.length)];
+  }
+
+  // Time
+  if (lower === 'time' || lower === 'clock') {
+    const now = new Date();
+    return `🕐 ${now.toLocaleTimeString()} — ${now.toLocaleDateString()}\n📡 BlackSwan uptime: always on`;
+  }
+
+  // Status / scan
+  if (lower === 'status' || lower === 'scan') {
+    const active = agents.filter(a => a.status === 'active');
+    const idle = agents.filter(a => a.status === 'idle');
+    const offline = agents.filter(a => a.status === 'offline');
+    const errored = agents.filter(a => a.status === 'error');
+    const totalCost = agents.reduce((s, a) => s + a.costToday, 0);
+    const totalTokens = agents.reduce((s, a) => s + a.tokensUsed, 0);
+    const connUp = connections.filter(c => c.status === 'connected').length;
+    const connTotal = connections.length;
+
+    return `👽 BlackSwan Office Scan\n` +
+      `${'━'.repeat(32)}\n` +
+      `  🟢 Active:  ${active.length} agent${active.length !== 1 ? 's' : ''}${active.length > 0 ? ` (${active.map(a => a.name).join(', ')})` : ''}\n` +
+      `  🟡 Idle:    ${idle.length} agent${idle.length !== 1 ? 's' : ''}\n` +
+      `  ⚪ Offline: ${offline.length}\n` +
+      (errored.length > 0 ? `  🔴 Error:   ${errored.length} (${errored.map(a => a.name).join(', ')})\n` : '') +
+      `  📡 Connections: ${connUp}/${connTotal} online\n` +
+      `  💰 Cost today: $${totalCost.toFixed(4)}\n` +
+      `  🔤 Tokens: ${totalTokens.toLocaleString()}\n` +
+      `${'━'.repeat(32)}\n` +
+      (active.length > 0
+        ? `📍 Active now: ${active.map(a => `${a.name} → ${a.activity}`).join('; ')}`
+        : `📍 All quiet. Agents standing by.`);
+  }
+
+  // Agents roster
+  if (lower === 'agents' || lower === 'roster') {
+    if (agents.length === 0) return '👽 No agents detected in the office.';
+    const lines = agents.map(a => {
+      const status = { active: '🟢', idle: '🟡', error: '🔴', offline: '⚪' }[a.status] || '⚪';
+      const cost = a.costToday > 0 ? ` · $${a.costToday.toFixed(4)}` : '';
+      const model = a.model !== 'unknown' ? ` · ${a.model}` : '';
+      return `  ${status} ${a.name} [${a.role}]${model}${cost}\n    └─ ${a.activity}`;
+    });
+    return `👽 Agent Roster (${agents.length})\n${'━'.repeat(32)}\n${lines.join('\n')}`;
+  }
+
+  // Costs
+  if (lower === 'costs' || lower === 'cost' || lower === 'spend') {
+    const sorted = [...agents].filter(a => a.costToday > 0).sort((a, b) => b.costToday - a.costToday);
+    const totalCost = agents.reduce((s, a) => s + a.costToday, 0);
+    if (sorted.length === 0) return `👽 $0.00 spent today. The office is running lean.`;
+    const lines = sorted.map(a =>
+      `  $${a.costToday.toFixed(4)}  ${a.name} (${a.model}) — ${a.tokensUsed.toLocaleString()} tokens`
+    );
+    return `👽 Cost Analysis\n${'━'.repeat(32)}\n${lines.join('\n')}\n${'━'.repeat(32)}\n  Total: $${totalCost.toFixed(4)}`;
+  }
+
+  // Connections
+  if (lower === 'connections' || lower === 'conns') {
+    if (connections.length === 0) return '👽 No connections configured. Add one in ⚙️ → Connections.';
+    const lines = connections.map(c => {
+      const icon = { connected: '🟢', connecting: '🟡', error: '🔴', disconnected: '⚪' }[c.status] || '⚪';
+      return `  ${icon} ${c.name} [${c.provider}] — ${c.status}${c.error ? ` (${c.error})` : ''}`;
+    });
+    return `👽 Connection Status\n${'━'.repeat(32)}\n${lines.join('\n')}`;
+  }
+
+  // Tips
+  if (lower === 'tips' || lower === 'optimize' || lower === 'advice') {
+    const tips: string[] = [];
+    const active = agents.filter(a => a.status === 'active');
+    const totalCost = agents.reduce((s, a) => s + a.costToday, 0);
+    const cachedRatio = agents.reduce((s, a) => s + a.cachedTokens, 0) / Math.max(1, agents.reduce((s, a) => s + a.inputTokens, 0));
+
+    if (active.length === 0 && agents.length > 1) tips.push('💡 No agents active — consider assigning tasks to idle agents.');
+    if (totalCost > 1) tips.push('💡 Spending over $1 today — review if all active sessions are needed.');
+    if (cachedRatio < 0.3) tips.push('💡 Low cache hit rate — consider structuring prompts for better caching.');
+    if (connections.filter(c => c.status === 'error').length > 0) tips.push('💡 Some connections have errors — check ⚙️ → Connections.');
+    if (agents.some(a => a.model?.includes('opus'))) tips.push('💡 Using Opus models — switch to Sonnet/Haiku for routine tasks to save costs.');
+    if (tips.length === 0) tips.push('✅ Office looking good! No optimization suggestions right now.');
+    return `👽 BlackSwan Tips\n${'━'.repeat(32)}\n${tips.join('\n')}`;
+  }
+
+  // Whoami
+  if (lower === 'whoami' || lower === 'who am i') {
+    return `👽 You are the operator of this circle.\n` +
+      `  Agents under your command: ${agents.length}\n` +
+      `  Connections: ${connections.length}\n` +
+      `  BlackSwan status: Always online ∞`;
+  }
+
+  // Default — treat as a chat message, respond with personality
+  const chatResponses = [
+    `👽 Interesting... "${input}". I'll keep my sensors tuned to that.`,
+    `👽 *processes through alien neural net* — Noted. Anything else, operator?`,
+    `👽 The cosmic frequencies resonate with your words. I am listening.`,
+    `👽 Acknowledged. BlackSwan is always watching, always learning.`,
+    `👽 *holographic shimmer* — My circuits are processing your request.`,
+    `👽 Transmission received. The circle grows stronger with each interaction.`,
+  ];
+  return chatResponses[Math.floor(Math.random() * chatResponses.length)];
 }
 
 async function processLocalCommand(text: string, agents: OfficeAgent[], connections?: AgentConnection[]): Promise<{ response: string; command?: OfficeCommand } | null> {
@@ -215,7 +372,8 @@ async function processLocalCommand(text: string, agents: OfficeAgent[], connecti
     const { getAdvancedHelp } = await import('../../../../lib/advancedChatCommands');
     return {
       response: `🏢 Office Commands\n\n` +
-        `QUICK:\n• @agent message — Talk to an agent directly\n• $ command — Run a shell command (via bridge)\n• sh command — Same as $ command\n\n` +
+        `QUICK:\n• @agent message — Talk to an agent directly\n• swan [cmd] — Talk to BlackSwan AI (always available)\n• $ command — Run a shell command (via bridge)\n• sh command — Same as $ command\n\n` +
+        `BLACKSWAN AI:\n• swan — Greet BlackSwan\n• swan status — Office analysis\n• swan scan — Deep scan all agents\n• swan costs — Cost breakdown\n• swan fortune — Cosmic prediction\n• swan tips — Optimization advice\n• @BlackSwan hi — Chat directly\n\n` +
         `LOCAL:\n• status — Office overview\n• agents — List all agents\n• connections — List all connections\n• agent [name] — Agent details\n• costs — Cost breakdown\n• theme [name] — Change theme\n\n` +
         `CONVERSATIONS:\n• log — Recent messages\n• log [agent] — Filter by agent\n• threads — Conversation threads\n• clear log — Clear conversation log\n• clear — Clear terminal history\n\n` +
         `AGENT COMMANDS:\n• ask [question] — Ask default agent\n• task [message] — Send task to default agent\n• task @[name] [message] — Route to connection/agent\n• spawn [task] — Launch background sub-agent\n• subagents — List running sub-agents\n• msg [session] [text] — Message a session\n• broadcast [msg] — Send to all channels\n\n` +
@@ -365,6 +523,16 @@ export default function OfficeChat({
     }
 
     const lower = text.toLowerCase();
+
+    // ─── BlackSwan local AI — always available, no external connection needed ───
+    const swanMatch = lower.match(/^(?:swan|blackswan|bs)\s*(.*)/);
+    const atSwanMatch = text.match(/^@(?:BlackSwan|blackswan|swan)\s+([\s\S]*)/);
+    if (swanMatch || atSwanMatch) {
+      const swanInput = (swanMatch?.[1] || atSwanMatch?.[1] || '').trim();
+      const swanResponse = processBlackSwanCommand(swanInput, agents, connections || []);
+      addMsg(swanResponse, false, 'BlackSwan');
+      return;
+    }
 
     // ─── Shell commands: $ command, > command, sh command, shell command ───
     const shellMatch = text.match(/^(?:\$|>|sh |shell )\s*(.*)/s);
@@ -766,7 +934,9 @@ export default function OfficeChat({
       return;
     }
 
-    addMsg('Unknown command. Type "help" for all commands.', false, 'Office AI');
+    // Route unrecognized input to BlackSwan instead of a dead-end
+    const swanReply = processBlackSwanCommand(text, agents, connections || []);
+    addMsg(swanReply, false, 'BlackSwan');
   };
 
   if (minimized) {

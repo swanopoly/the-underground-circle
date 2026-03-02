@@ -56,7 +56,7 @@ export const DEFAULT_AGENT: OfficeAgent = {
   name: 'BlackSwan',
   role: 'Circle AI',
   status: 'idle',
-  color: '#a855f7',
+  color: '#22d3ee',
   deskIndex: 0,
   activity: 'Watching the circle',
   messagesProcessed: 0,

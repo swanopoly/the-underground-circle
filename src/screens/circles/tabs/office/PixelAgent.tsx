@@ -390,11 +390,16 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         
         {selected && <View style={[styles.selectionRing, { borderColor: agent.color }]} />}
 
+        {/* Ground spotlight — always visible for non-offline agents */}
+        {!isOffline && (
+          <View style={[styles.groundSpotlight, { backgroundColor: agent.color }]} />
+        )}
+
         {/* Active glow — pulsing backlight behind working agents */}
         {isWorking && !isOffline && (
           <Animated.View style={[styles.activeGlow, {
             backgroundColor: agent.color,
-            opacity: glowAnim.interpolate({ inputRange: [0.3, 0.9], outputRange: [0.08, 0.2] }),
+            opacity: glowAnim.interpolate({ inputRange: [0.3, 0.9], outputRange: [0.18, 0.45] }),
             transform: [{ scaleX: breatheAnim }],
           }]} />
         )}
@@ -1418,11 +1423,13 @@ const styles = StyleSheet.create({
 
   statusDot: {
     position: 'absolute',
-    top: 6,
-    right: 10,
-    width: 6,
-    height: 6,
-    borderRadius: 3,
+    top: 5,
+    right: 9,
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#0a0a14',
     zIndex: 10,
   },
   // Hats
@@ -1459,7 +1466,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 8,
     borderWidth: 1,
-    borderColor: '#1e1b4b30',
+    borderColor: '#3b3680',
     borderRadius: 1,
   },
   hair: {
@@ -1600,7 +1607,7 @@ const styles = StyleSheet.create({
     height: PX * 5,
     position: 'relative',
     borderWidth: 1,
-    borderColor: '#1e1b4b30',
+    borderColor: '#3b3680',
   },
   bodyShade: {
     position: 'absolute',
@@ -1621,7 +1628,7 @@ const styles = StyleSheet.create({
     height: PX * 0.6,
     borderRadius: PX * 0.3,
     borderWidth: 0.5,
-    borderColor: '#1e1b4b50',
+    borderColor: '#4b45a0',
   },
   hand: {
     position: 'absolute',
@@ -1661,7 +1668,7 @@ const styles = StyleSheet.create({
   shoes: { flexDirection: 'row', gap: PX * 0.7, marginTop: -1 },
   shoe: { width: PX * 3, height: PX * 1.2, borderRadius: 1, position: 'relative' },
   // Drop shadow
-  dropShadow: { width: PX * 7, height: PX * 1.2, backgroundColor: '#312e8125', borderRadius: PX * 3, marginTop: 2 },
+  dropShadow: { width: PX * 8, height: PX * 1.5, backgroundColor: '#1a1a3060', borderRadius: PX * 4, marginTop: 2 },
   // Scarf
   scarf: { flexDirection: 'row', marginTop: -1, marginBottom: -1, zIndex: 3 },
   scarfStrip: { width: PX * 2.3, height: PX * 1 },
@@ -1753,14 +1760,30 @@ const styles = StyleSheet.create({
     borderRightColor: 'transparent',
   },
   // Name
-  nameContainer: { alignItems: 'center', marginTop: 2 },
+  nameContainer: {
+    alignItems: 'center', marginTop: 2,
+    backgroundColor: '#0a0a1499',
+    paddingHorizontal: 4, paddingVertical: 1,
+    borderRadius: 3,
+  },
   name: {
     fontSize: 7,
     fontWeight: '800',
     fontFamily: 'monospace',
     letterSpacing: 0.3,
   },
-  offlineOpacity: { opacity: 0.4 },
+  // Ground spotlight
+  groundSpotlight: {
+    position: 'absolute',
+    bottom: 18,
+    left: -2,
+    right: -2,
+    height: PX * 2,
+    borderRadius: PX * 4,
+    opacity: 0.12,
+    zIndex: -2,
+  },
+  offlineOpacity: { opacity: 0.55 },
 
 
   // --- INJECTED HI-RES PIXEL ART STYLES ---

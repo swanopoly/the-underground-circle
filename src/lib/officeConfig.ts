@@ -391,21 +391,21 @@ export const DEFAULT_APPEARANCE: AgentAppearance = {
 
 // Default appearance for the built-in BlackSwan agent
 export const UC_AGENT_APPEARANCE: AgentAppearance = {
-  skinTone: '#c4956a',
-  hairStyle: 'spiky',
-  hairColor: '#a855f7',
-  shirtColor: '#0d0d14',
-  pantsColor: '#1a1a2e',
-  shoeColor: '#a855f7',
-  accessory: 'glasses',
-  hat: 'none',
+  skinTone: '#7aedcf',       // holographic cyan-green skin
+  hairStyle: 'bald',         // alien — no hair
+  hairColor: '#22d3ee',
+  shirtColor: '#0a1a2a',     // dark holographic suit
+  pantsColor: '#0d1520',
+  shoeColor: '#22d3ee',      // glowing cyan boots
+  accessory: 'mask',         // alien face visor
+  hat: 'antenna',            // alien antenna
   expression: 'cool',
-  backItem: 'none',
-  eyeColor: '#a855f7',
+  backItem: 'wings',         // holographic energy wings
+  eyeColor: '#00ff88',       // bright alien green eyes
   facialHair: 'none',
-  pet: 'robot',
-  aura: 'electric',
-  handItem: 'none',
+  pet: 'alien',              // alien companion
+  aura: 'cosmic',            // nebula/space aura
+  handItem: 'wand',          // alien tech staff
 };
 
 // ─── Office Layout ───────────────────────────────────────────────────────────
