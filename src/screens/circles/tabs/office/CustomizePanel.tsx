@@ -9,6 +9,7 @@ import {
   AgentAppearance, DEFAULT_APPEARANCE,
   EnvironmentType, ENVIRONMENT_OPTIONS,
   THEME_COLOR_PROPERTIES, COLOR_SWATCHES,
+  OWNER_EMAIL,
 } from '../../../../lib/officeConfig';
 import { OfficeAgent } from '../../../../lib/officeAgents';
 import PixelAgent from './PixelAgent';
@@ -59,6 +60,8 @@ interface Props {
   customThemes?: CustomThemeRecord[];
   onCustomThemesRefresh?: () => void;
   circleId?: string;
+  // Owner gating
+  userEmail?: string;
 }
 
 type AddStep = 'list' | 'pick-provider' | 'form';
@@ -71,7 +74,9 @@ export default function CustomizePanel({
   telegramChatTitle, onTelegramConnect, onTelegramDisconnect, telegramError, telegramConnecting,
   budgetConfig, onBudgetConfigChange,
   customThemes = [], onCustomThemesRefresh, circleId,
+  userEmail,
 }: Props) {
+  const isOwner = userEmail === OWNER_EMAIL;
   const [tab, setTab] = useState<Tab>('theme');
   const [selectedAgentId, setSelectedAgentId] = useState(agents[0]?.name || '');
 
@@ -434,6 +439,16 @@ export default function CustomizePanel({
                   </View>
                 </View>
               )}
+
+              {/* Reset theme to default */}
+              {currentTheme !== 'underground' && (
+                <Pressable
+                  onPress={() => onThemeChange('underground')}
+                  style={styles.resetBtn}
+                >
+                  <Text style={styles.resetBtnText}>↺ RESET TO DEFAULT</Text>
+                </Pressable>
+              )}
             </View>
           )}
 
@@ -467,6 +482,14 @@ export default function CustomizePanel({
                       scale={1.8}
                     />
                   </View>
+
+                  {/* Reset agent appearance */}
+                  <Pressable
+                    onPress={() => onAppearanceChange(selectedAgentId, { ...DEFAULT_APPEARANCE })}
+                    style={styles.resetBtn}
+                  >
+                    <Text style={styles.resetBtnText}>↺ RESET AGENT</Text>
+                  </Pressable>
 
                   <Text style={styles.sectionTitle}>SKIN TONE</Text>
                   <View style={styles.colorRow}>
@@ -528,8 +551,8 @@ export default function CustomizePanel({
                   </View>
                   <Text style={styles.sectionTitle}>HAT</Text>
                   <View style={styles.optionRow}>
-                    {(['none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns', 'space_helmet', 'wizard_hat', 'halo', 'antenna'] as const).map(hat => {
-                      const labels: Record<string, string> = { none: 'NONE', cap: '🧢', tophat: '🎩', beanie: '🧶', crown: '👑', helmet: '⛑️', horns: '😈', space_helmet: '🪖 SPACE', wizard_hat: '🧙 WIZARD', halo: '😇 HALO', antenna: '👽 ANTENNA' };
+                    {(['none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns', ...(isOwner ? ['space_helmet'] as const : []), 'wizard_hat', 'halo', 'antenna'] as const).map(hat => {
+                      const labels: Record<string, string> = { none: 'NONE', cap: '🧢', tophat: '🎩', beanie: '🧶', crown: '👑', helmet: '⛑️', horns: '😈', space_helmet: '🚀 SPACE', wizard_hat: '🧙 WIZARD', halo: '😇 HALO', antenna: '👽 ANTENNA' };
                       return (
                         <Pressable key={hat} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, hat: hat })}
                           style={[styles.optionBtn, currentAppearance.hat === hat && styles.optionBtnActive]}>
@@ -614,8 +637,8 @@ export default function CustomizePanel({
                   </View>
                   <Text style={styles.sectionTitle}>HAND ITEM</Text>
                   <View style={styles.optionRow}>
-                    {(['none', 'lightsaber', 'coffee', 'laptop', 'flag', 'wand'] as const).map(item => {
-                      const labels: Record<string, string> = { none: 'NONE', lightsaber: '⚔️ SABER', coffee: '☕ COFFEE', laptop: '💻 LAPTOP', flag: '🚩 FLAG', wand: '🪄 WAND' };
+                    {(['none', ...(isOwner ? ['lightsaber'] as const : []), 'coffee', 'laptop', 'flag', 'wand'] as const).map(item => {
+                      const labels: Record<string, string> = { none: 'NONE', lightsaber: '⚡ SABER', coffee: '☕ COFFEE', laptop: '💻 LAPTOP', flag: '🚩 FLAG', wand: '🪄 WAND' };
                       return (
                         <Pressable key={item} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, handItem: item })}
                           style={[styles.optionBtn, (currentAppearance.handItem || 'none') === item && styles.optionBtnActive]}>
@@ -1494,5 +1517,15 @@ const styles = StyleSheet.create({
   cteSaveBtn: { backgroundColor: '#6366f1' },
   cteActionBtnText: {
     fontSize: 12, color: '#888', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1,
+  },
+  resetBtn: {
+    marginTop: 12, paddingVertical: 10, paddingHorizontal: 16,
+    borderRadius: 8, borderWidth: 1, borderColor: '#ef444440',
+    backgroundColor: '#ef444410', alignItems: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  resetBtnText: {
+    fontSize: 11, color: '#ef4444', fontFamily: 'monospace',
+    fontWeight: '800', letterSpacing: 1,
   },
 });

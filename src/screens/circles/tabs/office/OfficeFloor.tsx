@@ -5,7 +5,7 @@ import { THEME_BACKGROUNDS } from '../../../../lib/themeBackgrounds';
 
 const GRID_SIZE = 16;
 export const FLOOR_W = 900;
-export const FLOOR_H = 680;
+export const FLOOR_H = 970;
 
   // Advanced Volumetric FX injected
   const renderAtmospherics = () => {
@@ -23,6 +23,7 @@ export const DESK_POSITIONS = [
   { x: 40, y: 260 }, { x: 220, y: 260 }, { x: 400, y: 260 }, { x: 580, y: 260 },
   { x: 40, y: 390 }, { x: 220, y: 390 }, { x: 400, y: 390 }, { x: 580, y: 390 },
   { x: 40, y: 520 }, { x: 220, y: 520 }, { x: 400, y: 520 }, { x: 580, y: 520 },
+  { x: 40, y: 650 }, { x: 220, y: 650 }, { x: 400, y: 650 }, { x: 580, y: 650 },
 ];
 
 interface Props {
@@ -1719,7 +1720,7 @@ function SubmarineDecor({ theme }: { theme: OfficeTheme }) {
         </View>
       </View>
       {/* Pipe run across floor */}
-      <View style={{ position: 'absolute' as const, top: 650, left: 100, right: 100, height: 6, backgroundColor: theme.deskBorder, borderRadius: 3, opacity: 0.4 }} />
+      <View style={{ position: 'absolute' as const, top: 780, left: 100, right: 100, height: 6, backgroundColor: theme.deskBorder, borderRadius: 3, opacity: 0.4 }} />
       <View style={[s.rug, { backgroundColor: theme.rugColor, borderColor: theme.rugBorder }]} />
     </>
   );
@@ -2055,6 +2056,191 @@ function renderFloorPattern(env: EnvironmentType, theme: OfficeTheme): React.Rea
       return lines;
     }
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  PIXEL ART ACCESSORY STRIP — fills gap between wall & first desk row
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function AccessoryStrip({ theme }: { theme: OfficeTheme }) {
+  const Y = 193; // just below wallTop (190px)
+  const accent = theme.accentGlow || '#6366f1';
+  return (
+    <View style={{ position: 'absolute' as const, top: 0, left: 0, right: 0, height: 260, zIndex: 1, pointerEvents: 'none' } as any}>
+
+      {/* ── Water Cooler (x=30) ─────────────────────────────────── */}
+      <View style={{ position: 'absolute' as const, left: 34, top: Y }}>
+        {/* Jug (top) */}
+        <View style={{ width: 14, height: 14, backgroundColor: '#a5c8e8', borderRadius: 7, borderWidth: 1, borderColor: '#7ba8d4', alignSelf: 'center' as const }} />
+        {/* Body */}
+        <View style={{ width: 18, height: 24, backgroundColor: '#e2e8f0', borderRadius: 2, borderWidth: 1, borderColor: '#cbd5e1', alignSelf: 'center' as const, marginTop: -2 }}>
+          {/* Water level */}
+          <View style={{ position: 'absolute' as const, bottom: 2, left: 2, right: 2, height: 12, backgroundColor: '#93c5fd40', borderRadius: 1 }} />
+          {/* Tap */}
+          <View style={{ position: 'absolute' as const, right: -4, top: 14, width: 5, height: 3, backgroundColor: '#94a3b8', borderRadius: 1 }} />
+        </View>
+        {/* Legs */}
+        <View style={{ flexDirection: 'row' as const, justifyContent: 'space-between' as const, width: 16, alignSelf: 'center' as const }}>
+          <View style={{ width: 2, height: 8, backgroundColor: '#94a3b8' }} />
+          <View style={{ width: 2, height: 8, backgroundColor: '#94a3b8' }} />
+        </View>
+      </View>
+
+      {/* ── Filing Cabinet (x=100) ──────────────────────────────── */}
+      <View style={{ position: 'absolute' as const, left: 100, top: Y + 4 }}>
+        <View style={{ width: 28, height: 40, backgroundColor: '#374151', borderRadius: 2, borderWidth: 1, borderColor: '#4b5563' }}>
+          {/* Drawer 1 */}
+          <View style={{ marginTop: 3, marginHorizontal: 2, height: 10, backgroundColor: '#1f2937', borderRadius: 1, borderWidth: 1, borderColor: '#4b556340' }}>
+            <View style={{ position: 'absolute' as const, top: 3, left: 8, width: 8, height: 3, backgroundColor: '#6b7280', borderRadius: 1 }} />
+          </View>
+          {/* Drawer 2 */}
+          <View style={{ marginTop: 2, marginHorizontal: 2, height: 10, backgroundColor: '#1f2937', borderRadius: 1, borderWidth: 1, borderColor: '#4b556340' }}>
+            <View style={{ position: 'absolute' as const, top: 3, left: 8, width: 8, height: 3, backgroundColor: '#6b7280', borderRadius: 1 }} />
+          </View>
+          {/* Drawer 3 (slightly open) */}
+          <View style={{ marginTop: 2, marginHorizontal: 2, height: 10, backgroundColor: '#1f2937', borderRadius: 1, borderWidth: 1, borderColor: '#4b556340' }}>
+            <View style={{ position: 'absolute' as const, top: 3, left: 8, width: 8, height: 3, backgroundColor: '#6b7280', borderRadius: 1 }} />
+            {/* Paper sticking out */}
+            <View style={{ position: 'absolute' as const, top: -3, left: 6, width: 10, height: 4, backgroundColor: '#f1f5f9', borderTopLeftRadius: 1, borderTopRightRadius: 1 }} />
+          </View>
+        </View>
+      </View>
+
+      {/* ── Bookshelf (x=200) ──────────────────────────────────── */}
+      <View style={{ position: 'absolute' as const, left: 195, top: Y - 2 }}>
+        {/* Frame */}
+        <View style={{ width: 50, height: 48, backgroundColor: '#44403c', borderRadius: 2, borderWidth: 1, borderColor: '#57534e' }}>
+          {/* Shelf divider */}
+          <View style={{ position: 'absolute' as const, top: 22, left: 2, right: 2, height: 2, backgroundColor: '#57534e' }} />
+          {/* Top shelf books */}
+          <View style={{ position: 'absolute' as const, top: 3, left: 4, flexDirection: 'row' as const, gap: 1 }}>
+            <View style={{ width: 5, height: 18, backgroundColor: '#ef4444', borderRadius: 1 }} />
+            <View style={{ width: 6, height: 16, backgroundColor: '#3b82f6', borderRadius: 1, marginTop: 2 }} />
+            <View style={{ width: 5, height: 18, backgroundColor: '#22c55e', borderRadius: 1 }} />
+            <View style={{ width: 4, height: 15, backgroundColor: '#f59e0b', borderRadius: 1, marginTop: 3 }} />
+            <View style={{ width: 6, height: 17, backgroundColor: '#8b5cf6', borderRadius: 1, marginTop: 1 }} />
+            <View style={{ width: 5, height: 18, backgroundColor: '#ec4899', borderRadius: 1 }} />
+          </View>
+          {/* Bottom shelf books */}
+          <View style={{ position: 'absolute' as const, top: 26, left: 4, flexDirection: 'row' as const, gap: 1 }}>
+            <View style={{ width: 6, height: 18, backgroundColor: '#06b6d4', borderRadius: 1 }} />
+            <View style={{ width: 5, height: 16, backgroundColor: '#d946ef', borderRadius: 1, marginTop: 2 }} />
+            <View style={{ width: 7, height: 18, backgroundColor: '#64748b', borderRadius: 1 }} />
+            <View style={{ width: 5, height: 17, backgroundColor: '#f97316', borderRadius: 1, marginTop: 1 }} />
+            <View style={{ width: 6, height: 15, backgroundColor: '#14b8a6', borderRadius: 1, marginTop: 3 }} />
+          </View>
+        </View>
+      </View>
+
+      {/* ── Coat Rack (x=310) ──────────────────────────────────── */}
+      <View style={{ position: 'absolute' as const, left: 315, top: Y }}>
+        {/* Pole */}
+        <View style={{ width: 3, height: 44, backgroundColor: '#78716c', alignSelf: 'center' as const }}>
+          {/* Top knob */}
+          <View style={{ position: 'absolute' as const, top: -3, left: -2, width: 7, height: 5, backgroundColor: '#a8a29e', borderRadius: 3 }} />
+          {/* Hooks */}
+          <View style={{ position: 'absolute' as const, top: 6, left: -8, width: 8, height: 2, backgroundColor: '#78716c', borderTopLeftRadius: 2 }} />
+          <View style={{ position: 'absolute' as const, top: 6, right: -8, width: 8, height: 2, backgroundColor: '#78716c', borderTopRightRadius: 2 }} />
+          <View style={{ position: 'absolute' as const, top: 14, left: -6, width: 6, height: 2, backgroundColor: '#78716c', borderTopLeftRadius: 2 }} />
+          <View style={{ position: 'absolute' as const, top: 14, right: -6, width: 6, height: 2, backgroundColor: '#78716c', borderTopRightRadius: 2 }} />
+          {/* Hanging jacket */}
+          <View style={{ position: 'absolute' as const, top: 8, left: -12, width: 10, height: 18, backgroundColor: '#1e293b', borderRadius: 2, borderWidth: 1, borderColor: '#334155' }} />
+          {/* Hanging scarf */}
+          <View style={{ position: 'absolute' as const, top: 16, right: -10, width: 4, height: 20, backgroundColor: accent + '60', borderRadius: 1 }} />
+        </View>
+        {/* Base */}
+        <View style={{ width: 20, height: 3, backgroundColor: '#78716c', borderRadius: 1, alignSelf: 'center' as const }} />
+      </View>
+
+      {/* ── Printer/Fax (x=430) ───────────────────────────────── */}
+      <View style={{ position: 'absolute' as const, left: 425, top: Y + 18 }}>
+        {/* Printer body */}
+        <View style={{ width: 32, height: 18, backgroundColor: '#1f2937', borderRadius: 2, borderWidth: 1, borderColor: '#374151' }}>
+          {/* Paper tray in */}
+          <View style={{ position: 'absolute' as const, top: -5, left: 6, width: 20, height: 5, backgroundColor: '#e2e8f0', borderTopLeftRadius: 2, borderTopRightRadius: 2, borderWidth: 1, borderColor: '#cbd5e1' }} />
+          {/* Paper coming out */}
+          <View style={{ position: 'absolute' as const, bottom: -6, left: 8, width: 16, height: 8, backgroundColor: '#f8fafc', borderBottomLeftRadius: 1, borderBottomRightRadius: 1 }}>
+            {/* Print lines */}
+            <View style={{ marginTop: 2, marginHorizontal: 2, height: 1, backgroundColor: '#94a3b840' }} />
+            <View style={{ marginTop: 1, marginHorizontal: 2, height: 1, backgroundColor: '#94a3b830', width: 8 }} />
+          </View>
+          {/* Status LED */}
+          <View style={{ position: 'absolute' as const, top: 3, right: 4, width: 3, height: 3, borderRadius: 1.5, backgroundColor: '#22c55e' }} />
+          {/* Button */}
+          <View style={{ position: 'absolute' as const, top: 8, right: 4, width: 5, height: 3, backgroundColor: '#374151', borderRadius: 1 }} />
+        </View>
+        {/* Small table under printer */}
+        <View style={{ width: 36, height: 10, backgroundColor: theme.deskColor || '#2d2d3e', borderRadius: 1, borderWidth: 1, borderColor: theme.deskBorder || '#3d3d50', marginTop: -1, alignSelf: 'center' as const }} />
+      </View>
+
+      {/* ── Tall Plant / Fern (x=530) ─────────────────────────── */}
+      <View style={{ position: 'absolute' as const, left: 535, top: Y - 6 }}>
+        {/* Leaves (layered) */}
+        <View style={{ alignItems: 'center' as const }}>
+          <View style={{ width: 8, height: 14, backgroundColor: '#166534', borderRadius: 4, transform: [{ rotate: '-15deg' }], marginBottom: -4 }} />
+          <View style={{ width: 10, height: 16, backgroundColor: '#15803d', borderRadius: 5, marginLeft: -6, marginBottom: -6 }} />
+          <View style={{ width: 10, height: 16, backgroundColor: '#22c55e', borderRadius: 5, marginLeft: 8, marginTop: -10 }} />
+          <View style={{ width: 8, height: 12, backgroundColor: '#16a34a', borderRadius: 4, marginTop: -4 }} />
+        </View>
+        {/* Stem */}
+        <View style={{ width: 3, height: 14, backgroundColor: '#166534', alignSelf: 'center' as const, marginTop: -2 }} />
+        {/* Pot */}
+        <View style={{ width: 18, height: 14, backgroundColor: '#92400e', borderBottomLeftRadius: 3, borderBottomRightRadius: 3, alignSelf: 'center' as const }}>
+          <View style={{ width: 20, height: 4, backgroundColor: '#a16207', borderRadius: 1, alignSelf: 'center' as const }} />
+          {/* Soil */}
+          <View style={{ position: 'absolute' as const, top: 4, left: 2, right: 2, height: 3, backgroundColor: '#3d1f00', borderRadius: 1 }} />
+        </View>
+      </View>
+
+      {/* ── Notice Board / Pin Board (on wall, x=650) ─────────── */}
+      <View style={{ position: 'absolute' as const, left: 640, top: Y - 40 }}>
+        {/* Cork board */}
+        <View style={{ width: 56, height: 36, backgroundColor: '#b8860b30', borderRadius: 2, borderWidth: 2, borderColor: '#44403c' }}>
+          {/* Pinned notes */}
+          <View style={{ position: 'absolute' as const, top: 4, left: 5, width: 14, height: 12, backgroundColor: '#fef08a', borderRadius: 1, transform: [{ rotate: '-3deg' }] }}>
+            {/* Pin */}
+            <View style={{ position: 'absolute' as const, top: -2, left: 5, width: 4, height: 4, borderRadius: 2, backgroundColor: '#ef4444' }} />
+          </View>
+          <View style={{ position: 'absolute' as const, top: 6, left: 24, width: 12, height: 14, backgroundColor: '#bfdbfe', borderRadius: 1, transform: [{ rotate: '2deg' }] }}>
+            <View style={{ position: 'absolute' as const, top: -2, left: 4, width: 4, height: 4, borderRadius: 2, backgroundColor: '#3b82f6' }} />
+          </View>
+          <View style={{ position: 'absolute' as const, top: 3, right: 5, width: 13, height: 11, backgroundColor: '#bbf7d0', borderRadius: 1, transform: [{ rotate: '-1deg' }] }}>
+            <View style={{ position: 'absolute' as const, top: -2, left: 5, width: 4, height: 4, borderRadius: 2, backgroundColor: '#22c55e' }} />
+          </View>
+          <View style={{ position: 'absolute' as const, bottom: 4, left: 12, width: 16, height: 10, backgroundColor: '#fecdd3', borderRadius: 1, transform: [{ rotate: '1deg' }] }}>
+            <View style={{ position: 'absolute' as const, top: -2, left: 6, width: 4, height: 4, borderRadius: 2, backgroundColor: '#f97316' }} />
+          </View>
+          <View style={{ position: 'absolute' as const, bottom: 5, right: 8, width: 11, height: 9, backgroundColor: '#e9d5ff', borderRadius: 1, transform: [{ rotate: '-2deg' }] }}>
+            <View style={{ position: 'absolute' as const, top: -2, left: 4, width: 4, height: 4, borderRadius: 2, backgroundColor: '#a855f7' }} />
+          </View>
+        </View>
+      </View>
+
+      {/* ── Small Rug / Welcome Mat (x=400, on floor) ─────────── */}
+      <View style={{ position: 'absolute' as const, left: 360, top: Y + 36 }}>
+        <View style={{ width: 60, height: 16, backgroundColor: accent + '12', borderRadius: 3, borderWidth: 1, borderColor: accent + '20' }}>
+          {/* Rug pattern — center stripe */}
+          <View style={{ position: 'absolute' as const, top: 5, left: 8, right: 8, height: 2, backgroundColor: accent + '18', borderRadius: 1 }} />
+          {/* Diamond pattern */}
+          <View style={{ position: 'absolute' as const, top: 3, left: 26, width: 8, height: 8, backgroundColor: accent + '10', borderRadius: 1, transform: [{ rotate: '45deg' }] }} />
+        </View>
+      </View>
+
+      {/* ── Umbrella Stand (x=770) ────────────────────────────── */}
+      <View style={{ position: 'absolute' as const, left: 775, top: Y + 8 }}>
+        {/* Bucket */}
+        <View style={{ width: 16, height: 20, backgroundColor: '#374151', borderBottomLeftRadius: 3, borderBottomRightRadius: 3, borderWidth: 1, borderColor: '#4b5563' }}>
+          {/* Umbrella handles sticking out */}
+          <View style={{ position: 'absolute' as const, top: -14, left: 2, width: 2, height: 16, backgroundColor: '#1e40af', transform: [{ rotate: '-5deg' }] }}>
+            <View style={{ position: 'absolute' as const, top: 0, left: -3, width: 6, height: 4, borderTopLeftRadius: 4, borderTopRightRadius: 4, backgroundColor: '#1e40af' }} />
+          </View>
+          <View style={{ position: 'absolute' as const, top: -12, right: 2, width: 2, height: 14, backgroundColor: '#991b1b', transform: [{ rotate: '4deg' }] }}>
+            <View style={{ position: 'absolute' as const, top: 0, right: -3, width: 6, height: 4, borderTopLeftRadius: 4, borderTopRightRadius: 4, backgroundColor: '#991b1b' }} />
+          </View>
+        </View>
+      </View>
+    </View>
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2444,6 +2630,9 @@ export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorP
         </>
       )}
 
+      {/* Pixel art accessories — fills gap between wall and desks */}
+      <AccessoryStrip theme={theme} />
+
       {/* Environment desks (always render as Views for agent positioning) */}
       {DESK_POSITIONS.map((pos, i) => (
         <React.Fragment key={i}>{renderDesk(env, pos.x, pos.y, theme)}</React.Fragment>
@@ -2462,10 +2651,7 @@ export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorP
         />
       ))}
 
-      {/* Dynamic floor label */}
-      <View style={s.floorLabelWrap}>
-        <Text style={s.floorLabel}>{theme.name.toUpperCase()} · FLOOR 1</Text>
-      </View>
+      {/* Floor label removed */}
     </Pressable>
   );
 }

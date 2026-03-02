@@ -300,6 +300,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   
   const flatListRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
+  const quickScrollRef = useRef<ScrollView>(null);
+  const quickScrollX = useRef(0);
   const welcomeAnim = useRef(new Animated.Value(0)).current;
   const newMessageAnims = useRef<Map<string, Animated.Value>>(new Map()).current;
 
@@ -1056,17 +1058,45 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       {/* Quick prompts with 3D effect */}
       <View style={styles.quickPromptSection}>
         <Text style={styles.sectionLabel}>QUICK ACTIONS</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickPromptScroll}>
-          {QUICK_PROMPTS.map((p, i) => (
-            <EnhancedPromptCard
-              key={i}
-              label={p.label}
-              onPress={() => sendMessage(p.text)}
-              accentColor={accentColor}
-              delay={i * 100}
-            />
-          ))}
-        </ScrollView>
+        <View style={styles.quickPromptRow}>
+          <Pressable
+            onPress={() => {
+              quickScrollX.current = Math.max(0, quickScrollX.current - 200);
+              quickScrollRef.current?.scrollTo({ x: quickScrollX.current, animated: true });
+            }}
+            style={[styles.quickArrow, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={[styles.quickArrowText, { color: accentColor }]}>‹</Text>
+          </Pressable>
+          <ScrollView
+            ref={quickScrollRef}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.quickPromptScroll}
+            onScroll={(e) => { quickScrollX.current = e.nativeEvent.contentOffset.x; }}
+            scrollEventThrottle={16}
+            style={{ flex: 1 }}
+          >
+            {QUICK_PROMPTS.map((p, i) => (
+              <EnhancedPromptCard
+                key={i}
+                label={p.label}
+                onPress={() => sendMessage(p.text)}
+                accentColor={accentColor}
+                delay={i * 100}
+              />
+            ))}
+          </ScrollView>
+          <Pressable
+            onPress={() => {
+              quickScrollX.current = quickScrollX.current + 200;
+              quickScrollRef.current?.scrollTo({ x: quickScrollX.current, animated: true });
+            }}
+            style={[styles.quickArrow, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={[styles.quickArrowText, { color: accentColor }]}>›</Text>
+          </Pressable>
+        </View>
       </View>
 
       {/* Categories with glassmorphism */}
@@ -2289,7 +2319,7 @@ const styles = StyleSheet.create({
 
   // Empty state
   emptyContainer: { padding: 20, maxWidth: 860, alignSelf: 'center', width: '100%' },
-  heroSection: { alignItems: 'center', paddingTop: 40, paddingBottom: 20 },
+  heroSection: { alignItems: 'center', paddingTop: 100, paddingBottom: 20 },
   heroSectionWeb: Platform.OS === 'web' ? {
     backgroundImage: 'radial-gradient(circle at center, rgba(99, 102, 241, 0.1), transparent 70%)',
   } as any : {},
@@ -2322,7 +2352,14 @@ const styles = StyleSheet.create({
 
   // Enhanced prompts
   quickPromptSection: { marginBottom: 24 },
-  quickPromptScroll: { flexDirection: 'row', gap: 12, paddingRight: 20 },
+  quickPromptRow: { flexDirection: 'row', alignItems: 'center' },
+  quickArrow: {
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: '#1a1a2e', borderWidth: 1, borderColor: '#2a2a3e',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  quickArrowText: { fontSize: 18, fontWeight: '700', marginTop: -1 },
+  quickPromptScroll: { flexDirection: 'row', gap: 12, paddingHorizontal: 8 },
   enhancedPromptCard: {
     paddingVertical: 12,
     paddingHorizontal: 16,

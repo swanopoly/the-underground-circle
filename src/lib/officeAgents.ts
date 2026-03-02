@@ -41,7 +41,7 @@ export const STATUS_COLORS: Record<AgentStatus, string> = {
 };
 
 // Agent colors for assignment
-const AGENT_COLORS = [
+export const AGENT_COLORS = [
   '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899',
   '#14b8a6', '#f472b6', '#fb923c', '#dc2626', '#84cc16', '#38bdf8',
   '#a855f7', '#22d3ee', '#e879f9', '#facc15',

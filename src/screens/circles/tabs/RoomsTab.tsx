@@ -18,6 +18,11 @@ import {
 } from 'react-native';
 import { supabase } from '../../../lib/supabase';
 import { getSwanBotResponse as getAIResponse } from '../../../lib/swanbot';
+import {
+  getStoredToken, storeToken, removeToken, validateToken as ghValidateToken,
+  listRepos, getRepoTree, getFileContent, groupTreeByFolder,
+  type GitHubUser, type GitHubRepo, type GitHubTreeEntry,
+} from '../../../lib/github';
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface Room {
@@ -244,6 +249,193 @@ function detectFileType(name: string, current: FileType = 'typescript'): FileTyp
   if (name.endsWith('.thread')) return 'plaintext';
   if (name.endsWith('.present')) return 'markdown';
   return MAP[ext] ?? current;
+}
+
+// ─── Syntax Highlighting ─────────────────────────────────────────────────────
+
+/** Token types for syntax coloring */
+type TokenType = 'keyword' | 'string' | 'comment' | 'number' | 'type' | 'function' | 'operator' | 'punctuation' | 'property' | 'builtin' | 'tag' | 'attribute' | 'variable' | 'plain';
+
+const TOKEN_COLORS: Record<TokenType, string> = {
+  keyword:     '#ff7b72',   // red-ish (if, else, const, return…)
+  string:      '#a5d6ff',   // light blue (strings)
+  comment:     '#8b949e',   // gray (comments)
+  number:      '#79c0ff',   // blue (numeric literals)
+  type:        '#ffa657',   // orange (type names, classes)
+  function:    '#d2a8ff',   // purple (function names)
+  operator:    '#ff7b72',   // red-ish (=, +, =>)
+  punctuation: '#8b949e',   // gray ({, }, [, ], ;)
+  property:    '#79c0ff',   // blue (object keys)
+  builtin:     '#ffa657',   // orange (console, Math, etc.)
+  tag:         '#7ee787',   // green (HTML tags)
+  attribute:   '#79c0ff',   // blue (HTML attributes)
+  variable:    '#ffa657',   // orange (special vars)
+  plain:       '#e6edf3',   // default text
+};
+
+interface Token { text: string; type: TokenType; }
+
+const LANG_KEYWORDS: Record<string, Set<string>> = {
+  typescript: new Set(['const','let','var','function','return','if','else','for','while','do','switch','case','break','continue','new','delete','typeof','instanceof','in','of','class','extends','implements','interface','type','enum','namespace','module','export','import','from','default','as','async','await','yield','try','catch','finally','throw','this','super','static','public','private','protected','readonly','abstract','declare','get','set','void','null','undefined','true','false','never','unknown','any','keyof','infer','is']),
+  javascript: new Set(['const','let','var','function','return','if','else','for','while','do','switch','case','break','continue','new','delete','typeof','instanceof','in','of','class','extends','export','import','from','default','as','async','await','yield','try','catch','finally','throw','this','super','static','get','set','void','null','undefined','true','false']),
+  python: new Set(['def','class','return','if','elif','else','for','while','break','continue','import','from','as','try','except','finally','raise','with','yield','async','await','pass','del','in','not','and','or','is','lambda','global','nonlocal','assert','True','False','None','self','cls']),
+  rust: new Set(['fn','let','mut','const','if','else','for','while','loop','match','return','break','continue','struct','enum','impl','trait','type','pub','use','mod','crate','self','super','as','in','ref','move','async','await','unsafe','where','dyn','static','extern','true','false','Some','None','Ok','Err','Self']),
+  go: new Set(['func','var','const','return','if','else','for','range','switch','case','break','continue','type','struct','interface','map','chan','go','select','defer','import','package','true','false','nil','make','new','append','len','cap','delete','copy','close','panic','recover']),
+  sql: new Set(['SELECT','FROM','WHERE','AND','OR','NOT','INSERT','INTO','VALUES','UPDATE','SET','DELETE','CREATE','TABLE','ALTER','DROP','INDEX','JOIN','LEFT','RIGHT','INNER','OUTER','ON','GROUP','BY','ORDER','ASC','DESC','HAVING','LIMIT','OFFSET','UNION','AS','DISTINCT','COUNT','SUM','AVG','MIN','MAX','NULL','IS','IN','BETWEEN','LIKE','EXISTS','CASE','WHEN','THEN','ELSE','END','PRIMARY','KEY','FOREIGN','REFERENCES','CASCADE','DEFAULT','CONSTRAINT','VIEW','TRIGGER','PROCEDURE','BEGIN','COMMIT','ROLLBACK','GRANT','REVOKE']),
+  bash: new Set(['if','then','else','elif','fi','for','while','do','done','case','esac','in','function','return','echo','exit','export','source','alias','unset','local','readonly','shift','set','true','false','cd','ls','grep','awk','sed','cat','rm','cp','mv','mkdir','chmod','chown','sudo','apt','yum','brew','npm','yarn','git','docker','curl','wget']),
+  html: new Set([]),
+  css: new Set(['@import','@media','@keyframes','@font-face','@supports','!important']),
+  json: new Set([]),
+  yaml: new Set(['true','false','null','yes','no','on','off']),
+};
+
+const LANG_TYPES: Record<string, Set<string>> = {
+  typescript: new Set(['string','number','boolean','object','symbol','bigint','Array','Promise','Map','Set','Record','Partial','Required','Readonly','Pick','Omit','Exclude','Extract','NonNullable','ReturnType','Parameters','InstanceType','React','ReactNode','JSX','Element','FC','Component','HTMLElement','Event','Error','Date','RegExp','JSON','Math','console','Object','Function','Symbol','Buffer','NodeJS','Response','Request']),
+  javascript: new Set(['Array','Promise','Map','Set','Error','Date','RegExp','JSON','Math','console','Object','Function','Symbol','Buffer','Response','Request','HTMLElement','Event']),
+  python: new Set(['int','float','str','bool','list','dict','tuple','set','bytes','type','object','range','enumerate','zip','map','filter','print','len','super','isinstance','issubclass','Exception','ValueError','TypeError','KeyError','IndexError','AttributeError','RuntimeError','StopIteration','Generator']),
+  rust: new Set(['i8','i16','i32','i64','i128','u8','u16','u32','u64','u128','f32','f64','bool','char','str','String','Vec','Box','Rc','Arc','Option','Result','HashMap','HashSet','BTreeMap','Iterator','Future','Pin','Cow']),
+  go: new Set(['int','int8','int16','int32','int64','uint','uint8','uint16','uint32','uint64','float32','float64','complex64','complex128','byte','rune','string','bool','error','any','comparable']),
+};
+
+const LANG_BUILTINS: Record<string, Set<string>> = {
+  typescript: new Set(['console','Math','JSON','Object','Array','Promise','String','Number','Boolean','Date','RegExp','Error','Map','Set','parseInt','parseFloat','isNaN','isFinite','setTimeout','setInterval','clearTimeout','clearInterval','fetch','require','process','window','document','globalThis','Symbol','Proxy','Reflect','WeakMap','WeakSet','BigInt','Intl']),
+  javascript: new Set(['console','Math','JSON','Object','Array','Promise','String','Number','Boolean','Date','RegExp','Error','Map','Set','parseInt','parseFloat','isNaN','isFinite','setTimeout','setInterval','clearTimeout','clearInterval','fetch','require','process','window','document','globalThis']),
+  python: new Set(['print','len','range','type','str','int','float','bool','list','dict','tuple','set','sorted','reversed','enumerate','zip','map','filter','any','all','abs','min','max','sum','round','input','open','super','isinstance','issubclass','hasattr','getattr','setattr','delattr','iter','next','id','hex','oct','bin','chr','ord','format','repr','hash','dir','vars','help','__name__','__init__','__str__','__repr__']),
+  rust: new Set(['println','print','eprintln','eprint','format','vec','panic','assert','assert_eq','assert_ne','debug_assert','todo','unimplemented','unreachable','cfg','derive','allow','warn','deny','forbid','test','bench','main','include','include_str','include_bytes','env','file','line','column','module_path','stringify','concat','compile_error']),
+  go: new Set(['fmt','log','os','io','net','http','json','strings','strconv','sync','context','errors','time','math','sort','bytes','bufio','regexp','path','filepath','encoding','crypto','reflect','testing','flag']),
+  bash: new Set(['echo','printf','read','test','expr','eval','exec','trap','wait','kill','jobs','bg','fg','nohup','xargs','tee','sort','uniq','wc','cut','tr','head','tail','find','which','whereis','type','file','stat','date','cal','uptime','whoami','hostname','uname','env','printenv','declare']),
+};
+
+function tokenizeLine(line: string, lang: string): Token[] {
+  const tokens: Token[] = [];
+  const keywords = LANG_KEYWORDS[lang] || LANG_KEYWORDS.typescript || new Set();
+  const types = LANG_TYPES[lang] || new Set();
+  const builtins = LANG_BUILTINS[lang] || new Set();
+  const isSql = lang === 'sql';
+  const isHtml = lang === 'html';
+  const isCss = lang === 'css';
+  const isJson = lang === 'json';
+  const isYaml = lang === 'yaml';
+  const isBash = lang === 'bash';
+  const isPython = lang === 'python';
+
+  let i = 0;
+  while (i < line.length) {
+    // ── Comments ──
+    if (!isJson && !isYaml) {
+      if (line[i] === '/' && line[i+1] === '/') { tokens.push({ text: line.slice(i), type: 'comment' }); return tokens; }
+      if (line[i] === '#' && (isPython || isBash || isYaml)) { tokens.push({ text: line.slice(i), type: 'comment' }); return tokens; }
+      if (isSql && line[i] === '-' && line[i+1] === '-') { tokens.push({ text: line.slice(i), type: 'comment' }); return tokens; }
+      if (isCss && line[i] === '/' && line[i+1] === '*') {
+        const end = line.indexOf('*/', i+2);
+        if (end !== -1) { tokens.push({ text: line.slice(i, end+2), type: 'comment' }); i = end+2; continue; }
+        tokens.push({ text: line.slice(i), type: 'comment' }); return tokens;
+      }
+    }
+
+    // ── Strings ──
+    if (line[i] === '"' || line[i] === "'" || line[i] === '`') {
+      const q = line[i]; let j = i+1;
+      while (j < line.length && line[j] !== q) { if (line[j] === '\\') j++; j++; }
+      tokens.push({ text: line.slice(i, j+1), type: 'string' }); i = j+1; continue;
+    }
+
+    // ── Numbers ──
+    if (/[0-9]/.test(line[i]) && (i === 0 || /[\s,;:([\]{}<>=!+\-*/&|^~%?]/.test(line[i-1]))) {
+      let j = i;
+      if (line[j] === '0' && (line[j+1] === 'x' || line[j+1] === 'X' || line[j+1] === 'b' || line[j+1] === 'o')) j += 2;
+      while (j < line.length && /[0-9a-fA-F._]/.test(line[j])) j++;
+      if (j < line.length && /[eE]/.test(line[j])) { j++; if (line[j] === '+' || line[j] === '-') j++; while (j < line.length && /[0-9]/.test(line[j])) j++; }
+      tokens.push({ text: line.slice(i, j), type: 'number' }); i = j; continue;
+    }
+
+    // ── HTML tags ──
+    if (isHtml && line[i] === '<') {
+      const tagMatch = line.slice(i).match(/^<\/?([a-zA-Z][a-zA-Z0-9-]*)/);
+      if (tagMatch) {
+        tokens.push({ text: line[i] + (line[i+1] === '/' ? '/' : ''), type: 'punctuation' });
+        i += line[i+1] === '/' ? 2 : 1;
+        tokens.push({ text: tagMatch[1], type: 'tag' });
+        i += tagMatch[1].length;
+        // Attributes
+        while (i < line.length && line[i] !== '>' && !(line[i] === '/' && line[i+1] === '>')) {
+          if (/\s/.test(line[i])) { tokens.push({ text: line[i], type: 'plain' }); i++; continue; }
+          const attrMatch = line.slice(i).match(/^([a-zA-Z_:][a-zA-Z0-9_.:-]*)/);
+          if (attrMatch) { tokens.push({ text: attrMatch[1], type: 'attribute' }); i += attrMatch[1].length; continue; }
+          if (line[i] === '=') { tokens.push({ text: '=', type: 'operator' }); i++; continue; }
+          if (line[i] === '"' || line[i] === "'") { const q = line[i]; let j = i+1; while (j < line.length && line[j] !== q) j++; tokens.push({ text: line.slice(i, j+1), type: 'string' }); i = j+1; continue; }
+          tokens.push({ text: line[i], type: 'plain' }); i++;
+        }
+        if (i < line.length) {
+          const cls = line[i] === '/' ? '/>' : '>';
+          tokens.push({ text: cls, type: 'punctuation' }); i += cls.length;
+        }
+        continue;
+      }
+    }
+
+    // ── CSS property/value pairs ──
+    if (isCss && /[a-zA-Z-]/.test(line[i])) {
+      let j = i; while (j < line.length && /[a-zA-Z0-9-]/.test(line[j])) j++;
+      const word = line.slice(i, j);
+      if (line[j] === ':') { tokens.push({ text: word, type: 'property' }); i = j; continue; }
+      if (word.startsWith('@')) { tokens.push({ text: word, type: 'keyword' }); i = j; continue; }
+      tokens.push({ text: word, type: 'plain' }); i = j; continue;
+    }
+
+    // ── YAML keys ──
+    if (isYaml && i === 0 || (isYaml && i > 0 && line.slice(0, i).trim() === '')) {
+      const yamlKeyMatch = line.slice(i).match(/^(\s*[a-zA-Z_][a-zA-Z0-9_.-]*)(\s*:)/);
+      if (yamlKeyMatch) {
+        if (yamlKeyMatch[1] !== yamlKeyMatch[1].trimStart()) {
+          const ws = yamlKeyMatch[1].length - yamlKeyMatch[1].trimStart().length;
+          tokens.push({ text: yamlKeyMatch[1].slice(0, ws), type: 'plain' });
+          tokens.push({ text: yamlKeyMatch[1].trimStart(), type: 'property' });
+        } else {
+          tokens.push({ text: yamlKeyMatch[1], type: 'property' });
+        }
+        tokens.push({ text: yamlKeyMatch[2], type: 'punctuation' });
+        i += yamlKeyMatch[0].length; continue;
+      }
+    }
+
+    // ── Words (identifiers, keywords, types) ──
+    if (/[a-zA-Z_$@]/.test(line[i])) {
+      let j = i; while (j < line.length && /[a-zA-Z0-9_$]/.test(line[j])) j++;
+      const word = line.slice(i, j);
+      const lcWord = isSql ? word.toUpperCase() : word;
+      if (keywords.has(isSql ? lcWord : word)) { tokens.push({ text: word, type: 'keyword' }); }
+      else if (types.has(word)) { tokens.push({ text: word, type: 'type' }); }
+      else if (builtins.has(word)) { tokens.push({ text: word, type: 'builtin' }); }
+      else if (line[j] === '(') { tokens.push({ text: word, type: 'function' }); }
+      else if (isJson && line.slice(j).trimStart().startsWith(':')) { tokens.push({ text: word, type: 'property' }); }
+      else if (/^[A-Z][a-zA-Z0-9]*$/.test(word) && !isSql) { tokens.push({ text: word, type: 'type' }); }
+      else { tokens.push({ text: word, type: 'plain' }); }
+      i = j; continue;
+    }
+
+    // ── Operators ──
+    if (/[=+\-*/<>!&|^~%?:]/.test(line[i])) {
+      let j = i; while (j < line.length && /[=+\-*/<>!&|^~%?:]/.test(line[j])) j++;
+      tokens.push({ text: line.slice(i, j), type: 'operator' }); i = j; continue;
+    }
+
+    // ── Punctuation ──
+    if (/[{}()\[\];,.]/.test(line[i])) {
+      tokens.push({ text: line[i], type: 'punctuation' }); i++; continue;
+    }
+
+    // ── Whitespace / other ──
+    tokens.push({ text: line[i], type: 'plain' }); i++;
+  }
+
+  return tokens;
+}
+
+// ─── Line Number Gutter Width Helper ─────────────────────────────────────────
+
+function gutterWidth(lineCount: number): number {
+  return Math.max(3, String(lineCount).length) * 8 + 16;
 }
 
 function formatBytes(bytes: number): string {
@@ -558,10 +750,11 @@ function CreateRoomModal({ visible, circleId, accentColor, onClose, onCreated }:
 
 // ─── Room Detail ──────────────────────────────────────────────────────────────
 
-type RightPanel = 'chat' | 'apis' | 'secrets' | 'usage' | 'sessions' | 'services' | 'permissions' | 'tasks' | 'playground' | null;
+type RightPanel = 'chat' | 'apis' | 'secrets' | 'usage' | 'sessions' | 'services' | 'permissions' | 'tasks' | 'playground' | 'github' | null;
 
 const RIGHT_PANEL_TABS: [RightPanel, string][] = [
   ['chat',        'Chat'],
+  ['github',      'GitHub'],
   ['playground',  'Playground'],
   ['sessions',    'Sessions'],
   ['services',    'Services'],
@@ -586,14 +779,82 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
   const [isDragging, setIsDragging] = useState(false);
   const [showNewFile, setShowNewFile] = useState(false);
 
+  // GitHub browsing state
+  const [ghConnected, setGhConnected] = useState(false);
+  const [ghUser, setGhUser] = useState<GitHubUser | null>(null);
+  const [ghRepo, setGhRepo] = useState<GitHubRepo | null>(null);
+  const [ghTree, setGhTree] = useState<GitHubTreeEntry[]>([]);
+  const [ghBrowsing, setGhBrowsing] = useState(false);
+  const [ghLoadingFile, setGhLoadingFile] = useState<string | null>(null);
+  const [ghLoadingTree, setGhLoadingTree] = useState(false);
+
   const activeTab = openTabs.find(t => t.id === activeTabId) ?? null;
   const isDirty = activeTab ? (editingContent[activeTab.id] !== undefined && editingContent[activeTab.id] !== activeTab.content) : false;
   const hasOpenedRef = useRef(false);
+
+  // Check for stored GitHub token on mount
+  useEffect(() => {
+    (async () => {
+      const token = await getStoredToken(room.circle_id);
+      if (token) {
+        const { user } = await ghValidateToken(token);
+        if (user) { setGhConnected(true); setGhUser(user); }
+        else { await removeToken(room.circle_id); }
+      }
+    })();
+  }, [room.circle_id]);
+
+  const isGitHubFile = (file: RoomFile) => file.id.startsWith('gh_');
 
   const openFile = useCallback((file: RoomFile) => {
     setOpenTabs(p => p.find(t => t.id === file.id) ? p : [...p, file]);
     setActiveTabId(file.id);
   }, []);
+
+  const openGitHubFile = useCallback(async (entry: GitHubTreeEntry) => {
+    if (!ghRepo) return;
+    const virtualId = `gh_${ghRepo.full_name}_${entry.path}`;
+    const existing = openTabs.find(t => t.id === virtualId);
+    if (existing) { setActiveTabId(virtualId); return; }
+
+    setGhLoadingFile(entry.path);
+    const token = await getStoredToken(room.circle_id);
+    if (!token) { setGhLoadingFile(null); return; }
+
+    const [owner, repoName] = ghRepo.full_name.split('/');
+    const { content, size, error } = await getFileContent(token, owner, repoName, entry.path);
+    setGhLoadingFile(null);
+    if (error) return;
+
+    const fileName = entry.path.split('/').pop() || entry.path;
+    const folder = entry.path.includes('/') ? '/' + entry.path.substring(0, entry.path.lastIndexOf('/')) : '/';
+    const fileType = detectFileType(fileName);
+    const virtualFile: RoomFile = {
+      id: virtualId, room_id: room.id, name: fileName, folder,
+      file_type: fileType, content, storage_url: null, mime_type: null,
+      size_bytes: size, tags: ['github', ghRepo.full_name],
+      created_by: null, created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(), is_deleted: false,
+    };
+    setOpenTabs(p => [...p, virtualFile]);
+    setActiveTabId(virtualId);
+  }, [ghRepo, room.circle_id, room.id, openTabs]);
+
+  const importGitHubFile = async (file: RoomFile) => {
+    if (!isGitHubFile(file)) return;
+    const { data: { user } } = await supabase.auth.getUser();
+    const { data, error } = await supabase.from('room_files').insert({
+      room_id: room.id, name: file.name, folder: file.folder,
+      file_type: file.file_type, content: file.content,
+      size_bytes: file.size_bytes, tags: file.tags.filter(t => t !== 'github'),
+      created_by: user?.id || null,
+    }).select().single();
+    if (!error && data) {
+      setFiles(p => [...p, data]);
+      setOpenTabs(p => p.map(t => t.id === file.id ? data : t));
+      setActiveTabId(data.id);
+    }
+  };
 
   // Load files
   const loadFiles = useCallback(async () => {
@@ -724,7 +985,7 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
   };
 
   const saveFile = async () => {
-    if (!activeTab || !isDirty) return;
+    if (!activeTab || !isDirty || isGitHubFile(activeTab)) return;
     setSaving(true);
     const newContent = editingContent[activeTab.id] ?? activeTab.content;
     try {
@@ -899,28 +1160,70 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
         {sidebarOpen && (
           <View style={[s.sidebar, isMobile && s.sidebarMobile]}>
             <View style={s.sidebarHeader}>
-              <Text style={s.sidebarTitle}>FILES</Text>
-              <Pressable onPress={()=>setShowNewFile(true)} style={s.sidebarAdd}>
-                <Text style={{color:'#888',fontSize:14}}>+</Text>
-              </Pressable>
+              {ghBrowsing ? (
+                <>
+                  <Pressable onPress={() => setGhBrowsing(false)} style={{flexDirection:'row',alignItems:'center',gap:4}}>
+                    <Text style={{color:'#888',fontSize:11}}>←</Text>
+                    <Text style={[s.sidebarTitle,{color:accentColor}]}>GITHUB</Text>
+                  </Pressable>
+                  <Text style={{color:'#555',fontSize:9,flex:1,marginLeft:4}} numberOfLines={1}>{ghRepo?.full_name}</Text>
+                </>
+              ) : (
+                <>
+                  <Text style={s.sidebarTitle}>FILES</Text>
+                  <View style={{flexDirection:'row',gap:4}}>
+                    {ghConnected && ghRepo && (
+                      <Pressable onPress={() => setGhBrowsing(true)} style={s.sidebarAdd}>
+                        <Text style={{color:'#888',fontSize:11}}>🐙</Text>
+                      </Pressable>
+                    )}
+                    <Pressable onPress={()=>setShowNewFile(true)} style={s.sidebarAdd}>
+                      <Text style={{color:'#888',fontSize:14}}>+</Text>
+                    </Pressable>
+                  </View>
+                </>
+              )}
             </View>
             <ScrollView style={s.sidebarScroll}>
-              {Object.entries(folderMap).map(([folder, folderFiles]) => (
-                <FolderSection key={folder} folder={folder} files={folderFiles}
-                  activeTabId={activeTabId} onOpen={openFile}
-                  onDelete={deleteFile} onDownload={downloadFile}
-                  accentColor={accentColor} />
-              ))}
-              {files.length === 0 && (
-                <View style={{padding:16,alignItems:'center'}}>
-                  <Text style={{color:'#555',fontSize:12,textAlign:'center'}}>No files yet.{'\n'}Upload or create one.</Text>
-                </View>
-              )}
-              {/* Drag drop hint */}
-              {Platform.OS === 'web' && (
-                <View style={s.dropHint}>
-                  <Text style={s.dropHintText}>⬆ Drop files anywhere to upload</Text>
-                </View>
+              {ghBrowsing ? (
+                <>
+                  {ghLoadingTree && (
+                    <View style={{padding:20,alignItems:'center'}}>
+                      <ActivityIndicator color={accentColor} size="small" />
+                      <Text style={{color:'#555',fontSize:11,marginTop:8}}>Loading file tree...</Text>
+                    </View>
+                  )}
+                  {!ghLoadingTree && Object.entries(groupTreeByFolder(ghTree)).map(([folder, entries]) => (
+                    <GitHubFolderSection key={folder} folder={folder} entries={entries}
+                      activeTabId={activeTabId} loadingPath={ghLoadingFile}
+                      onOpen={openGitHubFile} repoFullName={ghRepo?.full_name || ''}
+                      accentColor={accentColor} />
+                  ))}
+                  {!ghLoadingTree && ghTree.length === 0 && (
+                    <View style={{padding:16,alignItems:'center'}}>
+                      <Text style={{color:'#555',fontSize:12,textAlign:'center'}}>No files in repository</Text>
+                    </View>
+                  )}
+                </>
+              ) : (
+                <>
+                  {Object.entries(folderMap).map(([folder, folderFiles]) => (
+                    <FolderSection key={folder} folder={folder} files={folderFiles}
+                      activeTabId={activeTabId} onOpen={openFile}
+                      onDelete={deleteFile} onDownload={downloadFile}
+                      accentColor={accentColor} />
+                  ))}
+                  {files.length === 0 && (
+                    <View style={{padding:16,alignItems:'center'}}>
+                      <Text style={{color:'#555',fontSize:12,textAlign:'center'}}>No files yet.{'\n'}Upload or create one.</Text>
+                    </View>
+                  )}
+                  {Platform.OS === 'web' && (
+                    <View style={s.dropHint}>
+                      <Text style={s.dropHintText}>⬆ Drop files anywhere to upload</Text>
+                    </View>
+                  )}
+                </>
               )}
             </ScrollView>
           </View>
@@ -933,13 +1236,15 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
             {openTabs.map(tab => {
               const isActive = tab.id === activeTabId;
               const dirty = editingContent[tab.id] !== undefined;
+              const tabLangColor = LANG_COLORS[tab.file_type] || '#888';
               return (
                 <Pressable key={tab.id} onPress={() => setActiveTabId(tab.id)}
-                  style={[s.editorTab, isActive && {backgroundColor:'#0d1117',borderBottomColor:accentColor}]}>
+                  style={[s.editorTab, isActive && {backgroundColor:'#0d1117',borderBottomColor:tabLangColor}]}>
                   <Text style={s.editorTabIcon}>{FILE_ICONS[tab.file_type]||'📄'}</Text>
                   <Text style={[s.editorTabName, isActive && {color:'#fff'}]} numberOfLines={1}>
                     {tab.name}{dirty?'●':''}
                   </Text>
+                  <View style={{width:6,height:6,borderRadius:3,backgroundColor:tabLangColor,opacity:isActive?1:0.4}} />
                   <Pressable onPress={e=>closeTab(tab.id,e)} hitSlop={6} style={s.tabClose}>
                     <Text style={s.tabCloseText}>×</Text>
                   </Pressable>
@@ -958,13 +1263,32 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
                 {FILE_ICONS[activeTab.file_type]} {activeTab.folder !== '/' ? activeTab.folder+'/' : ''}{activeTab.name}
               </Text>
               <View style={s.fileToolbarRight}>
-                <Text style={s.fileToolbarMeta}>
-                  {formatBytes(activeTab.size_bytes)} · {activeTab.file_type}
-                </Text>
-                <Pressable onPress={()=>downloadFile(activeTab)} style={s.fileAction}>
-                  <Text style={s.fileActionText}>⬇ Download</Text>
-                </Pressable>
-                {activeTab.tags.length > 0 && activeTab.tags.map(tag => (
+                {isGitHubFile(activeTab) && (
+                  <>
+                    <View style={{backgroundColor:'#24292f30',paddingHorizontal:6,paddingVertical:2,borderRadius:4}}>
+                      <Text style={{color:'#888',fontSize:10,fontWeight:'700',fontFamily:MONO}}>GITHUB · READ-ONLY</Text>
+                    </View>
+                    <Pressable onPress={()=>importGitHubFile(activeTab)}
+                      style={[s.fileAction,{backgroundColor:'#22c55e15',borderColor:'#22c55e30',borderWidth:1,borderRadius:6}]}>
+                      <Text style={{color:'#22c55e',fontSize:11,fontWeight:'700'}}>↓ Import to Room</Text>
+                    </Pressable>
+                  </>
+                )}
+                <View style={{flexDirection:'row',alignItems:'center',gap:6}}>
+                  <View style={{width:8,height:8,borderRadius:4,backgroundColor:LANG_COLORS[activeTab.file_type]||'#888'}} />
+                  <Text style={[s.fileToolbarMeta,{color:LANG_COLORS[activeTab.file_type]||'#888'}]}>
+                    {activeTab.file_type.toUpperCase()}
+                  </Text>
+                  <Text style={s.fileToolbarMeta}>
+                    {formatBytes(activeTab.size_bytes)}
+                  </Text>
+                </View>
+                {!isGitHubFile(activeTab) && (
+                  <Pressable onPress={()=>downloadFile(activeTab)} style={s.fileAction}>
+                    <Text style={s.fileActionText}>⬇ Download</Text>
+                  </Pressable>
+                )}
+                {activeTab.tags.length > 0 && activeTab.tags.filter(t => t !== 'github').map(tag => (
                   <View key={tag} style={s.tag}><Text style={s.tagText}>{tag}</Text></View>
                 ))}
               </View>
@@ -976,7 +1300,10 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
             <FileViewer
               file={activeTab}
               editValue={editingContent[activeTab.id]}
-              onEdit={v => setEditingContent(p => ({...p, [activeTab.id]:v}))}
+              onEdit={v => {
+                if (isGitHubFile(activeTab)) return;
+                setEditingContent(p => ({...p, [activeTab.id]:v}));
+              }}
             />
           ) : (
             <View style={s.noFile}>
@@ -1009,6 +1336,23 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
             {rightPanel === 'permissions' && <PermissionsPanel roomId={room.id} accentColor={accentColor} />}
             {rightPanel === 'tasks'       && <TasksPanel roomId={room.id} accentColor={accentColor} />}
             {rightPanel === 'playground'  && <PlaygroundPanel roomId={room.id} accentColor={accentColor} activeFile={activeTab} circleId={room.circle_id} />}
+            {rightPanel === 'github' && <GitHubPanel circleId={room.circle_id} accentColor={accentColor}
+              ghConnected={ghConnected} ghUser={ghUser} ghRepo={ghRepo}
+              onConnected={(user) => { setGhConnected(true); setGhUser(user); }}
+              onDisconnected={() => { setGhConnected(false); setGhUser(null); setGhRepo(null); setGhTree([]); setGhBrowsing(false); }}
+              onRepoSelected={async (repo) => {
+                setGhRepo(repo);
+                setGhLoadingTree(true);
+                const token = await getStoredToken(room.circle_id);
+                if (!token) { setGhLoadingTree(false); return; }
+                const [owner, repoName] = repo.full_name.split('/');
+                const { tree } = await getRepoTree(token, owner, repoName, repo.default_branch);
+                setGhTree(tree);
+                setGhLoadingTree(false);
+                setGhBrowsing(true);
+              }}
+              onRepoClosed={() => { setGhRepo(null); setGhTree([]); setGhBrowsing(false); }}
+            />}
             {!rightPanel && (
               <View style={{flex:1,justifyContent:'center',alignItems:'center'}}>
                 <Text style={{color:'#444',fontSize:12}}>Select a panel above</Text>
@@ -1038,6 +1382,23 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
           {rightPanel === 'permissions' && <PermissionsPanel roomId={room.id} accentColor={accentColor} />}
           {rightPanel === 'tasks'       && <TasksPanel roomId={room.id} accentColor={accentColor} />}
             {rightPanel === 'playground'  && <PlaygroundPanel roomId={room.id} accentColor={accentColor} activeFile={activeTab} circleId={room.circle_id} />}
+          {rightPanel === 'github' && <GitHubPanel circleId={room.circle_id} accentColor={accentColor}
+              ghConnected={ghConnected} ghUser={ghUser} ghRepo={ghRepo}
+              onConnected={(user) => { setGhConnected(true); setGhUser(user); }}
+              onDisconnected={() => { setGhConnected(false); setGhUser(null); setGhRepo(null); setGhTree([]); setGhBrowsing(false); }}
+              onRepoSelected={async (repo) => {
+                setGhRepo(repo);
+                setGhLoadingTree(true);
+                const token = await getStoredToken(room.circle_id);
+                if (!token) { setGhLoadingTree(false); return; }
+                const [owner, repoName] = repo.full_name.split('/');
+                const { tree } = await getRepoTree(token, owner, repoName, repo.default_branch);
+                setGhTree(tree);
+                setGhLoadingTree(false);
+                setGhBrowsing(true);
+              }}
+              onRepoClosed={() => { setGhRepo(null); setGhTree([]); setGhBrowsing(false); }}
+            />}
         </View>
       )}
 
@@ -1119,6 +1480,8 @@ function FileViewer({ file, editValue, onEdit }: {
 }) {
   const content = editValue ?? file.content;
   const lang = file.file_type;
+  const scrollRef = useRef<ScrollView>(null);
+  const inputRef = useRef<TextInput>(null);
 
   if (lang === 'image') {
     const uri = (file.storage_url || content).trim();
@@ -1184,9 +1547,32 @@ function FileViewer({ file, editValue, onEdit }: {
   }
 
   if (lang === 'plaintext') {
+    const ptLines = content.split('\n');
+    const ptGw = gutterWidth(ptLines.length);
     return (
-      <TextInput style={[s.codeEditor,{fontFamily:undefined,fontSize:14,lineHeight:22}]}
-        value={content} onChangeText={onEdit} multiline autoCorrect={false} />
+      <View style={{flex:1,backgroundColor:'#0d1117'}}>
+        <ScrollView style={{flex:1}}>
+          <View style={{position:'relative',minHeight:ptLines.length*22+32}}>
+            {/* Line numbers */}
+            <View style={{position:'absolute',top:0,left:0,bottom:0,paddingTop:8}} pointerEvents="none">
+              {ptLines.map((_,idx) => (
+                <Text key={idx} style={{width:ptGw,textAlign:'right',paddingRight:12,color:'#484f58',fontSize:13,fontFamily:MONO,lineHeight:22,userSelect:'none'} as any} selectable={false}>
+                  {idx+1}
+                </Text>
+              ))}
+            </View>
+            <TextInput
+              style={{
+                paddingTop:8,paddingBottom:16,paddingLeft:ptGw+4,paddingRight:16,
+                color:'#e6edf3',fontSize:14,lineHeight:22,
+                textAlignVertical:'top',minHeight:ptLines.length*22+32,
+                ...(Platform.OS==='web'?{outlineStyle:'none'} as any:{}),
+              }}
+              value={content} onChangeText={onEdit} multiline autoCorrect={false}
+            />
+          </View>
+        </ScrollView>
+      </View>
     );
   }
 
@@ -1194,11 +1580,63 @@ function FileViewer({ file, editValue, onEdit }: {
     return <CanvasViewer file={file} onEdit={onEdit} />;
   }
 
-  // Code
+  // Code — syntax highlighted
+  const lines = content.split('\n');
+  const gw = gutterWidth(lines.length);
+  const isReadonly = file.id.startsWith('gh_');
+  const langColor = LANG_COLORS[lang] || '#888';
+
   return (
-    <View style={{flex:1}}>
-      <TextInput style={s.codeEditor} value={content} onChangeText={onEdit}
-        multiline autoCapitalize="none" autoCorrect={false} spellCheck={false} />
+    <View style={{flex:1,backgroundColor:'#0d1117'}}>
+      {/* Language pill */}
+      <View style={{flexDirection:'row',alignItems:'center',paddingHorizontal:14,paddingTop:6,paddingBottom:4,gap:8}}>
+        <View style={{backgroundColor:langColor+'20',paddingHorizontal:8,paddingVertical:2,borderRadius:4,borderWidth:1,borderColor:langColor+'40'}}>
+          <Text style={{color:langColor,fontSize:10,fontWeight:'700',fontFamily:MONO}}>{FILE_ICONS[lang]||'📄'} {lang.toUpperCase()}</Text>
+        </View>
+        <Text style={{color:'#555',fontSize:10,fontFamily:MONO}}>{lines.length} lines</Text>
+      </View>
+
+      <ScrollView style={{flex:1}} ref={scrollRef}>
+        <View style={{position:'relative',minHeight:lines.length*22+32}}>
+          {/* Highlighted code layer */}
+          <View style={{position:'absolute',top:0,left:0,right:0,paddingTop:8,paddingBottom:16}} pointerEvents="none">
+            {lines.map((line, idx) => {
+              const tokens = tokenizeLine(line, lang);
+              return (
+                <View key={idx} style={{flexDirection:'row',minHeight:22,alignItems:'flex-start'}}>
+                  {/* Line number */}
+                  <Text style={{width:gw,textAlign:'right',paddingRight:12,color:'#484f58',fontSize:13,fontFamily:MONO,lineHeight:22,userSelect:'none'} as any} selectable={false}>
+                    {idx+1}
+                  </Text>
+                  {/* Tokens */}
+                  <Text style={{flex:1,fontSize:13,fontFamily:MONO,lineHeight:22}}>
+                    {tokens.map((tk, ti) => (
+                      <Text key={ti} style={{color:TOKEN_COLORS[tk.type]}}>{tk.text}</Text>
+                    ))}
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+
+          {/* Editable TextInput layer — transparent text, positioned over the highlight */}
+          {!isReadonly && (
+            <TextInput
+              ref={inputRef}
+              style={{
+                position:'absolute',top:0,left:0,right:0,
+                paddingTop:8,paddingBottom:16,paddingLeft:gw+4,paddingRight:16,
+                color:'transparent',fontSize:13,fontFamily:MONO,lineHeight:22,
+                textAlignVertical:'top',
+                minHeight:lines.length*22+32,
+                ...(Platform.OS==='web'?{outlineStyle:'none',caretColor:'#fff'} as any:{}),
+              }}
+              value={content} onChangeText={onEdit}
+              multiline autoCapitalize="none" autoCorrect={false} spellCheck={false}
+            />
+          )}
+        </View>
+      </ScrollView>
     </View>
   );
 }
@@ -3173,6 +3611,285 @@ const panelTabSt = StyleSheet.create({
   roleBadge: { paddingHorizontal: 6, paddingVertical: 3, borderRadius: 4, borderWidth: 1 },
   permBadge: { paddingHorizontal: 7, paddingVertical: 4, borderRadius: 4, borderWidth: 1, borderColor: '#222', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
 });
+
+// ─── GitHub Panel ─────────────────────────────────────────────────────────────
+
+function GitHubPanel({ circleId, accentColor, ghConnected, ghUser, ghRepo,
+  onConnected, onDisconnected, onRepoSelected, onRepoClosed,
+}: {
+  circleId: string; accentColor: string;
+  ghConnected: boolean; ghUser: GitHubUser | null; ghRepo: GitHubRepo | null;
+  onConnected: (user: GitHubUser) => void;
+  onDisconnected: () => void;
+  onRepoSelected: (repo: GitHubRepo) => void;
+  onRepoClosed: () => void;
+}) {
+  const [tokenInput, setTokenInput] = useState('');
+  const [connecting, setConnecting] = useState(false);
+  const [error, setError] = useState('');
+  const [repos, setRepos] = useState<GitHubRepo[]>([]);
+  const [loadingRepos, setLoadingRepos] = useState(false);
+  const [repoFilter, setRepoFilter] = useState('');
+
+  useEffect(() => {
+    if (ghConnected) loadRepos();
+  }, [ghConnected]);
+
+  const loadRepos = async () => {
+    const token = await getStoredToken(circleId);
+    if (!token) return;
+    setLoadingRepos(true);
+    const { repos: r, error: e } = await listRepos(token);
+    setRepos(r);
+    if (e) setError(e);
+    setLoadingRepos(false);
+  };
+
+  const handleConnect = async () => {
+    if (!tokenInput.trim()) { setError('Token is required'); return; }
+    setConnecting(true);
+    setError('');
+    const { user, error: e } = await ghValidateToken(tokenInput.trim());
+    if (e || !user) { setError(e || 'Invalid token'); setConnecting(false); return; }
+    await storeToken(circleId, tokenInput.trim());
+    setTokenInput('');
+    onConnected(user);
+    setConnecting(false);
+  };
+
+  const handleDisconnect = async () => {
+    await removeToken(circleId);
+    setRepos([]);
+    onDisconnected();
+  };
+
+  const filtered = repos.filter(r =>
+    r.full_name.toLowerCase().includes(repoFilter.toLowerCase())
+  );
+
+  if (!ghConnected) {
+    return (
+      <ScrollView style={{flex:1}} contentContainerStyle={{padding:16}}>
+        <Text style={{color:'#fff',fontSize:14,fontWeight:'700',marginBottom:8}}>Connect GitHub</Text>
+        <Text style={{color:'#666',fontSize:12,lineHeight:18,marginBottom:16}}>
+          Enter a Personal Access Token to browse repositories including private ones.{'\n'}
+          Generate one at github.com/settings/tokens with &quot;repo&quot; scope.
+        </Text>
+
+        <Text style={ghSt.label}>Personal Access Token</Text>
+        <TextInput
+          style={ghSt.input}
+          value={tokenInput}
+          onChangeText={setTokenInput}
+          placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+          placeholderTextColor="#555"
+          secureTextEntry
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+
+        {error ? <Text style={{color:'#ef4444',fontSize:11,marginTop:8}}>{error}</Text> : null}
+
+        <Pressable onPress={handleConnect} disabled={connecting}
+          style={[ghSt.connectBtn,{backgroundColor:accentColor,opacity:connecting?0.5:1}]}>
+          <Text style={ghSt.connectText}>{connecting ? 'Connecting...' : 'Connect to GitHub'}</Text>
+        </Pressable>
+
+        <View style={{marginTop:24,gap:10}}>
+          <Text style={{color:'#555',fontSize:10,fontWeight:'800',letterSpacing:1}}>HOW TO GET A TOKEN</Text>
+          {[
+            'Go to github.com → Settings → Developer settings',
+            'Click "Personal access tokens" → "Tokens (classic)"',
+            'Generate new token with "repo" scope',
+            'Copy and paste the token above',
+          ].map((step, i) => (
+            <View key={i} style={{flexDirection:'row',gap:8}}>
+              <Text style={{color:accentColor,fontSize:11,fontWeight:'700'}}>{i+1}.</Text>
+              <Text style={{color:'#888',fontSize:11,flex:1}}>{step}</Text>
+            </View>
+          ))}
+        </View>
+      </ScrollView>
+    );
+  }
+
+  return (
+    <View style={{flex:1}}>
+      {/* User header */}
+      <View style={ghSt.userHeader}>
+        <Text style={{fontSize:14}}>🐙</Text>
+        <Text style={{color:'#fff',fontSize:12,fontWeight:'700',flex:1}}>{ghUser?.login}</Text>
+        <Pressable onPress={handleDisconnect} style={ghSt.disconnectBtn}>
+          <Text style={{color:'#ef4444',fontSize:10,fontWeight:'700'}}>Disconnect</Text>
+        </Pressable>
+      </View>
+
+      {/* Active repo indicator */}
+      {ghRepo && (
+        <View style={[ghSt.activeRepo,{backgroundColor:accentColor+'10'}]}>
+          <Text style={{fontSize:11}}>{ghRepo.private ? '🔒' : '📦'}</Text>
+          <Text style={{color:accentColor,fontSize:11,fontWeight:'700',flex:1}} numberOfLines={1}>{ghRepo.full_name}</Text>
+          <Text style={{color:'#555',fontSize:9}}>{ghRepo.default_branch}</Text>
+          <Pressable onPress={onRepoClosed} style={ghSt.closeRepoBtn}>
+            <Text style={{color:'#888',fontSize:10}}>✕</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* Search */}
+      <View style={{paddingHorizontal:12,paddingVertical:8}}>
+        <TextInput style={ghSt.filterInput}
+          value={repoFilter} onChangeText={setRepoFilter}
+          placeholder="Filter repositories..." placeholderTextColor="#555"
+          autoCapitalize="none" />
+      </View>
+
+      {/* Repo list */}
+      {loadingRepos ? (
+        <View style={{padding:20,alignItems:'center'}}>
+          <ActivityIndicator color={accentColor} size="small" />
+          <Text style={{color:'#555',fontSize:11,marginTop:8}}>Loading repositories...</Text>
+        </View>
+      ) : (
+        <ScrollView style={{flex:1}}>
+          {filtered.map(repo => (
+            <Pressable key={repo.id} onPress={() => onRepoSelected(repo)}
+              style={[ghSt.repoRow,
+                ghRepo?.id === repo.id && {backgroundColor:accentColor+'15'},
+                Platform.OS === 'web' ? {cursor:'pointer'} as any : {},
+              ]}>
+              <View style={{flexDirection:'row',alignItems:'center',gap:6}}>
+                <Text style={{fontSize:10}}>{repo.private ? '🔒' : '📦'}</Text>
+                <Text style={{color:'#e6e6e6',fontSize:12,fontWeight:'600',flex:1}} numberOfLines={1}>{repo.full_name}</Text>
+                {repo.language && (
+                  <View style={[ghSt.langChip,{backgroundColor:(LANG_COLORS[repo.language.toLowerCase()]||'#888')+'30'}]}>
+                    <Text style={{color:LANG_COLORS[repo.language.toLowerCase()]||'#888',fontSize:9,fontWeight:'700'}}>{repo.language}</Text>
+                  </View>
+                )}
+              </View>
+              {repo.description && (
+                <Text style={{color:'#555',fontSize:10,marginLeft:18}} numberOfLines={1}>{repo.description}</Text>
+              )}
+              <View style={{flexDirection:'row',gap:10,marginLeft:18,marginTop:2}}>
+                <Text style={{color:'#444',fontSize:9}}>★ {repo.stargazers_count}</Text>
+                {repo.fork && <Text style={{color:'#444',fontSize:9}}>fork</Text>}
+                <Text style={{color:'#444',fontSize:9}}>{timeAgo(repo.updated_at)}</Text>
+                <Text style={{color:'#333',fontSize:9}}>{repo.default_branch}</Text>
+              </View>
+            </Pressable>
+          ))}
+          {filtered.length === 0 && !loadingRepos && (
+            <View style={{padding:20,alignItems:'center'}}>
+              <Text style={{color:'#555',fontSize:11}}>
+                {repoFilter ? 'No matching repositories' : 'No repositories found'}
+              </Text>
+            </View>
+          )}
+          {/* Load more hint */}
+          {repos.length >= 100 && (
+            <Pressable onPress={async () => {
+              const token = await getStoredToken(circleId);
+              if (!token) return;
+              const page = Math.ceil(repos.length / 100) + 1;
+              const { repos: more } = await listRepos(token, page);
+              if (more.length) setRepos(p => [...p, ...more]);
+            }} style={{padding:12,alignItems:'center'}}>
+              <Text style={{color:accentColor,fontSize:11,fontWeight:'700'}}>Load more repositories...</Text>
+            </Pressable>
+          )}
+        </ScrollView>
+      )}
+
+      {error ? <Text style={{color:'#ef4444',fontSize:10,padding:8}}>{error}</Text> : null}
+    </View>
+  );
+}
+
+const ghSt = StyleSheet.create({
+  label: { color:'#888', fontSize:11, fontWeight:'700', marginBottom:6 },
+  input: {
+    backgroundColor:'#111', borderWidth:1, borderColor:'#222', borderRadius:8,
+    padding:12, color:'#fff', fontSize:13, fontFamily:MONO,
+  },
+  connectBtn: {
+    marginTop:16, paddingVertical:12, borderRadius:10, alignItems:'center',
+    ...(Platform.OS === 'web' ? { cursor:'pointer' } as any : {}),
+  },
+  connectText: { color:'#fff', fontSize:13, fontWeight:'700' },
+  userHeader: {
+    flexDirection:'row', alignItems:'center', padding:12, gap:8,
+    borderBottomWidth:1, borderBottomColor:'#1a1a1a',
+  },
+  disconnectBtn: {
+    paddingHorizontal:8, paddingVertical:4, borderRadius:6, backgroundColor:'#ef444420',
+    ...(Platform.OS === 'web' ? { cursor:'pointer' } as any : {}),
+  },
+  activeRepo: {
+    flexDirection:'row', alignItems:'center', padding:10, gap:8,
+    borderBottomWidth:1, borderBottomColor:'#1a1a1a',
+  },
+  closeRepoBtn: {
+    paddingHorizontal:6, paddingVertical:3, borderRadius:4, backgroundColor:'#ffffff10',
+    ...(Platform.OS === 'web' ? { cursor:'pointer' } as any : {}),
+  },
+  filterInput: {
+    backgroundColor:'#111', borderWidth:1, borderColor:'#222', borderRadius:6,
+    paddingHorizontal:10, paddingVertical:6, color:'#fff', fontSize:11, fontFamily:MONO,
+  },
+  repoRow: {
+    padding:10, borderBottomWidth:1, borderBottomColor:'#111', gap:2,
+  },
+  langChip: {
+    paddingHorizontal:5, paddingVertical:1, borderRadius:4,
+  },
+});
+
+// ─── GitHub Folder Section ────────────────────────────────────────────────────
+
+function GitHubFolderSection({ folder, entries, activeTabId, loadingPath, onOpen, repoFullName, accentColor }: {
+  folder: string; entries: GitHubTreeEntry[]; activeTabId: string | null;
+  loadingPath: string | null;
+  onOpen: (e: GitHubTreeEntry) => void;
+  repoFullName: string; accentColor: string;
+}) {
+  const [expanded, setExpanded] = useState(folder === '/');
+  const folderName = folder === '/' ? 'root' : folder.replace(/^\//, '');
+  const lastSegment = folderName.split('/').pop() || '';
+  const folderIcon = FOLDER_ICONS[lastSegment] ?? FOLDER_ICONS.default;
+
+  return (
+    <View>
+      <Pressable onPress={() => setExpanded(p => !p)} style={s.folderRow}>
+        <Text style={s.folderArrow}>{expanded ? '▾' : '▸'}</Text>
+        <Text style={s.folderIcon}>{folderIcon}</Text>
+        <Text style={s.folderName} numberOfLines={1}>{folderName}</Text>
+        <Text style={s.folderCount}>{entries.length}</Text>
+      </Pressable>
+      {expanded && entries.map(entry => {
+        const fileName = entry.path.split('/').pop() || entry.path;
+        const fileType = detectFileType(fileName);
+        const virtualId = `gh_${repoFullName}_${entry.path}`;
+        const isActive = virtualId === activeTabId;
+        const isLoading = entry.path === loadingPath;
+
+        return (
+          <Pressable key={entry.sha} onPress={() => onOpen(entry)}
+            style={[s.fileRow, isActive && {backgroundColor:accentColor+'18'},
+              Platform.OS === 'web' ? {cursor:'pointer'} as any : {},
+            ]}>
+            <Text style={[s.fileRowIcon,{color:LANG_COLORS[fileType]||'#888'}]}>
+              {isLoading ? '⏳' : (FILE_ICONS[fileType] || '📄')}
+            </Text>
+            <Text style={[s.fileRowName, isActive && {color:'#fff'}]} numberOfLines={1}>{fileName}</Text>
+            {entry.size != null && entry.size > 0 && (
+              <Text style={{color:'#444',fontSize:9,marginLeft:'auto'}}>{formatBytes(entry.size)}</Text>
+            )}
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 

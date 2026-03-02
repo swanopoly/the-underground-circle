@@ -113,11 +113,6 @@ export default function CircleDetailScreen({ route, navigation }: any) {
               <Text style={styles.circleName} numberOfLines={1}>
                 {(circle?.name || circleName)?.toUpperCase()}
               </Text>
-              <View style={[styles.typeBadge, { backgroundColor: accentColor + '18', borderColor: accentColor + '40' }]}>
-                <Text style={[styles.typeText, { color: accentColor }]}>
-                  {typeLabels[circleType] || 'CUSTOM'}
-                </Text>
-              </View>
             </View>
 
             <Pressable

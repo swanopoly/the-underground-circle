@@ -1,6 +1,9 @@
 // Office Customization System
 import { AgentStatus } from './officeAgents';
 
+// Owner email for exclusive features (space helmet, lightsaber)
+export const OWNER_EMAIL = 'chrisswanson189@gmail.com';
+
 // ─── Office Floors ───────────────────────────────────────────────────────────
 
 export interface OfficeFloor {

@@ -28,6 +28,9 @@ import {
 import {
   AgentConnection, loadConnections, saveConnections, PROVIDER_META,
 } from '../../../lib/connectionManager';
+import {
+  ClaudeCodePoller, bridgeSessionsToAgents, detectClaudeCodeBridge,
+} from '../../../lib/claudeCodeDetector';
 import { storage } from '../../../lib/storage';
 import CostDashboard from '../../../components/CostDashboard';
 import SessionTagsDashboard from '../../../components/SessionTagsDashboard';
@@ -127,6 +130,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [celebrationBadge, setCelebrationBadge] = useState<Badge | null>(null);
   const [dancingAgentId, setDancingAgentId] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | undefined>();
+  const [userEmail, setUserEmail] = useState<string | undefined>();
   const pendingApprovals = useAgentApprovals(circleId);
 
   // Load custom themes from Supabase
@@ -146,7 +150,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   // Load user ID for rewards
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => setUserId(user?.id)).catch(() => {});
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      setUserId(user?.id);
+      setUserEmail(user?.email ?? undefined);
+    }).catch(() => {});
   }, []);
 
 
@@ -193,6 +200,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const pollersRef = useRef<Map<string, OpenClawPoller>>(new Map());
   const sessionsRef = useRef<Map<string, OpenClawSession[]>>(new Map());
   const [sessionsTick, setSessionsTick] = useState(0); // force re-render on session updates
+  const ccPollerRef = useRef<ClaudeCodePoller | null>(null);
 
   // ─── Current user ─────────────────────────────────────────────────────────
   const [currentUserId, setCurrentUserId] = useState<string>('');
@@ -694,8 +702,35 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
       // Load budget config
       loadBudgetConfig().then(setBudgetConfig);
+
+      // Auto-detect Claude Code bridge (zero config — no OpenClaw needed)
+      detectClaudeCodeBridge().then(detected => {
+        if (detected && !ccPollerRef.current) {
+          ccPollerRef.current = new ClaudeCodePoller(sessions => {
+            sessionsRef.current.set('claude-code-auto', bridgeSessionsToAgents(sessions) as any);
+            setSessionsTick(t => t + 1);
+          });
+          ccPollerRef.current.start(10000);
+        }
+      });
     })();
   }, [connectOne]);
+
+  // Retry Claude Code bridge detection every 30s (user may start bridge after app)
+  useEffect(() => {
+    const retryInterval = setInterval(async () => {
+      if (ccPollerRef.current) return; // already connected
+      const detected = await detectClaudeCodeBridge();
+      if (detected) {
+        ccPollerRef.current = new ClaudeCodePoller(sessions => {
+          sessionsRef.current.set('claude-code-auto', bridgeSessionsToAgents(sessions) as any);
+          setSessionsTick(t => t + 1);
+        });
+        ccPollerRef.current.start(10000);
+      }
+    }, 30000);
+    return () => clearInterval(retryInterval);
+  }, []);
 
   // Cleanup pollers on unmount
   useEffect(() => {
@@ -703,6 +738,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       pollersRef.current.forEach(p => p.stop());
       pollersRef.current.clear();
       if (tgPollerRef.current) tgPollerRef.current.stop();
+      if (ccPollerRef.current) { ccPollerRef.current.stop(); ccPollerRef.current = null; }
     };
   }, []);
 
@@ -754,6 +790,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     const connAgents = sessionsToAgents(sessions, conn.id, conn.name, conn.provider);
     rawAgents.push(...connAgents);
     indexOffset += connAgents.length;
+  }
+  // Merge auto-detected Claude Code sessions (bridge on localhost:7778)
+  const ccAutoAgents = sessionsRef.current.get('claude-code-auto') as unknown as OfficeAgent[] | undefined;
+  if (ccAutoAgents && ccAutoAgents.length > 0) {
+    rawAgents.push(...ccAutoAgents);
   }
   // Apply custom names
   const allAgents = rawAgents.map(a => agentNames[a.id] ? { ...a, name: agentNames[a.id] } : a);
@@ -2053,6 +2094,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         customThemes={customThemeRecords}
         onCustomThemesRefresh={refreshCustomThemes}
         circleId={circleId}
+        userEmail={userEmail}
       />
 
       {/* NFT Picker Modal */}
