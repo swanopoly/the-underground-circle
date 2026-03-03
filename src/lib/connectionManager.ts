@@ -1,7 +1,7 @@
 import { storage } from './storage';
 import { supabase } from './supabase';
 
-export type ProviderType = 'openclaw' | 'claude-code' | 'generic-agent' | 'codex' | 'gemini' | 'cursor';
+export type ProviderType = 'openclaw' | 'claude-code' | 'generic-agent' | 'codex' | 'gemini' | 'cursor' | 'blackswan-local';
 
 export interface AgentConnection {
   id: string;
@@ -27,6 +27,7 @@ export const PROVIDER_META: Record<ProviderType, { icon: string; label: string; 
   'codex': { icon: '🧠', label: 'OpenAI Codex', color: '#10a37f', defaultEndpoint: 'https://api.openai.com/v1' },
   'gemini': { icon: '♊', label: 'Google Gemini', color: '#4285f4', defaultEndpoint: 'https://generativelanguage.googleapis.com/v1beta' },
   'cursor': { icon: '🎯', label: 'Cursor', color: '#8b5cf6', defaultEndpoint: 'http://localhost:2087' },
+  'blackswan-local': { icon: '🦢', label: 'BlackSwan LLM', color: '#22d3ee', defaultEndpoint: 'http://localhost:7779' },
 };
 
 const STORAGE_KEY = '@office_connections';
@@ -66,6 +67,7 @@ function toSupabaseRow(conn: AgentConnection, userId: string) {
         : conn.provider === 'codex' ? 'assistant'
         : conn.provider === 'gemini' ? 'assistant'
         : conn.provider === 'cursor' ? 'assistant'
+        : conn.provider === 'blackswan-local' ? 'assistant'
         : 'custom',
     is_active: conn.enabled,
     metadata: {

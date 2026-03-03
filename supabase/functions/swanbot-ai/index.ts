@@ -227,6 +227,37 @@ The app has built-in crypto wallets (MetaMask for ETH, Phantom for SOL). Users c
   return prompt;
 }
 
+// ─── Call BlackSwan LLM (local/self-hosted, zero cost) ───────────────────────
+
+async function callBlackSwanLLM(systemPrompt: string, userMessage: string): Promise<string | null> {
+  const blackswanUrl = Deno.env.get("BLACKSWAN_API_URL");
+  if (!blackswanUrl) return null;
+
+  try {
+    const response = await fetch(`${blackswanUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "blackswan",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userMessage },
+        ],
+        temperature: 0.7,
+        max_tokens: 1024,
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Call Claude ──────────────────────────────────────────────────────────────
 
 async function callClaude(systemPrompt: string, userMessage: string): Promise<string> {
@@ -290,8 +321,11 @@ Deno.serve(async (req: Request) => {
     // Build the system prompt with all context
     const systemPrompt = buildSystemPrompt(context);
 
-    // Call Claude
-    const aiResponse = await callClaude(systemPrompt, message);
+    // Try BlackSwan LLM first (zero cost), fall back to Claude
+    let aiResponse = await callBlackSwanLLM(systemPrompt, message);
+    if (!aiResponse) {
+      aiResponse = await callClaude(systemPrompt, message);
+    }
 
     return new Response(
       JSON.stringify({ response: aiResponse }),

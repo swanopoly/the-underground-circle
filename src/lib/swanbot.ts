@@ -373,7 +373,32 @@ export async function getSwanBotResponse(
     addToHistory(context.circleId, 'user', cleaned);
   }
 
-  // Try AI Edge Function first
+  // Try BlackSwan LLM first (local, zero cost)
+  try {
+    const { isBlackSwanAvailable, callBlackSwan } = await import('./blackswanLLM');
+    if (await isBlackSwanAvailable()) {
+      const circleData = await getCircleContextData(context);
+      const systemPrompt = buildSystemPrompt(context, circleData);
+      const history = context.circleId ? getHistory(context.circleId) : [];
+      const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
+        { role: 'system', content: systemPrompt },
+        ...history.slice(-10).map(h => ({
+          role: (h.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+          content: h.text,
+        })),
+        { role: 'user', content: cleaned },
+      ];
+      const result = await callBlackSwan(messages, { maxTokens: 500 });
+      if (result.content) {
+        if (context.circleId) addToHistory(context.circleId, 'model', result.content);
+        return result.content;
+      }
+    }
+  } catch (err) {
+    console.warn('BlackSwan LLM unavailable, falling back:', err);
+  }
+
+  // Try AI Edge Function (Claude Haiku)
   if (context.circleId) {
     const aiResponse = await callSwanBotAI(cleaned, context.circleId, context.userId, context.discordContext);
     if (aiResponse) {

@@ -74,7 +74,7 @@ export const DEFAULT_AGENT: OfficeAgent = {
   newTokens: 0,
   turns: 0,
   sessionKey: 'blackswan',
-  model: 'claude-haiku-4-5',
+  model: 'blackswan-7b',
   connectionId: 'default',
   connectionName: 'The Underground Circle',
   providerType: 'generic-agent',

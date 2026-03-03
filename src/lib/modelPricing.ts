@@ -46,6 +46,10 @@ export const MODEL_PRICING: Record<string, ModelRate> = {
   'gpt-4o-mini':      { inPer1M: 0.20,  outPer1M: 0.80,  cachedInPer1M: 0.02,  label: 'GPT-4o Mini'      },
   'gpt-4o':           { inPer1M: 3.00,  outPer1M: 12.0,  cachedInPer1M: 0.30,  label: 'GPT-4o'           },
   'gpt-4':            { inPer1M: 3.00,  outPer1M: 12.0,  cachedInPer1M: 0.30,  label: 'GPT-4'            },
+  // ── BlackSwan (self-hosted, zero cost) ────────────────────────────────────
+  'blackswan-7b':     { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'BlackSwan 7B'     },
+  'blackswan-4b':     { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'BlackSwan 4B'     },
+  'blackswan':        { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'BlackSwan'        },
   // ── Default fallback ──────────────────────────────────────────────────────
   'default':          { inPer1M: 4,     outPer1M: 20,    cachedInPer1M: 0.4,   label: 'Unknown Model'    },
 };
