@@ -14,6 +14,8 @@ export interface InvocationRequest {
   command: string;
   targetAgentId?: string;
   targetAgentName: string;
+  promptName?: string;
+  promptLabel?: string;
 }
 
 export interface AgentInvocationResult {
@@ -235,6 +237,21 @@ export async function invokeAndStream(
   console.log(`[agentInvocation] Response row created: ${responseId}`);
 
   try {
+    // Step 1b: Resolve prompt if referenced
+    let promptVersionId: string | undefined;
+    if (req.promptName) {
+      try {
+        const { getPrompt } = await import('./promptManager');
+        const compiled = await getPrompt(req.promptName, req.promptLabel || 'production', {}, req.circleId);
+        if (compiled) {
+          promptVersionId = compiled.versionId;
+          console.log(`[agentInvocation] Resolved prompt: ${req.promptName} v${compiled.version} (${compiled.label})`);
+        }
+      } catch (e) {
+        console.warn('[agentInvocation] Prompt resolution failed:', e);
+      }
+    }
+
     // Step 2: Call agent
     console.log(`[agentInvocation] Invoking gateway: ${resolvedUrl}/tools/invoke`);
     const result = await callOpenClawAgent(

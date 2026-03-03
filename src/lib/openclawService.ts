@@ -67,6 +67,7 @@ async function chatCompletion(
   message: string,
   agentId = 'main',
   sessionKey?: string,
+  systemPrompt?: string,
 ): Promise<{ ok: boolean; reply?: string; error?: string }> {
   try {
     const headers: Record<string, string> = {
@@ -76,12 +77,16 @@ async function chatCompletion(
     };
     if (sessionKey) headers['x-openclaw-session-key'] = sessionKey;
 
+    const messages: Array<{ role: string; content: string }> = [];
+    if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+    messages.push({ role: 'user', content: message });
+
     const res = await fetch(`${config.endpoint}/v1/chat/completions`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
         model: `openclaw:${agentId}`,
-        messages: [{ role: 'user', content: message }],
+        messages,
       }),
     });
 

@@ -64,7 +64,31 @@ async function callGemini(
   circleData: CircleContextData
 ): Promise<string | null> {
   try {
-    const systemPrompt = buildSystemPrompt(context, circleData);
+    // Try DB-driven prompt first (Langfuse-style), fall back to hard-coded
+    let systemPrompt: string;
+    try {
+      const { getPrompt } = await import('./promptManager');
+      const name = context.userName || 'fam';
+      const streakInfo = circleData.userProfile
+        ? `${name}'s current streak: ${circleData.userProfile.current_streak || 0} days (longest: ${circleData.userProfile.longest_streak || 0})`
+        : '';
+      const memberList = circleData.members.length > 0
+        ? `Circle members: ${circleData.members.map((m: any) => `${m.display_name || m.username} (${m.current_streak || 0}-day streak)`).join(', ')}`
+        : '';
+      const checkInInfo = circleData.todayCheckIns.length > 0
+        ? `Checked in today: ${circleData.todayCheckIns.map((c: any) => c.user?.display_name || c.user?.username).join(', ')} (${circleData.todayCheckIns.length}/${circleData.members.length})`
+        : `Nobody has checked in yet today (0/${circleData.members.length})`;
+      const taskInfo = circleData.stats
+        ? `Tasks - Open: ${circleData.stats.openTasks}, In Progress: ${circleData.stats.inProgress}, Done: ${circleData.stats.done}`
+        : '';
+      const dbPrompt = await getPrompt('blackswan-system', 'production', {
+        userName: name, streakInfo, memberList, checkInInfo, taskInfo,
+        discordContext: context.discordContext || '',
+      }, context.circleId);
+      systemPrompt = dbPrompt?.content || buildSystemPrompt(context, circleData);
+    } catch {
+      systemPrompt = buildSystemPrompt(context, circleData);
+    }
     const history = context.circleId ? getHistory(context.circleId) : [];
 
     const contents: any[] = [];

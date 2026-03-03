@@ -51,6 +51,7 @@ import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
 import SharedMemoryPanel from '../../../components/SharedMemoryPanel';
 import { useAgentApprovals } from '../../../services/hitlService';
 import ByoaPanel from './office/ByoaPanel';
+import PromptManagerPanel from './office/PromptManagerPanel';
 import AgentTemplates from './office/AgentTemplates';
 import {
   CircleOfficeAgent,
@@ -175,7 +176,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [enrichedAgents, setEnrichedAgents] = useState<OfficeAgent[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
-  const [viewMode, setViewMode] = useState<'office' | 'cost' | 'tags' | 'metrics' | 'farm' | 'canvas' | 'analytics' | 'terminal'>('office'); // Toggle between views
+  const [viewMode, setViewMode] = useState<'office' | 'cost' | 'tags' | 'metrics' | 'farm' | 'canvas' | 'analytics' | 'terminal' | 'prompts'>('office'); // Toggle between views
   const [sessionTags, setSessionTags] = useState<Map<string, SessionTag[]>>(new Map());
   const [budgetConfig, setBudgetConfig] = useState<BudgetConfig>({ enabled: false });
   const [budgetAlertsDismissed, setBudgetAlertsDismissed] = useState(false);
@@ -1460,6 +1461,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               ⌨️
             </Text>
           </Pressable>
+          <Pressable
+            onPress={() => setViewMode(viewMode === 'prompts' ? 'office' : 'prompts')}
+            style={[styles.modeBtn, viewMode === 'prompts' && styles.modeBtnActive,
+              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={[styles.modeBtnText, viewMode === 'prompts' && styles.modeBtnTextActive]}>
+              📝
+            </Text>
+          </Pressable>
           {viewMode === 'office' && (
             <Pressable
               onPress={() => { setEditMode(!editMode); setPlacingType(null); setSelectedFurnitureId(null); }}
@@ -1712,10 +1722,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           sharedTargetName={terminalTargetName}
           onSharedSelectTarget={(id, name) => { setTerminalTargetId(id); setTerminalTargetName(name); }}
         />
+      ) : viewMode === 'prompts' ? (
+        <PromptManagerPanel
+          circleId={circleId}
+          userId={currentUserId}
+          accentColor={accentColor}
+        />
       ) : null}
 
       {/* Main Content - Switch between Office, Cost, Tags, Metrics, and Farm views */}
-      {(viewMode === 'canvas' || viewMode === 'analytics' || viewMode === 'terminal') ? null : viewMode === 'cost' ? (
+      {(viewMode === 'canvas' || viewMode === 'analytics' || viewMode === 'terminal' || viewMode === 'prompts') ? null : viewMode === 'cost' ? (
         <CostDashboard
           sessions={enrichedSessions}
           agents={enrichedAgents}
