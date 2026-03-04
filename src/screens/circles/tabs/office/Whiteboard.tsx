@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, TextInput, StyleSheet, Pressable, Platform, ScrollView,
   Animated, Easing,
@@ -8,6 +8,7 @@ import {
   STATUS_COLORS,
   calculateDailyScore,
 } from '../../../../lib/officeAgents';
+import { isBlackSwanAvailable } from '../../../../lib/blackswanLLM';
 import { CronJob } from '../../../../lib/openclawService';
 import { useAgentActivity, AgentActivity } from '../../../../services/agentActivityLogger';
 import { supabase } from '../../../../lib/supabase';
@@ -32,11 +33,11 @@ interface Props {
 
 // ── COLORS ─────────────────────────────────────────────────────────────────
 const C = {
-  bg: '#0a0a14',
-  surface: '#12121e',
-  surfaceLight: '#181830',
-  border: '#1a1a2e',
-  borderActive: '#252540',
+  bg: '#05050d',
+  surface: '#0c0c18',
+  surfaceLight: '#111124',
+  border: '#14142a',
+  borderActive: '#1e1e3a',
   text: '#e2e2e8',
   textSec: '#8b8b9e',
   textTert: '#555566',
@@ -130,7 +131,7 @@ const TAB_LIST: { key: TabKey; label: string }[] = [
   { key: 'ops', label: 'OPS' },
 ];
 
-const COLLAPSED_H = 72;
+const COLLAPSED_H = 48;
 const EXPANDED_H = 320;
 
 export default function Whiteboard({
@@ -142,6 +143,19 @@ export default function Whiteboard({
   const [editing, setEditing] = useState(false);
   const [noteText, setNoteText] = useState('');
   const [expanded, setExpanded] = useState(false);
+
+  // ── BlackSwan status ──
+  const [bsStatus, setBsStatus] = useState<'local' | 'offline' | 'checking'>('checking');
+  useEffect(() => {
+    let alive = true;
+    const check = async () => {
+      const ok = await isBlackSwanAvailable();
+      if (alive) setBsStatus(ok ? 'local' : 'offline');
+    };
+    check();
+    const t = setInterval(check, 30_000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
 
   // Animated values
   const expandAnim = useRef(new Animated.Value(0)).current; // 0 = collapsed, 1 = expanded
@@ -304,6 +318,22 @@ export default function Whiteboard({
         <View style={{ flex: 1 }} />
         <Text style={s.connText}>🔌 {connectedCount}/{totalConnections || 0}</Text>
         <Text style={s.timeText}>{timeStr}</Text>
+        {/* BlackSwan status pill */}
+        <View style={[
+          s.bsPill,
+          bsStatus === 'local'    && s.bsPillLocal,
+          bsStatus === 'offline'  && s.bsPillOffline,
+          bsStatus === 'checking' && s.bsPillChecking,
+        ]}>
+          <Text style={[
+            s.bsPillText,
+            bsStatus === 'local'   && { color: '#22c55e' },
+            bsStatus === 'offline' && { color: '#555' },
+            bsStatus === 'checking' && { color: '#6366f1' },
+          ]}>
+            {bsStatus === 'local' ? '🦢 LOCAL' : bsStatus === 'checking' ? '🦢 …' : '🦢 OFF'}
+          </Text>
+        </View>
         {/* Expand/collapse chevron */}
         <Animated.View style={{ transform: [{ rotate: expandBtnRotate }], marginLeft: 4 }}>
           <Text style={s.chevron}>▼</Text>
@@ -313,27 +343,21 @@ export default function Whiteboard({
       {/* Status Distribution Bar — always visible */}
       <StatusBar agents={agents} farmMetrics={farmMetrics} />
 
-      {/* Key Metrics Row — always visible */}
-      <View style={s.metricsRow}>
-        <MiniMetric label="COST" value={`$${farmMetrics.totalCostToday.toFixed(2)}`} color={C.error} />
-        <MiniMetric label="TOKENS" value={farmMetrics.totalTokensUsed > 0 ? `${(farmMetrics.totalTokensUsed / 1000).toFixed(0)}K` : '0'} color={C.pink} />
-        <MiniMetric label="TASKS" value={`${todayStats.completed}✓ ${todayStats.failed}✗`} color={C.active} />
-        <MiniMetric label="RATE" value={todayStats.rate !== null ? `${todayStats.rate}%` : '—'} color={C.accent} />
-      </View>
+      {/* Key Metrics Row — only visible when expanded */}
+      {expanded && (
+        <View style={s.metricsRow}>
+          <MiniMetric label="COST" value={`$${farmMetrics.totalCostToday.toFixed(2)}`} color={C.error} />
+          <MiniMetric label="TOKENS" value={farmMetrics.totalTokensUsed > 0 ? `${(farmMetrics.totalTokensUsed / 1000).toFixed(0)}K` : '0'} color={C.pink} />
+          <MiniMetric label="TASKS" value={`${todayStats.completed}✓ ${todayStats.failed}✗`} color={C.active} />
+          <MiniMetric label="RATE" value={todayStats.rate !== null ? `${todayStats.rate}%` : '—'} color={C.accent} />
+        </View>
+      )}
 
       {/* ── EXPANDED: full details ── */}
       <Animated.View style={{ opacity: contentOpacity, transform: [{ translateY: contentTranslateY }], flex: 1 }}>
         <ScrollView showsVerticalScrollIndicator={false} onStartShouldSetResponder={() => true}>
-          {/* XP Bar */}
-          <View style={[s.xpRow, { borderColor: badgeColor + '30' }]}>
-            <Text style={[s.xpRank, { color: badgeColor }]}>
-              {reward.currentBadge ? reward.currentBadge.name.toUpperCase() : 'UNRANKED'}
-            </Text>
-            <View style={s.xpTrack}>
-              <View style={[s.xpFill, { width: `${reward.progressPct}%` as any, backgroundColor: badgeColor }]} />
-            </View>
-            <Text style={s.xpVal}>{formatPoints(reward.lifetimeXP)}</Text>
-          </View>
+          {/* XP Bar — RPG style */}
+          <RpgXpBar reward={reward} badgeColor={badgeColor} />
 
           {/* Tab bar */}
           <View style={s.tabBar}>
@@ -885,6 +909,105 @@ function NotesView({ notes, noteText, setNoteText, addNote }: {
   );
 }
 
+// ── RPG XP BAR ──────────────────────────────────────────────────────────────
+function RpgXpBar({ reward, badgeColor }: { reward: RewardState; badgeColor: string }) {
+  const shimmerAnim = useRef(new Animated.Value(0)).current;
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    // Shimmer sweep — runs continuously
+    const shimmer = Animated.loop(
+      Animated.timing(shimmerAnim, {
+        toValue: 1, duration: 1800, easing: Easing.linear, useNativeDriver: false,
+      })
+    );
+    shimmer.start();
+    // Pulse on near-complete progress
+    if (reward.progressPct >= 80) {
+      const pulse = Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, { toValue: 1.04, duration: 700, easing: Easing.inOut(Easing.sin), useNativeDriver: false }),
+          Animated.timing(pulseAnim, { toValue: 1, duration: 700, easing: Easing.inOut(Easing.sin), useNativeDriver: false }),
+        ])
+      );
+      pulse.start();
+      return () => { shimmer.stop(); pulse.stop(); };
+    }
+    return () => shimmer.stop();
+  }, [reward.progressPct]);
+
+  const shimmerLeft = shimmerAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['-15%' as any, '110%' as any],
+  });
+
+  const SEGMENTS = 10;
+  const currentBadgeName = reward.currentBadge?.name ?? 'UNRANKED';
+  const nextBadgeName = reward.nextBadge?.name ?? 'MAX';
+  const icon = reward.currentBadge
+    ? (reward.currentBadge.name.includes('Legend') ? '👑'
+      : reward.currentBadge.name.includes('Master') ? '⚔️'
+      : reward.currentBadge.name.includes('Expert') ? '🔥'
+      : reward.currentBadge.name.includes('Veteran') ? '🛡️'
+      : reward.currentBadge.name.includes('Recruit') ? '🌱'
+      : '⭐')
+    : '💀';
+
+  const xpToNext = reward.nextBadge
+    ? reward.nextBadge.pointsRequired - (reward.currentBadge?.pointsRequired ?? 0)
+    : 0;
+  const xpProgress = reward.lifetimeXP - (reward.currentBadge?.pointsRequired ?? 0);
+
+  return (
+    <Animated.View style={[s.xpCard, { borderColor: badgeColor + '40', transform: [{ scale: pulseAnim }] }]}>
+      {/* Top row: rank badge + XP total */}
+      <View style={s.xpTopRow}>
+        <View style={[s.xpLevelBadge, { backgroundColor: badgeColor + '18', borderColor: badgeColor + '55' }]}>
+          <Text style={s.xpLevelIcon}>{icon}</Text>
+          <Text style={[s.xpLevelName, { color: badgeColor }]}>{currentBadgeName.toUpperCase()}</Text>
+        </View>
+        <View style={s.xpRightCol}>
+          <Text style={s.xpTotalLabel}>TOTAL XP</Text>
+          <Text style={[s.xpTotalVal, { color: badgeColor }]}>{formatPoints(reward.lifetimeXP)}</Text>
+        </View>
+      </View>
+
+      {/* XP track with shimmer + segment ticks */}
+      <View style={s.xpTrackWrap}>
+        {/* Fill */}
+        <View style={[s.xpTrackFill, {
+          width: `${reward.progressPct}%` as any,
+          backgroundColor: badgeColor,
+          shadowColor: badgeColor,
+          ...(Platform.OS === 'web' ? { boxShadow: `0 0 6px ${badgeColor}99` } as any : {}),
+        }]} />
+        {/* Shimmer sweep */}
+        <Animated.View style={[s.xpTrackShimmer, { left: shimmerLeft, backgroundColor: '#ffffff' }]} />
+        {/* Segment ticks */}
+        <View style={s.xpSegments} pointerEvents="none">
+          {Array.from({ length: SEGMENTS - 1 }).map((_, i) => (
+            <View key={i} style={s.xpSegTick} />
+          ))}
+        </View>
+      </View>
+
+      {/* Bottom row: progress label + next tier */}
+      <View style={s.xpBottomRow}>
+        <Text style={[s.xpProgressLabel, { color: badgeColor }]}>
+          {reward.progressPct}% {reward.progressPct >= 80 ? '🔥' : reward.progressPct >= 50 ? '⚡' : ''}
+        </Text>
+        {reward.nextBadge ? (
+          <Text style={s.xpNextLabel}>
+            {formatPoints(xpProgress)} / {formatPoints(xpToNext)} → {nextBadgeName}
+          </Text>
+        ) : (
+          <Text style={[s.xpNextLabel, { color: badgeColor }]}>✦ MAX RANK ✦</Text>
+        )}
+      </View>
+    </Animated.View>
+  );
+}
+
 // ── STYLES ─────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   board: {
@@ -899,7 +1022,7 @@ const styles = StyleSheet.create({
     paddingTop: 6,
     paddingBottom: 4,
     overflow: 'hidden',
-  },
+  } as any,
 });
 
 const s = StyleSheet.create({
@@ -917,6 +1040,13 @@ const s = StyleSheet.create({
   connText: { fontSize: 6, fontFamily: 'monospace', color: C.textSec, fontWeight: '600' },
   timeText: { fontSize: 6, fontFamily: 'monospace', color: C.textTert, fontWeight: '700' },
   chevron: { fontSize: 6, color: C.accent, fontWeight: '900' },
+
+  // ── BlackSwan pill ──
+  bsPill: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4, borderWidth: 1, borderColor: '#1a1a2e', marginLeft: 4 },
+  bsPillLocal:    { backgroundColor: '#22c55e12', borderColor: '#22c55e40' },
+  bsPillOffline:  { backgroundColor: '#11111a',   borderColor: '#2a2a3a' },
+  bsPillChecking: { backgroundColor: '#6366f112', borderColor: '#6366f140' },
+  bsPillText: { fontSize: 6, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 0.3 },
 
   // ── Notes header ──
   headerBar: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6, paddingBottom: 4 },
@@ -938,7 +1068,23 @@ const s = StyleSheet.create({
   miniMetricVal: { fontSize: 7, fontWeight: '900', fontFamily: 'monospace' },
   miniMetricLabel: { fontSize: 4.5, fontWeight: '700', fontFamily: 'monospace', color: C.textTert, letterSpacing: 0.3, marginTop: 1 },
 
-  // ── XP Row ──
+  // ── XP Row (RPG) ──
+  xpCard: { backgroundColor: C.surface, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6, marginBottom: 6, borderWidth: 1, borderColor: C.border },
+  xpTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 5 },
+  xpLevelBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, borderWidth: 1 },
+  xpLevelIcon: { fontSize: 10 },
+  xpLevelName: { fontSize: 7, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.8 },
+  xpRightCol: { alignItems: 'flex-end', gap: 1 },
+  xpTotalLabel: { fontSize: 5, fontFamily: 'monospace', color: C.textTert, fontWeight: '600' },
+  xpTotalVal: { fontSize: 9, fontWeight: '900', fontFamily: 'monospace' },
+  xpTrackWrap: { position: 'relative', height: 8, backgroundColor: C.border, borderRadius: 4, overflow: 'hidden', marginBottom: 3 },
+  xpTrackFill: { position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: 4 },
+  xpTrackShimmer: { position: 'absolute', top: 0, bottom: 0, width: 40, opacity: 0.35 },
+  xpSegments: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, flexDirection: 'row' },
+  xpSegTick: { flex: 1, borderRightWidth: 1, borderRightColor: '#00000040' },
+  xpBottomRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  xpProgressLabel: { fontSize: 5.5, fontFamily: 'monospace', color: C.textSec, fontWeight: '700' },
+  xpNextLabel: { fontSize: 5.5, fontFamily: 'monospace', color: C.textTert },
   xpRow: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: C.surface, borderRadius: 6, paddingHorizontal: 5, paddingVertical: 3, marginBottom: 6 },
   xpRank: { fontSize: 5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.5 },
   xpTrack: { flex: 1, height: 3, backgroundColor: C.border, borderRadius: 1.5, overflow: 'hidden' },

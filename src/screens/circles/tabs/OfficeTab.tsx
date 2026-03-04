@@ -9,7 +9,7 @@ import ServerRack from './office/ServerRack';
 import Whiteboard from './office/Whiteboard';
 import AgentPanel from './office/AgentPanel';
 import CustomizePanel, { TelegramConfig } from './office/CustomizePanel';
-import OfficeChat, { OfficeCommand } from './office/OfficeChat';
+import type { OfficeCommand } from './office/OfficeChat';
 import { OfficeAgent, DEFAULT_AGENT, sessionsToAgents } from '../../../lib/officeAgents';
 import {
   OFFICE_THEMES, AgentAppearance, FurnitureItem, FURNITURE_CATALOG,
@@ -30,12 +30,9 @@ import {
 } from '../../../lib/connectionManager';
 import {
   ClaudeCodePoller, bridgeSessionsToAgents, detectClaudeCodeBridge,
+  publishClaudeCodeAgent, updateClaudeCodeAgentStatus, markClaudeCodeAgentOffline,
 } from '../../../lib/claudeCodeDetector';
 import { storage } from '../../../lib/storage';
-import CostDashboard from '../../../components/CostDashboard';
-import SessionTagsDashboard from '../../../components/SessionTagsDashboard';
-import ProjectRoomsPanel from '../../../components/ProjectRoomsPanel';
-import AgentPerformanceMetrics from '../../../components/AgentPerformanceMetrics';
 import {
   SessionTag, loadSessionTags, addSessionTag, removeSessionTag,
 } from '../../../lib/sessionTags';
@@ -45,20 +42,17 @@ import {
 import BudgetAlertBanner from '../../../components/BudgetAlertBanner';
 import { calculatePeriodCosts } from '../../../lib/costCalculations';
 import OfficeActionPanel from '../../../components/OfficeActionPanel';
-import FarmHealthDashboard from '../../../components/FarmHealthDashboard';
 import AgentActivityFeed from '../../../components/AgentActivityFeed';
 import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
-import SharedMemoryPanel from '../../../components/SharedMemoryPanel';
 import { useAgentApprovals } from '../../../services/hitlService';
-import ByoaPanel from './office/ByoaPanel';
-import PromptManagerPanel from './office/PromptManagerPanel';
-import AgentTemplates from './office/AgentTemplates';
 import {
   CircleOfficeAgent,
   loadCircleOfficeAgents,
   publishAgentToCircle,
   subscribeToCircleOffice,
   PROVIDER_DISPLAY,
+  createBlackSwanAgent,
+  BLACKSWAN_AGENT_ID,
 } from '../../../lib/circleOffice';
 import {
   startHeartbeat,
@@ -73,8 +67,6 @@ import {
   AgentLiveState,
   ConnectionStatus,
 } from '../../../lib/agentPresence';
-import PixelOfficeCanvas from '../../../components/PixelOfficeCanvas';
-import OfficeAnalyticsPanel from '../../../components/OfficeAnalyticsPanel';
 import OfficeTerminal from '../../../components/OfficeTerminal';
 import {
   subscribeToTerminalCommands,
@@ -86,6 +78,7 @@ import {
 import {
   invokeAndStream,
   invokeAllAgents,
+  invokeSelectedAgents,
 } from '../../../lib/agentInvocation';
 import { supabase } from '../../../lib/supabase';
 import { fetchNFTs } from '../../../lib/crypto';
@@ -93,7 +86,7 @@ import { NFT } from '../../../types';
 import AgentSetupWizard from '../../../components/AgentSetupWizard';
 import BadgeCelebration from '../../../components/BadgeCelebration';
 import RewardsPanel from '../../../components/RewardsPanel';
-import { useAgentPointsTracker, useUserRewards } from '../../../services/rewardService';
+import { useAllAgentPointsTracker, useUserRewards } from '../../../services/rewardService';
 import { Badge, getNextBadge } from '../../../lib/badges';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
@@ -126,8 +119,6 @@ interface Props {
 export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props) {
   const [selectedAgent, setSelectedAgent] = useState<OfficeAgent | null>(null);
   const [showCustomize, setShowCustomize] = useState(false);
-  const [showByoa, setShowByoa] = useState(false);
-  const [showTemplates, setShowTemplates] = useState(false);
   const [showRewards, setShowRewards] = useState(false);
   const [celebrationBadge, setCelebrationBadge] = useState<Badge | null>(null);
   const [dancingAgentId, setDancingAgentId] = useState<string | null>(null);
@@ -172,11 +163,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [terminalInput, setTerminalInput]         = useState('');
   const [terminalTargetId, setTerminalTargetId]   = useState<string | null>(null);
   const [terminalTargetName, setTerminalTargetName] = useState('@all');
+  const [terminalModel, setTerminalModel]         = useState<string | null>(null);
+  const [terminalTargetIds, setTerminalTargetIds] = useState<string[] | null>(null);
   const [statusHistory, setStatusHistory] = useState<Array<OfficeAgent[]>>([]);
   const [enrichedAgents, setEnrichedAgents] = useState<OfficeAgent[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
-  const [viewMode, setViewMode] = useState<'office' | 'cost' | 'tags' | 'metrics' | 'farm' | 'canvas' | 'analytics' | 'terminal' | 'prompts'>('office'); // Toggle between views
+  const viewMode = 'office'; // Simplified — analytics dashboards moved to Backpack tab
   const [sessionTags, setSessionTags] = useState<Map<string, SessionTag[]>>(new Map());
   const [budgetConfig, setBudgetConfig] = useState<BudgetConfig>({ enabled: false });
   const [budgetAlertsDismissed, setBudgetAlertsDismissed] = useState(false);
@@ -216,6 +209,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const sessionsRef = useRef<Map<string, OpenClawSession[]>>(new Map());
   const [sessionsTick, setSessionsTick] = useState(0); // force re-render on session updates
   const ccPollerRef = useRef<ClaudeCodePoller | null>(null);
+  const ccPublishedRef = useRef(false);
 
   // ─── Current user ─────────────────────────────────────────────────────────
   const [currentUserId, setCurrentUserId] = useState<string>('');
@@ -305,53 +299,87 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   }, [circleId, connections.filter(c => c.status === 'connected').length]);
 
   // ─── Terminal command subscription ────────────────────────────────────────
-  // Listen for commands targeting my agents; respond with a stub (Phase 3 = real bridge)
+  // Listen for commands targeting my agents + BlackSwan; invoke accordingly
   useEffect(() => {
     if (!currentUserId || !circleId) return;
 
     const myAgents = circleOfficeAgents.filter(a => a.ownerId === currentUserId);
-    if (myAgents.length === 0) return;
+    const blackSwanAgent = createBlackSwanAgent(circleId);
 
+    // Include both my agent IDs and BlackSwan's ID in the subscription filter
     const myAgentIds = myAgents.map(a => a.id);
+    const listenIds = [...myAgentIds, BLACKSWAN_AGENT_ID];
 
-    const unsub = subscribeToTerminalCommands(circleId, myAgentIds, async (cmd: BroadcastCommandPayload) => {
-      // Phase 3: Real agent invocation
-      // For @all: invoke all online agents in parallel
-      // For targeted: invoke specific agent
+    // Need at least BlackSwan to listen (always active)
+    if (listenIds.length === 0) return;
 
-      if (cmd.targetAgentId) {
-        // Single agent — invoke directly
-        const agent = myAgents.find(a => a.id === cmd.targetAgentId);
-        if (!agent) return;
+    const unsub = subscribeToTerminalCommands(circleId, listenIds, async (cmd: BroadcastCommandPayload) => {
+      const baseReq = {
+        messageId: cmd.messageId,
+        circleId,
+        command: cmd.commandText,
+        senderId: cmd.senderId,
+        targetAgentName: cmd.targetAgentName,
+        model: cmd.model,
+      };
 
-        // Fire off the invocation (don't await — let it stream)
-        invokeAndStream(
-          {
-            messageId: cmd.messageId,
-            circleId,
-            command: cmd.commandText,
-            targetAgentId: agent.id,
-            targetAgentName: `@${agent.name}`,
-          },
-          agent,
-          'http://localhost:18790'
-        ).catch(err => {
-          console.error('[OfficeTab] Invocation failed:', err);
-        });
+      // Helper: check if BlackSwan is targeted
+      const blackSwanTargeted =
+        cmd.targetAgentId === BLACKSWAN_AGENT_ID
+        || cmd.targetAgentName?.toLowerCase().includes('blackswan')
+        || cmd.targetAgentName?.toLowerCase().includes('swan')
+        || cmd.targetAgentIds?.includes(BLACKSWAN_AGENT_ID);
+
+      if (cmd.targetAgentIds && cmd.targetAgentIds.length > 0) {
+        // Multi-select — invoke selected agents in parallel
+        // Invoke BlackSwan if included
+        if (cmd.targetAgentIds.includes(BLACKSWAN_AGENT_ID)) {
+          invokeAndStream(
+            { ...baseReq, targetAgentId: BLACKSWAN_AGENT_ID, targetAgentName: '@BlackSwan' },
+            blackSwanAgent,
+          ).catch(err => console.error('[OfficeTab] BlackSwan invocation failed:', err));
+        }
+        // Invoke user's agents that are in the multi-select
+        const myTargetedAgents = myAgents.filter(a => cmd.targetAgentIds!.includes(a.id));
+        if (myTargetedAgents.length > 0) {
+          invokeSelectedAgents(
+            baseReq,
+            myTargetedAgents,
+            cmd.targetAgentIds.filter(id => id !== BLACKSWAN_AGENT_ID),
+            'http://localhost:18790'
+          ).catch(err => console.error('[OfficeTab] Multi-select invocation failed:', err));
+        }
+      } else if (cmd.targetAgentId) {
+        // Single agent target
+        if (blackSwanTargeted) {
+          invokeAndStream(
+            { ...baseReq, targetAgentId: BLACKSWAN_AGENT_ID, targetAgentName: '@BlackSwan' },
+            blackSwanAgent,
+          ).catch(err => console.error('[OfficeTab] BlackSwan invocation failed:', err));
+        } else {
+          const agent = myAgents.find(a => a.id === cmd.targetAgentId);
+          if (!agent) return;
+
+          invokeAndStream(
+            { ...baseReq, targetAgentId: agent.id, targetAgentName: `@${agent.name}` },
+            agent,
+            'http://localhost:18790'
+          ).catch(err => console.error('[OfficeTab] Invocation failed:', err));
+        }
       } else {
-        // @all command — invoke all agents in parallel
-        invokeAllAgents(
-          {
-            messageId: cmd.messageId,
-            circleId,
-            command: cmd.commandText,
-            targetAgentName: '@all',
-          },
-          myAgents,
-          'http://localhost:18790'
-        ).catch(err => {
-          console.error('[OfficeTab] Multi-agent invocation failed:', err);
-        });
+        // @all — invoke BlackSwan + all user's agents in parallel
+        invokeAndStream(
+          { ...baseReq, targetAgentId: BLACKSWAN_AGENT_ID, targetAgentName: '@BlackSwan' },
+          blackSwanAgent,
+        ).catch(err => console.error('[OfficeTab] BlackSwan @all invocation failed:', err));
+
+        if (myAgents.length > 0) {
+          invokeAllAgents(
+            { ...baseReq, targetAgentName: '@all' },
+            myAgents,
+            'http://localhost:18790'
+          ).catch(err => console.error('[OfficeTab] Multi-agent invocation failed:', err));
+        }
       }
     });
 
@@ -744,6 +772,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           ccPollerRef.current = new ClaudeCodePoller(sessions => {
             sessionsRef.current.set('claude-code-auto', bridgeSessionsToAgents(sessions) as any);
             setSessionsTick(t => t + 1);
+            // Publish to circle_office_agents DB on first detection
+            if (!ccPublishedRef.current && circleId) {
+              ccPublishedRef.current = true;
+              publishClaudeCodeAgent(circleId, sessions.length)
+                .then(() => loadCircleOffice())
+                .catch(err => console.error('[OfficeTab] Failed to publish Claude Code agent:', err));
+            }
+            // Update live status on each poll
+            if (ccPublishedRef.current && circleId) {
+              updateClaudeCodeAgentStatus(circleId, sessions).catch(() => {});
+            }
           });
           ccPollerRef.current.start(10000);
         }
@@ -752,20 +791,42 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   }, [connectOne]);
 
   // Retry Claude Code bridge detection every 30s (user may start bridge after app)
+  // Also detects bridge going offline and marks agent accordingly
   useEffect(() => {
     const retryInterval = setInterval(async () => {
-      if (ccPollerRef.current) return; // already connected
       const detected = await detectClaudeCodeBridge();
-      if (detected) {
+
+      if (detected && !ccPollerRef.current) {
+        // Bridge came online — start poller
         ccPollerRef.current = new ClaudeCodePoller(sessions => {
           sessionsRef.current.set('claude-code-auto', bridgeSessionsToAgents(sessions) as any);
           setSessionsTick(t => t + 1);
+          if (!ccPublishedRef.current && circleId) {
+            ccPublishedRef.current = true;
+            publishClaudeCodeAgent(circleId, sessions.length)
+              .then(() => loadCircleOffice())
+              .catch(err => console.error('[OfficeTab] Failed to publish Claude Code agent:', err));
+          }
+          if (ccPublishedRef.current && circleId) {
+            updateClaudeCodeAgentStatus(circleId, sessions).catch(() => {});
+          }
         });
         ccPollerRef.current.start(10000);
+      } else if (!detected && ccPollerRef.current) {
+        // Bridge went offline — stop poller and mark agent offline
+        ccPollerRef.current.stop();
+        ccPollerRef.current = null;
+        sessionsRef.current.delete('claude-code-auto');
+        setSessionsTick(t => t + 1);
+        if (ccPublishedRef.current && circleId) {
+          markClaudeCodeAgentOffline(circleId)
+            .then(() => loadCircleOffice())
+            .catch(() => {});
+        }
       }
     }, 30000);
     return () => clearInterval(retryInterval);
-  }, []);
+  }, [circleId, loadCircleOffice]);
 
   // Cleanup pollers on unmount
   useEffect(() => {
@@ -773,9 +834,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       pollersRef.current.forEach(p => p.stop());
       pollersRef.current.clear();
       if (tgPollerRef.current) tgPollerRef.current.stop();
-      if (ccPollerRef.current) { ccPollerRef.current.stop(); ccPollerRef.current = null; }
+      if (ccPollerRef.current) {
+        ccPollerRef.current.stop();
+        ccPollerRef.current = null;
+      }
+      // Mark Claude Code agent offline when tab unmounts
+      if (ccPublishedRef.current && circleId) {
+        markClaudeCodeAgentOffline(circleId).catch(() => {});
+        ccPublishedRef.current = false;
+      }
     };
-  }, []);
+  }, [circleId]);
 
   // ─── Floor management (must be defined before useEffects that use it) ──────
 
@@ -791,9 +860,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         if (user) {
           supabase.from('profiles').update({
             office_layout: { floors, currentFloorId, updatedAt: now }
-          }).eq('id', user.id).then(({ error }) => {
-            if (error) _profileHasOfficeLayout = false;
-          }).catch(() => { _profileHasOfficeLayout = false; });
+          }).eq('id', user.id).then(
+            ({ error }) => { if (error) _profileHasOfficeLayout = false; },
+            () => { _profileHasOfficeLayout = false; },
+          );
         }
       }).catch(() => {});
     }
@@ -851,11 +921,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const nextBadge = getNextBadge(userXp);
   const xpNext = nextBadge?.pointsRequired ?? 100;
 
-  const _primaryAgent = displayAgents[0];
-  useAgentPointsTracker(
+  // Track ALL agents' turns — every bot earns XP for the user
+  useAllAgentPointsTracker(
     userId,
-    _primaryAgent?.turns ?? _primaryAgent?.messagesProcessed ?? 0,
-    _primaryAgent?.model ?? 'unknown',
+    userAgents,
     (newBadges) => {
       if (newBadges.length > 0) {
         setCelebrationBadge(newBadges[0]);
@@ -987,9 +1056,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       if (_profileHasAgentAppearance) {
         supabase.auth.getUser().then(({ data: { user } }) => {
           if (user) {
-            supabase.from('profiles').update({ agent_appearance: appearances }).eq('id', user.id).then(({ error }) => {
-              if (error) _profileHasAgentAppearance = false;
-            }).catch(() => { _profileHasAgentAppearance = false; });
+            supabase.from('profiles').update({ agent_appearance: appearances }).eq('id', user.id).then(
+              ({ error }) => { if (error) _profileHasAgentAppearance = false; },
+              () => { _profileHasAgentAppearance = false; },
+            );
           }
         }).catch(() => {});
       }
@@ -1389,98 +1459,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       {/* Title bar */}
       <View style={styles.titleBar}>
         <View style={styles.titleInner}>
+          {/* Edit mode toggle */}
           <Pressable
-            onPress={() => {
-              setViewMode(viewMode === 'cost' ? 'office' : 'cost');
-            }}
-            style={[styles.modeBtn, viewMode === 'cost' && styles.modeBtnActive,
+            onPress={() => { setEditMode(!editMode); setPlacingType(null); setSelectedFurnitureId(null); }}
+            style={[styles.modeBtn, editMode && styles.modeBtnActive,
               Platform.OS === 'web' && { cursor: 'pointer' } as any]}
           >
-            <Text style={[styles.modeBtnText, viewMode === 'cost' && styles.modeBtnTextActive]}>
-              📊
+            <Text style={[styles.modeBtnText, editMode && styles.modeBtnTextActive]}>
+              {editMode ? '✓' : '🔧'}
             </Text>
           </Pressable>
-          <Pressable
-            onPress={() => {
-              setViewMode(viewMode === 'tags' ? 'office' : 'tags');
-            }}
-            style={[styles.modeBtn, viewMode === 'tags' && styles.modeBtnActive,
-              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          >
-            <Text style={[styles.modeBtnText, viewMode === 'tags' && styles.modeBtnTextActive]}>
-              🏷️
-            </Text>
-          </Pressable>
-          <Pressable
-            onPress={() => {
-              setViewMode(viewMode === 'metrics' ? 'office' : 'metrics');
-            }}
-            style={[styles.modeBtn, viewMode === 'metrics' && styles.modeBtnActive,
-              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          >
-            <Text style={[styles.modeBtnText, viewMode === 'metrics' && styles.modeBtnTextActive]}>
-              🏆
-            </Text>
-          </Pressable>
-          <Pressable
-            onPress={() => {
-              setViewMode(viewMode === 'farm' ? 'office' : 'farm');
-            }}
-            style={[styles.modeBtn, viewMode === 'farm' && styles.modeBtnActive,
-              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          >
-            <Text style={[styles.modeBtnText, viewMode === 'farm' && styles.modeBtnTextActive]}>
-              🏥
-            </Text>
-          </Pressable>
-          {/* ─── New: Pixel Canvas / Analytics / Terminal ─── */}
-          <Pressable
-            onPress={() => setViewMode(viewMode === 'canvas' ? 'office' : 'canvas')}
-            style={[styles.modeBtn, viewMode === 'canvas' && styles.modeBtnActive,
-              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          >
-            <Text style={[styles.modeBtnText, viewMode === 'canvas' && styles.modeBtnTextActive]}>
-              🖥️
-            </Text>
-          </Pressable>
-          <Pressable
-            onPress={() => setViewMode(viewMode === 'analytics' ? 'office' : 'analytics')}
-            style={[styles.modeBtn, viewMode === 'analytics' && styles.modeBtnActive,
-              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          >
-            <Text style={[styles.modeBtnText, viewMode === 'analytics' && styles.modeBtnTextActive]}>
-              📈
-            </Text>
-          </Pressable>
-          <Pressable
-            onPress={() => setViewMode(viewMode === 'terminal' ? 'office' : 'terminal')}
-            style={[styles.modeBtn, viewMode === 'terminal' && styles.modeBtnActive,
-              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          >
-            <Text style={[styles.modeBtnText, viewMode === 'terminal' && styles.modeBtnTextActive]}>
-              ⌨️
-            </Text>
-          </Pressable>
-          <Pressable
-            onPress={() => setViewMode(viewMode === 'prompts' ? 'office' : 'prompts')}
-            style={[styles.modeBtn, viewMode === 'prompts' && styles.modeBtnActive,
-              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          >
-            <Text style={[styles.modeBtnText, viewMode === 'prompts' && styles.modeBtnTextActive]}>
-              📝
-            </Text>
-          </Pressable>
-          {viewMode === 'office' && (
-            <Pressable
-              onPress={() => { setEditMode(!editMode); setPlacingType(null); setSelectedFurnitureId(null); }}
-              style={[styles.modeBtn, editMode && styles.modeBtnActive,
-                Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-            >
-              <Text style={[styles.modeBtnText, editMode && styles.modeBtnTextActive]}>
-                {editMode ? '✓' : '🔧'}
-              </Text>
-            </Pressable>
-          )}
           {!isDesktop ? (
             <View style={styles.titleCenterMobile}>
               <Text style={{ fontSize: 14 }}>🏢</Text>
@@ -1697,86 +1685,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </View>
       )}
 
-      {/* ─── New views: Pixel Canvas / Analytics / Terminal ─── */}
-      {viewMode === 'canvas' ? (
-        <PixelOfficeCanvas
-          agents={mergedCircleAgents}
-          currentUserId={currentUserId}
-        />
-      ) : viewMode === 'analytics' ? (
-        <OfficeAnalyticsPanel
-          circleId={circleId}
-          userId={currentUserId}
-          agents={mergedCircleAgents}
-        />
-      ) : viewMode === 'terminal' ? (
-        <OfficeTerminal
-          circleId={circleId}
-          userId={currentUserId}
-          userDisplayName={currentUserName}
-          agents={mergedCircleAgents}
-          myAgentIds={mergedCircleAgents.filter(a => a.ownerId === currentUserId).map(a => a.id)}
-          sharedInput={terminalInput}
-          onSharedInputChange={setTerminalInput}
-          sharedTargetId={terminalTargetId}
-          sharedTargetName={terminalTargetName}
-          onSharedSelectTarget={(id, name) => { setTerminalTargetId(id); setTerminalTargetName(name); }}
-        />
-      ) : viewMode === 'prompts' ? (
-        <PromptManagerPanel
-          circleId={circleId}
-          userId={currentUserId}
-          accentColor={accentColor}
-        />
-      ) : null}
-
-      {/* Main Content - Switch between Office, Cost, Tags, Metrics, and Farm views */}
-      {(viewMode === 'canvas' || viewMode === 'analytics' || viewMode === 'terminal' || viewMode === 'prompts') ? null : viewMode === 'cost' ? (
-        <CostDashboard
-          sessions={enrichedSessions}
-          agents={enrichedAgents}
-          sessionTags={sessionTags}
-          accentColor={accentColor}
-        />
-      ) : viewMode === 'tags' ? (
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 16 }}>
-          {/* BYOA + Deploy buttons */}
-          <View style={{ flexDirection: 'row', gap: 10, marginBottom: 4 }}>
-            <Pressable
-              style={styles.tagsActionBtn}
-              onPress={() => setShowTemplates(true)}
-            >
-              <Text style={styles.tagsActionBtnText}>+ DEPLOY AGENT</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.tagsActionBtn, styles.tagsActionBtnSecondary]}
-              onPress={() => setShowByoa(true)}
-            >
-              <Text style={[styles.tagsActionBtnText, styles.tagsActionBtnTextSecondary]}>BYOA SETUP</Text>
-            </Pressable>
-          </View>
-          {/* Shared Memory */}
-          <SharedMemoryPanel circleId={circleId} />
-          <ProjectRoomsPanel circleId={circleId} />
-          <SessionTagsDashboard
-            agents={displayAgents}
-            sessionTags={sessionTags}
-          />
-        </ScrollView>
-      ) : viewMode === 'metrics' ? (
-        <AgentPerformanceMetrics
-          agents={enrichedAgents}
-          sessions={enrichedSessions}
-          accentColor={accentColor}
-        />
-      ) : viewMode === 'farm' ? (
-        <FarmHealthDashboard
-          agents={enrichedAgents}
-          sessions={enrichedSessions}
-          accentColor={accentColor}
-        />
-      ) : (
-        <View style={styles.mainContent}>
+      {/* Main Content — Office Floor View */}
+      <View style={styles.mainContent}>
         {/* Mobile: Card-based agent list */}
         {!isDesktop ? (
           <ScrollView style={styles.mobileAgentScroll} showsVerticalScrollIndicator={true} contentContainerStyle={styles.mobileAgentList}>
@@ -2001,15 +1911,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             {/* Circle Office Panel — all members' bots */}
             {!editMode && (
               <>
-                {mergedCircleAgents.length > 0 && (
-                  <CircleOfficePanel
-                    agents={mergedCircleAgents}
-                    onRefresh={loadCircleOffice}
-                    accentColor={accentColor}
-                    connectionStatus={circleConnectionStatus}
-                    compact
-                  />
-                )}
                 {/* Desktop publish CTA — always show if not yet published */}
                 {!mergedCircleAgents.some(a => a.isOwn) && (
                   <Pressable
@@ -2114,6 +2015,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               sharedTargetId={terminalTargetId}
               sharedTargetName={terminalTargetName}
               onSharedSelectTarget={(id, name) => { setTerminalTargetId(id); setTerminalTargetName(name); }}
+              sharedModel={terminalModel}
+              onSharedModelChange={setTerminalModel}
+              sharedTargetIds={terminalTargetIds}
+              onSharedSelectTargets={(ids, _names) => setTerminalTargetIds(ids)}
               compact
             />
           </View>
@@ -2133,11 +2038,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               sharedTargetId={terminalTargetId}
               sharedTargetName={terminalTargetName}
               onSharedSelectTarget={(id, name) => { setTerminalTargetId(id); setTerminalTargetName(name); }}
+              sharedModel={terminalModel}
+              onSharedModelChange={setTerminalModel}
+              sharedTargetIds={terminalTargetIds}
+              onSharedSelectTargets={(ids, _names) => setTerminalTargetIds(ids)}
             />
           </View>
         )}
       </View>
-      )}
 
       {/* Agent detail panel */}
       {!editMode && (
@@ -2241,23 +2149,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         badge={celebrationBadge}
         onDismiss={() => setCelebrationBadge(null)}
       />
-
-      {/* BYOA Panel Modal */}
-      <Modal visible={showByoa} animationType="slide" presentationStyle="pageSheet">
-        <ByoaPanel
-          circleId={circleId}
-          onClose={() => setShowByoa(false)}
-        />
-      </Modal>
-
-      {/* Agent Templates Modal */}
-      <Modal visible={showTemplates} animationType="slide" presentationStyle="pageSheet">
-        <AgentTemplates
-          circleId={circleId}
-          onClose={() => setShowTemplates(false)}
-          onDeployed={() => setShowTemplates(false)}
-        />
-      </Modal>
 
       {/* Agent setup wizard */}
       <AgentSetupWizard
