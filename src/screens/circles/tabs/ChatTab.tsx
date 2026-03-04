@@ -352,35 +352,65 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
     // Load persisted messages
     try {
+      // Explicitly select only known-safe columns to avoid schema drift errors.
+      // is_bot and reactions are added via migration — use safe fallback if missing.
       const { data, error } = await supabase
         .from('messages')
-        .select('*, user:profiles(username, display_name)')
+        .select('id, circle_id, user_id, content, reply_to, created_at, is_bot, reactions, user:profiles(username, display_name)')
         .eq('circle_id', circleId)
         .order('created_at', { ascending: true })
         .limit(100);
 
       if (error) {
-        console.error('Error loading messages:', error);
+        // Fallback: if new columns not yet migrated, select without them
+        if (error.code === '42703' || (error.message && error.message.includes('does not exist'))) {
+          console.warn('[ChatTab] Schema migration pending — loading without is_bot/reactions');
+          const { data: fallback, error: fe } = await supabase
+            .from('messages')
+            .select('id, circle_id, user_id, content, reply_to, created_at, user:profiles(username, display_name)')
+            .eq('circle_id', circleId)
+            .order('created_at', { ascending: true })
+            .limit(100);
+          if (!fe && fallback && fallback.length > 0) {
+            const loaded: ChatMessage[] = fallback.map((m: any) => ({
+              id: m.id, dbId: m.id,
+              content: m.content || '',
+              isBot: (m.content || '').startsWith('🦢 **BlackSwan:**') || (m.content || '').startsWith('🦢 **SwanBot:**'),
+              isUser: m.user_id === user?.id,
+              userName: m.user?.display_name || m.user?.username || 'Unknown',
+              timestamp: new Date(m.created_at),
+              reactions: {}, replyTo: null, isCheckIn: false, isAchievement: false,
+            }));
+            setMessages(loaded);
+          }
+        } else {
+          console.error('[ChatTab] Error loading messages:', error);
+        }
       } else if (data && data.length > 0) {
-        const loaded: ChatMessage[] = data.map((m: any) => ({
-          id: m.id,
-          dbId: m.id,
-          content: m.is_bot
-            ? (m.content || '').replace(/^🦢 \*\*(SwanBot|BlackSwan):\*\* /, '').replace(/^👑 \*\*KingClaw:\*\* /, '')
-            : m.content,
-          isBot: m.is_bot || false,
-          isUser: m.user_id === user?.id && !m.is_bot,
-          userName: m.is_bot ? 'BlackSwan 🦢' : (m.user?.display_name || m.user?.username || 'Unknown'),
-          timestamp: new Date(m.created_at),
-          reactions: m.reactions || {},
-          replyTo: null,
-          isCheckIn: (m.content || '').toLowerCase().includes('checked in') || (m.content || '').toLowerCase().includes('streak'),
-          isAchievement: (m.content || '').toLowerCase().includes('achievement') || (m.content || '').toLowerCase().includes('unlocked'),
-        }));
+        const loaded: ChatMessage[] = data.map((m: any) => {
+          const isBot = m.is_bot === true
+            || (m.content || '').startsWith('🦢 **BlackSwan:**')
+            || (m.content || '').startsWith('🦢 **SwanBot:**');
+          return {
+            id: m.id,
+            dbId: m.id,
+            content: isBot
+              ? (m.content || '').replace(/^🦢 \*\*(SwanBot|BlackSwan):\*\* /, '').replace(/^👑 \*\*KingClaw:\*\* /, '')
+              : (m.content || ''),
+            isBot,
+            isUser: m.user_id === user?.id && !isBot,
+            userName: isBot ? 'BlackSwan 🦢' : (m.user?.display_name || m.user?.username || 'Unknown'),
+            timestamp: new Date(m.created_at),
+            reactions: m.reactions || {},
+            replyTo: null,
+            isCheckIn: (m.content || '').toLowerCase().includes('checked in') || (m.content || '').toLowerCase().includes('streak'),
+            isAchievement: (m.content || '').toLowerCase().includes('achievement') || (m.content || '').toLowerCase().includes('unlocked'),
+          };
+        });
         setMessages(loaded);
       }
     } catch (e) { 
-      console.error('Unexpected error loading messages:', e);
+      console.error('[ChatTab] Unexpected error loading messages:', e);
     }
 
     // Check wallet
@@ -427,15 +457,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         // Skip messages we sent ourselves (already in local state)
         if (newMsg.user_id === currentUserId) return;
 
+        // Detect bot messages even if is_bot column not yet migrated
+        const isBotMsg = newMsg.is_bot === true
+          || (newMsg.content || '').startsWith('🦢 **BlackSwan:**')
+          || (newMsg.content || '').startsWith('🦢 **SwanBot:**');
+
         const msg: ChatMessage = {
           id: newMsg.id,
           dbId: newMsg.id,
-          content: newMsg.is_bot
+          content: isBotMsg
             ? (newMsg.content || '').replace(/^🦢 \*\*(SwanBot|BlackSwan):\*\* /, '').replace(/^👑 \*\*KingClaw:\*\* /, '')
-            : newMsg.content,
-          isBot: newMsg.is_bot || false,
+            : (newMsg.content || ''),
+          isBot: isBotMsg,
           isUser: false,
-          userName: newMsg.is_bot ? 'BlackSwan 🦢' : 'Circle Member',
+          userName: isBotMsg ? 'BlackSwan 🦢' : 'Circle Member',
           timestamp: new Date(newMsg.created_at),
           reactions: newMsg.reactions || {},
           replyTo: null,
@@ -542,19 +577,35 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             content,
             reactions: {},
             is_bot: false,
+            ...(replyTo?.dbId ? { reply_to: replyTo.dbId } : {}),
           }).select('id').single();
 
           if (error) {
-            console.error('Error persisting message (attempt', attempt + 1, '):', error.message);
-            if (attempt < 2) {
+            // If schema migration hasn't run yet, retry without new columns
+            if (error.code === 'PGRST204' || error.code === '42703') {
+              console.warn('[ChatTab] Retrying insert without is_bot/reactions (migration pending)');
+              const { data: d2, error: e2 } = await supabase.from('messages').insert({
+                circle_id: circleId,
+                user_id: currentUserId,
+                content,
+              }).select('id').single();
+              if (!e2 && d2) {
+                setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, dbId: d2.id } : m));
+              } else {
+                console.error('[ChatTab] Fallback insert failed:', e2?.message);
+              }
+              return;
+            }
+            console.error('[ChatTab] Error persisting message (attempt', attempt + 1, '):', error.code, error.message);
+            if (attempt < 3) {
               setTimeout(() => persistMessage(attempt + 1), 1000 * (attempt + 1));
             }
           } else if (data) {
             setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, dbId: data.id } : m));
           }
         } catch (e) {
-          console.error('Unexpected error persisting:', e);
-          if (attempt < 2) {
+          console.error('[ChatTab] Unexpected error persisting:', e);
+          if (attempt < 3) {
             setTimeout(() => persistMessage(attempt + 1), 1000 * (attempt + 1));
           }
         }
@@ -591,12 +642,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             is_bot: true,
           });
           if (error) {
-            console.error('Error persisting bot message (attempt', attempt + 1, '):', error.message);
-            if (attempt < 2) setTimeout(() => persistBot(attempt + 1), 1000 * (attempt + 1));
+            // Schema migration pending — retry without new columns
+            if (error.code === 'PGRST204' || error.code === '42703') {
+              console.warn('[ChatTab] Bot message: retrying without is_bot/reactions');
+              await supabase.from('messages').insert({
+                circle_id: circleId,
+                user_id: currentUserId,
+                content: `🦢 **BlackSwan:** ${content}`,
+              });
+              return;
+            }
+            console.error('[ChatTab] Error persisting bot message (attempt', attempt + 1, '):', error.code, error.message);
+            if (attempt < 3) setTimeout(() => persistBot(attempt + 1), 1000 * (attempt + 1));
           }
         } catch (e) {
-          console.error('Unexpected error persisting bot msg:', e);
-          if (attempt < 2) setTimeout(() => persistBot(attempt + 1), 1000 * (attempt + 1));
+          console.error('[ChatTab] Unexpected error persisting bot msg:', e);
+          if (attempt < 3) setTimeout(() => persistBot(attempt + 1), 1000 * (attempt + 1));
         }
       };
       persistBot();
