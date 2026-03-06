@@ -10,12 +10,15 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { signInWithSSO } from '../../lib/sso';
 
 export default function LoginScreen({ navigation }: any) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [showSSO, setShowSSO] = useState(false);
+  const [ssoDomain, setSsoDomain] = useState('');
   const { width } = useWindowDimensions();
   const isWide = width > 500;
 
@@ -29,6 +32,17 @@ export default function LoginScreen({ navigation }: any) {
     const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
     setLoading(false);
     if (signInError) setError(signInError.message);
+  };
+
+  const handleSSO = async () => {
+    if (!ssoDomain.trim()) {
+      setError('Enter your company domain');
+      return;
+    }
+    setLoading(true);
+    const { error: ssoError } = await signInWithSSO(ssoDomain.trim());
+    setLoading(false);
+    if (ssoError) setError(ssoError);
   };
 
   return (
@@ -87,6 +101,37 @@ export default function LoginScreen({ navigation }: any) {
           </View>
 
           <View style={styles.divider} />
+
+          {showSSO ? (
+            <View style={styles.ssoSection}>
+              <TextInput
+                style={styles.input}
+                placeholder="company.com"
+                placeholderTextColor="#444"
+                value={ssoDomain}
+                onChangeText={setSsoDomain}
+                autoCapitalize="none"
+              />
+              <TouchableOpacity
+                style={styles.ssoButton}
+                onPress={handleSSO}
+                disabled={loading}
+              >
+                <Text style={styles.ssoButtonText}>
+                  {loading ? 'REDIRECTING...' : 'SIGN IN WITH SSO'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => setShowSSO(false)}>
+                <Text style={styles.ssoBackText}>← Back to email login</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <TouchableOpacity onPress={() => setShowSSO(true)}>
+              <Text style={styles.ssoLinkText}>Sign in with SSO</Text>
+            </TouchableOpacity>
+          )}
+
+          <View style={styles.dividerSmall} />
 
           <TouchableOpacity onPress={() => navigation.navigate('SignUp')}>
             <Text style={styles.linkText}>
@@ -225,5 +270,40 @@ const styles = StyleSheet.create({
   linkBold: {
     color: '#fff',
     fontWeight: '700',
+  },
+  ssoSection: {
+    marginBottom: 16,
+  },
+  ssoButton: {
+    backgroundColor: '#1a1a2e',
+    borderWidth: 1,
+    borderColor: '#6366f140',
+    borderRadius: 10,
+    padding: 15,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  ssoButtonText: {
+    color: '#6366f1',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
+  ssoBackText: {
+    color: '#555',
+    textAlign: 'center',
+    fontSize: 13,
+  },
+  ssoLinkText: {
+    color: '#6366f1',
+    textAlign: 'center',
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 16,
+  },
+  dividerSmall: {
+    height: 1,
+    backgroundColor: '#222',
+    marginBottom: 16,
   },
 });

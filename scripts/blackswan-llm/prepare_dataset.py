@@ -18,6 +18,8 @@ from collections import Counter
 DATA_DIR = Path(__file__).parent / "training_data"
 REAL_FILE = DATA_DIR / "blackswan_real.jsonl"
 SYNTHETIC_FILE = DATA_DIR / "blackswan_synthetic.jsonl"
+MULTITURN_FILE = DATA_DIR / "blackswan_multiturn.jsonl"
+PUBLIC_FILE = DATA_DIR / "public_curated.jsonl"
 TRAIN_FILE = DATA_DIR / "train.jsonl"
 EVAL_FILE = DATA_DIR / "eval.jsonl"
 STATS_FILE = DATA_DIR / "stats.json"
@@ -203,10 +205,17 @@ def main():
     # Load data
     real = load_jsonl(REAL_FILE)
     synthetic = load_jsonl(SYNTHETIC_FILE)
-    print(f"Loaded: {len(real)} real, {len(synthetic)} synthetic")
-    stats["sources"] = {"real": len(real), "synthetic": len(synthetic)}
+    multiturn = load_jsonl(MULTITURN_FILE)
+    public = load_jsonl(PUBLIC_FILE)
+    print(f"Loaded: {len(real)} real, {len(synthetic)} synthetic, {len(multiturn)} multiturn, {len(public)} public")
+    stats["sources"] = {
+        "real": len(real),
+        "synthetic": len(synthetic),
+        "multiturn": len(multiturn),
+        "public": len(public),
+    }
 
-    all_convs = real + synthetic
+    all_convs = real + synthetic + multiturn + public
     print(f"Total raw: {len(all_convs)}")
 
     # Step 1: PII cleaning

@@ -1,35 +1,38 @@
 /**
  * HaloBadge — renders a single badge in Xbox Halo style
  * Hexagonal/shield shape with tier glow, center icon, and name plate
+ *
+ * Layout: wrapper is a COLUMN (badge + tier strip stacked), not overlapping.
+ * This prevents the tier strip from bleeding outside the declared height.
  */
 import React, { useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, Animated, Platform } from 'react-native';
+import { View, Text, StyleSheet, Animated } from 'react-native';
 import { Badge, TIER_COLORS } from '../lib/badges';
 
 interface Props {
   badge: Badge;
   earned?: boolean;
   size?: 'sm' | 'md' | 'lg';
-  animate?: boolean; // pulse glow on earn
+  animate?: boolean;
 }
 
 const SIZES = {
-  sm: { outer: 54, inner: 42, icon: 18, name: 7 },
-  md: { outer: 80, inner: 62, icon: 26, name: 9 },
-  lg: { outer: 120, inner: 94, icon: 40, name: 11 },
+  sm: { outer: 48, inner: 36, icon: 16, name: 6,  strip: 14 },
+  md: { outer: 72, inner: 56, icon: 24, name: 8,  strip: 18 },
+  lg: { outer: 110, inner: 86, icon: 38, name: 10, strip: 22 },
 };
 
 export default function HaloBadge({ badge, earned = true, size = 'md', animate = false }: Props) {
   const tier = TIER_COLORS[badge.tier];
   const dim = SIZES[size];
   const glowAnim = useRef(new Animated.Value(0.4)).current;
-  const scaleAnim = useRef(new Animated.Value(1)).current;
+  const scaleAnim = useRef(new Animated.Value(animate ? 0 : 1)).current;
 
   useEffect(() => {
     if (!animate || !earned) return;
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(glowAnim, { toValue: 1, duration: 1200, useNativeDriver: true }),
+        Animated.timing(glowAnim, { toValue: 1,   duration: 1200, useNativeDriver: true }),
         Animated.timing(glowAnim, { toValue: 0.4, duration: 1200, useNativeDriver: true }),
       ]),
     );
@@ -41,100 +44,121 @@ export default function HaloBadge({ badge, earned = true, size = 'md', animate =
     if (!animate) return;
     Animated.spring(scaleAnim, {
       toValue: 1,
-      from: 0,
       useNativeDriver: true,
       tension: 80,
       friction: 8,
     } as any).start();
   }, [animate]);
 
-  const opacity = earned ? 1 : 0.25;
+  const borderRadius =
+    badge.shape === 'circle'  ? dim.outer / 2 :
+    badge.shape === 'diamond' ? 4 :
+    badge.shape === 'star'    ? 12 :
+    badge.shape === 'shield'  ? 10 :
+    10; // hexagon
+
+  const innerRadius =
+    badge.shape === 'circle'  ? dim.inner / 2 :
+    badge.shape === 'diamond' ? 2 :
+    6;
 
   return (
-    <View style={[styles.wrapper, { width: dim.outer, height: dim.outer, opacity }]}>
-      {/* Glow ring */}
-      {earned && (
+    // Column wrapper: badge body on top, tier strip below — no absolute positioning
+    <View style={[st.col, { opacity: earned ? 1 : 0.28 }]}>
+      {/* Glow ring — absolute inside this column row */}
+      <View style={[st.badgeArea, { width: dim.outer, height: dim.outer }]}>
+        {earned && (
+          <Animated.View
+            style={[
+              st.glowRing,
+              {
+                width: dim.outer + 10,
+                height: dim.outer + 10,
+                borderRadius: (dim.outer + 10) / 2,
+                backgroundColor: tier.glow,
+                opacity: glowAnim,
+                top: -5, left: -5,
+              },
+            ]}
+          />
+        )}
+
+        {/* Outer shell */}
         <Animated.View
           style={[
-            styles.glowRing,
+            st.outer,
             {
-              width: dim.outer + 8,
-              height: dim.outer + 8,
-              borderRadius: (dim.outer + 8) / 2,
-              backgroundColor: tier.glow,
-              opacity: glowAnim,
-            },
-          ]}
-        />
-      )}
-
-      {/* Outer hexagon shell */}
-      <Animated.View
-        style={[
-          styles.outer,
-          {
-            width: dim.outer,
-            height: dim.outer,
-            borderRadius: badge.shape === 'circle' ? dim.outer / 2
-              : badge.shape === 'diamond' ? 4
-              : badge.shape === 'star' ? 12
-              : badge.shape === 'shield' ? 10
-              : 10, // hexagon
-            backgroundColor: tier.bg,
-            borderColor: tier.border,
-            transform: [
-              { scale: scaleAnim },
-              ...(badge.shape === 'diamond' ? [{ rotate: '45deg' }] : []),
-            ],
-          },
-        ]}
-      >
-        {/* Inner plate */}
-        <View
-          style={[
-            styles.inner,
-            {
-              width: dim.inner,
-              height: dim.inner,
-              borderRadius: badge.shape === 'circle' ? dim.inner / 2
-                : badge.shape === 'diamond' ? 2
-                : 6,
-              backgroundColor: earned ? tier.border + '18' : '#111',
-              borderColor: tier.border + '40',
-              transform: badge.shape === 'diamond' ? [{ rotate: '-45deg' }] : [],
+              width: dim.outer,
+              height: dim.outer,
+              borderRadius,
+              backgroundColor: tier.bg,
+              borderColor: earned ? tier.border : '#333',
+              transform: [
+                { scale: scaleAnim },
+                ...(badge.shape === 'diamond' ? [{ rotate: '45deg' }] : []),
+              ],
             },
           ]}
         >
-          {/* Center glyph */}
-          <Text style={[
-            styles.icon,
-            { fontSize: dim.icon },
-            badge.shape === 'diamond' && { transform: [{ rotate: '-45deg' }] },
-          ]}>
-            {badge.icon}
-          </Text>
-        </View>
-      </Animated.View>
+          {/* Inner plate */}
+          <View
+            style={[
+              st.inner,
+              {
+                width: dim.inner,
+                height: dim.inner,
+                borderRadius: innerRadius,
+                backgroundColor: earned ? tier.border + '18' : '#0a0a0a',
+                borderColor: earned ? tier.border + '44' : '#222',
+                transform: badge.shape === 'diamond' ? [{ rotate: '-45deg' }] : [],
+              },
+            ]}
+          >
+            <Text
+              style={[
+                st.icon,
+                { fontSize: dim.icon },
+                badge.shape === 'diamond' && { transform: [{ rotate: '-45deg' }] },
+              ]}
+            >
+              {badge.icon}
+            </Text>
+          </View>
+        </Animated.View>
+      </View>
 
-      {/* Tier label strip */}
-      <View style={[styles.tierStrip, { backgroundColor: tier.border + '20', borderColor: tier.border + '50' }]}>
-        <Text style={[styles.tierText, { color: tier.border, fontSize: dim.name }]}>
-          {TIER_COLORS[badge.tier].label}
+      {/* Tier strip — normal flow, sits below the badge, no overlap */}
+      <View
+        style={[
+          st.tierStrip,
+          {
+            backgroundColor: earned ? tier.border + '22' : '#111',
+            borderColor: earned ? tier.border + '55' : '#222',
+            marginTop: 5,
+            paddingHorizontal: size === 'lg' ? 8 : size === 'md' ? 6 : 4,
+            paddingVertical: size === 'lg' ? 2 : 1,
+          },
+        ]}
+      >
+        <Text style={[st.tierText, { color: earned ? tier.border : '#333', fontSize: dim.name }]}>
+          {tier.label}
         </Text>
       </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  wrapper: {
+const st = StyleSheet.create({
+  col: {
+    alignItems: 'center',
+  },
+  badgeArea: {
     alignItems: 'center',
     justifyContent: 'center',
+    position: 'relative',
   },
   glowRing: {
     position: 'absolute',
-    top: -4,
-    left: -4,
   },
   outer: {
     borderWidth: 2,
@@ -142,9 +166,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.5,
-    shadowRadius: 4,
-    elevation: 6,
+    shadowOpacity: 0.6,
+    shadowRadius: 6,
+    elevation: 8,
   },
   inner: {
     borderWidth: 1,
@@ -155,12 +179,8 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   tierStrip: {
-    position: 'absolute',
-    bottom: -2,
     borderWidth: 1,
-    borderRadius: 3,
-    paddingHorizontal: 5,
-    paddingVertical: 1,
+    borderRadius: 4,
   },
   tierText: {
     fontWeight: '900',

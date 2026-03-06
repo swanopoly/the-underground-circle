@@ -18,14 +18,16 @@ import {
 
 interface CostData {
   today: number;
-  todayChange: number; // % change from yesterday
+  todayChange: number;
   week: number;
-  weekChange: number; // % change from last week
+  weekChange: number;
   month: number;
-  monthChange: number; // % change from last month
-  dailyHistory: Array<{ date: string; cost: number }>; // Last 30 days
+  monthChange: number;
+  dailyHistory: Array<{ date: string; cost: number }>;
   topSpenders: Array<{ name: string; cost: number; percentage: number; sessions: number }>;
   insights: Array<{ type: 'warning' | 'tip' | 'success'; text: string }>;
+  modelBreakdown: Array<{ model: string; cost: number; tokens: number; percentage: number; color: string }>;
+  tokenBreakdown: { input: number; output: number; cached: number; newInput: number; total: number };
 }
 
 interface Props {
@@ -232,6 +234,112 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
         <View style={styles.chartContainer}>
           <MiniBarChart data={costData.dailyHistory} accentColor={accentColor} />
         </View>
+        {/* Period comparison */}
+        {costData.dailyHistory.length > 1 && (
+          <View style={styles.trendSummary}>
+            <View style={styles.trendItem}>
+              <Text style={styles.trendLabel}>AVG/DAY</Text>
+              <Text style={[styles.trendValue, { color: accentColor }]}>
+                ${(costData.dailyHistory.reduce((s, d) => s + d.cost, 0) / costData.dailyHistory.length).toFixed(3)}
+              </Text>
+            </View>
+            <View style={styles.trendItem}>
+              <Text style={styles.trendLabel}>PEAK</Text>
+              <Text style={[styles.trendValue, { color: '#ef4444' }]}>
+                ${Math.max(...costData.dailyHistory.map(d => d.cost)).toFixed(3)}
+              </Text>
+            </View>
+            <View style={styles.trendItem}>
+              <Text style={styles.trendLabel}>TREND</Text>
+              <Text style={[styles.trendValue, { color: (() => {
+                const first = costData.dailyHistory.slice(0, Math.floor(costData.dailyHistory.length / 2));
+                const second = costData.dailyHistory.slice(Math.floor(costData.dailyHistory.length / 2));
+                const firstAvg = first.reduce((s, d) => s + d.cost, 0) / (first.length || 1);
+                const secondAvg = second.reduce((s, d) => s + d.cost, 0) / (second.length || 1);
+                return secondAvg > firstAvg ? '#ef4444' : '#22c55e';
+              })() }]}>
+                {(() => {
+                  const first = costData.dailyHistory.slice(0, Math.floor(costData.dailyHistory.length / 2));
+                  const second = costData.dailyHistory.slice(Math.floor(costData.dailyHistory.length / 2));
+                  const firstAvg = first.reduce((s, d) => s + d.cost, 0) / (first.length || 1);
+                  const secondAvg = second.reduce((s, d) => s + d.cost, 0) / (second.length || 1);
+                  const change = firstAvg > 0 ? ((secondAvg - firstAvg) / firstAvg) * 100 : 0;
+                  return `${change > 0 ? '▲' : '▼'} ${Math.abs(change).toFixed(0)}%`;
+                })()}
+              </Text>
+            </View>
+          </View>
+        )}
+      </View>
+
+      {/* Per-Model Cost Breakdown */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>COST BY MODEL</Text>
+        <View style={styles.spendersContainer}>
+          {costData.modelBreakdown.map((m, i) => (
+            <View key={i} style={styles.modelRow}>
+              <View style={styles.modelLeft}>
+                <View style={[styles.modelDot, { backgroundColor: m.color }]} />
+                <Text style={styles.modelName}>{m.model}</Text>
+              </View>
+              <View style={styles.modelRight}>
+                <Text style={[styles.modelCost, { color: accentColor }]}>${m.cost.toFixed(3)}</Text>
+                <Text style={styles.modelTokens}>{formatTokenCount(m.tokens)} tok</Text>
+              </View>
+              <View style={styles.spenderBar}>
+                <View style={[styles.spenderBarFill, { width: (m.percentage + '%') as any, backgroundColor: m.color }]} />
+              </View>
+            </View>
+          ))}
+          {costData.modelBreakdown.length === 0 && (
+            <Text style={styles.noDataText}>No model data yet</Text>
+          )}
+        </View>
+      </View>
+
+      {/* Token Breakdown */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>TOKEN BREAKDOWN</Text>
+        <View style={styles.tokenGrid}>
+          <View style={styles.tokenCard}>
+            <Text style={styles.tokenLabel}>INPUT</Text>
+            <Text style={[styles.tokenValue, { color: '#3b82f6' }]}>
+              {formatTokenCount(costData.tokenBreakdown.input)}
+            </Text>
+          </View>
+          <View style={styles.tokenCard}>
+            <Text style={styles.tokenLabel}>OUTPUT</Text>
+            <Text style={[styles.tokenValue, { color: '#8b5cf6' }]}>
+              {formatTokenCount(costData.tokenBreakdown.output)}
+            </Text>
+          </View>
+          <View style={styles.tokenCard}>
+            <Text style={styles.tokenLabel}>CACHED</Text>
+            <Text style={[styles.tokenValue, { color: '#22c55e' }]}>
+              {formatTokenCount(costData.tokenBreakdown.cached)}
+            </Text>
+          </View>
+          <View style={styles.tokenCard}>
+            <Text style={styles.tokenLabel}>NEW INPUT</Text>
+            <Text style={[styles.tokenValue, { color: '#f59e0b' }]}>
+              {formatTokenCount(costData.tokenBreakdown.newInput)}
+            </Text>
+          </View>
+        </View>
+        {/* Token bar visualization */}
+        <View style={styles.tokenBarContainer}>
+          {costData.tokenBreakdown.total > 0 && (
+            <View style={styles.tokenBarRow}>
+              <View style={[styles.tokenBarSegment, { flex: costData.tokenBreakdown.input || 1, backgroundColor: '#3b82f6' }]} />
+              <View style={[styles.tokenBarSegment, { flex: costData.tokenBreakdown.output || 1, backgroundColor: '#8b5cf6' }]} />
+            </View>
+          )}
+          <View style={styles.tokenBarLegend}>
+            <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#3b82f6' }]} /><Text style={styles.legendText}>Input</Text></View>
+            <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#8b5cf6' }]} /><Text style={styles.legendText}>Output</Text></View>
+            <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#22c55e' }]} /><Text style={styles.legendText}>Cached</Text></View>
+          </View>
+        </View>
       </View>
 
       {/* Top Spenders */}
@@ -380,7 +488,7 @@ function MiniBarChart({ data, accentColor }: {
                 style={[
                   styles.bar,
                   {
-                    height: heightPercent + '%',
+                    height: (heightPercent + '%') as any,
                     backgroundColor: isToday ? accentColor : accentColor + '60',
                   },
                 ]}
@@ -434,7 +542,7 @@ function SpenderRow({ name, cost, percentage, sessions, rank, accentColor }: {
         <View
           style={[
             styles.spenderBarFill,
-            { width: percentage + '%', backgroundColor: accentColor },
+            { width: (percentage + '%') as any, backgroundColor: accentColor },
           ]}
         />
       </View>
@@ -493,6 +601,10 @@ function calculateCostData(sessions: OpenClawSession[], dateRange: 7 | 30 | 90 =
 
   const agentCosts: Record<string, { cost: number; sessions: number }> = {};
   const dailyCosts: Record<string, number> = {};
+  const modelCosts: Record<string, { cost: number; tokens: number }> = {};
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  let totalCachedTokens = 0;
 
   sessions.forEach(s => {
     const cost = s.totalCost || 0;
@@ -511,6 +623,17 @@ function calculateCostData(sessions: OpenClawSession[], dateRange: 7 | 30 | 90 =
     if (!agentCosts[agentName]) agentCosts[agentName] = { cost: 0, sessions: 0 };
     agentCosts[agentName].cost += cost;
     agentCosts[agentName].sessions += 1;
+
+    // Model totals
+    const model = s.model || 'unknown';
+    if (!modelCosts[model]) modelCosts[model] = { cost: 0, tokens: 0 };
+    modelCosts[model].cost += cost;
+    modelCosts[model].tokens += (s.totalInputTokens || 0) + (s.totalOutputTokens || 0);
+
+    // Token breakdown
+    totalInputTokens += s.totalInputTokens || 0;
+    totalOutputTokens += s.totalOutputTokens || 0;
+    totalCachedTokens += s.cachedTokens || 0;
 
     // Daily totals (last 30 days)
     const dateKey = sessionDate.toISOString().split('T')[0];
@@ -570,6 +693,40 @@ function calculateCostData(sessions: OpenClawSession[], dateRange: 7 | 30 | 90 =
     });
   }
 
+  // Model breakdown
+  const MODEL_COLORS: Record<string, string> = {
+    'blackswan': '#ef4444',
+    'claude-haiku-4-5-20251001': '#22c55e',
+    'claude-sonnet-4-6': '#3b82f6',
+    'claude-opus-4-6': '#8b5cf6',
+    'mixed': '#f59e0b',
+    'unknown': '#666',
+  };
+  const totalModelCost = Object.values(modelCosts).reduce((s, m) => s + m.cost, 0) || 1;
+  const modelBreakdown = Object.entries(modelCosts)
+    .map(([model, data]) => ({
+      model: model.replace('claude-haiku-4-5-20251001', 'Haiku')
+                   .replace('claude-sonnet-4-6', 'Sonnet')
+                   .replace('claude-opus-4-6', 'Opus')
+                   .replace('blackswan', 'BlackSwan')
+                   .replace('mixed', 'Mixed')
+                   .replace('unknown', 'Unknown'),
+      cost: data.cost,
+      tokens: data.tokens,
+      percentage: (data.cost / totalModelCost) * 100,
+      color: MODEL_COLORS[model] || '#666',
+    }))
+    .sort((a, b) => b.cost - a.cost);
+
+  // Token breakdown
+  const tokenBreakdown = {
+    input: totalInputTokens,
+    output: totalOutputTokens,
+    cached: totalCachedTokens,
+    newInput: totalInputTokens - totalCachedTokens,
+    total: totalInputTokens + totalOutputTokens,
+  };
+
   return {
     today: todayCost,
     todayChange,
@@ -580,6 +737,8 @@ function calculateCostData(sessions: OpenClawSession[], dateRange: 7 | 30 | 90 =
     dailyHistory,
     topSpenders,
     insights,
+    modelBreakdown,
+    tokenBreakdown,
   };
 }
 
@@ -886,6 +1045,143 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '500',
     lineHeight: 18,
+  },
+
+  // Trend Summary
+  trendSummary: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    backgroundColor: '#1a1a1a',
+    borderWidth: 1,
+    borderColor: '#333',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 8,
+  },
+  trendItem: {
+    alignItems: 'center',
+  },
+  trendLabel: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#666',
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
+  trendValue: {
+    fontSize: 14,
+    fontWeight: '800',
+  },
+
+  // Model Breakdown
+  modelRow: {
+    backgroundColor: '#1a1a1a',
+    borderWidth: 1,
+    borderColor: '#333',
+    borderRadius: 8,
+    padding: 12,
+  },
+  modelLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  modelDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginRight: 8,
+  },
+  modelName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  modelRight: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  modelCost: {
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  modelTokens: {
+    fontSize: 12,
+    color: '#888',
+    fontWeight: '600',
+  },
+  noDataText: {
+    fontSize: 12,
+    color: '#666',
+    textAlign: 'center',
+    padding: 16,
+  },
+
+  // Token Breakdown
+  tokenGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 12,
+  },
+  tokenCard: {
+    flex: 1,
+    minWidth: '45%' as any,
+    backgroundColor: '#1a1a1a',
+    borderWidth: 1,
+    borderColor: '#333',
+    borderRadius: 8,
+    padding: 12,
+    alignItems: 'center',
+  },
+  tokenLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#888',
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
+  tokenValue: {
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  tokenBarContainer: {
+    backgroundColor: '#1a1a1a',
+    borderWidth: 1,
+    borderColor: '#333',
+    borderRadius: 8,
+    padding: 12,
+  },
+  tokenBarRow: {
+    flexDirection: 'row',
+    height: 12,
+    borderRadius: 6,
+    overflow: 'hidden',
+    marginBottom: 8,
+  },
+  tokenBarSegment: {
+    height: '100%',
+  },
+  tokenBarLegend: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 16,
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  legendDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  legendText: {
+    fontSize: 10,
+    color: '#888',
+    fontWeight: '600',
   },
 
   // Export Modal

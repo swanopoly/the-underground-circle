@@ -210,7 +210,8 @@ const CIRCLE_ICONS = [
   '🖥️', '👥', '✍️', '💼', '🔬', '🤖', '🐾', '📡', '🛠️', '🌐'
 ];
 
-export default function CreateCircleScreen({ navigation }: any) {
+export default function CreateCircleScreen({ route, navigation }: any) {
+  const orgId = route?.params?.orgId || null;
   const [step, setStep] = useState<'template' | 'customize'>('template');
   const [selectedTemplate, setSelectedTemplate] = useState<CircleTemplate | null>(null);
   
@@ -267,6 +268,7 @@ export default function CreateCircleScreen({ navigation }: any) {
         accent_color: accentColor,
         check_in_format: checkInFormat,
         tags,
+        ...(orgId ? { org_id: orgId } : {}),
       })
       .select()
       .single();

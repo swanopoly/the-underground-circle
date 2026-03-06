@@ -14,11 +14,12 @@ interface RequestBody {
   message: string;
   circleId: string;
   userId: string;
+  model?: string | null; // 'blackswan' | 'claude-haiku' | 'claude-sonnet' | 'claude-opus' | null (auto)
 }
 
 // ─── Context Gathering ───────────────────────────────────────────────────────
 
-async function gatherCircleContext(supabase: any, circleId: string, userId: string) {
+async function gatherCircleContext(supabase: any, circleId: string, userId: string, userMessage?: string) {
   // Get circle info
   const { data: circle } = await supabase
     .from("circles")
@@ -89,6 +90,64 @@ async function gatherCircleContext(supabase: any, circleId: string, userId: stri
   const checkedInIds = new Set((todayCheckIns || []).map((c: any) => c.user?.username));
   const notCheckedIn = members.filter((m: any) => !checkedInIds.has(m.username));
 
+  // Get user XP & level
+  const { data: userXp } = await supabase
+    .from("user_xp")
+    .select("total_xp, level, title, grind_karma, social_karma")
+    .eq("user_id", userId)
+    .single();
+
+  // Get member XP for leaderboard context
+  const memberIds = members.map((m: any) => m.id).filter(Boolean);
+  const { data: memberXp } = memberIds.length > 0
+    ? await supabase.from("user_xp").select("user_id, total_xp, level, title").in("user_id", memberIds)
+    : { data: [] };
+
+  // Get user's recent achievements
+  const { data: userAchievements } = await supabase
+    .from("user_achievements")
+    .select("unlocked_at, achievement:achievements(name, description, icon, xp_reward)")
+    .eq("user_id", userId)
+    .order("unlocked_at", { ascending: false })
+    .limit(5);
+
+  // Get active challenges
+  const { data: activeChallenges } = await supabase
+    .from("challenges")
+    .select("title, description, challenge_type, target_value, start_date, end_date, xp_reward, status")
+    .eq("circle_id", circleId)
+    .eq("status", "active")
+    .limit(5);
+
+  // Get user's goals / north star
+  const { data: userGoals } = await supabase
+    .from("north_star_entries")
+    .select("content, created_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(3);
+
+  // Get recent agent activity in the circle
+  const { data: agentActivity } = await supabase
+    .from("agent_activity")
+    .select("agent_name, activity_type, title, body, created_at")
+    .eq("circle_id", circleId)
+    .order("created_at", { ascending: false })
+    .limit(10);
+
+  // Load relevant past knowledge for this conversation
+  let knowledgeEntries: any[] = [];
+  try {
+    const { data: knowledge } = await supabase.rpc("get_relevant_knowledge", {
+      p_circle_id: circleId,
+      p_message: userMessage || "",
+      p_limit: 5,
+    });
+    knowledgeEntries = knowledge || [];
+  } catch {
+    // Knowledge table may not exist yet — gracefully skip
+  }
+
   return {
     circle,
     members,
@@ -101,6 +160,13 @@ async function gatherCircleContext(supabase: any, circleId: string, userId: stri
     notCheckedIn,
     memberCount: members.length,
     checkedInCount: (todayCheckIns || []).length,
+    userXp: userXp || null,
+    memberXp: memberXp || [],
+    userAchievements: userAchievements || [],
+    activeChallenges: activeChallenges || [],
+    userGoals: userGoals || [],
+    agentActivity: agentActivity || [],
+    knowledgeEntries,
   };
 }
 
@@ -126,6 +192,12 @@ function buildSystemPrompt(ctx: any) {
 - Use emojis very sparingly — only when they actually add something (🦢 🔥 ✅)
 - Keep responses tight — concise for casual chat, structured and thorough for real guidance
 
+## Expanded Knowledge
+- Design & UI/UX: You understand layout, color theory, typography, component patterns, responsive design, design systems. You can critique interfaces, suggest improvements, and reference real tools (Figma, Framer, Tailwind).
+- Art & Creative: Visual storytelling, brand identity, aesthetic critique, creative direction, color palettes, illustration guidance. You appreciate craft.
+- Code & Technical: Architecture patterns, debugging, code review, performance, testing strategy. You know React, Node, Python, Supabase, TypeScript, and modern stacks deeply.
+- General Knowledge: Science, history, philosophy, business strategy, psychology, culture. You weave it in when relevant, never to show off.
+
 ## Current Time
 ${dateStr} at ${timeStr} ET
 
@@ -143,6 +215,52 @@ Name: ${ctx.currentUser?.display_name || ctx.currentUser?.username || "Unknown"}
 Streak: ${ctx.currentUser?.current_streak || 0} days
 Longest streak: ${ctx.currentUser?.longest_streak || 0} days
 Bio: ${ctx.currentUser?.bio || "None set"}`;
+
+  // XP & Level
+  if (ctx.userXp) {
+    prompt += `\nXP: ${ctx.userXp.total_xp || 0} | Level ${ctx.userXp.level || 1} "${ctx.userXp.title || "Newcomer"}"`;
+    prompt += `\nGrind Karma: ${ctx.userXp.grind_karma || 0} | Social Karma: ${ctx.userXp.social_karma || 0}`;
+  }
+
+  // Member XP leaderboard
+  if (ctx.memberXp && ctx.memberXp.length > 0) {
+    const xpMap = new Map(ctx.memberXp.map((x: any) => [x.user_id, x]));
+    const ranked = ctx.members
+      .map((m: any) => ({ name: m.display_name || m.username, ...(xpMap.get(m.id) || { total_xp: 0, level: 1 }) }))
+      .sort((a: any, b: any) => (b.total_xp || 0) - (a.total_xp || 0));
+    prompt += `\n\n## XP Leaderboard\n${ranked.map((r: any, i: number) => `${i + 1}. ${r.name} — ${r.total_xp || 0} XP (Lv${r.level || 1})`).join("\n")}`;
+  }
+
+  // Recent achievements
+  if (ctx.userAchievements && ctx.userAchievements.length > 0) {
+    prompt += `\n\n## User's Recent Achievements\n${ctx.userAchievements.map((a: any) => `- ${a.achievement?.icon || "🏅"} ${a.achievement?.name} — ${a.achievement?.description || ""} (+${a.achievement?.xp_reward || 0} XP)`).join("\n")}`;
+  }
+
+  // Active challenges
+  if (ctx.activeChallenges && ctx.activeChallenges.length > 0) {
+    prompt += `\n\n## Active Challenges\n${ctx.activeChallenges.map((c: any) => `- ${c.title} (${c.challenge_type}) — target: ${c.target_value}, ends ${c.end_date || "TBD"}, reward: ${c.xp_reward || 0} XP`).join("\n")}`;
+  }
+
+  // User goals
+  if (ctx.userGoals && ctx.userGoals.length > 0) {
+    prompt += `\n\n## User's Goals / North Star\n${ctx.userGoals.map((g: any) => `- "${g.content}"`).join("\n")}`;
+  }
+
+  // Recent agent activity
+  if (ctx.agentActivity && ctx.agentActivity.length > 0) {
+    prompt += `\n\n## Recent Agent Activity\n${ctx.agentActivity.slice(0, 5).map((a: any) => `- [${a.agent_name}] ${a.activity_type}: ${a.title || a.body?.slice(0, 80) || ""}`).join("\n")}`;
+  }
+
+  // Learned knowledge from past conversations
+  if (ctx.knowledgeEntries && ctx.knowledgeEntries.length > 0) {
+    prompt += `\n\n## Learned Knowledge (from past conversations)
+Use these past exchanges to inform your tone, approach, and answers. If a similar question was asked before, build on your previous response rather than starting from scratch.
+${ctx.knowledgeEntries.map((k: any) => {
+      const summary = k.summary || k.user_message?.slice(0, 100);
+      const response = k.bot_response?.slice(0, 150);
+      return `- [${k.category}] User asked: "${summary}" → You responded: "${response}..."`;
+    }).join("\n")}`;
+  }
 
   if (ctx.notCheckedIn.length > 0) {
     prompt += `\n\n## Haven't Checked In Today\n${ctx.notCheckedIn.map((m: any) => `- ${m.display_name || m.username}`).join("\n")}`;
@@ -260,11 +378,29 @@ async function callBlackSwanLLM(systemPrompt: string, userMessage: string): Prom
 
 // ─── Call Claude ──────────────────────────────────────────────────────────────
 
-async function callClaude(systemPrompt: string, userMessage: string): Promise<string> {
+// Map terminal model keys to Anthropic model IDs
+const CLAUDE_MODEL_MAP: Record<string, string> = {
+  "claude-haiku":  "claude-haiku-4-5-20251001",
+  "claude-sonnet": "claude-sonnet-4-6",
+  "claude-opus":   "claude-opus-4-6",
+};
+
+interface ClaudeResult {
+  text: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+}
+
+async function callClaude(systemPrompt: string, userMessage: string, modelKey?: string | null): Promise<ClaudeResult> {
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
   if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY not set");
   }
+
+  const modelId = (modelKey && CLAUDE_MODEL_MAP[modelKey]) || CLAUDE_MODEL_MAP["claude-haiku"];
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -274,7 +410,7 @@ async function callClaude(systemPrompt: string, userMessage: string): Promise<st
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
+      model: modelId,
       max_tokens: 1024,
       system: systemPrompt,
       messages: [
@@ -285,11 +421,89 @@ async function callClaude(systemPrompt: string, userMessage: string): Promise<st
 
   if (!response.ok) {
     const err = await response.text();
-    throw new Error(`Claude API error: ${response.status} — ${err}`);
+    throw new Error(`Claude API error (${modelId}): ${response.status} — ${err}`);
   }
 
   const data = await response.json();
-  return data.content?.[0]?.text || "Something went wrong. Try again.";
+  const usage = data.usage || {};
+
+  return {
+    text: data.content?.[0]?.text || "Something went wrong. Try again.",
+    model: modelId,
+    inputTokens: usage.input_tokens || 0,
+    outputTokens: usage.output_tokens || 0,
+    cacheCreationTokens: usage.cache_creation_input_tokens || 0,
+    cacheReadTokens: usage.cache_read_input_tokens || 0,
+  };
+}
+
+// ─── Knowledge Storage ──────────────────────────────────────────────────
+
+function categorizeMessage(message: string): string {
+  const lower = message.toLowerCase();
+  const patterns: [string, RegExp][] = [
+    ["games",             /\b(trivia|game|play|quiz|would you rather|hot take|roast|bet)\b/],
+    ["crypto",            /\b(crypto|eth|sol|wallet|send|tip|bounty|metamask|phantom|token)\b/],
+    ["tasks",             /\b(task|todo|assign|deadline|due|priority|done|complete)\b/],
+    ["accountability",    /\b(streak|check.?in|accountab|habit|goal|commit|discipline)\b/],
+    ["coaching",          /\b(advice|help|stuck|motivat|how do i|should i|mentor|guide|improve)\b/],
+    ["technical",         /\b(code|bug|error|api|database|react|typescript|deploy|server)\b/],
+    ["creative",          /\b(design|art|brand|logo|color|font|ui|ux|layout|creative)\b/],
+    ["circle_management", /\b(circle|member|invite|admin|role|kick|settings|manage)\b/],
+    ["social",            /\b(hey|hello|what.?s up|how are|thanks|lol|haha|chill|vibe)\b/],
+    ["onboarding",        /\b(new here|first time|how does|getting started|what is this)\b/],
+    ["feedback",          /\b(feedback|suggest|feature|bug report|improve|issue)\b/],
+  ];
+  for (const [cat, regex] of patterns) {
+    if (regex.test(lower)) return cat;
+  }
+  return "general";
+}
+
+async function storeKnowledgeEntry(
+  supabase: any,
+  circleId: string,
+  userId: string,
+  userName: string | null,
+  userMessage: string,
+  botResponse: string,
+  modelUsed: string,
+  tokensUsed: number,
+  memberCount: number,
+  userStreak: number,
+  source: string = "webchat",
+): Promise<void> {
+  try {
+    const category = categorizeMessage(userMessage);
+    // Simple quality heuristic: longer, substantive responses score higher
+    const responseLen = botResponse.length;
+    let quality = 0.5;
+    if (responseLen > 200) quality = 0.6;
+    if (responseLen > 500) quality = 0.7;
+    if (responseLen > 1000) quality = 0.8;
+    // Penalize very short bot responses (likely errors or "I don't know")
+    if (responseLen < 50) quality = 0.3;
+
+    await supabase.from("blackswan_knowledge").insert({
+      circle_id: circleId,
+      user_id: userId,
+      user_name: userName,
+      user_message: userMessage,
+      bot_response: botResponse,
+      category,
+      summary: userMessage.length > 100 ? userMessage.slice(0, 100) + "..." : userMessage,
+      quality_score: quality,
+      response_length: responseLen,
+      member_count: memberCount,
+      user_streak: userStreak,
+      source,
+      model_used: modelUsed,
+      tokens_used: tokensUsed,
+    });
+  } catch (e) {
+    // Non-critical — don't fail the response if knowledge storage fails
+    console.warn("[swanbot-ai] Failed to store knowledge entry:", e);
+  }
 }
 
 // ─── Main Handler ────────────────────────────────────────────────────────────
@@ -301,7 +515,7 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { message, circleId, userId }: RequestBody = await req.json();
+    const { message, circleId, userId, model }: RequestBody = await req.json();
 
     if (!message || !circleId || !userId) {
       return new Response(
@@ -315,20 +529,76 @@ Deno.serve(async (req: Request) => {
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    // Gather full circle context
-    const context = await gatherCircleContext(supabase, circleId, userId);
+    // Gather full circle context (includes relevant knowledge entries)
+    const context = await gatherCircleContext(supabase, circleId, userId, message);
 
     // Build the system prompt with all context
     const systemPrompt = buildSystemPrompt(context);
 
-    // Try BlackSwan LLM first (zero cost), fall back to Claude
-    let aiResponse = await callBlackSwanLLM(systemPrompt, message);
-    if (!aiResponse) {
-      aiResponse = await callClaude(systemPrompt, message);
+    // Route based on requested model:
+    // - null/auto/blackswan: try local BlackSwan LLM first, fall back to Claude Haiku
+    // - claude-haiku/sonnet/opus: skip local, go straight to that Claude model
+    let aiResponse: string | null = null;
+    let tokenBreakdown = {
+      model: "blackswan",
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_tokens: 0,
+      cache_read_tokens: 0,
+      total_tokens: 0,
+    };
+    const isClaudeModel = model && model.startsWith("claude-");
+
+    if (!isClaudeModel) {
+      // Try BlackSwan LLM first (zero cost)
+      aiResponse = await callBlackSwanLLM(systemPrompt, message);
+      if (aiResponse) {
+        // Estimate tokens for BlackSwan (local, no real usage data)
+        const est = Math.ceil((message.length + aiResponse.length) / 4);
+        tokenBreakdown = {
+          model: "blackswan",
+          input_tokens: Math.ceil(message.length / 4),
+          output_tokens: Math.ceil(aiResponse.length / 4),
+          cache_creation_tokens: 0,
+          cache_read_tokens: 0,
+          total_tokens: est,
+        };
+      }
     }
 
+    if (!aiResponse) {
+      // Fall back to Claude (using requested model or default Haiku)
+      const result = await callClaude(systemPrompt, message, isClaudeModel ? model : null);
+      aiResponse = result.text;
+      tokenBreakdown = {
+        model: result.model,
+        input_tokens: result.inputTokens,
+        output_tokens: result.outputTokens,
+        cache_creation_tokens: result.cacheCreationTokens,
+        cache_read_tokens: result.cacheReadTokens,
+        total_tokens: result.inputTokens + result.outputTokens,
+      };
+    }
+
+    // Store this exchange in the knowledge base (fire-and-forget)
+    storeKnowledgeEntry(
+      supabase,
+      circleId,
+      userId,
+      context.currentUser?.display_name || context.currentUser?.username || null,
+      message,
+      aiResponse,
+      tokenBreakdown.model,
+      tokenBreakdown.total_tokens,
+      context.memberCount,
+      context.currentUser?.current_streak || 0,
+    ).catch(() => {}); // Swallow — never block the response
+
     return new Response(
-      JSON.stringify({ response: aiResponse }),
+      JSON.stringify({
+        response: aiResponse,
+        usage: tokenBreakdown,
+      }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (error: any) {

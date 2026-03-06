@@ -1,5 +1,9 @@
 // Conversation Log - Track messages sent to and from agents
-import { getItem, setItem, removeItem } from './storage';
+import { storage } from './storage';
+
+const getItem = (key: string) => storage.getItem(key);
+const setItem = (key: string, value: string) => storage.setItem(key, value);
+const removeItem = (key: string) => storage.removeItem(key);
 
 const STORAGE_KEY = '@office_conversation_log';
 

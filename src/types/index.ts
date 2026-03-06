@@ -37,7 +37,8 @@ export interface Circle {
   vibe?: string;
   rules?: string[];
   circle_image_url?: string;
-  verification_badges?: string[]; // Array of badge types: 'activity_verified', 'peer_validated', etc.
+  verification_badges?: string[];
+  org_id?: string;
 }
 
 export interface CheckInFormat {
@@ -391,4 +392,171 @@ export interface PhotonProof {
   latitude?: number;
   longitude?: number;
   created_at: string;
+}
+
+// ─── Organization Types ──────────────────────────────────────────────
+
+export interface Organization {
+  id: string;
+  name: string;
+  slug: string;
+  logo_url?: string;
+  created_by: string;
+  plan: 'free' | 'pro' | 'business' | 'enterprise';
+  stripe_customer_id?: string;
+  stripe_subscription_id?: string;
+  subscription_status: 'active' | 'past_due' | 'canceled' | 'trialing' | 'incomplete';
+  seat_count: number;
+  settings: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+  member_count?: number;
+  circle_count?: number;
+}
+
+export interface OrgMember {
+  id: string;
+  org_id: string;
+  user_id: string;
+  role: 'owner' | 'admin' | 'member';
+  invited_by?: string;
+  joined_at: string;
+  user?: User;
+}
+
+export interface OrgFeatures {
+  org_id: string;
+  max_circles: number;
+  max_members_per_circle: number;
+  analytics_enabled: boolean;
+  slack_enabled: boolean;
+  teams_enabled: boolean;
+  sso_enabled: boolean;
+  export_enabled: boolean;
+  whitelabel_enabled: boolean;
+  custom_branding: boolean;
+  goal_alignment: boolean;
+}
+
+export interface CircleInvite {
+  id: string;
+  circle_id: string;
+  org_id?: string;
+  invited_by: string;
+  invite_type: 'link' | 'email';
+  invite_code: string;
+  email?: string;
+  role: 'member' | 'admin';
+  status: 'pending' | 'accepted' | 'expired' | 'revoked';
+  max_uses: number;
+  use_count: number;
+  expires_at?: string;
+  created_at: string;
+}
+
+export interface CircleAnalytics {
+  circle_id: string;
+  date: string;
+  active_members: number;
+  total_check_ins: number;
+  total_messages: number;
+  avg_streak: number;
+  agent_cost_total: number;
+  agent_tokens_total: number;
+  tasks_completed: number;
+  tasks_created: number;
+}
+
+export interface MemberEngagement {
+  user_id: string;
+  username: string;
+  display_name: string;
+  check_ins: number;
+  messages: number;
+  tasks_completed: number;
+  current_streak: number;
+  last_active: string;
+}
+
+// ─── Goal Alignment Types ─────────────────────────────────────────────
+
+export type GoalType = 'north_star' | 'okr_objective' | 'key_result' | 'circle_goal';
+export type GoalStatus = 'active' | 'completed' | 'paused' | 'abandoned';
+
+export interface OrgGoal {
+  id: string;
+  org_id: string;
+  parent_id?: string;
+  goal_type: GoalType;
+  title: string;
+  description?: string;
+  circle_id?: string;
+  owner_id?: string;
+  target_value?: number;
+  current_value: number;
+  unit?: string;
+  status: GoalStatus;
+  due_date?: string;
+  created_at: string;
+  updated_at: string;
+  children?: OrgGoal[];
+  owner?: User;
+  circle?: Circle;
+}
+
+export interface GoalCheckInLink {
+  id: string;
+  goal_id: string;
+  check_in_id: string;
+  contributed_value: number;
+  created_at: string;
+}
+
+// ─── Reporting Types ──────────────────────────────────────────────────
+
+export interface Report {
+  id: string;
+  org_id: string;
+  report_type: 'analytics' | 'goals' | 'engagement' | 'comprehensive';
+  format: 'pdf' | 'csv';
+  date_from: string;
+  date_to: string;
+  file_url?: string;
+  status: 'pending' | 'generating' | 'ready' | 'failed';
+  created_by: string;
+  created_at: string;
+}
+
+export interface ReportSchedule {
+  id: string;
+  org_id: string;
+  report_type: string;
+  frequency: 'daily' | 'weekly' | 'monthly';
+  recipients: string[];
+  next_run: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+// ─── White-Label Types ────────────────────────────────────────────────
+
+export interface WhiteLabelConfig {
+  id: string;
+  org_id: string;
+  app_name: string;
+  logo_url?: string;
+  favicon_url?: string;
+  primary_color: string;
+  accent_color: string;
+  background_color: string;
+  card_color: string;
+  border_color: string;
+  text_color: string;
+  font_family: string;
+  custom_domain?: string;
+  hide_branding: boolean;
+  custom_css?: string;
+  login_message?: string;
+  created_at: string;
+  updated_at: string;
 }

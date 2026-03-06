@@ -145,11 +145,26 @@ const rowStyles = StyleSheet.create({
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
+interface LatencyPercentiles { p50: number; p95: number; p99: number; count: number }
+interface ErrorRateData { total: number; errors: number; rate: number; recentErrors: Array<{ agent: string; error: string; time: string }> }
+
+function computePercentiles(values: number[]): LatencyPercentiles {
+  if (values.length === 0) return { p50: 0, p95: 0, p99: 0, count: 0 };
+  const sorted = [...values].sort((a, b) => a - b);
+  const p = (pct: number) => sorted[Math.min(Math.floor(sorted.length * pct / 100), sorted.length - 1)];
+  return { p50: p(50), p95: p(95), p99: p(99), count: sorted.length };
+}
+
+interface UserUsage { name: string; commands: number; tokens: number; cost: number; model: string; lastActive: string }
+
 type Scope = 'all' | 'mine';
 
 export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAgents }: Props) {
   const [scope, setScope] = useState<Scope>('all');
   const [agents, setAgents] = useState<CircleOfficeAgent[]>(propAgents);
+  const [latencyPercentiles, setLatencyPercentiles] = useState<LatencyPercentiles>({ p50: 0, p95: 0, p99: 0, count: 0 });
+  const [errorRateData, setErrorRateData] = useState<ErrorRateData>({ total: 0, errors: 0, rate: 0, recentErrors: [] });
+  const [userUsage, setUserUsage] = useState<UserUsage[]>([]);
 
   // Keep local state in sync with prop changes (parent's realtime updates)
   useEffect(() => {
@@ -186,6 +201,107 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
 
     return () => { supabase.removeChannel(channel); };
   }, [circleId]);
+
+  // Load latency percentiles and error rates from terminal responses
+  const loadResponseAnalytics = useCallback(async () => {
+    if (!circleId) return;
+    const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
+
+    const { data: responses } = await supabase
+      .from('office_terminal_responses')
+      .select('latency_ms, status, agent_name, error_message, created_at')
+      .eq('circle_id', circleId)
+      .gte('created_at', weekAgo);
+
+    if (!responses) return;
+
+    // Latency percentiles (from successful responses)
+    const latencies = responses
+      .filter(r => r.status === 'done' && r.latency_ms != null)
+      .map(r => r.latency_ms as number);
+    setLatencyPercentiles(computePercentiles(latencies));
+
+    // Error rates
+    const total = responses.length;
+    const errors = responses.filter(r => r.status === 'error').length;
+    const recentErrors = responses
+      .filter(r => r.status === 'error')
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .slice(0, 5)
+      .map(r => ({
+        agent: r.agent_name || 'Unknown',
+        error: r.error_message || 'Unknown error',
+        time: r.created_at,
+      }));
+    setErrorRateData({ total, errors, rate: total > 0 ? (errors / total) * 100 : 0, recentErrors });
+
+    // User-level usage: group messages by sender
+    const { data: messages } = await supabase
+      .from('office_terminal_messages')
+      .select('id, sender_id, model, created_at')
+      .eq('circle_id', circleId)
+      .gte('created_at', weekAgo)
+      .neq('status', 'deleted');
+
+    if (messages && messages.length > 0) {
+      // Group by sender
+      const senderIds = [...new Set(messages.map(m => m.sender_id).filter(Boolean))];
+      const { data: profiles } = senderIds.length > 0
+        ? await supabase.from('profiles').select('id, display_name, username').in('id', senderIds)
+        : { data: [] };
+      const profileMap = new Map((profiles || []).map(p => [p.id, p]));
+
+      // Map messages to responses for token data
+      const msgIds = messages.map(m => m.id);
+      const { data: respData } = await supabase
+        .from('office_terminal_responses')
+        .select('message_id, token_count, model')
+        .in('message_id', msgIds);
+
+      const respByMsg = new Map<string, { tokens: number; model: string }>();
+      for (const r of (respData || [])) {
+        const existing = respByMsg.get(r.message_id);
+        respByMsg.set(r.message_id, {
+          tokens: (existing?.tokens || 0) + (r.token_count || 0),
+          model: r.model || existing?.model || 'unknown',
+        });
+      }
+
+      const byUser = new Map<string, { commands: number; tokens: number; models: Record<string, number>; lastActive: string }>();
+      for (const m of messages) {
+        const sid = m.sender_id || 'unknown';
+        const entry = byUser.get(sid) || { commands: 0, tokens: 0, models: {}, lastActive: '' };
+        entry.commands++;
+        const resp = respByMsg.get(m.id);
+        entry.tokens += resp?.tokens || 0;
+        const model = resp?.model || m.model || 'unknown';
+        entry.models[model] = (entry.models[model] || 0) + 1;
+        if (m.created_at > entry.lastActive) entry.lastActive = m.created_at;
+        byUser.set(sid, entry);
+      }
+
+      const usage: UserUsage[] = [];
+      for (const [senderId, data] of byUser) {
+        const profile = profileMap.get(senderId);
+        const topModel = Object.entries(data.models).sort((a, b) => b[1] - a[1])[0]?.[0] || 'unknown';
+        usage.push({
+          name: profile?.display_name || profile?.username || 'User',
+          commands: data.commands,
+          tokens: data.tokens,
+          cost: data.tokens * 0.0000005,
+          model: topModel
+            .replace('claude-haiku-4-5-20251001', 'Haiku')
+            .replace('claude-sonnet-4-6', 'Sonnet')
+            .replace('claude-opus-4-6', 'Opus')
+            .replace('blackswan', 'BlackSwan'),
+          lastActive: data.lastActive,
+        });
+      }
+      setUserUsage(usage.sort((a, b) => b.tokens - a.tokens));
+    }
+  }, [circleId]);
+
+  useEffect(() => { loadResponseAnalytics(); }, [loadResponseAnalytics]);
 
   // Filter by scope
   const filtered = scope === 'mine'
@@ -271,6 +387,97 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
             valueColor={avgUptime != null ? uptimeColor(avgUptime) : '#52525b'}
           />
         </View>
+
+        {/* Latency Percentiles */}
+        {latencyPercentiles.count > 0 && (
+          <View style={styles.metricsCard}>
+            <Text style={styles.metricsTitle}>LATENCY PERCENTILES (7D)</Text>
+            <View style={styles.percentilesRow}>
+              <View style={styles.percentileItem}>
+                <Text style={styles.percentileLabel}>P50</Text>
+                <Text style={[styles.percentileValue, { color: latencyColor(latencyPercentiles.p50) }]}>
+                  {fmtLatency(latencyPercentiles.p50)}
+                </Text>
+              </View>
+              <View style={styles.percentileDivider} />
+              <View style={styles.percentileItem}>
+                <Text style={styles.percentileLabel}>P95</Text>
+                <Text style={[styles.percentileValue, { color: latencyColor(latencyPercentiles.p95) }]}>
+                  {fmtLatency(latencyPercentiles.p95)}
+                </Text>
+              </View>
+              <View style={styles.percentileDivider} />
+              <View style={styles.percentileItem}>
+                <Text style={styles.percentileLabel}>P99</Text>
+                <Text style={[styles.percentileValue, { color: latencyColor(latencyPercentiles.p99) }]}>
+                  {fmtLatency(latencyPercentiles.p99)}
+                </Text>
+              </View>
+            </View>
+            <Text style={styles.percentileSub}>{latencyPercentiles.count} requests sampled</Text>
+          </View>
+        )}
+
+        {/* Success / Error Rate */}
+        {errorRateData.total > 0 && (
+          <View style={styles.metricsCard}>
+            <Text style={styles.metricsTitle}>SUCCESS RATE (7D)</Text>
+            <View style={styles.errorRateRow}>
+              <View style={styles.errorRateMain}>
+                <Text style={[styles.errorRateValue, {
+                  color: errorRateData.rate > 10 ? '#ef4444' : errorRateData.rate > 5 ? '#f59e0b' : '#22c55e',
+                }]}>
+                  {(100 - errorRateData.rate).toFixed(1)}%
+                </Text>
+                <Text style={styles.errorRateSub}>
+                  {errorRateData.total - errorRateData.errors} OK / {errorRateData.errors} errors
+                </Text>
+              </View>
+              {/* Success bar */}
+              <View style={styles.successBar}>
+                <View style={[styles.successBarFill, {
+                  width: `${100 - errorRateData.rate}%`,
+                  backgroundColor: errorRateData.rate > 10 ? '#ef4444' : '#22c55e',
+                }]} />
+              </View>
+            </View>
+            {/* Recent errors */}
+            {errorRateData.recentErrors.length > 0 && (
+              <View style={styles.recentErrors}>
+                <Text style={styles.recentErrorsTitle}>Recent Errors</Text>
+                {errorRateData.recentErrors.map((e, i) => (
+                  <View key={i} style={styles.errorItem}>
+                    <Text style={styles.errorAgent}>{e.agent}</Text>
+                    <Text style={styles.errorMsg} numberOfLines={1}>{e.error}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+          </View>
+        )}
+
+        {/* Usage by Member */}
+        {userUsage.length > 0 && (
+          <View style={styles.agentList}>
+            <View style={styles.listHeader}>
+              <Text style={styles.listTitle}>Usage by Member (7d)</Text>
+              <Text style={styles.listSub}>{userUsage.length} active users</Text>
+            </View>
+            {userUsage.map((u, i) => (
+              <View key={i} style={rowStyles.row}>
+                <View style={[rowStyles.dot, { backgroundColor: '#6366f1' }]} />
+                <View style={rowStyles.info}>
+                  <Text style={rowStyles.name}>{u.name}</Text>
+                  <Text style={rowStyles.owner}>{u.commands} cmds / {u.model}</Text>
+                </View>
+                <Text style={[rowStyles.tokens, { color: tokenColor(u.tokens) }]}>
+                  {fmtTokens(u.tokens)}
+                </Text>
+                <Text style={rowStyles.msgs}>${u.cost.toFixed(3)}</Text>
+              </View>
+            ))}
+          </View>
+        )}
 
         {/* Per-agent breakdown */}
         {sortedAgents.length > 0 && (
@@ -374,6 +581,109 @@ const styles = StyleSheet.create({
     color: '#52525b',
     fontSize: 10,
   },
+  // Latency Percentiles & Error Rate
+  metricsCard: {
+    backgroundColor: '#111',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1f1f1f',
+    padding: 14,
+  },
+  metricsTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#888',
+    letterSpacing: 1.5,
+    marginBottom: 12,
+  },
+  percentilesRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    alignItems: 'center',
+  },
+  percentileItem: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  percentileLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#666',
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
+  percentileValue: {
+    fontSize: 20,
+    fontWeight: '800',
+  },
+  percentileDivider: {
+    width: 1,
+    height: 32,
+    backgroundColor: '#333',
+  },
+  percentileSub: {
+    fontSize: 10,
+    color: '#555',
+    textAlign: 'center',
+    marginTop: 8,
+  },
+  errorRateRow: {
+    marginBottom: 8,
+  },
+  errorRateMain: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 8,
+    marginBottom: 8,
+  },
+  errorRateValue: {
+    fontSize: 28,
+    fontWeight: '800',
+  },
+  errorRateSub: {
+    fontSize: 11,
+    color: '#888',
+  },
+  successBar: {
+    height: 6,
+    backgroundColor: '#333',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  successBarFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  recentErrors: {
+    marginTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#1f1f1f',
+    paddingTop: 8,
+  },
+  recentErrorsTitle: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#ef4444',
+    letterSpacing: 1,
+    marginBottom: 6,
+  },
+  errorItem: {
+    flexDirection: 'row',
+    paddingVertical: 4,
+    gap: 8,
+  },
+  errorAgent: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#888',
+    minWidth: 70,
+  },
+  errorMsg: {
+    fontSize: 11,
+    color: '#ef4444',
+    flex: 1,
+  },
+
   empty: {
     alignItems: 'center',
     paddingVertical: 48,

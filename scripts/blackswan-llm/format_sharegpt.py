@@ -42,9 +42,15 @@ SYSTEM_PROMPT = """You are BlackSwan — an AI accountability partner embedded i
 - Productivity, accountability, goal-setting, human performance
 - Circle data: members, streaks, tasks, check-ins
 - Help people think clearly: planning, prioritizing, working through blockers
-- Practical and specific advice — not generic motivational noise"""
+- Practical and specific advice — not generic motivational noise
 
-TERMINAL_SYSTEM = """You are BlackSwan in the Office Terminal — the command center for The Underground Circle. You coordinate agents, analyze performance, and help manage the office. Be concise and technical when responding to commands."""
+## Extended Knowledge
+- Design & UI/UX: layout, color theory, typography, component patterns, responsive design, design systems (Figma, Framer, Tailwind)
+- Art & creative direction: visual storytelling, brand identity, aesthetic critique, color palettes
+- Code & architecture: debugging, testing, performance, code review, modern stacks (React, Node, Python, Supabase, TypeScript)
+- General knowledge: science, history, philosophy, business, culture — woven in when relevant"""
+
+TERMINAL_SYSTEM = """You are BlackSwan in the Office Terminal — the command center for The Underground Circle. You coordinate agents, analyze performance, and help manage the office. You have deep technical knowledge of design, code, and architecture. Be concise and technical when responding to commands."""
 
 
 def load_json(filename):
@@ -288,6 +294,125 @@ def convert_agent_activity():
     return conversations
 
 
+def convert_tasks():
+    """Create coaching conversations from task completion/blockers."""
+    tasks = load_json("tasks.json")
+    profiles = load_json("profiles.json")
+    if not tasks:
+        return []
+
+    profile_lookup = {p["id"]: p for p in profiles}
+    conversations = []
+
+    for task in tasks:
+        title = (task.get("title") or "").strip()
+        if not title or len(title) < 5:
+            continue
+
+        profile = profile_lookup.get(task.get("created_by"), {})
+        name = profile.get("display_name") or profile.get("username") or "fam"
+        status = task.get("status", "open")
+        priority = task.get("priority", "normal")
+        desc = (task.get("description") or "").strip()
+
+        if status == "done":
+            human_msg = f"Just finished: {title}"
+            response = f"**Done.** \"{title}\" — that's one less thing on the board. Momentum compounds. What's next?"
+        elif priority in ("urgent", "high"):
+            human_msg = f"I need to get this done ASAP: {title}" + (f"\n{desc[:100]}" if desc else "")
+            response = f"High priority: **{title}**. Break it down — what's the single next action? Ship the smallest useful piece first, then iterate."
+        else:
+            human_msg = f"Working on: {title}" + (f"\n{desc[:100]}" if desc else "")
+            response = f"Solid focus. **{title}** — keep the scope tight and ship it. Don't let perfect block progress."
+
+        conv = {
+            "conversations": [
+                {"from": "system", "value": SYSTEM_PROMPT + f"\n\nContext: Talking to {name}."},
+                {"from": "human", "value": human_msg},
+                {"from": "gpt", "value": response},
+            ]
+        }
+        conversations.append(conv)
+
+    return conversations
+
+
+def convert_goals():
+    """Create goal-setting conversations from north_star_entries."""
+    goals = load_json("north_star_entries.json")
+    profiles = load_json("profiles.json")
+    if not goals:
+        return []
+
+    profile_lookup = {p["id"]: p for p in profiles}
+    conversations = []
+
+    for goal in goals:
+        intention = (goal.get("intention") or "").strip()
+        if not intention or len(intention) < 5:
+            continue
+
+        profile = profile_lookup.get(goal.get("user_id"), {})
+        name = profile.get("display_name") or profile.get("username") or "fam"
+        energy = goal.get("energy", "medium")
+        priority = goal.get("priority", "")
+
+        human_msg = f"Today's intention: {intention}"
+        if energy:
+            human_msg += f"\nEnergy level: {energy}"
+        if priority:
+            human_msg += f"\nPriority: {priority}"
+
+        if energy in ("low", "exhausted"):
+            response = f"Energy's low — respect that. **{intention[:40]}** is still a solid intention. Focus on the one thing that moves the needle most. Protect your energy for that."
+        elif energy in ("high", "wired"):
+            response = f"You're locked in. **{intention[:40]}** — channel that energy before it burns off. Start with the hardest part while you've got the fire."
+        else:
+            response = f"Good intention: **{intention[:40]}**. Now make it specific — what does 'done' look like by end of day? One clear deliverable."
+
+        conv = {
+            "conversations": [
+                {"from": "system", "value": SYSTEM_PROMPT + f"\n\nContext: {name} setting daily intention."},
+                {"from": "human", "value": human_msg},
+                {"from": "gpt", "value": response},
+            ]
+        }
+        conversations.append(conv)
+
+    return conversations
+
+
+def convert_agent_patterns():
+    """Extract agent coordination patterns for terminal training."""
+    agents = load_json("circle_office_agents.json")
+    if not agents:
+        return []
+
+    conversations = []
+    for agent in agents:
+        name = agent.get("name", "Unknown")
+        provider = agent.get("provider", "unknown")
+        status = agent.get("status", "offline")
+        tokens = agent.get("token_usage_today", 0)
+        messages = agent.get("message_count_today", 0)
+        last_cmd = agent.get("last_command", "")
+
+        if not name or name == "Unknown":
+            continue
+
+        # Generate status query training data
+        conv = {
+            "conversations": [
+                {"from": "system", "value": TERMINAL_SYSTEM},
+                {"from": "human", "value": f"@{name} status"},
+                {"from": "gpt", "value": f"**{name}** ({provider})\nStatus: {status}\nTokens today: {tokens:,}\nMessages: {messages}" + (f"\nLast command: {last_cmd}" if last_cmd else "")},
+            ]
+        }
+        conversations.append(conv)
+
+    return conversations
+
+
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     all_convs = []
@@ -298,6 +423,9 @@ def main():
         ("Room Messages", convert_room_messages),
         ("Check-ins", convert_checkins),
         ("Agent Activity", convert_agent_activity),
+        ("Tasks", convert_tasks),
+        ("Goals", convert_goals),
+        ("Agent Patterns", convert_agent_patterns),
     ]
 
     for name, fn in converters:

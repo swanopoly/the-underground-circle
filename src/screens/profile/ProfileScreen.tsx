@@ -726,7 +726,6 @@ const styles = StyleSheet.create({
 
   // XP Bar
   xpCard: { marginBottom: 12, padding: 18 },
-  xpHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
   xpLevel: { color: '#fff', fontSize: 13, fontWeight: '800', letterSpacing: 2 },
   xpNumbers: { color: '#888', fontSize: 12, fontWeight: '600' },
   xpBarBg: { height: 8, backgroundColor: '#1a1a1a', borderRadius: 4, overflow: 'hidden' },

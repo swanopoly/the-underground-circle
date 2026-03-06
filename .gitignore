@@ -43,3 +43,17 @@ yarn-error.*
 
 # Local Netlify folder
 .netlify
+
+# BlackSwan LLM artifacts (large files)
+scripts/blackswan-llm/models/
+scripts/blackswan-llm/training_data/
+scripts/blackswan-llm/raw_data/
+scripts/blackswan-llm/__pycache__/
+scripts/blackswan-llm/unsloth_compiled_cache/
+
+# 3D model assets
+assets/models/
+
+# Python
+__pycache__/
+*.pyc

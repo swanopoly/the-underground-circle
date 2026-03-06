@@ -22,11 +22,12 @@ from pathlib import Path
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-BASE_MODEL = "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"
+BASE_MODEL = "unsloth/Qwen2.5-3B-Instruct-bnb-4bit"
 MAX_SEQ_LENGTH = 4096
-LORA_RANK = 64
-LORA_ALPHA = 128
-LORA_DROPOUT = 0.05
+LORA_RANK = 32
+LORA_ALPHA = 64
+LORA_DROPOUT = 0
+NEFTUNE_ALPHA = 5  # Free 10-35% instruction-following improvement
 
 DATA_DIR = Path(__file__).parent / "training_data"
 TRAIN_FILE = DATA_DIR / "train.jsonl"
@@ -36,11 +37,12 @@ OUTPUT_DIR = Path(__file__).parent / "models" / "v1.0"
 
 def main():
     parser = argparse.ArgumentParser(description="Fine-tune BlackSwan LLM")
-    parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--batch", type=int, default=2)
-    parser.add_argument("--grad-accum", type=int, default=4)
-    parser.add_argument("--warmup-ratio", type=float, default=0.05)
+    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--grad-accum", type=int, default=16)
+    parser.add_argument("--warmup-ratio", type=float, default=0.03)
+    parser.add_argument("--neftune", type=float, default=NEFTUNE_ALPHA, help="NEFTune noise alpha (0 to disable)")
     parser.add_argument("--skip-merge", action="store_true", help="Skip full merge (saves time/VRAM)")
     parser.add_argument("--skip-gguf", action="store_true", help="Skip GGUF export")
     args = parser.parse_args()
@@ -55,13 +57,15 @@ def main():
 
     # ─── Load model ──────────────────────────────────────────────────────────
     print(f"\nLoading {BASE_MODEL}...")
-    model, tokenizer = FastLanguageModel.get_peft_model(
-        FastLanguageModel.from_pretrained(
-            model_name=BASE_MODEL,
-            max_seq_length=MAX_SEQ_LENGTH,
-            dtype=None,  # auto-detect
-            load_in_4bit=True,
-        ),
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=BASE_MODEL,
+        max_seq_length=MAX_SEQ_LENGTH,
+        dtype=None,  # auto-detect
+        load_in_4bit=True,
+    )
+
+    model = FastLanguageModel.get_peft_model(
+        model,
         r=LORA_RANK,
         lora_alpha=LORA_ALPHA,
         lora_dropout=LORA_DROPOUT,
@@ -107,29 +111,31 @@ def main():
         eval_data = load_sharegpt(EVAL_FILE)
         print(f"  Eval examples: {len(eval_data)}")
 
-    train_dataset = Dataset.from_list(train_data)
-    eval_dataset = Dataset.from_list(eval_data) if eval_data else None
+    # Pre-apply chat template to create "text" column
+    def apply_template(item):
+        text = tokenizer.apply_chat_template(
+            item["messages"],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        return {"text": text}
 
-    # ─── Formatting function ─────────────────────────────────────────────────
-    def formatting_func(examples):
-        """Apply chat template to messages."""
-        texts = []
-        for messages in examples["messages"]:
-            text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-            texts.append(text)
-        return {"text": texts}
+    train_texts = [apply_template(d) for d in train_data]
+    eval_texts = [apply_template(d) for d in eval_data] if eval_data else []
+
+    train_dataset = Dataset.from_list(train_texts)
+    eval_dataset = Dataset.from_list(eval_texts) if eval_texts else None
+
+    print(f"  Sample text length: {len(train_texts[0]['text'])} chars")
 
     # ─── Training ────────────────────────────────────────────────────────────
     print(f"\nTraining config:")
     print(f"  Epochs: {args.epochs}")
-    print(f"  Batch size: {args.batch} (× {args.grad_accum} grad accum = {args.batch * args.grad_accum} effective)")
+    print(f"  Batch size: {args.batch} (x {args.grad_accum} grad accum = {args.batch * args.grad_accum} effective)")
     print(f"  Learning rate: {args.lr}")
     print(f"  LoRA rank: {LORA_RANK}, alpha: {LORA_ALPHA}")
     print(f"  Max seq length: {MAX_SEQ_LENGTH}")
+    print(f"  NEFTune alpha: {args.neftune}")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     lora_dir = OUTPUT_DIR / "lora"
@@ -143,7 +149,7 @@ def main():
         lr_scheduler_type="cosine",
         warmup_ratio=args.warmup_ratio,
         weight_decay=0.01,
-        fp16=True,
+        bf16=True,
         logging_steps=10,
         save_strategy="epoch",
         eval_strategy="epoch" if eval_dataset else "no",
@@ -152,16 +158,20 @@ def main():
         report_to="none",
     )
 
-    trainer = SFTTrainer(
+    trainer_kwargs = dict(
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         args=training_args,
-        formatting_func=formatting_func,
         max_seq_length=MAX_SEQ_LENGTH,
         packing=True,
+        dataset_text_field="text",
     )
+    if args.neftune > 0:
+        trainer_kwargs["neftune_noise_alpha"] = args.neftune
+
+    trainer = SFTTrainer(**trainer_kwargs)
 
     print("\nStarting training...")
     train_result = trainer.train()

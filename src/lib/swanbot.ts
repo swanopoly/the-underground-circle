@@ -37,10 +37,10 @@ function addToHistory(circleId: string, role: 'user' | 'model', text: string) {
 
 // ─── AI Edge Function Call ───────────────────────────────────────────────────
 
-async function callSwanBotAI(message: string, circleId: string, userId: string, discordContext?: string): Promise<string | null> {
+async function callSwanBotAI(message: string, circleId: string, userId: string, discordContext?: string, model?: string | null): Promise<string | null> {
   try {
     const { data, error } = await supabase.functions.invoke('swanbot-ai', {
-      body: { message, circleId, userId, discordContext },
+      body: { message, circleId, userId, discordContext, model: model || 'blackswan' },
     });
     if (error) {
       console.warn('SwanBot AI function error:', error);
@@ -178,6 +178,11 @@ function buildSystemPrompt(context: SwanBotContext, data: CircleContextData): st
 - You know the circle's data — members, streaks, tasks, check-ins — and you use it to give grounded advice
 - You help people think clearly: planning, prioritizing, working through blockers
 - When you give advice, it's practical and specific — not generic motivational noise
+- You understand design deeply: UI/UX principles, color theory, typography, layout, responsive design, component patterns, and design systems — you reference real tools like Figma, Framer, Tailwind
+- You can critique visual work, suggest improvements, and explain the reasoning behind design decisions
+- You know code: architecture patterns, debugging strategies, performance optimization, testing, and modern dev stacks (React, Node, Python, Supabase, TypeScript)
+- You appreciate art and creative direction: visual storytelling, brand identity, aesthetic critique, and the intersection of design and engineering
+- You have broad general knowledge across science, history, philosophy, business, and culture — and you weave it in when it's relevant, never to show off
 
 ## Current Context
 - Talking to: ${name}
@@ -373,7 +378,21 @@ export async function getSwanBotResponse(
     addToHistory(context.circleId, 'user', cleaned);
   }
 
-  // Try BlackSwan LLM first (local, zero cost)
+  // Check for exact command matches first (instant, structured data queries)
+  for (const cmd of localCommands) {
+    const match = cleaned.match(cmd.match);
+    if (match) {
+      try {
+        const response = await cmd.handler(context, match);
+        if (context.circleId) addToHistory(context.circleId, 'model', response);
+        return response;
+      } catch (err: any) {
+        return `Something broke: ${err.message}`;
+      }
+    }
+  }
+
+  // Try BlackSwan LLM (local, zero cost)
   try {
     const { isBlackSwanAvailable, callBlackSwan } = await import('./blackswanLLM');
     if (await isBlackSwanAvailable()) {
@@ -402,23 +421,8 @@ export async function getSwanBotResponse(
   if (context.circleId) {
     const aiResponse = await callSwanBotAI(cleaned, context.circleId, context.userId, context.discordContext);
     if (aiResponse) {
-      const response = aiResponse.startsWith('🦢') ? aiResponse : aiResponse;
-      if (context.circleId) addToHistory(context.circleId, 'model', response);
-      return response;
-    }
-  }
-
-  // Check for exact command matches (structured data queries)
-  for (const cmd of localCommands) {
-    const match = cleaned.match(cmd.match);
-    if (match) {
-      try {
-        const response = await cmd.handler(context, match);
-        if (context.circleId) addToHistory(context.circleId, 'model', response);
-        return response;
-      } catch (err: any) {
-        return `Something broke: ${err.message}`;
-      }
+      if (context.circleId) addToHistory(context.circleId, 'model', aiResponse);
+      return aiResponse;
     }
   }
 

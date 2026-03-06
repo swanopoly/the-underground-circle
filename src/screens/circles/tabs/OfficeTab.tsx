@@ -161,10 +161,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // ─── Shared terminal state — both the tab view and the bottom drawer
   //     use these so input/target stay in sync (true mirror behaviour) ──────
   const [terminalInput, setTerminalInput]         = useState('');
-  const [terminalTargetId, setTerminalTargetId]   = useState<string | null>(null);
-  const [terminalTargetName, setTerminalTargetName] = useState('@all');
-  const [terminalModel, setTerminalModel]         = useState<string | null>(null);
-  const [terminalTargetIds, setTerminalTargetIds] = useState<string[] | null>(null);
+  const [terminalTargetId, setTerminalTargetId]   = useState<string | null>('blackswan-default');
+  const [terminalTargetName, setTerminalTargetName] = useState('@BlackSwan');
+  const [terminalModel, setTerminalModel]         = useState<string | null>('blackswan');
+  const [terminalTargetIds, setTerminalTargetIds] = useState<string[] | null>(['blackswan-default']);
   const [statusHistory, setStatusHistory] = useState<Array<OfficeAgent[]>>([]);
   const [enrichedAgents, setEnrichedAgents] = useState<OfficeAgent[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
@@ -297,6 +297,76 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       leavePresenceChannel(circleId);
     };
   }, [circleId, connections.filter(c => c.status === 'connected').length]);
+
+  // ─── Direct invocation handler (called by OfficeTerminal after send) ─────
+  const handleCommandSent = useCallback((params: {
+    messageId: string;
+    command: string;
+    targetAgentId: string | null;
+    targetAgentIds: string[] | null;
+    targetAgentName: string;
+    model: string | null;
+    senderId: string;
+  }) => {
+    const blackSwanAgent = createBlackSwanAgent(circleId);
+    const myAgents = circleOfficeAgents.filter(a => a.ownerId === currentUserId);
+
+    const baseReq = {
+      messageId: params.messageId,
+      circleId,
+      command: params.command,
+      senderId: params.senderId,
+      targetAgentName: params.targetAgentName,
+      model: params.model,
+    };
+
+    const blackSwanTargeted =
+      params.targetAgentId === BLACKSWAN_AGENT_ID
+      || params.targetAgentName?.toLowerCase().includes('blackswan')
+      || params.targetAgentName?.toLowerCase().includes('swan')
+      || params.targetAgentIds?.includes(BLACKSWAN_AGENT_ID);
+
+    if (params.targetAgentIds && params.targetAgentIds.length > 0) {
+      if (params.targetAgentIds.includes(BLACKSWAN_AGENT_ID) || blackSwanTargeted) {
+        invokeAndStream(
+          { ...baseReq, targetAgentId: BLACKSWAN_AGENT_ID, targetAgentName: '@BlackSwan' },
+          blackSwanAgent,
+        ).catch(err => console.error('[OfficeTab] BlackSwan invocation failed:', err));
+      }
+      const myTargetedAgents = myAgents.filter(a => params.targetAgentIds!.includes(a.id));
+      if (myTargetedAgents.length > 0) {
+        invokeSelectedAgents(
+          baseReq, myTargetedAgents,
+          params.targetAgentIds.filter(id => id !== BLACKSWAN_AGENT_ID),
+        ).catch(err => console.error('[OfficeTab] Multi-select invocation failed:', err));
+      }
+    } else if (params.targetAgentId) {
+      if (blackSwanTargeted) {
+        invokeAndStream(
+          { ...baseReq, targetAgentId: BLACKSWAN_AGENT_ID, targetAgentName: '@BlackSwan' },
+          blackSwanAgent,
+        ).catch(err => console.error('[OfficeTab] BlackSwan invocation failed:', err));
+      } else {
+        const agent = myAgents.find(a => a.id === params.targetAgentId);
+        if (agent) {
+          invokeAndStream(
+            { ...baseReq, targetAgentId: agent.id, targetAgentName: `@${agent.name}` },
+            agent,
+          ).catch(err => console.error('[OfficeTab] Invocation failed:', err));
+        }
+      }
+    } else {
+      // @all
+      invokeAndStream(
+        { ...baseReq, targetAgentId: BLACKSWAN_AGENT_ID, targetAgentName: '@BlackSwan' },
+        blackSwanAgent,
+      ).catch(err => console.error('[OfficeTab] BlackSwan @all invocation failed:', err));
+      if (myAgents.length > 0) {
+        invokeAllAgents(baseReq, myAgents)
+          .catch(err => console.error('[OfficeTab] Multi-agent invocation failed:', err));
+      }
+    }
+  }, [circleId, currentUserId, circleOfficeAgents]);
 
   // ─── Terminal command subscription ────────────────────────────────────────
   // Listen for commands targeting my agents + BlackSwan; invoke accordingly
@@ -813,11 +883,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         });
         ccPollerRef.current.start(10000);
       } else if (!detected && ccPollerRef.current) {
-        // Bridge went offline — stop poller and mark agent offline
+        // Bridge went offline — stop poller, keep agent visible as idle
         ccPollerRef.current.stop();
         ccPollerRef.current = null;
-        sessionsRef.current.delete('claude-code-auto');
-        setSessionsTick(t => t + 1);
+        // Don't remove from sessionsRef — keep the pixel agent showing as idle
+        // Just update all agents to idle status
+        const existing = sessionsRef.current.get('claude-code-auto') as unknown as OfficeAgent[] | undefined;
+        if (existing && existing.length > 0) {
+          const idled = existing.map(a => ({ ...a, status: 'idle' as const, activity: 'Session ended — idling' }));
+          sessionsRef.current.set('claude-code-auto', idled as any);
+          setSessionsTick(t => t + 1);
+        }
         if (ccPublishedRef.current && circleId) {
           markClaudeCodeAgentOffline(circleId)
             .then(() => loadCircleOffice())
@@ -838,10 +914,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         ccPollerRef.current.stop();
         ccPollerRef.current = null;
       }
-      // Mark Claude Code agent offline when tab unmounts
+      // Mark Claude Code agent idle (not offline) when tab unmounts — stays visible for 1 hour
       if (ccPublishedRef.current && circleId) {
         markClaudeCodeAgentOffline(circleId).catch(() => {});
-        ccPublishedRef.current = false;
       }
     };
   }, [circleId]);
@@ -903,6 +978,44 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   if (ccAutoAgents && ccAutoAgents.length > 0) {
     rawAgents.push(...ccAutoAgents);
   }
+
+  // Merge DB-backed agents that have no corresponding live session
+  // This keeps idle/building agents visible as pixel agents even when the bridge disconnects
+  const liveAgentNames = new Set(rawAgents.map(a => a.name));
+  const myDbAgents = mergedCircleAgents.filter(a =>
+    a.ownerId === currentUserId && a.status !== 'offline' && !liveAgentNames.has(a.name)
+  );
+  for (const dbAgent of myDbAgents) {
+    rawAgents.push({
+      id: `db::${dbAgent.id}`,
+      name: dbAgent.name,
+      role: dbAgent.provider || 'Agent',
+      status: dbAgent.status,
+      color: dbAgent.color,
+      deskIndex: rawAgents.length,
+      activity: dbAgent.currentTask || 'Idling',
+      messagesProcessed: dbAgent.message_count_total || 0,
+      uptimeHours: 0,
+      uptime: '',
+      lastActive: dbAgent.lastActiveAt || '',
+      recentActions: [],
+      recentMessages: [],
+      costToday: 0,
+      costWeek: 0,
+      tokensUsed: dbAgent.token_usage_total || 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedTokens: 0,
+      newTokens: 0,
+      turns: dbAgent.message_count_total || 0,
+      sessionKey: dbAgent.id,
+      model: 'unknown',
+      connectionId: 'db-agent',
+      connectionName: dbAgent.name,
+      providerType: (dbAgent.provider || 'generic-agent') as ProviderType,
+    });
+  }
+
   // Apply custom names
   const allAgents = rawAgents.map(a => agentNames[a.id] ? { ...a, name: agentNames[a.id] } : a);
 
@@ -1834,6 +1947,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               </Text>
               <AgentActivityFeed circleId={circleId} maxHeight={320} />
             </View>
+
           </ScrollView>
         ) : (
           /* Desktop: Isometric office view */
@@ -2019,6 +2133,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               onSharedModelChange={setTerminalModel}
               sharedTargetIds={terminalTargetIds}
               onSharedSelectTargets={(ids, _names) => setTerminalTargetIds(ids)}
+              onCommandSent={handleCommandSent}
               compact
             />
           </View>
@@ -2042,6 +2157,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               onSharedModelChange={setTerminalModel}
               sharedTargetIds={terminalTargetIds}
               onSharedSelectTargets={(ids, _names) => setTerminalTargetIds(ids)}
+              onCommandSent={handleCommandSent}
             />
           </View>
         )}

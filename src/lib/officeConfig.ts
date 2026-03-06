@@ -348,23 +348,30 @@ export const OFFICE_THEMES: Record<string, OfficeTheme> = {
 
 export interface AgentAppearance {
   skinTone: string;
-  hairStyle: 'flat' | 'spiky' | 'mohawk' | 'long' | 'bald' | 'cap' | 'curly' | 'ponytail';
+  hairStyle: 'flat' | 'spiky' | 'mohawk' | 'long' | 'bald' | 'cap' | 'curly' | 'ponytail' | 'buzzcut' | 'afro' | 'undercut' | 'pigtails';
   hairColor: string;
   shirtColor: string;
   pantsColor: string;
   shoeColor: string;
-  accessory: 'none' | 'glasses' | 'headphones' | 'bowtie' | 'scarf' | 'hoodie' | 'mask' | 'monocle' | 'eyepatch' | 'bandana';
-  hat: 'none' | 'cap' | 'tophat' | 'beanie' | 'crown' | 'helmet' | 'horns' | 'space_helmet' | 'wizard_hat' | 'halo' | 'antenna' | 'crab_helmet';
-  expression: 'neutral' | 'happy' | 'focused' | 'sleepy' | 'cool' | 'angry';
-  backItem: 'none' | 'cape' | 'backpack' | 'wings' | 'jetpack' | 'shield' | 'sword' | 'quiver' | 'crab_shell';
+  accessory: 'none' | 'glasses' | 'headphones' | 'bowtie' | 'scarf' | 'hoodie' | 'mask' | 'monocle' | 'eyepatch' | 'bandana' | 'chain' | 'piercing' | 'visor_shades' | 'gas_mask';
+  hat: 'none' | 'cap' | 'tophat' | 'beanie' | 'crown' | 'helmet' | 'horns' | 'space_helmet' | 'wizard_hat' | 'halo' | 'antenna' | 'crab_helmet' | 'pirate_hat' | 'cowboy_hat' | 'fez' | 'mohawk_spikes';
+  expression: 'neutral' | 'happy' | 'focused' | 'sleepy' | 'cool' | 'angry' | 'surprised' | 'smirk' | 'crying';
+  backItem: 'none' | 'cape' | 'backpack' | 'wings' | 'jetpack' | 'shield' | 'sword' | 'quiver' | 'crab_shell' | 'tentacles' | 'rocket' | 'scroll' | 'boombox';
   eyeColor: string;
-  facialHair: 'none' | 'stubble' | 'beard' | 'mustache' | 'goatee';
-  pet: 'none' | 'cat' | 'dog' | 'bird' | 'robot' | 'dragon' | 'alien' | 'crab';
-  aura: 'none' | 'fire' | 'ice' | 'electric' | 'nature' | 'shadow' | 'rainbow' | 'glitch' | 'cosmic';
-  handItem: 'none' | 'lightsaber' | 'coffee' | 'laptop' | 'flag' | 'wand' | 'crab_claws';
+  facialHair: 'none' | 'stubble' | 'beard' | 'mustache' | 'goatee' | 'fu_manchu' | 'sideburns' | 'soul_patch';
+  pet: 'none' | 'cat' | 'dog' | 'bird' | 'robot' | 'dragon' | 'alien' | 'crab' | 'snake' | 'bat' | 'skull' | 'mushroom';
+  aura: 'none' | 'fire' | 'ice' | 'electric' | 'nature' | 'shadow' | 'rainbow' | 'glitch' | 'cosmic' | 'toxic' | 'holy' | 'void';
+  handItem: 'none' | 'lightsaber' | 'coffee' | 'laptop' | 'flag' | 'wand' | 'crab_claws' | 'sword_hand' | 'pizza' | 'microphone' | 'torch';
 }
 
-export const SKIN_TONES = ['#f5d0a9', '#e8b88a', '#c68642', '#8d5524', '#4a2c0a', '#f5e6cc'];
+// Neon/glowing skin tones — detected in PixelAgent for glow effect
+export const NEON_SKIN_TONES = ['#ff00ff', '#00ff88', '#00ffff', '#ff4444', '#ffff00', '#aa55ff'];
+
+export const SKIN_TONES = [
+  '#f5d0a9', '#e8b88a', '#c68642', '#8d5524', '#4a2c0a', '#f5e6cc',
+  // Neon / glowing
+  '#ff00ff', '#00ff88', '#00ffff', '#ff4444', '#ffff00', '#aa55ff',
+];
 export const HAIR_COLORS = ['#1a1a1a', '#4a3728', '#8b6914', '#c41e3a', '#2563eb', '#9333ea', '#22c55e', '#f59e0b', '#ec4899', '#ffffff'];
 export const SHIRT_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#3b82f6', '#14b8a6', '#f97316', '#64748b'];
 export const PANTS_COLORS = ['#2d2d3d', '#1a1a2e', '#3d2b1a', '#1e3a5f', '#2d1b4e', '#1a3d1a'];
@@ -389,23 +396,23 @@ export const DEFAULT_APPEARANCE: AgentAppearance = {
   handItem: 'none',
 };
 
-// Default appearance for the built-in BlackSwan agent
+// Default appearance for the built-in BlackSwan agent (crab-red theme)
 export const UC_AGENT_APPEARANCE: AgentAppearance = {
-  skinTone: '#7aedcf',       // holographic cyan-green skin
-  hairStyle: 'bald',         // alien — no hair
-  hairColor: '#22d3ee',
-  shirtColor: '#0a1a2a',     // dark holographic suit
-  pantsColor: '#0d1520',
-  shoeColor: '#22d3ee',      // glowing cyan boots
-  accessory: 'mask',         // alien face visor
-  hat: 'antenna',            // alien antenna
+  skinTone: '#f0a0a0',       // pale crab-red skin
+  hairStyle: 'bald',         // no hair
+  hairColor: '#ef4444',
+  shirtColor: '#1a0a0a',     // dark crimson suit
+  pantsColor: '#150808',
+  shoeColor: '#ef4444',      // crab-red boots
+  accessory: 'mask',         // face visor
+  hat: 'crab_helmet',        // crab helmet
   expression: 'cool',
-  backItem: 'wings',         // holographic energy wings
-  eyeColor: '#00ff88',       // bright alien green eyes
+  backItem: 'crab_shell',    // crab shell
+  eyeColor: '#ff4444',       // bright red eyes
   facialHair: 'none',
-  pet: 'alien',              // alien companion
-  aura: 'cosmic',            // nebula/space aura
-  handItem: 'wand',          // alien tech staff
+  pet: 'crab',               // crab companion
+  aura: 'fire',              // fire aura
+  handItem: 'crab_claws',    // crab claws
 };
 
 // ─── Office Layout ───────────────────────────────────────────────────────────

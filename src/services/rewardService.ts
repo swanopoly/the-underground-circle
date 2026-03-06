@@ -1,6 +1,7 @@
 import { supabase } from '../lib/supabase';
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { BADGES, Badge, getPointsForModel } from '../lib/badges';
+import type { OfficeAgent } from '../lib/officeAgents';
 
 export interface UserPoints {
   user_id: string;
@@ -34,13 +35,25 @@ export async function awardPoints(
   });
 
   if (error) {
-    console.error('awardPoints RPC error — falling back to direct upsert:', error);
-    // Fallback: best-effort direct upsert (still better than silently losing XP)
+    console.error('awardPoints RPC error — falling back to direct increment:', error);
+    // Fallback: read current value, then increment (not atomic but better than overwriting)
+    const { data: existing } = await supabase
+      .from('user_points')
+      .select('total_points, lifetime_points')
+      .eq('user_id', userId)
+      .maybeSingle();
+    const prevTotal = existing?.total_points ?? 0;
+    const prevLifetime = existing?.lifetime_points ?? 0;
     await supabase.from('user_points').upsert(
-      { user_id: userId, total_points: points, lifetime_points: points, updated_at: new Date().toISOString() },
+      {
+        user_id: userId,
+        total_points: prevTotal + points,
+        lifetime_points: prevLifetime + points,
+        updated_at: new Date().toISOString(),
+      },
       { onConflict: 'user_id' },
     );
-    return { newTotal: points, newBadges: [] };
+    return { newTotal: prevLifetime + points, newBadges: [] };
   }
 
   const newLifetime: number = Array.isArray(data) ? (data[0]?.new_lifetime ?? 0) : (data?.new_lifetime ?? 0);
@@ -146,8 +159,84 @@ export function useAgentPointsTracker(
     // Debounce to batch rapid updates
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
+      debounceRef.current = null;
       const { newBadges } = await awardAgentTurnPoints(userId, agentModel, delta);
       if (newBadges.length > 0) onNewBadges(newBadges);
     }, 2000);
   }, [agentTurns, userId]);
+
+  // Cleanup pending debounce on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
+}
+
+// ─── Multi-agent XP tracker ──────────────────────────────────────────────
+// Tracks ALL connected agents' turns and awards XP to the USER.
+// Every bot earns XP for its owner — Claude Code, OpenClaw, Codex, all of them.
+
+export function useAllAgentPointsTracker(
+  userId: string | undefined,
+  agents: OfficeAgent[],
+  onNewBadges: (badges: Badge[]) => void,
+) {
+  const prevTurnsRef = useRef<Map<string, number>>(new Map());
+  const pendingPointsRef = useRef(0);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!userId || agents.length === 0) return;
+
+    let newPoints = 0;
+
+    for (const agent of agents) {
+      // Skip the default BlackSwan agent (always has 0 turns)
+      if (agent.id === 'default::blackswan') continue;
+
+      const currentTurns = agent.turns || agent.messagesProcessed || 0;
+      if (currentTurns <= 0) continue;
+
+      const prevTurns = prevTurnsRef.current.get(agent.id) ?? 0;
+      if (currentTurns > prevTurns) {
+        const delta = currentTurns - prevTurns;
+        const ppTurn = getPointsForModel(agent.model);
+        newPoints += delta * ppTurn;
+        prevTurnsRef.current.set(agent.id, currentTurns);
+      }
+    }
+
+    if (newPoints <= 0) return;
+
+    pendingPointsRef.current += newPoints;
+
+    // Debounce: batch rapid agent updates into one DB call
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      debounceRef.current = null;
+      const points = pendingPointsRef.current;
+      pendingPointsRef.current = 0;
+      if (points <= 0) return;
+
+      const agentSummary = agents
+        .filter(a => a.id !== 'default::blackswan' && (a.turns || a.messagesProcessed || 0) > 0)
+        .map(a => `${a.name}(${a.model})`)
+        .join(', ');
+
+      const { newBadges } = await awardPoints(userId, points, 'Agent activity', {
+        agentCount: agents.length,
+        agents: agentSummary,
+        points,
+      });
+      if (newBadges.length > 0) onNewBadges(newBadges);
+    }, 3000);
+  }, [agents, userId]);
+
+  // Cleanup pending debounce on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
 }

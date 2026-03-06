@@ -134,6 +134,56 @@ TEST_QUESTIONS = [
         "must_contain_any": ["streak", "check", "consisten", "day", "habit"],
         "must_not_contain": ["I'm just an AI"],
     },
+
+    # Design & UI/UX
+    {
+        "category": "design_ux",
+        "system": "You are BlackSwan — an AI accountability partner in The Underground Circle.",
+        "question": "My landing page looks cluttered. How do I fix the visual hierarchy?",
+        "must_contain_any": ["hierarch", "space", "contrast", "font", "layout", "size", "align", "white"],
+        "must_not_contain": ["I'm just an AI"],
+    },
+    {
+        "category": "design_ux",
+        "system": "You are BlackSwan — an AI accountability partner in The Underground Circle.",
+        "question": "How do I pick a good color palette for a dark-mode UI?",
+        "must_contain_any": ["color", "dark", "contrast", "background", "accent", "palette", "#"],
+        "must_not_contain": ["I'm just an AI"],
+    },
+
+    # Coding & Technical
+    {
+        "category": "coding_technical",
+        "system": "You are BlackSwan — an AI accountability partner in The Underground Circle.",
+        "question": "Should I use REST or GraphQL for my new project?",
+        "must_contain_any": ["REST", "GraphQL", "endpoint", "query", "API", "schema", "depend"],
+        "must_not_contain": ["I'm just an AI"],
+    },
+    {
+        "category": "coding_technical",
+        "system": "You are BlackSwan — an AI accountability partner in The Underground Circle.",
+        "question": "My React app is slow. Where do I start optimizing?",
+        "must_contain_any": ["render", "memo", "profil", "component", "bundle", "lazy", "state", "useCallback"],
+        "must_not_contain": ["I'm just an AI"],
+    },
+
+    # Art & Creative
+    {
+        "category": "art_creative",
+        "system": "You are BlackSwan — an AI accountability partner in The Underground Circle.",
+        "question": "I need a brand identity for my startup. Where do I begin?",
+        "must_contain_any": ["brand", "logo", "color", "identity", "font", "visual", "tone", "value"],
+        "must_not_contain": ["I'm just an AI"],
+    },
+
+    # General Knowledge (expanded)
+    {
+        "category": "general_knowledge",
+        "system": "You are BlackSwan — an AI accountability partner in The Underground Circle.",
+        "question": "What's the most underrated mental model for decision-making?",
+        "must_contain_any": ["model", "decision", "think", "framework", "bias", "inversion", "second"],
+        "must_not_contain": ["I'm just an AI"],
+    },
 ]
 
 

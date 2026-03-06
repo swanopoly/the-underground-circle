@@ -114,6 +114,19 @@ TABLES = {
         "select": "id,circle_id,title,description,proposal_type,status,created_at",
         "order": "created_at.asc",
     },
+    # Tier 4: Extended learning data
+    "session_tags": {
+        "select": "id,circle_id,session_id,tag,category,created_at",
+        "order": "created_at.asc",
+    },
+    "goals": {
+        "select": "id,user_id,circle_id,title,description,status,target_date,created_at",
+        "order": "created_at.asc",
+    },
+    "circle_office_agents": {
+        "select": "id,circle_id,owner_id,provider,name,status,token_usage_today,message_count_today,last_command,created_at",
+        "order": "created_at.asc",
+    },
 }
 
 
@@ -125,12 +138,24 @@ def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     total_rows = 0
 
+    # Use training-safe views when available (respects user opt-out)
+    TRAINING_SAFE_VIEWS = {
+        "messages": "training_safe_messages",
+        "check_ins": "training_safe_check_ins",
+        "office_terminal_messages": "training_safe_terminal",
+        "tasks": "training_safe_tasks",
+        "north_star_entries": "training_safe_goals",
+    }
+
     print(f"Exporting from {SUPABASE_URL}")
-    print(f"Output: {OUTPUT_DIR}\n")
+    print(f"Output: {OUTPUT_DIR}")
+    print(f"Using privacy-safe views where available\n")
 
     for table_name, config in TABLES.items():
-        print(f"  {table_name}...", end=" ", flush=True)
-        rows = fetch_table(table_name, **config)
+        # Use training-safe view if available (filters opted-out users)
+        source = TRAINING_SAFE_VIEWS.get(table_name, table_name)
+        print(f"  {table_name} (via {source})...", end=" ", flush=True)
+        rows = fetch_table(source, **config)
         output_path = OUTPUT_DIR / f"{table_name}.json"
         with open(output_path, "w") as f:
             json.dump(rows, f, indent=2, default=str)

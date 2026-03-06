@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, Animated, Pressable, Platform, Easing } from 'react-native';
 import { OfficeAgent, STATUS_COLORS } from '../../../../lib/officeAgents';
-import { AgentAppearance, DEFAULT_APPEARANCE, EnvironmentType, THEME_OUTFITS } from '../../../../lib/officeConfig';
+import { AgentAppearance, DEFAULT_APPEARANCE, EnvironmentType, THEME_OUTFITS, NEON_SKIN_TONES } from '../../../../lib/officeConfig';
 import ThoughtBubble from '../../../../components/ThoughtBubble';
 import { ThoughtBubble as ThoughtData, generateThoughtBubble } from '../../../../lib/agentMessaging';
 
@@ -37,6 +37,15 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
   const outfit = (environmentType && !isCustomized) ? THEME_OUTFITS[environmentType] : null;
   const showThemeHeadgear = outfit?.headgear && a.hat === 'none';
   const effectiveBootColor = outfit?.bootColor || a.shoeColor || '#1a1a1a';
+
+  // Neon/glowing skin detection
+  const isNeonSkin = NEON_SKIN_TONES.includes(a.skinTone);
+  const neonGlow = isNeonSkin ? {
+    shadowColor: a.skinTone,
+    shadowOffset: { width: 0, height: 0 } as const,
+    shadowRadius: 8,
+    shadowOpacity: 0.9,
+  } : {} as any;
   const bobAnim = useRef(new Animated.Value(0)).current;
   const breatheAnim = useRef(new Animated.Value(1)).current;
   const glowAnim = useRef(new Animated.Value(0.3)).current;
@@ -496,6 +505,34 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           </View>
         )}
 
+        {a.hat === 'pirate_hat' && (
+          <View style={styles.pirateHat}>
+            <View style={styles.pirateHatCrown} />
+            <View style={styles.pirateHatBrim} />
+            <View style={styles.pirateHatSkull} />
+          </View>
+        )}
+        {a.hat === 'cowboy_hat' && (
+          <View style={styles.cowboyHat}>
+            <View style={styles.cowboyHatCrown} />
+            <View style={styles.cowboyHatBrim} />
+          </View>
+        )}
+        {a.hat === 'fez' && (
+          <View style={styles.fez}>
+            <View style={styles.fezBody} />
+            <View style={styles.fezTassel} />
+          </View>
+        )}
+        {a.hat === 'mohawk_spikes' && (
+          <View style={styles.mohawkSpikes}>
+            <View style={styles.spike} />
+            <View style={[styles.spike, { height: PX * 2.5 }]} />
+            <View style={styles.spike} />
+            <View style={[styles.spike, { height: PX * 1.5 }]} />
+          </View>
+        )}
+
         {/* Theme headgear (only when user has no hat) */}
         {showThemeHeadgear && outfit.headgear === 'bandana' && (
           <View style={styles.bandana}>
@@ -536,10 +573,10 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           transform: [{ translateX: lookAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [-1.5, 0, 1.5] }) }],
         }]}>
           {/* Ears */}
-          <View style={[styles.ear, styles.earLeft, { backgroundColor: a.skinTone }]}>
+          <View style={[styles.ear, styles.earLeft, { backgroundColor: a.skinTone, ...neonGlow }]}>
             <View style={[styles.earInner, { backgroundColor: a.skinTone }]} />
           </View>
-          <View style={[styles.ear, styles.earRight, { backgroundColor: a.skinTone }]}>
+          <View style={[styles.ear, styles.earRight, { backgroundColor: a.skinTone, ...neonGlow }]}>
             <View style={[styles.earInner, { backgroundColor: a.skinTone }]} />
           </View>
           {/* Hair */}
@@ -552,10 +589,21 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
               a.hairStyle === 'long' && styles.hairLong,
               a.hairStyle === 'curly' && styles.hairCurly,
               a.hairStyle === 'ponytail' && styles.hairPonytail,
+              a.hairStyle === 'buzzcut' && styles.hairBuzzcut,
+              a.hairStyle === 'afro' && styles.hairAfro,
+              a.hairStyle === 'undercut' && styles.hairUndercut,
+              a.hairStyle === 'pigtails' && styles.hairPigtails,
             ]}>
               {/* Hair highlight — light hits from top-left */}
               <View style={styles.hairHighlight} />
             </View>
+          )}
+          {/* Pigtail bundles */}
+          {a.hairStyle === 'pigtails' && (
+            <>
+              <View style={[styles.pigtailBundleL, { backgroundColor: a.hairColor }]} />
+              <View style={[styles.pigtailBundleR, { backgroundColor: a.hairColor }]} />
+            </>
           )}
           {/* Bald head shine */}
           {a.hairStyle === 'bald' && (
@@ -566,7 +614,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             <View style={[styles.ponytailTail, { backgroundColor: a.hairColor }]} />
           )}
           {/* Face */}
-          <View style={[styles.face, { backgroundColor: a.skinTone }]}>
+          <View style={[styles.face, { backgroundColor: a.skinTone, ...neonGlow }]}>
             {/* Brow ridge — subtle forehead depth */}
             <View style={styles.browRidge} />
             {/* Accessory: glasses */}
@@ -590,9 +638,21 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
                 <View style={[styles.brow, { transform: [{ rotate: '-20deg' }], backgroundColor: '#1a1a1a' }]} />
               </View>
             )}
+            {a.expression === 'surprised' && (
+              <View style={styles.browRow}>
+                <View style={[styles.brow, { transform: [{ translateY: -PX * 0.5 }] }]} />
+                <View style={[styles.brow, { transform: [{ translateY: -PX * 0.5 }] }]} />
+              </View>
+            )}
+            {a.expression === 'smirk' && (
+              <View style={styles.browRow}>
+                <View style={[styles.brow, { transform: [{ rotate: '-10deg' }] }]} />
+                <View style={[styles.brow, { transform: [{ rotate: '5deg' }, { translateY: -PX * 0.3 }] }]} />
+              </View>
+            )}
             {/* Eyes — with blink animation */}
             <Animated.View style={[styles.eyeRow, { transform: [{ scaleY: blinkAnim }] }]}>
-              <View style={[styles.eye, isOffline && styles.closedEye, a.expression === 'cool' && styles.coolEye, a.expression === 'sleepy' && styles.sleepyEye]}>
+              <View style={[styles.eye, isOffline && styles.closedEye, a.expression === 'cool' && styles.coolEye, a.expression === 'sleepy' && styles.sleepyEye, a.expression === 'surprised' && styles.surprisedEye, a.expression === 'smirk' && styles.smirkEyeL, a.expression === 'crying' && styles.cryingEye]}>
                 {!isOffline && a.expression !== 'sleepy' && (
                   <>
                     <View style={[styles.iris, { backgroundColor: a.eyeColor || '#3b82f6' }]}>
@@ -602,7 +662,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
                   </>
                 )}
               </View>
-              <View style={[styles.eye, isOffline && styles.closedEye, a.expression === 'cool' && styles.coolEye, a.expression === 'sleepy' && styles.sleepyEye]}>
+              <View style={[styles.eye, isOffline && styles.closedEye, a.expression === 'cool' && styles.coolEye, a.expression === 'sleepy' && styles.sleepyEye, a.expression === 'surprised' && styles.surprisedEye, a.expression === 'smirk' && styles.smirkEyeR, a.expression === 'crying' && styles.cryingEye]}>
                 {!isOffline && a.expression !== 'sleepy' && (
                   <>
                     <View style={[styles.iris, { backgroundColor: a.eyeColor || '#3b82f6' }]}>
@@ -617,12 +677,22 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             {a.expression === 'sleepy' && (
               <Text style={styles.sleepyZ}>z</Text>
             )}
+            {/* Crying tears */}
+            {a.expression === 'crying' && (
+              <>
+                <View style={[styles.tear, { left: PX * 1.2 }]} />
+                <View style={[styles.tear, { right: PX * 1.2 }]} />
+              </>
+            )}
             {/* Mouth */}
             <View style={[
               styles.mouth,
               isOffline && styles.sleepMouth,
               a.expression === 'happy' && styles.happyMouth,
               a.expression === 'angry' && styles.angryMouth,
+              a.expression === 'surprised' && styles.surprisedMouth,
+              a.expression === 'smirk' && styles.smirkMouth,
+              a.expression === 'crying' && styles.cryingMouth,
             ]} />
             {/* Mask accessory */}
             {a.accessory === 'mask' && (
@@ -639,6 +709,28 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             )}
             {a.accessory === 'bandana' && (
               <View style={styles.accessoryBandana} />
+            )}
+            {a.accessory === 'chain' && (
+              <View style={styles.accessoryChain}>
+                <View style={styles.chainLink1} />
+                <View style={styles.chainLink2} />
+                <View style={styles.chainLink3} />
+              </View>
+            )}
+            {a.accessory === 'piercing' && (
+              <View style={styles.accessoryPiercing} />
+            )}
+            {a.accessory === 'visor_shades' && (
+              <View style={styles.accessoryVisor}>
+                <View style={styles.visorStripe} />
+              </View>
+            )}
+            {a.accessory === 'gas_mask' && (
+              <View style={styles.accessoryGasMask}>
+                <View style={styles.gasMaskFilterL} />
+                <View style={styles.gasMaskFilterR} />
+                <View style={styles.gasMaskVent} />
+              </View>
             )}
             {/* Theme extras on face */}
             {outfit?.extraElement === 'eye_patch' && (
@@ -671,6 +763,21 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             )}
             {(a.facialHair || 'none') === 'goatee' && (
               <View style={[styles.goatee, { backgroundColor: a.hairColor }]} />
+            )}
+            {(a.facialHair || 'none') === 'fu_manchu' && (
+              <View style={styles.fuManchuRow}>
+                <View style={[styles.fuManchuHalf, { backgroundColor: a.hairColor, transform: [{ rotate: '5deg' }] }]} />
+                <View style={[styles.fuManchuHalf, { backgroundColor: a.hairColor, transform: [{ rotate: '-5deg' }] }]} />
+              </View>
+            )}
+            {(a.facialHair || 'none') === 'sideburns' && (
+              <>
+                <View style={[styles.sideburn, styles.sideburnL, { backgroundColor: a.hairColor }]} />
+                <View style={[styles.sideburn, styles.sideburnR, { backgroundColor: a.hairColor }]} />
+              </>
+            )}
+            {(a.facialHair || 'none') === 'soul_patch' && (
+              <View style={[styles.soulPatch, { backgroundColor: a.hairColor }]} />
             )}
             {/* Cheek blush — happy expression */}
             {a.expression === 'happy' && !isOffline && (
@@ -764,9 +871,39 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             <View style={styles.crabBackShellRidge3} />
           </View>
         )}
+        {a.backItem === 'tentacles' && (
+          <View style={styles.tentacles}>
+            <View style={[styles.tentacle, { transform: [{ rotate: '-30deg' }] }]} />
+            <View style={[styles.tentacle, { transform: [{ rotate: '-10deg' }], height: PX * 4 }]} />
+            <View style={[styles.tentacle, { transform: [{ rotate: '10deg' }] }]} />
+            <View style={[styles.tentacle, { transform: [{ rotate: '30deg' }], height: PX * 3.5 }]} />
+          </View>
+        )}
+        {a.backItem === 'rocket' && (
+          <View style={styles.rocketPack}>
+            <View style={styles.rocketBody} />
+            <View style={styles.rocketNose} />
+            <View style={styles.rocketFlame} />
+          </View>
+        )}
+        {a.backItem === 'scroll' && (
+          <View style={styles.scrollBack}>
+            <View style={styles.scrollBody} />
+            <View style={styles.scrollCapTop} />
+            <View style={styles.scrollCapBot} />
+          </View>
+        )}
+        {a.backItem === 'boombox' && (
+          <View style={styles.boombox}>
+            <View style={styles.boomboxBody} />
+            <View style={styles.boomboxSpeakerL} />
+            <View style={styles.boomboxSpeakerR} />
+            <View style={styles.boomboxHandle} />
+          </View>
+        )}
 
         {/* Neck */}
-        <View style={[styles.neck, { backgroundColor: a.skinTone }]}>
+        <View style={[styles.neck, { backgroundColor: a.skinTone, ...neonGlow }]}>
           <View style={styles.neckShadow} />
         </View>
 
@@ -834,7 +971,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             <View style={{ position: 'absolute', top: -1, left: -1, width: 2, height: 2, backgroundColor: a.shirtColor, opacity: 0.5, borderRadius: 1 }} />
             <View style={styles.armWrinkle} />
             <View style={[styles.wristCuff, { backgroundColor: a.shirtColor }]} />
-            <View style={[styles.hand, { backgroundColor: outfit?.extraElement === 'gauntlets' ? (outfit.accentColor || '#6b7280') : a.skinTone }]}>
+            <View style={[styles.hand, { backgroundColor: outfit?.extraElement === 'gauntlets' ? (outfit.accentColor || '#6b7280') : a.skinTone, ...neonGlow }]}>
               <View style={styles.fingerLine} />
               <View style={[styles.fingerLine, styles.fingerLine2]} />
             </View>
@@ -847,7 +984,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             <View style={{ position: 'absolute', top: -1, left: -1, width: 2, height: 2, backgroundColor: a.shirtColor, opacity: 0.5, borderRadius: 1 }} />
             <View style={styles.armWrinkle} />
             <View style={[styles.wristCuff, { backgroundColor: a.shirtColor }]} />
-            <View style={[styles.hand, { backgroundColor: outfit?.extraElement === 'gauntlets' ? (outfit.accentColor || '#6b7280') : a.skinTone }]}>
+            <View style={[styles.hand, { backgroundColor: outfit?.extraElement === 'gauntlets' ? (outfit.accentColor || '#6b7280') : a.skinTone, ...neonGlow }]}>
               <View style={styles.fingerLine} />
               <View style={[styles.fingerLine, styles.fingerLine2]} />
             </View>
@@ -900,6 +1037,34 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
               <View style={styles.handCrabArm} />
               <View style={styles.handCrabClawTop} />
               <View style={styles.handCrabClawBot} />
+            </View>
+          )}
+          {(a.handItem || 'none') === 'sword_hand' && (
+            <View style={styles.handSword}>
+              <View style={styles.handSwordBlade} />
+              <View style={styles.handSwordGuard} />
+              <View style={styles.handSwordHilt} />
+            </View>
+          )}
+          {(a.handItem || 'none') === 'pizza' && (
+            <View style={styles.handPizza}>
+              <View style={styles.pizzaSlice} />
+              <View style={styles.pizzaCrust} />
+              <View style={styles.pizzaTopping1} />
+              <View style={styles.pizzaTopping2} />
+            </View>
+          )}
+          {(a.handItem || 'none') === 'microphone' && (
+            <View style={styles.handMic}>
+              <View style={styles.micHead} />
+              <View style={styles.micStick} />
+            </View>
+          )}
+          {(a.handItem || 'none') === 'torch' && (
+            <View style={styles.handTorch}>
+              <View style={styles.torchFlame} />
+              <View style={styles.torchFlameInner} />
+              <View style={styles.torchStick} />
             </View>
           )}
         </Animated.View>
@@ -1124,6 +1289,46 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             <View style={styles.crabLeg3R} />
           </Animated.View>
         )}
+        {(a.pet || 'none') === 'snake' && (
+          <Animated.View style={[styles.petSnake, { transform: [{ translateY: petBounce }] }]}>
+            <Animated.View style={[styles.snakeBody, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-3deg', '3deg'] }) }] }]} />
+            <View style={styles.snakeHead}>
+              <View style={styles.snakeEye} />
+              <View style={styles.snakeTongue} />
+            </View>
+          </Animated.View>
+        )}
+        {(a.pet || 'none') === 'bat' && (
+          <Animated.View style={[styles.petBat, { transform: [{ translateY: petBounce }] }]}>
+            <View style={styles.batBody} />
+            <Animated.View style={[styles.batWingL, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-10deg', '20deg'] }) }] }]} />
+            <Animated.View style={[styles.batWingR, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['10deg', '-20deg'] }) }] }]} />
+            <View style={[styles.batEye, { left: PX * 0.3 }]} />
+            <View style={[styles.batEye, { right: PX * 0.3 }]} />
+          </Animated.View>
+        )}
+        {(a.pet || 'none') === 'skull' && (
+          <Animated.View style={[styles.petSkull, { transform: [{ translateY: petBounce }] }]}>
+            <View style={styles.skullHead}>
+              <View style={[styles.skullEye, { left: PX * 0.4 }]} />
+              <View style={[styles.skullEye, { right: PX * 0.4 }]} />
+              <View style={styles.skullNose} />
+              <View style={styles.skullTeeth} />
+            </View>
+            <View style={styles.skullJaw} />
+          </Animated.View>
+        )}
+        {(a.pet || 'none') === 'mushroom' && (
+          <Animated.View style={[styles.petMushroom, { transform: [{ translateY: petBounce }] }]}>
+            <View style={styles.mushroomCap}>
+              <View style={styles.mushroomSpot1} />
+              <View style={styles.mushroomSpot2} />
+            </View>
+            <View style={styles.mushroomStem} />
+            <View style={[styles.mushroomEye, { left: PX * 0.5 }]} />
+            <View style={[styles.mushroomEye, { right: PX * 0.5 }]} />
+          </Animated.View>
+        )}
 
         {/* Aura effects — animated */}
         {(a.aura || 'none') === 'fire' && (
@@ -1202,6 +1407,30 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             <Animated.View style={[styles.cosmicStar5, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.9] }), transform: [{ scale: auraPulse.interpolate({ inputRange: [0.92, 1.12], outputRange: [0.8, 1.3] }) }] }]} />
             <Animated.View style={[styles.cosmicNebula, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.05, 0.2] }), transform: [{ scale: auraPulse }] }]} />
             <Animated.View style={[styles.cosmicRing, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.1, 0.3] }), transform: [{ rotate: auraRotate.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) }] }]} />
+          </Animated.View>
+        )}
+
+        {(a.aura || 'none') === 'toxic' && (
+          <Animated.View style={[styles.auraToxic, { transform: [{ scale: auraPulse }] }]}>
+            <Animated.View style={[styles.toxicBubble1, { opacity: auraFlicker, transform: [{ translateY: auraDrift }] }]} />
+            <Animated.View style={[styles.toxicBubble2, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.4, 0.9] }), transform: [{ translateY: auraDrift.interpolate({ inputRange: [-2, 2], outputRange: [1, -2] }) }] }]} />
+            <Animated.View style={[styles.toxicBubble3, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.8] }) }]} />
+            <View style={styles.toxicGlow} />
+          </Animated.View>
+        )}
+        {(a.aura || 'none') === 'holy' && (
+          <Animated.View style={[styles.auraHoly, { transform: [{ scale: auraPulse.interpolate({ inputRange: [0.92, 1.12], outputRange: [0.97, 1.03] }) }] }]}>
+            <Animated.View style={[styles.holyRay1, { opacity: auraFlicker }]} />
+            <Animated.View style={[styles.holyRay2, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }) }]} />
+            <Animated.View style={[styles.holyRay3, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.8] }) }]} />
+            <View style={styles.holyGlow} />
+          </Animated.View>
+        )}
+        {(a.aura || 'none') === 'void' && (
+          <Animated.View style={[styles.auraVoid, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.4, 0.8] }) }]}>
+            <Animated.View style={[styles.voidRing, { transform: [{ scale: auraPulse }, { rotate: auraRotate.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) }] }]} />
+            <Animated.View style={[styles.voidParticle1, { opacity: auraFlicker, transform: [{ translateY: auraDrift }] }]} />
+            <Animated.View style={[styles.voidParticle2, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.7] }) }]} />
           </Animated.View>
         )}
 
@@ -1375,6 +1604,7 @@ const xpStyles = StyleSheet.create({
 });
 
 const PX = 2.5;
+const HPX = PX * 1.4; // hand items drawn bigger
 
 
 // ── FLOATING TEXT ────────────────────────────────────────────────────────
@@ -2309,123 +2539,123 @@ const styles = StyleSheet.create({
   cosmicNebula: { position: 'absolute', top: PX * 1, left: PX * 0.5, width: PX * 4, height: PX * 3, backgroundColor: '#8b5cf6', borderRadius: PX * 2, opacity: 0.1 },
   cosmicRing: { position: 'absolute', top: PX * 0.5, left: 0, right: 0, height: PX * 5, borderWidth: 1, borderColor: '#fef08a20', borderRadius: PX * 5 },
 
-  // ── Hand Items ───────────────────────────────────────────
-  handLightsaber: { position: 'absolute', right: -PX * 2.5, bottom: PX * 0.5, zIndex: 3, alignItems: 'center' as const },
+  // ── Hand Items (HPX = 1.4x bigger) ─────────────────────────
+  handLightsaber: { position: 'absolute', right: -HPX * 2.5, bottom: HPX * 0.5, zIndex: 3, alignItems: 'center' as const },
   lightsaberGlow: {
-    position: 'absolute' as const, top: 0, left: -PX * 0.5,
-    width: PX * 1.5, height: PX * 6.5,
-    borderRadius: PX * 0.75, opacity: 0.25,
+    position: 'absolute' as const, top: 0, left: -HPX * 0.5,
+    width: HPX * 1.5, height: HPX * 6.5,
+    borderRadius: HPX * 0.75, opacity: 0.25,
   },
   lightsaberBlade: {
-    width: PX * 0.7, height: PX * 6,
-    borderRadius: PX * 0.35,
+    width: HPX * 0.7, height: HPX * 6,
+    borderRadius: HPX * 0.35,
     shadowOffset: { width: 0, height: 0 }, shadowRadius: 8, shadowOpacity: 1,
   },
   lightsaberCore: {
-    position: 'absolute' as const, top: PX * 5.8, left: PX * 0.05,
-    width: PX * 0.6, height: PX * 0.6,
-    borderRadius: PX * 0.3, opacity: 0.9,
+    position: 'absolute' as const, top: HPX * 5.8, left: HPX * 0.05,
+    width: HPX * 0.6, height: HPX * 0.6,
+    borderRadius: HPX * 0.3, opacity: 0.9,
   },
   lightsaberHilt: {
-    width: PX * 1.2, height: PX * 2,
+    width: HPX * 1.2, height: HPX * 2,
     backgroundColor: '#374151', borderRadius: 1,
     borderWidth: 0.5, borderColor: '#6b7280',
   },
   lightsaberGuard: {
-    width: PX * 1.8, height: PX * 0.4,
+    width: HPX * 1.8, height: HPX * 0.4,
     backgroundColor: '#6b7280', borderRadius: 1,
     marginTop: -1,
   },
   lightsaberGrip1: {
-    position: 'absolute' as const, bottom: PX * 0.5, left: PX * 0.15,
-    width: PX * 0.9, height: PX * 0.2,
+    position: 'absolute' as const, bottom: HPX * 0.5, left: HPX * 0.15,
+    width: HPX * 0.9, height: HPX * 0.2,
     backgroundColor: '#1f2937', borderRadius: 0.5,
   },
   lightsaberGrip2: {
-    position: 'absolute' as const, bottom: PX * 0.9, left: PX * 0.15,
-    width: PX * 0.9, height: PX * 0.2,
+    position: 'absolute' as const, bottom: HPX * 0.9, left: HPX * 0.15,
+    width: HPX * 0.9, height: HPX * 0.2,
     backgroundColor: '#1f2937', borderRadius: 0.5,
   },
 
-  handCoffee: { position: 'absolute', right: -PX * 2, bottom: 0, zIndex: 3 },
+  handCoffee: { position: 'absolute', right: -HPX * 2, bottom: 0, zIndex: 3 },
   handCoffeeBody: {
-    width: PX * 1.8, height: PX * 2, backgroundColor: '#f5f5f4',
+    width: HPX * 1.8, height: HPX * 2, backgroundColor: '#f5f5f4',
     borderRadius: 2, borderWidth: 0.5, borderColor: '#9ca3af',
   },
   handCoffeeLid: {
-    position: 'absolute' as const, top: -PX * 0.3, left: -PX * 0.1,
-    width: PX * 2, height: PX * 0.5, backgroundColor: '#78350f',
+    position: 'absolute' as const, top: -HPX * 0.3, left: -HPX * 0.1,
+    width: HPX * 2, height: HPX * 0.5, backgroundColor: '#78350f',
     borderRadius: 1, borderWidth: 0.5, borderColor: '#92400e',
   },
   handCoffeeHandle: {
-    position: 'absolute', right: -PX * 0.6, top: PX * 0.4,
-    width: PX * 0.6, height: PX * 1.2, borderWidth: 0.5,
-    borderColor: '#9ca3af', borderRadius: PX * 0.3, backgroundColor: 'transparent',
+    position: 'absolute', right: -HPX * 0.6, top: HPX * 0.4,
+    width: HPX * 0.6, height: HPX * 1.2, borderWidth: 0.5,
+    borderColor: '#9ca3af', borderRadius: HPX * 0.3, backgroundColor: 'transparent',
   },
   handCoffeeSteam: {
-    position: 'absolute' as const, top: -PX * 1.2, left: PX * 0.5,
-    width: PX * 0.3, height: PX * 0.8, backgroundColor: '#ffffff30',
-    borderRadius: PX * 0.15,
+    position: 'absolute' as const, top: -HPX * 1.2, left: HPX * 0.5,
+    width: HPX * 0.3, height: HPX * 0.8, backgroundColor: '#ffffff30',
+    borderRadius: HPX * 0.15,
   },
 
-  handLaptop: { position: 'absolute', right: -PX * 2.5, bottom: -PX * 0.5, zIndex: 3 },
+  handLaptop: { position: 'absolute', right: -HPX * 2.5, bottom: -HPX * 0.5, zIndex: 3 },
   handLaptopScreen: {
-    width: PX * 2.5, height: PX * 1.8, backgroundColor: '#0f172a',
+    width: HPX * 2.5, height: HPX * 1.8, backgroundColor: '#0f172a',
     borderWidth: 0.5, borderColor: '#334155',
     borderTopLeftRadius: 2, borderTopRightRadius: 2,
     shadowColor: '#60a5fa', shadowOffset: { width: 0, height: 0 }, shadowRadius: 4, shadowOpacity: 0.3,
   },
   handLaptopScreenGlow: {
-    position: 'absolute' as const, top: PX * 0.3, left: PX * 0.3,
-    width: PX * 1.9, height: PX * 0.3, backgroundColor: '#3b82f640',
+    position: 'absolute' as const, top: HPX * 0.3, left: HPX * 0.3,
+    width: HPX * 1.9, height: HPX * 0.3, backgroundColor: '#3b82f640',
     borderRadius: 1,
   },
   handLaptopBase: {
-    width: PX * 2.8, height: PX * 0.5, backgroundColor: '#6b7280',
+    width: HPX * 2.8, height: HPX * 0.5, backgroundColor: '#6b7280',
     borderBottomLeftRadius: 1, borderBottomRightRadius: 1,
     borderWidth: 0.5, borderColor: '#4b5563',
   },
 
-  handFlag: { position: 'absolute', right: -PX * 2, bottom: 0, zIndex: 3 },
-  handFlagPole: { width: PX * 0.3, height: PX * 4, backgroundColor: '#6b7280' },
-  handFlagCloth: { position: 'absolute', top: 0, left: PX * 0.3, width: PX * 2, height: PX * 1.5, borderTopRightRadius: 1, borderBottomRightRadius: 1 },
+  handFlag: { position: 'absolute', right: -HPX * 2, bottom: 0, zIndex: 3 },
+  handFlagPole: { width: HPX * 0.3, height: HPX * 4, backgroundColor: '#6b7280' },
+  handFlagCloth: { position: 'absolute', top: 0, left: HPX * 0.3, width: HPX * 2, height: HPX * 1.5, borderTopRightRadius: 1, borderBottomRightRadius: 1 },
 
-  handWand: { position: 'absolute', right: -PX * 2, bottom: 0, zIndex: 3 },
+  handWand: { position: 'absolute', right: -HPX * 2, bottom: 0, zIndex: 3 },
   handWandStick: {
-    width: PX * 0.5, height: PX * 3.5, backgroundColor: '#78350f',
+    width: HPX * 0.5, height: HPX * 3.5, backgroundColor: '#78350f',
     borderRadius: 1, transform: [{ rotate: '-15deg' }],
     borderWidth: 0.5, borderColor: '#92400e',
   },
   handWandSpark: {
-    position: 'absolute', top: -PX * 0.8, left: PX * 0.3,
-    width: PX * 1, height: PX * 1, backgroundColor: '#fef08a',
-    borderRadius: PX * 0.5,
+    position: 'absolute', top: -HPX * 0.8, left: HPX * 0.3,
+    width: HPX * 1, height: HPX * 1, backgroundColor: '#fef08a',
+    borderRadius: HPX * 0.5,
     shadowColor: '#fef08a', shadowOffset: { width: 0, height: 0 }, shadowRadius: 6, shadowOpacity: 1,
   },
   handWandSpark2: {
-    position: 'absolute' as const, top: -PX * 0.3, left: PX * 1.2,
-    width: PX * 0.4, height: PX * 0.4, backgroundColor: '#fde68a80',
-    borderRadius: PX * 0.2,
+    position: 'absolute' as const, top: -HPX * 0.3, left: HPX * 1.2,
+    width: HPX * 0.4, height: HPX * 0.4, backgroundColor: '#fde68a80',
+    borderRadius: HPX * 0.2,
   },
   handWandSpark3: {
-    position: 'absolute' as const, top: PX * 0.2, left: -PX * 0.2,
-    width: PX * 0.3, height: PX * 0.3, backgroundColor: '#fde68a60',
-    borderRadius: PX * 0.15,
+    position: 'absolute' as const, top: HPX * 0.2, left: -HPX * 0.2,
+    width: HPX * 0.3, height: HPX * 0.3, backgroundColor: '#fde68a60',
+    borderRadius: HPX * 0.15,
   },
 
   // ── Crab Claws (hand item) ─────────────────────────────────────────
-  handCrabClaws: { position: 'absolute', right: -PX * 2.5, bottom: PX * 0.5, zIndex: 3, alignItems: 'center' as const },
-  handCrabArm: { width: PX * 0.6, height: PX * 2, backgroundColor: '#ef4444', borderRadius: 1, transform: [{ rotate: '-10deg' }] },
+  handCrabClaws: { position: 'absolute', right: -HPX * 2.5, bottom: HPX * 0.5, zIndex: 3, alignItems: 'center' as const },
+  handCrabArm: { width: HPX * 0.6, height: HPX * 2, backgroundColor: '#ef4444', borderRadius: 1, transform: [{ rotate: '-10deg' }] },
   handCrabClawTop: {
-    position: 'absolute', top: -PX * 0.8, left: -PX * 0.6,
-    width: PX * 1.5, height: PX * 0.7, backgroundColor: '#ef4444',
-    borderTopLeftRadius: PX * 0.8, borderTopRightRadius: PX * 0.3,
+    position: 'absolute', top: -HPX * 0.8, left: -HPX * 0.6,
+    width: HPX * 1.5, height: HPX * 0.7, backgroundColor: '#ef4444',
+    borderTopLeftRadius: HPX * 0.8, borderTopRightRadius: HPX * 0.3,
     transform: [{ rotate: '-20deg' }],
   },
   handCrabClawBot: {
-    position: 'absolute', top: -PX * 0.1, left: -PX * 0.6,
-    width: PX * 1.5, height: PX * 0.7, backgroundColor: '#dc2626',
-    borderBottomLeftRadius: PX * 0.8, borderBottomRightRadius: PX * 0.3,
+    position: 'absolute', top: -HPX * 0.1, left: -HPX * 0.6,
+    width: HPX * 1.5, height: HPX * 0.7, backgroundColor: '#dc2626',
+    borderBottomLeftRadius: HPX * 0.8, borderBottomRightRadius: HPX * 0.3,
     transform: [{ rotate: '10deg' }],
   },
 
@@ -2570,5 +2800,150 @@ const styles = StyleSheet.create({
   crabLeg1R: { position: 'absolute', bottom: PX * 0.2, right: PX * 0.5, width: PX * 1.5, height: PX * 0.3, backgroundColor: '#dc2626', borderRadius: 1, transform: [{ rotate: '25deg' }] },
   crabLeg2R: { position: 'absolute', bottom: PX * 0.6, right: PX * 0.2, width: PX * 1.5, height: PX * 0.3, backgroundColor: '#dc2626', borderRadius: 1, transform: [{ rotate: '15deg' }] },
   crabLeg3R: { position: 'absolute', bottom: PX * 1, right: 0, width: PX * 1.3, height: PX * 0.3, backgroundColor: '#dc2626', borderRadius: 1, transform: [{ rotate: '5deg' }] },
+
+  // ── New Hair Styles ─────────────────────────────────────────
+  hairBuzzcut: { height: PX * 1.2, borderRadius: 1 },
+  hairAfro: { width: PX * 9, height: PX * 5, borderRadius: PX * 4.5, marginTop: -PX * 1.5, marginLeft: -PX * 1 },
+  hairUndercut: { height: PX * 2, borderTopLeftRadius: 2, borderTopRightRadius: 2, borderBottomLeftRadius: 0, borderBottomRightRadius: 0 },
+  hairPigtails: { height: PX * 2, borderTopLeftRadius: 2, borderTopRightRadius: 2 },
+  pigtailBundleL: { position: 'absolute', top: PX * 5, left: -PX * 1, width: PX * 1.5, height: PX * 2.5, borderRadius: PX * 0.8 },
+  pigtailBundleR: { position: 'absolute', top: PX * 5, right: -PX * 1, width: PX * 1.5, height: PX * 2.5, borderRadius: PX * 0.8 },
+
+  // ── New Hats (pirate, cowboy, fez, mohawk spikes) ──────────
+  pirateHat: { alignItems: 'center' as const, marginBottom: -6, zIndex: 5 },
+  pirateHatCrown: { width: PX * 7, height: PX * 3, backgroundColor: '#1a1a1a', borderTopLeftRadius: PX * 3, borderTopRightRadius: PX * 3 },
+  pirateHatBrim: { width: PX * 9, height: PX * 1.2, backgroundColor: '#1a1a1a', borderRadius: 1, marginTop: -1 },
+  pirateHatSkull: { position: 'absolute', top: PX * 0.8, left: PX * 2.5, width: PX * 1.5, height: PX * 1.5, backgroundColor: '#ffffff60', borderRadius: PX * 0.75 },
+
+  cowboyHat: { alignItems: 'center' as const, marginBottom: -6, zIndex: 5 },
+  cowboyHatCrown: { width: PX * 5, height: PX * 2.5, backgroundColor: '#92400e', borderTopLeftRadius: PX * 2, borderTopRightRadius: PX * 2 },
+  cowboyHatBrim: { width: PX * 10, height: PX * 1.2, backgroundColor: '#78350f', borderRadius: PX * 0.6, marginTop: -1 },
+
+  fez: { alignItems: 'center' as const, marginBottom: -6, zIndex: 5 },
+  fezBody: { width: PX * 5, height: PX * 3.5, backgroundColor: '#dc2626', borderTopLeftRadius: 2, borderTopRightRadius: 2 },
+  fezTassel: { position: 'absolute', top: 0, right: -PX * 1.5, width: PX * 0.4, height: PX * 2, backgroundColor: '#1a1a1a', borderRadius: 1, transform: [{ rotate: '20deg' }] },
+
+  mohawkSpikes: { flexDirection: 'row' as const, alignItems: 'flex-end' as const, marginBottom: -6, zIndex: 5, gap: 1 },
+  spike: { width: PX * 1.2, height: PX * 2, backgroundColor: '#9ca3af', borderTopLeftRadius: PX * 0.5, borderTopRightRadius: PX * 0.5 },
+
+  // ── New Accessories (chain, piercing, visor, gas mask) ─────
+  accessoryChain: { position: 'absolute', bottom: -PX * 1, left: PX * 1, flexDirection: 'row' as const, gap: 1, zIndex: 2 },
+  chainLink1: { width: PX * 0.8, height: PX * 0.8, borderWidth: 0.8, borderColor: '#d4a017', borderRadius: PX * 0.4 },
+  chainLink2: { width: PX * 0.8, height: PX * 0.8, borderWidth: 0.8, borderColor: '#d4a017', borderRadius: PX * 0.4, marginTop: PX * 0.2 },
+  chainLink3: { width: PX * 0.8, height: PX * 0.8, borderWidth: 0.8, borderColor: '#d4a017', borderRadius: PX * 0.4 },
+
+  accessoryPiercing: { position: 'absolute', bottom: PX * 0.5, right: PX * 0.8, width: PX * 0.6, height: PX * 0.6, backgroundColor: '#c0c0c0', borderRadius: PX * 0.3, borderWidth: 0.5, borderColor: '#9ca3af', zIndex: 3 },
+
+  accessoryVisor: { position: 'absolute', top: 0, left: -PX * 0.3, right: -PX * 0.3, height: PX * 1.8, backgroundColor: '#1a1a1acc', borderRadius: 2, zIndex: 3 },
+  visorStripe: { position: 'absolute', top: PX * 0.5, left: 0, right: 0, height: PX * 0.4, backgroundColor: '#3b82f680' },
+
+  accessoryGasMask: { position: 'absolute', bottom: -PX * 0.5, left: 0, right: 0, height: PX * 3, backgroundColor: '#4b5563', borderRadius: 2, zIndex: 3 },
+  gasMaskFilterL: { position: 'absolute', bottom: PX * 0.3, left: -PX * 0.8, width: PX * 1, height: PX * 1.5, backgroundColor: '#374151', borderRadius: PX * 0.3 },
+  gasMaskFilterR: { position: 'absolute', bottom: PX * 0.3, right: -PX * 0.8, width: PX * 1, height: PX * 1.5, backgroundColor: '#374151', borderRadius: PX * 0.3 },
+  gasMaskVent: { position: 'absolute', bottom: PX * 0.2, left: PX * 1.5, width: PX * 2.5, height: PX * 0.6, backgroundColor: '#1f2937', borderRadius: 1 },
+
+  // ── New Expressions ────────────────────────────────────────
+  surprisedEye: { width: PX * 1.5, height: PX * 1.8, borderRadius: PX * 0.75 },
+  smirkEyeL: { width: PX * 1.2, height: PX * 1.2 },
+  smirkEyeR: { width: PX * 1.4, height: PX * 1, borderRadius: PX * 0.5 },
+  cryingEye: { width: PX * 1.2, height: PX * 1.6, borderBottomLeftRadius: PX * 0.3, borderBottomRightRadius: PX * 0.3 },
+  surprisedMouth: { width: PX * 1.2, height: PX * 1.2, borderRadius: PX * 0.6, backgroundColor: '#1a1a1a' },
+  smirkMouth: { width: PX * 2, height: PX * 0.6, borderBottomRightRadius: 3, backgroundColor: '#c4956a', transform: [{ rotate: '5deg' }] },
+  cryingMouth: { width: PX * 2, height: PX * 0.8, borderTopLeftRadius: 3, borderTopRightRadius: 3, backgroundColor: '#1a1a1a' },
+  tear: { position: 'absolute', bottom: PX * 0.5, width: PX * 0.4, height: PX * 1, backgroundColor: '#60a5fa80', borderRadius: PX * 0.2 },
+
+  // ── New Facial Hair ────────────────────────────────────────
+  fuManchuRow: { flexDirection: 'row' as const, position: 'absolute', bottom: -PX * 0.5, gap: PX * 0.8 },
+  fuManchuHalf: { width: PX * 0.5, height: PX * 2.5, borderRadius: 1 },
+  sideburn: { position: 'absolute', width: PX * 0.8, height: PX * 2, borderBottomLeftRadius: PX * 0.3, borderBottomRightRadius: PX * 0.3 },
+  sideburnL: { left: -PX * 0.2, top: PX * 0.5 },
+  sideburnR: { right: -PX * 0.2, top: PX * 0.5 },
+  soulPatch: { position: 'absolute', bottom: -PX * 0.8, width: PX * 0.8, height: PX * 0.8, borderRadius: PX * 0.4, alignSelf: 'center' },
+
+  // ── New Back Items ─────────────────────────────────────────
+  tentacles: { position: 'absolute', top: 30, left: 2, zIndex: -1, flexDirection: 'row' as const, gap: 1 },
+  tentacle: { width: PX * 0.6, height: PX * 5, backgroundColor: '#8b5cf6', borderRadius: PX * 0.3, borderBottomLeftRadius: PX * 1, borderBottomRightRadius: PX * 1 },
+
+  rocketPack: { position: 'absolute', top: 28, right: 2, zIndex: -1, alignItems: 'center' as const },
+  rocketBody: { width: PX * 2.5, height: PX * 4, backgroundColor: '#f5f5f4', borderRadius: PX * 1, borderWidth: 1, borderColor: '#d4d4d4' },
+  rocketNose: { position: 'absolute', top: -PX * 1, width: 0, height: 0, borderLeftWidth: PX * 1.25, borderRightWidth: PX * 1.25, borderBottomWidth: PX * 1.5, borderLeftColor: 'transparent', borderRightColor: 'transparent', borderBottomColor: '#ef4444' },
+  rocketFlame: { width: PX * 1.5, height: PX * 2, backgroundColor: '#f97316', borderBottomLeftRadius: PX * 0.5, borderBottomRightRadius: PX * 0.5, opacity: 0.8, shadowColor: '#f97316', shadowRadius: 4, shadowOpacity: 0.8 },
+
+  scrollBack: { position: 'absolute', top: 28, right: 4, zIndex: -1, alignItems: 'center' as const },
+  scrollBody: { width: PX * 2, height: PX * 5, backgroundColor: '#fef3c7', borderWidth: 0.5, borderColor: '#d97706' },
+  scrollCapTop: { position: 'absolute', top: -PX * 0.3, width: PX * 2.5, height: PX * 0.6, backgroundColor: '#92400e', borderRadius: PX * 0.3 },
+  scrollCapBot: { position: 'absolute', bottom: -PX * 0.3, width: PX * 2.5, height: PX * 0.6, backgroundColor: '#92400e', borderRadius: PX * 0.3 },
+
+  boombox: { position: 'absolute', top: 30, left: 2, zIndex: -1, alignItems: 'center' as const },
+  boomboxBody: { width: PX * 5, height: PX * 3, backgroundColor: '#374151', borderRadius: 2, borderWidth: 1, borderColor: '#4b5563' },
+  boomboxSpeakerL: { position: 'absolute', top: PX * 0.5, left: PX * 0.3, width: PX * 1.2, height: PX * 1.2, backgroundColor: '#1f2937', borderRadius: PX * 0.6, borderWidth: 0.5, borderColor: '#6b7280' },
+  boomboxSpeakerR: { position: 'absolute', top: PX * 0.5, right: PX * 0.3, width: PX * 1.2, height: PX * 1.2, backgroundColor: '#1f2937', borderRadius: PX * 0.6, borderWidth: 0.5, borderColor: '#6b7280' },
+  boomboxHandle: { position: 'absolute', top: -PX * 0.8, left: PX * 1, right: PX * 1, height: PX * 0.4, backgroundColor: '#6b7280', borderTopLeftRadius: 3, borderTopRightRadius: 3 },
+
+  // ── New Pets ───────────────────────────────────────────────
+  petSnake: { position: 'absolute', bottom: 14, right: -10, width: PX * 8, height: PX * 4, zIndex: -1 },
+  snakeBody: { position: 'absolute', bottom: PX * 0.5, left: PX * 1, width: PX * 5, height: PX * 0.8, backgroundColor: '#22c55e', borderRadius: PX * 0.4, transform: [{ rotate: '-3deg' }] },
+  snakeHead: { position: 'absolute', bottom: PX * 0.8, left: PX * 0.2, width: PX * 1.5, height: PX * 1.2, backgroundColor: '#22c55e', borderRadius: PX * 0.6 },
+  snakeEye: { position: 'absolute', top: PX * 0.2, left: PX * 0.3, width: PX * 0.4, height: PX * 0.4, backgroundColor: '#1a1a1a', borderRadius: PX * 0.2 },
+  snakeTongue: { position: 'absolute', bottom: PX * 0.1, left: -PX * 0.5, width: PX * 0.8, height: PX * 0.15, backgroundColor: '#ef4444' },
+
+  petBat: { position: 'absolute', top: 6, right: -8, width: PX * 6, height: PX * 4, zIndex: 8 },
+  batBody: { position: 'absolute', bottom: PX * 0.5, left: PX * 1.8, width: PX * 2, height: PX * 1.5, backgroundColor: '#4b5563', borderRadius: PX * 0.7 },
+  batWingL: { position: 'absolute', bottom: PX * 1, left: 0, width: PX * 2.2, height: PX * 1.5, backgroundColor: '#37415180', borderTopLeftRadius: PX * 1.5, borderBottomLeftRadius: PX * 0.2, transformOrigin: 'right center' },
+  batWingR: { position: 'absolute', bottom: PX * 1, right: PX * 0.5, width: PX * 2.2, height: PX * 1.5, backgroundColor: '#37415180', borderTopRightRadius: PX * 1.5, borderBottomRightRadius: PX * 0.2, transformOrigin: 'left center' },
+  batEye: { position: 'absolute', bottom: PX * 1.5, width: PX * 0.4, height: PX * 0.4, backgroundColor: '#ef4444', borderRadius: PX * 0.2, shadowColor: '#ef4444', shadowRadius: 2, shadowOpacity: 0.8 },
+
+  petSkull: { position: 'absolute', bottom: 14, right: -8, width: PX * 5, height: PX * 5, zIndex: -1 },
+  skullHead: { position: 'absolute', bottom: PX * 0.5, left: PX * 0.5, width: PX * 3, height: PX * 2.8, backgroundColor: '#f5f5f4', borderTopLeftRadius: PX * 1.5, borderTopRightRadius: PX * 1.5, borderRadius: PX * 0.5 },
+  skullEye: { position: 'absolute', top: PX * 0.6, width: PX * 0.8, height: PX * 0.8, backgroundColor: '#1a1a1a', borderRadius: PX * 0.4 },
+  skullNose: { position: 'absolute', bottom: PX * 0.8, left: PX * 1.2, width: PX * 0.5, height: PX * 0.3, backgroundColor: '#d4d4d480', borderRadius: PX * 0.15 },
+  skullTeeth: { position: 'absolute', bottom: 0, left: PX * 0.5, right: PX * 0.5, height: PX * 0.4, backgroundColor: '#e5e5e5', borderBottomLeftRadius: 1, borderBottomRightRadius: 1 },
+  skullJaw: { position: 'absolute', bottom: 0, left: PX * 0.8, width: PX * 2.4, height: PX * 0.5, backgroundColor: '#e5e5e5', borderBottomLeftRadius: PX * 0.3, borderBottomRightRadius: PX * 0.3 },
+
+  petMushroom: { position: 'absolute', bottom: 14, right: -8, width: PX * 5, height: PX * 4.5, zIndex: -1 },
+  mushroomCap: { position: 'absolute', bottom: PX * 1.5, left: PX * 0.3, width: PX * 3.5, height: PX * 2, backgroundColor: '#ef4444', borderTopLeftRadius: PX * 2, borderTopRightRadius: PX * 2, borderBottomLeftRadius: PX * 0.5, borderBottomRightRadius: PX * 0.5 },
+  mushroomSpot1: { position: 'absolute', top: PX * 0.3, left: PX * 0.5, width: PX * 0.8, height: PX * 0.8, backgroundColor: '#ffffff60', borderRadius: PX * 0.4 },
+  mushroomSpot2: { position: 'absolute', top: PX * 0.5, right: PX * 0.6, width: PX * 0.6, height: PX * 0.6, backgroundColor: '#ffffff40', borderRadius: PX * 0.3 },
+  mushroomStem: { position: 'absolute', bottom: 0, left: PX * 1.2, width: PX * 1.2, height: PX * 1.5, backgroundColor: '#fef3c7', borderBottomLeftRadius: PX * 0.3, borderBottomRightRadius: PX * 0.3 },
+  mushroomEye: { position: 'absolute', bottom: PX * 1.8, width: PX * 0.4, height: PX * 0.4, backgroundColor: '#1a1a1a', borderRadius: PX * 0.2 },
+
+  // ── New Auras (toxic, holy, void) ──────────────────────────
+  auraToxic: { position: 'absolute', top: 0, left: -2, right: -2, bottom: 16, zIndex: -1 },
+  toxicBubble1: { position: 'absolute', top: PX * 0.5, left: PX * 0.5, width: PX * 1.5, height: PX * 1.5, backgroundColor: '#22c55e60', borderRadius: PX * 0.75, shadowColor: '#22c55e', shadowRadius: 5, shadowOpacity: 0.7 },
+  toxicBubble2: { position: 'absolute', top: PX * 2.5, right: PX * 0.5, width: PX * 1, height: PX * 1, backgroundColor: '#4ade8050', borderRadius: PX * 0.5, shadowColor: '#22c55e', shadowRadius: 4, shadowOpacity: 0.6 },
+  toxicBubble3: { position: 'absolute', top: PX * 1, left: PX * 3, width: PX * 0.8, height: PX * 0.8, backgroundColor: '#86efac40', borderRadius: PX * 0.4 },
+  toxicGlow: { position: 'absolute', bottom: 0, left: 0, right: 0, height: PX * 2, backgroundColor: '#22c55e10', borderRadius: PX * 2, shadowColor: '#22c55e', shadowRadius: 8, shadowOpacity: 0.2 },
+
+  auraHoly: { position: 'absolute', top: -2, left: -2, right: -2, bottom: 16, zIndex: -1 },
+  holyRay1: { position: 'absolute', top: 0, left: PX * 1, width: PX * 0.5, height: PX * 6, backgroundColor: '#fef08a30', borderRadius: PX * 0.25, transform: [{ rotate: '-5deg' }] },
+  holyRay2: { position: 'absolute', top: -PX * 0.5, left: PX * 2.5, width: PX * 0.4, height: PX * 6.5, backgroundColor: '#fef08a25', borderRadius: PX * 0.2 },
+  holyRay3: { position: 'absolute', top: 0, right: PX * 1, width: PX * 0.5, height: PX * 6, backgroundColor: '#fef08a20', borderRadius: PX * 0.25, transform: [{ rotate: '5deg' }] },
+  holyGlow: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#fef08a', borderRadius: 8, opacity: 0.08, shadowColor: '#fef08a', shadowRadius: 12, shadowOpacity: 0.3 },
+
+  auraVoid: { position: 'absolute', top: 2, left: -4, right: -4, bottom: 16, zIndex: -1 },
+  voidRing: { position: 'absolute', top: PX * 0.5, left: 0, right: 0, height: PX * 5, borderWidth: 1.5, borderColor: '#6b21a830', borderRadius: PX * 5, backgroundColor: '#0a0a1440' },
+  voidParticle1: { position: 'absolute', top: PX * 1, left: PX * 0.5, width: PX * 0.6, height: PX * 0.6, backgroundColor: '#7c3aed', borderRadius: PX * 0.3, shadowColor: '#7c3aed', shadowRadius: 4, shadowOpacity: 0.9 },
+  voidParticle2: { position: 'absolute', top: PX * 3, right: PX * 0.5, width: PX * 0.5, height: PX * 0.5, backgroundColor: '#4c1d95', borderRadius: PX * 0.25, shadowColor: '#4c1d95', shadowRadius: 3, shadowOpacity: 0.8 },
+
+  // ── New Hand Items (bigger with HPX) ───────────────────────
+  handSword: { position: 'absolute', right: -HPX * 2, bottom: HPX * 0.5, zIndex: 3, alignItems: 'center' as const },
+  handSwordBlade: { width: HPX * 0.8, height: HPX * 5, backgroundColor: '#9ca3af', borderRadius: 1 },
+  handSwordGuard: { width: HPX * 2.5, height: HPX * 0.5, backgroundColor: '#d4a017', borderRadius: 1, marginTop: -1 },
+  handSwordHilt: { width: HPX * 1.2, height: HPX * 1.2, backgroundColor: '#78350f', borderRadius: 1, marginTop: -1 },
+
+  handPizza: { position: 'absolute', right: -HPX * 1.8, bottom: 0, zIndex: 3 },
+  pizzaSlice: { width: 0, height: 0, borderLeftWidth: HPX * 1.2, borderRightWidth: HPX * 1.2, borderBottomWidth: HPX * 2.5, borderLeftColor: 'transparent', borderRightColor: 'transparent', borderBottomColor: '#f59e0b' },
+  pizzaCrust: { width: HPX * 2.4, height: HPX * 0.5, backgroundColor: '#92400e', borderBottomLeftRadius: 2, borderBottomRightRadius: 2 },
+  pizzaTopping1: { position: 'absolute', top: HPX * 1.2, left: HPX * 0.6, width: HPX * 0.4, height: HPX * 0.4, backgroundColor: '#ef4444', borderRadius: HPX * 0.2 },
+  pizzaTopping2: { position: 'absolute', top: HPX * 0.8, left: HPX * 1.3, width: HPX * 0.35, height: HPX * 0.35, backgroundColor: '#ef4444', borderRadius: HPX * 0.17 },
+
+  handMic: { position: 'absolute', right: -HPX * 1.8, bottom: 0, zIndex: 3, alignItems: 'center' as const },
+  micHead: { width: HPX * 1.2, height: HPX * 1.5, backgroundColor: '#6b7280', borderTopLeftRadius: HPX * 0.6, borderTopRightRadius: HPX * 0.6, borderWidth: 0.5, borderColor: '#9ca3af' },
+  micStick: { width: HPX * 0.4, height: HPX * 2.5, backgroundColor: '#374151', borderRadius: 1 },
+
+  handTorch: { position: 'absolute', right: -HPX * 1.8, bottom: 0, zIndex: 3, alignItems: 'center' as const },
+  torchFlame: { width: HPX * 1.5, height: HPX * 1.8, backgroundColor: '#f97316', borderTopLeftRadius: HPX * 0.7, borderTopRightRadius: HPX * 0.7, borderRadius: HPX * 0.5, shadowColor: '#f97316', shadowRadius: 6, shadowOpacity: 0.9 },
+  torchFlameInner: { position: 'absolute', top: HPX * 0.3, left: HPX * 0.3, width: HPX * 0.8, height: HPX * 1, backgroundColor: '#fef08a', borderRadius: HPX * 0.4, opacity: 0.7 },
+  torchStick: { width: HPX * 0.5, height: HPX * 2.5, backgroundColor: '#78350f', borderRadius: 1 },
 
 });

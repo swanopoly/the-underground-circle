@@ -23,9 +23,16 @@ export function calculateAgentScore(
   sessions: OpenClawSession[],
   allAgents: OfficeAgent[],
 ): AgentPerformanceScore {
-  // Find the session for this agent
-  const sessionKey = agent.id.includes('::') ? agent.id.split('::')[1] : agent.id;
-  const session = sessions.find(s => s.sessionKey === sessionKey);
+  // Find sessions for this agent (sessions are per-response, match by agentId)
+  const agentSessions = sessions.filter(s => s.agentId === agent.id || s.agentId === agent.name);
+  // Create an aggregate session for compatibility with downstream functions
+  const session = agentSessions.length > 0 ? {
+    ...agentSessions[0],
+    turns: agentSessions.length,
+    totalCost: agentSessions.reduce((sum, s) => sum + (s.totalCost || 0), 0),
+    totalInputTokens: agentSessions.reduce((sum, s) => sum + (s.totalInputTokens || 0), 0),
+    totalOutputTokens: agentSessions.reduce((sum, s) => sum + (s.totalOutputTokens || 0), 0),
+  } : undefined;
 
   // Reliability: Based on status and uptime
   const reliability = calculateReliability(agent);
@@ -52,7 +59,8 @@ export function calculateAgentScore(
 
   // Calculate rank among all agents
   const scores = allAgents.map(a => {
-    const s = sessions.find(ses => ses.sessionKey === (a.id.includes('::') ? a.id.split('::')[1] : a.id));
+    const aSessions = sessions.filter(ses => ses.agentId === a.id || ses.agentId === a.name);
+    const s = aSessions.length > 0 ? { ...aSessions[0], turns: aSessions.length, totalCost: aSessions.reduce((sum, ses) => sum + (ses.totalCost || 0), 0) } : undefined;
     return calculateOverallScore(a, s);
   }).sort((a, b) => b - a);
   const rank = scores.indexOf(overall) + 1;

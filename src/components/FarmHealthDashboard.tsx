@@ -43,7 +43,7 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
 
     const health = performHealthCheck(agents, sessions);
     setHealthCheck(health);
-  }, [agents.length, sessions.length]);
+  }, [agents, sessions]);
 
   const renderOverview = () => {
     if (!farmMetrics) return null;

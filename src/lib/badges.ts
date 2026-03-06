@@ -212,8 +212,13 @@ export function getEarnedBadges(currentPoints: number): Badge[] {
 
 // Points earned per model per turn — generous by design.
 // XP should flow naturally from every agent task. Badges are what's hard.
+//
+// BlackSwan LLM is the crown jewel — highest XP by design.
+// It's our model, our vision. Using it should feel rewarding.
 export function getPointsForModel(model: string): number {
   const m = model.toLowerCase();
+  // BlackSwan LLM — top tier, always highest XP
+  if (m.includes('blackswan') || m.includes('black-swan') || m.includes('black_swan')) return 50;
   if (m.includes('opus') || m.includes('gpt-4') || m.includes('gemini-ultra')) return 25;
   if (m.includes('sonnet') || m.includes('gpt-4o') || m.includes('claude-3-5')) return 15;
   if (m.includes('haiku') || m.includes('flash') || m.includes('mini')) return 8;

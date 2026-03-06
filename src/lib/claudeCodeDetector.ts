@@ -7,6 +7,8 @@
 import { OfficeAgent, AgentStatus } from './officeAgents';
 import { ProviderType } from './connectionManager';
 import { estimateCostWithCache } from './modelPricing';
+import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
+import { supabase } from './supabase';
 
 const BRIDGE_URL = 'http://localhost:7778';
 
@@ -122,10 +124,10 @@ export async function execBridgeCommand(
 // ── Convert bridge sessions to OfficeAgent[] ─────────────────────────────────
 
 function inferBridgeStatus(s: ClaudeCodeSession): AgentStatus {
-  if (!s.lastActivity) return 'offline';
+  if (!s.lastActivity) return 'idle';
   const age = Date.now() - new Date(s.lastActivity).getTime();
   if (age < 30_000) return 'active';
-  if (age < 300_000) return 'idle';
+  if (age < 3_600_000) return 'idle';   // Stay idle for up to 1 hour
   return 'offline';
 }
 
@@ -190,3 +192,114 @@ export function bridgeSessionsToAgents(sessions: ClaudeCodeSession[]): OfficeAge
     providerType: 'claude-code' as ProviderType,
   }));
 }
+
+// ── DB publishing: Auto-publish Claude Code agent to circle_office_agents ────
+
+export const CLAUDE_CODE_AGENT_NAME = 'Claude Code';
+const CLAUDE_CODE_BRIDGE_URL = 'http://localhost:7778';
+
+/**
+ * Publish a single "Claude Code" agent to circle_office_agents.
+ * Upsert on (circle_id, owner_id, name) — safe to call multiple times.
+ */
+export async function publishClaudeCodeAgent(
+  circleId: string,
+  sessionCount: number,
+): Promise<{ agentId?: string; error?: string }> {
+  const display = PROVIDER_DISPLAY['claude-code'];
+  const result = await publishAgentToCircle({
+    circleId,
+    provider: 'claude-code',
+    name: CLAUDE_CODE_AGENT_NAME,
+    color: display?.color || '#6366f1',
+    toolIcon: display?.icon || '💻',
+    gatewayUrl: CLAUDE_CODE_BRIDGE_URL,
+    isPublic: false,
+  });
+
+  if (result.error) {
+    console.error('[claudeCodeDetector] Failed to publish agent:', result.error);
+    return { error: result.error };
+  }
+
+  if (result.agent) {
+    await supabase
+      .from('circle_office_agents')
+      .update({
+        status: 'idle',
+        current_task: sessionCount > 0
+          ? `${sessionCount} session(s) active`
+          : 'Bridge connected',
+        last_active_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', result.agent.id);
+  }
+
+  return { agentId: result.agent?.id };
+}
+
+/**
+ * Update the Claude Code agent's live status based on session data.
+ */
+export async function updateClaudeCodeAgentStatus(
+  circleId: string,
+  sessions: ClaudeCodeSession[],
+): Promise<void> {
+  try {
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) return;
+
+    const activeSessions = sessions.filter(s => s.status === 'active');
+    const status = activeSessions.length > 0
+      ? 'building'
+      : 'idle';    // Always idle, never immediately offline
+    const currentTask = activeSessions.length > 0
+      ? `Working on ${activeSessions[0].projectDir.split('/').pop() || 'project'}`
+      : sessions.length > 0
+        ? `${sessions.length} session(s) idle`
+        : 'Session ended — idling';
+
+    await supabase
+      .from('circle_office_agents')
+      .update({
+        status,
+        current_task: currentTask,
+        last_active_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('circle_id', circleId)
+      .eq('owner_id', auth.user.id)
+      .eq('name', CLAUDE_CODE_AGENT_NAME);
+  } catch (err) {
+    console.warn('[claudeCodeDetector] Failed to update agent status:', err);
+  }
+}
+
+/**
+ * Mark the Claude Code agent as idle (not offline) when bridge disconnects.
+ * The agent stays visible for 1 hour before transitioning to offline.
+ */
+export async function markClaudeCodeAgentIdle(circleId: string): Promise<void> {
+  try {
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) return;
+
+    await supabase
+      .from('circle_office_agents')
+      .update({
+        status: 'idle',
+        current_task: 'Session ended — idling',
+        last_active_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('circle_id', circleId)
+      .eq('owner_id', auth.user.id)
+      .eq('name', CLAUDE_CODE_AGENT_NAME);
+  } catch (err) {
+    console.warn('[claudeCodeDetector] Failed to mark agent idle:', err);
+  }
+}
+
+// Keep the old name as an alias for backward compat
+export const markClaudeCodeAgentOffline = markClaudeCodeAgentIdle;

@@ -418,8 +418,7 @@ function CabinWall({ theme }: { theme: OfficeTheme }) {
   const logs = Array.from({ length: 10 }, (_, i) => (
     <View key={i} style={{
       position: 'absolute' as const, top: i * 19, left: 0, right: 0, height: 18,
-      backgroundColor: theme.wallColor, borderTopWidth: 1, borderTopColor: '#ffffff20', borderBottomWidth: 2, borderBottomColor: theme.wallBorder + '80', shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.2,
-      borderTopWidth: i === 0 ? 0 : 1, borderTopColor: theme.deskColor,
+      backgroundColor: theme.wallColor, borderTopWidth: i === 0 ? 0 : 1, borderTopColor: theme.deskColor, borderBottomWidth: 2, borderBottomColor: theme.wallBorder + '80', shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.2,
     }}>
       {/* Rich wood grain lines — 5 per log */}
       <View style={{ position: 'absolute' as const, top: 3, left: (i * 40) % 200, width: 70, height: 1, backgroundColor: theme.deskColor + '25' }} />

@@ -8,6 +8,7 @@ export interface BudgetConfig {
   weekly?: number;  // Weekly budget in USD
   monthly?: number; // Monthly budget in USD
   enabled: boolean;
+  hardLimit?: boolean; // true = block invocations when exceeded, false = alert only
 }
 
 export type AlertLevel = 'none' | 'info' | 'warning' | 'danger' | 'critical';
@@ -154,6 +155,32 @@ function formatAlertMessage(
   }
   
   return `${emoji} ${percentStr}% of ${period} budget used`;
+}
+
+// ─── Hard Limit Check ──────────────────────────────────
+
+/**
+ * Check if spending exceeds hard limits.
+ * Returns null if OK, or a message string if blocked.
+ */
+export function checkHardLimit(
+  config: BudgetConfig,
+  spendToday: number,
+  spendWeek: number,
+  spendMonth: number
+): string | null {
+  if (!config.enabled || !config.hardLimit) return null;
+
+  if (config.daily && config.daily > 0 && spendToday >= config.daily) {
+    return `Daily spending limit reached ($${spendToday.toFixed(2)} / $${config.daily.toFixed(2)}). Agent invocations paused until tomorrow.`;
+  }
+  if (config.weekly && config.weekly > 0 && spendWeek >= config.weekly) {
+    return `Weekly spending limit reached ($${spendWeek.toFixed(2)} / $${config.weekly.toFixed(2)}). Agent invocations paused until next week.`;
+  }
+  if (config.monthly && config.monthly > 0 && spendMonth >= config.monthly) {
+    return `Monthly spending limit reached ($${spendMonth.toFixed(2)} / $${config.monthly.toFixed(2)}). Agent invocations paused until next month.`;
+  }
+  return null;
 }
 
 // ─── Alert Styling ──────────────────────────────────────

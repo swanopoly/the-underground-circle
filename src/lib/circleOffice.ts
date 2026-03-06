@@ -14,7 +14,7 @@ import { supabase } from './supabase';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type AgentStatus = 'idle' | 'building' | 'offline' | 'error';
+export type AgentStatus = 'active' | 'idle' | 'building' | 'offline' | 'error';
 
 export type CircleOfficeAgent = {
   id: string;
@@ -78,6 +78,7 @@ export type PublishAgentInput = {
 // ─── Provider → Icon + Color map ─────────────────────────────────────────────
 
 export const PROVIDER_DISPLAY: Record<string, { icon: string; color: string; label: string }> = {
+  'blackswan':     { icon: '🦢', color: '#22c55e', label: 'BlackSwan' },
   'openclaw':      { icon: '🐾', color: '#f59e0b', label: 'OpenClaw' },
   'claude-code':   { icon: '💻', color: '#6366f1', label: 'Claude Code' },
   'cowork':        { icon: '💼', color: '#22c55e', label: 'Cowork' },
@@ -87,9 +88,42 @@ export const PROVIDER_DISPLAY: Record<string, { icon: string; color: string; lab
   'generic-agent': { icon: '⚡', color: '#06b6d4', label: 'AI Agent' },
 };
 
+// ─── BlackSwan default agent — always present in every circle ────────────────
+
+export const BLACKSWAN_AGENT_ID = 'blackswan-default';
+
+export function createBlackSwanAgent(circleId: string): CircleOfficeAgent {
+  return {
+    id: BLACKSWAN_AGENT_ID,
+    circleId,
+    ownerId: 'system',
+    ownerDisplayName: 'The Underground Circle',
+    ownerUsername: 'system',
+    provider: 'blackswan',
+    name: 'BlackSwan',
+    color: '#22c55e',
+    toolIcon: '🦢',
+    status: 'idle',
+    isPublished: true,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    isOwn: false,
+    isPublic: true,
+  };
+}
+
 // ─── DB row mapper ────────────────────────────────────────────────────────────
 
+const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour — idle agents go offline after this
+
 function fromRow(row: any, currentUserId?: string): CircleOfficeAgent {
+  // Auto-transition idle → offline after 1 hour of no activity
+  let status = row.status || 'offline';
+  if (status === 'idle' && row.last_active_at) {
+    const idleMs = Date.now() - new Date(row.last_active_at).getTime();
+    if (idleMs > IDLE_TIMEOUT_MS) status = 'offline';
+  }
+
   return {
     id: row.id,
     circleId: row.circle_id,
@@ -100,7 +134,7 @@ function fromRow(row: any, currentUserId?: string): CircleOfficeAgent {
     name: row.name,
     color: row.color || '#6366f1',
     toolIcon: row.tool_icon || '🤖',
-    status: row.status || 'offline',
+    status,
     currentTask: row.current_task,
     currentGoal: row.current_goal,
     sessionUrl: row.session_url,
@@ -164,7 +198,15 @@ export async function loadCircleOfficeAgents(circleId: string): Promise<{
       .order('created_at', { ascending: true });
 
     if (error) return { agents: [], error: error.message };
-    return { agents: (data || []).map(r => fromRow(r, currentUserId)) };
+    const agents = (data || []).map(r => fromRow(r, currentUserId));
+
+    // Always include BlackSwan as the first agent (unless one is already published by name)
+    const hasBlackSwan = agents.some(a => a.name.toLowerCase() === 'blackswan');
+    if (!hasBlackSwan) {
+      agents.unshift(createBlackSwanAgent(circleId));
+    }
+
+    return { agents };
   } catch (e: any) {
     return { agents: [], error: e.message };
   }

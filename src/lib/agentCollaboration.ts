@@ -390,6 +390,47 @@ export async function sendContextualMessage(
   }
 }
 
+// ─── Broadcast to All Agents ──────────────────────────────
+
+export async function broadcastMessage(
+  agents: OfficeAgent[],
+  getConfig: (connectionId: string) => OpenClawConfig | null,
+  message: string
+): Promise<{ ok: boolean; deliveredTo?: string[]; error?: string }> {
+  const delivered: string[] = [];
+  const errors: string[] = [];
+
+  for (const agent of agents) {
+    if (agent.status !== 'active' && agent.status !== 'idle') continue;
+    const config = getConfig(agent.connectionId);
+    if (!config) continue;
+
+    const sessionKey = agent.id.includes('::') ? agent.id.split('::')[1] : agent.id;
+    try {
+      const res = await fetch(`${config.endpoint}/tools/invoke`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.token}`,
+        },
+        body: JSON.stringify({
+          tool: 'sessions_send',
+          args: { sessionKey, message: `📢 [BROADCAST]\n\n${message}` },
+        }),
+      });
+      if (res.ok) delivered.push(agent.name);
+      else errors.push(`${agent.name}: HTTP ${res.status}`);
+    } catch (e: any) {
+      errors.push(`${agent.name}: ${e.message}`);
+    }
+  }
+
+  if (delivered.length === 0 && errors.length > 0) {
+    return { ok: false, error: errors.join(', ') };
+  }
+  return { ok: true, deliveredTo: delivered };
+}
+
 // ─── Agent-to-Agent Relay (Auto-coordination) ─────────────
 
 export async function relayMessageBetweenAgents(

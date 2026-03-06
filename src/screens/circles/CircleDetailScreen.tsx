@@ -15,12 +15,14 @@ import { supabase } from '../../lib/supabase';
 import ChatTab from './tabs/ChatTab';
 import FeedTab from './tabs/FeedTab';
 import MembersTab from './tabs/MembersTab';
-import DiscordTab from './tabs/DiscordTab';
 import ChallengesTab from './tabs/ChallengesTab';
 import OfficeTab, { AgentStats } from './tabs/OfficeTab';
 import WalletTab from './tabs/WalletTab';
 import ProfileTab from './tabs/ProfileTab';
 import RoomsTab from './tabs/RoomsTab';
+import AnalyticsTab from './tabs/AnalyticsTab';
+import IntegrationsTab from './tabs/IntegrationsTab';
+import BackpackTab from './tabs/BackpackTab';
 
 import { Circle } from '../../types';
 import ErrorBoundary from '../../components/ErrorBoundary';
@@ -29,10 +31,12 @@ const TAB_META: { key: string; label: string; icon: string }[] = [
   { key: 'CHAT', label: 'Chat', icon: '💬' },
   { key: 'OFFICE', label: 'Office', icon: '🏢' },
   { key: 'ROOMS', label: 'Rooms', icon: '🏠' },
+  { key: 'BACKPACK', label: 'Backpack', icon: '🎒' },
   { key: 'FEED', label: 'Feed', icon: '📋' },
   { key: 'CHALLENGES', label: 'Challenges', icon: '🏆' },
   { key: 'MEMBERS', label: 'Members', icon: '👥' },
-  { key: 'DISCORD', label: 'Discord', icon: '🎮' },
+  { key: 'ANALYTICS', label: 'Analytics', icon: '📊' },
+  { key: 'INTEGRATIONS', label: 'Integrations', icon: '🔗' },
   { key: 'WALLET', label: 'Wallet', icon: '💰' },
   { key: 'PROFILE', label: 'Profile', icon: '👤' },
 ];
@@ -202,6 +206,11 @@ export default function CircleDetailScreen({ route, navigation }: any) {
           <RoomsTab circleId={circleId} accentColor={accentColor} />
         </ErrorBoundary>
       </View>
+      <View style={[styles.tabContent, activeTab !== 'BACKPACK' && styles.hiddenTab]}>
+        <ErrorBoundary>
+          <BackpackTab circleId={circleId} accentColor={accentColor} />
+        </ErrorBoundary>
+      </View>
       <View style={[styles.tabContent, activeTab !== 'FEED' && styles.hiddenTab]}>
         <ErrorBoundary>
           <FeedTab circleId={circleId} />
@@ -218,9 +227,14 @@ export default function CircleDetailScreen({ route, navigation }: any) {
         </ErrorBoundary>
       </View>
 
-      <View style={[styles.tabContent, activeTab !== 'DISCORD' && styles.hiddenTab]}>
+      <View style={[styles.tabContent, activeTab !== 'ANALYTICS' && styles.hiddenTab]}>
         <ErrorBoundary>
-          <DiscordTab circleId={circleId} />
+          <AnalyticsTab circleId={circleId} />
+        </ErrorBoundary>
+      </View>
+      <View style={[styles.tabContent, activeTab !== 'INTEGRATIONS' && styles.hiddenTab]}>
+        <ErrorBoundary>
+          <IntegrationsTab circleId={circleId} />
         </ErrorBoundary>
       </View>
       <View style={[styles.tabContent, activeTab !== 'WALLET' && styles.hiddenTab]}>

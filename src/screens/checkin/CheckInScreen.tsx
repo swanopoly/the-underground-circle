@@ -39,10 +39,10 @@ function ProofDisplay({
     }
   };
 
-  // Mock validation data - in real implementation this would come from props/database
-  const validationScore = Math.floor(Math.random() * 100); // TODO: Replace with real data
-  const validationCount = Math.floor(Math.random() * 5); // TODO: Replace with real data
-  const userHasValidated = Math.random() > 0.7; // TODO: Replace with real data
+  // Validation defaults — real peer validation will be added in a future release
+  const validationScore = proof?.validation_score ?? 0;
+  const validationCount = proof?.validation_count ?? 0;
+  const userHasValidated = false;
 
   const getValidationBadge = () => {
     if (validationScore >= 80) return { text: '✅ VERIFIED', style: styles.verifiedBadge };

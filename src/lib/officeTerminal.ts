@@ -20,16 +20,20 @@ import { RealtimeChannel } from '@supabase/supabase-js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type TerminalMessageStatus = 'pending' | 'streaming' | 'done' | 'error';
+export type TerminalMessageStatus = 'pending' | 'invoked' | 'streaming' | 'done' | 'error' | 'deleted';
 
 export interface TerminalMessage {
   id: string;
   circleId: string;
   senderId: string;
   senderName: string;
-  targetAgentId: string | null; // null = @all
-  targetAgentName: string;      // "@all" or agent name
+  targetAgentId: string | null;    // null = @all (legacy single target)
+  targetAgentName: string;         // "@all" or agent name
+  targetAgentIds: string[] | null; // multi-select: array of agent IDs
+  model: string | null;            // model preference: 'blackswan', 'claude-haiku', etc.
   commandText: string;
+  // Phase 2 response fields removed — responses now live in office_terminal_responses table.
+  // These are kept as null stubs for backward-compat with UI components that check them.
   responseText: string | null;
   responseAgentId: string | null;
   responseAgentName: string | null;
@@ -47,6 +51,8 @@ export interface SendCommandParams {
   commandText: string;
   targetAgentId?: string | null;
   targetAgentName?: string;
+  targetAgentIds?: string[] | null;
+  model?: string | null;
 }
 
 export interface BroadcastCommandPayload {
@@ -57,6 +63,8 @@ export interface BroadcastCommandPayload {
   commandText: string;
   targetAgentId: string | null;
   targetAgentName: string;
+  targetAgentIds: string[] | null;
+  model: string | null;
   timestamp: string;
 }
 
@@ -81,12 +89,16 @@ function fromRow(row: Record<string, unknown>): TerminalMessage {
     senderName:      row.sender_name as string,
     targetAgentId:   (row.target_agent_id as string | null) ?? null,
     targetAgentName: (row.target_agent_name as string) || '@all',
+    targetAgentIds:  (row.target_agent_ids as string[] | null) ?? null,
+    model:           (row.model as string | null) ?? null,
     commandText:     row.command_text as string,
-    responseText:    (row.response_text as string | null) ?? null,
-    responseAgentId: (row.response_agent_id as string | null) ?? null,
-    responseAgentName:(row.response_agent_name as string | null) ?? null,
-    tokenCost:       (row.token_cost as number) || 0,
-    latencyMs:       (row.latency_ms as number | null) ?? null,
+    // Phase 3: response fields moved to office_terminal_responses table.
+    // Return null/0 stubs — UI reads from the responses map instead.
+    responseText:    null,
+    responseAgentId: null,
+    responseAgentName: null,
+    tokenCost:       0,
+    latencyMs:       null,
     status:          (row.status as TerminalMessageStatus) || 'pending',
     createdAt:       row.created_at as string,
     updatedAt:       row.updated_at as string,
@@ -106,7 +118,15 @@ export async function sendTerminalCommand(
   const {
     circleId, senderId, senderName,
     commandText, targetAgentId = null, targetAgentName = '@all',
+    targetAgentIds = null, model = null,
   } = params;
+
+  // Validate UUID fields — non-UUID agent IDs (e.g. 'default::blackswan') must be nullified
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const safeAgentId = targetAgentId && UUID_RE.test(targetAgentId) ? targetAgentId : null;
+  const safeAgentIds = targetAgentIds
+    ? targetAgentIds.filter((id: string) => UUID_RE.test(id))
+    : null;
 
   // 1. Write to DB
   const { data, error } = await supabase
@@ -115,8 +135,10 @@ export async function sendTerminalCommand(
       circle_id:         circleId,
       sender_id:         senderId,
       sender_name:       senderName,
-      target_agent_id:   targetAgentId,
+      target_agent_id:   safeAgentId,
       target_agent_name: targetAgentName,
+      target_agent_ids:  safeAgentIds && safeAgentIds.length > 0 ? safeAgentIds : null,
+      model:             model,
       command_text:      commandText,
       status:            'pending',
     })
@@ -139,6 +161,8 @@ export async function sendTerminalCommand(
       commandText,
       targetAgentId,
       targetAgentName,
+      targetAgentIds,
+      model,
       timestamp: new Date().toISOString(),
     } satisfies BroadcastCommandPayload,
   });
@@ -159,11 +183,16 @@ export function subscribeToTerminalCommands(
   const existing = commandChannels.get(circleId);
   if (existing) supabase.removeChannel(existing);
 
-  const channel = supabase.channel(channelName)
+  const channel = supabase.channel(channelName, {
+    config: { broadcast: { self: true } },
+  })
     .on('broadcast', { event: 'command' }, ({ payload }) => {
       const p = payload as BroadcastCommandPayload;
-      // Handle if: @all (null targetAgentId) OR targeted at one of my agents
-      const isForMe = !p.targetAgentId || myAgentIds.includes(p.targetAgentId);
+      // Handle if: @all (no targets) OR single-targeted at me OR multi-targeted including me
+      const isForMe =
+        (!p.targetAgentId && !p.targetAgentIds?.length)              // @all
+        || (p.targetAgentId && myAgentIds.includes(p.targetAgentId)) // legacy single
+        || (p.targetAgentIds?.some(id => myAgentIds.includes(id)));  // multi-select
       if (isForMe) onCommand(p);
     })
     .subscribe();
@@ -198,6 +227,7 @@ export async function respondToCommand(
       token_count:   tokenCost,
       latency_ms:    latencyMs,
       status:        'done',
+      circle_id:     circleId,
     }, { onConflict: 'message_id,agent_id' });
 
   if (error) return { error: error.message };
@@ -306,6 +336,7 @@ export async function loadTerminalHistory(
     .from('office_terminal_messages')
     .select('*')
     .eq('circle_id', circleId)
+    .neq('status', 'deleted')
     .order('created_at', { ascending: false })
     .limit(limit);
 
@@ -340,6 +371,22 @@ export function subscribeToTerminalMessages(
     .subscribe();
 
   return () => supabase.removeChannel(channel);
+}
+
+// ─── Delete a terminal message (soft-delete via status flag) ─────────────────
+
+export async function deleteTerminalMessage(messageId: string): Promise<{ error?: string }> {
+  try {
+    const { error } = await supabase
+      .from('office_terminal_messages')
+      .update({ status: 'deleted', updated_at: new Date().toISOString() })
+      .eq('id', messageId);
+
+    if (error) return { error: error.message };
+    return {};
+  } catch (e: any) {
+    return { error: e.message };
+  }
 }
 
 // ─── Update agent analytics ───────────────────────────────────────────────────
@@ -421,7 +468,9 @@ async function getOrCreateCommandChannel(circleId: string): Promise<RealtimeChan
   const existing = commandChannels.get(circleId);
   if (existing) return existing;
 
-  const channel = supabase.channel(`office-terminal-cmd-${circleId}`);
+  const channel = supabase.channel(`office-terminal-cmd-${circleId}`, {
+    config: { broadcast: { self: true } },
+  });
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
       resolve(); // Resolve anyway — channel may still work for broadcast

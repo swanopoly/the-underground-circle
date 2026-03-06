@@ -169,6 +169,7 @@ FROM profiles;
 GRANT SELECT ON safe_profiles TO authenticated;
 
 -- Create function to get user's circles efficiently
+DROP FUNCTION IF EXISTS get_user_circles(uuid);
 CREATE OR REPLACE FUNCTION get_user_circles(user_uuid uuid DEFAULT auth.uid())
 RETURNS TABLE (
   id uuid,

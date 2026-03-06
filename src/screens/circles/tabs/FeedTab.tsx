@@ -58,17 +58,32 @@ export default function FeedTab({ circleId }: { circleId: string }) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
     try {
-      const [checkInRes, xpRes, taskRes] = await Promise.all([
+      // Get circle member IDs first, then fetch their XP from user_points
+      const [checkInRes, memberRes, taskRes] = await Promise.all([
         supabase.from('check_ins').select('user_id, content, created_at, profiles(username, display_name)')
           .eq('circle_id', circleId).gte('created_at', today + 'T00:00:00').order('created_at', { ascending: false }).limit(20),
-        supabase.from('user_xp').select('user_id, total_xp, profiles(username, display_name)')
-          .eq('circle_id', circleId).order('total_xp', { ascending: false }).limit(10),
+        supabase.from('circle_members').select('user_id').eq('circle_id', circleId).limit(50),
         supabase.from('tasks').select('id').eq('circle_id', circleId).eq('status', 'done').gte('completed_at', today + 'T00:00:00'),
       ]);
       const todayCheckIns = checkInRes.data || [];
       const activeMembers = new Set(todayCheckIns.map((c: any) => c.user_id)).size;
-      const mvpRaw = xpRes.data?.[0];
-      const mvp = mvpRaw ? { name: (mvpRaw.profiles as any)?.display_name || (mvpRaw.profiles as any)?.username || 'Unknown', xp: mvpRaw.total_xp } : null;
+
+      // Fetch MVP from user_points for circle members
+      const memberIds = (memberRes.data || []).map((m: any) => m.user_id);
+      let mvp: { name: string; xp: number } | null = null;
+      if (memberIds.length > 0) {
+        const [xpRes, profileRes] = await Promise.all([
+          supabase.from('user_points').select('user_id, lifetime_points')
+            .in('user_id', memberIds).order('lifetime_points', { ascending: false }).limit(1),
+          supabase.from('profiles').select('id, username, display_name')
+            .in('id', memberIds),
+        ]);
+        const topXp = xpRes.data?.[0];
+        if (topXp) {
+          const prof = (profileRes.data || []).find((p: any) => p.id === topXp.user_id);
+          mvp = { name: prof?.display_name || prof?.username || 'Unknown', xp: topXp.lifetime_points };
+        }
+      }
       const nudge = await generateNudge(user.id).catch(() => null);
       const insight = await getProgressInsight(user.id).catch(() => '');
       setDigest({ todayCheckIns, activeMembers, tasksCompleted: taskRes.data?.length || 0, mvp, streakAtRisk: [], nudge, insight });

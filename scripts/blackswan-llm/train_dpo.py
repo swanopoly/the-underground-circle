@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""
+BlackSwan LLM — Phase 3: DPO alignment training via Unsloth.
+
+Trains on preference data (chosen/rejected pairs) to align the model
+with human preferences after SFT.
+
+Reads: training_data/dpo_train.jsonl (prompt/chosen/rejected format)
+Uses: models/v1.0/lora/ as base (SFT checkpoint)
+
+Usage:
+  python train_dpo.py [--epochs 1] [--lr 5e-5]
+"""
+
+import json
+import argparse
+from pathlib import Path
+
+DATA_DIR = Path(__file__).parent / "training_data"
+DPO_TRAIN_FILE = DATA_DIR / "dpo_train.jsonl"
+DPO_EVAL_FILE = DATA_DIR / "dpo_eval.jsonl"
+OUTPUT_DIR = Path(__file__).parent / "models" / "v1.0"
+SFT_LORA_DIR = OUTPUT_DIR / "lora"
+
+MAX_SEQ_LENGTH = 1024
+LORA_RANK = 32
+LORA_ALPHA = 64
+
+
+def main():
+    parser = argparse.ArgumentParser(description="DPO alignment for BlackSwan LLM")
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--grad-accum", type=int, default=16)
+    parser.add_argument("--beta", type=float, default=0.1, help="DPO beta parameter")
+    parser.add_argument("--skip-merge", action="store_true")
+    parser.add_argument("--max-samples", type=int, default=2000, help="Max training samples (0=all)")
+    args = parser.parse_args()
+
+    print("Loading libraries...")
+    from unsloth import FastLanguageModel
+    from unsloth.chat_templates import get_chat_template
+    from datasets import Dataset
+    from trl import DPOTrainer, DPOConfig
+
+    # Load SFT model (with LoRA adapters)
+    print(f"\nLoading SFT model from {SFT_LORA_DIR}...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=str(SFT_LORA_DIR),
+        max_seq_length=MAX_SEQ_LENGTH,
+        dtype=None,
+        load_in_4bit=True,
+    )
+
+    # Apply chat template
+    tokenizer = get_chat_template(tokenizer, chat_template="qwen-2.5")
+
+    # Make model trainable again for DPO
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=LORA_RANK,
+        lora_alpha=LORA_ALPHA,
+        lora_dropout=0,
+        target_modules=[
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ],
+        bias="none",
+        use_gradient_checkpointing="unsloth",
+        random_state=42,
+    )
+
+    # Load DPO dataset
+    print("\nLoading DPO data...")
+
+    def load_dpo(path):
+        """Load DPO JSONL with prompt/chosen/rejected fields."""
+        items = []
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                # Format for DPO: each item needs prompt, chosen, rejected
+                items.append({
+                    "prompt": obj["prompt"],
+                    "chosen": obj["chosen"],
+                    "rejected": obj["rejected"],
+                })
+        return items
+
+    train_data = load_dpo(DPO_TRAIN_FILE)
+    if args.max_samples > 0 and len(train_data) > args.max_samples:
+        import random
+        random.seed(42)
+        random.shuffle(train_data)
+        train_data = train_data[:args.max_samples]
+    print(f"  DPO train: {len(train_data)}")
+    train_dataset = Dataset.from_list(train_data)
+
+    eval_dataset = None
+    if DPO_EVAL_FILE.exists():
+        eval_data = load_dpo(DPO_EVAL_FILE)
+        eval_dataset = Dataset.from_list(eval_data)
+        print(f"  DPO eval: {len(eval_data)}")
+
+    # DPO training config
+    dpo_dir = OUTPUT_DIR / "dpo"
+    dpo_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\nDPO config:")
+    print(f"  Epochs: {args.epochs}")
+    print(f"  Learning rate: {args.lr}")
+    print(f"  Beta: {args.beta}")
+    print(f"  Effective batch: {args.batch * args.grad_accum}")
+
+    dpo_config = DPOConfig(
+        output_dir=str(dpo_dir),
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.batch,
+        gradient_accumulation_steps=args.grad_accum,
+        learning_rate=args.lr,
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.1,
+        weight_decay=0.01,
+        bf16=True,
+        logging_steps=5,
+        save_strategy="epoch",
+        eval_strategy="epoch" if eval_dataset else "no",
+        save_total_limit=1,
+        seed=42,
+        report_to="none",
+        beta=args.beta,
+        max_length=MAX_SEQ_LENGTH,
+        max_prompt_length=MAX_SEQ_LENGTH // 2,
+    )
+
+    trainer = DPOTrainer(
+        model=model,
+        ref_model=None,  # Unsloth handles this
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        processing_class=tokenizer,
+        args=dpo_config,
+    )
+
+    print("\nStarting DPO training...")
+    result = trainer.train()
+
+    print(f"\nDPO complete!")
+    print(f"  Loss: {result.training_loss:.4f}")
+    print(f"  Runtime: {result.metrics.get('train_runtime', 0):.0f}s")
+
+    # Save DPO-aligned model
+    model.save_pretrained(str(dpo_dir))
+    tokenizer.save_pretrained(str(dpo_dir))
+    print(f"\nDPO model saved to {dpo_dir}")
+
+
+if __name__ == "__main__":
+    main()

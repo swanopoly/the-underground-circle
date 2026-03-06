@@ -32,6 +32,7 @@ ALTER TABLE challenges ENABLE ROW LEVEL SECURITY;
 ALTER TABLE challenge_participants ENABLE ROW LEVEL SECURITY;
 
 -- Members can read challenges in their circles
+DO $$ BEGIN
 CREATE POLICY "Members can read circle challenges"
   ON challenges FOR SELECT
   USING (
@@ -39,8 +40,11 @@ CREATE POLICY "Members can read circle challenges"
       SELECT circle_id FROM circle_members WHERE user_id = auth.uid()
     )
   );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- Creators can insert challenges
+DO $$ BEGIN
 CREATE POLICY "Members can create challenges"
   ON challenges FOR INSERT
   WITH CHECK (
@@ -49,8 +53,11 @@ CREATE POLICY "Members can create challenges"
       SELECT circle_id FROM circle_members WHERE user_id = auth.uid()
     )
   );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- Participants can read
+DO $$ BEGIN
 CREATE POLICY "Members can read challenge participants"
   ON challenge_participants FOR SELECT
   USING (
@@ -60,19 +67,27 @@ CREATE POLICY "Members can read challenge participants"
       WHERE cm.user_id = auth.uid()
     )
   );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- Users can join challenges
+DO $$ BEGIN
 CREATE POLICY "Users can join challenges"
   ON challenge_participants FOR INSERT
   WITH CHECK (
     user_id = auth.uid()
   );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- Participants can update their own progress
+DO $$ BEGIN
 CREATE POLICY "Participants can update own progress"
   ON challenge_participants FOR UPDATE
   USING (user_id = auth.uid())
   WITH CHECK (user_id = auth.uid());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- Add proof column to check_ins
 ALTER TABLE check_ins ADD COLUMN IF NOT EXISTS proof jsonb DEFAULT NULL;

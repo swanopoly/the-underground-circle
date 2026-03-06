@@ -43,6 +43,7 @@ const QUICK_PROMPTS = [
   { label: '🗳️ Vote', text: '/proposals' },
   { label: '💸 Send Crypto', text: '__SEND_CRYPTO__' },
   { label: '⚔️ Challenge', text: 'challenge a member' },
+  { label: '🦢 Help', text: 'help' },
 ];
 
 const PROMPT_CATEGORIES = [
@@ -1299,25 +1300,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             contentContainerStyle={styles.messageList}
           />
           
-          {/* Step Away / Remote Control Handoff */}
-          {currentUserId && (
-            <View style={styles.stepAwayRow}>
-              <StepAwayCard
-                circleId={circleId}
-                userId={currentUserId}
-                userName={currentUserName}
-                onPost={async (_type, content) => {
-                  await sendMessage(content);
-                }}
-              />
-            </View>
-          )}
-
-          {/* Enhanced quick bar */}
+          {/* Enhanced quick bar with Step Away */}
           <EnhancedQuickBar
             onPromptPress={sendMessage}
             onSendCrypto={() => setShowSendCrypto(true)}
             accentColor={accentColor}
+            circleId={circleId}
+            userId={currentUserId}
+            userName={currentUserName}
           />
         </>
       )}
@@ -1760,11 +1750,38 @@ function EnhancedReactionPicker({ onReaction, accentColor }: { onReaction: (emoj
   );
 }
 
-function EnhancedQuickBar({ onPromptPress, onSendCrypto, accentColor }: {
+function EnhancedQuickBar({ onPromptPress, onSendCrypto, accentColor, circleId, userId, userName }: {
   onPromptPress: (text: string) => void;
   onSendCrypto: () => void;
   accentColor: string;
+  circleId?: string;
+  userId?: string | null;
+  userName?: string;
 }) {
+  const scrollRef = useRef<ScrollView>(null);
+  const [showStepAway, setShowStepAway] = useState(false);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(true);
+  const scrollX = useRef(0);
+  const contentWidth = useRef(0);
+  const containerWidth = useRef(0);
+
+  const updateArrows = () => {
+    setCanScrollLeft(scrollX.current > 5);
+    setCanScrollRight(scrollX.current < contentWidth.current - containerWidth.current - 5);
+  };
+
+  const scrollLeft = () => {
+    const newX = Math.max(0, scrollX.current - 200);
+    scrollRef.current?.scrollTo({ x: newX, animated: true });
+  };
+
+  const scrollRight = () => {
+    const maxX = contentWidth.current - containerWidth.current;
+    const newX = Math.min(maxX, scrollX.current + 200);
+    scrollRef.current?.scrollTo({ x: newX, animated: true });
+  };
+
   const barStyle = Platform.OS === 'web' ? {
     backdropFilter: 'blur(10px)',
     borderColor: accentColor + '20',
@@ -1772,7 +1789,24 @@ function EnhancedQuickBar({ onPromptPress, onSendCrypto, accentColor }: {
 
   return (
     <View style={[styles.enhancedQuickBar, barStyle]}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickBarScroll}>
+      {canScrollLeft && (
+        <Pressable onPress={scrollLeft} style={[styles.scrollArrow, styles.scrollArrowLeft]}>
+          <Text style={styles.scrollArrowText}>{'‹'}</Text>
+        </Pressable>
+      )}
+      <ScrollView
+        ref={scrollRef}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.quickBarScroll}
+        onScroll={(e) => {
+          scrollX.current = e.nativeEvent.contentOffset.x;
+          updateArrows();
+        }}
+        onContentSizeChange={(w) => { contentWidth.current = w; updateArrows(); }}
+        onLayout={(e) => { containerWidth.current = e.nativeEvent.layout.width; updateArrows(); }}
+        scrollEventThrottle={16}
+      >
         {QUICK_PROMPTS.map((p, i) => (
           <EnhancedQuickChip
             key={i}
@@ -1784,8 +1818,29 @@ function EnhancedQuickBar({ onPromptPress, onSendCrypto, accentColor }: {
         <EnhancedQuickChip label="🧠 Trivia" onPress={() => onPromptPress('trivia')} accentColor={accentColor} />
         <EnhancedQuickChip label="🤔 WYR" onPress={() => onPromptPress('would you rather')} accentColor={accentColor} />
         <EnhancedQuickChip label="🔥 Hot Take" onPress={() => onPromptPress('hot take')} accentColor={accentColor} />
+        <EnhancedQuickChip label="🖥️ Step Away" onPress={() => setShowStepAway(true)} accentColor={accentColor} />
         <EnhancedQuickChip label="🦢 More" onPress={() => onPromptPress('help')} accentColor={accentColor} />
       </ScrollView>
+      {canScrollRight && (
+        <Pressable onPress={scrollRight} style={[styles.scrollArrow, styles.scrollArrowRight]}>
+          <Text style={styles.scrollArrowText}>{'›'}</Text>
+        </Pressable>
+      )}
+
+      {/* Step Away Modal (rendered inline, triggered by chip) */}
+      {showStepAway && userId && circleId && (
+        <StepAwayCard
+          circleId={circleId}
+          userId={userId}
+          userName={userName || ''}
+          onPost={async (_type, content) => {
+            onPromptPress(content);
+            setShowStepAway(false);
+          }}
+          autoOpen
+          onClose={() => setShowStepAway(false)}
+        />
+      )}
     </View>
   );
 }
@@ -2640,15 +2695,6 @@ const styles = StyleSheet.create({
   replyIndicatorName: { fontSize: 12, fontWeight: '700' },
   replyIndicatorText: { color: '#555', fontSize: 12, flex: 1 },
 
-  // Step Away row
-  stepAwayRow: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    maxWidth: 860,
-    alignSelf: 'center',
-    width: '100%',
-  },
-
   // Enhanced UI components
   enhancedQuickBar: {
     borderTopWidth: 1,
@@ -2668,6 +2714,39 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer', whiteSpace: 'nowrap', transition: 'all 0.2s' } as any : {}),
   },
   quickBarChipText: { fontSize: 11, fontWeight: '700' },
+
+  // Scroll arrows for quick bar
+  scrollArrow: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  scrollArrowLeft: {
+    left: 0,
+    backgroundColor: '#0a0a0af0',
+    borderRightWidth: 1,
+    borderRightColor: '#ffffff10',
+    borderTopRightRadius: 8,
+    borderBottomRightRadius: 8,
+  },
+  scrollArrowRight: {
+    right: 0,
+    backgroundColor: '#0a0a0af0',
+    borderLeftWidth: 1,
+    borderLeftColor: '#ffffff10',
+    borderTopLeftRadius: 8,
+    borderBottomLeftRadius: 8,
+  },
+  scrollArrowText: {
+    color: '#888',
+    fontSize: 22,
+    fontWeight: '700',
+  },
 
   // Enhanced crypto panel
   enhancedCryptoPanel: {

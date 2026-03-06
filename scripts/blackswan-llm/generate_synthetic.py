@@ -47,7 +47,13 @@ SYSTEM_PROMPT = """You are BlackSwan — an AI accountability partner embedded i
 - Productivity, accountability, goal-setting, human performance
 - Circle data: members, streaks, tasks, check-ins
 - Help people think clearly: planning, prioritizing, working through blockers
-- Practical and specific advice — not generic motivational noise"""
+- Practical and specific advice — not generic motivational noise
+
+## Extended Knowledge
+- Design & UI/UX: layout, color theory, typography, component patterns, responsive design, design systems. You can critique interfaces, suggest improvements, and reference real tools (Figma, Framer, Tailwind)
+- Art & creative direction: visual storytelling, brand identity, aesthetic critique, color palettes, mood boards, illustration styles
+- Code & architecture: debugging, testing, performance, code review, modern stacks (React, Node, Python, Supabase, TypeScript). You give specific, actionable technical advice
+- General knowledge: science, history, philosophy, business strategy, psychology, culture. You weave it in naturally when it adds value"""
 
 TERMINAL_SYSTEM = """You are BlackSwan in the Office Terminal — the command center for The Underground Circle. You coordinate agents, analyze performance, and help manage the office. Be concise and technical when responding to commands."""
 
@@ -84,6 +90,36 @@ BLOCKER_EXAMPLES = [
     "infrastructure not ready", "need more test data",
 ]
 
+TECH_STACK_EXAMPLES = [
+    "React Native", "Next.js", "Supabase", "Node.js", "Python", "TypeScript",
+    "PostgreSQL", "Redis", "Docker", "Kubernetes", "GraphQL", "REST API",
+    "TailwindCSS", "Swift", "Kotlin", "Rust", "Go", "Firebase", "Django",
+    "FastAPI", "Vue.js", "Svelte", "AWS Lambda", "Vercel", "Prisma",
+]
+
+DESIGN_TOOLS = [
+    "Figma", "Framer", "TailwindCSS", "Storybook", "design system",
+    "component library", "wireframe", "prototype", "mockup", "Sketch",
+]
+
+ART_STYLES = [
+    "minimalist", "brutalist", "glassmorphism", "neomorphism", "dark mode",
+    "cyberpunk", "vaporwave", "retro-futurism", "geometric", "abstract",
+    "flat design", "material design", "skeuomorphism", "isometric",
+]
+
+CODE_PATTERNS = [
+    "singleton", "observer", "factory", "strategy", "middleware",
+    "hooks pattern", "compound components", "render props", "HOC",
+    "repository pattern", "CQRS", "event sourcing", "pub/sub",
+]
+
+UI_COMPONENTS = [
+    "navigation bar", "sidebar", "modal", "dropdown", "data table",
+    "dashboard layout", "card grid", "form wizard", "toast notification",
+    "infinite scroll list", "tab interface", "search with filters",
+]
+
 # ─── Scenario generators ────────────────────────────────────────────────────
 
 def random_name():
@@ -100,6 +136,21 @@ def random_task():
 
 def random_blocker():
     return random.choice(BLOCKER_EXAMPLES)
+
+def random_tech():
+    return random.choice(TECH_STACK_EXAMPLES)
+
+def random_design_tool():
+    return random.choice(DESIGN_TOOLS)
+
+def random_art_style():
+    return random.choice(ART_STYLES)
+
+def random_pattern():
+    return random.choice(CODE_PATTERNS)
+
+def random_component():
+    return random.choice(UI_COMPONENTS)
 
 def random_circle():
     return random.choice(CIRCLE_NAMES)
@@ -118,10 +169,10 @@ ACCOUNTABILITY_SCENARIOS = [
         "context": f"User: {random_name()}, streak: {random_streak()} days, just checked in after missing 3 days",
         "human": "I'm back. Missed a few days, feeling behind on everything.",
     },
-    lambda: {
-        "context": f"User: {random_name()}, streak: {s := random.randint(30, 100)} days",
+    lambda: (lambda s=random.randint(30, 100): {
+        "context": f"User: {random_name()}, streak: {s} days",
         "human": f"Day {s}. Still going. Sometimes I wonder if this even matters.",
-    },
+    })(),
     lambda: {
         "context": f"User: {random_name()}, streak: 0 days, brand new to the circle",
         "human": "Just joined. What's the deal with streaks and check-ins?",
@@ -361,35 +412,215 @@ GENERAL_CONVERSATION_SCENARIOS = [
     },
 ]
 
+# ─── Category: Design & UI/UX ──────────────────────────────────────────────
+
+DESIGN_UX_SCENARIOS = [
+    lambda: {
+        "context": f"User: {random_name()}, building a {random.choice(['SaaS app', 'mobile app', 'landing page', 'dashboard', 'e-commerce site'])}",
+        "human": f"I'm designing a {random_component()} in {random_design_tool()}. Any tips on making it feel polished?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, working on {random.choice(['dark mode', 'light mode', 'theme system'])}",
+        "human": "How do I pick a good color palette for a dark-mode UI? I keep making it look too gray.",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, building with {random_tech()}",
+        "human": f"What font pairing works for a {random.choice(['technical', 'creative', 'corporate', 'startup', 'gaming'])} product?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, designing a {random_component()}",
+        "human": f"My {random_component()} feels cluttered. How do I simplify without losing functionality?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, building a design system",
+        "human": f"Should I build my own design system or use something like {random.choice(['Shadcn', 'Radix', 'Material UI', 'Chakra', 'Mantine'])}?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, making their app responsive",
+        "human": "My layout breaks on mobile. What's the best approach to responsive design in React Native?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, redesigning their app",
+        "human": f"I want to go for a {random_art_style()} aesthetic. How do I pull that off without it looking gimmicky?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, working on microinteractions",
+        "human": "What micro-interactions actually make a UI feel premium? Not just animations for the sake of it.",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, building a {random.choice(['onboarding flow', 'checkout flow', 'settings page', 'profile page'])}",
+        "human": f"What are the biggest UX mistakes people make with {random.choice(['onboarding', 'forms', 'navigation', 'modals', 'empty states'])}?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, wants feedback on layout",
+        "human": f"I have a {random_component()} with 6 different data points. How do I organize the visual hierarchy?",
+    },
+]
+
+# ─── Category: Art & Creative ──────────────────────────────────────────────
+
+ART_CREATIVE_SCENARIOS = [
+    lambda: {
+        "context": f"User: {random_name()}, building brand identity for a startup",
+        "human": "I need a brand identity for my tech startup. Where do I start?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, working on visual identity",
+        "human": f"My logo is too generic. How do I make it more memorable without being over-the-top?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, creating illustrations for their app",
+        "human": f"I want custom illustrations for my app in a {random_art_style()} style. Should I use AI tools or hire someone?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, designing marketing visuals",
+        "human": "What makes a social media graphic actually stop the scroll? Give me the formula.",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, working on color theory",
+        "human": f"I'm going for a {random.choice(['warm', 'cool', 'neon', 'muted', 'earthy', 'pastel'])} palette. What are the rules for making it cohesive?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, building a portfolio",
+        "human": "How should I present my design work in a portfolio? What actually impresses people?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, exploring creative direction",
+        "human": f"What's the difference between {random_art_style()} and {random_art_style()} in practice?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, creating a mood board",
+        "human": f"I'm building a mood board for a {random.choice(['fintech', 'health', 'gaming', 'social', 'education', 'productivity'])} app. What should I include?",
+    },
+]
+
+# ─── Category: Coding & Technical ──────────────────────────────────────────
+
+CODING_TECHNICAL_SCENARIOS = [
+    lambda: {
+        "context": f"User: {random_name()}, building with {random_tech()} + {random_tech()}",
+        "human": f"Should I use {random_tech()} or {random_tech()} for my backend? Pros and cons?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, debugging a production issue",
+        "human": f"My {random_tech()} app is slow in production but fast locally. Where do I start debugging?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, choosing an architecture pattern",
+        "human": f"When should I use the {random_pattern()} pattern? Is it overkill for a small project?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, writing tests",
+        "human": f"What's the right testing strategy for a {random_tech()} app? Unit vs integration vs e2e — where's the sweet spot?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, doing code review",
+        "human": "What are the top things you look for in a code review? Not just style stuff — real issues.",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, building an API",
+        "human": f"REST vs GraphQL vs tRPC for a {random.choice(['mobile app', 'SaaS dashboard', 'real-time app', 'marketplace'])} — which and why?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, designing a database schema",
+        "human": f"How should I model {random.choice(['user permissions', 'a social feed', 'multi-tenancy', 'a chat system', 'an event log'])} in {random.choice(['PostgreSQL', 'MongoDB', 'Supabase'])}?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, optimizing performance",
+        "human": f"My {random_tech()} app loads in 8 seconds. How do I get it under 2?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, setting up CI/CD",
+        "human": f"What's the simplest CI/CD setup for a {random_tech()} project that actually works?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, dealing with technical debt",
+        "human": "I have a 3000-line monolith component. How do I refactor it without breaking everything?",
+    },
+]
+
+# ─── Category: General Knowledge ──────────────────────────────────────────
+
+GENERAL_KNOWLEDGE_SCENARIOS = [
+    lambda: {
+        "context": f"User: {random_name()}, curious about mental models",
+        "human": "What's the most underrated mental model for making better decisions?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, thinking about business strategy",
+        "human": f"How do {random.choice(['solo founders', 'small teams', 'bootstrapped startups', 'first-time founders'])} compete against big companies?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, interested in psychology",
+        "human": "Why do some people thrive under pressure while others freeze? What does the science say?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, reading about history",
+        "human": "What historical figure had the best productivity system? I'm not talking Benjamin Franklin.",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, thinking about philosophy",
+        "human": f"How does {random.choice(['stoicism', 'minimalism', 'ikigai', 'wabi-sabi', 'kaizen'])} actually apply to building products?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, curious about science",
+        "human": f"Explain {random.choice(['compound interest', 'network effects', 'entropy', 'antifragility', 'Pareto principle'])} like I'm building a startup.",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, exploring culture",
+        "human": f"What can builders learn from {random.choice(['jazz musicians', 'Olympic athletes', 'chess grandmasters', 'Navy SEALs', 'Michelin chefs'])}?",
+    },
+    lambda: {
+        "context": f"User: {random_name()}, thinking about the future",
+        "human": f"What's going to matter most in {random.choice(['AI', 'web3', 'creator economy', 'remote work', 'personal branding'])} in the next 5 years?",
+    },
+]
+
 # ─── All categories ──────────────────────────────────────────────────────────
 
 CATEGORIES = {
     "accountability_coaching": {
         "scenarios": ACCOUNTABILITY_SCENARIOS,
-        "weight": 25,  # percentage of total
+        "weight": 20,
     },
     "task_planning": {
         "scenarios": TASK_PLANNING_SCENARIOS,
-        "weight": 20,
+        "weight": 15,
     },
     "circle_management": {
         "scenarios": CIRCLE_MANAGEMENT_SCENARIOS,
-        "weight": 15,
+        "weight": 10,
     },
     "agent_coordination": {
         "scenarios": AGENT_COORDINATION_SCENARIOS,
-        "weight": 15,
+        "weight": 10,
     },
     "community_engagement": {
         "scenarios": COMMUNITY_ENGAGEMENT_SCENARIOS,
-        "weight": 10,
+        "weight": 5,
     },
     "goal_setting": {
         "scenarios": GOAL_SETTING_SCENARIOS,
-        "weight": 10,
+        "weight": 5,
     },
     "general_conversation": {
         "scenarios": GENERAL_CONVERSATION_SCENARIOS,
+        "weight": 5,
+    },
+    "design_ux": {
+        "scenarios": DESIGN_UX_SCENARIOS,
+        "weight": 10,
+    },
+    "art_creative": {
+        "scenarios": ART_CREATIVE_SCENARIOS,
+        "weight": 5,
+    },
+    "coding_technical": {
+        "scenarios": CODING_TECHNICAL_SCENARIOS,
+        "weight": 10,
+    },
+    "general_knowledge": {
+        "scenarios": GENERAL_KNOWLEDGE_SCENARIOS,
         "weight": 5,
     },
 }
@@ -409,6 +640,10 @@ BlackSwan's personality:
 - Uses emojis sparingly — only when they add something
 - Short responses for casual chat, structured for real guidance
 - NEVER says "I'm just an AI" — BlackSwan is BlackSwan, full stop
+- Has deep knowledge of design, UI/UX, art direction, coding, architecture, and general knowledge
+- When discussing design or code, gives specific, actionable feedback — not vague praise
+- References real tools, frameworks, and techniques by name
+- Can critique visual designs, suggest improvements, and explain why
 
 Context: {context}
 

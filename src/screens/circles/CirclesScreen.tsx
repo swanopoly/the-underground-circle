@@ -190,6 +190,20 @@ export default function CirclesScreen({ navigation }: any) {
       )}
 
       <View style={styles.bottomButtons}>
+        <View style={styles.orgRow}>
+          <Pressable
+            onPress={() => navigation.navigate('OrgList')}
+            style={[styles.orgButton, { flex: 1 }]}
+          >
+            <Text style={styles.orgButtonText}>🏢 Organizations</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => navigation.navigate('Schools')}
+            style={[styles.orgButton, styles.schoolButton, { flex: 1 }]}
+          >
+            <Text style={styles.schoolButtonText}>🎓 For Schools</Text>
+          </Pressable>
+        </View>
         <Button
           title="CREATE A CIRCLE"
           onPress={() => navigation.navigate('CreateCircle')}
@@ -374,5 +388,33 @@ const styles = StyleSheet.create({
     maxWidth: 480,
     alignSelf: 'center',
     width: '100%',
+  },
+  orgRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 4,
+  },
+  orgButton: {
+    backgroundColor: '#111',
+    borderWidth: 1,
+    borderColor: '#6366f140',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  orgButtonText: {
+    color: '#6366f1',
+    fontSize: 13,
+    fontWeight: '600',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  schoolButton: {
+    borderColor: '#22c55e40',
+  },
+  schoolButtonText: {
+    color: '#22c55e',
+    fontSize: 13,
+    fontWeight: '600',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
 });

@@ -2,7 +2,7 @@
 import { OpenClawSession } from './openclawService';
 import { ProviderType } from './connectionManager';
 
-export type AgentStatus = 'active' | 'idle' | 'error' | 'offline';
+export type AgentStatus = 'active' | 'idle' | 'building' | 'error' | 'offline';
 
 export interface OfficeAgent {
   id: string;
@@ -36,6 +36,7 @@ export interface OfficeAgent {
 export const STATUS_COLORS: Record<AgentStatus, string> = {
   active: '#22c55e',
   idle: '#eab308',
+  building: '#3b82f6',
   error: '#ef4444',
   offline: '#6b7280',
 };
@@ -55,8 +56,8 @@ export const DEFAULT_AGENT: OfficeAgent = {
   id: 'default::blackswan',
   name: 'BlackSwan',
   role: 'Circle AI',
-  status: 'idle',
-  color: '#22d3ee',
+  status: 'active',
+  color: '#ef4444',
   deskIndex: 0,
   activity: 'Watching the circle',
   messagesProcessed: 0,
@@ -76,8 +77,8 @@ export const DEFAULT_AGENT: OfficeAgent = {
   sessionKey: 'blackswan',
   model: 'blackswan-7b',
   connectionId: 'default',
-  connectionName: 'The Underground Circle',
-  providerType: 'generic-agent',
+  connectionName: 'BlackSwan',
+  providerType: 'blackswan-local',
 };
 
 // Pricing is centralized in modelPricing.ts — single source of truth

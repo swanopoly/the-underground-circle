@@ -194,7 +194,7 @@ export default function AgentPanel({
       </View>
 
       {/* Session Tags */}
-      {onAddSessionTag && onRemoveSessionTag && (
+      {onAddSessionTag && onRemoveSessionTag && sessionKey && (
         <View style={styles.tagsSection}>
           <Text style={styles.tagsSectionTitle}>SESSION TAGS</Text>
           <SessionTagInput
@@ -391,7 +391,7 @@ export default function AgentPanel({
       )}
 
       {/* Kill switch / controls */}
-      {circleId && (
+      {circleId && sessionKey && (
         <AgentKillSwitch
           control={control}
           circleId={circleId}

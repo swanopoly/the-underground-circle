@@ -16,18 +16,30 @@ import {
 } from 'react-native';
 import {
   TerminalMessage,
+  TerminalMessageStatus,
   TerminalResponse,
   sendTerminalCommand,
   loadTerminalHistory,
   loadResponsesForMessages,
   subscribeToTerminalMessages,
-  subscribeToTerminalResponses,
-  BroadcastResponsePayload,
+  deleteTerminalMessage,
 } from '../lib/officeTerminal';
 import { supabase } from '../lib/supabase';
 import { CircleOfficeAgent } from '../lib/circleOffice';
+import { awardPoints } from '../services/rewardService';
+import { getPointsForModel } from '../lib/badges';
+import AutomationsPanel from './AutomationsPanel';
 
-// TerminalResponse is imported from officeTerminal.ts
+// ─── Model options ────────────────────────────────────────────────────────────
+
+const TERMINAL_MODELS = [
+  { key: null,             label: 'Auto',      icon: '🔄', color: '#6366f1' },
+  { key: 'blackswan',     label: 'BlackSwan',  icon: '🦢', color: '#22c55e' },
+  { key: 'claude-haiku',  label: 'Haiku',      icon: '⚡', color: '#f59e0b' },
+  { key: 'claude-sonnet', label: 'Sonnet',     icon: '🎯', color: '#8b5cf6' },
+  { key: 'claude-opus',   label: 'Opus',       icon: '🧠', color: '#ef4444' },
+  { key: 'gemini-flash',  label: 'Gemini',     icon: '♊', color: '#4285f4' },
+] as const;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,8 +58,27 @@ interface Props {
   sharedTargetName?: string;
   onSharedSelectTarget?: (id: string | null, name: string) => void;
 
+  // ── Model selector ──
+  sharedModel?: string | null;
+  onSharedModelChange?: (m: string | null) => void;
+
+  // ── Multi-agent targeting ──
+  sharedTargetIds?: string[] | null;
+  onSharedSelectTargets?: (ids: string[] | null, names: string) => void;
+
   // ── Layout ──
   compact?: boolean;  // true = hide header bar (used in the bottom drawer)
+
+  // ── Direct invocation callback (bypasses broadcast round-trip) ──
+  onCommandSent?: (params: {
+    messageId: string;
+    command: string;
+    targetAgentId: string | null;
+    targetAgentIds: string[] | null;
+    targetAgentName: string;
+    model: string | null;
+    senderId: string;
+  }) => void;
 }
 
 // ─── Built-in command descriptions ───────────────────────────────────────────
@@ -101,12 +132,22 @@ const pendingStyles = StyleSheet.create({
 
 // ─── Terminal Message Row ─────────────────────────────────────────────────────
 
-function TerminalRow({ msg, responses }: { msg: TerminalMessage; responses?: TerminalResponse[] }) {
+function TerminalRow({ msg, responses, onDelete }: {
+  msg: TerminalMessage;
+  responses?: TerminalResponse[];
+  onDelete?: (id: string) => void;
+}) {
   const msgResponses = responses || [];
   const isLocal = msg.id.startsWith('local-');
+  const [hovered, setHovered] = useState(false);
 
   return (
-    <View style={rowStyles.container}>
+    <View
+      style={rowStyles.container}
+      // @ts-ignore — web-only hover props
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
       {/* Header */}
       <View style={rowStyles.header}>
         <Text style={rowStyles.time}>{fmtTime(msg.createdAt)}</Text>
@@ -119,6 +160,15 @@ function TerminalRow({ msg, responses }: { msg: TerminalMessage; responses?: Ter
         <Text style={[rowStyles.target, isLocal && rowStyles.targetLocal]}>
           {msg.targetAgentName}
         </Text>
+        {onDelete && hovered && (
+          <Pressable
+            style={rowStyles.deleteBtn}
+            onPress={() => onDelete(msg.id)}
+            hitSlop={8}
+          >
+            <Text style={rowStyles.deleteText}>✕</Text>
+          </Pressable>
+        )}
       </View>
 
       {/* Command */}
@@ -239,6 +289,18 @@ const rowStyles = StyleSheet.create({
     color: '#ef4444', fontSize: 12,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
+  deleteBtn: {
+    marginLeft: 'auto',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    backgroundColor: '#1a1a1a',
+  },
+  deleteText: {
+    color: '#52525b',
+    fontSize: 10,
+    fontWeight: '700',
+  },
   divider: { height: 1, backgroundColor: '#1a1a1a', marginTop: 10 },
 });
 
@@ -272,6 +334,37 @@ const chipStyles = StyleSheet.create({
   dot: { width: 6, height: 6, borderRadius: 3, flexShrink: 0 },
   text: { color: '#71717a', fontSize: 11, fontWeight: '600', maxWidth: 80 },
   textActive: { color: '#6366f1' },
+});
+
+// ─── Model Chip ──────────────────────────────────────────────────────────────
+
+function ModelChip({ label, icon, active, color, onPress }: {
+  label: string; icon: string; active: boolean; color: string; onPress: () => void;
+}) {
+  return (
+    <Pressable
+      style={[modelChipStyles.chip, active && { backgroundColor: color + '15', borderColor: color }]}
+      onPress={onPress}
+    >
+      <Text style={modelChipStyles.icon}>{icon}</Text>
+      <Text style={[modelChipStyles.text, active && { color }]} numberOfLines={1}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+const modelChipStyles = StyleSheet.create({
+  chip: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 5,
+    backgroundColor: '#111', borderWidth: 1, borderColor: '#2a2a2a',
+  },
+  icon: { fontSize: 10 },
+  text: {
+    color: '#52525b', fontSize: 10, fontWeight: '600',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
 });
 
 // ─── Autocomplete suggestion row ──────────────────────────────────────────────
@@ -320,19 +413,29 @@ const STATUS_DOT: Record<string, string> = {
   idle: '#22c55e', building: '#f59e0b', offline: '#52525b', error: '#ef4444',
 };
 
+// ─── Terminal sub-tabs ────────────────────────────────────────────────────────
+
+type TerminalTab = 'commands' | 'automations';
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function OfficeTerminal({
   circleId, userId, userDisplayName, agents, myAgentIds,
   sharedInput, onSharedInputChange,
   sharedTargetId, sharedTargetName, onSharedSelectTarget,
+  sharedModel, onSharedModelChange,
+  sharedTargetIds, onSharedSelectTargets,
   compact = false,
+  onCommandSent,
 }: Props) {
+  const [terminalTab, setTerminalTab]          = useState<TerminalTab>('commands');
   const [messages, setMessages]               = useState<TerminalMessage[]>([]);
   const [responses, setResponses]             = useState<Map<string, TerminalResponse[]>>(new Map());
   const [localInput, setLocalInput]           = useState('');
-  const [localTargetId, setLocalTargetId]     = useState<string | null>(null);
-  const [localTargetName, setLocalTargetName] = useState('@all');
+  const [localTargetId, setLocalTargetId]     = useState<string | null>('blackswan-default');
+  const [localTargetName, setLocalTargetName] = useState('@BlackSwan');
+  const [localModel, setLocalModel]           = useState<string | null>('blackswan');
+  const [localTargetIds, setLocalTargetIds]   = useState<string[] | null>(['blackswan-default']);
   const [sending, setSending]                 = useState(false);
   const [loading, setLoading]                 = useState(true);
   // Command history — local per instance (UI preference)
@@ -359,6 +462,52 @@ export default function OfficeTerminal({
     }
   }, [onSharedSelectTarget]);
 
+  // ── Model selection ──
+  const selectedModel = sharedModel !== undefined ? sharedModel : localModel;
+  const setSelectedModel = useCallback((m: string | null) => {
+    if (onSharedModelChange !== undefined) onSharedModelChange(m);
+    else setLocalModel(m);
+  }, [onSharedModelChange]);
+
+  // ── Multi-agent targeting ──
+  const targetIds = sharedTargetIds !== undefined ? sharedTargetIds : localTargetIds;
+  const selectTargets = useCallback((ids: string[] | null, names: string) => {
+    if (onSharedSelectTargets !== undefined) {
+      onSharedSelectTargets(ids, names);
+    } else {
+      setLocalTargetIds(ids);
+    }
+  }, [onSharedSelectTargets]);
+
+  // Toggle an agent in/out of multi-select
+  const toggleAgentTarget = useCallback((agentId: string, agentName: string) => {
+    const current = targetIds || [];
+    const isSelected = current.includes(agentId);
+
+    if (isSelected) {
+      // Remove agent
+      const next = current.filter(id => id !== agentId);
+      if (next.length === 0) {
+        // Back to @all
+        selectTarget(null, '@all');
+        selectTargets(null, '@all');
+      } else {
+        selectTargets(next, next.length === 1 ? `@${agentName}` : `${next.length} agents`);
+      }
+    } else {
+      // Add agent
+      const next = [...current, agentId];
+      selectTarget(agentId, `@${agentName}`); // keep legacy single for backward compat
+      selectTargets(next, next.length === 1 ? `@${agentName}` : `${next.length} agents`);
+    }
+  }, [targetIds, selectTarget, selectTargets]);
+
+  // Select @all (clear multi-select)
+  const selectAll = useCallback(() => {
+    selectTarget(null, '@all');
+    selectTargets(null, '@all');
+  }, [selectTarget, selectTargets]);
+
   // ── Load history + subscribe ───────────────────────────────────────────────
   useEffect(() => {
     loadTerminalHistory(circleId, 50).then(async ({ messages: hist }) => {
@@ -380,6 +529,17 @@ export default function OfficeTerminal({
 
   useEffect(() => {
     const unsub = subscribeToTerminalMessages(circleId, (updated) => {
+      // Soft-deleted messages: remove from view
+      if (updated.status === 'deleted') {
+        setMessages(prev => prev.filter(m => m.id !== updated.id));
+        setResponses(prev => {
+          const next = new Map(prev);
+          next.delete(updated.id);
+          return next;
+        });
+        return;
+      }
+
       setMessages(prev => {
         const idx = prev.findIndex(m => m.id === updated.id);
         if (idx >= 0) {
@@ -391,32 +551,12 @@ export default function OfficeTerminal({
     return unsub;
   }, [circleId]);
 
-  // Subscribe to phase 2 broadcast responses (for backward compat)
-  useEffect(() => {
-    const unsub = subscribeToTerminalResponses(circleId, (resp: BroadcastResponsePayload) => {
-      setMessages(prev => prev.map(m =>
-        m.id === resp.messageId
-          ? {
-              ...m,
-              responseText:      resp.responseText,
-              responseAgentId:   resp.responseAgentId,
-              responseAgentName: resp.responseAgentName,
-              tokenCost:         resp.tokenCost,
-              latencyMs:         resp.latencyMs,
-              status:            resp.status,
-            }
-          : m
-      ));
-    });
-    return unsub;
-  }, [circleId]);
+  // Phase 2 broadcast subscription removed — Phase 3 postgres_changes on
+  // office_terminal_responses is now the single source of truth for responses.
 
-  // Phase 3: Subscribe to office_terminal_responses for multiple agent responses
-  // Note: Supabase Realtime postgres_changes does NOT support 'in' filters.
-  // We subscribe to all changes on the table and filter client-side by message ID.
+  // Phase 3: Subscribe to office_terminal_responses for this circle's responses.
+  // Single stable channel — never re-created on messages change to avoid missing events.
   useEffect(() => {
-    const messageIdSet = new Set(messages.map(m => m.id));
-
     const channel = supabase
       .channel(`terminal-responses:${circleId}`)
       .on(
@@ -425,12 +565,12 @@ export default function OfficeTerminal({
           event: '*',
           schema: 'public',
           table: 'office_terminal_responses',
+          filter: `circle_id=eq.${circleId}`,
         },
         (payload: any) => {
           const raw = payload.new;
           if (!raw) return;
 
-          // Map snake_case DB columns → camelCase TerminalResponse
           const row: TerminalResponse = {
             id:           raw.id,
             messageId:    raw.message_id,
@@ -444,9 +584,6 @@ export default function OfficeTerminal({
             createdAt:    raw.created_at,
             updatedAt:    raw.updated_at,
           };
-
-          // Only handle responses for messages we're currently displaying
-          if (!messageIdSet.has(row.messageId)) return;
 
           setResponses(prev => {
             const next = new Map(prev);
@@ -467,7 +604,7 @@ export default function OfficeTerminal({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [circleId, messages]);
+  }, [circleId]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -475,6 +612,40 @@ export default function OfficeTerminal({
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
     }
   }, [messages.length]);
+
+  // Fix #6: Auto-timeout pending/invoked messages after 60s
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setMessages(prev => prev.map(m => {
+        if ((m.status === 'pending' || m.status === 'invoked') &&
+            now - new Date(m.createdAt).getTime() > 60000) {
+          return { ...m, status: 'error' as TerminalMessageStatus };
+        }
+        return m;
+      }));
+    }, 10000); // Check every 10s
+    return () => clearInterval(interval);
+  }, []);
+
+  // ── Delete a message ───────────────────────────────────────────────────────
+  const handleDelete = useCallback(async (messageId: string) => {
+    // Remove from local state immediately
+    setMessages(prev => prev.filter(m => m.id !== messageId));
+    setResponses(prev => {
+      const next = new Map(prev);
+      next.delete(messageId);
+      return next;
+    });
+
+    // Delete from DB (skip local-only messages)
+    if (!messageId.startsWith('local-')) {
+      const result = await deleteTerminalMessage(messageId);
+      if (result.error) {
+        console.warn('[OfficeTerminal] Delete failed:', result.error);
+      }
+    }
+  }, []);
 
   // ── Handle /help builtin ───────────────────────────────────────────────────
   const handleHelp = useCallback(() => {
@@ -487,6 +658,8 @@ export default function OfficeTerminal({
       commandText: '/help',
       targetAgentId: null,
       targetAgentName: 'local',
+      targetAgentIds: null,
+      model: null,
       responseText: HELP_TEXT,
       responseAgentId: null,
       responseAgentName: 'HELP',
@@ -519,17 +692,51 @@ export default function OfficeTerminal({
     setCmdHistory(prev => [cmd, ...prev].slice(0, 50));
     setHistoryIdx(-1);
 
-    await sendTerminalCommand({
+    // Build target name for display
+    const displayTargetName = targetIds && targetIds.length > 0
+      ? (targetIds.length === 1
+        ? agents.find(a => a.id === targetIds[0])?.name
+          ? `@${agents.find(a => a.id === targetIds[0])!.name}`
+          : targetAgentName
+        : `${targetIds.length} agents`)
+      : targetAgentName;
+
+    const result = await sendTerminalCommand({
       circleId,
       senderId: userId,
       senderName: userDisplayName,
       commandText: cmd,
       targetAgentId: targetAgentId ?? undefined,
-      targetAgentName,
+      targetAgentName: displayTargetName,
+      targetAgentIds: targetIds,
+      model: selectedModel,
     });
 
+    // Award XP for terminal activity — model-aware so BlackSwan gives the most
+    if (result.messageId && userId) {
+      const xp = getPointsForModel(selectedModel || 'auto');
+      awardPoints(userId, xp, 'Terminal command', {
+        command: cmd.slice(0, 50),
+        target: displayTargetName,
+        model: selectedModel || 'auto',
+      }).catch(() => {});
+
+      // Direct invocation — bypass broadcast round-trip for immediate response
+      if (onCommandSent) {
+        onCommandSent({
+          messageId: result.messageId,
+          command: cmd,
+          targetAgentId: targetAgentId ?? null,
+          targetAgentIds: targetIds ?? null,
+          targetAgentName: displayTargetName,
+          model: selectedModel ?? null,
+          senderId: userId,
+        });
+      }
+    }
+
     setSending(false);
-  }, [input, sending, circleId, userId, userDisplayName, targetAgentId, targetAgentName, handleHelp, setInput]);
+  }, [input, sending, circleId, userId, userDisplayName, targetAgentId, targetAgentName, targetIds, selectedModel, agents, handleHelp, setInput, onCommandSent]);
 
   // ── Command history navigation (↑ / ↓) ────────────────────────────────────
   const handleKeyPress = useCallback((e: any) => {
@@ -578,6 +785,32 @@ export default function OfficeTerminal({
         </View>
       )}
 
+      {/* Terminal sub-tabs */}
+      <View style={styles.termTabBar}>
+        <Pressable
+          onPress={() => setTerminalTab('commands')}
+          style={[styles.termTab, terminalTab === 'commands' && styles.termTabActive,
+            Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        >
+          <Text style={[styles.termTabText, terminalTab === 'commands' && styles.termTabTextActive]}>⌨ COMMANDS</Text>
+        </Pressable>
+        <Pressable
+          onPress={() => setTerminalTab('automations')}
+          style={[styles.termTab, terminalTab === 'automations' && styles.termTabActive,
+            Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        >
+          <Text style={[styles.termTabText, terminalTab === 'automations' && styles.termTabTextActive]}>⚡ AUTOMATIONS</Text>
+        </Pressable>
+      </View>
+
+      {/* Automations view */}
+      {terminalTab === 'automations' ? (
+        <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+          <AutomationsPanel circleId={circleId} />
+        </ScrollView>
+      ) : (
+      <>
+
       {/* Message list */}
       {loading ? (
         <View style={styles.loadingState}>
@@ -599,7 +832,7 @@ export default function OfficeTerminal({
           data={messages}
           keyExtractor={m => m.id}
           renderItem={({ item }) => (
-            <TerminalRow msg={item} responses={responses.get(item.id)} />
+            <TerminalRow msg={item} responses={responses.get(item.id)} onDelete={handleDelete} />
           )}
           style={styles.list}
           contentContainerStyle={styles.listContent}
@@ -621,7 +854,27 @@ export default function OfficeTerminal({
         />
       )}
 
-      {/* Target selector chips */}
+      {/* Model selector chips */}
+      <View style={styles.modelRow}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.chipsScroll}
+        >
+          {TERMINAL_MODELS.map(m => (
+            <ModelChip
+              key={m.key ?? 'auto'}
+              label={m.label}
+              icon={m.icon}
+              color={m.color}
+              active={selectedModel === m.key}
+              onPress={() => setSelectedModel(m.key)}
+            />
+          ))}
+        </ScrollView>
+      </View>
+
+      {/* Target selector chips — multi-select enabled */}
       <View style={styles.chipRow}>
         <ScrollView
           horizontal
@@ -630,16 +883,16 @@ export default function OfficeTerminal({
         >
           <AgentChip
             label="@all"
-            active={targetAgentId === null}
-            onPress={() => selectTarget(null, '@all')}
+            active={!targetIds || targetIds.length === 0}
+            onPress={selectAll}
           />
           {onlineAgents.map(agent => (
             <AgentChip
               key={agent.id}
               label={`@${agent.name}`}
-              active={targetAgentId === agent.id}
+              active={targetIds?.includes(agent.id) ?? false}
               dotColor={STATUS_DOT[agent.status] || STATUS_DOT.offline}
-              onPress={() => selectTarget(agent.id, `@${agent.name}`)}
+              onPress={() => toggleAgentTarget(agent.id, agent.name)}
             />
           ))}
           {/* Quick command chips */}
@@ -659,7 +912,10 @@ export default function OfficeTerminal({
       {/* Input bar */}
       <View style={styles.inputRow}>
         <View style={styles.inputPrefix}>
-          <Text style={styles.prefixText}>&gt; {targetAgentName} ▸</Text>
+          <Text style={styles.prefixText}>
+            {selectedModel ? `[${TERMINAL_MODELS.find(m => m.key === selectedModel)?.label || selectedModel}] ` : ''}
+            &gt; {targetIds && targetIds.length > 1 ? `${targetIds.length} agents` : targetAgentName} ▸
+          </Text>
         </View>
         <TextInput
           ref={inputRef}
@@ -693,6 +949,9 @@ export default function OfficeTerminal({
           </Text>
         </View>
       )}
+
+      </>
+      )}
     </KeyboardAvoidingView>
   );
 }
@@ -713,7 +972,32 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 } as any,
+  termTabBar: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a1a',
+    paddingHorizontal: 4,
+  } as any,
+  termTab: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderBottomWidth: 2,
+    borderBottomColor: 'transparent',
+  } as any,
+  termTabActive: {
+    borderBottomColor: '#6366f1',
+  } as any,
+  termTabText: {
+    color: '#555',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  } as any,
+  termTabTextActive: {
+    color: '#a5b4fc',
+  } as any,
   headerTitle: {
     color: '#e5e5e5',
     fontSize: 12,
@@ -753,6 +1037,10 @@ const styles = StyleSheet.create({
   emptyText: {
     color: '#3f3f46', fontSize: 11, textAlign: 'center', lineHeight: 18,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  modelRow: {
+    borderTopWidth: 1, borderTopColor: '#1a1a1a', paddingVertical: 4,
+    backgroundColor: '#0a0a0a',
   },
   chipRow: { borderTopWidth: 1, borderTopColor: '#1a1a1a', paddingVertical: 6 },
   chipsScroll: {

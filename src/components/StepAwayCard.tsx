@@ -54,6 +54,9 @@ type Props = {
     task: string;
     startedAt: string;
   };
+  // If true, opens the modal immediately (no trigger button rendered)
+  autoOpen?: boolean;
+  onClose?: () => void;
 };
 
 // ─── Tool config ──────────────────────────────────────────────────────────────
@@ -79,8 +82,8 @@ const VERDICTS = [
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function StepAwayCard({ circleId, userId, userName, onPost, activeHandoff }: Props) {
-  const [visible, setVisible] = useState(false);
+export default function StepAwayCard({ circleId, userId, userName, onPost, activeHandoff, autoOpen, onClose }: Props) {
+  const [visible, setVisible] = useState(autoOpen || false);
   const [mode, setMode] = useState<'step-away' | 'back-at-keyboard'>(
     activeHandoff ? 'back-at-keyboard' : 'step-away'
   );
@@ -128,7 +131,7 @@ export default function StepAwayCard({ circleId, userId, userName, onPost, activ
         returnTime,
       });
 
-      setVisible(false);
+      handleClose();
       resetForm();
     } finally {
       setLoading(false);
@@ -154,7 +157,7 @@ export default function StepAwayCard({ circleId, userId, userName, onPost, activ
       // Set circle office agent back to idle
       await updateAgentStatus(circleId, 'idle', {});
 
-      setVisible(false);
+      handleClose();
       resetForm();
     } finally {
       setLoading(false);
@@ -180,13 +183,18 @@ export default function StepAwayCard({ circleId, userId, userName, onPost, activ
     </Pressable>
   );
 
+  const handleClose = () => {
+    setVisible(false);
+    onClose?.();
+  };
+
   // ─── Modal ────────────────────────────────────────────────────────────────
 
   return (
     <>
-      {triggerBtn}
+      {!autoOpen && triggerBtn}
 
-      <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setVisible(false)}>
+      <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={handleClose}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
           <ScrollView style={styles.modal} contentContainerStyle={{ paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
 
@@ -195,7 +203,7 @@ export default function StepAwayCard({ circleId, userId, userName, onPost, activ
               <Text style={styles.modalTitle}>
                 {mode === 'step-away' ? '🖥️  Step Away & Hand Off' : '⌨️  Back at Keyboard'}
               </Text>
-              <Pressable onPress={() => setVisible(false)}>
+              <Pressable onPress={handleClose}>
                 <Text style={styles.closeBtn}>✕</Text>
               </Pressable>
             </View>

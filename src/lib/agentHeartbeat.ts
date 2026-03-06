@@ -85,11 +85,12 @@ export async function stopHeartbeat(circleId: string): Promise<void> {
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) return;
 
-  // Mark agents offline when user leaves
+  // Mark agents idle (not offline) — they stay visible for 1 hour
   await supabase
     .from('circle_office_agents')
     .update({
-      status: 'offline',
+      status: 'idle',
+      current_task: 'Session ended — idling',
       updated_at: new Date().toISOString(),
     })
     .eq('circle_id', circleId)

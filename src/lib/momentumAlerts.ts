@@ -158,9 +158,9 @@ class MomentumAlertsSystem {
 
     const activeMembers = [...new Set((recentCheckIns || []).map(ci => ci.user_id))];
     
-    const recentActivities: ActivityEvent[] = (recentCheckIns || []).map(ci => ({
+    const recentActivities: ActivityEvent[] = (recentCheckIns || []).map((ci: any) => ({
       userId: ci.user_id,
-      userName: ci.profiles.display_name || ci.profiles.username,
+      userName: ci.profiles?.display_name || ci.profiles?.username,
       action: 'check_in',
       timestamp: new Date(ci.created_at),
       xpEarned: getXPForAction('check_in'),

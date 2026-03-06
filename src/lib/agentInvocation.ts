@@ -4,7 +4,8 @@
  */
 
 import { supabase } from './supabase';
-import { CircleOfficeAgent } from './circleOffice';
+import { CircleOfficeAgent, BLACKSWAN_AGENT_ID } from './circleOffice';
+import { loadBudgetConfig, checkHardLimit } from './budgetAlerts';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -12,10 +13,19 @@ export interface InvocationRequest {
   messageId: string;
   circleId: string;
   command: string;
+  senderId?: string;
   targetAgentId?: string;
   targetAgentName: string;
   promptName?: string;
   promptLabel?: string;
+  model?: string | null;
+}
+
+export interface TokenBreakdown {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
 }
 
 export interface AgentInvocationResult {
@@ -25,6 +35,8 @@ export interface AgentInvocationResult {
   tokenCount?: number;
   latencyMs?: number;
   error?: string;
+  model?: string;
+  tokens?: TokenBreakdown;
 }
 
 // ─── DB: Create response row (atomic) ───────────────────────────────────────
@@ -60,7 +72,9 @@ export async function streamResponse(
   text: string,
   status: 'pending' | 'streaming' | 'done' | 'error',
   tokenCount: number = 0,
-  latencyMs?: number
+  latencyMs?: number,
+  model?: string,
+  tokens?: TokenBreakdown
 ): Promise<boolean> {
   try {
     const { error } = await supabase.rpc('stream_response', {
@@ -69,6 +83,11 @@ export async function streamResponse(
       p_status: status,
       p_tokens: tokenCount,
       p_latency_ms: latencyMs ?? null,
+      p_model: model ?? null,
+      p_input_tokens: tokens?.inputTokens ?? 0,
+      p_output_tokens: tokens?.outputTokens ?? 0,
+      p_cache_creation_tokens: tokens?.cacheCreationTokens ?? 0,
+      p_cache_read_tokens: tokens?.cacheReadTokens ?? 0,
     });
 
     if (error) {
@@ -103,6 +122,127 @@ export async function markMessageDone(messageId: string): Promise<boolean> {
   }
 }
 
+// ─── BlackSwan: Invoke via swanbot-ai edge function ─────────────────────────
+
+function isBlackSwanAgent(agent: CircleOfficeAgent): boolean {
+  return agent.provider === 'blackswan' || agent.id === BLACKSWAN_AGENT_ID;
+}
+
+async function invokeBlackSwan(
+  command: string,
+  circleId: string,
+  senderId: string,
+  model?: string | null,
+): Promise<AgentInvocationResult> {
+  const start = Date.now();
+
+  try {
+    const { data, error } = await supabase.functions.invoke('swanbot-ai', {
+      body: { message: command, circleId, userId: senderId, model: model || null },
+    });
+
+    const latencyMs = Date.now() - start;
+
+    if (error) {
+      return {
+        success: false,
+        error: `BlackSwan edge function error: ${error.message}`,
+      };
+    }
+
+    const responseText = data?.response || 'BlackSwan is thinking...';
+    const usage = data?.usage;
+    const tokenCount = usage?.total_tokens || estimateTokens(command, responseText);
+
+    return {
+      success: true,
+      responseText,
+      tokenCount,
+      latencyMs,
+      model: usage?.model || 'blackswan',
+      tokens: {
+        inputTokens: usage?.input_tokens || 0,
+        outputTokens: usage?.output_tokens || 0,
+        cacheCreationTokens: usage?.cache_creation_tokens || 0,
+        cacheReadTokens: usage?.cache_read_tokens || 0,
+      },
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err.message || 'BlackSwan invocation failed',
+    };
+  }
+}
+
+// ─── Claude Code: Invoke via local bridge POST /exec ────────────────────────
+
+function isClaudeCodeAgent(agent: CircleOfficeAgent): boolean {
+  return agent.provider === 'claude-code';
+}
+
+async function invokeClaudeCode(
+  command: string,
+  bridgeUrl: string = 'http://localhost:7778',
+): Promise<AgentInvocationResult> {
+  const start = Date.now();
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 35000);
+
+    const response = await fetch(`${bridgeUrl}/exec`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+    const latencyMs = Date.now() - start;
+
+    if (!response.ok) {
+      return {
+        success: false,
+        error: `Claude Code bridge error: HTTP ${response.status}`,
+      };
+    }
+
+    const data = await response.json();
+
+    if (!data.ok) {
+      return {
+        success: false,
+        error: data.error || `Command failed with exit code ${data.code}`,
+      };
+    }
+
+    const responseText = (data.stdout || '').trim()
+      || (data.stderr || '').trim()
+      || 'Command executed (no output)';
+
+    const tokenCount = estimateTokens(command, responseText);
+
+    return {
+      success: true,
+      responseText,
+      tokenCount,
+      latencyMs,
+    };
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      return {
+        success: false,
+        error: 'Claude Code bridge command timed out (35s)',
+      };
+    }
+    return {
+      success: false,
+      error: err.message || 'Claude Code bridge not reachable',
+    };
+  }
+}
+
 // ─── OpenClaw Gateway: Invoke Agent ─────────────────────────────────────────
 
 /**
@@ -115,9 +255,18 @@ export async function callOpenClawAgent(
   command: string,
   agentId: string,
   agentName: string,
-  gatewayUrl: string = 'http://localhost:18790',
-  timeoutMs: number = 30000
+  gatewayUrl: string,
+  timeoutMs: number = 30000,
+  model?: string | null,
+  authToken?: string
 ): Promise<AgentInvocationResult> {
+  if (!gatewayUrl) {
+    return {
+      success: false,
+      error: 'No gateway URL configured — add a connection in ⚙️ → Connections',
+    };
+  }
+
   const start = Date.now();
 
   try {
@@ -125,17 +274,23 @@ export async function callOpenClawAgent(
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'x-openclaw-agent-id': agentId,
+      };
+      if (authToken) {
+        headers['Authorization'] = `Bearer ${authToken}`;
+      }
+
       const response = await fetch(`${gatewayUrl}/tools/invoke`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-openclaw-agent-id': agentId,
-        },
+        headers,
         body: JSON.stringify({
           tool: 'execute_command',
           params: {
             command,
             agentName,
+            model: model || undefined,
           },
         }),
         signal: controller.signal,
@@ -207,22 +362,62 @@ function estimateTokens(command: string, response: string): number {
 export async function invokeAndStream(
   req: InvocationRequest,
   agent: CircleOfficeAgent,
-  gatewayUrl: string = 'http://localhost:18790'
+  gatewayUrl?: string,
+  authToken?: string
 ): Promise<AgentInvocationResult> {
+  // Check hard spending limits before invoking
+  try {
+    const budgetConfig = await loadBudgetConfig();
+    if (budgetConfig.enabled && budgetConfig.hardLimit) {
+      const now = new Date();
+      const todayStr = now.toISOString().split('T')[0];
+      const weekAgo = new Date(now.getTime() - 7 * 86400000).toISOString();
+      const monthAgo = new Date(now.getTime() - 30 * 86400000).toISOString();
+
+      const [todayRes, weekRes, monthRes] = await Promise.all([
+        supabase.from('office_terminal_responses').select('token_count').eq('circle_id', req.circleId).gte('created_at', todayStr).eq('status', 'done'),
+        supabase.from('office_terminal_responses').select('token_count').eq('circle_id', req.circleId).gte('created_at', weekAgo).eq('status', 'done'),
+        supabase.from('office_terminal_responses').select('token_count').eq('circle_id', req.circleId).gte('created_at', monthAgo).eq('status', 'done'),
+      ]);
+
+      const estimateCost = (rows: any[]) => (rows || []).reduce((s: number, r: any) => s + (r.token_count || 0), 0) * 0.0000005;
+      const blocked = checkHardLimit(budgetConfig, estimateCost(todayRes.data || []), estimateCost(weekRes.data || []), estimateCost(monthRes.data || []));
+      if (blocked) {
+        return { success: false, error: blocked };
+      }
+    }
+  } catch (e) {
+    console.warn('[agentInvocation] Budget check failed, proceeding:', e);
+  }
+
+  // Detect agent type for routing
+  const blackSwan = isBlackSwanAgent(agent);
+  const claudeCode = isClaudeCodeAgent(agent);
+
   // Resolve the actual gateway URL to use:
   // 1. Use agent's stored gatewayUrl if available
   // 2. Fall back to the passed-in gatewayUrl (caller's local)
+  // Resolve gateway URL: agent's stored URL > caller's URL > fail
   const resolvedUrl = agent.gatewayUrl || gatewayUrl;
+  if (!resolvedUrl && !blackSwan && !claudeCode) {
+    return {
+      success: false,
+      error: `No gateway URL for ${agent.name} — configure one in ⚙️ → Connections`,
+    };
+  }
 
   // Cross-machine guard: if agent is not ours and not public, fail clearly
-  if (!agent.isOwn && !agent.isPublic) {
+  // BlackSwan is always public (server-side edge function)
+  // Claude Code is local-only but invoked by its owner
+  if (!blackSwan && !claudeCode && !agent.isOwn && !agent.isPublic) {
     return {
       success: false,
       error: `${agent.name} is local-only — they need to set up a public URL to receive cross-machine commands`,
     };
   }
 
-  console.log(`[agentInvocation] Starting: ${agent.name} ← "${req.command}" via ${resolvedUrl}`);
+  const via = blackSwan ? 'swanbot-ai' : claudeCode ? `bridge:${resolvedUrl}` : resolvedUrl;
+  console.log(`[agentInvocation] Starting: ${agent.name} ← "${req.command}" via ${via}`);
 
   // Step 1: Create response row
   const responseId = await invokeAgent(req.messageId, agent.id, agent.name);
@@ -252,15 +447,48 @@ export async function invokeAndStream(
       }
     }
 
-    // Step 2: Call agent
-    console.log(`[agentInvocation] Invoking gateway: ${resolvedUrl}/tools/invoke`);
-    const result = await callOpenClawAgent(
-      req.command,
-      agent.id,
-      agent.name,
-      resolvedUrl,
-      30000  // 30 second timeout
-    );
+    // Step 2: Call agent (route by provider type)
+    let result: AgentInvocationResult;
+
+    if (blackSwan) {
+      if (req.model === 'gemini-flash') {
+        // Gemini selected — use client-side Gemini path (edge fn only has Anthropic key)
+        console.log(`[agentInvocation] Invoking Gemini client-side for BlackSwan`);
+        const geminiStart = Date.now();
+        try {
+          const { getSwanBotResponse } = await import('./swanbot');
+          const geminiResult = await getSwanBotResponse(req.command, {
+            userId: req.senderId || req.messageId,
+            circleId: req.circleId,
+          });
+          result = {
+            success: true,
+            responseText: geminiResult,
+            tokenCount: estimateTokens(req.command, geminiResult),
+            latencyMs: Date.now() - geminiStart,
+          };
+        } catch (err: any) {
+          result = { success: false, error: `Gemini fallback failed: ${err.message}` };
+        }
+      } else {
+        console.log(`[agentInvocation] Invoking BlackSwan via swanbot-ai edge function (model: ${req.model || 'auto'})`);
+        result = await invokeBlackSwan(req.command, req.circleId, req.senderId || req.messageId, req.model);
+      }
+    } else if (claudeCode) {
+      console.log(`[agentInvocation] Invoking Claude Code via bridge: ${resolvedUrl}/exec`);
+      result = await invokeClaudeCode(req.command, resolvedUrl);
+    } else {
+      console.log(`[agentInvocation] Invoking gateway: ${resolvedUrl}/tools/invoke`);
+      result = await callOpenClawAgent(
+        req.command,
+        agent.id,
+        agent.name,
+        resolvedUrl!,
+        30000,  // 30 second timeout
+        req.model,
+        authToken
+      );
+    }
 
     if (!result.success) {
       console.error(`[agentInvocation] Agent error: ${result.error}`);
@@ -270,13 +498,15 @@ export async function invokeAndStream(
 
     console.log(`[agentInvocation] Agent responded: ${result.tokenCount} tokens, ${result.latencyMs}ms latency`);
 
-    // Step 3: Stream final response
+    // Step 3: Stream final response with token breakdown
     const updated = await streamResponse(
       responseId,
       result.responseText || '',
       'done',
       result.tokenCount || 0,
-      result.latencyMs
+      result.latencyMs,
+      result.model,
+      result.tokens
     );
 
     // Step 4: Mark message complete
@@ -305,7 +535,8 @@ export async function invokeAndStream(
 export async function invokeAllAgents(
   req: InvocationRequest,
   agents: CircleOfficeAgent[],
-  gatewayUrl?: string
+  gatewayUrl?: string,
+  authToken?: string
 ): Promise<AgentInvocationResult[]> {
   // Filter to online agents only
   const onlineAgents = agents.filter(a => a.status !== 'offline');
@@ -326,7 +557,45 @@ export async function invokeAllAgents(
         targetAgentName: `@${agent.name}`,
       },
       agent,
-      gatewayUrl
+      gatewayUrl,
+      authToken
+    )
+  );
+
+  return Promise.all(promises);
+}
+
+// ─── Multi-Agent: Invoke selected agents in parallel ────────────────────────
+
+export async function invokeSelectedAgents(
+  req: InvocationRequest,
+  agents: CircleOfficeAgent[],
+  targetIds: string[],
+  gatewayUrl?: string,
+  authToken?: string
+): Promise<AgentInvocationResult[]> {
+  // Filter to online agents matching the selected IDs
+  const selectedAgents = agents.filter(
+    a => a.status !== 'offline' && targetIds.includes(a.id)
+  );
+
+  if (selectedAgents.length === 0) {
+    return [{
+      success: false,
+      error: 'No selected agents are online',
+    }];
+  }
+
+  const promises = selectedAgents.map(agent =>
+    invokeAndStream(
+      {
+        ...req,
+        targetAgentId: agent.id,
+        targetAgentName: `@${agent.name}`,
+      },
+      agent,
+      gatewayUrl,
+      authToken
     )
   );
 

@@ -335,15 +335,12 @@ function SortButton({ label, active, onPress, accentColor }: {
 
 function calculateAgentMetrics(agents: OfficeAgent[], sessions: OpenClawSession[]): AgentMetrics[] {
   return agents.map(agent => {
-    // Extract sessionKey from agent.id
-    const sessionKey = agent.id.includes('::') ? agent.id.split('::')[1] : agent.id;
-    
-    // Find matching session
-    const session = sessions.find(s => s.sessionKey === sessionKey);
-    
-    const sessionCount = session?.turns || 1;
-    const totalCost = agent.costToday || 0;
-    const totalTokens = agent.tokensUsed || 0;
+    // Find all sessions for this agent (sessions are per-response, keyed by agentId)
+    const agentSessions = sessions.filter(s => s.agentId === agent.id || s.agentId === agent.name);
+
+    const sessionCount = agentSessions.length || 1;
+    const totalCost = agentSessions.reduce((sum, s) => sum + (s.totalCost || 0), 0) || agent.costToday || 0;
+    const totalTokens = agentSessions.reduce((sum, s) => sum + (s.totalInputTokens || 0) + (s.totalOutputTokens || 0), 0) || agent.tokensUsed || 0;
     const avgCostPerSession = sessionCount > 0 ? totalCost / sessionCount : totalCost;
     const avgTokensPerSession = sessionCount > 0 ? totalTokens / sessionCount : totalTokens;
     const efficiency = totalCost > 0 ? totalTokens / totalCost / 1000 : 0; // tokens per dollar (in thousands)
