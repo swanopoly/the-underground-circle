@@ -184,31 +184,6 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     return () => loop.stop();
   }, [dancing]);
 
-  // Bob + breathe + sway — randomized per agent so they move independently
-  useEffect(() => {
-    const bobDur = 1200 + Math.random() * 600; // 1.2–1.8s per agent
-    const bobLoop = animLoop(() => Animated.sequence([
-        Animated.parallel([
-          Animated.timing(bobAnim, { toValue: -8, duration: bobDur, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(breatheAnim, { toValue: 1.08, duration: bobDur, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        ]),
-        Animated.parallel([
-          Animated.timing(bobAnim, { toValue: 0, duration: bobDur, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(breatheAnim, { toValue: 1, duration: bobDur, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        ]),
-      ]));
-    const swayDur = 1800 + Math.random() * 800;
-    const swayLoop = animLoop(() => Animated.sequence([
-        Animated.timing(swayAnim, { toValue: 4, duration: swayDur, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(swayAnim, { toValue: -4, duration: swayDur, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(swayAnim, { toValue: 2, duration: swayDur * 0.8, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(swayAnim, { toValue: -3, duration: swayDur * 0.9, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(swayAnim, { toValue: 0, duration: swayDur * 0.7, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-      ]));
-    // Stagger start so agents don't sync
-    const startDelay = setTimeout(() => { bobLoop.start(); swayLoop.start(); }, Math.random() * 1500);
-    return () => { clearTimeout(startDelay); bobLoop.stop(); swayLoop.stop(); };
-  }, []);
 
   // Glow animation
   useEffect(() => {
@@ -270,27 +245,6 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     }
   }, [agent.status]);
 
-  // Look-around — randomized per agent so they don't move in sync
-  useEffect(() => {
-    let stopped = false;
-    const rand = (min: number, max: number) => min + Math.random() * (max - min);
-    const doLook = () => {
-      if (stopped) return;
-      const dir = Math.random() > 0.5 ? 1 : -1;
-      const mag = 0.4 + Math.random() * 0.6; // 0.4–1.0
-      Animated.sequence([
-        Animated.delay(rand(800, 3000)),
-        Animated.timing(lookAnim, { toValue: dir * mag, duration: rand(350, 600), useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
-        Animated.delay(rand(500, 2000)),
-        Animated.timing(lookAnim, { toValue: -dir * mag * 0.6, duration: rand(300, 500), useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
-        Animated.delay(rand(300, 1200)),
-        Animated.timing(lookAnim, { toValue: 0, duration: rand(250, 400), useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
-      ]).start(({ finished }) => { if (finished && !stopped) doLook(); });
-    };
-    // Stagger start by random offset so agents aren't in sync
-    const startDelay = setTimeout(doLook, Math.random() * 2000);
-    return () => { stopped = true; clearTimeout(startDelay); };
-  }, []);
 
   // Limb fidget — always runs, randomized delays per agent
   useEffect(() => {
@@ -764,6 +718,11 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           ],
         }]}>
         
+        {/* Floating Gamified Text */}
+        {floatingText.map(ft => (
+          <FloatingText key={ft.id} text={ft.text} color={ft.color} xOffset={ft.x} />
+        ))}
+
         {/* Celebration confetti */}
         {celebrating && <ConfettiBurst />}
 
