@@ -1,7 +1,9 @@
 import { storage } from './storage';
 import { supabase } from './supabase';
 
-export type ProviderType = 'openclaw' | 'claude-code' | 'generic-agent' | 'codex' | 'gemini' | 'cursor' | 'blackswan-local';
+export type ProviderType =
+  | 'openclaw' | 'claude-code' | 'generic-agent' | 'codex' | 'gemini' | 'cursor' | 'blackswan-local'
+  | 'openai' | 'anthropic' | 'openrouter' | 'groq' | 'ollama' | 'replicate' | 'figma';
 
 export interface AgentConnection {
   id: string;
@@ -20,14 +22,24 @@ export interface AgentConnection {
   remoteId?: string;
 }
 
-export const PROVIDER_META: Record<ProviderType, { icon: string; label: string; color: string; defaultEndpoint: string }> = {
-  'openclaw': { icon: '🐾', label: 'OpenClaw', color: '#6366f1', defaultEndpoint: 'http://localhost:18790' },
-  'claude-code': { icon: '🤖', label: 'Claude Code', color: '#f59e0b', defaultEndpoint: 'http://localhost:8080' },
-  'generic-agent': { icon: '⚡', label: 'Generic Agent', color: '#10b981', defaultEndpoint: 'https://' },
-  'codex': { icon: '🧠', label: 'OpenAI Codex', color: '#10a37f', defaultEndpoint: 'https://api.openai.com/v1' },
-  'gemini': { icon: '♊', label: 'Google Gemini', color: '#4285f4', defaultEndpoint: 'https://generativelanguage.googleapis.com/v1beta' },
-  'cursor': { icon: '🎯', label: 'Cursor', color: '#8b5cf6', defaultEndpoint: 'http://localhost:2087' },
-  'blackswan-local': { icon: '🦢', label: 'BlackSwan LLM', color: '#22d3ee', defaultEndpoint: 'http://localhost:7779' },
+export const PROVIDER_META: Record<ProviderType, { icon: string; label: string; color: string; defaultEndpoint: string; isLLM?: boolean }> = {
+  // ── Local agents / bridges ──
+  'openclaw':       { icon: '🐾', label: 'OpenClaw',       color: '#6366f1', defaultEndpoint: 'http://localhost:18790' },
+  'claude-code':    { icon: '🤖', label: 'Claude Code',    color: '#f59e0b', defaultEndpoint: 'http://localhost:8080' },
+  'generic-agent':  { icon: '⚡', label: 'Generic Agent',  color: '#10b981', defaultEndpoint: 'https://' },
+  'cursor':         { icon: '🎯', label: 'Cursor',         color: '#8b5cf6', defaultEndpoint: 'http://localhost:2087' },
+  'blackswan-local':{ icon: '🦢', label: 'BlackSwan LLM',  color: '#22d3ee', defaultEndpoint: 'http://localhost:7779' },
+  // ── BYO LLM API providers ──
+  'openai':         { icon: '🟢', label: 'OpenAI',         color: '#10a37f', defaultEndpoint: 'https://api.openai.com/v1',      isLLM: true },
+  'anthropic':      { icon: '🟠', label: 'Anthropic',      color: '#d97706', defaultEndpoint: 'https://api.anthropic.com/v1',   isLLM: true },
+  'openrouter':     { icon: '🔀', label: 'OpenRouter',     color: '#6d28d9', defaultEndpoint: 'https://openrouter.ai/api/v1',   isLLM: true },
+  'groq':           { icon: '⚡', label: 'Groq',           color: '#f97316', defaultEndpoint: 'https://api.groq.com/openai/v1', isLLM: true },
+  'ollama':         { icon: '🦙', label: 'Ollama',         color: '#0ea5e9', defaultEndpoint: 'http://localhost:11434',          isLLM: true },
+  'codex':          { icon: '🧠', label: 'OpenAI Codex',   color: '#10a37f', defaultEndpoint: 'https://api.openai.com/v1',      isLLM: true },
+  'gemini':         { icon: '♊', label: 'Google Gemini',   color: '#4285f4', defaultEndpoint: 'https://generativelanguage.googleapis.com/v1beta', isLLM: true },
+  // ── Creative tools ──
+  'replicate':      { icon: '🎨', label: 'Replicate',      color: '#ec4899', defaultEndpoint: 'https://api.replicate.com/v1',   isLLM: true },
+  'figma':          { icon: '🎨', label: 'Figma',          color: '#a259ff', defaultEndpoint: 'https://api.figma.com' },
 };
 
 const STORAGE_KEY = '@office_connections';

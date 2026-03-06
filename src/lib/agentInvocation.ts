@@ -136,9 +136,15 @@ async function invokeBlackSwan(
 ): Promise<AgentInvocationResult> {
   const start = Date.now();
 
+  // Strip thinking level suffix from model (e.g. "claude-sonnet::deep")
+  let cleanModel = model;
+  if (cleanModel && cleanModel.includes('::')) {
+    cleanModel = cleanModel.split('::')[0];
+  }
+
   try {
     const { data, error } = await supabase.functions.invoke('swanbot-ai', {
-      body: { message: command, circleId, userId: senderId, model: model || null },
+      body: { message: command, circleId, userId: senderId, model: cleanModel || null },
     });
 
     const latencyMs = Date.now() - start;
@@ -240,6 +246,94 @@ async function invokeClaudeCode(
       success: false,
       error: err.message || 'Claude Code bridge not reachable',
     };
+  }
+}
+
+// ─── BYO LLM: Invoke via llm-proxy edge function ────────────────────────────
+
+const BYO_LLM_PROVIDERS = ['openai', 'anthropic', 'openrouter', 'groq', 'ollama'];
+
+function isBYOLLMAgent(agent: CircleOfficeAgent): boolean {
+  return BYO_LLM_PROVIDERS.includes(agent.provider);
+}
+
+/**
+ * Parse a BYO model key like "openai/gpt-4o" into provider + model.
+ * Falls back to the agent's provider if no prefix found.
+ */
+function parseBYOModel(modelKey: string | null | undefined, agentProvider: string): { provider: string; model: string; thinkingLevel?: string } {
+  // Strip thinking level suffix (e.g. "openai/gpt-4o::deep" → thinkingLevel = "deep")
+  let thinkingLevel: string | undefined;
+  let cleanKey = modelKey;
+  if (cleanKey && cleanKey.includes('::')) {
+    const [base, level] = cleanKey.split('::');
+    cleanKey = base;
+    if (['fast', 'balanced', 'deep'].includes(level)) thinkingLevel = level;
+  }
+
+  if (!cleanKey) {
+    const defaults: Record<string, string> = {
+      openai: 'gpt-4o',
+      anthropic: 'claude-sonnet-4-6',
+      openrouter: 'anthropic/claude-sonnet-4-6',
+      groq: 'llama-3.3-70b-versatile',
+      ollama: 'blackswan',
+    };
+    return { provider: agentProvider, model: defaults[agentProvider] || 'gpt-4o', thinkingLevel };
+  }
+  const parts = cleanKey.split('/');
+  if (parts.length >= 2 && BYO_LLM_PROVIDERS.includes(parts[0])) {
+    return { provider: parts[0], model: parts.slice(1).join('/'), thinkingLevel };
+  }
+  return { provider: agentProvider, model: cleanKey, thinkingLevel };
+}
+
+async function invokeBYOLLM(
+  command: string,
+  agentProvider: string,
+  model?: string | null,
+  circleId?: string,
+  senderId?: string,
+): Promise<AgentInvocationResult> {
+  const start = Date.now();
+  const { provider, model: resolvedModel, thinkingLevel } = parseBYOModel(model, agentProvider);
+
+  try {
+    const { data, error } = await supabase.functions.invoke('llm-proxy', {
+      body: {
+        provider,
+        model: resolvedModel,
+        messages: [{ role: 'user', content: command }],
+        circleId,
+        userId: senderId,
+        ...(thinkingLevel && thinkingLevel !== 'balanced' ? { thinkingLevel } : {}),
+      },
+    });
+
+    const latencyMs = Date.now() - start;
+
+    if (error) {
+      return { success: false, error: `LLM Proxy error: ${error.message}` };
+    }
+    if (data?.error) {
+      return { success: false, error: data.error };
+    }
+
+    return {
+      success: true,
+      responseText: data.response,
+      tokenCount: data.usage?.total_tokens || 0,
+      latencyMs,
+      model: data.usage?.model || resolvedModel,
+      tokens: {
+        inputTokens: data.usage?.input_tokens || 0,
+        outputTokens: data.usage?.output_tokens || 0,
+        cacheCreationTokens: data.usage?.cache_creation_tokens || 0,
+        cacheReadTokens: data.usage?.cache_read_tokens || 0,
+      },
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message || 'BYO LLM invocation failed' };
   }
 }
 
@@ -393,13 +487,14 @@ export async function invokeAndStream(
   // Detect agent type for routing
   const blackSwan = isBlackSwanAgent(agent);
   const claudeCode = isClaudeCodeAgent(agent);
+  const byoLLM = isBYOLLMAgent(agent);
 
   // Resolve the actual gateway URL to use:
   // 1. Use agent's stored gatewayUrl if available
   // 2. Fall back to the passed-in gatewayUrl (caller's local)
   // Resolve gateway URL: agent's stored URL > caller's URL > fail
   const resolvedUrl = agent.gatewayUrl || gatewayUrl;
-  if (!resolvedUrl && !blackSwan && !claudeCode) {
+  if (!resolvedUrl && !blackSwan && !claudeCode && !byoLLM) {
     return {
       success: false,
       error: `No gateway URL for ${agent.name} — configure one in ⚙️ → Connections`,
@@ -409,14 +504,14 @@ export async function invokeAndStream(
   // Cross-machine guard: if agent is not ours and not public, fail clearly
   // BlackSwan is always public (server-side edge function)
   // Claude Code is local-only but invoked by its owner
-  if (!blackSwan && !claudeCode && !agent.isOwn && !agent.isPublic) {
+  if (!blackSwan && !claudeCode && !byoLLM && !agent.isOwn && !agent.isPublic) {
     return {
       success: false,
       error: `${agent.name} is local-only — they need to set up a public URL to receive cross-machine commands`,
     };
   }
 
-  const via = blackSwan ? 'swanbot-ai' : claudeCode ? `bridge:${resolvedUrl}` : resolvedUrl;
+  const via = blackSwan ? 'swanbot-ai' : claudeCode ? `bridge:${resolvedUrl}` : byoLLM ? `llm-proxy:${agent.provider}` : resolvedUrl;
   console.log(`[agentInvocation] Starting: ${agent.name} ← "${req.command}" via ${via}`);
 
   // Step 1: Create response row
@@ -477,6 +572,9 @@ export async function invokeAndStream(
     } else if (claudeCode) {
       console.log(`[agentInvocation] Invoking Claude Code via bridge: ${resolvedUrl}/exec`);
       result = await invokeClaudeCode(req.command, resolvedUrl);
+    } else if (byoLLM) {
+      console.log(`[agentInvocation] Invoking BYO LLM: ${agent.provider} (model: ${req.model || 'default'})`);
+      result = await invokeBYOLLM(req.command, agent.provider, req.model, req.circleId, req.senderId);
     } else {
       console.log(`[agentInvocation] Invoking gateway: ${resolvedUrl}/tools/invoke`);
       result = await callOpenClawAgent(

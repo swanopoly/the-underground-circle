@@ -26,6 +26,7 @@ import {
   createQuickPoll, createYesNoProposal, getProposals, castVote, resolveProposal,
   pinMessage, unpinMessage, getPinnedMessages,
 } from '../../../lib/governance';
+import { awardXP, getXPForAction } from '../../../lib/gamification';
 import ProposalCard from '../../../components/ProposalCard';
 import StepAwayCard from '../../../components/StepAwayCard';
 import { Proposal, PinnedMessage } from '../../../types';
@@ -57,7 +58,7 @@ const PROMPT_CATEGORIES = [
       { label: 'Two Truths & a Lie', desc: 'Guess which is the lie', text: 'two truths' },
       { label: 'Rate My Day', desc: 'Score your day 1-10', text: 'rate my day' },
       { label: 'This or That', desc: 'Quick picks', text: 'this or that' },
-      { label: 'Roast Battle', desc: 'BlackSwan roasts everyone 😈', text: 'roast battle' },
+      { label: 'Roast Battle', desc: 'Agent roasts everyone 😈', text: 'roast battle' },
     ],
   },
   {
@@ -347,7 +348,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         .select('user:profiles(id, username, display_name)')
         .eq('circle_id', circleId);
       const m = (data || []).map((d: any) => d.user).filter(Boolean);
-      m.push({ id: BLACKSWAN_ID, username: 'BlackSwan', display_name: 'BlackSwan 🦢' });
+      m.push({ id: BLACKSWAN_ID, username: 'Agent', display_name: 'Agent 🦢' });
       setMembers(m);
     } catch (e) { /* circle may not exist yet */ }
 
@@ -376,7 +377,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             const loaded: ChatMessage[] = fallback.map((m: any) => ({
               id: m.id, dbId: m.id,
               content: m.content || '',
-              isBot: (m.content || '').startsWith('🦢 **BlackSwan:**') || (m.content || '').startsWith('🦢 **SwanBot:**'),
+              isBot: (m.content || '').startsWith('🦢 **Agent:**') || (m.content || '').startsWith('🦢 **BlackSwan:**') || (m.content || '').startsWith('🦢 **SwanBot:**'),
               isUser: m.user_id === user?.id,
               userName: m.user?.display_name || m.user?.username || 'Unknown',
               timestamp: new Date(m.created_at),
@@ -390,17 +391,18 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       } else if (data && data.length > 0) {
         const loaded: ChatMessage[] = data.map((m: any) => {
           const isBot = m.is_bot === true
+            || (m.content || '').startsWith('🦢 **Agent:**')
             || (m.content || '').startsWith('🦢 **BlackSwan:**')
             || (m.content || '').startsWith('🦢 **SwanBot:**');
           return {
             id: m.id,
             dbId: m.id,
             content: isBot
-              ? (m.content || '').replace(/^🦢 \*\*(SwanBot|BlackSwan):\*\* /, '').replace(/^👑 \*\*KingClaw:\*\* /, '')
+              ? (m.content || '').replace(/^🦢 \*\*(SwanBot|BlackSwan|Agent):\*\* /, '').replace(/^👑 \*\*KingClaw:\*\* /, '')
               : (m.content || ''),
             isBot,
             isUser: m.user_id === user?.id && !isBot,
-            userName: isBot ? 'BlackSwan 🦢' : (m.user?.display_name || m.user?.username || 'Unknown'),
+            userName: isBot ? 'Agent 🦢' : (m.user?.display_name || m.user?.username || 'Unknown'),
             timestamp: new Date(m.created_at),
             reactions: m.reactions || {},
             replyTo: null,
@@ -460,6 +462,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
         // Detect bot messages even if is_bot column not yet migrated
         const isBotMsg = newMsg.is_bot === true
+          || (newMsg.content || '').startsWith('🦢 **Agent:**')
           || (newMsg.content || '').startsWith('🦢 **BlackSwan:**')
           || (newMsg.content || '').startsWith('🦢 **SwanBot:**');
 
@@ -467,11 +470,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           id: newMsg.id,
           dbId: newMsg.id,
           content: isBotMsg
-            ? (newMsg.content || '').replace(/^🦢 \*\*(SwanBot|BlackSwan):\*\* /, '').replace(/^👑 \*\*KingClaw:\*\* /, '')
+            ? (newMsg.content || '').replace(/^🦢 \*\*(SwanBot|BlackSwan|Agent):\*\* /, '').replace(/^👑 \*\*KingClaw:\*\* /, '')
             : (newMsg.content || ''),
           isBot: isBotMsg,
           isUser: false,
-          userName: isBotMsg ? 'BlackSwan 🦢' : 'Circle Member',
+          userName: isBotMsg ? 'Agent 🦢' : 'Circle Member',
           timestamp: new Date(newMsg.created_at),
           reactions: newMsg.reactions || {},
           replyTo: null,
@@ -623,11 +626,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       content,
       isBot: true,
       isUser: false,
-      userName: 'BlackSwan 🦢',
+      userName: 'Agent 🦢',
       timestamp: new Date(),
       reactions: {},
     };
-    
+
     setMessages(prev => [...prev, msg]);
     animateNewMessage(msg.id);
 
@@ -638,7 +641,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           const { error } = await supabase.from('messages').insert({
             circle_id: circleId,
             user_id: currentUserId,
-            content: `🦢 **BlackSwan:** ${content}`,
+            content: `🦢 **Agent:** ${content}`,
             reactions: {},
             is_bot: true,
           });
@@ -649,7 +652,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               await supabase.from('messages').insert({
                 circle_id: circleId,
                 user_id: currentUserId,
-                content: `🦢 **BlackSwan:** ${content}`,
+                content: `🦢 **Agent:** ${content}`,
               });
               return;
             }
@@ -849,14 +852,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
 
-    // Trigger BlackSwan AI — responds to @blackswan, @swanbot, @swan, or quick prompts
-    const isBotMention = /(@blackswan|@swanbot|@swan\b)/i.test(content);
+    // Trigger Agent AI — responds to @agent, @blackswan, @swanbot, @swan, or quick prompts
+    const isBotMention = /(@agent|@blackswan|@swanbot|@swan\b)/i.test(content);
     const isQuickPrompt = QUICK_PROMPTS.some(p => p.text === content) ||
       PROMPT_CATEGORIES.some(cat => cat.prompts.some(p => p.text === content));
     const shouldTriggerBot = isBotMention || isQuickPrompt;
 
     if (shouldTriggerBot) {
-      const cleanContent = content.replace(/@(blackswan|swanbot|swan)\s*/gi, '').trim() || content;
+      const cleanContent = content.replace(/@(agent|blackswan|swanbot|swan)\s*/gi, '').trim() || content;
 
       setBotTyping(true);
       try {
@@ -1198,7 +1201,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       <View style={styles.tipsSection}>
         <Text style={styles.sectionLabel}>💡 HOW IT WORKS</Text>
         {[
-          '🦢 Tap the swan button or type @BlackSwan to talk to the AI',
+          '🦢 Tap the swan button or type @Agent to talk to the AI',
           '🎮 Play games — trivia, would you rather, hot takes, and more',
           '⚔️ Challenge members — 1v1 duels, speed tasks, dares',
           '🧠 AI knows everything — tasks, streak, check-ins, who\'s slacking',
@@ -1304,6 +1307,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           <EnhancedQuickBar
             onPromptPress={sendMessage}
             onSendCrypto={() => setShowSendCrypto(true)}
+            onNuke={async () => {
+              const { error } = await supabase.from('messages').delete().eq('circle_id', circleId);
+              if (!error) setMessages([]);
+            }}
             accentColor={accentColor}
             circleId={circleId}
             userId={currentUserId}
@@ -1340,7 +1347,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       {botTyping && (
         <View style={[styles.typingBar, { borderColor: accentColor + '20' }]}>
           <View style={[styles.typingDot, { backgroundColor: accentColor }]} />
-          <Text style={styles.typingText}>BlackSwan is thinking...</Text>
+          <Text style={styles.typingText}>Agent is thinking...</Text>
           <TypingDots />
         </View>
       )}
@@ -1369,7 +1376,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         onInputChange={handleInputChange}
         onSend={sendMessage}
         onFocusBot={() => {
-          if (!input.includes('@BlackSwan')) setInput('@BlackSwan ' + input);
+          if (!input.includes('@Agent')) setInput('@Agent ' + input);
           inputRef.current?.focus();
         }}
         inputRef={inputRef}
@@ -1750,9 +1757,10 @@ function EnhancedReactionPicker({ onReaction, accentColor }: { onReaction: (emoj
   );
 }
 
-function EnhancedQuickBar({ onPromptPress, onSendCrypto, accentColor, circleId, userId, userName }: {
+function EnhancedQuickBar({ onPromptPress, onSendCrypto, onNuke, accentColor, circleId, userId, userName }: {
   onPromptPress: (text: string) => void;
   onSendCrypto: () => void;
+  onNuke: () => Promise<void>;
   accentColor: string;
   circleId?: string;
   userId?: string | null;
@@ -1760,11 +1768,78 @@ function EnhancedQuickBar({ onPromptPress, onSendCrypto, accentColor, circleId, 
 }) {
   const scrollRef = useRef<ScrollView>(null);
   const [showStepAway, setShowStepAway] = useState(false);
+  const [showCheckIn, setShowCheckIn] = useState(false);
+  const [checkInText, setCheckInText] = useState('');
+  const [checkInLoading, setCheckInLoading] = useState(false);
+  const [showCreateTask, setShowCreateTask] = useState(false);
+  const [taskTitle, setTaskTitle] = useState('');
+  const [taskPostToChat, setTaskPostToChat] = useState(true);
+  const [taskLoading, setTaskLoading] = useState(false);
+  const [showNukeConfirm, setShowNukeConfirm] = useState(false);
+  const [nuking, setNuking] = useState(false);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(true);
   const scrollX = useRef(0);
   const contentWidth = useRef(0);
   const containerWidth = useRef(0);
+
+  const handleCheckIn = async () => {
+    const text = checkInText.trim();
+    if (!text || text.length < 10) return;
+    if (!userId || !circleId) return;
+    setCheckInLoading(true);
+    try {
+      const { error } = await supabase.from('check_ins').insert({
+        user_id: userId,
+        circle_id: circleId,
+        content: text.slice(0, 500),
+        check_in_date: new Date().toISOString().split('T')[0],
+      });
+      if (error) {
+        if (error.code === '23505') {
+          onPromptPress('who checked in');
+        }
+        setCheckInLoading(false);
+        return;
+      }
+      awardXP(userId, getXPForAction('check_in'), 'check_in', { circle_id: circleId }).catch(() => {});
+      setCheckInText('');
+      setShowCheckIn(false);
+      // Announce in chat
+      onPromptPress(`I just checked in: "${text}"`);
+    } catch {
+      // ignore
+    }
+    setCheckInLoading(false);
+  };
+
+  const handleCreateTask = async () => {
+    const title = taskTitle.trim();
+    if (!title || !userId || !circleId) return;
+    setTaskLoading(true);
+    try {
+      const { error } = await supabase.from('tasks').insert({
+        circle_id: circleId,
+        created_by: userId,
+        title,
+        status: 'open',
+        priority: 'normal',
+      });
+      if (error) {
+        setTaskLoading(false);
+        return;
+      }
+      awardXP(userId, getXPForAction('create_task'), 'create_task', { circle_id: circleId }).catch(() => {});
+      setTaskTitle('');
+      setShowCreateTask(false);
+      if (taskPostToChat) {
+        onPromptPress(`I just created a task: "${title}"`);
+      }
+    } catch {
+      // ignore
+    }
+    setTaskLoading(false);
+  };
 
   const updateArrows = () => {
     setCanScrollLeft(scrollX.current > 5);
@@ -1807,6 +1882,8 @@ function EnhancedQuickBar({ onPromptPress, onSendCrypto, accentColor, circleId, 
         onLayout={(e) => { containerWidth.current = e.nativeEvent.layout.width; updateArrows(); }}
         scrollEventThrottle={16}
       >
+        <EnhancedQuickChip label="✅ Check In" onPress={() => setShowCheckIn(true)} accentColor={accentColor} />
+        <EnhancedQuickChip label="📋 New Task" onPress={() => setShowCreateTask(true)} accentColor={accentColor} />
         {QUICK_PROMPTS.map((p, i) => (
           <EnhancedQuickChip
             key={i}
@@ -1820,6 +1897,7 @@ function EnhancedQuickBar({ onPromptPress, onSendCrypto, accentColor, circleId, 
         <EnhancedQuickChip label="🔥 Hot Take" onPress={() => onPromptPress('hot take')} accentColor={accentColor} />
         <EnhancedQuickChip label="🖥️ Step Away" onPress={() => setShowStepAway(true)} accentColor={accentColor} />
         <EnhancedQuickChip label="🦢 More" onPress={() => onPromptPress('help')} accentColor={accentColor} />
+        <EnhancedQuickChip label="☢️ Nuke It" onPress={() => setShowNukeConfirm(true)} accentColor={'#ef4444'} />
       </ScrollView>
       {canScrollRight && (
         <Pressable onPress={scrollRight} style={[styles.scrollArrow, styles.scrollArrowRight]}>
@@ -1840,6 +1918,107 @@ function EnhancedQuickBar({ onPromptPress, onSendCrypto, accentColor, circleId, 
           autoOpen
           onClose={() => setShowStepAway(false)}
         />
+      )}
+
+      {/* Inline Check-In Panel */}
+      {showCheckIn && (
+        <View style={[checkInStyles.panel, { borderColor: accentColor + '30' }]}>
+          <View style={checkInStyles.header}>
+            <Text style={checkInStyles.title}>✅ Quick Check-In</Text>
+            <Pressable onPress={() => setShowCheckIn(false)}>
+              <Text style={checkInStyles.close}>✕</Text>
+            </Pressable>
+          </View>
+          <TextInput
+            style={[checkInStyles.input, { borderColor: accentColor + '30' }]}
+            placeholder="What did you work on today?"
+            placeholderTextColor="#555"
+            value={checkInText}
+            onChangeText={setCheckInText}
+            multiline
+            maxLength={500}
+            autoFocus
+          />
+          <View style={checkInStyles.footer}>
+            <Text style={checkInStyles.charCount}>{checkInText.trim().length < 10 ? `${10 - checkInText.trim().length} more chars` : '✓'}</Text>
+            <Pressable
+              onPress={handleCheckIn}
+              disabled={checkInLoading || checkInText.trim().length < 10}
+              style={[checkInStyles.submitBtn, { backgroundColor: checkInText.trim().length >= 10 ? accentColor : '#333' }]}
+            >
+              <Text style={checkInStyles.submitText}>{checkInLoading ? '...' : 'Check In'}</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
+      {/* Inline Create Task Panel */}
+      {showCreateTask && (
+        <View style={[checkInStyles.panel, { borderColor: accentColor + '30' }]}>
+          <View style={checkInStyles.header}>
+            <Text style={checkInStyles.title}>📋 New Task</Text>
+            <Pressable onPress={() => setShowCreateTask(false)}>
+              <Text style={checkInStyles.close}>✕</Text>
+            </Pressable>
+          </View>
+          <TextInput
+            style={[checkInStyles.input, { borderColor: accentColor + '30', minHeight: 40 }]}
+            placeholder="Task title..."
+            placeholderTextColor="#555"
+            value={taskTitle}
+            onChangeText={setTaskTitle}
+            maxLength={200}
+            autoFocus
+          />
+          <View style={checkInStyles.footer}>
+            <Pressable onPress={() => setTaskPostToChat(!taskPostToChat)} style={checkInStyles.checkbox}>
+              <View style={[checkInStyles.checkboxBox, taskPostToChat && { backgroundColor: accentColor, borderColor: accentColor }]}>
+                {taskPostToChat && <Text style={checkInStyles.checkboxCheck}>✓</Text>}
+              </View>
+              <Text style={checkInStyles.checkboxLabel}>Post to chat</Text>
+            </Pressable>
+            <Pressable
+              onPress={handleCreateTask}
+              disabled={taskLoading || !taskTitle.trim()}
+              style={[checkInStyles.submitBtn, { backgroundColor: taskTitle.trim() ? accentColor : '#333' }]}
+            >
+              <Text style={checkInStyles.submitText}>{taskLoading ? '...' : 'Create'}</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
+      {/* Nuke Confirmation */}
+      {showNukeConfirm && (
+        <View style={[checkInStyles.panel, { borderColor: '#ef444460' }]}>
+          <View style={checkInStyles.header}>
+            <Text style={checkInStyles.title}>☢️ Nuke All Messages?</Text>
+            <Pressable onPress={() => setShowNukeConfirm(false)}>
+              <Text style={checkInStyles.close}>✕</Text>
+            </Pressable>
+          </View>
+          <Text style={{ color: '#999', fontSize: 12, marginBottom: 10 }}>This will permanently delete every message in this chat. This cannot be undone.</Text>
+          <View style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
+            <Pressable
+              onPress={() => setShowNukeConfirm(false)}
+              style={[checkInStyles.submitBtn, { backgroundColor: '#333' }]}
+            >
+              <Text style={checkInStyles.submitText}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              onPress={async () => {
+                setNuking(true);
+                await onNuke();
+                setNuking(false);
+                setShowNukeConfirm(false);
+              }}
+              disabled={nuking}
+              style={[checkInStyles.submitBtn, { backgroundColor: '#ef4444' }]}
+            >
+              <Text style={checkInStyles.submitText}>{nuking ? '...' : 'Nuke It ☢️'}</Text>
+            </Pressable>
+          </View>
+        </View>
       )}
     </View>
   );
@@ -2232,7 +2411,7 @@ function EnhancedInput({ input, onInputChange, onSend, onFocusBot, inputRef, acc
         <TextInput
           ref={inputRef}
           style={styles.enhancedInput}
-          placeholder="Message your circle... @BlackSwan to talk to AI"
+          placeholder="Message your circle... @Agent to talk to AI"
           placeholderTextColor="#444"
           value={input}
           onChangeText={onInputChange}
@@ -2384,6 +2563,22 @@ const warRoomBannerStyles = StyleSheet.create({
   dot: { width: 6, height: 6, borderRadius: 3 },
   chipText: { color: '#aaa', fontSize: 12, fontWeight: '600' },
   chipTime: { color: '#555', fontSize: 11 },
+});
+
+const checkInStyles = StyleSheet.create({
+  panel: { backgroundColor: '#111', borderWidth: 1, borderRadius: 12, margin: 8, padding: 12 },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
+  title: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  close: { color: '#666', fontSize: 16, padding: 4 },
+  input: { backgroundColor: '#0a0a0a', borderWidth: 1, borderRadius: 8, color: '#fff', fontSize: 13, padding: 10, minHeight: 60, textAlignVertical: 'top' },
+  footer: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 },
+  charCount: { color: '#555', fontSize: 11 },
+  submitBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8 },
+  submitText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  checkbox: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  checkboxBox: { width: 18, height: 18, borderWidth: 1.5, borderColor: '#444', borderRadius: 4, alignItems: 'center', justifyContent: 'center' },
+  checkboxCheck: { color: '#fff', fontSize: 11, fontWeight: '700', marginTop: -1 },
+  checkboxLabel: { color: '#888', fontSize: 11 },
 });
 
 // ─── Enhanced Styles ─────────────────────────────────────────────────────────

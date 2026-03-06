@@ -277,10 +277,14 @@ async function routeOutput(
 interface AutomationRequest {
   automationId: string;
   circleId: string;
-  triggerSource: "schedule" | "event" | "manual";
+  triggerSource: "schedule" | "event" | "manual" | "retry";
   triggeredBy?: string;
   eventPayload?: any;
+  retryCount?: number;
 }
+
+const MAX_RETRIES = 2;
+const RETRY_DELAY_MS = 30_000; // 30 seconds
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -301,7 +305,7 @@ Deno.serve(async (req: Request) => {
 
   try {
     const body: AutomationRequest = await req.json();
-    const { automationId, circleId, triggerSource, triggeredBy, eventPayload } = body;
+    const { automationId, circleId, triggerSource, triggeredBy, eventPayload, retryCount = 0 } = body;
 
     if (!automationId || !circleId) {
       return new Response(
@@ -429,7 +433,7 @@ ${contextString}`;
             status: "failed",
             completed_at: new Date().toISOString(),
             duration_ms: durationMs,
-            error_message: execErr.message,
+            error_message: `${execErr.message}${retryCount > 0 ? ` (retry ${retryCount}/${MAX_RETRIES})` : ""}`,
           })
           .eq("id", runId);
       }
@@ -439,6 +443,40 @@ ${contextString}`;
         .from("circle_automations")
         .update({ last_error: execErr.message })
         .eq("id", automationId);
+
+      // Retry logic: schedule a retry if under the limit
+      if (retryCount < MAX_RETRIES) {
+        const nextRetry = retryCount + 1;
+        console.log(`Scheduling retry ${nextRetry}/${MAX_RETRIES} for automation ${automationId} in ${RETRY_DELAY_MS}ms`);
+
+        // Fire retry after delay (non-blocking)
+        setTimeout(async () => {
+          try {
+            const supabaseUrl = Deno.env.get("SUPABASE_URL");
+            const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+            if (!supabaseUrl || !serviceKey) return;
+
+            await fetch(`${supabaseUrl}/functions/v1/automation-executor`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${serviceKey}`,
+              },
+              body: JSON.stringify({
+                automationId,
+                circleId,
+                triggerSource: "retry",
+                triggeredBy,
+                eventPayload,
+                retryCount: nextRetry,
+              }),
+              signal: AbortSignal.timeout(60_000),
+            });
+          } catch (retryErr) {
+            console.error(`Retry ${nextRetry} failed to dispatch:`, retryErr);
+          }
+        }, RETRY_DELAY_MS);
+      }
 
       throw execErr;
     }

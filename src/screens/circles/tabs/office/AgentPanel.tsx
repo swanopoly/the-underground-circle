@@ -363,27 +363,27 @@ export default function AgentPanel({
                 <ColorRow label="SKIN" colors={SKIN_TONES} value={a.skinTone} onSelect={c => update({ skinTone: c })} />
                 <ColorRow label="HAIR COLOR" colors={HAIR_COLORS} value={a.hairColor} onSelect={c => update({ hairColor: c })} />
                 <OptionRow label="HAIRSTYLE" value={a.hairStyle} onSelect={k => update({ hairStyle: k as any })}
-                  options={['flat', 'spiky', 'mohawk', 'long', 'curly', 'ponytail', 'cap', 'bald'].map(h => ({ key: h, label: h.toUpperCase() }))} />
+                  options={['flat', 'spiky', 'mohawk', 'long', 'curly', 'ponytail', 'cap', 'bald', 'buzzcut', 'afro', 'undercut', 'pigtails'].map(h => ({ key: h, label: h.toUpperCase() }))} />
                 <ColorRow label="EYES" colors={EYE_COLORS} value={a.eyeColor} onSelect={c => update({ eyeColor: c })} />
                 <ColorRow label="SHIRT" colors={SHIRT_COLORS} value={a.shirtColor} onSelect={c => update({ shirtColor: c })} />
                 <ColorRow label="PANTS" colors={PANTS_COLORS} value={a.pantsColor} onSelect={c => update({ pantsColor: c })} />
                 <ColorRow label="SHOES" colors={SHOE_COLORS} value={a.shoeColor} onSelect={c => update({ shoeColor: c })} />
                 <OptionRow label="HAT" value={a.hat} onSelect={k => update({ hat: k as any })}
-                  options={['none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns', 'space_helmet', 'wizard_hat', 'halo', 'antenna'].map(h => ({ key: h, label: h.toUpperCase().replace('_', ' ') }))} />
+                  options={['none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns', 'space_helmet', 'wizard_hat', 'halo', 'antenna', 'crab_helmet', 'pirate_hat', 'cowboy_hat', 'fez', 'mohawk_spikes'].map(h => ({ key: h, label: h.toUpperCase().replace('_', ' ') }))} />
                 <OptionRow label="EXPRESSION" value={a.expression} onSelect={k => update({ expression: k as any })}
-                  options={['neutral', 'happy', 'focused', 'sleepy', 'cool', 'angry'].map(e => ({ key: e, label: e.toUpperCase() }))} />
+                  options={['neutral', 'happy', 'focused', 'sleepy', 'cool', 'angry', 'surprised', 'smirk', 'crying'].map(e => ({ key: e, label: e.toUpperCase() }))} />
                 <OptionRow label="ACCESSORY" value={a.accessory} onSelect={k => update({ accessory: k as any })}
-                  options={['none', 'glasses', 'headphones', 'bowtie', 'scarf', 'hoodie', 'mask', 'monocle', 'eyepatch', 'bandana'].map(x => ({ key: x, label: x.toUpperCase() }))} />
+                  options={['none', 'glasses', 'headphones', 'bowtie', 'scarf', 'hoodie', 'mask', 'monocle', 'eyepatch', 'bandana', 'chain', 'piercing', 'visor_shades', 'gas_mask'].map(x => ({ key: x, label: x.toUpperCase().replace('_', ' ') }))} />
                 <OptionRow label="BACK ITEM" value={a.backItem} onSelect={k => update({ backItem: k as any })}
-                  options={['none', 'cape', 'backpack', 'wings', 'jetpack', 'shield', 'sword', 'quiver'].map(b => ({ key: b, label: b.toUpperCase() }))} />
+                  options={['none', 'cape', 'backpack', 'wings', 'jetpack', 'shield', 'sword', 'quiver', 'crab_shell', 'tentacles', 'rocket', 'scroll', 'boombox'].map(b => ({ key: b, label: b.toUpperCase().replace('_', ' ') }))} />
                 <OptionRow label="FACIAL HAIR" value={a.facialHair} onSelect={k => update({ facialHair: k as any })}
-                  options={['none', 'stubble', 'beard', 'mustache', 'goatee'].map(f => ({ key: f, label: f.toUpperCase() }))} />
+                  options={['none', 'stubble', 'beard', 'mustache', 'goatee', 'fu_manchu', 'sideburns', 'soul_patch'].map(f => ({ key: f, label: f.toUpperCase().replace('_', ' ') }))} />
                 <OptionRow label="PET" value={a.pet} onSelect={k => update({ pet: k as any })}
-                  options={[{ key: 'none', label: 'NONE' }, { key: 'cat', label: '🐱 CAT' }, { key: 'dog', label: '🐕 DOG' }, { key: 'bird', label: '🐦 BIRD' }, { key: 'robot', label: '🤖 BOT' }, { key: 'dragon', label: '🐉 DRAGON' }, { key: 'alien', label: '👽 ALIEN' }]} />
+                  options={[{ key: 'none', label: 'NONE' }, { key: 'cat', label: '🐱 CAT' }, { key: 'dog', label: '🐕 DOG' }, { key: 'bird', label: '🐦 BIRD' }, { key: 'robot', label: '🤖 BOT' }, { key: 'dragon', label: '🐉 DRAGON' }, { key: 'alien', label: '👽 ALIEN' }, { key: 'crab', label: '🦀 CRAB' }, { key: 'snake', label: '🐍 SNAKE' }, { key: 'bat', label: '🦇 BAT' }, { key: 'skull', label: '💀 SKULL' }, { key: 'mushroom', label: '🍄 SHROOM' }, { key: 'spider', label: '🕷️ SPIDER' }, { key: 'shark', label: '🦈 SHARK' }, { key: 'bones', label: '🦴 BONES' }]} />
                 <OptionRow label="AURA" value={a.aura} onSelect={k => update({ aura: k as any })}
-                  options={[{ key: 'none', label: 'NONE' }, { key: 'fire', label: '🔥 FIRE' }, { key: 'ice', label: '🧊 ICE' }, { key: 'electric', label: '⚡ ZAP' }, { key: 'nature', label: '🌿 LEAF' }, { key: 'shadow', label: '🌑 DARK' }, { key: 'rainbow', label: '🌈 RAINBOW' }, { key: 'glitch', label: '📟 GLITCH' }, { key: 'cosmic', label: '✨ COSMIC' }]} />
+                  options={[{ key: 'none', label: 'NONE' }, { key: 'fire', label: '🔥 FIRE' }, { key: 'ice', label: '🧊 ICE' }, { key: 'electric', label: '⚡ ZAP' }, { key: 'nature', label: '🌿 LEAF' }, { key: 'shadow', label: '🌑 DARK' }, { key: 'rainbow', label: '🌈 RAINBOW' }, { key: 'glitch', label: '📟 GLITCH' }, { key: 'cosmic', label: '✨ COSMIC' }, { key: 'toxic', label: '☠️ TOXIC' }, { key: 'holy', label: '😇 HOLY' }, { key: 'void', label: '🕳️ VOID' }, { key: 'galaxy', label: '🌌 GALAXY' }]} />
                 <OptionRow label="HAND ITEM" value={a.handItem || 'none'} onSelect={k => update({ handItem: k as any })}
-                  options={[{ key: 'none', label: 'NONE' }, { key: 'lightsaber', label: '⚔️ SABER' }, { key: 'coffee', label: '☕ COFFEE' }, { key: 'laptop', label: '💻 LAPTOP' }, { key: 'flag', label: '🚩 FLAG' }, { key: 'wand', label: '🪄 WAND' }]} />
+                  options={[{ key: 'none', label: 'NONE' }, { key: 'lightsaber', label: '⚔️ SABER' }, { key: 'coffee', label: '☕ COFFEE' }, { key: 'laptop', label: '💻 LAPTOP' }, { key: 'flag', label: '🚩 FLAG' }, { key: 'wand', label: '🪄 WAND' }, { key: 'crab_claws', label: '🦞 CLAWS' }, { key: 'sword_hand', label: '🗡️ SWORD' }, { key: 'pizza', label: '🍕 PIZZA' }, { key: 'microphone', label: '🎤 MIC' }, { key: 'torch', label: '🔦 TORCH' }]} />
               </View>
             );
           })()}

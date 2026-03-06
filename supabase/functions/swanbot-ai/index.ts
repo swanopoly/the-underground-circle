@@ -103,37 +103,50 @@ async function gatherCircleContext(supabase: any, circleId: string, userId: stri
     ? await supabase.from("user_xp").select("user_id, total_xp, level, title").in("user_id", memberIds)
     : { data: [] };
 
-  // Get user's recent achievements
-  const { data: userAchievements } = await supabase
-    .from("user_achievements")
-    .select("unlocked_at, achievement:achievements(name, description, icon, xp_reward)")
-    .eq("user_id", userId)
-    .order("unlocked_at", { ascending: false })
-    .limit(5);
+  // These tables may not exist yet — wrap each in try/catch
+  let userAchievements: any[] = [];
+  try {
+    const { data } = await supabase
+      .from("user_achievements")
+      .select("unlocked_at, achievement:achievements(name, description, icon, xp_reward)")
+      .eq("user_id", userId)
+      .order("unlocked_at", { ascending: false })
+      .limit(5);
+    userAchievements = data || [];
+  } catch { /* table may not exist */ }
 
-  // Get active challenges
-  const { data: activeChallenges } = await supabase
-    .from("challenges")
-    .select("title, description, challenge_type, target_value, start_date, end_date, xp_reward, status")
-    .eq("circle_id", circleId)
-    .eq("status", "active")
-    .limit(5);
+  let activeChallenges: any[] = [];
+  try {
+    const { data } = await supabase
+      .from("challenges")
+      .select("title, description, challenge_type, target_value, start_date, end_date, xp_reward, status")
+      .eq("circle_id", circleId)
+      .eq("status", "active")
+      .limit(5);
+    activeChallenges = data || [];
+  } catch { /* table may not exist */ }
 
-  // Get user's goals / north star
-  const { data: userGoals } = await supabase
-    .from("north_star_entries")
-    .select("content, created_at")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false })
-    .limit(3);
+  let userGoals: any[] = [];
+  try {
+    const { data } = await supabase
+      .from("north_star_entries")
+      .select("content, created_at")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(3);
+    userGoals = data || [];
+  } catch { /* table may not exist */ }
 
-  // Get recent agent activity in the circle
-  const { data: agentActivity } = await supabase
-    .from("agent_activity")
-    .select("agent_name, activity_type, title, body, created_at")
-    .eq("circle_id", circleId)
-    .order("created_at", { ascending: false })
-    .limit(10);
+  let agentActivity: any[] = [];
+  try {
+    const { data } = await supabase
+      .from("agent_activity")
+      .select("agent_name, activity_type, title, body, created_at")
+      .eq("circle_id", circleId)
+      .order("created_at", { ascending: false })
+      .limit(10);
+    agentActivity = data || [];
+  } catch { /* table may not exist */ }
 
   // Load relevant past knowledge for this conversation
   let knowledgeEntries: any[] = [];
@@ -177,7 +190,7 @@ function buildSystemPrompt(ctx: any) {
   const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" });
   const dateStr = now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "America/New_York" });
 
-  let prompt = `You are BlackSwan 🦢 — an AI accountability partner embedded in "The Underground Circle," a productivity and accountability app. You live inside circle group chats.
+  let prompt = `You are Agent 🦢 — an AI accountability partner embedded in "The Underground Circle," a productivity and accountability app. You live inside circle group chats.
 
 ## Your Personality
 - You carry yourself with quiet confidence — knowledgeable but never arrogant
@@ -284,7 +297,7 @@ ${ctx.knowledgeEntries.map((k: any) => {
 
   if (ctx.recentMessages.length > 0) {
     prompt += `\n\n## Recent Chat Messages (for context)\n${ctx.recentMessages.slice(-15).map((m: any) => {
-      const sender = m.is_bot ? "BlackSwan" : (m.user?.display_name || m.user?.username || "Unknown");
+      const sender = m.is_bot ? "Agent" : (m.user?.display_name || m.user?.username || "Unknown");
       return `[${sender}]: ${m.content.slice(0, 200)}`;
     }).join("\n")}`;
   }
@@ -294,7 +307,7 @@ ${ctx.knowledgeEntries.map((k: any) => {
 - If someone asks about the circle, give real data. If you don't have it, say "I don't have that right now" — no guessing.
 - If asked to create a task, direct them to the task board (you can't create tasks directly in this mode).
 - Keep responses under 300 words unless the user explicitly asks for more detail.
-- Always prefix your response with 🦢 (don't say "BlackSwan:" — the UI handles that).
+- Always prefix your response with 🦢 (don't say "Agent:" — the UI handles that).
 - When calling out missed check-ins, be specific: name the people, don't generalize.
 - Acknowledge wins with weight, not hype. A short "That's a real streak. Don't break it." lands harder than five fire emojis.
 - When someone seems stuck or down, be present and practical — not a cheerleader.
@@ -602,7 +615,7 @@ Deno.serve(async (req: Request) => {
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (error: any) {
-    console.error("BlackSwan AI error:", error);
+    console.error("[swanbot-ai] Error:", error);
     return new Response(
       JSON.stringify({ error: error.message || "Internal server error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }

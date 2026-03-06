@@ -9,10 +9,10 @@
  * input + target state — changes to one are instantly mirrored in the other.
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TextInput, Pressable,
-  KeyboardAvoidingView, Platform, ScrollView,
+  KeyboardAvoidingView, Platform, ScrollView, Image,
 } from 'react-native';
 import {
   TerminalMessage,
@@ -29,17 +29,54 @@ import { CircleOfficeAgent } from '../lib/circleOffice';
 import { awardPoints } from '../services/rewardService';
 import { getPointsForModel } from '../lib/badges';
 import AutomationsPanel from './AutomationsPanel';
+import { ProviderKey, PROVIDER_MODELS, LLMProvider, ThinkingLevel } from '../lib/llmProviders';
+import { PROVIDER_META } from '../lib/connectionManager';
+
+// ─── Thinking levels (inspired by OpenClaw) ──────────────────────────────────
+
+type TerminalMode = 'execute' | 'plan' | 'explore';
+
+const THINKING_LEVELS: Array<{ key: ThinkingLevel; label: string; icon: string; color: string }> = [
+  { key: 'fast',     label: 'Fast',     icon: '⚡', color: '#22c55e' },
+  { key: 'balanced', label: 'Balanced', icon: '⚖️', color: '#6366f1' },
+  { key: 'deep',     label: 'Deep',     icon: '🧠', color: '#f59e0b' },
+];
+
+const TERMINAL_MODES: Array<{ key: TerminalMode; label: string; icon: string }> = [
+  { key: 'execute', label: 'Execute', icon: '▶' },
+  { key: 'plan',    label: 'Plan',    icon: '📋' },
+  { key: 'explore', label: 'Explore', icon: '🔍' },
+];
 
 // ─── Model options ────────────────────────────────────────────────────────────
 
-const TERMINAL_MODELS = [
+const BASE_MODELS: Array<{ key: string | null; label: string; icon: string; color: string }> = [
   { key: null,             label: 'Auto',      icon: '🔄', color: '#6366f1' },
   { key: 'blackswan',     label: 'BlackSwan',  icon: '🦢', color: '#22c55e' },
   { key: 'claude-haiku',  label: 'Haiku',      icon: '⚡', color: '#f59e0b' },
   { key: 'claude-sonnet', label: 'Sonnet',     icon: '🎯', color: '#8b5cf6' },
   { key: 'claude-opus',   label: 'Opus',       icon: '🧠', color: '#ef4444' },
   { key: 'gemini-flash',  label: 'Gemini',     icon: '♊', color: '#4285f4' },
-] as const;
+];
+
+/** Build BYO model entries from user's stored API keys */
+function buildBYOModels(keys: ProviderKey[]): Array<{ key: string; label: string; icon: string; color: string }> {
+  const models: Array<{ key: string; label: string; icon: string; color: string }> = [];
+  for (const k of keys) {
+    if (!k.isActive) continue;
+    const providerModels = PROVIDER_MODELS[k.provider as LLMProvider] || [];
+    const meta = PROVIDER_META[k.provider as keyof typeof PROVIDER_META];
+    for (const m of providerModels.slice(0, 3)) {
+      models.push({
+        key: `${k.provider}/${m.id}`,
+        label: m.label,
+        icon: meta?.icon || '🤖',
+        color: meta?.color || '#6366f1',
+      });
+    }
+  }
+  return models;
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -65,6 +102,9 @@ interface Props {
   // ── Multi-agent targeting ──
   sharedTargetIds?: string[] | null;
   onSharedSelectTargets?: (ids: string[] | null, names: string) => void;
+
+  // ── BYO API keys (for dynamic model list) ──
+  byoProviderKeys?: ProviderKey[];
 
   // ── Layout ──
   compact?: boolean;  // true = hide header bar (used in the bottom drawer)
@@ -92,6 +132,7 @@ const BUILTIN_CMDS = [
   { cmd: '/cost',         desc: 'Request token usage & cost breakdown' },
   { cmd: '/ping',         desc: 'Verify agent is responsive' },
   { cmd: '/whoami',       desc: 'Ask agent to identify itself' },
+  { cmd: '/imagine',      desc: 'Generate an image from a prompt' },
 ];
 
 const HELP_TEXT = BUILTIN_CMDS.map(b => `${b.cmd.padEnd(14)} — ${b.desc}`).join('\n');
@@ -129,6 +170,48 @@ const pendingStyles = StyleSheet.create({
     fontSize: 12,
   },
 });
+
+// ─── Inline image detection ──────────────────────────────────────────────────
+
+const IMAGE_MD_REGEX = /!\[([^\]]*)\]\(([^)]+)\)/g;
+
+function ResponseContent({ text }: { text: string }) {
+  const parts: Array<{ type: 'text' | 'image'; value: string; alt?: string }> = [];
+  let last = 0;
+  let match: RegExpExecArray | null;
+
+  IMAGE_MD_REGEX.lastIndex = 0;
+  while ((match = IMAGE_MD_REGEX.exec(text)) !== null) {
+    if (match.index > last) {
+      parts.push({ type: 'text', value: text.slice(last, match.index) });
+    }
+    parts.push({ type: 'image', value: match[2], alt: match[1] });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) {
+    parts.push({ type: 'text', value: text.slice(last) });
+  }
+
+  if (parts.length === 0) return <Text style={rowStyles.responseText}>{text}</Text>;
+
+  return (
+    <View style={{ flex: 1 }}>
+      {parts.map((p, i) =>
+        p.type === 'image' ? (
+          <Image
+            key={i}
+            source={{ uri: p.value }}
+            style={{ width: 256, height: 256, borderRadius: 8, marginVertical: 6 }}
+            resizeMode="cover"
+            accessibilityLabel={p.alt || 'Generated image'}
+          />
+        ) : (
+          <Text key={i} style={rowStyles.responseText}>{p.value}</Text>
+        ),
+      )}
+    </View>
+  );
+}
 
 // ─── Terminal Message Row ─────────────────────────────────────────────────────
 
@@ -189,7 +272,7 @@ function TerminalRow({ msg, responses, onDelete }: {
               <Text style={rowStyles.errorText}>⚠ {resp.errorMessage || 'Error'}</Text>
             ) : (
               <>
-                <Text style={rowStyles.responseText}>{resp.responseText}</Text>
+                <ResponseContent text={resp.responseText || ''} />
                 {resp.tokenCount > 0 && (
                   <View style={rowStyles.costBadge}>
                     <Text style={rowStyles.costText}>{fmtTokenCost(resp.tokenCount)}</Text>
@@ -215,7 +298,7 @@ function TerminalRow({ msg, responses, onDelete }: {
               <Text style={rowStyles.responseArrow}> ▸ </Text>
             </>
           )}
-          <Text style={rowStyles.responseText}>{msg.responseText}</Text>
+          <ResponseContent text={msg.responseText || ''} />
         </View>
       ) : (
         // No responses yet
@@ -425,10 +508,19 @@ export default function OfficeTerminal({
   sharedTargetId, sharedTargetName, onSharedSelectTarget,
   sharedModel, onSharedModelChange,
   sharedTargetIds, onSharedSelectTargets,
+  byoProviderKeys,
   compact = false,
   onCommandSent,
 }: Props) {
+  // Dynamic model list: base models + BYO provider models
+  const TERMINAL_MODELS = useMemo(() => {
+    const byo = buildBYOModels(byoProviderKeys || []);
+    return [...BASE_MODELS, ...byo];
+  }, [byoProviderKeys]);
+
   const [terminalTab, setTerminalTab]          = useState<TerminalTab>('commands');
+  const [thinkingLevel, setThinkingLevel]     = useState<ThinkingLevel>('balanced');
+  const [terminalMode, setTerminalMode]       = useState<TerminalMode>('execute');
   const [messages, setMessages]               = useState<TerminalMessage[]>([]);
   const [responses, setResponses]             = useState<Map<string, TerminalResponse[]>>(new Map());
   const [localInput, setLocalInput]           = useState('');
@@ -687,6 +779,53 @@ export default function OfficeTerminal({
       return;
     }
 
+    // Handle /imagine command
+    if (cmd.startsWith('/imagine ')) {
+      const imagePrompt = cmd.slice(9).trim();
+      if (!imagePrompt) return;
+      setInput('');
+      setCmdHistory(prev => [cmd, ...prev].slice(0, 50));
+      setHistoryIdx(-1);
+      setSending(true);
+      try {
+        const { data, error } = await supabase.functions.invoke('image-generate', {
+          body: { provider: 'openai', prompt: imagePrompt, circleId },
+        });
+        const now = new Date().toISOString();
+        const responseText = error
+          ? `Image generation failed: ${error.message}`
+          : data?.error
+            ? `Error: ${data.error}`
+            : `![Generated Image](${data.url})\n\n${data.revised_prompt ? `*${data.revised_prompt}*` : ''}\n\nCost: $${(data.estimated_cost || 0).toFixed(3)}`;
+        const imgMsg: TerminalMessage = {
+          id: `local-imagine-${Date.now()}`,
+          circleId, senderId: userId, senderName: userDisplayName,
+          commandText: cmd, targetAgentId: null, targetAgentName: 'IMAGE',
+          targetAgentIds: null, model: null,
+          responseText, responseAgentId: null, responseAgentName: 'IMAGE',
+          tokenCost: 0, latencyMs: null, status: 'done',
+          createdAt: now, updatedAt: now,
+        };
+        setMessages(prev => [...prev, imgMsg]);
+        setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
+      } catch (e: any) {
+        const now = new Date().toISOString();
+        const errMsg: TerminalMessage = {
+          id: `local-imagine-err-${Date.now()}`,
+          circleId, senderId: userId, senderName: userDisplayName,
+          commandText: cmd, targetAgentId: null, targetAgentName: 'IMAGE',
+          targetAgentIds: null, model: null,
+          responseText: `Image generation error: ${e.message}`,
+          responseAgentId: null, responseAgentName: 'IMAGE',
+          tokenCost: 0, latencyMs: null, status: 'error',
+          createdAt: now, updatedAt: now,
+        };
+        setMessages(prev => [...prev, errMsg]);
+      }
+      setSending(false);
+      return;
+    }
+
     setSending(true);
     setInput('');
     setCmdHistory(prev => [cmd, ...prev].slice(0, 50));
@@ -701,15 +840,28 @@ export default function OfficeTerminal({
         : `${targetIds.length} agents`)
       : targetAgentName;
 
+    // Wrap command with mode prefix (Plan/Explore inject system-level context)
+    let wrappedCmd = cmd;
+    if (terminalMode === 'plan') {
+      wrappedCmd = `[PLAN MODE — outline steps, do not execute] ${cmd}`;
+    } else if (terminalMode === 'explore') {
+      wrappedCmd = `[EXPLORE MODE — research and explain, do not make changes] ${cmd}`;
+    }
+
+    // Embed thinking level in model key (e.g. "claude-sonnet::deep")
+    const modelWithThinking = selectedModel && thinkingLevel !== 'balanced'
+      ? `${selectedModel}::${thinkingLevel}`
+      : selectedModel;
+
     const result = await sendTerminalCommand({
       circleId,
       senderId: userId,
       senderName: userDisplayName,
-      commandText: cmd,
+      commandText: wrappedCmd,
       targetAgentId: targetAgentId ?? undefined,
       targetAgentName: displayTargetName,
       targetAgentIds: targetIds,
-      model: selectedModel,
+      model: modelWithThinking,
     });
 
     // Award XP for terminal activity — model-aware so BlackSwan gives the most
@@ -725,18 +877,18 @@ export default function OfficeTerminal({
       if (onCommandSent) {
         onCommandSent({
           messageId: result.messageId,
-          command: cmd,
+          command: wrappedCmd,
           targetAgentId: targetAgentId ?? null,
           targetAgentIds: targetIds ?? null,
           targetAgentName: displayTargetName,
-          model: selectedModel ?? null,
+          model: modelWithThinking ?? null,
           senderId: userId,
         });
       }
     }
 
     setSending(false);
-  }, [input, sending, circleId, userId, userDisplayName, targetAgentId, targetAgentName, targetIds, selectedModel, agents, handleHelp, setInput, onCommandSent]);
+  }, [input, sending, circleId, userId, userDisplayName, targetAgentId, targetAgentName, targetIds, selectedModel, agents, handleHelp, setInput, onCommandSent, terminalMode, thinkingLevel]);
 
   // ── Command history navigation (↑ / ↓) ────────────────────────────────────
   const handleKeyPress = useCallback((e: any) => {
@@ -874,6 +1026,39 @@ export default function OfficeTerminal({
         </ScrollView>
       </View>
 
+      {/* Thinking level + Mode selector */}
+      <View style={styles.modelRow}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.chipsScroll}
+        >
+          {THINKING_LEVELS.map(tl => (
+            <Pressable
+              key={tl.key}
+              onPress={() => setThinkingLevel(tl.key)}
+              style={[styles.thinkChip, thinkingLevel === tl.key && { borderColor: tl.color, backgroundColor: `${tl.color}18` }]}
+            >
+              <Text style={[styles.thinkChipText, thinkingLevel === tl.key && { color: tl.color }]}>
+                {tl.icon} {tl.label}
+              </Text>
+            </Pressable>
+          ))}
+          <View style={styles.chipDivider} />
+          {TERMINAL_MODES.map(tm => (
+            <Pressable
+              key={tm.key}
+              onPress={() => setTerminalMode(tm.key)}
+              style={[styles.thinkChip, terminalMode === tm.key && styles.modeChipActive]}
+            >
+              <Text style={[styles.thinkChipText, terminalMode === tm.key && styles.modeChipTextActive]}>
+                {tm.icon} {tm.label}
+              </Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      </View>
+
       {/* Target selector chips — multi-select enabled */}
       <View style={styles.chipRow}>
         <ScrollView
@@ -913,6 +1098,7 @@ export default function OfficeTerminal({
       <View style={styles.inputRow}>
         <View style={styles.inputPrefix}>
           <Text style={styles.prefixText}>
+            {terminalMode !== 'execute' ? `[${terminalMode.toUpperCase()}] ` : ''}
             {selectedModel ? `[${TERMINAL_MODELS.find(m => m.key === selectedModel)?.label || selectedModel}] ` : ''}
             &gt; {targetIds && targetIds.length > 1 ? `${targetIds.length} agents` : targetAgentName} ▸
           </Text>
@@ -1048,6 +1234,22 @@ const styles = StyleSheet.create({
   },
   chipDivider: {
     width: 1, height: 18, backgroundColor: '#2a2a2a', marginHorizontal: 4,
+  },
+  thinkChip: {
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6,
+    borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#111',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  thinkChipText: {
+    color: '#666', fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontWeight: '600',
+  },
+  modeChipActive: {
+    borderColor: '#6366f1', backgroundColor: '#6366f118',
+  },
+  modeChipTextActive: {
+    color: '#6366f1',
   },
   cmdChip: {
     paddingHorizontal: 8, paddingVertical: 4, borderRadius: 5,

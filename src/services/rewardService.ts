@@ -156,13 +156,13 @@ export function useAgentPointsTracker(
     const delta = agentTurns - lastTurns.current;
     lastTurns.current = agentTurns;
 
-    // Debounce to batch rapid updates
+    // Debounce to batch rapid updates (1.5s for snappy feedback)
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
       debounceRef.current = null;
       const { newBadges } = await awardAgentTurnPoints(userId, agentModel, delta);
       if (newBadges.length > 0) onNewBadges(newBadges);
-    }, 2000);
+    }, 1500);
   }, [agentTurns, userId]);
 
   // Cleanup pending debounce on unmount
@@ -211,7 +211,7 @@ export function useAllAgentPointsTracker(
 
     pendingPointsRef.current += newPoints;
 
-    // Debounce: batch rapid agent updates into one DB call
+    // Debounce: batch rapid agent updates into one DB call (1.5s for faster feedback)
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
       debounceRef.current = null;
@@ -230,7 +230,7 @@ export function useAllAgentPointsTracker(
         points,
       });
       if (newBadges.length > 0) onNewBadges(newBadges);
-    }, 3000);
+    }, 1500);
   }, [agents, userId]);
 
   // Cleanup pending debounce on unmount

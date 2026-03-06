@@ -174,6 +174,126 @@ function CastleWall({ theme }: { theme: OfficeTheme }) {
   );
 }
 
+function GothicCathedralWall({ theme }: { theme: OfficeTheme }) {
+  // Massive stone blocks with Gothic arches, ribbed vaulting, and rose window
+  const stoneRows = Array.from({ length: 5 }, (_, row) => {
+    const offset = row % 2 === 0 ? 0 : 55;
+    return Array.from({ length: 10 }, (_, col) => {
+      const w = 100 + ((row + col) % 3) * 8;
+      const shade = row < 2 ? '#ffffff05' : '#ffffff03';
+      return (
+        <View key={`gs${row}-${col}`} style={{
+          position: 'absolute' as const, top: row * 28 + 2, left: offset + col * 110,
+          width: w, height: 26, backgroundColor: theme.wallColor,
+          borderTopWidth: 1, borderTopColor: shade,
+          borderBottomWidth: 2, borderBottomColor: '#00000080',
+          borderLeftWidth: 1, borderLeftColor: '#ffffff06',
+          borderRightWidth: 1, borderRightColor: '#00000060',
+          borderRadius: 1,
+        }}>
+          {/* Weathering marks */}
+          {(row + col) % 3 === 0 && <View style={{ position: 'absolute' as const, top: 6, left: 15, width: 20, height: 1, backgroundColor: '#ffffff04', transform: [{ rotate: '2deg' }] }} />}
+          {(row + col) % 5 === 0 && <View style={{ position: 'absolute' as const, top: 14, left: 40, width: 4, height: 3, borderRadius: 2, backgroundColor: '#00000020' }} />}
+        </View>
+      );
+    });
+  });
+
+  return (
+    <>
+      <View style={[s.wallTop, { backgroundColor: '#060410', overflow: 'hidden', borderBottomWidth: 3, borderBottomColor: theme.wallBorder }]}>
+        {stoneRows}
+
+        {/* Gothic pointed arches — 3 arched alcoves */}
+        {[120, 380, 640].map((x, i) => (
+          <View key={`arch${i}`} style={{ position: 'absolute' as const, left: x, top: 10 }}>
+            {/* Arch keystone */}
+            <View style={{ position: 'absolute' as const, left: 55, top: -2, width: 10, height: 8, backgroundColor: theme.wallBorder, borderTopLeftRadius: 3, borderTopRightRadius: 3 }} />
+            {/* Left arch curve */}
+            <View style={{ position: 'absolute' as const, left: 0, top: 8, width: 60, height: 140, borderTopLeftRadius: 60, borderTopWidth: 2, borderLeftWidth: 2, borderColor: theme.accentGlow + '25', backgroundColor: 'transparent' }} />
+            {/* Right arch curve */}
+            <View style={{ position: 'absolute' as const, left: 60, top: 8, width: 60, height: 140, borderTopRightRadius: 60, borderTopWidth: 2, borderRightWidth: 2, borderColor: theme.accentGlow + '25', backgroundColor: 'transparent' }} />
+            {/* Arch interior darkness */}
+            <View style={{ position: 'absolute' as const, left: 8, top: 30, width: 104, height: 120, backgroundColor: '#02010508', borderTopLeftRadius: 52, borderTopRightRadius: 52 }} />
+            {/* Inner ribbing */}
+            <View style={{ position: 'absolute' as const, left: 20, top: 20, width: 40, height: 120, borderTopLeftRadius: 40, borderTopWidth: 1, borderLeftWidth: 1, borderColor: theme.accentGlow + '10', backgroundColor: 'transparent' }} />
+            <View style={{ position: 'absolute' as const, left: 60, top: 20, width: 40, height: 120, borderTopRightRadius: 40, borderTopWidth: 1, borderRightWidth: 1, borderColor: theme.accentGlow + '10', backgroundColor: 'transparent' }} />
+          </View>
+        ))}
+
+        {/* Rose Window (center) */}
+        <View style={{ position: 'absolute' as const, left: 400, top: 15, alignItems: 'center' as const }}>
+          {/* Outer ring */}
+          <View style={{
+            width: 80, height: 80, borderRadius: 40,
+            borderWidth: 2, borderColor: theme.accentGlow + '40',
+            backgroundColor: theme.windowSkyColor,
+            alignItems: 'center' as const, justifyContent: 'center' as const,
+          }}>
+            {/* Stained glass petals — 8 radial segments */}
+            {[0, 45, 90, 135, 180, 225, 270, 315].map((deg, i) => {
+              const colors = ['#8b000030', '#b8860b20', '#4b008220', '#00008b20', '#8b000020', '#b8860b30', '#4b008230', '#00008b30'];
+              return (
+                <View key={`petal${i}`} style={{
+                  position: 'absolute' as const,
+                  width: 16, height: 30,
+                  backgroundColor: colors[i],
+                  borderRadius: 8,
+                  transform: [{ rotate: `${deg}deg` }, { translateY: -15 }],
+                }} />
+              );
+            })}
+            {/* Center medallion */}
+            <View style={{
+              width: 20, height: 20, borderRadius: 10,
+              backgroundColor: theme.accentGlow + '30',
+              borderWidth: 1, borderColor: theme.accentGlow + '50',
+            }} />
+          </View>
+        </View>
+
+        {/* Iron candelabras with glow */}
+        {[60, 300, 560, 800].map((x, i) => (
+          <View key={`cand${i}`} style={{ position: 'absolute' as const, left: x, top: 105, alignItems: 'center' as const }}>
+            {/* Candle glow */}
+            <View style={{ position: 'absolute' as const, top: -12, width: 30, height: 24, borderRadius: 15, backgroundColor: '#b8860b08' }} />
+            <View style={{ position: 'absolute' as const, top: -8, width: 16, height: 16, borderRadius: 8, backgroundColor: '#ff990006' }} />
+            {/* Flame */}
+            <Text style={{ fontSize: 10, marginBottom: -2 }}>🕯️</Text>
+            {/* Iron holder */}
+            <View style={{ width: 6, height: 16, backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#333' }} />
+            <View style={{ width: 14, height: 3, backgroundColor: '#222', borderRadius: 1, borderWidth: 1, borderColor: '#333' }} />
+          </View>
+        ))}
+
+        {/* Ribbed vault lines (ceiling ribs) */}
+        {[0, 200, 450, 700].map((x, i) => (
+          <View key={`rib${i}`} style={{
+            position: 'absolute' as const, left: x, top: 0, width: 1, height: 180,
+            backgroundColor: theme.wallBorder + '20',
+          }} />
+        ))}
+
+        {/* Bottom shadow — deep, like a cathedral ceiling receding */}
+        <View style={{ position: 'absolute' as const, bottom: 0, left: 0, right: 0, height: 12, backgroundColor: '#00000040' }} />
+        <View style={{ position: 'absolute' as const, bottom: 0, left: 0, right: 0, height: 4, backgroundColor: '#00000060' }} />
+      </View>
+
+      {/* Left wall — tall stone pillar with buttress detail */}
+      <View style={[s.wallLeft, { backgroundColor: theme.wallColor, borderRightWidth: 3, borderRightColor: theme.wallBorder }]}>
+        {/* Pilaster (half-column) */}
+        <View style={{ position: 'absolute' as const, top: 0, right: 0, width: 6, height: FLOOR_H, backgroundColor: theme.wallBorder + '15' }} />
+        {/* Horizontal stone joints */}
+        {Array.from({ length: 20 }, (_, i) => (
+          <View key={`lj${i}`} style={{ position: 'absolute' as const, top: i * 48 + 24, left: 0, right: 0, height: 1, backgroundColor: '#00000020' }} />
+        ))}
+        {/* Column capital detail */}
+        <View style={{ position: 'absolute' as const, top: 185, right: 0, width: 10, height: 6, backgroundColor: theme.wallBorder + '25', borderTopLeftRadius: 3 }} />
+      </View>
+    </>
+  );
+}
+
 function StationWall({ theme }: { theme: OfficeTheme }) {
   // Metal panels with accent lines, seam details, and panel numbers
   const panels = Array.from({ length: 6 }, (_, i) => (
@@ -874,6 +994,57 @@ function CabinWindow({ theme }: { theme: OfficeTheme }) {
   );
 }
 
+function CathedralWindow({ theme }: { theme: OfficeTheme }) {
+  // Tall lancet stained glass windows with tracery
+  return (
+    <View style={[s.windowArea, { top: 16, right: 50 }]}>
+      {/* Three tall lancet windows */}
+      {[0, 75, 150].map((offset, i) => {
+        const glassColors = [
+          ['#8b000025', '#b8860b18', '#4b008218'],
+          ['#00008b20', '#b8860b20', '#8b000018'],
+          ['#4b008220', '#00008b18', '#b8860b25'],
+        ];
+        return (
+          <View key={`lw${i}`} style={{
+            position: 'absolute' as const, left: offset, top: 0,
+            width: 50, height: 130,
+          }}>
+            {/* Window frame — pointed Gothic arch */}
+            <View style={{
+              width: 50, height: 130,
+              borderTopLeftRadius: 25, borderTopRightRadius: 25,
+              borderWidth: 2, borderColor: theme.accentGlow + '30',
+              backgroundColor: theme.windowSkyColor,
+              overflow: 'hidden' as const,
+            }}>
+              {/* Stained glass panels — 3 vertical segments */}
+              {glassColors[i].map((color, j) => (
+                <View key={j} style={{
+                  position: 'absolute' as const, top: j * 42 + 10, left: 4, right: 4,
+                  height: 38, backgroundColor: color, borderRadius: 2,
+                  borderWidth: 1, borderColor: '#ffffff08',
+                }} />
+              ))}
+              {/* Central mullion (vertical bar) */}
+              <View style={{ position: 'absolute' as const, left: 24, top: 15, width: 2, height: 110, backgroundColor: theme.wallBorder }} />
+              {/* Horizontal transoms */}
+              <View style={{ position: 'absolute' as const, left: 4, top: 50, right: 4, height: 2, backgroundColor: theme.wallBorder }} />
+              <View style={{ position: 'absolute' as const, left: 4, top: 90, right: 4, height: 2, backgroundColor: theme.wallBorder }} />
+              {/* Pointed top trefoil detail */}
+              <View style={{ position: 'absolute' as const, top: 4, left: 15, width: 20, height: 10, borderRadius: 10, backgroundColor: theme.accentGlow + '15', borderWidth: 1, borderColor: theme.accentGlow + '20' }} />
+              {/* Light beam effect */}
+              <View style={{ position: 'absolute' as const, top: 0, left: 10, width: 30, height: 130, backgroundColor: '#b8860b04' }} />
+            </View>
+            {/* Window sill */}
+            <View style={{ width: 56, height: 4, backgroundColor: theme.wallBorder, marginLeft: -3, borderRadius: 1, marginTop: -1 }} />
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
 function renderWindow(env: EnvironmentType, theme: OfficeTheme) {
   switch (env) {
     case 'ship': return <ShipPorthole theme={theme} />;
@@ -887,6 +1058,7 @@ function renderWindow(env: EnvironmentType, theme: OfficeTheme) {
     case 'garden': return <MansionWindow theme={theme} />;
     case 'cyber': return <StationViewport theme={theme} />;
     case 'arctic': return <StationViewport theme={theme} />;
+    case 'cathedral': return <CathedralWindow theme={theme} />;
     default: return <OfficeWindow theme={theme} />;
   }
 }
@@ -904,6 +1076,7 @@ function renderWall(env: EnvironmentType, theme: OfficeTheme) {
     case 'garden': return <MansionWall theme={theme} />;
     case 'cyber': return <StationWall theme={theme} />;
     case 'arctic': return <StationWall theme={theme} />;
+    case 'cathedral': return <GothicCathedralWall theme={theme} />;
     default: return <OfficeWall theme={theme} />;
   }
 }
@@ -1444,6 +1617,7 @@ function renderDesk(env: EnvironmentType, x: number, y: number, theme: OfficeThe
     case 'garden': return <GardenDesk x={x} y={y} theme={theme} />;
     case 'cyber': return <CyberDesk x={x} y={y} theme={theme} />;
     case 'arctic': return <ArcticDesk x={x} y={y} theme={theme} />;
+    case 'cathedral': return <CastleDesk x={x} y={y} theme={theme} />;
     default: return <OfficeDesk x={x} y={y} theme={theme} />;
   }
 }
@@ -1895,6 +2069,76 @@ function CabinDecor({ theme }: { theme: OfficeTheme }) {
   );
 }
 
+function CathedralDecor({ theme }: { theme: OfficeTheme }) {
+  return (
+    <>
+      {/* Grand altar at top-right */}
+      <View style={{ position: 'absolute' as const, right: 30, top: 200 }}>
+        <View style={{
+          width: 90, height: 50, backgroundColor: theme.deskColor,
+          borderWidth: 2, borderColor: theme.accentGlow + '30',
+          borderTopLeftRadius: 3, borderTopRightRadius: 3,
+        }}>
+          {/* Altar cloth */}
+          <View style={{ position: 'absolute' as const, top: -2, left: -3, right: -3, height: 8, backgroundColor: '#8b000025', borderTopLeftRadius: 2, borderTopRightRadius: 2, borderBottomWidth: 1, borderBottomColor: theme.accentGlow + '20' }} />
+          {/* Cross */}
+          <View style={{ position: 'absolute' as const, top: 10, left: 40, width: 3, height: 22, backgroundColor: theme.accentGlow + '40' }} />
+          <View style={{ position: 'absolute' as const, top: 16, left: 34, width: 15, height: 3, backgroundColor: theme.accentGlow + '40' }} />
+          {/* Candles */}
+          <Text style={{ position: 'absolute' as const, top: 8, left: 10, fontSize: 10 }}>🕯️</Text>
+          <Text style={{ position: 'absolute' as const, top: 8, right: 10, fontSize: 10 }}>🕯️</Text>
+        </View>
+      </View>
+
+      {/* Stone columns along the nave */}
+      {[85, 650].map((x, i) => (
+        <View key={`col${i}`} style={{ position: 'absolute' as const, left: x, top: 195 }}>
+          {/* Column base */}
+          <View style={{ position: 'absolute' as const, bottom: -600, width: 16, height: 6, backgroundColor: theme.wallBorder + '40', borderRadius: 2 }} />
+          {/* Column shaft */}
+          <View style={{ width: 10, height: 750, backgroundColor: theme.wallBorder + '20', borderLeftWidth: 1, borderLeftColor: '#ffffff06', borderRightWidth: 1, borderRightColor: '#00000020', marginLeft: 3 }} />
+          {/* Column capital (top) */}
+          <View style={{ position: 'absolute' as const, top: -4, width: 16, height: 6, backgroundColor: theme.wallBorder + '30', borderRadius: 2 }} />
+        </View>
+      ))}
+
+      {/* Blood-red carpet runner down the center */}
+      <View style={{
+        position: 'absolute' as const, left: 350, top: 195, width: 60, height: FLOOR_H - 200,
+        backgroundColor: '#8b000012', borderWidth: 1, borderColor: '#8b000020',
+      }}>
+        {/* Carpet pattern — gold crosses */}
+        {Array.from({ length: 6 }, (_, i) => (
+          <View key={`cp${i}`} style={{ position: 'absolute' as const, top: 40 + i * 120, left: 22 }}>
+            <View style={{ width: 2, height: 12, backgroundColor: theme.accentGlow + '15', marginLeft: 6 }} />
+            <View style={{ position: 'absolute' as const, top: 4, width: 14, height: 2, backgroundColor: theme.accentGlow + '15' }} />
+          </View>
+        ))}
+        {/* Carpet fringe at bottom */}
+        <View style={{ position: 'absolute' as const, bottom: 0, left: 0, right: 0, height: 4, backgroundColor: '#8b000020' }} />
+      </View>
+
+      {/* Incense smoke wisps (ethereal) */}
+      {[200, 500].map((x, i) => (
+        <View key={`smoke${i}`} style={{ position: 'absolute' as const, left: x, top: 220, opacity: 0.15 }}>
+          <View style={{ width: 30, height: 60, borderRadius: 15, backgroundColor: '#b8860b08' }} />
+          <View style={{ position: 'absolute' as const, top: -10, left: 5, width: 20, height: 40, borderRadius: 10, backgroundColor: '#ffffff04' }} />
+        </View>
+      ))}
+
+      {/* Ornate rug (prayer area) */}
+      <View style={[s.rug, {
+        backgroundColor: '#1a080825',
+        borderColor: theme.accentGlow + '18',
+        borderWidth: 2,
+      }]}>
+        {/* Inner border */}
+        <View style={{ position: 'absolute' as const, top: 4, left: 4, right: 4, bottom: 4, borderWidth: 1, borderColor: '#8b000015', borderRadius: 2 }} />
+      </View>
+    </>
+  );
+}
+
 function renderDecor(env: EnvironmentType, theme: OfficeTheme) {
   switch (env) {
     case 'ship': return <ShipDecor theme={theme} />;
@@ -1908,6 +2152,7 @@ function renderDecor(env: EnvironmentType, theme: OfficeTheme) {
     case 'garden': return <CabinDecor theme={theme} />;
     case 'cyber': return <StationDecor theme={theme} />;
     case 'arctic': return <StationDecor theme={theme} />;
+    case 'cathedral': return <CathedralDecor theme={theme} />;
     default: return <OfficeDecor theme={theme} />;
   }
 }
@@ -2051,6 +2296,46 @@ function renderFloorPattern(env: EnvironmentType, theme: OfficeTheme): React.Rea
         );
       }
       return planks;
+    }
+    case 'cathedral': {
+      // Polished stone tiles in alternating dark/light with gold inlay crosses
+      const tiles: React.ReactElement[] = [];
+      for (let y = 190; y < FLOOR_H; y += 48) {
+        const row = ((y - 190) / 48);
+        const offset = row % 2 === 0 ? 0 : 24;
+        for (let x = 10 + offset; x < FLOOR_W; x += 48) {
+          const isDark = (row + Math.floor((x - 10) / 48)) % 2 === 0;
+          tiles.push(
+            <View key={`cath${x}-${y}`} style={{
+              position: 'absolute' as const, top: y, left: x,
+              width: 46, height: 46,
+              backgroundColor: isDark ? '#05030808' : '#0a080f08',
+              borderWidth: 1, borderColor: theme.wallBorder + '10',
+              borderRadius: 1,
+            }}>
+              {/* Stone vein detail */}
+              <View style={{ position: 'absolute' as const, top: 8, left: 6, width: 20, height: 1, backgroundColor: '#ffffff03', transform: [{ rotate: '8deg' }] }} />
+              {/* Gold inlay cross on every 4th tile */}
+              {(row + Math.floor((x - 10) / 48)) % 4 === 0 && (
+                <>
+                  <View style={{ position: 'absolute' as const, top: 18, left: 22, width: 2, height: 12, backgroundColor: theme.accentGlow + '10' }} />
+                  <View style={{ position: 'absolute' as const, top: 22, left: 16, width: 14, height: 2, backgroundColor: theme.accentGlow + '10' }} />
+                </>
+              )}
+              {/* Corner wear */}
+              {(x + y) % 192 === 0 && <View style={{ position: 'absolute' as const, bottom: 2, right: 2, width: 6, height: 4, borderRadius: 2, backgroundColor: '#00000010' }} />}
+            </View>
+          );
+        }
+      }
+      // Central aisle highlight — subtle light beam
+      tiles.push(
+        <View key="aisle-light" style={{
+          position: 'absolute' as const, top: 190, left: 340, width: 80, height: FLOOR_H - 190,
+          backgroundColor: '#b8860b02',
+        }} />
+      );
+      return tiles;
     }
     default: {
       // Standard grid

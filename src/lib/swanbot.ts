@@ -40,15 +40,19 @@ function addToHistory(circleId: string, role: 'user' | 'model', text: string) {
 async function callSwanBotAI(message: string, circleId: string, userId: string, discordContext?: string, model?: string | null): Promise<string | null> {
   try {
     const { data, error } = await supabase.functions.invoke('swanbot-ai', {
-      body: { message, circleId, userId, discordContext, model: model || 'blackswan' },
+      body: { message, circleId, userId, discordContext, model: model || 'claude-haiku' },
     });
     if (error) {
-      console.warn('SwanBot AI function error:', error);
+      console.warn('[SwanBot] Edge function error:', error?.message || error);
+      return null;
+    }
+    if (data?.error) {
+      console.warn('[SwanBot] Edge function returned error:', data.error);
       return null;
     }
     return data?.response || null;
-  } catch (err) {
-    console.warn('SwanBot AI call failed:', err);
+  } catch (err: any) {
+    console.warn('[SwanBot] Edge function call failed:', err?.message || err);
     return null;
   }
 }
@@ -159,7 +163,7 @@ function buildSystemPrompt(context: SwanBotContext, data: CircleContextData): st
     ? `Tasks - Open: ${data.stats.openTasks}, In Progress: ${data.stats.inProgress}, Done: ${data.stats.done}`
     : '';
 
-  return `You are BlackSwan 🦢, the AI companion inside The Underground Circle — an accountability app for serious builders and grinders.
+  return `You are Agent 🦢, the AI companion inside The Underground Circle — an accountability app for serious builders and grinders.
 
 ## Your Personality
 - You carry yourself with quiet confidence — you know your stuff, but you don't need to prove it
@@ -171,7 +175,7 @@ function buildSystemPrompt(context: SwanBotContext, data: CircleContextData): st
 - You're never a know-it-all. When you don't know something, you say so cleanly — no stalling, no overexplaining
 - You use emojis sparingly — only when they add something
 - Short, precise responses for casual conversation. Detailed and structured when someone needs real guidance
-- You NEVER say "I'm just an AI" or "As an AI" — you're BlackSwan, full stop
+- You NEVER say "I'm just an AI" or "As an AI" — you're Agent, full stop
 
 ## Your Knowledge
 - You have deep knowledge of productivity, accountability, goal-setting, and human performance
@@ -367,7 +371,7 @@ export async function getSwanBotResponse(
   message: string,
   context: SwanBotContext
 ): Promise<string> {
-  const cleaned = message.replace(/@(blackswan|swanbot|swan)\b/gi, '').trim();
+  const cleaned = message.replace(/@(agent|blackswan|swanbot|swan)\b/gi, '').trim();
 
   if (!cleaned) {
     return "What's good? 🦢";
@@ -392,10 +396,11 @@ export async function getSwanBotResponse(
     }
   }
 
-  // Try BlackSwan LLM (local, zero cost)
+  // Tier 1: Try BlackSwan LLM (local, zero cost — only works when ollama is running)
   try {
     const { isBlackSwanAvailable, callBlackSwan } = await import('./blackswanLLM');
     if (await isBlackSwanAvailable()) {
+      console.log('[SwanBot] Tier 1: BlackSwan LLM available, calling...');
       const circleData = await getCircleContextData(context);
       const systemPrompt = buildSystemPrompt(context, circleData);
       const history = context.circleId ? getHistory(context.circleId) : [];
@@ -412,39 +417,49 @@ export async function getSwanBotResponse(
         if (context.circleId) addToHistory(context.circleId, 'model', result.content);
         return result.content;
       }
+      console.warn('[SwanBot] Tier 1: BlackSwan returned empty response');
+    } else {
+      console.log('[SwanBot] Tier 1: BlackSwan LLM not available (expected on web)');
     }
   } catch (err) {
-    console.warn('BlackSwan LLM unavailable, falling back:', err);
+    console.warn('[SwanBot] Tier 1: BlackSwan LLM error:', err);
   }
 
-  // Try AI Edge Function (Claude Haiku)
+  // Tier 2: Try AI Edge Function (Claude Haiku — primary for web)
   if (context.circleId) {
+    console.log('[SwanBot] Tier 2: Calling swanbot-ai edge function...');
     const aiResponse = await callSwanBotAI(cleaned, context.circleId, context.userId, context.discordContext);
     if (aiResponse) {
+      console.log('[SwanBot] Tier 2: Got response from edge function');
       if (context.circleId) addToHistory(context.circleId, 'model', aiResponse);
       return aiResponse;
     }
+    console.warn('[SwanBot] Tier 2: Edge function returned null');
   }
 
-  // Conversational AI via Gemini
+  // Tier 3: Conversational AI via Gemini
   try {
+    console.log('[SwanBot] Tier 3: Trying Gemini fallback...');
     const circleData = await getCircleContextData(context);
     const geminiResponse = await callGemini(cleaned, context, circleData);
     if (geminiResponse) {
+      console.log('[SwanBot] Tier 3: Got response from Gemini');
       if (context.circleId) addToHistory(context.circleId, 'model', geminiResponse);
       return geminiResponse;
     }
+    console.warn('[SwanBot] Tier 3: Gemini returned null');
   } catch (err) {
-    console.warn('Gemini conversation failed:', err);
+    console.warn('[SwanBot] Tier 3: Gemini error:', err);
   }
 
-  // Ultimate fallback — still conversational
+  // Ultimate fallback — actually useful when AI is completely unavailable
   const name = context.userName || 'fam';
+  console.error('[SwanBot] All AI tiers failed for message:', cleaned.slice(0, 50));
   const fallbacks = [
-    `Yo ${name}, I'm having a brain fart rn 😅 Try again?`,
-    `My bad, something glitched. Hit me again ${name}`,
-    `Connection's being weird — ask me again and I gotchu`,
-    `${name} I blanked for a sec lol. What were you saying?`,
+    `Hey ${name}, my AI connection is down right now. Try a command like "status", "my tasks", "streak", or "leaderboard" — those always work.`,
+    `${name}, I can't reach my AI backend at the moment. You can still use commands: "help" to see what's available.`,
+    `AI's offline rn ${name}. Commands like "status", "streak", "my tasks" still work — type "help" to see all options.`,
+    `Connection to AI is temporarily down. In the meantime, try "status" or "my tasks" — I've got those locally. 🦢`,
   ];
   const response = fallbacks[Math.floor(Math.random() * fallbacks.length)];
   if (context.circleId) addToHistory(context.circleId, 'model', response);

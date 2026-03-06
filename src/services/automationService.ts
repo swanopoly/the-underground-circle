@@ -10,9 +10,10 @@ import { supabase } from '../lib/supabase';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type TriggerType = 'schedule' | 'event' | 'manual';
+export type TriggerType = 'schedule' | 'event' | 'manual' | 'webhook';
 export type OutputTarget = 'activity' | 'chat' | 'webhook' | 'silent';
 export type RunStatus = 'running' | 'completed' | 'failed' | 'skipped';
+export type WebhookProvider = 'github' | 'slack' | 'linear';
 
 export interface CircleAutomation {
   id: string;
@@ -135,11 +136,13 @@ function computeNextRun(cronExpression: string | undefined): string | null {
   if (!cronExpression) return null;
   const now = new Date();
   switch (cronExpression) {
-    case 'hourly':  now.setHours(now.getHours() + 1); break;
-    case 'daily':   now.setDate(now.getDate() + 1); break;
-    case 'weekly':  now.setDate(now.getDate() + 7); break;
-    case 'monthly': now.setMonth(now.getMonth() + 1); break;
-    default:        now.setDate(now.getDate() + 1); break;
+    case 'hourly':      now.setHours(now.getHours() + 1); break;
+    case 'every_6h':    now.setHours(now.getHours() + 6); break;
+    case 'twice_daily': now.setHours(now.getHours() + 12); break;
+    case 'daily':       now.setDate(now.getDate() + 1); break;
+    case 'weekly':      now.setDate(now.getDate() + 7); break;
+    case 'monthly':     now.setMonth(now.getMonth() + 1); break;
+    default:            now.setDate(now.getDate() + 1); break;
   }
   return now.toISOString();
 }
@@ -277,6 +280,47 @@ export async function loadRuns(automationId: string, limit = 20): Promise<Automa
   return (data || []).map(runFromRow);
 }
 
+// ─── Stats ───────────────────────────────────────────────────────────────────
+
+export interface AutomationStats {
+  successRate: number;   // 0-100
+  totalCost: number;
+  avgDurationMs: number;
+  totalRuns: number;
+}
+
+export async function loadAutomationStats(circleId: string): Promise<Record<string, AutomationStats>> {
+  const { data, error } = await supabase
+    .from('automation_runs')
+    .select('automation_id, status, estimated_cost, duration_ms')
+    .eq('circle_id', circleId)
+    .order('started_at', { ascending: false })
+    .limit(500);
+
+  if (error || !data) return {};
+
+  const agg: Record<string, { completed: number; total: number; cost: number; dur: number }> = {};
+  for (const r of data) {
+    if (!agg[r.automation_id]) agg[r.automation_id] = { completed: 0, total: 0, cost: 0, dur: 0 };
+    const a = agg[r.automation_id];
+    a.total++;
+    if (r.status === 'completed') a.completed++;
+    a.cost += Number(r.estimated_cost) || 0;
+    a.dur += r.duration_ms || 0;
+  }
+
+  const result: Record<string, AutomationStats> = {};
+  for (const [id, a] of Object.entries(agg)) {
+    result[id] = {
+      successRate: a.total > 0 ? Math.round((a.completed / a.total) * 100) : 0,
+      totalCost: a.cost,
+      avgDurationMs: a.total > 0 ? Math.round(a.dur / a.total) : 0,
+      totalRuns: a.total,
+    };
+  }
+  return result;
+}
+
 // ─── Hooks ───────────────────────────────────────────────────────────────────
 
 export function useCircleAutomations(circleId: string | null) {
@@ -314,6 +358,20 @@ export function useCircleAutomations(circleId: string | null) {
   return { automations, isLoading, refresh };
 }
 
+export function useAutomationStats(circleId: string | null) {
+  const [stats, setStats] = useState<Record<string, AutomationStats>>({});
+
+  const refresh = useCallback(async () => {
+    if (!circleId) return;
+    const data = await loadAutomationStats(circleId);
+    setStats(data);
+  }, [circleId]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  return { stats, refreshStats: refresh };
+}
+
 export function useAutomationRuns(automationId: string | null) {
   const [runs, setRuns] = useState<AutomationRun[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -329,4 +387,165 @@ export function useAutomationRuns(automationId: string | null) {
   useEffect(() => { refresh(); }, [refresh]);
 
   return { runs, isLoading, refresh };
+}
+
+// ─── Dashboard Stats ──────────────────────────────────────────────────────────
+
+export interface DashboardStats {
+  successfulLast7d: number;
+  failedLast7d: number;
+}
+
+export async function loadDashboardStats(circleId: string): Promise<DashboardStats> {
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data, error } = await supabase
+    .from('automation_runs')
+    .select('status')
+    .eq('circle_id', circleId)
+    .gte('started_at', sevenDaysAgo);
+
+  if (error || !data) return { successfulLast7d: 0, failedLast7d: 0 };
+
+  return {
+    successfulLast7d: data.filter((r) => r.status === 'completed').length,
+    failedLast7d:     data.filter((r) => r.status === 'failed').length,
+  };
+}
+
+export function useDashboardStats(circleId: string | null) {
+  const [stats, setStats] = useState<DashboardStats>({ successfulLast7d: 0, failedLast7d: 0 });
+
+  const refresh = useCallback(async () => {
+    if (!circleId) return;
+    const s = await loadDashboardStats(circleId);
+    setStats(s);
+  }, [circleId]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  return { stats, refresh };
+}
+
+// ─── Recent Runs (cross-automation) ───────────────────────────────────────────
+
+export async function loadRecentRuns(circleId: string, limit = 30): Promise<AutomationRun[]> {
+  const { data, error } = await supabase
+    .from('automation_runs')
+    .select('*')
+    .eq('circle_id', circleId)
+    .order('started_at', { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    console.warn('[automationService] loadRecentRuns error:', error.message);
+    return [];
+  }
+  return (data || []).map(runFromRow);
+}
+
+// ─── Memory Notes ─────────────────────────────────────────────────────────────
+
+export interface MemoryNote {
+  id: string;
+  automationId: string;
+  circleId: string;
+  title: string;
+  content: string;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function memoryNoteFromRow(row: any): MemoryNote {
+  return {
+    id: row.id,
+    automationId: row.automation_id,
+    circleId: row.circle_id,
+    title: row.title,
+    content: row.content,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function loadMemoryNotes(automationId: string): Promise<MemoryNote[]> {
+  const { data, error } = await supabase
+    .from('automation_memory_notes')
+    .select('*')
+    .eq('automation_id', automationId)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    console.warn('[automationService] loadMemoryNotes error:', error.message);
+    return [];
+  }
+  return (data || []).map(memoryNoteFromRow);
+}
+
+export async function createMemoryNote(
+  automationId: string,
+  circleId: string,
+  title: string,
+  content: string,
+): Promise<{ note?: MemoryNote; error?: string }> {
+  const { data: auth } = await supabase.auth.getUser();
+  if (!auth.user) return { error: 'Not authenticated' };
+
+  const { data, error } = await supabase
+    .from('automation_memory_notes')
+    .insert({
+      automation_id: automationId,
+      circle_id: circleId,
+      title: title.trim(),
+      content: content.trim(),
+      created_by: auth.user.id,
+    })
+    .select()
+    .single();
+
+  if (error) return { error: error.message };
+  return { note: memoryNoteFromRow(data) };
+}
+
+export async function updateMemoryNote(
+  id: string,
+  updates: { title?: string; content?: string },
+): Promise<{ error?: string }> {
+  const payload: any = { updated_at: new Date().toISOString() };
+  if (updates.title !== undefined) payload.title = updates.title.trim();
+  if (updates.content !== undefined) payload.content = updates.content.trim();
+
+  const { error } = await supabase
+    .from('automation_memory_notes')
+    .update(payload)
+    .eq('id', id);
+
+  return error ? { error: error.message } : {};
+}
+
+export async function deleteMemoryNote(id: string): Promise<{ error?: string }> {
+  const { error } = await supabase
+    .from('automation_memory_notes')
+    .delete()
+    .eq('id', id);
+  return error ? { error: error.message } : {};
+}
+
+export function useMemoryNotes(automationId: string | null) {
+  const [notes, setNotes] = useState<MemoryNote[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!automationId) { setNotes([]); return; }
+    setIsLoading(true);
+    const data = await loadMemoryNotes(automationId);
+    setNotes(data);
+    setIsLoading(false);
+  }, [automationId]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  return { notes, isLoading, refresh };
 }

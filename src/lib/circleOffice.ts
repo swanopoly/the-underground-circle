@@ -86,6 +86,14 @@ export const PROVIDER_DISPLAY: Record<string, { icon: string; color: string; lab
   'gemini':        { icon: '♊', color: '#4285f4', label: 'Google Gemini' },
   'cursor':        { icon: '🎯', color: '#8b5cf6', label: 'Cursor' },
   'generic-agent': { icon: '⚡', color: '#06b6d4', label: 'AI Agent' },
+  // BYO LLM providers
+  'openai':        { icon: '🟢', color: '#10a37f', label: 'OpenAI' },
+  'anthropic':     { icon: '🟠', color: '#d97706', label: 'Anthropic' },
+  'openrouter':    { icon: '🔀', color: '#6d28d9', label: 'OpenRouter' },
+  'groq':          { icon: '⚡', color: '#f97316', label: 'Groq' },
+  'ollama':        { icon: '🦙', color: '#0ea5e9', label: 'Ollama' },
+  'replicate':     { icon: '🎨', color: '#ec4899', label: 'Replicate' },
+  'figma':         { icon: '🎨', color: '#a259ff', label: 'Figma' },
 };
 
 // ─── BlackSwan default agent — always present in every circle ────────────────

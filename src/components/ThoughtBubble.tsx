@@ -37,12 +37,16 @@ export default function ThoughtBubble({ thought, onDismiss }: Props) {
 
   if (!thought) return null;
 
-  const typeColors = {
-    info: '#3b82f6',
-    warning: '#f59e0b',
-    success: '#22c55e',
-    funny: '#ec4899',
-    idea: '#8b5cf6',
+  const typeColors: Record<string, string> = {
+    info: '#3b82f6',       // blue — operational, model, cost
+    warning: '#f59e0b',    // amber — errors, cost spikes
+    success: '#22c55e',    // green — active work
+    funny: '#ec4899',      // pink — humor
+    idea: '#8b5cf6',       // purple — proactive suggestions
+    news: '#06b6d4',       // cyan — tech news, HN, techmeme
+    trending: '#f97316',   // orange — X/Twitter trends
+    xp: '#fbbf24',         // gold — XP progress, badges
+    personality: '#6366f1', // indigo — agent personality
   };
 
   const bgColor = typeColors[thought.type] || '#666';

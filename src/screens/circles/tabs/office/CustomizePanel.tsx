@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
-  View, Text, StyleSheet, Pressable, ScrollView, TextInput, Platform, Modal,
+  View, Text, StyleSheet, Pressable, ScrollView, TextInput, Platform, Modal, Linking,
 } from 'react-native';
 import {
   OFFICE_THEMES, OfficeTheme,
@@ -9,20 +9,26 @@ import {
   AgentAppearance, DEFAULT_APPEARANCE,
   EnvironmentType, ENVIRONMENT_OPTIONS,
   THEME_COLOR_PROPERTIES, COLOR_SWATCHES,
-  OWNER_EMAIL, NEON_SKIN_TONES,
+  OWNER_EMAIL, NEON_SKIN_TONES, generateRandomAppearance,
 } from '../../../../lib/officeConfig';
 import { OfficeAgent } from '../../../../lib/officeAgents';
 import PixelAgent from './PixelAgent';
 import {
   AgentConnection, ProviderType, PROVIDER_META, generateId,
 } from '../../../../lib/connectionManager';
+import {
+  ProviderKey, LLMProvider, PROVIDER_MODELS, PROVIDER_HELP,
+  storeApiKey, deleteApiKey, testApiKey, listApiKeys,
+} from '../../../../lib/llmProviders';
 import { BudgetConfig } from '../../../../lib/budgetAlerts';
+import { IDLE_BEHAVIORS, IdleBehaviorConfig, IdleBehaviorDef } from '../../../../lib/idleBehaviors';
+import { supabase } from '../../../../lib/supabase';
 import {
   CustomThemeRecord, saveCustomTheme, deleteCustomTheme,
   CUSTOM_THEME_PREFIX, customThemeToOfficeTheme,
 } from '../../../../services/customThemes';
 
-type Tab = 'theme' | 'agents' | 'connections' | 'telegram' | 'budget';
+type Tab = 'theme' | 'agents' | 'connections' | 'api-keys' | 'telegram' | 'budget' | 'idle';
 
 export interface TelegramConfig {
   botToken: string;
@@ -53,9 +59,15 @@ interface Props {
   onTelegramDisconnect: () => void;
   telegramError: string | null;
   telegramConnecting: boolean;
+  // BYO API Keys
+  providerKeys?: ProviderKey[];
+  onProviderKeysRefresh?: () => void;
   // Budget
   budgetConfig: BudgetConfig;
   onBudgetConfigChange: (config: BudgetConfig) => void;
+  // Idle Behaviors
+  idleConfig?: IdleBehaviorConfig;
+  onIdleConfigChange?: (config: IdleBehaviorConfig) => void;
   // Custom themes
   customThemes?: CustomThemeRecord[];
   onCustomThemesRefresh?: () => void;
@@ -72,7 +84,9 @@ export default function CustomizePanel({
   connections, onAddConnection, onRemoveConnection, onConnectConnection, onDisconnectConnection,
   telegramConfig, onTelegramConfigChange, telegramConnected, telegramBotName,
   telegramChatTitle, onTelegramConnect, onTelegramDisconnect, telegramError, telegramConnecting,
+  providerKeys = [], onProviderKeysRefresh,
   budgetConfig, onBudgetConfigChange,
+  idleConfig, onIdleConfigChange,
   customThemes = [], onCustomThemesRefresh, circleId,
   userEmail,
 }: Props) {
@@ -90,6 +104,101 @@ export default function CustomizePanel({
   const [showToken, setShowToken] = useState(false);
   const [visibleTokenIds, setVisibleTokenIds] = useState<Set<string>>(new Set());
   const [showRemoteControl, setShowRemoteControl] = useState(false);
+
+  // API Key management state
+  const [apiKeyInputs, setApiKeyInputs] = useState<Record<string, string>>({});
+  const [apiKeyEndpoints, setApiKeyEndpoints] = useState<Record<string, string>>({});
+  const [apiKeyTesting, setApiKeyTesting] = useState<Record<string, boolean>>({});
+  const [apiKeySaving, setApiKeySaving] = useState<Record<string, boolean>>({});
+  const [apiKeyStatus, setApiKeyStatus] = useState<Record<string, { ok: boolean; msg: string }>>({});
+
+  // Agent personality state
+  const [personalityText, setPersonalityText] = useState('');
+  const [personalitySaving, setPersonalitySaving] = useState(false);
+  const [personalityStatus, setPersonalityStatus] = useState('');
+  const [personalityLoaded, setPersonalityLoaded] = useState(false);
+
+  // Load personality when agents tab is selected
+  useEffect(() => {
+    if (tab !== 'agents' || personalityLoaded || !circleId) return;
+    (async () => {
+      const { data: auth } = await supabase.auth.getUser();
+      if (!auth.user) return;
+      const { data } = await supabase
+        .from('agent_personalities')
+        .select('personality')
+        .eq('user_id', auth.user.id)
+        .eq('circle_id', circleId)
+        .maybeSingle();
+      if (data?.personality) setPersonalityText(data.personality);
+      setPersonalityLoaded(true);
+    })();
+  }, [tab, personalityLoaded, circleId]);
+
+  const handleSavePersonality = async () => {
+    if (!circleId) return;
+    setPersonalitySaving(true);
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) { setPersonalitySaving(false); return; }
+    const { error } = await supabase
+      .from('agent_personalities')
+      .upsert({
+        user_id: auth.user.id,
+        circle_id: circleId,
+        agent_name: 'default',
+        personality: personalityText.trim(),
+      }, { onConflict: 'user_id,circle_id,agent_name' });
+    setPersonalityStatus(error ? `Error: ${error.message}` : 'Personality saved!');
+    setPersonalitySaving(false);
+    setTimeout(() => setPersonalityStatus(''), 3000);
+  };
+
+  const LLM_PROVIDERS: LLMProvider[] = ['openai', 'anthropic', 'openrouter', 'groq', 'ollama', 'replicate'];
+
+  const hasKeyForProvider = (p: LLMProvider) => providerKeys.some(k => k.provider === p && k.isActive);
+  const getKeyForProvider = (p: LLMProvider) => providerKeys.find(k => k.provider === p && k.isActive);
+
+  const handleSaveApiKey = async (provider: LLMProvider) => {
+    const key = apiKeyInputs[provider]?.trim();
+    if (!key) return;
+    setApiKeySaving(prev => ({ ...prev, [provider]: true }));
+    setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: false, msg: '' } }));
+    const endpoint = apiKeyEndpoints[provider]?.trim() || undefined;
+    const result = await storeApiKey(provider, key, 'default', endpoint);
+    if (result.error) {
+      setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: false, msg: result.error! } }));
+    } else {
+      setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: true, msg: 'Key saved!' } }));
+      setApiKeyInputs(prev => ({ ...prev, [provider]: '' }));
+      onProviderKeysRefresh?.();
+    }
+    setApiKeySaving(prev => ({ ...prev, [provider]: false }));
+  };
+
+  const handleTestApiKey = async (provider: LLMProvider) => {
+    const key = apiKeyInputs[provider]?.trim();
+    if (!key) return;
+    setApiKeyTesting(prev => ({ ...prev, [provider]: true }));
+    setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: false, msg: '' } }));
+    const result = await testApiKey(provider, key);
+    setApiKeyStatus(prev => ({
+      ...prev,
+      [provider]: result.success ? { ok: true, msg: 'Key works!' } : { ok: false, msg: result.error || 'Test failed' },
+    }));
+    setApiKeyTesting(prev => ({ ...prev, [provider]: false }));
+  };
+
+  const handleDeleteApiKey = async (provider: LLMProvider) => {
+    const existing = getKeyForProvider(provider);
+    if (!existing) return;
+    const result = await deleteApiKey(existing.id);
+    if (result.error) {
+      setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: false, msg: result.error! } }));
+    } else {
+      setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: true, msg: 'Key deleted' } }));
+      onProviderKeysRefresh?.();
+    }
+  };
 
   // Custom theme editor state
   const [showThemeEditor, setShowThemeEditor] = useState(false);
@@ -237,16 +346,17 @@ export default function CustomizePanel({
 
         {/* Tabs */}
         <View style={styles.tabs}>
-          {(['theme', 'agents', 'connections', 'telegram', 'budget'] as Tab[]).map(t => (
+          {(['theme', 'agents', 'connections', 'api-keys', 'telegram', 'budget', 'idle'] as Tab[]).map(t => (
             <Pressable
               key={t}
               onPress={() => { setTab(t); if (t !== 'connections') resetAddForm(); }}
               style={[styles.tab, tab === t && styles.tabActive]}
             >
               <Text style={[styles.tabText, tab === t && styles.tabTextActive]}>
-                {t === 'theme' ? '🎨' : t === 'agents' ? '🤖' : t === 'connections' ? '🔗' : t === 'telegram' ? '✈️' : '💰'}
-                {' '}{t === 'connections' ? 'Connect' : t.charAt(0).toUpperCase() + t.slice(1)}
+                {t === 'theme' ? '🎨' : t === 'agents' ? '🤖' : t === 'connections' ? '🔗' : t === 'api-keys' ? '🔑' : t === 'telegram' ? '✈️' : t === 'budget' ? '💰' : '⚙️'}
+                {' '}{t === 'connections' ? 'Connect' : t === 'api-keys' ? 'Keys' : t.charAt(0).toUpperCase() + t.slice(1)}
                 {t === 'connections' && connections.length > 0 ? ` (${connectedCount}/${connections.length})` : ''}
+                {t === 'api-keys' && providerKeys.length > 0 ? ` (${providerKeys.filter(k => k.isActive).length})` : ''}
               </Text>
             </Pressable>
           ))}
@@ -483,13 +593,21 @@ export default function CustomizePanel({
                     />
                   </View>
 
-                  {/* Reset agent appearance */}
-                  <Pressable
-                    onPress={() => onAppearanceChange(selectedAgentId, { ...DEFAULT_APPEARANCE })}
-                    style={styles.resetBtn}
-                  >
-                    <Text style={styles.resetBtnText}>↺ RESET AGENT</Text>
-                  </Pressable>
+                  {/* Reset / Randomize buttons */}
+                  <View style={{ flexDirection: 'row', gap: 8, marginBottom: 4 }}>
+                    <Pressable
+                      onPress={() => onAppearanceChange(selectedAgentId, { ...DEFAULT_APPEARANCE })}
+                      style={[styles.resetBtn, { flex: 1, marginBottom: 0 }]}
+                    >
+                      <Text style={styles.resetBtnText}>↺ RESET</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => onAppearanceChange(selectedAgentId, generateRandomAppearance())}
+                      style={[styles.resetBtn, { flex: 1, marginBottom: 0, backgroundColor: '#6366f120', borderColor: '#6366f1' }]}
+                    >
+                      <Text style={[styles.resetBtnText, { color: '#6366f1' }]}>🎲 RANDOMIZE</Text>
+                    </Pressable>
+                  </View>
 
                   <Text style={styles.sectionTitle}>SKIN TONE</Text>
                   <View style={styles.colorRow}>
@@ -609,8 +727,8 @@ export default function CustomizePanel({
                   </View>
                   <Text style={styles.sectionTitle}>PET</Text>
                   <View style={styles.optionRow}>
-                    {(['none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab', 'snake', 'bat', 'skull', 'mushroom'] as const).map(pet => {
-                      const labels: Record<string, string> = { none: 'NONE', cat: '🐱 CAT', dog: '🐕 DOG', bird: '🐦 BIRD', robot: '🤖 ROBOT', dragon: '🐉 DRAGON', alien: '👽 ALIEN', crab: '🦀 CRAB', snake: '🐍 SNAKE', bat: '🦇 BAT', skull: '💀 SKULL', mushroom: '🍄 SHROOM' };
+                    {(['none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab', 'snake', 'bat', 'skull', 'mushroom', 'spider', 'shark', 'bones'] as const).map(pet => {
+                      const labels: Record<string, string> = { none: 'NONE', cat: '🐱 CAT', dog: '🐕 DOG', bird: '🐦 BIRD', robot: '🤖 ROBOT', dragon: '🐉 DRAGON', alien: '👽 ALIEN', crab: '🦀 CRAB', snake: '🐍 SNAKE', bat: '🦇 BAT', skull: '💀 SKULL', mushroom: '🍄 SHROOM', spider: '🕷️ SPIDER', shark: '🦈 SHARK', bones: '🦴 BONES' };
                       return (
                         <Pressable key={pet} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, pet: pet })}
                           style={[styles.optionBtn, (currentAppearance.pet || 'none') === pet && styles.optionBtnActive]}>
@@ -623,8 +741,8 @@ export default function CustomizePanel({
                   </View>
                   <Text style={styles.sectionTitle}>AURA</Text>
                   <View style={styles.optionRow}>
-                    {(['none', 'fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow', 'glitch', 'cosmic', 'toxic', 'holy', 'void'] as const).map(aura => {
-                      const labels: Record<string, string> = { none: 'NONE', fire: '🔥 FIRE', ice: '🧊 ICE', electric: '⚡ BOLT', nature: '🌿 LEAF', shadow: '🌑 SHADOW', rainbow: '🌈 RAINBOW', glitch: '📟 GLITCH', cosmic: '✨ COSMIC', toxic: '☢️ TOXIC', holy: '🕊️ HOLY', void: '🕳️ VOID' };
+                    {(['none', 'fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow', 'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy'] as const).map(aura => {
+                      const labels: Record<string, string> = { none: 'NONE', fire: '🔥 FIRE', ice: '🧊 ICE', electric: '⚡ BOLT', nature: '🌿 LEAF', shadow: '🌑 SHADOW', rainbow: '🌈 RAINBOW', glitch: '📟 GLITCH', cosmic: '✨ COSMIC', toxic: '☢️ TOXIC', holy: '🕊️ HOLY', void: '🕳️ VOID', galaxy: '🌌 GALAXY' };
                       return (
                         <Pressable key={aura} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, aura: aura })}
                           style={[styles.optionBtn, (currentAppearance.aura || 'none') === aura && styles.optionBtnActive]}>
@@ -651,6 +769,35 @@ export default function CustomizePanel({
                   </View>
                 </>
               )}
+
+              {/* Agent Personality Editor (inspired by OpenClaw SOUL.md) */}
+              <Text style={[styles.sectionTitle, { marginTop: 16 }]}>AGENT PERSONALITY</Text>
+              <Text style={styles.connectionHint}>
+                Define how your agents communicate. This personality is prepended to the system prompt for all LLM calls.
+              </Text>
+              <TextInput
+                style={[styles.input, { minHeight: 100, textAlignVertical: 'top' }]}
+                value={personalityText}
+                onChangeText={setPersonalityText}
+                placeholder="e.g. You are a focused, no-nonsense productivity coach. Keep responses concise and actionable. Use bullet points."
+                placeholderTextColor="#555"
+                multiline
+                numberOfLines={5}
+              />
+              <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 4 }}>
+                <Pressable
+                  onPress={handleSavePersonality}
+                  disabled={personalitySaving}
+                  style={[styles.quickConnectBtn, { opacity: personalitySaving ? 0.4 : 1 }]}
+                >
+                  <Text style={styles.quickConnectText}>{personalitySaving ? 'SAVING...' : 'SAVE PERSONALITY'}</Text>
+                </Pressable>
+                {personalityStatus ? (
+                  <Text style={{ fontSize: 9, color: personalityStatus.startsWith('Error') ? '#ff5555' : '#22c55e', fontFamily: 'monospace' }}>
+                    {personalityStatus}
+                  </Text>
+                ) : null}
+              </View>
             </View>
           )}
 
@@ -980,6 +1127,38 @@ export default function CustomizePanel({
                   )}
                 </>
               )}
+
+              {/* Figma Integration */}
+              <Text style={[styles.sectionTitle, { marginTop: 16 }]}>FIGMA</Text>
+              <View style={styles.connCard}>
+                <View style={styles.connCardHeader}>
+                  <Text style={styles.connProviderIcon}>🎨</Text>
+                  <View style={styles.connCardInfo}>
+                    <Text style={styles.connCardName}>Figma</Text>
+                    <Text style={styles.connCardEndpoint}>Connect your Figma account via OAuth</Text>
+                  </View>
+                </View>
+                <Pressable
+                  onPress={() => {
+                    // Start Figma OAuth flow
+                    (async () => {
+                      const { data: auth } = await supabase.auth.getSession();
+                      const token = auth.session?.access_token || '';
+                      const url = `${supabase.supabaseUrl}/functions/v1/figma-oauth/authorize?state=${encodeURIComponent(token)}`;
+                      Linking.openURL(url);
+                    })();
+                  }}
+                  style={[styles.quickConnectBtn, { alignSelf: 'flex-start' }]}
+                >
+                  <Text style={styles.quickConnectText}>CONNECT FIGMA</Text>
+                </Pressable>
+                <View style={styles.connectInfo}>
+                  <Text style={styles.connectInfoTitle}>What you get</Text>
+                  <Text style={styles.connectInfoText}>🎨 Link Figma files to circle tasks</Text>
+                  <Text style={styles.connectInfoText}>🖼️ Auto-render design thumbnails</Text>
+                  <Text style={styles.connectInfoText}>🔗 OAuth — no manual API keys needed</Text>
+                </View>
+              </View>
             </View>
           )}
 
@@ -1069,11 +1248,148 @@ export default function CustomizePanel({
             </View>
           )}
 
+          {/* ─── API Keys Tab ─── */}
+          {tab === 'api-keys' && (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>BYO API KEYS</Text>
+              <Text style={styles.connectionHint}>
+                Add your own LLM API keys to use any model directly in the Terminal.
+                Keys are encrypted and stored securely.
+              </Text>
+
+              {LLM_PROVIDERS.map(provider => {
+                const meta = PROVIDER_META[provider as keyof typeof PROVIDER_META];
+                const help = PROVIDER_HELP[provider];
+                const hasKey = hasKeyForProvider(provider);
+                const existing = getKeyForProvider(provider);
+                const status = apiKeyStatus[provider];
+                const isTesting = apiKeyTesting[provider];
+                const isSaving = apiKeySaving[provider];
+                const models = PROVIDER_MODELS[provider] || [];
+
+                return (
+                  <View key={provider} style={styles.connCard}>
+                    <View style={styles.connCardHeader}>
+                      <Text style={styles.connProviderIcon}>{meta?.icon || '🤖'}</Text>
+                      <View style={styles.connCardInfo}>
+                        <View style={styles.connCardNameRow}>
+                          <Text style={styles.connCardName}>{meta?.label || provider}</Text>
+                          {hasKey && (
+                            <View style={[styles.autoConnectBadge, { backgroundColor: '#22c55e20', borderColor: '#22c55e40' }]}>
+                              <Text style={[styles.autoConnectText, { color: '#22c55e' }]}>KEY STORED</Text>
+                            </View>
+                          )}
+                          {!hasKey && (
+                            <View style={[styles.autoConnectBadge, { backgroundColor: '#ff555520', borderColor: '#ff555540' }]}>
+                              <Text style={[styles.autoConnectText, { color: '#ff5555' }]}>NO KEY</Text>
+                            </View>
+                          )}
+                        </View>
+                        <Text style={styles.connCardEndpoint}>{help?.hint}</Text>
+                      </View>
+                    </View>
+
+                    {/* Key input */}
+                    {!hasKey && (
+                      <>
+                        <TextInput
+                          style={styles.input}
+                          value={apiKeyInputs[provider] || ''}
+                          onChangeText={(v) => setApiKeyInputs(prev => ({ ...prev, [provider]: v }))}
+                          placeholder={provider === 'ollama' ? 'Not required for Ollama' : `sk-... or your ${meta?.label} API key`}
+                          placeholderTextColor="#666"
+                          secureTextEntry={provider !== 'ollama'}
+                          autoCapitalize="none"
+                          autoCorrect={false}
+                        />
+                        {provider === 'ollama' && (
+                          <>
+                            <Text style={styles.inputLabel}>Ollama Endpoint</Text>
+                            <TextInput
+                              style={styles.input}
+                              value={apiKeyEndpoints[provider] || ''}
+                              onChangeText={(v) => setApiKeyEndpoints(prev => ({ ...prev, [provider]: v }))}
+                              placeholder="http://localhost:11434"
+                              placeholderTextColor="#666"
+                              autoCapitalize="none"
+                              autoCorrect={false}
+                            />
+                          </>
+                        )}
+                        <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
+                          <Pressable
+                            onPress={() => handleSaveApiKey(provider)}
+                            disabled={isSaving || !apiKeyInputs[provider]?.trim()}
+                            style={[styles.quickConnectBtn, { opacity: isSaving || !apiKeyInputs[provider]?.trim() ? 0.4 : 1 }]}
+                          >
+                            <Text style={styles.quickConnectText}>{isSaving ? 'SAVING...' : 'SAVE KEY'}</Text>
+                          </Pressable>
+                          {provider !== 'ollama' && (
+                            <Pressable
+                              onPress={() => handleTestApiKey(provider)}
+                              disabled={isTesting || !apiKeyInputs[provider]?.trim()}
+                              style={[styles.quickConnectBtn, { opacity: isTesting || !apiKeyInputs[provider]?.trim() ? 0.4 : 1, borderColor: '#22c55e40', backgroundColor: '#22c55e10' }]}
+                            >
+                              <Text style={[styles.quickConnectText, { color: '#22c55e' }]}>{isTesting ? 'TESTING...' : 'TEST'}</Text>
+                            </Pressable>
+                          )}
+                          <Pressable
+                            onPress={() => help?.url && Linking.openURL(help.url)}
+                            style={[styles.quickConnectBtn, { borderColor: '#0ea5e940', backgroundColor: '#0ea5e910' }]}
+                          >
+                            <Text style={[styles.quickConnectText, { color: '#0ea5e9' }]}>GET KEY</Text>
+                          </Pressable>
+                        </View>
+                      </>
+                    )}
+
+                    {/* Key stored — show models + delete */}
+                    {hasKey && (
+                      <>
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
+                          {models.slice(0, 4).map(m => (
+                            <View key={m.id} style={{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, backgroundColor: '#6366f115', borderWidth: 1, borderColor: '#6366f130' }}>
+                              <Text style={{ fontSize: 9, color: '#8888cc', fontFamily: 'monospace' }}>{m.label}</Text>
+                            </View>
+                          ))}
+                          {models.length > 4 && (
+                            <Text style={{ fontSize: 9, color: '#666', fontFamily: 'monospace', alignSelf: 'center' }}>+{models.length - 4} more</Text>
+                          )}
+                        </View>
+                        <Pressable
+                          onPress={() => handleDeleteApiKey(provider)}
+                          style={[styles.quickConnectBtn, { borderColor: '#ff555540', backgroundColor: '#ff555510', alignSelf: 'flex-start', marginTop: 4 }]}
+                        >
+                          <Text style={[styles.quickConnectText, { color: '#ff5555' }]}>DELETE KEY</Text>
+                        </Pressable>
+                      </>
+                    )}
+
+                    {/* Status message */}
+                    {status?.msg ? (
+                      <Text style={{ fontSize: 9, color: status.ok ? '#22c55e' : '#ff5555', fontFamily: 'monospace', marginTop: 2 }}>
+                        {status.msg}
+                      </Text>
+                    ) : null}
+                  </View>
+                );
+              })}
+
+              <View style={styles.connectInfo}>
+                <Text style={styles.connectInfoTitle}>How It Works</Text>
+                <Text style={styles.connectInfoText}>🔑 Add your own API keys for any supported provider</Text>
+                <Text style={styles.connectInfoText}>🤖 Models appear in the Terminal's model selector</Text>
+                <Text style={styles.connectInfoText}>🔒 Keys are encrypted at rest — never visible after saving</Text>
+                <Text style={styles.connectInfoText}>💰 Usage billed to YOUR API key, not the platform</Text>
+              </View>
+            </View>
+          )}
+
           {/* ─── Budget Tab ─── */}
           {tab === 'budget' && (
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>BUDGET LIMITS</Text>
-              
+
               <View style={styles.budgetToggle}>
                 <Text style={styles.budgetToggleLabel}>Enable Budget Alerts</Text>
                 <Pressable
@@ -1136,12 +1452,196 @@ export default function CustomizePanel({
               </View>
             </View>
           )}
+
+          {/* ─── Idle Behaviors Tab ─── */}
+          {tab === 'idle' && idleConfig && onIdleConfigChange && (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>IDLE AGENT BEHAVIORS</Text>
+              <Text style={[styles.connectInfoText, { marginBottom: 12 }]}>
+                Agents do useful work in the background when idle — checking streaks, scanning tasks, curating knowledge.
+              </Text>
+
+              {/* Master toggle */}
+              <View style={styles.budgetToggle}>
+                <Text style={styles.budgetToggleLabel}>Enable Idle Behaviors</Text>
+                <Pressable
+                  onPress={() => onIdleConfigChange({ ...idleConfig, masterEnabled: !idleConfig.masterEnabled })}
+                  style={[styles.toggle, idleConfig.masterEnabled && styles.toggleActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <View style={[styles.toggleKnob, idleConfig.masterEnabled && styles.toggleKnobActive]} />
+                </Pressable>
+              </View>
+
+              {idleConfig.masterEnabled && (
+                <>
+                  {/* Tier 1 — Automated */}
+                  <Text style={[styles.sectionTitle, { marginTop: 16, color: '#22c55e' }]}>AUTOMATED</Text>
+                  <Text style={[styles.connectInfoText, { marginBottom: 8 }]}>No AI cost — pure data checks</Text>
+                  {IDLE_BEHAVIORS.filter(b => b.tier === 1).map(b => {
+                    const state = idleConfig.behaviors[b.id];
+                    if (!state) return null;
+                    return (
+                      <View key={b.id} style={idleStyles.behaviorRow}>
+                        <View style={idleStyles.behaviorInfo}>
+                          <Text style={idleStyles.behaviorName}>{b.icon} {b.name}</Text>
+                          <Text style={idleStyles.behaviorDesc}>{b.description}</Text>
+                          <Text style={idleStyles.behaviorMeta}>
+                            Cooldown: {b.defaultCooldownMinutes >= 1440 ? `${Math.round(b.defaultCooldownMinutes / 1440)}d` : b.defaultCooldownMinutes >= 60 ? `${Math.round(b.defaultCooldownMinutes / 60)}h` : `${b.defaultCooldownMinutes}m`}
+                            {state.lastRanAt ? ` · Last: ${formatLastRan(state.lastRanAt)}` : ' · Never ran'}
+                          </Text>
+                        </View>
+                        <Pressable
+                          onPress={() => {
+                            onIdleConfigChange({
+                              ...idleConfig,
+                              behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: !state.enabled } },
+                            });
+                          }}
+                          style={[styles.toggle, state.enabled && styles.toggleActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                        >
+                          <View style={[styles.toggleKnob, state.enabled && styles.toggleKnobActive]} />
+                        </Pressable>
+                      </View>
+                    );
+                  })}
+
+                  {/* Tier 2 — AI-Powered */}
+                  <Text style={[styles.sectionTitle, { marginTop: 20, color: '#6366f1' }]}>AI-POWERED</Text>
+                  <Text style={[styles.connectInfoText, { marginBottom: 8 }]}>Uses Claude Haiku — minimal cost per run</Text>
+                  {IDLE_BEHAVIORS.filter(b => b.tier === 2).map(b => {
+                    const state = idleConfig.behaviors[b.id];
+                    if (!state) return null;
+                    return (
+                      <View key={b.id} style={idleStyles.behaviorRow}>
+                        <View style={idleStyles.behaviorInfo}>
+                          <Text style={idleStyles.behaviorName}>{b.icon} {b.name}</Text>
+                          <Text style={idleStyles.behaviorDesc}>{b.description}</Text>
+                          <Text style={idleStyles.behaviorMeta}>
+                            Cooldown: {b.defaultCooldownMinutes >= 1440 ? `${Math.round(b.defaultCooldownMinutes / 1440)}d` : `${Math.round(b.defaultCooldownMinutes / 60)}h`}
+                            {state.lastRanAt ? ` · Last: ${formatLastRan(state.lastRanAt)}` : ' · Never ran'}
+                          </Text>
+                        </View>
+                        <Pressable
+                          onPress={() => {
+                            onIdleConfigChange({
+                              ...idleConfig,
+                              behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: !state.enabled } },
+                            });
+                          }}
+                          style={[styles.toggle, state.enabled && styles.toggleActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                        >
+                          <View style={[styles.toggleKnob, state.enabled && styles.toggleKnobActive]} />
+                        </Pressable>
+                      </View>
+                    );
+                  })}
+
+                  {/* Tier 3 — Owner Only */}
+                  {isOwner && (
+                    <>
+                      <View style={idleStyles.ownerDivider}>
+                        <View style={idleStyles.ownerDividerLine} />
+                        <Text style={idleStyles.ownerDividerText}>🔒 OWNER ONLY</Text>
+                        <View style={idleStyles.ownerDividerLine} />
+                      </View>
+                      <Text style={[styles.connectInfoText, { marginBottom: 8 }]}>Uses Claude Code bridge or AI analysis — only visible to you</Text>
+                      {IDLE_BEHAVIORS.filter(b => b.tier === 3).map(b => {
+                        const state = idleConfig.behaviors[b.id];
+                        if (!state) return null;
+                        return (
+                          <View key={b.id} style={idleStyles.behaviorRow}>
+                            <View style={idleStyles.behaviorInfo}>
+                              <Text style={idleStyles.behaviorName}>{b.icon} {b.name}</Text>
+                              <Text style={idleStyles.behaviorDesc}>{b.description}</Text>
+                              <Text style={idleStyles.behaviorMeta}>
+                                Cooldown: {b.defaultCooldownMinutes >= 1440 ? `${Math.round(b.defaultCooldownMinutes / 1440)}d` : `${Math.round(b.defaultCooldownMinutes / 60)}h`}
+                                {state.lastRanAt ? ` · Last: ${formatLastRan(state.lastRanAt)}` : ' · Never ran'}
+                                {b.requiresBridge ? ' · Needs bridge' : ''}
+                              </Text>
+                            </View>
+                            <Pressable
+                              onPress={() => {
+                                onIdleConfigChange({
+                                  ...idleConfig,
+                                  behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: !state.enabled } },
+                                });
+                              }}
+                              style={[styles.toggle, state.enabled && styles.toggleActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                            >
+                              <View style={[styles.toggleKnob, state.enabled && styles.toggleKnobActive]} />
+                            </Pressable>
+                          </View>
+                        );
+                      })}
+                    </>
+                  )}
+                </>
+              )}
+            </View>
+          )}
         </ScrollView>
       </View>
     </View>
     </Modal>
   );
 }
+
+function formatLastRan(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 60_000) return 'just now';
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`;
+  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h ago`;
+  return `${Math.floor(ms / 86_400_000)}d ago`;
+}
+
+const idleStyles = StyleSheet.create({
+  behaviorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    paddingHorizontal: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: '#ffffff08',
+  },
+  behaviorInfo: { flex: 1, marginRight: 12 },
+  behaviorName: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#ddd',
+    fontFamily: 'monospace',
+  },
+  behaviorDesc: {
+    fontSize: 10,
+    color: '#888',
+    fontFamily: 'monospace',
+    marginTop: 2,
+  },
+  behaviorMeta: {
+    fontSize: 9,
+    color: '#555',
+    fontFamily: 'monospace',
+    marginTop: 3,
+  },
+  ownerDivider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 20,
+    marginBottom: 8,
+  },
+  ownerDividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#f5920040',
+  },
+  ownerDividerText: {
+    fontSize: 10,
+    color: '#f59200',
+    fontFamily: 'monospace',
+    fontWeight: '800',
+    marginHorizontal: 8,
+  },
+});
 
 const styles = StyleSheet.create({
   overlay: {

@@ -27,12 +27,12 @@ export function createDefaultFloor(id: string, name: string, themeId: string, or
 }
 
 export const DEFAULT_FLOORS: OfficeFloor[] = [
-  createDefaultFloor('floor_1', '1F - Main', 'underground', 0),
+  createDefaultFloor('floor_1', '1F - Main', 'gothic-cathedral', 0),
 ];
 
 // ─── Office Themes ───────────────────────────────────────────────────────────
 
-export type EnvironmentType = 'office' | 'ship' | 'castle' | 'station' | 'submarine' | 'mansion' | 'lair' | 'cabin' | 'temple' | 'garden' | 'cyber' | 'arctic';
+export type EnvironmentType = 'office' | 'ship' | 'castle' | 'station' | 'submarine' | 'mansion' | 'lair' | 'cabin' | 'temple' | 'garden' | 'cyber' | 'arctic' | 'cathedral';
 
 export interface OfficeTheme {
   id: string;
@@ -54,6 +54,24 @@ export interface OfficeTheme {
 }
 
 export const OFFICE_THEMES: Record<string, OfficeTheme> = {
+  'gothic-cathedral': {
+    id: 'gothic-cathedral',
+    name: '⛪ Gothic Cathedral',
+    environmentType: 'cathedral',
+    floorColor: '#080608',           // Deep charcoal stone
+    gridColor: '#b8860b06',          // Faint golden grid
+    wallColor: '#0c0a10',            // Dark purple-black stone
+    wallBorder: '#2a1f3a',           // Dim purple mortar
+    accentGlow: '#b8860b',           // Dark gold / antique gold
+    rugColor: '#120810',             // Deep crimson-black runner
+    rugBorder: '#8b0000',            // Dark blood red
+    deskColor: '#1a1018',            // Dark oak (near-black)
+    deskBorder: '#2a1830',           // Purple-tinged wood grain
+    chairColor: '#120a14',           // Ebony pew
+    chairBorder: '#201428',          // Purple shadow
+    windowSkyColor: '#0a0420',       // Deep midnight purple
+    windowCityColor: '#1a0840',      // Stained glass violet
+  },
   underground: {
     id: 'underground',
     name: 'Underground HQ',
@@ -359,8 +377,8 @@ export interface AgentAppearance {
   backItem: 'none' | 'cape' | 'backpack' | 'wings' | 'jetpack' | 'shield' | 'sword' | 'quiver' | 'crab_shell' | 'tentacles' | 'rocket' | 'scroll' | 'boombox';
   eyeColor: string;
   facialHair: 'none' | 'stubble' | 'beard' | 'mustache' | 'goatee' | 'fu_manchu' | 'sideburns' | 'soul_patch';
-  pet: 'none' | 'cat' | 'dog' | 'bird' | 'robot' | 'dragon' | 'alien' | 'crab' | 'snake' | 'bat' | 'skull' | 'mushroom';
-  aura: 'none' | 'fire' | 'ice' | 'electric' | 'nature' | 'shadow' | 'rainbow' | 'glitch' | 'cosmic' | 'toxic' | 'holy' | 'void';
+  pet: 'none' | 'cat' | 'dog' | 'bird' | 'robot' | 'dragon' | 'alien' | 'crab' | 'snake' | 'bat' | 'skull' | 'mushroom' | 'spider' | 'shark' | 'bones';
+  aura: 'none' | 'fire' | 'ice' | 'electric' | 'nature' | 'shadow' | 'rainbow' | 'glitch' | 'cosmic' | 'toxic' | 'holy' | 'void' | 'galaxy';
   handItem: 'none' | 'lightsaber' | 'coffee' | 'laptop' | 'flag' | 'wand' | 'crab_claws' | 'sword_hand' | 'pizza' | 'microphone' | 'torch';
 }
 
@@ -414,6 +432,28 @@ export const UC_AGENT_APPEARANCE: AgentAppearance = {
   aura: 'fire',              // fire aura
   handItem: 'crab_claws',    // crab claws
 };
+
+// Generate a fully random appearance (for new agents or the Randomize button)
+export function generateRandomAppearance(): AgentAppearance {
+  const pick = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
+  return {
+    skinTone: pick(SKIN_TONES),
+    hairStyle: pick<AgentAppearance['hairStyle']>(['flat', 'spiky', 'mohawk', 'long', 'bald', 'cap', 'curly', 'ponytail', 'buzzcut', 'afro', 'undercut', 'pigtails']),
+    hairColor: pick(HAIR_COLORS),
+    shirtColor: pick(SHIRT_COLORS),
+    pantsColor: pick(PANTS_COLORS),
+    shoeColor: pick(SHOE_COLORS),
+    accessory: pick<AgentAppearance['accessory']>(['none', 'glasses', 'headphones', 'bowtie', 'scarf', 'hoodie', 'mask', 'monocle', 'eyepatch', 'bandana', 'chain', 'piercing', 'visor_shades', 'gas_mask']),
+    hat: pick<AgentAppearance['hat']>(['none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns', 'wizard_hat', 'halo', 'antenna', 'pirate_hat', 'cowboy_hat', 'fez', 'mohawk_spikes']),
+    expression: pick<AgentAppearance['expression']>(['neutral', 'happy', 'focused', 'sleepy', 'cool', 'angry', 'surprised', 'smirk', 'crying']),
+    backItem: pick<AgentAppearance['backItem']>(['none', 'cape', 'backpack', 'wings', 'jetpack', 'shield', 'sword', 'quiver', 'tentacles', 'rocket', 'scroll', 'boombox']),
+    eyeColor: pick(EYE_COLORS),
+    facialHair: pick<AgentAppearance['facialHair']>(['none', 'none', 'none', 'stubble', 'beard', 'mustache', 'goatee', 'fu_manchu', 'sideburns', 'soul_patch']),
+    pet: pick<AgentAppearance['pet']>(['none', 'none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab', 'snake', 'bat', 'skull', 'mushroom', 'spider', 'shark', 'bones']),
+    aura: pick<AgentAppearance['aura']>(['none', 'none', 'fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow', 'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy']),
+    handItem: pick<AgentAppearance['handItem']>(['none', 'none', 'coffee', 'laptop', 'flag', 'wand', 'sword_hand', 'pizza', 'microphone', 'torch']),
+  };
+}
 
 // ─── Office Layout ───────────────────────────────────────────────────────────
 

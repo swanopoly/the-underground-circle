@@ -17,4 +17,5 @@ export const THEME_BACKGROUNDS: Record<EnvironmentType, ImageSourcePropType | nu
   garden: require('../../assets/themes/garden-bg.png'),
   cyber: require('../../assets/themes/cyber-bg.png'),
   arctic: require('../../assets/themes/arctic-bg.png'),
+  cathedral: null,  // Rendered procedurally — no PNG sprite
 };

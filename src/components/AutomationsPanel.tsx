@@ -1,31 +1,68 @@
 /**
- * AutomationsPanel.tsx — Circle Automations UI
+ * AutomationsPanel.tsx — Circle Automations Dashboard
  *
- * Cursor-style always-on automations panel.
- * Lives inside OfficeTab as a collapsible section.
+ * Full-page automations UI with:
+ *   • Stats bar (total, successful 7d, failed 7d, run history)
+ *   • Quick-create natural-language bar
+ *   • Mine / All tab filter + search
+ *   • Automation cards with run history, edit, memory notes
+ *   • Suggested templates grid (2-col, collapsible "More")
+ *   • Searchable trigger picker (Schedule / Circle Events / GitHub / Slack / Linear)
+ *   • Memory Notes modal (per-automation context injected into AI prompts)
+ *   • Model picker dropdown
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, Pressable, Modal, TextInput,
-  Switch, ActivityIndicator, Platform, FlatList,
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  Pressable,
+  Modal,
+  TextInput,
+  Switch,
+  ActivityIndicator,
+  Platform,
 } from 'react-native';
 import {
-  useCircleAutomations, useAutomationRuns,
-  createAutomation, deleteAutomation, toggleAutomation, triggerAutomation,
-  CircleAutomation, AutomationRun, CreateAutomationInput,
-  TriggerType, OutputTarget,
+  useCircleAutomations,
+  useAutomationRuns,
+  useAutomationStats,
+  createAutomation,
+  updateAutomation,
+  deleteAutomation,
+  toggleAutomation,
+  triggerAutomation,
+  CircleAutomation,
+  AutomationRun,
+  AutomationStats,
+  CreateAutomationInput,
+  TriggerType,
+  OutputTarget,
+  useMemoryNotes,
+  createMemoryNote,
+  updateMemoryNote,
+  deleteMemoryNote,
+  MemoryNote,
+  useDashboardStats,
+  loadRecentRuns,
 } from '../services/automationService';
-import { AUTOMATION_TEMPLATES, AutomationTemplate, TEMPLATE_CATEGORIES } from '../lib/automationTemplates';
+import {
+  AUTOMATION_TEMPLATES,
+  AutomationTemplate,
+  SUGGESTED_TEMPLATES,
+} from '../lib/automationTemplates';
+import { supabase } from '../lib/supabase';
 
-// ─── Props ───────────────────────────────────────────────────────────────────
+// ─── Props ────────────────────────────────────────────────────────────────────
 
 interface Props {
   circleId: string;
   accentColor?: string;
 }
 
-// ─── Time helpers ────────────────────────────────────────────────────────────
+// ─── Time helpers ─────────────────────────────────────────────────────────────
 
 function timeAgo(iso: string | null): string {
   if (!iso) return 'never';
@@ -45,59 +82,1085 @@ function timeUntil(iso: string | null): string {
   return `in ${Math.floor(ms / 86_400_000)}d`;
 }
 
-// ─── Trigger/output labels ──────────────────────────────────────────────────
+// ─── Trigger catalog ──────────────────────────────────────────────────────────
+
+export interface TriggerOption {
+  id: string;
+  label: string;
+  description: string;
+  icon: string;
+  category: string;
+  triggerType: TriggerType;
+  cronExpression?: string;
+  eventTable?: string;
+  webhookProvider?: string;
+  webhookEvent?: string;
+}
+
+const TRIGGER_CATALOG: { category: string; icon: string; items: TriggerOption[] }[] = [
+  {
+    category: 'Schedule',
+    icon: '🕐',
+    items: [
+      { id: 'schedule:hourly',      label: 'Every hour',    description: 'Runs once per hour',       icon: '⏱️', category: 'Schedule', triggerType: 'schedule', cronExpression: 'hourly' },
+      { id: 'schedule:every_6h',    label: 'Every 6 hours', description: 'Runs 4× per day',           icon: '⏲️', category: 'Schedule', triggerType: 'schedule', cronExpression: 'every_6h' },
+      { id: 'schedule:twice_daily', label: 'Twice daily',   description: 'Morning & evening',        icon: '🌅', category: 'Schedule', triggerType: 'schedule', cronExpression: 'twice_daily' },
+      { id: 'schedule:daily',       label: 'Daily',         description: 'Runs once per day',        icon: '📅', category: 'Schedule', triggerType: 'schedule', cronExpression: 'daily' },
+      { id: 'schedule:weekly',      label: 'Weekly',        description: 'Runs every Monday',        icon: '📆', category: 'Schedule', triggerType: 'schedule', cronExpression: 'weekly' },
+      { id: 'schedule:monthly',     label: 'Monthly',       description: 'Runs first of month',      icon: '🗓️', category: 'Schedule', triggerType: 'schedule', cronExpression: 'monthly' },
+    ],
+  },
+  {
+    category: 'Circle Events',
+    icon: '⭕',
+    items: [
+      { id: 'event:check_ins',      label: 'New check-in',       description: 'Member checks in',          icon: '✅', category: 'Circle Events', triggerType: 'event', eventTable: 'check_ins' },
+      { id: 'event:circle_members', label: 'New member joined',  description: 'Someone joins the circle',  icon: '👋', category: 'Circle Events', triggerType: 'event', eventTable: 'circle_members' },
+      { id: 'event:tasks',          label: 'Task completed',     description: 'A task is marked done',     icon: '🏁', category: 'Circle Events', triggerType: 'event', eventTable: 'tasks' },
+      { id: 'event:messages',       label: 'New circle message', description: 'Message posted to chat',    icon: '💬', category: 'Circle Events', triggerType: 'event', eventTable: 'messages' },
+    ],
+  },
+  {
+    category: 'Manual',
+    icon: '🖐️',
+    items: [
+      { id: 'manual:run', label: 'Manual run', description: 'Triggered manually by a member', icon: '▶️', category: 'Manual', triggerType: 'manual' },
+    ],
+  },
+  {
+    category: 'GitHub',
+    icon: '🐙',
+    items: [
+      { id: 'webhook:github:push',                 label: 'New push to branch',   description: 'Code pushed to a branch',          icon: '📤', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'push' },
+      { id: 'webhook:github:ci_completed',         label: 'CI completed',         description: 'GitHub Actions workflow finished',  icon: '🔧', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'ci_completed' },
+      { id: 'webhook:github:pull_request_opened',  label: 'PR opened',            description: 'Pull request opened',              icon: '🔀', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'pull_request_opened' },
+      { id: 'webhook:github:pull_request_merged',  label: 'PR merged',            description: 'Pull request merged',              icon: '✅', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'pull_request_merged' },
+    ],
+  },
+  {
+    category: 'Slack',
+    icon: '💼',
+    items: [
+      { id: 'webhook:slack:message',         label: 'New message in channel', description: 'Message posted in a Slack channel', icon: '💬', category: 'Slack', triggerType: 'webhook', webhookProvider: 'slack', webhookEvent: 'message' },
+      { id: 'webhook:slack:channel_created', label: 'Channel created',        description: 'New Slack channel created',         icon: '#️⃣', category: 'Slack', triggerType: 'webhook', webhookProvider: 'slack', webhookEvent: 'channel_created' },
+      { id: 'webhook:slack:reaction_added',  label: 'Reaction added',         description: 'Emoji reaction on a message',       icon: '😄', category: 'Slack', triggerType: 'webhook', webhookProvider: 'slack', webhookEvent: 'reaction_added' },
+    ],
+  },
+  {
+    category: 'Linear',
+    icon: '🔷',
+    items: [
+      { id: 'webhook:linear:issue_created',   label: 'Issue created',       description: 'New Linear issue',               icon: '🎯', category: 'Linear', triggerType: 'webhook', webhookProvider: 'linear', webhookEvent: 'issue_created' },
+      { id: 'webhook:linear:cycle_completed', label: 'End of cycle',        description: 'Linear cycle completes',         icon: '🔄', category: 'Linear', triggerType: 'webhook', webhookProvider: 'linear', webhookEvent: 'cycle_completed' },
+      { id: 'webhook:linear:issue_updated',   label: 'Issue status changed', description: 'Issue moved to new status',     icon: '↔️', category: 'Linear', triggerType: 'webhook', webhookProvider: 'linear', webhookEvent: 'issue_updated' },
+    ],
+  },
+];
+
+const ALL_TRIGGER_OPTIONS = TRIGGER_CATALOG.flatMap((g) => g.items);
+
+function getTriggerById(id: string): TriggerOption | undefined {
+  return ALL_TRIGGER_OPTIONS.find((t) => t.id === id);
+}
+
+// Smart trigger detection from natural language description
+function detectTrigger(text: string): TriggerOption | null {
+  const t = text.toLowerCase();
+  if (/\bci\b|pipeline|github action|build fail/.test(t))       return getTriggerById('webhook:github:ci_completed') ?? null;
+  if (/\bpr\b|pull request|merge/.test(t))                       return getTriggerById('webhook:github:pull_request_opened') ?? null;
+  if (/\bgithub\b|push|commit|branch/.test(t))                   return getTriggerById('webhook:github:push') ?? null;
+  if (/\bslack\b/.test(t))                                       return getTriggerById('webhook:slack:message') ?? null;
+  if (/\blinear\b/.test(t))                                      return getTriggerById('webhook:linear:issue_created') ?? null;
+  if (/\bdaily\b|every day|each day/.test(t))                   return getTriggerById('schedule:daily') ?? null;
+  if (/\bweekly\b|every week|each week/.test(t))                 return getTriggerById('schedule:weekly') ?? null;
+  if (/\bhourly\b|every hour/.test(t))                           return getTriggerById('schedule:hourly') ?? null;
+  if (/\bcheck.?in\b/.test(t))                                   return getTriggerById('event:check_ins') ?? null;
+  return null;
+}
+
+// ─── Trigger / output labels ──────────────────────────────────────────────────
 
 const TRIGGER_LABELS: Record<TriggerType, { label: string; color: string }> = {
   schedule: { label: 'SCHEDULE', color: '#6366f1' },
-  event: { label: 'EVENT', color: '#f59e0b' },
-  manual: { label: 'MANUAL', color: '#22c55e' },
+  event:    { label: 'EVENT',    color: '#f59e0b' },
+  manual:   { label: 'MANUAL',   color: '#22c55e' },
+  webhook:  { label: 'WEBHOOK',  color: '#06b6d4' },
 };
 
 const OUTPUT_LABELS: Record<OutputTarget, string> = {
-  chat: 'Chat',
+  chat:     'Chat',
   activity: 'Activity Feed',
-  webhook: 'Webhook',
-  silent: 'Silent',
+  webhook:  'Webhook',
+  silent:   'Silent',
 };
 
-const CRON_OPTIONS = [
-  { value: 'hourly', label: 'Every hour' },
-  { value: 'daily', label: 'Daily' },
-  { value: 'weekly', label: 'Weekly' },
-  { value: 'monthly', label: 'Monthly' },
-];
-
 const MODEL_OPTIONS = [
-  { value: 'claude-haiku', label: 'Haiku (fast, cheap)' },
-  { value: 'claude-sonnet', label: 'Sonnet (balanced)' },
-  { value: 'claude-opus', label: 'Opus (powerful)' },
+  { value: 'claude-haiku',  label: 'Haiku 4.5',  sub: 'fast · cheap',   color: '#22c55e' },
+  { value: 'claude-sonnet', label: 'Sonnet 4.6', sub: 'balanced',        color: '#6366f1' },
+  { value: 'claude-opus',   label: 'Opus 4.6',   sub: 'most powerful',   color: '#f59e0b' },
 ];
-
-const EVENT_TABLE_OPTIONS = [
-  { value: 'check_ins', label: 'Check-ins' },
-  { value: 'circle_members', label: 'New members' },
-];
-
-// ─── Status icon helper ─────────────────────────────────────────────────────
 
 function runStatusIcon(status: string): string {
   switch (status) {
     case 'completed': return '✅';
-    case 'failed': return '❌';
-    case 'running': return '⏳';
-    case 'skipped': return '⏭️';
-    default: return '·';
+    case 'failed':    return '❌';
+    case 'running':   return '⏳';
+    case 'skipped':   return '⏭️';
+    default:          return '·';
   }
 }
 
-// ─── Component ───────────────────────────────────────────────────────────────
+// ─── Stats Bar ────────────────────────────────────────────────────────────────
+
+function StatsDashboard({
+  circleId,
+  automationCount,
+  accentColor,
+  onRunHistory,
+}: {
+  circleId: string;
+  automationCount: number;
+  accentColor: string;
+  onRunHistory: () => void;
+}) {
+  const { stats } = useDashboardStats(circleId);
+
+  return (
+    <View style={sd.row}>
+      <View style={sd.card}>
+        <Text style={sd.cardLabel}>Total Automations</Text>
+        <Text style={sd.cardValue}>{automationCount}</Text>
+      </View>
+      <View style={sd.card}>
+        <Text style={sd.cardLabel}>Successful · 7d</Text>
+        <Text style={[sd.cardValue, { color: '#22c55e' }]}>{stats.successfulLast7d}</Text>
+      </View>
+      <View style={sd.card}>
+        <Text style={sd.cardLabel}>Failed · 7d</Text>
+        <Text style={[sd.cardValue, { color: stats.failedLast7d > 0 ? '#ef4444' : '#888' }]}>
+          {stats.failedLast7d}
+        </Text>
+      </View>
+      <Pressable
+        onPress={onRunHistory}
+        style={[sd.card, sd.historyCard, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+      >
+        <Text style={[sd.historyLabel, { color: accentColor }]}>Run History →</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+const sd = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 12,
+  },
+  card: {
+    flex: 1,
+    backgroundColor: '#111',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1e1e1e',
+    padding: 12,
+    minHeight: 60,
+    justifyContent: 'space-between',
+  },
+  historyCard: {
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+  },
+  cardLabel: {
+    color: '#666',
+    fontSize: 10,
+    fontFamily: 'monospace',
+    letterSpacing: 0.5,
+  },
+  cardValue: {
+    color: '#fff',
+    fontSize: 22,
+    fontWeight: '700',
+    marginTop: 4,
+  },
+  historyLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+});
+
+// ─── Quick Create Bar ─────────────────────────────────────────────────────────
+
+function QuickCreateBar({
+  onSubmit,
+  accentColor,
+}: {
+  onSubmit: (prompt: string, detectedTrigger: TriggerOption | null) => void;
+  accentColor: string;
+}) {
+  const [text, setText] = useState('');
+
+  const handleSubmit = () => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const trigger = detectTrigger(trimmed);
+    onSubmit(trimmed, trigger);
+    setText('');
+  };
+
+  return (
+    <View style={qc.container}>
+      <TextInput
+        style={qc.input}
+        value={text}
+        onChangeText={setText}
+        placeholder="Describe what you want to automate... e.g. 'When CI fails on a PR, diagnose and open a fix PR'"
+        placeholderTextColor="#3a3a3a"
+        multiline
+        numberOfLines={2}
+        textAlignVertical="top"
+        onSubmitEditing={handleSubmit}
+      />
+      <Pressable
+        onPress={handleSubmit}
+        disabled={!text.trim()}
+        style={[
+          qc.submitBtn,
+          { backgroundColor: text.trim() ? accentColor : '#222' },
+          Platform.OS === 'web' && { cursor: text.trim() ? 'pointer' : 'default' } as any,
+        ]}
+      >
+        <Text style={[qc.submitIcon, { color: text.trim() ? '#fff' : '#555' }]}>↑</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+const qc = StyleSheet.create({
+  container: {
+    backgroundColor: '#111',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#1e1e1e',
+    padding: 12,
+    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 8,
+  },
+  input: {
+    flex: 1,
+    color: '#ccc',
+    fontSize: 13,
+    minHeight: 44,
+    maxHeight: 80,
+    lineHeight: 20,
+  },
+  submitBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 2,
+  },
+  submitIcon: {
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+});
+
+// ─── Suggested Templates Grid ─────────────────────────────────────────────────
+
+const SUGGESTED_VISIBLE = 4; // show first 4 by default
+
+function SuggestedSection({
+  onApply,
+  accentColor,
+}: {
+  onApply: (template: AutomationTemplate) => void;
+  accentColor: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? SUGGESTED_TEMPLATES : SUGGESTED_TEMPLATES.slice(0, SUGGESTED_VISIBLE);
+  const hasMore = SUGGESTED_TEMPLATES.length > SUGGESTED_VISIBLE;
+
+  return (
+    <View style={sg.container}>
+      <Text style={sg.sectionLabel}>Suggested</Text>
+      <View style={sg.grid}>
+        {visible.map((t) => (
+          <Pressable
+            key={t.id}
+            onPress={() => onApply(t)}
+            style={[sg.card, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <View style={[sg.iconBox, { backgroundColor: t.suggestedIconBg || '#1a1a1a' }]}>
+              <Text style={sg.iconEmoji}>{t.icon}</Text>
+            </View>
+            <Text style={sg.cardTitle}>{t.name}</Text>
+            <Text style={sg.cardDesc} numberOfLines={2}>{t.description}</Text>
+          </Pressable>
+        ))}
+      </View>
+      {hasMore && (
+        <Pressable
+          onPress={() => setExpanded(!expanded)}
+          style={[sg.moreBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        >
+          <Text style={sg.moreText}>{expanded ? 'Less ∧' : 'More ∨'}</Text>
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
+const sg = StyleSheet.create({
+  container: {
+    marginTop: 16,
+  },
+  sectionLabel: {
+    color: '#888',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 10,
+  },
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  card: {
+    width: '48.5%',
+    backgroundColor: '#0d0d0d',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#1a1a1a',
+    padding: 14,
+    gap: 8,
+  },
+  iconBox: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  iconEmoji: {
+    fontSize: 18,
+  },
+  cardTitle: {
+    color: '#e5e5e5',
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  cardDesc: {
+    color: '#555',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  moreBtn: {
+    marginTop: 10,
+    paddingVertical: 4,
+  },
+  moreText: {
+    color: '#666',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+});
+
+// ─── Run History Modal (cross-automation) ─────────────────────────────────────
+
+function RunHistoryModal({
+  circleId,
+  onClose,
+}: {
+  circleId: string;
+  onClose: () => void;
+}) {
+  const [runs, setRuns] = useState<AutomationRun[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    loadRecentRuns(circleId, 30).then((r) => {
+      setRuns(r);
+      setLoading(false);
+    });
+  }, [circleId]);
+
+  return (
+    <Modal transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={rh.backdrop} onPress={onClose}>
+        <Pressable style={rh.sheet} onPress={(e) => e.stopPropagation()}>
+          <View style={rh.header}>
+            <Text style={rh.title}>Run History</Text>
+            <Pressable onPress={onClose} style={rh.closeBtn}>
+              <Text style={rh.closeText}>✕</Text>
+            </Pressable>
+          </View>
+          <View style={rh.divider} />
+          {loading ? (
+            <ActivityIndicator size="small" color="#555" style={{ padding: 24 }} />
+          ) : runs.length === 0 ? (
+            <Text style={rh.empty}>No runs yet</Text>
+          ) : (
+            <ScrollView showsVerticalScrollIndicator={false}>
+              {runs.map((run) => (
+                <View key={run.id} style={rh.row}>
+                  <Text style={rh.rowIcon}>{runStatusIcon(run.status)}</Text>
+                  <View style={rh.rowInfo}>
+                    <Text style={rh.rowTime}>{timeAgo(run.startedAt)}</Text>
+                    {run.outputText && (
+                      <Text style={rh.rowOutput} numberOfLines={1}>{run.outputText}</Text>
+                    )}
+                    {run.errorMessage && (
+                      <Text style={rh.rowError} numberOfLines={1}>{run.errorMessage}</Text>
+                    )}
+                  </View>
+                  <View style={rh.rowMeta}>
+                    {run.durationMs != null && (
+                      <Text style={rh.rowMetaText}>{(run.durationMs / 1000).toFixed(1)}s</Text>
+                    )}
+                    {run.estimatedCost > 0 && (
+                      <Text style={rh.rowMetaCost}>${run.estimatedCost.toFixed(4)}</Text>
+                    )}
+                  </View>
+                </View>
+              ))}
+            </ScrollView>
+          )}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+const rh = StyleSheet.create({
+  backdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  sheet: {
+    backgroundColor: '#111',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#222',
+    width: '100%',
+    maxWidth: 480,
+    maxHeight: '80%',
+    overflow: 'hidden',
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 16,
+  },
+  title: { color: '#fff', fontSize: 16, fontWeight: '800' },
+  closeBtn: { padding: 4 },
+  closeText: { color: '#555', fontSize: 16 },
+  divider: { height: 1, backgroundColor: '#1a1a1a' },
+  empty: { color: '#555', fontSize: 12, textAlign: 'center', padding: 24, fontFamily: 'monospace' },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    padding: 10,
+    paddingHorizontal: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#0f0f0f',
+    gap: 10,
+  },
+  rowIcon: { fontSize: 13, marginTop: 1 },
+  rowInfo: { flex: 1 },
+  rowTime: { color: '#888', fontSize: 10, fontFamily: 'monospace' },
+  rowOutput: { color: '#ccc', fontSize: 11, marginTop: 2 },
+  rowError: { color: '#ef4444', fontSize: 11, marginTop: 2 },
+  rowMeta: { alignItems: 'flex-end', gap: 2 },
+  rowMetaText: { color: '#555', fontSize: 10, fontFamily: 'monospace' },
+  rowMetaCost: { color: '#f59e0b', fontSize: 10, fontFamily: 'monospace' },
+});
+
+// ─── Trigger Picker Modal ─────────────────────────────────────────────────────
+
+function TriggerPickerModal({
+  onSelect,
+  onClose,
+}: {
+  onSelect: (trigger: TriggerOption) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState('');
+
+  const filtered = useMemo(() => {
+    if (!query.trim()) return TRIGGER_CATALOG;
+    const q = query.toLowerCase();
+    return TRIGGER_CATALOG
+      .map((group) => ({
+        ...group,
+        items: group.items.filter(
+          (t) => t.label.toLowerCase().includes(q) || t.description.toLowerCase().includes(q),
+        ),
+      }))
+      .filter((g) => g.items.length > 0);
+  }, [query]);
+
+  return (
+    <Modal transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={tp.backdrop} onPress={onClose}>
+        <Pressable style={tp.sheet} onPress={(e) => e.stopPropagation()}>
+          <View style={tp.searchRow}>
+            <Text style={tp.searchIcon}>🔍</Text>
+            <TextInput
+              style={tp.searchInput}
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Search triggers..."
+              placeholderTextColor="#555"
+              autoFocus
+            />
+            <Pressable onPress={onClose} style={tp.closeBtn}>
+              <Text style={tp.closeText}>✕</Text>
+            </Pressable>
+          </View>
+          <ScrollView showsVerticalScrollIndicator={false} style={tp.scroll}>
+            {filtered.map((group) => (
+              <View key={group.category}>
+                <View style={tp.groupHeader}>
+                  <Text style={tp.groupIcon}>{group.icon}</Text>
+                  <Text style={tp.groupLabel}>{group.category}</Text>
+                </View>
+                {group.items.map((item) => (
+                  <Pressable
+                    key={item.id}
+                    onPress={() => { onSelect(item); onClose(); }}
+                    style={[tp.item, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  >
+                    <Text style={tp.itemIcon}>{item.icon}</Text>
+                    <View style={tp.itemInfo}>
+                      <Text style={tp.itemLabel}>{item.label}</Text>
+                      <Text style={tp.itemDesc}>{item.description}</Text>
+                    </View>
+                    <Text style={tp.itemArrow}>›</Text>
+                  </Pressable>
+                ))}
+              </View>
+            ))}
+            {filtered.length === 0 && (
+              <Text style={tp.empty}>No triggers match "{query}"</Text>
+            )}
+          </ScrollView>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+const tp = StyleSheet.create({
+  backdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  sheet: {
+    backgroundColor: '#111',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#222',
+    width: '100%',
+    maxWidth: 420,
+    maxHeight: '80%',
+    overflow: 'hidden',
+  },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a1a',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  searchIcon: { fontSize: 14, color: '#555' },
+  searchInput: { flex: 1, color: '#fff', fontSize: 14, fontFamily: 'monospace' },
+  closeBtn: { padding: 4 },
+  closeText: { color: '#555', fontSize: 14 },
+  scroll: { flex: 1 },
+  groupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingTop: 14,
+    paddingBottom: 6,
+  },
+  groupIcon: { fontSize: 13 },
+  groupLabel: {
+    color: '#666',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
+  item: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    gap: 10,
+  },
+  itemIcon: { fontSize: 18, width: 26, textAlign: 'center' },
+  itemInfo: { flex: 1 },
+  itemLabel: { color: '#e5e5e5', fontSize: 13, fontWeight: '600' },
+  itemDesc: { color: '#555', fontSize: 11, marginTop: 1 },
+  itemArrow: { color: '#444', fontSize: 16 },
+  empty: { color: '#555', fontSize: 12, fontFamily: 'monospace', textAlign: 'center', padding: 24 },
+});
+
+// ─── Model Picker Modal ───────────────────────────────────────────────────────
+
+function ModelPickerModal({
+  selected,
+  onSelect,
+  onClose,
+}: {
+  selected: string;
+  onSelect: (v: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={mp.backdrop} onPress={onClose}>
+        <Pressable style={mp.sheet} onPress={(e) => e.stopPropagation()}>
+          <Text style={mp.title}>Select Model</Text>
+          {MODEL_OPTIONS.map((opt) => {
+            const active = selected === opt.value;
+            return (
+              <Pressable
+                key={opt.value}
+                onPress={() => { onSelect(opt.value); onClose(); }}
+                style={[mp.item, active && { borderColor: opt.color, backgroundColor: opt.color + '15' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              >
+                <View style={[mp.dot, { backgroundColor: opt.color }]} />
+                <View style={mp.itemInfo}>
+                  <Text style={[mp.itemLabel, active && { color: opt.color }]}>{opt.label}</Text>
+                  <Text style={mp.itemSub}>{opt.sub}</Text>
+                </View>
+                {active && <Text style={[mp.check, { color: opt.color }]}>✓</Text>}
+              </Pressable>
+            );
+          })}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+const mp = StyleSheet.create({
+  backdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  sheet: {
+    backgroundColor: '#111',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#222',
+    width: '100%',
+    maxWidth: 320,
+    padding: 16,
+  },
+  title: {
+    color: '#888',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginBottom: 10,
+  },
+  item: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#222',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 6,
+    gap: 10,
+  },
+  dot: { width: 8, height: 8, borderRadius: 4 },
+  itemInfo: { flex: 1 },
+  itemLabel: { color: '#e5e5e5', fontSize: 13, fontWeight: '700' },
+  itemSub: { color: '#555', fontSize: 11, marginTop: 2 },
+  check: { fontSize: 16 },
+});
+
+// ─── Memory Notes Modal ───────────────────────────────────────────────────────
+
+function MemoryNotesModal({
+  automationId,
+  automationName,
+  circleId,
+  onClose,
+  accentColor,
+}: {
+  automationId: string | null;
+  automationName: string;
+  circleId: string;
+  onClose: () => void;
+  accentColor: string;
+}) {
+  const { notes, isLoading, refresh } = useMemoryNotes(automationId);
+  const [editingNote, setEditingNote] = useState<MemoryNote | null>(null);
+  const [showNew, setShowNew] = useState(false);
+
+  return (
+    <Modal transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={mn.backdrop} onPress={onClose}>
+        <Pressable style={mn.sheet} onPress={(e) => e.stopPropagation()}>
+          <View style={mn.header}>
+            <View>
+              <Text style={mn.title}>Memory Notes</Text>
+              <Text style={mn.subtitle}>Context injected into AI prompts when this automation runs</Text>
+            </View>
+            <Pressable onPress={onClose} style={mn.closeBtn}>
+              <Text style={mn.closeText}>✕</Text>
+            </Pressable>
+          </View>
+          <View style={mn.divider} />
+
+          {!automationId ? (
+            <View style={mn.unsaved}>
+              <Text style={mn.unsavedIcon}>💾</Text>
+              <Text style={mn.unsavedText}>Save this automation to enable and configure memory notes.</Text>
+            </View>
+          ) : isLoading ? (
+            <ActivityIndicator size="small" color="#555" style={{ padding: 24 }} />
+          ) : (
+            <ScrollView style={mn.scroll} showsVerticalScrollIndicator={false}>
+              {notes.length === 0 && !showNew && (
+                <View style={mn.empty}>
+                  <Text style={mn.emptyIcon}>🧠</Text>
+                  <Text style={mn.emptyText}>No memory notes yet</Text>
+                  <Text style={mn.emptySubtext}>Add context the AI will use every time this automation runs — project goals, team preferences, background info, etc.</Text>
+                </View>
+              )}
+              {notes.map((note) =>
+                editingNote?.id === note.id ? (
+                  <NoteEditor
+                    key={note.id}
+                    initialTitle={note.title}
+                    initialContent={note.content}
+                    accentColor={accentColor}
+                    onSave={async (title, content) => {
+                      await updateMemoryNote(note.id, { title, content });
+                      setEditingNote(null);
+                      refresh();
+                    }}
+                    onCancel={() => setEditingNote(null)}
+                  />
+                ) : (
+                  <NoteCard
+                    key={note.id}
+                    note={note}
+                    onEdit={() => setEditingNote(note)}
+                    onDelete={async () => {
+                      await deleteMemoryNote(note.id);
+                      refresh();
+                    }}
+                    accentColor={accentColor}
+                  />
+                ),
+              )}
+              {showNew && (
+                <NoteEditor
+                  accentColor={accentColor}
+                  onSave={async (title, content) => {
+                    if (automationId) {
+                      await createMemoryNote(automationId, circleId, title, content);
+                      refresh();
+                    }
+                    setShowNew(false);
+                  }}
+                  onCancel={() => setShowNew(false)}
+                />
+              )}
+              {!showNew && (
+                <Pressable
+                  onPress={() => setShowNew(true)}
+                  style={[mn.addNoteBtn, { borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <Text style={[mn.addNoteBtnText, { color: accentColor }]}>+ Add Memory Note</Text>
+                </Pressable>
+              )}
+            </ScrollView>
+          )}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+function NoteCard({
+  note, onEdit, onDelete, accentColor,
+}: { note: MemoryNote; onEdit: () => void; onDelete: () => void; accentColor: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <View style={mn.noteCard}>
+      <Pressable
+        onPress={() => setExpanded(!expanded)}
+        style={[mn.noteHeader, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+      >
+        <Text style={mn.noteIcon}>📝</Text>
+        <Text style={mn.noteTitle} numberOfLines={1}>{note.title}</Text>
+        <Text style={mn.noteChevron}>{expanded ? '▲' : '▼'}</Text>
+      </Pressable>
+      {expanded && (
+        <View style={mn.noteBody}>
+          <Text style={mn.noteContent} selectable>{note.content || '(empty)'}</Text>
+          <View style={mn.noteActions}>
+            <Pressable onPress={onEdit} style={[mn.noteActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+              <Text style={[mn.noteActionText, { color: accentColor }]}>✏️ Edit</Text>
+            </Pressable>
+            <Pressable onPress={onDelete} style={[mn.noteActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+              <Text style={[mn.noteActionText, { color: '#ef4444' }]}>🗑 Delete</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+}
+
+function NoteEditor({
+  initialTitle = '',
+  initialContent = '',
+  onSave,
+  onCancel,
+  accentColor,
+}: {
+  initialTitle?: string;
+  initialContent?: string;
+  onSave: (title: string, content: string) => Promise<void>;
+  onCancel: () => void;
+  accentColor: string;
+}) {
+  const [title, setTitle] = useState(initialTitle);
+  const [content, setContent] = useState(initialContent);
+  const [saving, setSaving] = useState(false);
+
+  return (
+    <View style={mn.editor}>
+      <TextInput
+        style={mn.editorTitle}
+        value={title}
+        onChangeText={setTitle}
+        placeholder="Note title (e.g. Team Context, Project Goals)"
+        placeholderTextColor="#444"
+      />
+      <TextInput
+        style={mn.editorContent}
+        value={content}
+        onChangeText={setContent}
+        placeholder="Write context the AI should always know when running this automation..."
+        placeholderTextColor="#444"
+        multiline
+        numberOfLines={5}
+        textAlignVertical="top"
+      />
+      <View style={mn.editorActions}>
+        <Pressable
+          onPress={onCancel}
+          style={[mn.editorCancelBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        >
+          <Text style={mn.editorCancelText}>Cancel</Text>
+        </Pressable>
+        <Pressable
+          onPress={async () => {
+            if (!title.trim()) return;
+            setSaving(true);
+            await onSave(title, content);
+            setSaving(false);
+          }}
+          disabled={saving || !title.trim()}
+          style={[
+            mn.editorSaveBtn,
+            { backgroundColor: accentColor, opacity: (saving || !title.trim()) ? 0.5 : 1 },
+            Platform.OS === 'web' && { cursor: 'pointer' } as any,
+          ]}
+        >
+          {saving ? <ActivityIndicator size="small" color="#fff" /> : <Text style={mn.editorSaveText}>Save</Text>}
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+const mn = StyleSheet.create({
+  backdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  sheet: {
+    backgroundColor: '#111',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#222',
+    width: '100%',
+    maxWidth: 480,
+    maxHeight: '85%',
+    overflow: 'hidden',
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    padding: 20,
+    paddingBottom: 14,
+  },
+  title: { color: '#fff', fontSize: 16, fontWeight: '800' },
+  subtitle: { color: '#555', fontSize: 11, marginTop: 3 },
+  closeBtn: { padding: 4 },
+  closeText: { color: '#555', fontSize: 16 },
+  divider: { height: 1, backgroundColor: '#1a1a1a' },
+  scroll: { maxHeight: 480 },
+  unsaved: { alignItems: 'center', padding: 32, gap: 10 },
+  unsavedIcon: { fontSize: 32 },
+  unsavedText: { color: '#666', fontSize: 13, textAlign: 'center' },
+  empty: { alignItems: 'center', padding: 24, gap: 8 },
+  emptyIcon: { fontSize: 28 },
+  emptyText: { color: '#888', fontSize: 14, fontWeight: '700' },
+  emptySubtext: { color: '#555', fontSize: 12, textAlign: 'center', lineHeight: 18 },
+  addNoteBtn: {
+    margin: 16,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  addNoteBtnText: { fontSize: 13, fontWeight: '700' },
+  noteCard: {
+    marginHorizontal: 16,
+    marginTop: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1e1e1e',
+    backgroundColor: '#0d0d0d',
+    overflow: 'hidden',
+  },
+  noteHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    gap: 8,
+  },
+  noteIcon: { fontSize: 14 },
+  noteTitle: { flex: 1, color: '#e5e5e5', fontSize: 13, fontWeight: '600' },
+  noteChevron: { color: '#444', fontSize: 10 },
+  noteBody: { paddingHorizontal: 12, paddingBottom: 12 },
+  noteContent: { color: '#888', fontSize: 12, lineHeight: 18, fontFamily: 'monospace' },
+  noteActions: { flexDirection: 'row', gap: 12, marginTop: 10 },
+  noteActionBtn: {},
+  noteActionText: { fontSize: 12, fontWeight: '600' },
+  editor: {
+    margin: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    backgroundColor: '#0d0d0d',
+    overflow: 'hidden',
+    padding: 12,
+    gap: 8,
+  },
+  editorTitle: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e1e1e',
+    paddingBottom: 8,
+  },
+  editorContent: { color: '#ccc', fontSize: 12, fontFamily: 'monospace', minHeight: 80, lineHeight: 18 },
+  editorActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8, marginTop: 4 },
+  editorCancelBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  editorCancelText: { color: '#777', fontSize: 12 },
+  editorSaveBtn: { paddingHorizontal: 16, paddingVertical: 6, borderRadius: 6 },
+  editorSaveText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+});
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: Props) {
   const { automations, isLoading, refresh } = useCircleAutomations(circleId);
-  const [collapsed, setCollapsed] = useState(false);
+  const { stats, refreshStats } = useAutomationStats(circleId);
+
+  // Auth
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setCurrentUserId(data.user?.id ?? null));
+  }, []);
+
+  // Filter state
+  const [activeTab, setActiveTab] = useState<'mine' | 'all'>('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showSearch, setShowSearch] = useState(false);
+  const searchRef = useRef<TextInput>(null);
+
+  // Modal state
   const [showCreate, setShowCreate] = useState(false);
+  const [editingAutomation, setEditingAutomation] = useState<CircleAutomation | null>(null);
+  const [duplicatingAutomation, setDuplicatingAutomation] = useState<CircleAutomation | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [triggeringId, setTriggeringId] = useState<string | null>(null);
+  const [memoryNotesFor, setMemoryNotesFor] = useState<CircleAutomation | null>(null);
+  const [showRunHistory, setShowRunHistory] = useState(false);
+
+  // Pre-fill for quick create
+  const [quickPrompt, setQuickPrompt] = useState('');
+  const [quickTrigger, setQuickTrigger] = useState<TriggerOption | null>(null);
+  // Pre-fill for suggested template apply
+  const [applyingTemplate, setApplyingTemplate] = useState<AutomationTemplate | null>(null);
+
+  // Filtered automations
+  const filteredAutomations = useMemo(() => {
+    let list = automations;
+    if (activeTab === 'mine' && currentUserId) {
+      list = list.filter((a) => a.createdBy === currentUserId);
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      list = list.filter(
+        (a) =>
+          a.name.toLowerCase().includes(q) ||
+          (a.description ?? '').toLowerCase().includes(q),
+      );
+    }
+    return list;
+  }, [automations, activeTab, currentUserId, searchQuery]);
 
   const handleToggle = useCallback(async (id: string, enabled: boolean) => {
     await toggleAutomation(id, enabled);
@@ -107,109 +1170,223 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
     setTriggeringId(id);
     await triggerAutomation(id, circleId);
     setTriggeringId(null);
-    // Refresh will happen via realtime
   }, [circleId]);
 
   const handleDelete = useCallback(async (id: string) => {
     await deleteAutomation(id);
   }, []);
 
+  const handleQuickCreate = (prompt: string, trigger: TriggerOption | null) => {
+    setQuickPrompt(prompt);
+    setQuickTrigger(trigger);
+    setShowCreate(true);
+  };
+
+  const handleApplySuggested = (template: AutomationTemplate) => {
+    setApplyingTemplate(template);
+    setShowCreate(true);
+  };
+
+  const closeForm = () => {
+    setShowCreate(false);
+    setEditingAutomation(null);
+    setDuplicatingAutomation(null);
+    setApplyingTemplate(null);
+    setQuickPrompt('');
+    setQuickTrigger(null);
+  };
+
+  const onSaved = () => {
+    closeForm();
+    refresh();
+    refreshStats();
+  };
+
   if (isLoading) {
     return (
       <View style={s.container}>
-        <ActivityIndicator size="small" color="#555" />
+        <ActivityIndicator size="small" color="#555" style={{ margin: 24 }} />
       </View>
     );
   }
 
   return (
     <View style={s.container}>
-      {/* Header */}
-      <Pressable
-        onPress={() => setCollapsed(!collapsed)}
-        style={[s.header, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-      >
-        <Text style={s.headerIcon}>⚡</Text>
-        <Text style={s.headerLabel}>AUTOMATIONS</Text>
-        {automations.length > 0 && (
-          <View style={[s.countBadge, { backgroundColor: accentColor + '30' }]}>
-            <Text style={[s.countText, { color: accentColor }]}>{automations.length}</Text>
-          </View>
-        )}
-        <View style={{ flex: 1 }} />
-        {!collapsed && (
-          <Pressable
-            onPress={(e) => { e.stopPropagation(); setShowCreate(true); }}
-            style={[s.addBtn, { borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          >
-            <Text style={[s.addBtnText, { color: accentColor }]}>+ NEW</Text>
-          </Pressable>
-        )}
-        <Text style={s.chevron}>{collapsed ? '▶' : '▼'}</Text>
-      </Pressable>
+      {/* Page title */}
+      <Text style={s.pageTitle}>Automations</Text>
 
-      {!collapsed && (
-        <View style={s.body}>
-          {automations.length === 0 ? (
-            <View style={s.empty}>
-              <Text style={s.emptyText}>No automations yet</Text>
-              <Text style={s.emptySubtext}>Create one from a template or build your own</Text>
-              <Pressable
-                onPress={() => setShowCreate(true)}
-                style={[s.emptyBtn, { backgroundColor: accentColor }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              >
-                <Text style={s.emptyBtnText}>Create Automation</Text>
-              </Pressable>
-            </View>
+      {/* Stats bar */}
+      <StatsDashboard
+        circleId={circleId}
+        automationCount={automations.length}
+        accentColor={accentColor}
+        onRunHistory={() => setShowRunHistory(true)}
+      />
+
+      {/* Quick create bar */}
+      <QuickCreateBar onSubmit={handleQuickCreate} accentColor={accentColor} />
+
+      {/* Filter row: Mine / All + search + New */}
+      <View style={s.filterRow}>
+        <View style={s.tabs}>
+          {(['mine', 'all'] as const).map((tab) => (
+            <Pressable
+              key={tab}
+              onPress={() => setActiveTab(tab)}
+              style={[
+                s.tab,
+                activeTab === tab && { backgroundColor: '#fff' },
+                Platform.OS === 'web' && { cursor: 'pointer' } as any,
+              ]}
+            >
+              <Text style={[s.tabText, activeTab === tab && { color: '#000' }]}>
+                {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <View style={s.filterRight}>
+          {showSearch ? (
+            <TextInput
+              ref={searchRef}
+              style={s.searchInput}
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              placeholder="Search..."
+              placeholderTextColor="#555"
+              autoFocus
+              onBlur={() => { if (!searchQuery) setShowSearch(false); }}
+            />
           ) : (
-            automations.map((auto) => (
-              <AutomationCard
-                key={auto.id}
-                automation={auto}
-                expanded={expandedId === auto.id}
-                onToggle={handleToggle}
-                onTrigger={handleTrigger}
-                onDelete={handleDelete}
-                onExpand={() => setExpandedId(expandedId === auto.id ? null : auto.id)}
-                triggering={triggeringId === auto.id}
-                accentColor={accentColor}
-              />
-            ))
+            <Pressable
+              onPress={() => { setShowSearch(true); setTimeout(() => searchRef.current?.focus(), 50); }}
+              style={[s.iconBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={s.iconBtnText}>🔍</Text>
+            </Pressable>
           )}
+          <Pressable
+            onPress={() => setShowCreate(true)}
+            style={[s.newBtn, { backgroundColor: '#fff' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={s.newBtnText}>+ New</Text>
+          </Pressable>
+        </View>
+      </View>
+
+      {/* Automation list OR empty state */}
+      {filteredAutomations.length === 0 ? (
+        <View style={s.emptyState}>
+          <Text style={s.emptyTitle}>No Automations Yet</Text>
+          <Text style={s.emptySubtitle}>
+            Run agents on a schedule or automatically in response to events.
+          </Text>
+          <Pressable
+            onPress={() => setShowCreate(true)}
+            style={[s.emptyBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={s.emptyBtnText}>Create Automation</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <View style={s.list}>
+          {filteredAutomations.map((auto) => (
+            <AutomationCard
+              key={auto.id}
+              automation={auto}
+              stats={stats[auto.id]}
+              expanded={expandedId === auto.id}
+              triggering={triggeringId === auto.id}
+              accentColor={accentColor}
+              onToggle={handleToggle}
+              onTrigger={handleTrigger}
+              onDelete={handleDelete}
+              onEdit={() => setEditingAutomation(auto)}
+              onDuplicate={() => setDuplicatingAutomation(auto)}
+              onExpand={() => setExpandedId(expandedId === auto.id ? null : auto.id)}
+              onMemoryNotes={() => setMemoryNotesFor(auto)}
+            />
+          ))}
         </View>
       )}
 
-      {showCreate && (
-        <CreateAutomationModal
+      {/* Suggested templates (always shown below list) */}
+      <SuggestedSection onApply={handleApplySuggested} accentColor={accentColor} />
+
+      {/* ── Modals ── */}
+
+      {(showCreate || editingAutomation || duplicatingAutomation) && (
+        <AutomationFormModal
           circleId={circleId}
           accentColor={accentColor}
-          onClose={() => setShowCreate(false)}
-          onCreated={() => { setShowCreate(false); refresh(); }}
+          editing={editingAutomation || undefined}
+          duplicating={duplicatingAutomation || undefined}
+          initialPrompt={quickPrompt || undefined}
+          initialTrigger={quickTrigger || undefined}
+          initialTemplate={applyingTemplate || undefined}
+          onClose={closeForm}
+          onSaved={onSaved}
+        />
+      )}
+
+      {memoryNotesFor && (
+        <MemoryNotesModal
+          automationId={memoryNotesFor.id}
+          automationName={memoryNotesFor.name}
+          circleId={circleId}
+          onClose={() => setMemoryNotesFor(null)}
+          accentColor={accentColor}
+        />
+      )}
+
+      {showRunHistory && (
+        <RunHistoryModal
+          circleId={circleId}
+          onClose={() => setShowRunHistory(false)}
         />
       )}
     </View>
   );
 }
 
-// ─── Automation Card ─────────────────────────────────────────────────────────
+// ─── Automation Card ──────────────────────────────────────────────────────────
 
 function AutomationCard({
-  automation: auto, expanded, onToggle, onTrigger, onDelete, onExpand, triggering, accentColor,
+  automation: auto,
+  stats,
+  expanded,
+  triggering,
+  accentColor,
+  onToggle,
+  onTrigger,
+  onDelete,
+  onEdit,
+  onDuplicate,
+  onExpand,
+  onMemoryNotes,
 }: {
   automation: CircleAutomation;
+  stats?: AutomationStats;
   expanded: boolean;
+  triggering: boolean;
+  accentColor: string;
   onToggle: (id: string, enabled: boolean) => void;
   onTrigger: (id: string) => void;
   onDelete: (id: string) => void;
+  onEdit: () => void;
+  onDuplicate: () => void;
   onExpand: () => void;
-  triggering: boolean;
-  accentColor: string;
+  onMemoryNotes: () => void;
 }) {
-  const trigger = TRIGGER_LABELS[auto.triggerType];
+  const trigger = TRIGGER_LABELS[auto.triggerType] ?? TRIGGER_LABELS.manual;
 
   return (
     <View style={s.card}>
-      <Pressable onPress={onExpand} style={[s.cardHeader, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+      <Pressable
+        onPress={onExpand}
+        style={[s.cardHeader, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+      >
         <Text style={s.cardIcon}>{auto.icon}</Text>
         <View style={s.cardInfo}>
           <Text style={s.cardName} numberOfLines={1}>{auto.name}</Text>
@@ -220,12 +1397,45 @@ function AutomationCard({
             {auto.cronExpression && (
               <Text style={s.cardMetaText}>{auto.cronExpression}</Text>
             )}
+            {auto.eventConfig?.provider && (
+              <Text style={s.cardMetaText}>{auto.eventConfig.provider}</Text>
+            )}
             <Text style={s.cardMetaText}>·</Text>
             <Text style={s.cardMetaText}>Last: {timeAgo(auto.lastRunAt)}</Text>
             {auto.runCount > 0 && (
               <Text style={s.cardMetaText}>· {auto.runCount} runs</Text>
             )}
           </View>
+          {stats && stats.totalRuns > 0 && (
+            <View style={s.statsRow}>
+              <Text
+                style={[
+                  s.statText,
+                  {
+                    color:
+                      stats.successRate >= 80
+                        ? '#22c55e'
+                        : stats.successRate >= 50
+                        ? '#f59e0b'
+                        : '#ef4444',
+                  },
+                ]}
+              >
+                {stats.successRate}% ok
+              </Text>
+              <Text style={s.statText}>
+                {stats.avgDurationMs < 1000
+                  ? `${stats.avgDurationMs}ms`
+                  : `${(stats.avgDurationMs / 1000).toFixed(1)}s`}{' '}
+                avg
+              </Text>
+              {stats.totalCost > 0 && (
+                <Text style={[s.statText, { color: '#f59e0b' }]}>
+                  ${stats.totalCost < 0.01 ? stats.totalCost.toFixed(4) : stats.totalCost.toFixed(2)}
+                </Text>
+              )}
+            </View>
+          )}
         </View>
         <Switch
           value={auto.enabled}
@@ -246,7 +1456,7 @@ function AutomationCard({
         <Text style={s.nextRun}>Next: {timeUntil(auto.nextRunAt)}</Text>
       )}
 
-      {/* Action buttons */}
+      {/* Actions */}
       <View style={s.cardActions}>
         <Pressable
           onPress={() => onTrigger(auto.id)}
@@ -256,20 +1466,23 @@ function AutomationCard({
           {triggering ? (
             <ActivityIndicator size="small" color="#22c55e" />
           ) : (
-            <Text style={s.runBtnText}>▶ Run Now</Text>
+            <Text style={s.runBtnText}>▶ Run</Text>
           )}
         </Pressable>
-        <Pressable
-          onPress={onExpand}
-          style={[s.historyBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-        >
-          <Text style={s.historyBtnText}>{expanded ? '▲ Hide' : '▼ History'}</Text>
+        <Pressable onPress={onEdit} style={[s.actionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+          <Text style={s.actionBtnText}>✏️</Text>
+        </Pressable>
+        <Pressable onPress={onMemoryNotes} style={[s.memoryBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+          <Text style={s.memoryBtnText}>🧠 Memory</Text>
+        </Pressable>
+        <Pressable onPress={onDuplicate} style={[s.actionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+          <Text style={s.actionBtnText}>📋</Text>
+        </Pressable>
+        <Pressable onPress={onExpand} style={[s.historyBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+          <Text style={s.historyBtnText}>{expanded ? '▲' : '▼ Log'}</Text>
         </Pressable>
         <View style={{ flex: 1 }} />
-        <Pressable
-          onPress={() => onDelete(auto.id)}
-          style={[s.deleteBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-        >
+        <Pressable onPress={() => onDelete(auto.id)} style={[s.deleteBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
           <Text style={s.deleteBtnText}>✕</Text>
         </Pressable>
       </View>
@@ -279,18 +1492,13 @@ function AutomationCard({
   );
 }
 
-// ─── Run History (expandable) ────────────────────────────────────────────────
+// ─── Run History (expandable) ─────────────────────────────────────────────────
 
 function RunHistory({ automationId }: { automationId: string }) {
   const { runs, isLoading } = useAutomationRuns(automationId);
 
-  if (isLoading) {
-    return <ActivityIndicator size="small" color="#555" style={{ padding: 8 }} />;
-  }
-
-  if (runs.length === 0) {
-    return <Text style={s.noRuns}>No runs yet</Text>;
-  }
+  if (isLoading) return <ActivityIndicator size="small" color="#555" style={{ padding: 8 }} />;
+  if (runs.length === 0) return <Text style={s.noRuns}>No runs yet</Text>;
 
   return (
     <View style={s.runsList}>
@@ -340,45 +1548,126 @@ function RunRow({ run }: { run: AutomationRun }) {
   );
 }
 
-// ─── Create Automation Modal ─────────────────────────────────────────────────
+// ─── Automation Form Modal ────────────────────────────────────────────────────
 
-function CreateAutomationModal({
-  circleId, accentColor, onClose, onCreated,
+function AutomationFormModal({
+  circleId,
+  accentColor,
+  onClose,
+  onSaved,
+  editing,
+  duplicating,
+  initialPrompt,
+  initialTrigger,
+  initialTemplate,
 }: {
   circleId: string;
   accentColor: string;
   onClose: () => void;
-  onCreated: () => void;
+  onSaved: () => void;
+  editing?: CircleAutomation;
+  duplicating?: CircleAutomation;
+  initialPrompt?: string;
+  initialTrigger?: TriggerOption;
+  initialTemplate?: AutomationTemplate;
 }) {
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [icon, setIcon] = useState('⚡');
-  const [triggerType, setTriggerType] = useState<TriggerType>('schedule');
-  const [cronExpression, setCronExpression] = useState('daily');
-  const [eventTable, setEventTable] = useState('check_ins');
-  const [prompt, setPrompt] = useState('');
-  const [model, setModel] = useState('claude-haiku');
-  const [outputTarget, setOutputTarget] = useState<OutputTarget>('chat');
-  const [includeContext, setIncludeContext] = useState({ members: true, check_ins: true, tasks: true, streaks: true, analytics: false });
+  const prefill = editing || duplicating;
+  const isEdit = !!editing;
+
+  // Build initial trigger ID from existing automation
+  const initialTriggerId = useMemo<string | null>(() => {
+    if (!prefill) return null;
+    if (prefill.triggerType === 'schedule' && prefill.cronExpression) return `schedule:${prefill.cronExpression}`;
+    if (prefill.triggerType === 'event' && prefill.eventConfig?.table) return `event:${prefill.eventConfig.table}`;
+    if (prefill.triggerType === 'manual') return 'manual:run';
+    if (prefill.triggerType === 'webhook' && prefill.eventConfig?.provider && prefill.eventConfig?.event)
+      return `webhook:${prefill.eventConfig.provider}:${prefill.eventConfig.event}`;
+    return null;
+  }, [prefill]);
+
+  const resolveInitialTrigger = (): TriggerOption | null => {
+    if (initialTrigger) return initialTrigger;
+    if (initialTemplate) {
+      if (initialTemplate.trigger_type === 'schedule' && initialTemplate.cron_expression)
+        return getTriggerById(`schedule:${initialTemplate.cron_expression}`) ?? null;
+      if (initialTemplate.trigger_type === 'event' && initialTemplate.event_config?.table)
+        return getTriggerById(`event:${initialTemplate.event_config.table}`) ?? null;
+      if (initialTemplate.trigger_type === 'manual') return getTriggerById('manual:run') ?? null;
+      if (initialTemplate.trigger_type === 'webhook' && initialTemplate.webhook_config)
+        return getTriggerById(`webhook:${initialTemplate.webhook_config.provider}:${initialTemplate.webhook_config.event}`) ?? null;
+    }
+    if (initialTriggerId) return getTriggerById(initialTriggerId) ?? null;
+    return null;
+  };
+
+  const [selectedTrigger, setSelectedTrigger] = useState<TriggerOption | null>(resolveInitialTrigger);
+  const [showTriggerPicker, setShowTriggerPicker] = useState(false);
+  const [showModelPicker, setShowModelPicker] = useState(false);
+  const [showMemoryNotes, setShowMemoryNotes] = useState(false);
+  const [savedId, setSavedId] = useState<string | null>(isEdit ? (editing?.id ?? null) : null);
+
+  const [name, setName] = useState(
+    initialTemplate?.name ??
+    (prefill ? (duplicating ? `${prefill.name} (copy)` : prefill.name) : ''),
+  );
+  const [description, setDescription] = useState(
+    initialTemplate?.description ?? prefill?.description ?? '',
+  );
+  const [icon, setIcon] = useState(initialTemplate?.icon ?? prefill?.icon ?? '⚡');
+  const [prompt, setPrompt] = useState(
+    initialTemplate?.prompt ?? initialPrompt ?? prefill?.prompt ?? '',
+  );
+  const [model, setModel] = useState(
+    initialTemplate?.model ?? prefill?.model ?? 'claude-haiku',
+  );
+  const [outputTarget, setOutputTarget] = useState<OutputTarget>(
+    (initialTemplate?.output_target as OutputTarget | undefined) ?? prefill?.outputTarget ?? 'chat',
+  );
+  const [includeContext, setIncludeContext] = useState<Record<string, boolean>>(
+    initialTemplate?.include_context ??
+    prefill?.includeContext ??
+    { members: true, check_ins: true, tasks: true, streaks: true, analytics: false },
+  );
+  const [templateId, setTemplateId] = useState<string | null>(
+    initialTemplate?.id ?? prefill?.templateId ?? null,
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+
+  const currentModel = MODEL_OPTIONS.find((m) => m.value === model) ?? MODEL_OPTIONS[0];
 
   const applyTemplate = (t: AutomationTemplate) => {
-    setSelectedTemplateId(t.id);
+    setTemplateId(t.id);
     setName(t.name);
     setDescription(t.description);
     setIcon(t.icon);
-    setTriggerType(t.trigger_type);
-    if (t.cron_expression) setCronExpression(t.cron_expression);
-    if (t.event_config?.table) setEventTable(t.event_config.table);
     setPrompt(t.prompt);
     setModel(t.model);
-    setOutputTarget(t.output_target);
-    setIncludeContext(t.include_context as any);
+    setOutputTarget(t.output_target as OutputTarget);
+    setIncludeContext(t.include_context);
+
+    if (t.trigger_type === 'schedule' && t.cron_expression)
+      setSelectedTrigger(getTriggerById(`schedule:${t.cron_expression}`) ?? null);
+    else if (t.trigger_type === 'event' && t.event_config?.table)
+      setSelectedTrigger(getTriggerById(`event:${t.event_config.table}`) ?? null);
+    else if (t.trigger_type === 'manual')
+      setSelectedTrigger(getTriggerById('manual:run') ?? null);
+    else if (t.trigger_type === 'webhook' && t.webhook_config)
+      setSelectedTrigger(getTriggerById(`webhook:${t.webhook_config.provider}:${t.webhook_config.event}`) ?? null);
   };
 
-  const handleCreate = async () => {
+  const buildTriggerPayload = () => {
+    const triggerType: TriggerType = selectedTrigger?.triggerType ?? 'manual';
+    const cronExpression = selectedTrigger?.cronExpression;
+    const eventConfig = selectedTrigger?.eventTable
+      ? { table: selectedTrigger.eventTable, event: 'INSERT' }
+      : selectedTrigger?.webhookProvider
+      ? { provider: selectedTrigger.webhookProvider, event: selectedTrigger.webhookEvent }
+      : undefined;
+    return { triggerType, cronExpression, eventConfig };
+  };
+
+  const handleSave = async () => {
     if (!name.trim() || !prompt.trim()) {
       setError('Name and prompt are required');
       return;
@@ -386,138 +1675,135 @@ function CreateAutomationModal({
     setSaving(true);
     setError('');
 
-    const input: CreateAutomationInput = {
-      circleId,
-      name: name.trim(),
-      description: description.trim() || undefined,
-      icon,
-      triggerType,
-      cronExpression: triggerType === 'schedule' ? cronExpression : undefined,
-      eventConfig: triggerType === 'event' ? { table: eventTable, event: 'INSERT' } : undefined,
-      prompt: prompt.trim(),
-      model,
-      includeContext,
-      outputTarget,
-      templateId: selectedTemplateId || undefined,
-    };
+    const { triggerType, cronExpression, eventConfig } = buildTriggerPayload();
 
-    const result = await createAutomation(input);
-    setSaving(false);
-
-    if (result.error) {
-      setError(result.error);
+    if (isEdit && editing) {
+      const result = await updateAutomation(editing.id, {
+        name: name.trim(),
+        description: description.trim(),
+        icon,
+        prompt: prompt.trim(),
+        model,
+        cronExpression,
+        eventConfig,
+        includeContext,
+        outputTarget,
+      });
+      setSaving(false);
+      if (result.error) { setError(result.error); return; }
+      onSaved();
     } else {
-      onCreated();
+      const input: CreateAutomationInput = {
+        circleId,
+        name: name.trim(),
+        description: description.trim() || undefined,
+        icon,
+        triggerType,
+        cronExpression,
+        eventConfig,
+        prompt: prompt.trim(),
+        model,
+        includeContext,
+        outputTarget,
+        templateId: templateId || undefined,
+      };
+      const result = await createAutomation(input);
+      setSaving(false);
+      if (result.error) { setError(result.error); return; }
+      setSavedId(result.automation?.id ?? null);
+      onSaved();
     }
   };
 
   return (
     <Modal transparent animationType="fade" onRequestClose={onClose}>
-      <Pressable style={s.modalBackdrop} onPress={onClose}>
-        <Pressable style={s.modalContent} onPress={(e) => e.stopPropagation()}>
+      <Pressable style={f.backdrop} onPress={onClose}>
+        <Pressable style={f.sheet} onPress={(e) => e.stopPropagation()}>
           <ScrollView showsVerticalScrollIndicator={false}>
-            <Text style={s.modalTitle}>Create Automation</Text>
 
-            {/* Template Gallery */}
-            <Text style={s.sectionLabel}>TEMPLATES</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.templateScroll}>
+            {/* Header */}
+            <View style={f.headerRow}>
+              <Text style={f.title}>{isEdit ? 'Edit Automation' : 'New Automation'}</Text>
+              <Pressable
+                onPress={() => setShowMemoryNotes(true)}
+                style={[f.memoryHeaderBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              >
+                <Text style={f.memoryHeaderText}>🧠 Memory</Text>
+              </Pressable>
+            </View>
+
+            {/* Template gallery */}
+            <Text style={f.label}>TEMPLATES</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={f.templateScroll}>
               {AUTOMATION_TEMPLATES.map((t) => (
                 <Pressable
                   key={t.id}
                   onPress={() => applyTemplate(t)}
                   style={[
-                    s.templateChip,
-                    selectedTemplateId === t.id && { borderColor: accentColor, backgroundColor: accentColor + '15' },
+                    f.templateChip,
+                    templateId === t.id && { borderColor: accentColor, backgroundColor: accentColor + '15' },
                     Platform.OS === 'web' && { cursor: 'pointer' } as any,
                   ]}
                 >
-                  <Text style={s.templateIcon}>{t.icon}</Text>
-                  <Text style={[s.templateName, selectedTemplateId === t.id && { color: accentColor }]}>{t.name}</Text>
+                  <Text style={f.templateIcon}>{t.icon}</Text>
+                  <Text style={[f.templateName, templateId === t.id && { color: accentColor }]}>{t.name}</Text>
                 </Pressable>
               ))}
             </ScrollView>
 
             {/* Name */}
-            <Text style={s.sectionLabel}>NAME</Text>
+            <Text style={f.label}>NAME</Text>
             <TextInput
-              style={s.input}
+              style={f.input}
               value={name}
               onChangeText={setName}
               placeholder="e.g. Daily Standup Summary"
               placeholderTextColor="#555"
             />
 
-            {/* Description */}
-            <Text style={s.sectionLabel}>DESCRIPTION (optional)</Text>
-            <TextInput
-              style={s.input}
-              value={description}
-              onChangeText={setDescription}
-              placeholder="What does this automation do?"
-              placeholderTextColor="#555"
-            />
-
-            {/* Trigger Type */}
-            <Text style={s.sectionLabel}>TRIGGER</Text>
-            <View style={s.chipRow}>
-              {(['schedule', 'event', 'manual'] as TriggerType[]).map((t) => {
-                const tl = TRIGGER_LABELS[t];
-                const sel = triggerType === t;
-                return (
+            {/* Trigger */}
+            <Text style={f.label}>TRIGGER</Text>
+            {selectedTrigger ? (
+              <View style={f.selectedTriggerRow}>
+                <View style={[f.selectedTriggerPill, { borderColor: (TRIGGER_LABELS[selectedTrigger.triggerType]?.color ?? '#6366f1') + '60' }]}>
+                  <Text style={f.selectedTriggerIcon}>{selectedTrigger.icon}</Text>
+                  <View>
+                    <Text style={[f.selectedTriggerLabel, { color: TRIGGER_LABELS[selectedTrigger.triggerType]?.color ?? '#6366f1' }]}>
+                      {selectedTrigger.label}
+                    </Text>
+                    <Text style={f.selectedTriggerCat}>{selectedTrigger.category}</Text>
+                  </View>
                   <Pressable
-                    key={t}
-                    onPress={() => setTriggerType(t)}
-                    style={[s.chip, sel && { borderColor: tl.color, backgroundColor: tl.color + '20' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                    onPress={() => setSelectedTrigger(null)}
+                    style={[f.clearTriggerBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                   >
-                    <Text style={[s.chipText, sel && { color: tl.color }]}>{tl.label}</Text>
+                    <Text style={f.clearTriggerText}>✕</Text>
                   </Pressable>
-                );
-              })}
-            </View>
-
-            {/* Schedule config */}
-            {triggerType === 'schedule' && (
-              <>
-                <Text style={s.sectionLabel}>FREQUENCY</Text>
-                <View style={s.chipRow}>
-                  {CRON_OPTIONS.map((opt) => (
-                    <Pressable
-                      key={opt.value}
-                      onPress={() => setCronExpression(opt.value)}
-                      style={[s.chip, cronExpression === opt.value && { borderColor: accentColor, backgroundColor: accentColor + '20' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                    >
-                      <Text style={[s.chipText, cronExpression === opt.value && { color: accentColor }]}>{opt.label}</Text>
-                    </Pressable>
-                  ))}
                 </View>
-              </>
-            )}
-
-            {/* Event config */}
-            {triggerType === 'event' && (
-              <>
-                <Text style={s.sectionLabel}>EVENT SOURCE</Text>
-                <View style={s.chipRow}>
-                  {EVENT_TABLE_OPTIONS.map((opt) => (
-                    <Pressable
-                      key={opt.value}
-                      onPress={() => setEventTable(opt.value)}
-                      style={[s.chip, eventTable === opt.value && { borderColor: '#f59e0b', backgroundColor: '#f59e0b20' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                    >
-                      <Text style={[s.chipText, eventTable === opt.value && { color: '#f59e0b' }]}>{opt.label}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-              </>
+                <Pressable
+                  onPress={() => setShowTriggerPicker(true)}
+                  style={[f.changeTriggerBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <Text style={f.changeTriggerText}>Change</Text>
+                </Pressable>
+              </View>
+            ) : (
+              <Pressable
+                onPress={() => setShowTriggerPicker(true)}
+                style={[f.addTriggerBtn, { borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              >
+                <Text style={[f.addTriggerPlus, { color: accentColor }]}>+</Text>
+                <Text style={[f.addTriggerText, { color: accentColor }]}>Add Trigger</Text>
+              </Pressable>
             )}
 
             {/* Prompt */}
-            <Text style={s.sectionLabel}>PROMPT</Text>
+            <Text style={f.label}>INSTRUCTIONS</Text>
             <TextInput
-              style={[s.input, s.promptInput]}
+              style={[f.input, f.promptInput]}
               value={prompt}
               onChangeText={setPrompt}
-              placeholder="What should the AI do? Use {{circle_name}}, {{member_count}}, etc."
+              placeholder="What should the AI do? Use {{circle_name}}, {{member_count}}, {{event}}, etc."
               placeholderTextColor="#555"
               multiline
               numberOfLines={5}
@@ -525,129 +1811,235 @@ function CreateAutomationModal({
             />
 
             {/* Model */}
-            <Text style={s.sectionLabel}>MODEL</Text>
-            <View style={s.chipRow}>
-              {MODEL_OPTIONS.map((opt) => (
-                <Pressable
-                  key={opt.value}
-                  onPress={() => setModel(opt.value)}
-                  style={[s.chip, model === opt.value && { borderColor: accentColor, backgroundColor: accentColor + '20' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                >
-                  <Text style={[s.chipText, model === opt.value && { color: accentColor }]}>{opt.label}</Text>
-                </Pressable>
-              ))}
-            </View>
+            <Text style={f.label}>MODEL</Text>
+            <Pressable
+              onPress={() => setShowModelPicker(true)}
+              style={[f.modelDropdown, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <View style={[f.modelDot, { backgroundColor: currentModel.color }]} />
+              <Text style={[f.modelLabel, { color: currentModel.color }]}>{currentModel.label}</Text>
+              <Text style={f.modelSub}>{currentModel.sub}</Text>
+              <View style={{ flex: 1 }} />
+              <Text style={f.modelChevron}>▾</Text>
+            </Pressable>
 
-            {/* Output Target */}
-            <Text style={s.sectionLabel}>OUTPUT</Text>
-            <View style={s.chipRow}>
+            {/* Output */}
+            <Text style={f.label}>OUTPUT</Text>
+            <View style={f.chipRow}>
               {(['chat', 'activity', 'webhook', 'silent'] as OutputTarget[]).map((t) => (
                 <Pressable
                   key={t}
                   onPress={() => setOutputTarget(t)}
-                  style={[s.chip, outputTarget === t && { borderColor: accentColor, backgroundColor: accentColor + '20' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  style={[
+                    f.chip,
+                    outputTarget === t && { borderColor: accentColor, backgroundColor: accentColor + '20' },
+                    Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                  ]}
                 >
-                  <Text style={[s.chipText, outputTarget === t && { color: accentColor }]}>{OUTPUT_LABELS[t]}</Text>
+                  <Text style={[f.chipText, outputTarget === t && { color: accentColor }]}>
+                    {OUTPUT_LABELS[t]}
+                  </Text>
                 </Pressable>
               ))}
             </View>
 
-            {/* Context toggles */}
-            <Text style={s.sectionLabel}>CONTEXT</Text>
-            <View style={s.contextToggles}>
+            {/* Context */}
+            <Text style={f.label}>CONTEXT</Text>
+            <View style={f.contextRow}>
               {(['members', 'check_ins', 'tasks', 'streaks', 'analytics'] as const).map((key) => (
                 <Pressable
                   key={key}
                   onPress={() => setIncludeContext((prev) => ({ ...prev, [key]: !prev[key] }))}
-                  style={[s.contextToggle, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  style={[f.contextToggle, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                 >
-                  <Text style={[s.contextToggleText, includeContext[key] && { color: '#22c55e' }]}>
+                  <Text style={[f.contextText, includeContext[key] && { color: '#22c55e' }]}>
                     {includeContext[key] ? '☑' : '☐'} {key.replace('_', ' ')}
                   </Text>
                 </Pressable>
               ))}
             </View>
 
-            {error ? <Text style={s.errorMsg}>{error}</Text> : null}
+            {/* Memory notes section */}
+            <View style={f.memorySection}>
+              <View style={f.memorySectionRow}>
+                <Text style={f.label}>MEMORY NOTES</Text>
+                <Pressable
+                  onPress={() => setShowMemoryNotes(true)}
+                  style={[Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <Text style={[f.memoryManageText, { color: accentColor }]}>Manage →</Text>
+                </Pressable>
+              </View>
+              <Text style={f.memorySub}>
+                {savedId
+                  ? 'View and edit memory-tool files that agents use as context.'
+                  : 'Save this automation to enable and configure memory notes.'}
+              </Text>
+            </View>
+
+            {error ? <Text style={f.errorMsg}>{error}</Text> : null}
 
             {/* Buttons */}
-            <View style={s.modalButtons}>
+            <View style={f.btnRow}>
               <Pressable
                 onPress={onClose}
-                style={[s.cancelBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                style={[f.cancelBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
               >
-                <Text style={s.cancelBtnText}>Cancel</Text>
+                <Text style={f.cancelText}>Cancel</Text>
               </Pressable>
               <Pressable
-                onPress={handleCreate}
+                onPress={handleSave}
                 disabled={saving}
-                style={[s.createBtn, { backgroundColor: accentColor, opacity: saving ? 0.6 : 1 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                style={[f.saveBtn, { backgroundColor: accentColor, opacity: saving ? 0.6 : 1 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
               >
                 {saving ? (
                   <ActivityIndicator size="small" color="#fff" />
                 ) : (
-                  <Text style={s.createBtnText}>Create</Text>
+                  <Text style={f.saveText}>{isEdit ? 'Save' : 'Create'}</Text>
                 )}
               </Pressable>
             </View>
           </ScrollView>
         </Pressable>
       </Pressable>
+
+      {showTriggerPicker && (
+        <TriggerPickerModal
+          onSelect={setSelectedTrigger}
+          onClose={() => setShowTriggerPicker(false)}
+        />
+      )}
+
+      {showModelPicker && (
+        <ModelPickerModal
+          selected={model}
+          onSelect={setModel}
+          onClose={() => setShowModelPicker(false)}
+        />
+      )}
+
+      {showMemoryNotes && (
+        <MemoryNotesModal
+          automationId={savedId}
+          automationName={name || 'New Automation'}
+          circleId={circleId}
+          onClose={() => setShowMemoryNotes(false)}
+          accentColor={accentColor}
+        />
+      )}
     </Modal>
   );
 }
 
-// ─── Styles ──────────────────────────────────────────────────────────────────
+// ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
   container: {
-    marginHorizontal: 8,
-    marginTop: 12,
-    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingTop: 16,
+    paddingBottom: 24,
   },
-  header: {
+  pageTitle: {
+    color: '#fff',
+    fontSize: 22,
+    fontWeight: '800',
+    marginBottom: 14,
+  },
+
+  // Filter row
+  filterRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 8,
-    paddingHorizontal: 4,
+    justifyContent: 'space-between',
+    marginBottom: 12,
   },
-  headerIcon: { fontSize: 14, marginRight: 6 },
-  headerLabel: {
-    color: '#6B7280',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  countBadge: {
+  tabs: {
+    flexDirection: 'row',
+    backgroundColor: '#1a1a1a',
     borderRadius: 8,
-    paddingHorizontal: 6,
-    paddingVertical: 1,
-    marginLeft: 6,
+    padding: 3,
+    gap: 2,
   },
-  countText: { fontSize: 10, fontWeight: '700', fontFamily: 'monospace' },
-  addBtn: {
-    borderWidth: 1,
+  tab: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
     borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    marginRight: 8,
   },
-  addBtnText: { fontSize: 10, fontWeight: '700', fontFamily: 'monospace' },
-  chevron: { color: '#555', fontSize: 10 },
-  body: { paddingBottom: 4 },
+  tabText: {
+    color: '#888',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  filterRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  iconBtn: {
+    width: 32,
+    height: 32,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  iconBtnText: { fontSize: 16 },
+  searchInput: {
+    color: '#fff',
+    fontSize: 13,
+    borderWidth: 1,
+    borderColor: '#333',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    width: 120,
+    fontFamily: 'monospace',
+  },
+  newBtn: {
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  newBtnText: {
+    color: '#000',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+
+  // List
+  list: { gap: 6, marginBottom: 4 },
 
   // Empty state
-  empty: { alignItems: 'center', paddingVertical: 20 },
-  emptyText: { color: '#888', fontSize: 13, fontWeight: '600' },
-  emptySubtext: { color: '#555', fontSize: 11, marginTop: 4 },
+  emptyState: {
+    backgroundColor: '#0d0d0d',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#1a1a1a',
+    padding: 32,
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  emptyTitle: {
+    color: '#e5e5e5',
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  emptySubtitle: {
+    color: '#666',
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 18,
+    maxWidth: 280,
+  },
   emptyBtn: {
-    marginTop: 12,
+    marginTop: 16,
+    backgroundColor: '#1a1a1a',
+    borderWidth: 1,
+    borderColor: '#333',
     borderRadius: 8,
-    paddingHorizontal: 16,
+    paddingHorizontal: 20,
     paddingVertical: 8,
   },
-  emptyBtnText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  emptyBtnText: { color: '#e5e5e5', fontSize: 13, fontWeight: '600' },
 
   // Card
   card: {
@@ -655,7 +2047,6 @@ const s = StyleSheet.create({
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#1a1a1a',
-    marginBottom: 6,
     overflow: 'hidden',
   },
   cardHeader: {
@@ -667,22 +2058,15 @@ const s = StyleSheet.create({
   cardIcon: { fontSize: 18 },
   cardInfo: { flex: 1 },
   cardName: { color: '#fff', fontSize: 13, fontWeight: '700' },
-  cardMeta: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3 },
+  cardMeta: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3, flexWrap: 'wrap' },
   cardMetaText: { color: '#666', fontSize: 10, fontFamily: 'monospace' },
   triggerBadge: { borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 },
   triggerText: { fontSize: 9, fontWeight: '800', fontFamily: 'monospace' },
-  errorRow: {
-    paddingHorizontal: 10,
-    paddingBottom: 4,
-  },
+  statsRow: { flexDirection: 'row', gap: 10, marginTop: 3 },
+  statText: { color: '#555', fontSize: 9, fontFamily: 'monospace' },
+  errorRow: { paddingHorizontal: 10, paddingBottom: 4 },
   errorText: { color: '#ef4444', fontSize: 10, fontFamily: 'monospace' },
-  nextRun: {
-    color: '#555',
-    fontSize: 10,
-    fontFamily: 'monospace',
-    paddingHorizontal: 10,
-    paddingBottom: 4,
-  },
+  nextRun: { color: '#555', fontSize: 10, fontFamily: 'monospace', paddingHorizontal: 10, paddingBottom: 4 },
 
   // Card actions
   cardActions: {
@@ -690,89 +2074,48 @@ const s = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 10,
     paddingBottom: 8,
-    gap: 8,
+    gap: 6,
+    flexWrap: 'wrap',
   },
-  runBtn: {
-    backgroundColor: '#22c55e15',
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
+  runBtn: { backgroundColor: '#22c55e15', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 4 },
   runBtnText: { color: '#22c55e', fontSize: 11, fontWeight: '700', fontFamily: 'monospace' },
-  historyBtn: {
-    backgroundColor: '#6366f115',
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
+  actionBtn: { backgroundColor: '#1e1e1e', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 },
+  actionBtnText: { fontSize: 12 },
+  memoryBtn: { backgroundColor: '#8b5cf615', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 },
+  memoryBtnText: { color: '#8b5cf6', fontSize: 11, fontWeight: '700', fontFamily: 'monospace' },
+  historyBtn: { backgroundColor: '#6366f115', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 },
   historyBtnText: { color: '#6366f1', fontSize: 11, fontWeight: '700', fontFamily: 'monospace' },
-  deleteBtn: {
-    padding: 4,
-  },
-  deleteBtnText: { color: '#555', fontSize: 12 },
+  deleteBtn: { padding: 4 },
+  deleteBtnText: { color: '#444', fontSize: 12 },
 
   // Run history
-  noRuns: {
-    color: '#555',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    padding: 10,
-    textAlign: 'center',
-  },
-  runsList: {
-    borderTopWidth: 1,
-    borderTopColor: '#1a1a1a',
-  },
-  runRow: {
-    borderBottomWidth: 1,
-    borderBottomColor: '#0f0f0f',
-  },
-  runRowHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 8,
-    paddingHorizontal: 10,
-    gap: 8,
-  },
+  noRuns: { color: '#555', fontSize: 11, fontFamily: 'monospace', padding: 10, textAlign: 'center' },
+  runsList: { borderTopWidth: 1, borderTopColor: '#1a1a1a' },
+  runRow: { borderBottomWidth: 1, borderBottomColor: '#0f0f0f' },
+  runRowHeader: { flexDirection: 'row', alignItems: 'center', padding: 8, paddingHorizontal: 10, gap: 8 },
   runIcon: { fontSize: 12 },
   runTime: { color: '#888', fontSize: 10, fontFamily: 'monospace' },
   runDuration: { color: '#555', fontSize: 10, fontFamily: 'monospace' },
   runTokens: { color: '#555', fontSize: 10, fontFamily: 'monospace' },
   runCost: { color: '#f59e0b', fontSize: 10, fontFamily: 'monospace' },
   runChevron: { color: '#444', fontSize: 9, marginLeft: 'auto' },
-  runDetail: {
-    paddingHorizontal: 10,
-    paddingBottom: 10,
-    backgroundColor: '#0a0a0a',
-  },
-  runOutput: {
-    color: '#ccc',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    lineHeight: 16,
-  },
-  runError: {
-    color: '#ef4444',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    marginTop: 4,
-  },
-  runMeta: {
-    color: '#444',
-    fontSize: 9,
-    fontFamily: 'monospace',
-    marginTop: 6,
-  },
+  runDetail: { paddingHorizontal: 10, paddingBottom: 10, backgroundColor: '#0a0a0a' },
+  runOutput: { color: '#ccc', fontSize: 11, fontFamily: 'monospace', lineHeight: 16 },
+  runError: { color: '#ef4444', fontSize: 11, fontFamily: 'monospace', marginTop: 4 },
+  runMeta: { color: '#444', fontSize: 9, fontFamily: 'monospace', marginTop: 6 },
+});
 
-  // Modal
-  modalBackdrop: {
+// ─── Form styles ──────────────────────────────────────────────────────────────
+
+const f = StyleSheet.create({
+  backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.7)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 16,
   },
-  modalContent: {
+  sheet: {
     backgroundColor: '#111',
     borderRadius: 16,
     borderWidth: 1,
@@ -780,15 +2123,25 @@ const s = StyleSheet.create({
     padding: 20,
     width: '100%',
     maxWidth: 500,
-    maxHeight: '90%',
+    maxHeight: '92%',
   },
-  modalTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '800',
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: 16,
   },
-  sectionLabel: {
+  title: { color: '#fff', fontSize: 18, fontWeight: '800' },
+  memoryHeaderBtn: {
+    backgroundColor: '#8b5cf615',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderWidth: 1,
+    borderColor: '#8b5cf630',
+  },
+  memoryHeaderText: { color: '#8b5cf6', fontSize: 11, fontWeight: '700' },
+  label: {
     color: '#6B7280',
     fontSize: 10,
     fontWeight: '700',
@@ -807,30 +2160,64 @@ const s = StyleSheet.create({
     padding: 10,
     fontFamily: 'monospace',
   },
-  promptInput: {
-    minHeight: 100,
-    textAlignVertical: 'top',
-  },
-  chipRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  chip: {
-    borderWidth: 1,
-    borderColor: '#333',
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-  },
-  chipText: {
-    color: '#888',
-    fontSize: 11,
-    fontWeight: '600',
-    fontFamily: 'monospace',
-  },
+  promptInput: { minHeight: 100, textAlignVertical: 'top' },
 
-  // Template chips
+  // Trigger
+  addTriggerBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  addTriggerPlus: { fontSize: 16, fontWeight: '700' },
+  addTriggerText: { fontSize: 13, fontWeight: '600' },
+  selectedTriggerRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  selectedTriggerPill: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: '#0d0d0d',
+  },
+  selectedTriggerIcon: { fontSize: 16 },
+  selectedTriggerLabel: { fontSize: 13, fontWeight: '700' },
+  selectedTriggerCat: { color: '#555', fontSize: 10 },
+  clearTriggerBtn: { marginLeft: 'auto', padding: 4 },
+  clearTriggerText: { color: '#555', fontSize: 12 },
+  changeTriggerBtn: { paddingHorizontal: 10, paddingVertical: 8, borderWidth: 1, borderColor: '#333', borderRadius: 8 },
+  changeTriggerText: { color: '#888', fontSize: 11 },
+
+  // Model dropdown
+  modelDropdown: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#0a0a0a',
+    borderWidth: 1,
+    borderColor: '#222',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  modelDot: { width: 8, height: 8, borderRadius: 4 },
+  modelLabel: { fontSize: 13, fontWeight: '700' },
+  modelSub: { color: '#555', fontSize: 11 },
+  modelChevron: { color: '#555', fontSize: 14 },
+
+  // Chips
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  chip: { borderWidth: 1, borderColor: '#333', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 5 },
+  chipText: { color: '#888', fontSize: 11, fontWeight: '600', fontFamily: 'monospace' },
+
+  // Templates
   templateScroll: { marginBottom: 4 },
   templateChip: {
     flexDirection: 'row',
@@ -846,45 +2233,30 @@ const s = StyleSheet.create({
   templateIcon: { fontSize: 14 },
   templateName: { color: '#888', fontSize: 11, fontWeight: '600' },
 
-  // Context toggles
-  contextToggles: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
+  // Context
+  contextRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   contextToggle: {},
-  contextToggleText: {
-    color: '#666',
-    fontSize: 11,
-    fontFamily: 'monospace',
-  },
+  contextText: { color: '#666', fontSize: 11, fontFamily: 'monospace' },
 
-  errorMsg: {
-    color: '#ef4444',
-    fontSize: 11,
-    marginTop: 8,
-  },
-
-  // Modal buttons
-  modalButtons: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 10,
+  // Memory notes section
+  memorySection: {
     marginTop: 16,
-    paddingBottom: 4,
-  },
-  cancelBtn: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    padding: 12,
+    backgroundColor: '#0a0a0a',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#1a1a1a',
   },
-  cancelBtnText: { color: '#888', fontSize: 13, fontWeight: '600' },
-  createBtn: {
-    paddingHorizontal: 20,
-    paddingVertical: 8,
-    borderRadius: 8,
-  },
-  createBtnText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  memorySectionRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  memoryManageText: { fontSize: 11, fontWeight: '700' },
+  memorySub: { color: '#555', fontSize: 11, marginTop: 4 },
+
+  errorMsg: { color: '#ef4444', fontSize: 11, marginTop: 8 },
+
+  // Buttons
+  btnRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 16, paddingBottom: 4 },
+  cancelBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#333' },
+  cancelText: { color: '#888', fontSize: 13, fontWeight: '600' },
+  saveBtn: { paddingHorizontal: 20, paddingVertical: 8, borderRadius: 8 },
+  saveText: { color: '#fff', fontSize: 13, fontWeight: '700' },
 });

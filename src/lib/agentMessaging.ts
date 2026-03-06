@@ -1,6 +1,7 @@
 // Agent-to-Agent Messaging System
 import { OfficeAgent } from './officeAgents';
 import { OpenClawConfig } from './openclawService';
+import { getCachedTrending } from './trendingContent';
 
 export type MessageRecipient = 'all' | 'project' | string; // 'all', project ID, or specific agent ID
 
@@ -16,7 +17,7 @@ export interface AgentMessage {
 export interface ThoughtBubble {
   agentId: string;
   text: string;
-  type: 'info' | 'warning' | 'success' | 'funny' | 'idea';
+  type: 'info' | 'warning' | 'success' | 'funny' | 'idea' | 'news' | 'trending' | 'xp' | 'personality';
   timestamp: string;
   duration: number; // ms to show
 }
@@ -601,7 +602,7 @@ export function generateThoughtBubble(
 
   // XP progress thoughts (always relevant)
   const xpPool = xpThoughts(agent, xp, xpNext, context.nextBadgeName);
-  if (xpPool.length > 0) add(xpPool, 'idea', 5);
+  if (xpPool.length > 0) add(xpPool, 'xp', 5);
 
   // Cost & efficiency
   if (agent.tokensUsed > 0) add(costThoughts(agent), 'info', 4);
@@ -625,13 +626,18 @@ export function generateThoughtBubble(
   }
 
   // Tech & world news (moderate weight — keeps things fresh)
-  add(techNewsThoughts(), 'info', 4);
+  add(techNewsThoughts(), 'news', 4);
 
   // Techmeme headlines (solid weight — real news feel)
-  add(techmemeHeadlines(), 'info', 5);
+  add(techmemeHeadlines(), 'news', 5);
+
+  // Real trending content (HN + X/Twitter)
+  const trending = getCachedTrending();
+  if (trending.hn.length > 0) add(trending.hn, 'news', 5);
+  if (trending.xTrending.length > 0) add(trending.xTrending, 'trending', 5);
 
   // Agent personality / dialogue
-  add(personalityThoughts(agent), 'info', 3);
+  add(personalityThoughts(agent), 'personality', 3);
 
   // Funny (low weight — occasional)
   add(funnyThoughts(), 'funny', 1);

@@ -14,6 +14,7 @@ import { OfficeAgent, DEFAULT_AGENT, sessionsToAgents } from '../../../lib/offic
 import {
   OFFICE_THEMES, AgentAppearance, FurnitureItem, FURNITURE_CATALOG,
   OfficeFloor, DEFAULT_FLOORS, createDefaultFloor, OfficeTheme, UC_AGENT_APPEARANCE,
+  generateRandomAppearance, OWNER_EMAIL,
 } from '../../../lib/officeConfig';
 import { useCustomThemes, customThemeToOfficeTheme, CUSTOM_THEME_PREFIX, CustomThemeRecord } from '../../../services/customThemes';
 import { enrichAgentsWithCache, enrichSessionsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
@@ -33,6 +34,7 @@ import {
   publishClaudeCodeAgent, updateClaudeCodeAgentStatus, markClaudeCodeAgentOffline,
 } from '../../../lib/claudeCodeDetector';
 import { storage } from '../../../lib/storage';
+import { loadTrendingContent } from '../../../lib/trendingContent';
 import {
   SessionTag, loadSessionTags, addSessionTag, removeSessionTag,
 } from '../../../lib/sessionTags';
@@ -73,6 +75,7 @@ import {
   respondToCommand,
   cleanupTerminalChannels,
   updateAgentAnalytics,
+  sendTerminalCommand,
   BroadcastCommandPayload,
 } from '../../../lib/officeTerminal';
 import {
@@ -80,6 +83,11 @@ import {
   invokeAllAgents,
   invokeSelectedAgents,
 } from '../../../lib/agentInvocation';
+import { useUserApiKeys } from '../../../lib/llmProviders';
+import {
+  IdleBehaviorConfig, loadIdleConfig, saveIdleConfig,
+  startIdleScheduler, stopIdleScheduler, getDefaultIdleConfig,
+} from '../../../lib/idleBehaviors';
 import { supabase } from '../../../lib/supabase';
 import { fetchNFTs } from '../../../lib/crypto';
 import { NFT } from '../../../types';
@@ -149,8 +157,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     }).catch(() => {});
   }, []);
 
+  // Pre-load trending content for thought bubbles (HN + X trends, 12h cache)
+  useEffect(() => {
+    loadTrendingContent().catch(() => {});
+  }, []);
 
   const [appearances, setAppearances] = useState<Record<string, AgentAppearance>>({});
+  const appearancesLoadedRef = useRef(false);
   const [connectionsCollapsed, setConnectionsCollapsed] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [placingType, setPlacingType] = useState<string | null>(null);
@@ -172,6 +185,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const viewMode = 'office'; // Simplified — analytics dashboards moved to Backpack tab
   const [sessionTags, setSessionTags] = useState<Map<string, SessionTag[]>>(new Map());
   const [budgetConfig, setBudgetConfig] = useState<BudgetConfig>({ enabled: false });
+  const [idleConfig, setIdleConfig] = useState<IdleBehaviorConfig>(getDefaultIdleConfig());
+  const idleConfigRef = useRef<IdleBehaviorConfig>(getDefaultIdleConfig());
+  const { keys: providerKeys, refresh: refreshProviderKeys } = useUserApiKeys();
   const [budgetAlertsDismissed, setBudgetAlertsDismissed] = useState(false);
   const [actionResult, setActionResult] = useState<string>('');
   const [showActionResult, setShowActionResult] = useState(false);
@@ -253,6 +269,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   useEffect(() => {
     const connectedConns = connections.filter(c => c.status === 'connected');
 
+    // Start idle behavior scheduler (runs alongside heartbeat)
+    const isOwner = userEmail === OWNER_EMAIL;
+    if (userId) {
+      startIdleScheduler(circleId, userId, isOwner, () => idleConfigRef.current, (updated) => {
+        setIdleConfig(updated);
+        idleConfigRef.current = updated;
+      });
+    }
+
     if (connectedConns.length > 0) {
       // DB heartbeat layer
       startHeartbeat(circleId, connectedConns).then(() => loadCircleOffice());
@@ -295,6 +320,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     return () => {
       stopHeartbeat(circleId);
       leavePresenceChannel(circleId);
+      stopIdleScheduler(circleId);
     };
   }, [circleId, connections.filter(c => c.status === 'connected').length]);
 
@@ -813,6 +839,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           if (appearancesRaw) setAppearances(JSON.parse(appearancesRaw));
         } catch {}
       }
+      appearancesLoadedRef.current = true;
 
       // Load whiteboard notes
       try {
@@ -833,8 +860,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         setSessionTags(merged);
       });
 
-      // Load budget config
+      // Load budget config + idle behaviors config
       loadBudgetConfig().then(setBudgetConfig);
+      loadIdleConfig().then(cfg => { setIdleConfig(cfg); idleConfigRef.current = cfg; });
 
       // Auto-detect Claude Code bridge (zero config — no OpenClaw needed)
       detectClaudeCodeBridge().then(detected => {
@@ -854,7 +882,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               updateClaudeCodeAgentStatus(circleId, sessions).catch(() => {});
             }
           });
-          ccPollerRef.current.start(10000);
+          ccPollerRef.current.start(5000);
         }
       });
     })();
@@ -881,7 +909,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             updateClaudeCodeAgentStatus(circleId, sessions).catch(() => {});
           }
         });
-        ccPollerRef.current.start(10000);
+        ccPollerRef.current.start(5000);
       } else if (!detected && ccPollerRef.current) {
         // Bridge went offline — stop poller, keep agent visible as idle
         ccPollerRef.current.stop();
@@ -1024,9 +1052,23 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // Always include the default UC Agent alongside user agents
   const displayAgents = [DEFAULT_AGENT, ...userAgents];
 
-  // Resolve appearance — UC Agent has a built-in appearance, user agents use stored appearances
+  // Resolve appearance — UC Agent gets crab look, user agents use stored appearances
   const getAppearance = (agent: OfficeAgent) =>
     agent.id === DEFAULT_AGENT.id ? (appearances[agent.name] || UC_AGENT_APPEARANCE) : appearances[agent.name];
+
+  // Auto-assign random outfits to new agents (only after appearances have loaded from storage)
+  useEffect(() => {
+    if (!appearancesLoadedRef.current) return;
+    const newAppearances: Record<string, AgentAppearance> = {};
+    for (const agent of userAgents) {
+      if (!appearances[agent.name]) {
+        newAppearances[agent.name] = generateRandomAppearance();
+      }
+    }
+    if (Object.keys(newAppearances).length > 0) {
+      setAppearances(prev => ({ ...prev, ...newAppearances }));
+    }
+  }, [userAgents.map(a => a.name).join(',')]); // re-run only when agent list changes
 
   // ─── Reward tracking — award points as agent turns accumulate ──────────
   const { points: userPoints } = useUserRewards(userId);
@@ -1558,6 +1600,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     setBudgetAlertsDismissed(false); // Re-show alerts when config changes
   }, []);
 
+  // ─── Idle behavior handlers ──────────────────────────────
+
+  const handleIdleConfigChange = useCallback(async (config: IdleBehaviorConfig) => {
+    setIdleConfig(config);
+    idleConfigRef.current = config;
+    await saveIdleConfig(config);
+  }, []);
+
   // Calculate budget alerts using real session costs
   const periodCosts = calculatePeriodCosts(enrichedSessions);
   const budgetAlerts = calculateBudgetAlerts(
@@ -2010,9 +2060,35 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                             onPress={() => handleAgentPress(agent)}
                             selected={selectedAgent?.id === agent.id}
                             showThoughts={!editMode}
+                            totalAgents={agents.length}
                             dancing={dancingAgentId === 'all' || dancingAgentId === agent.id}
                             xp={userXp}
                             xpNext={xpNext}
+                            turns={agent.turns || agent.messagesProcessed || 0}
+                            tokens={agent.tokensUsed || 0}
+                            onAutomate={(taskText) => {
+                              sendTerminalCommand({
+                                circleId,
+                                senderId: currentUserId,
+                                senderName: currentUserName,
+                                commandText: taskText,
+                                targetAgentId: agent.id,
+                                targetAgentName: `@${agent.name}`,
+                                targetAgentIds: [agent.id],
+                              }).then(result => {
+                                if (result.messageId) {
+                                  handleCommandSent({
+                                    messageId: result.messageId,
+                                    command: taskText,
+                                    targetAgentId: agent.id,
+                                    targetAgentIds: [agent.id],
+                                    targetAgentName: `@${agent.name}`,
+                                    model: null,
+                                    senderId: currentUserId,
+                                  });
+                                }
+                              });
+                            }}
                           />
                         </View>
                       );
@@ -2134,6 +2210,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               sharedTargetIds={terminalTargetIds}
               onSharedSelectTargets={(ids, _names) => setTerminalTargetIds(ids)}
               onCommandSent={handleCommandSent}
+              byoProviderKeys={providerKeys}
               compact
             />
           </View>
@@ -2142,6 +2219,21 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         {/* Terminal - fullscreen overlay (same mirror) */}
         {terminalSize === 'full' && (
           <View style={styles.terminalFullscreen}>
+            {/* Exit fullscreen button */}
+            <View style={styles.terminalFullscreenHeader}>
+              <Pressable
+                onPress={() => setTerminalSize('half')}
+                style={[styles.terminalFullscreenBtn, Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}]}
+              >
+                <Text style={styles.terminalFullscreenBtnText}>▬ Half</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setTerminalSize('closed')}
+                style={[styles.terminalFullscreenBtn, Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}]}
+              >
+                <Text style={styles.terminalFullscreenBtnText}>✕ Close</Text>
+              </Pressable>
+            </View>
             <OfficeTerminal
               circleId={circleId}
               userId={currentUserId}
@@ -2158,6 +2250,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               sharedTargetIds={terminalTargetIds}
               onSharedSelectTargets={(ids, _names) => setTerminalTargetIds(ids)}
               onCommandSent={handleCommandSent}
+              byoProviderKeys={providerKeys}
             />
           </View>
         )}
@@ -2299,8 +2392,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         onTelegramDisconnect={handleTelegramDisconnect}
         telegramError={telegramError}
         telegramConnecting={telegramConnecting}
+        providerKeys={providerKeys}
+        onProviderKeysRefresh={refreshProviderKeys}
         budgetConfig={budgetConfig}
         onBudgetConfigChange={handleBudgetConfigChange}
+        idleConfig={idleConfig}
+        onIdleConfigChange={handleIdleConfigChange}
         customThemes={customThemeRecords}
         onCustomThemesRefresh={refreshCustomThemes}
         circleId={circleId}
@@ -3248,5 +3345,29 @@ const styles = StyleSheet.create({
     bottom: 0,
     zIndex: 2000,
     backgroundColor: '#000',
+  },
+  terminalFullscreenHeader: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a2e',
+    backgroundColor: '#0a0a0f',
+  },
+  terminalFullscreenBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 6,
+    backgroundColor: '#ffffff08',
+    borderWidth: 1,
+    borderColor: '#ffffff15',
+  },
+  terminalFullscreenBtnText: {
+    color: '#888',
+    fontSize: 11,
+    fontFamily: 'monospace',
+    fontWeight: '600',
   },
 });

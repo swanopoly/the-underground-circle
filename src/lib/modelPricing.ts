@@ -43,9 +43,19 @@ export const MODEL_PRICING: Record<string, ModelRate> = {
   'gemini-pro':       { inPer1M: 1.50,  outPer1M: 6.00,  cachedInPer1M: 0.15,  label: 'Gemini Pro'       },
   'gemini':           { inPer1M: 1.50,  outPer1M: 6.00,  cachedInPer1M: 0.15,  label: 'Gemini'           },
   // ── OpenAI ────────────────────────────────────────────────────────────────
-  'gpt-4o-mini':      { inPer1M: 0.20,  outPer1M: 0.80,  cachedInPer1M: 0.02,  label: 'GPT-4o Mini'      },
-  'gpt-4o':           { inPer1M: 3.00,  outPer1M: 12.0,  cachedInPer1M: 0.30,  label: 'GPT-4o'           },
+  'gpt-4o-mini':      { inPer1M: 0.15,  outPer1M: 0.60,  cachedInPer1M: 0.075, label: 'GPT-4o Mini'      },
+  'gpt-4o':           { inPer1M: 2.50,  outPer1M: 10.0,  cachedInPer1M: 1.25,  label: 'GPT-4o'           },
   'gpt-4':            { inPer1M: 3.00,  outPer1M: 12.0,  cachedInPer1M: 0.30,  label: 'GPT-4'            },
+  'o1':               { inPer1M: 15.0,  outPer1M: 60.0,  cachedInPer1M: 7.50,  label: 'OpenAI o1'        },
+  'o3-mini':          { inPer1M: 1.10,  outPer1M: 4.40,  cachedInPer1M: 0.55,  label: 'o3 Mini'          },
+  // ── Groq ─────────────────────────────────────────────────────────────────
+  'llama-3.3-70b':    { inPer1M: 0.59,  outPer1M: 0.79,  cachedInPer1M: 0.06,  label: 'Llama 3.3 70B'    },
+  'mixtral-8x7b':     { inPer1M: 0.24,  outPer1M: 0.24,  cachedInPer1M: 0.02,  label: 'Mixtral 8x7B'     },
+  // ── Ollama (self-hosted) ─────────────────────────────────────────────────
+  'ollama':           { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'Ollama (Local)'    },
+  // ── Replicate ────────────────────────────────────────────────────────────
+  'flux-schnell':     { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'Flux Schnell'      },
+  'flux-dev':         { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'Flux Dev'          },
   // ── BlackSwan (self-hosted, zero cost) ────────────────────────────────────
   'blackswan-7b':     { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'BlackSwan 7B'     },
   'blackswan-4b':     { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'BlackSwan 4B'     },

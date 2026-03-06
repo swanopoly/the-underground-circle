@@ -144,6 +144,17 @@ export default function FeedTab({ circleId }: { circleId: string }) {
     fetchTasks();
   }, [fetchTasks]);
 
+  // Realtime: refresh when tasks are inserted, updated, or deleted
+  useEffect(() => {
+    const channel = supabase
+      .channel(`tasks-feed-${circleId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks', filter: `circle_id=eq.${circleId}` }, () => {
+        fetchTasks();
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [circleId, fetchTasks]);
+
   const updateTaskStatus = async (taskId: string, status: string) => {
     await supabase.from('tasks').update({
       status,

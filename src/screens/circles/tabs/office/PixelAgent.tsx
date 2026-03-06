@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, Animated, Pressable, Platform, Easing } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { View, Text, TextInput, StyleSheet, Animated, Pressable, Platform, Easing } from 'react-native';
 import { OfficeAgent, STATUS_COLORS } from '../../../../lib/officeAgents';
 import { AgentAppearance, DEFAULT_APPEARANCE, EnvironmentType, THEME_OUTFITS, NEON_SKIN_TONES } from '../../../../lib/officeConfig';
 import ThoughtBubble from '../../../../components/ThoughtBubble';
@@ -13,12 +13,16 @@ interface Props {
   selected: boolean;
   scale?: number;
   showThoughts?: boolean; // Enable thought bubbles
+  totalAgents?: number;   // Total agents on floor — scales thought frequency down
   dancing?: boolean; // Badge celebration dance
   xp?: number;       // current XP points
   xpNext?: number;   // XP needed for next badge
+  turns?: number;    // total turns/messages processed
+  tokens?: number;   // total tokens used
+  onAutomate?: (taskText: string) => void; // inline task assignment
 }
 
-export default function PixelAgent({ agent, appearance, environmentType, onPress, selected, scale = 1, showThoughts = false, dancing = false, xp = 0, xpNext = 100 }: Props) {
+export default function PixelAgent({ agent, appearance, environmentType, onPress, selected, scale = 1, showThoughts = false, totalAgents = 1, dancing = false, xp = 0, xpNext = 100, turns = 0, tokens = 0, onAutomate }: Props) {
   const a = appearance || { ...DEFAULT_APPEARANCE, shirtColor: agent.color, hairColor: agent.color };
 
   // Only apply theme outfits to agents using default appearance (not user-customized)
@@ -58,6 +62,13 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
   const typingAnim = useRef(new Animated.Value(0)).current; // arm wiggle when building
   const lookAnim = useRef(new Animated.Value(0)).current; // subtle head shift when idle
 
+  // Limb wiggle animations
+  const leftArmWiggle = useRef(new Animated.Value(0)).current;
+  const rightArmWiggle = useRef(new Animated.Value(0)).current;
+  const leftLegWiggle = useRef(new Animated.Value(0)).current;
+  const rightLegWiggle = useRef(new Animated.Value(0)).current;
+  const celebJump = useRef(new Animated.Value(0)).current;
+
   // Aura animations
   const auraFlicker = useRef(new Animated.Value(0)).current;
   const auraPulse = useRef(new Animated.Value(1)).current;
@@ -67,21 +78,55 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
   // Pet animations
   const petBounce = useRef(new Animated.Value(0)).current;
   const petTail = useRef(new Animated.Value(0)).current;
+  const petCrawl = useRef(new Animated.Value(0)).current; // horizontal crawl/swim cycle
+  const petCrawlY = useRef(new Animated.Value(0)).current; // vertical wave for swim
+  const petWander = useRef(new Animated.Value(0)).current; // periodic walk to new position
+  const petWanderY = useRef(new Animated.Value(0)).current; // vertical wander (for flying pets)
+  const petLegAnim = useRef(new Animated.Value(0)).current; // leg walk cycle (0→1→0 rapid)
 
   const [currentThought, setCurrentThought] = useState<ThoughtData | null>(null);
-  const [floatingText, setFloatingText] = useState<{id: number, text: string, color: string, x: number}[]>([]);
+  const [floatingText, setFloatingText] = useState<{id: number | string, text: string, color: string, x: number}[]>([]);
   const [mood, setMood] = useState<string | null>(null); // emoji mood indicator
+  const [showSparkle, setShowSparkle] = useState(false);
+  const [showLevelUp, setShowLevelUp] = useState(false);
+  const [celebrating, setCelebrating] = useState(false);
+  const [showAutomateButton, setShowAutomateButton] = useState(false);
+  const [showAutomateInput, setShowAutomateInput] = useState(false);
+  const [automateText, setAutomateText] = useState('');
   const floatId = useRef(0);
   const lastCost = useRef(agent.costToday);
   const lastStatus = useRef(agent.status);
+  const lastXp = useRef(xp);
+  const lastTurns = useRef(turns);
+  const lastTokens = useRef(tokens);
   const buildStartTime = useRef<number>(0);
+  const comboCount = useRef(0);        // consecutive builds without error
+  const lastFloatTime = useRef(0);     // throttle rapid-fire floats
+  const automateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const automateInputRef = useRef<TextInput>(null);
 
   const handlePressIn = () => {
-    Animated.spring(pressScale, { toValue: 0.9, useNativeDriver: true }).start();
+    Animated.spring(pressScale, { toValue: 0.9, useNativeDriver: false }).start();
+    setShowSparkle(true);
   };
   const handlePressOut = () => {
-    Animated.spring(pressScale, { toValue: 1, friction: 3, tension: 40, useNativeDriver: true }).start();
+    Animated.spring(pressScale, { toValue: 1, friction: 3, tension: 40, useNativeDriver: false }).start();
   };
+
+  const handleAutomateSubmit = useCallback(() => {
+    const text = automateText.trim();
+    if (!text || !onAutomate) return;
+    onAutomate(text);
+    setAutomateText('');
+    setShowAutomateInput(false);
+    setShowAutomateButton(false);
+    // Show confirmation float
+    setTimeout(() => {
+      const id = `auto-${Date.now()}`;
+      setFloatingText(prev => [...prev, { id, text: 'TASK SENT!', color: '#22c55e', x: 0 }]);
+      setTimeout(() => setFloatingText(prev => prev.filter(f => f.id !== id)), 2000);
+    }, 100);
+  }, [automateText, onAutomate]);
 
   // Dance animation — triggered by badge earn
   useEffect(() => {
@@ -95,28 +140,28 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     const loop = Animated.loop(
       Animated.sequence([
         Animated.parallel([
-          Animated.timing(danceX, { toValue: -8, duration: 120, useNativeDriver: true }),
-          Animated.timing(danceY, { toValue: -10, duration: 120, useNativeDriver: true }),
-          Animated.timing(danceRotate, { toValue: -15, duration: 120, useNativeDriver: true }),
-          Animated.timing(danceScale, { toValue: 1.15, duration: 120, useNativeDriver: true }),
+          Animated.timing(danceX, { toValue: -8, duration: 120, useNativeDriver: false }),
+          Animated.timing(danceY, { toValue: -10, duration: 120, useNativeDriver: false }),
+          Animated.timing(danceRotate, { toValue: -15, duration: 120, useNativeDriver: false }),
+          Animated.timing(danceScale, { toValue: 1.15, duration: 120, useNativeDriver: false }),
         ]),
         Animated.parallel([
-          Animated.timing(danceX, { toValue: 8, duration: 120, useNativeDriver: true }),
-          Animated.timing(danceY, { toValue: -4, duration: 120, useNativeDriver: true }),
-          Animated.timing(danceRotate, { toValue: 15, duration: 120, useNativeDriver: true }),
-          Animated.timing(danceScale, { toValue: 1.35, duration: 120, useNativeDriver: true }),
+          Animated.timing(danceX, { toValue: 8, duration: 120, useNativeDriver: false }),
+          Animated.timing(danceY, { toValue: -4, duration: 120, useNativeDriver: false }),
+          Animated.timing(danceRotate, { toValue: 15, duration: 120, useNativeDriver: false }),
+          Animated.timing(danceScale, { toValue: 1.35, duration: 120, useNativeDriver: false }),
         ]),
         Animated.parallel([
-          Animated.timing(danceX, { toValue: -6, duration: 100, useNativeDriver: true }),
-          Animated.timing(danceY, { toValue: -12, duration: 100, useNativeDriver: true }),
-          Animated.timing(danceRotate, { toValue: -10, duration: 100, useNativeDriver: true }),
-          Animated.timing(danceScale, { toValue: 1.1, duration: 100, useNativeDriver: true }),
+          Animated.timing(danceX, { toValue: -6, duration: 100, useNativeDriver: false }),
+          Animated.timing(danceY, { toValue: -12, duration: 100, useNativeDriver: false }),
+          Animated.timing(danceRotate, { toValue: -10, duration: 100, useNativeDriver: false }),
+          Animated.timing(danceScale, { toValue: 1.1, duration: 100, useNativeDriver: false }),
         ]),
         Animated.parallel([
-          Animated.timing(danceX, { toValue: 0, duration: 150, useNativeDriver: true }),
-          Animated.timing(danceY, { toValue: 0, duration: 150, useNativeDriver: true }),
-          Animated.timing(danceRotate, { toValue: 0, duration: 150, useNativeDriver: true }),
-          Animated.timing(danceScale, { toValue: 1, duration: 150, useNativeDriver: true }),
+          Animated.timing(danceX, { toValue: 0, duration: 150, useNativeDriver: false }),
+          Animated.timing(danceY, { toValue: 0, duration: 150, useNativeDriver: false }),
+          Animated.timing(danceRotate, { toValue: 0, duration: 150, useNativeDriver: false }),
+          Animated.timing(danceScale, { toValue: 1, duration: 150, useNativeDriver: false }),
         ]),
       ]),
     );
@@ -124,33 +169,31 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     return () => loop.stop();
   }, [dancing]);
 
-  // Bob + breathe animation
+  // Bob + breathe animation — always on for visible life
   useEffect(() => {
-    if (agent.status === 'active' || agent.status === 'idle') {
-      const bobLoop = Animated.loop(
-        Animated.sequence([
-          Animated.parallel([
-            Animated.timing(bobAnim, { toValue: -2, duration: 1600, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-            Animated.timing(breatheAnim, { toValue: 1.04, duration: 1600, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-          ]),
-          Animated.parallel([
-            Animated.timing(bobAnim, { toValue: 0, duration: 1600, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-            Animated.timing(breatheAnim, { toValue: 1, duration: 1600, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-          ]),
-        ])
-      );
-      bobLoop.start();
-      return () => bobLoop.stop();
-    }
-  }, [agent.status]);
+    const bobLoop = Animated.loop(
+      Animated.sequence([
+        Animated.parallel([
+          Animated.timing(bobAnim, { toValue: -2.5, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(breatheAnim, { toValue: 1.05, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        ]),
+        Animated.parallel([
+          Animated.timing(bobAnim, { toValue: 0, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(breatheAnim, { toValue: 1, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        ]),
+      ])
+    );
+    bobLoop.start();
+    return () => bobLoop.stop();
+  }, []);
 
   // Glow animation
   useEffect(() => {
     if (agent.status === 'active') {
       const glowLoop = Animated.loop(
         Animated.sequence([
-          Animated.timing(glowAnim, { toValue: 0.9, duration: 1500, useNativeDriver: true }),
-          Animated.timing(glowAnim, { toValue: 0.3, duration: 1500, useNativeDriver: true }),
+          Animated.timing(glowAnim, { toValue: 0.9, duration: 1500, useNativeDriver: false }),
+          Animated.timing(glowAnim, { toValue: 0.3, duration: 1500, useNativeDriver: false }),
         ])
       );
       glowLoop.start();
@@ -163,18 +206,18 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     if (agent.status === 'offline') return;
     const blink = () => {
       Animated.sequence([
-        Animated.timing(blinkAnim, { toValue: 0, duration: 80, useNativeDriver: true }),
-        Animated.timing(blinkAnim, { toValue: 1, duration: 80, useNativeDriver: true }),
+        Animated.timing(blinkAnim, { toValue: 0, duration: 80, useNativeDriver: false }),
+        Animated.timing(blinkAnim, { toValue: 1, duration: 80, useNativeDriver: false }),
       ]).start();
     };
     // Double-blink occasionally
     const doubleBlink = () => {
       Animated.sequence([
-        Animated.timing(blinkAnim, { toValue: 0, duration: 80, useNativeDriver: true }),
-        Animated.timing(blinkAnim, { toValue: 1, duration: 60, useNativeDriver: true }),
+        Animated.timing(blinkAnim, { toValue: 0, duration: 80, useNativeDriver: false }),
+        Animated.timing(blinkAnim, { toValue: 1, duration: 60, useNativeDriver: false }),
         Animated.delay(120),
-        Animated.timing(blinkAnim, { toValue: 0, duration: 80, useNativeDriver: true }),
-        Animated.timing(blinkAnim, { toValue: 1, duration: 80, useNativeDriver: true }),
+        Animated.timing(blinkAnim, { toValue: 0, duration: 80, useNativeDriver: false }),
+        Animated.timing(blinkAnim, { toValue: 1, duration: 80, useNativeDriver: false }),
       ]).start();
     };
     const scheduleNext = () => {
@@ -193,11 +236,11 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     if (agent.status === 'active' || agent.status === 'building') {
       const typingLoop = Animated.loop(
         Animated.sequence([
-          Animated.timing(typingAnim, { toValue: 1, duration: 300, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(typingAnim, { toValue: -1, duration: 300, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(typingAnim, { toValue: 0.5, duration: 200, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(typingAnim, { toValue: -0.5, duration: 200, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(typingAnim, { toValue: 0, duration: 150, useNativeDriver: true }),
+          Animated.timing(typingAnim, { toValue: 1, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(typingAnim, { toValue: -1, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(typingAnim, { toValue: 0.5, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(typingAnim, { toValue: -0.5, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(typingAnim, { toValue: 0, duration: 150, useNativeDriver: false }),
           Animated.delay(400),
         ])
       );
@@ -208,49 +251,114 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     }
   }, [agent.status]);
 
-  // Idle look-around — subtle head shift when idle
+  // Look-around — always runs, head shifts left/right
   useEffect(() => {
-    if (agent.status === 'idle') {
-      const lookLoop = Animated.loop(
-        Animated.sequence([
-          Animated.delay(3000),
-          Animated.timing(lookAnim, { toValue: 1, duration: 800, useNativeDriver: true, easing: Easing.inOut(Easing.ease) }),
-          Animated.delay(2000),
-          Animated.timing(lookAnim, { toValue: -1, duration: 800, useNativeDriver: true, easing: Easing.inOut(Easing.ease) }),
-          Animated.delay(1500),
-          Animated.timing(lookAnim, { toValue: 0, duration: 600, useNativeDriver: true, easing: Easing.inOut(Easing.ease) }),
-        ])
-      );
-      lookLoop.start();
-      return () => lookLoop.stop();
+    const lookLoop = Animated.loop(
+      Animated.sequence([
+        Animated.delay(2000),
+        Animated.timing(lookAnim, { toValue: 1, duration: 600, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
+        Animated.delay(1500),
+        Animated.timing(lookAnim, { toValue: -1, duration: 600, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
+        Animated.delay(1200),
+        Animated.timing(lookAnim, { toValue: 0.5, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
+        Animated.delay(800),
+        Animated.timing(lookAnim, { toValue: 0, duration: 500, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
+      ])
+    );
+    lookLoop.start();
+    return () => lookLoop.stop();
+  }, []);
+
+  // Limb fidget — always runs regardless of status for visible life
+  useEffect(() => {
+    const fidgetLoop = Animated.loop(
+      Animated.sequence([
+        Animated.delay(1500),
+        // Left arm swings out, right leg shifts
+        Animated.parallel([
+          Animated.timing(leftArmWiggle, { toValue: -20, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightArmWiggle, { toValue: 8, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightLegWiggle, { toValue: 2.5, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        ]),
+        Animated.parallel([
+          Animated.timing(leftArmWiggle, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightArmWiggle, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightLegWiggle, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        ]),
+        Animated.delay(2000),
+        // Right arm swings out, left leg shifts
+        Animated.parallel([
+          Animated.timing(rightArmWiggle, { toValue: 20, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftArmWiggle, { toValue: -8, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftLegWiggle, { toValue: -2.5, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        ]),
+        Animated.parallel([
+          Animated.timing(rightArmWiggle, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftArmWiggle, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftLegWiggle, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        ]),
+        Animated.delay(1000),
+        // Quick double fidget — both arms flap
+        Animated.parallel([
+          Animated.timing(leftArmWiggle, { toValue: -15, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightArmWiggle, { toValue: 15, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftLegWiggle, { toValue: 2, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightLegWiggle, { toValue: -2, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        ]),
+        Animated.parallel([
+          Animated.timing(leftArmWiggle, { toValue: 12, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightArmWiggle, { toValue: -12, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftLegWiggle, { toValue: -2, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightLegWiggle, { toValue: 2, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        ]),
+        Animated.parallel([
+          Animated.timing(leftArmWiggle, { toValue: 0, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightArmWiggle, { toValue: 0, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftLegWiggle, { toValue: 0, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightLegWiggle, { toValue: 0, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        ]),
+      ])
+    );
+    fidgetLoop.start();
+    return () => fidgetLoop.stop();
+  }, []);
+
+  // Automate Me button — appears after 5s idle
+  useEffect(() => {
+    if (agent.status === 'idle' && onAutomate && !showAutomateInput) {
+      automateTimerRef.current = setTimeout(() => setShowAutomateButton(true), 5000);
     } else {
-      lookAnim.setValue(0);
+      setShowAutomateButton(false);
+      setShowAutomateInput(false);
+      setAutomateText('');
+      if (automateTimerRef.current) clearTimeout(automateTimerRef.current);
     }
-  }, [agent.status]);
+    return () => { if (automateTimerRef.current) clearTimeout(automateTimerRef.current); };
+  }, [agent.status, onAutomate, showAutomateInput]);
 
   // Aura animations — flicker, pulse, rotation, drift
   useEffect(() => {
     const flickerLoop = Animated.loop(
       Animated.sequence([
-        Animated.timing(auraFlicker, { toValue: 1, duration: 400, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(auraFlicker, { toValue: 0.4, duration: 300, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(auraFlicker, { toValue: 0.8, duration: 350, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(auraFlicker, { toValue: 0.2, duration: 250, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(auraFlicker, { toValue: 1, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(auraFlicker, { toValue: 0.4, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(auraFlicker, { toValue: 0.8, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(auraFlicker, { toValue: 0.2, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
       ])
     );
     const pulseLoop = Animated.loop(
       Animated.sequence([
-        Animated.timing(auraPulse, { toValue: 1.12, duration: 1200, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(auraPulse, { toValue: 0.92, duration: 1200, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(auraPulse, { toValue: 1.12, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(auraPulse, { toValue: 0.92, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
       ])
     );
     const rotateLoop = Animated.loop(
-      Animated.timing(auraRotate, { toValue: 1, duration: 6000, useNativeDriver: true, easing: Easing.linear })
+      Animated.timing(auraRotate, { toValue: 1, duration: 6000, useNativeDriver: false, easing: Easing.linear })
     );
     const driftLoop = Animated.loop(
       Animated.sequence([
-        Animated.timing(auraDrift, { toValue: -2, duration: 1800, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(auraDrift, { toValue: 2, duration: 1800, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(auraDrift, { toValue: -2, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(auraDrift, { toValue: 2, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
       ])
     );
     flickerLoop.start();
@@ -260,23 +368,73 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     return () => { flickerLoop.stop(); pulseLoop.stop(); rotateLoop.stop(); driftLoop.stop(); };
   }, []);
 
-  // Pet animations — bounce and tail wag
+  // Pet animations — all simple independent loops (no nesting, web-safe)
   useEffect(() => {
+    // Bounce — bigger amplitude so it's visible
     const bounceLoop = Animated.loop(
       Animated.sequence([
-        Animated.timing(petBounce, { toValue: -2, duration: 600, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petBounce, { toValue: 0, duration: 600, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petBounce, { toValue: -3.5, duration: 500, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petBounce, { toValue: 0, duration: 500, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
       ])
     );
+    // Tail — wag continuously
     const tailLoop = Animated.loop(
       Animated.sequence([
-        Animated.timing(petTail, { toValue: 1, duration: 300, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petTail, { toValue: -1, duration: 300, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petTail, { toValue: 1, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petTail, { toValue: -1, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+      ])
+    );
+    // Crawl — horizontal sway (spider/shark use this)
+    const crawlLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(petCrawl, { toValue: 10, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petCrawl, { toValue: -10, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+      ])
+    );
+    // CrawlY — vertical sway
+    const crawlYLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(petCrawlY, { toValue: -3, duration: 1100, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petCrawlY, { toValue: 3, duration: 1100, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+      ])
+    );
+    // Wander — walk right then left, flat loops (no nesting)
+    const wanderLoop = Animated.loop(
+      Animated.sequence([
+        Animated.delay(2500),
+        Animated.timing(petWander, { toValue: 14, duration: 1500, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
+        Animated.delay(2000),
+        Animated.timing(petWander, { toValue: 0, duration: 1500, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
+        Animated.delay(3000),
+        Animated.timing(petWander, { toValue: -12, duration: 1300, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
+        Animated.delay(1800),
+        Animated.timing(petWander, { toValue: 0, duration: 1300, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
+      ])
+    );
+    // WanderY — vertical float for flying pets
+    const wanderYLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(petWanderY, { toValue: -6, duration: 2200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petWanderY, { toValue: 4, duration: 2200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petWanderY, { toValue: -3, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petWanderY, { toValue: 0, duration: 1500, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+      ])
+    );
+    // Leg walk cycle — always runs, rapid alternating
+    const legLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(petLegAnim, { toValue: 1, duration: 150, useNativeDriver: false }),
+        Animated.timing(petLegAnim, { toValue: -1, duration: 150, useNativeDriver: false }),
       ])
     );
     bounceLoop.start();
     tailLoop.start();
-    return () => { bounceLoop.stop(); tailLoop.stop(); };
+    crawlLoop.start();
+    crawlYLoop.start();
+    wanderLoop.start();
+    wanderYLoop.start();
+    legLoop.start();
+    return () => { bounceLoop.stop(); tailLoop.stop(); crawlLoop.stop(); crawlYLoop.stop(); wanderLoop.stop(); wanderYLoop.stop(); legLoop.stop(); };
   }, []);
 
   // Mood indicator — reacts to agent activity
@@ -291,8 +449,10 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
       if (agent.status === 'active' || agent.status === 'building') {
         buildStartTime.current = Date.now();
         newMood = '⚡'; moodDuration = 3000;
-      } else if (agent.status === 'idle' && lastStatus.current === 'active') {
-        newMood = '✅'; moodDuration = 4000;
+      } else if (agent.status === 'idle' && (lastStatus.current === 'active' || lastStatus.current === 'building')) {
+        newMood = '🎉'; moodDuration = 4000;
+      } else if (agent.status === 'error') {
+        newMood = '😰'; moodDuration = 5000;
       } else if (agent.status === 'offline') {
         newMood = '💤'; moodDuration = 0; // persist until status changes
       }
@@ -322,28 +482,224 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     const statusChanged = agent.status !== lastStatus.current;
     const longIdle = agent.status === 'idle';
 
-    // Spawn floating text on cost changes or status changes
+    // ─── Helper: spawn a floating text indicator ──────────────────────
+    const spawnFloat = (text: string, color: string, delay = 0) => {
+      const spawn = () => {
+        const id = floatId.current++;
+        const x = Math.random() * 30 - 15;
+        setFloatingText(prev => [...prev, { id, text, color, x }]);
+        setTimeout(() => setFloatingText(prev => prev.filter(t => t.id !== id)), 2500);
+        lastFloatTime.current = Date.now();
+      };
+      if (delay > 0) setTimeout(spawn, delay);
+      else spawn();
+    };
+
+    // ─── 1. Cost tracking ────────────────────────────────────────────
     if (agent.costToday > lastCost.current && agent.costToday > 0) {
       const diff = agent.costToday - lastCost.current;
       if (diff > 0.001) {
-        const id = floatId.current++;
-        setFloatingText(prev => [...prev, { id, text: `-$${diff.toFixed(3)}`, color: '#ef4444', x: Math.random() * 20 - 10 }]);
-        setTimeout(() => setFloatingText(prev => prev.filter(t => t.id !== id)), 2000);
+        spawnFloat(`-$${diff.toFixed(3)}`, '#ef4444');
+        // Milestone costs
+        if (lastCost.current < 0.10 && agent.costToday >= 0.10) spawnFloat('$0.10 SPENT', '#f97316', 400);
+        if (lastCost.current < 1.00 && agent.costToday >= 1.00) spawnFloat('$1 MILESTONE!', '#f59e0b', 400);
       }
     }
 
-    if (statusChanged && (agent.status === 'active' || agent.status === 'building')) {
-      const id = floatId.current++;
-      setFloatingText(prev => [...prev, { id, text: '+BUILD', color: '#22c55e', x: Math.random() * 20 - 10 }]);
-      setTimeout(() => setFloatingText(prev => prev.filter(t => t.id !== id)), 2000);
+    // ─── 2. Status transitions — the big ones ───────────────────────
+    if (statusChanged) {
+      if (agent.status === 'active' || agent.status === 'building') {
+        buildStartTime.current = Date.now();
+        comboCount.current++;
+        const buildStarts = ['BUILDING', 'LOCKED IN', 'LET\'S GO', 'ON IT', 'WORKING'];
+        spawnFloat(`+${buildStarts[Math.floor(Math.random() * buildStarts.length)]}`, '#22c55e');
+        // Combo streaks
+        if (comboCount.current >= 3) spawnFloat(`${comboCount.current}x COMBO!`, '#a855f7', 300);
+        if (comboCount.current >= 5) spawnFloat('ON FIRE!', '#f97316', 500);
+        if (comboCount.current >= 8) spawnFloat('BEAST MODE!', '#ec4899', 700);
+        if (comboCount.current >= 10) spawnFloat('UNSTOPPABLE!', '#ec4899', 900);
+        if (comboCount.current >= 15) spawnFloat('LEGENDARY!', '#fbbf24', 1100);
+      } else if (agent.status === 'idle' && (lastStatus.current === 'active' || lastStatus.current === 'building')) {
+        // Task complete — show duration + celebration
+        const elapsed = Date.now() - buildStartTime.current;
+        const secs = Math.round(elapsed / 1000);
+        const finishWords = ['FINISHED ✓', 'DONE ✓', 'SHIPPED ✓', 'NAILED IT ✓', 'CRUSHED IT ✓'];
+        spawnFloat(finishWords[Math.floor(Math.random() * finishWords.length)], '#22d3ee');
+        if (secs > 0 && secs < 300) spawnFloat(`${secs}s BUILD`, '#818cf8', 350);
+        if (secs <= 5) spawnFloat('SPEED RUN!', '#f59e0b', 600);
+        if (secs <= 2) spawnFloat('INSTANT!', '#ec4899', 800);
+        if (secs >= 30 && secs < 120) spawnFloat('SOLID WORK', '#a78bfa', 600);
+        if (secs >= 120) spawnFloat('MARATHON BUILD!', '#ec4899', 600);
+        // Random encouragement after finish
+        if (Math.random() < 0.3) {
+          const cheers = ['KEEP GOING', 'LETS STACK', 'MOMENTUM', 'NO STOPPING'];
+          spawnFloat(cheers[Math.floor(Math.random() * cheers.length)], '#34d399', 900);
+        }
+        // Celebration animation — jump + arm pump + confetti
+        setCelebrating(true);
+        Animated.sequence([
+          Animated.timing(celebJump, { toValue: -12, duration: 150, useNativeDriver: false, easing: Easing.out(Easing.quad) }),
+          Animated.timing(celebJump, { toValue: 2, duration: 100, useNativeDriver: false }),
+          Animated.timing(celebJump, { toValue: -6, duration: 120, useNativeDriver: false }),
+          Animated.timing(celebJump, { toValue: 0, duration: 150, useNativeDriver: false, easing: Easing.bounce }),
+        ]).start();
+        Animated.sequence([
+          Animated.parallel([
+            Animated.timing(leftArmWiggle, { toValue: -25, duration: 150, useNativeDriver: false }),
+            Animated.timing(rightArmWiggle, { toValue: 25, duration: 150, useNativeDriver: false }),
+          ]),
+          Animated.parallel([
+            Animated.timing(leftArmWiggle, { toValue: 15, duration: 120, useNativeDriver: false }),
+            Animated.timing(rightArmWiggle, { toValue: -15, duration: 120, useNativeDriver: false }),
+          ]),
+          Animated.parallel([
+            Animated.timing(leftArmWiggle, { toValue: 0, duration: 200, useNativeDriver: false }),
+            Animated.timing(rightArmWiggle, { toValue: 0, duration: 200, useNativeDriver: false }),
+          ]),
+        ]).start();
+        setTimeout(() => setCelebrating(false), 1500);
+      } else if (agent.status === 'error') {
+        comboCount.current = 0; // break the combo
+        spawnFloat('-ERROR', '#ef4444');
+        spawnFloat('COMBO LOST', '#6b7280', 300);
+      } else if (agent.status === 'offline') {
+        spawnFloat('OFFLINE', '#6b7280');
+      } else if (agent.status === 'idle' && lastStatus.current === 'offline') {
+        spawnFloat('ONLINE!', '#22c55e');
+        spawnFloat('READY', '#38bdf8', 400);
+      }
+    }
+
+    // ─── 3. Turn/message tracking ────────────────────────────────────
+    if (turns > lastTurns.current && lastTurns.current >= 0) {
+      const delta = turns - lastTurns.current;
+      if (delta > 0) {
+        spawnFloat(`+${delta} MSG`, '#38bdf8');
+        // Turn milestones
+        if (lastTurns.current < 5 && turns >= 5) spawnFloat('5 MSGS', '#a78bfa', 350);
+        if (lastTurns.current < 10 && turns >= 10) spawnFloat('10 MSGS!', '#a78bfa', 350);
+        if (lastTurns.current < 25 && turns >= 25) spawnFloat('25 MSGS!', '#c084fc', 350);
+        if (lastTurns.current < 50 && turns >= 50) spawnFloat('50 MSGS!', '#c084fc', 350);
+        if (lastTurns.current < 100 && turns >= 100) spawnFloat('100 MSGS!', '#e879f9', 350);
+        if (lastTurns.current < 250 && turns >= 250) spawnFloat('250 MSG BEAST!', '#f472b6', 350);
+        if (lastTurns.current < 500 && turns >= 500) spawnFloat('500 MSG LEGEND!', '#f472b6', 350);
+        if (lastTurns.current < 1000 && turns >= 1000) spawnFloat('1K MSGS!!!', '#ec4899', 350);
+      }
+    }
+    lastTurns.current = turns;
+
+    // ─── 4. Token tracking ───────────────────────────────────────────
+    if (tokens > lastTokens.current && lastTokens.current >= 0) {
+      const delta = tokens - lastTokens.current;
+      if (delta > 50) {
+        const k = Math.round(delta / 1000);
+        spawnFloat(k > 0 ? `+${k}K TKN` : `+${delta} TKN`, '#34d399', 200);
+        // Token milestones
+        if (lastTokens.current < 1000 && tokens >= 1000) spawnFloat('1K TOKENS', '#6ee7b7', 500);
+        if (lastTokens.current < 5000 && tokens >= 5000) spawnFloat('5K TOKENS', '#6ee7b7', 500);
+        if (lastTokens.current < 10000 && tokens >= 10000) spawnFloat('10K TOKENS!', '#6ee7b7', 500);
+        if (lastTokens.current < 50000 && tokens >= 50000) spawnFloat('50K TOKENS!', '#a7f3d0', 500);
+        if (lastTokens.current < 100000 && tokens >= 100000) spawnFloat('100K TOKENS!', '#a7f3d0', 500);
+        if (lastTokens.current < 500000 && tokens >= 500000) spawnFloat('500K TOKENS!!', '#fbbf24', 500);
+        if (lastTokens.current < 1000000 && tokens >= 1000000) spawnFloat('1M TOKENS!!', '#fbbf24', 500);
+      }
+    }
+    lastTokens.current = tokens;
+
+    // ─── 5. XP tracking — FIXED: no longer skips first award ─────────
+    if (xp > lastXp.current) {
+      const gained = xp - lastXp.current;
+      spawnFloat(`+${gained} XP`, '#fbbf24');
+      // Level-up flash if crossed threshold
+      if (lastXp.current < xpNext && xp >= xpNext) {
+        setShowLevelUp(true);
+        spawnFloat('LEVEL UP!', '#f59e0b', 400);
+        spawnFloat('NEW BADGE!', '#ec4899', 700);
+      }
+      // XP milestones — more granular
+      if (lastXp.current < 50 && xp >= 50) spawnFloat('50 XP!', '#fcd34d', 500);
+      if (lastXp.current < 100 && xp >= 100) spawnFloat('100 XP!', '#fcd34d', 500);
+      if (lastXp.current < 250 && xp >= 250) spawnFloat('250 XP!', '#fbbf24', 500);
+      if (lastXp.current < 500 && xp >= 500) spawnFloat('500 XP!', '#fbbf24', 500);
+      if (lastXp.current < 1000 && xp >= 1000) spawnFloat('1K XP!!', '#f59e0b', 500);
+      if (lastXp.current < 2500 && xp >= 2500) spawnFloat('2.5K XP!!', '#f59e0b', 500);
+      if (lastXp.current < 5000 && xp >= 5000) spawnFloat('5K XP LEGEND!', '#ef4444', 500);
+      if (lastXp.current < 10000 && xp >= 10000) spawnFloat('10K XP GOD!', '#ec4899', 500);
+      // Random encouragement on XP gain
+      if (Math.random() < 0.25) {
+        const xpVibes = ['NICE', 'STACKING', 'LEVELING UP', 'EXP GAINED'];
+        spawnFloat(xpVibes[Math.floor(Math.random() * xpVibes.length)], '#d4a017', 600);
+      }
+    }
+    lastXp.current = xp;
+
+    // ─── 6. Periodic indicators during builds ──────────────────────
+    if ((agent.status === 'active' || agent.status === 'building') && buildStartTime.current > 0) {
+      const elapsed = Date.now() - buildStartTime.current;
+      if (elapsed > 10000 && elapsed < 11000) spawnFloat('THINKING...', '#94a3b8');
+      if (elapsed > 20000 && elapsed < 21000) {
+        const mid = ['COOKING...', 'PROCESSING...', 'ALMOST...', 'CRAFTING...'];
+        spawnFloat(mid[Math.floor(Math.random() * mid.length)], '#94a3b8');
+      }
+      if (elapsed > 30000 && elapsed < 31000) spawnFloat('DEEP WORK...', '#818cf8');
+      if (elapsed > 45000 && elapsed < 46000) spawnFloat('IN THE ZONE', '#a78bfa');
+      if (elapsed > 60000 && elapsed < 61000) spawnFloat('GRINDING...', '#a855f7');
+      if (elapsed > 90000 && elapsed < 91000) spawnFloat('STILL AT IT...', '#c084fc');
+      if (elapsed > 120000 && elapsed < 121000) spawnFloat('MARATHON!', '#ec4899');
+      if (elapsed > 180000 && elapsed < 181000) spawnFloat('ABSOLUTE UNIT!', '#f472b6');
+    }
+
+    // ─── 6b. Random building encouragement ──────────────────────
+    if ((agent.status === 'active' || agent.status === 'building') && Date.now() - lastFloatTime.current > 8000) {
+      if (Math.random() < 0.20) {
+        const buildVibes = ['COOKING', 'IN THE ZONE', 'FOCUSED', 'FLOW STATE', 'HEADS DOWN', 'LOCKED IN', 'BUILDING...', 'CRAFTING', 'SHIPPING'];
+        const buildColors = ['#818cf8', '#a78bfa', '#c084fc', '#6366f1'];
+        spawnFloat(buildVibes[Math.floor(Math.random() * buildVibes.length)], buildColors[Math.floor(Math.random() * buildColors.length)]);
+      }
+    }
+
+    // ─── 7. Ambient idle vibes (periodic encouragement when idle) ────
+    if (agent.status === 'idle' && Date.now() - lastFloatTime.current > 6000) {
+      if (Math.random() < 0.30) {
+        const hour = new Date().getHours();
+        const ambientTexts: string[] = [];
+        // Time-of-day vibes
+        if (hour >= 5 && hour < 12) ambientTexts.push('GOOD MORNING', 'RISE & GRIND', 'FRESH START', 'EARLY BIRD', 'DAY MODE ON', 'COFFEE TIME');
+        else if (hour >= 12 && hour < 17) ambientTexts.push('AFTERNOON PUSH', 'KEEP BUILDING', 'STAY FOCUSED', 'HEADS DOWN', 'CRUISING', 'PEAK HOURS');
+        else if (hour >= 17 && hour < 22) ambientTexts.push('EVENING GRIND', 'NIGHT OWL', 'STILL HERE', 'AFTER HOURS', 'OVERTIME', 'GOLDEN HOUR');
+        else ambientTexts.push('LATE NIGHT MODE', 'NO SLEEP', 'BURNING OIL', 'MIDNIGHT OIL', '3AM VIBES', 'INSOMNIA MODE');
+        // General vibes — big pool
+        ambientTexts.push(
+          'READY', 'STANDING BY', 'WAITING...', 'IDLE', '...', 'ZZZ',
+          'BORED', 'ASSIGN ME', 'NEED TASKS', 'WHAT NEXT?', 'SEND IT',
+          'AVAILABLE', 'ON DECK', 'FREE AGENT',
+          'JUST VIBING', 'DOING NOTHING', 'TWIDDLING THUMBS',
+          'STRETCHING', 'YAWN', 'LOOKING AROUND', 'WHISTLING',
+          'DAYDREAMING', 'AFK ENERGY', 'IDLE HANDS',
+        );
+        // XP-aware
+        if (xp > 0) ambientTexts.push(`${xp} XP`, 'XP STACKING');
+        if (comboCount.current > 0) ambientTexts.push(`${comboCount.current} STREAK`, 'COMBO READY');
+        // Cost-aware
+        if (agent.costToday > 0 && agent.costToday < 0.01) ambientTexts.push('EFFICIENT', 'LOW COST');
+        if (agent.costToday === 0) ambientTexts.push('FREE MODE', '$0 VIBES');
+        // Random motivational
+        if (Math.random() < 0.3) ambientTexts.push('SHIP IT', 'BUILD MODE', 'LETS GO', 'ONE MORE TASK', 'STACK WINS', 'NO STOPPING', 'MOMENTUM');
+
+        const pick = ambientTexts[Math.floor(Math.random() * ambientTexts.length)];
+        const ambientColors = ['#64748b', '#94a3b8', '#6b7280', '#78716c', '#57534e'];
+        spawnFloat(pick, ambientColors[Math.floor(Math.random() * ambientColors.length)]);
+      }
     }
 
     lastCost.current = agent.costToday;
     lastStatus.current = agent.status;
 
-    // Random thoughts every 8-20 seconds
-    const minDelay = 8000;
-    const maxDelay = 20000;
+    // Random thoughts — frequency scales down with more agents on the floor
+    // 1-3 agents: 8-20s, 4-6: 15-35s, 7-10: 25-55s, 11+: 40-80s
+    const crowdMultiplier = totalAgents <= 3 ? 1 : totalAgents <= 6 ? 1.8 : totalAgents <= 10 ? 3 : 4.5;
+    const minDelay = 8000 * crowdMultiplier;
+    const maxDelay = 20000 * crowdMultiplier;
     const delay = Math.random() * (maxDelay - minDelay) + minDelay;
 
     const thoughtCtx = {
@@ -365,7 +721,38 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     }
 
     return () => clearTimeout(timer);
-  }, [agent.costToday, agent.status, showThoughts, currentThought]);
+  }, [agent.costToday, agent.status, showThoughts, currentThought, xp, turns, tokens]);
+
+  // ─── Idle behavior floating text (cyan) ──────────────────────────
+  const IDLE_BEHAVIOR_KEYWORDS: Record<string, string> = {
+    'checking streaks': 'CHECKING...',
+    'scanning tasks': 'REVIEWING...',
+    'checking circle pulse': 'MONITORING...',
+    'curating knowledge': 'CURATING...',
+    'generating memory': 'DIGESTING...',
+    'preparing morning': 'BRIEFING...',
+    'generating weekly': 'REFLECTING...',
+    'analyzing goal': 'ANALYZING...',
+    'scanning codebase': 'SCANNING...',
+    'checking dependencies': 'AUDITING...',
+    'analyzing cost': 'OPTIMIZING...',
+  };
+  const lastIdleFloatRef = useRef(0);
+  useEffect(() => {
+    if (agent.status !== 'building') return;
+    const activity = (agent.activity || '').toLowerCase();
+    let behaviorText: string | null = null;
+    for (const [prefix, text] of Object.entries(IDLE_BEHAVIOR_KEYWORDS)) {
+      if (activity.startsWith(prefix)) { behaviorText = text; break; }
+    }
+    if (!behaviorText) return;
+    const now = Date.now();
+    if (now - lastIdleFloatRef.current < 3000) return;
+    lastIdleFloatRef.current = now;
+    const id = floatId.current++;
+    setFloatingText(prev => [...prev, { id, text: behaviorText!, color: '#22d3ee', x: (Math.random() - 0.5) * 30 }]);
+    setTimeout(() => setFloatingText(prev => prev.filter(f => f.id !== id)), 2500);
+  }, [agent.status, agent.activity]);
 
   const statusColor = STATUS_COLORS[agent.status];
   const isOffline = agent.status === 'offline';
@@ -377,7 +764,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
       <Animated.View style={[styles.container, {
           transform: [
             { translateX: danceX },
-            { translateY: Animated.add(bobAnim, danceY) },
+            { translateY: Animated.add(Animated.add(bobAnim, danceY), celebJump) },
             { rotate: danceRotate.interpolate({ inputRange: [-360, 360], outputRange: ['-360deg', '360deg'] }) },
             { scale: danceScale },
             { scale: pressScale },
@@ -388,6 +775,21 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         {floatingText.map(ft => (
           <FloatingText key={ft.id} text={ft.text} color={ft.color} xOffset={ft.x} />
         ))}
+
+        {/* Celebration confetti */}
+        {celebrating && <ConfettiBurst />}
+
+        {/* Tamagotchi: Sleep ZZZs when offline */}
+        {isOffline && <SleepZzz />}
+
+        {/* Tamagotchi: Sweat drops during error */}
+        {agent.status === 'error' && <SweatDrop />}
+
+        {/* Tamagotchi: Sparkle on tap */}
+        {showSparkle && <SparkleEffect onComplete={() => setShowSparkle(false)} />}
+
+        {/* Tamagotchi: Level-up flash */}
+        {showLevelUp && <LevelUpFlash onComplete={() => setShowLevelUp(false)} />}
 
         {/* Thought bubble */}
         {showThoughts && currentThought && (
@@ -435,7 +837,9 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
 
         {/* Hat */}
         {a.hat === 'crown' && (
-          <Text style={styles.hatEmoji}>{'👑'}</Text>
+          <Animated.View style={{ opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1] }), transform: [{ scale: auraPulse.interpolate({ inputRange: [0.92, 1.12], outputRange: [0.97, 1.03] }) }] }}>
+            <Text style={styles.hatEmoji}>{'👑'}</Text>
+          </Animated.View>
         )}
         {a.hat === 'cap' && (
           <View style={[styles.cap, { backgroundColor: a.shirtColor }]} />
@@ -467,11 +871,11 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         {a.hat === 'space_helmet' && (
           <View style={styles.spaceHelmet}>
             <View style={styles.spaceHelmetAntenna} />
-            <View style={styles.spaceHelmetAntennaTip} />
+            <Animated.View style={[styles.spaceHelmetAntennaTip, { opacity: auraFlicker, transform: [{ scale: auraPulse }] }]} />
             <View style={styles.spaceHelmetDome}>
               <View style={styles.spaceHelmetHighlight} />
             </View>
-            <View style={styles.spaceHelmetVisor} />
+            <Animated.View style={[styles.spaceHelmetVisor, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1] }) }]} />
             <View style={styles.spaceHelmetRim} />
           </View>
         )}
@@ -479,17 +883,17 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           <View style={styles.wizardHat}>
             <View style={[styles.wizardHatTop, { borderBottomColor: '#6366f1' }]} />
             <View style={[styles.wizardHatBrim, { backgroundColor: '#6366f1' }]} />
-            <View style={styles.wizardStar1} />
-            <View style={styles.wizardStar2} />
+            <Animated.View style={[styles.wizardStar1, { opacity: auraFlicker, transform: [{ scale: auraPulse }] }]} />
+            <Animated.View style={[styles.wizardStar2, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.3, 1] }), transform: [{ scale: auraPulse.interpolate({ inputRange: [0.92, 1.12], outputRange: [1.12, 0.92] }) }] }]} />
           </View>
         )}
         {a.hat === 'halo' && (
-          <View style={styles.haloRing} />
+          <Animated.View style={[styles.haloRing, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1] }), transform: [{ scale: auraPulse.interpolate({ inputRange: [0.92, 1.12], outputRange: [0.95, 1.05] }) }] }]} />
         )}
         {a.hat === 'antenna' && (
           <View style={styles.antennaWrap}>
             <View style={styles.antennaStalk} />
-            <View style={styles.antennaBobble} />
+            <Animated.View style={[styles.antennaBobble, { opacity: auraFlicker, transform: [{ scale: auraPulse }] }]} />
           </View>
         )}
         {a.hat === 'crab_helmet' && (
@@ -521,7 +925,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         {a.hat === 'fez' && (
           <View style={styles.fez}>
             <View style={styles.fezBody} />
-            <View style={styles.fezTassel} />
+            <Animated.View style={[styles.fezTassel, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-12deg', '12deg'] }) }] }]} />
           </View>
         )}
         {a.hat === 'mohawk_spikes' && (
@@ -570,7 +974,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
 
         {/* Head — with look-around animation when idle */}
         <Animated.View style={[styles.head, isOffline && styles.offlineOpacity, {
-          transform: [{ translateX: lookAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [-1.5, 0, 1.5] }) }],
+          transform: [{ translateX: lookAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [-3, 0, 3] }) }],
         }]}>
           {/* Ears */}
           <View style={[styles.ear, styles.earLeft, { backgroundColor: a.skinTone, ...neonGlow }]}>
@@ -711,18 +1115,18 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
               <View style={styles.accessoryBandana} />
             )}
             {a.accessory === 'chain' && (
-              <View style={styles.accessoryChain}>
-                <View style={styles.chainLink1} />
+              <Animated.View style={[styles.accessoryChain, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-4deg', '4deg'] }) }] }]}>
+                <Animated.View style={[styles.chainLink1, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1] }) }]} />
                 <View style={styles.chainLink2} />
-                <View style={styles.chainLink3} />
-              </View>
+                <Animated.View style={[styles.chainLink3, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) }]} />
+              </Animated.View>
             )}
             {a.accessory === 'piercing' && (
               <View style={styles.accessoryPiercing} />
             )}
             {a.accessory === 'visor_shades' && (
               <View style={styles.accessoryVisor}>
-                <View style={styles.visorStripe} />
+                <Animated.View style={[styles.visorStripe, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }), transform: [{ translateX: auraDrift }] }]} />
               </View>
             )}
             {a.accessory === 'gas_mask' && (
@@ -795,18 +1199,18 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         {a.accessory === 'headphones' && (
           <View style={styles.headphones}>
             <View style={styles.hpBand} />
-            <View style={[styles.hpEar, { left: -2 }]} />
-            <View style={[styles.hpEar, { right: -2 }]} />
+            <Animated.View style={[styles.hpEar, { left: -2, transform: [{ scale: auraPulse.interpolate({ inputRange: [0.92, 1.12], outputRange: [0.95, 1.05] }) }] }]} />
+            <Animated.View style={[styles.hpEar, { right: -2, transform: [{ scale: auraPulse.interpolate({ inputRange: [0.92, 1.12], outputRange: [1.05, 0.95] }) }] }]} />
           </View>
         )}
 
         {/* Scarf accessory — between head and body */}
         {a.accessory === 'scarf' && (
-          <View style={styles.scarf}>
+          <Animated.View style={[styles.scarf, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-2deg', '2deg'] }) }] }]}>
             <View style={[styles.scarfStrip, { backgroundColor: '#ef4444' }]} />
             <View style={[styles.scarfStrip, { backgroundColor: '#dc2626' }]} />
             <View style={[styles.scarfStrip, { backgroundColor: '#ef4444' }]} />
-          </View>
+          </Animated.View>
         )}
 
         {/* Hoodie overlay */}
@@ -816,7 +1220,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
 
         {/* Back item — rendered behind body */}
         {a.backItem === 'cape' && (
-          <View style={[styles.cape, { backgroundColor: a.shirtColor + 'cc', borderColor: a.shirtColor }]} />
+          <Animated.View style={[styles.cape, { backgroundColor: a.shirtColor + 'cc', borderColor: a.shirtColor, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-3deg', '3deg'] }) }, { scaleY: auraPulse.interpolate({ inputRange: [0.92, 1.12], outputRange: [0.97, 1.03] }) }] }]} />
         )}
         {a.backItem === 'backpack' && (
           <View style={styles.backpack}>
@@ -825,10 +1229,10 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         )}
         {a.backItem === 'wings' && (
           <View style={styles.wingsWrap}>
-            <View style={[styles.wing, styles.wingLeft, { borderBottomColor: '#a5b4fc70' }]} />
-            <View style={[styles.wingInner, styles.wingInnerLeft, { borderBottomColor: '#c7d2fe50' }]} />
-            <View style={[styles.wing, styles.wingRight, { borderBottomColor: '#a5b4fc70' }]} />
-            <View style={[styles.wingInner, styles.wingInnerRight, { borderBottomColor: '#c7d2fe50' }]} />
+            <Animated.View style={[styles.wing, styles.wingLeft, { borderBottomColor: '#a5b4fc70', transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-8deg', '8deg'] }) }] }]} />
+            <Animated.View style={[styles.wingInner, styles.wingInnerLeft, { borderBottomColor: '#c7d2fe50', transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-5deg', '5deg'] }) }] }]} />
+            <Animated.View style={[styles.wing, styles.wingRight, { borderBottomColor: '#a5b4fc70', transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['8deg', '-8deg'] }) }] }]} />
+            <Animated.View style={[styles.wingInner, styles.wingInnerRight, { borderBottomColor: '#c7d2fe50', transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['5deg', '-5deg'] }) }] }]} />
           </View>
         )}
         {a.backItem === 'jetpack' && (
@@ -837,9 +1241,9 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
               <View style={styles.jetpackDetail} />
             </View>
             <View style={styles.jetpackNozzle} />
-            <View style={styles.jetpackFlame}>
-              <View style={styles.jetpackFlameInner} />
-            </View>
+            <Animated.View style={[styles.jetpackFlame, { opacity: auraFlicker, transform: [{ scaleY: auraPulse }] }]}>
+              <Animated.View style={[styles.jetpackFlameInner, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }) }]} />
+            </Animated.View>
           </View>
         )}
         {a.backItem === 'shield' && (
@@ -873,17 +1277,17 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         )}
         {a.backItem === 'tentacles' && (
           <View style={styles.tentacles}>
-            <View style={[styles.tentacle, { transform: [{ rotate: '-30deg' }] }]} />
-            <View style={[styles.tentacle, { transform: [{ rotate: '-10deg' }], height: PX * 4 }]} />
-            <View style={[styles.tentacle, { transform: [{ rotate: '10deg' }] }]} />
-            <View style={[styles.tentacle, { transform: [{ rotate: '30deg' }], height: PX * 3.5 }]} />
+            <Animated.View style={[styles.tentacle, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-35deg', '-25deg'] }) }] }]} />
+            <Animated.View style={[styles.tentacle, { height: PX * 4, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-5deg', '-15deg'] }) }] }]} />
+            <Animated.View style={[styles.tentacle, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['15deg', '5deg'] }) }] }]} />
+            <Animated.View style={[styles.tentacle, { height: PX * 3.5, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['25deg', '35deg'] }) }] }]} />
           </View>
         )}
         {a.backItem === 'rocket' && (
           <View style={styles.rocketPack}>
             <View style={styles.rocketBody} />
             <View style={styles.rocketNose} />
-            <View style={styles.rocketFlame} />
+            <Animated.View style={[styles.rocketFlame, { opacity: auraFlicker, transform: [{ scaleY: auraPulse }, { scaleX: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1.2] }) }] }]} />
           </View>
         )}
         {a.backItem === 'scroll' && (
@@ -894,12 +1298,12 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           </View>
         )}
         {a.backItem === 'boombox' && (
-          <View style={styles.boombox}>
+          <Animated.View style={[styles.boombox, { transform: [{ scale: auraPulse }] }]}>
             <View style={styles.boomboxBody} />
-            <View style={styles.boomboxSpeakerL} />
-            <View style={styles.boomboxSpeakerR} />
+            <Animated.View style={[styles.boomboxSpeakerL, { transform: [{ scale: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1.15] }) }] }]} />
+            <Animated.View style={[styles.boomboxSpeakerR, { transform: [{ scale: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [1.15, 0.9] }) }] }]} />
             <View style={styles.boomboxHandle} />
-          </View>
+          </Animated.View>
         )}
 
         {/* Neck */}
@@ -963,9 +1367,12 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           )}
           {/* Shirt pocket */}
           <View style={styles.shirtPocket} />
-          {/* Left arm — typing wiggle when building */}
+          {/* Left arm — typing wiggle when building + idle fidget */}
           <Animated.View style={[styles.arm, styles.leftArm, { backgroundColor: a.shirtColor,
-            transform: [{ translateY: typingAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [-1, 0, 1] }) }],
+            transform: [
+              { translateY: typingAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [-1, 0, 1] }) },
+              { rotate: leftArmWiggle.interpolate({ inputRange: [-30, 0, 30], outputRange: ['-30deg', '0deg', '30deg'] }) },
+            ],
           }]}>
             <View style={styles.shoulderHighlight} />
             <View style={{ position: 'absolute', top: -1, left: -1, width: 2, height: 2, backgroundColor: a.shirtColor, opacity: 0.5, borderRadius: 1 }} />
@@ -976,9 +1383,12 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
               <View style={[styles.fingerLine, styles.fingerLine2]} />
             </View>
           </Animated.View>
-          {/* Right arm — opposite phase typing */}
+          {/* Right arm — opposite phase typing + idle fidget */}
           <Animated.View style={[styles.arm, styles.rightArm, { backgroundColor: a.shirtColor,
-            transform: [{ translateY: typingAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [1, 0, -1] }) }],
+            transform: [
+              { translateY: typingAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [1, 0, -1] }) },
+              { rotate: rightArmWiggle.interpolate({ inputRange: [-30, 0, 30], outputRange: ['-30deg', '0deg', '30deg'] }) },
+            ],
           }]}>
             <View style={styles.shoulderHighlight} />
             <View style={{ position: 'absolute', top: -1, left: -1, width: 2, height: 2, backgroundColor: a.shirtColor, opacity: 0.5, borderRadius: 1 }} />
@@ -992,9 +1402,9 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           {/* Hand item — rendered at right arm position */}
           {(a.handItem || 'none') === 'lightsaber' && (
             <View style={styles.handLightsaber}>
-              <View style={[styles.lightsaberGlow, { backgroundColor: agent.color }]} />
-              <View style={[styles.lightsaberBlade, { backgroundColor: agent.color + 'dd', shadowColor: agent.color }]} />
-              <View style={[styles.lightsaberCore, { backgroundColor: agent.color }]} />
+              <Animated.View style={[styles.lightsaberGlow, { backgroundColor: agent.color, opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.4, 0.9] }), transform: [{ scaleX: auraPulse }] }]} />
+              <Animated.View style={[styles.lightsaberBlade, { backgroundColor: agent.color + 'dd', shadowColor: agent.color, opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1] }) }]} />
+              <Animated.View style={[styles.lightsaberCore, { backgroundColor: agent.color, opacity: auraFlicker }]} />
               <View style={styles.lightsaberGuard} />
               <View style={styles.lightsaberHilt}>
                 <View style={styles.lightsaberGrip1} />
@@ -1004,7 +1414,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           )}
           {(a.handItem || 'none') === 'coffee' && (
             <View style={styles.handCoffee}>
-              <View style={styles.handCoffeeSteam} />
+              <Animated.View style={[styles.handCoffeeSteam, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.2, 0.7] }), transform: [{ translateY: auraDrift }, { scaleX: auraPulse }] }]} />
               <View style={styles.handCoffeeLid} />
               <View style={styles.handCoffeeBody} />
               <View style={styles.handCoffeeHandle} />
@@ -1013,7 +1423,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           {(a.handItem || 'none') === 'laptop' && (
             <View style={styles.handLaptop}>
               <View style={styles.handLaptopScreen}>
-                <View style={styles.handLaptopScreenGlow} />
+                <Animated.View style={[styles.handLaptopScreenGlow, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.4, 0.9] }) }]} />
               </View>
               <View style={styles.handLaptopBase} />
             </View>
@@ -1021,22 +1431,22 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           {(a.handItem || 'none') === 'flag' && (
             <View style={styles.handFlag}>
               <View style={styles.handFlagPole} />
-              <View style={[styles.handFlagCloth, { backgroundColor: agent.color + '80' }]} />
+              <Animated.View style={[styles.handFlagCloth, { backgroundColor: agent.color + '80', transform: [{ scaleX: auraPulse.interpolate({ inputRange: [0.92, 1.12], outputRange: [0.9, 1.1] }) }, { rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-3deg', '3deg'] }) }] }]} />
             </View>
           )}
           {(a.handItem || 'none') === 'wand' && (
             <View style={styles.handWand}>
-              <View style={styles.handWandSpark} />
-              <View style={styles.handWandSpark2} />
-              <View style={styles.handWandSpark3} />
+              <Animated.View style={[styles.handWandSpark, { opacity: auraFlicker, transform: [{ scale: auraPulse }, { translateY: auraDrift }] }]} />
+              <Animated.View style={[styles.handWandSpark2, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.3, 1] }), transform: [{ scale: auraPulse.interpolate({ inputRange: [0.92, 1.12], outputRange: [1.12, 0.92] }) }] }]} />
+              <Animated.View style={[styles.handWandSpark3, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.5, 0.9] }), transform: [{ translateX: auraDrift }] }]} />
               <View style={styles.handWandStick} />
             </View>
           )}
           {(a.handItem || 'none') === 'crab_claws' && (
             <View style={styles.handCrabClaws}>
               <View style={styles.handCrabArm} />
-              <View style={styles.handCrabClawTop} />
-              <View style={styles.handCrabClawBot} />
+              <Animated.View style={[styles.handCrabClawTop, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-8deg', '0deg'] }) }] }]} />
+              <Animated.View style={[styles.handCrabClawBot, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['0deg', '8deg'] }) }] }]} />
             </View>
           )}
           {(a.handItem || 'none') === 'sword_hand' && (
@@ -1056,14 +1466,14 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           )}
           {(a.handItem || 'none') === 'microphone' && (
             <View style={styles.handMic}>
-              <View style={styles.micHead} />
+              <Animated.View style={[styles.micHead, { transform: [{ scale: auraPulse }] }]} />
               <View style={styles.micStick} />
             </View>
           )}
           {(a.handItem || 'none') === 'torch' && (
             <View style={styles.handTorch}>
-              <View style={styles.torchFlame} />
-              <View style={styles.torchFlameInner} />
+              <Animated.View style={[styles.torchFlame, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1] }), transform: [{ scaleY: auraPulse }, { scaleX: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1.2] }) }] }]} />
+              <Animated.View style={[styles.torchFlameInner, { opacity: auraFlicker, transform: [{ translateY: auraDrift }] }]} />
               <View style={styles.torchStick} />
             </View>
           )}
@@ -1086,14 +1496,18 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
 
         {/* Legs */}
         <View style={[styles.legs, isOffline && styles.offlineOpacity]}>
-          <View style={[styles.leg, { backgroundColor: a.pantsColor }]}>
-            <View style={styles.kneeShadow} />
-            <View style={styles.pantCuff} />
-          </View>
-          <View style={[styles.leg, { backgroundColor: a.pantsColor }]}>
-            <View style={styles.kneeShadow} />
-            <View style={styles.pantCuff} />
-          </View>
+          <Animated.View style={{ transform: [{ translateX: leftLegWiggle }] }}>
+            <View style={[styles.leg, { backgroundColor: a.pantsColor }]}>
+              <View style={styles.kneeShadow} />
+              <View style={styles.pantCuff} />
+            </View>
+          </Animated.View>
+          <Animated.View style={{ transform: [{ translateX: rightLegWiggle }] }}>
+            <View style={[styles.leg, { backgroundColor: a.pantsColor }]}>
+              <View style={styles.kneeShadow} />
+              <View style={styles.pantCuff} />
+            </View>
+          </Animated.View>
         </View>
 
         {/* Shoes */}
@@ -1119,16 +1533,16 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
 
         {/* Pet companion */}
         {(a.pet || 'none') === 'cat' && (
-          <Animated.View style={[styles.petCat, { transform: [{ translateY: petBounce }] }]}>
+          <Animated.View style={[styles.petCat, { transform: [{ translateX: petWander }, { translateY: petBounce }] }]}>
             <View style={styles.catBody}>
               <View style={styles.catBelly} />
               <View style={styles.catStripe1} />
               <View style={styles.catStripe2} />
             </View>
-            <View style={styles.catLegFL} />
-            <View style={styles.catLegFR} />
-            <View style={styles.catLegBL} />
-            <View style={styles.catLegBR} />
+            <Animated.View style={[styles.catLegFL, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['15deg', '0deg', '-15deg'] }) }] }]} />
+            <Animated.View style={[styles.catLegFR, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-15deg', '0deg', '15deg'] }) }] }]} />
+            <Animated.View style={[styles.catLegBL, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-12deg', '0deg', '12deg'] }) }] }]} />
+            <Animated.View style={[styles.catLegBR, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['12deg', '0deg', '-12deg'] }) }] }]} />
             <View style={styles.catHead}>
               <View style={styles.catEyeLeft} />
               <View style={styles.catEyeRight} />
@@ -1149,20 +1563,20 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           </Animated.View>
         )}
         {(a.pet || 'none') === 'dog' && (
-          <Animated.View style={[styles.petDog, { transform: [{ translateY: petBounce }] }]}>
+          <Animated.View style={[styles.petDog, { transform: [{ translateX: petWander }, { translateY: petBounce }] }]}>
             <View style={styles.dogBody}>
               <View style={styles.dogBelly} />
               <View style={styles.dogCollar} />
-              <View style={styles.dogCollarTag} />
+              <Animated.View style={[styles.dogCollarTag, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-10deg', '10deg'] }) }] }]} />
             </View>
-            <View style={styles.dogLegFL} />
-            <View style={styles.dogLegFR} />
-            <View style={styles.dogLegBL} />
-            <View style={styles.dogLegBR} />
+            <Animated.View style={[styles.dogLegFL, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['18deg', '0deg', '-18deg'] }) }] }]} />
+            <Animated.View style={[styles.dogLegFR, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-18deg', '0deg', '18deg'] }) }] }]} />
+            <Animated.View style={[styles.dogLegBL, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-14deg', '0deg', '14deg'] }) }] }]} />
+            <Animated.View style={[styles.dogLegBR, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['14deg', '0deg', '-14deg'] }) }] }]} />
             <View style={styles.dogHead}>
               <View style={styles.dogSnout} />
               <View style={styles.dogNose} />
-              <View style={styles.dogTongue} />
+              <Animated.View style={[styles.dogTongue, { transform: [{ translateY: petBounce.interpolate({ inputRange: [-2, 0], outputRange: [1, 0] }) }] }]} />
               <View style={styles.dogEyeLeft} />
               <View style={styles.dogEyeRight} />
               <View style={styles.dogBrowL} />
@@ -1174,90 +1588,94 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           </Animated.View>
         )}
         {(a.pet || 'none') === 'bird' && (
-          <Animated.View style={[styles.petBird, { transform: [{ translateY: petBounce }] }]}>
+          <Animated.View style={[styles.petBird, { transform: [{ translateX: petWander }, { translateY: Animated.add(petBounce, petWanderY) }] }]}>
             <View style={styles.birdBody}>
               <View style={styles.birdChest} />
             </View>
             <View style={styles.birdHead}>
               <View style={styles.birdEye} />
-              <View style={styles.birdCrest} />
+              <Animated.View style={[styles.birdCrest, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-5deg', '5deg'] }) }] }]} />
             </View>
-            <Animated.View style={[styles.birdWingL, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-15deg', '5deg'] }) }] }]} />
-            <Animated.View style={[styles.birdWingR, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['5deg', '-15deg'] }) }] }]} />
+            <Animated.View style={[styles.birdWingL, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-25deg', '10deg'] }) }] }]} />
+            <Animated.View style={[styles.birdWingR, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['10deg', '-25deg'] }) }] }]} />
             <View style={styles.birdBeak} />
-            <View style={styles.birdTail} />
-            <View style={styles.birdLegL} />
-            <View style={styles.birdLegR} />
+            <Animated.View style={[styles.birdTail, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-8deg', '8deg'] }) }] }]} />
+            <Animated.View style={[styles.birdLegL, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['10deg', '0deg', '-10deg'] }) }] }]} />
+            <Animated.View style={[styles.birdLegR, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-10deg', '0deg', '10deg'] }) }] }]} />
           </Animated.View>
         )}
         {(a.pet || 'none') === 'robot' && (
-          <Animated.View style={[styles.petRobot, { transform: [{ translateY: petBounce }] }]}>
+          <Animated.View style={[styles.petRobot, { transform: [{ translateX: petWander }, { translateY: petBounce }] }]}>
             <View style={styles.robotBody}>
-              <View style={[styles.robotEye, { left: PX * 0.5 }]} />
-              <View style={[styles.robotEye, { right: PX * 0.5 }]} />
+              <Animated.View style={[styles.robotEye, { left: PX * 0.5, opacity: auraFlicker.interpolate({ inputRange: [0, 0.1, 1], outputRange: [0.3, 1, 1] }) }]} />
+              <Animated.View style={[styles.robotEye, { right: PX * 0.5, opacity: auraFlicker.interpolate({ inputRange: [0, 0.1, 1], outputRange: [0.3, 1, 1] }) }]} />
               <View style={styles.robotChest} />
-              <View style={styles.robotPanel} />
-              <View style={styles.robotBtn1} />
-              <View style={styles.robotBtn2} />
+              <Animated.View style={[styles.robotPanel, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }) }]} />
+              <Animated.View style={[styles.robotBtn1, { opacity: auraFlicker }]} />
+              <Animated.View style={[styles.robotBtn2, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [1, 0.4] }) }]} />
             </View>
-            <View style={styles.robotLegL} />
-            <View style={styles.robotLegR} />
+            <Animated.View style={[styles.robotLegL, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['12deg', '0deg', '-12deg'] }) }] }]} />
+            <Animated.View style={[styles.robotLegR, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-12deg', '0deg', '12deg'] }) }] }]} />
             <View style={styles.robotFootL} />
             <View style={styles.robotFootR} />
             <View style={styles.robotAntenna} />
-            <Animated.View style={[styles.robotAntennaDot, { opacity: auraFlicker }]} />
-            <View style={styles.robotArm} />
+            <Animated.View style={[styles.robotAntennaDot, { opacity: auraFlicker, transform: [{ scale: auraPulse }] }]} />
+            <Animated.View style={[styles.robotArm, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-10deg', '0deg', '10deg'] }) }] }]} />
           </Animated.View>
         )}
         {(a.pet || 'none') === 'dragon' && (
-          <Animated.View style={[styles.petDragon, { transform: [{ translateY: petBounce }] }]}>
+          <Animated.View style={[styles.petDragon, { transform: [{ translateX: petWander }, { translateY: petBounce }] }]}>
             <View style={styles.dragonBody}>
               <View style={styles.dragonBelly} />
               <View style={styles.dragonSpine1} />
               <View style={styles.dragonSpine2} />
               <View style={styles.dragonSpine3} />
             </View>
-            <View style={styles.dragonHead}>
-              <View style={styles.dragonEye} />
-              <View style={styles.dragonPupil} />
-              <View style={styles.dragonSnout} />
-              <View style={styles.dragonNostril} />
-              <View style={styles.dragonHorn} />
-            </View>
-            <Animated.View style={[styles.dragonWingL, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-5deg', '15deg'] }) }] }]} />
-            <Animated.View style={[styles.dragonWingR, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['5deg', '-15deg'] }) }] }]} />
-            <View style={styles.dragonLegFL} />
-            <View style={styles.dragonLegFR} />
-            <Animated.View style={[styles.dragonTail, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-25deg', '-5deg'] }) }] }]} />
-            <Animated.View style={[styles.dragonTailTip, { opacity: auraFlicker }]} />
-            <Animated.View style={[styles.dragonBreath, { opacity: auraFlicker, transform: [{ scaleX: auraPulse }] }]} />
+            <Animated.View style={[{ transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-2deg', '2deg'] }) }] }]}>
+              <View style={styles.dragonHead}>
+                <View style={styles.dragonEye} />
+                <View style={styles.dragonPupil} />
+                <View style={styles.dragonSnout} />
+                <Animated.View style={[styles.dragonNostril, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }) }]} />
+                <View style={styles.dragonHorn} />
+              </View>
+            </Animated.View>
+            <Animated.View style={[styles.dragonWingL, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-15deg', '20deg'] }) }] }]} />
+            <Animated.View style={[styles.dragonWingR, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['15deg', '-20deg'] }) }] }]} />
+            <Animated.View style={[styles.dragonLegFL, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['15deg', '0deg', '-15deg'] }) }] }]} />
+            <Animated.View style={[styles.dragonLegFR, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-15deg', '0deg', '15deg'] }) }] }]} />
+            <Animated.View style={[styles.dragonTail, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-30deg', '0deg'] }) }] }]} />
+            <Animated.View style={[styles.dragonTailTip, { opacity: auraFlicker, transform: [{ scale: auraPulse }] }]} />
+            <Animated.View style={[styles.dragonBreath, { opacity: auraFlicker, transform: [{ scaleX: auraPulse }, { scaleY: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1.3] }) }] }]} />
           </Animated.View>
         )}
         {(a.pet || 'none') === 'alien' && (
-          <Animated.View style={[styles.petAlien, { transform: [{ translateY: petBounce }] }]}>
+          <Animated.View style={[styles.petAlien, { transform: [{ translateX: petWander }, { translateY: petBounce }] }]}>
             <View style={styles.alienBody}>
               <View style={styles.alienBelt} />
-              <View style={styles.alienGem} />
+              <Animated.View style={[styles.alienGem, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }), transform: [{ scale: auraPulse }] }]} />
             </View>
-            <View style={styles.alienHead}>
-              <View style={[styles.alienEye, { left: PX * 0.4 }]} />
-              <View style={[styles.alienEye, { right: PX * 0.4 }]} />
-              <View style={[styles.alienPupil, { left: PX * 0.55 }]} />
-              <View style={[styles.alienPupil, { right: PX * 0.55 }]} />
-              <View style={styles.alienMouth} />
-            </View>
-            <View style={styles.alienAntennaL} />
-            <View style={styles.alienAntennaR} />
-            <Animated.View style={[styles.alienAntennaTipL, { opacity: auraFlicker }]} />
-            <Animated.View style={[styles.alienAntennaTipR, { opacity: auraFlicker }]} />
-            <View style={styles.alienLegL} />
-            <View style={styles.alienLegR} />
+            <Animated.View style={[{ transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-3deg', '3deg'] }) }] }]}>
+              <View style={styles.alienHead}>
+                <View style={[styles.alienEye, { left: PX * 0.4 }]} />
+                <View style={[styles.alienEye, { right: PX * 0.4 }]} />
+                <Animated.View style={[styles.alienPupil, { left: PX * 0.55, transform: [{ translateX: auraDrift.interpolate({ inputRange: [-2, 2], outputRange: [-0.5, 0.5] }) }] }]} />
+                <Animated.View style={[styles.alienPupil, { right: PX * 0.55, transform: [{ translateX: auraDrift.interpolate({ inputRange: [-2, 2], outputRange: [-0.5, 0.5] }) }] }]} />
+                <View style={styles.alienMouth} />
+              </View>
+            </Animated.View>
+            <Animated.View style={[styles.alienAntennaL, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-5deg', '5deg'] }) }] }]} />
+            <Animated.View style={[styles.alienAntennaR, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['5deg', '-5deg'] }) }] }]} />
+            <Animated.View style={[styles.alienAntennaTipL, { opacity: auraFlicker, transform: [{ scale: auraPulse }] }]} />
+            <Animated.View style={[styles.alienAntennaTipR, { opacity: auraFlicker, transform: [{ scale: auraPulse.interpolate({ inputRange: [0.92, 1.12], outputRange: [1.12, 0.92] }) }] }]} />
+            <Animated.View style={[styles.alienLegL, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['10deg', '0deg', '-10deg'] }) }] }]} />
+            <Animated.View style={[styles.alienLegR, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-10deg', '0deg', '10deg'] }) }] }]} />
           </Animated.View>
         )}
 
         {/* Crab pet */}
         {(a.pet || 'none') === 'crab' && (
-          <Animated.View style={[styles.petCrab, { transform: [{ translateY: petBounce }] }]}>
+          <Animated.View style={[styles.petCrab, { transform: [{ translateX: petWander }, { translateY: petBounce }] }]}>
             {/* Shell body */}
             <View style={styles.crabShell}>
               <View style={styles.crabShellHighlight} />
@@ -1265,69 +1683,159 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
               <View style={styles.crabShellPattern2} />
             </View>
             {/* Eye stalks */}
-            <View style={styles.crabEyeStalkL} />
-            <View style={styles.crabEyeStalkR} />
+            <Animated.View style={[styles.crabEyeStalkL, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-5deg', '5deg'] }) }] }]} />
+            <Animated.View style={[styles.crabEyeStalkR, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['5deg', '-5deg'] }) }] }]} />
             <View style={[styles.crabEye, styles.crabEyeL]} />
             <View style={[styles.crabEye, styles.crabEyeR]} />
-            <View style={[styles.crabPupil, styles.crabPupilL]} />
-            <View style={[styles.crabPupil, styles.crabPupilR]} />
+            <Animated.View style={[styles.crabPupil, styles.crabPupilL, { transform: [{ translateX: auraDrift.interpolate({ inputRange: [-2, 2], outputRange: [-0.3, 0.3] }) }] }]} />
+            <Animated.View style={[styles.crabPupil, styles.crabPupilR, { transform: [{ translateX: auraDrift.interpolate({ inputRange: [-2, 2], outputRange: [-0.3, 0.3] }) }] }]} />
             {/* Claws */}
-            <Animated.View style={[styles.crabClawL, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-8deg', '8deg'] }) }] }]}>
+            <Animated.View style={[styles.crabClawL, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-12deg', '12deg'] }) }] }]}>
               <View style={styles.crabClawPincerTop} />
               <View style={styles.crabClawPincerBot} />
             </Animated.View>
-            <Animated.View style={[styles.crabClawR, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['8deg', '-8deg'] }) }] }]}>
+            <Animated.View style={[styles.crabClawR, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['12deg', '-12deg'] }) }] }]}>
               <View style={styles.crabClawPincerTop} />
               <View style={styles.crabClawPincerBot} />
             </Animated.View>
-            {/* Legs */}
-            <View style={styles.crabLeg1L} />
-            <View style={styles.crabLeg2L} />
-            <View style={styles.crabLeg3L} />
-            <View style={styles.crabLeg1R} />
-            <View style={styles.crabLeg2R} />
-            <View style={styles.crabLeg3R} />
+            {/* Legs — animated walk */}
+            <Animated.View style={[styles.crabLeg1L, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-12deg', '0deg', '12deg'] }) }] }]} />
+            <Animated.View style={[styles.crabLeg2L, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['10deg', '0deg', '-10deg'] }) }] }]} />
+            <Animated.View style={[styles.crabLeg3L, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-8deg', '0deg', '8deg'] }) }] }]} />
+            <Animated.View style={[styles.crabLeg1R, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['12deg', '0deg', '-12deg'] }) }] }]} />
+            <Animated.View style={[styles.crabLeg2R, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-10deg', '0deg', '10deg'] }) }] }]} />
+            <Animated.View style={[styles.crabLeg3R, { transform: [{ rotate: petLegAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['8deg', '0deg', '-8deg'] }) }] }]} />
           </Animated.View>
         )}
         {(a.pet || 'none') === 'snake' && (
-          <Animated.View style={[styles.petSnake, { transform: [{ translateY: petBounce }] }]}>
-            <Animated.View style={[styles.snakeBody, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-3deg', '3deg'] }) }] }]} />
-            <View style={styles.snakeHead}>
-              <View style={styles.snakeEye} />
-              <View style={styles.snakeTongue} />
-            </View>
+          <Animated.View style={[styles.petSnake, { transform: [{ translateX: petWander }, { translateY: petBounce }] }]}>
+            <Animated.View style={[styles.snakeBody, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-8deg', '8deg'] }) }, { scaleX: auraPulse.interpolate({ inputRange: [0.92, 1.12], outputRange: [0.95, 1.05] }) }] }]} />
+            <Animated.View style={[{ transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['3deg', '-3deg'] }) }] }]}>
+              <View style={styles.snakeHead}>
+                <View style={styles.snakeEye} />
+                <Animated.View style={[styles.snakeTongue, { transform: [{ scaleX: auraFlicker.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.5, 1.3, 0.5] }) }] }]} />
+              </View>
+            </Animated.View>
           </Animated.View>
         )}
         {(a.pet || 'none') === 'bat' && (
-          <Animated.View style={[styles.petBat, { transform: [{ translateY: petBounce }] }]}>
+          <Animated.View style={[styles.petBat, { transform: [{ translateX: petWander }, { translateY: Animated.add(petBounce, petWanderY) }] }]}>
             <View style={styles.batBody} />
-            <Animated.View style={[styles.batWingL, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-10deg', '20deg'] }) }] }]} />
-            <Animated.View style={[styles.batWingR, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['10deg', '-20deg'] }) }] }]} />
-            <View style={[styles.batEye, { left: PX * 0.3 }]} />
-            <View style={[styles.batEye, { right: PX * 0.3 }]} />
+            <Animated.View style={[styles.batWingL, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-20deg', '25deg'] }) }] }]} />
+            <Animated.View style={[styles.batWingR, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['20deg', '-25deg'] }) }] }]} />
+            <Animated.View style={[styles.batEye, { left: PX * 0.3, opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }) }]} />
+            <Animated.View style={[styles.batEye, { right: PX * 0.3, opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }) }]} />
           </Animated.View>
         )}
         {(a.pet || 'none') === 'skull' && (
-          <Animated.View style={[styles.petSkull, { transform: [{ translateY: petBounce }] }]}>
+          <Animated.View style={[styles.petSkull, { transform: [{ translateX: petWander }, { translateY: Animated.add(petBounce, petWanderY) }, { rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-5deg', '5deg'] }) }] }]}>
             <View style={styles.skullHead}>
-              <View style={[styles.skullEye, { left: PX * 0.4 }]} />
-              <View style={[styles.skullEye, { right: PX * 0.4 }]} />
+              <Animated.View style={[styles.skullEye, { left: PX * 0.4, opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.3, 1] }) }]} />
+              <Animated.View style={[styles.skullEye, { right: PX * 0.4, opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.3, 1] }) }]} />
               <View style={styles.skullNose} />
               <View style={styles.skullTeeth} />
             </View>
-            <View style={styles.skullJaw} />
+            <Animated.View style={[styles.skullJaw, { transform: [{ translateY: petTail.interpolate({ inputRange: [-1, 1], outputRange: [0, 1.5] }) }] }]} />
           </Animated.View>
         )}
         {(a.pet || 'none') === 'mushroom' && (
-          <Animated.View style={[styles.petMushroom, { transform: [{ translateY: petBounce }] }]}>
-            <View style={styles.mushroomCap}>
+          <Animated.View style={[styles.petMushroom, { transform: [{ translateX: petWander }, { translateY: petBounce }, { rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-4deg', '4deg'] }) }] }]}>
+            <Animated.View style={[styles.mushroomCap, { transform: [{ scale: auraPulse.interpolate({ inputRange: [0.92, 1.12], outputRange: [0.97, 1.03] }) }] }]}>
               <View style={styles.mushroomSpot1} />
               <View style={styles.mushroomSpot2} />
-            </View>
+            </Animated.View>
             <View style={styles.mushroomStem} />
-            <View style={[styles.mushroomEye, { left: PX * 0.5 }]} />
-            <View style={[styles.mushroomEye, { right: PX * 0.5 }]} />
+            <Animated.View style={[styles.mushroomEye, { left: PX * 0.5, transform: [{ scaleY: auraFlicker.interpolate({ inputRange: [0, 0.05, 0.1, 1], outputRange: [0.1, 0.1, 1, 1] }) }] }]} />
+            <Animated.View style={[styles.mushroomEye, { right: PX * 0.5, transform: [{ scaleY: auraFlicker.interpolate({ inputRange: [0, 0.05, 0.1, 1], outputRange: [0.1, 0.1, 1, 1] }) }] }]} />
           </Animated.View>
+        )}
+
+        {/* Spider pet — crawls side to side */}
+        {(a.pet || 'none') === 'spider' && (
+          <Animated.View style={[styles.petSpider, { transform: [{ translateX: Animated.add(petCrawl, petWander) }, { translateY: petCrawlY }] }]}>
+            {/* Body */}
+            <View style={{ width: PX * 3, height: PX * 2.2, backgroundColor: '#1a1a1a', borderRadius: PX * 1.1, position: 'absolute', top: 0, left: PX * 0.5 }} />
+            {/* Head */}
+            <View style={{ width: PX * 1.8, height: PX * 1.5, backgroundColor: '#2d2d2d', borderRadius: PX * 0.9, position: 'absolute', top: -PX * 0.8, left: PX * 1.1 }} />
+            {/* Eyes — 8 red dots */}
+            <View style={{ width: PX * 0.35, height: PX * 0.35, backgroundColor: '#ef4444', borderRadius: PX * 0.2, position: 'absolute', top: -PX * 0.5, left: PX * 1.3 }} />
+            <View style={{ width: PX * 0.35, height: PX * 0.35, backgroundColor: '#ef4444', borderRadius: PX * 0.2, position: 'absolute', top: -PX * 0.5, left: PX * 1.7 }} />
+            <View style={{ width: PX * 0.35, height: PX * 0.35, backgroundColor: '#ef4444', borderRadius: PX * 0.2, position: 'absolute', top: -PX * 0.5, left: PX * 2.1 }} />
+            <View style={{ width: PX * 0.35, height: PX * 0.35, backgroundColor: '#ef4444', borderRadius: PX * 0.2, position: 'absolute', top: -PX * 0.5, left: PX * 2.5 }} />
+            {/* Legs — 4 per side, animated with petTail */}
+            <Animated.View style={{ position: 'absolute', top: PX * 0.2, left: -PX * 1.5, width: PX * 2, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-15deg', '15deg'] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 0.8, left: -PX * 1.8, width: PX * 2.3, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['10deg', '-10deg'] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 1.4, left: -PX * 1.6, width: PX * 2.1, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-12deg', '12deg'] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 1.8, left: -PX * 1.2, width: PX * 1.7, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['8deg', '-8deg'] }) }] }} />
+            {/* Right legs */}
+            <Animated.View style={{ position: 'absolute', top: PX * 0.2, right: -PX * 1.5, width: PX * 2, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['15deg', '-15deg'] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 0.8, right: -PX * 1.8, width: PX * 2.3, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-10deg', '10deg'] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 1.4, right: -PX * 1.6, width: PX * 2.1, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['12deg', '-12deg'] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 1.8, right: -PX * 1.2, width: PX * 1.7, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-8deg', '8deg'] }) }] }} />
+            {/* Web thread dangling */}
+            <Animated.View style={{ position: 'absolute', top: -PX * 4, left: PX * 1.8, width: PX * 0.15, height: PX * 3.5, backgroundColor: '#ffffff30', opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.2, 0.5] }) }} />
+          </Animated.View>
+        )}
+
+        {/* Shark pet — swims back and forth */}
+        {(a.pet || 'none') === 'shark' && (
+          <Animated.View style={[styles.petShark, { transform: [{ translateX: Animated.add(petCrawl, petWander) }, { translateY: petCrawlY }] }]}>
+            {/* Body */}
+            <View style={{ width: PX * 5, height: PX * 2.5, backgroundColor: '#64748b', borderRadius: PX * 1.2, position: 'absolute', top: 0, left: 0 }}>
+              {/* Belly */}
+              <View style={{ position: 'absolute', bottom: 0, left: PX * 0.5, width: PX * 4, height: PX * 1, backgroundColor: '#e2e8f0', borderBottomLeftRadius: PX * 0.8, borderBottomRightRadius: PX * 0.8 }} />
+            </View>
+            {/* Dorsal fin */}
+            <View style={{ position: 'absolute', top: -PX * 1.5, left: PX * 1.8, width: 0, height: 0, borderLeftWidth: PX * 0.8, borderRightWidth: PX * 0.8, borderBottomWidth: PX * 1.8, borderLeftColor: 'transparent', borderRightColor: 'transparent', borderBottomColor: '#475569' }} />
+            {/* Tail fin */}
+            <Animated.View style={{ position: 'absolute', top: -PX * 0.5, right: -PX * 1.5, width: 0, height: 0, borderTopWidth: PX * 1.2, borderBottomWidth: PX * 1.2, borderLeftWidth: PX * 1.8, borderTopColor: 'transparent', borderBottomColor: 'transparent', borderLeftColor: '#475569', transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-15deg', '15deg'] }) }] }} />
+            {/* Pectoral fins */}
+            <View style={{ position: 'absolute', top: PX * 1.8, left: PX * 1, width: PX * 1.2, height: PX * 0.4, backgroundColor: '#475569', borderRadius: PX * 0.2, transform: [{ rotate: '20deg' }] }} />
+            <View style={{ position: 'absolute', top: PX * 1.8, left: PX * 2.8, width: PX * 1.2, height: PX * 0.4, backgroundColor: '#475569', borderRadius: PX * 0.2, transform: [{ rotate: '-20deg' }] }} />
+            {/* Eye */}
+            <View style={{ position: 'absolute', top: PX * 0.5, left: PX * 0.5, width: PX * 0.6, height: PX * 0.6, backgroundColor: '#0f172a', borderRadius: PX * 0.3 }} />
+            <View style={{ position: 'absolute', top: PX * 0.55, left: PX * 0.55, width: PX * 0.25, height: PX * 0.25, backgroundColor: '#ffffff', borderRadius: PX * 0.15 }} />
+            {/* Teeth */}
+            <View style={{ position: 'absolute', top: PX * 1.5, left: PX * 0, width: PX * 1.5, height: PX * 0.3, backgroundColor: '#ffffff', borderRadius: PX * 0.1 }} />
+            {/* Gill slits */}
+            <View style={{ position: 'absolute', top: PX * 0.5, left: PX * 1.5, width: PX * 0.1, height: PX * 0.8, backgroundColor: '#47556950' }} />
+            <View style={{ position: 'absolute', top: PX * 0.5, left: PX * 1.8, width: PX * 0.1, height: PX * 0.8, backgroundColor: '#47556950' }} />
+            <View style={{ position: 'absolute', top: PX * 0.5, left: PX * 2.1, width: PX * 0.1, height: PX * 0.8, backgroundColor: '#47556950' }} />
+          </Animated.View>
+        )}
+
+        {/* Bones pet — falling bones */}
+        {(a.pet || 'none') === 'bones' && (
+          <View style={[styles.petBones]}>
+            {/* Bone 1 — falls slowly */}
+            <Animated.View style={{ position: 'absolute', top: -PX * 6, left: -PX * 2, opacity: auraDrift.interpolate({ inputRange: [-2, 0, 2], outputRange: [0.3, 0.9, 0.3] }), transform: [{ translateY: auraDrift.interpolate({ inputRange: [-2, 2], outputRange: [-4, 12] }) }, { rotate: auraRotate.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '180deg'] }) }] }}>
+              <View style={{ width: PX * 1.5, height: PX * 0.4, backgroundColor: '#e2e8f0', borderRadius: PX * 0.2 }} />
+              <View style={{ width: PX * 0.5, height: PX * 0.5, backgroundColor: '#e2e8f0', borderRadius: PX * 0.25, position: 'absolute', top: -PX * 0.2, left: -PX * 0.1 }} />
+              <View style={{ width: PX * 0.5, height: PX * 0.5, backgroundColor: '#e2e8f0', borderRadius: PX * 0.25, position: 'absolute', top: -PX * 0.2, right: -PX * 0.1 }} />
+              <View style={{ width: PX * 0.5, height: PX * 0.5, backgroundColor: '#e2e8f0', borderRadius: PX * 0.25, position: 'absolute', bottom: -PX * 0.2, left: -PX * 0.1 }} />
+              <View style={{ width: PX * 0.5, height: PX * 0.5, backgroundColor: '#e2e8f0', borderRadius: PX * 0.25, position: 'absolute', bottom: -PX * 0.2, right: -PX * 0.1 }} />
+            </Animated.View>
+            {/* Bone 2 — offset timing */}
+            <Animated.View style={{ position: 'absolute', top: -PX * 3, left: PX * 5, opacity: auraDrift.interpolate({ inputRange: [-2, 0, 2], outputRange: [0.8, 0.4, 0.8] }), transform: [{ translateY: auraDrift.interpolate({ inputRange: [-2, 2], outputRange: [8, -2] }) }, { rotate: auraRotate.interpolate({ inputRange: [0, 1], outputRange: ['90deg', '270deg'] }) }] }}>
+              <View style={{ width: PX * 1.2, height: PX * 0.35, backgroundColor: '#cbd5e1', borderRadius: PX * 0.18 }} />
+              <View style={{ width: PX * 0.4, height: PX * 0.4, backgroundColor: '#cbd5e1', borderRadius: PX * 0.2, position: 'absolute', top: -PX * 0.15, left: -PX * 0.08 }} />
+              <View style={{ width: PX * 0.4, height: PX * 0.4, backgroundColor: '#cbd5e1', borderRadius: PX * 0.2, position: 'absolute', top: -PX * 0.15, right: -PX * 0.08 }} />
+              <View style={{ width: PX * 0.4, height: PX * 0.4, backgroundColor: '#cbd5e1', borderRadius: PX * 0.2, position: 'absolute', bottom: -PX * 0.15, left: -PX * 0.08 }} />
+              <View style={{ width: PX * 0.4, height: PX * 0.4, backgroundColor: '#cbd5e1', borderRadius: PX * 0.2, position: 'absolute', bottom: -PX * 0.15, right: -PX * 0.08 }} />
+            </Animated.View>
+            {/* Skull fragment */}
+            <Animated.View style={{ position: 'absolute', top: -PX * 1, left: PX * 1, opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.4, 0.9] }), transform: [{ translateY: auraDrift.interpolate({ inputRange: [-2, 2], outputRange: [2, 10] }) }, { rotate: auraRotate.interpolate({ inputRange: [0, 1], outputRange: ['30deg', '390deg'] }) }] }}>
+              <View style={{ width: PX * 1.4, height: PX * 1.4, backgroundColor: '#f1f5f9', borderRadius: PX * 0.7 }} />
+              <View style={{ width: PX * 0.3, height: PX * 0.3, backgroundColor: '#0f172a', borderRadius: PX * 0.15, position: 'absolute', top: PX * 0.3, left: PX * 0.25 }} />
+              <View style={{ width: PX * 0.3, height: PX * 0.3, backgroundColor: '#0f172a', borderRadius: PX * 0.15, position: 'absolute', top: PX * 0.3, right: PX * 0.25 }} />
+            </Animated.View>
+            {/* Ribcage */}
+            <Animated.View style={{ position: 'absolute', top: -PX * 8, left: PX * 3.5, opacity: auraDrift.interpolate({ inputRange: [-2, 0, 2], outputRange: [0.5, 0.8, 0.5] }), transform: [{ translateY: auraDrift.interpolate({ inputRange: [-2, 2], outputRange: [-2, 14] }) }, { rotate: '15deg' }] }}>
+              <View style={{ width: PX * 1.8, height: PX * 0.2, backgroundColor: '#e2e8f0', borderRadius: PX * 0.1 }} />
+              <View style={{ width: PX * 1.6, height: PX * 0.2, backgroundColor: '#e2e8f0', borderRadius: PX * 0.1, marginTop: PX * 0.3, marginLeft: PX * 0.1 }} />
+              <View style={{ width: PX * 1.4, height: PX * 0.2, backgroundColor: '#e2e8f0', borderRadius: PX * 0.1, marginTop: PX * 0.3, marginLeft: PX * 0.2 }} />
+            </Animated.View>
+          </View>
         )}
 
         {/* Aura effects — animated */}
@@ -1433,6 +1941,29 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             <Animated.View style={[styles.voidParticle2, { opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.7] }) }]} />
           </Animated.View>
         )}
+        {(a.aura || 'none') === 'galaxy' && (
+          <Animated.View style={[styles.auraGalaxy, { transform: [{ rotate: auraRotate.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) }] }]}>
+            {/* Spiral arm 1 */}
+            <Animated.View style={{ position: 'absolute', top: PX * 1, left: PX * 0.5, width: PX * 5, height: PX * 1, backgroundColor: '#8b5cf640', borderRadius: PX * 0.5, transform: [{ rotate: '30deg' }, { scaleX: auraPulse }] }} />
+            {/* Spiral arm 2 */}
+            <Animated.View style={{ position: 'absolute', top: PX * 3, left: PX * -0.5, width: PX * 5, height: PX * 0.8, backgroundColor: '#3b82f640', borderRadius: PX * 0.4, transform: [{ rotate: '-40deg' }, { scaleX: auraPulse.interpolate({ inputRange: [0.92, 1.12], outputRange: [1.12, 0.92] }) }] }} />
+            {/* Spiral arm 3 */}
+            <Animated.View style={{ position: 'absolute', top: PX * 5, left: PX * 1, width: PX * 4, height: PX * 0.6, backgroundColor: '#ec489940', borderRadius: PX * 0.3, transform: [{ rotate: '60deg' }, { scaleX: auraPulse }] }} />
+            {/* Galaxy core — bright center */}
+            <Animated.View style={{ position: 'absolute', top: PX * 2.5, left: PX * 1.5, width: PX * 2, height: PX * 2, borderRadius: PX * 1, backgroundColor: '#fef08a', opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.4, 0.8] }), shadowColor: '#fef08a', shadowRadius: 8, shadowOpacity: 0.8 }} />
+            {/* Orbiting stars */}
+            <Animated.View style={{ position: 'absolute', top: PX * 0.2, left: PX * 0.8, width: PX * 0.6, height: PX * 0.6, borderRadius: PX * 0.3, backgroundColor: '#fef08a', opacity: auraFlicker, shadowColor: '#fef08a', shadowRadius: 4, shadowOpacity: 1, transform: [{ translateX: auraDrift.interpolate({ inputRange: [-2, 2], outputRange: [-3, 3] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 1.5, right: PX * 0.2, width: PX * 0.5, height: PX * 0.5, borderRadius: PX * 0.25, backgroundColor: '#67e8f9', opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }), shadowColor: '#67e8f9', shadowRadius: 3, shadowOpacity: 1, transform: [{ translateY: auraDrift }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 5.5, left: PX * 3, width: PX * 0.4, height: PX * 0.4, borderRadius: PX * 0.2, backgroundColor: '#f472b6', opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.4, 0.9] }), shadowColor: '#f472b6', shadowRadius: 3, shadowOpacity: 1 }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 4, left: PX * -0.5, width: PX * 0.45, height: PX * 0.45, borderRadius: PX * 0.23, backgroundColor: '#a78bfa', opacity: auraFlicker, shadowColor: '#a78bfa', shadowRadius: 4, shadowOpacity: 1, transform: [{ translateX: auraDrift.interpolate({ inputRange: [-2, 2], outputRange: [2, -2] }) }, { translateY: auraDrift }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 0.8, left: PX * 3.5, width: PX * 0.35, height: PX * 0.35, borderRadius: PX * 0.18, backgroundColor: '#fbbf24', opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.8] }), shadowColor: '#fbbf24', shadowRadius: 3, shadowOpacity: 1 }} />
+            {/* Comet trail */}
+            <Animated.View style={{ position: 'absolute', top: PX * 1, left: PX * 4, width: PX * 3, height: PX * 0.25, backgroundColor: '#67e8f9', borderRadius: PX * 0.12, opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0, 0.6] }), transform: [{ rotate: '-20deg' }, { translateX: auraDrift.interpolate({ inputRange: [-2, 2], outputRange: [-6, 2] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 5, right: PX * 3.5, width: PX * 2.5, height: PX * 0.2, backgroundColor: '#f472b6', borderRadius: PX * 0.1, opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0, 0.5] }), transform: [{ rotate: '25deg' }, { translateX: auraDrift.interpolate({ inputRange: [-2, 2], outputRange: [4, -4] }) }] }} />
+            {/* Nebula clouds */}
+            <Animated.View style={{ position: 'absolute', top: PX * -1, left: PX * -1, width: PX * 7, height: PX * 9, borderRadius: PX * 3.5, backgroundColor: '#7c3aed', opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.03, 0.1] }), transform: [{ scale: auraPulse }] }} />
+          </Animated.View>
+        )}
 
         {/* Name label */}
         <View style={styles.nameContainer}>
@@ -1441,8 +1972,93 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
 
         {/* XP bar */}
         <XPBar xp={xp} xpNext={xpNext} color={agent.color} />
+
+        {/* Automate Me button */}
+        {showAutomateButton && onAutomate && !showAutomateInput && (
+          <Pressable
+            onPress={(e) => { e.stopPropagation?.(); setShowAutomateInput(true); setTimeout(() => automateInputRef.current?.focus(), 100); }}
+            style={{ position: 'absolute', bottom: -16, left: '50%', marginLeft: -20, zIndex: 45, backgroundColor: '#8b5cf6', paddingHorizontal: 4, paddingVertical: 1.5, borderRadius: 3 }}
+          >
+            <Text style={{ color: '#fff', fontSize: 5, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 0.3 }}>AUTOMATE</Text>
+          </Pressable>
+        )}
+        {showAutomateInput && onAutomate && (
+          <View
+            style={{ position: 'absolute', bottom: -22, left: '50%', marginLeft: -50, zIndex: 50, flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a2e', borderWidth: 1, borderColor: '#8b5cf6', borderRadius: 3, padding: 1.5 }}
+            onStartShouldSetResponder={() => true}
+            onResponderTerminationRequest={() => false}
+          >
+            <TextInput
+              ref={automateInputRef}
+              value={automateText}
+              onChangeText={setAutomateText}
+              onSubmitEditing={handleAutomateSubmit}
+              placeholder="task..."
+              placeholderTextColor="#666"
+              style={{ width: 80, height: 12, fontSize: 6, color: '#e2e8f0', fontFamily: 'monospace', paddingHorizontal: 2, paddingVertical: 0 }}
+              returnKeyType="go"
+            />
+            <Pressable onPress={(e) => { e.stopPropagation?.(); handleAutomateSubmit(); }} style={{ backgroundColor: '#8b5cf6', paddingHorizontal: 3, paddingVertical: 1, borderRadius: 2, marginLeft: 1 }}>
+              <Text style={{ color: '#fff', fontSize: 5, fontWeight: '700', fontFamily: 'monospace' }}>GO</Text>
+            </Pressable>
+          </View>
+        )}
       </Animated.View>
     </Pressable>
+  );
+}
+
+// ── CONFETTI BURST ────────────────────────────────────────────────────────
+
+const CONFETTI_COLORS = ['#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316'];
+
+function ConfettiBurst() {
+  const particles = useRef(
+    Array.from({ length: 10 }, (_, i) => ({
+      id: i,
+      x: new Animated.Value(0),
+      y: new Animated.Value(0),
+      opacity: new Animated.Value(1),
+      rotate: new Animated.Value(0),
+      color: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
+      angle: (i / 10) * Math.PI * 2 + (Math.random() - 0.5) * 0.5,
+      distance: 12 + Math.random() * 18,
+    }))
+  ).current;
+
+  useEffect(() => {
+    const anims = particles.map(p =>
+      Animated.parallel([
+        Animated.timing(p.x, { toValue: Math.cos(p.angle) * p.distance, duration: 600, easing: Easing.out(Easing.quad), useNativeDriver: false }),
+        Animated.timing(p.y, { toValue: Math.sin(p.angle) * p.distance - 8, duration: 600, easing: Easing.out(Easing.quad), useNativeDriver: false }),
+        Animated.timing(p.rotate, { toValue: 2 + Math.random() * 3, duration: 600, useNativeDriver: false }),
+        Animated.timing(p.opacity, { toValue: 0, duration: 700, easing: Easing.in(Easing.quad), useNativeDriver: false }),
+      ])
+    );
+    Animated.parallel(anims).start();
+  }, []);
+
+  return (
+    <View style={{ position: 'absolute', top: '30%', left: '50%', zIndex: 60 }}>
+      {particles.map(p => (
+        <Animated.View
+          key={p.id}
+          style={{
+            position: 'absolute',
+            width: 3,
+            height: 3,
+            borderRadius: 1,
+            backgroundColor: p.color,
+            opacity: p.opacity,
+            transform: [
+              { translateX: p.x },
+              { translateY: p.y },
+              { rotate: p.rotate.interpolate({ inputRange: [0, 5], outputRange: ['0deg', '1800deg'] }) },
+            ],
+          }}
+        />
+      ))}
+    </View>
   );
 }
 
@@ -1612,28 +2228,36 @@ const HPX = PX * 1.4; // hand items drawn bigger
 function FloatingText({ text, color, xOffset }: { text: string; color: string; xOffset: number }) {
   const animY = useRef(new Animated.Value(0)).current;
   const opacity = useRef(new Animated.Value(1)).current;
+  const scaleAnim = useRef(new Animated.Value(0.3)).current;
+
+  // Determine if this is a "big" indicator (milestones, combos, level ups)
+  const isBig = text.includes('!') || text.includes('COMBO') || text.includes('LEVEL') || text.includes('FIRE') || text.includes('UNSTOPPABLE') || text.includes('LEGEND');
 
   useEffect(() => {
     Animated.parallel([
-      Animated.timing(animY, { toValue: -30, duration: 1500, useNativeDriver: true, easing: Easing.out(Easing.cubic) }),
-      Animated.timing(opacity, { toValue: 0, duration: 1500, useNativeDriver: true, delay: 500 }),
+      // Pop-in scale
+      Animated.spring(scaleAnim, { toValue: 1, friction: 4, tension: 120, useNativeDriver: false }),
+      // Float upward
+      Animated.timing(animY, { toValue: isBig ? -45 : -35, duration: 2000, useNativeDriver: false, easing: Easing.out(Easing.cubic) }),
+      // Fade out
+      Animated.timing(opacity, { toValue: 0, duration: 2000, useNativeDriver: false, delay: 600 }),
     ]).start();
   }, []);
 
   return (
     <Animated.Text style={{
       position: 'absolute',
-      top: -10,
+      top: -12,
       left: 10 + xOffset,
       color,
-      fontSize: 8,
+      fontSize: isBig ? 10 : 8,
       fontWeight: '900',
       fontFamily: 'monospace',
       textShadowColor: '#000000',
       textShadowOffset: { width: 1, height: 1 },
-      textShadowRadius: 1,
+      textShadowRadius: 2,
       zIndex: 20,
-      transform: [{ translateY: animY }],
+      transform: [{ translateY: animY }, { scale: scaleAnim }],
       opacity,
     }}>
       {text}
@@ -1649,11 +2273,11 @@ function MoodBubble({ emoji }: { emoji: string }) {
 
   useEffect(() => {
     Animated.sequence([
-      Animated.spring(scaleAnim, { toValue: 1, friction: 4, tension: 60, useNativeDriver: true }),
+      Animated.spring(scaleAnim, { toValue: 1, friction: 4, tension: 60, useNativeDriver: false }),
       Animated.loop(
         Animated.sequence([
-          Animated.timing(floatAnim, { toValue: -3, duration: 1200, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(floatAnim, { toValue: 0, duration: 1200, useNativeDriver: true, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(floatAnim, { toValue: -3, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(floatAnim, { toValue: 0, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ])
       ),
     ]).start();
@@ -1678,6 +2302,139 @@ function MoodBubble({ emoji }: { emoji: string }) {
         <Text style={{ fontSize: 9 }}>{emoji}</Text>
       </View>
     </Animated.View>
+  );
+}
+
+// ── TAMAGOTCHI: SLEEP ZZZ ───────────────────────────────────────────────
+
+function SleepZzz() {
+  const z1Y = useRef(new Animated.Value(0)).current;
+  const z1Op = useRef(new Animated.Value(0)).current;
+  const z2Y = useRef(new Animated.Value(0)).current;
+  const z2Op = useRef(new Animated.Value(0)).current;
+  const z3Y = useRef(new Animated.Value(0)).current;
+  const z3Op = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const animateZ = (y: Animated.Value, op: Animated.Value, delay: number) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.delay(delay),
+          Animated.parallel([
+            Animated.timing(y, { toValue: -20, duration: 1800, useNativeDriver: false, easing: Easing.out(Easing.sin) }),
+            Animated.sequence([
+              Animated.timing(op, { toValue: 1, duration: 400, useNativeDriver: false }),
+              Animated.timing(op, { toValue: 0, duration: 1400, useNativeDriver: false }),
+            ]),
+          ]),
+          Animated.timing(y, { toValue: 0, duration: 0, useNativeDriver: false }),
+        ])
+      );
+    animateZ(z1Y, z1Op, 0).start();
+    animateZ(z2Y, z2Op, 600).start();
+    animateZ(z3Y, z3Op, 1200).start();
+  }, []);
+
+  return (
+    <>
+      <Animated.Text style={{ position: 'absolute', top: -4, left: 18, fontSize: 7, color: '#94a3b8', fontWeight: '900', fontFamily: 'monospace', transform: [{ translateY: z1Y }], opacity: z1Op, zIndex: 22 }}>z</Animated.Text>
+      <Animated.Text style={{ position: 'absolute', top: -4, left: 24, fontSize: 9, color: '#94a3b8', fontWeight: '900', fontFamily: 'monospace', transform: [{ translateY: z2Y }], opacity: z2Op, zIndex: 22 }}>Z</Animated.Text>
+      <Animated.Text style={{ position: 'absolute', top: -4, left: 32, fontSize: 11, color: '#94a3b8', fontWeight: '900', fontFamily: 'monospace', transform: [{ translateY: z3Y }], opacity: z3Op, zIndex: 22 }}>Z</Animated.Text>
+    </>
+  );
+}
+
+// ── TAMAGOTCHI: SPARKLE EFFECT ──────────────────────────────────────────
+
+function SparkleEffect({ onComplete }: { onComplete: () => void }) {
+  const particles = useRef(
+    Array.from({ length: 6 }, () => ({
+      x: new Animated.Value(0),
+      y: new Animated.Value(0),
+      op: new Animated.Value(1),
+      angle: Math.random() * Math.PI * 2,
+    }))
+  ).current;
+
+  useEffect(() => {
+    const anims = particles.map(p => {
+      const dist = 12 + Math.random() * 10;
+      return Animated.parallel([
+        Animated.timing(p.x, { toValue: Math.cos(p.angle) * dist, duration: 500, useNativeDriver: false }),
+        Animated.timing(p.y, { toValue: Math.sin(p.angle) * dist, duration: 500, useNativeDriver: false }),
+        Animated.timing(p.op, { toValue: 0, duration: 500, useNativeDriver: false }),
+      ]);
+    });
+    Animated.parallel(anims).start(onComplete);
+  }, []);
+
+  const colors = ['#fbbf24', '#f472b6', '#60a5fa', '#a78bfa', '#34d399', '#fb923c'];
+  return (
+    <>
+      {particles.map((p, i) => (
+        <Animated.Text key={i} style={{
+          position: 'absolute', top: 20, left: 25, fontSize: 6,
+          color: colors[i],
+          transform: [{ translateX: p.x }, { translateY: p.y }],
+          opacity: p.op, zIndex: 30,
+        }}>✦</Animated.Text>
+      ))}
+    </>
+  );
+}
+
+// ── TAMAGOTCHI: SWEAT DROP ──────────────────────────────────────────────
+
+function SweatDrop() {
+  const dropY = useRef(new Animated.Value(0)).current;
+  const dropOp = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.parallel([
+          Animated.timing(dropY, { toValue: 8, duration: 800, useNativeDriver: false, easing: Easing.in(Easing.quad) }),
+          Animated.sequence([
+            Animated.timing(dropOp, { toValue: 1, duration: 200, useNativeDriver: false }),
+            Animated.timing(dropOp, { toValue: 0, duration: 600, useNativeDriver: false }),
+          ]),
+        ]),
+        Animated.timing(dropY, { toValue: 0, duration: 0, useNativeDriver: false }),
+        Animated.delay(1500),
+      ])
+    ).start();
+  }, []);
+
+  return (
+    <Animated.Text style={{
+      position: 'absolute', top: 8, right: 4, fontSize: 8,
+      transform: [{ translateY: dropY }], opacity: dropOp, zIndex: 22,
+    }}>💧</Animated.Text>
+  );
+}
+
+// ── TAMAGOTCHI: LEVEL-UP FLASH ──────────────────────────────────────────
+
+function LevelUpFlash({ onComplete }: { onComplete: () => void }) {
+  const flashOp = useRef(new Animated.Value(0)).current;
+  const flashScale = useRef(new Animated.Value(0.5)).current;
+
+  useEffect(() => {
+    Animated.sequence([
+      Animated.parallel([
+        Animated.timing(flashOp, { toValue: 0.8, duration: 200, useNativeDriver: false }),
+        Animated.spring(flashScale, { toValue: 1.5, friction: 4, tension: 60, useNativeDriver: false }),
+      ]),
+      Animated.timing(flashOp, { toValue: 0, duration: 600, useNativeDriver: false }),
+    ]).start(onComplete);
+  }, []);
+
+  return (
+    <Animated.View style={{
+      position: 'absolute', top: -5, left: -5, right: -5, bottom: 15,
+      borderRadius: 8, backgroundColor: '#fbbf24',
+      opacity: flashOp, transform: [{ scale: flashScale }], zIndex: 15,
+    }} />
   );
 }
 
@@ -2924,6 +3681,18 @@ const styles = StyleSheet.create({
   voidRing: { position: 'absolute', top: PX * 0.5, left: 0, right: 0, height: PX * 5, borderWidth: 1.5, borderColor: '#6b21a830', borderRadius: PX * 5, backgroundColor: '#0a0a1440' },
   voidParticle1: { position: 'absolute', top: PX * 1, left: PX * 0.5, width: PX * 0.6, height: PX * 0.6, backgroundColor: '#7c3aed', borderRadius: PX * 0.3, shadowColor: '#7c3aed', shadowRadius: 4, shadowOpacity: 0.9 },
   voidParticle2: { position: 'absolute', top: PX * 3, right: PX * 0.5, width: PX * 0.5, height: PX * 0.5, backgroundColor: '#4c1d95', borderRadius: PX * 0.25, shadowColor: '#4c1d95', shadowRadius: 3, shadowOpacity: 0.8 },
+
+  // ── Galaxy Aura ────────────────────────────────────
+  auraGalaxy: { position: 'absolute', top: -PX * 2, left: -PX * 2, width: PX * 9, height: PX * 10, zIndex: -1 },
+
+  // ── Spider Pet ─────────────────────────────────────
+  petSpider: { position: 'absolute', bottom: 16, right: -14, width: PX * 6, height: PX * 4, zIndex: -1 },
+
+  // ── Shark Pet ──────────────────────────────────────
+  petShark: { position: 'absolute', bottom: 10, left: -18, width: PX * 8, height: PX * 4, zIndex: -1 },
+
+  // ── Bones Pet ──────────────────────────────────────
+  petBones: { position: 'absolute', top: -PX * 2, left: -PX * 2, width: PX * 10, height: PX * 14, zIndex: -1, overflow: 'visible' as const },
 
   // ── New Hand Items (bigger with HPX) ───────────────────────
   handSword: { position: 'absolute', right: -HPX * 2, bottom: HPX * 0.5, zIndex: 3, alignItems: 'center' as const },
