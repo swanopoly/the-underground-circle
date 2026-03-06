@@ -61,6 +61,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
   const blinkAnim = useRef(new Animated.Value(1)).current; // 1 = open, 0 = closed
   const typingAnim = useRef(new Animated.Value(0)).current; // arm wiggle when building
   const lookAnim = useRef(new Animated.Value(0)).current; // subtle head shift when idle
+  const swayAnim = useRef(new Animated.Value(0)).current; // whole-body rocking sway
 
   // Limb wiggle animations
   const leftArmWiggle = useRef(new Animated.Value(0)).current;
@@ -169,13 +170,13 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     return () => loop.stop();
   }, [dancing]);
 
-  // Bob + breathe animation — always on for visible life
+  // Bob + breathe + sway — always on for visible life
   useEffect(() => {
     const bobLoop = Animated.loop(
       Animated.sequence([
         Animated.parallel([
-          Animated.timing(bobAnim, { toValue: -2.5, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(breatheAnim, { toValue: 1.05, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(bobAnim, { toValue: -8, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(breatheAnim, { toValue: 1.08, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ]),
         Animated.parallel([
           Animated.timing(bobAnim, { toValue: 0, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
@@ -183,8 +184,19 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         ]),
       ])
     );
+    // Whole-body sway — gentle rocking left-right, always visible
+    const swayLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(swayAnim, { toValue: 4, duration: 2200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(swayAnim, { toValue: -4, duration: 2200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(swayAnim, { toValue: 2, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(swayAnim, { toValue: -3, duration: 2000, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(swayAnim, { toValue: 0, duration: 1600, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+      ])
+    );
     bobLoop.start();
-    return () => bobLoop.stop();
+    swayLoop.start();
+    return () => { bobLoop.stop(); swayLoop.stop(); };
   }, []);
 
   // Glow animation
@@ -251,71 +263,71 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     }
   }, [agent.status]);
 
-  // Look-around — always runs, head shifts left/right
+  // Look-around — always runs, head shifts left/right (big visible movement)
   useEffect(() => {
     const lookLoop = Animated.loop(
       Animated.sequence([
-        Animated.delay(2000),
-        Animated.timing(lookAnim, { toValue: 1, duration: 600, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
         Animated.delay(1500),
-        Animated.timing(lookAnim, { toValue: -1, duration: 600, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
+        Animated.timing(lookAnim, { toValue: 1, duration: 500, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
         Animated.delay(1200),
-        Animated.timing(lookAnim, { toValue: 0.5, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
-        Animated.delay(800),
-        Animated.timing(lookAnim, { toValue: 0, duration: 500, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
+        Animated.timing(lookAnim, { toValue: -1, duration: 500, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
+        Animated.delay(1000),
+        Animated.timing(lookAnim, { toValue: 0.6, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
+        Animated.delay(600),
+        Animated.timing(lookAnim, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
       ])
     );
     lookLoop.start();
     return () => lookLoop.stop();
   }, []);
 
-  // Limb fidget — always runs regardless of status for visible life
+  // Limb fidget — always runs, big visible arm swings + leg shifts
   useEffect(() => {
     const fidgetLoop = Animated.loop(
       Animated.sequence([
+        Animated.delay(1200),
+        // Left arm swings out big, right leg shifts
+        Animated.parallel([
+          Animated.timing(leftArmWiggle, { toValue: -35, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightArmWiggle, { toValue: 15, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightLegWiggle, { toValue: 5, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        ]),
+        Animated.parallel([
+          Animated.timing(leftArmWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightArmWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightLegWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        ]),
         Animated.delay(1500),
-        // Left arm swings out, right leg shifts
+        // Right arm swings out big, left leg shifts
         Animated.parallel([
-          Animated.timing(leftArmWiggle, { toValue: -20, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightArmWiggle, { toValue: 8, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightLegWiggle, { toValue: 2.5, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightArmWiggle, { toValue: 35, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftArmWiggle, { toValue: -15, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftLegWiggle, { toValue: -5, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ]),
         Animated.parallel([
-          Animated.timing(leftArmWiggle, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightArmWiggle, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightLegWiggle, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightArmWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftArmWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftLegWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ]),
-        Animated.delay(2000),
-        // Right arm swings out, left leg shifts
+        Animated.delay(800),
+        // Quick double flap — both arms swing wide
         Animated.parallel([
-          Animated.timing(rightArmWiggle, { toValue: 20, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(leftArmWiggle, { toValue: -8, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(leftLegWiggle, { toValue: -2.5, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        ]),
-        Animated.parallel([
-          Animated.timing(rightArmWiggle, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(leftArmWiggle, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(leftLegWiggle, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        ]),
-        Animated.delay(1000),
-        // Quick double fidget — both arms flap
-        Animated.parallel([
-          Animated.timing(leftArmWiggle, { toValue: -15, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightArmWiggle, { toValue: 15, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(leftLegWiggle, { toValue: 2, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightLegWiggle, { toValue: -2, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftArmWiggle, { toValue: -30, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightArmWiggle, { toValue: 30, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftLegWiggle, { toValue: 4, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightLegWiggle, { toValue: -4, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ]),
         Animated.parallel([
-          Animated.timing(leftArmWiggle, { toValue: 12, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightArmWiggle, { toValue: -12, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(leftLegWiggle, { toValue: -2, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightLegWiggle, { toValue: 2, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftArmWiggle, { toValue: 25, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightArmWiggle, { toValue: -25, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftLegWiggle, { toValue: -4, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightLegWiggle, { toValue: 4, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ]),
         Animated.parallel([
-          Animated.timing(leftArmWiggle, { toValue: 0, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightArmWiggle, { toValue: 0, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(leftLegWiggle, { toValue: 0, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightLegWiggle, { toValue: 0, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftArmWiggle, { toValue: 0, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightArmWiggle, { toValue: 0, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(leftLegWiggle, { toValue: 0, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(rightLegWiggle, { toValue: 0, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ]),
       ])
     );
@@ -368,59 +380,59 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     return () => { flickerLoop.stop(); pulseLoop.stop(); rotateLoop.stop(); driftLoop.stop(); };
   }, []);
 
-  // Pet animations — all simple independent loops (no nesting, web-safe)
+  // Pet animations — big visible movements, all independent flat loops
   useEffect(() => {
-    // Bounce — bigger amplitude so it's visible
+    // Bounce — very visible hop
     const bounceLoop = Animated.loop(
       Animated.sequence([
-        Animated.timing(petBounce, { toValue: -3.5, duration: 500, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petBounce, { toValue: 0, duration: 500, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petBounce, { toValue: -8, duration: 400, useNativeDriver: false, easing: Easing.out(Easing.quad) }),
+        Animated.timing(petBounce, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.bounce }),
       ])
     );
-    // Tail — wag continuously
+    // Tail — big wag
     const tailLoop = Animated.loop(
       Animated.sequence([
-        Animated.timing(petTail, { toValue: 1, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petTail, { toValue: -1, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petTail, { toValue: 1, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petTail, { toValue: -1, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
       ])
     );
-    // Crawl — horizontal sway (spider/shark use this)
+    // Crawl — big horizontal sweep (spider/shark)
     const crawlLoop = Animated.loop(
       Animated.sequence([
-        Animated.timing(petCrawl, { toValue: 10, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petCrawl, { toValue: -10, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petCrawl, { toValue: 20, duration: 1500, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petCrawl, { toValue: -20, duration: 1500, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
       ])
     );
-    // CrawlY — vertical sway
+    // CrawlY — vertical bob
     const crawlYLoop = Animated.loop(
       Animated.sequence([
-        Animated.timing(petCrawlY, { toValue: -3, duration: 1100, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petCrawlY, { toValue: 3, duration: 1100, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petCrawlY, { toValue: -6, duration: 900, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petCrawlY, { toValue: 6, duration: 900, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
       ])
     );
-    // Wander — walk right then left, flat loops (no nesting)
+    // Wander — big roam across the space
     const wanderLoop = Animated.loop(
       Animated.sequence([
-        Animated.delay(2500),
-        Animated.timing(petWander, { toValue: 14, duration: 1500, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
+        Animated.delay(1500),
+        Animated.timing(petWander, { toValue: 25, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
+        Animated.delay(1200),
+        Animated.timing(petWander, { toValue: 0, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
         Animated.delay(2000),
-        Animated.timing(petWander, { toValue: 0, duration: 1500, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
-        Animated.delay(3000),
-        Animated.timing(petWander, { toValue: -12, duration: 1300, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
-        Animated.delay(1800),
-        Animated.timing(petWander, { toValue: 0, duration: 1300, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
+        Animated.timing(petWander, { toValue: -22, duration: 1100, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
+        Animated.delay(1000),
+        Animated.timing(petWander, { toValue: 0, duration: 1100, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
       ])
     );
-    // WanderY — vertical float for flying pets
+    // WanderY — big vertical float for flying pets
     const wanderYLoop = Animated.loop(
       Animated.sequence([
-        Animated.timing(petWanderY, { toValue: -6, duration: 2200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petWanderY, { toValue: 4, duration: 2200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petWanderY, { toValue: -3, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petWanderY, { toValue: 0, duration: 1500, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petWanderY, { toValue: -12, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petWanderY, { toValue: 8, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petWanderY, { toValue: -5, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petWanderY, { toValue: 0, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
       ])
     );
-    // Leg walk cycle — always runs, rapid alternating
+    // Leg walk cycle — rapid alternating
     const legLoop = Animated.loop(
       Animated.sequence([
         Animated.timing(petLegAnim, { toValue: 1, duration: 150, useNativeDriver: false }),
@@ -763,7 +775,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     <Pressable onPress={onPress} onPressIn={handlePressIn} onPressOut={handlePressOut} style={Platform.OS === 'web' ? { cursor: 'pointer' } as any : undefined}>
       <Animated.View style={[styles.container, {
           transform: [
-            { translateX: danceX },
+            { translateX: Animated.add(danceX, swayAnim) },
             { translateY: Animated.add(Animated.add(bobAnim, danceY), celebJump) },
             { rotate: danceRotate.interpolate({ inputRange: [-360, 360], outputRange: ['-360deg', '360deg'] }) },
             { scale: danceScale },
@@ -823,9 +835,9 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         {/* Action Particles when building/active */}
         {(agent.status === 'active' || agent.status === 'building') && !isOffline && (
           <View style={styles.particlesContainer} pointerEvents="none">
-            <Animated.View style={[styles.particle, { backgroundColor: agent.color, transform: [{ translateY: bobAnim.interpolate({ inputRange: [-2, 0], outputRange: [-20, 0] }) }], opacity: glowAnim }]} />
-            <Animated.View style={[styles.particle, { left: 15, backgroundColor: agent.color, transform: [{ translateY: bobAnim.interpolate({ inputRange: [-2, 0], outputRange: [-10, 5] }) }], opacity: glowAnim }]} />
-            <Animated.View style={[styles.particle, { right: 15, backgroundColor: agent.color, transform: [{ translateY: bobAnim.interpolate({ inputRange: [-2, 0], outputRange: [-15, 2] }) }], opacity: glowAnim }]} />
+            <Animated.View style={[styles.particle, { backgroundColor: agent.color, transform: [{ translateY: bobAnim.interpolate({ inputRange: [-8, 0], outputRange: [-20, 0] }) }], opacity: glowAnim }]} />
+            <Animated.View style={[styles.particle, { left: 15, backgroundColor: agent.color, transform: [{ translateY: bobAnim.interpolate({ inputRange: [-8, 0], outputRange: [-10, 5] }) }], opacity: glowAnim }]} />
+            <Animated.View style={[styles.particle, { right: 15, backgroundColor: agent.color, transform: [{ translateY: bobAnim.interpolate({ inputRange: [-8, 0], outputRange: [-15, 2] }) }], opacity: glowAnim }]} />
           </View>
         )}
 
@@ -974,7 +986,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
 
         {/* Head — with look-around animation when idle */}
         <Animated.View style={[styles.head, isOffline && styles.offlineOpacity, {
-          transform: [{ translateX: lookAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [-3, 0, 3] }) }],
+          transform: [{ translateX: lookAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [-6, 0, 6] }) }],
         }]}>
           {/* Ears */}
           <View style={[styles.ear, styles.earLeft, { backgroundColor: a.skinTone, ...neonGlow }]}>
@@ -1525,10 +1537,10 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         {/* Drop shadow */}
         <Animated.View style={[styles.dropShadow, {
           transform: [
-            { scaleX: bobAnim.interpolate({ inputRange: [-2, 0], outputRange: [0.8, 1] }) },
-            { scaleY: bobAnim.interpolate({ inputRange: [-2, 0], outputRange: [0.8, 1] }) }
+            { scaleX: bobAnim.interpolate({ inputRange: [-8, 0], outputRange: [0.7, 1] }) },
+            { scaleY: bobAnim.interpolate({ inputRange: [-8, 0], outputRange: [0.7, 1] }) }
           ],
-          opacity: bobAnim.interpolate({ inputRange: [-2, 0], outputRange: [0.4, 0.7] })
+          opacity: bobAnim.interpolate({ inputRange: [-8, 0], outputRange: [0.3, 0.7] })
         }]} />
 
         {/* Pet companion */}

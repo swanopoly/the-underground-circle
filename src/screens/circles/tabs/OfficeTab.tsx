@@ -1056,17 +1056,34 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const getAppearance = (agent: OfficeAgent) =>
     agent.id === DEFAULT_AGENT.id ? (appearances[agent.name] || UC_AGENT_APPEARANCE) : appearances[agent.name];
 
-  // Auto-assign random outfits to new agents (only after appearances have loaded from storage)
+  // Auto-assign random outfits to new agents + backfill pets/auras for existing agents
   useEffect(() => {
     if (!appearancesLoadedRef.current) return;
-    const newAppearances: Record<string, AgentAppearance> = {};
+    const pick = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
+    const petPool: AgentAppearance['pet'][] = ['cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab', 'snake', 'bat', 'skull', 'mushroom', 'spider', 'shark', 'bones'];
+    const auraPool: AgentAppearance['aura'][] = ['fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow', 'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy'];
+    const updates: Record<string, AgentAppearance> = {};
     for (const agent of userAgents) {
       if (!appearances[agent.name]) {
-        newAppearances[agent.name] = generateRandomAppearance();
+        updates[agent.name] = generateRandomAppearance();
+      } else {
+        // Backfill: give existing agents a pet/aura if they don't have one
+        const existing = appearances[agent.name];
+        let changed = false;
+        const patched = { ...existing };
+        if (!existing.pet || existing.pet === 'none') {
+          patched.pet = pick(petPool);
+          changed = true;
+        }
+        if (!existing.aura || existing.aura === 'none') {
+          patched.aura = pick(auraPool);
+          changed = true;
+        }
+        if (changed) updates[agent.name] = patched;
       }
     }
-    if (Object.keys(newAppearances).length > 0) {
-      setAppearances(prev => ({ ...prev, ...newAppearances }));
+    if (Object.keys(updates).length > 0) {
+      setAppearances(prev => ({ ...prev, ...updates }));
     }
   }, [userAgents.map(a => a.name).join(',')]); // re-run only when agent list changes
 
