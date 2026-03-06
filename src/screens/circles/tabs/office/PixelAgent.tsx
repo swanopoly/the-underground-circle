@@ -5,6 +5,22 @@ import { AgentAppearance, DEFAULT_APPEARANCE, EnvironmentType, THEME_OUTFITS, NE
 import ThoughtBubble from '../../../../components/ThoughtBubble';
 import { ThoughtBubble as ThoughtData, generateThoughtBubble } from '../../../../lib/agentMessaging';
 
+// Animated.loop is broken on React Native Web — runs once then stops silently.
+// This helper recursively restarts the animation using a factory function.
+function animLoop(factory: () => Animated.CompositeAnimation): { start: () => void; stop: () => void } {
+  let stopped = false;
+  const run = () => {
+    if (stopped) return;
+    factory().start(({ finished }) => {
+      if (finished && !stopped) run();
+    });
+  };
+  return {
+    start: () => { stopped = false; run(); },
+    stop: () => { stopped = true; },
+  };
+}
+
 interface Props {
   agent: OfficeAgent;
   appearance?: AgentAppearance;
@@ -138,8 +154,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
       danceScale.setValue(1);
       return;
     }
-    const loop = Animated.loop(
-      Animated.sequence([
+    const loop = animLoop(() => Animated.sequence([
         Animated.parallel([
           Animated.timing(danceX, { toValue: -8, duration: 120, useNativeDriver: false }),
           Animated.timing(danceY, { toValue: -10, duration: 120, useNativeDriver: false }),
@@ -164,16 +179,14 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           Animated.timing(danceRotate, { toValue: 0, duration: 150, useNativeDriver: false }),
           Animated.timing(danceScale, { toValue: 1, duration: 150, useNativeDriver: false }),
         ]),
-      ]),
-    );
+      ]));
     loop.start();
     return () => loop.stop();
   }, [dancing]);
 
   // Bob + breathe + sway — always on for visible life
   useEffect(() => {
-    const bobLoop = Animated.loop(
-      Animated.sequence([
+    const bobLoop = animLoop(() => Animated.sequence([
         Animated.parallel([
           Animated.timing(bobAnim, { toValue: -8, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(breatheAnim, { toValue: 1.08, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
@@ -182,18 +195,15 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           Animated.timing(bobAnim, { toValue: 0, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(breatheAnim, { toValue: 1, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ]),
-      ])
-    );
+      ]));
     // Whole-body sway — gentle rocking left-right, always visible
-    const swayLoop = Animated.loop(
-      Animated.sequence([
+    const swayLoop = animLoop(() => Animated.sequence([
         Animated.timing(swayAnim, { toValue: 4, duration: 2200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(swayAnim, { toValue: -4, duration: 2200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(swayAnim, { toValue: 2, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(swayAnim, { toValue: -3, duration: 2000, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(swayAnim, { toValue: 0, duration: 1600, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-      ])
-    );
+      ]));
     bobLoop.start();
     swayLoop.start();
     return () => { bobLoop.stop(); swayLoop.stop(); };
@@ -202,12 +212,10 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
   // Glow animation
   useEffect(() => {
     if (agent.status === 'active') {
-      const glowLoop = Animated.loop(
-        Animated.sequence([
+      const glowLoop = animLoop(() => Animated.sequence([
           Animated.timing(glowAnim, { toValue: 0.9, duration: 1500, useNativeDriver: false }),
           Animated.timing(glowAnim, { toValue: 0.3, duration: 1500, useNativeDriver: false }),
-        ])
-      );
+        ]));
       glowLoop.start();
       return () => glowLoop.stop();
     }
@@ -246,16 +254,14 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
   // Typing animation — arm wiggle when building/active
   useEffect(() => {
     if (agent.status === 'active' || agent.status === 'building') {
-      const typingLoop = Animated.loop(
-        Animated.sequence([
+      const typingLoop = animLoop(() => Animated.sequence([
           Animated.timing(typingAnim, { toValue: 1, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(typingAnim, { toValue: -1, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(typingAnim, { toValue: 0.5, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(typingAnim, { toValue: -0.5, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(typingAnim, { toValue: 0, duration: 150, useNativeDriver: false }),
           Animated.delay(400),
-        ])
-      );
+        ]));
       typingLoop.start();
       return () => typingLoop.stop();
     } else {
@@ -265,8 +271,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
 
   // Look-around — always runs, head shifts left/right (big visible movement)
   useEffect(() => {
-    const lookLoop = Animated.loop(
-      Animated.sequence([
+    const lookLoop = animLoop(() => Animated.sequence([
         Animated.delay(1500),
         Animated.timing(lookAnim, { toValue: 1, duration: 500, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
         Animated.delay(1200),
@@ -275,18 +280,15 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         Animated.timing(lookAnim, { toValue: 0.6, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
         Animated.delay(600),
         Animated.timing(lookAnim, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
-      ])
-    );
+      ]));
     lookLoop.start();
     return () => lookLoop.stop();
   }, []);
 
   // Limb fidget — always runs, big visible arm swings + leg shifts
   useEffect(() => {
-    const fidgetLoop = Animated.loop(
-      Animated.sequence([
+    const fidgetLoop = animLoop(() => Animated.sequence([
         Animated.delay(1200),
-        // Left arm swings out big, right leg shifts
         Animated.parallel([
           Animated.timing(leftArmWiggle, { toValue: -35, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(rightArmWiggle, { toValue: 15, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
@@ -298,7 +300,6 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           Animated.timing(rightLegWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ]),
         Animated.delay(1500),
-        // Right arm swings out big, left leg shifts
         Animated.parallel([
           Animated.timing(rightArmWiggle, { toValue: 35, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(leftArmWiggle, { toValue: -15, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
@@ -310,7 +311,6 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           Animated.timing(leftLegWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ]),
         Animated.delay(800),
-        // Quick double flap — both arms swing wide
         Animated.parallel([
           Animated.timing(leftArmWiggle, { toValue: -30, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(rightArmWiggle, { toValue: 30, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
@@ -329,8 +329,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           Animated.timing(leftLegWiggle, { toValue: 0, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(rightLegWiggle, { toValue: 0, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ]),
-      ])
-    );
+      ]));
     fidgetLoop.start();
     return () => fidgetLoop.stop();
   }, []);
@@ -350,29 +349,24 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
 
   // Aura animations — flicker, pulse, rotation, drift
   useEffect(() => {
-    const flickerLoop = Animated.loop(
-      Animated.sequence([
+    const flickerLoop = animLoop(() => Animated.sequence([
         Animated.timing(auraFlicker, { toValue: 1, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(auraFlicker, { toValue: 0.4, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(auraFlicker, { toValue: 0.8, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(auraFlicker, { toValue: 0.2, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-      ])
-    );
-    const pulseLoop = Animated.loop(
-      Animated.sequence([
+      ]));
+    const pulseLoop = animLoop(() => Animated.sequence([
         Animated.timing(auraPulse, { toValue: 1.12, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(auraPulse, { toValue: 0.92, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-      ])
-    );
-    const rotateLoop = Animated.loop(
-      Animated.timing(auraRotate, { toValue: 1, duration: 6000, useNativeDriver: false, easing: Easing.linear })
-    );
-    const driftLoop = Animated.loop(
-      Animated.sequence([
+      ]));
+    const rotateLoop = animLoop(() => {
+      auraRotate.setValue(0);
+      return Animated.timing(auraRotate, { toValue: 1, duration: 6000, useNativeDriver: false, easing: Easing.linear });
+    });
+    const driftLoop = animLoop(() => Animated.sequence([
         Animated.timing(auraDrift, { toValue: -2, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(auraDrift, { toValue: 2, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-      ])
-    );
+      ]));
     flickerLoop.start();
     pulseLoop.start();
     rotateLoop.start();
@@ -382,37 +376,23 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
 
   // Pet animations — big visible movements, all independent flat loops
   useEffect(() => {
-    // Bounce — very visible hop
-    const bounceLoop = Animated.loop(
-      Animated.sequence([
+    const bounceLoop = animLoop(() => Animated.sequence([
         Animated.timing(petBounce, { toValue: -8, duration: 400, useNativeDriver: false, easing: Easing.out(Easing.quad) }),
         Animated.timing(petBounce, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.bounce }),
-      ])
-    );
-    // Tail — big wag
-    const tailLoop = Animated.loop(
-      Animated.sequence([
+      ]));
+    const tailLoop = animLoop(() => Animated.sequence([
         Animated.timing(petTail, { toValue: 1, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(petTail, { toValue: -1, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-      ])
-    );
-    // Crawl — big horizontal sweep (spider/shark)
-    const crawlLoop = Animated.loop(
-      Animated.sequence([
+      ]));
+    const crawlLoop = animLoop(() => Animated.sequence([
         Animated.timing(petCrawl, { toValue: 20, duration: 1500, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(petCrawl, { toValue: -20, duration: 1500, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-      ])
-    );
-    // CrawlY — vertical bob
-    const crawlYLoop = Animated.loop(
-      Animated.sequence([
+      ]));
+    const crawlYLoop = animLoop(() => Animated.sequence([
         Animated.timing(petCrawlY, { toValue: -6, duration: 900, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(petCrawlY, { toValue: 6, duration: 900, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-      ])
-    );
-    // Wander — big roam across the space
-    const wanderLoop = Animated.loop(
-      Animated.sequence([
+      ]));
+    const wanderLoop = animLoop(() => Animated.sequence([
         Animated.delay(1500),
         Animated.timing(petWander, { toValue: 25, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
         Animated.delay(1200),
@@ -421,24 +401,17 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         Animated.timing(petWander, { toValue: -22, duration: 1100, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
         Animated.delay(1000),
         Animated.timing(petWander, { toValue: 0, duration: 1100, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
-      ])
-    );
-    // WanderY — big vertical float for flying pets
-    const wanderYLoop = Animated.loop(
-      Animated.sequence([
+      ]));
+    const wanderYLoop = animLoop(() => Animated.sequence([
         Animated.timing(petWanderY, { toValue: -12, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(petWanderY, { toValue: 8, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(petWanderY, { toValue: -5, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(petWanderY, { toValue: 0, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-      ])
-    );
-    // Leg walk cycle — rapid alternating
-    const legLoop = Animated.loop(
-      Animated.sequence([
+      ]));
+    const legLoop = animLoop(() => Animated.sequence([
         Animated.timing(petLegAnim, { toValue: 1, duration: 150, useNativeDriver: false }),
         Animated.timing(petLegAnim, { toValue: -1, duration: 150, useNativeDriver: false }),
-      ])
-    );
+      ]));
     bounceLoop.start();
     tailLoop.start();
     crawlLoop.start();
@@ -2086,20 +2059,22 @@ function XPBar({ xp, xpNext, color }: { xp: number; xpNext: number; color: strin
   const rainbowAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    Animated.loop(
-      Animated.sequence([
+    const loop = animLoop(() => Animated.sequence([
         Animated.timing(pulseAnim, { toValue: 1, duration: 900, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
         Animated.timing(pulseAnim, { toValue: 0, duration: 900, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
-      ])
-    ).start();
+      ]));
+    loop.start();
+    return () => loop.stop();
   }, []);
 
   useEffect(() => {
     if (!isFull) return;
-    Animated.loop(
-      Animated.timing(rainbowAnim, { toValue: 1, duration: 2000, easing: Easing.linear, useNativeDriver: false })
-    ).start();
-    return () => rainbowAnim.stopAnimation();
+    const loop = animLoop(() => {
+      rainbowAnim.setValue(0);
+      return Animated.timing(rainbowAnim, { toValue: 1, duration: 2000, easing: Easing.linear, useNativeDriver: false });
+    });
+    loop.start();
+    return () => loop.stop();
   }, [isFull]);
 
   // Glow opacity: stronger when full
@@ -2284,15 +2259,13 @@ function MoodBubble({ emoji }: { emoji: string }) {
   const floatAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    Animated.sequence([
-      Animated.spring(scaleAnim, { toValue: 1, friction: 4, tension: 60, useNativeDriver: false }),
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(floatAnim, { toValue: -3, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(floatAnim, { toValue: 0, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        ])
-      ),
-    ]).start();
+    Animated.spring(scaleAnim, { toValue: 1, friction: 4, tension: 60, useNativeDriver: false }).start(() => {
+      const floatLoop = animLoop(() => Animated.sequence([
+        Animated.timing(floatAnim, { toValue: -3, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(floatAnim, { toValue: 0, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+      ]));
+      floatLoop.start();
+    });
   }, []);
 
   return (
@@ -2329,8 +2302,7 @@ function SleepZzz() {
 
   useEffect(() => {
     const animateZ = (y: Animated.Value, op: Animated.Value, delay: number) =>
-      Animated.loop(
-        Animated.sequence([
+      animLoop(() => Animated.sequence([
           Animated.delay(delay),
           Animated.parallel([
             Animated.timing(y, { toValue: -20, duration: 1800, useNativeDriver: false, easing: Easing.out(Easing.sin) }),
@@ -2340,11 +2312,11 @@ function SleepZzz() {
             ]),
           ]),
           Animated.timing(y, { toValue: 0, duration: 0, useNativeDriver: false }),
-        ])
-      );
-    animateZ(z1Y, z1Op, 0).start();
-    animateZ(z2Y, z2Op, 600).start();
-    animateZ(z3Y, z3Op, 1200).start();
+        ]));
+    const z1 = animateZ(z1Y, z1Op, 0); z1.start();
+    const z2 = animateZ(z2Y, z2Op, 600); z2.start();
+    const z3 = animateZ(z3Y, z3Op, 1200); z3.start();
+    return () => { z1.stop(); z2.stop(); z3.stop(); };
   }, []);
 
   return (
@@ -2402,8 +2374,7 @@ function SweatDrop() {
   const dropOp = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    Animated.loop(
-      Animated.sequence([
+    const loop = animLoop(() => Animated.sequence([
         Animated.parallel([
           Animated.timing(dropY, { toValue: 8, duration: 800, useNativeDriver: false, easing: Easing.in(Easing.quad) }),
           Animated.sequence([
@@ -2413,8 +2384,9 @@ function SweatDrop() {
         ]),
         Animated.timing(dropY, { toValue: 0, duration: 0, useNativeDriver: false }),
         Animated.delay(1500),
-      ])
-    ).start();
+      ]));
+    loop.start();
+    return () => loop.stop();
   }, []);
 
   return (
