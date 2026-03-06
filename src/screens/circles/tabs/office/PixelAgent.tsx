@@ -184,29 +184,30 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     return () => loop.stop();
   }, [dancing]);
 
-  // Bob + breathe + sway — always on for visible life
+  // Bob + breathe + sway — randomized per agent so they move independently
   useEffect(() => {
+    const bobDur = 1200 + Math.random() * 600; // 1.2–1.8s per agent
     const bobLoop = animLoop(() => Animated.sequence([
         Animated.parallel([
-          Animated.timing(bobAnim, { toValue: -8, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(breatheAnim, { toValue: 1.08, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(bobAnim, { toValue: -8, duration: bobDur, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(breatheAnim, { toValue: 1.08, duration: bobDur, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ]),
         Animated.parallel([
-          Animated.timing(bobAnim, { toValue: 0, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(breatheAnim, { toValue: 1, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(bobAnim, { toValue: 0, duration: bobDur, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(breatheAnim, { toValue: 1, duration: bobDur, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ]),
       ]));
-    // Whole-body sway — gentle rocking left-right, always visible
+    const swayDur = 1800 + Math.random() * 800;
     const swayLoop = animLoop(() => Animated.sequence([
-        Animated.timing(swayAnim, { toValue: 4, duration: 2200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(swayAnim, { toValue: -4, duration: 2200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(swayAnim, { toValue: 2, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(swayAnim, { toValue: -3, duration: 2000, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(swayAnim, { toValue: 0, duration: 1600, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(swayAnim, { toValue: 4, duration: swayDur, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(swayAnim, { toValue: -4, duration: swayDur, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(swayAnim, { toValue: 2, duration: swayDur * 0.8, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(swayAnim, { toValue: -3, duration: swayDur * 0.9, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(swayAnim, { toValue: 0, duration: swayDur * 0.7, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
       ]));
-    bobLoop.start();
-    swayLoop.start();
-    return () => { bobLoop.stop(); swayLoop.stop(); };
+    // Stagger start so agents don't sync
+    const startDelay = setTimeout(() => { bobLoop.start(); swayLoop.start(); }, Math.random() * 1500);
+    return () => { clearTimeout(startDelay); bobLoop.stop(); swayLoop.stop(); };
   }, []);
 
   // Glow animation
@@ -269,26 +270,33 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     }
   }, [agent.status]);
 
-  // Look-around — always runs, head shifts left/right (big visible movement)
+  // Look-around — randomized per agent so they don't move in sync
   useEffect(() => {
-    const lookLoop = animLoop(() => Animated.sequence([
-        Animated.delay(1500),
-        Animated.timing(lookAnim, { toValue: 1, duration: 500, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
-        Animated.delay(1200),
-        Animated.timing(lookAnim, { toValue: -1, duration: 500, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
-        Animated.delay(1000),
-        Animated.timing(lookAnim, { toValue: 0.6, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
-        Animated.delay(600),
-        Animated.timing(lookAnim, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
-      ]));
-    lookLoop.start();
-    return () => lookLoop.stop();
+    let stopped = false;
+    const rand = (min: number, max: number) => min + Math.random() * (max - min);
+    const doLook = () => {
+      if (stopped) return;
+      const dir = Math.random() > 0.5 ? 1 : -1;
+      const mag = 0.4 + Math.random() * 0.6; // 0.4–1.0
+      Animated.sequence([
+        Animated.delay(rand(800, 3000)),
+        Animated.timing(lookAnim, { toValue: dir * mag, duration: rand(350, 600), useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
+        Animated.delay(rand(500, 2000)),
+        Animated.timing(lookAnim, { toValue: -dir * mag * 0.6, duration: rand(300, 500), useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
+        Animated.delay(rand(300, 1200)),
+        Animated.timing(lookAnim, { toValue: 0, duration: rand(250, 400), useNativeDriver: false, easing: Easing.inOut(Easing.ease) }),
+      ]).start(({ finished }) => { if (finished && !stopped) doLook(); });
+    };
+    // Stagger start by random offset so agents aren't in sync
+    const startDelay = setTimeout(doLook, Math.random() * 2000);
+    return () => { stopped = true; clearTimeout(startDelay); };
   }, []);
 
-  // Limb fidget — always runs, big visible arm swings + leg shifts
+  // Limb fidget — always runs, randomized delays per agent
   useEffect(() => {
+    const rd = () => 800 + Math.random() * 1500; // random delay 0.8-2.3s
     const fidgetLoop = animLoop(() => Animated.sequence([
-        Animated.delay(1200),
+        Animated.delay(rd()),
         Animated.parallel([
           Animated.timing(leftArmWiggle, { toValue: -35, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(rightArmWiggle, { toValue: 15, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
@@ -299,7 +307,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           Animated.timing(rightArmWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(rightLegWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ]),
-        Animated.delay(1500),
+        Animated.delay(rd()),
         Animated.parallel([
           Animated.timing(rightArmWiggle, { toValue: 35, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(leftArmWiggle, { toValue: -15, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
@@ -310,7 +318,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           Animated.timing(leftArmWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(leftLegWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         ]),
-        Animated.delay(800),
+        Animated.delay(rd()),
         Animated.parallel([
           Animated.timing(leftArmWiggle, { toValue: -30, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
           Animated.timing(rightArmWiggle, { toValue: 30, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
@@ -756,11 +764,6 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
           ],
         }]}>
         
-        {/* Floating Gamified Text */}
-        {floatingText.map(ft => (
-          <FloatingText key={ft.id} text={ft.text} color={ft.color} xOffset={ft.x} />
-        ))}
-
         {/* Celebration confetti */}
         {celebrating && <ConfettiBurst />}
 
