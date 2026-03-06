@@ -246,54 +246,55 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
   }, [agent.status]);
 
 
-  // Limb fidget — always runs, randomized delays per agent
+  // Limb fidget — triggers randomly, not always-on, different per agent
   useEffect(() => {
-    const rd = () => 800 + Math.random() * 1500; // random delay 0.8-2.3s
-    const fidgetLoop = animLoop(() => Animated.sequence([
-        Animated.delay(rd()),
-        Animated.parallel([
-          Animated.timing(leftArmWiggle, { toValue: -35, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightArmWiggle, { toValue: 15, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightLegWiggle, { toValue: 5, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        ]),
-        Animated.parallel([
-          Animated.timing(leftArmWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightArmWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightLegWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        ]),
-        Animated.delay(rd()),
-        Animated.parallel([
-          Animated.timing(rightArmWiggle, { toValue: 35, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(leftArmWiggle, { toValue: -15, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(leftLegWiggle, { toValue: -5, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        ]),
-        Animated.parallel([
-          Animated.timing(rightArmWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(leftArmWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(leftLegWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        ]),
-        Animated.delay(rd()),
-        Animated.parallel([
-          Animated.timing(leftArmWiggle, { toValue: -30, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightArmWiggle, { toValue: 30, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(leftLegWiggle, { toValue: 4, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightLegWiggle, { toValue: -4, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        ]),
-        Animated.parallel([
-          Animated.timing(leftArmWiggle, { toValue: 25, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightArmWiggle, { toValue: -25, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(leftLegWiggle, { toValue: -4, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightLegWiggle, { toValue: 4, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        ]),
-        Animated.parallel([
-          Animated.timing(leftArmWiggle, { toValue: 0, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightArmWiggle, { toValue: 0, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(leftLegWiggle, { toValue: 0, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-          Animated.timing(rightLegWiggle, { toValue: 0, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        ]),
-      ]));
-    fidgetLoop.start();
-    return () => fidgetLoop.stop();
+    let stopped = false;
+    const doFidget = () => {
+      if (stopped) return;
+      // Pick a random fidget type (0=left arm, 1=right arm, 2=double flap)
+      const type = Math.floor(Math.random() * 3);
+      const anim = type === 0
+        ? Animated.sequence([
+            Animated.parallel([
+              Animated.timing(leftArmWiggle, { toValue: -35, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+              Animated.timing(rightLegWiggle, { toValue: 5, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+            ]),
+            Animated.parallel([
+              Animated.timing(leftArmWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+              Animated.timing(rightLegWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+            ]),
+          ])
+        : type === 1
+        ? Animated.sequence([
+            Animated.parallel([
+              Animated.timing(rightArmWiggle, { toValue: 35, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+              Animated.timing(leftLegWiggle, { toValue: -5, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+            ]),
+            Animated.parallel([
+              Animated.timing(rightArmWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+              Animated.timing(leftLegWiggle, { toValue: 0, duration: 350, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+            ]),
+          ])
+        : Animated.sequence([
+            Animated.parallel([
+              Animated.timing(leftArmWiggle, { toValue: -30, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+              Animated.timing(rightArmWiggle, { toValue: 30, duration: 180, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+            ]),
+            Animated.parallel([
+              Animated.timing(leftArmWiggle, { toValue: 0, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+              Animated.timing(rightArmWiggle, { toValue: 0, duration: 250, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+            ]),
+          ]);
+      anim.start(({ finished }) => {
+        if (finished && !stopped) {
+          // Wait 3-8 seconds before next fidget (random per occurrence)
+          setTimeout(doFidget, 3000 + Math.random() * 5000);
+        }
+      });
+    };
+    // Stagger initial start per agent
+    const startDelay = setTimeout(doFidget, 1000 + Math.random() * 4000);
+    return () => { stopped = true; clearTimeout(startDelay); };
   }, []);
 
   // Automate Me button — appears after 5s idle
@@ -336,52 +337,86 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     return () => { flickerLoop.stop(); pulseLoop.stop(); rotateLoop.stop(); driftLoop.stop(); };
   }, []);
 
-  // Pet animations — big visible movements, all independent flat loops
+  // Pet animations — random bursts, not always-on, different per agent
   useEffect(() => {
-    const bounceLoop = animLoop(() => Animated.sequence([
+    let stopped = false;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+
+    // Random bounce — hop then wait 2-6s
+    const doBounce = () => {
+      if (stopped) return;
+      Animated.sequence([
         Animated.timing(petBounce, { toValue: -8, duration: 400, useNativeDriver: false, easing: Easing.out(Easing.quad) }),
         Animated.timing(petBounce, { toValue: 0, duration: 400, useNativeDriver: false, easing: Easing.bounce }),
-      ]));
-    const tailLoop = animLoop(() => Animated.sequence([
-        Animated.timing(petTail, { toValue: 1, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petTail, { toValue: -1, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-      ]));
-    const crawlLoop = animLoop(() => Animated.sequence([
-        Animated.timing(petCrawl, { toValue: 20, duration: 1500, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petCrawl, { toValue: -20, duration: 1500, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-      ]));
-    const crawlYLoop = animLoop(() => Animated.sequence([
-        Animated.timing(petCrawlY, { toValue: -6, duration: 900, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petCrawlY, { toValue: 6, duration: 900, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-      ]));
-    const wanderLoop = animLoop(() => Animated.sequence([
-        Animated.delay(1500),
-        Animated.timing(petWander, { toValue: 25, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
-        Animated.delay(1200),
-        Animated.timing(petWander, { toValue: 0, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
-        Animated.delay(2000),
-        Animated.timing(petWander, { toValue: -22, duration: 1100, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
-        Animated.delay(1000),
-        Animated.timing(petWander, { toValue: 0, duration: 1100, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
-      ]));
-    const wanderYLoop = animLoop(() => Animated.sequence([
-        Animated.timing(petWanderY, { toValue: -12, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petWanderY, { toValue: 8, duration: 1800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petWanderY, { toValue: -5, duration: 1400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-        Animated.timing(petWanderY, { toValue: 0, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
-      ]));
-    const legLoop = animLoop(() => Animated.sequence([
-        Animated.timing(petLegAnim, { toValue: 1, duration: 150, useNativeDriver: false }),
-        Animated.timing(petLegAnim, { toValue: -1, duration: 150, useNativeDriver: false }),
-      ]));
-    bounceLoop.start();
-    tailLoop.start();
-    crawlLoop.start();
-    crawlYLoop.start();
-    wanderLoop.start();
-    wanderYLoop.start();
-    legLoop.start();
-    return () => { bounceLoop.stop(); tailLoop.stop(); crawlLoop.stop(); crawlYLoop.stop(); wanderLoop.stop(); wanderYLoop.stop(); legLoop.stop(); };
+      ]).start(({ finished }) => {
+        if (finished && !stopped) timers.push(setTimeout(doBounce, 2000 + Math.random() * 4000));
+      });
+    };
+
+    // Random tail wag — wag a few times then pause 1-4s
+    const doTailWag = () => {
+      if (stopped) return;
+      const wags = 2 + Math.floor(Math.random() * 4); // 2-5 wags
+      const wagSeq: Animated.CompositeAnimation[] = [];
+      for (let i = 0; i < wags; i++) {
+        wagSeq.push(
+          Animated.timing(petTail, { toValue: 1, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.timing(petTail, { toValue: -1, duration: 200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        );
+      }
+      wagSeq.push(Animated.timing(petTail, { toValue: 0, duration: 150, useNativeDriver: false }));
+      Animated.sequence(wagSeq).start(({ finished }) => {
+        if (finished && !stopped) timers.push(setTimeout(doTailWag, 1000 + Math.random() * 3000));
+      });
+    };
+
+    // Random wander — walk to a random spot, pause, walk back
+    const doWander = () => {
+      if (stopped) return;
+      const dest = (Math.random() - 0.5) * 40; // -20 to +20
+      const dur = 800 + Math.random() * 1000;
+      Animated.sequence([
+        Animated.timing(petWander, { toValue: dest, duration: dur, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
+        Animated.delay(1000 + Math.random() * 2000),
+        Animated.timing(petWander, { toValue: 0, duration: dur, useNativeDriver: false, easing: Easing.inOut(Easing.quad) }),
+      ]).start(({ finished }) => {
+        if (finished && !stopped) timers.push(setTimeout(doWander, 3000 + Math.random() * 6000));
+      });
+    };
+
+    // Random vertical float (flying pets)
+    const doFloat = () => {
+      if (stopped) return;
+      const dest = -4 - Math.random() * 8; // -4 to -12
+      Animated.sequence([
+        Animated.timing(petWanderY, { toValue: dest, duration: 1200 + Math.random() * 800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(petWanderY, { toValue: 0, duration: 1000 + Math.random() * 600, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+      ]).start(({ finished }) => {
+        if (finished && !stopped) timers.push(setTimeout(doFloat, 2000 + Math.random() * 4000));
+      });
+    };
+
+    // Random crawl (spider/shark horizontal sweep)
+    const doCrawl = () => {
+      if (stopped) return;
+      const dest = (Math.random() - 0.5) * 30;
+      Animated.sequence([
+        Animated.timing(petCrawl, { toValue: dest, duration: 1200 + Math.random() * 800, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.delay(500 + Math.random() * 1500),
+        Animated.timing(petCrawl, { toValue: 0, duration: 1000 + Math.random() * 600, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+      ]).start(({ finished }) => {
+        if (finished && !stopped) timers.push(setTimeout(doCrawl, 2000 + Math.random() * 5000));
+      });
+    };
+
+    // Stagger start times per agent — each pet behavior starts at a different time
+    timers.push(setTimeout(doBounce, Math.random() * 3000));
+    timers.push(setTimeout(doTailWag, 500 + Math.random() * 2000));
+    timers.push(setTimeout(doWander, 2000 + Math.random() * 4000));
+    timers.push(setTimeout(doFloat, 1000 + Math.random() * 3000));
+    timers.push(setTimeout(doCrawl, 1500 + Math.random() * 3000));
+
+    return () => { stopped = true; timers.forEach(t => clearTimeout(t)); };
   }, []);
 
   // Mood indicator — reacts to agent activity
