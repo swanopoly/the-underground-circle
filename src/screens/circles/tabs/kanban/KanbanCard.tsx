@@ -36,11 +36,28 @@ function priorityBadge(priority: string): { label: string; color: string } {
   return { label: 'L', color: '#555' };
 }
 
+function getDueDateInfo(dueDate: string | null): { label: string; color: string } | null {
+  if (!dueDate) return null;
+  const now = new Date();
+  const due = new Date(dueDate + 'T23:59:59');
+  const diffMs = due.getTime() - now.getTime();
+  const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+
+  if (diffDays < 0) {
+    const overdue = Math.abs(diffDays);
+    return { label: `${overdue}d overdue`, color: '#ef4444' };
+  }
+  if (diffDays === 0) return { label: 'Due today', color: '#f97316' };
+  if (diffDays <= 3) return { label: `Due in ${diffDays}d`, color: '#f59e0b' };
+  return { label: `Due ${diffDays}d`, color: '#555566' };
+}
+
 export default function KanbanCard({ task, agents, goals, onPress, onMove, onDragStart, onDragEnd }: Props) {
   const [hovered, setHovered] = useState(false);
   const [showMoveBar, setShowMoveBar] = useState(false);
   const isDone = task.status === 'done';
   const isPeerReview = task.status === 'peer_review';
+  const dueDateInfo = !isDone ? getDueDateInfo(task.due_date) : null;
 
   const assignedAgent = task.assigned_agent_id
     ? agents.find(a => a.id === task.assigned_agent_id)
@@ -152,6 +169,13 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
             <View style={[s.priorityBadge, { backgroundColor: pb.color + '18' }]}>
               <Text style={[s.priorityText, { color: pb.color }]}>{pb.label}</Text>
             </View>
+
+            {/* Due date urgency */}
+            {dueDateInfo && (
+              <View style={[s.dueBadge, { backgroundColor: dueDateInfo.color + '15' }]}>
+                <Text style={[s.dueText, { color: dueDateInfo.color }]}>{dueDateInfo.label}</Text>
+              </View>
+            )}
 
             {/* Time ago */}
             <Text style={s.timeText}>{timeAgo(task.created_at)}</Text>
@@ -320,6 +344,15 @@ const s = StyleSheet.create({
   priorityText: {
     fontSize: 9,
     fontWeight: '800',
+  },
+  dueBadge: {
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  dueText: {
+    fontSize: 9,
+    fontWeight: '700',
   },
   timeText: {
     color: '#444455',

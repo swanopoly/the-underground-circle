@@ -5,7 +5,7 @@
  * Mobile: tab switcher between Goals | Activity | Board
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, TextInput, Pressable, StyleSheet, Platform, ScrollView,
   useWindowDimensions,
@@ -24,6 +24,7 @@ import GoalsPanel from './kanban/GoalsPanel';
 import ActivityFeedPanel from './kanban/ActivityFeedPanel';
 import KanbanBoard from './kanban/KanbanBoard';
 import TaskDetailModal from './kanban/TaskDetailModal';
+import DigestPanel from './kanban/DigestPanel';
 
 const MOBILE_BREAKPOINT = 768;
 
@@ -37,8 +38,10 @@ export default function FeedTab({ circleId }: { circleId: string }) {
   const [showCreate, setShowCreate] = useState(false);
   const [createInColumn, setCreateInColumn] = useState<TaskStatus>('todo');
   const [mobileTab, setMobileTab] = useState<MobileTab>('board');
+  const [digestCollapsed, setDigestCollapsed] = useState(true);
   const { width } = useWindowDimensions();
   const isMobile = width < MOBILE_BREAKPOINT;
+  const searchInputRef = useRef<TextInput>(null);
 
   // Filter tasks by goal
   const filteredTasksByColumn = useMemo(() => {
@@ -49,6 +52,73 @@ export default function FeedTab({ circleId }: { circleId: string }) {
     }
     return filtered;
   }, [kanban.tasksByColumn, filteredGoalId]);
+
+  // Dashboard stats
+  const stats = useMemo(() => {
+    const allTasks = kanban.tasks;
+    const total = allTasks.length;
+    const inProgress = allTasks.filter(t => t.status === 'in_progress').length;
+    const today = new Date().toISOString().split('T')[0];
+    const doneToday = allTasks.filter(t =>
+      t.status === 'done' && t.completed_at && t.completed_at.startsWith(today)
+    ).length;
+    const totalDone = allTasks.filter(t => t.status === 'done').length;
+    const completionRate = total > 0 ? Math.round((totalDone / total) * 100) : 0;
+    return { total, inProgress, doneToday, completionRate };
+  }, [kanban.tasks]);
+
+  // Batch move handler
+  const handleBatchMove = useCallback(async (taskIds: string[], newStatus: TaskStatus) => {
+    for (const id of taskIds) {
+      await kanban.moveTask(id, newStatus);
+    }
+  }, [kanban.moveTask]);
+
+  // Archive done handler (deletes old completed tasks)
+  const handleArchiveDone = useCallback(async (taskIds: string[]) => {
+    for (const id of taskIds) {
+      await kanban.deleteTask(id);
+    }
+  }, [kanban.deleteTask]);
+
+  // Keyboard shortcuts (web only)
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+
+      if (e.key === 'Escape') {
+        if (detailTask) { setDetailTask(null); e.preventDefault(); return; }
+        if (showCreate) { setShowCreate(false); e.preventDefault(); return; }
+      }
+
+      if (isInput) return;
+
+      if (e.key === 'n' || e.key === 'N') {
+        setCreateInColumn('todo');
+        setShowCreate(true);
+        e.preventDefault();
+        return;
+      }
+      if (e.key === '/') {
+        searchInputRef.current?.focus();
+        e.preventDefault();
+        return;
+      }
+      // 1-7 switch mobile tabs to columns
+      if (isMobile && e.key >= '1' && e.key <= '7') {
+        const colIndex = parseInt(e.key) - 1;
+        if (colIndex < COLUMNS.length) {
+          setMobileTab('board');
+          // The column switch happens through the board's activeColumn
+        }
+        return;
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [detailTask, showCreate, isMobile]);
 
   if (kanban.loading) {
     return (
@@ -67,6 +137,8 @@ export default function FeedTab({ circleId }: { circleId: string }) {
     return (
       <View style={s.container}>
         <AgentTopBar agents={kanban.agents} />
+        <DigestPanel circleId={circleId} />
+        <StatsHeader stats={stats} />
 
         <View style={s.mobileBody}>
           {mobileTab === 'goals' && (
@@ -98,6 +170,9 @@ export default function FeedTab({ circleId }: { circleId: string }) {
               onMoveTask={kanban.moveTask}
               onQuickAdd={(status, title) => kanban.createTask({ title, status })}
               onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
+              searchInputRef={searchInputRef}
+              onBatchMove={handleBatchMove}
+              onArchiveDone={handleArchiveDone}
             />
           )}
         </View>
@@ -153,6 +228,8 @@ export default function FeedTab({ circleId }: { circleId: string }) {
   return (
     <View style={s.container}>
       <AgentTopBar agents={kanban.agents} />
+      <DigestPanel circleId={circleId} />
+      <StatsHeader stats={stats} />
 
       <View style={s.body}>
         <GoalsPanel
@@ -177,6 +254,9 @@ export default function FeedTab({ circleId }: { circleId: string }) {
           onMoveTask={kanban.moveTask}
           onQuickAdd={(status, title) => kanban.createTask({ title, status })}
           onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
+          searchInputRef={searchInputRef}
+          onBatchMove={handleBatchMove}
+          onArchiveDone={handleArchiveDone}
         />
       </View>
 
@@ -205,6 +285,78 @@ export default function FeedTab({ circleId }: { circleId: string }) {
     </View>
   );
 }
+
+// ─── Stats Header ───────────────────────────────────────────────────────────
+
+function StatsHeader({ stats }: { stats: { total: number; inProgress: number; doneToday: number; completionRate: number } }) {
+  return (
+    <View style={sh.container}>
+      <View style={sh.pill}>
+        <Text style={sh.pillValue}>{stats.total}</Text>
+        <Text style={sh.pillLabel}>total</Text>
+      </View>
+      <View style={sh.pill}>
+        <Text style={[sh.pillValue, { color: '#f59e0b' }]}>{stats.inProgress}</Text>
+        <Text style={sh.pillLabel}>active</Text>
+      </View>
+      <View style={sh.pill}>
+        <Text style={[sh.pillValue, { color: '#22c55e' }]}>{stats.doneToday}</Text>
+        <Text style={sh.pillLabel}>today</Text>
+      </View>
+      <View style={sh.pill}>
+        <Text style={[sh.pillValue, { color: '#6366f1' }]}>{stats.completionRate}%</Text>
+        <Text style={sh.pillLabel}>done</Text>
+      </View>
+      {Platform.OS === 'web' && (
+        <View style={sh.kbdHints}>
+          <Text style={sh.kbdText}>n new</Text>
+          <Text style={sh.kbdText}>/ search</Text>
+          <Text style={sh.kbdText}>esc close</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+const sh = StyleSheet.create({
+  container: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: '#0a0a12',
+    borderBottomWidth: 1,
+    borderBottomColor: '#15151e',
+    gap: 8,
+  },
+  pill: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 3,
+  },
+  pillValue: {
+    color: '#e4e4ed',
+    fontSize: 14,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  pillLabel: {
+    color: '#555566',
+    fontSize: 10,
+    fontWeight: '500',
+  },
+  kbdHints: {
+    flexDirection: 'row',
+    gap: 8,
+    marginLeft: 'auto' as any,
+  },
+  kbdText: {
+    color: '#333348',
+    fontSize: 9,
+    fontWeight: '500',
+    fontFamily: 'monospace',
+  },
+});
 
 // ─── Create Task Modal ──────────────────────────────────────────────────────
 

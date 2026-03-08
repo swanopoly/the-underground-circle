@@ -46,6 +46,11 @@ export default function GoalsPanel({
         </Pressable>
       </View>
 
+      {/* Progress summary */}
+      {goals.length > 0 && (
+        <GoalProgressSummary goals={goals} agents={agents} />
+      )}
+
       {/* Filter clear */}
       {filteredGoalId && (
         <Pressable onPress={() => onFilter(null)} style={s.clearFilter}>
@@ -361,6 +366,112 @@ function EditGoalModal({
     </View>
   );
 }
+
+// ─── Goal Progress Summary ─────────────────────────────────────────────────
+
+function GoalProgressSummary({ goals, agents }: { goals: GoalWithCount[]; agents: CircleOfficeAgent[] }) {
+  const activeGoals = goals.filter(g => g.status === 'active');
+  const totalTasks = goals.reduce((sum, g) => sum + g.task_count, 0);
+  const totalCompleted = goals.reduce((sum, g) => sum + g.completed_count, 0);
+  const overallPct = totalTasks > 0 ? Math.round((totalCompleted / totalTasks) * 100) : 0;
+
+  // Most active agent: appears in the most goals
+  const agentCounts: Record<string, number> = {};
+  for (const g of goals) {
+    for (const aid of g.assigned_agent_ids) {
+      agentCounts[aid] = (agentCounts[aid] || 0) + 1;
+    }
+  }
+  const topAgentId = Object.entries(agentCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const topAgent = topAgentId ? agents.find(a => a.id === topAgentId) : null;
+
+  return (
+    <View style={summary.container}>
+      <View style={summary.row}>
+        <View style={summary.stat}>
+          <Text style={summary.statValue}>{overallPct}%</Text>
+          <Text style={summary.statLabel}>done</Text>
+        </View>
+        <View style={summary.stat}>
+          <Text style={[summary.statValue, { color: '#22c55e' }]}>{activeGoals.length}</Text>
+          <Text style={summary.statLabel}>active</Text>
+        </View>
+      </View>
+      <View style={summary.progressBar}>
+        <View style={[summary.progressFill, { width: `${overallPct}%` as any }]} />
+      </View>
+      {topAgent && (
+        <View style={summary.mvpRow}>
+          <View style={[summary.mvpDot, { backgroundColor: topAgent.color || '#6366f1' }]} />
+          <Text style={summary.mvpText} numberOfLines={1}>{topAgent.name}</Text>
+          <Text style={summary.mvpLabel}>top agent</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+const summary = StyleSheet.create({
+  container: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#15151e',
+    gap: 6,
+  },
+  row: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  stat: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 3,
+  },
+  statValue: {
+    color: '#6366f1',
+    fontSize: 16,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  statLabel: {
+    color: '#555566',
+    fontSize: 10,
+    fontWeight: '500',
+  },
+  progressBar: {
+    height: 3,
+    backgroundColor: '#1a1a28',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: '#6366f1',
+  },
+  mvpRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  mvpDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  mvpText: {
+    color: '#9090a8',
+    fontSize: 10,
+    fontWeight: '600',
+    flex: 1,
+  },
+  mvpLabel: {
+    color: '#444455',
+    fontSize: 9,
+    fontWeight: '500',
+  },
+});
 
 // ─── Constants & Styles ────────────────────────────────────────────────────
 

@@ -4,7 +4,7 @@
 
 import React, { useState } from 'react';
 import { View, Text, FlatList, TextInput, Pressable, StyleSheet, Platform } from 'react-native';
-import { KanbanTask, KanbanColumnDef, TaskStatus } from '../../../../types/kanban';
+import { KanbanTask, KanbanColumnDef, TaskStatus, COLUMNS, PRIORITY_COLORS } from '../../../../types/kanban';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
 import type { GoalWithCount } from '../../../../hooks/useGoals';
 import KanbanCard from './KanbanCard';
@@ -25,15 +25,32 @@ interface Props {
   onDragEnter?: () => void;
   onDragLeave?: () => void;
   onDrop?: (taskId: string) => void;
+  onBatchMove?: (taskIds: string[], newStatus: TaskStatus) => void;
+  onArchiveDone?: (taskIds: string[]) => void;
 }
 
 export default function KanbanColumn({
   column, tasks, agents, goals, isFullWidth, isDragOver,
   onCardPress, onMoveTask, onQuickAdd, onAddTask,
   onDragStart, onDragEnd, onDragEnter, onDragLeave, onDrop,
+  onBatchMove, onArchiveDone,
 }: Props) {
   const [quickAddText, setQuickAddText] = useState('');
   const [quickAddFocused, setQuickAddFocused] = useState(false);
+  const [showBatchMenu, setShowBatchMenu] = useState(false);
+
+  // Priority breakdown for batch menu
+  const priorityBreakdown = tasks.reduce((acc, t) => {
+    acc[t.priority] = (acc[t.priority] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+
+  // Archive: tasks completed > 7 days ago
+  const archivableTasks = column.key === 'done' ? tasks.filter(t => {
+    if (!t.completed_at) return false;
+    const daysSince = (Date.now() - new Date(t.completed_at).getTime()) / (1000 * 60 * 60 * 24);
+    return daysSince > 7;
+  }) : [];
 
   const handleQuickAdd = () => {
     const title = quickAddText.trim();
@@ -75,10 +92,68 @@ export default function KanbanColumn({
             <Text style={[s.countText, { color: column.color }]}>{tasks.length}</Text>
           </View>
         </View>
-        <Pressable onPress={onAddTask} style={s.addBtn} hitSlop={6}>
-          <Text style={s.addBtnText}>+</Text>
-        </Pressable>
+        <View style={s.headerRight}>
+          {tasks.length > 0 && (
+            <Pressable onPress={() => setShowBatchMenu(p => !p)} style={[s.batchBtn, showBatchMenu && s.batchBtnActive]} hitSlop={4}>
+              <Text style={s.batchBtnText}>...</Text>
+            </Pressable>
+          )}
+          <Pressable onPress={onAddTask} style={s.addBtn} hitSlop={6}>
+            <Text style={s.addBtnText}>+</Text>
+          </Pressable>
+        </View>
       </View>
+
+      {/* Batch actions menu */}
+      {showBatchMenu && (
+        <View style={s.batchMenu}>
+          {/* Priority breakdown */}
+          <View style={s.batchSection}>
+            <Text style={s.batchSectionLabel}>PRIORITY</Text>
+            <View style={s.batchPriorityRow}>
+              {Object.entries(priorityBreakdown).map(([p, count]) => (
+                <View key={p} style={s.batchPriorityPill}>
+                  <View style={[s.batchPriorityDot, { backgroundColor: PRIORITY_COLORS[p as keyof typeof PRIORITY_COLORS] || '#555' }]} />
+                  <Text style={s.batchPriorityText}>{p}: {count}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+          {/* Move all */}
+          <View style={s.batchSection}>
+            <Text style={s.batchSectionLabel}>MOVE ALL TO</Text>
+            <View style={s.batchMoveRow}>
+              {COLUMNS.filter(c => c.key !== column.key).map(c => (
+                <Pressable
+                  key={c.key}
+                  onPress={() => {
+                    if (onBatchMove && tasks.length > 0) {
+                      onBatchMove(tasks.map(t => t.id), c.key);
+                    }
+                    setShowBatchMenu(false);
+                  }}
+                  style={s.batchMoveChip}
+                >
+                  <View style={[s.batchMoveDot, { backgroundColor: c.color }]} />
+                  <Text style={[s.batchMoveText, { color: c.color }]}>{c.label}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+          {/* Archive done */}
+          {column.key === 'done' && archivableTasks.length > 0 && (
+            <Pressable
+              onPress={() => {
+                if (onArchiveDone) onArchiveDone(archivableTasks.map(t => t.id));
+                setShowBatchMenu(false);
+              }}
+              style={s.batchArchiveBtn}
+            >
+              <Text style={s.batchArchiveText}>Archive {archivableTasks.length} old tasks</Text>
+            </Pressable>
+          )}
+        </View>
+      )}
 
       {/* Drop indicator */}
       {isDragOver && (
@@ -203,6 +278,108 @@ const s = StyleSheet.create({
   countText: {
     fontSize: 10,
     fontWeight: '700',
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  batchBtn: {
+    width: 22,
+    height: 22,
+    borderRadius: 6,
+    justifyContent: 'center',
+    alignItems: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  batchBtnActive: {
+    backgroundColor: '#1e1e2e',
+  },
+  batchBtnText: {
+    color: '#555566',
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 1,
+    lineHeight: 12,
+  },
+  batchMenu: {
+    marginHorizontal: 8,
+    marginBottom: 6,
+    backgroundColor: '#0e0e16',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1e1e2e',
+    padding: 8,
+    gap: 8,
+  },
+  batchSection: {
+    gap: 4,
+  },
+  batchSectionLabel: {
+    color: '#555566',
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  batchPriorityRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
+  },
+  batchPriorityPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    backgroundColor: '#15151e',
+  },
+  batchPriorityDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+  },
+  batchPriorityText: {
+    color: '#6b6b80',
+    fontSize: 9,
+    fontWeight: '600',
+  },
+  batchMoveRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 3,
+  },
+  batchMoveChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 5,
+    backgroundColor: '#15151e',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background 0.15s' } as any : {}),
+  },
+  batchMoveDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+  },
+  batchMoveText: {
+    fontSize: 9,
+    fontWeight: '600',
+  },
+  batchArchiveBtn: {
+    backgroundColor: '#ef444412',
+    borderRadius: 6,
+    paddingVertical: 6,
+    alignItems: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  batchArchiveText: {
+    color: '#ef4444',
+    fontSize: 10,
+    fontWeight: '600',
   },
   addBtn: {
     width: 22,
