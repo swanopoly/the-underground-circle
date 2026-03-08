@@ -4,22 +4,7 @@ import { OfficeAgent, STATUS_COLORS } from '../../../../lib/officeAgents';
 import { AgentAppearance, DEFAULT_APPEARANCE, EnvironmentType, THEME_OUTFITS, NEON_SKIN_TONES } from '../../../../lib/officeConfig';
 import ThoughtBubble from '../../../../components/ThoughtBubble';
 import { ThoughtBubble as ThoughtData, generateThoughtBubble } from '../../../../lib/agentMessaging';
-
-// Animated.loop is broken on React Native Web — runs once then stops silently.
-// This helper recursively restarts the animation using a factory function.
-function animLoop(factory: () => Animated.CompositeAnimation): { start: () => void; stop: () => void } {
-  let stopped = false;
-  const run = () => {
-    if (stopped) return;
-    factory().start(({ finished }) => {
-      if (finished && !stopped) run();
-    });
-  };
-  return {
-    start: () => { stopped = false; run(); },
-    stop: () => { stopped = true; },
-  };
-}
+import { animLoop } from '../../../../lib/animationHelpers';
 
 interface Props {
   agent: OfficeAgent;

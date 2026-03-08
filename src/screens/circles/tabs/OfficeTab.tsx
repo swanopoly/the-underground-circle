@@ -12,9 +12,9 @@ import CustomizePanel, { TelegramConfig } from './office/CustomizePanel';
 import type { OfficeCommand } from './office/OfficeChat';
 import { OfficeAgent, DEFAULT_AGENT, sessionsToAgents } from '../../../lib/officeAgents';
 import {
-  OFFICE_THEMES, AgentAppearance, FurnitureItem, FURNITURE_CATALOG,
+  OFFICE_THEMES, AgentAppearance, FurnitureItem, FurnitureType, FURNITURE_CATALOG,
   OfficeFloor, DEFAULT_FLOORS, createDefaultFloor, OfficeTheme, UC_AGENT_APPEARANCE,
-  generateRandomAppearance, OWNER_EMAIL,
+  generateRandomAppearance, OWNER_EMAIL, isInteractiveFurniture,
 } from '../../../lib/officeConfig';
 import { useCustomThemes, customThemeToOfficeTheme, CUSTOM_THEME_PREFIX, CustomThemeRecord } from '../../../services/customThemes';
 import { enrichAgentsWithCache, enrichSessionsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
@@ -96,6 +96,10 @@ import BadgeCelebration from '../../../components/BadgeCelebration';
 import RewardsPanel from '../../../components/RewardsPanel';
 import { useAllAgentPointsTracker, useUserRewards } from '../../../services/rewardService';
 import { Badge, getNextBadge } from '../../../lib/badges';
+import {
+  RippleEffect, ConfettiEffect, RocketEffect, DiceEffect,
+  PulseEffect, ShakeEffect, FireworksEffect,
+} from './office/FloorEffects';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -215,6 +219,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [stickyGifSearch, setStickyGifSearch] = useState('');
   const stickyCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const stickyDrawingRef = useRef(false);
+
+  // ─── Interactive furniture state ──────────────────────────────────────────
+  const [interactInputId, setInteractInputId] = useState<string | null>(null);
+  const [interactInputText, setInteractInputText] = useState('');
+  const [interactAgentTarget, setInteractAgentTarget] = useState<string | null>(null);
+  const [floorEffects, setFloorEffects] = useState<Array<{ id: string; type: string; x: number; y: number; createdAt: number }>>([]);
 
   // ─── Setup wizard ─────────────────────────────────────────────────────────
   const [showSetupWizard, setShowSetupWizard] = useState(false);
@@ -1519,6 +1529,184 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     ));
   };
 
+  // ─── Interactive furniture handler ────────────────────────────────────────
+  const handleFurnitureInteract = useCallback((id: string, type: FurnitureType) => {
+    const currentFloor = floors.find(f => f.id === currentFloorId);
+    const item = currentFloor?.furniture.find(f => f.id === id);
+    if (!item) return;
+
+    const updateFurnitureField = (fields: Partial<FurnitureItem>) => {
+      setFloors(prev => prev.map(f =>
+        f.id === currentFloorId ? {
+          ...f,
+          furniture: f.furniture.map(fi => fi.id === id ? { ...fi, ...fields } : fi),
+        } : f
+      ));
+    };
+
+    const addFloorEffect = (effectType: string) => {
+      const eff = { id: `eff_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, type: effectType, x: item.x, y: item.y, createdAt: Date.now() };
+      setFloorEffects(prev => [...prev, eff]);
+    };
+
+    switch (type) {
+      case 'enter_key':
+      case 'command_console':
+        if (interactInputId === id) {
+          setInteractInputId(null);
+          setInteractInputText('');
+          setInteractAgentTarget(null);
+        } else {
+          setInteractInputId(id);
+          setInteractInputText('');
+          setInteractAgentTarget(type === 'command_console' ? (displayAgents[0]?.id || null) : null);
+        }
+        break;
+
+      case 'button_panel': {
+        const presets = item.buttonPresets?.length ? item.buttonPresets : ['Status update', 'Ship it', 'Stand up'];
+        const current = (item.jukeboxTrack || 0) % presets.length;
+        const cmd = presets[current];
+        updateFurnitureField({ jukeboxTrack: current + 1 });
+        if (currentUserId && currentUserName) {
+          sendTerminalCommand({
+            circleId, senderId: currentUserId, senderName: currentUserName,
+            commandText: cmd, targetAgentName: '@all',
+          });
+        }
+        break;
+      }
+
+      case 'alarm_bell':
+        addFloorEffect('shake');
+        break;
+
+      case 'launch_pad':
+        addFloorEffect('rocket');
+        if (currentUserId && currentUserName) {
+          sendTerminalCommand({
+            circleId, senderId: currentUserId, senderName: currentUserName,
+            commandText: 'Ship it! 🚀', targetAgentName: '@all',
+          });
+        }
+        break;
+
+      case 'jukebox': {
+        const tracks = ['Lo-fi Beats', 'Synthwave', 'Jazz Hop', 'Deep Focus', 'Ambient'];
+        const next = ((item.jukeboxTrack || 0) + 1) % tracks.length;
+        updateFurnitureField({ jukeboxTrack: next, label: tracks[next] });
+        addFloorEffect('pulse');
+        break;
+      }
+
+      case 'dice_roller': {
+        const roll = Math.floor(Math.random() * 6) + 1;
+        updateFurnitureField({ lastDiceRoll: roll });
+        addFloorEffect('dice');
+        break;
+      }
+
+      case 'gong':
+        addFloorEffect('ripple');
+        break;
+
+      case 'confetti_cannon':
+        addFloorEffect('confetti');
+        break;
+
+      case 'timer_display': {
+        if (item.timerEnd && item.timerEnd > Date.now()) {
+          updateFurnitureField({ timerEnd: undefined });
+        } else {
+          updateFurnitureField({ timerEnd: Date.now() + 25 * 60 * 1000 });
+        }
+        break;
+      }
+
+      case 'slot_machine': {
+        const symbols = ['🍒', '🔔', '💎', '7️⃣', '⭐', '🍀'];
+        const r1 = Math.floor(Math.random() * symbols.length);
+        const r2 = Math.floor(Math.random() * symbols.length);
+        const r3 = Math.floor(Math.random() * symbols.length);
+        updateFurnitureField({ slotResult: [r1, r2, r3] });
+        if (r1 === r2 && r2 === r3) {
+          addFloorEffect('fireworks');
+        }
+        break;
+      }
+
+      case 'crystal_ball': {
+        const fortunes = [
+          'A merge conflict approaches...', 'The CI pipeline smiles upon you',
+          'Beware of scope creep', 'A refactor brings clarity', 'Ship it and iterate',
+          'The bug hides in the callback', 'Your PR will be approved swiftly',
+          'An unexpected dependency update looms', 'Trust the types',
+          'The linter knows the way', 'A deadline approaches faster than expected',
+          'Your tests will save you today', 'Rubber duck debugging reveals all',
+          'The docs were wrong all along', 'A senior dev reviews your code favorably',
+          'Beware the off-by-one error', 'A production incident teaches wisdom',
+          'The feature flag was on all along', 'Stack overflow has the answer',
+          'Your branch name tells a story',
+        ];
+        updateFurnitureField({ fortuneText: fortunes[Math.floor(Math.random() * fortunes.length)] });
+        addFloorEffect('pulse');
+        break;
+      }
+
+      case 'mood_ring':
+        addFloorEffect('pulse');
+        break;
+
+      case 'boom_box':
+        updateFurnitureField({ boomboxPlaying: !item.boomboxPlaying });
+        break;
+
+      case 'lava_lamp': {
+        const colors = ['#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#8b5cf6', '#ec4899', '#14b8a6'];
+        const currentIdx = colors.indexOf(item.lavaColor || '#ef4444');
+        const nextColor = colors[(currentIdx + 1) % colors.length];
+        updateFurnitureField({ lavaColor: nextColor });
+        break;
+      }
+
+      case 'whack_a_mole':
+        // Handled internally by the WhackAMoleItem component
+        break;
+
+      default:
+        break;
+    }
+  }, [floors, currentFloorId, interactInputId, currentUserId, currentUserName, circleId, displayAgents]);
+
+  const handleInteractSubmit = useCallback(() => {
+    if (!interactInputId || !interactInputText.trim() || !currentUserId || !currentUserName) return;
+    const currentFloor = floors.find(f => f.id === currentFloorId);
+    const item = currentFloor?.furniture.find(f => f.id === interactInputId);
+
+    const params: any = {
+      circleId,
+      senderId: currentUserId,
+      senderName: currentUserName,
+      commandText: interactInputText.trim(),
+    };
+
+    if (item?.type === 'command_console' && interactAgentTarget) {
+      const agent = displayAgents.find(a => a.id === interactAgentTarget);
+      if (agent) {
+        params.targetAgentId = agent.id;
+        params.targetAgentName = `@${agent.name}`;
+        params.targetAgentIds = [agent.id];
+      }
+    } else {
+      params.targetAgentName = '@all';
+    }
+
+    sendTerminalCommand(params);
+    setInteractInputId(null);
+    setInteractInputText('');
+    setInteractAgentTarget(null);
+  }, [interactInputId, interactInputText, currentUserId, currentUserName, circleId, floors, currentFloorId, interactAgentTarget, displayAgents]);
+
   const handleCommand = (cmd: OfficeCommand) => {
     if (cmd.type === 'theme') handleChangeFloorTheme(currentFloor.id, cmd.value);
     if (cmd.type === 'info') {
@@ -1790,7 +1978,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           </View>
 
           {/* Category rows */}
-          {(['work', 'lounge', 'tech', 'decor'] as const).map(cat => {
+          {(['interactive', 'work', 'lounge', 'tech', 'decor'] as const).map(cat => {
             const items = FURNITURE_CATALOG.filter(f => f.category === cat && !['desk'].includes(f.type));
             if (items.length === 0) return null;
             return (
@@ -2030,6 +2218,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                       onFloorPress={editMode ? handleFloorPress : undefined}
                       onFurniturePress={editMode ? handleFurniturePress : undefined}
                       onFurnitureMove={editMode ? handleFurnitureMove : undefined}
+                      onFurnitureInteract={handleFurnitureInteract}
+                      agents={displayAgents}
                       selectedFurnitureId={editMode ? selectedFurnitureId : null}
                     />
                     <Whiteboard editable={editMode} notes={whiteboardNotes} onNotesChange={setWhiteboardNotes} agents={displayAgents} statusHistory={statusHistory} cronJobs={cronJobs} circleId={circleId} connectedCount={connections.filter(c => c.status === 'connected').length} totalConnections={connections.length} />
@@ -2109,6 +2299,83 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                           />
                         </View>
                       );
+                    })}
+
+                    {/* Interactive furniture input overlay */}
+                    {interactInputId && (() => {
+                      const curFloor = floors.find(f => f.id === currentFloorId);
+                      const fi = curFloor?.furniture.find(f => f.id === interactInputId);
+                      if (!fi) return null;
+                      const isConsole = fi.type === 'command_console';
+                      return (
+                        <View style={{ position: 'absolute', left: fi.x - 10, top: fi.y + (FURNITURE_CATALOG.find(c => c.type === fi.type)?.height || 50) + 4, zIndex: 50, flexDirection: 'column', gap: 3 }} pointerEvents="box-none">
+                          {isConsole && (
+                            <View style={{ flexDirection: 'row', gap: 2, marginBottom: 2 }}>
+                              {displayAgents.slice(0, 6).map(a => (
+                                <Pressable
+                                  key={a.id}
+                                  onPress={() => setInteractAgentTarget(a.id)}
+                                  style={{
+                                    paddingHorizontal: 4, paddingVertical: 2, borderRadius: 3,
+                                    backgroundColor: interactAgentTarget === a.id ? (currentTheme.accentGlow + '40') : '#1e293b',
+                                    borderWidth: 1, borderColor: interactAgentTarget === a.id ? currentTheme.accentGlow : '#334155',
+                                    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+                                  }}
+                                >
+                                  <Text style={{ color: interactAgentTarget === a.id ? currentTheme.accentGlow : '#94a3b8', fontSize: 6, fontFamily: 'monospace' }}>@{a.name}</Text>
+                                </Pressable>
+                              ))}
+                            </View>
+                          )}
+                          <View style={{ flexDirection: 'row', gap: 2, alignItems: 'center' }}>
+                            <TextInput
+                              value={interactInputText}
+                              onChangeText={setInteractInputText}
+                              onSubmitEditing={handleInteractSubmit}
+                              placeholder={isConsole ? 'Command...' : 'Task for all agents...'}
+                              placeholderTextColor="#64748b"
+                              autoFocus
+                              style={{
+                                width: 120, height: 20, fontSize: 8, fontFamily: 'monospace',
+                                color: '#e2e8f0', backgroundColor: '#0f172a', borderWidth: 1,
+                                borderColor: currentTheme.accentGlow + '60', borderRadius: 4,
+                                paddingHorizontal: 4, paddingVertical: 2,
+                              }}
+                            />
+                            <Pressable
+                              onPress={handleInteractSubmit}
+                              style={{
+                                paddingHorizontal: 6, paddingVertical: 3, backgroundColor: currentTheme.accentGlow,
+                                borderRadius: 3, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+                              }}
+                            >
+                              <Text style={{ color: '#000', fontSize: 7, fontWeight: '900', fontFamily: 'monospace' }}>GO</Text>
+                            </Pressable>
+                            <Pressable
+                              onPress={() => { setInteractInputId(null); setInteractInputText(''); }}
+                              style={{ paddingHorizontal: 4, paddingVertical: 3, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
+                            >
+                              <Text style={{ color: '#ef4444', fontSize: 7, fontWeight: '900', fontFamily: 'monospace' }}>✕</Text>
+                            </Pressable>
+                          </View>
+                        </View>
+                      );
+                    })()}
+
+                    {/* Floor effects overlay */}
+                    {floorEffects.map(eff => {
+                      const removeEffect = () => setFloorEffects(prev => prev.filter(e => e.id !== eff.id));
+                      const props = { key: eff.id, x: eff.x, y: eff.y, onComplete: removeEffect };
+                      switch (eff.type) {
+                        case 'ripple': return <RippleEffect {...props} />;
+                        case 'confetti': return <ConfettiEffect {...props} />;
+                        case 'rocket': return <RocketEffect {...props} />;
+                        case 'dice': return <DiceEffect {...props} />;
+                        case 'pulse': return <PulseEffect {...props} />;
+                        case 'shake': return <ShakeEffect {...props} />;
+                        case 'fireworks': return <FireworksEffect {...props} />;
+                        default: return null;
+                      }
                     })}
                   </View>
                 </View>

@@ -1,738 +1,620 @@
-import React, { useState, useEffect, useCallback } from 'react';
+/**
+ * FeedTab — HQ Dashboard with AgentTopBar, GoalsPanel, ActivityFeed, KanbanBoard
+ *
+ * Desktop: three-panel layout + top bar
+ * Mobile: tab switcher between Goals | Activity | Board
+ */
+
+import React, { useState, useMemo } from 'react';
 import {
-  View,
-  Text,
-  TextInput,
-  FlatList,
-  StyleSheet,
-  Platform,
-  Pressable,
-  RefreshControl,
-  Modal,
+  View, Text, TextInput, Pressable, StyleSheet, Platform, ScrollView,
+  useWindowDimensions,
 } from 'react-native';
-import { supabase } from '../../../lib/supabase';
-import { showAlert } from '../../../lib/alert';
-import Button from '../../../components/Button';
-import { awardXP, getXPForAction } from '../../../lib/gamification';
-import { generateNudge, getProgressInsight } from '../../../lib/coach';
+import { useKanbanData, type KanbanMember } from '../../../hooks/useKanbanData';
+import { useGoals } from '../../../hooks/useGoals';
+import {
+  KanbanTask, TaskStatus, TaskPriority, TasksByColumn,
+  COLUMNS, PRIORITY_COLORS, PRIORITY_LABELS,
+} from '../../../types/kanban';
+import type { GoalWithCount } from '../../../hooks/useGoals';
+import type { CircleOfficeAgent } from '../../../lib/circleOffice';
 
-const PRIORITY_COLORS: any = {
-  low: '#555',
-  normal: '#888',
-  high: '#e89b3e',
-  urgent: '#e84040',
-};
+import AgentTopBar from './kanban/AgentTopBar';
+import GoalsPanel from './kanban/GoalsPanel';
+import ActivityFeedPanel from './kanban/ActivityFeedPanel';
+import KanbanBoard from './kanban/KanbanBoard';
+import TaskDetailModal from './kanban/TaskDetailModal';
 
-const PRIORITY_LABELS: any = {
-  low: 'LOW',
-  normal: 'NORMAL',
-  high: 'HIGH',
-  urgent: 'URGENT',
-};
+const MOBILE_BREAKPOINT = 768;
 
-const STATUS_LABELS: any = {
-  open: 'TO DO',
-  in_progress: 'IN PROGRESS',
-  done: 'DONE',
-};
+type MobileTab = 'goals' | 'activity' | 'board';
 
 export default function FeedTab({ circleId }: { circleId: string }) {
-  const [tasks, setTasks] = useState<any[]>([]);
-  const [refreshing, setRefreshing] = useState(false);
+  const kanban = useKanbanData(circleId);
+  const goalsHook = useGoals(circleId);
+  const [filteredGoalId, setFilteredGoalId] = useState<string | null>(null);
+  const [detailTask, setDetailTask] = useState<KanbanTask | null>(null);
   const [showCreate, setShowCreate] = useState(false);
-  const [filter, setFilter] = useState<string>('all');
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-  const [members, setMembers] = useState<any[]>([]);
+  const [createInColumn, setCreateInColumn] = useState<TaskStatus>('todo');
+  const [mobileTab, setMobileTab] = useState<MobileTab>('board');
+  const { width } = useWindowDimensions();
+  const isMobile = width < MOBILE_BREAKPOINT;
 
-  // ── Digest state ──────────────────────────────────────────────────────────
-  const [showDigest, setShowDigest] = useState(true);
-  const [digest, setDigest] = useState<{
-    todayCheckIns: any[]; activeMembers: number; tasksCompleted: number;
-    mvp: { name: string; xp: number } | null; streakAtRisk: any[];
-    nudge: string | null; insight: string;
-  } | null>(null);
-
-  const today = new Date().toISOString().split('T')[0];
-
-  const fetchDigest = useCallback(async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-    try {
-      // Get circle member IDs first, then fetch their XP from user_points
-      const [checkInRes, memberRes, taskRes] = await Promise.all([
-        supabase.from('check_ins').select('user_id, content, created_at, profiles(username, display_name)')
-          .eq('circle_id', circleId).gte('created_at', today + 'T00:00:00').order('created_at', { ascending: false }).limit(20),
-        supabase.from('circle_members').select('user_id').eq('circle_id', circleId).limit(50),
-        supabase.from('tasks').select('id').eq('circle_id', circleId).eq('status', 'done').gte('completed_at', today + 'T00:00:00'),
-      ]);
-      const todayCheckIns = checkInRes.data || [];
-      const activeMembers = new Set(todayCheckIns.map((c: any) => c.user_id)).size;
-
-      // Fetch MVP from user_points for circle members
-      const memberIds = (memberRes.data || []).map((m: any) => m.user_id);
-      let mvp: { name: string; xp: number } | null = null;
-      if (memberIds.length > 0) {
-        const [xpRes, profileRes] = await Promise.all([
-          supabase.from('user_points').select('user_id, lifetime_points')
-            .in('user_id', memberIds).order('lifetime_points', { ascending: false }).limit(1),
-          supabase.from('profiles').select('id, username, display_name')
-            .in('id', memberIds),
-        ]);
-        const topXp = xpRes.data?.[0];
-        if (topXp) {
-          const prof = (profileRes.data || []).find((p: any) => p.id === topXp.user_id);
-          mvp = { name: prof?.display_name || prof?.username || 'Unknown', xp: topXp.lifetime_points };
-        }
-      }
-      const nudge = await generateNudge(user.id).catch(() => null);
-      const insight = await getProgressInsight(user.id).catch(() => '');
-      setDigest({ todayCheckIns, activeMembers, tasksCompleted: taskRes.data?.length || 0, mvp, streakAtRisk: [], nudge, insight });
-    } catch {}
-  }, [circleId, today]);
-
-  useEffect(() => { fetchDigest(); }, [fetchDigest]);
-
-  const fetchTasks = useCallback(async () => {
-    try {
-      const { data: { user }, error: userError } = await supabase.auth.getUser();
-      if (userError) {
-        console.error('Error getting user:', userError);
-        return;
-      }
-      if (user) setCurrentUserId(user.id);
-
-      let query = supabase
-        .from('tasks')
-        .select('*, creator:profiles!tasks_created_by_fkey(username, display_name), assignee:profiles!tasks_assigned_to_fkey(username, display_name)')
-        .eq('circle_id', circleId)
-        .order('created_at', { ascending: false })
-        .limit(50);
-
-      if (filter === 'mine' && user) {
-        query = query.or(`assigned_to.eq.${user.id},created_by.eq.${user.id}`);
-      } else if (filter !== 'all') {
-        query = query.eq('status', filter);
-      }
-
-      const { data, error } = await query;
-      if (error) {
-        console.error('Error fetching tasks:', error);
-        showAlert('Error', 'Failed to load tasks');
-        return;
-      }
-      setTasks(data || []);
-
-      // Fetch members for assignment
-      const { data: memberData, error: memberError } = await supabase
-        .from('circle_members')
-        .select('user:profiles(id, username, display_name)')
-        .eq('circle_id', circleId)
-        .limit(50);
-      
-      if (memberError) {
-        console.error('Error fetching members:', memberError);
-      } else {
-        setMembers((memberData || []).map((m: any) => m.user));
-      }
-    } catch (err) {
-      console.error('Unexpected error in fetchTasks:', err);
-      showAlert('Error', 'Something went wrong loading tasks');
+  // Filter tasks by goal
+  const filteredTasksByColumn = useMemo(() => {
+    if (!filteredGoalId) return kanban.tasksByColumn;
+    const filtered = {} as TasksByColumn;
+    for (const key of Object.keys(kanban.tasksByColumn) as TaskStatus[]) {
+      filtered[key] = kanban.tasksByColumn[key].filter(t => (t as any).goal_id === filteredGoalId);
     }
-  }, [circleId, filter]);
+    return filtered;
+  }, [kanban.tasksByColumn, filteredGoalId]);
 
-  useEffect(() => {
-    fetchTasks();
-  }, [fetchTasks]);
-
-  // Realtime: refresh when tasks are inserted, updated, or deleted
-  useEffect(() => {
-    const channel = supabase
-      .channel(`tasks-feed-${circleId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks', filter: `circle_id=eq.${circleId}` }, () => {
-        fetchTasks();
-      })
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [circleId, fetchTasks]);
-
-  const updateTaskStatus = async (taskId: string, status: string) => {
-    await supabase.from('tasks').update({
-      status,
-      completed_at: status === 'done' ? new Date().toISOString() : null,
-    }).eq('id', taskId);
-
-    // Award XP when task is marked done
-    if (status === 'done' && currentUserId) {
-      awardXP(currentUserId, getXPForAction('task_complete'), 'task_complete', { task_id: taskId }).catch(console.error);
-    }
-
-    fetchTasks();
-  };
-
-  const onRefresh = async () => {
-    setRefreshing(true);
-    await fetchTasks();
-    setRefreshing(false);
-  };
-
-  const openCount = tasks.filter(t => t.status === 'open').length;
-  const progressCount = tasks.filter(t => t.status === 'in_progress').length;
-  const doneCount = tasks.filter(t => t.status === 'done').length;
-
-  return (
-    <View style={styles.container}>
-      {/* ── Digest Panel ────────────────────────────────────────────────────── */}
-      <Pressable onPress={() => setShowDigest(p => !p)} style={digestStyles.header}>
-        <Text style={digestStyles.title}>📊 DAILY DIGEST</Text>
-        <Text style={digestStyles.toggle}>{showDigest ? '▲' : '▼'}</Text>
-      </Pressable>
-      {showDigest && (
-        <View style={digestStyles.body}>
-          {digest ? (
-            <View style={digestStyles.grid}>
-              <View style={digestStyles.stat}>
-                <Text style={digestStyles.statNum}>{digest.todayCheckIns.length}</Text>
-                <Text style={digestStyles.statLbl}>Check-ins Today</Text>
-              </View>
-              <View style={digestStyles.divider} />
-              <View style={digestStyles.stat}>
-                <Text style={digestStyles.statNum}>{digest.activeMembers}</Text>
-                <Text style={digestStyles.statLbl}>Active Members</Text>
-              </View>
-              <View style={digestStyles.divider} />
-              <View style={digestStyles.stat}>
-                <Text style={digestStyles.statNum}>{digest.tasksCompleted}</Text>
-                <Text style={digestStyles.statLbl}>Tasks Done Today</Text>
-              </View>
-              {digest.mvp && (<>
-                <View style={digestStyles.divider} />
-                <View style={digestStyles.stat}>
-                  <Text style={[digestStyles.statNum, { color: '#f59e0b' }]}>🏆 {digest.mvp.name}</Text>
-                  <Text style={digestStyles.statLbl}>{digest.mvp.xp.toLocaleString()} XP · MVP</Text>
-                </View>
-              </>)}
-            </View>
-          ) : (
-            <Text style={digestStyles.loading}>Loading digest...</Text>
-          )}
-          {digest?.nudge ? (
-            <View style={digestStyles.nudgeBox}>
-              <Text style={digestStyles.nudgeText}>💡 {digest.nudge}</Text>
-            </View>
-          ) : null}
-          {digest?.insight ? (
-            <View style={digestStyles.insightBox}>
-              <Text style={digestStyles.insightText}>📈 {digest.insight}</Text>
-            </View>
-          ) : null}
-          {digest?.todayCheckIns && digest.todayCheckIns.length > 0 && (
-            <View style={digestStyles.checkinsBox}>
-              <Text style={digestStyles.checkinsTitle}>Today's Check-ins</Text>
-              {digest.todayCheckIns.slice(0, 3).map((c: any, i: number) => (
-                <View key={i} style={digestStyles.checkinRow}>
-                  <Text style={digestStyles.checkinName}>
-                    {(c.profiles as any)?.display_name || (c.profiles as any)?.username || 'Member'}
-                  </Text>
-                  <Text style={digestStyles.checkinContent} numberOfLines={1}>{c.content}</Text>
-                </View>
-              ))}
-              {digest.todayCheckIns.length > 3 && (
-                <Text style={digestStyles.moreText}>+{digest.todayCheckIns.length - 3} more</Text>
-              )}
-            </View>
-          )}
-        </View>
-      )}
-
-      {/* Stats Bar */}
-      <View style={styles.statsBar}>
-        <View style={styles.statItem}>
-          <Text style={styles.statNum}>{openCount}</Text>
-          <Text style={styles.statLabel}>TO DO</Text>
-        </View>
-        <View style={[styles.statDot, { backgroundColor: '#e89b3e' }]} />
-        <View style={styles.statItem}>
-          <Text style={styles.statNum}>{progressCount}</Text>
-          <Text style={styles.statLabel}>IN PROGRESS</Text>
-        </View>
-        <View style={[styles.statDot, { backgroundColor: '#4a9a4a' }]} />
-        <View style={styles.statItem}>
-          <Text style={styles.statNum}>{doneCount}</Text>
-          <Text style={styles.statLabel}>DONE</Text>
+  if (kanban.loading) {
+    return (
+      <View style={s.loadingContainer}>
+        <View style={s.loadingDots}>
+          <View style={[s.loadingDot, { backgroundColor: '#6366f1' }]} />
+          <View style={[s.loadingDot, { backgroundColor: '#f59e0b', opacity: 0.7 }]} />
+          <View style={[s.loadingDot, { backgroundColor: '#22c55e', opacity: 0.4 }]} />
         </View>
       </View>
+    );
+  }
 
-      {/* Filter Chips */}
-      <View style={styles.filterRow}>
-        {[
-          { key: 'all', label: 'ALL' },
-          { key: 'mine', label: 'MINE' },
-          { key: 'open', label: 'TO DO' },
-          { key: 'in_progress', label: 'IN PROGRESS' },
-          { key: 'done', label: 'DONE' },
-        ].map((f) => (
-          <FilterChip
-            key={f.key}
-            label={f.label}
-            active={filter === f.key}
-            onPress={() => setFilter(f.key)}
-          />
-        ))}
-      </View>
+  // ─── Mobile Layout ─────────────────────────────────────────────────────
+  if (isMobile) {
+    return (
+      <View style={s.container}>
+        <AgentTopBar agents={kanban.agents} />
 
-      {/* Task List */}
-      <FlatList
-        data={tasks}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item }) => (
-          <TaskCard
-            task={item}
-            currentUserId={currentUserId}
-            onStatusChange={updateTaskStatus}
+        <View style={s.mobileBody}>
+          {mobileTab === 'goals' && (
+            <View style={s.mobilePanel}>
+              <GoalsPanel
+                goals={goalsHook.goals}
+                agents={kanban.agents}
+                filteredGoalId={filteredGoalId}
+                onFilter={setFilteredGoalId}
+                onCreateGoal={goalsHook.createGoal}
+                onUpdateGoal={goalsHook.updateGoal}
+                onDeleteGoal={goalsHook.deleteGoal}
+                onCreateTask={kanban.createTask}
+              />
+            </View>
+          )}
+          {mobileTab === 'activity' && (
+            <View style={s.mobilePanel}>
+              <ActivityFeedPanel circleId={circleId} agents={kanban.agents} />
+            </View>
+          )}
+          {mobileTab === 'board' && (
+            <KanbanBoard
+              columns={COLUMNS}
+              tasksByColumn={filteredTasksByColumn}
+              agents={kanban.agents}
+              goals={goalsHook.goals}
+              onCardPress={setDetailTask}
+              onMoveTask={kanban.moveTask}
+              onQuickAdd={(status, title) => kanban.createTask({ title, status })}
+              onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
+            />
+          )}
+        </View>
+
+        {/* Mobile tab bar */}
+        <View style={s.mobileTabBar}>
+          {([
+            { key: 'goals' as MobileTab, label: 'Goals', icon: '\u2299' },
+            { key: 'activity' as MobileTab, label: 'Activity', icon: '\u26A1' },
+            { key: 'board' as MobileTab, label: 'Board', icon: '\u25A6' },
+          ]).map(tab => {
+            const isActive = mobileTab === tab.key;
+            return (
+              <Pressable
+                key={tab.key}
+                onPress={() => setMobileTab(tab.key)}
+                style={[s.mobileTabBtn, isActive && s.mobileTabBtnActive]}
+              >
+                <Text style={[s.mobileTabIcon, isActive && s.mobileTabIconActive]}>{tab.icon}</Text>
+                <Text style={[s.mobileTabLabel, isActive && s.mobileTabLabelActive]}>{tab.label}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+
+        {detailTask && (
+          <TaskDetailModal
+            task={detailTask}
+            kanban={kanban}
+            goals={goalsHook.goals}
+            onClose={() => setDetailTask(null)}
           />
         )}
-        contentContainerStyle={styles.list}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#fff" />
-        }
-        ListEmptyComponent={
-          <View style={styles.empty}>
-            <Text style={styles.emptyIcon}>📋</Text>
-            <Text style={styles.emptyText}>No tasks yet</Text>
-            <Text style={styles.emptySubtext}>Create one and start grinding</Text>
-          </View>
-        }
-      />
 
-      {/* Create Task Button */}
-      <View style={styles.createBar}>
-        <Button title="+ NEW TASK" onPress={() => setShowCreate(true)} />
+        {showCreate && (
+          <CreateTaskModal
+            column={createInColumn}
+            members={kanban.members}
+            agents={kanban.agents}
+            goals={goalsHook.goals}
+            onClose={() => setShowCreate(false)}
+            onCreate={async (fields) => {
+              await kanban.createTask(fields);
+              setShowCreate(false);
+            }}
+          />
+        )}
+      </View>
+    );
+  }
+
+  // ─── Desktop Layout ────────────────────────────────────────────────────
+  return (
+    <View style={s.container}>
+      <AgentTopBar agents={kanban.agents} />
+
+      <View style={s.body}>
+        <GoalsPanel
+          goals={goalsHook.goals}
+          agents={kanban.agents}
+          filteredGoalId={filteredGoalId}
+          onFilter={setFilteredGoalId}
+          onCreateGoal={goalsHook.createGoal}
+          onUpdateGoal={goalsHook.updateGoal}
+          onDeleteGoal={goalsHook.deleteGoal}
+          onCreateTask={kanban.createTask}
+        />
+
+        <ActivityFeedPanel circleId={circleId} agents={kanban.agents} />
+
+        <KanbanBoard
+          columns={COLUMNS}
+          tasksByColumn={filteredTasksByColumn}
+          agents={kanban.agents}
+          goals={goalsHook.goals}
+          onCardPress={setDetailTask}
+          onMoveTask={kanban.moveTask}
+          onQuickAdd={(status, title) => kanban.createTask({ title, status })}
+          onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
+        />
       </View>
 
-      {/* Create Task Modal */}
+      {detailTask && (
+        <TaskDetailModal
+          task={detailTask}
+          kanban={kanban}
+          goals={goalsHook.goals}
+          onClose={() => setDetailTask(null)}
+        />
+      )}
+
       {showCreate && (
         <CreateTaskModal
-          circleId={circleId}
-          members={members}
-          currentUserId={currentUserId}
+          column={createInColumn}
+          members={kanban.members}
+          agents={kanban.agents}
+          goals={goalsHook.goals}
           onClose={() => setShowCreate(false)}
-          onCreated={() => { setShowCreate(false); fetchTasks(); }}
+          onCreate={async (fields) => {
+            await kanban.createTask(fields);
+            setShowCreate(false);
+          }}
         />
       )}
     </View>
   );
 }
 
-function FilterChip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <Pressable
-      onPress={onPress}
-      onHoverIn={() => setHovered(true)}
-      onHoverOut={() => setHovered(false)}
-      style={[styles.chip, active && styles.chipActive, hovered && !active && styles.chipHovered]}
-    >
-      <Text style={[styles.chipText, active && styles.chipTextActive]}>{label}</Text>
-    </Pressable>
-  );
+// ─── Create Task Modal ──────────────────────────────────────────────────────
+
+interface CreateModalProps {
+  column: TaskStatus;
+  members: KanbanMember[];
+  agents: CircleOfficeAgent[];
+  goals: GoalWithCount[];
+  onClose: () => void;
+  onCreate: (fields: {
+    title: string;
+    description?: string;
+    priority?: TaskPriority;
+    status?: TaskStatus;
+    assigned_to?: string | null;
+    assigned_agent_id?: string | null;
+    due_date?: string | null;
+    goal_id?: string | null;
+  }) => void;
 }
 
-function TaskCard({ task, currentUserId, onStatusChange }: any) {
-  const [hovered, setHovered] = useState(false);
-  const isDone = task.status === 'done';
-  const priorityColor = PRIORITY_COLORS[task.priority] || '#888';
+function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: CreateModalProps) {
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [priority, setPriority] = useState<TaskPriority>('normal');
+  const [assignedTo, setAssignedTo] = useState<string | null>(null);
+  const [assignedAgentId, setAssignedAgentId] = useState<string | null>(null);
+  const [dueDate, setDueDate] = useState('');
+  const [selectedGoalId, setSelectedGoalId] = useState<string | null>(null);
+  const [error, setError] = useState('');
 
-  const nextStatus = () => {
-    if (task.status === 'open') return 'in_progress';
-    if (task.status === 'in_progress') return 'done';
-    return 'open';
+  const columnDef = COLUMNS.find(c => c.key === column) || COLUMNS[1];
+
+  const handleCreate = () => {
+    if (!title.trim()) { setError('Give the task a title'); return; }
+    onCreate({
+      title: title.trim(),
+      description: description.trim() || undefined,
+      priority,
+      status: column,
+      assigned_to: assignedTo,
+      assigned_agent_id: assignedAgentId,
+      due_date: dueDate || null,
+      goal_id: selectedGoalId,
+    });
   };
-
-  const statusIcon = () => {
-    if (task.status === 'done') return '✓';
-    if (task.status === 'in_progress') return '◐';
-    return '○';
-  };
-
-  const dueText = () => {
-    if (!task.due_date) return null;
-    const due = new Date(task.due_date);
-    const now = new Date();
-    const diff = Math.ceil((due.getTime() - now.getTime()) / 86400000);
-    if (diff < 0) return { text: `${Math.abs(diff)}d overdue`, color: '#e84040' };
-    if (diff === 0) return { text: 'Due today', color: '#e89b3e' };
-    if (diff <= 3) return { text: `Due in ${diff}d`, color: '#e89b3e' };
-    return { text: `Due in ${diff}d`, color: '#555' };
-  };
-
-  const due = dueText();
 
   return (
-    <Pressable
-      onHoverIn={() => setHovered(true)}
-      onHoverOut={() => setHovered(false)}
-      style={[styles.taskCard, hovered && styles.taskCardHovered, isDone && styles.taskCardDone]}
-    >
-      <View style={styles.taskRow}>
-        {/* Status Toggle */}
-        <Pressable onPress={() => onStatusChange(task.id, nextStatus())} style={styles.statusButton}>
-          <Text style={[styles.statusIcon, isDone && styles.statusIconDone]}>{statusIcon()}</Text>
-        </Pressable>
-
-        <View style={styles.taskContent}>
-          {/* Title + Priority */}
-          <View style={styles.taskHeader}>
-            <Text style={[styles.taskTitle, isDone && styles.taskTitleDone]} numberOfLines={2}>
-              {task.title}
-            </Text>
-            <View style={[styles.priorityBadge, { borderColor: priorityColor }]}>
-              <Text style={[styles.priorityText, { color: priorityColor }]}>
-                {PRIORITY_LABELS[task.priority]}
-              </Text>
+    <View style={m.overlay}>
+      <Pressable style={m.backdrop} onPress={onClose} />
+      <View style={m.modal}>
+        <ScrollView contentContainerStyle={m.scrollContent} showsVerticalScrollIndicator={false}>
+          {/* Header */}
+          <View style={m.headerRow}>
+            <Text style={m.headerTitle}>New task</Text>
+            <View style={[m.columnBadge, { backgroundColor: columnDef.color + '12' }]}>
+              <View style={[m.columnDot, { backgroundColor: columnDef.color }]} />
+              <Text style={[m.columnBadgeText, { color: columnDef.color }]}>{columnDef.label}</Text>
             </View>
           </View>
 
+          {error ? (
+            <View style={m.errorBox}>
+              <Text style={m.errorText}>{error}</Text>
+            </View>
+          ) : null}
+
+          {/* Title */}
+          <TextInput
+            style={m.titleInput}
+            placeholder="Task title"
+            placeholderTextColor="#444455"
+            value={title}
+            onChangeText={(t) => { setTitle(t); setError(''); }}
+            maxLength={200}
+            autoFocus
+          />
+
           {/* Description */}
-          {task.description && (
-            <Text style={styles.taskDesc} numberOfLines={2}>{task.description}</Text>
+          <TextInput
+            style={[m.input, m.textArea]}
+            placeholder="Add details..."
+            placeholderTextColor="#333348"
+            value={description}
+            onChangeText={setDescription}
+            multiline
+            maxLength={500}
+          />
+
+          {/* Goal selector */}
+          {goals.length > 0 && (
+            <>
+              <Text style={m.sectionLabel}>Goal</Text>
+              <View style={m.chipRow}>
+                <Pressable
+                  onPress={() => setSelectedGoalId(null)}
+                  style={[m.chip, !selectedGoalId && m.chipActive]}
+                >
+                  <Text style={[m.chipText, !selectedGoalId && { color: '#e4e4ed' }]}>None</Text>
+                </Pressable>
+                {goals.map(g => {
+                  const active = selectedGoalId === g.id;
+                  const gColor = g.status === 'active' ? '#22c55e' : g.status === 'paused' ? '#f59e0b' : '#666680';
+                  return (
+                    <Pressable
+                      key={g.id}
+                      onPress={() => setSelectedGoalId(active ? null : g.id)}
+                      style={[m.chip, active && { backgroundColor: gColor + '15', borderColor: gColor + '30' }]}
+                    >
+                      <View style={[m.chipDot, { backgroundColor: gColor }]} />
+                      <Text style={[m.chipText, active && { color: gColor }]} numberOfLines={1}>{g.name}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </>
           )}
 
-          {/* Footer: assignee, due, status */}
-          <View style={styles.taskFooter}>
-            {task.assignee && (
-              <View style={styles.assigneeBadge}>
-                <Text style={styles.assigneeText}>→ {task.assignee.display_name}</Text>
-              </View>
-            )}
-            {due && (
-              <Text style={[styles.dueText, { color: due.color }]}>{due.text}</Text>
-            )}
-            <Text style={styles.statusText}>{STATUS_LABELS[task.status]}</Text>
+          {/* Priority */}
+          <Text style={m.sectionLabel}>Priority</Text>
+          <View style={m.chipRow}>
+            {(['low', 'normal', 'high', 'urgent'] as TaskPriority[]).map(p => {
+              const active = priority === p;
+              const color = PRIORITY_COLORS[p];
+              return (
+                <Pressable
+                  key={p}
+                  onPress={() => setPriority(p)}
+                  style={[m.chip, active && { backgroundColor: color + '15', borderColor: color + '30' }]}
+                >
+                  {active && <View style={[m.chipDot, { backgroundColor: color }]} />}
+                  <Text style={[m.chipText, active && { color }]}>{PRIORITY_LABELS[p]}</Text>
+                </Pressable>
+              );
+            })}
           </View>
-        </View>
-      </View>
-    </Pressable>
-  );
-}
 
-function CreateTaskModal({ circleId, members, currentUserId, onClose, onCreated }: any) {
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [priority, setPriority] = useState('normal');
-  const [assignedTo, setAssignedTo] = useState<string | null>(null);
-  const [dueDate, setDueDate] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  const handleCreate = async () => {
-    setError('');
-    if (!title.trim()) { setError('Give the task a title'); return; }
-
-    setLoading(true);
-    const { error: createError } = await supabase.from('tasks').insert({
-      circle_id: circleId,
-      created_by: currentUserId,
-      assigned_to: assignedTo,
-      title: title.trim(),
-      description: description.trim() || null,
-      priority,
-      due_date: dueDate || null,
-    });
-
-    setLoading(false);
-    if (createError) { setError(createError.message); return; }
-    onCreated();
-  };
-
-  return (
-    <View style={styles.modalOverlay}>
-      <Pressable style={styles.modalBackdrop} onPress={onClose} />
-      <View style={styles.modalCard}>
-        <Text style={styles.modalTitle}>NEW TASK</Text>
-
-        {error ? (
-          <View style={styles.errorBox}>
-            <Text style={styles.errorText}>{error}</Text>
+          {/* Assign */}
+          <Text style={m.sectionLabel}>Assign to</Text>
+          <View style={m.chipRow}>
+            <Pressable
+              onPress={() => { setAssignedTo(null); setAssignedAgentId(null); }}
+              style={[m.chip, !assignedTo && !assignedAgentId && m.chipActive]}
+            >
+              <Text style={[m.chipText, !assignedTo && !assignedAgentId && { color: '#e4e4ed' }]}>Nobody</Text>
+            </Pressable>
+            {members.map(mem => (
+              <Pressable
+                key={mem.id}
+                onPress={() => { setAssignedTo(mem.id); setAssignedAgentId(null); }}
+                style={[m.chip, assignedTo === mem.id && m.chipActive]}
+              >
+                <Text style={[m.chipText, assignedTo === mem.id && { color: '#e4e4ed' }]}>
+                  {mem.display_name || mem.username}
+                </Text>
+              </Pressable>
+            ))}
+            {agents.map(a => (
+              <Pressable
+                key={a.id}
+                onPress={() => { setAssignedAgentId(a.id); setAssignedTo(null); }}
+                style={[m.chip, assignedAgentId === a.id && { backgroundColor: (a.color || '#6366f1') + '15', borderColor: (a.color || '#6366f1') + '30' }]}
+              >
+                <View style={[m.chipDot, { backgroundColor: a.color || '#6366f1' }]} />
+                <Text style={[m.chipText, assignedAgentId === a.id && { color: a.color || '#6366f1' }]}>{a.name}</Text>
+              </Pressable>
+            ))}
           </View>
-        ) : null}
 
-        <Text style={styles.inputLabel}>TITLE</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="What needs to get done?"
-          placeholderTextColor="#444"
-          value={title}
-          onChangeText={setTitle}
-          maxLength={200}
-        />
-
-        <Text style={styles.inputLabel}>DETAILS (OPTIONAL)</Text>
-        <TextInput
-          style={[styles.input, styles.textArea]}
-          placeholder="More context..."
-          placeholderTextColor="#444"
-          value={description}
-          onChangeText={setDescription}
-          multiline
-          maxLength={500}
-        />
-
-        <Text style={styles.inputLabel}>PRIORITY</Text>
-        <View style={styles.priorityRow}>
-          {['low', 'normal', 'high', 'urgent'].map((p) => (
-            <PriorityChip
-              key={p}
-              label={PRIORITY_LABELS[p]}
-              color={PRIORITY_COLORS[p]}
-              active={priority === p}
-              onPress={() => setPriority(p)}
-            />
-          ))}
-        </View>
-
-        <Text style={styles.inputLabel}>ASSIGN TO</Text>
-        <View style={styles.assignRow}>
-          <AssignChip
-            label="Unassigned"
-            active={assignedTo === null}
-            onPress={() => setAssignedTo(null)}
+          {/* Due date */}
+          <Text style={m.sectionLabel}>Due date</Text>
+          <TextInput
+            style={m.input}
+            placeholder="YYYY-MM-DD"
+            placeholderTextColor="#333348"
+            value={dueDate}
+            onChangeText={setDueDate}
+            maxLength={10}
           />
-          {members.map((m: any) => (
-            <AssignChip
-              key={m.id}
-              label={m.display_name || m.username}
-              active={assignedTo === m.id}
-              onPress={() => setAssignedTo(m.id)}
-            />
-          ))}
-        </View>
 
-        <Text style={styles.inputLabel}>DUE DATE (OPTIONAL)</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="YYYY-MM-DD"
-          placeholderTextColor="#444"
-          value={dueDate}
-          onChangeText={setDueDate}
-          maxLength={10}
-        />
-
-        <View style={styles.modalButtons}>
-          <Button title="CREATE TASK" onPress={handleCreate} loading={loading} />
-          <Button title="CANCEL" variant="ghost" onPress={onClose} />
-        </View>
+          {/* Actions */}
+          <View style={m.btnRow}>
+            <Pressable onPress={handleCreate} style={m.createBtn}>
+              <Text style={m.createBtnText}>Create task</Text>
+            </Pressable>
+            <Pressable onPress={onClose} style={m.cancelBtn}>
+              <Text style={m.cancelBtnText}>Cancel</Text>
+            </Pressable>
+          </View>
+        </ScrollView>
       </View>
     </View>
   );
 }
 
-function PriorityChip({ label, color, active, onPress }: any) {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <Pressable
-      onPress={onPress}
-      onHoverIn={() => setHovered(true)}
-      onHoverOut={() => setHovered(false)}
-      style={[styles.pChip, active && { borderColor: color, backgroundColor: color + '15' }, hovered && !active && styles.pChipHovered]}
-    >
-      <Text style={[styles.pChipText, { color: active ? color : '#555' }]}>{label}</Text>
-    </Pressable>
-  );
-}
+// ─── Styles ─────────────────────────────────────────────────────────────────
 
-function AssignChip({ label, active, onPress }: any) {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <Pressable
-      onPress={onPress}
-      onHoverIn={() => setHovered(true)}
-      onHoverOut={() => setHovered(false)}
-      style={[styles.aChip, active && styles.aChipActive, hovered && !active && styles.aChipHovered]}
-    >
-      <Text style={[styles.aChipText, active && styles.aChipTextActive]}>{label}</Text>
-    </Pressable>
-  );
-}
-
-const digestStyles = StyleSheet.create({
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 8, backgroundColor: '#0d0d12', borderBottomWidth: 1, borderBottomColor: '#1a1a2e' },
-  title: { color: '#6366f1', fontSize: 10, fontWeight: '800', letterSpacing: 2 },
-  toggle: { color: '#444', fontSize: 12 },
-  body: { backgroundColor: '#080810', borderBottomWidth: 1, borderBottomColor: '#1a1a2e', paddingBottom: 10 },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 16, paddingTop: 10, gap: 4, alignItems: 'center' },
-  stat: { alignItems: 'center', paddingHorizontal: 12, paddingVertical: 6 },
-  statNum: { color: '#fff', fontSize: 16, fontWeight: '900' },
-  statLbl: { color: '#555', fontSize: 9, letterSpacing: 1, fontWeight: '700', marginTop: 2 },
-  divider: { width: 1, height: 28, backgroundColor: '#1a1a2e' },
-  loading: { color: '#444', fontSize: 11, padding: 12, textAlign: 'center' },
-  nudgeBox: { marginHorizontal: 16, marginTop: 8, backgroundColor: '#6366f110', borderRadius: 8, padding: 10, borderWidth: 1, borderColor: '#6366f130' },
-  nudgeText: { color: '#a5b4fc', fontSize: 12, lineHeight: 18 },
-  insightBox: { marginHorizontal: 16, marginTop: 6, backgroundColor: '#22c55e10', borderRadius: 8, padding: 10, borderWidth: 1, borderColor: '#22c55e30' },
-  insightText: { color: '#86efac', fontSize: 12, lineHeight: 18 },
-  checkinsBox: { marginHorizontal: 16, marginTop: 8 },
-  checkinsTitle: { color: '#444', fontSize: 9, fontWeight: '800', letterSpacing: 2, marginBottom: 6 },
-  checkinRow: { flexDirection: 'row', gap: 8, paddingVertical: 4, borderTopWidth: 1, borderTopColor: '#111' },
-  checkinName: { color: '#888', fontSize: 11, fontWeight: '700', minWidth: 80 },
-  checkinContent: { color: '#555', fontSize: 11, flex: 1 },
-  moreText: { color: '#444', fontSize: 10, marginTop: 4 },
-});
-
-const styles = StyleSheet.create({
-  container: { flex: 1 },
-  statsBar: {
+const s = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#08080e' },
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#08080e' },
+  loadingDots: { flexDirection: 'row', gap: 8 },
+  loadingDot: { width: 8, height: 8, borderRadius: 4 },
+  body: {
+    flex: 1,
     flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 16,
-    padding: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
-    maxWidth: 860,
-    alignSelf: 'center',
-    width: '100%',
   },
-  statItem: { alignItems: 'center' },
-  statNum: { color: '#fff', fontSize: 18, fontWeight: '900' },
-  statLabel: { color: '#555', fontSize: 9, letterSpacing: 1, fontWeight: '700', marginTop: 2 },
-  statDot: { width: 4, height: 4, borderRadius: 2 },
-  filterRow: {
+  // Mobile
+  mobileBody: {
+    flex: 1,
+  },
+  mobilePanel: {
+    flex: 1,
+  },
+  mobileTabBar: {
     flexDirection: 'row',
-    padding: 12,
-    paddingHorizontal: 16,
-    gap: 6,
-    maxWidth: 860,
-    alignSelf: 'center',
-    width: '100%',
-    flexWrap: 'wrap',
-  },
-  chip: {
+    backgroundColor: '#0a0a12',
+    borderTopWidth: 1,
+    borderTopColor: '#15151e',
     paddingVertical: 6,
     paddingHorizontal: 12,
-    borderRadius: 8,
-    backgroundColor: '#111',
-    borderWidth: 1,
-    borderColor: '#222',
-    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
   },
-  chipActive: { borderColor: '#fff', backgroundColor: '#1a1a1a' },
-  chipHovered: { borderColor: '#444' },
-  chipText: { color: '#555', fontSize: 11, fontWeight: '700', letterSpacing: 1 },
-  chipTextActive: { color: '#fff' },
-  list: {
-    padding: 16,
-    maxWidth: 860,
-    alignSelf: 'center',
-    width: '100%',
-  },
-  taskCard: {
-    backgroundColor: '#111',
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: '#1a1a1a',
-    ...(Platform.OS === 'web' ? { transition: 'all 0.15s ease' } as any : {}),
-  },
-  taskCardHovered: { borderColor: '#2a2a2a', backgroundColor: '#131313' },
-  taskCardDone: { opacity: 0.6 },
-  taskRow: { flexDirection: 'row', gap: 12 },
-  statusButton: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#1a1a1a',
-    justifyContent: 'center',
+  mobileTabBtn: {
+    flex: 1,
     alignItems: 'center',
-    marginTop: 2,
+    gap: 3,
+    paddingVertical: 6,
+    borderRadius: 8,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  statusIcon: { color: '#666', fontSize: 16 },
-  statusIconDone: { color: '#4a9a4a' },
-  taskContent: { flex: 1 },
-  taskHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 },
-  taskTitle: { color: '#fff', fontSize: 15, fontWeight: '700', flex: 1 },
-  taskTitleDone: { textDecorationLine: 'line-through', color: '#666' },
-  priorityBadge: { borderWidth: 1, borderRadius: 6, paddingVertical: 2, paddingHorizontal: 6 },
-  priorityText: { fontSize: 9, fontWeight: '800', letterSpacing: 1 },
-  taskDesc: { color: '#666', fontSize: 13, marginTop: 6, lineHeight: 18 },
-  taskFooter: { flexDirection: 'row', gap: 10, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' },
-  assigneeBadge: { backgroundColor: '#1a1a2e', borderRadius: 6, paddingVertical: 2, paddingHorizontal: 8 },
-  assigneeText: { color: '#88f', fontSize: 11, fontWeight: '600' },
-  dueText: { fontSize: 11, fontWeight: '600' },
-  statusText: { color: '#444', fontSize: 10, letterSpacing: 1, fontWeight: '700' },
-  createBar: {
-    padding: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#1a1a1a',
-    maxWidth: 860,
-    alignSelf: 'center',
-    width: '100%',
+  mobileTabBtnActive: {
+    backgroundColor: '#15151e',
   },
-  empty: { alignItems: 'center', paddingTop: 60 },
-  emptyIcon: { fontSize: 32, marginBottom: 12 },
-  emptyText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  emptySubtext: { color: '#555', fontSize: 14, marginTop: 4 },
-  // Modal
-  modalOverlay: {
+  mobileTabIcon: {
+    fontSize: 16,
+    color: '#444455',
+  },
+  mobileTabIconActive: {
+    color: '#e4e4ed',
+  },
+  mobileTabLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#444455',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  mobileTabLabelActive: {
+    color: '#c0c0d0',
+  },
+});
+
+const m = StyleSheet.create({
+  overlay: {
     position: 'absolute',
     top: 0, left: 0, right: 0, bottom: 0,
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 100,
   },
-  modalBackdrop: {
+  backdrop: {
     position: 'absolute',
     top: 0, left: 0, right: 0, bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.7)',
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    ...(Platform.OS === 'web' ? { backdropFilter: 'blur(4px)' } as any : {}),
   },
-  modalCard: {
-    width: '90%',
-    maxWidth: 700,
-    backgroundColor: '#111',
+  modal: {
+    backgroundColor: '#111119',
     borderRadius: 16,
-    padding: 28,
     borderWidth: 1,
-    borderColor: '#222',
-    zIndex: 101,
+    borderColor: '#1e1e2e',
+    width: '92%',
+    maxWidth: 480,
     maxHeight: '85%',
+    zIndex: 101,
+    ...(Platform.OS === 'web' ? { boxShadow: '0 20px 60px rgba(0,0,0,0.5)' } as any : {}),
   },
-  modalTitle: {
-    color: '#fff',
+  scrollContent: {
+    padding: 24,
+  },
+  headerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  headerTitle: {
+    color: '#e4e4ed',
     fontSize: 18,
-    fontWeight: '900',
-    letterSpacing: 3,
-    textAlign: 'center',
-    marginBottom: 24,
+    fontWeight: '600',
   },
-  inputLabel: { color: '#666', fontSize: 11, letterSpacing: 2, fontWeight: '700', marginBottom: 8 },
-  input: {
-    backgroundColor: '#0a0a0a',
-    borderWidth: 1,
-    borderColor: '#2a2a2a',
+  columnBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 20,
+  },
+  columnDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  columnBadgeText: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  errorBox: {
+    backgroundColor: '#ef444415',
     borderRadius: 10,
-    padding: 14,
+    padding: 12,
+    marginBottom: 14,
+  },
+  errorText: {
+    color: '#f87171',
+    fontSize: 13,
+    textAlign: 'center',
+  },
+  titleInput: {
+    color: '#e4e4ed',
+    fontSize: 16,
+    fontWeight: '500',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    backgroundColor: '#0c0c14',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#1a1a28',
+    marginBottom: 10,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+  },
+  input: {
+    color: '#c0c0d0',
+    fontSize: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    backgroundColor: '#0c0c14',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#1a1a28',
+    marginBottom: 10,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+  },
+  textArea: {
+    minHeight: 70,
+    textAlignVertical: 'top',
+  },
+  sectionLabel: {
+    color: '#6b6b80',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 8,
+    marginTop: 6,
+  },
+  chipRow: {
+    flexDirection: 'row',
+    gap: 6,
+    flexWrap: 'wrap',
+    marginBottom: 10,
+  },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#1e1e2e',
+    backgroundColor: '#0c0c14',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
+  },
+  chipActive: {
+    borderColor: '#3a3a50',
+    backgroundColor: '#1a1a28',
+  },
+  chipDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  chipText: {
+    color: '#555566',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  btnRow: {
+    gap: 8,
+    marginTop: 16,
+  },
+  createBtn: {
+    backgroundColor: '#6366f1',
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'opacity 0.15s' } as any : {}),
+  },
+  createBtnText: {
     color: '#fff',
-    fontSize: 15,
-    marginBottom: 16,
+    fontSize: 14,
+    fontWeight: '600',
   },
-  textArea: { minHeight: 60, textAlignVertical: 'top' },
-  errorBox: { backgroundColor: '#2a1515', borderWidth: 1, borderColor: '#4a2020', borderRadius: 10, padding: 12, marginBottom: 16 },
-  errorText: { color: '#ff6666', fontSize: 13, textAlign: 'center' },
-  priorityRow: { flexDirection: 'row', gap: 6, marginBottom: 16, flexWrap: 'wrap' },
-  pChip: {
-    paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: '#222', backgroundColor: '#0a0a0a',
-    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
+  cancelBtn: {
+    paddingVertical: 8,
+    alignItems: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  pChipHovered: { borderColor: '#444' },
-  pChipText: { fontSize: 11, fontWeight: '700', letterSpacing: 1 },
-  assignRow: { flexDirection: 'row', gap: 6, marginBottom: 16, flexWrap: 'wrap' },
-  aChip: {
-    paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: '#222', backgroundColor: '#0a0a0a',
-    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
+  cancelBtnText: {
+    color: '#555566',
+    fontSize: 13,
+    fontWeight: '500',
   },
-  aChipActive: { borderColor: '#fff', backgroundColor: '#1a1a1a' },
-  aChipHovered: { borderColor: '#444' },
-  aChipText: { color: '#555', fontSize: 12, fontWeight: '600' },
-  aChipTextActive: { color: '#fff' },
-  modalButtons: { gap: 8, marginTop: 8 },
 });

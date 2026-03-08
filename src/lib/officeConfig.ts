@@ -462,7 +462,11 @@ export type FurnitureType =
   | 'server' | 'coffee' | 'watercooler' | 'arcade'
   | 'tv' | 'pingtable' | 'snackbar' | 'neonsign' | 'rug'
   | 'safe' | 'trophy' | 'standingdesk' | 'beanbag' | 'printer' | 'clock' | 'window'
-  | 'nft_frame' | 'stickynote';
+  | 'nft_frame' | 'stickynote'
+  | 'enter_key' | 'button_panel' | 'alarm_bell' | 'launch_pad'
+  | 'jukebox' | 'dice_roller' | 'gong' | 'confetti_cannon'
+  | 'timer_display' | 'scoreboard' | 'status_board' | 'command_console'
+  | 'slot_machine' | 'crystal_ball' | 'mood_ring' | 'boom_box' | 'lava_lamp' | 'whack_a_mole';
 
 export interface FurnitureItem {
   id: string;
@@ -482,6 +486,16 @@ export interface FurnitureItem {
   noteColor?: string;       // bg color of the sticky note
   noteDrawing?: string;     // base64 PNG of the drawing
   noteGifUrl?: string;      // GIF URL
+  // Interactive item state
+  buttonPresets?: string[];  // button_panel: array of quick-command labels
+  timerEnd?: number;         // timer_display: Date.now() + duration (ms)
+  lastDiceRoll?: number;     // dice_roller: last result 1-6
+  jukeboxTrack?: number;     // jukebox: current track index 0-4
+  slotResult?: [number, number, number]; // slot_machine column indices
+  fortuneText?: string;      // crystal_ball: last fortune
+  boomboxPlaying?: boolean;  // boom_box: playing state
+  lavaColor?: string;        // lava_lamp: current color
+  whackScore?: number;       // whack_a_mole: score
 }
 
 export interface FurnitureCatalogEntry {
@@ -490,7 +504,7 @@ export interface FurnitureCatalogEntry {
   icon: string;
   width: number;
   height: number;
-  category: 'work' | 'lounge' | 'decor' | 'tech';
+  category: 'work' | 'lounge' | 'decor' | 'tech' | 'interactive';
   description: string;
 }
 
@@ -523,7 +537,35 @@ export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
   { type: 'window',      name: 'Window',         icon: '🪟',  width: 60,  height: 40,  category: 'decor',  description: 'Let the light in' },
   { type: 'nft_frame',   name: 'Image / NFT',    icon: '🖼',  width: 80,  height: 80,  category: 'decor',  description: 'Upload image or display NFT' },
   { type: 'stickynote',  name: 'Sticky Note',    icon: '📝',  width: 100, height: 100, category: 'work',   description: 'Write, draw, or add GIFs' },
+  // Interactive
+  { type: 'enter_key',      name: 'Enter Key',       icon: '⏎',  width: 80,  height: 60,  category: 'interactive', description: 'Click to send a task to all agents' },
+  { type: 'button_panel',   name: 'Button Panel',    icon: '🔘', width: 90,  height: 50,  category: 'interactive', description: 'Quick-command buttons' },
+  { type: 'alarm_bell',     name: 'Alarm Bell',      icon: '🔔', width: 50,  height: 50,  category: 'interactive', description: 'Ring to get attention' },
+  { type: 'launch_pad',     name: 'Launch Pad',      icon: '🚀', width: 70,  height: 70,  category: 'interactive', description: 'Launch tasks to all agents' },
+  { type: 'jukebox',        name: 'Jukebox',         icon: '🎵', width: 60,  height: 80,  category: 'interactive', description: 'Cycle through tracks' },
+  { type: 'dice_roller',    name: 'Dice Roller',     icon: '🎲', width: 50,  height: 50,  category: 'interactive', description: 'Roll a random number' },
+  { type: 'gong',           name: 'Gong',            icon: '🔊', width: 60,  height: 70,  category: 'interactive', description: 'Strike for a ripple effect' },
+  { type: 'confetti_cannon',name: 'Confetti Cannon', icon: '🎉', width: 50,  height: 60,  category: 'interactive', description: 'Burst confetti on the floor' },
+  { type: 'timer_display',  name: 'Timer',           icon: '⏱',  width: 70,  height: 50,  category: 'interactive', description: '25-min pomodoro countdown' },
+  { type: 'scoreboard',     name: 'Scoreboard',      icon: '📊', width: 100, height: 60,  category: 'interactive', description: 'Tasks completed today' },
+  { type: 'status_board',   name: 'Status Board',    icon: '📋', width: 110, height: 70,  category: 'interactive', description: 'Agent status at a glance' },
+  { type: 'command_console',name: 'Command Console', icon: '💻', width: 90,  height: 60,  category: 'interactive', description: 'Send command to specific agent' },
+  { type: 'slot_machine',  name: 'Slot Machine',    icon: '🎰', width: 60,  height: 80,  category: 'interactive', description: 'Spin for a jackpot!' },
+  { type: 'crystal_ball',  name: 'Crystal Ball',    icon: '🔮', width: 50,  height: 50,  category: 'interactive', description: 'Reveal your fortune' },
+  { type: 'mood_ring',     name: 'Mood Ring',       icon: '💍', width: 50,  height: 50,  category: 'interactive', description: 'Team vibe check' },
+  { type: 'boom_box',      name: 'Boom Box',        icon: '📻', width: 70,  height: 50,  category: 'interactive', description: 'Animated equalizer' },
+  { type: 'lava_lamp',     name: 'Lava Lamp',       icon: '🫧', width: 30,  height: 60,  category: 'interactive', description: 'Mesmerizing blobs' },
+  { type: 'whack_a_mole',  name: 'Whack-a-Mole',   icon: '🔨', width: 80,  height: 60,  category: 'interactive', description: 'Mini whack game' },
 ];
+
+export function isInteractiveFurniture(type: FurnitureType): boolean {
+  return [
+    'enter_key', 'button_panel', 'alarm_bell', 'launch_pad',
+    'jukebox', 'dice_roller', 'gong', 'confetti_cannon',
+    'timer_display', 'scoreboard', 'status_board', 'command_console',
+    'slot_machine', 'crystal_ball', 'mood_ring', 'boom_box', 'lava_lamp', 'whack_a_mole',
+  ].includes(type);
+}
 
 // ─── OpenClaw Connection ─────────────────────────────────────────────────────
 

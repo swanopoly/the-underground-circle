@@ -580,7 +580,7 @@ export default function RoomsTab({ circleId, accentColor }: Props) {
       {/* Header */}
       <View style={s.listHeader}>
         <View>
-          <Text style={s.listTitle}>🏠 ROOMS</Text>
+          <Text style={s.listTitle}>{'[R]'} ROOMS</Text>
           <Text style={s.listSub}>{rooms.length} workspace{rooms.length!==1?'s':''}</Text>
         </View>
         <Pressable onPress={() => setShowCreate(true)} style={[s.createBtn,{backgroundColor:accentColor+'20',borderColor:accentColor+'60'}]}>
@@ -591,7 +591,7 @@ export default function RoomsTab({ circleId, accentColor }: Props) {
       <ScrollView style={s.list} contentContainerStyle={s.listContent}>
         {rooms.length === 0 ? (
           <View style={s.empty}>
-            <Text style={s.emptyIcon}>🏠</Text>
+            <Text style={s.emptyIcon}>{'[ ]'}</Text>
             <Text style={s.emptyTitle}>No rooms yet</Text>
             <Text style={s.emptySub}>Create a Room — a shared workspace with files, APIs, chat, and agents.</Text>
             <Pressable onPress={() => setShowCreate(true)} style={[s.emptyBtn,{backgroundColor:accentColor}]}>
@@ -644,7 +644,7 @@ function RoomCard({ room, accentColor, isMobile, onPress, onDelete }: {
           <Text style={[s.langBadgeText,{color:langColor}]}>{room.language.toUpperCase()}</Text>
         </View>
         <Pressable onPress={e=>{e.stopPropagation?.();onDelete();}} style={s.cardDelete} hitSlop={8}>
-          <Text style={s.cardDeleteText}>🗑</Text>
+          <Text style={s.cardDeleteText}>x</Text>
         </Pressable>
       </View>
       {room.file_path && <Text style={s.cardPath} numberOfLines={1}>{room.file_path}</Text>}
@@ -3894,69 +3894,69 @@ function GitHubFolderSection({ folder, entries, activeTabId, loadingPath, onOpen
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
-  container: { flex:1, backgroundColor:'#0a0a0a' },
+  container: { flex:1, backgroundColor:'#050508' },
   dragging: { opacity:0.85 },
-  center: { flex:1, justifyContent:'center', alignItems:'center', backgroundColor:'#0a0a0a' },
-  loadingText: { color:'#888', marginTop:8, fontSize:12 },
+  center: { flex:1, justifyContent:'center', alignItems:'center', backgroundColor:'#050508' },
+  loadingText: { color:'#666680', marginTop:8, fontSize:12, fontFamily:MONO },
 
-  // List
-  listHeader: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', paddingHorizontal:20, paddingVertical:16, borderBottomWidth:1, borderBottomColor:'#1a1a1a' },
-  listTitle: { color:'#fff', fontSize:18, fontWeight:'800', letterSpacing:1 },
-  listSub: { color:'#666', fontSize:12 },
+  // List — pixel-art header
+  listHeader: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', paddingHorizontal:16, paddingVertical:12, borderBottomWidth:2, borderBottomColor:'#1a1a2e' },
+  listTitle: { color:'#fff', fontSize:16, fontWeight:'900', fontFamily:MONO, letterSpacing:3, textTransform:'uppercase' as any },
+  listSub: { color:'#666680', fontSize:11, fontFamily:MONO },
   list: { flex:1 },
-  listContent: { padding:16 },
-  createBtn: { paddingHorizontal:16, paddingVertical:10, borderRadius:12, borderWidth:1, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
-  createBtnText: { fontSize:13, fontWeight:'700' },
+  listContent: { padding:12 },
+  createBtn: { paddingHorizontal:12, paddingVertical:8, borderRadius:2, borderWidth:2, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
+  createBtnText: { fontSize:12, fontWeight:'700', fontFamily:MONO },
 
   // Grid
-  grid: { flexDirection:'row', flexWrap:'wrap', gap:14 },
+  grid: { flexDirection:'row', flexWrap:'wrap', gap:8 },
   gridMobile: { flexDirection:'column' },
 
-  // Room Card
-  card: { backgroundColor:'#111', borderWidth:1, borderColor:'#222', borderRadius:14, padding:16, minWidth:260, maxWidth:420, flex:1, ...(Platform.OS==='web'?{cursor:'pointer',transition:'all 0.2s ease'} as any:{}) },
+  // Room Card — pixel-art: sharp corners, stepped shadow
+  card: { backgroundColor:'#111118', borderWidth:2, borderColor:'#2a2a3e', borderRadius:2, padding:12, minWidth:260, maxWidth:420, flex:1, ...(Platform.OS==='web'?{cursor:'pointer',boxShadow:'4px 4px 0px #050508'} as any:{shadowColor:'#050508',shadowOffset:{width:4,height:4},shadowOpacity:1,shadowRadius:0,elevation:4}) },
   cardMobile: { maxWidth:'100%' as any },
   cardHeader: { flexDirection:'row', alignItems:'center', marginBottom:8, gap:6 },
-  cardIcon: { fontSize:16 },
-  cardName: { color:'#fff', fontSize:15, fontWeight:'700', flex:1 },
-  cardPath: { color:'#888', fontSize:12, fontFamily:MONO, marginBottom:6 },
-  cardDesc: { color:'#666', fontSize:12, marginBottom:8, lineHeight:18 },
+  cardIcon: { fontSize:14, fontFamily:MONO },
+  cardName: { color:'#fff', fontSize:14, fontWeight:'700', fontFamily:MONO, flex:1 },
+  cardPath: { color:'#666680', fontSize:11, fontFamily:MONO, marginBottom:6 },
+  cardDesc: { color:'#555568', fontSize:11, fontFamily:MONO, marginBottom:8, lineHeight:16 },
   cardFooter: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginBottom:8 },
-  cardTime: { color:'#555', fontSize:11 },
-  cardFiles: { backgroundColor:'#ffffff08', paddingHorizontal:8, paddingVertical:3, borderRadius:6 },
-  cardFilesText: { color:'#666', fontSize:11 },
+  cardTime: { color:'#333348', fontSize:10, fontFamily:MONO },
+  cardFiles: { backgroundColor:'#ffffff06', paddingHorizontal:8, paddingVertical:3, borderRadius:2, borderWidth:1, borderColor:'#1a1a2e' },
+  cardFilesText: { color:'#666680', fontSize:10, fontFamily:MONO },
   cardDelete: { paddingHorizontal:6, paddingVertical:2, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
-  cardDeleteText: { fontSize:14, opacity:0.4 },
+  cardDeleteText: { fontSize:12, fontFamily:MONO, fontWeight:'700', color:'#ef444460' },
   cardApiBadges: { flexDirection:'row', gap:6 },
-  cardApiBadge: { fontSize:12, opacity:0.5 },
+  cardApiBadge: { fontSize:10, fontFamily:MONO, color:'#666680' },
 
-  // Lang badge
-  langBadge: { paddingHorizontal:7, paddingVertical:3, borderRadius:6, borderWidth:1 },
-  langBadgeText: { fontSize:10, fontWeight:'700', letterSpacing:0.5 },
+  // Lang badge — pixel
+  langBadge: { paddingHorizontal:6, paddingVertical:3, borderRadius:2, borderWidth:2 },
+  langBadgeText: { fontSize:9, fontWeight:'900', fontFamily:MONO, letterSpacing:1 },
 
-  // Empty state
-  empty: { alignItems:'center', paddingVertical:60 },
-  emptyIcon: { fontSize:48, marginBottom:12 },
-  emptyTitle: { color:'#fff', fontSize:18, fontWeight:'700', marginBottom:8 },
-  emptySub: { color:'#888', fontSize:13, textAlign:'center', maxWidth:300, marginBottom:20, lineHeight:20 },
-  emptyBtn: { paddingHorizontal:20, paddingVertical:12, borderRadius:12 },
-  emptyBtnText: { color:'#fff', fontSize:14, fontWeight:'700' },
-  emptyText: { color:'#555', fontSize:13, fontStyle:'italic' },
+  // Empty state — pixel
+  empty: { alignItems:'center', paddingVertical:48 },
+  emptyIcon: { fontSize:32, fontFamily:MONO, fontWeight:'900', color:'#333348', marginBottom:12 },
+  emptyTitle: { color:'#c0c0d0', fontSize:16, fontWeight:'900', fontFamily:MONO, marginBottom:8, letterSpacing:1 },
+  emptySub: { color:'#666680', fontSize:12, fontFamily:MONO, textAlign:'center', maxWidth:280, marginBottom:20, lineHeight:18 },
+  emptyBtn: { paddingHorizontal:16, paddingVertical:10, borderRadius:2, borderWidth:2, borderColor:'#ffffff20' },
+  emptyBtnText: { color:'#fff', fontSize:13, fontWeight:'700', fontFamily:MONO },
+  emptyText: { color:'#333348', fontSize:12, fontFamily:MONO },
 
-  // Modal
+  // Modal — pixel borders
   overlay: { flex:1, backgroundColor:'rgba(0,0,0,0.85)', justifyContent:'center', alignItems:'center' },
-  modalBox: { backgroundColor:'#111', borderWidth:1, borderColor:'#222', borderRadius:16, padding:24, width:'90%', maxWidth:540, maxHeight:'90%' },
-  modalTitle: { color:'#fff', fontSize:18, fontWeight:'800', marginBottom:4 },
-  modalSub: { color:'#666', fontSize:12, marginBottom:20, lineHeight:18 },
-  label: { color:'#888', fontSize:12, fontWeight:'600', marginBottom:6, marginTop:12, letterSpacing:0.5 },
-  input: { backgroundColor:'#0a0a0a', borderWidth:1, borderColor:'#222', borderRadius:10, paddingHorizontal:14, paddingVertical:10, color:'#fff', fontSize:14 },
+  modalBox: { backgroundColor:'#111118', borderWidth:2, borderColor:'#2a2a3e', borderRadius:2, padding:20, width:'90%', maxWidth:540, maxHeight:'90%', ...(Platform.OS==='web'?{boxShadow:'6px 6px 0px #050508'} as any:{}) },
+  modalTitle: { color:'#fff', fontSize:16, fontWeight:'900', fontFamily:MONO, letterSpacing:1, marginBottom:4 },
+  modalSub: { color:'#666680', fontSize:11, fontFamily:MONO, marginBottom:16, lineHeight:16 },
+  label: { color:'#666680', fontSize:10, fontWeight:'700', fontFamily:MONO, marginBottom:6, marginTop:12, letterSpacing:1, textTransform:'uppercase' as any },
+  input: { backgroundColor:'#050508', borderWidth:2, borderColor:'#2a2a3e', borderRadius:2, paddingHorizontal:12, paddingVertical:10, color:'#fff', fontSize:13, fontFamily:MONO },
   langPicker: { marginBottom:4 },
-  langOpt: { paddingHorizontal:12, paddingVertical:6, borderRadius:8, borderWidth:1, borderColor:'#222', marginRight:6, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
-  langOptText: { color:'#888', fontSize:12, fontWeight:'600' },
-  modalActions: { flexDirection:'row', justifyContent:'flex-end', gap:10, marginTop:20 },
-  cancelBtn: { paddingHorizontal:16, paddingVertical:10, borderRadius:10 },
-  cancelText: { color:'#888', fontSize:14, fontWeight:'600' },
-  submitBtn: { paddingHorizontal:20, paddingVertical:10, borderRadius:10 },
-  submitText: { color:'#fff', fontSize:14, fontWeight:'700' },
+  langOpt: { paddingHorizontal:10, paddingVertical:6, borderRadius:2, borderWidth:2, borderColor:'#1a1a2e', marginRight:6, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
+  langOptText: { color:'#666680', fontSize:11, fontWeight:'700', fontFamily:MONO },
+  modalActions: { flexDirection:'row', justifyContent:'flex-end', gap:8, marginTop:16 },
+  cancelBtn: { paddingHorizontal:14, paddingVertical:8, borderRadius:2 },
+  cancelText: { color:'#666680', fontSize:13, fontWeight:'600', fontFamily:MONO },
+  submitBtn: { paddingHorizontal:16, paddingVertical:8, borderRadius:2, borderWidth:2, borderColor:'#ffffff20' },
+  submitText: { color:'#fff', fontSize:13, fontWeight:'700', fontFamily:MONO },
 
   // Detail Top Bar
   detailBar: { flexDirection:'row', alignItems:'center', paddingHorizontal:14, paddingVertical:10, borderBottomWidth:1, borderBottomColor:'#1a1a1a', gap:10 },

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Text, StyleSheet, Platform, Pressable, ActivityIndicator } from 'react-native';
+import { PIXEL_COLORS, GRID } from '../lib/pixelDesign';
 
 interface ButtonProps {
   title: string;
@@ -11,16 +12,15 @@ interface ButtonProps {
 }
 
 export default function Button({ title, onPress, loading, variant = 'primary', disabled, style }: ButtonProps) {
-  const [hovered, setHovered] = useState(false);
+  const [pressed, setPressed] = useState(false);
 
   const buttonStyles = [
     styles.base,
     variant === 'primary' && styles.primary,
     variant === 'secondary' && styles.secondary,
     variant === 'ghost' && styles.ghost,
-    hovered && variant === 'primary' && styles.primaryHovered,
-    hovered && variant === 'secondary' && styles.secondaryHovered,
-    hovered && variant === 'ghost' && styles.ghostHovered,
+    pressed && variant === 'primary' && styles.primaryPressed,
+    pressed && variant === 'secondary' && styles.secondaryPressed,
     (disabled || loading) && styles.disabled,
     style,
   ];
@@ -35,13 +35,13 @@ export default function Button({ title, onPress, loading, variant = 'primary', d
   return (
     <Pressable
       onPress={onPress}
-      onHoverIn={() => setHovered(true)}
-      onHoverOut={() => setHovered(false)}
+      onPressIn={() => setPressed(true)}
+      onPressOut={() => setPressed(false)}
       disabled={disabled || loading}
       style={buttonStyles}
     >
       {loading ? (
-        <ActivityIndicator color={variant === 'primary' ? '#0a0a0a' : '#fff'} size="small" />
+        <ActivityIndicator color={variant === 'primary' ? PIXEL_COLORS.bg0 : '#fff'} size="small" />
       ) : (
         <Text style={textStyles}>{title}</Text>
       )}
@@ -51,50 +51,64 @@ export default function Button({ title, onPress, loading, variant = 'primary', d
 
 const styles = StyleSheet.create({
   base: {
-    borderRadius: 10,
-    padding: 15,
+    borderRadius: 2,
+    padding: GRID.md,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
-    minHeight: 50,
-    ...(Platform.OS === 'web' ? { transition: 'all 0.2s ease', cursor: 'pointer' } as any : {}),
+    minHeight: 48,
+    borderWidth: 2,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
+  // Primary — raised pixel button (light top-left, dark bottom-right)
   primary: {
     backgroundColor: '#fff',
+    borderTopColor: '#ffffff',
+    borderLeftColor: '#ffffff',
+    borderRightColor: '#888888',
+    borderBottomColor: '#888888',
   },
-  primaryHovered: {
-    backgroundColor: '#e0e0e0',
-    ...(Platform.OS === 'web' ? { transform: [{ translateY: -1 }] } : {}),
+  primaryPressed: {
+    borderTopColor: '#888888',
+    borderLeftColor: '#888888',
+    borderRightColor: '#ffffff',
+    borderBottomColor: '#ffffff',
   },
+  // Secondary — outlined pixel button
   secondary: {
     backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: '#333',
+    borderTopColor: PIXEL_COLORS.border2,
+    borderLeftColor: PIXEL_COLORS.border2,
+    borderRightColor: PIXEL_COLORS.bg0,
+    borderBottomColor: PIXEL_COLORS.bg0,
   },
-  secondaryHovered: {
-    borderColor: '#555',
-    backgroundColor: '#1a1a1a',
+  secondaryPressed: {
+    borderTopColor: PIXEL_COLORS.bg0,
+    borderLeftColor: PIXEL_COLORS.bg0,
+    borderRightColor: PIXEL_COLORS.border2,
+    borderBottomColor: PIXEL_COLORS.border2,
   },
+  // Ghost
   ghost: {
     backgroundColor: 'transparent',
-  },
-  ghostHovered: {
-    backgroundColor: '#1a1a1a',
+    borderColor: 'transparent',
   },
   disabled: {
-    opacity: 0.5,
+    opacity: 0.4,
   },
   text: {
-    fontSize: 14,
-    fontWeight: '800',
-    letterSpacing: 2,
+    fontSize: 12,
+    fontWeight: '900',
+    fontFamily: 'monospace',
+    letterSpacing: 3,
+    textTransform: 'uppercase',
   },
   primaryText: {
-    color: '#0a0a0a',
+    color: PIXEL_COLORS.bg0,
   },
   secondaryText: {
     color: '#fff',
   },
   ghostText: {
-    color: '#888',
+    color: PIXEL_COLORS.text2,
   },
 });

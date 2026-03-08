@@ -1,6 +1,14 @@
 import React from 'react';
 import { View, Text, StyleSheet, Pressable, Platform, Image } from 'react-native';
-import { OfficeTheme, OFFICE_THEMES, FurnitureItem, EnvironmentType } from '../../../../lib/officeConfig';
+import { OfficeTheme, OFFICE_THEMES, FurnitureItem, FurnitureType, EnvironmentType, isInteractiveFurniture } from '../../../../lib/officeConfig';
+import type { OfficeAgent } from '../../../../lib/officeAgents';
+import {
+  EnterKeyItem, ButtonPanelItem, AlarmBellItem, LaunchPadItem,
+  JukeboxItem, DiceRollerItem, GongItem, ConfettiCannonItem,
+  TimerDisplayItem, ScoreboardItem, StatusBoardItem, CommandConsoleItem,
+  SlotMachineItem, CrystalBallItem, MoodRingItem, BoomBoxItem,
+  LavaLampItem, WhackAMoleItem,
+} from './InteractiveFurniture';
 import { THEME_BACKGROUNDS } from '../../../../lib/themeBackgrounds';
 
 const GRID_SIZE = 16;
@@ -41,6 +49,8 @@ interface Props {
   onFloorPress?: (x: number, y: number) => void;
   onFurniturePress?: (id: string) => void;
   onFurnitureMove?: (id: string, x: number, y: number) => void;
+  onFurnitureInteract?: (id: string, type: FurnitureType) => void;
+  agents?: OfficeAgent[];
   selectedFurnitureId?: string | null;
   editMode?: boolean;
 }
@@ -2540,22 +2550,27 @@ function AccessoryStrip({ theme }: { theme: OfficeTheme }) {
 //  PLACED FURNITURE RENDERER
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function FurnitureRenderer({ item, theme, onPress, onMove, editMode, selected }: {
+function FurnitureRenderer({ item, theme, onPress, onMove, onInteract, editMode, selected, agents }: {
   item: FurnitureItem;
   theme: OfficeTheme;
   onPress: () => void;
   onMove?: (x: number, y: number) => void;
+  onInteract?: () => void;
   editMode?: boolean;
   selected?: boolean;
+  agents?: OfficeAgent[];
 }) {
-  const content = renderFurnitureContent(item, theme);
+  const content = renderFurnitureContent(item, theme, agents);
+  const isInteractive = isInteractiveFurniture(item.type);
   const dragRef = React.useRef<{ startX: number; startY: number; itemX: number; itemY: number; dragging: boolean } | null>(null);
   const elRef = React.useRef<any>(null);
   const moveRef = React.useRef(onMove);
   const pressRef = React.useRef(onPress);
+  const interactRef = React.useRef(onInteract);
   const posRef = React.useRef({ x: item.x, y: item.y });
   moveRef.current = onMove;
   pressRef.current = onPress;
+  interactRef.current = onInteract;
   posRef.current = { x: item.x, y: item.y };
 
   React.useEffect(() => {
@@ -2623,12 +2638,20 @@ function FurnitureRenderer({ item, theme, onPress, onMove, editMode, selected }:
     return () => el.removeEventListener('pointerdown', handlePointerDown);
   }, [editMode]);
 
+  const handleInteractClick = React.useCallback(() => {
+    if (!editMode && isInteractive && interactRef.current) {
+      interactRef.current();
+    }
+  }, [editMode, isInteractive]);
+
   return (
-    <View
+    <Pressable
       ref={elRef}
+      onPress={!editMode && isInteractive ? handleInteractClick : undefined}
       style={[s.placedWrap, { left: item.x, top: item.y },
-        Platform.OS === 'web' && { cursor: editMode ? 'grab' : 'default', userSelect: 'none' } as any,
+        Platform.OS === 'web' && { cursor: editMode ? 'grab' : (isInteractive ? 'pointer' : 'default'), userSelect: 'none' } as any,
         selected && s.placedSelected,
+        !editMode && isInteractive && s.placedInteractive,
       ]}
     >
       {content}
@@ -2642,11 +2665,11 @@ function FurnitureRenderer({ item, theme, onPress, onMove, editMode, selected }:
           <Text style={s.editGrabText}>⋮⋮</Text>
         </View>
       )}
-    </View>
+    </Pressable>
   );
 }
 
-function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme) {
+function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme, agents?: OfficeAgent[]) {
   switch (item.type) {
     case 'plant':
       return (
@@ -2881,6 +2904,25 @@ function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme) {
         </View>
       );
     }
+    // ─── Interactive Items (animated components) ──────────────────────
+    case 'enter_key': return <EnterKeyItem item={item} theme={theme} />;
+    case 'button_panel': return <ButtonPanelItem item={item} theme={theme} />;
+    case 'alarm_bell': return <AlarmBellItem item={item} theme={theme} />;
+    case 'launch_pad': return <LaunchPadItem item={item} theme={theme} />;
+    case 'jukebox': return <JukeboxItem item={item} theme={theme} />;
+    case 'dice_roller': return <DiceRollerItem item={item} theme={theme} />;
+    case 'gong': return <GongItem item={item} theme={theme} />;
+    case 'confetti_cannon': return <ConfettiCannonItem item={item} theme={theme} />;
+    case 'timer_display': return <TimerDisplayItem item={item} theme={theme} />;
+    case 'scoreboard': return <ScoreboardItem item={item} theme={theme} agents={agents} />;
+    case 'status_board': return <StatusBoardItem item={item} theme={theme} agents={agents} />;
+    case 'command_console': return <CommandConsoleItem item={item} theme={theme} />;
+    case 'slot_machine': return <SlotMachineItem item={item} theme={theme} />;
+    case 'crystal_ball': return <CrystalBallItem item={item} theme={theme} />;
+    case 'mood_ring': return <MoodRingItem item={item} theme={theme} agents={agents} />;
+    case 'boom_box': return <BoomBoxItem item={item} theme={theme} />;
+    case 'lava_lamp': return <LavaLampItem item={item} theme={theme} />;
+    case 'whack_a_mole': return <WhackAMoleItem item={item} theme={theme} />;
     default:
       return <Text style={{ fontSize: 20 }}>📦</Text>;
   }
@@ -2890,7 +2932,7 @@ function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme) {
 //  MAIN FLOOR COMPONENT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorPress, onFurniturePress, onFurnitureMove, selectedFurnitureId, editMode }: Props) {
+export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorPress, onFurniturePress, onFurnitureMove, onFurnitureInteract, agents, selectedFurnitureId, editMode }: Props) {
   const theme = themeProp || OFFICE_THEMES.underground;
   const env = theme.environmentType || 'office';
 
@@ -2956,8 +2998,10 @@ export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorP
           theme={theme}
           onPress={() => onFurniturePress?.(item.id)}
           onMove={onFurnitureMove ? (x, y) => onFurnitureMove(item.id, x, y) : undefined}
+          onInteract={onFurnitureInteract ? () => onFurnitureInteract(item.id, item.type) : undefined}
           editMode={editMode}
           selected={selectedFurnitureId === item.id}
+          agents={agents}
         />
       ))}
 
@@ -3010,6 +3054,8 @@ const s = StyleSheet.create({
 
   placedWrap: { position: 'absolute', zIndex: 8 },
   placedSelected: { zIndex: 20, ...(Platform.OS === 'web' ? { outline: '2px solid #3b82f6', outlineOffset: 2, borderRadius: 2 } as any : { borderWidth: 2, borderColor: '#3b82f6', borderRadius: 2 }) },
+  placedInteractive: { zIndex: 12 },
+  fInteractive: { alignItems: 'center' as const, justifyContent: 'center' as const, borderWidth: 1, overflow: 'hidden' as const },
   editDeleteBtn: { position: 'absolute', top: -20, left: '50%' as any, marginLeft: -22, width: 44, height: 18, borderRadius: 4, backgroundColor: '#ef4444', alignItems: 'center', justifyContent: 'center', zIndex: 12, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
   editDeleteText: { color: '#fff', fontSize: 7, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 0.5 },
   editGrabHint: { position: 'absolute', top: -2, right: -8, width: 12, height: 12, borderRadius: 2, backgroundColor: '#ffffff30', alignItems: 'center', justifyContent: 'center', zIndex: 10 },

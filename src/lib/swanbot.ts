@@ -264,7 +264,7 @@ async function getCircleContextData(ctx: SwanBotContext): Promise<CircleContextD
       .from('tasks').select('status').eq('circle_id', ctx.circleId);
     const t = tasks || [];
     stats = {
-      openTasks: t.filter((x: any) => x.status === 'open').length,
+      openTasks: t.filter((x: any) => ['backlog', 'todo', 'open'].includes(x.status)).length,
       inProgress: t.filter((x: any) => x.status === 'in_progress').length,
       done: t.filter((x: any) => x.status === 'done').length,
     };
@@ -357,7 +357,7 @@ const localCommands: CmdHandler[] = [
       const title = match[1].trim();
       const { error } = await supabase.from('tasks').insert({
         circle_id: ctx.circleId, created_by: ctx.userId,
-        title, status: 'open', priority: 'normal',
+        title, status: 'todo', priority: 'normal',
       });
       if (error) return `Failed to create: ${error.message}`;
       return `✅ Created: **${title}**\n\nNow go crush it.`;

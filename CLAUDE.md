@@ -491,6 +491,40 @@ ba8a778  agent XP bar under name
 
 ---
 
+## Design System — Pixel Art Philosophy
+
+> **LESS EMOJIS.** Use pixel-block text icons (`$`, `>_`, `#`, `[]`, `//`, `P`, etc.) inside small colored boxes instead of emoji. Emoji are acceptable ONLY in user-generated content and agent personality (thought bubbles, chat). All structural UI — headers, nav, compartment icons, stat labels, action buttons — must use monospace text glyphs.
+
+### Core Rules
+1. **Sharp edges** — `borderRadius: 2` max. NO rounded corners (12px, 10px, 8px) anywhere.
+2. **Stepped borders** — `borderWidth: 2` (not 1px hairlines). Heavier, blockier.
+3. **Isometric shadow** — `boxShadow: 4px 4px 0px #050508` (web) / `shadowOffset: {4,4}, shadowRadius: 0` (native). NO blur.
+4. **Pixel-grid spacing** — All spacing in multiples of 4px (`PX = 4`). Use `GRID.xs` (4), `GRID.sm` (8), `GRID.md` (12), `GRID.lg` (16), `GRID.xl` (24).
+5. **Monospace everywhere** — `fontFamily: 'monospace'` for ALL text. Headers use `letterSpacing: 2-3, textTransform: 'uppercase'`.
+6. **Dark palette** — Backgrounds: `#050508`, `#0a0a0f`, `#111118`, `#1a1a25`. Borders: `#1a1a2e`, `#2a2a3e`, `#3a3a4e`.
+7. **Neon accents** — Functional color only: indigo `#6366f1`, green `#22c55e`, amber `#f59e0b`, cyan `#06b6d4`, pink `#ec4899`.
+8. **Icon blocks** — `32x32` or `36x36` boxes with `borderWidth: 2, borderRadius: 2`, dark tinted bg (`color + '18'`), containing monospace text.
+
+### Design System File
+`src/lib/pixelDesign.ts` — exports `PIXEL_COLORS`, `PIXEL_ICONS`, `GRID`, `PX`, shared style objects (`pixelCard`, `pixelInset`, `pixelButton`, `pixelHeader`, `pixelLabel`, `pixelBody`, `pixelMuted`), and helpers (`iconBoxStyle`, `accentBorder`).
+
+### Inspiration Sources
+- **eBoy Pixoramas** — isometric depth, dense detail, sharp pixel grids
+- **Undertale / Celeste / Hyper Light Drifter** — neon accents on dark, expressive minimalism
+- **Stardew Valley** — warm pixel art with functional UI
+- **Kaisermann.me** — CRT/pixel font aesthetic for developer tools
+- **WorkOS Launch Week** — "pixelated and playful" product UI diverging from corporate style
+- **Y-N10.com** — isometric 3D pixel scene as entire UI
+
+### Where It's Applied
+- **BackpackTab** — pixel icon blocks, stepped card borders, monospace headers, isometric shadows
+- **RoomsTab** — pixel card styling, sharp borders, text icons replacing emoji
+- **OfficeFloor** — already pixel-art (theme sprites, 16px grid)
+- **PixelAgent** — already pixel-art (PX unit system, blocky rendering)
+- **AutomationsPanel** — dark cards, monospace text (apply pixel borders next)
+
+---
+
 ## Roadmap (Not Yet Built)
 
 - `step_away_sessions` table for tracking open handoffs
