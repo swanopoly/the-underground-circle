@@ -53,6 +53,7 @@ import {
   AUTOMATION_TEMPLATES,
   AutomationTemplate,
   SUGGESTED_TEMPLATES,
+  SUGGESTED_GROUPS,
 } from '../lib/automationTemplates';
 import { supabase } from '../lib/supabase';
 
@@ -375,7 +376,7 @@ const qc = StyleSheet.create({
 
 // ─── Suggested Templates Grid ─────────────────────────────────────────────────
 
-const SUGGESTED_VISIBLE = 4; // show first 4 by default
+const GROUPS_VISIBLE = 2; // show first 2 groups by default
 
 function SuggestedSection({
   onApply,
@@ -385,33 +386,46 @@ function SuggestedSection({
   accentColor: string;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const visible = expanded ? SUGGESTED_TEMPLATES : SUGGESTED_TEMPLATES.slice(0, SUGGESTED_VISIBLE);
-  const hasMore = SUGGESTED_TEMPLATES.length > SUGGESTED_VISIBLE;
+  const groups = expanded ? SUGGESTED_GROUPS : SUGGESTED_GROUPS.slice(0, GROUPS_VISIBLE);
+  const hasMore = SUGGESTED_GROUPS.length > GROUPS_VISIBLE;
 
   return (
     <View style={sg.container}>
-      <Text style={sg.sectionLabel}>Suggested</Text>
-      <View style={sg.grid}>
-        {visible.map((t) => (
-          <Pressable
-            key={t.id}
-            onPress={() => onApply(t)}
-            style={[sg.card, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          >
-            <View style={[sg.iconBox, { backgroundColor: t.suggestedIconBg || '#1a1a1a' }]}>
-              <Text style={sg.iconEmoji}>{t.icon}</Text>
+      <Text style={sg.sectionLabel}>Suggested Automations</Text>
+      {groups.map((group) => (
+        <View key={group.key} style={sg.groupContainer}>
+          <View style={sg.groupHeader}>
+            <View style={sg.groupIconBox}>
+              <Text style={sg.groupIconText}>{group.icon}</Text>
             </View>
-            <Text style={sg.cardTitle}>{t.name}</Text>
-            <Text style={sg.cardDesc} numberOfLines={2}>{t.description}</Text>
-          </Pressable>
-        ))}
-      </View>
+            <Text style={sg.groupLabel}>{group.label}</Text>
+            <Text style={sg.groupCount}>{group.templates.length}</Text>
+          </View>
+          <View style={sg.grid}>
+            {group.templates.map((t) => (
+              <Pressable
+                key={t.id}
+                onPress={() => onApply(t)}
+                style={[sg.card, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              >
+                <View style={[sg.iconBox, { backgroundColor: t.suggestedIconBg || '#1a1a1a' }]}>
+                  <Text style={sg.iconEmoji}>{t.icon}</Text>
+                </View>
+                <Text style={sg.cardTitle}>{t.name}</Text>
+                <Text style={sg.cardDesc} numberOfLines={2}>{t.description}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      ))}
       {hasMore && (
         <Pressable
           onPress={() => setExpanded(!expanded)}
           style={[sg.moreBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
         >
-          <Text style={sg.moreText}>{expanded ? 'Less ∧' : 'More ∨'}</Text>
+          <Text style={sg.moreText}>
+            {expanded ? 'Show less ∧' : `Show ${SUGGESTED_GROUPS.length - GROUPS_VISIBLE} more groups ∨`}
+          </Text>
         </Pressable>
       )}
     </View>
@@ -424,9 +438,55 @@ const sg = StyleSheet.create({
   },
   sectionLabel: {
     color: '#888',
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 14,
+    letterSpacing: 0.5,
+    fontFamily: 'monospace',
+    textTransform: 'uppercase',
+  },
+  groupContainer: {
+    marginBottom: 16,
+  },
+  groupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  groupIconBox: {
+    width: 24,
+    height: 24,
+    borderRadius: 4,
+    backgroundColor: '#15151e',
+    borderWidth: 1,
+    borderColor: '#1e1e2e',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  groupIconText: {
+    color: '#6366f1',
+    fontSize: 9,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+  },
+  groupLabel: {
+    color: '#9090a8',
     fontSize: 12,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    letterSpacing: 0.5,
+    flex: 1,
+  },
+  groupCount: {
+    color: '#444455',
+    fontSize: 10,
     fontWeight: '600',
-    marginBottom: 10,
+    fontFamily: 'monospace',
+    backgroundColor: '#111118',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
   },
   grid: {
     flexDirection: 'row',

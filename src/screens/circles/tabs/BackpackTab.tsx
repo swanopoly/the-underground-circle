@@ -41,8 +41,9 @@ import SharedMemoryPanel from '../../../components/SharedMemoryPanel';
 import ProjectRoomsPanel from '../../../components/ProjectRoomsPanel';
 import PromptManagerPanel from './office/PromptManagerPanel';
 import TraceViewer from '../../../components/TraceViewer';
+import LLMBenchmarkPanel from '../../../components/LLMBenchmarkPanel';
 
-type Compartment = 'none' | 'cost' | 'terminal' | 'farm' | 'performance' | 'projects' | 'analytics' | 'canvas' | 'prompts' | 'traces';
+type Compartment = 'none' | 'cost' | 'terminal' | 'farm' | 'performance' | 'projects' | 'analytics' | 'canvas' | 'prompts' | 'traces' | 'llm-bench';
 
 // Pixel-art icon blocks instead of emoji
 const COMPARTMENTS: {
@@ -61,6 +62,7 @@ const COMPARTMENTS: {
   { key: 'analytics',   label: 'Analytics',        iconLabel: '//', color: '#3b82f6', description: 'Deep office analytics' },
   { key: 'canvas',      label: 'Canvas',           iconLabel: '::',  color: '#8b5cf6', description: 'Pixel agent visualization' },
   { key: 'prompts',     label: 'Prompts',          iconLabel: 'P',  color: '#14b8a6', description: 'Prompt library & management' },
+  { key: 'llm-bench',   label: 'LLM Bench',        iconLabel: '|=|', color: '#f59e0b', description: 'BlackSwan vs industry models' },
 ];
 
 interface Props {
@@ -176,6 +178,11 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
             <PromptManagerPanel
               circleId={circleId}
               userId={data.currentUserId}
+              accentColor={accentColor}
+            />
+          )}
+          {activeCompartment === 'llm-bench' && (
+            <LLMBenchmarkPanel
               accentColor={accentColor}
             />
           )}
@@ -298,6 +305,7 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
               case 'analytics': miniStat = `${data.mergedCircleAgents.length} circle agents`; break;
               case 'canvas': miniStat = `${data.mergedCircleAgents.length} agents`; break;
               case 'prompts': miniStat = 'Library'; break;
+              case 'llm-bench': miniStat = '16 models'; break;
             }
 
             return (
