@@ -540,6 +540,49 @@ Format as a clean report with headers and bullet points.`,
         suggestedIconBg: '#0d1a1a',
       },
       {
+        id: 'suggest-llm-benchmark-tracker',
+        name: 'LLM benchmark tracker',
+        icon: '📊',
+        description: 'Monitor new LLM releases and update the benchmark comparison page with latest scores',
+        category: 'ops',
+        trigger_type: 'schedule',
+        cron_expression: 'weekly',
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'chat',
+        prompt: `You are the LLM Benchmark Tracker for {{circle_name}}. Your job is to monitor the AI model landscape and report notable changes.
+
+Check for new model releases and benchmark updates from the past week. Sources to reference:
+- OpenAI (GPT-5.x series), Anthropic (Claude 4.x), Google (Gemini 3.x), Alibaba (Qwen3.5), Meta (Llama 4), xAI (Grok), DeepSeek
+- HuggingFace Open LLM Leaderboard, lmsys Chatbot Arena, Artificial Analysis
+
+Report the following:
+
+## NEW RELEASES
+List any new model releases or major updates from the past week with:
+- Model name, provider, parameter count
+- Key benchmark scores if available (MMLU, HumanEval, GSM8K, HellaSwag, ARC-C)
+- How it compares to existing models in our tracker
+
+## BENCHMARK UPDATES
+Any significant score revisions or new benchmark results for existing models.
+
+## BLACKSWAN IMPACT
+- How do new releases affect BlackSwan's relative position?
+- Any new open-weight models that could be good base models for future BlackSwan training?
+- Specific scores to update in the LLM Bench panel (provide model name + benchmark + new score)
+
+## RECOMMENDED ACTIONS
+- Models to add to the benchmark panel
+- Scores to update
+- Whether BlackSwan's training strategy should adapt (e.g. newer base model available)
+
+If nothing notable happened this week, respond with: "No significant LLM releases or benchmark changes this week. Current rankings hold."`,
+        include_context: { analytics: true },
+        suggested: true,
+        suggestedIconBg: '#1a0d2a',
+      },
+      {
         id: 'suggest-cost-watchdog',
         name: 'AI cost watchdog',
         icon: '💸',

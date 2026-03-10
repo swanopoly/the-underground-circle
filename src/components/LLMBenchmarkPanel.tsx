@@ -44,41 +44,70 @@ interface ModelScore {
 }
 
 const MODELS: ModelScore[] = [
-  // ─── Frontier ───
+  // ─── Frontier (2026) ───
   {
-    name: 'Claude Opus 4',
+    name: 'GPT-5.4',
+    tier: 'frontier',
+    color: '#10b981',
+    params: '~2T',
+    scores: { overall: 96, mmlu: 97, humaneval: 93, gsm8k: 98, hellaswag: 97, arc: 98 },
+  },
+  {
+    name: 'Claude Opus 4.6',
     tier: 'frontier',
     color: '#d4a574',
     params: '~2T',
-    scores: { overall: 92, mmlu: 95, humaneval: 85, gsm8k: 95, hellaswag: 96, arc: 97 },
+    scores: { overall: 95, mmlu: 95, humaneval: 92, gsm8k: 97, hellaswag: 97, arc: 97 },
   },
   {
-    name: 'GPT-4o',
+    name: 'Gemini 3.1 Pro',
+    tier: 'frontier',
+    color: '#4285f4',
+    params: '~1.5T',
+    scores: { overall: 94, mmlu: 94, humaneval: 90, gsm8k: 96, hellaswag: 97, arc: 96 },
+  },
+  {
+    name: 'Claude Sonnet 4.6',
+    tier: 'frontier',
+    color: '#b99a74',
+    params: '~500B',
+    scores: { overall: 92, mmlu: 89, humaneval: 92, gsm8k: 95, hellaswag: 96, arc: 95 },
+  },
+  {
+    name: 'GPT-5.2',
     tier: 'frontier',
     color: '#74b9a5',
-    params: '~1.8T',
-    scores: { overall: 91, mmlu: 93, humaneval: 87, gsm8k: 94, hellaswag: 95, arc: 96 },
+    params: '~1.5T',
+    scores: { overall: 93, mmlu: 93, humaneval: 90, gsm8k: 96, hellaswag: 96, arc: 96 },
+  },
+  {
+    name: 'DeepSeek V3.2',
+    tier: 'frontier',
+    color: '#0ea5e9',
+    params: 'MoE 671B',
+    scores: { overall: 90, mmlu: 89, humaneval: 86, gsm8k: 93, hellaswag: 95, arc: 94 },
   },
   {
     name: 'Qwen3.5-397B MoE',
     tier: 'frontier',
     color: '#a855f7',
     params: '397B (17B active)',
-    scores: { overall: 90, mmlu: 91, humaneval: 84, gsm8k: 93, hellaswag: 94, arc: 95 },
+    scores: { overall: 91, mmlu: 91, humaneval: 85, gsm8k: 93, hellaswag: 95, arc: 95 },
   },
   {
-    name: 'Claude Sonnet 4',
+    name: 'Grok 3',
     tier: 'frontier',
-    color: '#b99a74',
-    params: '~500B',
-    scores: { overall: 88, mmlu: 89, humaneval: 82, gsm8k: 92, hellaswag: 93, arc: 93 },
+    color: '#ef4444',
+    params: '~1T',
+    scores: { overall: 89, mmlu: 88, humaneval: 84, gsm8k: 92, hellaswag: 94, arc: 93 },
   },
+  // ─── Frontier (2025 gen) ───
   {
-    name: 'Gemini 2.0 Pro',
+    name: 'GPT-4o',
     tier: 'frontier',
-    color: '#7488d4',
-    params: '~500B',
-    scores: { overall: 87, mmlu: 86, humaneval: 80, gsm8k: 91, hellaswag: 92, arc: 92 },
+    color: '#74c5a5',
+    params: '~1.8T',
+    scores: { overall: 88, mmlu: 88, humaneval: 87, gsm8k: 94, hellaswag: 95, arc: 96 },
   },
   // ─── Mid ───
   {
@@ -89,11 +118,11 @@ const MODELS: ModelScore[] = [
     scores: { overall: 83, mmlu: 86, humaneval: 76, gsm8k: 88, hellaswag: 88, arc: 87 },
   },
   {
-    name: 'Llama 3.1 70B',
+    name: 'Llama 4 Scout',
     tier: 'mid',
-    color: '#5b8dd9',
-    params: '70B',
-    scores: { overall: 80, mmlu: 82, humaneval: 73, gsm8k: 84, hellaswag: 87, arc: 86 },
+    color: '#0066cc',
+    params: 'MoE 109B (17B active)',
+    scores: { overall: 82, mmlu: 84, humaneval: 74, gsm8k: 87, hellaswag: 87, arc: 86 },
   },
   {
     name: 'Qwen2.5-72B',
@@ -101,6 +130,13 @@ const MODELS: ModelScore[] = [
     color: '#a074d4',
     params: '72B',
     scores: { overall: 81, mmlu: 85, humaneval: 74, gsm8k: 86, hellaswag: 86, arc: 85 },
+  },
+  {
+    name: 'Llama 3.1 70B',
+    tier: 'mid',
+    color: '#5b8dd9',
+    params: '70B',
+    scores: { overall: 80, mmlu: 82, humaneval: 73, gsm8k: 84, hellaswag: 87, arc: 86 },
   },
   {
     name: 'Qwen3.5-27B',
