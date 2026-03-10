@@ -44,8 +44,9 @@ interface ModelScore {
 }
 
 const MODELS: ModelScore[] = [
+  // ─── Frontier ───
   {
-    name: 'Claude Opus',
+    name: 'Claude Opus 4',
     tier: 'frontier',
     color: '#d4a574',
     params: '~2T',
@@ -59,32 +60,33 @@ const MODELS: ModelScore[] = [
     scores: { overall: 91, mmlu: 93, humaneval: 87, gsm8k: 94, hellaswag: 95, arc: 96 },
   },
   {
-    name: 'Claude Sonnet',
+    name: 'Qwen3.5-397B MoE',
+    tier: 'frontier',
+    color: '#a855f7',
+    params: '397B (17B active)',
+    scores: { overall: 90, mmlu: 91, humaneval: 84, gsm8k: 93, hellaswag: 94, arc: 95 },
+  },
+  {
+    name: 'Claude Sonnet 4',
     tier: 'frontier',
     color: '#b99a74',
     params: '~500B',
     scores: { overall: 88, mmlu: 89, humaneval: 82, gsm8k: 92, hellaswag: 93, arc: 93 },
   },
   {
-    name: 'Gemini 1.5 Pro',
+    name: 'Gemini 2.0 Pro',
     tier: 'frontier',
     color: '#7488d4',
     params: '~500B',
     scores: { overall: 87, mmlu: 86, humaneval: 80, gsm8k: 91, hellaswag: 92, arc: 92 },
   },
+  // ─── Mid ───
   {
-    name: 'GPT-4o-mini',
+    name: 'Qwen3.5-122B MoE',
     tier: 'mid',
-    color: '#74c5a5',
-    params: '~8B',
-    scores: { overall: 79, mmlu: 82, humaneval: 72, gsm8k: 87, hellaswag: 85, arc: 84 },
-  },
-  {
-    name: 'Claude Haiku',
-    tier: 'mid',
-    color: '#c5a974',
-    params: '~20B',
-    scores: { overall: 78, mmlu: 80, humaneval: 70, gsm8k: 85, hellaswag: 84, arc: 82 },
+    color: '#9333ea',
+    params: '122B (10B active)',
+    scores: { overall: 83, mmlu: 86, humaneval: 76, gsm8k: 88, hellaswag: 88, arc: 87 },
   },
   {
     name: 'Llama 3.1 70B',
@@ -101,11 +103,33 @@ const MODELS: ModelScore[] = [
     scores: { overall: 81, mmlu: 85, humaneval: 74, gsm8k: 86, hellaswag: 86, arc: 85 },
   },
   {
-    name: 'Mistral-7B',
+    name: 'Qwen3.5-27B',
+    tier: 'mid',
+    color: '#7c3aed',
+    params: '27B',
+    scores: { overall: 79, mmlu: 83, humaneval: 71, gsm8k: 85, hellaswag: 84, arc: 83 },
+  },
+  {
+    name: 'GPT-4o-mini',
+    tier: 'mid',
+    color: '#74c5a5',
+    params: '~8B',
+    scores: { overall: 79, mmlu: 82, humaneval: 72, gsm8k: 87, hellaswag: 85, arc: 84 },
+  },
+  {
+    name: 'Claude Haiku 4.5',
+    tier: 'mid',
+    color: '#c5a974',
+    params: '~20B',
+    scores: { overall: 78, mmlu: 80, humaneval: 70, gsm8k: 85, hellaswag: 84, arc: 82 },
+  },
+  // ─── Small ───
+  {
+    name: 'Qwen3.5-9B',
     tier: 'small',
-    color: '#f97316',
-    params: '7B',
-    scores: { overall: 61, mmlu: 63, humaneval: 32, gsm8k: 52, hellaswag: 83, arc: 76 },
+    color: '#6d28d9',
+    params: '9B',
+    scores: { overall: 74, mmlu: 78, humaneval: 62, gsm8k: 80, hellaswag: 82, arc: 80 },
   },
   {
     name: 'Llama 3.1 8B',
@@ -122,6 +146,20 @@ const MODELS: ModelScore[] = [
     scores: { overall: 68, mmlu: 74, humaneval: 55, gsm8k: 65, hellaswag: 80, arc: 76 },
   },
   {
+    name: 'Mistral-7B',
+    tier: 'small',
+    color: '#f97316',
+    params: '7B',
+    scores: { overall: 61, mmlu: 63, humaneval: 32, gsm8k: 52, hellaswag: 83, arc: 76 },
+  },
+  {
+    name: 'Qwen3.5-4B',
+    tier: 'small',
+    color: '#5b21b6',
+    params: '4B',
+    scores: { overall: 66, mmlu: 71, humaneval: 52, gsm8k: 72, hellaswag: 76, arc: 72 },
+  },
+  {
     name: 'Phi-3 Mini',
     tier: 'small',
     color: '#22c55e',
@@ -136,12 +174,27 @@ const MODELS: ModelScore[] = [
     scores: { overall: 57, mmlu: 63, humaneval: 38, gsm8k: 55, hellaswag: 72, arc: 58 },
   },
   {
+    name: 'Qwen3.5-2B',
+    tier: 'small',
+    color: '#4c1d95',
+    params: '2B',
+    scores: { overall: 58, mmlu: 62, humaneval: 42, gsm8k: 62, hellaswag: 70, arc: 60 },
+  },
+  {
     name: 'Llama 3.2 3B',
     tier: 'small',
     color: '#4a8ad4',
     params: '3B',
     scores: { overall: 54, mmlu: 58, humaneval: 30, gsm8k: 48, hellaswag: 71, arc: 60 },
   },
+  {
+    name: 'Qwen3.5-0.8B',
+    tier: 'small',
+    color: '#3b0764',
+    params: '0.8B',
+    scores: { overall: 42, mmlu: 45, humaneval: 25, gsm8k: 40, hellaswag: 58, arc: 48 },
+  },
+  // ─── BlackSwan Family ───
   {
     name: 'BlackSwan v3',
     tier: 'blackswan',
@@ -150,11 +203,18 @@ const MODELS: ModelScore[] = [
     scores: { overall: 38, mmlu: 42, humaneval: 18, gsm8k: 30, hellaswag: 55, arc: 42 },
   },
   {
-    name: 'BlackSwan v4',
+    name: 'BlackSwan Mini',
     tier: 'blackswan',
     color: '#f59e0b',
-    params: '7B (QLoRA)',
-    scores: { overall: 0, mmlu: 0, humaneval: 0, gsm8k: 0, hellaswag: 0, arc: 0 }, // TBD — training in progress
+    params: '7B Qwen2.5 (QLoRA)',
+    scores: { overall: 0, mmlu: 0, humaneval: 0, gsm8k: 0, hellaswag: 0, arc: 0 }, // v4 — training in progress
+  },
+  {
+    name: 'BlackSwan',
+    tier: 'blackswan',
+    color: '#ef4444',
+    params: '27B Qwen3.5 (QLoRA)',
+    scores: { overall: 0, mmlu: 0, humaneval: 0, gsm8k: 0, hellaswag: 0, arc: 0 }, // v5 — planned
   },
 ];
 
@@ -238,7 +298,7 @@ export default function LLMBenchmarkPanel({ accentColor = '#6366f1' }: Props) {
           const barWidth = maxScore > 0 ? (score / maxScore) * 100 : 0;
           const isBlackSwan = model.tier === 'blackswan';
           const isSelected = selectedModel === model.name;
-          const isTBD = score === 0 && model.name === 'BlackSwan v4';
+          const isTBD = score === 0 && model.tier === 'blackswan';
 
           return (
             <Pressable
@@ -346,12 +406,15 @@ export default function LLMBenchmarkPanel({ accentColor = '#6366f1' }: Props) {
 
       {/* Training progress note */}
       <View style={styles.noteCard}>
-        <Text style={styles.noteTitle}>TRAINING PROGRESS</Text>
+        <Text style={styles.noteTitle}>BLACKSWAN ROADMAP</Text>
         <Text style={styles.noteText}>
-          BlackSwan v3 — 3B Qwen2.5 + QLoRA (12K examples, 2 epochs){'\n'}
-          BlackSwan v4 — 7B Qwen2.5 + QLoRA (43K examples, in progress){'\n\n'}
-          Scores update as training completes and benchmarks are run.
-          Run eval scripts to update BlackSwan scores after each training round.
+          {'v3 — Qwen2.5-3B QLoRA (12K examples) ✓ deployed\n'}
+          {'Mini — Qwen2.5-7B QLoRA (43K examples) ⏳ training\n'}
+          {'BlackSwan — Qwen3.5-27B QLoRA (43K+ examples) 🔜 planned\n\n'}
+          {'Mini = fast, lightweight, runs on any hardware\n'}
+          {'BlackSwan = full power, needs 56GB+ VRAM (Mac w/ unified memory)\n\n'}
+          {'Base model: Qwen3.5-27B (dense, Apache 2.0)\n'}
+          {'Scores update after each training round + benchmark eval.'}
         </Text>
       </View>
     </ScrollView>

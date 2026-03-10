@@ -305,7 +305,7 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
               case 'analytics': miniStat = `${data.mergedCircleAgents.length} circle agents`; break;
               case 'canvas': miniStat = `${data.mergedCircleAgents.length} agents`; break;
               case 'prompts': miniStat = 'Library'; break;
-              case 'llm-bench': miniStat = '16 models'; break;
+              case 'llm-bench': miniStat = '23 models'; break;
             }
 
             return (
