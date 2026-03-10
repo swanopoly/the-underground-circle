@@ -2,28 +2,32 @@
 """
 BlackSwan LLM v4 — Fine-tune with expanded dataset.
 
-Key changes from v3:
-  - LoRA rank: 64 (was 32) — more expressive adapter
-  - LoRA alpha: 128 (was 64) — matched 2:1 ratio
-  - Dataset: ~44K examples (was ~12K) — 4x more data
-  - Epochs: 2 (same, but 4x more gradient steps due to data)
-  - NEFTune: 5 (same, proven effective)
+Upgraded for machines with more RAM (Apple Silicon Mac or large-VRAM GPU):
+  - Base model: Qwen2.5-7B-Instruct (was 3B) — much stronger base
+  - LoRA rank: 64 — expressive adapter
+  - LoRA alpha: 128 — matched 2:1 ratio
+  - Dataset: ~44K examples (was ~12K in v3) — 4x more data
+  - Batch size: 2 (was 1) — faster training with more memory
   - Output: models/v4/
 
+Supports both CUDA (Linux/Windows) and MPS (Apple Silicon Mac).
+
 Usage:
-  python train_v4.py [--epochs 2] [--lr 1e-4] [--batch 1]
+  python train_v4.py [--epochs 1] [--lr 1e-4] [--batch 2]
+  python train_v4.py --base-model unsloth/Qwen2.5-3B-Instruct-bnb-4bit  # fallback to 3B
 """
 
 import json
 import argparse
+import platform
 from pathlib import Path
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-BASE_MODEL = "unsloth/Qwen2.5-3B-Instruct-bnb-4bit"
+BASE_MODEL = "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"  # Upgraded from 3B
 MAX_SEQ_LENGTH = 4096
-LORA_RANK = 64       # Doubled from v3 (32)
-LORA_ALPHA = 128     # Doubled from v3 (64), maintains 2:1 ratio
+LORA_RANK = 64
+LORA_ALPHA = 128
 LORA_DROPOUT = 0
 NEFTUNE_ALPHA = 5
 
@@ -35,15 +39,21 @@ OUTPUT_DIR = Path(__file__).parent / "models" / "v4"
 
 def main():
     parser = argparse.ArgumentParser(description="Fine-tune BlackSwan LLM v4")
-    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--batch", type=int, default=1)
-    parser.add_argument("--grad-accum", type=int, default=16)
+    parser.add_argument("--batch", type=int, default=2)
+    parser.add_argument("--grad-accum", type=int, default=8)
     parser.add_argument("--warmup-ratio", type=float, default=0.03)
     parser.add_argument("--neftune", type=float, default=NEFTUNE_ALPHA)
     parser.add_argument("--skip-merge", action="store_true")
     parser.add_argument("--skip-gguf", action="store_true")
+    parser.add_argument("--base-model", type=str, default=BASE_MODEL,
+                        help="Override base model (e.g. unsloth/Qwen2.5-3B-Instruct-bnb-4bit)")
     args = parser.parse_args()
+
+    is_mac = platform.system() == "Darwin"
+    if is_mac:
+        print("Detected Apple Silicon Mac — using MPS backend")
 
     print("Loading libraries...")
     from unsloth import FastLanguageModel
@@ -52,9 +62,10 @@ def main():
     from trl import SFTTrainer
     from transformers import TrainingArguments
 
-    print(f"\nLoading {BASE_MODEL}...")
+    base_model = args.base_model
+    print(f"\nLoading {base_model}...")
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=BASE_MODEL,
+        model_name=base_model,
         max_seq_length=MAX_SEQ_LENGTH,
         dtype=None,
         load_in_4bit=True,

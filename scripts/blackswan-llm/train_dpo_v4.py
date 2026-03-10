@@ -22,9 +22,10 @@ DPO_EVAL_FILE = DATA_DIR / "dpo_eval.jsonl"
 OUTPUT_DIR = Path(__file__).parent / "models" / "v4"
 SFT_LORA_DIR = OUTPUT_DIR / "lora"
 
-MAX_SEQ_LENGTH = 2048  # Increased from 1024
-LORA_RANK = 64         # Matched to v4 SFT
+MAX_SEQ_LENGTH = 2048
+LORA_RANK = 64
 LORA_ALPHA = 128
+# Note: Works on both CUDA (Linux) and MPS (Apple Silicon Mac) via Unsloth
 
 
 def main():
