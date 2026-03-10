@@ -470,7 +470,7 @@ Overview | Activity | Ops | Agent Log
 
 ## BlackSwan LLM v4 — Mac Training Instructions
 
-**THIS MACHINE'S JOB:** Train BlackSwan LLM v4 on Apple Silicon Mac. The main dev machine (WSL2) continues building the app separately.
+**This Mac can be used for both training AND app development.** The training pipeline is fully self-contained in `scripts/blackswan-llm/` and doesn't touch app code. You can train in one terminal and build the app in another. The primary dev machine is WSL2 but this Mac is a full dev environment too — just `git pull` before starting work and push when done to stay in sync.
 
 ### Quick Start
 ```bash
