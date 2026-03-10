@@ -468,6 +468,58 @@ Overview | Activity | Ops | Agent Log
 
 ---
 
+## BlackSwan LLM v4 — Mac Training Instructions
+
+**THIS MACHINE'S JOB:** Train BlackSwan LLM v4 on Apple Silicon Mac. The main dev machine (WSL2) continues building the app separately.
+
+### Quick Start
+```bash
+git clone git@github.com:swanopoly/the-underground-circle.git
+cd the-underground-circle/scripts/blackswan-llm
+
+# One-time setup
+conda create -n blackswan python=3.12 -y
+conda activate blackswan
+pip install "unsloth[colab-new]" torch datasets trl transformers
+
+# Run full pipeline (~8-12 hours total, fully autonomous)
+bash run_v4_pipeline.sh
+```
+
+### What the Pipeline Does (6 steps, all automated)
+1. **Download datasets** — 8 datasets from HuggingFace (~43K examples total): CodeAlpaca 8K, Evol-Instruct-Code 7K, OpenHermes 2.5 10K, Capybara 5K, SlimOrca 5K, UltraChat 3K, GSM8K 3K, MathInstruct 2K
+2. **Prepare dataset** — merge with BlackSwan synthetic data, PII filter, dedup, 95/5 train/eval split → ~41K train, ~2K eval
+3. **Download DPO data** — 6.3K preference pairs from argilla/dpo-mix-7k
+4. **SFT Training** — Qwen2.5-7B-Instruct, 4-bit QLoRA, LoRA rank 64, 1 epoch, batch 2 (~6-10 hours)
+5. **DPO Alignment** — preference tuning on SFT checkpoint (~1-2 hours)
+6. **Deploy to Ollama** — exports GGUF Q4_K_M, creates `blackswan:v4` model
+
+### After Training is Done
+The GGUF file will be at `models/v4/gguf_dpo/*.gguf` (~3-4GB). To deploy on the main dev machine:
+```bash
+# Option A: SCP the GGUF back
+scp models/v4/gguf_dpo/*.gguf swan@dev-machine:/home/swan/the-underground-circle/scripts/blackswan-llm/models/v4/
+
+# Option B: If Ollama is on this Mac, test locally first
+ollama create blackswan:v4 -f models/v4/Modelfile
+ollama run blackswan:v4 "Write a Python function to merge two sorted arrays"
+```
+
+### If Something Goes Wrong
+- **OOM during training:** Reduce batch size: `python train_v4.py --batch 1 --grad-accum 16`
+- **OOM with 7B model:** Fall back to 3B: `python train_v4.py --base-model unsloth/Qwen2.5-3B-Instruct-bnb-4bit`
+- **Unsloth install fails on Mac:** Try `pip install unsloth` (without the `[colab-new]` extra)
+- **Training interrupted:** SFT saves checkpoints per epoch at `models/v4/lora/`. Restart DPO from there.
+- **Want to monitor progress:** `tail -f` the terminal output — loss is logged every 25 steps
+
+### Key Facts
+- Training data is .gitignored — download scripts regenerate it
+- Models are .gitignored — only scripts are in the repo
+- This does NOT touch app code — safe to run while the other machine builds
+- The 7B model is 2x better than the 3B we had before, and with 4x the data (43K vs 12K), expect a major quality jump
+
+---
+
 ## Pending / Known Issues
 
 | Issue | Priority | Status |
