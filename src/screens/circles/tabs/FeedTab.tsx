@@ -17,14 +17,153 @@ import {
   COLUMNS, PRIORITY_COLORS, PRIORITY_LABELS,
 } from '../../../types/kanban';
 import type { GoalWithCount } from '../../../hooks/useGoals';
-import type { CircleOfficeAgent } from '../../../lib/circleOffice';
+import type { CircleOfficeAgent, AgentStatus } from '../../../lib/circleOffice';
+import { PROVIDER_DISPLAY, subscribeToCircleOffice } from '../../../lib/circleOffice';
+import {
+  subscribeAutoConnect,
+  getAutoConnectConnections,
+  getAutoConnectSessions,
+  setAutoConnectCircleId,
+} from '../../../lib/agentAutoConnect';
+import type { OfficeAgent } from '../../../lib/officeAgents';
+import { sessionsToAgents } from '../../../lib/officeAgents';
+import type { OpenClawSession } from '../../../lib/openclawService';
+import { loadAgentIdentities, type AgentIdentity } from '../../../lib/agentIdentity';
+import { storage } from '../../../lib/storage';
+import { useCircleAutomations, useDashboardStats } from '../../../services/automationService';
 
 import AgentTopBar from './kanban/AgentTopBar';
+import OrchestraPanel from './kanban/OrchestraPanel';
 import GoalsPanel from './kanban/GoalsPanel';
 import ActivityFeedPanel from './kanban/ActivityFeedPanel';
 import KanbanBoard from './kanban/KanbanBoard';
 import TaskDetailModal from './kanban/TaskDetailModal';
-import DigestPanel from './kanban/DigestPanel';
+import GoalDetailModal from './kanban/GoalDetailModal';
+
+// ─── Water Flow Loading Animation ─────────────────────────────────────────
+
+const WAVE_COLORS = ['#6366f1', '#a855f7', '#ec4899', '#f43f5e', '#f59e0b', '#22c55e', '#06b6d4'];
+let _loadingStyleInjected = false;
+
+function FeedLoadingAnimation() {
+  useEffect(() => {
+    if (Platform.OS !== 'web' || _loadingStyleInjected) return;
+    _loadingStyleInjected = true;
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes uc-wave {
+        0%, 100% { transform: translateY(0) scale(1); opacity: 0.4; }
+        30% { transform: translateY(-18px) scale(1.3); opacity: 1; }
+        60% { transform: translateY(4px) scale(0.9); opacity: 0.7; }
+      }
+      .uc-wave-dot {
+        width: 10px; height: 10px; border-radius: 50%;
+        animation: uc-wave 1.4s ease-in-out infinite;
+      }
+    `;
+    document.head.appendChild(style);
+  }, []);
+
+  if (Platform.OS === 'web') {
+    return (
+      <View style={s.loadingContainer}>
+        <View style={s.loadingDots}>
+          {WAVE_COLORS.map((color, i) => (
+            <div
+              key={i}
+              className="uc-wave-dot"
+              style={{
+                backgroundColor: color,
+                animationDelay: `${i * 0.12}s`,
+                boxShadow: `0 0 12px ${color}60`,
+              }}
+            />
+          ))}
+        </View>
+      </View>
+    );
+  }
+
+  // Native fallback — static dots
+  return (
+    <View style={s.loadingContainer}>
+      <View style={s.loadingDots}>
+        {WAVE_COLORS.map((color, i) => (
+          <View key={i} style={[s.loadingDot, { backgroundColor: color }]} />
+        ))}
+      </View>
+    </View>
+  );
+}
+
+// ─── Task Search Bar (rendered in FeedTab, right under OrchestraPanel) ────
+
+function TaskSearchBar({
+  searchText,
+  onSearchChange,
+  filterPriority,
+  onFilterPriority,
+  filterAssignee,
+  onFilterAssignee,
+  assigneeOptions,
+  searchInputRef,
+  totalTasks,
+}: {
+  searchText: string;
+  onSearchChange: (text: string) => void;
+  filterPriority: TaskPriority | null;
+  onFilterPriority: (p: TaskPriority | null) => void;
+  filterAssignee: string | null;
+  onFilterAssignee: (a: string | null) => void;
+  assigneeOptions: { id: string; label: string; color: string }[];
+  searchInputRef?: React.RefObject<TextInput | null>;
+  totalTasks: number;
+}) {
+  const hasFilters = searchText || filterPriority || filterAssignee;
+  return (
+    <View style={fb.filterBar}>
+      <View style={fb.searchRow}>
+        <Text style={fb.searchIcon}>/</Text>
+        <TextInput
+          ref={searchInputRef as any}
+          style={fb.searchInput}
+          placeholder="Search tasks..."
+          placeholderTextColor="#444455"
+          value={searchText}
+          onChangeText={onSearchChange}
+          maxLength={100}
+        />
+        {hasFilters ? (
+          <Pressable onPress={() => { onSearchChange(''); onFilterPriority(null); onFilterAssignee(null); }} style={fb.clearBtn}>
+            <Text style={fb.clearBtnText}>Clear</Text>
+          </Pressable>
+        ) : null}
+      </View>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={fb.filterChips}>
+        {(['urgent', 'high', 'normal', 'low'] as TaskPriority[]).map(p => {
+          const active = filterPriority === p;
+          return (
+            <Pressable key={p} onPress={() => onFilterPriority(active ? null : p)} style={[fb.filterChip, active && fb.filterChipActive]}>
+              <Text style={[fb.filterChipText, active && { color: '#e4e4ed' }]}>{PRIORITY_LABELS[p]}</Text>
+            </Pressable>
+          );
+        })}
+        <View style={fb.taskCount}>
+          <Text style={fb.taskCountText}>{totalTasks} tasks</Text>
+        </View>
+        {assigneeOptions.map(opt => {
+          const active = filterAssignee === opt.id;
+          return (
+            <Pressable key={opt.id} onPress={() => onFilterAssignee(active ? null : opt.id)} style={[fb.filterChip, active && { backgroundColor: opt.color + '18', borderColor: opt.color + '30' }]}>
+              <View style={[fb.filterChipDot, { backgroundColor: opt.color }]} />
+              <Text style={[fb.filterChipText, active && { color: opt.color }]} numberOfLines={1}>{opt.label}</Text>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+}
 
 const MOBILE_BREAKPOINT = 768;
 
@@ -33,15 +172,177 @@ type MobileTab = 'goals' | 'activity' | 'board';
 export default function FeedTab({ circleId }: { circleId: string }) {
   const kanban = useKanbanData(circleId);
   const goalsHook = useGoals(circleId);
+  const { automations } = useCircleAutomations(circleId);
+  const { stats: dashStats } = useDashboardStats(circleId);
   const [filteredGoalId, setFilteredGoalId] = useState<string | null>(null);
   const [detailTask, setDetailTask] = useState<KanbanTask | null>(null);
+  const [editGoal, setEditGoal] = useState<GoalWithCount | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [createInColumn, setCreateInColumn] = useState<TaskStatus>('todo');
   const [mobileTab, setMobileTab] = useState<MobileTab>('board');
-  const [digestCollapsed, setDigestCollapsed] = useState(true);
   const { width } = useWindowDimensions();
   const isMobile = width < MOBILE_BREAKPOINT;
   const searchInputRef = useRef<TextInput>(null);
+
+  // ─── Live agent subscription (auto-connect + DB realtime) ────
+  const [liveAgentTick, setLiveAgentTick] = useState(0);
+  const [agentIdentities, setAgentIdentities] = useState<Map<string, AgentIdentity>>(new Map());
+  const [legacyNames, setLegacyNames] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    setAutoConnectCircleId(circleId);
+    const unsubAuto = subscribeAutoConnect(() => setLiveAgentTick(t => t + 1));
+    const unsubDb = subscribeToCircleOffice(circleId, () => {
+      kanban.refresh();
+      setLiveAgentTick(t => t + 1);
+    });
+    // Load persistent agent identities (custom names, etc.)
+    loadAgentIdentities().then(setAgentIdentities).catch(() => {});
+    storage.getItem('@office_agent_names').then(raw => {
+      if (raw) setLegacyNames(JSON.parse(raw));
+    }).catch(() => {});
+    return () => { unsubAuto(); unsubDb(); };
+  }, [circleId]);
+
+  // Merge DB agents with live connected agents from auto-connect service
+  const agents = useMemo(() => {
+    const dbAgents = kanban.agents;
+    const connections = getAutoConnectConnections();
+    const sessionsMap = getAutoConnectSessions();
+
+    // Convert live sessions → OfficeAgent[] (same pattern as OfficeTab)
+    const liveOfficeAgents: OfficeAgent[] = [];
+    for (const [connId, sessions] of sessionsMap) {
+      if (connId === 'claude-code-auto') {
+        // Claude Code sessions are already OfficeAgent[]
+        const ccAgents = sessions as unknown as OfficeAgent[];
+        if (ccAgents?.length) liveOfficeAgents.push(...ccAgents);
+      } else {
+        // OpenClaw sessions need conversion via sessionsToAgents()
+        const conn = connections.find(c => c.id === connId);
+        if (conn && sessions?.length) {
+          const converted = sessionsToAgents(
+            sessions as OpenClawSession[],
+            connId,
+            conn.name,
+            conn.provider as any,
+          );
+          liveOfficeAgents.push(...converted);
+        }
+      }
+    }
+
+    // Apply persistent identity (custom names) — same as OfficeTab's restoreAllAgents
+    const resolvedAgents = liveOfficeAgents.map(oa => {
+      const sessionKey = oa.id.includes('::') ? oa.id.split('::')[1] : oa.id;
+      const identity = agentIdentities.get(sessionKey);
+      const legacyName = legacyNames[oa.id];
+      return {
+        ...oa,
+        name: identity?.customName || legacyName || oa.name,
+        color: identity?.customColor || oa.color,
+      };
+    });
+
+    // Map OfficeAgent → CircleOfficeAgent shape for the UI
+    const liveAsCircle: CircleOfficeAgent[] = resolvedAgents.map(oa => {
+      const providerInfo = PROVIDER_DISPLAY[oa.providerType] || PROVIDER_DISPLAY['generic-agent'];
+      return {
+        id: oa.id,
+        circleId,
+        ownerId: '',
+        ownerDisplayName: '',
+        ownerUsername: '',
+        provider: oa.providerType || 'generic-agent',
+        name: oa.name,
+        color: oa.color || providerInfo?.color || '#6366f1',
+        toolIcon: providerInfo?.icon || '🤖',
+        status: (oa.status || 'idle') as AgentStatus,
+        currentTask: undefined,
+        isPublished: true,
+        createdAt: '',
+        updatedAt: '',
+      };
+    });
+
+    // Merge: update DB agents with live status, add new live agents
+    const merged = dbAgents.map(a => {
+      const live = liveAsCircle.find(l =>
+        l.name.toLowerCase() === a.name.toLowerCase() || l.id === a.id,
+      );
+      return live ? { ...a, status: live.status } as CircleOfficeAgent : a;
+    });
+    const existingNames = new Set(merged.map(a => a.name.toLowerCase()));
+    for (const live of liveAsCircle) {
+      if (!existingNames.has(live.name.toLowerCase())) {
+        existingNames.add(live.name.toLowerCase());
+        merged.push(live);
+      }
+    }
+
+    return merged;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kanban.agents, liveAgentTick, circleId, agentIdentities, legacyNames]);
+
+  // ─── Search & filter state (lifted from KanbanBoard) ────
+  const [searchText, setSearchText] = useState('');
+  const [filterPriority, setFilterPriority] = useState<TaskPriority | null>(null);
+  const [filterAssignee, setFilterAssignee] = useState<string | null>(null);
+
+  // Collect unique assignees for filter chips
+  const assigneeOptions = useMemo(() => {
+    const opts: { id: string; label: string; color: string }[] = [];
+    const seen = new Set<string>();
+    const allTasks = Object.values(kanban.tasksByColumn).flat();
+    for (const t of allTasks) {
+      if (t.assigned_agent_id && !seen.has('agent:' + t.assigned_agent_id)) {
+        seen.add('agent:' + t.assigned_agent_id);
+        const agent = agents.find(a => a.id === t.assigned_agent_id);
+        opts.push({ id: 'agent:' + t.assigned_agent_id, label: agent?.name || 'Agent', color: agent?.color || '#6366f1' });
+      }
+      if (t.assigned_to && !seen.has(t.assigned_to)) {
+        seen.add(t.assigned_to);
+        opts.push({ id: t.assigned_to, label: (t as any).assignee?.display_name || (t as any).assignee?.username || 'User', color: '#6366f1' });
+      }
+    }
+    return opts;
+  }, [kanban.tasksByColumn, agents]);
+
+  const totalTasks = useMemo(() => Object.values(kanban.tasksByColumn).reduce((sum, arr) => sum + arr.length, 0), [kanban.tasksByColumn]);
+
+  const automationStats = useMemo(() => {
+    const activeCount = automations.filter(a => a.enabled).length;
+    const runsThisWeek = (dashStats?.successfulLast7d || 0) + (dashStats?.failedLast7d || 0);
+    return { activeCount, runsThisWeek };
+  }, [automations, dashStats]);
+
+  // Task health stats for OrchestraPanel
+  const taskStats = useMemo(() => {
+    const allTasks = Object.values(kanban.tasksByColumn).flat();
+    const now = Date.now();
+    const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
+    let overdue = 0;
+    let dueToday = 0;
+    let inProgress = 0;
+    let completedThisWeek = 0;
+    const completed = kanban.tasksByColumn.done?.length || 0;
+
+    for (const t of allTasks) {
+      if (t.status === 'in_progress') inProgress++;
+      if (t.status === 'done' && t.completed_at && new Date(t.completed_at).getTime() > weekAgo) {
+        completedThisWeek++;
+      }
+      if (t.due_date && t.status !== 'done') {
+        const due = new Date(t.due_date + 'T23:59:59');
+        const diffMs = due.getTime() - now;
+        const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+        if (diffDays < 0) overdue++;
+        else if (diffDays === 0) dueToday++;
+      }
+    }
+
+    return { total: allTasks.length, completed, inProgress, overdue, dueToday, completedThisWeek };
+  }, [kanban.tasksByColumn]);
 
   // Filter tasks by goal
   const filteredTasksByColumn = useMemo(() => {
@@ -53,19 +354,6 @@ export default function FeedTab({ circleId }: { circleId: string }) {
     return filtered;
   }, [kanban.tasksByColumn, filteredGoalId]);
 
-  // Dashboard stats
-  const stats = useMemo(() => {
-    const allTasks = kanban.tasks;
-    const total = allTasks.length;
-    const inProgress = allTasks.filter(t => t.status === 'in_progress').length;
-    const today = new Date().toISOString().split('T')[0];
-    const doneToday = allTasks.filter(t =>
-      t.status === 'done' && t.completed_at && t.completed_at.startsWith(today)
-    ).length;
-    const totalDone = allTasks.filter(t => t.status === 'done').length;
-    const completionRate = total > 0 ? Math.round((totalDone / total) * 100) : 0;
-    return { total, inProgress, doneToday, completionRate };
-  }, [kanban.tasks]);
 
   // Batch move handler
   const handleBatchMove = useCallback(async (taskIds: string[], newStatus: TaskStatus) => {
@@ -121,58 +409,63 @@ export default function FeedTab({ circleId }: { circleId: string }) {
   }, [detailTask, showCreate, isMobile]);
 
   if (kanban.loading) {
-    return (
-      <View style={s.loadingContainer}>
-        <View style={s.loadingDots}>
-          <View style={[s.loadingDot, { backgroundColor: '#6366f1' }]} />
-          <View style={[s.loadingDot, { backgroundColor: '#f59e0b', opacity: 0.7 }]} />
-          <View style={[s.loadingDot, { backgroundColor: '#22c55e', opacity: 0.4 }]} />
-        </View>
-      </View>
-    );
+    return <FeedLoadingAnimation />;
   }
 
   // ─── Mobile Layout ─────────────────────────────────────────────────────
   if (isMobile) {
     return (
       <View style={s.container}>
-        <AgentTopBar agents={kanban.agents} />
-        <DigestPanel circleId={circleId} />
-        <StatsHeader stats={stats} />
+        <AgentTopBar agents={agents} />
+        <OrchestraPanel agents={agents} automationStats={automationStats} taskStats={taskStats} />
+        <TaskSearchBar
+          searchText={searchText}
+          onSearchChange={setSearchText}
+          filterPriority={filterPriority}
+          onFilterPriority={setFilterPriority}
+          filterAssignee={filterAssignee}
+          onFilterAssignee={setFilterAssignee}
+          assigneeOptions={assigneeOptions}
+          searchInputRef={searchInputRef}
+          totalTasks={totalTasks}
+        />
 
         <View style={s.mobileBody}>
           {mobileTab === 'goals' && (
             <View style={s.mobilePanel}>
               <GoalsPanel
                 goals={goalsHook.goals}
-                agents={kanban.agents}
+                agents={agents}
                 filteredGoalId={filteredGoalId}
                 onFilter={setFilteredGoalId}
                 onCreateGoal={goalsHook.createGoal}
                 onUpdateGoal={goalsHook.updateGoal}
                 onDeleteGoal={goalsHook.deleteGoal}
                 onCreateTask={kanban.createTask}
+                onEditGoal={setEditGoal}
               />
             </View>
           )}
           {mobileTab === 'activity' && (
             <View style={s.mobilePanel}>
-              <ActivityFeedPanel circleId={circleId} agents={kanban.agents} />
+              <ActivityFeedPanel circleId={circleId} agents={agents} />
             </View>
           )}
           {mobileTab === 'board' && (
             <KanbanBoard
               columns={COLUMNS}
               tasksByColumn={filteredTasksByColumn}
-              agents={kanban.agents}
+              agents={agents}
               goals={goalsHook.goals}
               onCardPress={setDetailTask}
               onMoveTask={kanban.moveTask}
               onQuickAdd={(status, title) => kanban.createTask({ title, status })}
               onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
-              searchInputRef={searchInputRef}
               onBatchMove={handleBatchMove}
               onArchiveDone={handleArchiveDone}
+              externalSearchText={searchText}
+              externalFilterPriority={filterPriority}
+              externalFilterAssignee={filterAssignee}
             />
           )}
         </View>
@@ -207,11 +500,22 @@ export default function FeedTab({ circleId }: { circleId: string }) {
           />
         )}
 
+        {editGoal && (
+          <GoalDetailModal
+            goal={editGoal}
+            agents={agents}
+            onClose={() => setEditGoal(null)}
+            onUpdate={(goalId, fields) => { goalsHook.updateGoal(goalId, fields); setEditGoal(null); }}
+            onDelete={(goalId) => { goalsHook.deleteGoal(goalId); setEditGoal(null); }}
+            onCreateTask={kanban.createTask}
+          />
+        )}
+
         {showCreate && (
           <CreateTaskModal
             column={createInColumn}
             members={kanban.members}
-            agents={kanban.agents}
+            agents={agents}
             goals={goalsHook.goals}
             onClose={() => setShowCreate(false)}
             onCreate={async (fields) => {
@@ -227,36 +531,49 @@ export default function FeedTab({ circleId }: { circleId: string }) {
   // ─── Desktop Layout ────────────────────────────────────────────────────
   return (
     <View style={s.container}>
-      <AgentTopBar agents={kanban.agents} />
-      <DigestPanel circleId={circleId} />
-      <StatsHeader stats={stats} />
+      <AgentTopBar agents={agents} />
+      <OrchestraPanel agents={agents} automationStats={automationStats} taskStats={taskStats} />
+      <TaskSearchBar
+        searchText={searchText}
+        onSearchChange={setSearchText}
+        filterPriority={filterPriority}
+        onFilterPriority={setFilterPriority}
+        filterAssignee={filterAssignee}
+        onFilterAssignee={setFilterAssignee}
+        assigneeOptions={assigneeOptions}
+        searchInputRef={searchInputRef}
+        totalTasks={totalTasks}
+      />
 
       <View style={s.body}>
         <GoalsPanel
           goals={goalsHook.goals}
-          agents={kanban.agents}
+          agents={agents}
           filteredGoalId={filteredGoalId}
           onFilter={setFilteredGoalId}
           onCreateGoal={goalsHook.createGoal}
           onUpdateGoal={goalsHook.updateGoal}
           onDeleteGoal={goalsHook.deleteGoal}
           onCreateTask={kanban.createTask}
+          onEditGoal={setEditGoal}
         />
 
-        <ActivityFeedPanel circleId={circleId} agents={kanban.agents} />
+        <ActivityFeedPanel circleId={circleId} agents={agents} />
 
         <KanbanBoard
           columns={COLUMNS}
           tasksByColumn={filteredTasksByColumn}
-          agents={kanban.agents}
+          agents={agents}
           goals={goalsHook.goals}
           onCardPress={setDetailTask}
           onMoveTask={kanban.moveTask}
           onQuickAdd={(status, title) => kanban.createTask({ title, status })}
           onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
-          searchInputRef={searchInputRef}
           onBatchMove={handleBatchMove}
           onArchiveDone={handleArchiveDone}
+          externalSearchText={searchText}
+          externalFilterPriority={filterPriority}
+          externalFilterAssignee={filterAssignee}
         />
       </View>
 
@@ -269,11 +586,22 @@ export default function FeedTab({ circleId }: { circleId: string }) {
         />
       )}
 
+      {editGoal && (
+        <GoalDetailModal
+          goal={editGoal}
+          agents={agents}
+          onClose={() => setEditGoal(null)}
+          onUpdate={(goalId, fields) => { goalsHook.updateGoal(goalId, fields); setEditGoal(null); }}
+          onDelete={(goalId) => { goalsHook.deleteGoal(goalId); setEditGoal(null); }}
+          onCreateTask={kanban.createTask}
+        />
+      )}
+
       {showCreate && (
         <CreateTaskModal
           column={createInColumn}
           members={kanban.members}
-          agents={kanban.agents}
+          agents={agents}
           goals={goalsHook.goals}
           onClose={() => setShowCreate(false)}
           onCreate={async (fields) => {
@@ -285,78 +613,6 @@ export default function FeedTab({ circleId }: { circleId: string }) {
     </View>
   );
 }
-
-// ─── Stats Header ───────────────────────────────────────────────────────────
-
-function StatsHeader({ stats }: { stats: { total: number; inProgress: number; doneToday: number; completionRate: number } }) {
-  return (
-    <View style={sh.container}>
-      <View style={sh.pill}>
-        <Text style={sh.pillValue}>{stats.total}</Text>
-        <Text style={sh.pillLabel}>total</Text>
-      </View>
-      <View style={sh.pill}>
-        <Text style={[sh.pillValue, { color: '#f59e0b' }]}>{stats.inProgress}</Text>
-        <Text style={sh.pillLabel}>active</Text>
-      </View>
-      <View style={sh.pill}>
-        <Text style={[sh.pillValue, { color: '#22c55e' }]}>{stats.doneToday}</Text>
-        <Text style={sh.pillLabel}>today</Text>
-      </View>
-      <View style={sh.pill}>
-        <Text style={[sh.pillValue, { color: '#6366f1' }]}>{stats.completionRate}%</Text>
-        <Text style={sh.pillLabel}>done</Text>
-      </View>
-      {Platform.OS === 'web' && (
-        <View style={sh.kbdHints}>
-          <Text style={sh.kbdText}>n new</Text>
-          <Text style={sh.kbdText}>/ search</Text>
-          <Text style={sh.kbdText}>esc close</Text>
-        </View>
-      )}
-    </View>
-  );
-}
-
-const sh = StyleSheet.create({
-  container: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    backgroundColor: '#0a0a12',
-    borderBottomWidth: 1,
-    borderBottomColor: '#15151e',
-    gap: 8,
-  },
-  pill: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    gap: 3,
-  },
-  pillValue: {
-    color: '#e4e4ed',
-    fontSize: 14,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-  },
-  pillLabel: {
-    color: '#555566',
-    fontSize: 10,
-    fontWeight: '500',
-  },
-  kbdHints: {
-    flexDirection: 'row',
-    gap: 8,
-    marginLeft: 'auto' as any,
-  },
-  kbdText: {
-    color: '#333348',
-    fontSize: 9,
-    fontWeight: '500',
-    fontFamily: 'monospace',
-  },
-});
 
 // ─── Create Task Modal ──────────────────────────────────────────────────────
 
@@ -557,8 +813,8 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#08080e' },
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#08080e' },
-  loadingDots: { flexDirection: 'row', gap: 8 },
-  loadingDot: { width: 8, height: 8, borderRadius: 4 },
+  loadingDots: { flexDirection: 'row', gap: 10, alignItems: 'center', height: 40 },
+  loadingDot: { width: 10, height: 10, borderRadius: 5 },
   body: {
     flex: 1,
     flexDirection: 'row',
@@ -605,6 +861,97 @@ const s = StyleSheet.create({
   },
   mobileTabLabelActive: {
     color: '#c0c0d0',
+  },
+});
+
+const fb = StyleSheet.create({
+  filterBar: {
+    backgroundColor: '#0a0a12',
+    borderBottomWidth: 1,
+    borderBottomColor: '#15151e',
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 6,
+    gap: 6,
+  },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#111119',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1a1a28',
+    paddingHorizontal: 8,
+  },
+  searchIcon: {
+    color: '#444455',
+    fontSize: 13,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    marginRight: 4,
+  },
+  searchInput: {
+    flex: 1,
+    color: '#c0c0d0',
+    fontSize: 12,
+    paddingVertical: 7,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+  },
+  clearBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    backgroundColor: '#1e1e2e',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  clearBtnText: {
+    color: '#6b6b80',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  filterChips: {
+    flexDirection: 'row',
+    gap: 4,
+    paddingVertical: 2,
+  },
+  filterChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#1e1e2e',
+    backgroundColor: '#0c0c14',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
+  },
+  filterChipActive: {
+    backgroundColor: '#1a1a28',
+    borderColor: '#3a3a50',
+  },
+  filterChipDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+  },
+  filterChipText: {
+    color: '#555566',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  taskCount: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    backgroundColor: '#111119',
+    marginLeft: 4,
+  },
+  taskCountText: {
+    color: '#555566',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: 'monospace',
   },
 });
 

@@ -21,14 +21,16 @@ interface Props {
   onUpdateGoal: (goalId: string, fields: Partial<Goal>) => void;
   onDeleteGoal: (goalId: string) => void;
   onCreateTask?: (fields: CreateTaskFields) => Promise<void>;
+  onEditGoal?: (goal: GoalWithCount) => void;
 }
 
 export default function GoalsPanel({
   goals, agents, filteredGoalId, onFilter,
-  onCreateGoal, onUpdateGoal, onDeleteGoal, onCreateTask,
+  onCreateGoal, onUpdateGoal, onDeleteGoal, onCreateTask, onEditGoal,
 }: Props) {
   const [showAdd, setShowAdd] = useState(false);
   const [editGoal, setEditGoal] = useState<GoalWithCount | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   return (
     <View style={s.container}>
@@ -70,19 +72,31 @@ export default function GoalsPanel({
             <Pressable
               key={goal.id}
               onPress={() => onFilter(isSelected ? null : goal.id)}
-              style={[s.card, isSelected && s.cardSelected]}
+              style={[s.card, isSelected && s.cardSelected, isSelected && { borderLeftWidth: 3, borderLeftColor: statusColor }]}
             >
               <View style={s.cardHeader}>
                 <Text style={s.cardName} numberOfLines={1}>{goal.name}</Text>
                 <View style={s.cardActions}>
-                  <Pressable onPress={(e: any) => { e.stopPropagation?.(); setEditGoal(goal); }} hitSlop={6}>
+                  <Pressable onPress={(e: any) => { e.stopPropagation?.(); onEditGoal ? onEditGoal(goal) : setEditGoal(goal); }} hitSlop={6}>
                     <Text style={s.cardActionIcon}>&#x270E;</Text>
                   </Pressable>
-                  <Pressable onPress={(e: any) => { e.stopPropagation?.(); onDeleteGoal(goal.id); }} hitSlop={6}>
+                  <Pressable onPress={(e: any) => { e.stopPropagation?.(); setConfirmDeleteId(confirmDeleteId === goal.id ? null : goal.id); }} hitSlop={6}>
                     <Text style={s.cardActionIcon}>&#x2715;</Text>
                   </Pressable>
                 </View>
               </View>
+
+              {confirmDeleteId === goal.id && (
+                <View style={s.deleteConfirm}>
+                  <Text style={s.deleteConfirmText}>Delete this goal?</Text>
+                  <Pressable onPress={(e: any) => { e.stopPropagation?.(); onDeleteGoal(goal.id); setConfirmDeleteId(null); }} style={s.deleteConfirmBtn}>
+                    <Text style={s.deleteConfirmBtnText}>Yes</Text>
+                  </Pressable>
+                  <Pressable onPress={(e: any) => { e.stopPropagation?.(); setConfirmDeleteId(null); }} style={s.deleteCancelBtn}>
+                    <Text style={s.deleteCancelBtnText}>No</Text>
+                  </Pressable>
+                </View>
+              )}
 
               {/* Status badge */}
               <View style={[s.statusBadge, { backgroundColor: statusColor + '18' }]}>
@@ -90,9 +104,17 @@ export default function GoalsPanel({
                 <Text style={[s.statusText, { color: statusColor }]}>{goal.status.toUpperCase()}</Text>
               </View>
 
+              {/* Description preview */}
+              {!!goal.description && (
+                <Text style={s.cardDescription} numberOfLines={1}>{goal.description}</Text>
+              )}
+
               {/* Progress */}
               <View style={s.progressRow}>
-                <Text style={s.progressText}>{goal.completed_count}/{goal.task_count} ({pct}%)</Text>
+                {goal.task_count === 0
+                  ? <Text style={s.progressTextMuted}>No tasks</Text>
+                  : <Text style={s.progressText}>{goal.completed_count} done · {goal.task_count} total</Text>
+                }
               </View>
               <View style={s.progressBar}>
                 <View style={[s.progressFill, { width: `${pct}%` as any, backgroundColor: barColor }]} />
@@ -140,8 +162,8 @@ export default function GoalsPanel({
         />
       )}
 
-      {/* Edit Goal Modal */}
-      {editGoal && (
+      {/* Edit Goal Modal (internal fallback — only used if onEditGoal not provided) */}
+      {!onEditGoal && editGoal && (
         <EditGoalModal
           goal={editGoal}
           agents={agents}
@@ -371,6 +393,8 @@ function EditGoalModal({
 
 function GoalProgressSummary({ goals, agents }: { goals: GoalWithCount[]; agents: CircleOfficeAgent[] }) {
   const activeGoals = goals.filter(g => g.status === 'active');
+  const pausedGoals = goals.filter(g => g.status === 'paused');
+  const completedGoals = goals.filter(g => g.status === 'completed');
   const totalTasks = goals.reduce((sum, g) => sum + g.task_count, 0);
   const totalCompleted = goals.reduce((sum, g) => sum + g.completed_count, 0);
   const overallPct = totalTasks > 0 ? Math.round((totalCompleted / totalTasks) * 100) : 0;
@@ -396,7 +420,28 @@ function GoalProgressSummary({ goals, agents }: { goals: GoalWithCount[]; agents
           <Text style={[summary.statValue, { color: '#22c55e' }]}>{activeGoals.length}</Text>
           <Text style={summary.statLabel}>active</Text>
         </View>
+        <View style={summary.stat}>
+          <Text style={[summary.statValue, { color: '#a5b4fc' }]}>{totalTasks}</Text>
+          <Text style={summary.statLabel}>tasks</Text>
+        </View>
       </View>
+      {/* Extra counts row: paused + completed goals */}
+      {(pausedGoals.length > 0 || completedGoals.length > 0) && (
+        <View style={summary.row}>
+          {pausedGoals.length > 0 && (
+            <View style={summary.stat}>
+              <Text style={[summary.statValue, { color: '#f59e0b', fontSize: 13 }]}>{pausedGoals.length}</Text>
+              <Text style={summary.statLabel}>paused</Text>
+            </View>
+          )}
+          {completedGoals.length > 0 && (
+            <View style={summary.stat}>
+              <Text style={[summary.statValue, { color: '#666680', fontSize: 13 }]}>{completedGoals.length}</Text>
+              <Text style={summary.statLabel}>done</Text>
+            </View>
+          )}
+        </View>
+      )}
       <View style={summary.progressBar}>
         <View style={[summary.progressFill, { width: `${overallPct}%` as any }]} />
       </View>
@@ -592,6 +637,11 @@ const s = StyleSheet.create({
     fontSize: 11,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
+  cardDescription: {
+    color: '#555566',
+    fontSize: 10,
+    lineHeight: 14,
+  },
   statusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -619,6 +669,12 @@ const s = StyleSheet.create({
     color: '#6b6b80',
     fontSize: 11,
     fontWeight: '500',
+  },
+  progressTextMuted: {
+    color: '#444455',
+    fontSize: 11,
+    fontWeight: '500',
+    fontStyle: 'italic',
   },
   progressBar: {
     height: 4,
@@ -679,6 +735,41 @@ const s = StyleSheet.create({
   emptyBtnText: {
     color: '#6b6b80',
     fontSize: 11,
+    fontWeight: '600',
+  },
+  deleteConfirm: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 4,
+  },
+  deleteConfirmText: {
+    color: '#f87171',
+    fontSize: 10,
+    fontWeight: '500',
+    flex: 1,
+  },
+  deleteConfirmBtn: {
+    backgroundColor: '#ef444420',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  deleteConfirmBtnText: {
+    color: '#f87171',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  deleteCancelBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  deleteCancelBtnText: {
+    color: '#6b6b80',
+    fontSize: 10,
     fontWeight: '600',
   },
 });

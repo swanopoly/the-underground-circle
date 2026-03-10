@@ -240,8 +240,7 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
       .from('office_terminal_messages')
       .select('id, sender_id, model, created_at')
       .eq('circle_id', circleId)
-      .gte('created_at', weekAgo)
-      .neq('status', 'deleted');
+      .gte('created_at', weekAgo);
 
     if (messages && messages.length > 0) {
       // Group by sender

@@ -8,6 +8,7 @@ import { supabase } from './src/lib/supabase';
 import AuthNavigator from './src/navigation/AuthNavigator';
 import MainNavigator from './src/navigation/MainNavigator';
 import ErrorBoundary from './src/components/ErrorBoundary';
+import { startAgentAutoConnect, stopAgentAutoConnect } from './src/lib/agentAutoConnect';
 
 const NAV_STATE_KEY = 'uc_nav_state_v1';
 
@@ -77,12 +78,22 @@ export default function App() {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       setLoading(false);
+      // Start agent auto-connect immediately if already logged in
+      if (session) {
+        startAgentAutoConnect();
+      }
     }).catch(() => {
       setLoading(false);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
+      // Start agent auto-connect when user logs in, stop on logout
+      if (session) {
+        startAgentAutoConnect();
+      } else {
+        stopAgentAutoConnect();
+      }
     });
 
     return () => {

@@ -79,13 +79,14 @@ class ServiceManager {
 
 // Services
 const services = [
+  new ServiceManager('Claude Code Bridge', 'node', ['scripts/claude-bridge.js']),
   new ServiceManager('CORS Proxy', 'node', ['openclaw-proxy.js']),
-  new ServiceManager('Expo Dev Server', 'npm', ['start']),
+  new ServiceManager('Expo Dev Server', 'npx', ['expo', 'start', '--web']),
 ];
 
 // Start all services
-console.log('🦢 OpenClaw Development Server');
-console.log('================================\n');
+console.log('🦢 Underground Circle Dev Server');
+console.log('=================================\n');
 services.forEach(s => s.start());
 
 // Graceful shutdown

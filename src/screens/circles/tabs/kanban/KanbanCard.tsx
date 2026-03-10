@@ -4,7 +4,7 @@
 
 import React, { useState } from 'react';
 import { View, Text, Pressable, StyleSheet, Platform } from 'react-native';
-import { KanbanTask, TaskStatus, PRIORITY_COLORS, COLUMNS, DEFAULT_AGENT_ROSTER } from '../../../../types/kanban';
+import { KanbanTask, TaskStatus, PRIORITY_COLORS, COLUMNS, DEFAULT_AGENT_ROSTER, MODEL_ICONS } from '../../../../types/kanban';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
 import type { GoalWithCount } from '../../../../hooks/useGoals';
 
@@ -27,6 +27,17 @@ function timeAgo(dateStr: string): string {
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
   return `${Math.floor(hrs / 24)}d ago`;
+}
+
+function daysBetween(startStr: string, endStr: string): number {
+  const ms = new Date(endStr).getTime() - new Date(startStr).getTime();
+  return Math.max(1, Math.round(ms / (1000 * 60 * 60 * 24)));
+}
+
+function isStale(task: KanbanTask): boolean {
+  if (task.status !== 'backlog' && task.status !== 'todo') return false;
+  const ms = Date.now() - new Date(task.created_at).getTime();
+  return ms > 7 * 24 * 60 * 60 * 1000;
 }
 
 function priorityBadge(priority: string): { label: string; color: string } {
@@ -104,6 +115,13 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
         {/* Title */}
         <Text style={[s.title, isDone && s.titleDone]} numberOfLines={2}>{task.title}</Text>
 
+        {/* Description preview */}
+        {task.description ? (
+          <Text style={s.descriptionPreview} numberOfLines={1}>
+            {task.description.length > 60 ? task.description.slice(0, 60) + '...' : task.description}
+          </Text>
+        ) : null}
+
         {/* Goal tag */}
         {goalData && (
           <View style={s.goalTag}>
@@ -152,11 +170,24 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
           </View>
 
           <View style={s.footerRight}>
-            {/* Agent avatar */}
+            {/* Agent avatar + model indicator */}
             {assignedAgent ? (
-              <View style={[s.avatar, { backgroundColor: assignedAgent.color || '#6366f1' }]}>
-                <Text style={s.avatarText}>{assignedAgent.name[0].toUpperCase()}</Text>
-              </View>
+              <>
+                <View style={[s.avatar, { backgroundColor: assignedAgent.color || '#6366f1' }]}>
+                  <Text style={s.avatarText}>{assignedAgent.name[0].toUpperCase()}</Text>
+                </View>
+                {(() => {
+                  const roster = DEFAULT_AGENT_ROSTER.find(r =>
+                    assignedAgent.name?.toLowerCase().includes(r.name.toLowerCase())
+                  );
+                  const mi = roster ? MODEL_ICONS[roster.preferredModel] : null;
+                  return mi ? (
+                    <View style={[s.modelPill, { backgroundColor: mi.color + '15' }]}>
+                      <Text style={{ fontSize: 8, lineHeight: 10 }}>{mi.icon}</Text>
+                    </View>
+                  ) : null;
+                })()}
+              </>
             ) : task.assignee ? (
               <View style={[s.avatar, { backgroundColor: '#6366f1' }]}>
                 <Text style={s.avatarText}>
@@ -170,6 +201,18 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
               <Text style={[s.priorityText, { color: pb.color }]}>{pb.label}</Text>
             </View>
 
+            {/* Comment count badge */}
+            {task.review_comments_count != null && task.review_comments_count > 0 && (
+              <View style={s.commentBadge}>
+                <Text style={s.commentText}>{'\uD83D\uDCAC'} {task.review_comments_count}</Text>
+              </View>
+            )}
+
+            {/* Stale task indicator */}
+            {!isDone && isStale(task) && (
+              <Text style={s.staleIcon}>{'\u23F3'}</Text>
+            )}
+
             {/* Due date urgency */}
             {dueDateInfo && (
               <View style={[s.dueBadge, { backgroundColor: dueDateInfo.color + '15' }]}>
@@ -177,8 +220,12 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
               </View>
             )}
 
-            {/* Time ago */}
-            <Text style={s.timeText}>{timeAgo(task.created_at)}</Text>
+            {/* Time ago / Completion time */}
+            {isDone && task.completed_at ? (
+              <Text style={s.completionText}>Done in {daysBetween(task.created_at, task.completed_at)}d</Text>
+            ) : (
+              <Text style={s.timeText}>{timeAgo(task.created_at)}</Text>
+            )}
 
             {/* Move menu trigger (mobile) */}
             <Pressable
@@ -252,6 +299,12 @@ const s = StyleSheet.create({
   titleDone: {
     textDecorationLine: 'line-through',
     color: '#555566',
+  },
+  descriptionPreview: {
+    color: '#555566',
+    fontSize: 9,
+    lineHeight: 13,
+    marginTop: -4,
   },
   goalTag: {
     flexDirection: 'row',
@@ -336,6 +389,14 @@ const s = StyleSheet.create({
     fontSize: 9,
     fontWeight: '700',
   },
+  modelPill: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: -4,
+  },
   priorityBadge: {
     paddingHorizontal: 5,
     paddingVertical: 1,
@@ -358,6 +419,26 @@ const s = StyleSheet.create({
     color: '#444455',
     fontSize: 10,
     fontWeight: '500',
+  },
+  commentBadge: {
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 4,
+    backgroundColor: '#55556618',
+  },
+  commentText: {
+    color: '#555566',
+    fontSize: 9,
+    fontWeight: '700',
+  },
+  staleIcon: {
+    fontSize: 10,
+    color: '#f59e0b',
+  },
+  completionText: {
+    color: '#22c55e',
+    fontSize: 10,
+    fontWeight: '600',
   },
   moveBtn: {
     width: 22,

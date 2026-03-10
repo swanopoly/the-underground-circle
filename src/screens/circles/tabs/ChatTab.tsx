@@ -10,6 +10,7 @@ import {
   KeyboardAvoidingView,
   ScrollView,
   Animated,
+  Image,
 } from 'react-native';
 import { supabase } from '../../../lib/supabase';
 import { getSwanBotResponse as getAIResponse, SwanBotContext } from '../../../lib/swanbot';
@@ -242,6 +243,52 @@ function ParticleEffect({ x, y, color, onComplete }: { x: number; y: number; col
   );
 }
 
+const WAVE_COLORS_CHAT = ['#6366f1', '#a855f7', '#ec4899', '#f43f5e', '#f59e0b', '#22c55e', '#06b6d4'];
+let _chatWaveStyleInjected = false;
+
+function ChatLoadingWave() {
+  useEffect(() => {
+    if (Platform.OS !== 'web' || _chatWaveStyleInjected) return;
+    _chatWaveStyleInjected = true;
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes uc-chat-wave {
+        0%, 100% { transform: translateY(0) scale(1); opacity: 0.4; }
+        30% { transform: translateY(-26px) scale(1.3); opacity: 1; }
+        60% { transform: translateY(6px) scale(0.9); opacity: 0.7; }
+      }
+      .uc-chat-dot {
+        width: 18px; height: 18px; border-radius: 50%;
+        animation: uc-chat-wave 1.4s ease-in-out infinite;
+      }
+    `;
+    document.head.appendChild(style);
+  }, []);
+
+  if (Platform.OS === 'web') {
+    return (
+      <View style={chatLoadStyles.dotsRow}>
+        {WAVE_COLORS_CHAT.map((color, i) => (
+          <div
+            key={i}
+            className="uc-chat-dot"
+            style={{ backgroundColor: color, animationDelay: `${i * 0.12}s` }}
+          />
+        ))}
+      </View>
+    );
+  }
+
+  // Native fallback
+  return (
+    <View style={chatLoadStyles.dotsRow}>
+      {WAVE_COLORS_CHAT.map((color, i) => (
+        <View key={i} style={[chatLoadStyles.nativeDot, { backgroundColor: color }]} />
+      ))}
+    </View>
+  );
+}
+
 function TypingDots() {
   const [dotCount, setDotCount] = useState(1);
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -267,6 +314,22 @@ function TypingDots() {
     </Animated.View>
   );
 }
+
+const chatLoadStyles = StyleSheet.create({
+  dotsRow: {
+    flexDirection: 'row',
+    gap: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 24,
+  },
+  nativeDot: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    opacity: 0.7,
+  },
+});
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
@@ -1105,9 +1168,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       )}
 
       <View style={[styles.heroSection, Platform.OS === 'web' && styles.heroSectionWeb]}>
-        <Animated.View style={[styles.heroBotAvatar, { backgroundColor: accentColor + '20' }]}>
-          <Text style={styles.heroBotEmoji}>🦢</Text>
-        </Animated.View>
+        <Image
+          source={{ uri: 'https://swanopoly.s3.us-east-1.amazonaws.com/SwanAI/swanai.png' }}
+          style={styles.heroBotImage}
+          resizeMode="contain"
+        />
         <Text style={[styles.heroTitle, { color: accentColor }]}>CIRCLE CHAT</Text>
         <Text style={styles.heroSubtitle}>
           Talk with your crew. Play games. Challenge each other.{'\n'}
@@ -1120,48 +1185,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         </View>
       </View>
 
-      {/* Quick prompts with 3D effect */}
+      {/* Quick actions — same bar as active chat */}
       <View style={styles.quickPromptSection}>
         <Text style={styles.sectionLabel}>QUICK ACTIONS</Text>
-        <View style={styles.quickPromptRow}>
-          <Pressable
-            onPress={() => {
-              quickScrollX.current = Math.max(0, quickScrollX.current - 200);
-              quickScrollRef.current?.scrollTo({ x: quickScrollX.current, animated: true });
-            }}
-            style={[styles.quickArrow, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          >
-            <Text style={[styles.quickArrowText, { color: accentColor }]}>‹</Text>
-          </Pressable>
-          <ScrollView
-            ref={quickScrollRef}
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.quickPromptScroll}
-            onScroll={(e) => { quickScrollX.current = e.nativeEvent.contentOffset.x; }}
-            scrollEventThrottle={16}
-            style={{ flex: 1 }}
-          >
-            {QUICK_PROMPTS.map((p, i) => (
-              <EnhancedPromptCard
-                key={i}
-                label={p.label}
-                onPress={() => sendMessage(p.text)}
-                accentColor={accentColor}
-                delay={i * 100}
-              />
-            ))}
-          </ScrollView>
-          <Pressable
-            onPress={() => {
-              quickScrollX.current = quickScrollX.current + 200;
-              quickScrollRef.current?.scrollTo({ x: quickScrollX.current, animated: true });
-            }}
-            style={[styles.quickArrow, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          >
-            <Text style={[styles.quickArrowText, { color: accentColor }]}>›</Text>
-          </Pressable>
-        </View>
+        <EnhancedQuickBar
+          onPromptPress={sendMessage}
+          onSendCrypto={() => setShowSendCrypto(true)}
+          onNuke={async () => {
+            const { error } = await supabase.from('messages').delete().eq('circle_id', circleId);
+            if (!error) setMessages([]);
+          }}
+          accentColor={accentColor}
+          circleId={circleId}
+          userId={currentUserId}
+          userName={currentUserName}
+        />
       </View>
 
       {/* Categories with glassmorphism */}
@@ -1219,8 +1257,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return (
       <View style={styles.loadingContainer}>
         <View style={styles.loadingPulse}>
-          <Text style={[styles.loadingText, { color: accentColor }]}>LOADING CHAT</Text>
-          <TypingDots />
+          <Text style={[styles.loadingText, { color: accentColor }]}>LOADING</Text>
+          <ChatLoadingWave />
         </View>
       </View>
     );
@@ -2588,7 +2626,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0a0a0a' },
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   loadingPulse: { alignItems: 'center' },
-  loadingText: { fontSize: 12, letterSpacing: 2, fontWeight: '700' },
+  loadingText: { fontSize: 28, letterSpacing: 6, fontWeight: '800' },
 
   // Accent line
   accentLine: {
@@ -2635,17 +2673,13 @@ const styles = StyleSheet.create({
     backgroundImage: 'radial-gradient(circle at center, rgba(99, 102, 241, 0.1), transparent 70%)',
   } as any : {},
   heroBotAvatar: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 16,
-    borderWidth: 2,
-    borderColor: '#6366f1',
+    marginBottom: 20,
     ...(Platform.OS === 'web' ? { className: 'bot-float-anim' } as any : {}),
   } as any,
   heroBotEmoji: { fontSize: 36 },
+  heroBotImage: { width: 180, height: 180, marginBottom: 4 },
   heroTitle: { fontSize: 24, fontWeight: '900', letterSpacing: 4, marginBottom: 8 },
   heroSubtitle: { color: '#666', fontSize: 14, textAlign: 'center', lineHeight: 20, maxWidth: 360 },
 

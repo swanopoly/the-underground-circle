@@ -249,19 +249,58 @@ async function routeOutput(
     case "webhook":
       if (webhookUrl) {
         try {
-          await fetch(webhookUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              text,
-              source: "circle-automation",
-              automation: automationName,
-              circle_id: circleId,
-            }),
-            signal: AbortSignal.timeout(10000),
-          });
+          // Telegram Bot API detection: URL contains api.telegram.org or has telegram config
+          if (webhookUrl.includes("api.telegram.org")) {
+            // Direct Telegram URL: extract bot token and chat ID from URL params
+            await fetch(webhookUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ text, parse_mode: "Markdown" }),
+              signal: AbortSignal.timeout(10000),
+            });
+          } else {
+            await fetch(webhookUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                text,
+                source: "circle-automation",
+                automation: automationName,
+                circle_id: circleId,
+              }),
+              signal: AbortSignal.timeout(10000),
+            });
+          }
         } catch (e) {
           console.warn("Webhook delivery failed:", e);
+        }
+      }
+      // Also try Telegram via circle settings if no webhookUrl
+      if (!webhookUrl) {
+        try {
+          const { data: circle } = await supabase
+            .from("circles")
+            .select("settings")
+            .eq("id", circleId)
+            .single();
+          const tg = circle?.settings?.telegram;
+          if (tg?.bot_token && tg?.chat_id) {
+            await fetch(
+              `https://api.telegram.org/bot${tg.bot_token}/sendMessage`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  chat_id: tg.chat_id,
+                  text: `\u{1F9B2} *${automationName || "Automation"}*\n\n${text}`,
+                  parse_mode: "Markdown",
+                }),
+                signal: AbortSignal.timeout(10000),
+              }
+            );
+          }
+        } catch (e) {
+          console.warn("Telegram fallback failed:", e);
         }
       }
       break;
@@ -270,6 +309,146 @@ async function routeOutput(
       // Output stored only in automation_runs
       break;
   }
+}
+
+// ─── Build detailed report task ──────────────────────────────────────────────
+
+interface ReportInput {
+  automationName: string;
+  automationId: string;
+  runId: string;
+  triggerSource: string;
+  model: string;
+  modelKey: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCost: number;
+  durationMs: number;
+  outputTarget: string;
+  skipped: boolean;
+  circleName: string;
+  memberCount: number;
+  checkedInCount: number;
+  members: any[];
+  notCheckedIn: any[];
+  todayCheckIns: any[];
+  openTasks: any[];
+  completedTasks: any[];
+  aiOutput: string;
+  resolvedPrompt: string;
+  systemPrompt: string;
+  logSteps: string[];
+  completedAt: string;
+}
+
+function buildReportTask(r: ReportInput): { title: string; description: string } {
+  const ts = new Date(r.completedAt);
+  const dateLabel = ts.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const timeLabel = ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" });
+  const title = `[Auto] ${r.automationName} - ${dateLabel} ${timeLabel}`;
+
+  const lines: string[] = [];
+
+  // ── Summary ──
+  lines.push(`AUTOMATION REPORT: ${r.automationName}`);
+  lines.push(`${"=".repeat(50)}`);
+  lines.push(`Status: ${r.skipped ? "SKIPPED" : "COMPLETED"}`);
+  lines.push(`Trigger: ${r.triggerSource}`);
+  lines.push(`Completed: ${dateLabel} at ${timeLabel} ET`);
+  lines.push(`Duration: ${(r.durationMs / 1000).toFixed(1)}s`);
+  lines.push(`Model: ${r.model} (${r.modelKey})`);
+  lines.push(`Tokens: ${r.totalTokens} total (${r.inputTokens} input / ${r.outputTokens} output)`);
+  lines.push(`Cost: $${r.estimatedCost.toFixed(4)}`);
+  lines.push(`Output routed to: ${r.outputTarget}`);
+  lines.push(`Run ID: ${r.runId}`);
+  lines.push("");
+
+  // ── Context Analyzed ──
+  lines.push(`CONTEXT ANALYZED`);
+  lines.push(`${"-".repeat(50)}`);
+  lines.push(`Circle: ${r.circleName}`);
+  lines.push(`Members: ${r.memberCount} total, ${r.checkedInCount} checked in today`);
+  lines.push(`Open tasks: ${r.openTasks.length}`);
+  lines.push(`Completed tasks (7d): ${r.completedTasks.length}`);
+  lines.push("");
+
+  // Members
+  if (r.members.length > 0) {
+    lines.push(`MEMBERS REVIEWED (${r.members.length})`);
+    lines.push(`${"-".repeat(50)}`);
+    for (const m of r.members) {
+      const streak = m.current_streak || 0;
+      const longest = m.longest_streak || 0;
+      lines.push(`  ${m.display_name || m.username} (${m.role || "member"}) - ${streak}d streak (best: ${longest}d)`);
+    }
+    lines.push("");
+  }
+
+  // Not checked in
+  if (r.notCheckedIn.length > 0) {
+    lines.push(`NOT CHECKED IN TODAY (${r.notCheckedIn.length})`);
+    lines.push(`${"-".repeat(50)}`);
+    for (const m of r.notCheckedIn) {
+      lines.push(`  - ${m.display_name || m.username}`);
+    }
+    lines.push("");
+  }
+
+  // Check-ins
+  if (r.todayCheckIns.length > 0) {
+    lines.push(`TODAY'S CHECK-INS (${r.todayCheckIns.length})`);
+    lines.push(`${"-".repeat(50)}`);
+    for (const c of r.todayCheckIns) {
+      const who = c.user?.display_name || c.user?.username || "Unknown";
+      const when = new Date(c.created_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+      lines.push(`  [${when}] ${who}: "${c.content}"`);
+    }
+    lines.push("");
+  }
+
+  // Open tasks
+  if (r.openTasks.length > 0) {
+    lines.push(`OPEN TASKS REVIEWED (${r.openTasks.length})`);
+    lines.push(`${"-".repeat(50)}`);
+    for (const t of r.openTasks.slice(0, 20)) {
+      const who = t.assignee?.display_name || "Unassigned";
+      lines.push(`  [${(t.priority || "normal").toUpperCase()}] ${t.title} -> ${who} (${t.status})${t.due_date ? ` due ${t.due_date}` : ""}`);
+    }
+    lines.push("");
+  }
+
+  // Completed tasks
+  if (r.completedTasks.length > 0) {
+    lines.push(`COMPLETED THIS WEEK (${r.completedTasks.length})`);
+    lines.push(`${"-".repeat(50)}`);
+    for (const t of r.completedTasks) {
+      const who = t.assignee?.display_name || "someone";
+      lines.push(`  [done] ${t.title} by ${who}`);
+    }
+    lines.push("");
+  }
+
+  // ── AI Response ──
+  lines.push(`AI RESPONSE`);
+  lines.push(`${"=".repeat(50)}`);
+  lines.push(r.aiOutput);
+  lines.push("");
+
+  // ── Execution Log ──
+  lines.push(`EXECUTION LOG`);
+  lines.push(`${"-".repeat(50)}`);
+  for (const step of r.logSteps) {
+    lines.push(`  ${step}`);
+  }
+  lines.push("");
+
+  // ── Prompt ──
+  lines.push(`PROMPT SENT TO AI`);
+  lines.push(`${"-".repeat(50)}`);
+  lines.push(r.resolvedPrompt);
+
+  return { title, description: lines.join("\n") };
 }
 
 // ─── Main handler ────────────────────────────────────────────────────────────
@@ -350,11 +529,26 @@ Deno.serve(async (req: Request) => {
 
     const runId = run?.id;
     const startTime = Date.now();
+    const logSteps: string[] = [];
+
+    // Helper to log a step and update the run record in realtime
+    const logStep = async (step: string) => {
+      logSteps.push(`[${((Date.now() - startTime) / 1000).toFixed(1)}s] ${step}`);
+      if (runId) {
+        await supabase
+          .from("automation_runs")
+          .update({ error_message: logSteps.join("\n") })
+          .eq("id", runId)
+          .eq("status", "running");
+      }
+    };
 
     try {
       // 3. Gather context
+      await logStep(`⏳ Gathering context for "${automation.name}"...`);
       const contextFlags: ContextFlags = automation.include_context || {};
       const context = await gatherContext(supabase, circleId, contextFlags);
+      await logStep(`✓ Context loaded — ${context.memberCount} members, ${context.checkedInCount} checked in, ${context.openTasks?.length || 0} open tasks`);
 
       // 4. Substitute variables in prompt
       const contextString = buildContextString(context);
@@ -370,6 +564,7 @@ Deno.serve(async (req: Request) => {
       }
 
       const resolvedPrompt = substituteVariables(automation.prompt, vars);
+      await logStep(`✓ Prompt resolved (${resolvedPrompt.length} chars)`);
 
       // 5. Build system prompt
       const systemPrompt = `You are BlackSwan 🦢 — an AI assistant for "${context.circle?.name || "Unknown"}" circle.
@@ -381,42 +576,143 @@ Always prefix your response with 🦢.
 ${contextString}`;
 
       // 6. Call AI
-      const aiResult = await callClaude(systemPrompt, resolvedPrompt, automation.model || "claude-haiku");
+      const modelKey = automation.model || "claude-haiku";
+      const modelId = CLAUDE_MODEL_MAP[modelKey] || CLAUDE_MODEL_MAP["claude-haiku"];
+      await logStep(`⏳ Calling ${modelId}...`);
+      const aiResult = await callClaude(systemPrompt, resolvedPrompt, modelKey);
+      await logStep(`✓ AI responded — ${aiResult.totalTokens} tokens (${aiResult.inputTokens} in / ${aiResult.outputTokens} out) · $${aiResult.estimatedCost.toFixed(4)}`);
 
       // 7. Route output
+      const outputTarget = automation.output_target || "silent";
+      if (outputTarget !== "silent") {
+        await logStep(`⏳ Routing output → ${outputTarget}...`);
+      }
       await routeOutput(
         supabase,
-        automation.output_target,
+        outputTarget,
         circleId,
         automation.agent || "BlackSwan",
         aiResult.text,
         automation.webhook_url,
         automation.name,
       );
+      if (outputTarget !== "silent") {
+        await logStep(`✓ Output delivered to ${outputTarget}`);
+      }
 
-      // 8. Update run as completed
+      // 8. Always log to agent_activity (so it shows in the activity feed)
+      const activityBody = `**${automation.name}** (${triggerSource})\n\n${aiResult.text.slice(0, 1500)}\n\n_${aiResult.totalTokens} tokens · ${modelId} · $${aiResult.estimatedCost.toFixed(4)}_`;
+      await supabase.from("agent_activity").insert({
+        circle_id: circleId,
+        agent_name: automation.agent || "BlackSwan",
+        source: triggerSource === "manual" ? "webchat" : "cron",
+        source_detail: `automation:${automation.name}`,
+        activity_type: "task_completed",
+        title: `🤖 ${automation.name}`,
+        body: activityBody.slice(0, 2000),
+        status: "completed",
+        metadata: {
+          automation_id: automationId,
+          run_id: runId,
+          model: modelId,
+          tokens: aiResult.totalTokens,
+          cost: aiResult.estimatedCost,
+          trigger: triggerSource,
+          output_target: outputTarget,
+        },
+      });
+
+      // 9. Update run as completed with detailed log
       const durationMs = Date.now() - startTime;
+      logSteps.push(`[${(durationMs / 1000).toFixed(1)}s] ✅ Completed successfully`);
+      const completedAt = new Date().toISOString();
       await supabase
         .from("automation_runs")
         .update({
           status: "completed",
-          completed_at: new Date().toISOString(),
+          completed_at: completedAt,
           duration_ms: durationMs,
           output_text: aiResult.text,
           prompt_used: resolvedPrompt,
           token_count: aiResult.totalTokens,
           model_used: aiResult.model,
           estimated_cost: aiResult.estimatedCost,
-          input_context: { circle: context.circle?.name, memberCount: context.memberCount },
-          output_target: automation.output_target,
+          input_context: {
+            circle: context.circle?.name,
+            memberCount: context.memberCount,
+            checkedInCount: context.checkedInCount,
+            openTaskCount: context.openTasks?.length || 0,
+            log: logSteps,
+          },
+          output_target: outputTarget,
+          error_message: null,
         })
         .eq("id", runId);
 
-      // 9. Clear last_error on success
+      // 10. Update automation metadata
       await supabase
         .from("circle_automations")
-        .update({ last_error: null })
+        .update({
+          last_error: null,
+          last_run_at: new Date().toISOString(),
+          run_count: (automation.run_count || 0) + 1,
+        })
         .eq("id", automationId);
+
+      // 11. Create detailed report task
+      await logStep("⏳ Creating report task...");
+      const skipped = aiResult.text.trim() === "SKIP";
+      const taskCreator = triggeredBy || automation.created_by || null;
+      if (taskCreator) {
+        const reportTask = buildReportTask({
+          automationName: automation.name,
+          automationId,
+          runId: runId || "unknown",
+          triggerSource,
+          model: modelId,
+          modelKey,
+          inputTokens: aiResult.inputTokens,
+          outputTokens: aiResult.outputTokens,
+          totalTokens: aiResult.totalTokens,
+          estimatedCost: aiResult.estimatedCost,
+          durationMs,
+          outputTarget,
+          skipped,
+          circleName: context.circle?.name || "Unknown",
+          memberCount: context.memberCount,
+          checkedInCount: context.checkedInCount,
+          members: context.members,
+          notCheckedIn: context.notCheckedIn,
+          todayCheckIns: context.todayCheckIns,
+          openTasks: context.openTasks,
+          completedTasks: context.completedTasks,
+          aiOutput: aiResult.text,
+          resolvedPrompt,
+          systemPrompt,
+          logSteps,
+          completedAt,
+        });
+        const { data: newTask } = await supabase.from("tasks").insert({
+          circle_id: circleId,
+          created_by: taskCreator,
+          title: reportTask.title,
+          description: reportTask.description,
+          priority: skipped ? "low" : "normal",
+          status: "done",
+          completed_at: completedAt,
+          position: 99999,
+        }).select("id").single();
+
+        // Add the full AI output as a comment on the task
+        if (newTask?.id) {
+          await supabase.from("task_comments").insert({
+            task_id: newTask.id,
+            user_id: taskCreator,
+            content: `[AUTOMATION_REPORT]\n\n--- AI FULL OUTPUT ---\n${aiResult.text}\n\n--- PROMPT SENT ---\n${resolvedPrompt}\n\n--- SYSTEM PROMPT ---\n${systemPrompt}`,
+          });
+        }
+        await logStep("✓ Report task created");
+      }
 
       return new Response(
         JSON.stringify({ ok: true, runId, durationMs, tokens: aiResult.totalTokens }),
@@ -424,8 +720,10 @@ ${contextString}`;
       );
 
     } catch (execErr: any) {
-      // Update run as failed
+      // Update run as failed with detailed log
       const durationMs = Date.now() - startTime;
+      logSteps.push(`[${(durationMs / 1000).toFixed(1)}s] ❌ Failed: ${execErr.message}`);
+
       if (runId) {
         await supabase
           .from("automation_runs")
@@ -433,23 +731,68 @@ ${contextString}`;
             status: "failed",
             completed_at: new Date().toISOString(),
             duration_ms: durationMs,
-            error_message: `${execErr.message}${retryCount > 0 ? ` (retry ${retryCount}/${MAX_RETRIES})` : ""}`,
+            error_message: execErr.message,
+            input_context: { log: logSteps },
           })
           .eq("id", runId);
       }
 
+      // Log failure to activity feed
+      await supabase.from("agent_activity").insert({
+        circle_id: circleId,
+        agent_name: automation.agent || "BlackSwan",
+        source: triggerSource === "manual" ? "webchat" : "cron",
+        source_detail: `automation:${automation.name}`,
+        activity_type: "task_completed",
+        title: `🤖 ${automation.name}`,
+        body: `❌ Failed: ${execErr.message}\n\n${logSteps.join("\n")}`.slice(0, 2000),
+        status: "failed",
+        metadata: { automation_id: automationId, run_id: runId, trigger: triggerSource },
+      });
+
       // Update automation last_error
       await supabase
         .from("circle_automations")
-        .update({ last_error: execErr.message })
+        .update({ last_error: execErr.message, last_run_at: new Date().toISOString() })
         .eq("id", automationId);
+
+      // Create failure report task
+      const failCreator = triggeredBy || automation.created_by || null;
+      if (failCreator) {
+        const ts = new Date();
+        const dateLabel = ts.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+        const timeLabel = ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" });
+        const failReport = [
+          `AUTOMATION FAILED: ${automation.name}`,
+          `${"=".repeat(50)}`,
+          `Status: FAILED`,
+          `Error: ${execErr.message}`,
+          `Trigger: ${triggerSource}`,
+          `Failed at: ${dateLabel} at ${timeLabel} ET`,
+          `Duration: ${(durationMs / 1000).toFixed(1)}s`,
+          `Run ID: ${runId || "unknown"}`,
+          "",
+          `EXECUTION LOG`,
+          `${"-".repeat(50)}`,
+          ...logSteps.map((s: string) => `  ${s}`),
+        ].join("\n");
+
+        await supabase.from("tasks").insert({
+          circle_id: circleId,
+          created_by: failCreator,
+          title: `[Auto] FAILED: ${automation.name} - ${dateLabel} ${timeLabel}`,
+          description: failReport,
+          priority: "high",
+          status: "backlog",
+          position: 99999,
+        });
+      }
 
       // Retry logic: schedule a retry if under the limit
       if (retryCount < MAX_RETRIES) {
         const nextRetry = retryCount + 1;
         console.log(`Scheduling retry ${nextRetry}/${MAX_RETRIES} for automation ${automationId} in ${RETRY_DELAY_MS}ms`);
 
-        // Fire retry after delay (non-blocking)
         setTimeout(async () => {
           try {
             const supabaseUrl = Deno.env.get("SUPABASE_URL");

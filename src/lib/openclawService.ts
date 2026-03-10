@@ -24,6 +24,9 @@ export interface OpenClawSession {
   newTokens?: number;      // cumulative non-cached input tokens
   turns?: number;
   uptime?: string;
+  // Subagent info
+  isSubagent?: boolean;
+  parentSessionKey?: string;
 }
 
 export interface OpenClawSessionStatus {
@@ -520,10 +523,71 @@ function parseHistory(raw: any): Array<{ role: string; content: string }> {
   return [];
 }
 
+// ─── Subagent Enumeration ─────────────────────────────────
+
+export interface OpenClawSubAgent {
+  id: string;
+  name?: string;
+  sessionKey?: string;
+  status?: string;
+  model?: string;
+  task?: string;
+}
+
+export async function listSubAgentsDetailed(
+  config: OpenClawConfig,
+): Promise<{ ok: boolean; subagents: OpenClawSubAgent[]; error?: string }> {
+  try {
+    const result = await invokeToolRaw(config, 'subagents', { action: 'list' });
+    if (!result.ok) return { ok: false, subagents: [], error: result.error?.message };
+    const raw = result.result;
+    let subagents: OpenClawSubAgent[] = [];
+
+    // Parse structured details if available
+    if (raw?.details?.subagents && Array.isArray(raw.details.subagents)) {
+      subagents = raw.details.subagents.map((s: any) => ({
+        id: s.id || s.sessionKey || '',
+        name: s.name || s.displayName || undefined,
+        sessionKey: s.sessionKey || s.key || undefined,
+        status: s.status || 'unknown',
+        model: s.model || undefined,
+        task: s.task || s.description || undefined,
+      }));
+    } else if (Array.isArray(raw)) {
+      subagents = raw.map((s: any) => ({
+        id: typeof s === 'string' ? s : s.id || '',
+        name: s.name || undefined,
+        sessionKey: s.sessionKey || undefined,
+        status: s.status || 'unknown',
+        model: s.model || undefined,
+        task: s.task || undefined,
+      }));
+    } else if (raw?.content?.[0]?.text) {
+      // Try parsing from text
+      try {
+        const parsed = JSON.parse(raw.content[0].text);
+        if (Array.isArray(parsed)) {
+          subagents = parsed.map((s: any) => ({
+            id: typeof s === 'string' ? s : s.id || '',
+            name: s.name || undefined,
+            sessionKey: s.sessionKey || undefined,
+            status: s.status || 'unknown',
+          }));
+        }
+      } catch {}
+    }
+
+    return { ok: true, subagents };
+  } catch (e: any) {
+    return { ok: false, subagents: [], error: e.message };
+  }
+}
+
 // ─── Polling Manager ────────────────────────────────────
 
 export type OpenClawUpdate = {
   sessions: OpenClawSession[];
+  subagents: OpenClawSubAgent[];
   timestamp: number;
 };
 
@@ -531,6 +595,7 @@ export class OpenClawPoller {
   private config: OpenClawConfig;
   private interval: ReturnType<typeof setInterval> | null = null;
   private onUpdate: (update: OpenClawUpdate) => void;
+  private pollCount = 0;
 
   constructor(config: OpenClawConfig, onUpdate: (update: OpenClawUpdate) => void) {
     this.config = config;
@@ -551,15 +616,25 @@ export class OpenClawPoller {
   }
 
   private async poll() {
-    const result = await listSessions(this.config);
-    if (result.ok && result.sessions) {
+    this.pollCount++;
+
+    // Fetch sessions + subagents in parallel
+    // Subagents are fetched every 3rd poll to reduce API load
+    const fetchSubagents = this.pollCount % 3 === 1;
+    const [sessionsResult, subagentsResult] = await Promise.all([
+      listSessions(this.config),
+      fetchSubagents
+        ? listSubAgentsDetailed(this.config).catch(() => ({ ok: false, subagents: [] as OpenClawSubAgent[] }))
+        : Promise.resolve(null),
+    ]);
+
+    if (sessionsResult.ok && sessionsResult.sessions) {
       // Enrich sessions with cost/token data from session_status
-      // Limit concurrent enrichment calls to prevent API overload
       const MAX_CONCURRENT = 10;
       const enriched: OpenClawSession[] = [];
-      
-      for (let i = 0; i < result.sessions.length; i += MAX_CONCURRENT) {
-        const batch = result.sessions.slice(i, i + MAX_CONCURRENT);
+
+      for (let i = 0; i < sessionsResult.sessions.length; i += MAX_CONCURRENT) {
+        const batch = sessionsResult.sessions.slice(i, i + MAX_CONCURRENT);
         const batchEnriched = await Promise.all(
           batch.map(async (s) => {
             try {
@@ -583,8 +658,39 @@ export class OpenClawPoller {
         );
         enriched.push(...batchEnriched);
       }
-      
-      this.onUpdate({ sessions: enriched, timestamp: Date.now() });
+
+      // Tag sessions that are subagents (match by sessionKey from subagent list)
+      const subagents = subagentsResult?.subagents || [];
+      const subagentSessionKeys = new Set(
+        subagents.map(sa => sa.sessionKey).filter(Boolean)
+      );
+      for (const session of enriched) {
+        if (session.kind === 'subagent' || subagentSessionKeys.has(session.sessionKey)) {
+          session.isSubagent = true;
+        }
+      }
+
+      // Also add subagent sessions not already in the sessions list
+      if (subagents.length > 0) {
+        const existingKeys = new Set(enriched.map(s => s.sessionKey));
+        for (const sa of subagents) {
+          if (sa.sessionKey && !existingKeys.has(sa.sessionKey)) {
+            enriched.push({
+              sessionKey: sa.sessionKey,
+              kind: 'subagent',
+              agentId: sa.id,
+              model: sa.model,
+              isSubagent: true,
+            });
+          }
+        }
+      }
+
+      this.onUpdate({
+        sessions: enriched,
+        subagents,
+        timestamp: Date.now(),
+      });
     }
   }
 }

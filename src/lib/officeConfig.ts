@@ -466,13 +466,26 @@ export type FurnitureType =
   | 'enter_key' | 'button_panel' | 'alarm_bell' | 'launch_pad'
   | 'jukebox' | 'dice_roller' | 'gong' | 'confetti_cannon'
   | 'timer_display' | 'scoreboard' | 'status_board' | 'command_console'
-  | 'slot_machine' | 'crystal_ball' | 'mood_ring' | 'boom_box' | 'lava_lamp' | 'whack_a_mole';
+  | 'slot_machine' | 'crystal_ball' | 'mood_ring' | 'boom_box' | 'lava_lamp' | 'whack_a_mole'
+  // New items
+  | 'fireplace' | 'aquarium' | 'vinyl_player' | 'rain_window' | 'galaxy_orb'
+  | 'zen_garden' | 'quote_board' | 'progress_bar' | 'terrarium' | 'hologram'
+  | 'focus_candle' | 'pixel_display'
+  // Integration items
+  | 'spotify_jukebox' | 'discord_hub' | 'video_call' | 'message_board'
+  | 'smart_tv' | 'weather_station' | 'twitch_stream' | 'pomodoro_room'
+  | 'crypto_ticker' | 'github_feed' | 'calendar_widget' | 'world_clock'
+  | 'music_visualizer' | 'figma_board'
+  // Games
+  | 'poker_table' | 'chess_board' | 'coin_flip' | 'connect_four' | 'trivia_screen' | 'roulette_wheel';
 
 export interface FurnitureItem {
   id: string;
   type: FurnitureType;
   x: number;
   y: number;
+  itemWidth?: number;   // user-resized width (defaults to catalog width)
+  itemHeight?: number;  // user-resized height (defaults to catalog height)
   rotation?: number;
   label?: string; // custom label (e.g. neon sign text)
   // NFT frame data
@@ -496,7 +509,123 @@ export interface FurnitureItem {
   boomboxPlaying?: boolean;  // boom_box: playing state
   lavaColor?: string;        // lava_lamp: current color
   whackScore?: number;       // whack_a_mole: score
+  // New item state
+  fireplaceIntensity?: number;   // fireplace: 0-2 (low/med/high)
+  aquariumFishCount?: number;    // aquarium: 1-8
+  vinylPlaying?: boolean;        // vinyl_player: spinning state
+  quoteIndex?: number;           // quote_board: current quote
+  progressValue?: number;        // progress_bar: 0-100
+  pixelScene?: number;           // pixel_display: scene index
+  focusBurning?: boolean;        // focus_candle: lit state
+  zenPattern?: number;           // zen_garden: pattern index
+  hologramShape?: number;        // hologram: shape index
+  // Integration item state
+  spotifyConnected?: boolean;      // spotify_jukebox: OAuth connected
+  spotifyTrackName?: string;       // spotify_jukebox: current track name
+  spotifyArtist?: string;          // spotify_jukebox: current artist
+  spotifyPlaying?: boolean;        // spotify_jukebox: playback state
+  spotifyProgress?: number;        // spotify_jukebox: 0-100 playback progress
+  discordConnected?: boolean;      // discord_hub: webhook connected
+  discordChannel?: string;         // discord_hub: channel name
+  discordStatus?: string;          // discord_hub: online/idle/dnd/offline
+  discordMemberCount?: number;     // discord_hub: server member count
+  videoCallActive?: boolean;       // video_call: in-call state
+  videoCallProvider?: string;      // video_call: zoom/meet/teams
+  videoCallLink?: string;          // video_call: meeting URL
+  videoCallParticipants?: number;  // video_call: participant count
+  messageSource?: string;          // message_board: imessage/sms/whatsapp
+  messagePreview?: string;         // message_board: last message preview
+  messageCount?: number;           // message_board: unread count
+  tvApp?: string;                  // smart_tv: youtube/netflix/hulu/disney/twitch
+  tvContentUrl?: string;           // smart_tv: embed/content URL
+  tvWidth?: number;                // smart_tv: custom width
+  tvHeight?: number;               // smart_tv: custom height
+  tvPoweredOn?: boolean;           // smart_tv: power state
+  weatherCity?: string;            // weather_station: city name
+  weatherTemp?: number;            // weather_station: temperature
+  weatherCondition?: string;       // weather_station: sunny/cloudy/rainy/snowy
+  twitchChannel?: string;          // twitch_stream: channel name
+  twitchLive?: boolean;            // twitch_stream: live status
+  twitchViewers?: number;          // twitch_stream: viewer count
+  pomodoroMinutes?: number;        // pomodoro_room: session minutes
+  pomodoroBreak?: boolean;         // pomodoro_room: break or work
+  pomodoroSessions?: number;       // pomodoro_room: completed sessions count
+  // New connected items
+  cryptoTickerCoins?: string;       // crypto_ticker: "SOL,ETH,BTC" coins to display
+  cryptoTickerPrices?: string;      // crypto_ticker: "150.23,3400.11,68000.55" prices
+  cryptoTickerChanges?: string;     // crypto_ticker: "+2.5,-1.2,+0.8" % changes
+  githubRepo?: string;              // github_feed: "user/repo"
+  githubActivity?: string;          // github_feed: recent activity summary
+  githubCommits?: number;           // github_feed: commit count this week
+  githubPRs?: number;               // github_feed: open PR count
+  calendarEvent?: string;           // calendar_widget: next event title
+  calendarTime?: string;            // calendar_widget: event time "2:00 PM"
+  calendarProvider?: string;        // calendar_widget: google/outlook
+  calendarEvents?: number;          // calendar_widget: events today count
+  worldClockZones?: string;         // world_clock: "America/New_York,Europe/London,Asia/Tokyo"
+  worldClockLabels?: string;        // world_clock: "NYC,LDN,TYO"
+  musicVisualizerActive?: boolean;  // music_visualizer: playing
+  musicVisualizerStyle?: number;    // music_visualizer: 0=bars, 1=wave, 2=circle
+  figmaBoardUrl?: string;           // figma_board: Figma file URL
+  figmaBoardConnected?: boolean;    // figma_board: connected state
+  figmaBoardPreview?: string;       // figma_board: frame name
+  // Game item state
+  pokerChips?: number;              // poker_table: player chip count (starts 2000)
+  pokerHand?: string;               // poker_table: current hand display e.g. "A♠ K♥"
+  pokerPot?: number;                // poker_table: current pot size
+  pokerPhase?: string;              // poker_table: waiting/deal/flop/turn/river/showdown
+  pokerBetAmount?: number;          // poker_table: current bet
+  pokerAction?: string;             // poker_table: last player action (fold/call/raise/check)
+  pokerHandRank?: string;           // poker_table: evaluated hand name "PAIR OF ACES"
+  pokerBsHandRank?: string;         // poker_table: BlackSwan hand rank at showdown
+  pokerDealer?: string;             // poker_table: 'player' | 'blackswan' dealer position
+  pokerHandsWon?: number;           // poker_table: total hands won
+  pokerHandsPlayed?: number;        // poker_table: total hands played
+  pokerBlinds?: number;             // poker_table: current blind level (25/50/100)
+  pokerSolWager?: number;           // poker_table: SOL amount wagered (legacy)
+  pokerCryptoType?: string;         // poker_table: SOL/ETH/BTC/USDC/MATIC
+  pokerCryptoAmount?: number;       // poker_table: crypto wager amount
+  pokerBlackswanEnabled?: boolean;  // poker_table: BlackSwan AI is playing
+  pokerBlackswanChips?: number;     // poker_table: BlackSwan chip count
+  pokerBlackswanHand?: string;      // poker_table: BlackSwan hand (hidden)
+  pokerBlackswanFolded?: boolean;   // poker_table: BlackSwan folded
+  pokerBlackswanLine?: string;      // poker_table: BlackSwan trash talk
+  pokerPlayerCount?: number;        // poker_table: seats taken
+  pokerWinnerName?: string;         // poker_table: last round winner
+  pokerCommunity?: string;          // poker_table: community cards "A♠ K♥ Q♦"
+  chessPosition?: string;           // chess_board: FEN-like display state
+  chessTurn?: string;               // chess_board: white/black
+  chessGameOver?: boolean;          // chess_board: game ended
+  coinFlipResult?: string;          // coin_flip: heads/tails
+  coinFlipStreak?: number;          // coin_flip: win streak
+  coinFlipSolBet?: number;          // coin_flip: legacy SOL wager
+  coinFlipCryptoType?: string;      // coin_flip: crypto type
+  coinFlipCryptoAmount?: number;    // coin_flip: crypto wager
+  coinFlipBlackswan?: boolean;      // coin_flip: BlackSwan is opponent
+  coinFlipWins?: number;            // coin_flip: total wins
+  coinFlipLosses?: number;          // coin_flip: total losses
+  connectFourBoard?: string;        // connect_four: board state string
+  connectFourTurn?: number;         // connect_four: 1=red, 2=yellow
+  connectFourWinner?: number;       // connect_four: 0/1/2
+  connectFourBlackswan?: boolean;   // connect_four: BlackSwan as opponent
+  triviaQuestion?: string;          // trivia_screen: current question
+  triviaAnswer?: number;            // trivia_screen: selected answer index
+  triviaScore?: number;             // trivia_screen: streak score
+  triviaCategory?: string;          // trivia_screen: tech/crypto/general
+  triviaBlackswan?: boolean;        // trivia_screen: BlackSwan competing
+  rouletteNumber?: number;          // roulette_wheel: last landed number
+  rouletteBetType?: string;         // roulette_wheel: red/black/odd/even/number
+  rouletteSpinning?: boolean;       // roulette_wheel: currently spinning
+  rouletteSolBet?: number;          // roulette_wheel: legacy SOL wager
+  rouletteCryptoType?: string;      // roulette_wheel: crypto type
+  rouletteCryptoAmount?: number;    // roulette_wheel: crypto wager
+  // Universal game state
+  gameCryptoType?: string;          // any game: active crypto for wagers
+  gameCryptoWager?: number;         // any game: current wager amount
+  gameBlackswanActive?: boolean;    // any game: BlackSwan AI enabled
 }
+
+export type FurnitureCategory = 'games' | 'connected' | 'vibe' | 'productivity' | 'fun' | 'furniture';
 
 export interface FurnitureCatalogEntry {
   type: FurnitureType;
@@ -504,58 +633,91 @@ export interface FurnitureCatalogEntry {
   icon: string;
   width: number;
   height: number;
-  category: 'work' | 'lounge' | 'decor' | 'tech' | 'interactive';
+  category: FurnitureCategory;
   description: string;
 }
 
 export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
-  // Work
-  { type: 'desk',        name: 'Desk',           icon: '🖥',  width: 100, height: 50,  category: 'work',   description: 'Standard workstation' },
-  { type: 'standingdesk',name: 'Standing Desk',  icon: '📐',  width: 90,  height: 55,  category: 'work',   description: 'Ergonomic standing desk' },
-  { type: 'whiteboard',  name: 'Whiteboard',     icon: '📋',  width: 120, height: 60,  category: 'work',   description: 'Planning board' },
-  { type: 'printer',     name: 'Printer',        icon: '🖨',  width: 40,  height: 30,  category: 'work',   description: 'Network printer' },
-  { type: 'server',      name: 'Server Rack',    icon: '🗄',  width: 50,  height: 60,  category: 'tech',   description: 'Hosts all the agents' },
-  // Lounge
-  { type: 'couch',       name: 'Couch',          icon: '🛋',  width: 80,  height: 40,  category: 'lounge', description: 'Chill zone seating' },
-  { type: 'beanbag',     name: 'Bean Bag',       icon: '⬡',   width: 35,  height: 35,  category: 'lounge', description: 'Low-key seating' },
-  { type: 'pingtable',   name: 'Ping Pong',      icon: '🏓',  width: 100, height: 50,  category: 'lounge', description: 'Team ping pong table' },
-  { type: 'snackbar',    name: 'Snack Bar',      icon: '🍕',  width: 70,  height: 40,  category: 'lounge', description: 'Keep the team fueled' },
-  { type: 'arcade',      name: 'Arcade',         icon: '🕹',  width: 30,  height: 50,  category: 'lounge', description: 'Retro arcade machine' },
-  // Tech & decor
-  { type: 'tv',          name: 'Big Screen TV',  icon: '📺',  width: 80,  height: 50,  category: 'tech',   description: 'Dashboard display' },
-  { type: 'coffee',      name: 'Coffee Machine', icon: '☕',  width: 30,  height: 30,  category: 'lounge', description: 'Fuel for the grind' },
-  { type: 'watercooler', name: 'Water Cooler',   icon: '💧',  width: 20,  height: 35,  category: 'lounge', description: 'Hydration station' },
-  // Decor
-  { type: 'plant',       name: 'Plant',          icon: '🌿',  width: 30,  height: 40,  category: 'decor',  description: 'Adds life to the office' },
-  { type: 'lamp',        name: 'Floor Lamp',     icon: '💡',  width: 20,  height: 50,  category: 'decor',  description: 'Mood lighting' },
-  { type: 'bookshelf',   name: 'Bookshelf',      icon: '📚',  width: 60,  height: 40,  category: 'decor',  description: 'Knowledge hub' },
-  { type: 'rug',         name: 'Rug',            icon: '⬜',  width: 80,  height: 50,  category: 'decor',  description: 'Defines a space' },
-  { type: 'neonsign',    name: 'Neon Sign',      icon: '✦',   width: 60,  height: 25,  category: 'decor',  description: 'Custom neon text' },
-  { type: 'trophy',      name: 'Trophy Shelf',   icon: '🏆',  width: 50,  height: 40,  category: 'decor',  description: 'Show your wins' },
-  { type: 'safe',        name: 'Safe',           icon: '🔒',  width: 30,  height: 35,  category: 'tech',   description: 'Secure vault' },
-  { type: 'clock',       name: 'Wall Clock',     icon: '🕐',  width: 25,  height: 25,  category: 'decor',  description: 'Always be on time' },
-  { type: 'window',      name: 'Window',         icon: '🪟',  width: 60,  height: 40,  category: 'decor',  description: 'Let the light in' },
-  { type: 'nft_frame',   name: 'Image / NFT',    icon: '🖼',  width: 80,  height: 80,  category: 'decor',  description: 'Upload image or display NFT' },
-  { type: 'stickynote',  name: 'Sticky Note',    icon: '📝',  width: 100, height: 100, category: 'work',   description: 'Write, draw, or add GIFs' },
-  // Interactive
-  { type: 'enter_key',      name: 'Enter Key',       icon: '⏎',  width: 80,  height: 60,  category: 'interactive', description: 'Click to send a task to all agents' },
-  { type: 'button_panel',   name: 'Button Panel',    icon: '🔘', width: 90,  height: 50,  category: 'interactive', description: 'Quick-command buttons' },
-  { type: 'alarm_bell',     name: 'Alarm Bell',      icon: '🔔', width: 50,  height: 50,  category: 'interactive', description: 'Ring to get attention' },
-  { type: 'launch_pad',     name: 'Launch Pad',      icon: '🚀', width: 70,  height: 70,  category: 'interactive', description: 'Launch tasks to all agents' },
-  { type: 'jukebox',        name: 'Jukebox',         icon: '🎵', width: 60,  height: 80,  category: 'interactive', description: 'Cycle through tracks' },
-  { type: 'dice_roller',    name: 'Dice Roller',     icon: '🎲', width: 50,  height: 50,  category: 'interactive', description: 'Roll a random number' },
-  { type: 'gong',           name: 'Gong',            icon: '🔊', width: 60,  height: 70,  category: 'interactive', description: 'Strike for a ripple effect' },
-  { type: 'confetti_cannon',name: 'Confetti Cannon', icon: '🎉', width: 50,  height: 60,  category: 'interactive', description: 'Burst confetti on the floor' },
-  { type: 'timer_display',  name: 'Timer',           icon: '⏱',  width: 70,  height: 50,  category: 'interactive', description: '25-min pomodoro countdown' },
-  { type: 'scoreboard',     name: 'Scoreboard',      icon: '📊', width: 100, height: 60,  category: 'interactive', description: 'Tasks completed today' },
-  { type: 'status_board',   name: 'Status Board',    icon: '📋', width: 110, height: 70,  category: 'interactive', description: 'Agent status at a glance' },
-  { type: 'command_console',name: 'Command Console', icon: '💻', width: 90,  height: 60,  category: 'interactive', description: 'Send command to specific agent' },
-  { type: 'slot_machine',  name: 'Slot Machine',    icon: '🎰', width: 60,  height: 80,  category: 'interactive', description: 'Spin for a jackpot!' },
-  { type: 'crystal_ball',  name: 'Crystal Ball',    icon: '🔮', width: 50,  height: 50,  category: 'interactive', description: 'Reveal your fortune' },
-  { type: 'mood_ring',     name: 'Mood Ring',       icon: '💍', width: 50,  height: 50,  category: 'interactive', description: 'Team vibe check' },
-  { type: 'boom_box',      name: 'Boom Box',        icon: '📻', width: 70,  height: 50,  category: 'interactive', description: 'Animated equalizer' },
-  { type: 'lava_lamp',     name: 'Lava Lamp',       icon: '🫧', width: 30,  height: 60,  category: 'interactive', description: 'Mesmerizing blobs' },
-  { type: 'whack_a_mole',  name: 'Whack-a-Mole',   icon: '🔨', width: 80,  height: 60,  category: 'interactive', description: 'Mini whack game' },
+  // ── Connected (apps, services & integrations) — first ──────────────────
+  { type: 'crypto_ticker',    name: 'Crypto Ticker',    icon: '📈', width: 100, height: 50,  category: 'connected', description: 'Live SOL, ETH, BTC prices' },
+  { type: 'github_feed',      name: 'GitHub Feed',      icon: '🐙', width: 90,  height: 70,  category: 'connected', description: 'Repo commits, PRs & activity' },
+  { type: 'calendar_widget',  name: 'Calendar',         icon: '📅', width: 80,  height: 70,  category: 'connected', description: 'Google / Outlook next events' },
+  { type: 'world_clock',      name: 'World Clock',      icon: '🌍', width: 100, height: 50,  category: 'connected', description: 'Multi-timezone display' },
+  { type: 'music_visualizer', name: 'Music Visualizer', icon: '🎶', width: 90,  height: 60,  category: 'connected', description: 'Audio spectrum visualizer' },
+  { type: 'figma_board',      name: 'Figma Board',      icon: '🎨', width: 100, height: 80,  category: 'connected', description: 'Preview your Figma designs' },
+  { type: 'smart_tv',        name: 'Smart TV',        icon: '📺', width: 120, height: 80,  category: 'connected', description: 'Stream YouTube, Netflix, Hulu & more' },
+  { type: 'spotify_jukebox', name: 'Spotify Jukebox', icon: '🎧', width: 70,  height: 90,  category: 'connected', description: 'Connect Spotify — control playback' },
+  { type: 'discord_hub',     name: 'Discord Hub',     icon: '💬', width: 80,  height: 70,  category: 'connected', description: 'Connect Discord server widget' },
+  { type: 'twitch_stream',   name: 'Twitch Stream',   icon: '🟣', width: 90,  height: 60,  category: 'connected', description: 'Watch or show a Twitch stream' },
+  { type: 'video_call',      name: 'Video Call',      icon: '📹', width: 90,  height: 70,  category: 'connected', description: 'Start Zoom / Meet / Teams call' },
+  { type: 'message_board',   name: 'Message Board',   icon: '📱', width: 60,  height: 90,  category: 'connected', description: 'View text messages & notifications' },
+  { type: 'weather_station', name: 'Weather Station', icon: '🌤️', width: 60,  height: 50,  category: 'connected', description: 'Live local weather display' },
+  { type: 'tv',              name: 'Dashboard TV',    icon: '🖥',  width: 80,  height: 50,  category: 'connected', description: 'Static dashboard display' },
+  // ── Games (bet SOL, compete with circle) ───────────────────────────────
+  { type: 'poker_table',    name: 'Poker Table',    icon: '🃏', width: 130, height: 100, category: 'games', description: '2K chips · Texas Hold\'em · bet crypto' },
+  { type: 'coin_flip',      name: 'Coin Flip',      icon: '🪙', width: 60,  height: 60,  category: 'games', description: 'Flip a coin · wager SOL' },
+  { type: 'roulette_wheel', name: 'Roulette',       icon: '🎡', width: 90,  height: 90,  category: 'games', description: 'Spin the wheel · bet SOL' },
+  { type: 'chess_board',    name: 'Chess',           icon: '♟️', width: 90,  height: 90,  category: 'games', description: 'Classic chess match' },
+  { type: 'connect_four',   name: 'Connect Four',   icon: '🔴', width: 80,  height: 80,  category: 'games', description: 'Drop chips · 4 in a row' },
+  { type: 'trivia_screen',  name: 'Trivia',         icon: '🧠', width: 90,  height: 60,  category: 'games', description: 'Quick trivia rounds · streak score' },
+  // ── Vibe (aesthetic & ambient) ──────────────────────────────────────────
+  { type: 'fireplace',     name: 'Fireplace',       icon: '🔥', width: 80,  height: 70,  category: 'vibe', description: 'Crackling fire with embers' },
+  { type: 'aquarium',      name: 'Aquarium',        icon: '🐠', width: 90,  height: 60,  category: 'vibe', description: 'Fish tank with swimming fish' },
+  { type: 'rain_window',   name: 'Rain Window',     icon: '🌧️', width: 70,  height: 50,  category: 'vibe', description: 'Rainy window — lo-fi vibes' },
+  { type: 'galaxy_orb',    name: 'Galaxy Orb',      icon: '🌌', width: 50,  height: 50,  category: 'vibe', description: 'Floating galaxy sphere' },
+  { type: 'terrarium',     name: 'Terrarium',       icon: '🦋', width: 60,  height: 50,  category: 'vibe', description: 'Mini garden with butterflies' },
+  { type: 'zen_garden',    name: 'Zen Garden',      icon: '🪨', width: 80,  height: 50,  category: 'vibe', description: 'Rake new sand patterns' },
+  { type: 'hologram',      name: 'Hologram',        icon: '🔷', width: 60,  height: 70,  category: 'vibe', description: 'Rotating holographic display' },
+  { type: 'pixel_display', name: 'Pixel Display',   icon: '👾', width: 70,  height: 50,  category: 'vibe', description: 'Animated pixel art scenes' },
+  { type: 'lava_lamp',     name: 'Lava Lamp',       icon: '🫧', width: 30,  height: 60,  category: 'vibe', description: 'Mesmerizing blobs' },
+  { type: 'vinyl_player',  name: 'Vinyl Player',    icon: '💿', width: 60,  height: 60,  category: 'vibe', description: 'Spinning record player' },
+  { type: 'focus_candle',  name: 'Focus Candle',    icon: '🕯️', width: 30,  height: 50,  category: 'vibe', description: 'Light to enter focus mode' },
+  { type: 'nft_frame',     name: 'Image / NFT',     icon: '🖼',  width: 80,  height: 80,  category: 'vibe', description: 'Upload image or display NFT' },
+  { type: 'neonsign',      name: 'Neon Sign',       icon: '✦',   width: 60,  height: 25,  category: 'vibe', description: 'Custom neon text' },
+  // ── Productivity (work tools & tracking) ────────────────────────────────
+  { type: 'pomodoro_room',   name: 'Pomodoro Room',   icon: '🍅', width: 70,  height: 60,  category: 'productivity', description: 'Focus timer with break tracking' },
+  { type: 'quote_board',    name: 'Quote Board',     icon: '💬', width: 100, height: 50,  category: 'productivity', description: 'Rotating inspiration quotes' },
+  { type: 'progress_bar',   name: 'Progress Bar',    icon: '📶', width: 100, height: 40,  category: 'productivity', description: 'Team task completion tracker' },
+  { type: 'scoreboard',     name: 'Scoreboard',      icon: '📊', width: 100, height: 60,  category: 'productivity', description: 'Tasks completed today' },
+  { type: 'status_board',   name: 'Status Board',    icon: '📋', width: 110, height: 70,  category: 'productivity', description: 'Agent status at a glance' },
+  { type: 'timer_display',  name: 'Timer',           icon: '⏱',  width: 70,  height: 50,  category: 'productivity', description: '25-min pomodoro countdown' },
+  { type: 'command_console',name: 'Command Console', icon: '💻', width: 90,  height: 60,  category: 'productivity', description: 'Send command to specific agent' },
+  { type: 'enter_key',      name: 'Enter Key',       icon: '⏎',  width: 80,  height: 60,  category: 'productivity', description: 'Send a task to all agents' },
+  { type: 'button_panel',   name: 'Button Panel',    icon: '🔘', width: 90,  height: 50,  category: 'productivity', description: 'Quick-command buttons' },
+  { type: 'whiteboard',     name: 'Whiteboard',      icon: '📋', width: 120, height: 60,  category: 'productivity', description: 'Planning board' },
+  { type: 'stickynote',     name: 'Sticky Note',     icon: '📝', width: 100, height: 100, category: 'productivity', description: 'Write, draw, or add GIFs' },
+  // ── Fun (games & toys) ──────────────────────────────────────────────────
+  { type: 'jukebox',        name: 'Jukebox',         icon: '🎵', width: 60,  height: 80,  category: 'fun', description: 'Cycle through tracks' },
+  { type: 'boom_box',       name: 'Boom Box',        icon: '📻', width: 70,  height: 50,  category: 'fun', description: 'Animated equalizer' },
+  { type: 'dice_roller',    name: 'Dice Roller',     icon: '🎲', width: 50,  height: 50,  category: 'fun', description: 'Roll a random number' },
+  { type: 'slot_machine',   name: 'Slot Machine',    icon: '🎰', width: 60,  height: 80,  category: 'fun', description: 'Spin for a jackpot!' },
+  { type: 'crystal_ball',   name: 'Crystal Ball',    icon: '🔮', width: 50,  height: 50,  category: 'fun', description: 'Reveal your fortune' },
+  { type: 'whack_a_mole',   name: 'Whack-a-Mole',   icon: '🔨', width: 80,  height: 60,  category: 'fun', description: 'Mini whack game' },
+  { type: 'confetti_cannon',name: 'Confetti Cannon', icon: '🎉', width: 50,  height: 60,  category: 'fun', description: 'Burst confetti on the floor' },
+  { type: 'gong',           name: 'Gong',            icon: '🔊', width: 60,  height: 70,  category: 'fun', description: 'Strike for a ripple effect' },
+  { type: 'alarm_bell',     name: 'Alarm Bell',      icon: '🔔', width: 50,  height: 50,  category: 'fun', description: 'Ring to get attention' },
+  { type: 'launch_pad',     name: 'Launch Pad',      icon: '🚀', width: 70,  height: 70,  category: 'fun', description: 'Launch tasks to all agents' },
+  { type: 'mood_ring',      name: 'Mood Ring',       icon: '💍', width: 50,  height: 50,  category: 'fun', description: 'Team vibe check' },
+  { type: 'arcade',         name: 'Arcade',          icon: '🕹',  width: 30,  height: 50,  category: 'fun', description: 'Retro arcade machine' },
+  { type: 'pingtable',      name: 'Ping Pong',       icon: '🏓', width: 100, height: 50,  category: 'fun', description: 'Team ping pong table' },
+  // ── Furniture (office basics) ───────────────────────────────────────────
+  { type: 'desk',         name: 'Desk',           icon: '🖥',  width: 100, height: 50,  category: 'furniture', description: 'Standard workstation' },
+  { type: 'standingdesk', name: 'Standing Desk',  icon: '📐',  width: 90,  height: 55,  category: 'furniture', description: 'Ergonomic standing desk' },
+  { type: 'couch',        name: 'Couch',          icon: '🛋',  width: 80,  height: 40,  category: 'furniture', description: 'Chill zone seating' },
+  { type: 'beanbag',      name: 'Bean Bag',       icon: '⬡',   width: 35,  height: 35,  category: 'furniture', description: 'Low-key seating' },
+  { type: 'server',       name: 'Server Rack',    icon: '🗄',  width: 50,  height: 60,  category: 'furniture', description: 'Hosts all the agents' },
+  { type: 'printer',      name: 'Printer',        icon: '🖨',  width: 40,  height: 30,  category: 'furniture', description: 'Network printer' },
+  { type: 'coffee',       name: 'Coffee Machine', icon: '☕',  width: 30,  height: 30,  category: 'furniture', description: 'Fuel for the grind' },
+  { type: 'watercooler',  name: 'Water Cooler',   icon: '💧',  width: 20,  height: 35,  category: 'furniture', description: 'Hydration station' },
+  { type: 'snackbar',     name: 'Snack Bar',      icon: '🍕',  width: 70,  height: 40,  category: 'furniture', description: 'Keep the team fueled' },
+  { type: 'plant',        name: 'Plant',          icon: '🌿',  width: 30,  height: 40,  category: 'furniture', description: 'Adds life to the office' },
+  { type: 'lamp',         name: 'Floor Lamp',     icon: '💡',  width: 20,  height: 50,  category: 'furniture', description: 'Mood lighting' },
+  { type: 'bookshelf',    name: 'Bookshelf',      icon: '📚',  width: 60,  height: 40,  category: 'furniture', description: 'Knowledge hub' },
+  { type: 'rug',          name: 'Rug',            icon: '⬜',  width: 80,  height: 50,  category: 'furniture', description: 'Defines a space' },
+  { type: 'trophy',       name: 'Trophy Shelf',   icon: '🏆',  width: 50,  height: 40,  category: 'furniture', description: 'Show your wins' },
+  { type: 'safe',         name: 'Safe',           icon: '🔒',  width: 30,  height: 35,  category: 'furniture', description: 'Secure vault' },
+  { type: 'clock',        name: 'Wall Clock',     icon: '🕐',  width: 25,  height: 25,  category: 'furniture', description: 'Always be on time' },
+  { type: 'window',       name: 'Window',         icon: '🪟',  width: 60,  height: 40,  category: 'furniture', description: 'Let the light in' },
 ];
 
 export function isInteractiveFurniture(type: FurnitureType): boolean {
@@ -564,6 +726,13 @@ export function isInteractiveFurniture(type: FurnitureType): boolean {
     'jukebox', 'dice_roller', 'gong', 'confetti_cannon',
     'timer_display', 'scoreboard', 'status_board', 'command_console',
     'slot_machine', 'crystal_ball', 'mood_ring', 'boom_box', 'lava_lamp', 'whack_a_mole',
+    'vinyl_player', 'galaxy_orb', 'zen_garden', 'focus_candle',
+    'quote_board', 'progress_bar', 'hologram', 'pixel_display',
+    'spotify_jukebox', 'discord_hub', 'video_call', 'message_board',
+    'smart_tv', 'weather_station', 'twitch_stream', 'pomodoro_room',
+    'crypto_ticker', 'github_feed', 'calendar_widget', 'world_clock',
+    'music_visualizer', 'figma_board',
+    'poker_table', 'chess_board', 'coin_flip', 'connect_four', 'trivia_screen', 'roulette_wheel',
   ].includes(type);
 }
 

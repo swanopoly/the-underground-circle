@@ -340,17 +340,20 @@ async function invokeBYOLLM(
 // ─── OpenClaw Gateway: Invoke Agent ─────────────────────────────────────────
 
 /**
- * Call the OpenClaw agent via gateway with timeout.
- * Gateway endpoint: http://localhost:18790/tools/invoke
- * 
- * Returns: { response: string, tokenCount: number, latencyMs: number }
+ * Call the OpenClaw agent via gateway using sessions_send + response polling.
+ *
+ * Flow:
+ * 1. Snapshot the last message timestamp from sessions_history
+ * 2. Send the command via sessions_send
+ * 3. Poll sessions_history for a new assistant response
+ * 4. Return the response text
  */
 export async function callOpenClawAgent(
   command: string,
   agentId: string,
   agentName: string,
   gatewayUrl: string,
-  timeoutMs: number = 30000,
+  timeoutMs: number = 60000,
   model?: string | null,
   authToken?: string
 ): Promise<AgentInvocationResult> {
@@ -363,75 +366,121 @@ export async function callOpenClawAgent(
 
   const start = Date.now();
 
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        'x-openclaw-agent-id': agentId,
-      };
-      if (authToken) {
-        headers['Authorization'] = `Bearer ${authToken}`;
-      }
-
-      const response = await fetch(`${gatewayUrl}/tools/invoke`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          tool: 'execute_command',
-          params: {
-            command,
-            agentName,
-            model: model || undefined,
-          },
-        }),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeout);
-      const latencyMs = Date.now() - start;
-
-      if (!response.ok) {
-        return {
-          success: false,
-          error: `Gateway error: ${response.status} ${response.statusText}`,
-        };
-      }
-
-      const data = await response.json();
-      const responseText = data.result || data.response || 'Agent executed successfully';
-
-      // Extract token count from response headers or body
-      const tokenCount = data.tokenCount
-        || data.tokens
-        || parseInt(response.headers.get('x-token-count') || '0')
-        || estimateTokens(command, responseText);
-
-      return {
-        success: true,
-        responseText,
-        tokenCount,
-        latencyMs,
-      };
-    } catch (fetchErr: any) {
-      clearTimeout(timeout);
-      
-      // Timeout error
-      if (fetchErr.name === 'AbortError') {
-        return {
-          success: false,
-          error: `Agent timeout (${timeoutMs}ms) — no response from gateway`,
-        };
-      }
-
-      throw fetchErr;
+  // Extract session key from the agent ID (format: "connectionId::sessionKey")
+  // Fall back to "agent:main:main" if we can't parse it
+  let sessionKey = 'agent:main:main';
+  if (agentId.includes('::')) {
+    const parts = agentId.split('::');
+    if (parts.length >= 2 && parts[1].startsWith('agent:')) {
+      sessionKey = parts.slice(1).join('::');
     }
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (authToken) {
+    headers['Authorization'] = `Bearer ${authToken}`;
+  }
+
+  async function invokeGatewayTool(tool: string, args: Record<string, any>): Promise<any> {
+    const res = await fetch(`${gatewayUrl}/tools/invoke`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ tool, args }),
+    });
+    if (!res.ok) throw new Error(`Gateway HTTP ${res.status}`);
+    return res.json();
+  }
+
+  try {
+    // Step 1: Snapshot the last assistant message timestamp
+    let lastAssistantTimestamp = 0;
+    try {
+      const histBefore = await invokeGatewayTool('sessions_history', {
+        sessionKey,
+        limit: 3,
+      });
+      const msgs = histBefore?.result?.details?.messages || [];
+      for (const m of msgs) {
+        if (m.role === 'assistant' && m.timestamp) {
+          lastAssistantTimestamp = Math.max(lastAssistantTimestamp, m.timestamp);
+        }
+      }
+    } catch {
+      // OK — we'll just look for any response
+    }
+
+    // Step 2: Send the command via sessions_send
+    const sendResult = await invokeGatewayTool('sessions_send', {
+      sessionKey,
+      message: command,
+    });
+
+    if (!sendResult?.ok) {
+      return {
+        success: false,
+        error: `Failed to send message to OpenClaw: ${sendResult?.error?.message || 'unknown error'}`,
+      };
+    }
+
+    // Step 3: Poll sessions_history for a new assistant response
+    const POLL_INTERVAL = 2000;
+    const maxPolls = Math.ceil(timeoutMs / POLL_INTERVAL);
+
+    for (let i = 0; i < maxPolls; i++) {
+      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+
+      try {
+        const histAfter = await invokeGatewayTool('sessions_history', {
+          sessionKey,
+          limit: 3,
+        });
+
+        const msgs = histAfter?.result?.details?.messages || [];
+
+        // Look for a new assistant message with text content
+        for (const m of msgs) {
+          if (m.role !== 'assistant') continue;
+          if (m.timestamp && m.timestamp <= lastAssistantTimestamp) continue;
+          if (m.stopReason === 'error') continue;
+
+          // Extract text from content array
+          const content = m.content;
+          let text = '';
+          if (typeof content === 'string') {
+            text = content;
+          } else if (Array.isArray(content)) {
+            text = content
+              .filter((c: any) => c.type === 'text')
+              .map((c: any) => c.text)
+              .join('');
+          }
+
+          if (text) {
+            const latencyMs = Date.now() - start;
+            return {
+              success: true,
+              responseText: text,
+              tokenCount: estimateTokens(command, text),
+              latencyMs,
+              model: m.model || model || undefined,
+            };
+          }
+        }
+      } catch {
+        // Poll failed — keep trying
+      }
+    }
+
+    return {
+      success: false,
+      error: `OpenClaw agent did not respond within ${Math.round(timeoutMs / 1000)}s`,
+    };
   } catch (err: any) {
     return {
       success: false,
-      error: err.message || 'Agent invocation failed',
+      error: err.message || 'OpenClaw invocation failed',
     };
   }
 }

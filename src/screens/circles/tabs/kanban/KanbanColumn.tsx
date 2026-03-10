@@ -38,6 +38,7 @@ export default function KanbanColumn({
   const [quickAddText, setQuickAddText] = useState('');
   const [quickAddFocused, setQuickAddFocused] = useState(false);
   const [showBatchMenu, setShowBatchMenu] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
 
   // Priority breakdown for batch menu
   const priorityBreakdown = tasks.reduce((acc, t) => {
@@ -94,7 +95,7 @@ export default function KanbanColumn({
         </View>
         <View style={s.headerRight}>
           {tasks.length > 0 && (
-            <Pressable onPress={() => setShowBatchMenu(p => !p)} style={[s.batchBtn, showBatchMenu && s.batchBtnActive]} hitSlop={4}>
+            <Pressable onPress={() => { setShowBatchMenu(p => !p); setConfirmArchive(false); }} style={[s.batchBtn, showBatchMenu && s.batchBtnActive]} hitSlop={4}>
               <Text style={s.batchBtnText}>...</Text>
             </Pressable>
           )}
@@ -142,15 +143,33 @@ export default function KanbanColumn({
           </View>
           {/* Archive done */}
           {column.key === 'done' && archivableTasks.length > 0 && (
-            <Pressable
-              onPress={() => {
-                if (onArchiveDone) onArchiveDone(archivableTasks.map(t => t.id));
-                setShowBatchMenu(false);
-              }}
-              style={s.batchArchiveBtn}
-            >
-              <Text style={s.batchArchiveText}>Archive {archivableTasks.length} old tasks</Text>
-            </Pressable>
+            !confirmArchive ? (
+              <Pressable
+                onPress={() => setConfirmArchive(true)}
+                style={s.batchArchiveBtn}
+              >
+                <Text style={s.batchArchiveText}>Archive {archivableTasks.length} old tasks</Text>
+              </Pressable>
+            ) : (
+              <View style={s.batchArchiveConfirm}>
+                <Text style={s.batchArchiveWarning}>{archivableTasks.length} tasks will be permanently deleted</Text>
+                <View style={s.batchArchiveActions}>
+                  <Pressable
+                    onPress={() => {
+                      if (onArchiveDone) onArchiveDone(archivableTasks.map(t => t.id));
+                      setShowBatchMenu(false);
+                      setConfirmArchive(false);
+                    }}
+                    style={s.batchArchiveConfirmBtn}
+                  >
+                    <Text style={s.batchArchiveConfirmText}>Delete</Text>
+                  </Pressable>
+                  <Pressable onPress={() => setConfirmArchive(false)} style={s.batchArchiveCancelBtn}>
+                    <Text style={s.batchArchiveCancelText}>Cancel</Text>
+                  </Pressable>
+                </View>
+              </View>
+            )
           )}
         </View>
       )}
@@ -378,6 +397,42 @@ const s = StyleSheet.create({
   },
   batchArchiveText: {
     color: '#ef4444',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  batchArchiveConfirm: {
+    padding: 8,
+    gap: 6,
+  },
+  batchArchiveWarning: {
+    color: '#f87171',
+    fontSize: 10,
+    fontWeight: '500',
+  },
+  batchArchiveActions: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  batchArchiveConfirmBtn: {
+    backgroundColor: '#ef444420',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  batchArchiveConfirmText: {
+    color: '#f87171',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  batchArchiveCancelBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  batchArchiveCancelText: {
+    color: '#6b6b80',
     fontSize: 10,
     fontWeight: '600',
   },

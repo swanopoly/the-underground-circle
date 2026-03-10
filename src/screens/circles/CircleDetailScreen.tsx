@@ -60,6 +60,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
     loadCircleData();
   }, [circleId]);
 
+
   const loadCircleData = async () => {
     try {
       const { data: circleData } = await supabase

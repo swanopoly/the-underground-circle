@@ -336,7 +336,6 @@ export async function loadTerminalHistory(
     .from('office_terminal_messages')
     .select('*')
     .eq('circle_id', circleId)
-    .neq('status', 'deleted')
     .order('created_at', { ascending: false })
     .limit(limit);
 
@@ -354,7 +353,8 @@ export async function loadTerminalHistory(
 
 export function subscribeToTerminalMessages(
   circleId: string,
-  onUpdate: (msg: TerminalMessage) => void
+  onUpdate: (msg: TerminalMessage) => void,
+  onDelete?: (id: string) => void
 ): () => void {
   const channel = supabase
     .channel(`terminal-db-${circleId}`)
@@ -363,23 +363,37 @@ export function subscribeToTerminalMessages(
       schema: 'public',
       table: 'office_terminal_messages',
       filter: `circle_id=eq.${circleId}`,
-    }, ({ new: row, eventType }) => {
-      if (eventType !== 'DELETE' && row) {
-        onUpdate(fromRow(row as Record<string, unknown>));
+    }, ({ new: row, old: oldRow, eventType }) => {
+      // Hard DELETE — notify component to remove from state
+      if (eventType === 'DELETE') {
+        const id = (oldRow as any)?.id;
+        if (id && onDelete) onDelete(id);
+        return;
       }
+      if (!row) return;
+
+      const msg = fromRow(row as Record<string, unknown>);
+      onUpdate(msg);
     })
     .subscribe();
 
   return () => supabase.removeChannel(channel);
 }
 
-// ─── Delete a terminal message (soft-delete via status flag) ─────────────────
+// ─── Delete a terminal message (hard delete — removes row + responses) ───────
 
 export async function deleteTerminalMessage(messageId: string): Promise<{ error?: string }> {
   try {
+    // Delete responses first (child rows)
+    await supabase
+      .from('office_terminal_responses')
+      .delete()
+      .eq('message_id', messageId);
+
+    // Delete the message itself
     const { error } = await supabase
       .from('office_terminal_messages')
-      .update({ status: 'deleted', updated_at: new Date().toISOString() })
+      .delete()
       .eq('id', messageId);
 
     if (error) return { error: error.message };

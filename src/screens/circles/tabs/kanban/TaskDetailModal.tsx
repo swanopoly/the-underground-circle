@@ -16,6 +16,291 @@ import type { GoalWithCount } from '../../../../hooks/useGoals';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
 import { supabase } from '../../../../lib/supabase';
 
+// ─── Automation Report Section Parser ────────────────────────────────────────
+
+interface ReportSection {
+  heading: string;
+  content: string;
+  type: 'summary' | 'context' | 'members' | 'checkins' | 'tasks' | 'ai' | 'log' | 'prompt' | 'other';
+}
+
+function parseReportSections(description: string): ReportSection[] {
+  const sections: ReportSection[] = [];
+  const lines = description.split('\n');
+  let currentHeading = '';
+  let currentLines: string[] = [];
+  let currentType: ReportSection['type'] = 'summary';
+
+  const typeMap: Record<string, ReportSection['type']> = {
+    'AUTOMATION REPORT': 'summary',
+    'AUTOMATION FAILED': 'summary',
+    'CONTEXT ANALYZED': 'context',
+    'MEMBERS REVIEWED': 'members',
+    'NOT CHECKED IN TODAY': 'checkins',
+    "TODAY'S CHECK-INS": 'checkins',
+    'OPEN TASKS REVIEWED': 'tasks',
+    'COMPLETED THIS WEEK': 'tasks',
+    'AI RESPONSE': 'ai',
+    'EXECUTION LOG': 'log',
+    'PROMPT SENT TO AI': 'prompt',
+  };
+
+  const flush = () => {
+    if (currentHeading || currentLines.length > 0) {
+      sections.push({
+        heading: currentHeading,
+        content: currentLines.join('\n').trim(),
+        type: currentType,
+      });
+    }
+  };
+
+  for (const line of lines) {
+    // Detect section headers (lines followed by === or --- separators, or all-caps lines)
+    const isSeparator = /^[=-]{10,}$/.test(line.trim());
+    if (isSeparator) continue;
+
+    // Check if this line is a section heading
+    const matchedType = Object.entries(typeMap).find(([key]) => line.trim().startsWith(key));
+    if (matchedType && line.trim() === line.trim().toUpperCase()) {
+      flush();
+      currentHeading = line.trim();
+      currentLines = [];
+      currentType = matchedType[1];
+      continue;
+    }
+
+    currentLines.push(line);
+  }
+  flush();
+  return sections;
+}
+
+function AutomationReportView({ description }: { description: string }) {
+  const sections = parseReportSections(description);
+  const [expandedSections, setExpandedSections] = React.useState<Set<number>>(new Set([0, 5])); // Summary + AI expanded
+
+  const toggleSection = (idx: number) => {
+    setExpandedSections(prev => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  };
+
+  const sectionIcons: Record<ReportSection['type'], string> = {
+    summary: '\u{1F4CB}',
+    context: '\u{1F50D}',
+    members: '\u{1F465}',
+    checkins: '\u2705',
+    tasks: '\u{1F4DD}',
+    ai: '\u{1F9E0}',
+    log: '\u23F1\uFE0F',
+    prompt: '\u{1F4E4}',
+    other: '\u{1F4C4}',
+  };
+
+  const sectionColors: Record<ReportSection['type'], string> = {
+    summary: '#6366f1',
+    context: '#8b5cf6',
+    members: '#06b6d4',
+    checkins: '#22c55e',
+    tasks: '#f59e0b',
+    ai: '#ec4899',
+    log: '#64748b',
+    prompt: '#78716c',
+    other: '#6b6b80',
+  };
+
+  if (sections.length === 0) {
+    return <Text style={rs.emptyText}>{description || 'No description'}</Text>;
+  }
+
+  return (
+    <View style={rs.container}>
+      {sections.map((section, idx) => {
+        const expanded = expandedSections.has(idx);
+        const color = sectionColors[section.type] || '#6b6b80';
+        const icon = sectionIcons[section.type] || '\u{1F4C4}';
+        const lineCount = section.content.split('\n').length;
+
+        return (
+          <View key={idx} style={[rs.section, { borderLeftColor: color }]}>
+            <Pressable onPress={() => toggleSection(idx)} style={rs.sectionHeader}>
+              <View style={rs.sectionHeaderLeft}>
+                <Text style={rs.sectionIcon}>{icon}</Text>
+                <Text style={[rs.sectionTitle, { color }]}>{section.heading || 'Details'}</Text>
+                {lineCount > 1 && (
+                  <View style={[rs.lineBadge, { backgroundColor: color + '15' }]}>
+                    <Text style={[rs.lineBadgeText, { color }]}>{lineCount} lines</Text>
+                  </View>
+                )}
+              </View>
+              <Text style={[rs.expandArrow, { color }]}>{expanded ? '\u25BC' : '\u25B6'}</Text>
+            </Pressable>
+            {expanded && (
+              <View style={rs.sectionBody}>
+                {section.type === 'ai' ? (
+                  <View style={rs.aiOutputBox}>
+                    <Text style={rs.aiOutputText} selectable>{section.content}</Text>
+                  </View>
+                ) : section.type === 'log' ? (
+                  <View style={rs.logBox}>
+                    {section.content.split('\n').filter(Boolean).map((line, i) => {
+                      const isSuccess = line.includes('\u2713') || line.includes('\u2705');
+                      const isError = line.includes('\u274C');
+                      const isPending = line.includes('\u23F3') || line.includes('\u231B');
+                      const lineColor = isError ? '#ef4444' : isSuccess ? '#22c55e' : isPending ? '#f59e0b' : '#9090a8';
+                      return (
+                        <Text key={i} style={[rs.logLine, { color: lineColor }]} selectable>{line.trim()}</Text>
+                      );
+                    })}
+                  </View>
+                ) : section.type === 'summary' ? (
+                  <View style={rs.summaryBox}>
+                    {section.content.split('\n').filter(Boolean).map((line, i) => {
+                      const [label, ...rest] = line.split(':');
+                      const value = rest.join(':').trim();
+                      if (!value) return <Text key={i} style={rs.summaryLine} selectable>{line}</Text>;
+                      return (
+                        <View key={i} style={rs.summaryRow}>
+                          <Text style={rs.summaryLabel}>{label}:</Text>
+                          <Text style={[
+                            rs.summaryValue,
+                            line.startsWith('Status: FAILED') && { color: '#ef4444' },
+                            line.startsWith('Status: COMPLETED') && { color: '#22c55e' },
+                            line.startsWith('Status: SKIPPED') && { color: '#f59e0b' },
+                          ]} selectable>{value}</Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                ) : (
+                  <Text style={rs.sectionContent} selectable>{section.content}</Text>
+                )}
+              </View>
+            )}
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+const rs = StyleSheet.create({
+  container: {
+    gap: 4,
+  },
+  emptyText: {
+    color: '#444455',
+    fontSize: 14,
+    fontStyle: 'italic',
+  },
+  section: {
+    borderLeftWidth: 3,
+    borderLeftColor: '#6366f1',
+    borderRadius: 8,
+    backgroundColor: '#0c0c14',
+    overflow: 'hidden',
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', userSelect: 'none' } as any : {}),
+  },
+  sectionHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  sectionIcon: {
+    fontSize: 14,
+  },
+  sectionTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  lineBadge: {
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+  },
+  lineBadgeText: {
+    fontSize: 9,
+    fontWeight: '600',
+  },
+  expandArrow: {
+    fontSize: 10,
+  },
+  sectionBody: {
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+  },
+  sectionContent: {
+    color: '#9090a8',
+    fontSize: 12,
+    lineHeight: 18,
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+  },
+  // AI output
+  aiOutputBox: {
+    backgroundColor: '#0a0a12',
+    borderWidth: 1,
+    borderColor: '#ec489920',
+    borderRadius: 8,
+    padding: 12,
+  },
+  aiOutputText: {
+    color: '#e4e4ed',
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  // Log
+  logBox: {
+    backgroundColor: '#0a0a12',
+    borderRadius: 8,
+    padding: 10,
+    gap: 3,
+  },
+  logLine: {
+    fontSize: 11,
+    lineHeight: 18,
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+  },
+  // Summary
+  summaryBox: {
+    gap: 4,
+  },
+  summaryRow: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  summaryLabel: {
+    color: '#6b6b80',
+    fontSize: 12,
+    fontWeight: '600',
+    minWidth: 90,
+  },
+  summaryValue: {
+    color: '#c0c0d0',
+    fontSize: 12,
+    flex: 1,
+  },
+  summaryLine: {
+    color: '#9090a8',
+    fontSize: 12,
+  },
+});
+
+// ─── Main Component ─────────────────────────────────────────────────────────
+
 interface Props {
   task: KanbanTask;
   kanban: KanbanData;
@@ -135,6 +420,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
   const peerApprovals = task.peer_approvals || [];
   const goalData = goals?.find(g => g.id === task.goal_id);
   const goalAgentIds = goalData?.assigned_agent_ids || [];
+  const isAutoReport = task.title.startsWith('[Auto]');
 
   const timeSince = (iso: string) => {
     const ms = Date.now() - new Date(iso).getTime();
@@ -163,6 +449,17 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
               <View style={[s.reviewBanner, { backgroundColor: '#f9731608' }]}>
                 <View style={[s.reviewBannerDot, { backgroundColor: '#f97316' }]} />
                 <Text style={[s.reviewBannerText, { color: '#f97316' }]}>FINAL REVIEW</Text>
+              </View>
+            )}
+            {isAutoReport && (
+              <View style={[s.reviewBanner, { backgroundColor: '#6366f108' }]}>
+                <Text style={{ fontSize: 12 }}>{'\u{1F916}'}</Text>
+                <Text style={[s.reviewBannerText, { color: '#6366f1' }]}>AUTOMATION REPORT</Text>
+                {task.title.includes('FAILED') && (
+                  <View style={{ backgroundColor: '#ef444420', borderRadius: 8, paddingHorizontal: 6, paddingVertical: 1, marginLeft: 4 }}>
+                    <Text style={{ color: '#ef4444', fontSize: 9, fontWeight: '700' }}>FAILED</Text>
+                  </View>
+                )}
               </View>
             )}
 
@@ -301,10 +598,12 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                 value={description}
                 onChangeText={setDescription}
                 multiline
-                maxLength={500}
+                maxLength={isAutoReport ? 50000 : 2000}
                 placeholder="Add details..."
                 placeholderTextColor="#333348"
               />
+            ) : isAutoReport ? (
+              <AutomationReportView description={task.description || ''} />
             ) : (
               <Text style={[s.fieldValue, !task.description && s.fieldEmpty]}>
                 {task.description || 'No description'}
@@ -561,7 +860,7 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { boxShadow: '0 20px 60px rgba(0,0,0,0.5)' } as any : {}),
   },
   scroll: {
-    maxHeight: 520,
+    maxHeight: 620,
   },
   scrollContent: {
     padding: 24,

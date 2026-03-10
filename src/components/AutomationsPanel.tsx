@@ -47,6 +47,7 @@ import {
   MemoryNote,
   useDashboardStats,
   loadRecentRuns,
+  useCircleRunStream,
 } from '../services/automationService';
 import {
   AUTOMATION_TEMPLATES,
@@ -1117,6 +1118,7 @@ const mn = StyleSheet.create({
 export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: Props) {
   const { automations, isLoading, refresh } = useCircleAutomations(circleId);
   const { stats, refreshStats } = useAutomationStats(circleId);
+  const liveRuns = useCircleRunStream(circleId);
 
   // Auth
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -1168,9 +1170,15 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
 
   const handleTrigger = useCallback(async (id: string) => {
     setTriggeringId(id);
-    await triggerAutomation(id, circleId);
+    setExpandedId(id); // Auto-expand log so user sees progress
+    const result = await triggerAutomation(id, circleId);
     setTriggeringId(null);
-  }, [circleId]);
+    if (result.error) {
+      console.warn('[Automation] Trigger error:', result.error);
+    }
+    // Refresh stats after run completes
+    refreshStats();
+  }, [circleId, refreshStats]);
 
   const handleDelete = useCallback(async (id: string) => {
     await deleteAutomation(id);
@@ -1291,6 +1299,62 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
         </View>
       ) : (
         <View style={s.list}>
+          {/* Live run banners */}
+          {liveRuns.filter(r => r.status === 'running').map(run => {
+            const auto = automations.find(a => a.id === run.automationId);
+            const logLines = (run.inputContext as any)?.log || [];
+            const lastLog = typeof run.errorMessage === 'string' && run.status === 'running'
+              ? run.errorMessage.split('\n').filter(Boolean)
+              : logLines;
+            return (
+              <View key={`live-${run.id}`} style={{ backgroundColor: '#1a1a2e', borderWidth: 1, borderColor: '#6366f180', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <ActivityIndicator size="small" color="#6366f1" />
+                  <Text style={{ color: '#ddd', fontSize: 13, fontWeight: '700' }}>
+                    Running: {auto?.name || 'Automation'}
+                  </Text>
+                  <Text style={{ color: '#888', fontSize: 11 }}>
+                    {run.durationMs != null ? `${(run.durationMs / 1000).toFixed(1)}s` : '...'}
+                  </Text>
+                </View>
+                {lastLog.length > 0 && (
+                  <View style={{ backgroundColor: '#111', borderRadius: 4, padding: 6, marginTop: 2 }}>
+                    {(Array.isArray(lastLog) ? lastLog : [lastLog]).slice(-5).map((line: string, i: number) => (
+                      <Text key={i} style={{ color: '#aaa', fontSize: 10, fontFamily: 'monospace', lineHeight: 14 }}>{line}</Text>
+                    ))}
+                  </View>
+                )}
+              </View>
+            );
+          })}
+          {/* Recently completed runs — brief success/fail flash */}
+          {liveRuns.filter(r => r.status === 'completed' || r.status === 'failed').map(run => {
+            const auto = automations.find(a => a.id === run.automationId);
+            const isOk = run.status === 'completed';
+            return (
+              <View key={`done-${run.id}`} style={{ backgroundColor: isOk ? '#0a2010' : '#200a0a', borderWidth: 1, borderColor: isOk ? '#22c55e40' : '#ef444440', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={{ fontSize: 14 }}>{isOk ? '✅' : '❌'}</Text>
+                  <Text style={{ color: isOk ? '#22c55e' : '#ef4444', fontSize: 13, fontWeight: '700', flex: 1 }}>
+                    {auto?.name || 'Automation'} — {isOk ? 'Completed' : 'Failed'}
+                  </Text>
+                  <Text style={{ color: '#888', fontSize: 11 }}>
+                    {run.durationMs != null ? `${(run.durationMs / 1000).toFixed(1)}s` : ''} · {run.tokenCount} tok
+                  </Text>
+                </View>
+                {run.outputText && isOk && (
+                  <Text style={{ color: '#ccc', fontSize: 11, fontFamily: 'monospace', marginTop: 4 }} numberOfLines={3}>
+                    {run.outputText.slice(0, 300)}
+                  </Text>
+                )}
+                {run.errorMessage && !isOk && (
+                  <Text style={{ color: '#ef4444', fontSize: 11, fontFamily: 'monospace', marginTop: 4 }} numberOfLines={2}>
+                    {run.errorMessage}
+                  </Text>
+                )}
+              </View>
+            );
+          })}
           {filteredAutomations.map((auto) => (
             <AutomationCard
               key={auto.id}
@@ -1400,6 +1464,11 @@ function AutomationCard({
             {auto.eventConfig?.provider && (
               <Text style={s.cardMetaText}>{auto.eventConfig.provider}</Text>
             )}
+            {auto.eventConfig?.linked_goal_id && (
+              <View style={[s.triggerBadge, { backgroundColor: '#22c55e25' }]}>
+                <Text style={[s.triggerText, { color: '#22c55e' }]}>🎯 Goal linked</Text>
+              </View>
+            )}
             <Text style={s.cardMetaText}>·</Text>
             <Text style={s.cardMetaText}>Last: {timeAgo(auto.lastRunAt)}</Text>
             {auto.runCount > 0 && (
@@ -1461,10 +1530,13 @@ function AutomationCard({
         <Pressable
           onPress={() => onTrigger(auto.id)}
           disabled={triggering}
-          style={[s.runBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          style={[s.runBtn, triggering && { backgroundColor: '#22c55e15', borderColor: '#22c55e40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
         >
           {triggering ? (
-            <ActivityIndicator size="small" color="#22c55e" />
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              <ActivityIndicator size="small" color="#22c55e" />
+              <Text style={[s.runBtnText, { color: '#22c55e' }]}>Running...</Text>
+            </View>
           ) : (
             <Text style={s.runBtnText}>▶ Run</Text>
           )}
@@ -1510,7 +1582,8 @@ function RunHistory({ automationId }: { automationId: string }) {
 }
 
 function RunRow({ run }: { run: AutomationRun }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(run.status === 'running');
+  const logSteps: string[] = (run.inputContext as any)?.log || [];
 
   return (
     <View style={s.runRow}>
@@ -1518,7 +1591,9 @@ function RunRow({ run }: { run: AutomationRun }) {
         onPress={() => setExpanded(!expanded)}
         style={[s.runRowHeader, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
       >
-        <Text style={s.runIcon}>{runStatusIcon(run.status)}</Text>
+        <Text style={s.runIcon}>
+          {run.status === 'running' ? '🔄' : runStatusIcon(run.status)}
+        </Text>
         <Text style={s.runTime}>{timeAgo(run.startedAt)}</Text>
         {run.durationMs != null && (
           <Text style={s.runDuration}>{(run.durationMs / 1000).toFixed(1)}s</Text>
@@ -1529,19 +1604,54 @@ function RunRow({ run }: { run: AutomationRun }) {
         {run.estimatedCost > 0 && (
           <Text style={s.runCost}>${run.estimatedCost.toFixed(4)}</Text>
         )}
+        {run.status === 'running' && (
+          <ActivityIndicator size="small" color="#6366f1" style={{ marginLeft: 4 }} />
+        )}
         <Text style={s.runChevron}>{expanded ? '▲' : '▼'}</Text>
       </Pressable>
       {expanded && (
         <View style={s.runDetail}>
-          {run.outputText && (
-            <Text style={s.runOutput} selectable>{run.outputText.slice(0, 500)}</Text>
+          {/* Execution log */}
+          {logSteps.length > 0 && (
+            <View style={{ backgroundColor: '#0a0a14', borderRadius: 4, padding: 6, marginBottom: 6, borderWidth: 1, borderColor: '#1a1a2e' }}>
+              <Text style={{ color: '#666', fontSize: 9, fontWeight: '800', fontFamily: 'monospace', marginBottom: 3, letterSpacing: 1 }}>EXECUTION LOG</Text>
+              {logSteps.map((step: string, i: number) => (
+                <Text key={i} style={{ color: step.includes('❌') ? '#ef4444' : step.includes('✓') || step.includes('✅') ? '#22c55e' : '#aaa', fontSize: 10, fontFamily: 'monospace', lineHeight: 14 }}>{step}</Text>
+              ))}
+            </View>
           )}
-          {run.errorMessage && (
+          {/* AI output */}
+          {run.outputText && (
+            <View style={{ marginBottom: 4 }}>
+              <Text style={{ color: '#666', fontSize: 9, fontWeight: '800', fontFamily: 'monospace', marginBottom: 2, letterSpacing: 1 }}>OUTPUT</Text>
+              <Text style={s.runOutput} selectable>{run.outputText.slice(0, 800)}</Text>
+            </View>
+          )}
+          {/* Error */}
+          {run.errorMessage && run.status !== 'running' && (
             <Text style={s.runError}>{run.errorMessage}</Text>
           )}
-          <Text style={s.runMeta}>
-            Model: {run.modelUsed || '?'} · Output: {run.outputTarget || '?'} · Trigger: {run.triggerSource}
-          </Text>
+          {/* Live progress for running */}
+          {run.status === 'running' && run.errorMessage && (
+            <View style={{ marginBottom: 4 }}>
+              <Text style={{ color: '#666', fontSize: 9, fontWeight: '800', fontFamily: 'monospace', marginBottom: 2, letterSpacing: 1 }}>PROGRESS</Text>
+              {run.errorMessage.split('\n').filter(Boolean).map((line: string, i: number) => (
+                <Text key={i} style={{ color: line.includes('✓') ? '#22c55e' : '#aaa', fontSize: 10, fontFamily: 'monospace', lineHeight: 14 }}>{line}</Text>
+              ))}
+            </View>
+          )}
+          {/* Meta info */}
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 2 }}>
+            <Text style={s.runMeta}>Model: {run.modelUsed || '?'}</Text>
+            <Text style={s.runMeta}>Output: {run.outputTarget || '?'}</Text>
+            <Text style={s.runMeta}>Trigger: {run.triggerSource}</Text>
+            {(run.inputContext as any)?.memberCount != null && (
+              <Text style={s.runMeta}>Members: {(run.inputContext as any).memberCount}</Text>
+            )}
+            {(run.inputContext as any)?.checkedInCount != null && (
+              <Text style={s.runMeta}>Checked in: {(run.inputContext as any).checkedInCount}</Text>
+            )}
+          </View>
         </View>
       )}
     </View>
@@ -1580,7 +1690,7 @@ function AutomationFormModal({
     if (prefill.triggerType === 'schedule' && prefill.cronExpression) return `schedule:${prefill.cronExpression}`;
     if (prefill.triggerType === 'event' && prefill.eventConfig?.table) return `event:${prefill.eventConfig.table}`;
     if (prefill.triggerType === 'manual') return 'manual:run';
-    if (prefill.triggerType === 'webhook' && prefill.eventConfig?.provider && prefill.eventConfig?.event)
+    if (prefill.eventConfig?.provider && prefill.eventConfig?.event)
       return `webhook:${prefill.eventConfig.provider}:${prefill.eventConfig.event}`;
     return null;
   }, [prefill]);
@@ -1593,8 +1703,8 @@ function AutomationFormModal({
       if (initialTemplate.trigger_type === 'event' && initialTemplate.event_config?.table)
         return getTriggerById(`event:${initialTemplate.event_config.table}`) ?? null;
       if (initialTemplate.trigger_type === 'manual') return getTriggerById('manual:run') ?? null;
-      if (initialTemplate.trigger_type === 'webhook' && initialTemplate.webhook_config)
-        return getTriggerById(`webhook:${initialTemplate.webhook_config.provider}:${initialTemplate.webhook_config.event}`) ?? null;
+      if (initialTemplate.event_config?.provider)
+        return getTriggerById(`webhook:${initialTemplate.event_config.provider}:${initialTemplate.event_config.event}`) ?? null;
     }
     if (initialTriggerId) return getTriggerById(initialTriggerId) ?? null;
     return null;
@@ -1634,6 +1744,32 @@ function AutomationFormModal({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
+  // ── Link to Feed (goal + task) ──
+  type LinkMode = 'none' | 'existing' | 'new_goal' | 'new_goal_task' | 'new_task';
+  const [linkMode, setLinkMode] = useState<LinkMode>(
+    prefill?.eventConfig?.linked_goal_id ? 'existing' : 'none',
+  );
+  const [linkedGoalId, setLinkedGoalId] = useState<string | null>(
+    prefill?.eventConfig?.linked_goal_id ?? null,
+  );
+  const [newGoalName, setNewGoalName] = useState('');
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [availableGoals, setAvailableGoals] = useState<{ id: string; name: string; status: string }[]>([]);
+  const [goalsLoaded, setGoalsLoaded] = useState(false);
+
+  useEffect(() => {
+    if (goalsLoaded) return;
+    supabase
+      .from('goals')
+      .select('id, name, status')
+      .eq('circle_id', circleId)
+      .order('created_at', { ascending: false })
+      .then(({ data }) => {
+        if (data) setAvailableGoals(data);
+        setGoalsLoaded(true);
+      });
+  }, [circleId, goalsLoaded]);
+
   const currentModel = MODEL_OPTIONS.find((m) => m.value === model) ?? MODEL_OPTIONS[0];
 
   const applyTemplate = (t: AutomationTemplate) => {
@@ -1652,12 +1788,14 @@ function AutomationFormModal({
       setSelectedTrigger(getTriggerById(`event:${t.event_config.table}`) ?? null);
     else if (t.trigger_type === 'manual')
       setSelectedTrigger(getTriggerById('manual:run') ?? null);
-    else if (t.trigger_type === 'webhook' && t.webhook_config)
-      setSelectedTrigger(getTriggerById(`webhook:${t.webhook_config.provider}:${t.webhook_config.event}`) ?? null);
+    else if (t.event_config?.provider)
+      setSelectedTrigger(getTriggerById(`webhook:${t.event_config.provider}:${t.event_config.event}`) ?? null);
   };
 
   const buildTriggerPayload = () => {
-    const triggerType: TriggerType = selectedTrigger?.triggerType ?? 'manual';
+    // Map 'webhook' → 'event' for DB (constraint only allows schedule/event/manual)
+    const rawType = selectedTrigger?.triggerType ?? 'manual';
+    const triggerType: TriggerType = rawType === 'webhook' ? 'event' : rawType;
     const cronExpression = selectedTrigger?.cronExpression;
     const eventConfig = selectedTrigger?.eventTable
       ? { table: selectedTrigger.eventTable, event: 'INSERT' }
@@ -1677,6 +1815,44 @@ function AutomationFormModal({
 
     const { triggerType, cronExpression, eventConfig } = buildTriggerPayload();
 
+    // ── Create linked goal / task if requested ──
+    let finalGoalId = linkedGoalId;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user && (linkMode === 'new_goal' || linkMode === 'new_goal_task') && newGoalName.trim()) {
+        const { data: goalData } = await supabase.from('goals').insert({
+          circle_id: circleId,
+          name: newGoalName.trim(),
+          description: `Auto-created from automation: ${name.trim()}`,
+          status: 'active',
+          assigned_agent_ids: [],
+          target_count: 0,
+          created_by: user.id,
+        }).select('id').single();
+        if (goalData) finalGoalId = goalData.id;
+      }
+      if (user && (linkMode === 'new_goal_task' || linkMode === 'new_task') && newTaskTitle.trim()) {
+        const taskGoalId = finalGoalId;
+        await supabase.from('tasks').insert({
+          circle_id: circleId,
+          created_by: user.id,
+          title: newTaskTitle.trim(),
+          description: `Linked to automation: ${name.trim()}`,
+          priority: 'normal',
+          status: 'todo',
+          goal_id: taskGoalId || null,
+          position: 0,
+        });
+      }
+    } catch (e) {
+      console.error('Failed to create linked goal/task:', e);
+    }
+
+    // Merge linked_goal_id into eventConfig
+    const mergedEventConfig = finalGoalId
+      ? { ...(eventConfig || {}), linked_goal_id: finalGoalId }
+      : eventConfig;
+
     if (isEdit && editing) {
       const result = await updateAutomation(editing.id, {
         name: name.trim(),
@@ -1685,7 +1861,7 @@ function AutomationFormModal({
         prompt: prompt.trim(),
         model,
         cronExpression,
-        eventConfig,
+        eventConfig: mergedEventConfig,
         includeContext,
         outputTarget,
       });
@@ -1700,7 +1876,7 @@ function AutomationFormModal({
         icon,
         triggerType,
         cronExpression,
-        eventConfig,
+        eventConfig: mergedEventConfig,
         prompt: prompt.trim(),
         model,
         includeContext,
@@ -1858,6 +2034,108 @@ function AutomationFormModal({
                 </Pressable>
               ))}
             </View>
+
+            {/* Link to Feed — goal + task */}
+            <Text style={f.label}>LINK TO FEED</Text>
+            <View style={f.chipRow}>
+              {([
+                ['none', 'No link'],
+                ['existing', 'Existing Goal'],
+                ['new_goal', 'New Goal'],
+                ['new_goal_task', 'New Goal + Task'],
+                ['new_task', 'New Task'],
+              ] as [LinkMode, string][]).map(([mode, label]) => (
+                <Pressable
+                  key={mode}
+                  onPress={() => { setLinkMode(mode); if (mode === 'none') { setLinkedGoalId(null); setNewGoalName(''); setNewTaskTitle(''); } }}
+                  style={[
+                    f.chip,
+                    linkMode === mode && { borderColor: '#22c55e', backgroundColor: '#22c55e20' },
+                    Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                  ]}
+                >
+                  <Text style={[f.chipText, linkMode === mode && { color: '#22c55e' }]}>{label}</Text>
+                </Pressable>
+              ))}
+            </View>
+
+            {linkMode === 'existing' && (
+              <View style={{ marginTop: 6, marginBottom: 8 }}>
+                <Text style={[f.label, { marginTop: 0, marginBottom: 4 }]}>SELECT GOAL</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                  <View style={f.chipRow}>
+                    {availableGoals.map((g) => (
+                      <Pressable
+                        key={g.id}
+                        onPress={() => setLinkedGoalId(g.id)}
+                        style={[
+                          f.chip,
+                          linkedGoalId === g.id && { borderColor: '#22c55e', backgroundColor: '#22c55e20' },
+                          Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                        ]}
+                      >
+                        <Text style={[f.chipText, linkedGoalId === g.id && { color: '#22c55e' }]}>
+                          🎯 {g.name}
+                        </Text>
+                      </Pressable>
+                    ))}
+                    {availableGoals.length === 0 && (
+                      <Text style={{ color: '#555', fontSize: 11 }}>No goals yet — create one below</Text>
+                    )}
+                  </View>
+                </ScrollView>
+              </View>
+            )}
+
+            {(linkMode === 'new_goal' || linkMode === 'new_goal_task') && (
+              <View style={{ marginTop: 6 }}>
+                <Text style={[f.label, { marginTop: 0, marginBottom: 4 }]}>NEW GOAL NAME</Text>
+                <TextInput
+                  style={f.input}
+                  value={newGoalName}
+                  onChangeText={setNewGoalName}
+                  placeholder="e.g. Ship v2 by Friday"
+                  placeholderTextColor="#555"
+                />
+              </View>
+            )}
+
+            {(linkMode === 'new_goal_task' || linkMode === 'new_task') && (
+              <View style={{ marginTop: linkMode === 'new_task' ? 6 : 0 }}>
+                <Text style={[f.label, { marginTop: 0, marginBottom: 4 }]}>NEW TASK TITLE</Text>
+                <TextInput
+                  style={f.input}
+                  value={newTaskTitle}
+                  onChangeText={setNewTaskTitle}
+                  placeholder="e.g. Set up CI pipeline"
+                  placeholderTextColor="#555"
+                />
+                {linkMode === 'new_task' && availableGoals.length > 0 && (
+                  <View style={{ marginTop: 4 }}>
+                    <Text style={[f.label, { marginTop: 0, marginBottom: 4 }]}>ATTACH TO GOAL (optional)</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                      <View style={f.chipRow}>
+                        <Pressable
+                          onPress={() => setLinkedGoalId(null)}
+                          style={[f.chip, !linkedGoalId && { borderColor: '#555', backgroundColor: '#ffffff08' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                        >
+                          <Text style={[f.chipText, !linkedGoalId && { color: '#aaa' }]}>None</Text>
+                        </Pressable>
+                        {availableGoals.map((g) => (
+                          <Pressable
+                            key={g.id}
+                            onPress={() => setLinkedGoalId(g.id)}
+                            style={[f.chip, linkedGoalId === g.id && { borderColor: '#22c55e', backgroundColor: '#22c55e20' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                          >
+                            <Text style={[f.chipText, linkedGoalId === g.id && { color: '#22c55e' }]}>🎯 {g.name}</Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    </ScrollView>
+                  </View>
+                )}
+              </View>
+            )}
 
             {/* Memory notes section */}
             <View style={f.memorySection}>

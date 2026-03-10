@@ -7,7 +7,8 @@ import {
   View, Text, ScrollView, Pressable, StyleSheet, Platform,
 } from 'react-native';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
-import { DEFAULT_AGENT_ROSTER, type AgentProfile } from '../../../../types/kanban';
+import { PROVIDER_DISPLAY } from '../../../../lib/circleOffice';
+import { DEFAULT_AGENT_ROSTER, MODEL_ICONS, type AgentProfile } from '../../../../types/kanban';
 
 interface Props {
   agents: CircleOfficeAgent[];
@@ -43,7 +44,7 @@ export default function AgentTopBar({ agents }: Props) {
       {/* AGENTS indicator with count */}
       <View style={s.agentsLabel}>
         <View style={[s.agentsDot, { backgroundColor: anyActive ? '#22c55e' : '#555' }]} />
-        <Text style={s.agentsText}>AGENTS</Text>
+        <Text style={s.agentsText}>ORCHESTRA</Text>
         <View style={s.agentsCountBadge}>
           <Text style={[s.agentsCountText, anyActive && { color: '#22c55e' }]}>
             {onlineCount}/{agents.length}
@@ -87,22 +88,36 @@ export default function AgentTopBar({ agents }: Props) {
                   onPress={() => setPopoverAgentId(null)}
                 >
                   <View style={s.popover}>
-                    {/* Name + emoji */}
+                    {/* Name + icon */}
                     <View style={s.popoverHeader}>
-                      {profile && <Text style={s.popoverEmoji}>{profile.emoji}</Text>}
+                      {profile ? (
+                        <Text style={s.popoverEmoji}>{profile.emoji}</Text>
+                      ) : (
+                        <Text style={s.popoverEmoji}>{agent.toolIcon || PROVIDER_DISPLAY[agent.provider]?.icon || '🤖'}</Text>
+                      )}
                       <Text style={s.popoverName}>{agent.name}</Text>
                     </View>
 
-                    {/* Role label */}
+                    {/* Role / Provider label */}
                     {profile ? (
                       <Text style={s.popoverRole}>{profile.roleLabel}</Text>
                     ) : (
-                      <Text style={s.popoverRole}>Agent</Text>
+                      <Text style={s.popoverRole}>{PROVIDER_DISPLAY[agent.provider]?.label || 'Agent'}</Text>
                     )}
 
                     {/* Specialty */}
                     {profile && (
                       <Text style={s.popoverSpecialty} numberOfLines={2}>{profile.specialty}</Text>
+                    )}
+
+                    {/* Provider badge for non-roster agents */}
+                    {!profile && agent.provider && PROVIDER_DISPLAY[agent.provider] && (
+                      <View style={[s.popoverChip, { backgroundColor: (PROVIDER_DISPLAY[agent.provider].color) + '15' }]}>
+                        <Text style={{ fontSize: 11 }}>{PROVIDER_DISPLAY[agent.provider].icon}</Text>
+                        <Text style={[s.popoverChipText, { color: PROVIDER_DISPLAY[agent.provider].color }]}>
+                          {PROVIDER_DISPLAY[agent.provider].label}
+                        </Text>
+                      </View>
                     )}
 
                     {/* Current task */}
@@ -113,6 +128,22 @@ export default function AgentTopBar({ agents }: Props) {
                       </View>
                     ) : (
                       <Text style={s.popoverDescMuted}>No active task</Text>
+                    )}
+
+                    {/* Model badge */}
+                    {profile && (() => {
+                      const mi = MODEL_ICONS[profile.preferredModel];
+                      return mi ? (
+                        <View style={[s.popoverChip, { backgroundColor: mi.color + '15' }]}>
+                          <Text style={{ fontSize: 11 }}>{mi.icon}</Text>
+                          <Text style={[s.popoverChipText, { color: mi.color }]}>{mi.label}</Text>
+                        </View>
+                      ) : null;
+                    })()}
+
+                    {/* Model reason tooltip */}
+                    {profile?.modelReason && (
+                      <Text style={s.popoverModelReason}>{profile.modelReason}</Text>
                     )}
 
                     {/* Status chip */}
@@ -306,5 +337,11 @@ const s = StyleSheet.create({
   popoverChipText: {
     fontSize: 11,
     fontWeight: '600',
+  },
+  popoverModelReason: {
+    color: '#555566',
+    fontSize: 10,
+    fontStyle: 'italic',
+    lineHeight: 14,
   },
 });

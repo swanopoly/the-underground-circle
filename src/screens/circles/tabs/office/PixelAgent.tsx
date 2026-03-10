@@ -287,18 +287,18 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     return () => { stopped = true; clearTimeout(startDelay); };
   }, []);
 
-  // Automate Me button — appears after 5s idle
+  // Automate Me button — show when selected or idle
   useEffect(() => {
-    if (agent.status === 'idle' && onAutomate && !showAutomateInput) {
-      automateTimerRef.current = setTimeout(() => setShowAutomateButton(true), 5000);
-    } else {
+    if (onAutomate && !showAutomateInput && (selected || agent.status === 'idle')) {
+      automateTimerRef.current = setTimeout(() => setShowAutomateButton(true), selected ? 300 : 5000);
+    } else if (!selected && agent.status !== 'idle') {
       setShowAutomateButton(false);
       setShowAutomateInput(false);
       setAutomateText('');
       if (automateTimerRef.current) clearTimeout(automateTimerRef.current);
     }
     return () => { if (automateTimerRef.current) clearTimeout(automateTimerRef.current); };
-  }, [agent.status, onAutomate, showAutomateInput]);
+  }, [agent.status, onAutomate, showAutomateInput, selected]);
 
   // Aura animations — flicker, pulse, rotation, drift
   useEffect(() => {
@@ -1944,34 +1944,13 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         <XPBar xp={xp} xpNext={xpNext} color={agent.color} />
 
         {/* Automate Me button */}
-        {showAutomateButton && onAutomate && !showAutomateInput && (
+        {showAutomateButton && onAutomate && (
           <Pressable
-            onPress={(e) => { e.stopPropagation?.(); setShowAutomateInput(true); setTimeout(() => automateInputRef.current?.focus(), 100); }}
-            style={{ position: 'absolute', bottom: -16, left: '50%', marginLeft: -20, zIndex: 45, backgroundColor: '#8b5cf6', paddingHorizontal: 4, paddingVertical: 1.5, borderRadius: 3 }}
+            onPress={(e) => { e.stopPropagation?.(); onAutomate(''); }}
+            style={{ position: 'absolute', bottom: -16, left: '50%', marginLeft: -24, zIndex: 45, backgroundColor: '#8b5cf6', paddingHorizontal: 5, paddingVertical: 2, borderRadius: 3, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
           >
-            <Text style={{ color: '#fff', fontSize: 5, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 0.3 }}>AUTOMATE</Text>
+            <Text style={{ color: '#fff', fontSize: 5, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 0.3 }}>⚡ AUTOMATE</Text>
           </Pressable>
-        )}
-        {showAutomateInput && onAutomate && (
-          <View
-            style={{ position: 'absolute', bottom: -22, left: '50%', marginLeft: -50, zIndex: 50, flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a2e', borderWidth: 1, borderColor: '#8b5cf6', borderRadius: 3, padding: 1.5 }}
-            onStartShouldSetResponder={() => true}
-            onResponderTerminationRequest={() => false}
-          >
-            <TextInput
-              ref={automateInputRef}
-              value={automateText}
-              onChangeText={setAutomateText}
-              onSubmitEditing={handleAutomateSubmit}
-              placeholder="task..."
-              placeholderTextColor="#666"
-              style={{ width: 80, height: 12, fontSize: 6, color: '#e2e8f0', fontFamily: 'monospace', paddingHorizontal: 2, paddingVertical: 0 }}
-              returnKeyType="go"
-            />
-            <Pressable onPress={(e) => { e.stopPropagation?.(); handleAutomateSubmit(); }} style={{ backgroundColor: '#8b5cf6', paddingHorizontal: 3, paddingVertical: 1, borderRadius: 2, marginLeft: 1 }}>
-              <Text style={{ color: '#fff', fontSize: 5, fontWeight: '700', fontFamily: 'monospace' }}>GO</Text>
-            </Pressable>
-          </View>
         )}
       </Animated.View>
     </Pressable>

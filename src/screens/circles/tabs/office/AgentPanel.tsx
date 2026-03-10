@@ -11,6 +11,11 @@ import {
   AgentAppearance, DEFAULT_APPEARANCE, EnvironmentType,
   SKIN_TONES, HAIR_COLORS, SHIRT_COLORS, SHOE_COLORS, EYE_COLORS,
 } from '../../../../lib/officeConfig';
+import {
+  SoulTemplate, SoulCategory, SOUL_CATEGORIES,
+  getTemplatesByCategory, detectTemplate,
+} from '../../../../lib/soulTemplates';
+import { supabase } from '../../../../lib/supabase';
 
 const PANTS_COLORS = ['#2d2d3d', '#1a1a2e', '#3d2b1a', '#1e3a5f', '#2d1b4e', '#1a3d1a'];
 
@@ -72,6 +77,12 @@ export default function AgentPanel({
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState('');
   const [showCustomize, setShowCustomize] = useState(false);
+  const [showSoul, setShowSoul] = useState(false);
+  const [soulCategory, setSoulCategory] = useState<SoulCategory>('role');
+  const [soulText, setSoulText] = useState('');
+  const [soulSaving, setSoulSaving] = useState(false);
+  const [soulStatus, setSoulStatus] = useState('');
+  const [soulLoaded, setSoulLoaded] = useState<string | null>(null); // tracks which agent was loaded
 
   useEffect(() => {
     if (agent) {
@@ -96,6 +107,66 @@ export default function AgentPanel({
     : undefined;
 
   const control = useAgentControl(circleId, sessionKey);
+
+  // Load personality when agent panel opens for a specific agent
+  useEffect(() => {
+    if (!agent || !circleId) return;
+    const agentKey = agent.name || 'default';
+    if (soulLoaded === agentKey) return; // already loaded
+    (async () => {
+      const { data: auth } = await supabase.auth.getUser();
+      if (!auth.user) return;
+      const { data } = await supabase
+        .from('agent_personalities')
+        .select('personality')
+        .eq('user_id', auth.user.id)
+        .eq('circle_id', circleId)
+        .eq('agent_name', agentKey)
+        .maybeSingle();
+      // Fallback: if no per-agent personality, try 'default'
+      if (!data?.personality) {
+        const { data: defaultData } = await supabase
+          .from('agent_personalities')
+          .select('personality')
+          .eq('user_id', auth.user.id)
+          .eq('circle_id', circleId)
+          .eq('agent_name', 'default')
+          .maybeSingle();
+        setSoulText(defaultData?.personality || '');
+      } else {
+        setSoulText(data.personality);
+      }
+      setSoulLoaded(agentKey);
+    })();
+  }, [agent?.name, circleId]);
+
+  // Reset loaded state when agent changes
+  useEffect(() => {
+    if (!agent) {
+      setSoulLoaded(null);
+      setSoulText('');
+      setShowSoul(false);
+    }
+  }, [agent?.name]);
+
+  const handleSaveSoul = async () => {
+    if (!circleId || !agent) return;
+    setSoulSaving(true);
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) { setSoulSaving(false); return; }
+    const agentKey = agent.name || 'default';
+    const { error } = await supabase
+      .from('agent_personalities')
+      .upsert({
+        user_id: auth.user.id,
+        circle_id: circleId,
+        agent_name: agentKey,
+        personality: soulText.trim(),
+      }, { onConflict: 'user_id,circle_id,agent_name' });
+    setSoulStatus(error ? `Error: ${error.message}` : 'Soul saved!');
+    setSoulSaving(false);
+    setTimeout(() => setSoulStatus(''), 3000);
+  };
 
   if (!agent) return null;
 
@@ -305,45 +376,43 @@ export default function AgentPanel({
               onAppearanceChange(agent.name, { ...a, ...patch });
             };
 
-            const ColorRow = ({ label, colors, value, onSelect }: { label: string; colors: string[]; value: string; onSelect: (c: string) => void }) => (
-              <View style={styles.custRow}>
-                <Text style={styles.custLabel}>{label}</Text>
-                <View style={styles.custSwatches}>
-                  {colors.map(c => (
-                    <Pressable
-                      key={c}
-                      onPress={() => onSelect(c)}
-                      style={[
-                        styles.custSwatch,
-                        { backgroundColor: c },
-                        value === c && styles.custSwatchActive,
-                        Platform.OS === 'web' && { cursor: 'pointer' } as any,
-                      ]}
-                    />
-                  ))}
-                </View>
-              </View>
+            const NEON_SKIN_TONES = ['#ff00ff', '#00ff88', '#00ffff', '#ff4444', '#ffff00', '#aa55ff'];
+
+            const ColorScroll = ({ label, colors, value, onSelect }: { label: string; colors: string[]; value: string; onSelect: (c: string) => void }) => (
+              <>
+                <Text style={styles.custSectionTitle}>{label}</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.custScroll}>
+                  {colors.map(c => {
+                    const active = value === c;
+                    const isNeon = NEON_SKIN_TONES.includes(c);
+                    return (
+                      <Pressable key={c} onPress={() => onSelect(c)}
+                        style={[styles.custItemSwatch, { backgroundColor: c }, isNeon && { shadowColor: c, shadowOffset: { width: 0, height: 0 }, shadowRadius: 8, shadowOpacity: 0.9 }, active && styles.custItemSwatchActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                        {active && <Text style={styles.custItemCheck}>✓</Text>}
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+              </>
             );
 
-            const OptionRow = ({ label, options, value, onSelect }: { label: string; options: { key: string; label: string }[]; value: string; onSelect: (k: string) => void }) => (
-              <View style={styles.custRow}>
-                <Text style={styles.custLabel}>{label}</Text>
-                <View style={styles.custOptions}>
-                  {options.map(o => (
-                    <Pressable
-                      key={o.key}
-                      onPress={() => onSelect(o.key)}
-                      style={[
-                        styles.custOptionBtn,
-                        value === o.key && styles.custOptionActive,
-                        Platform.OS === 'web' && { cursor: 'pointer' } as any,
-                      ]}
-                    >
-                      <Text style={[styles.custOptionText, value === o.key && styles.custOptionTextActive]}>{o.label}</Text>
+            const ItemScroll = ({ label, items }: { label: string; items: { key: string; emoji: string; name: string; active: boolean; glow?: string }[] }) => (
+              <>
+                <Text style={styles.custSectionTitle}>{label}</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.custScroll}>
+                  {items.map(item => (
+                    <Pressable key={item.key}
+                      onPress={() => {
+                        const field = label === 'HAT' ? 'hat' : label === 'EXPRESSION' ? 'expression' : label === 'ACCESSORY' ? 'accessory' : label === 'BACK ITEM' ? 'backItem' : label === 'FACIAL HAIR' ? 'facialHair' : label === 'PET' ? 'pet' : label === 'AURA' ? 'aura' : label === 'HAND ITEM' ? 'handItem' : label === 'HAIR STYLE' ? 'hairStyle' : '';
+                        if (field) update({ [field]: item.key } as any);
+                      }}
+                      style={[styles.custItemCard, item.active && styles.custItemCardActive, item.active && item.glow && { shadowColor: item.glow, shadowOffset: { width: 0, height: 0 }, shadowRadius: 10, shadowOpacity: 0.8 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Text style={styles.custItemEmoji}>{item.emoji}</Text>
+                      <Text style={[styles.custItemLabel, item.active && styles.custItemLabelActive]}>{item.name}</Text>
                     </Pressable>
                   ))}
-                </View>
-              </View>
+                </ScrollView>
+              </>
             );
 
             return (
@@ -360,33 +429,176 @@ export default function AgentPanel({
                   />
                 </View>
 
-                <ColorRow label="SKIN" colors={SKIN_TONES} value={a.skinTone} onSelect={c => update({ skinTone: c })} />
-                <ColorRow label="HAIR COLOR" colors={HAIR_COLORS} value={a.hairColor} onSelect={c => update({ hairColor: c })} />
-                <OptionRow label="HAIRSTYLE" value={a.hairStyle} onSelect={k => update({ hairStyle: k as any })}
-                  options={['flat', 'spiky', 'mohawk', 'long', 'curly', 'ponytail', 'cap', 'bald', 'buzzcut', 'afro', 'undercut', 'pigtails'].map(h => ({ key: h, label: h.toUpperCase() }))} />
-                <ColorRow label="EYES" colors={EYE_COLORS} value={a.eyeColor} onSelect={c => update({ eyeColor: c })} />
-                <ColorRow label="SHIRT" colors={SHIRT_COLORS} value={a.shirtColor} onSelect={c => update({ shirtColor: c })} />
-                <ColorRow label="PANTS" colors={PANTS_COLORS} value={a.pantsColor} onSelect={c => update({ pantsColor: c })} />
-                <ColorRow label="SHOES" colors={SHOE_COLORS} value={a.shoeColor} onSelect={c => update({ shoeColor: c })} />
-                <OptionRow label="HAT" value={a.hat} onSelect={k => update({ hat: k as any })}
-                  options={['none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns', 'space_helmet', 'wizard_hat', 'halo', 'antenna', 'crab_helmet', 'pirate_hat', 'cowboy_hat', 'fez', 'mohawk_spikes'].map(h => ({ key: h, label: h.toUpperCase().replace('_', ' ') }))} />
-                <OptionRow label="EXPRESSION" value={a.expression} onSelect={k => update({ expression: k as any })}
-                  options={['neutral', 'happy', 'focused', 'sleepy', 'cool', 'angry', 'surprised', 'smirk', 'crying'].map(e => ({ key: e, label: e.toUpperCase() }))} />
-                <OptionRow label="ACCESSORY" value={a.accessory} onSelect={k => update({ accessory: k as any })}
-                  options={['none', 'glasses', 'headphones', 'bowtie', 'scarf', 'hoodie', 'mask', 'monocle', 'eyepatch', 'bandana', 'chain', 'piercing', 'visor_shades', 'gas_mask'].map(x => ({ key: x, label: x.toUpperCase().replace('_', ' ') }))} />
-                <OptionRow label="BACK ITEM" value={a.backItem} onSelect={k => update({ backItem: k as any })}
-                  options={['none', 'cape', 'backpack', 'wings', 'jetpack', 'shield', 'sword', 'quiver', 'crab_shell', 'tentacles', 'rocket', 'scroll', 'boombox'].map(b => ({ key: b, label: b.toUpperCase().replace('_', ' ') }))} />
-                <OptionRow label="FACIAL HAIR" value={a.facialHair} onSelect={k => update({ facialHair: k as any })}
-                  options={['none', 'stubble', 'beard', 'mustache', 'goatee', 'fu_manchu', 'sideburns', 'soul_patch'].map(f => ({ key: f, label: f.toUpperCase().replace('_', ' ') }))} />
-                <OptionRow label="PET" value={a.pet} onSelect={k => update({ pet: k as any })}
-                  options={[{ key: 'none', label: 'NONE' }, { key: 'cat', label: '🐱 CAT' }, { key: 'dog', label: '🐕 DOG' }, { key: 'bird', label: '🐦 BIRD' }, { key: 'robot', label: '🤖 BOT' }, { key: 'dragon', label: '🐉 DRAGON' }, { key: 'alien', label: '👽 ALIEN' }, { key: 'crab', label: '🦀 CRAB' }, { key: 'snake', label: '🐍 SNAKE' }, { key: 'bat', label: '🦇 BAT' }, { key: 'skull', label: '💀 SKULL' }, { key: 'mushroom', label: '🍄 SHROOM' }, { key: 'spider', label: '🕷️ SPIDER' }, { key: 'shark', label: '🦈 SHARK' }, { key: 'bones', label: '🦴 BONES' }]} />
-                <OptionRow label="AURA" value={a.aura} onSelect={k => update({ aura: k as any })}
-                  options={[{ key: 'none', label: 'NONE' }, { key: 'fire', label: '🔥 FIRE' }, { key: 'ice', label: '🧊 ICE' }, { key: 'electric', label: '⚡ ZAP' }, { key: 'nature', label: '🌿 LEAF' }, { key: 'shadow', label: '🌑 DARK' }, { key: 'rainbow', label: '🌈 RAINBOW' }, { key: 'glitch', label: '📟 GLITCH' }, { key: 'cosmic', label: '✨ COSMIC' }, { key: 'toxic', label: '☠️ TOXIC' }, { key: 'holy', label: '😇 HOLY' }, { key: 'void', label: '🕳️ VOID' }, { key: 'galaxy', label: '🌌 GALAXY' }]} />
-                <OptionRow label="HAND ITEM" value={a.handItem || 'none'} onSelect={k => update({ handItem: k as any })}
-                  options={[{ key: 'none', label: 'NONE' }, { key: 'lightsaber', label: '⚔️ SABER' }, { key: 'coffee', label: '☕ COFFEE' }, { key: 'laptop', label: '💻 LAPTOP' }, { key: 'flag', label: '🚩 FLAG' }, { key: 'wand', label: '🪄 WAND' }, { key: 'crab_claws', label: '🦞 CLAWS' }, { key: 'sword_hand', label: '🗡️ SWORD' }, { key: 'pizza', label: '🍕 PIZZA' }, { key: 'microphone', label: '🎤 MIC' }, { key: 'torch', label: '🔦 TORCH' }]} />
+                <ColorScroll label="SKIN" colors={SKIN_TONES} value={a.skinTone} onSelect={c => update({ skinTone: c })} />
+                <ColorScroll label="HAIR COLOR" colors={HAIR_COLORS} value={a.hairColor} onSelect={c => update({ hairColor: c })} />
+                <ItemScroll label="HAIR STYLE" items={['flat', 'spiky', 'mohawk', 'long', 'curly', 'ponytail', 'cap', 'bald', 'buzzcut', 'afro', 'undercut', 'pigtails'].map(h => {
+                  const emojis: Record<string, string> = { flat: '➡️', spiky: '⬆️', mohawk: '🔱', long: '💇', curly: '🌀', ponytail: '🎀', cap: '🧢', bald: '🥚', buzzcut: '✂️', afro: '🟤', undercut: '💈', pigtails: '🎗️' };
+                  return { key: h, emoji: emojis[h], name: h.toUpperCase(), active: a.hairStyle === h };
+                })} />
+                <ColorScroll label="EYES" colors={EYE_COLORS} value={a.eyeColor} onSelect={c => update({ eyeColor: c })} />
+                <ColorScroll label="SHIRT" colors={SHIRT_COLORS} value={a.shirtColor} onSelect={c => update({ shirtColor: c })} />
+                <ColorScroll label="PANTS" colors={PANTS_COLORS} value={a.pantsColor} onSelect={c => update({ pantsColor: c })} />
+                <ColorScroll label="SHOES" colors={SHOE_COLORS} value={a.shoeColor} onSelect={c => update({ shoeColor: c })} />
+                <ItemScroll label="EXPRESSION" items={['neutral', 'happy', 'focused', 'sleepy', 'cool', 'angry', 'surprised', 'smirk', 'crying'].map(e => {
+                  const emojis: Record<string, string> = { neutral: '😐', happy: '😊', focused: '🤨', sleepy: '😴', cool: '😎', angry: '😠', surprised: '😲', smirk: '😏', crying: '😢' };
+                  return { key: e, emoji: emojis[e], name: e.toUpperCase(), active: a.expression === e };
+                })} />
+                <ItemScroll label="HAT" items={['none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns', 'space_helmet', 'wizard_hat', 'halo', 'antenna', 'crab_helmet', 'pirate_hat', 'cowboy_hat', 'fez', 'mohawk_spikes'].map(h => {
+                  const emojis: Record<string, string> = { none: '🚫', cap: '🧢', tophat: '🎩', beanie: '🧶', crown: '👑', helmet: '⛑️', horns: '😈', space_helmet: '🚀', wizard_hat: '🧙', halo: '😇', antenna: '👽', crab_helmet: '🦀', pirate_hat: '🏴‍☠️', cowboy_hat: '🤠', fez: '🎖️', mohawk_spikes: '🔩' };
+                  const names: Record<string, string> = { none: 'NONE', cap: 'CAP', tophat: 'TOP HAT', beanie: 'BEANIE', crown: 'CROWN', helmet: 'HELMET', horns: 'HORNS', space_helmet: 'SPACE', wizard_hat: 'WIZARD', halo: 'HALO', antenna: 'ANTENNA', crab_helmet: 'CRAB', pirate_hat: 'PIRATE', cowboy_hat: 'COWBOY', fez: 'FEZ', mohawk_spikes: 'SPIKES' };
+                  return { key: h, emoji: emojis[h], name: names[h], active: a.hat === h };
+                })} />
+                <ItemScroll label="ACCESSORY" items={['none', 'glasses', 'headphones', 'bowtie', 'scarf', 'hoodie', 'mask', 'monocle', 'eyepatch', 'bandana', 'chain', 'piercing', 'visor_shades', 'gas_mask'].map(x => {
+                  const emojis: Record<string, string> = { none: '🚫', glasses: '👓', headphones: '🎧', bowtie: '🎀', scarf: '🧣', hoodie: '🧥', mask: '😷', monocle: '🧐', eyepatch: '🏴‍☠️', bandana: '🥷', chain: '⛓️', piercing: '💎', visor_shades: '🕶️', gas_mask: '☣️' };
+                  const names: Record<string, string> = { none: 'NONE', glasses: 'GLASSES', headphones: 'PHONES', bowtie: 'BOWTIE', scarf: 'SCARF', hoodie: 'HOODIE', mask: 'MASK', monocle: 'MONOCLE', eyepatch: 'PATCH', bandana: 'BANDANA', chain: 'CHAIN', piercing: 'PIERCE', visor_shades: 'VISOR', gas_mask: 'GAS MASK' };
+                  return { key: x, emoji: emojis[x], name: names[x], active: a.accessory === x };
+                })} />
+                <ItemScroll label="FACIAL HAIR" items={['none', 'stubble', 'beard', 'mustache', 'goatee', 'fu_manchu', 'sideburns', 'soul_patch'].map(f => {
+                  const emojis: Record<string, string> = { none: '🚫', stubble: '🔘', beard: '🧔', mustache: '👨', goatee: '🐐', fu_manchu: '🐉', sideburns: '🔲', soul_patch: '▪️' };
+                  const names: Record<string, string> = { none: 'NONE', stubble: 'STUBBLE', beard: 'BEARD', mustache: 'STACHE', goatee: 'GOATEE', fu_manchu: 'FU MANCHU', sideburns: 'BURNS', soul_patch: 'PATCH' };
+                  return { key: f, emoji: emojis[f], name: names[f], active: (a.facialHair || 'none') === f };
+                })} />
+                <ItemScroll label="BACK ITEM" items={['none', 'cape', 'backpack', 'wings', 'jetpack', 'shield', 'sword', 'quiver', 'crab_shell', 'tentacles', 'rocket', 'scroll', 'boombox'].map(b => {
+                  const emojis: Record<string, string> = { none: '🚫', cape: '🦸', backpack: '🎒', wings: '🪽', jetpack: '🚀', shield: '🛡️', sword: '⚔️', quiver: '🏹', crab_shell: '🦀', tentacles: '🐙', rocket: '🚀', scroll: '📜', boombox: '📻' };
+                  const names: Record<string, string> = { none: 'NONE', cape: 'CAPE', backpack: 'PACK', wings: 'WINGS', jetpack: 'JETPACK', shield: 'SHIELD', sword: 'SWORD', quiver: 'QUIVER', crab_shell: 'SHELL', tentacles: 'TENTACLES', rocket: 'ROCKET', scroll: 'SCROLL', boombox: 'BOOMBOX' };
+                  return { key: b, emoji: emojis[b], name: names[b], active: (a.backItem || 'none') === b };
+                })} />
+                <ItemScroll label="PET" items={['none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab', 'snake', 'bat', 'skull', 'mushroom', 'spider', 'shark', 'bones'].map(p => {
+                  const emojis: Record<string, string> = { none: '🚫', cat: '🐱', dog: '🐕', bird: '🐦', robot: '🤖', dragon: '🐉', alien: '👽', crab: '🦀', snake: '🐍', bat: '🦇', skull: '💀', mushroom: '🍄', spider: '🕷️', shark: '🦈', bones: '🦴' };
+                  const names: Record<string, string> = { none: 'NONE', cat: 'CAT', dog: 'DOG', bird: 'BIRD', robot: 'ROBOT', dragon: 'DRAGON', alien: 'ALIEN', crab: 'CRAB', snake: 'SNAKE', bat: 'BAT', skull: 'SKULL', mushroom: 'SHROOM', spider: 'SPIDER', shark: 'SHARK', bones: 'BONES' };
+                  return { key: p, emoji: emojis[p], name: names[p], active: (a.pet || 'none') === p };
+                })} />
+                <ItemScroll label="AURA" items={['none', 'fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow', 'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy'].map(au => {
+                  const emojis: Record<string, string> = { none: '🚫', fire: '🔥', ice: '🧊', electric: '⚡', nature: '🌿', shadow: '🌑', rainbow: '🌈', glitch: '📟', cosmic: '✨', toxic: '☢️', holy: '🕊️', void: '🕳️', galaxy: '🌌' };
+                  const names: Record<string, string> = { none: 'NONE', fire: 'FIRE', ice: 'ICE', electric: 'BOLT', nature: 'LEAF', shadow: 'SHADOW', rainbow: 'RAINBOW', glitch: 'GLITCH', cosmic: 'COSMIC', toxic: 'TOXIC', holy: 'HOLY', void: 'VOID', galaxy: 'GALAXY' };
+                  const glowColors: Record<string, string> = { fire: '#ff6600', ice: '#00bfff', electric: '#ffff00', nature: '#22c55e', shadow: '#6b21a8', rainbow: '#ff69b4', cosmic: '#c084fc', toxic: '#22c55e', holy: '#ffd700', galaxy: '#818cf8' };
+                  return { key: au, emoji: emojis[au], name: names[au], active: (a.aura || 'none') === au, glow: glowColors[au] };
+                })} />
+                <ItemScroll label="HAND ITEM" items={['none', 'lightsaber', 'coffee', 'laptop', 'flag', 'wand', 'crab_claws', 'sword_hand', 'pizza', 'microphone', 'torch'].map(hi => {
+                  const emojis: Record<string, string> = { none: '🚫', lightsaber: '⚔️', coffee: '☕', laptop: '💻', flag: '🚩', wand: '🪄', crab_claws: '🦞', sword_hand: '🗡️', pizza: '🍕', microphone: '🎤', torch: '🔦' };
+                  const names: Record<string, string> = { none: 'NONE', lightsaber: 'SABER', coffee: 'COFFEE', laptop: 'LAPTOP', flag: 'FLAG', wand: 'WAND', crab_claws: 'CLAWS', sword_hand: 'SWORD', pizza: 'PIZZA', microphone: 'MIC', torch: 'TORCH' };
+                  return { key: hi, emoji: emojis[hi], name: names[hi], active: (a.handItem || 'none') === hi };
+                })} />
               </View>
             );
           })()}
+        </View>
+      )}
+
+      {/* Agent Soul / Personality */}
+      {circleId && (
+        <View style={styles.customizeSection}>
+          <Pressable
+            onPress={() => setShowSoul(!showSoul)}
+            style={[styles.customizeToggle, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={styles.customizeToggleText}>
+              {showSoul ? '▼' : '▶'} AGENT SOUL
+            </Text>
+            {(() => {
+              const active = detectTemplate(soulText);
+              return active ? (
+                <View style={styles.soulActiveBadge}>
+                  <Text style={styles.soulActiveBadgeText}>{active.emoji} {active.name}</Text>
+                </View>
+              ) : soulText.trim() ? (
+                <View style={styles.soulActiveBadge}>
+                  <Text style={styles.soulActiveBadgeText}>Custom</Text>
+                </View>
+              ) : null;
+            })()}
+          </Pressable>
+
+          {showSoul && (
+            <View style={styles.soulBody}>
+              <Text style={styles.soulHint}>
+                Define {agent.name}'s personality. Prepended to every LLM call.
+              </Text>
+
+              {/* Category tabs */}
+              <View style={styles.soulCategoryRow}>
+                {SOUL_CATEGORIES.map(cat => (
+                  <Pressable
+                    key={cat.key}
+                    onPress={() => setSoulCategory(cat.key)}
+                    style={[
+                      styles.soulCategoryTab,
+                      soulCategory === cat.key && { borderColor: cat.color, backgroundColor: cat.color + '15' },
+                      Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                    ]}
+                  >
+                    <Text style={[
+                      styles.soulCategoryText,
+                      soulCategory === cat.key && { color: cat.color },
+                    ]}>
+                      {cat.icon} {cat.label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              {/* Template cards */}
+              <ScrollView style={{ maxHeight: 200 }} nestedScrollEnabled showsVerticalScrollIndicator={false}>
+                {getTemplatesByCategory(soulCategory).map(tmpl => {
+                  const isActive = detectTemplate(soulText)?.id === tmpl.id;
+                  const catColor = SOUL_CATEGORIES.find(c => c.key === tmpl.category)?.color || '#6366f1';
+                  return (
+                    <Pressable
+                      key={tmpl.id}
+                      onPress={() => setSoulText(tmpl.soulText)}
+                      style={[
+                        styles.soulCard,
+                        isActive && { borderColor: catColor, backgroundColor: catColor + '10' },
+                        Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                      ]}
+                    >
+                      <View style={styles.soulCardHeader}>
+                        <Text style={{ fontSize: 14 }}>{tmpl.emoji}</Text>
+                        <Text style={[styles.soulCardName, isActive && { color: '#eee' }]} numberOfLines={1}>{tmpl.name}</Text>
+                        {isActive && <Text style={{ fontSize: 7, color: catColor, fontWeight: '800' }}>ACTIVE</Text>}
+                      </View>
+                      <Text style={styles.soulCardDesc} numberOfLines={1}>{tmpl.description}</Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+
+              {/* Editable text */}
+              <TextInput
+                style={styles.soulInput}
+                value={soulText}
+                onChangeText={setSoulText}
+                placeholder="Pick a template or write custom SOUL.md..."
+                placeholderTextColor="#444"
+                multiline
+                numberOfLines={4}
+              />
+
+              {/* Save / Clear row */}
+              <View style={styles.soulActions}>
+                <Pressable
+                  onPress={handleSaveSoul}
+                  disabled={soulSaving}
+                  style={[styles.soulSaveBtn, soulSaving && { opacity: 0.4 }]}
+                >
+                  <Text style={styles.soulSaveBtnText}>{soulSaving ? 'SAVING...' : 'SAVE SOUL'}</Text>
+                </Pressable>
+                {soulText.trim() ? (
+                  <Pressable
+                    onPress={() => setSoulText('')}
+                    style={styles.soulClearBtn}
+                  >
+                    <Text style={styles.soulClearBtnText}>CLEAR</Text>
+                  </Pressable>
+                ) : null}
+                {soulStatus ? (
+                  <Text style={{ fontSize: 8, color: soulStatus.startsWith('Error') ? '#ff5555' : '#22c55e', fontFamily: 'monospace' }}>
+                    {soulStatus}
+                  </Text>
+                ) : null}
+              </View>
+            </View>
+          )}
         </View>
       )}
 
@@ -749,7 +961,7 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
   custBody: {
-    gap: 8,
+    gap: 4,
     paddingTop: 8,
   },
   custPreview: {
@@ -761,56 +973,129 @@ const styles = StyleSheet.create({
     borderColor: '#1a1a2e',
     marginBottom: 4,
   },
-  custRow: {
-    gap: 4,
-  },
-  custLabel: {
-    fontSize: 8,
-    fontWeight: '800',
-    color: '#555',
+  custSectionTitle: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#777',
     fontFamily: 'monospace',
-    letterSpacing: 1.2,
+    letterSpacing: 1.5,
+    marginTop: 6,
+    marginBottom: 3,
   },
-  custSwatches: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 5,
+  custScroll: {
+    marginBottom: 2,
   },
-  custSwatch: {
-    width: 22,
-    height: 22,
-    borderRadius: 4,
-    borderWidth: 1.5,
+  custItemSwatch: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    borderWidth: 2.5,
     borderColor: 'transparent',
+    marginRight: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  custSwatchActive: {
+  custItemSwatchActive: {
     borderColor: '#fff',
-    ...(Platform.OS === 'web' ? { boxShadow: '0 0 6px #ffffff60' } as any : {}),
+    ...(Platform.OS === 'web' ? { boxShadow: '0 0 8px rgba(255,255,255,0.4)' } as any : {}),
   },
-  custOptions: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 4,
+  custItemCheck: {
+    fontSize: 14,
+    color: '#fff',
+    fontWeight: '900',
+    textShadowColor: '#000',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
-  custOptionBtn: {
-    paddingHorizontal: 7,
-    paddingVertical: 4,
-    borderRadius: 4,
-    backgroundColor: '#111118',
-    borderWidth: 1,
+  custItemCard: {
+    width: 60,
+    height: 60,
+    borderRadius: 10,
+    borderWidth: 1.5,
     borderColor: '#1a1a2e',
+    backgroundColor: '#0a0a10',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 6,
+    gap: 1,
   },
-  custOptionActive: {
+  custItemCardActive: {
+    borderColor: '#6366f1',
     backgroundColor: '#6366f120',
-    borderColor: '#6366f160',
+    ...(Platform.OS === 'web' ? { boxShadow: '0 0 10px rgba(99,102,241,0.3)' } as any : {}),
   },
-  custOptionText: {
+  custItemEmoji: {
+    fontSize: 20,
+  },
+  custItemLabel: {
     fontSize: 7,
-    fontWeight: '700',
     color: '#555',
     fontFamily: 'monospace',
+    fontWeight: '700',
+    textAlign: 'center',
   },
-  custOptionTextActive: {
-    color: '#a5b4fc',
+  custItemLabelActive: {
+    color: '#ddd',
+  },
+  // Soul / personality styles
+  soulActiveBadge: {
+    paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8,
+    borderWidth: 1, borderColor: '#6366f140', backgroundColor: '#6366f110',
+    marginLeft: 8,
+  },
+  soulActiveBadgeText: {
+    fontSize: 7, color: '#aaa', fontFamily: 'monospace', fontWeight: '700',
+  },
+  soulBody: {
+    gap: 8, paddingTop: 8,
+  },
+  soulHint: {
+    fontSize: 9, color: '#666', fontFamily: 'monospace', fontStyle: 'italic', lineHeight: 13,
+  },
+  soulCategoryRow: {
+    flexDirection: 'row', gap: 4,
+  },
+  soulCategoryTab: {
+    flex: 1, paddingVertical: 6, paddingHorizontal: 4, borderRadius: 6,
+    borderWidth: 1, borderColor: '#1a1a2e', backgroundColor: '#0a0a10',
+    alignItems: 'center',
+  },
+  soulCategoryText: {
+    fontSize: 8, color: '#555', fontFamily: 'monospace', fontWeight: '700',
+  },
+  soulCard: {
+    backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a2e',
+    borderRadius: 6, padding: 8, gap: 3, marginBottom: 4,
+  },
+  soulCardHeader: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+  },
+  soulCardName: {
+    fontSize: 10, fontWeight: '800', color: '#999', fontFamily: 'monospace', flex: 1,
+  },
+  soulCardDesc: {
+    fontSize: 8, color: '#555', fontFamily: 'monospace', lineHeight: 12,
+  },
+  soulInput: {
+    backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a2e',
+    borderRadius: 6, padding: 8, color: '#ccc', fontFamily: 'monospace',
+    fontSize: 9, minHeight: 80, textAlignVertical: 'top',
+  },
+  soulActions: {
+    flexDirection: 'row', gap: 6, alignItems: 'center',
+  },
+  soulSaveBtn: {
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6,
+    backgroundColor: '#6366f120', borderWidth: 1, borderColor: '#6366f140',
+  },
+  soulSaveBtnText: {
+    fontSize: 8, color: '#6366f1', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5,
+  },
+  soulClearBtn: {
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6,
+    backgroundColor: '#ef444420', borderWidth: 1, borderColor: '#ef444440',
+  },
+  soulClearBtnText: {
+    fontSize: 8, color: '#ef4444', fontFamily: 'monospace', fontWeight: '800',
   },
 });

@@ -27,12 +27,21 @@ import {
   testConnection, listAgents, listCronJobs, CronJob,
 } from '../../../lib/openclawService';
 import {
-  AgentConnection, loadConnections, saveConnections, PROVIDER_META,
+  AgentConnection, ProviderType, loadConnections, saveConnections, PROVIDER_META,
+  autoDiscoverLocalAgents, probeEndpointHealth, getOpenClawEndpoint,
 } from '../../../lib/connectionManager';
 import {
   ClaudeCodePoller, bridgeSessionsToAgents, detectClaudeCodeBridge,
   publishClaudeCodeAgent, updateClaudeCodeAgentStatus, markClaudeCodeAgentOffline,
 } from '../../../lib/claudeCodeDetector';
+import {
+  isAutoConnectRunning,
+  getAutoConnectConnections,
+  getAutoConnectSessions,
+  subscribeAutoConnect,
+  setAutoConnectCircleId,
+  updateAutoConnectConnections,
+} from '../../../lib/agentAutoConnect';
 import { storage } from '../../../lib/storage';
 import { loadTrendingContent } from '../../../lib/trendingContent';
 import {
@@ -56,6 +65,9 @@ import {
   createBlackSwanAgent,
   BLACKSWAN_AGENT_ID,
 } from '../../../lib/circleOffice';
+import {
+  evaluatePokerHand, blackswanDecide, blackswanRaise, getBlackswanLine,
+} from '../../../lib/circleGames';
 import {
   startHeartbeat,
   stopHeartbeat,
@@ -171,10 +183,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [connectionsCollapsed, setConnectionsCollapsed] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [placingType, setPlacingType] = useState<string | null>(null);
+  const [activeCatalogCat, setActiveCatalogCat] = useState<string>('connected');
+  const catalogScrollRef = useRef<ScrollView>(null);
   const [selectedFurnitureId, setSelectedFurnitureId] = useState<string | null>(null);
   const [whiteboardNotes, setWhiteboardNotes] = useState<string[]>([]);
   const [chatMinimized, setChatMinimized] = useState(false);
   const [terminalSize, setTerminalSize] = useState<'closed' | 'half' | 'full'>('closed');
+  const [terminalInitialTab, setTerminalInitialTab] = useState<'commands' | 'automations'>('commands');
   // ─── Shared terminal state — both the tab view and the bottom drawer
   //     use these so input/target stay in sync (true mirror behaviour) ──────
   const [terminalInput, setTerminalInput]         = useState('');
@@ -219,6 +234,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [stickyGifSearch, setStickyGifSearch] = useState('');
   const stickyCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const stickyDrawingRef = useRef(false);
+
+  // ─── Service connector state ────────────────────────────────────────────
+  const [serviceModalVisible, setServiceModalVisible] = useState(false);
+  const [serviceModalTargetId, setServiceModalTargetId] = useState<string | null>(null);
+  const [serviceModalType, setServiceModalType] = useState<string>('');
+  const [serviceUrl, setServiceUrl] = useState('');
+  const [serviceTvApp, setServiceTvApp] = useState('youtube');
+  const [serviceTvWidth, setServiceTvWidth] = useState('120');
+  const [serviceTvHeight, setServiceTvHeight] = useState('80');
+  const [serviceDiscordChannel, setServiceDiscordChannel] = useState('');
+  const [serviceTwitchChannel, setServiceTwitchChannel] = useState('');
+  const [serviceCallProvider, setServiceCallProvider] = useState('zoom');
 
   // ─── Interactive furniture state ──────────────────────────────────────────
   const [interactInputId, setInteractInputId] = useState<string | null>(null);
@@ -346,6 +373,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   }) => {
     const blackSwanAgent = createBlackSwanAgent(circleId);
     const myAgents = circleOfficeAgents.filter(a => a.ownerId === currentUserId);
+    // Use the actual connected endpoint, not hardcoded localhost
+    const gwUrl = getOpenClawEndpoint(connections) || undefined;
 
     const baseReq = {
       messageId: params.messageId,
@@ -374,6 +403,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         invokeSelectedAgents(
           baseReq, myTargetedAgents,
           params.targetAgentIds.filter(id => id !== BLACKSWAN_AGENT_ID),
+          gwUrl,
         ).catch(err => console.error('[OfficeTab] Multi-select invocation failed:', err));
       }
     } else if (params.targetAgentId) {
@@ -388,6 +418,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           invokeAndStream(
             { ...baseReq, targetAgentId: agent.id, targetAgentName: `@${agent.name}` },
             agent,
+            gwUrl,
           ).catch(err => console.error('[OfficeTab] Invocation failed:', err));
         }
       }
@@ -398,14 +429,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         blackSwanAgent,
       ).catch(err => console.error('[OfficeTab] BlackSwan @all invocation failed:', err));
       if (myAgents.length > 0) {
-        invokeAllAgents(baseReq, myAgents)
+        invokeAllAgents(baseReq, myAgents, gwUrl)
           .catch(err => console.error('[OfficeTab] Multi-agent invocation failed:', err));
       }
     }
-  }, [circleId, currentUserId, circleOfficeAgents]);
+  }, [circleId, currentUserId, circleOfficeAgents, connections]);
 
   // ─── Terminal command subscription ────────────────────────────────────────
   // Listen for commands targeting my agents + BlackSwan; invoke accordingly
+  // Resolve the gateway URL from active connections (not hardcoded)
+  const resolvedGatewayUrl = getOpenClawEndpoint(connections);
+
   useEffect(() => {
     if (!currentUserId || !circleId) return;
 
@@ -428,6 +462,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         targetAgentName: cmd.targetAgentName,
         model: cmd.model,
       };
+
+      // Use connection endpoint, not hardcoded localhost
+      const gwUrl = resolvedGatewayUrl || undefined;
 
       // Helper: check if BlackSwan is targeted
       const blackSwanTargeted =
@@ -452,7 +489,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             baseReq,
             myTargetedAgents,
             cmd.targetAgentIds.filter(id => id !== BLACKSWAN_AGENT_ID),
-            'http://localhost:18790'
+            gwUrl
           ).catch(err => console.error('[OfficeTab] Multi-select invocation failed:', err));
         }
       } else if (cmd.targetAgentId) {
@@ -469,7 +506,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           invokeAndStream(
             { ...baseReq, targetAgentId: agent.id, targetAgentName: `@${agent.name}` },
             agent,
-            'http://localhost:18790'
+            gwUrl
           ).catch(err => console.error('[OfficeTab] Invocation failed:', err));
         }
       } else {
@@ -483,7 +520,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           invokeAllAgents(
             { ...baseReq, targetAgentName: '@all' },
             myAgents,
-            'http://localhost:18790'
+            gwUrl
           ).catch(err => console.error('[OfficeTab] Multi-agent invocation failed:', err));
         }
       }
@@ -493,7 +530,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       unsub();
       cleanupTerminalChannels(circleId);
     };
-  }, [circleId, currentUserId, circleOfficeAgents.filter(a => a.ownerId === currentUserId).length]);
+  }, [circleId, currentUserId, circleOfficeAgents.filter(a => a.ownerId === currentUserId).length, resolvedGatewayUrl]);
 
   // Merge live presence into circle office agents
   const mergedCircleAgents = circleOfficeAgents.map(agent => ({
@@ -637,6 +674,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         ? prev.map(c => c.id === conn.id ? conn : c)
         : [...prev, conn];
       saveConnections(updated);
+      updateAutoConnectConnections(updated);
       return updated;
     });
     // Auto-connect
@@ -648,6 +686,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     setConnections(prev => {
       const updated = prev.filter(c => c.id !== id);
       saveConnections(updated);
+      updateAutoConnectConnections(updated);
       return updated;
     });
   }, [disconnectOne]);
@@ -722,26 +761,90 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     setTelegramError(null);
   }, []);
 
-  // ─── Load saved connections on mount ──────────────────────────────
+  // ─── Load saved connections on mount + auto-discover ──────────────
+  // Agent detection (Claude Code bridge + OpenClaw) is handled by the app-level
+  // agentAutoConnect singleton (started in App.tsx on auth). OfficeTab just
+  // picks up the already-connected state and subscribes for updates.
 
   const floorsInitializedRef = useRef(false);
   const initRef = useRef(false);
   useEffect(() => {
     if (initRef.current) return;
     initRef.current = true;
-    (async () => {
-      // Load connections
-      const conns = await loadConnections();
-      setConnections(conns);
 
-      // Auto-connect all enabled connections
-      // NOTE: We always attempt localhost connections — when the user browses from
-      // their own machine, localhost in the browser points to their local proxy.
-      for (const conn of conns) {
-        if (conn.enabled) {
-          connectOne(conn);
+    // Tell the auto-connect service which circle we're in (for DB publishing)
+    setAutoConnectCircleId(circleId);
+
+    (async () => {
+      // ── Pick up pre-connected agents from the app-level singleton ──
+      if (isAutoConnectRunning()) {
+        const preConns = getAutoConnectConnections();
+        const preSessions = getAutoConnectSessions();
+        if (preConns.length > 0) {
+          setConnections(preConns);
+          console.log('[OfficeTab] Loaded', preConns.length, 'pre-connected agents from auto-connect');
         }
+        // Copy sessions into our local ref
+        for (const [key, sessions] of preSessions) {
+          sessionsRef.current.set(key, sessions);
+        }
+        if (preSessions.size > 0) {
+          setSessionsTick(t => t + 1);
+        }
+        // Mark CC as already published if singleton has sessions
+        if (preSessions.has('claude-code-auto')) {
+          ccPublishedRef.current = true;
+        }
+      } else {
+        // Fallback: singleton hasn't started yet — do legacy load
+        let conns = await loadConnections();
+        const { discovered } = await autoDiscoverLocalAgents(conns);
+        if (discovered) {
+          const existingOpenClaw = conns.find(c => c.provider === 'openclaw');
+          if (existingOpenClaw?.token) {
+            discovered.token = existingOpenClaw.token;
+          }
+          conns = [...conns, discovered];
+          saveConnections(conns);
+        }
+        setConnections(conns);
+        for (const conn of conns) {
+          if (conn.enabled) connectOne(conn);
+        }
+
+        // Legacy CC detection
+        detectClaudeCodeBridge().then(detected => {
+          if (detected && !ccPollerRef.current) {
+            ccPollerRef.current = new ClaudeCodePoller(sessions => {
+              sessionsRef.current.set('claude-code-auto', bridgeSessionsToAgents(sessions) as any);
+              setSessionsTick(t => t + 1);
+              if (!ccPublishedRef.current && circleId) {
+                ccPublishedRef.current = true;
+                publishClaudeCodeAgent(circleId, sessions.length)
+                  .then(() => loadCircleOffice())
+                  .catch(err => console.error('[OfficeTab] Failed to publish Claude Code agent:', err));
+              }
+              if (ccPublishedRef.current && circleId) {
+                updateClaudeCodeAgentStatus(circleId, sessions).catch(() => {});
+              }
+            });
+            ccPollerRef.current.start(5000);
+          }
+        });
       }
+
+      // ── Subscribe to singleton updates so OfficeTab stays in sync ──
+      const unsub = subscribeAutoConnect(() => {
+        const latestConns = getAutoConnectConnections();
+        const latestSessions = getAutoConnectSessions();
+        setConnections(latestConns);
+        for (const [key, sessions] of latestSessions) {
+          sessionsRef.current.set(key, sessions);
+        }
+        setSessionsTick(t => t + 1);
+      });
+      // Store unsubscribe for cleanup
+      (initRef as any)._unsub = unsub;
 
       // Load custom agent names
       try {
@@ -798,8 +901,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             const remote = layoutData?.office_layout as { floors?: OfficeFloor[]; currentFloorId?: string; updatedAt?: number } | null;
             if (remote?.floors && remote.floors.length > 0) {
               const remoteUpdatedAt = remote.updatedAt || 0;
-              // Use remote only if it has a strictly newer timestamp
-              // If timestamps match or are both missing, prefer whichever has more furniture
               let useRemote = false;
               if (remoteUpdatedAt > localUpdatedAt) {
                 useRemote = true;
@@ -825,7 +926,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       floorsInitializedRef.current = true;
 
       // Load agent appearances — Supabase + localStorage merge
-      // Column may not exist yet — detect and disable future attempts
       try {
         const appearancesRaw = await storage.getItem(STORAGE_KEY_APPEARANCES);
         const local = appearancesRaw ? JSON.parse(appearancesRaw) : {};
@@ -862,7 +962,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         loadSessionTags(),
         loadCachedTags()
       ]).then(([primaryTags, cachedTags]) => {
-        // Merge: primary tags take precedence
         const merged = new Map(cachedTags);
         primaryTags.forEach((tags, key) => {
           merged.set(key, tags);
@@ -873,74 +972,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       // Load budget config + idle behaviors config
       loadBudgetConfig().then(setBudgetConfig);
       loadIdleConfig().then(cfg => { setIdleConfig(cfg); idleConfigRef.current = cfg; });
-
-      // Auto-detect Claude Code bridge (zero config — no OpenClaw needed)
-      detectClaudeCodeBridge().then(detected => {
-        if (detected && !ccPollerRef.current) {
-          ccPollerRef.current = new ClaudeCodePoller(sessions => {
-            sessionsRef.current.set('claude-code-auto', bridgeSessionsToAgents(sessions) as any);
-            setSessionsTick(t => t + 1);
-            // Publish to circle_office_agents DB on first detection
-            if (!ccPublishedRef.current && circleId) {
-              ccPublishedRef.current = true;
-              publishClaudeCodeAgent(circleId, sessions.length)
-                .then(() => loadCircleOffice())
-                .catch(err => console.error('[OfficeTab] Failed to publish Claude Code agent:', err));
-            }
-            // Update live status on each poll
-            if (ccPublishedRef.current && circleId) {
-              updateClaudeCodeAgentStatus(circleId, sessions).catch(() => {});
-            }
-          });
-          ccPollerRef.current.start(5000);
-        }
-      });
     })();
-  }, [connectOne]);
 
-  // Retry Claude Code bridge detection every 30s (user may start bridge after app)
-  // Also detects bridge going offline and marks agent accordingly
-  useEffect(() => {
-    const retryInterval = setInterval(async () => {
-      const detected = await detectClaudeCodeBridge();
-
-      if (detected && !ccPollerRef.current) {
-        // Bridge came online — start poller
-        ccPollerRef.current = new ClaudeCodePoller(sessions => {
-          sessionsRef.current.set('claude-code-auto', bridgeSessionsToAgents(sessions) as any);
-          setSessionsTick(t => t + 1);
-          if (!ccPublishedRef.current && circleId) {
-            ccPublishedRef.current = true;
-            publishClaudeCodeAgent(circleId, sessions.length)
-              .then(() => loadCircleOffice())
-              .catch(err => console.error('[OfficeTab] Failed to publish Claude Code agent:', err));
-          }
-          if (ccPublishedRef.current && circleId) {
-            updateClaudeCodeAgentStatus(circleId, sessions).catch(() => {});
-          }
-        });
-        ccPollerRef.current.start(5000);
-      } else if (!detected && ccPollerRef.current) {
-        // Bridge went offline — stop poller, keep agent visible as idle
-        ccPollerRef.current.stop();
-        ccPollerRef.current = null;
-        // Don't remove from sessionsRef — keep the pixel agent showing as idle
-        // Just update all agents to idle status
-        const existing = sessionsRef.current.get('claude-code-auto') as unknown as OfficeAgent[] | undefined;
-        if (existing && existing.length > 0) {
-          const idled = existing.map(a => ({ ...a, status: 'idle' as const, activity: 'Session ended — idling' }));
-          sessionsRef.current.set('claude-code-auto', idled as any);
-          setSessionsTick(t => t + 1);
-        }
-        if (ccPublishedRef.current && circleId) {
-          markClaudeCodeAgentOffline(circleId)
-            .then(() => loadCircleOffice())
-            .catch(() => {});
-        }
-      }
-    }, 30000);
-    return () => clearInterval(retryInterval);
-  }, [circleId, loadCircleOffice]);
+    return () => {
+      if ((initRef as any)._unsub) (initRef as any)._unsub();
+    };
+  }, [connectOne, circleId]);
 
   // Cleanup pollers on unmount
   useEffect(() => {
@@ -1291,7 +1328,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     // If something is selected and user taps floor, deselect
     if (selectedFurnitureId) { setSelectedFurnitureId(null); return; }
     if (!placingType) return;
-    const newFurniture = { id: `f_${Date.now()}`, type: placingType as any, x, y };
+    const catalogEntry = FURNITURE_CATALOG.find(c => c.type === placingType);
+    const newFurniture = {
+      id: `f_${Date.now()}`, type: placingType as any, x, y,
+      itemWidth: catalogEntry?.width, itemHeight: catalogEntry?.height,
+    };
     setFloors(prev => prev.map(f =>
       f.id === currentFloorId ? { ...f, furniture: [...f.furniture, newFurniture] } : f
     ));
@@ -1308,6 +1349,22 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       setSelectedFurnitureId(id);
       setImagePickerTab('upload');
       setNftPickerVisible(true);
+      return;
+    }
+    // Connected items — open service connector on first tap
+    const connectedTypes = ['smart_tv', 'spotify_jukebox', 'discord_hub', 'twitch_stream', 'video_call', 'crypto_ticker', 'github_feed', 'calendar_widget', 'world_clock', 'music_visualizer', 'figma_board'];
+    if (item && connectedTypes.includes(item.type) && selectedFurnitureId !== id) {
+      setServiceModalTargetId(id);
+      setSelectedFurnitureId(id);
+      setServiceModalType(item.type);
+      setServiceUrl(item.tvContentUrl || '');
+      setServiceTvApp(item.tvApp || 'youtube');
+      setServiceTvWidth(String(item.tvWidth || 120));
+      setServiceTvHeight(String(item.tvHeight || 80));
+      setServiceDiscordChannel(item.discordChannel || '');
+      setServiceTwitchChannel(item.twitchChannel || '');
+      setServiceCallProvider(item.videoCallProvider || 'zoom');
+      setServiceModalVisible(true);
       return;
     }
     // Sticky note — open editor on first tap
@@ -1477,6 +1534,60 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     setStickyEditorTargetId(null);
   };
 
+  const handleServiceSave = () => {
+    if (!serviceModalTargetId) return;
+    const updates: Record<string, any> = {};
+    switch (serviceModalType) {
+      case 'smart_tv':
+        updates.tvApp = serviceTvApp;
+        updates.tvContentUrl = serviceUrl || undefined;
+        updates.tvWidth = parseInt(serviceTvWidth) || 120;
+        updates.tvHeight = parseInt(serviceTvHeight) || 80;
+        updates.tvPoweredOn = true;
+        break;
+      case 'spotify_jukebox':
+        updates.spotifyConnected = true;
+        updates.spotifyTrackName = 'Connected';
+        updates.spotifyArtist = 'Spotify';
+        updates.spotifyPlaying = false;
+        break;
+      case 'discord_hub':
+        updates.discordConnected = true;
+        updates.discordChannel = serviceDiscordChannel || 'general';
+        updates.discordStatus = 'online';
+        updates.discordMemberCount = 1;
+        break;
+      case 'twitch_stream':
+        updates.twitchChannel = serviceTwitchChannel || 'stream';
+        updates.twitchLive = true;
+        updates.twitchViewers = 0;
+        break;
+      case 'video_call':
+        updates.videoCallProvider = serviceCallProvider;
+        updates.videoCallLink = serviceUrl || undefined;
+        break;
+    }
+    setFloors(prev => prev.map(f =>
+      f.id === currentFloorId ? {
+        ...f,
+        furniture: f.furniture.map(item =>
+          item.id === serviceModalTargetId ? { ...item, ...updates } : item
+        ),
+      } : f
+    ));
+    setServiceModalVisible(false);
+    setServiceModalTargetId(null);
+  };
+
+  const handleServiceOpen = (url: string) => {
+    if (!url) return;
+    if (Platform.OS === 'web') {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    } else {
+      Linking.openURL(url);
+    }
+  };
+
   const initStickyCanvas = (canvas: HTMLCanvasElement | null) => {
     if (!canvas || stickyCanvasRef.current === canvas) return;
     stickyCanvasRef.current = canvas;
@@ -1525,6 +1636,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       f.id === currentFloorId ? {
         ...f,
         furniture: f.furniture.map(item => item.id === id ? { ...item, x, y } : item),
+      } : f
+    ));
+  };
+
+  const handleFurnitureResize = (id: string, w: number, h: number) => {
+    setFloors(prev => prev.map(f =>
+      f.id === currentFloorId ? {
+        ...f,
+        furniture: f.furniture.map(item => item.id === id ? { ...item, itemWidth: w, itemHeight: h } : item),
       } : f
     ));
   };
@@ -1672,6 +1792,596 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       case 'whack_a_mole':
         // Handled internally by the WhackAMoleItem component
         break;
+
+      case 'fireplace': {
+        const next = ((item.fireplaceIntensity ?? 1) + 1) % 3;
+        updateFurnitureField({ fireplaceIntensity: next });
+        addFloorEffect('pulse');
+        break;
+      }
+
+      case 'aquarium': {
+        const count = (item.aquariumFishCount || 3) + 1;
+        updateFurnitureField({ aquariumFishCount: count > 8 ? 1 : count });
+        break;
+      }
+
+      case 'vinyl_player':
+        updateFurnitureField({ vinylPlaying: !item.vinylPlaying });
+        break;
+
+      case 'rain_window':
+        // Ambient — no interaction needed
+        break;
+
+      case 'galaxy_orb':
+        addFloorEffect('pulse');
+        break;
+
+      case 'terrarium':
+        // Ambient — no interaction needed
+        break;
+
+      case 'zen_garden': {
+        const next = ((item.zenPattern ?? 0) + 1) % 3;
+        updateFurnitureField({ zenPattern: next });
+        break;
+      }
+
+      case 'focus_candle':
+        updateFurnitureField({ focusBurning: !item.focusBurning });
+        break;
+
+      case 'quote_board': {
+        const nextQ = ((item.quoteIndex || 0) + 1) % 10;
+        updateFurnitureField({ quoteIndex: nextQ });
+        break;
+      }
+
+      case 'progress_bar': {
+        const nextVal = ((item.progressValue || 0) + 10) % 110;
+        updateFurnitureField({ progressValue: nextVal });
+        if (nextVal === 100) addFloorEffect('confetti');
+        break;
+      }
+
+      case 'hologram': {
+        const next = ((item.hologramShape ?? 0) + 1) % 3;
+        updateFurnitureField({ hologramShape: next });
+        addFloorEffect('pulse');
+        break;
+      }
+
+      case 'pixel_display': {
+        const next = ((item.pixelScene ?? 0) + 1) % 4;
+        updateFurnitureField({ pixelScene: next });
+        break;
+      }
+
+      case 'spotify_jukebox': {
+        if (!item.spotifyConnected) {
+          // Open Spotify auth — for now toggle connected state to demo
+          updateFurnitureField({
+            spotifyConnected: true,
+            spotifyTrackName: 'Lo-fi Beats',
+            spotifyArtist: 'ChillHop',
+            spotifyPlaying: true,
+            spotifyProgress: 35,
+          });
+        } else {
+          // Toggle playback
+          updateFurnitureField({ spotifyPlaying: !item.spotifyPlaying });
+          if (!item.spotifyPlaying) addFloorEffect('pulse');
+        }
+        break;
+      }
+
+      case 'discord_hub': {
+        if (!item.discordConnected) {
+          updateFurnitureField({
+            discordConnected: true,
+            discordChannel: 'general',
+            discordStatus: 'online',
+            discordMemberCount: 12,
+          });
+        } else {
+          const statuses = ['online', 'idle', 'dnd', 'offline'];
+          const curIdx = statuses.indexOf(item.discordStatus || 'online');
+          updateFurnitureField({ discordStatus: statuses[(curIdx + 1) % statuses.length] });
+        }
+        break;
+      }
+
+      case 'video_call': {
+        if (!item.videoCallActive) {
+          const providers = ['zoom', 'meet', 'teams'];
+          const curIdx = providers.indexOf(item.videoCallProvider || 'meet');
+          const provider = providers[(curIdx + 1) % providers.length];
+          updateFurnitureField({
+            videoCallActive: true,
+            videoCallProvider: provider,
+            videoCallParticipants: Math.floor(Math.random() * 4) + 2,
+          });
+          addFloorEffect('pulse');
+        } else {
+          updateFurnitureField({ videoCallActive: false, videoCallParticipants: 0 });
+        }
+        break;
+      }
+
+      case 'message_board': {
+        const sources = ['imessage', 'sms', 'whatsapp'];
+        const curIdx = sources.indexOf(item.messageSource || 'sms');
+        const msgs = [
+          'Hey, are you free?', 'Meeting at 3pm', 'Ship it! 🚀',
+          'PR looks good 👍', 'Lunch?', 'Check this out',
+        ];
+        updateFurnitureField({
+          messageSource: sources[(curIdx + 1) % sources.length],
+          messagePreview: msgs[Math.floor(Math.random() * msgs.length)],
+          messageCount: Math.floor(Math.random() * 8) + 1,
+        });
+        break;
+      }
+
+      case 'smart_tv': {
+        if (!item.tvPoweredOn) {
+          updateFurnitureField({ tvPoweredOn: true, tvApp: item.tvApp || 'youtube' });
+        } else {
+          // For non-embeddable apps with a URL, open in new tab on tap
+          const nonEmbeddable = ['netflix', 'hulu', 'disney'];
+          if (nonEmbeddable.includes(item.tvApp || '') && item.tvContentUrl) {
+            if (Platform.OS === 'web') {
+              window.open(item.tvContentUrl, '_blank', 'noopener,noreferrer');
+            } else {
+              Linking.openURL(item.tvContentUrl);
+            }
+          } else {
+            const apps = ['youtube', 'netflix', 'hulu', 'disney', 'twitch'];
+            const curIdx = apps.indexOf(item.tvApp || 'youtube');
+            updateFurnitureField({ tvApp: apps[(curIdx + 1) % apps.length] });
+            addFloorEffect('pulse');
+          }
+        }
+        break;
+      }
+
+      case 'weather_station': {
+        const conditions = ['sunny', 'cloudy', 'rainy', 'snowy'];
+        const curIdx = conditions.indexOf(item.weatherCondition || 'sunny');
+        const cities = ['New York', 'Tokyo', 'London', 'Paris', 'Sydney', 'Dubai', 'LA'];
+        const temps: Record<string, number[]> = {
+          sunny: [78, 85, 92], cloudy: [62, 68, 55], rainy: [48, 52, 58], snowy: [28, 32, 18],
+        };
+        const nextCond = conditions[(curIdx + 1) % conditions.length];
+        const tempArr = temps[nextCond];
+        updateFurnitureField({
+          weatherCondition: nextCond,
+          weatherTemp: tempArr[Math.floor(Math.random() * tempArr.length)],
+          weatherCity: cities[Math.floor(Math.random() * cities.length)],
+        });
+        break;
+      }
+
+      case 'twitch_stream': {
+        updateFurnitureField({
+          twitchLive: !item.twitchLive,
+          twitchChannel: item.twitchChannel || 'stream',
+          twitchViewers: item.twitchLive ? 0 : Math.floor(Math.random() * 5000) + 100,
+        });
+        break;
+      }
+
+      case 'pomodoro_room': {
+        if (item.pomodoroBreak) {
+          updateFurnitureField({ pomodoroBreak: false, pomodoroMinutes: 25 });
+        } else {
+          updateFurnitureField({
+            pomodoroBreak: true,
+            pomodoroMinutes: 5,
+            pomodoroSessions: (item.pomodoroSessions || 0) + 1,
+          });
+          addFloorEffect('confetti');
+        }
+        break;
+      }
+
+      // ─── Game Items ──────────────────────────────────────────────────
+
+      case 'poker_table': {
+        const phase = item.pokerPhase || 'waiting';
+        const phases = ['waiting', 'deal', 'flop', 'turn', 'river', 'showdown'];
+        const nextPhaseIdx = (phases.indexOf(phase) + 1) % phases.length;
+        const nextPhase = phases[nextPhaseIdx] as string;
+        const bsEnabled = item.pokerBlackswanEnabled || item.gameBlackswanActive;
+        const blinds = item.pokerBlinds || 25;
+
+        // Deck helper — deal random cards without duplicates
+        const usedCards = new Set<string>();
+        const suits = ['♠', '♥', '♦', '♣'];
+        const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
+        const randomCard = () => {
+          let card: string;
+          do { card = `${ranks[Math.floor(Math.random() * ranks.length)]}${suits[Math.floor(Math.random() * suits.length)]}`; }
+          while (usedCards.has(card));
+          usedCards.add(card);
+          return card;
+        };
+
+        if (nextPhase === 'waiting') {
+          // Reset round — keep chips, toggle BlackSwan if not enabled
+          const handsPlayed = (item.pokerHandsPlayed || 0);
+          updateFurnitureField({
+            pokerPhase: 'waiting',
+            pokerHand: '',
+            pokerPot: 0,
+            pokerBetAmount: 0,
+            pokerBlackswanFolded: false,
+            pokerBlackswanHand: '',
+            pokerBlackswanLine: '',
+            pokerWinnerName: '',
+            pokerCommunity: '',
+            pokerAction: '',
+            pokerHandRank: '',
+            pokerBsHandRank: '',
+            pokerBlackswanEnabled: !bsEnabled,
+            pokerDealer: (item.pokerDealer === 'player') ? 'blackswan' : 'player',
+          });
+          if (!bsEnabled) addFloorEffect('pulse');
+        } else if (nextPhase === 'deal') {
+          // Mark existing community cards as used
+          // Deal fresh cards
+          const playerHand = `${randomCard()} ${randomCard()}`;
+          const bsHand = bsEnabled ? `${randomCard()} ${randomCard()}` : '';
+          const ante = blinds * 2;
+          const playerChips = (item.pokerChips ?? 2000) - ante;
+          const bsChips = bsEnabled ? (item.pokerBlackswanChips ?? 2000) - ante : (item.pokerBlackswanChips ?? 2000);
+          const potTotal = bsEnabled ? ante * 2 : ante;
+
+          const bsLine = bsEnabled ? getBlackswanLine('deal') : '';
+
+          updateFurnitureField({
+            pokerPhase: 'deal',
+            pokerHand: playerHand,
+            pokerPot: potTotal,
+            pokerChips: Math.max(0, playerChips),
+            pokerBlackswanHand: bsHand,
+            pokerBlackswanChips: Math.max(0, bsChips),
+            pokerBlackswanFolded: false,
+            pokerBlackswanLine: bsLine,
+            pokerCommunity: '',
+            pokerAction: 'ANTE',
+            pokerHandRank: '',
+            pokerBsHandRank: '',
+            pokerHandsPlayed: (item.pokerHandsPlayed || 0) + 1,
+            pokerBlinds: blinds,
+          });
+          addFloorEffect('pulse');
+        } else if (nextPhase === 'showdown') {
+          // Evaluate hands using proper poker hand evaluator
+          const communityCards = (item.pokerCommunity || '').split(' ').filter(Boolean);
+          const playerCards = (item.pokerHand || '').split(' ').filter(Boolean);
+          const bsCards = (item.pokerBlackswanHand || '').split(' ').filter(Boolean);
+
+          const playerEval = evaluatePokerHand([...playerCards, ...communityCards]);
+          const bsEval = bsEnabled && !item.pokerBlackswanFolded
+            ? evaluatePokerHand([...bsCards, ...communityCards])
+            : { rank: -1, name: 'Folded', score: -1 };
+
+          const playerWins = item.pokerBlackswanFolded || playerEval.score >= bsEval.score;
+          const pot = item.pokerPot || 100;
+
+          const bsLine = bsEnabled
+            ? getBlackswanLine(playerWins ? 'lose' : 'win')
+            : '';
+
+          updateFurnitureField({
+            pokerPhase: 'showdown',
+            pokerChips: (item.pokerChips ?? 2000) + (playerWins ? pot : 0),
+            pokerBlackswanChips: bsEnabled ? (item.pokerBlackswanChips ?? 2000) + (playerWins ? 0 : pot) : undefined,
+            pokerWinnerName: playerWins ? 'YOU' : 'BlackSwan',
+            pokerBlackswanLine: bsLine,
+            pokerHandRank: playerEval.name,
+            pokerBsHandRank: bsEval.name,
+            pokerAction: playerWins ? 'WIN' : 'LOSE',
+            pokerHandsWon: (item.pokerHandsWon || 0) + (playerWins ? 1 : 0),
+          });
+          if (playerWins) addFloorEffect('fireworks');
+        } else {
+          // Flop/turn/river — deal community cards, BlackSwan AI decides
+          const bet = blinds * 2;
+          const chips = (item.pokerChips ?? 2000) - bet;
+
+          // Add community cards (mark existing as used first)
+          const existingCommunity = item.pokerCommunity || '';
+          const existingCards = existingCommunity ? existingCommunity.split(' ').filter(Boolean) : [];
+          for (const c of existingCards) usedCards.add(c);
+          // Also mark player and BS hands as used
+          for (const c of (item.pokerHand || '').split(' ').filter(Boolean)) usedCards.add(c);
+          for (const c of (item.pokerBlackswanHand || '').split(' ').filter(Boolean)) usedCards.add(c);
+
+          const newCount = nextPhase === 'flop' ? 3 : 1;
+          const newCards = Array.from({ length: newCount }, () => randomCard());
+          const allCommunity = [...existingCards, ...newCards].join(' ');
+
+          // BlackSwan AI decision using real hand evaluation
+          let bsFolded = item.pokerBlackswanFolded || false;
+          let bsChips = item.pokerBlackswanChips ?? 2000;
+          let bsLine = '';
+          let bsBet = 0;
+          let bsAction = '';
+          if (bsEnabled && !bsFolded) {
+            const bsHand = item.pokerBlackswanHand || '';
+            const decision = blackswanDecide(bsHand, item.pokerPot || 0, bet, bsChips, nextPhase as any);
+            if (decision === 'fold') {
+              bsFolded = true;
+              bsLine = getBlackswanLine('fold');
+              bsAction = 'FOLD';
+            } else if (decision === 'raise') {
+              const raiseAmt = blackswanRaise(item.pokerPot || 0, bsChips);
+              bsBet = Math.min(bet + raiseAmt, bsChips);
+              bsChips -= bsBet;
+              bsLine = getBlackswanLine('raise');
+              bsAction = 'RAISE';
+            } else {
+              bsBet = Math.min(bet, bsChips);
+              bsChips -= bsBet;
+              bsAction = 'CALL';
+            }
+          }
+
+          updateFurnitureField({
+            pokerPhase: nextPhase,
+            pokerPot: (item.pokerPot || 0) + bet + bsBet,
+            pokerChips: Math.max(0, chips),
+            pokerBlackswanChips: bsChips,
+            pokerBlackswanFolded: bsFolded,
+            pokerBlackswanLine: bsLine,
+            pokerCommunity: allCommunity,
+            pokerAction: bsAction || 'CALL',
+          });
+        }
+        break;
+      }
+
+      case 'coin_flip': {
+        const result = Math.random() > 0.5 ? 'heads' : 'tails';
+        const bsActive = item.coinFlipBlackswan || item.gameBlackswanActive;
+        // BlackSwan always picks opposite of the likely outcome (contrarian)
+        const bsPick = result === 'heads' ? 'tails' : 'heads';
+        const playerWins = true; // Player always picks the result for demo
+        const prevResult = item.coinFlipResult;
+        const streak = prevResult === result ? (item.coinFlipStreak || 0) + 1 : 1;
+        updateFurnitureField({
+          coinFlipResult: result,
+          coinFlipStreak: streak,
+          coinFlipWins: (item.coinFlipWins || 0) + (playerWins ? 1 : 0),
+          coinFlipLosses: (item.coinFlipLosses || 0) + (playerWins ? 0 : 1),
+          coinFlipBlackswan: !bsActive, // Toggle BlackSwan each flip
+        });
+        if (streak >= 3) addFloorEffect('fireworks');
+        else addFloorEffect('pulse');
+        break;
+      }
+
+      case 'roulette_wheel': {
+        if (item.rouletteSpinning) break;
+        // Cycle crypto type on each spin
+        const cryptos = ['SOL', 'ETH', 'BTC', 'USDC', 'MATIC'];
+        const curCrypto = item.rouletteCryptoType || item.gameCryptoType || 'SOL';
+        const nextCrypto = cryptos[(cryptos.indexOf(curCrypto) + 1) % cryptos.length];
+        updateFurnitureField({
+          rouletteSpinning: true,
+          rouletteBetType: item.rouletteBetType || 'red',
+          rouletteCryptoType: nextCrypto,
+          rouletteCryptoAmount: item.rouletteCryptoAmount || 0.1,
+        });
+        setTimeout(() => {
+          const number = Math.floor(Math.random() * 37);
+          const redNums = [1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36];
+          const isRed = redNums.includes(number);
+          const betType = item.rouletteBetType || 'red';
+          const won = (betType === 'red' && isRed) || (betType === 'black' && !isRed && number !== 0)
+            || (betType === 'odd' && number % 2 === 1) || (betType === 'even' && number % 2 === 0 && number !== 0);
+          updateFurnitureField({ rouletteSpinning: false, rouletteNumber: number });
+          if (won) addFloorEffect('fireworks');
+          const betTypes = ['red', 'black', 'odd', 'even'];
+          const nextBet = betTypes[(betTypes.indexOf(betType) + 1) % betTypes.length];
+          setTimeout(() => updateFurnitureField({ rouletteBetType: nextBet }), 500);
+        }, 2500);
+        break;
+      }
+
+      case 'chess_board': {
+        const turns = ['white', 'black'];
+        const curIdx = turns.indexOf(item.chessTurn || 'white');
+        updateFurnitureField({ chessTurn: turns[(curIdx + 1) % turns.length] });
+        break;
+      }
+
+      case 'connect_four': {
+        if (item.connectFourWinner) {
+          updateFurnitureField({ connectFourBoard: '', connectFourTurn: 1, connectFourWinner: 0, connectFourBlackswan: !item.connectFourBlackswan });
+          break;
+        }
+        const board = item.connectFourBoard || '000000000000000000000000000000000000000000';
+        const turn = item.connectFourTurn || 1;
+        const cols = [0, 1, 2, 3, 4, 5, 6].filter(c => {
+          // Check top of each column
+          return board[c] === '0';
+        });
+        if (cols.length === 0) {
+          updateFurnitureField({ connectFourWinner: turn });
+          break;
+        }
+        const col = cols[Math.floor(Math.random() * cols.length)];
+        let targetRow = -1;
+        for (let r = 5; r >= 0; r--) {
+          if (board[r * 7 + col] === '0') { targetRow = r; break; }
+        }
+        if (targetRow >= 0) {
+          const idx = targetRow * 7 + col;
+          const newBoard = board.substring(0, idx) + String(turn) + board.substring(idx + 1);
+          const nextTurn = turn === 1 ? 2 : 1;
+          updateFurnitureField({ connectFourBoard: newBoard, connectFourTurn: nextTurn });
+
+          // If BlackSwan enabled and it's now AI's turn, auto-play after delay
+          if (item.connectFourBlackswan && nextTurn === 2) {
+            setTimeout(() => {
+              const bCols = [0, 1, 2, 3, 4, 5, 6].filter(c => newBoard[c] === '0');
+              if (bCols.length === 0) return;
+              // BlackSwan picks center-biased column
+              const weights = bCols.map(c => 7 - Math.abs(c - 3));
+              const total = weights.reduce((a, b) => a + b, 0);
+              let r = Math.random() * total;
+              let bCol = bCols[0];
+              for (let i = 0; i < bCols.length; i++) {
+                r -= weights[i];
+                if (r <= 0) { bCol = bCols[i]; break; }
+              }
+              let bRow = -1;
+              for (let rr = 5; rr >= 0; rr--) {
+                if (newBoard[rr * 7 + bCol] === '0') { bRow = rr; break; }
+              }
+              if (bRow >= 0) {
+                const bIdx = bRow * 7 + bCol;
+                const bBoard = newBoard.substring(0, bIdx) + '2' + newBoard.substring(bIdx + 1);
+                updateFurnitureField({ connectFourBoard: bBoard, connectFourTurn: 1 });
+              }
+            }, 800);
+          }
+        }
+        break;
+      }
+
+      case 'trivia_screen': {
+        const questions = [
+          { q: 'What does SOL stand for?', cat: 'crypto' },
+          { q: 'Who created Bitcoin?', cat: 'crypto' },
+          { q: 'What is a DAO?', cat: 'crypto' },
+          { q: 'What consensus does Solana use?', cat: 'crypto' },
+          { q: 'What is a DEX?', cat: 'crypto' },
+          { q: 'What language is React Native in?', cat: 'tech' },
+          { q: 'What does API stand for?', cat: 'tech' },
+          { q: 'What is TypeScript?', cat: 'tech' },
+          { q: 'What is WebSocket used for?', cat: 'tech' },
+          { q: 'What does RPC stand for?', cat: 'tech' },
+          { q: 'How many planets in our solar system?', cat: 'general' },
+          { q: 'What year was the iPhone released?', cat: 'general' },
+          { q: 'What is the speed of light?', cat: 'general' },
+        ];
+        const qIdx = Math.floor(Math.random() * questions.length);
+        const picked = questions[qIdx];
+        if (item.triviaAnswer !== undefined && item.triviaAnswer >= 0) {
+          const correct = item.triviaAnswer === 0;
+          updateFurnitureField({
+            triviaScore: (item.triviaScore || 0) + (correct ? 1 : 0),
+            triviaQuestion: picked.q,
+            triviaCategory: picked.cat,
+            triviaAnswer: -1,
+          });
+          if (correct) addFloorEffect('pulse');
+        } else {
+          const ans = Math.floor(Math.random() * 4);
+          updateFurnitureField({ triviaAnswer: ans });
+        }
+        break;
+      }
+
+      case 'crypto_ticker': {
+        // Cycle through crypto display — rotate which coins are shown
+        const allCoins = ['SOL', 'ETH', 'BTC', 'USDC', 'MATIC'];
+        const curCoinsArr = (item.cryptoTickerCoins || 'SOL,ETH,BTC').split(',');
+        // Shift the display window by 1
+        const startIdx = allCoins.indexOf(curCoinsArr[0] || 'SOL');
+        const newStart = (startIdx + 1) % allCoins.length;
+        const newCoins = [0, 1, 2].map(i => allCoins[(newStart + i) % allCoins.length]);
+        // Generate mock prices
+        const mockPrices: Record<string, number> = { SOL: 145.23, ETH: 3842.10, BTC: 68420.50, USDC: 1.00, MATIC: 0.89 };
+        const mockChanges: Record<string, number> = { SOL: 4.2, ETH: -1.3, BTC: 2.8, USDC: 0.01, MATIC: -3.1 };
+        updateFurnitureField({
+          cryptoTickerCoins: newCoins.join(','),
+          cryptoTickerPrices: newCoins.map(c => mockPrices[c] || 0).join(','),
+          cryptoTickerChanges: newCoins.map(c => mockChanges[c] || 0).join(','),
+        });
+        addFloorEffect('pulse');
+        break;
+      }
+
+      case 'github_feed': {
+        // Cycle through demo repos
+        const repos = ['swanopoly/the-underground-circle', 'vercel/next.js', 'facebook/react', 'denoland/deno'];
+        const curRepo = item.githubRepo || repos[0];
+        const curIdx = repos.indexOf(curRepo);
+        const nextRepo = repos[(curIdx + 1) % repos.length];
+        const activities = ['Push to main', 'PR merged: fix auth', 'Issue opened: bug report', 'Release v2.1.0', 'CI passed'];
+        updateFurnitureField({
+          githubRepo: nextRepo,
+          githubActivity: activities[Math.floor(Math.random() * activities.length)],
+          githubCommits: Math.floor(Math.random() * 20) + 1,
+          githubPRs: Math.floor(Math.random() * 5),
+        });
+        break;
+      }
+
+      case 'calendar_widget': {
+        // Cycle through demo events
+        const events = [
+          { name: 'Team Standup', time: '10:00 AM' },
+          { name: 'Design Review', time: '2:00 PM' },
+          { name: 'Sprint Planning', time: '11:30 AM' },
+          { name: '1:1 with Lead', time: '4:00 PM' },
+          { name: 'Deploy Window', time: '6:00 PM' },
+        ];
+        const curIdx = events.findIndex(e => e.name === item.calendarEvent);
+        const next = events[(curIdx + 1) % events.length];
+        updateFurnitureField({
+          calendarEvent: next.name,
+          calendarTime: next.time,
+          calendarEvents: Math.floor(Math.random() * 6) + 1,
+        });
+        break;
+      }
+
+      case 'world_clock': {
+        // Cycle timezone sets
+        const zoneSets = [
+          { zones: 'America/New_York,Europe/London,Asia/Tokyo', labels: 'NYC,LDN,TKY' },
+          { zones: 'America/Los_Angeles,Europe/Berlin,Asia/Shanghai', labels: 'LA,BER,SHG' },
+          { zones: 'America/Chicago,Asia/Dubai,Australia/Sydney', labels: 'CHI,DXB,SYD' },
+        ];
+        const curLabels = item.worldClockLabels || 'NYC,LDN,TKY';
+        const curIdx = zoneSets.findIndex(s => s.labels === curLabels);
+        const next = zoneSets[(curIdx + 1) % zoneSets.length];
+        updateFurnitureField({
+          worldClockZones: next.zones,
+          worldClockLabels: next.labels,
+        });
+        addFloorEffect('pulse');
+        break;
+      }
+
+      case 'music_visualizer': {
+        // Toggle active + cycle style (0=bars, 1=wave, 2=circle)
+        const curStyle = item.musicVisualizerStyle ?? 0;
+        if (item.musicVisualizerActive) {
+          updateFurnitureField({ musicVisualizerStyle: (curStyle + 1) % 3 });
+        } else {
+          updateFurnitureField({ musicVisualizerActive: true });
+        }
+        addFloorEffect('pulse');
+        break;
+      }
+
+      case 'figma_board': {
+        // Toggle connected state
+        updateFurnitureField({
+          figmaBoardConnected: !item.figmaBoardConnected,
+          figmaBoardUrl: item.figmaBoardUrl || 'https://figma.com/file/demo',
+        });
+        if (!item.figmaBoardConnected) addFloorEffect('pulse');
+        break;
+      }
 
       default:
         break;
@@ -1959,7 +2669,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         <View style={styles.editToolbar}>
           <View style={styles.editToolbarHeader}>
             <Text style={styles.editLabel}>
-              {placingType ? `TAP FLOOR — PLACING: ${placingType.toUpperCase()}` : selectedFurnitureId ? 'DRAG TO MOVE · TAP DELETE TO REMOVE' : 'SELECT ITEM BELOW, TAP TO PLACE · DRAG TO MOVE'}
+              {placingType ? `TAP FLOOR — PLACING: ${placingType.toUpperCase()}` : selectedFurnitureId ? 'DRAG TO MOVE · CORNERS TO RESIZE · TAP DELETE TO REMOVE' : 'SELECT ITEM BELOW, TAP TO PLACE · DRAG TO MOVE'}
             </Text>
             <View style={styles.editToolbarActions}>
               {placingType && (
@@ -1977,30 +2687,104 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             </View>
           </View>
 
-          {/* Category rows */}
-          {(['interactive', 'work', 'lounge', 'tech', 'decor'] as const).map(cat => {
-            const items = FURNITURE_CATALOG.filter(f => f.category === cat && !['desk'].includes(f.type));
-            if (items.length === 0) return null;
+          {/* Category rows — vertical scroll, one row visible at a time with arrow nav */}
+          {(() => {
+            const allCats = (['games', 'connected', 'vibe', 'productivity', 'fun', 'furniture'] as const).filter(
+              cat => FURNITURE_CATALOG.some(f => f.category === cat)
+            );
+            const catColors: Record<string, string> = {
+              games: '#ef4444', connected: '#1DB954', vibe: '#8b5cf6', productivity: '#3b82f6',
+              fun: '#f59e0b', furniture: '#6b7280',
+            };
+            const catIcons: Record<string, string> = {
+              games: '🃏', connected: '🔗', vibe: '✨', productivity: '📊',
+              fun: '🎮', furniture: '🪑',
+            };
             return (
-              <View key={cat} style={styles.editCategoryRow}>
-                <Text style={styles.editCategoryLabel}>{cat.toUpperCase()}</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.editItems}>
-                  {items.map(item => (
-                    <Pressable
-                      key={item.type}
-                      onPress={() => setPlacingType(placingType === item.type ? null : item.type as any)}
-                      style={[styles.editItem, placingType === item.type && styles.editItemActive,
-                        Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                    >
-                      <Text style={styles.editItemIcon}>{item.icon}</Text>
-                      <Text style={styles.editItemName}>{item.name}</Text>
-                      {item.description ? <Text style={styles.editItemDesc} numberOfLines={1}>{item.description}</Text> : null}
-                    </Pressable>
-                  ))}
+              <View style={styles.editCatalogWrap}>
+                {/* Category tab bar */}
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.editCatTabs}>
+                  {allCats.map(cat => {
+                    const count = FURNITURE_CATALOG.filter(f => f.category === cat).length;
+                    return (
+                      <Pressable
+                        key={cat}
+                        onPress={() => { setActiveCatalogCat(cat as any); catalogScrollRef.current?.scrollTo?.({ x: 0, animated: false }); }}
+                        style={[
+                          styles.editCatTab,
+                          activeCatalogCat === cat && { borderColor: catColors[cat] + '80', backgroundColor: catColors[cat] + '15' },
+                          Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                        ]}
+                      >
+                        <Text style={{ fontSize: 10 }}>{catIcons[cat]}</Text>
+                        <Text style={[styles.editCatTabText, { color: activeCatalogCat === cat ? catColors[cat] : '#666' }]}>
+                          {cat.toUpperCase()}
+                        </Text>
+                        <Text style={[styles.editCatTabCount, { color: catColors[cat] + '80' }]}>{count}</Text>
+                      </Pressable>
+                    );
+                  })}
                 </ScrollView>
+
+                {/* Active category row with scroll arrows */}
+                {(() => {
+                  const cat = activeCatalogCat || 'connected';
+                  const items = FURNITURE_CATALOG.filter(f => f.category === cat);
+                  const color = catColors[cat] || '#888';
+                  return (
+                    <View style={styles.editCatRowWrap}>
+                      {/* Left arrow */}
+                      {items.length > 3 && (
+                        <Pressable
+                          onPress={() => catalogScrollRef.current?.scrollTo?.({ x: 0, animated: true })}
+                          style={[styles.editScrollArrow, styles.editScrollArrowLeft, { borderColor: color + '40' },
+                            Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                        >
+                          <Text style={[styles.editScrollArrowText, { color }]}>‹</Text>
+                        </Pressable>
+                      )}
+
+                      <ScrollView
+                        ref={catalogScrollRef}
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        contentContainerStyle={styles.editItems}
+                        style={{ flex: 1 }}
+                      >
+                        {items.map(item => {
+                          const isActive = placingType === item.type;
+                          return (
+                            <Pressable
+                              key={item.type}
+                              onPress={() => setPlacingType(isActive ? null : item.type as any)}
+                              style={[styles.editItem, isActive && styles.editItemActive,
+                                isActive && { borderColor: color + '80', shadowColor: color, shadowOffset: { width: 0, height: 0 }, shadowRadius: 8, shadowOpacity: 0.5 },
+                                Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                            >
+                              <Text style={styles.editItemIcon}>{item.icon}</Text>
+                              <Text style={[styles.editItemName, isActive && { color: '#eee' }]}>{item.name}</Text>
+                              {item.description ? <Text style={styles.editItemDesc} numberOfLines={2}>{item.description}</Text> : null}
+                            </Pressable>
+                          );
+                        })}
+                      </ScrollView>
+
+                      {/* Right arrow */}
+                      {items.length > 3 && (
+                        <Pressable
+                          onPress={() => catalogScrollRef.current?.scrollToEnd?.({ animated: true })}
+                          style={[styles.editScrollArrow, styles.editScrollArrowRight, { borderColor: color + '40' },
+                            Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                        >
+                          <Text style={[styles.editScrollArrowText, { color }]}>›</Text>
+                        </Pressable>
+                      )}
+                    </View>
+                  );
+                })()}
               </View>
             );
-          })}
+          })()}
         </View>
       )}
 
@@ -2218,6 +3002,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                       onFloorPress={editMode ? handleFloorPress : undefined}
                       onFurniturePress={editMode ? handleFurniturePress : undefined}
                       onFurnitureMove={editMode ? handleFurnitureMove : undefined}
+                      onFurnitureResize={editMode ? handleFurnitureResize : undefined}
                       onFurnitureInteract={handleFurnitureInteract}
                       agents={displayAgents}
                       selectedFurnitureId={editMode ? selectedFurnitureId : null}
@@ -2273,28 +3058,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                             xpNext={xpNext}
                             turns={agent.turns || agent.messagesProcessed || 0}
                             tokens={agent.tokensUsed || 0}
-                            onAutomate={(taskText) => {
-                              sendTerminalCommand({
-                                circleId,
-                                senderId: currentUserId,
-                                senderName: currentUserName,
-                                commandText: taskText,
-                                targetAgentId: agent.id,
-                                targetAgentName: `@${agent.name}`,
-                                targetAgentIds: [agent.id],
-                              }).then(result => {
-                                if (result.messageId) {
-                                  handleCommandSent({
-                                    messageId: result.messageId,
-                                    command: taskText,
-                                    targetAgentId: agent.id,
-                                    targetAgentIds: [agent.id],
-                                    targetAgentName: `@${agent.name}`,
-                                    model: null,
-                                    senderId: currentUserId,
-                                  });
-                                }
-                              });
+                            onAutomate={() => {
+                              setTerminalInitialTab('automations');
+                              setTerminalSize('full');
                             }}
                           />
                         </View>
@@ -2445,7 +3211,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         <View style={styles.chatToggle}>
           <View style={styles.terminalBar}>
             <Pressable
-              onPress={() => setTerminalSize(terminalSize === 'closed' ? 'half' : 'closed')}
+              onPress={() => { setTerminalInitialTab('commands'); setTerminalSize(terminalSize === 'closed' ? 'full' : 'closed'); }}
               style={[styles.terminalBarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
               accessibilityRole="button"
               accessibilityLabel={terminalSize === 'closed' ? 'Open terminal' : 'Close terminal'}
@@ -2453,6 +3219,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               <Text style={styles.chatToggleText}>
                 {terminalSize === 'closed' ? '▲ TERMINAL' : '▼ HIDE'}
               </Text>
+            </Pressable>
+            <Pressable
+              onPress={() => { setTerminalInitialTab('automations'); setTerminalSize('full'); }}
+              style={[styles.terminalBarBtn, { marginLeft: 4 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              accessibilityRole="button"
+              accessibilityLabel="Open automations"
+            >
+              <Text style={[styles.chatToggleText, { color: '#06b6d4' }]}>⚡ AUTOMATIONS</Text>
             </Pressable>
             {terminalSize !== 'closed' && (
               <View style={styles.terminalSizeButtons}>
@@ -2495,6 +3269,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               onSharedSelectTargets={(ids, _names) => setTerminalTargetIds(ids)}
               onCommandSent={handleCommandSent}
               byoProviderKeys={providerKeys}
+              initialTab={terminalInitialTab}
               compact
             />
           </View>
@@ -2535,6 +3310,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               onSharedSelectTargets={(ids, _names) => setTerminalTargetIds(ids)}
               onCommandSent={handleCommandSent}
               byoProviderKeys={providerKeys}
+              initialTab={terminalInitialTab}
             />
           </View>
         )}
@@ -2895,6 +3671,220 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             {/* Save button */}
             <Pressable onPress={handleStickyNoteSave} style={[stickyStyles.saveBtn, Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}]}>
               <Text style={stickyStyles.saveBtnText}>SAVE NOTE</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ─── Service Connector Modal ──────────────────────────────────────── */}
+      <Modal visible={serviceModalVisible} animationType="fade" transparent>
+        <View style={nftStyles.overlay}>
+          <View style={[nftStyles.card, { maxHeight: 600 }]}>
+            <View style={nftStyles.header}>
+              <Text style={nftStyles.headerText}>
+                {serviceModalType === 'smart_tv' ? '📺 CONNECT TV' :
+                 serviceModalType === 'spotify_jukebox' ? '🎧 CONNECT SPOTIFY' :
+                 serviceModalType === 'discord_hub' ? '💬 CONNECT DISCORD' :
+                 serviceModalType === 'twitch_stream' ? '🟣 CONNECT TWITCH' :
+                 serviceModalType === 'video_call' ? '📹 SET UP CALL' : '🔗 CONNECT SERVICE'}
+              </Text>
+              <Pressable onPress={() => { setServiceModalVisible(false); setServiceModalTargetId(null); }} style={nftStyles.closeBtn}>
+                <Text style={nftStyles.closeText}>✕</Text>
+              </Pressable>
+            </View>
+
+            <ScrollView style={{ padding: 16 }} contentContainerStyle={{ gap: 16, paddingBottom: 20 }}>
+              {/* ── Smart TV ── */}
+              {serviceModalType === 'smart_tv' && (
+                <>
+                  <Text style={svcStyles.sectionLabel}>SELECT APP</Text>
+                  <View style={svcStyles.appGrid}>
+                    {([
+                      { id: 'youtube', name: 'YouTube', icon: '▶', color: '#FF0000', url: 'https://tv.youtube.com' },
+                      { id: 'netflix', name: 'Netflix', icon: 'N', color: '#E50914', url: 'https://www.netflix.com' },
+                      { id: 'hulu', name: 'Hulu', icon: 'H', color: '#1CE783', url: 'https://www.hulu.com' },
+                      { id: 'disney', name: 'Disney+', icon: 'D+', color: '#0063e5', url: 'https://www.disneyplus.com' },
+                      { id: 'twitch', name: 'Twitch', icon: '◉', color: '#9146FF', url: 'https://www.twitch.tv' },
+                    ] as const).map(app => (
+                      <Pressable
+                        key={app.id}
+                        onPress={() => { setServiceTvApp(app.id); setServiceUrl(app.url); }}
+                        style={[svcStyles.appCard, serviceTvApp === app.id && { borderColor: app.color, backgroundColor: app.color + '15' },
+                          Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                      >
+                        <Text style={[svcStyles.appIcon, { color: app.color }]}>{app.icon}</Text>
+                        <Text style={[svcStyles.appName, serviceTvApp === app.id && { color: app.color }]}>{app.name}</Text>
+                        {serviceTvApp === app.id && <Text style={[svcStyles.appCheck, { color: app.color }]}>✓</Text>}
+                      </Pressable>
+                    ))}
+                  </View>
+
+                  <Text style={svcStyles.sectionLabel}>CONTENT URL (optional)</Text>
+                  <TextInput
+                    value={serviceUrl}
+                    onChangeText={setServiceUrl}
+                    placeholder="https://youtube.com/watch?v=..."
+                    placeholderTextColor="#444"
+                    style={svcStyles.input}
+                  />
+
+                  <Text style={svcStyles.sectionLabel}>TV SIZE</Text>
+                  <View style={svcStyles.sizeRow}>
+                    <View style={svcStyles.sizeField}>
+                      <Text style={svcStyles.sizeLabel}>Width</Text>
+                      <TextInput value={serviceTvWidth} onChangeText={setServiceTvWidth} keyboardType="number-pad" style={svcStyles.sizeInput} />
+                    </View>
+                    <Text style={svcStyles.sizeX}>×</Text>
+                    <View style={svcStyles.sizeField}>
+                      <Text style={svcStyles.sizeLabel}>Height</Text>
+                      <TextInput value={serviceTvHeight} onChangeText={setServiceTvHeight} keyboardType="number-pad" style={svcStyles.sizeInput} />
+                    </View>
+                  </View>
+
+                  <Pressable
+                    onPress={() => serviceUrl ? handleServiceOpen(serviceUrl) : null}
+                    style={[svcStyles.openBtn, !serviceUrl && { opacity: 0.4 }, Platform.OS === 'web' && { cursor: serviceUrl ? 'pointer' : 'default' } as any]}
+                  >
+                    <Text style={svcStyles.openBtnText}>OPEN {serviceTvApp.toUpperCase()} IN NEW TAB ↗</Text>
+                  </Pressable>
+                </>
+              )}
+
+              {/* ── Spotify ── */}
+              {serviceModalType === 'spotify_jukebox' && (
+                <>
+                  <View style={svcStyles.serviceHero}>
+                    <Text style={{ fontSize: 40 }}>🎧</Text>
+                    <Text style={[svcStyles.heroTitle, { color: '#1DB954' }]}>Spotify</Text>
+                    <Text style={svcStyles.heroDesc}>Connect your Spotify account to control playback from your office</Text>
+                  </View>
+
+                  <Pressable
+                    onPress={() => handleServiceOpen('https://open.spotify.com')}
+                    style={[svcStyles.connectBtn, { backgroundColor: '#1DB954' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  >
+                    <Text style={svcStyles.connectBtnText}>OPEN SPOTIFY ↗</Text>
+                  </Pressable>
+
+                  <Text style={svcStyles.sectionLabel}>SPOTIFY URL (playlist, track, or album)</Text>
+                  <TextInput
+                    value={serviceUrl}
+                    onChangeText={setServiceUrl}
+                    placeholder="https://open.spotify.com/playlist/..."
+                    placeholderTextColor="#444"
+                    style={svcStyles.input}
+                  />
+                </>
+              )}
+
+              {/* ── Discord ── */}
+              {serviceModalType === 'discord_hub' && (
+                <>
+                  <View style={svcStyles.serviceHero}>
+                    <Text style={{ fontSize: 40 }}>💬</Text>
+                    <Text style={[svcStyles.heroTitle, { color: '#5865F2' }]}>Discord</Text>
+                    <Text style={svcStyles.heroDesc}>Connect your Discord server to show activity in your office</Text>
+                  </View>
+
+                  <Text style={svcStyles.sectionLabel}>CHANNEL NAME</Text>
+                  <TextInput
+                    value={serviceDiscordChannel}
+                    onChangeText={setServiceDiscordChannel}
+                    placeholder="general"
+                    placeholderTextColor="#444"
+                    style={svcStyles.input}
+                  />
+
+                  <Text style={svcStyles.sectionLabel}>DISCORD INVITE OR WEBHOOK URL</Text>
+                  <TextInput
+                    value={serviceUrl}
+                    onChangeText={setServiceUrl}
+                    placeholder="https://discord.gg/..."
+                    placeholderTextColor="#444"
+                    style={svcStyles.input}
+                  />
+
+                  <Pressable
+                    onPress={() => serviceUrl ? handleServiceOpen(serviceUrl) : handleServiceOpen('https://discord.com/app')}
+                    style={[svcStyles.connectBtn, { backgroundColor: '#5865F2' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  >
+                    <Text style={svcStyles.connectBtnText}>{serviceUrl ? 'OPEN DISCORD LINK ↗' : 'OPEN DISCORD ↗'}</Text>
+                  </Pressable>
+                </>
+              )}
+
+              {/* ── Twitch ── */}
+              {serviceModalType === 'twitch_stream' && (
+                <>
+                  <View style={svcStyles.serviceHero}>
+                    <Text style={{ fontSize: 40 }}>🟣</Text>
+                    <Text style={[svcStyles.heroTitle, { color: '#9146FF' }]}>Twitch</Text>
+                    <Text style={svcStyles.heroDesc}>Watch or display a Twitch stream in your office</Text>
+                  </View>
+
+                  <Text style={svcStyles.sectionLabel}>TWITCH CHANNEL NAME</Text>
+                  <TextInput
+                    value={serviceTwitchChannel}
+                    onChangeText={setServiceTwitchChannel}
+                    placeholder="ninja"
+                    placeholderTextColor="#444"
+                    style={svcStyles.input}
+                  />
+
+                  <Pressable
+                    onPress={() => handleServiceOpen(`https://twitch.tv/${serviceTwitchChannel || ''}`)}
+                    style={[svcStyles.connectBtn, { backgroundColor: '#9146FF' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  >
+                    <Text style={svcStyles.connectBtnText}>OPEN TWITCH ↗</Text>
+                  </Pressable>
+                </>
+              )}
+
+              {/* ── Video Call ── */}
+              {serviceModalType === 'video_call' && (
+                <>
+                  <Text style={svcStyles.sectionLabel}>SELECT PROVIDER</Text>
+                  <View style={svcStyles.appGrid}>
+                    {([
+                      { id: 'zoom', name: 'Zoom', icon: '🔵', color: '#2D8CFF' },
+                      { id: 'meet', name: 'Google Meet', icon: '🟢', color: '#00897B' },
+                      { id: 'teams', name: 'MS Teams', icon: '🟣', color: '#6264A7' },
+                    ] as const).map(prov => (
+                      <Pressable
+                        key={prov.id}
+                        onPress={() => setServiceCallProvider(prov.id)}
+                        style={[svcStyles.appCard, serviceCallProvider === prov.id && { borderColor: prov.color, backgroundColor: prov.color + '15' },
+                          Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                      >
+                        <Text style={svcStyles.appIcon}>{prov.icon}</Text>
+                        <Text style={[svcStyles.appName, serviceCallProvider === prov.id && { color: prov.color }]}>{prov.name}</Text>
+                        {serviceCallProvider === prov.id && <Text style={[svcStyles.appCheck, { color: prov.color }]}>✓</Text>}
+                      </Pressable>
+                    ))}
+                  </View>
+
+                  <Text style={svcStyles.sectionLabel}>MEETING LINK</Text>
+                  <TextInput
+                    value={serviceUrl}
+                    onChangeText={setServiceUrl}
+                    placeholder={serviceCallProvider === 'zoom' ? 'https://zoom.us/j/...' : serviceCallProvider === 'meet' ? 'https://meet.google.com/...' : 'https://teams.microsoft.com/...'}
+                    placeholderTextColor="#444"
+                    style={svcStyles.input}
+                  />
+
+                  <Pressable
+                    onPress={() => serviceUrl ? handleServiceOpen(serviceUrl) : null}
+                    style={[svcStyles.openBtn, !serviceUrl && { opacity: 0.4 }, Platform.OS === 'web' && { cursor: serviceUrl ? 'pointer' : 'default' } as any]}
+                  >
+                    <Text style={svcStyles.openBtnText}>JOIN CALL ↗</Text>
+                  </Pressable>
+                </>
+              )}
+            </ScrollView>
+
+            {/* Save button */}
+            <Pressable onPress={handleServiceSave} style={[svcStyles.saveBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+              <Text style={svcStyles.saveBtnText}>SAVE & CONNECT</Text>
             </Pressable>
           </View>
         </View>
@@ -3325,6 +4315,165 @@ const stickyStyles = StyleSheet.create({
   saveBtnText: { color: '#fff', fontSize: 12, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
 });
 
+// ─── Service Connector Modal Styles ──────────────────────────────────────────
+const svcStyles = StyleSheet.create({
+  sectionLabel: {
+    color: '#888',
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
+    marginBottom: 8,
+    marginTop: 16,
+  },
+  appGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 12,
+  },
+  appCard: {
+    backgroundColor: '#111',
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    borderRadius: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    alignItems: 'center',
+    minWidth: 72,
+    position: 'relative',
+  },
+  appIcon: {
+    fontSize: 22,
+    marginBottom: 4,
+  },
+  appName: {
+    color: '#aaa',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  appCheck: {
+    position: 'absolute',
+    top: 4,
+    right: 6,
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  input: {
+    backgroundColor: '#111',
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    color: '#fff',
+    fontSize: 13,
+    fontFamily: 'monospace',
+    marginBottom: 12,
+  },
+  sizeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 16,
+  },
+  sizeField: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  sizeLabel: {
+    color: '#666',
+    fontSize: 9,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
+  sizeInput: {
+    backgroundColor: '#111',
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    color: '#fff',
+    fontSize: 14,
+    fontFamily: 'monospace',
+    textAlign: 'center',
+    width: '100%',
+  },
+  sizeX: {
+    color: '#555',
+    fontSize: 16,
+    fontWeight: '700',
+    marginTop: 14,
+  },
+  openBtn: {
+    backgroundColor: '#6366f1',
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginTop: 4,
+    marginBottom: 12,
+  },
+  openBtnText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '900',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+  },
+  serviceHero: {
+    alignItems: 'center',
+    paddingVertical: 16,
+    marginBottom: 8,
+  },
+  heroTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    fontFamily: 'monospace',
+    marginTop: 8,
+  },
+  heroDesc: {
+    color: '#666',
+    fontSize: 11,
+    fontFamily: 'monospace',
+    textAlign: 'center',
+    marginTop: 6,
+    lineHeight: 16,
+    maxWidth: 260,
+  },
+  connectBtn: {
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  connectBtnText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '900',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+  },
+  saveBtn: {
+    backgroundColor: '#22c55e',
+    borderRadius: 8,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  saveBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '900',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+  },
+});
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#050508' },
   titleBar: {
@@ -3457,26 +4606,60 @@ const styles = StyleSheet.create({
   connectionAddChipText: { fontSize: 14, color: '#22c55e', fontWeight: '700' },
 
   editToolbar: {
-    paddingHorizontal: 12, paddingVertical: 8,
+    paddingHorizontal: 12, paddingVertical: 10,
     borderBottomWidth: 1, borderBottomColor: '#1a1a2e', backgroundColor: '#0a0a12',
   },
-  editLabel: { fontSize: 9, color: '#888', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1, marginBottom: 6 },
-  editItems: { gap: 6, flexDirection: 'row' },
+  editLabel: { fontSize: 10, color: '#888', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1, marginBottom: 8 },
+  editItems: { gap: 8, flexDirection: 'row', paddingRight: 12 },
   editItem: {
-    alignItems: 'center', paddingHorizontal: 10, paddingVertical: 6,
-    borderRadius: 8, borderWidth: 1, borderColor: '#1a1a2e', backgroundColor: '#0a0a10', gap: 2,
+    alignItems: 'center', justifyContent: 'center',
+    width: 88, height: 88,
+    borderRadius: 12, borderWidth: 1.5, borderColor: '#1a1a2e', backgroundColor: '#0a0a10',
+    gap: 3, paddingHorizontal: 4, paddingVertical: 6,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  editItemActive: { borderColor: '#6366f160', backgroundColor: '#6366f115' },
-  editItemIcon: { fontSize: 16 },
-  editItemName: { fontSize: 7, color: '#666', fontFamily: 'monospace', fontWeight: '600' },
-  editItemDesc: { fontSize: 5.5, color: '#999', fontFamily: 'monospace', maxWidth: 60, textAlign: 'center' },
-  editToolbarHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
+  editItemActive: {
+    borderColor: '#6366f160', backgroundColor: '#6366f115',
+    ...(Platform.OS === 'web' ? { boxShadow: '0 0 12px rgba(99,102,241,0.3)' } as any : {}),
+  },
+  editItemIcon: { fontSize: 28 },
+  editItemName: { fontSize: 10, color: '#aaa', fontFamily: 'monospace', fontWeight: '800', textAlign: 'center' },
+  editItemDesc: { fontSize: 8, color: '#555', fontFamily: 'monospace', maxWidth: 80, textAlign: 'center', lineHeight: 10 },
+  editToolbarHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
   editToolbarActions: { flexDirection: 'row', gap: 6 },
-  editActionBtn: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 4, borderWidth: 1, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
-  editActionBtnText: { fontSize: 8, fontWeight: '700', fontFamily: 'monospace' },
-  editCategoryRow: { marginBottom: 6 },
-  editCategoryLabel: { fontSize: 6, color: '#888', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5, marginBottom: 4 },
+  editActionBtn: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
+  editActionBtnText: { fontSize: 9, fontWeight: '800', fontFamily: 'monospace' },
+  editCatalogWrap: {
+    position: 'relative' as const,
+  },
+  editCatTabs: {
+    flexDirection: 'row' as const, gap: 6, paddingBottom: 8, paddingRight: 12,
+  },
+  editCatTab: {
+    flexDirection: 'row' as const, alignItems: 'center' as const, gap: 4,
+    paddingHorizontal: 10, paddingVertical: 5,
+    borderRadius: 8, borderWidth: 1, borderColor: '#1a1a2e',
+    backgroundColor: '#0d0d14',
+  },
+  editCatTabText: {
+    fontSize: 8, fontFamily: 'monospace', fontWeight: '800' as const, letterSpacing: 1,
+  },
+  editCatTabCount: {
+    fontSize: 7, fontFamily: 'monospace', fontWeight: '700' as const,
+  },
+  editCatRowWrap: {
+    flexDirection: 'row' as const, alignItems: 'center' as const,
+  },
+  editScrollArrow: {
+    width: 24, height: 80, borderRadius: 6, borderWidth: 1,
+    backgroundColor: '#0d0d1490', alignItems: 'center' as const, justifyContent: 'center' as const,
+    zIndex: 2,
+  },
+  editScrollArrowLeft: { marginRight: 4 },
+  editScrollArrowRight: { marginLeft: 4 },
+  editScrollArrowText: {
+    fontSize: 22, fontWeight: '700' as const,
+  },
   floorChipWrap: { flexDirection: 'row', alignItems: 'center', marginRight: 4 },
   floorDeleteBtn: { marginLeft: -2, marginRight: 6, width: 14, height: 14, borderRadius: 7, backgroundColor: '#ef444422', borderWidth: 1, borderColor: '#ef444444', alignItems: 'center', justifyContent: 'center', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
   floorDeleteBtnText: { fontSize: 7, color: '#ef4444', fontWeight: '800', lineHeight: 14 },

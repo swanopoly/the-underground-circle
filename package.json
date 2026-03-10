@@ -21,8 +21,8 @@
   ],
   "main": "index.ts",
   "scripts": {
-    "start": "expo start",
-    "dev": "node start-dev.js",
+    "start": "node start-dev.js",
+    "expo": "expo start",
     "proxy": "node openclaw-proxy.js",
     "build": "expo export --platform web",
     "android": "expo start --android",

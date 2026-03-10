@@ -250,3 +250,93 @@ export async function saveConnections(connections: AgentConnection[]): Promise<v
   // Re-save locally with updated remoteIds
   await saveLocal(connections);
 }
+
+// ─── Auto-Discovery ──────────────────────────────
+
+const LOCAL_OPENCLAW_ENDPOINTS = [
+  'http://localhost:18790', // CORS proxy (preferred)
+  'http://localhost:18789', // Direct gateway
+];
+
+/**
+ * Probe localhost for a running OpenClaw gateway.
+ * If found, auto-creates a connection entry (or returns existing).
+ * Works on both localhost dev and the live site — browser fetch to
+ * localhost reaches the user's own machine.
+ */
+export async function autoDiscoverLocalAgents(
+  existing: AgentConnection[],
+): Promise<{ discovered: AgentConnection | null; endpoint?: string }> {
+  // Skip if user already has an OpenClaw connection (enabled or not)
+  const hasOpenclaw = existing.some(
+    c => c.provider === 'openclaw' && c.endpoint.includes('localhost'),
+  );
+  if (hasOpenclaw) {
+    // Return the existing one for auto-reconnect
+    const conn = existing.find(c => c.provider === 'openclaw' && c.endpoint.includes('localhost'));
+    return { discovered: null, endpoint: conn?.endpoint };
+  }
+
+  for (const endpoint of LOCAL_OPENCLAW_ENDPOINTS) {
+    try {
+      const res = await fetch(`${endpoint}/health`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        if (data?.ok || data?.status === 'live') {
+          // Gateway is reachable — try to get token from a no-auth probe
+          // If token is needed, create connection with empty token (will fail auth
+          // but the diagnostic will guide the user)
+          const conn: AgentConnection = {
+            id: generateId(),
+            name: 'OpenClaw',
+            provider: 'openclaw',
+            endpoint,
+            token: '', // Will be filled from saved data or user input
+            enabled: true,
+            status: 'disconnected',
+            color: PROVIDER_META.openclaw.color,
+          };
+          return { discovered: conn, endpoint };
+        }
+      }
+    } catch {
+      // Endpoint not reachable — try next
+    }
+  }
+
+  return { discovered: null };
+}
+
+/**
+ * Probe an endpoint's health without auth.
+ * Returns true if the gateway is reachable and healthy.
+ */
+export async function probeEndpointHealth(endpoint: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${endpoint.replace(/\/$/, '')}/health`, {
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!res.ok) return false;
+    const data = await res.json().catch(() => null);
+    return data?.ok === true || data?.status === 'live';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get the first connected OpenClaw connection's endpoint,
+ * or fall back to the first enabled one.
+ */
+export function getOpenClawEndpoint(connections: AgentConnection[]): string | null {
+  const connected = connections.find(
+    c => c.provider === 'openclaw' && c.status === 'connected',
+  );
+  if (connected) return connected.endpoint;
+  const enabled = connections.find(
+    c => c.provider === 'openclaw' && c.enabled,
+  );
+  return enabled?.endpoint || null;
+}

@@ -57,10 +57,12 @@ export async function getProposals(circleId: string, status?: string): Promise<P
 
   // Get votes for each proposal
   const proposalIds = data.map(p => p.id);
-  const { data: votes } = await supabase
-    .from('proposal_votes')
-    .select('*, user:profiles!user_id(username, display_name)')
-    .in('proposal_id', proposalIds);
+  const { data: votes } = proposalIds.length > 0
+    ? await supabase
+        .from('proposal_votes')
+        .select('*, user:profiles!user_id(username, display_name)')
+        .in('proposal_id', proposalIds)
+    : { data: [] };
 
   // Get member count
   const { count: memberCount } = await supabase

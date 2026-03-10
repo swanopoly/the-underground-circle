@@ -229,73 +229,30 @@ function funnyThoughts(): string[] {
   ];
 }
 
-// ─── Techmeme Headlines (curated, rotating) ─────────────────
+// ─── Techmeme Headlines (real-time via trendingContent.ts) ────
 
 function techmemeHeadlines(): string[] {
-  // Curated headlines inspired by top Techmeme stories — rotated by day
-  const d = new Date();
-  const dayOfYear = Math.floor((d.getTime() - new Date(d.getFullYear(), 0, 0).getTime()) / 86400000);
-  const bucket = dayOfYear % 5; // 5 rotating sets
-
-  const sets: string[][] = [
-    [
-      'Techmeme: Apple unveils iPhone 17e — A19 chip, 48MP camera, $599.',
-      'Techmeme: M4 iPad Air doubles RAM to 12GB, keeps same $599 price.',
-      'Techmeme: iPhone 17e is first budget iPhone with MagSafe support.',
-      'Techmeme: OpenAI reportedly in talks to acquire Windsurf for $3B.',
-      'Techmeme: EU opens formal investigation into Nvidia over AI chip dominance.',
-      'Techmeme: Anthropic raises $2B Series D at $60B valuation.',
-      'Techmeme: Google DeepMind announces Gemini 2.5 with native code execution.',
-    ],
-    [
-      'Techmeme: Microsoft kills Copilot+ PC branding, refocuses on agents.',
-      'Techmeme: Cursor parent Anysphere hits $10B valuation in new round.',
-      'Techmeme: Apple Intelligence now available in 12 languages globally.',
-      'Techmeme: Meta open-sources Llama 4 Scout and Maverick models.',
-      'Techmeme: AWS announces Trainium3 chips, 2x performance per watt.',
-      'Techmeme: GitHub reports 150M developers — AI-assisted PRs up 300%.',
-      'Techmeme: Stripe launches AI-native billing for usage-based SaaS.',
-    ],
-    [
-      'Techmeme: Perplexity valued at $18B as AI search takes market share.',
-      'Techmeme: Samsung Galaxy S26 to ship with on-device LLM by default.',
-      'Techmeme: Docker acquires AI container startup for $500M.',
-      'Techmeme: US Commerce Dept tightens chip export rules for China again.',
-      'Techmeme: Figma launches AI-powered design-to-code in beta.',
-      'Techmeme: Cloudflare reports 40% of web traffic now AI bot-generated.',
-      'Techmeme: Databricks IPO filing reveals $3B ARR, profitable since Q3.',
-    ],
-    [
-      'Techmeme: xAI Grok 3 tops benchmarks but trails on safety evals.',
-      'Techmeme: Y Combinator W26 batch is 60% AI startups, record applications.',
-      'Techmeme: Notion launches autonomous project management agents.',
-      'Techmeme: Spotify uses ML to cut cloud costs by $100M annually.',
-      'Techmeme: Vercel ships v0 3.0 — generates full-stack apps from prompts.',
-      'Techmeme: Chrome 134 ships with built-in Gemini Nano for local AI.',
-      'Techmeme: Reddit bans AI scraping, sues three startups for training data.',
-    ],
-    [
-      'Techmeme: TSMC begins 1.4nm test production ahead of schedule.',
-      'Techmeme: Mistral Large 3 challenges GPT-4o on coding benchmarks.',
-      'Techmeme: Linear raises $100M for AI-first project management.',
-      'Techmeme: Sony announces PS5 Pro firmware update with AI upscaling.',
-      'Techmeme: India passes Digital Data Protection Act, tech firms scramble.',
-      'Techmeme: Wiz acquisition by Google Cloud closes at $32B.',
-      'Techmeme: Stack Overflow pivots to AI knowledge platform after 55% traffic drop.',
-    ],
-  ];
-
-  // Always include a few evergreen Techmeme-style headlines
-  const evergreen = [
+  const trending = getCachedTrending();
+  if (trending.techmeme.length > 0) {
+    return trending.techmeme;
+  }
+  // Fallback if no real data yet
+  return [
     'Scrolling Techmeme... the AI news cycle never sleeps.',
-    'Techmeme top story changed 3 times today. Wild news day.',
-    'Techmeme comments section is on fire right now.',
+    'Checking Techmeme for the latest... always something breaking.',
     'Another funding round on Techmeme. VC money still flowing into AI.',
     'Techmeme: Developer tools category is the hottest sector this quarter.',
-    'Checking Techmeme for the latest... always something breaking.',
   ];
+}
 
-  return [...(sets[bucket] || sets[0]), ...evergreen];
+// ─── Perplexity / AI News (real-time via trendingContent.ts) ──
+
+function perplexityNews(): string[] {
+  const trending = getCachedTrending();
+  if (trending.perplexity.length > 0) {
+    return trending.perplexity;
+  }
+  return [];
 }
 
 // ─── Tech & World News Thoughts ─────────────────────────────
@@ -625,16 +582,20 @@ export function generateThoughtBubble(
     ], 'info', 5);
   }
 
-  // Tech & world news (moderate weight — keeps things fresh)
-  add(techNewsThoughts(), 'news', 4);
+  // Tech & world news (lower weight now — real data takes priority)
+  add(techNewsThoughts(), 'news', 2);
 
-  // Techmeme headlines (solid weight — real news feel)
-  add(techmemeHeadlines(), 'news', 5);
+  // Real-time Techmeme headlines (fetched hourly)
+  add(techmemeHeadlines(), 'news', 6);
 
-  // Real trending content (HN + X/Twitter)
+  // Perplexity / AI news (fetched hourly)
+  const perplexityPool = perplexityNews();
+  if (perplexityPool.length > 0) add(perplexityPool, 'news', 5);
+
+  // Real trending content (HN + X/Twitter — fetched hourly)
   const trending = getCachedTrending();
-  if (trending.hn.length > 0) add(trending.hn, 'news', 5);
-  if (trending.xTrending.length > 0) add(trending.xTrending, 'trending', 5);
+  if (trending.hn.length > 0) add(trending.hn, 'news', 6);
+  if (trending.xTrending.length > 0) add(trending.xTrending, 'trending', 6);
 
   // Agent personality / dialogue
   add(personalityThoughts(agent), 'personality', 3);

@@ -108,6 +108,7 @@ interface Props {
 
   // ── Layout ──
   compact?: boolean;  // true = hide header bar (used in the bottom drawer)
+  initialTab?: 'commands' | 'automations';
 
   // ── Direct invocation callback (bypasses broadcast round-trip) ──
   onCommandSent?: (params: {
@@ -510,6 +511,7 @@ export default function OfficeTerminal({
   sharedTargetIds, onSharedSelectTargets,
   byoProviderKeys,
   compact = false,
+  initialTab,
   onCommandSent,
 }: Props) {
   // Dynamic model list: base models + BYO provider models
@@ -518,7 +520,8 @@ export default function OfficeTerminal({
     return [...BASE_MODELS, ...byo];
   }, [byoProviderKeys]);
 
-  const [terminalTab, setTerminalTab]          = useState<TerminalTab>('commands');
+  const [terminalTab, setTerminalTab]          = useState<TerminalTab>(initialTab || 'commands');
+  useEffect(() => { if (initialTab) setTerminalTab(initialTab); }, [initialTab]);
   const [thinkingLevel, setThinkingLevel]     = useState<ThinkingLevel>('balanced');
   const [terminalMode, setTerminalMode]       = useState<TerminalMode>('execute');
   const [messages, setMessages]               = useState<TerminalMessage[]>([]);
@@ -535,6 +538,8 @@ export default function OfficeTerminal({
   const [historyIdx, setHistoryIdx]           = useState(-1);
   const listRef   = useRef<FlatList<TerminalMessage>>(null);
   const inputRef  = useRef<TextInput>(null);
+  // Track deleted message IDs to prevent stale response subscription events
+  const deletedIdsRef = useRef<Set<string>>(new Set());
 
   // ── Derive active input/target from shared or local state ──────────────────
   const input = sharedInput !== undefined ? sharedInput : localInput;
@@ -602,6 +607,8 @@ export default function OfficeTerminal({
 
   // ── Load history + subscribe ───────────────────────────────────────────────
   useEffect(() => {
+    deletedIdsRef.current.clear();
+
     loadTerminalHistory(circleId, 50).then(async ({ messages: hist }) => {
       setMessages(hist);
       setLoading(false);
@@ -610,6 +617,7 @@ export default function OfficeTerminal({
         const resps = await loadResponsesForMessages(hist.map(m => m.id));
         const map = new Map<string, TerminalResponse[]>();
         for (const r of resps) {
+          if (deletedIdsRef.current.has(r.messageId)) continue;
           const arr = map.get(r.messageId) || [];
           arr.push(r);
           map.set(r.messageId, arr);
@@ -620,26 +628,31 @@ export default function OfficeTerminal({
   }, [circleId]);
 
   useEffect(() => {
-    const unsub = subscribeToTerminalMessages(circleId, (updated) => {
-      // Soft-deleted messages: remove from view
-      if (updated.status === 'deleted') {
-        setMessages(prev => prev.filter(m => m.id !== updated.id));
+    const unsub = subscribeToTerminalMessages(
+      circleId,
+      (updated) => {
+        // Skip updates for messages we've already deleted locally
+        if (deletedIdsRef.current.has(updated.id)) return;
+
+        setMessages(prev => {
+          const idx = prev.findIndex(m => m.id === updated.id);
+          if (idx >= 0) {
+            const next = [...prev]; next[idx] = updated; return next;
+          }
+          return [...prev, updated];
+        });
+      },
+      (deletedId) => {
+        // Hard DELETE from another client — remove from local state
+        deletedIdsRef.current.add(deletedId);
+        setMessages(prev => prev.filter(m => m.id !== deletedId));
         setResponses(prev => {
           const next = new Map(prev);
-          next.delete(updated.id);
+          next.delete(deletedId);
           return next;
         });
-        return;
-      }
-
-      setMessages(prev => {
-        const idx = prev.findIndex(m => m.id === updated.id);
-        if (idx >= 0) {
-          const next = [...prev]; next[idx] = updated; return next;
-        }
-        return [...prev, updated];
-      });
-    });
+      },
+    );
     return unsub;
   }, [circleId]);
 
@@ -662,6 +675,9 @@ export default function OfficeTerminal({
         (payload: any) => {
           const raw = payload.new;
           if (!raw) return;
+
+          // Skip responses for messages that have been deleted
+          if (deletedIdsRef.current.has(raw.message_id)) return;
 
           const row: TerminalResponse = {
             id:           raw.id,
@@ -722,6 +738,9 @@ export default function OfficeTerminal({
 
   // ── Delete a message ───────────────────────────────────────────────────────
   const handleDelete = useCallback(async (messageId: string) => {
+    // Track as deleted FIRST — prevents race conditions with realtime subscriptions
+    deletedIdsRef.current.add(messageId);
+
     // Remove from local state immediately
     setMessages(prev => prev.filter(m => m.id !== messageId));
     setResponses(prev => {

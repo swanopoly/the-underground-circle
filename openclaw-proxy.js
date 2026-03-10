@@ -7,6 +7,9 @@
  */
 
 const http = require('http');
+const fs   = require('fs');
+const path = require('path');
+const os   = require('os');
 const WebSocket = require('./node_modules/ws');
 const WebSocketServer = WebSocket.Server;
 const { URL } = require('url');
@@ -14,6 +17,19 @@ const { URL } = require('url');
 const GATEWAY_HOST = 'localhost';
 const GATEWAY_PORT = 18789;
 const PROXY_PORT   = 18790;
+
+// ─── Auto-load gateway auth token from OpenClaw config ───────────────────────
+let GATEWAY_TOKEN = '';
+try {
+  const configPath = path.join(os.homedir(), '.openclaw', 'openclaw.json');
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  GATEWAY_TOKEN = config?.gateway?.auth?.token || '';
+  if (GATEWAY_TOKEN) {
+    console.log('[proxy] Auth token loaded from ~/.openclaw/openclaw.json');
+  }
+} catch (e) {
+  console.warn('[proxy] Could not load OpenClaw config — auth token not available');
+}
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin':  '*',
@@ -31,12 +47,21 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Build forwarded headers, injecting auth token if missing or empty
+  const fwdHeaders = { ...req.headers, host: `${GATEWAY_HOST}:${GATEWAY_PORT}` };
+  if (GATEWAY_TOKEN) {
+    const auth = fwdHeaders['authorization'] || '';
+    if (!auth || auth === 'Bearer' || auth === 'Bearer ') {
+      fwdHeaders['authorization'] = `Bearer ${GATEWAY_TOKEN}`;
+    }
+  }
+
   const options = {
     hostname: GATEWAY_HOST,
     port:     GATEWAY_PORT,
     path:     req.url,
     method:   req.method,
-    headers:  { ...req.headers, host: `${GATEWAY_HOST}:${GATEWAY_PORT}` },
+    headers:  fwdHeaders,
   };
 
   const proxyReq = http.request(options, (proxyRes) => {

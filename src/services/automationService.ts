@@ -248,19 +248,45 @@ export async function toggleAutomation(id: string, enabled: boolean): Promise<{ 
 // ─── Trigger execution ──────────────────────────────────────────────────────
 
 export async function triggerAutomation(id: string, circleId: string): Promise<{ runId?: string; error?: string }> {
-  const { data: auth } = await supabase.auth.getUser();
+  // Refresh session to get a fresh access token — avoids 401 from expired JWT
+  const { data: refreshed } = await supabase.auth.refreshSession();
+  const accessToken = refreshed?.session?.access_token;
+  const userId = refreshed?.user?.id;
 
-  const { data, error } = await supabase.functions.invoke('automation-executor', {
-    body: {
-      automationId: id,
-      circleId,
-      triggerSource: 'manual',
-      triggeredBy: auth.user?.id,
-    },
-  });
+  if (!accessToken) {
+    return { error: 'Not authenticated — please sign in again' };
+  }
 
-  if (error) return { error: error.message };
-  return { runId: data?.runId };
+  // Call edge function directly with the fresh token to avoid stale SDK state
+  const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
+  const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
+
+  try {
+    const res = await fetch(`${supabaseUrl}/functions/v1/automation-executor`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+        'apikey': anonKey,
+      },
+      body: JSON.stringify({
+        automationId: id,
+        circleId,
+        triggerSource: 'manual',
+        triggeredBy: userId,
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      return { error: `${res.status}: ${text}` };
+    }
+
+    const data = await res.json();
+    return { runId: data?.runId };
+  } catch (e: any) {
+    return { error: e.message };
+  }
 }
 
 // ─── Load runs ──────────────────────────────────────────────────────────────
@@ -386,7 +412,71 @@ export function useAutomationRuns(automationId: string | null) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  // Realtime: subscribe to run updates for this automation
+  useEffect(() => {
+    if (!automationId) return;
+    const channel = supabase
+      .channel(`auto-runs:${automationId}`)
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'automation_runs',
+        filter: `automation_id=eq.${automationId}`,
+      }, (payload: any) => {
+        const row = payload.new;
+        if (!row) return;
+        const updated = runFromRow(row);
+        setRuns(prev => {
+          const idx = prev.findIndex(r => r.id === updated.id);
+          if (idx >= 0) {
+            const next = [...prev]; next[idx] = updated; return next;
+          }
+          return [updated, ...prev];
+        });
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [automationId]);
+
   return { runs, isLoading, refresh };
+}
+
+/** Subscribe to ALL automation runs for a circle — for live run tracking */
+export function useCircleRunStream(circleId: string | null) {
+  const [liveRuns, setLiveRuns] = useState<AutomationRun[]>([]);
+
+  useEffect(() => {
+    if (!circleId) return;
+    const channel = supabase
+      .channel(`auto-runs-circle:${circleId}`)
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'automation_runs',
+        filter: `circle_id=eq.${circleId}`,
+      }, (payload: any) => {
+        const row = payload.new;
+        if (!row) return;
+        const updated = runFromRow(row);
+        setLiveRuns(prev => {
+          const idx = prev.findIndex(r => r.id === updated.id);
+          if (idx >= 0) {
+            const next = [...prev]; next[idx] = updated; return next;
+          }
+          return [updated, ...prev];
+        });
+        // Auto-remove completed/failed runs from live list after 10s
+        if (updated.status === 'completed' || updated.status === 'failed') {
+          setTimeout(() => {
+            setLiveRuns(prev => prev.filter(r => r.id !== updated.id));
+          }, 10_000);
+        }
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [circleId]);
+
+  return liveRuns;
 }
 
 // ─── Dashboard Stats ──────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, Pressable, Platform, Image } from 'react-native';
-import { OfficeTheme, OFFICE_THEMES, FurnitureItem, FurnitureType, EnvironmentType, isInteractiveFurniture } from '../../../../lib/officeConfig';
+import { OfficeTheme, OFFICE_THEMES, FurnitureItem, FurnitureType, EnvironmentType, isInteractiveFurniture, FURNITURE_CATALOG } from '../../../../lib/officeConfig';
 import type { OfficeAgent } from '../../../../lib/officeAgents';
 import {
   EnterKeyItem, ButtonPanelItem, AlarmBellItem, LaunchPadItem,
@@ -8,6 +8,15 @@ import {
   TimerDisplayItem, ScoreboardItem, StatusBoardItem, CommandConsoleItem,
   SlotMachineItem, CrystalBallItem, MoodRingItem, BoomBoxItem,
   LavaLampItem, WhackAMoleItem,
+  FireplaceItem, AquariumItem, VinylPlayerItem, RainWindowItem,
+  GalaxyOrbItem, TerrariumItem, ZenGardenItem, FocusCandleItem,
+  QuoteBoardItem, ProgressBarItem, HologramItem, PixelDisplayItem,
+  SpotifyJukeboxItem, DiscordHubItem, VideoCallItem, MessageBoardItem,
+  SmartTVItem, WeatherStationItem, TwitchStreamItem, PomodoroRoomItem,
+  PokerTableItem, CoinFlipItem, RouletteWheelItem, ChessBoardItem,
+  ConnectFourItem, TriviaScreenItem,
+  CryptoTickerItem, GitHubFeedItem, CalendarWidgetItem, WorldClockItem,
+  MusicVisualizerItem, FigmaBoardItem,
 } from './InteractiveFurniture';
 import { THEME_BACKGROUNDS } from '../../../../lib/themeBackgrounds';
 
@@ -49,6 +58,7 @@ interface Props {
   onFloorPress?: (x: number, y: number) => void;
   onFurniturePress?: (id: string) => void;
   onFurnitureMove?: (id: string, x: number, y: number) => void;
+  onFurnitureResize?: (id: string, w: number, h: number) => void;
   onFurnitureInteract?: (id: string, type: FurnitureType) => void;
   agents?: OfficeAgent[];
   selectedFurnitureId?: string | null;
@@ -2550,11 +2560,26 @@ function AccessoryStrip({ theme }: { theme: OfficeTheme }) {
 //  PLACED FURNITURE RENDERER
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function FurnitureRenderer({ item, theme, onPress, onMove, onInteract, editMode, selected, agents }: {
+/** Find the CSS scale factor applied by ancestor transforms (for pointer delta compensation) */
+function findParentScale(el: HTMLElement): number {
+  let parent = el.parentElement;
+  while (parent) {
+    const t = parent.style?.transform || '';
+    const m = t.match(/scale\(([\d.]+)\)/);
+    if (m) return parseFloat(m[1]);
+    parent = parent.parentElement;
+  }
+  return 1;
+}
+
+const MIN_ITEM_SIZE = 16;
+
+function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract, editMode, selected, agents }: {
   item: FurnitureItem;
   theme: OfficeTheme;
   onPress: () => void;
   onMove?: (x: number, y: number) => void;
+  onResize?: (w: number, h: number) => void;
   onInteract?: () => void;
   editMode?: boolean;
   selected?: boolean;
@@ -2562,22 +2587,138 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onInteract, editMode,
 }) {
   const content = renderFurnitureContent(item, theme, agents);
   const isInteractive = isInteractiveFurniture(item.type);
+
+  // Look up the catalog natural size for this item type
+  const catalog = FURNITURE_CATALOG.find(c => c.type === item.type);
+  const naturalW = catalog?.width || 60;
+  const naturalH = catalog?.height || 60;
+  const currentW = item.itemWidth || naturalW;
+  const currentH = item.itemHeight || naturalH;
+  const scaleX = currentW / naturalW;
+  const scaleY = currentH / naturalH;
+
+  // Refs for drag
   const dragRef = React.useRef<{ startX: number; startY: number; itemX: number; itemY: number; dragging: boolean } | null>(null);
+  const resizingRef = React.useRef(false); // true while a resize drag is active
   const elRef = React.useRef<any>(null);
   const moveRef = React.useRef(onMove);
+  const resizeRef = React.useRef(onResize);
   const pressRef = React.useRef(onPress);
   const interactRef = React.useRef(onInteract);
   const posRef = React.useRef({ x: item.x, y: item.y });
+  const sizeRef = React.useRef({ w: currentW, h: currentH });
   moveRef.current = onMove;
+  resizeRef.current = onResize;
   pressRef.current = onPress;
   interactRef.current = onInteract;
   posRef.current = { x: item.x, y: item.y };
+  sizeRef.current = { w: currentW, h: currentH };
 
+  // ── Refs for 4 resize-handle DOM elements ──
+  const handleTLRef = React.useRef<any>(null);
+  const handleTRRef = React.useRef<any>(null);
+  const handleBLRef = React.useRef<any>(null);
+  const handleBRRef = React.useRef<any>(null);
+  const cornerRefs = { tl: handleTLRef, tr: handleTRRef, bl: handleBLRef, br: handleBRRef };
+  const handleEls = React.useRef(new Set<HTMLElement>());
+
+  // ── Shared: start a resize drag via native pointerdown ──
+  const startResize = React.useCallback((e: PointerEvent, corner: 'tl' | 'tr' | 'bl' | 'br') => {
+    if (!resizeRef.current) return;
+    e.stopPropagation();
+    e.preventDefault();
+    resizingRef.current = true;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startW = sizeRef.current.w;
+    const startH = sizeRef.current.h;
+    const startItemX = posRef.current.x;
+    const startItemY = posRef.current.y;
+    const el = elRef.current as HTMLElement;
+    const contentEl = el?.querySelector('[data-resize-content]') as HTMLElement | null;
+
+    const onMove = (me: PointerEvent) => {
+      const scale = findParentScale(el);
+      const dx = (me.clientX - startX) / scale;
+      const dy = (me.clientY - startY) / scale;
+      let newW = startW;
+      let newH = startH;
+      let newX = startItemX;
+      let newY = startItemY;
+
+      if (corner === 'br') {
+        newW = Math.max(MIN_ITEM_SIZE, Math.round((startW + dx) / GRID_SIZE) * GRID_SIZE);
+        newH = Math.max(MIN_ITEM_SIZE, Math.round((startH + dy) / GRID_SIZE) * GRID_SIZE);
+      } else if (corner === 'bl') {
+        newW = Math.max(MIN_ITEM_SIZE, Math.round((startW - dx) / GRID_SIZE) * GRID_SIZE);
+        newH = Math.max(MIN_ITEM_SIZE, Math.round((startH + dy) / GRID_SIZE) * GRID_SIZE);
+        newX = startItemX + (startW - newW);
+      } else if (corner === 'tr') {
+        newW = Math.max(MIN_ITEM_SIZE, Math.round((startW + dx) / GRID_SIZE) * GRID_SIZE);
+        newH = Math.max(MIN_ITEM_SIZE, Math.round((startH - dy) / GRID_SIZE) * GRID_SIZE);
+        newY = startItemY + (startH - newH);
+      } else { // tl
+        newW = Math.max(MIN_ITEM_SIZE, Math.round((startW - dx) / GRID_SIZE) * GRID_SIZE);
+        newH = Math.max(MIN_ITEM_SIZE, Math.round((startH - dy) / GRID_SIZE) * GRID_SIZE);
+        newX = startItemX + (startW - newW);
+        newY = startItemY + (startH - newH);
+      }
+
+      // Live preview via DOM
+      if (contentEl) {
+        contentEl.style.transform = `scale(${newW / naturalW}, ${newH / naturalH})`;
+      }
+      el.style.left = newX + 'px';
+      el.style.top = newY + 'px';
+      el.style.width = newW + 'px';
+      el.style.height = newH + 'px';
+      (el as any).__pendingResize = { w: newW, h: newH, x: newX, y: newY };
+    };
+
+    const onUp = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      resizingRef.current = false;
+      const pending = (el as any).__pendingResize;
+      if (pending) {
+        resizeRef.current?.(pending.w, pending.h);
+        moveRef.current?.(pending.x, pending.y);
+        delete (el as any).__pendingResize;
+      }
+    };
+
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+  }, [naturalW, naturalH]);
+
+  // ── Attach native pointerdown on resize handles + drag-to-move on main el ──
   React.useEffect(() => {
-    if (Platform.OS !== 'web' || !editMode || !elRef.current) return;
-    const el = elRef.current;
+    if (Platform.OS !== 'web' || !editMode) return;
+    const el = elRef.current as HTMLElement | null;
+    if (!el) return;
 
+    // Collect the 4 handle DOM elements
+    const handles = handleEls.current;
+    handles.clear();
+    (['tl', 'tr', 'bl', 'br'] as const).forEach(c => {
+      const h = (cornerRefs[c].current as HTMLElement | null);
+      if (h) handles.add(h);
+    });
+
+    // ── Resize: native pointerdown on each handle ──
+    const handleMap = new Map<HTMLElement, (e: PointerEvent) => void>();
+    (['tl', 'tr', 'bl', 'br'] as const).forEach(corner => {
+      const h = cornerRefs[corner].current as HTMLElement | null;
+      if (!h) return;
+      const fn = (e: PointerEvent) => startResize(e, corner);
+      handleMap.set(h, fn);
+      h.addEventListener('pointerdown', fn);
+    });
+
+    // ── Move: native pointerdown on main element ──
     const handlePointerDown = (e: PointerEvent) => {
+      // If the click landed on a resize handle, skip — that handler owns it
+      if (handles.has(e.target as HTMLElement)) return;
       if (!moveRef.current) return;
       e.stopPropagation();
       e.preventDefault();
@@ -2591,15 +2732,7 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onInteract, editMode,
           dragRef.current.dragging = true;
         }
         if (dragRef.current.dragging) {
-          // Find the scale transform on the office wrapper
-          let scale = 1;
-          let parent = el.parentElement;
-          while (parent) {
-            const t = parent.style?.transform || '';
-            const m = t.match(/scale\(([\d.]+)\)/);
-            if (m) { scale = parseFloat(m[1]); break; }
-            parent = parent.parentElement;
-          }
+          const scale = findParentScale(el);
           const newX = Math.round((dragRef.current.itemX + dx / scale) / GRID_SIZE) * GRID_SIZE;
           const newY = Math.round((dragRef.current.itemY + dy / scale) / GRID_SIZE) * GRID_SIZE;
           el.style.left = newX + 'px';
@@ -2611,14 +2744,7 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onInteract, editMode,
         document.removeEventListener('pointermove', onPointerMove);
         document.removeEventListener('pointerup', onPointerUp);
         if (dragRef.current?.dragging) {
-          let scale = 1;
-          let parent = el.parentElement;
-          while (parent) {
-            const t = parent.style?.transform || '';
-            const m = t.match(/scale\(([\d.]+)\)/);
-            if (m) { scale = parseFloat(m[1]); break; }
-            parent = parent.parentElement;
-          }
+          const scale = findParentScale(el);
           const dx = ue.clientX - dragRef.current.startX;
           const dy = ue.clientY - dragRef.current.startY;
           const newX = Math.max(0, Math.min(FLOOR_W - 20, Math.round((dragRef.current.itemX + dx / scale) / GRID_SIZE) * GRID_SIZE));
@@ -2635,8 +2761,12 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onInteract, editMode,
     };
 
     el.addEventListener('pointerdown', handlePointerDown);
-    return () => el.removeEventListener('pointerdown', handlePointerDown);
-  }, [editMode]);
+
+    return () => {
+      el.removeEventListener('pointerdown', handlePointerDown);
+      handleMap.forEach((fn, h) => h.removeEventListener('pointerdown', fn));
+    };
+  }, [editMode, selected, startResize]);
 
   const handleInteractClick = React.useCallback(() => {
     if (!editMode && isInteractive && interactRef.current) {
@@ -2648,17 +2778,39 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onInteract, editMode,
     <Pressable
       ref={elRef}
       onPress={!editMode && isInteractive ? handleInteractClick : undefined}
-      style={[s.placedWrap, { left: item.x, top: item.y },
+      style={[s.placedWrap,
+        { left: item.x, top: item.y, width: currentW, height: currentH },
         Platform.OS === 'web' && { cursor: editMode ? 'grab' : (isInteractive ? 'pointer' : 'default'), userSelect: 'none' } as any,
         selected && s.placedSelected,
         !editMode && isInteractive && s.placedInteractive,
       ]}
     >
-      {content}
+      {/* Scaled content wrapper — transforms the natural-size content to the user's custom size */}
+      <View
+        style={{ width: naturalW, height: naturalH, transformOrigin: 'top left', overflow: 'hidden', transform: [{ scaleX }, { scaleY }] } as any}
+        {...({ dataSet: { resizeContent: 'true' } } as any)}
+      >
+        {content}
+      </View>
+
+      {/* Edit mode controls */}
       {editMode && selected && (
-        <Pressable onPress={() => { pressRef.current(); }} style={s.editDeleteBtn}>
-          <Text style={s.editDeleteText}>DELETE</Text>
-        </Pressable>
+        <>
+          <Pressable onPress={() => { pressRef.current(); }} style={s.editDeleteBtn}>
+            <Text style={s.editDeleteText}>DELETE</Text>
+          </Pressable>
+          {/* Size label */}
+          <View style={{ position: 'absolute', bottom: -16, left: 0, right: 0, alignItems: 'center', zIndex: 30 }}>
+            <Text style={{ color: '#3b82f6', fontSize: 7, fontWeight: '800', fontFamily: 'monospace' }}>
+              {currentW}×{currentH}
+            </Text>
+          </View>
+          {/* Corner resize handles — refs used for native pointerdown in useEffect */}
+          <View ref={handleTLRef} style={{ position: 'absolute', top: -6, left: -6, width: 12, height: 12, borderRadius: 6, backgroundColor: '#3b82f6', borderWidth: 2, borderColor: '#fff', zIndex: 30, ...(Platform.OS === 'web' ? { cursor: 'nwse-resize' } : {}) } as any} />
+          <View ref={handleTRRef} style={{ position: 'absolute', top: -6, right: -6, width: 12, height: 12, borderRadius: 6, backgroundColor: '#3b82f6', borderWidth: 2, borderColor: '#fff', zIndex: 30, ...(Platform.OS === 'web' ? { cursor: 'nesw-resize' } : {}) } as any} />
+          <View ref={handleBLRef} style={{ position: 'absolute', bottom: -6, left: -6, width: 12, height: 12, borderRadius: 6, backgroundColor: '#3b82f6', borderWidth: 2, borderColor: '#fff', zIndex: 30, ...(Platform.OS === 'web' ? { cursor: 'nesw-resize' } : {}) } as any} />
+          <View ref={handleBRRef} style={{ position: 'absolute', bottom: -6, right: -6, width: 12, height: 12, borderRadius: 6, backgroundColor: '#3b82f6', borderWidth: 2, borderColor: '#fff', zIndex: 30, ...(Platform.OS === 'web' ? { cursor: 'nwse-resize' } : {}) } as any} />
+        </>
       )}
       {editMode && !selected && (
         <View style={s.editGrabHint}>
@@ -2923,6 +3075,38 @@ function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme, agents?
     case 'boom_box': return <BoomBoxItem item={item} theme={theme} />;
     case 'lava_lamp': return <LavaLampItem item={item} theme={theme} />;
     case 'whack_a_mole': return <WhackAMoleItem item={item} theme={theme} />;
+    case 'fireplace': return <FireplaceItem item={item} theme={theme} />;
+    case 'aquarium': return <AquariumItem item={item} theme={theme} />;
+    case 'vinyl_player': return <VinylPlayerItem item={item} theme={theme} />;
+    case 'rain_window': return <RainWindowItem item={item} theme={theme} />;
+    case 'galaxy_orb': return <GalaxyOrbItem item={item} theme={theme} />;
+    case 'terrarium': return <TerrariumItem item={item} theme={theme} />;
+    case 'zen_garden': return <ZenGardenItem item={item} theme={theme} />;
+    case 'focus_candle': return <FocusCandleItem item={item} theme={theme} />;
+    case 'quote_board': return <QuoteBoardItem item={item} theme={theme} />;
+    case 'progress_bar': return <ProgressBarItem item={item} theme={theme} />;
+    case 'hologram': return <HologramItem item={item} theme={theme} />;
+    case 'pixel_display': return <PixelDisplayItem item={item} theme={theme} />;
+    case 'spotify_jukebox': return <SpotifyJukeboxItem item={item} theme={theme} />;
+    case 'discord_hub': return <DiscordHubItem item={item} theme={theme} />;
+    case 'video_call': return <VideoCallItem item={item} theme={theme} />;
+    case 'message_board': return <MessageBoardItem item={item} theme={theme} />;
+    case 'smart_tv': return <SmartTVItem item={item} theme={theme} />;
+    case 'weather_station': return <WeatherStationItem item={item} theme={theme} />;
+    case 'twitch_stream': return <TwitchStreamItem item={item} theme={theme} />;
+    case 'pomodoro_room': return <PomodoroRoomItem item={item} theme={theme} />;
+    case 'poker_table': return <PokerTableItem item={item} theme={theme} />;
+    case 'coin_flip': return <CoinFlipItem item={item} theme={theme} />;
+    case 'roulette_wheel': return <RouletteWheelItem item={item} theme={theme} />;
+    case 'chess_board': return <ChessBoardItem item={item} theme={theme} />;
+    case 'connect_four': return <ConnectFourItem item={item} theme={theme} />;
+    case 'trivia_screen': return <TriviaScreenItem item={item} theme={theme} />;
+    case 'crypto_ticker': return <CryptoTickerItem item={item} theme={theme} />;
+    case 'github_feed': return <GitHubFeedItem item={item} theme={theme} />;
+    case 'calendar_widget': return <CalendarWidgetItem item={item} theme={theme} />;
+    case 'world_clock': return <WorldClockItem item={item} theme={theme} />;
+    case 'music_visualizer': return <MusicVisualizerItem item={item} theme={theme} />;
+    case 'figma_board': return <FigmaBoardItem item={item} theme={theme} />;
     default:
       return <Text style={{ fontSize: 20 }}>📦</Text>;
   }
@@ -2932,7 +3116,7 @@ function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme, agents?
 //  MAIN FLOOR COMPONENT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorPress, onFurniturePress, onFurnitureMove, onFurnitureInteract, agents, selectedFurnitureId, editMode }: Props) {
+export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorPress, onFurniturePress, onFurnitureMove, onFurnitureResize, onFurnitureInteract, agents, selectedFurnitureId, editMode }: Props) {
   const theme = themeProp || OFFICE_THEMES.underground;
   const env = theme.environmentType || 'office';
 
@@ -2998,6 +3182,7 @@ export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorP
           theme={theme}
           onPress={() => onFurniturePress?.(item.id)}
           onMove={onFurnitureMove ? (x, y) => onFurnitureMove(item.id, x, y) : undefined}
+          onResize={onFurnitureResize ? (w, h) => onFurnitureResize(item.id, w, h) : undefined}
           onInteract={onFurnitureInteract ? () => onFurnitureInteract(item.id, item.type) : undefined}
           editMode={editMode}
           selected={selectedFurnitureId === item.id}

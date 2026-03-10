@@ -27,6 +27,10 @@ import {
   CustomThemeRecord, saveCustomTheme, deleteCustomTheme,
   CUSTOM_THEME_PREFIX, customThemeToOfficeTheme,
 } from '../../../../services/customThemes';
+import {
+  SoulTemplate, SoulCategory, SOUL_CATEGORIES,
+  getTemplatesByCategory, detectTemplate,
+} from '../../../../lib/soulTemplates';
 
 type Tab = 'theme' | 'agents' | 'connections' | 'api-keys' | 'telegram' | 'budget' | 'idle';
 
@@ -117,6 +121,8 @@ export default function CustomizePanel({
   const [personalitySaving, setPersonalitySaving] = useState(false);
   const [personalityStatus, setPersonalityStatus] = useState('');
   const [personalityLoaded, setPersonalityLoaded] = useState(false);
+  const [soulCategory, setSoulCategory] = useState<SoulCategory>('role');
+  const [showSoulTemplates, setShowSoulTemplates] = useState(true);
 
   // Load personality when agents tab is selected
   useEffect(() => {
@@ -609,180 +615,324 @@ export default function CustomizePanel({
                     </Pressable>
                   </View>
 
-                  <Text style={styles.sectionTitle}>SKIN TONE</Text>
-                  <View style={styles.colorRow}>
-                    {SKIN_TONES.map(color => (
-                      <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, skinTone: color })}
-                        style={[styles.colorSwatch, { backgroundColor: color }, NEON_SKIN_TONES.includes(color) && { shadowColor: color, shadowOffset: { width: 0, height: 0 }, shadowRadius: 6, shadowOpacity: 0.9 }, currentAppearance.skinTone === color && styles.swatchActive]} />
-                    ))}
-                  </View>
-                  <Text style={styles.sectionTitle}>HAIR COLOR</Text>
-                  <View style={styles.colorRow}>
-                    {HAIR_COLORS.map(color => (
-                      <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, hairColor: color })}
-                        style={[styles.colorSwatch, { backgroundColor: color }, currentAppearance.hairColor === color && styles.swatchActive]} />
-                    ))}
-                  </View>
-                  <Text style={styles.sectionTitle}>HAIR STYLE</Text>
-                  <View style={styles.optionRow}>
-                    {(['flat', 'spiky', 'mohawk', 'long', 'curly', 'ponytail', 'cap', 'bald', 'buzzcut', 'afro', 'undercut', 'pigtails'] as const).map(style => (
-                      <Pressable key={style} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, hairStyle: style })}
-                        style={[styles.optionBtn, currentAppearance.hairStyle === style && styles.optionBtnActive]}>
-                        <Text style={[styles.optionText, currentAppearance.hairStyle === style && styles.optionTextActive]}>{style.toUpperCase()}</Text>
-                      </Pressable>
-                    ))}
-                  </View>
-                  <Text style={styles.sectionTitle}>SHIRT COLOR</Text>
-                  <View style={styles.colorRow}>
-                    {SHIRT_COLORS.map(color => (
-                      <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, shirtColor: color })}
-                        style={[styles.colorSwatch, { backgroundColor: color }, currentAppearance.shirtColor === color && styles.swatchActive]} />
-                    ))}
-                  </View>
-                  <Text style={styles.sectionTitle}>PANTS COLOR</Text>
-                  <View style={styles.colorRow}>
-                    {PANTS_COLORS.map(color => (
-                      <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, pantsColor: color })}
-                        style={[styles.colorSwatch, { backgroundColor: color }, currentAppearance.pantsColor === color && styles.swatchActive]} />
-                    ))}
-                  </View>
-                  <Text style={styles.sectionTitle}>SHOE COLOR</Text>
-                  <View style={styles.colorRow}>
-                    {SHOE_COLORS.map(color => (
-                      <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, shoeColor: color })}
-                        style={[styles.colorSwatch, { backgroundColor: color }, (currentAppearance.shoeColor || '#1a1a1a') === color && styles.swatchActive]} />
-                    ))}
-                  </View>
-                  <Text style={styles.sectionTitle}>ACCESSORY</Text>
-                  <View style={styles.optionRow}>
+                  {/* ── Scrollable single-row appearance sections ── */}
+
+                  <Text style={styles.itemSectionTitle}>SKIN TONE</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
+                    {SKIN_TONES.map(color => {
+                      const active = currentAppearance.skinTone === color;
+                      const isNeon = NEON_SKIN_TONES.includes(color);
+                      return (
+                        <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, skinTone: color })}
+                          style={[styles.itemSwatch, { backgroundColor: color }, isNeon && { shadowColor: color, shadowOffset: { width: 0, height: 0 }, shadowRadius: 8, shadowOpacity: 0.9 }, active && styles.itemSwatchActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          {active && <Text style={styles.itemSwatchCheck}>✓</Text>}
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+
+                  <Text style={styles.itemSectionTitle}>HAIR COLOR</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
+                    {HAIR_COLORS.map(color => {
+                      const active = currentAppearance.hairColor === color;
+                      return (
+                        <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, hairColor: color })}
+                          style={[styles.itemSwatch, { backgroundColor: color }, active && styles.itemSwatchActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          {active && <Text style={styles.itemSwatchCheck}>✓</Text>}
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+
+                  <Text style={styles.itemSectionTitle}>HAIR STYLE</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
+                    {(['flat', 'spiky', 'mohawk', 'long', 'curly', 'ponytail', 'cap', 'bald', 'buzzcut', 'afro', 'undercut', 'pigtails'] as const).map(style => {
+                      const active = currentAppearance.hairStyle === style;
+                      const emojis: Record<string, string> = { flat: '➡️', spiky: '⬆️', mohawk: '🔱', long: '💇', curly: '🌀', ponytail: '🎀', cap: '🧢', bald: '🥚', buzzcut: '✂️', afro: '🟤', undercut: '💈', pigtails: '🎗️' };
+                      return (
+                        <Pressable key={style} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, hairStyle: style })}
+                          style={[styles.itemCard, active && styles.itemCardActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          <Text style={styles.itemEmoji}>{emojis[style]}</Text>
+                          <Text style={[styles.itemLabel, active && styles.itemLabelActive]}>{style.toUpperCase()}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+
+                  <Text style={styles.itemSectionTitle}>EYE COLOR</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
+                    {EYE_COLORS.map(color => {
+                      const active = (currentAppearance.eyeColor || '#1a1a1a') === color;
+                      return (
+                        <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, eyeColor: color })}
+                          style={[styles.itemSwatch, { backgroundColor: color }, active && styles.itemSwatchActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          {active && <Text style={styles.itemSwatchCheck}>✓</Text>}
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+
+                  <Text style={styles.itemSectionTitle}>SHIRT COLOR</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
+                    {SHIRT_COLORS.map(color => {
+                      const active = currentAppearance.shirtColor === color;
+                      return (
+                        <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, shirtColor: color })}
+                          style={[styles.itemSwatch, { backgroundColor: color }, active && styles.itemSwatchActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          {active && <Text style={styles.itemSwatchCheck}>✓</Text>}
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+
+                  <Text style={styles.itemSectionTitle}>PANTS COLOR</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
+                    {PANTS_COLORS.map(color => {
+                      const active = currentAppearance.pantsColor === color;
+                      return (
+                        <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, pantsColor: color })}
+                          style={[styles.itemSwatch, { backgroundColor: color }, active && styles.itemSwatchActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          {active && <Text style={styles.itemSwatchCheck}>✓</Text>}
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+
+                  <Text style={styles.itemSectionTitle}>SHOE COLOR</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
+                    {SHOE_COLORS.map(color => {
+                      const active = (currentAppearance.shoeColor || '#1a1a1a') === color;
+                      return (
+                        <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, shoeColor: color })}
+                          style={[styles.itemSwatch, { backgroundColor: color }, active && styles.itemSwatchActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          {active && <Text style={styles.itemSwatchCheck}>✓</Text>}
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+
+                  <Text style={styles.itemSectionTitle}>EXPRESSION</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
+                    {(['neutral', 'happy', 'focused', 'sleepy', 'cool', 'angry', 'surprised', 'smirk', 'crying'] as const).map(expr => {
+                      const active = currentAppearance.expression === expr;
+                      const emojis: Record<string, string> = { neutral: '😐', happy: '😊', focused: '🤨', sleepy: '😴', cool: '😎', angry: '😠', surprised: '😲', smirk: '😏', crying: '😢' };
+                      return (
+                        <Pressable key={expr} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, expression: expr })}
+                          style={[styles.itemCard, active && styles.itemCardActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          <Text style={styles.itemEmoji}>{emojis[expr]}</Text>
+                          <Text style={[styles.itemLabel, active && styles.itemLabelActive]}>{expr.toUpperCase()}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+
+                  <Text style={styles.itemSectionTitle}>HAT</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
+                    {(['none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns', ...(isOwner ? ['space_helmet'] as const : []), 'wizard_hat', 'halo', 'antenna', 'crab_helmet', 'pirate_hat', 'cowboy_hat', 'fez', 'mohawk_spikes'] as const).map(hat => {
+                      const active = currentAppearance.hat === hat;
+                      const emojis: Record<string, string> = { none: '🚫', cap: '🧢', tophat: '🎩', beanie: '🧶', crown: '👑', helmet: '⛑️', horns: '😈', space_helmet: '🚀', wizard_hat: '🧙', halo: '😇', antenna: '👽', crab_helmet: '🦀', pirate_hat: '🏴‍☠️', cowboy_hat: '🤠', fez: '🎖️', mohawk_spikes: '🔩' };
+                      const names: Record<string, string> = { none: 'NONE', cap: 'CAP', tophat: 'TOP HAT', beanie: 'BEANIE', crown: 'CROWN', helmet: 'HELMET', horns: 'HORNS', space_helmet: 'SPACE', wizard_hat: 'WIZARD', halo: 'HALO', antenna: 'ANTENNA', crab_helmet: 'CRAB', pirate_hat: 'PIRATE', cowboy_hat: 'COWBOY', fez: 'FEZ', mohawk_spikes: 'SPIKES' };
+                      return (
+                        <Pressable key={hat} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, hat })}
+                          style={[styles.itemCard, active && styles.itemCardActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          <Text style={styles.itemEmoji}>{emojis[hat]}</Text>
+                          <Text style={[styles.itemLabel, active && styles.itemLabelActive]}>{names[hat]}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+
+                  <Text style={styles.itemSectionTitle}>ACCESSORY</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
                     {(['none', 'glasses', 'headphones', 'bowtie', 'scarf', 'hoodie', 'mask', 'monocle', 'eyepatch', 'bandana', 'chain', 'piercing', 'visor_shades', 'gas_mask'] as const).map(acc => {
-                      const labels: Record<string, string> = { none: 'NONE', glasses: '👓', headphones: '🎧', bowtie: '🎀', scarf: '🧣', hoodie: '🧥', mask: '😷', monocle: '🧐', eyepatch: '🏴‍☠️', bandana: '🥷', chain: '⛓️ CHAIN', piercing: '💎 PIERCING', visor_shades: '🕶️ VISOR', gas_mask: '☣️ GAS MASK' };
+                      const active = currentAppearance.accessory === acc;
+                      const emojis: Record<string, string> = { none: '🚫', glasses: '👓', headphones: '🎧', bowtie: '🎀', scarf: '🧣', hoodie: '🧥', mask: '😷', monocle: '🧐', eyepatch: '🏴‍☠️', bandana: '🥷', chain: '⛓️', piercing: '💎', visor_shades: '🕶️', gas_mask: '☣️' };
+                      const names: Record<string, string> = { none: 'NONE', glasses: 'GLASSES', headphones: 'PHONES', bowtie: 'BOWTIE', scarf: 'SCARF', hoodie: 'HOODIE', mask: 'MASK', monocle: 'MONOCLE', eyepatch: 'PATCH', bandana: 'BANDANA', chain: 'CHAIN', piercing: 'PIERCE', visor_shades: 'VISOR', gas_mask: 'GAS MASK' };
                       return (
                         <Pressable key={acc} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, accessory: acc })}
-                          style={[styles.optionBtn, currentAppearance.accessory === acc && styles.optionBtnActive]}>
-                          <Text style={[styles.optionText, currentAppearance.accessory === acc && styles.optionTextActive]}>
-                            {labels[acc]}
-                          </Text>
+                          style={[styles.itemCard, active && styles.itemCardActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          <Text style={styles.itemEmoji}>{emojis[acc]}</Text>
+                          <Text style={[styles.itemLabel, active && styles.itemLabelActive]}>{names[acc]}</Text>
                         </Pressable>
                       );
                     })}
-                  </View>
-                  <Text style={styles.sectionTitle}>HAT</Text>
-                  <View style={styles.optionRow}>
-                    {(['none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns', ...(isOwner ? ['space_helmet'] as const : []), 'wizard_hat', 'halo', 'antenna', 'crab_helmet', 'pirate_hat', 'cowboy_hat', 'fez', 'mohawk_spikes'] as const).map(hat => {
-                      const labels: Record<string, string> = { none: 'NONE', cap: '🧢', tophat: '🎩', beanie: '🧶', crown: '👑', helmet: '⛑️', horns: '😈', space_helmet: '🚀 SPACE', wizard_hat: '🧙 WIZARD', halo: '😇 HALO', antenna: '👽 ANTENNA', crab_helmet: '🦀 CRAB', pirate_hat: '🏴‍☠️ PIRATE', cowboy_hat: '🤠 COWBOY', fez: '🎖️ FEZ', mohawk_spikes: '🔩 SPIKES' };
-                      return (
-                        <Pressable key={hat} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, hat: hat })}
-                          style={[styles.optionBtn, currentAppearance.hat === hat && styles.optionBtnActive]}>
-                          <Text style={[styles.optionText, currentAppearance.hat === hat && styles.optionTextActive]}>
-                            {labels[hat]}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                  <Text style={styles.sectionTitle}>EXPRESSION</Text>
-                  <View style={styles.optionRow}>
-                    {(['neutral', 'happy', 'focused', 'sleepy', 'cool', 'angry', 'surprised', 'smirk', 'crying'] as const).map(expr => (
-                      <Pressable key={expr} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, expression: expr })}
-                        style={[styles.optionBtn, currentAppearance.expression === expr && styles.optionBtnActive]}>
-                        <Text style={[styles.optionText, currentAppearance.expression === expr && styles.optionTextActive]}>{expr.toUpperCase()}</Text>
-                      </Pressable>
-                    ))}
-                  </View>
-                  <Text style={styles.sectionTitle}>BACK ITEM</Text>
-                  <View style={styles.optionRow}>
-                    {(['none', 'cape', 'backpack', 'wings', 'jetpack', 'shield', 'sword', 'quiver', 'crab_shell', 'tentacles', 'rocket', 'scroll', 'boombox'] as const).map(item => {
-                      const labels: Record<string, string> = { none: 'NONE', cape: '🦸 CAPE', backpack: '🎒 PACK', wings: '🪽 WINGS', jetpack: '🚀 JETPACK', shield: '🛡️ SHIELD', sword: '⚔️ SWORD', quiver: '🏹 QUIVER', crab_shell: '🦀 SHELL', tentacles: '🐙 TENTACLES', rocket: '🚀 ROCKET', scroll: '📜 SCROLL', boombox: '📻 BOOMBOX' };
-                      return (
-                        <Pressable key={item} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, backItem: item })}
-                          style={[styles.optionBtn, (currentAppearance.backItem || 'none') === item && styles.optionBtnActive]}>
-                          <Text style={[styles.optionText, (currentAppearance.backItem || 'none') === item && styles.optionTextActive]}>
-                            {labels[item]}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                  <Text style={styles.sectionTitle}>EYE COLOR</Text>
-                  <View style={styles.colorRow}>
-                    {EYE_COLORS.map(color => (
-                      <Pressable key={color} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, eyeColor: color })}
-                        style={[styles.colorSwatch, { backgroundColor: color }, (currentAppearance.eyeColor || '#1a1a1a') === color && styles.swatchActive]} />
-                    ))}
-                  </View>
-                  <Text style={styles.sectionTitle}>FACIAL HAIR</Text>
-                  <View style={styles.optionRow}>
+                  </ScrollView>
+
+                  <Text style={styles.itemSectionTitle}>FACIAL HAIR</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
                     {(['none', 'stubble', 'beard', 'mustache', 'goatee', 'fu_manchu', 'sideburns', 'soul_patch'] as const).map(fh => {
-                      const labels: Record<string, string> = { none: 'NONE', stubble: '🔘 STUBBLE', beard: '🧔 BEARD', mustache: '👨 STACHE', goatee: '🐐 GOATEE', fu_manchu: '🐉 FU MANCHU', sideburns: '🔲 BURNS', soul_patch: '▪️ PATCH' };
+                      const active = (currentAppearance.facialHair || 'none') === fh;
+                      const emojis: Record<string, string> = { none: '🚫', stubble: '🔘', beard: '🧔', mustache: '👨', goatee: '🐐', fu_manchu: '🐉', sideburns: '🔲', soul_patch: '▪️' };
+                      const names: Record<string, string> = { none: 'NONE', stubble: 'STUBBLE', beard: 'BEARD', mustache: 'STACHE', goatee: 'GOATEE', fu_manchu: 'FU MANCHU', sideburns: 'BURNS', soul_patch: 'PATCH' };
                       return (
                         <Pressable key={fh} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, facialHair: fh })}
-                          style={[styles.optionBtn, (currentAppearance.facialHair || 'none') === fh && styles.optionBtnActive]}>
-                          <Text style={[styles.optionText, (currentAppearance.facialHair || 'none') === fh && styles.optionTextActive]}>
-                            {labels[fh]}
-                          </Text>
+                          style={[styles.itemCard, active && styles.itemCardActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          <Text style={styles.itemEmoji}>{emojis[fh]}</Text>
+                          <Text style={[styles.itemLabel, active && styles.itemLabelActive]}>{names[fh]}</Text>
                         </Pressable>
                       );
                     })}
-                  </View>
-                  <Text style={styles.sectionTitle}>PET</Text>
-                  <View style={styles.optionRow}>
+                  </ScrollView>
+
+                  <Text style={styles.itemSectionTitle}>BACK ITEM</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
+                    {(['none', 'cape', 'backpack', 'wings', 'jetpack', 'shield', 'sword', 'quiver', 'crab_shell', 'tentacles', 'rocket', 'scroll', 'boombox'] as const).map(item => {
+                      const active = (currentAppearance.backItem || 'none') === item;
+                      const emojis: Record<string, string> = { none: '🚫', cape: '🦸', backpack: '🎒', wings: '🪽', jetpack: '🚀', shield: '🛡️', sword: '⚔️', quiver: '🏹', crab_shell: '🦀', tentacles: '🐙', rocket: '🚀', scroll: '📜', boombox: '📻' };
+                      const names: Record<string, string> = { none: 'NONE', cape: 'CAPE', backpack: 'PACK', wings: 'WINGS', jetpack: 'JETPACK', shield: 'SHIELD', sword: 'SWORD', quiver: 'QUIVER', crab_shell: 'SHELL', tentacles: 'TENTACLES', rocket: 'ROCKET', scroll: 'SCROLL', boombox: 'BOOMBOX' };
+                      return (
+                        <Pressable key={item} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, backItem: item })}
+                          style={[styles.itemCard, active && styles.itemCardActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          <Text style={styles.itemEmoji}>{emojis[item]}</Text>
+                          <Text style={[styles.itemLabel, active && styles.itemLabelActive]}>{names[item]}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+
+                  <Text style={styles.itemSectionTitle}>PET</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
                     {(['none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab', 'snake', 'bat', 'skull', 'mushroom', 'spider', 'shark', 'bones'] as const).map(pet => {
-                      const labels: Record<string, string> = { none: 'NONE', cat: '🐱 CAT', dog: '🐕 DOG', bird: '🐦 BIRD', robot: '🤖 ROBOT', dragon: '🐉 DRAGON', alien: '👽 ALIEN', crab: '🦀 CRAB', snake: '🐍 SNAKE', bat: '🦇 BAT', skull: '💀 SKULL', mushroom: '🍄 SHROOM', spider: '🕷️ SPIDER', shark: '🦈 SHARK', bones: '🦴 BONES' };
+                      const active = (currentAppearance.pet || 'none') === pet;
+                      const emojis: Record<string, string> = { none: '🚫', cat: '🐱', dog: '🐕', bird: '🐦', robot: '🤖', dragon: '🐉', alien: '👽', crab: '🦀', snake: '🐍', bat: '🦇', skull: '💀', mushroom: '🍄', spider: '🕷️', shark: '🦈', bones: '🦴' };
+                      const names: Record<string, string> = { none: 'NONE', cat: 'CAT', dog: 'DOG', bird: 'BIRD', robot: 'ROBOT', dragon: 'DRAGON', alien: 'ALIEN', crab: 'CRAB', snake: 'SNAKE', bat: 'BAT', skull: 'SKULL', mushroom: 'SHROOM', spider: 'SPIDER', shark: 'SHARK', bones: 'BONES' };
                       return (
-                        <Pressable key={pet} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, pet: pet })}
-                          style={[styles.optionBtn, (currentAppearance.pet || 'none') === pet && styles.optionBtnActive]}>
-                          <Text style={[styles.optionText, (currentAppearance.pet || 'none') === pet && styles.optionTextActive]}>
-                            {labels[pet]}
-                          </Text>
+                        <Pressable key={pet} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, pet })}
+                          style={[styles.itemCard, active && styles.itemCardActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          <Text style={styles.itemEmoji}>{emojis[pet]}</Text>
+                          <Text style={[styles.itemLabel, active && styles.itemLabelActive]}>{names[pet]}</Text>
                         </Pressable>
                       );
                     })}
-                  </View>
-                  <Text style={styles.sectionTitle}>AURA</Text>
-                  <View style={styles.optionRow}>
+                  </ScrollView>
+
+                  <Text style={styles.itemSectionTitle}>AURA</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
                     {(['none', 'fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow', 'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy'] as const).map(aura => {
-                      const labels: Record<string, string> = { none: 'NONE', fire: '🔥 FIRE', ice: '🧊 ICE', electric: '⚡ BOLT', nature: '🌿 LEAF', shadow: '🌑 SHADOW', rainbow: '🌈 RAINBOW', glitch: '📟 GLITCH', cosmic: '✨ COSMIC', toxic: '☢️ TOXIC', holy: '🕊️ HOLY', void: '🕳️ VOID', galaxy: '🌌 GALAXY' };
+                      const active = (currentAppearance.aura || 'none') === aura;
+                      const emojis: Record<string, string> = { none: '🚫', fire: '🔥', ice: '🧊', electric: '⚡', nature: '🌿', shadow: '🌑', rainbow: '🌈', glitch: '📟', cosmic: '✨', toxic: '☢️', holy: '🕊️', void: '🕳️', galaxy: '🌌' };
+                      const names: Record<string, string> = { none: 'NONE', fire: 'FIRE', ice: 'ICE', electric: 'BOLT', nature: 'LEAF', shadow: 'SHADOW', rainbow: 'RAINBOW', glitch: 'GLITCH', cosmic: 'COSMIC', toxic: 'TOXIC', holy: 'HOLY', void: 'VOID', galaxy: 'GALAXY' };
+                      const glowColors: Record<string, string> = { fire: '#ff6600', ice: '#00bfff', electric: '#ffff00', nature: '#22c55e', shadow: '#6b21a8', rainbow: '#ff69b4', cosmic: '#c084fc', toxic: '#22c55e', holy: '#ffd700', galaxy: '#818cf8' };
                       return (
-                        <Pressable key={aura} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, aura: aura })}
-                          style={[styles.optionBtn, (currentAppearance.aura || 'none') === aura && styles.optionBtnActive]}>
-                          <Text style={[styles.optionText, (currentAppearance.aura || 'none') === aura && styles.optionTextActive]}>
-                            {labels[aura]}
-                          </Text>
+                        <Pressable key={aura} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, aura })}
+                          style={[styles.itemCard, active && styles.itemCardActive, active && glowColors[aura] && { shadowColor: glowColors[aura], shadowOffset: { width: 0, height: 0 }, shadowRadius: 10, shadowOpacity: 0.8 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          <Text style={styles.itemEmoji}>{emojis[aura]}</Text>
+                          <Text style={[styles.itemLabel, active && styles.itemLabelActive]}>{names[aura]}</Text>
                         </Pressable>
                       );
                     })}
-                  </View>
-                  <Text style={styles.sectionTitle}>HAND ITEM</Text>
-                  <View style={styles.optionRow}>
+                  </ScrollView>
+
+                  <Text style={styles.itemSectionTitle}>HAND ITEM</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.itemScroll}>
                     {(['none', ...(isOwner ? ['lightsaber'] as const : []), 'coffee', 'laptop', 'flag', 'wand', 'crab_claws', 'sword_hand', 'pizza', 'microphone', 'torch'] as const).map(item => {
-                      const labels: Record<string, string> = { none: 'NONE', lightsaber: '⚡ SABER', coffee: '☕ COFFEE', laptop: '💻 LAPTOP', flag: '🚩 FLAG', wand: '🪄 WAND', crab_claws: '🦀 CLAWS', sword_hand: '⚔️ SWORD', pizza: '🍕 PIZZA', microphone: '🎤 MIC', torch: '🔥 TORCH' };
+                      const active = (currentAppearance.handItem || 'none') === item;
+                      const emojis: Record<string, string> = { none: '🚫', lightsaber: '⚔️', coffee: '☕', laptop: '💻', flag: '🚩', wand: '🪄', crab_claws: '🦞', sword_hand: '🗡️', pizza: '🍕', microphone: '🎤', torch: '🔦' };
+                      const names: Record<string, string> = { none: 'NONE', lightsaber: 'SABER', coffee: 'COFFEE', laptop: 'LAPTOP', flag: 'FLAG', wand: 'WAND', crab_claws: 'CLAWS', sword_hand: 'SWORD', pizza: 'PIZZA', microphone: 'MIC', torch: 'TORCH' };
                       return (
                         <Pressable key={item} onPress={() => onAppearanceChange(selectedAgentId, { ...currentAppearance, handItem: item })}
-                          style={[styles.optionBtn, (currentAppearance.handItem || 'none') === item && styles.optionBtnActive]}>
-                          <Text style={[styles.optionText, (currentAppearance.handItem || 'none') === item && styles.optionTextActive]}>
-                            {labels[item]}
-                          </Text>
+                          style={[styles.itemCard, active && styles.itemCardActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          <Text style={styles.itemEmoji}>{emojis[item]}</Text>
+                          <Text style={[styles.itemLabel, active && styles.itemLabelActive]}>{names[item]}</Text>
                         </Pressable>
                       );
                     })}
-                  </View>
+                  </ScrollView>
                 </>
               )}
 
-              {/* Agent Personality Editor (inspired by OpenClaw SOUL.md) */}
-              <Text style={[styles.sectionTitle, { marginTop: 16 }]}>AGENT PERSONALITY</Text>
+              {/* Agent Personality / SOUL.md Editor */}
+              <Text style={[styles.sectionTitle, { marginTop: 16 }]}>AGENT SOUL</Text>
               <Text style={styles.connectionHint}>
-                Define how your agents communicate. This personality is prepended to the system prompt for all LLM calls.
+                Pick a template or write your own. This personality is prepended to the system prompt for all LLM calls.
               </Text>
+
+              {/* Template browser toggle */}
+              <Pressable
+                onPress={() => setShowSoulTemplates(!showSoulTemplates)}
+                style={[styles.soulToggle, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              >
+                <Text style={styles.soulToggleText}>
+                  {showSoulTemplates ? '▼' : '▶'} SOUL TEMPLATES
+                </Text>
+                {(() => {
+                  const active = detectTemplate(personalityText);
+                  return active ? (
+                    <View style={[styles.soulActiveBadge, { borderColor: SOUL_CATEGORIES.find(c => c.key === active.category)?.color + '60' }]}>
+                      <Text style={styles.soulActiveBadgeText}>{active.emoji} {active.name}</Text>
+                    </View>
+                  ) : null;
+                })()}
+              </Pressable>
+
+              {showSoulTemplates && (
+                <View style={styles.soulTemplateSection}>
+                  {/* Category tabs */}
+                  <View style={styles.soulCategoryRow}>
+                    {SOUL_CATEGORIES.map(cat => (
+                      <Pressable
+                        key={cat.key}
+                        onPress={() => setSoulCategory(cat.key)}
+                        style={[
+                          styles.soulCategoryTab,
+                          soulCategory === cat.key && { borderColor: cat.color, backgroundColor: cat.color + '15' },
+                          Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                        ]}
+                      >
+                        <Text style={[
+                          styles.soulCategoryText,
+                          soulCategory === cat.key && { color: cat.color },
+                        ]}>
+                          {cat.icon} {cat.label}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+
+                  {/* Template grid */}
+                  <View style={styles.soulGrid}>
+                    {getTemplatesByCategory(soulCategory).map(tmpl => {
+                      const isActive = detectTemplate(personalityText)?.id === tmpl.id;
+                      const catColor = SOUL_CATEGORIES.find(c => c.key === tmpl.category)?.color || '#6366f1';
+                      return (
+                        <Pressable
+                          key={tmpl.id}
+                          onPress={() => setPersonalityText(tmpl.soulText)}
+                          style={[
+                            styles.soulCard,
+                            isActive && { borderColor: catColor, backgroundColor: catColor + '10' },
+                            Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                          ]}
+                        >
+                          <View style={styles.soulCardHeader}>
+                            <Text style={styles.soulCardEmoji}>{tmpl.emoji}</Text>
+                            <Text style={[styles.soulCardName, isActive && { color: '#eee' }]}>{tmpl.name}</Text>
+                            {isActive && <Text style={{ fontSize: 8, color: catColor }}>ACTIVE</Text>}
+                          </View>
+                          <Text style={styles.soulCardDesc} numberOfLines={2}>{tmpl.description}</Text>
+                          <View style={styles.soulTagRow}>
+                            {tmpl.tags.slice(0, 3).map(tag => (
+                              <View key={tag} style={styles.soulTag}>
+                                <Text style={styles.soulTagText}>{tag}</Text>
+                              </View>
+                            ))}
+                          </View>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </View>
+              )}
+
+              {/* Editable text area */}
               <TextInput
-                style={[styles.input, { minHeight: 100, textAlignVertical: 'top' }]}
+                style={[styles.input, { minHeight: 120, textAlignVertical: 'top', marginTop: 8 }]}
                 value={personalityText}
                 onChangeText={setPersonalityText}
-                placeholder="e.g. You are a focused, no-nonsense productivity coach. Keep responses concise and actionable. Use bullet points."
+                placeholder="Pick a template above or write your own SOUL.md..."
                 placeholderTextColor="#555"
                 multiline
-                numberOfLines={5}
+                numberOfLines={6}
               />
               <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 4 }}>
                 <Pressable
@@ -790,8 +940,16 @@ export default function CustomizePanel({
                   disabled={personalitySaving}
                   style={[styles.quickConnectBtn, { opacity: personalitySaving ? 0.4 : 1 }]}
                 >
-                  <Text style={styles.quickConnectText}>{personalitySaving ? 'SAVING...' : 'SAVE PERSONALITY'}</Text>
+                  <Text style={styles.quickConnectText}>{personalitySaving ? 'SAVING...' : 'SAVE SOUL'}</Text>
                 </Pressable>
+                {personalityText.trim() ? (
+                  <Pressable
+                    onPress={() => setPersonalityText('')}
+                    style={[styles.quickConnectBtn, { backgroundColor: '#ef444420', borderColor: '#ef444440' }]}
+                  >
+                    <Text style={[styles.quickConnectText, { color: '#ef4444' }]}>CLEAR</Text>
+                  </Pressable>
+                ) : null}
                 {personalityStatus ? (
                   <Text style={{ fontSize: 9, color: personalityStatus.startsWith('Error') ? '#ff5555' : '#22c55e', fontFamily: 'monospace' }}>
                     {personalityStatus}
@@ -1722,7 +1880,46 @@ const styles = StyleSheet.create({
     marginBottom: 4, backgroundColor: '#0a0a10', borderRadius: 8, borderWidth: 1, borderColor: '#1a1a2e',
   },
 
-  // Colors & options
+  // Item sections — scrollable single-row layout
+  itemSectionTitle: {
+    fontSize: 11, fontWeight: '900', color: '#888', fontFamily: 'monospace',
+    letterSpacing: 1.5, marginTop: 10, marginBottom: 4,
+  },
+  itemScroll: {
+    marginBottom: 2,
+  },
+  itemSwatch: {
+    width: 44, height: 44, borderRadius: 10, borderWidth: 2.5, borderColor: 'transparent',
+    marginRight: 8, alignItems: 'center', justifyContent: 'center',
+  },
+  itemSwatchActive: {
+    borderColor: '#fff', borderWidth: 2.5,
+    ...(Platform.OS === 'web' ? { boxShadow: '0 0 10px rgba(255,255,255,0.4)' } as any : {}),
+  },
+  itemSwatchCheck: {
+    fontSize: 16, color: '#fff', fontWeight: '900',
+    textShadowColor: '#000', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3,
+  },
+  itemCard: {
+    width: 72, height: 72, borderRadius: 12, borderWidth: 1.5,
+    borderColor: '#1a1a2e', backgroundColor: '#0a0a10',
+    alignItems: 'center', justifyContent: 'center', marginRight: 8, gap: 2,
+  },
+  itemCardActive: {
+    borderColor: '#6366f1', backgroundColor: '#6366f120',
+    ...(Platform.OS === 'web' ? { boxShadow: '0 0 12px rgba(99,102,241,0.3)' } as any : {}),
+  },
+  itemEmoji: {
+    fontSize: 24,
+  },
+  itemLabel: {
+    fontSize: 8, color: '#666', fontFamily: 'monospace', fontWeight: '700',
+    letterSpacing: 0.5, textAlign: 'center',
+  },
+  itemLabelActive: {
+    color: '#ddd',
+  },
+  // Legacy — kept for compatibility with non-appearance option rows
   colorRow: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
   colorSwatch: {
     width: 36, height: 36, borderRadius: 8, borderWidth: 2, borderColor: 'transparent',
@@ -2027,5 +2224,64 @@ const styles = StyleSheet.create({
   resetBtnText: {
     fontSize: 11, color: '#ef4444', fontFamily: 'monospace',
     fontWeight: '800', letterSpacing: 1,
+  },
+
+  // Soul templates
+  soulToggle: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingVertical: 6, marginTop: 4,
+  },
+  soulToggleText: {
+    fontSize: 10, fontWeight: '800', color: '#888', fontFamily: 'monospace', letterSpacing: 1,
+  },
+  soulActiveBadge: {
+    paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8,
+    borderWidth: 1, borderColor: '#6366f140', backgroundColor: '#6366f110',
+  },
+  soulActiveBadgeText: {
+    fontSize: 8, color: '#aaa', fontFamily: 'monospace', fontWeight: '700',
+  },
+  soulTemplateSection: {
+    gap: 8, marginTop: 4,
+  },
+  soulCategoryRow: {
+    flexDirection: 'row', gap: 6,
+  },
+  soulCategoryTab: {
+    flex: 1, paddingVertical: 8, paddingHorizontal: 8, borderRadius: 8,
+    borderWidth: 1, borderColor: '#1a1a2e', backgroundColor: '#0a0a10',
+    alignItems: 'center',
+  },
+  soulCategoryText: {
+    fontSize: 9, color: '#666', fontFamily: 'monospace', fontWeight: '700',
+  },
+  soulGrid: {
+    gap: 6,
+  },
+  soulCard: {
+    backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a2e',
+    borderRadius: 8, padding: 10, gap: 4,
+  },
+  soulCardHeader: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+  },
+  soulCardEmoji: {
+    fontSize: 14,
+  },
+  soulCardName: {
+    fontSize: 11, fontWeight: '800', color: '#aaa', fontFamily: 'monospace', flex: 1,
+  },
+  soulCardDesc: {
+    fontSize: 9, color: '#666', fontFamily: 'monospace', lineHeight: 13,
+  },
+  soulTagRow: {
+    flexDirection: 'row', gap: 4, marginTop: 2,
+  },
+  soulTag: {
+    paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4,
+    backgroundColor: '#ffffff08',
+  },
+  soulTagText: {
+    fontSize: 7, color: '#555', fontFamily: 'monospace', fontWeight: '600',
   },
 });

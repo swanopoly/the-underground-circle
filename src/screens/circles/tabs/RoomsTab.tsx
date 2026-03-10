@@ -554,7 +554,7 @@ export default function RoomsTab({ circleId, accentColor }: Props) {
           { text:'Delete', style:'destructive', onPress:()=>r(true) },
         ]));
     if (!ok) return;
-    await supabase.from('circle_rooms').update({ is_active:false }).eq('id', roomId);
+    await supabase.from('circle_rooms').delete().eq('id', roomId);
     setRooms(p => p.filter(r => r.id !== roomId));
     if (selectedRoom?.id === roomId) setSelectedRoom(null);
   }, [selectedRoom]);
@@ -1017,7 +1017,7 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
         ]));
     if (!ok) return;
     if (file.id !== 'legacy') {
-      await supabase.from('room_files').update({ is_deleted:true }).eq('id', file.id);
+      await supabase.from('room_files').delete().eq('id', file.id);
     }
     setFiles(p => p.filter(f => f.id !== file.id));
     closeTab(file.id);
