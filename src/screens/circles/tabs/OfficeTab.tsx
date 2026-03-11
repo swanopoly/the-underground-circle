@@ -67,6 +67,8 @@ import {
 } from '../../../lib/circleOffice';
 import {
   evaluatePokerHand, blackswanDecide, blackswanRaise, getBlackswanLine,
+  CHESS_INITIAL_BOARD, getChessLegalMoves, applyChessMove, isCheckmate, isStalemate, isInCheck,
+  checkConnectFourWin, isConnectFourFull, connectFourAI,
 } from '../../../lib/circleGames';
 import {
   startHeartbeat,
@@ -2193,63 +2195,172 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       }
 
       case 'chess_board': {
-        const turns = ['white', 'black'];
-        const curIdx = turns.indexOf(item.chessTurn || 'white');
-        updateFurnitureField({ chessTurn: turns[(curIdx + 1) % turns.length] });
+        const board = item.chessBoard || CHESS_INITIAL_BOARD;
+        const turn = (item.chessTurn || 'white') as 'white' | 'black';
+
+        // If game is over, tap resets
+        if (item.chessGameOver) {
+          updateFurnitureField({
+            chessBoard: CHESS_INITIAL_BOARD,
+            chessTurn: 'white',
+            chessGameOver: false,
+            chessSelected: undefined,
+            chessCursor: undefined,
+            chessLastFrom: undefined,
+            chessLastTo: undefined,
+            chessMoveCount: 0,
+          });
+          break;
+        }
+
+        const legalMoves = getChessLegalMoves(board, turn);
+
+        // No legal moves = checkmate or stalemate
+        if (legalMoves.length === 0) {
+          updateFurnitureField({ chessGameOver: true });
+          break;
+        }
+
+        const cursor = item.chessCursor ?? -1;
+        const nextCursor = cursor + 1;
+
+        if (nextCursor >= legalMoves.length) {
+          // Wrap — execute the last highlighted move
+          const [from, to] = legalMoves[Math.max(0, cursor)];
+          const newBoard = applyChessMove(board, from, to);
+          const nextTurn = turn === 'white' ? 'black' : 'white';
+          const gameOver = isCheckmate(newBoard, nextTurn) || isStalemate(newBoard, nextTurn);
+
+          updateFurnitureField({
+            chessBoard: newBoard,
+            chessTurn: nextTurn,
+            chessGameOver: gameOver,
+            chessSelected: undefined,
+            chessCursor: undefined,
+            chessLastFrom: from,
+            chessLastTo: to,
+            chessMoveCount: (item.chessMoveCount || 0) + 1,
+          });
+
+          // Auto-play black after a short delay (AI opponent)
+          if (!gameOver && nextTurn === 'black') {
+            setTimeout(() => {
+              const aiMoves = getChessLegalMoves(newBoard, 'black');
+              if (aiMoves.length === 0) {
+                updateFurnitureField({ chessGameOver: true });
+                return;
+              }
+              // Simple AI: pick a random legal move (prefer captures)
+              const captures = aiMoves.filter(([, t]) => newBoard[t] !== '.');
+              const picked = captures.length > 0
+                ? captures[Math.floor(Math.random() * captures.length)]
+                : aiMoves[Math.floor(Math.random() * aiMoves.length)];
+              const aiBoard = applyChessMove(newBoard, picked[0], picked[1]);
+              const aiGameOver = isCheckmate(aiBoard, 'white') || isStalemate(aiBoard, 'white');
+              updateFurnitureField({
+                chessBoard: aiBoard,
+                chessTurn: 'white',
+                chessGameOver: aiGameOver,
+                chessSelected: undefined,
+                chessCursor: undefined,
+                chessLastFrom: picked[0],
+                chessLastTo: picked[1],
+                chessMoveCount: (item.chessMoveCount || 0) + 2,
+              });
+            }, 600);
+          }
+          if (gameOver) addFloorEffect('fireworks');
+        } else {
+          // Show next legal move
+          const [from, to] = legalMoves[nextCursor];
+          updateFurnitureField({
+            chessSelected: from,
+            chessCursor: nextCursor,
+            chessLastFrom: undefined,
+            chessLastTo: to,
+          });
+        }
         break;
       }
 
       case 'connect_four': {
         if (item.connectFourWinner) {
-          updateFurnitureField({ connectFourBoard: '', connectFourTurn: 1, connectFourWinner: 0, connectFourBlackswan: !item.connectFourBlackswan });
+          updateFurnitureField({ connectFourBoard: '', connectFourTurn: 1, connectFourWinner: 0, connectFourCol: undefined, connectFourBlackswan: !item.connectFourBlackswan });
           break;
         }
-        const board = item.connectFourBoard || '000000000000000000000000000000000000000000';
-        const turn = item.connectFourTurn || 1;
-        const cols = [0, 1, 2, 3, 4, 5, 6].filter(c => {
-          // Check top of each column
-          return board[c] === '0';
-        });
-        if (cols.length === 0) {
-          updateFurnitureField({ connectFourWinner: turn });
+        const c4board = item.connectFourBoard || '000000000000000000000000000000000000000000';
+        const c4turn = item.connectFourTurn || 1;
+        const c4availCols = [0, 1, 2, 3, 4, 5, 6].filter(c => c4board[c] === '0');
+        if (c4availCols.length === 0) {
+          updateFurnitureField({ connectFourWinner: 3 }); // draw
           break;
         }
-        const col = cols[Math.floor(Math.random() * cols.length)];
-        let targetRow = -1;
-        for (let r = 5; r >= 0; r--) {
-          if (board[r * 7 + col] === '0') { targetRow = r; break; }
-        }
-        if (targetRow >= 0) {
-          const idx = targetRow * 7 + col;
-          const newBoard = board.substring(0, idx) + String(turn) + board.substring(idx + 1);
-          const nextTurn = turn === 1 ? 2 : 1;
-          updateFurnitureField({ connectFourBoard: newBoard, connectFourTurn: nextTurn });
 
-          // If BlackSwan enabled and it's now AI's turn, auto-play after delay
-          if (item.connectFourBlackswan && nextTurn === 2) {
-            setTimeout(() => {
-              const bCols = [0, 1, 2, 3, 4, 5, 6].filter(c => newBoard[c] === '0');
-              if (bCols.length === 0) return;
-              // BlackSwan picks center-biased column
-              const weights = bCols.map(c => 7 - Math.abs(c - 3));
-              const total = weights.reduce((a, b) => a + b, 0);
-              let r = Math.random() * total;
-              let bCol = bCols[0];
-              for (let i = 0; i < bCols.length; i++) {
-                r -= weights[i];
-                if (r <= 0) { bCol = bCols[i]; break; }
-              }
-              let bRow = -1;
-              for (let rr = 5; rr >= 0; rr--) {
-                if (newBoard[rr * 7 + bCol] === '0') { bRow = rr; break; }
-              }
-              if (bRow >= 0) {
-                const bIdx = bRow * 7 + bCol;
-                const bBoard = newBoard.substring(0, bIdx) + '2' + newBoard.substring(bIdx + 1);
-                updateFurnitureField({ connectFourBoard: bBoard, connectFourTurn: 1 });
-              }
-            }, 800);
+        const c4curCol = item.connectFourCol;
+        if (c4curCol === undefined || c4curCol === null) {
+          // First tap: highlight first available column
+          updateFurnitureField({ connectFourCol: c4availCols[0] });
+          break;
+        }
+
+        // Find next available column after current
+        const c4colIdx = c4availCols.indexOf(c4curCol);
+        const c4nextColIdx = c4colIdx + 1;
+
+        if (c4nextColIdx >= c4availCols.length) {
+          // Wrap — drop in current column
+          const dropCol = c4curCol;
+          let c4targetRow = -1;
+          for (let r = 5; r >= 0; r--) {
+            if (c4board[r * 7 + dropCol] === '0') { c4targetRow = r; break; }
           }
+          if (c4targetRow < 0) break;
+
+          const c4idx = c4targetRow * 7 + dropCol;
+          const c4newBoard = c4board.substring(0, c4idx) + String(c4turn) + c4board.substring(c4idx + 1);
+
+          // Check for win
+          if (checkConnectFourWin(c4newBoard, c4targetRow, dropCol, c4turn)) {
+            updateFurnitureField({ connectFourBoard: c4newBoard, connectFourWinner: c4turn, connectFourCol: undefined });
+            addFloorEffect('fireworks');
+            break;
+          }
+          // Check for draw
+          if (isConnectFourFull(c4newBoard)) {
+            updateFurnitureField({ connectFourBoard: c4newBoard, connectFourWinner: 3, connectFourCol: undefined });
+            break;
+          }
+
+          const c4nextTurn = c4turn === 1 ? 2 : 1;
+          updateFurnitureField({ connectFourBoard: c4newBoard, connectFourTurn: c4nextTurn, connectFourCol: undefined });
+
+          // BlackSwan AI plays after delay
+          if (item.connectFourBlackswan && c4nextTurn === 2) {
+            setTimeout(() => {
+              const aiCol = connectFourAI(c4newBoard, 2);
+              if (aiCol < 0) return;
+              let aiRow = -1;
+              for (let rr = 5; rr >= 0; rr--) {
+                if (c4newBoard[rr * 7 + aiCol] === '0') { aiRow = rr; break; }
+              }
+              if (aiRow < 0) return;
+              const aiIdx = aiRow * 7 + aiCol;
+              const aiBoard = c4newBoard.substring(0, aiIdx) + '2' + c4newBoard.substring(aiIdx + 1);
+              if (checkConnectFourWin(aiBoard, aiRow, aiCol, 2)) {
+                updateFurnitureField({ connectFourBoard: aiBoard, connectFourWinner: 2, connectFourCol: undefined });
+                addFloorEffect('fireworks');
+                return;
+              }
+              if (isConnectFourFull(aiBoard)) {
+                updateFurnitureField({ connectFourBoard: aiBoard, connectFourWinner: 3, connectFourCol: undefined });
+                return;
+              }
+              updateFurnitureField({ connectFourBoard: aiBoard, connectFourTurn: 1, connectFourCol: undefined });
+            }, 600);
+          }
+        } else {
+          // Cycle to next available column
+          updateFurnitureField({ connectFourCol: c4availCols[c4nextColIdx] });
         }
         break;
       }

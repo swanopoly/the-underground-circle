@@ -281,3 +281,246 @@ export function roulettePayout(bet: RouletteBet): number {
   if (bet === 'green') return 35;
   return 2; // red/black/odd/even/high/low all pay 2x
 }
+
+// ── Chess Engine ────────────────────────────────────────────────────────────
+
+// Board is a 64-char string. Index 0 = a8, index 7 = h8, index 56 = a1, index 63 = h1.
+// Uppercase = white, lowercase = black, '.' = empty
+// R N B Q K B N R  (black back rank, indices 0-7)
+// P P P P P P P P  (black pawns, indices 8-15)
+// . . . . . . . .  (empty, indices 16-23)
+// ...
+// p p p p p p p p  (white pawns, indices 48-55)
+// r n b q k b n r  (white back rank, indices 56-63)
+
+export const CHESS_INITIAL_BOARD =
+  'rnbqkbnr' +
+  'pppppppp' +
+  '........' +
+  '........' +
+  '........' +
+  '........' +
+  'PPPPPPPP' +
+  'RNBQKBNR';
+
+export const PIECE_TO_UNICODE: Record<string, string> = {
+  'K': '♔', 'Q': '♕', 'R': '♖', 'B': '♗', 'N': '♘', 'P': '♙',
+  'k': '♚', 'q': '♛', 'r': '♜', 'b': '♝', 'n': '♞', 'p': '♟',
+};
+
+export function isWhitePiece(ch: string): boolean { return ch >= 'A' && ch <= 'Z'; }
+export function isBlackPiece(ch: string): boolean { return ch >= 'a' && ch <= 'z'; }
+
+function idxToRowCol(idx: number): [number, number] { return [Math.floor(idx / 8), idx % 8]; }
+function rowColToIdx(r: number, c: number): number { return r * 8 + c; }
+function inBounds(r: number, c: number): boolean { return r >= 0 && r < 8 && c >= 0 && c < 8; }
+
+function isOwnPiece(ch: string, white: boolean): boolean {
+  return white ? isWhitePiece(ch) : isBlackPiece(ch);
+}
+function isEnemyPiece(ch: string, white: boolean): boolean {
+  return white ? isBlackPiece(ch) : isWhitePiece(ch);
+}
+
+export function applyChessMove(board: string, from: number, to: number): string {
+  const arr = board.split('');
+  const piece = arr[from];
+  arr[to] = piece;
+  arr[from] = '.';
+  // Auto-promote pawns
+  if (piece === 'P' && to < 8) arr[to] = 'Q';
+  if (piece === 'p' && to >= 56) arr[to] = 'q';
+  return arr.join('');
+}
+
+function findKing(board: string, white: boolean): number {
+  const king = white ? 'K' : 'k';
+  return board.indexOf(king);
+}
+
+/** Generate pseudo-legal moves for a piece (ignoring check) */
+function pseudoMoves(board: string, idx: number): number[] {
+  const piece = board[idx];
+  if (piece === '.') return [];
+  const white = isWhitePiece(piece);
+  const [r, c] = idxToRowCol(idx);
+  const moves: number[] = [];
+  const type = piece.toUpperCase();
+
+  const addIfValid = (tr: number, tc: number) => {
+    if (!inBounds(tr, tc)) return false;
+    const target = board[rowColToIdx(tr, tc)];
+    if (isOwnPiece(target, white)) return false;
+    moves.push(rowColToIdx(tr, tc));
+    return target === '.'; // continue sliding if empty
+  };
+
+  const slide = (dr: number, dc: number) => {
+    for (let i = 1; i < 8; i++) {
+      if (!addIfValid(r + dr * i, c + dc * i)) break;
+    }
+  };
+
+  switch (type) {
+    case 'P': {
+      const dir = white ? -1 : 1;
+      const startRow = white ? 6 : 1;
+      // Forward
+      const fwd = rowColToIdx(r + dir, c);
+      if (inBounds(r + dir, c) && board[fwd] === '.') {
+        moves.push(fwd);
+        // Double push from start
+        if (r === startRow) {
+          const dbl = rowColToIdx(r + dir * 2, c);
+          if (board[dbl] === '.') moves.push(dbl);
+        }
+      }
+      // Captures
+      for (const dc of [-1, 1]) {
+        if (inBounds(r + dir, c + dc)) {
+          const capIdx = rowColToIdx(r + dir, c + dc);
+          if (isEnemyPiece(board[capIdx], white)) moves.push(capIdx);
+        }
+      }
+      break;
+    }
+    case 'N':
+      for (const [dr, dc] of [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]]) {
+        addIfValid(r + dr, c + dc);
+      }
+      break;
+    case 'B':
+      slide(1, 1); slide(1, -1); slide(-1, 1); slide(-1, -1);
+      break;
+    case 'R':
+      slide(1, 0); slide(-1, 0); slide(0, 1); slide(0, -1);
+      break;
+    case 'Q':
+      slide(1, 0); slide(-1, 0); slide(0, 1); slide(0, -1);
+      slide(1, 1); slide(1, -1); slide(-1, 1); slide(-1, -1);
+      break;
+    case 'K':
+      for (const [dr, dc] of [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]]) {
+        addIfValid(r + dr, c + dc);
+      }
+      break;
+  }
+  return moves;
+}
+
+/** Check if a side's king is attacked */
+export function isInCheck(board: string, white: boolean): boolean {
+  const kingIdx = findKing(board, white);
+  if (kingIdx < 0) return true;
+  // Check if any enemy piece can capture the king
+  for (let i = 0; i < 64; i++) {
+    const ch = board[i];
+    if (ch === '.' || isOwnPiece(ch, white)) continue;
+    if (pseudoMoves(board, i).includes(kingIdx)) return true;
+  }
+  return false;
+}
+
+/** Get all legal moves for a side (filtered for check) */
+export function getChessLegalMoves(board: string, turn: 'white' | 'black'): Array<[number, number]> {
+  const white = turn === 'white';
+  const moves: Array<[number, number]> = [];
+  for (let i = 0; i < 64; i++) {
+    const ch = board[i];
+    if (ch === '.' || !isOwnPiece(ch, white)) continue;
+    for (const to of pseudoMoves(board, i)) {
+      const newBoard = applyChessMove(board, i, to);
+      if (!isInCheck(newBoard, white)) {
+        moves.push([i, to]);
+      }
+    }
+  }
+  return moves;
+}
+
+export function isCheckmate(board: string, turn: 'white' | 'black'): boolean {
+  const white = turn === 'white';
+  return getChessLegalMoves(board, turn).length === 0 && isInCheck(board, white);
+}
+
+export function isStalemate(board: string, turn: 'white' | 'black'): boolean {
+  const white = turn === 'white';
+  return getChessLegalMoves(board, turn).length === 0 && !isInCheck(board, white);
+}
+
+// ── Connect Four Win Detection ──────────────────────────────────────────────
+
+/** Check if placing piece at (row, col) wins. Board is 42-char string (6 rows x 7 cols). */
+export function checkConnectFourWin(boardStr: string, row: number, col: number, player: number): boolean {
+  const get = (r: number, c: number): number => {
+    if (r < 0 || r >= 6 || c < 0 || c >= 7) return -1;
+    return parseInt(boardStr[r * 7 + c]) || 0;
+  };
+
+  const directions = [[0, 1], [1, 0], [1, 1], [1, -1]]; // horiz, vert, diag-down-right, diag-down-left
+  for (const [dr, dc] of directions) {
+    let count = 1;
+    // Count in positive direction
+    for (let i = 1; i < 4; i++) {
+      if (get(row + dr * i, col + dc * i) === player) count++;
+      else break;
+    }
+    // Count in negative direction
+    for (let i = 1; i < 4; i++) {
+      if (get(row - dr * i, col - dc * i) === player) count++;
+      else break;
+    }
+    if (count >= 4) return true;
+  }
+  return false;
+}
+
+/** Check if the connect four board is completely full */
+export function isConnectFourFull(boardStr: string): boolean {
+  for (let c = 0; c < 7; c++) {
+    if (boardStr[c] === '0') return false;
+  }
+  return true;
+}
+
+/** Simple AI for Connect Four — prefers center, blocks wins, takes wins */
+export function connectFourAI(boardStr: string, aiPlayer: number): number {
+  const opponent = aiPlayer === 1 ? 2 : 1;
+  const availCols: number[] = [];
+  for (let c = 0; c < 7; c++) {
+    if (boardStr[c] === '0') availCols.push(c);
+  }
+  if (availCols.length === 0) return -1;
+
+  const dropRow = (b: string, col: number): number => {
+    for (let r = 5; r >= 0; r--) {
+      if (b[r * 7 + col] === '0') return r;
+    }
+    return -1;
+  };
+
+  // 1. Take the win
+  for (const c of availCols) {
+    const r = dropRow(boardStr, c);
+    if (r >= 0) {
+      const idx = r * 7 + c;
+      const test = boardStr.substring(0, idx) + String(aiPlayer) + boardStr.substring(idx + 1);
+      if (checkConnectFourWin(test, r, c, aiPlayer)) return c;
+    }
+  }
+  // 2. Block opponent win
+  for (const c of availCols) {
+    const r = dropRow(boardStr, c);
+    if (r >= 0) {
+      const idx = r * 7 + c;
+      const test = boardStr.substring(0, idx) + String(opponent) + boardStr.substring(idx + 1);
+      if (checkConnectFourWin(test, r, c, opponent)) return c;
+    }
+  }
+  // 3. Prefer center columns
+  const centerPref = [3, 2, 4, 1, 5, 0, 6];
+  for (const c of centerPref) {
+    if (availCols.includes(c)) return c;
+  }
+  return availCols[0];
+}

@@ -596,6 +596,12 @@ export interface FurnitureItem {
   chessPosition?: string;           // chess_board: FEN-like display state
   chessTurn?: string;               // chess_board: white/black
   chessGameOver?: boolean;          // chess_board: game ended
+  chessBoard?: string;              // chess_board: 64-char board state
+  chessSelected?: number;           // chess_board: selected piece index 0-63
+  chessCursor?: number;             // chess_board: cursor into legal moves array
+  chessLastFrom?: number;           // chess_board: last move source
+  chessLastTo?: number;             // chess_board: last move dest
+  chessMoveCount?: number;          // chess_board: total half-moves
   coinFlipResult?: string;          // coin_flip: heads/tails
   coinFlipStreak?: number;          // coin_flip: win streak
   coinFlipSolBet?: number;          // coin_flip: legacy SOL wager
@@ -606,8 +612,9 @@ export interface FurnitureItem {
   coinFlipLosses?: number;          // coin_flip: total losses
   connectFourBoard?: string;        // connect_four: board state string
   connectFourTurn?: number;         // connect_four: 1=red, 2=yellow
-  connectFourWinner?: number;       // connect_four: 0/1/2
+  connectFourWinner?: number;       // connect_four: 0/1/2 (3=draw)
   connectFourBlackswan?: boolean;   // connect_four: BlackSwan as opponent
+  connectFourCol?: number;          // connect_four: column cursor 0-6
   triviaQuestion?: string;          // trivia_screen: current question
   triviaAnswer?: number;            // trivia_screen: selected answer index
   triviaScore?: number;             // trivia_screen: streak score

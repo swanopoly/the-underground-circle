@@ -2293,42 +2293,42 @@ export function FigmaBoardItem({ item, theme }: ItemProps) {
 
 // ── Poker Table (Enhanced) ──────────────────────────────────────────────────
 export function PokerTableItem({ item, theme }: ItemProps) {
-  const chipGlow = useRef(new Animated.Value(0)).current;
   const potPulse = useRef(new Animated.Value(0)).current;
   const bsGlow = useRef(new Animated.Value(0)).current;
   const dealerSpin = useRef(new Animated.Value(0)).current;
+  const winFlash = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    const cg = animLoop(() => {
-      chipGlow.setValue(0);
-      return Animated.sequence([
-        Animated.timing(chipGlow, { toValue: 1, duration: 2000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
-        Animated.timing(chipGlow, { toValue: 0, duration: 2000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
-      ]);
-    });
-    cg.start();
     const pp = animLoop(() => {
-      potPulse.setValue(0.8);
+      potPulse.setValue(0.85);
       return Animated.sequence([
-        Animated.timing(potPulse, { toValue: 1, duration: 1500, useNativeDriver: false }),
-        Animated.timing(potPulse, { toValue: 0.8, duration: 1500, useNativeDriver: false }),
+        Animated.timing(potPulse, { toValue: 1, duration: 1800, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+        Animated.timing(potPulse, { toValue: 0.85, duration: 1800, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
       ]);
     });
     pp.start();
     const bg = animLoop(() => {
-      bsGlow.setValue(0.4);
+      bsGlow.setValue(0.5);
       return Animated.sequence([
-        Animated.timing(bsGlow, { toValue: 1, duration: 1200, useNativeDriver: false }),
-        Animated.timing(bsGlow, { toValue: 0.4, duration: 1200, useNativeDriver: false }),
+        Animated.timing(bsGlow, { toValue: 1, duration: 1000, useNativeDriver: false }),
+        Animated.timing(bsGlow, { toValue: 0.5, duration: 1000, useNativeDriver: false }),
       ]);
     });
     bg.start();
     const ds = animLoop(() => {
       dealerSpin.setValue(0);
-      return Animated.timing(dealerSpin, { toValue: 1, duration: 6000, easing: Easing.linear, useNativeDriver: false });
+      return Animated.timing(dealerSpin, { toValue: 1, duration: 8000, easing: Easing.linear, useNativeDriver: false });
     });
     ds.start();
-    return () => { cg.stop(); pp.stop(); bg.stop(); ds.stop(); };
+    const wf = animLoop(() => {
+      winFlash.setValue(0);
+      return Animated.sequence([
+        Animated.timing(winFlash, { toValue: 1, duration: 800, useNativeDriver: false }),
+        Animated.timing(winFlash, { toValue: 0, duration: 800, useNativeDriver: false }),
+      ]);
+    });
+    wf.start();
+    return () => { pp.stop(); bg.stop(); ds.stop(); wf.stop(); };
   }, []);
 
   const chips = item.pokerChips ?? 2000;
@@ -2355,170 +2355,201 @@ export function PokerTableItem({ item, theme }: ItemProps) {
   const cryptoSymbols: Record<string, string> = { SOL: '◎', ETH: 'Ξ', BTC: '₿', USDC: '$', MATIC: '⬡' };
   const cColor = cryptoColors[cryptoType] || '#14F195';
   const cSymbol = cryptoSymbols[cryptoType] || '◎';
-  const feltGlow = chipGlow.interpolate({ inputRange: [0, 1], outputRange: ['#0d5a0d00', '#0d5a0d30'] });
   const dealerRotate = dealerSpin.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
-
-  const phaseLabel: Record<string, string> = {
-    waiting: 'TAP TO DEAL', deal: 'PRE-FLOP', flop: 'FLOP',
-    turn: 'TURN', river: 'RIVER', showdown: winnerName ? `${winnerName} WINS!` : 'SHOWDOWN',
-  };
 
   const communityCards = community ? community.split(' ') : [];
   const isShowdown = phase === 'showdown';
+  const isWaiting = phase === 'waiting';
+  const playerWon = isShowdown && winnerName === 'YOU';
   const bsCards = isShowdown && !bsFolded && item.pokerBlackswanHand ? item.pokerBlackswanHand.split(' ') : [];
 
-  // Card renderer helper
-  const renderCard = (card: string, w: number, h: number) => {
-    const isRed = card.includes('♥') || card.includes('♦');
+  const phaseLabel: Record<string, string> = {
+    waiting: 'TAP TO DEAL', deal: 'PRE-FLOP', flop: 'FLOP',
+    turn: 'TURN', river: 'RIVER', showdown: winnerName ? `${winnerName} WINS` : 'SHOWDOWN',
+  };
+
+  // Modern card renderer
+  const renderCard = (card: string, w: number, h: number, faceDown?: boolean) => {
+    if (faceDown) {
+      return (
+        <View style={{ width: w, height: h, backgroundColor: '#1a1a2e', borderRadius: 2, borderWidth: 0.5, borderColor: '#8b5cf6', overflow: 'hidden' }}>
+          {/* Crosshatch pattern */}
+          <View style={{ position: 'absolute', top: 1, left: 1, right: 1, bottom: 1, backgroundColor: '#16213e', borderRadius: 1 }}>
+            <View style={{ position: 'absolute', top: '20%' as any, left: '20%' as any, right: '20%' as any, bottom: '20%' as any, borderWidth: 0.5, borderColor: '#8b5cf640', borderRadius: 1 }} />
+          </View>
+        </View>
+      );
+    }
+    const isRed = card.includes('\u2665') || card.includes('\u2666');
     return (
-      <View style={{ width: w, height: h, backgroundColor: '#fff', borderRadius: 1.5, borderWidth: 0.5, borderColor: '#bbb', alignItems: 'center', justifyContent: 'center', ...({ boxShadow: '0 1px 2px #0004' } as any) }}>
-        <Text style={{ fontSize: w * 0.4, fontWeight: '800', color: isRed ? '#dc2626' : '#111', fontFamily: 'monospace' }}>{card}</Text>
+      <View style={{ width: w, height: h, backgroundColor: '#f8f9fa', borderRadius: 2, borderWidth: 0.5, borderColor: '#dee2e6', alignItems: 'center', justifyContent: 'center', ...({ boxShadow: '0 1px 3px #00000030' } as any) }}>
+        <Text style={{ fontSize: w * 0.38, fontWeight: '900', color: isRed ? '#e63946' : '#1d3557', fontFamily: 'monospace', letterSpacing: -0.5 }}>{card}</Text>
       </View>
     );
   };
 
+  // Chip stack renderer
+  const renderChipStack = (count: number, colors: string[]) => (
+    <View style={{ alignItems: 'center' }}>
+      {colors.map((color, i) => (
+        <View key={i} style={{ width: 8, height: 3, borderRadius: 4, backgroundColor: color, borderWidth: 0.5, borderColor: '#ffffff40', marginTop: i > 0 ? -1.5 : 0 }} />
+      ))}
+    </View>
+  );
+
   return (
-    <View style={{ width: 130, height: 100, backgroundColor: '#1a0a00', borderWidth: 2, borderColor: '#8B4513', borderRadius: 20, overflow: 'hidden' }}>
-      {/* Felt surface */}
-      <Animated.View style={{ position: 'absolute', top: 4, left: 4, right: 4, bottom: 4, backgroundColor: '#0d5a0d', borderRadius: 16, borderWidth: 2, borderColor: '#1a7a1a' }}>
-        <Animated.View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: feltGlow, borderRadius: 14 }} />
+    <View style={{ width: 130, height: 100, backgroundColor: '#0a0a0f', borderWidth: 2, borderColor: '#2d1b4e', borderRadius: 20, overflow: 'hidden' }}>
+      {/* Felt surface — dark premium green */}
+      <View style={{ position: 'absolute', top: 4, left: 4, right: 4, bottom: 4, backgroundColor: '#0d3320', borderRadius: 16, borderWidth: 1.5, borderColor: '#1a5c3a' }}>
+        {/* Inner glow gradient */}
+        <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 14, backgroundColor: '#0d332010' }} />
+        {/* Subtle center spotlight */}
+        <View style={{ position: 'absolute', top: '25%' as any, left: '25%' as any, right: '25%' as any, bottom: '25%' as any, borderRadius: 30, backgroundColor: '#1a5c3a15' }} />
+      </View>
+
+      {/* Table rail — premium gold accent */}
+      <View style={{ position: 'absolute', top: 2, left: '12%' as any, right: '12%' as any, height: 1.5, backgroundColor: '#d4a03460', borderRadius: 1 }} />
+      <View style={{ position: 'absolute', bottom: 2, left: '12%' as any, right: '12%' as any, height: 1.5, backgroundColor: '#d4a03460', borderRadius: 1 }} />
+      <View style={{ position: 'absolute', top: '12%' as any, left: 2, width: 1.5, bottom: '12%' as any, backgroundColor: '#d4a03430', borderRadius: 1 }} />
+      <View style={{ position: 'absolute', top: '12%' as any, right: 2, width: 1.5, bottom: '12%' as any, backgroundColor: '#d4a03430', borderRadius: 1 }} />
+
+      {/* Dealer button — sleek */}
+      <Animated.View style={{ position: 'absolute', top: dealer === 'blackswan' ? 18 : 70, left: dealer === 'blackswan' ? 28 : 58, width: 9, height: 9, borderRadius: 5, backgroundColor: '#fbbf24', borderWidth: 1, borderColor: '#f59e0b', alignItems: 'center', justifyContent: 'center', zIndex: 5, transform: [{ rotate: dealerRotate }], ...({ boxShadow: '0 0 4px #fbbf2480' } as any) }}>
+        <Text style={{ color: '#78350f', fontSize: 4, fontWeight: '900' }}>D</Text>
       </Animated.View>
 
-      {/* Table edge accents */}
-      <View style={{ position: 'absolute', top: 2, left: '15%' as any, right: '15%' as any, height: 2, backgroundColor: '#CD853F', borderRadius: 1 }} />
-      <View style={{ position: 'absolute', bottom: 2, left: '15%' as any, right: '15%' as any, height: 2, backgroundColor: '#CD853F', borderRadius: 1 }} />
-
-      {/* Dealer button */}
-      <Animated.View style={{ position: 'absolute', top: dealer === 'blackswan' ? 16 : 72, left: dealer === 'blackswan' ? 26 : 56, width: 10, height: 10, borderRadius: 5, backgroundColor: '#FFD700', borderWidth: 1, borderColor: '#B8860B', alignItems: 'center', justifyContent: 'center', zIndex: 5, transform: [{ rotate: dealerRotate }] }}>
-        <Text style={{ color: '#8B4513', fontSize: 4, fontWeight: '900' }}>D</Text>
-      </Animated.View>
-
-      {/* Phase label + blinds */}
-      <View style={{ position: 'absolute', top: 4, left: 0, right: 0, alignItems: 'center', zIndex: 3 }}>
-        <View style={{ backgroundColor: '#00000090', borderRadius: 4, paddingHorizontal: 6, paddingVertical: 1.5, flexDirection: 'row', alignItems: 'center', gap: 3 }}>
-          <Text style={{ color: isShowdown && winnerName ? '#22c55e' : '#FFD700', fontSize: 5, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 }}>
+      {/* Phase banner — top center */}
+      <View style={{ position: 'absolute', top: 3, left: 0, right: 0, alignItems: 'center', zIndex: 4 }}>
+        <View style={{ backgroundColor: isShowdown ? (playerWon ? '#05966920' : '#dc262620') : '#0f172a', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 2, borderWidth: 0.5, borderColor: isShowdown ? (playerWon ? '#22c55e40' : '#ef444440') : '#334155', flexDirection: 'row', alignItems: 'center', gap: 3, ...({ boxShadow: '0 2px 6px #00000040' } as any) }}>
+          {isWaiting && <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: '#fbbf24' }} />}
+          <Animated.Text style={{ color: isShowdown ? (playerWon ? '#4ade80' : '#f87171') : isWaiting ? '#fbbf24' : '#e2e8f0', fontSize: 5.5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.8, opacity: isShowdown ? winFlash : 1 }}>
             {phaseLabel[phase] || phase.toUpperCase()}
-          </Text>
-          {phase !== 'waiting' && (
-            <Text style={{ color: '#666', fontSize: 3.5, fontFamily: 'monospace' }}>{blinds}/{blinds * 2}</Text>
+          </Animated.Text>
+          {phase !== 'waiting' && phase !== 'showdown' && (
+            <Text style={{ color: '#64748b', fontSize: 3.5, fontFamily: 'monospace' }}>{blinds}/{blinds * 2}</Text>
           )}
         </View>
       </View>
 
-      {/* Community cards */}
+      {/* Community cards — centered */}
       {communityCards.length > 0 && (
         <View style={{ position: 'absolute', top: 17, left: 0, right: 0, flexDirection: 'row', justifyContent: 'center', gap: 2, zIndex: 2 }}>
-          {communityCards.map((card, i) => <View key={i}>{renderCard(card, 13, 17)}</View>)}
+          {communityCards.map((card, i) => <View key={i}>{renderCard(card, 14, 18)}</View>)}
         </View>
       )}
 
-      {/* Center pot */}
+      {/* Center pot — chip stack + amount */}
       <View style={{ position: 'absolute', top: 36, left: 0, right: 0, alignItems: 'center', zIndex: 2 }}>
         {pot > 0 && (
-          <Animated.View style={{ opacity: potPulse, alignItems: 'center' }}>
-            <View style={{ flexDirection: 'row', gap: 1, marginBottom: 1 }}>
-              {[0, 1, 2].map(i => (
-                <View key={i} style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: ['#ef4444', '#3b82f6', '#22c55e'][i], borderWidth: 1, borderColor: '#fff' }} />
-              ))}
+          <Animated.View style={{ opacity: potPulse, flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+            {renderChipStack(pot, ['#ef4444', '#3b82f6', '#22c55e', '#fbbf24'])}
+            <View style={{ alignItems: 'center' }}>
+              <Text style={{ color: '#fbbf24', fontSize: 7, fontWeight: '900', fontFamily: 'monospace', ...({ textShadow: '0 0 6px #fbbf2440' } as any) }}>{pot.toLocaleString()}</Text>
+              {cryptoAmount > 0 && (
+                <Text style={{ color: cColor, fontSize: 3.5, fontWeight: '800', fontFamily: 'monospace' }}>{cSymbol}{cryptoAmount}</Text>
+              )}
             </View>
-            <Text style={{ color: '#FFD700', fontSize: 6, fontWeight: '900', fontFamily: 'monospace' }}>{pot.toLocaleString()}</Text>
-            {cryptoAmount > 0 && (
-              <Text style={{ color: cColor, fontSize: 4, fontWeight: '900', fontFamily: 'monospace', marginTop: 0.5 }}>{cSymbol}{cryptoAmount} {cryptoType}</Text>
-            )}
           </Animated.View>
+        )}
+        {isWaiting && pot === 0 && (
+          <View style={{ alignItems: 'center', marginTop: 4 }}>
+            <Text style={{ color: '#475569', fontSize: 4, fontFamily: 'monospace', fontWeight: '600' }}>TEXAS HOLD'EM</Text>
+          </View>
         )}
       </View>
 
-      {/* Player hand */}
+      {/* Player hand — bottom center */}
       {hand ? (
-        <View style={{ position: 'absolute', bottom: 14, left: '50%' as any, transform: [{ translateX: -16 }], zIndex: 2, alignItems: 'center' }}>
+        <View style={{ position: 'absolute', bottom: 13, left: '50%' as any, transform: [{ translateX: -17 }], zIndex: 3, alignItems: 'center' }}>
           <View style={{ flexDirection: 'row', gap: 2 }}>
-            {hand.split(' ').slice(0, 2).map((card, i) => <View key={i}>{renderCard(card, 14, 18)}</View>)}
+            {hand.split(' ').slice(0, 2).map((card, i) => (
+              <View key={i} style={{ transform: [{ rotate: i === 0 ? '-3deg' : '3deg' }] }}>{renderCard(card, 15, 19)}</View>
+            ))}
           </View>
-          {/* Hand rank at showdown */}
           {isShowdown && handRank ? (
-            <View style={{ backgroundColor: '#00000090', borderRadius: 2, paddingHorizontal: 3, paddingVertical: 0.5, marginTop: 1 }}>
-              <Text style={{ color: '#FFD700', fontSize: 3, fontWeight: '900', fontFamily: 'monospace' }}>{handRank}</Text>
+            <View style={{ backgroundColor: playerWon ? '#05966930' : '#0f172a', borderRadius: 3, paddingHorizontal: 4, paddingVertical: 0.5, marginTop: 1.5, borderWidth: 0.5, borderColor: playerWon ? '#22c55e40' : '#334155' }}>
+              <Text style={{ color: playerWon ? '#4ade80' : '#fbbf24', fontSize: 3.5, fontWeight: '900', fontFamily: 'monospace' }}>{handRank}</Text>
             </View>
           ) : null}
         </View>
       ) : null}
 
-      {/* Player action indicator */}
+      {/* Player action badge */}
       {action && phase !== 'waiting' && phase !== 'showdown' && (
-        <View style={{ position: 'absolute', bottom: 34, right: 16, backgroundColor: action === 'raise' ? '#ef444490' : action === 'fold' ? '#55555590' : '#22c55e90', borderRadius: 3, paddingHorizontal: 3, paddingVertical: 1, zIndex: 4 }}>
-          <Text style={{ color: '#fff', fontSize: 3.5, fontWeight: '900', fontFamily: 'monospace' }}>{action.toUpperCase()}</Text>
+        <View style={{ position: 'absolute', bottom: 33, right: 14, backgroundColor: action === 'RAISE' ? '#dc262680' : action === 'FOLD' ? '#47556980' : '#05966980', borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1.5, zIndex: 4, ...({ boxShadow: '0 1px 4px #00000030' } as any) }}>
+          <Text style={{ color: '#f8fafc', fontSize: 3.5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.5 }}>{action}</Text>
         </View>
       )}
 
       {/* BlackSwan seat — top left */}
       {bsEnabled && (
-        <View style={{ position: 'absolute', top: 14, left: 6, alignItems: 'center', zIndex: 2 }}>
-          <Animated.View style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: '#111', borderWidth: 1.5, borderColor: bsFolded ? '#555' : '#8b5cf6', alignItems: 'center', justifyContent: 'center', opacity: bsFolded ? 0.4 : bsGlow }}>
-            <Text style={{ fontSize: 8 }}>🦢</Text>
+        <View style={{ position: 'absolute', top: 15, left: 6, alignItems: 'center', zIndex: 2 }}>
+          <Animated.View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: '#0f0a1a', borderWidth: 1.5, borderColor: bsFolded ? '#334155' : '#7c3aed', alignItems: 'center', justifyContent: 'center', opacity: bsFolded ? 0.35 : bsGlow, ...({ boxShadow: bsFolded ? 'none' : '0 0 6px #7c3aed60' } as any) }}>
+            <Text style={{ fontSize: 9 }}>🦢</Text>
           </Animated.View>
-          <Text style={{ color: bsFolded ? '#555' : '#8b5cf6', fontSize: 3.5, fontWeight: '800', fontFamily: 'monospace', marginTop: 1 }}>
+          <Text style={{ color: bsFolded ? '#475569' : '#a78bfa', fontSize: 3.5, fontWeight: '900', fontFamily: 'monospace', marginTop: 1 }}>
             {bsFolded ? 'FOLD' : bsChips.toLocaleString()}
           </Text>
-          {/* Cards: face-down or revealed at showdown */}
           {phase !== 'waiting' && !bsFolded && (
             <View style={{ flexDirection: 'row', gap: 1, marginTop: 1 }}>
               {bsCards.length > 0 ? (
-                bsCards.slice(0, 2).map((c, i) => <View key={i}>{renderCard(c, 8, 10)}</View>)
+                bsCards.slice(0, 2).map((c, i) => <View key={i}>{renderCard(c, 9, 11)}</View>)
               ) : (
                 <>
-                  <View style={{ width: 8, height: 10, backgroundColor: '#3b28cc', borderRadius: 1, borderWidth: 0.5, borderColor: '#8b5cf6' }} />
-                  <View style={{ width: 8, height: 10, backgroundColor: '#3b28cc', borderRadius: 1, borderWidth: 0.5, borderColor: '#8b5cf6' }} />
+                  {renderCard('', 9, 11, true)}
+                  {renderCard('', 9, 11, true)}
                 </>
               )}
             </View>
           )}
           {isShowdown && bsHandRank && !bsFolded ? (
-            <View style={{ backgroundColor: '#8b5cf620', borderRadius: 2, paddingHorizontal: 2, paddingVertical: 0.5, marginTop: 1 }}>
+            <View style={{ backgroundColor: '#7c3aed20', borderRadius: 2, paddingHorizontal: 3, paddingVertical: 0.5, marginTop: 1, borderWidth: 0.5, borderColor: '#7c3aed30' }}>
               <Text style={{ color: '#c4b5fd', fontSize: 2.5, fontWeight: '900', fontFamily: 'monospace' }}>{bsHandRank}</Text>
             </View>
           ) : null}
         </View>
       )}
 
-      {/* Empty player seats */}
+      {/* Empty seats — subtle ring */}
       {[{ t: 14, l: 106 }, { t: 48, l: 4 }, { t: 48, l: 112 }].map((pos, i) => (
-        <View key={i} style={{ position: 'absolute', top: pos.t, left: pos.l, width: 12, height: 12, borderRadius: 6, backgroundColor: '#222', borderWidth: 1, borderColor: '#444', alignItems: 'center', justifyContent: 'center' }}>
-          <Text style={{ fontSize: 6 }}>👤</Text>
+        <View key={i} style={{ position: 'absolute', top: pos.t, left: pos.l, width: 12, height: 12, borderRadius: 6, backgroundColor: '#0f172a', borderWidth: 1, borderColor: '#1e293b', alignItems: 'center', justifyContent: 'center' }}>
+          <View style={{ width: 6, height: 6, borderRadius: 3, borderWidth: 0.5, borderColor: '#334155' }} />
         </View>
       ))}
 
-      {/* Chip count + win record — bottom left */}
-      <View style={{ position: 'absolute', bottom: 2, left: 6, zIndex: 2 }}>
+      {/* Bottom HUD — chips + record */}
+      <View style={{ position: 'absolute', bottom: 1, left: 0, right: 0, height: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 6, zIndex: 3 }}>
+        {/* Chip count */}
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
-          <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: '#FFD700', borderWidth: 1, borderColor: '#B8860B' }} />
-          <Text style={{ color: '#FFD700', fontSize: 5, fontWeight: '900', fontFamily: 'monospace' }}>{chips.toLocaleString()}</Text>
+          <View style={{ width: 7, height: 3, borderRadius: 3, backgroundColor: '#fbbf24', borderWidth: 0.5, borderColor: '#f59e0b' }} />
+          <Text style={{ color: '#fbbf24', fontSize: 5, fontWeight: '900', fontFamily: 'monospace', ...({ textShadow: '0 0 4px #fbbf2430' } as any) }}>{chips.toLocaleString()}</Text>
+          {handsPlayed > 0 && (
+            <Text style={{ color: '#475569', fontSize: 3, fontFamily: 'monospace', marginLeft: 2 }}>{handsWon}W</Text>
+          )}
         </View>
-        {handsPlayed > 0 && (
-          <Text style={{ color: '#888', fontSize: 3, fontFamily: 'monospace', marginTop: 0.5 }}>{handsWon}W/{handsPlayed}H</Text>
+        {/* Crypto wager */}
+        {cryptoAmount > 0 && (
+          <View style={{ backgroundColor: '#0f172a80', borderRadius: 3, paddingHorizontal: 3, paddingVertical: 1, borderWidth: 0.5, borderColor: cColor + '30' }}>
+            <Text style={{ color: cColor, fontSize: 4, fontWeight: '900', fontFamily: 'monospace' }}>{cSymbol}{cryptoAmount}</Text>
+          </View>
         )}
       </View>
 
-      {/* Crypto wager — bottom right */}
-      {cryptoAmount > 0 && (
-        <View style={{ position: 'absolute', bottom: 3, right: 6, backgroundColor: '#00000060', borderRadius: 3, paddingHorizontal: 3, paddingVertical: 1, zIndex: 2 }}>
-          <Text style={{ color: cColor, fontSize: 5, fontWeight: '900', fontFamily: 'monospace' }}>{cSymbol}{cryptoAmount}</Text>
-        </View>
-      )}
-
-      {/* BlackSwan trash talk bubble */}
+      {/* BlackSwan trash talk — speech bubble */}
       {bsEnabled && bsLine ? (
-        <View style={{ position: 'absolute', top: 5, left: 24, maxWidth: 52, zIndex: 3 }}>
-          <View style={{ backgroundColor: '#8b5cf620', borderRadius: 3, paddingHorizontal: 3, paddingVertical: 1, borderWidth: 0.5, borderColor: '#8b5cf640' }}>
-            <Text style={{ color: '#c4b5fd', fontSize: 3, fontFamily: 'monospace' }} numberOfLines={2}>{bsLine}</Text>
+        <View style={{ position: 'absolute', top: 6, left: 26, maxWidth: 50, zIndex: 5 }}>
+          <View style={{ backgroundColor: '#1e1b4b', borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1.5, borderWidth: 0.5, borderColor: '#7c3aed40', ...({ boxShadow: '0 2px 6px #00000040' } as any) }}>
+            <Text style={{ color: '#c4b5fd', fontSize: 3, fontFamily: 'monospace', fontWeight: '600' }} numberOfLines={2}>{bsLine}</Text>
           </View>
+          {/* Speech bubble triangle */}
+          <View style={{ position: 'absolute', left: 4, bottom: -3, width: 0, height: 0, borderLeftWidth: 3, borderRightWidth: 3, borderTopWidth: 3, borderLeftColor: 'transparent', borderRightColor: 'transparent', borderTopColor: '#1e1b4b' }} />
         </View>
       ) : null}
 
       {/* YOU label */}
       {hand ? (
         <View style={{ position: 'absolute', bottom: 7, left: '50%' as any, transform: [{ translateX: -6 }], zIndex: 2 }}>
-          <Text style={{ color: '#FFD700', fontSize: 3.5, fontWeight: '800', fontFamily: 'monospace' }}>YOU</Text>
+          <Text style={{ color: '#94a3b8', fontSize: 3.5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 }}>YOU</Text>
         </View>
       ) : null}
     </View>
@@ -2734,37 +2765,55 @@ export function ChessBoardItem({ item, theme }: ItemProps) {
     return () => t.stop();
   }, []);
 
+  const PIECE_UNICODE: Record<string, string> = {
+    'K': '♔', 'Q': '♕', 'R': '♖', 'B': '♗', 'N': '♘', 'P': '♙',
+    'k': '♚', 'q': '♛', 'r': '♜', 'b': '♝', 'n': '♞', 'p': '♟',
+  };
+
+  const board = item.chessBoard || 'rnbqkbnrpppppppp................................PPPPPPPPRNBQKBNR';
   const turn = item.chessTurn || 'white';
   const gameOver = item.chessGameOver;
-
-  // Mini chess board with starting positions
-  const pieces = [
-    ['♜', '♞', '♝', '♛', '♚', '♝', '♞', '♜'],
-    ['♟', '♟', '♟', '♟', '♟', '♟', '♟', '♟'],
-    ['', '', '', '', '', '', '', ''],
-    ['', '', '', '', '', '', '', ''],
-    ['', '', '', '', '', '', '', ''],
-    ['', '', '', '', '', '', '', ''],
-    ['♙', '♙', '♙', '♙', '♙', '♙', '♙', '♙'],
-    ['♖', '♘', '♗', '♕', '♔', '♗', '♘', '♖'],
-  ];
+  const selected = item.chessSelected;
+  const targetSquare = item.chessLastTo;
+  const lastFrom = item.chessLastFrom;
+  const cursor = item.chessCursor;
+  const isSelecting = cursor !== undefined && cursor !== null && cursor >= 0;
 
   const turnIndicatorOp = thinkPulse;
 
+  // Status text
+  let statusText = `${turn.toUpperCase()}'S MOVE`;
+  if (gameOver) {
+    statusText = 'GAME OVER';
+  } else if (isSelecting) {
+    statusText = 'TAP TO CYCLE/PLAY';
+  }
+
   return (
-    <View style={{ width: 86, height: 86, backgroundColor: '#3e2723', borderWidth: 2, borderColor: '#8B4513', borderRadius: 4, padding: 3, overflow: 'hidden' }}>
+    <View style={{ width: 86, height: 86, backgroundColor: '#3e2723', borderWidth: 2, borderColor: '#8B4513', borderRadius: 4, padding: 2, overflow: 'hidden' }}>
       {/* Board */}
       <View style={{ flex: 1 }}>
-        {pieces.map((row, r) => (
+        {Array.from({ length: 8 }, (_, r) => (
           <View key={r} style={{ flexDirection: 'row', flex: 1 }}>
-            {row.map((piece, c) => (
-              <View key={c} style={{
-                flex: 1, alignItems: 'center', justifyContent: 'center',
-                backgroundColor: (r + c) % 2 === 0 ? '#F0D9B5' : '#B58863',
-              }}>
-                {piece ? <Text style={{ fontSize: 6.5, lineHeight: 8 }}>{piece}</Text> : null}
-              </View>
-            ))}
+            {Array.from({ length: 8 }, (_, c) => {
+              const idx = r * 8 + c;
+              const ch = board[idx];
+              const piece = ch !== '.' ? PIECE_UNICODE[ch] : null;
+              const isLight = (r + c) % 2 === 0;
+              const isSelected = selected === idx;
+              const isTarget = isSelecting && targetSquare === idx;
+              const isLastFrom = !isSelecting && lastFrom === idx;
+              const isLastTo = !isSelecting && targetSquare === idx;
+              let bg = isLight ? '#F0D9B5' : '#B58863';
+              if (isSelected) bg = '#66bb6a';
+              else if (isTarget) bg = '#ffee58';
+              else if (isLastFrom || isLastTo) bg = isLight ? '#aed581' : '#8bc34a';
+              return (
+                <View key={c} style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: bg }}>
+                  {piece ? <Text style={{ fontSize: 6.5, lineHeight: 8 }}>{piece}</Text> : null}
+                </View>
+              );
+            })}
           </View>
         ))}
       </View>
@@ -2773,7 +2822,7 @@ export function ChessBoardItem({ item, theme }: ItemProps) {
       <View style={{ position: 'absolute', bottom: -1, left: 0, right: 0, height: 10, backgroundColor: '#3e2723ee', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3 }}>
         <Animated.View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: turn === 'white' ? '#F0D9B5' : '#3e2723', borderWidth: 1, borderColor: '#8B4513', opacity: turnIndicatorOp }} />
         <Text style={{ color: '#CD853F', fontSize: 5, fontWeight: '800', fontFamily: 'monospace' }}>
-          {gameOver ? 'CHECKMATE' : `${turn.toUpperCase()}'S MOVE`}
+          {statusText}
         </Text>
       </View>
     </View>
@@ -2799,6 +2848,7 @@ export function ConnectFourItem({ item, theme }: ItemProps) {
   const turn = item.connectFourTurn || 1; // 1=red, 2=yellow
   const winner = item.connectFourWinner || 0;
   const boardStr = item.connectFourBoard || '';
+  const cursorCol = item.connectFourCol;
 
   // Parse board or use demo pattern
   const board: number[][] = [];
@@ -2819,38 +2869,54 @@ export function ConnectFourItem({ item, theme }: ItemProps) {
   const turnColor = turn === 1 ? '#ef4444' : '#eab308';
   const dropY = dropAnim.interpolate({ inputRange: [0, 1], outputRange: [-6, 0] });
 
+  // Calculate column-based position for the hovering piece
+  const colWidth = 76 / 7; // ~10.8px per column
+  const pieceLeft = cursorCol !== undefined && cursorCol !== null
+    ? cursorCol * colWidth + colWidth / 2 - 4
+    : 76 / 2 - 4;
+
   return (
     <View style={{ width: 76, height: 76, backgroundColor: '#1e40af', borderWidth: 2, borderColor: '#3b82f6', borderRadius: 6, padding: 2, overflow: 'hidden' }}>
       {/* Grid */}
       {board.map((row, r) => (
         <View key={r} style={{ flexDirection: 'row', flex: 1, gap: 1, justifyContent: 'center' }}>
-          {row.map((cell, c) => (
-            <View key={c} style={{ flex: 1, aspectRatio: 1, borderRadius: 100, backgroundColor: '#1e3a8a', alignItems: 'center', justifyContent: 'center', margin: 0.5 }}>
-              {cell > 0 && (
-                <View style={{ width: '80%' as any, height: '80%' as any, borderRadius: 100, backgroundColor: cell === 1 ? '#ef4444' : '#eab308' }} />
-              )}
-            </View>
-          ))}
+          {row.map((cell, c) => {
+            const isHighlighted = cursorCol === c && !winner;
+            return (
+              <View key={c} style={{ flex: 1, aspectRatio: 1, borderRadius: 100, backgroundColor: isHighlighted ? '#2563eb' : '#1e3a8a', alignItems: 'center', justifyContent: 'center', margin: 0.5 }}>
+                {cell > 0 && (
+                  <View style={{ width: '80%' as any, height: '80%' as any, borderRadius: 100, backgroundColor: cell === 1 ? '#ef4444' : '#eab308' }} />
+                )}
+              </View>
+            );
+          })}
         </View>
       ))}
 
-      {/* Dropping piece indicator */}
+      {/* Dropping piece indicator — positioned over cursor column */}
       <Animated.View style={{
-        position: 'absolute', top: 0, left: '50%' as any, marginLeft: -4,
+        position: 'absolute', top: 0, left: pieceLeft,
         width: 8, height: 8, borderRadius: 4, backgroundColor: turnColor,
         transform: [{ translateY: dropY }], opacity: winner ? 0 : 1,
       }} />
 
       {/* Status bar */}
       <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 10, backgroundColor: '#1e3a8aee', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 2 }}>
-        {winner ? (
+        {winner === 3 ? (
+          <Text style={{ color: '#94a3b8', fontSize: 5, fontWeight: '900', fontFamily: 'monospace' }}>DRAW!</Text>
+        ) : winner ? (
           <Text style={{ color: winner === 1 ? '#ef4444' : '#eab308', fontSize: 5, fontWeight: '900', fontFamily: 'monospace' }}>
             {winner === 1 ? 'RED' : 'YELLOW'} WINS!
           </Text>
+        ) : cursorCol !== undefined && cursorCol !== null ? (
+          <>
+            <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: turnColor }} />
+            <Text style={{ color: turnColor, fontSize: 4.5, fontWeight: '800', fontFamily: 'monospace' }}>COL {cursorCol + 1}</Text>
+          </>
         ) : (
           <>
             <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: turnColor }} />
-            <Text style={{ color: turnColor, fontSize: 4.5, fontWeight: '800', fontFamily: 'monospace' }}>DROP</Text>
+            <Text style={{ color: turnColor, fontSize: 4.5, fontWeight: '800', fontFamily: 'monospace' }}>TAP TO PLAY</Text>
           </>
         )}
       </View>
