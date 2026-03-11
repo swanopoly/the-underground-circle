@@ -650,14 +650,24 @@ ${contextString}`;
         .eq("id", runId);
 
       // 10. Update automation metadata
-      await supabase
-        .from("circle_automations")
-        .update({
-          last_error: null,
-          last_run_at: new Date().toISOString(),
-          run_count: (automation.run_count || 0) + 1,
-        })
-        .eq("id", automationId);
+      // Note: For scheduled triggers, pg_cron already updates last_run_at, run_count, and next_run_at.
+      // Only update here for non-schedule triggers (manual, event, retry) to avoid double-counting.
+      if (triggerSource !== "schedule") {
+        await supabase
+          .from("circle_automations")
+          .update({
+            last_error: null,
+            last_run_at: new Date().toISOString(),
+            run_count: (automation.run_count || 0) + 1,
+          })
+          .eq("id", automationId);
+      } else {
+        // For schedule triggers, only clear the last_error (pg_cron handles the rest)
+        await supabase
+          .from("circle_automations")
+          .update({ last_error: null })
+          .eq("id", automationId);
+      }
 
       // 11. Create detailed report task
       await logStep("⏳ Creating report task...");

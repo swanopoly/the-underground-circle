@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS automation_runs (
   status          text        NOT NULL DEFAULT 'running'
                     CHECK (status IN ('running', 'completed', 'failed', 'skipped')),
   trigger_source  text        NOT NULL DEFAULT 'schedule'
-                    CHECK (trigger_source IN ('schedule', 'event', 'manual')),
+                    CHECK (trigger_source IN ('schedule', 'event', 'manual', 'retry')),
   triggered_by    uuid        REFERENCES auth.users(id),
 
   -- Input/Output
@@ -217,10 +217,12 @@ BEGIN
     SET
       last_run_at = now(),
       next_run_at = CASE
-        WHEN cron_expression = 'hourly'  THEN now() + interval '1 hour'
-        WHEN cron_expression = 'daily'   THEN now() + interval '1 day'
-        WHEN cron_expression = 'weekly'  THEN now() + interval '7 days'
-        WHEN cron_expression = 'monthly' THEN now() + interval '30 days'
+        WHEN cron_expression = 'hourly'      THEN now() + interval '1 hour'
+        WHEN cron_expression = 'every_6h'    THEN now() + interval '6 hours'
+        WHEN cron_expression = 'twice_daily' THEN now() + interval '12 hours'
+        WHEN cron_expression = 'daily'       THEN now() + interval '1 day'
+        WHEN cron_expression = 'weekly'      THEN now() + interval '7 days'
+        WHEN cron_expression = 'monthly'     THEN now() + interval '30 days'
         ELSE now() + interval '1 day'
       END,
       run_count = run_count + 1
