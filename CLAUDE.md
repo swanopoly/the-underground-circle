@@ -1,15 +1,61 @@
 # CLAUDE.md — The Underground Circle
 
 > Comprehensive project context for AI agents (Claude Code, OpenClaw, Codex, etc.)
-> Last updated: 2026-03-10 (v5 — two-tier BlackSwan LLM: Mini 7B + Full 27B, LLM benchmark panel, automation groups)
+> Last updated: 2026-03-11 (Strategic pivot: GitHub integration + AI agent loop as core product)
+
+---
+
+## STRATEGIC FOCUS — READ THIS FIRST
+
+**The app's killer feature: Your team gets a shared AI agent (BlackSwan) that watches your GitHub repo, tracks who's shipping, catches when things break, and keeps everyone honest — no more standups.**
+
+Target: Small dev teams (2-5 people) building side projects together.
+
+### Priority 1: GitHub Integration + AI Agent Loop
+This is THE feature. Everything else is secondary until this works end-to-end.
+
+**Current state:**
+- `src/lib/github.ts` — PAT-based GitHub REST API (browse repos, read files) — WORKS
+- RoomsTab has "GitHub" panel for browsing repo files — WORKS
+- Automation system with pg_cron + edge function executor — WORKS
+- BlackSwan AI edge function with full circle context — WORKS
+
+**What needs to be built (in order):**
+1. **GitHub OAuth flow** — replace manual PAT with proper OAuth (edge function + callback)
+2. **GitHub webhook receiver** — new edge function that receives push/PR/CI events
+3. **`circle_github_events` table** — stores webhook payloads per circle
+4. **BlackSwan reads GitHub events** — scheduled automation posts shipping summaries
+5. **Promote GitHub to IntegrationsTab** — first-class integration alongside Slack/Teams/Discord
+6. **Invite link flow** — share URL → join → connect GitHub → AI starts in 2 minutes
+
+### Priority 2: BlackSwan Proactive Agent
+- Daily/weekly shipping summaries from real GitHub data
+- Nudge members who haven't pushed code
+- Auto-detect deploy failures and alert the team
+
+### Priority 3: Onboarding
+- First-run UX that shows value in <60 seconds
+- Working invite links
+
+### What is DEPRIORITIZED (don't build new stuff here):
+- Games, room customization, furniture — culture layer, not core
+- LLM benchmarks, BYO API keys — dev tools
+- Wallet/crypto, BlackSwan LLM training — nice-to-have
+
+### Quality Standards
+- Always run `npx tsc --noEmit --skipLibCheck` after changes
+- Deploy edge functions after fixes: `npx supabase functions deploy <name>`
+- SQL changes go through Supabase SQL Editor (migration system is broken)
+- Keep CLAUDE.md and memory/MEMORY.md updated every session
+- After DB schema changes: `NOTIFY pgrst, 'reload schema'`
 
 ---
 
 ## Project Overview
 
-**The Underground Circle** is a social accountability app for people using AI agents to build real things. Members form small crews (5–8 people), share their AI agents' work in real time, and hold each other accountable — not just for effort, but for *direction*.
+**The Underground Circle** is a shared AI agent platform for dev teams. Connect your GitHub repo, and BlackSwan (your circle's AI) watches commits, PRs, and CI — then keeps your team honest about shipping.
 
-It's the **human accountability layer for the AI-agent era**. Mixed circles (devs + creators + business owners). Everyone watches everyone's AI agents work. Everyone ships.
+It's the **AI-powered project manager nobody asked to be**. Small crews (2-8 people). BlackSwan watches the code. Everyone ships.
 
 - **Live URL:** https://app.chrisswanson.xyz
 - **Repo:** github.com/swanopoly/the-underground-circle
@@ -572,17 +618,27 @@ scp models/v5/gguf_dpo/*.gguf swan@dev-machine:~/the-underground-circle/scripts/
 
 ## Pending / Known Issues
 
+### Critical Path (GitHub Integration)
 | Issue | Priority | Status |
 |---|---|---|
-| pg_cron sweeper SQL | High | ⚠️ NOT run — SQL in Architecture Notes section |
-| custom_themes migration SQL | High | ⚠️ NOT run — `20260228_custom_themes.sql` |
-| agent_appearances migration SQL | High | ⚠️ NOT run — `20260301_agent_appearances.sql` |
-| office_layout migration SQL | High | ⚠️ NOT run — `20260301_office_layout.sql` |
-| room-task-executor edge function | High | ⚠️ NOT deployed — needs `npx supabase login` |
-| award_points RPC 400 | Medium | May need points_transactions confirmed |
-| circle_office_agents upsert 400 | Medium | AgentPanel bug |
+| GitHub OAuth edge function | **P0** | NOT STARTED — needed to replace manual PAT entry |
+| GitHub webhook receiver edge fn | **P0** | NOT STARTED — receives push/PR/CI events |
+| `circle_github_events` table | **P0** | NOT STARTED — stores webhook events per circle |
+| BlackSwan GitHub summary automation | **P0** | NOT STARTED — reads events, posts to chat |
+| GitHub in IntegrationsTab | **P1** | NOT STARTED — first-class platform card |
+| Invite link flow | **P1** | NOT STARTED — shareable join URL |
+
+### Infrastructure (run when convenient)
+| Issue | Priority | Status |
+|---|---|---|
+| pg_cron sweeper SQL | Medium | ⚠️ NOT run — SQL in Architecture Notes section |
+| custom_themes migration SQL | Medium | ⚠️ NOT run — `20260228_custom_themes.sql` |
+| agent_appearances migration SQL | Medium | ⚠️ NOT run — `20260301_agent_appearances.sql` |
+| office_layout migration SQL | Medium | ⚠️ NOT run — `20260301_office_layout.sql` |
+| room-task-executor edge function | Medium | ⚠️ NOT deployed — needs `npx supabase login` |
+| award_points RPC 400 | Low | May need points_transactions confirmed |
+| circle_office_agents upsert 400 | Low | AgentPanel bug |
 | Solana RPC 403s | Low | Pre-existing, publicnode workaround in place |
-| step_away_sessions table | Low | Not yet created |
 
 ---
 
