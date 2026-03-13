@@ -9,7 +9,7 @@
  * and Giza's dark depth aesthetic.
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import {
   View,
   Text,
@@ -29,19 +29,19 @@ import {
   iconBoxStyle,
 } from '../../../lib/pixelDesign';
 
-// Dashboard components
-import CostDashboard from '../../../components/CostDashboard';
-import AgentPerformanceMetrics from '../../../components/AgentPerformanceMetrics';
-import FarmHealthDashboard from '../../../components/FarmHealthDashboard';
-import OfficeAnalyticsPanel from '../../../components/OfficeAnalyticsPanel';
-import PixelOfficeCanvas from '../../../components/PixelOfficeCanvas';
-import OfficeTerminal from '../../../components/OfficeTerminal';
-import SessionTagsDashboard from '../../../components/SessionTagsDashboard';
-import SharedMemoryPanel from '../../../components/SharedMemoryPanel';
-import ProjectRoomsPanel from '../../../components/ProjectRoomsPanel';
-import PromptManagerPanel from './office/PromptManagerPanel';
-import TraceViewer from '../../../components/TraceViewer';
-import LLMBenchmarkPanel from '../../../components/LLMBenchmarkPanel';
+// Lazy-load dashboard components — only one is visible at a time
+const CostDashboard = lazy(() => import('../../../components/CostDashboard'));
+const AgentPerformanceMetrics = lazy(() => import('../../../components/AgentPerformanceMetrics'));
+const FarmHealthDashboard = lazy(() => import('../../../components/FarmHealthDashboard'));
+const OfficeAnalyticsPanel = lazy(() => import('../../../components/OfficeAnalyticsPanel'));
+const PixelOfficeCanvas = lazy(() => import('../../../components/PixelOfficeCanvas'));
+const OfficeTerminal = lazy(() => import('../../../components/OfficeTerminal'));
+const SessionTagsDashboard = lazy(() => import('../../../components/SessionTagsDashboard'));
+const SharedMemoryPanel = lazy(() => import('../../../components/SharedMemoryPanel'));
+const ProjectRoomsPanel = lazy(() => import('../../../components/ProjectRoomsPanel'));
+const PromptManagerPanel = lazy(() => import('./office/PromptManagerPanel'));
+const TraceViewer = lazy(() => import('../../../components/TraceViewer'));
+const LLMBenchmarkPanel = lazy(() => import('../../../components/LLMBenchmarkPanel'));
 
 type Compartment = 'none' | 'cost' | 'terminal' | 'farm' | 'performance' | 'projects' | 'analytics' | 'canvas' | 'prompts' | 'traces' | 'llm-bench';
 
@@ -102,6 +102,7 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
         </Pressable>
 
         <View style={styles.compartmentContent}>
+          <Suspense fallback={<View style={styles.loadingContainer}><ActivityIndicator color="#6366f1" size="small" /></View>}>
           {activeCompartment === 'cost' && (
             <CostDashboard
               sessions={data.enrichedSessions}
@@ -186,6 +187,7 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
               accentColor={accentColor}
             />
           )}
+          </Suspense>
         </View>
       </View>
     );

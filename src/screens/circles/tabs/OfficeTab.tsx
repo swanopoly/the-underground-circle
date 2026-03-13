@@ -83,7 +83,7 @@ import {
   AgentLiveState,
   ConnectionStatus,
 } from '../../../lib/agentPresence';
-import OfficeTerminal from '../../../components/OfficeTerminal';
+const OfficeTerminal = React.lazy(() => import('../../../components/OfficeTerminal'));
 import {
   subscribeToTerminalCommands,
   respondToCommand,
@@ -105,15 +105,19 @@ import {
 import { supabase } from '../../../lib/supabase';
 import { fetchNFTs } from '../../../lib/crypto';
 import { NFT } from '../../../types';
-import AgentSetupWizard from '../../../components/AgentSetupWizard';
-import BadgeCelebration from '../../../components/BadgeCelebration';
-import RewardsPanel from '../../../components/RewardsPanel';
+const AgentSetupWizard = React.lazy(() => import('../../../components/AgentSetupWizard'));
+const BadgeCelebration = React.lazy(() => import('../../../components/BadgeCelebration'));
+const RewardsPanel = React.lazy(() => import('../../../components/RewardsPanel'));
 import { useAllAgentPointsTracker, useUserRewards } from '../../../services/rewardService';
 import { Badge, getNextBadge } from '../../../lib/badges';
 import {
   RippleEffect, ConfettiEffect, RocketEffect, DiceEffect,
   PulseEffect, ShakeEffect, FireworksEffect,
 } from './office/FloorEffects';
+// Lazy-load heavy interactive components — only loaded when user clicks the furniture
+const RetroEmulator = React.lazy(() => import('../../../components/RetroEmulator'));
+const ScrabbleGame = React.lazy(() => import('../../../components/ScrabbleGame'));
+const PhoneMessenger = React.lazy(() => import('../../../components/PhoneMessenger'));
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -236,6 +240,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [stickyGifSearch, setStickyGifSearch] = useState('');
   const stickyCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const stickyDrawingRef = useRef(false);
+
+  // ─── Retro emulator state ────────────────────────────────────────────
+  const [emulatorVisible, setEmulatorVisible] = useState(false);
+  const [emulatorSystem, setEmulatorSystem] = useState<string>('gba');
+
+  // ─── Scrabble state ────────────────────────────────────────────────
+  const [scrabbleVisible, setScrabbleVisible] = useState(false);
+
+  // ─── Phone messenger state ─────────────────────────────────────────
+  const [phoneVisible, setPhoneVisible] = useState(false);
 
   // ─── Service connector state ────────────────────────────────────────────
   const [serviceModalVisible, setServiceModalVisible] = useState(false);
@@ -612,14 +626,22 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // ─── Connection helpers ──────────────────────────────
 
   const connectOne = useCallback(async (conn: AgentConnection) => {
-    // Update status to connecting
-    setConnections(prev => prev.map(c => c.id === conn.id ? { ...c, status: 'connecting' as const, error: undefined } : c));
+    // Update status to connecting (local + singleton)
+    setConnections(prev => {
+      const updated = prev.map(c => c.id === conn.id ? { ...c, status: 'connecting' as const, error: undefined } : c);
+      updateAutoConnectConnections(updated);
+      return updated;
+    });
 
     const config: OpenClawConfig = { endpoint: conn.endpoint, token: conn.token };
     const result = await testConnection(config);
 
     if (!result.ok) {
-      setConnections(prev => prev.map(c => c.id === conn.id ? { ...c, status: 'error' as const, error: result.error || 'Connection failed' } : c));
+      setConnections(prev => {
+        const updated = prev.map(c => c.id === conn.id ? { ...c, status: 'error' as const, error: result.error || 'Connection failed' } : c);
+        updateAutoConnectConnections(updated);
+        return updated;
+      });
       return;
     }
 
@@ -631,15 +653,19 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     const agentsResult = await listAgents(config);
     if (agentsResult.ok && agentsResult.agents) agentIds = agentsResult.agents;
 
-    // Update connection status
-    setConnections(prev => prev.map(c => c.id === conn.id ? {
-      ...c,
-      status: 'connected' as const,
-      error: undefined,
-      sessionCount: (result.sessions || []).length,
-      agentIds,
-      lastConnected: new Date().toISOString(),
-    } : c));
+    // Update connection status (local + singleton)
+    setConnections(prev => {
+      const updated = prev.map(c => c.id === conn.id ? {
+        ...c,
+        status: 'connected' as const,
+        error: undefined,
+        sessionCount: (result.sessions || []).length,
+        agentIds,
+        lastConnected: new Date().toISOString(),
+      } : c);
+      updateAutoConnectConnections(updated);
+      return updated;
+    });
 
     // Start poller
     const oldPoller = pollersRef.current.get(conn.id);
@@ -647,10 +673,24 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
     const poller = new OpenClawPoller(config, (update: OpenClawUpdate) => {
       sessionsRef.current.set(conn.id, update.sessions);
-      setConnections(prev => prev.map(c => c.id === conn.id && c.status === 'connected' ? {
-        ...c, sessionCount: update.sessions.length,
-      } : c));
+      setConnections(prev => {
+        const updated = prev.map(c => c.id === conn.id && c.status === 'connected' ? {
+          ...c, sessionCount: update.sessions.length,
+        } : c);
+        updateAutoConnectConnections(updated);
+        return updated;
+      });
       setSessionsTick(t => t + 1);
+    }, (error: string) => {
+      // Poller detected persistent failure — mark as error for retry
+      pollersRef.current.delete(conn.id);
+      setConnections(prev => {
+        const updated = prev.map(c => c.id === conn.id ? {
+          ...c, status: 'error' as const, error,
+        } : c);
+        updateAutoConnectConnections(updated);
+        return updated;
+      });
     });
     poller.start(10000);
     pollersRef.current.set(conn.id, poller);
@@ -662,9 +702,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     const poller = pollersRef.current.get(connId);
     if (poller) { poller.stop(); pollersRef.current.delete(connId); }
     sessionsRef.current.delete(connId);
-    setConnections(prev => prev.map(c => c.id === connId ? {
-      ...c, status: 'disconnected' as const, error: undefined, sessionCount: undefined, agentIds: undefined,
-    } : c));
+    setConnections(prev => {
+      const updated = prev.map(c => c.id === connId ? {
+        ...c, status: 'disconnected' as const, error: undefined, sessionCount: undefined, agentIds: undefined,
+      } : c);
+      updateAutoConnectConnections(updated);
+      return updated;
+    });
     setSessionsTick(t => t + 1);
   }, []);
 
@@ -836,10 +880,33 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       }
 
       // ── Subscribe to singleton updates so OfficeTab stays in sync ──
+      // Merge rather than overwrite — prefer 'connected'/'connecting' status over stale singleton data
       const unsub = subscribeAutoConnect(() => {
         const latestConns = getAutoConnectConnections();
         const latestSessions = getAutoConnectSessions();
-        setConnections(latestConns);
+        setConnections(prev => {
+          // Build map of singleton connections by id
+          const singletonMap = new Map(latestConns.map(c => [c.id, c]));
+          // Merge: if local has a connection that's connected/connecting but singleton says error/disconnected,
+          // keep the local version (OfficeTab's connectOne is more authoritative)
+          const merged = prev.map(local => {
+            const singleton = singletonMap.get(local.id);
+            if (!singleton) return local;
+            // If local is actively connected/connecting, don't let stale singleton state override it
+            if ((local.status === 'connected' || local.status === 'connecting') &&
+                (singleton.status === 'error' || singleton.status === 'disconnected')) {
+              return local;
+            }
+            return singleton;
+          });
+          // Add any connections from singleton that don't exist locally
+          for (const sc of latestConns) {
+            if (!merged.some(m => m.id === sc.id)) {
+              merged.push(sc);
+            }
+          }
+          return merged;
+        });
         for (const [key, sessions] of latestSessions) {
           sessionsRef.current.set(key, sessions);
         }
@@ -848,59 +915,59 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       // Store unsubscribe for cleanup
       (initRef as any)._unsub = unsub;
 
-      // Load custom agent names
-      try {
-        const namesRaw = await storage.getItem(STORAGE_KEY_AGENT_NAMES);
-        if (namesRaw) setAgentNames(JSON.parse(namesRaw));
-      } catch {}
+      // ── Batch all localStorage reads in parallel ──
+      const [namesRaw, tgRaw, floorsRaw, tsRaw, currentFloorRaw, appearancesRaw, notesRaw] = await Promise.all([
+        storage.getItem(STORAGE_KEY_AGENT_NAMES).catch(() => null),
+        storage.getItem(STORAGE_KEY_TELEGRAM).catch(() => null),
+        storage.getItem(STORAGE_KEY_FLOORS).catch(() => null),
+        storage.getItem(STORAGE_KEY_FLOORS_TS).catch(() => null),
+        storage.getItem(STORAGE_KEY_CURRENT_FLOOR).catch(() => null),
+        storage.getItem(STORAGE_KEY_APPEARANCES).catch(() => null),
+        storage.getItem(STORAGE_KEY_WHITEBOARD_NOTES).catch(() => null),
+      ]);
 
-      // Load Telegram config
-      try {
-        const tgRaw = await storage.getItem(STORAGE_KEY_TELEGRAM);
-        if (tgRaw) {
-          const tg = JSON.parse(tgRaw);
-          if (tg.botToken || tg.chatId) {
-            setTelegramConfig({ botToken: tg.botToken || '', chatId: tg.chatId || '' });
-          }
-        }
+      // Apply local-only state immediately (agent names, telegram, whiteboard)
+      if (namesRaw) try { setAgentNames(JSON.parse(namesRaw)); } catch {}
+      if (tgRaw) try {
+        const tg = JSON.parse(tgRaw);
+        if (tg.botToken || tg.chatId) setTelegramConfig({ botToken: tg.botToken || '', chatId: tg.chatId || '' });
       } catch {}
+      if (notesRaw) try { setWhiteboardNotes(JSON.parse(notesRaw)); } catch {}
 
-      // Load floors — localStorage + Supabase merge (newest wins by timestamp)
+      // Parse local floors
       let localFloors: OfficeFloor[] = [];
-      let localCurrentFloorId = '';
+      let localCurrentFloorId = currentFloorRaw || '';
       let localUpdatedAt = 0;
-      try {
-        const floorsRaw = await storage.getItem(STORAGE_KEY_FLOORS);
-        if (floorsRaw) {
-          const loadedFloors = JSON.parse(floorsRaw) as OfficeFloor[];
-          if (loadedFloors.length > 0) {
-            localFloors = loadedFloors;
-          }
-        }
-        const tsRaw = await storage.getItem(STORAGE_KEY_FLOORS_TS);
-        if (tsRaw) localUpdatedAt = parseInt(tsRaw, 10) || 0;
+      if (floorsRaw) try {
+        const loaded = JSON.parse(floorsRaw) as OfficeFloor[];
+        if (loaded.length > 0) localFloors = loaded;
       } catch {}
+      if (tsRaw) localUpdatedAt = parseInt(tsRaw, 10) || 0;
 
-      // Load current floor
-      try {
-        const currentFloorRaw = await storage.getItem(STORAGE_KEY_CURRENT_FLOOR);
-        if (currentFloorRaw) {
-          localCurrentFloorId = currentFloorRaw;
-        }
-      } catch {}
+      // Parse local appearances
+      const localAppearances = appearancesRaw ? (() => { try { return JSON.parse(appearancesRaw); } catch { return {}; } })() : {};
 
-      // Try loading from Supabase — compare timestamps, newest wins
-      // Column may not exist yet — detect and disable future attempts
+      // ── Single getUser() call + parallel Supabase profile queries ──
       let bestFloors = localFloors;
       let bestFloorId = localCurrentFloorId;
       try {
-        const { data: { user: floorUser } } = await supabase.auth.getUser();
-        if (floorUser && _profileHasOfficeLayout) {
-          const { data: layoutData, error: layoutErr } = await supabase.from('profiles').select('office_layout').eq('id', floorUser.id).single();
-          if (layoutErr) {
+        const { data: { user: authUser } } = await supabase.auth.getUser();
+        if (authUser) {
+          // Fetch both profile columns in parallel (wrap builders so TS sees Promise)
+          const layoutP = _profileHasOfficeLayout
+            ? supabase.from('profiles').select('office_layout').eq('id', authUser.id).single().then(r => r)
+            : Promise.resolve({ data: null, error: null } as any);
+          const appearanceP = _profileHasAgentAppearance
+            ? supabase.from('profiles').select('agent_appearance').eq('id', authUser.id).single().then(r => r)
+            : Promise.resolve({ data: null, error: null } as any);
+
+          const [layoutRes, appearanceRes] = await Promise.all([layoutP, appearanceP]);
+
+          // Merge floors
+          if (layoutRes.error) {
             _profileHasOfficeLayout = false;
-          } else {
-            const remote = layoutData?.office_layout as { floors?: OfficeFloor[]; currentFloorId?: string; updatedAt?: number } | null;
+          } else if (layoutRes.data?.office_layout) {
+            const remote = layoutRes.data.office_layout as { floors?: OfficeFloor[]; currentFloorId?: string; updatedAt?: number };
             if (remote?.floors && remote.floors.length > 0) {
               const remoteUpdatedAt = remote.updatedAt || 0;
               let useRemote = false;
@@ -917,61 +984,38 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               }
             }
           }
-        }
-      } catch {}
 
-      // Apply the winning data
-      if (bestFloors.length > 0) setFloors(bestFloors);
-      if (bestFloorId) setCurrentFloorId(bestFloorId);
-
-      // Floors are now loaded — enable persistence useEffect
-      floorsInitializedRef.current = true;
-
-      // Load agent appearances — Supabase + localStorage merge
-      try {
-        const appearancesRaw = await storage.getItem(STORAGE_KEY_APPEARANCES);
-        const local = appearancesRaw ? JSON.parse(appearancesRaw) : {};
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user && _profileHasAgentAppearance) {
-          const { data, error: appErr } = await supabase.from('profiles').select('agent_appearance').eq('id', user.id).single();
-          if (appErr) {
+          // Merge appearances
+          if (appearanceRes.error) {
             _profileHasAgentAppearance = false;
-            if (Object.keys(local).length > 0) setAppearances(local);
+            if (Object.keys(localAppearances).length > 0) setAppearances(localAppearances);
           } else {
-            const remote = data?.agent_appearance || {};
-            const merged = { ...local, ...remote };
-            setAppearances(merged);
+            const remoteApp = appearanceRes.data?.agent_appearance || {};
+            setAppearances({ ...localAppearances, ...remoteApp });
           }
-        } else if (Object.keys(local).length > 0) {
-          setAppearances(local);
+        } else {
+          if (Object.keys(localAppearances).length > 0) setAppearances(localAppearances);
         }
       } catch {
-        try {
-          const appearancesRaw = await storage.getItem(STORAGE_KEY_APPEARANCES);
-          if (appearancesRaw) setAppearances(JSON.parse(appearancesRaw));
-        } catch {}
+        if (Object.keys(localAppearances).length > 0) setAppearances(localAppearances);
       }
       appearancesLoadedRef.current = true;
 
-      // Load whiteboard notes
-      try {
-        const notesRaw = await storage.getItem(STORAGE_KEY_WHITEBOARD_NOTES);
-        if (notesRaw) setWhiteboardNotes(JSON.parse(notesRaw));
-      } catch {}
+      // Apply floors
+      if (bestFloors.length > 0) setFloors(bestFloors);
+      if (bestFloorId) setCurrentFloorId(bestFloorId);
+      floorsInitializedRef.current = true;
 
-      // Load session tags from both sources and merge
+      // ── Fire remaining async loads in parallel (non-blocking) ──
       Promise.all([
         loadSessionTags(),
         loadCachedTags()
       ]).then(([primaryTags, cachedTags]) => {
         const merged = new Map(cachedTags);
-        primaryTags.forEach((tags, key) => {
-          merged.set(key, tags);
-        });
+        primaryTags.forEach((tags, key) => { merged.set(key, tags); });
         setSessionTags(merged);
       });
 
-      // Load budget config + idle behaviors config
       loadBudgetConfig().then(setBudgetConfig);
       loadIdleConfig().then(cfg => { setIdleConfig(cfg); idleConfigRef.current = cfg; });
     })();
@@ -1583,6 +1627,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   const handleServiceOpen = (url: string) => {
     if (!url) return;
+    // Validate URL protocol to prevent javascript:/data:/file: injection
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return;
+    } catch {
+      return; // Invalid URL
+    }
     if (Platform.OS === 'web') {
       window.open(url, '_blank', 'noopener,noreferrer');
     } else {
@@ -1608,7 +1659,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.lineWidth = 3;
-    ctx.strokeStyle = '#1a1a1a';
+    ctx.strokeStyle = '#000000';
     let drawing = false;
     let lastX = 0, lastY = 0;
     canvas.onpointerdown = (e) => {
@@ -1803,8 +1854,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       }
 
       case 'aquarium': {
-        const count = (item.aquariumFishCount || 3) + 1;
-        updateFurnitureField({ aquariumFishCount: count > 8 ? 1 : count });
+        // Feed the fish! They swim to the top excitedly
+        updateFurnitureField({ aquariumFed: Date.now() });
+        addFloorEffect('pulse');
         break;
       }
 
@@ -1820,9 +1872,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         addFloorEffect('pulse');
         break;
 
-      case 'terrarium':
-        // Ambient — no interaction needed
+      case 'terrarium': {
+        // Feed the creatures! They react excitedly
+        updateFurnitureField({
+          terrariumFed: Date.now(),
+          terrariumCreature: ((item.terrariumCreature ?? 0) + 1) % 4,
+        });
+        addFloorEffect('pulse');
         break;
+      }
 
       case 'zen_garden': {
         const next = ((item.zenPattern ?? 0) + 1) % 3;
@@ -1912,17 +1970,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       }
 
       case 'message_board': {
-        const sources = ['imessage', 'sms', 'whatsapp'];
-        const curIdx = sources.indexOf(item.messageSource || 'sms');
-        const msgs = [
-          'Hey, are you free?', 'Meeting at 3pm', 'Ship it! 🚀',
-          'PR looks good 👍', 'Lunch?', 'Check this out',
-        ];
-        updateFurnitureField({
-          messageSource: sources[(curIdx + 1) % sources.length],
-          messagePreview: msgs[Math.floor(Math.random() * msgs.length)],
-          messageCount: Math.floor(Math.random() * 8) + 1,
-        });
+        setPhoneVisible(true);
         break;
       }
 
@@ -1985,6 +2033,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           });
           addFloorEffect('confetti');
         }
+        break;
+      }
+
+      case 'retro_console': {
+        setEmulatorSystem(item.emulatorSystem || 'gba');
+        setEmulatorVisible(true);
+        break;
+      }
+
+      case 'scrabble_board': {
+        setScrabbleVisible(true);
         break;
       }
 
@@ -3363,6 +3422,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         {/* Terminal - half size (mirrors the Terminal tab — shared state) */}
         {terminalSize === 'half' && (
           <View style={styles.chatPane}>
+            <React.Suspense fallback={<ActivityIndicator color="#6366f1" style={{ flex: 1 }} />}>
             <OfficeTerminal
               circleId={circleId}
               userId={currentUserId}
@@ -3383,6 +3443,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               initialTab={terminalInitialTab}
               compact
             />
+            </React.Suspense>
           </View>
         )}
 
@@ -3404,6 +3465,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                 <Text style={styles.terminalFullscreenBtnText}>✕ Close</Text>
               </Pressable>
             </View>
+            <React.Suspense fallback={<ActivityIndicator color="#6366f1" style={{ flex: 1 }} />}>
             <OfficeTerminal
               circleId={circleId}
               userId={currentUserId}
@@ -3423,6 +3485,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               byoProviderKeys={providerKeys}
               initialTab={terminalInitialTab}
             />
+            </React.Suspense>
           </View>
         )}
       </View>
@@ -3519,26 +3582,38 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </Pressable>
       </Modal>
 
-      {/* Rewards Panel Modal */}
-      <Modal visible={showRewards} animationType="slide" presentationStyle="pageSheet">
-        <RewardsPanel onClose={() => setShowRewards(false)} />
-      </Modal>
+      {/* Rewards Panel Modal (lazy) */}
+      {showRewards && (
+        <Modal visible={showRewards} animationType="slide" presentationStyle="pageSheet">
+          <React.Suspense fallback={null}>
+            <RewardsPanel onClose={() => setShowRewards(false)} />
+          </React.Suspense>
+        </Modal>
+      )}
 
-      {/* Badge celebration overlay — rendered outside Modal so it covers everything */}
-      <BadgeCelebration
-        badge={celebrationBadge}
-        onDismiss={() => setCelebrationBadge(null)}
-      />
+      {/* Badge celebration overlay (lazy) */}
+      {celebrationBadge && (
+        <React.Suspense fallback={null}>
+          <BadgeCelebration
+            badge={celebrationBadge}
+            onDismiss={() => setCelebrationBadge(null)}
+          />
+        </React.Suspense>
+      )}
 
-      {/* Agent setup wizard */}
-      <AgentSetupWizard
-        visible={showSetupWizard}
-        onClose={() => setShowSetupWizard(false)}
-        onComplete={(conn) => {
-          handleAddConnection(conn);
-          setShowSetupWizard(false);
-        }}
-      />
+      {/* Agent setup wizard (lazy) */}
+      {showSetupWizard && (
+        <React.Suspense fallback={null}>
+          <AgentSetupWizard
+            visible={showSetupWizard}
+            onClose={() => setShowSetupWizard(false)}
+            onComplete={(conn) => {
+              handleAddConnection(conn);
+              setShowSetupWizard(false);
+            }}
+          />
+        </React.Suspense>
+      )}
 
       {/* Customization panel */}
       <CustomizePanel
@@ -3646,7 +3721,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                         {nft.image ? (
                           <Image source={{ uri: nft.image }} style={nftStyles.nftImage} resizeMode="cover" />
                         ) : (
-                          <View style={[nftStyles.nftImage, { backgroundColor: '#1a1a2e', alignItems: 'center', justifyContent: 'center' }]}>
+                          <View style={[nftStyles.nftImage, { backgroundColor: '#2a2a2a', alignItems: 'center', justifyContent: 'center' }]}>
                             <Text style={{ fontSize: 24 }}>🖼</Text>
                           </View>
                         )}
@@ -3786,6 +3861,57 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           </View>
         </View>
       </Modal>
+
+      {/* ─── Retro Emulator Modal (lazy) ──────────────────────────────── */}
+      {emulatorVisible && (
+        <React.Suspense fallback={null}>
+          <RetroEmulator
+            visible={emulatorVisible}
+            onClose={() => setEmulatorVisible(false)}
+            initialSystem={emulatorSystem}
+          />
+        </React.Suspense>
+      )}
+
+      {/* ─── Scrabble Game Modal (lazy) ──────────────────────────────── */}
+      {scrabbleVisible && (
+        <React.Suspense fallback={null}>
+          <ScrabbleGame
+            visible={scrabbleVisible}
+            onClose={() => setScrabbleVisible(false)}
+            onStateChange={(state) => {
+              const fl = floors.find((f: OfficeFloor) => f.id === currentFloorId);
+              const fi = fl?.furniture.find((f: FurnitureItem) => f.type === 'scrabble_board');
+              if (fi) {
+                fi.scrabbleActive = !state.gameOver;
+                fi.scrabbleScore1 = state.score1;
+                fi.scrabbleScore2 = state.score2;
+                fi.scrabbleTurn = state.turn;
+                fi.scrabbleWinner = state.gameOver ? state.winner : undefined;
+              }
+            }}
+          />
+        </React.Suspense>
+      )}
+
+      {/* ─── Phone Messenger Modal (lazy) ──────────────────────────────── */}
+      {phoneVisible && (
+        <React.Suspense fallback={null}>
+          <PhoneMessenger
+            visible={phoneVisible}
+            onClose={() => setPhoneVisible(false)}
+            onUnreadCount={(count) => {
+              const fl = floors.find((f: OfficeFloor) => f.id === currentFloorId);
+              const fi = fl?.furniture.find((f: FurnitureItem) => f.type === 'message_board');
+              if (fi) {
+                fi.messageCount = count;
+                fi.messageSource = 'imessage';
+                fi.messagePreview = 'Connected via BlueBubbles';
+              }
+            }}
+          />
+        </React.Suspense>
+      )}
 
       {/* ─── Service Connector Modal ──────────────────────────────────────── */}
       <Modal visible={serviceModalVisible} animationType="fade" transparent>
@@ -4119,7 +4245,7 @@ function CircleOfficePanel({
             key={agent.id}
             style={[
               coStyles.agentCard,
-              { borderColor: isBuilding ? display.color + '66' : isOnline ? display.color + '33' : '#1a1a1a' },
+              { borderColor: isBuilding ? display.color + '66' : isOnline ? display.color + '33' : '#000000' },
               agent.isOwn && coStyles.ownAgentCard,
               isOffline && coStyles.offlineCard,
             ]}
@@ -4192,7 +4318,7 @@ const pmStyles = StyleSheet.create({
     justifyContent: 'center',
   },
   modal: {
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderRadius: 16,
     padding: 24,
     width: 340,
@@ -4359,8 +4485,8 @@ const coStyles = StyleSheet.create({
 
 const nftStyles = StyleSheet.create({
   overlay: { flex: 1, backgroundColor: '#00000088', justifyContent: 'center', alignItems: 'center' },
-  card: { width: 380, maxHeight: 500, backgroundColor: '#0d0d14', borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 16, overflow: 'hidden' },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderColor: '#1a1a2e' },
+  card: { width: 380, maxHeight: 500, backgroundColor: '#0d0d14', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 16, overflow: 'hidden' },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderColor: '#2a2a2a' },
   headerText: { color: '#eee', fontSize: 14, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 2 },
   closeBtn: { padding: 6 },
   closeText: { color: '#666', fontSize: 16 },
@@ -4370,17 +4496,17 @@ const nftStyles = StyleSheet.create({
   emptyHint: { color: '#555', fontSize: 11, fontFamily: 'monospace', textAlign: 'center', lineHeight: 16 },
   grid: { maxHeight: 380 },
   gridContent: { flexDirection: 'row', flexWrap: 'wrap', padding: 8, gap: 8 },
-  nftCard: { width: '30%' as any, backgroundColor: '#111', borderRadius: 8, borderWidth: 1, borderColor: '#1a1a2e', overflow: 'hidden', padding: 4, alignItems: 'center' },
+  nftCard: { width: '30%' as any, backgroundColor: '#111', borderRadius: 8, borderWidth: 1, borderColor: '#2a2a2a', overflow: 'hidden', padding: 4, alignItems: 'center' },
   nftImage: { width: '100%' as any, aspectRatio: 1, borderRadius: 6 },
   nftName: { color: '#ccc', fontSize: 9, fontFamily: 'monospace', fontWeight: '700', marginTop: 4, textAlign: 'center' },
   nftCollection: { color: '#555', fontSize: 7, fontFamily: 'monospace', textAlign: 'center' },
-  clearBtn: { margin: 12, padding: 10, backgroundColor: '#1a1a2e', borderRadius: 8, alignItems: 'center' },
+  clearBtn: { margin: 12, padding: 10, backgroundColor: '#2a2a2a', borderRadius: 8, alignItems: 'center' },
   clearText: { color: '#ef4444', fontSize: 10, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
 });
 
 const imgPickerStyles = StyleSheet.create({
-  tabRow: { flexDirection: 'row', borderBottomWidth: 1, borderColor: '#1a1a2e' },
-  tab: { flex: 1, paddingVertical: 10, alignItems: 'center', backgroundColor: '#0a0a10' },
+  tabRow: { flexDirection: 'row', borderBottomWidth: 1, borderColor: '#2a2a2a' },
+  tab: { flex: 1, paddingVertical: 10, alignItems: 'center', backgroundColor: '#000000' },
   tabActive: { backgroundColor: '#0d0d14', borderBottomWidth: 2, borderBottomColor: '#6366f1' },
   tabText: { color: '#555', fontSize: 10, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
   tabTextActive: { color: '#eee' },
@@ -4392,13 +4518,13 @@ const imgPickerStyles = StyleSheet.create({
 });
 
 const stickyStyles = StyleSheet.create({
-  colorRow: { flexDirection: 'row', justifyContent: 'center', gap: 8, paddingVertical: 10, borderBottomWidth: 1, borderColor: '#1a1a2e' },
+  colorRow: { flexDirection: 'row', justifyContent: 'center', gap: 8, paddingVertical: 10, borderBottomWidth: 1, borderColor: '#2a2a2a' },
   colorDot: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: '#333' },
   colorDotActive: { borderColor: '#fff', borderWidth: 3 },
   writeArea: { padding: 12, flex: 1 },
   textInput: {
     minHeight: 140, borderRadius: 6, padding: 12,
-    color: '#1a1a1a', fontSize: 14, fontFamily: 'monospace',
+    color: '#000000', fontSize: 14, fontFamily: 'monospace',
     textAlignVertical: 'top',
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
@@ -4406,7 +4532,7 @@ const stickyStyles = StyleSheet.create({
   canvasWrap: { width: '100%' as any, height: 200, borderRadius: 6, overflow: 'hidden' },
   clearDrawBtn: {
     paddingHorizontal: 16, paddingVertical: 6, borderRadius: 6,
-    borderWidth: 1, borderColor: '#333', backgroundColor: '#0a0a10',
+    borderWidth: 1, borderColor: '#333', backgroundColor: '#000000',
   },
   clearDrawText: { color: '#888', fontSize: 9, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
   gifArea: { padding: 12, gap: 10 },
@@ -4589,7 +4715,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#050508' },
   titleBar: {
     alignItems: 'center', paddingHorizontal: 8, paddingVertical: 2,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a2e',
+    borderBottomWidth: 1, borderBottomColor: '#2a2a2a',
   },
   titleInner: { flexDirection: 'row', alignItems: 'center', width: '100%', gap: 3 },
   titleCenter: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
@@ -4602,7 +4728,7 @@ const styles = StyleSheet.create({
   titleStatText: { fontSize: 10, color: '#888', fontFamily: 'monospace' },
   modeBtn: {
     paddingHorizontal: 6, paddingVertical: 4, borderRadius: 6,
-    borderWidth: 1, borderColor: '#1a1a2e', backgroundColor: '#0a0a10',
+    borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
     minWidth: 28, minHeight: 28, alignItems: 'center' as any, justifyContent: 'center' as any,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -4631,8 +4757,8 @@ const styles = StyleSheet.create({
   },
   tagsActionBtnTextSecondary: { color: '#6366f1' },
   iconBtn: {
-    width: 30, height: 30, borderRadius: 7, backgroundColor: '#111118',
-    borderWidth: 1, borderColor: '#1a1a2e', alignItems: 'center', justifyContent: 'center', marginLeft: 3,
+    width: 30, height: 30, borderRadius: 7, backgroundColor: '#222222',
+    borderWidth: 1, borderColor: '#2a2a2a', alignItems: 'center', justifyContent: 'center', marginLeft: 3,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   iconBtnText: { fontSize: 14 },
@@ -4647,13 +4773,13 @@ const styles = StyleSheet.create({
   // Floor selector
   floorBar: {
     paddingHorizontal: 8, paddingVertical: 2,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a2e', backgroundColor: '#08080d',
+    borderBottomWidth: 1, borderBottomColor: '#2a2a2a', backgroundColor: '#08080d',
   },
   floorList: { gap: 4, flexDirection: 'row', alignItems: 'center' },
   floorChip: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     paddingHorizontal: 8, paddingVertical: 3,
-    borderRadius: 6, borderWidth: 1, borderColor: '#1a1a2e', backgroundColor: '#0a0a10',
+    borderRadius: 6, borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
   },
   floorChipActive: {
     borderColor: '#6366f160', backgroundColor: '#6366f115',
@@ -4693,7 +4819,7 @@ const styles = StyleSheet.create({
   // Connections bar
   connectionsBar: {
     paddingHorizontal: 12, paddingVertical: 4,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a2e', backgroundColor: '#08080d',
+    borderBottomWidth: 1, borderBottomColor: '#2a2a2a', backgroundColor: '#08080d',
     flexDirection: 'row', alignItems: 'center',
   },
   connectionsToggle: { paddingRight: 8, paddingVertical: 2 },
@@ -4702,7 +4828,7 @@ const styles = StyleSheet.create({
   connectionChip: {
     flexDirection: 'row', alignItems: 'center', gap: 5,
     paddingHorizontal: 10, paddingVertical: 6,
-    borderRadius: 8, borderWidth: 1, borderColor: '#1a1a2e', backgroundColor: '#0d0d14',
+    borderRadius: 8, borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#0d0d14',
   },
   connectionChipDot: { width: 6, height: 6, borderRadius: 3 },
   connectionChipStatus: { width: 5, height: 5, borderRadius: 3 },
@@ -4718,14 +4844,14 @@ const styles = StyleSheet.create({
 
   editToolbar: {
     paddingHorizontal: 12, paddingVertical: 10,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a2e', backgroundColor: '#0a0a12',
+    borderBottomWidth: 1, borderBottomColor: '#2a2a2a', backgroundColor: '#0a0a12',
   },
   editLabel: { fontSize: 10, color: '#888', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1, marginBottom: 8 },
   editItems: { gap: 8, flexDirection: 'row', paddingRight: 12 },
   editItem: {
     alignItems: 'center', justifyContent: 'center',
     width: 88, height: 88,
-    borderRadius: 12, borderWidth: 1.5, borderColor: '#1a1a2e', backgroundColor: '#0a0a10',
+    borderRadius: 12, borderWidth: 1.5, borderColor: '#2a2a2a', backgroundColor: '#000000',
     gap: 3, paddingHorizontal: 4, paddingVertical: 6,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -4749,7 +4875,7 @@ const styles = StyleSheet.create({
   editCatTab: {
     flexDirection: 'row' as const, alignItems: 'center' as const, gap: 4,
     paddingHorizontal: 10, paddingVertical: 5,
-    borderRadius: 8, borderWidth: 1, borderColor: '#1a1a2e',
+    borderRadius: 8, borderWidth: 1, borderColor: '#2a2a2a',
     backgroundColor: '#0d0d14',
   },
   editCatTabText: {
@@ -4798,7 +4924,7 @@ const styles = StyleSheet.create({
   },
   mobileEmptyBtnText: { fontSize: 14, color: '#fff', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1 },
   mobileAgentCard: {
-    backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a2e',
+    backgroundColor: '#222222', borderWidth: 1, borderColor: '#2a2a2a',
     borderRadius: 14, padding: 16, gap: 10,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -4831,19 +4957,19 @@ const styles = StyleSheet.create({
   emptySub: { fontSize: 9, color: '#444', fontFamily: 'monospace', fontStyle: 'italic', textAlign: 'center' },
   agentPosition: { position: 'absolute', zIndex: 10 },
   quickBar: {
-    borderTopWidth: 1, borderTopColor: '#1a1a2e', paddingVertical: 6, paddingHorizontal: 8,
+    borderTopWidth: 1, borderTopColor: '#2a2a2a', paddingVertical: 6, paddingHorizontal: 8,
   },
   quickBarInner: { gap: 6, flexDirection: 'row' },
   quickChip: {
     flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8,
-    paddingVertical: 4, borderRadius: 10, borderWidth: 1, borderColor: '#1a1a2e', backgroundColor: '#0a0a10',
+    paddingVertical: 4, borderRadius: 10, borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
   },
   quickProviderDot: { width: 4, height: 4, borderRadius: 2 },
   quickDot: { width: 4, height: 4, borderRadius: 2 },
   quickName: { fontSize: 9, color: '#666', fontFamily: 'monospace', fontWeight: '600' },
   quickCost: { fontSize: 8, color: '#444', fontFamily: 'monospace' },
   chatToggle: {
-    borderTopWidth: 1, borderTopColor: '#1a1a2e',
+    borderTopWidth: 1, borderTopColor: '#2a2a2a',
     backgroundColor: '#0a0a12',
   },
   terminalBar: {
@@ -4859,7 +4985,7 @@ const styles = StyleSheet.create({
   },
   terminalSizeBtn: {
     width: 32, height: 28, borderRadius: 6,
-    backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a2e',
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#2a2a2a',
     alignItems: 'center', justifyContent: 'center',
   },
   terminalSizeBtnActive: {
@@ -4931,8 +5057,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
-    backgroundColor: '#0a0a0f',
+    borderBottomColor: '#2a2a2a',
+    backgroundColor: '#000000',
   },
   terminalFullscreenBtn: {
     paddingHorizontal: 12,

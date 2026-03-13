@@ -2,7 +2,7 @@
  * KanbanColumn — column with drag-and-drop target zone, 7-column support
  */
 
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { View, Text, FlatList, TextInput, Pressable, StyleSheet, Platform } from 'react-native';
 import { KanbanTask, KanbanColumnDef, TaskStatus, COLUMNS, PRIORITY_COLORS } from '../../../../types/kanban';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
@@ -39,6 +39,7 @@ export default function KanbanColumn({
   const [quickAddFocused, setQuickAddFocused] = useState(false);
   const [showBatchMenu, setShowBatchMenu] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
+  const dropRef = useRef<View>(null);
 
   // Priority breakdown for batch menu
   const priorityBreakdown = tasks.reduce((acc, t) => {
@@ -60,29 +61,56 @@ export default function KanbanColumn({
     setQuickAddText('');
   };
 
-  const webDropProps = Platform.OS === 'web' ? {
-    onDragOver: (e: any) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; },
-    onDragEnter: (e: any) => { e.preventDefault(); onDragEnter?.(); },
-    onDragLeave: (e: any) => {
-      if (e.currentTarget.contains(e.relatedTarget)) return;
-      onDragLeave?.();
-    },
-    onDrop: (e: any) => {
+  // Attach native HTML5 drop events via ref for reliable drop handling
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const node = dropRef.current as unknown as HTMLElement | null;
+    if (!node?.addEventListener) return;
+
+    const handleDragOver = (e: DragEvent) => {
       e.preventDefault();
-      const taskId = e.dataTransfer.getData('text/plain');
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    };
+
+    const handleDragEnterEvt = (e: DragEvent) => {
+      e.preventDefault();
+      onDragEnter?.();
+    };
+
+    const handleDragLeaveEvt = (e: DragEvent) => {
+      // Only fire if truly leaving the column (not entering a child)
+      if (node.contains(e.relatedTarget as Node)) return;
+      onDragLeave?.();
+    };
+
+    const handleDropEvt = (e: DragEvent) => {
+      e.preventDefault();
+      const taskId = e.dataTransfer?.getData('text/plain');
       if (taskId) onDrop?.(taskId);
-    },
-  } : {};
+    };
+
+    node.addEventListener('dragover', handleDragOver);
+    node.addEventListener('dragenter', handleDragEnterEvt);
+    node.addEventListener('dragleave', handleDragLeaveEvt);
+    node.addEventListener('drop', handleDropEvt);
+
+    return () => {
+      node.removeEventListener('dragover', handleDragOver);
+      node.removeEventListener('dragenter', handleDragEnterEvt);
+      node.removeEventListener('dragleave', handleDragLeaveEvt);
+      node.removeEventListener('drop', handleDropEvt);
+    };
+  }, [onDragEnter, onDragLeave, onDrop]);
 
   return (
     <View
+      ref={dropRef}
       style={[
         s.column,
         isFullWidth && s.columnFull,
         isDragOver && s.columnDragOver,
-        isDragOver && { borderColor: column.color + '50' },
+        isDragOver && { borderColor: column.color + '60', backgroundColor: column.color + '08' },
       ]}
-      {...webDropProps}
     >
       {/* Header */}
       <View style={s.header}>
@@ -176,8 +204,8 @@ export default function KanbanColumn({
 
       {/* Drop indicator */}
       {isDragOver && (
-        <View style={[s.dropIndicator, { backgroundColor: column.color + '12', borderColor: column.color + '30' }]}>
-          <Text style={[s.dropText, { color: column.color }]}>Drop here</Text>
+        <View style={[s.dropIndicator, { backgroundColor: column.color + '15', borderColor: column.color + '40' }]}>
+          <Text style={[s.dropText, { color: column.color }]}>Drop to move here</Text>
         </View>
       )}
 
@@ -243,7 +271,7 @@ const s = StyleSheet.create({
     minWidth: 240,
     backgroundColor: '#0c0c14',
     borderRadius: 12,
-    borderWidth: 1,
+    borderWidth: 2,
     borderColor: '#1a1a28',
     marginRight: 10,
     flexShrink: 0,
@@ -262,7 +290,7 @@ const s = StyleSheet.create({
     borderBottomWidth: 0,
   },
   columnDragOver: {
-    backgroundColor: '#0f0f1a',
+    // Colors applied inline with column.color
   },
   header: {
     flexDirection: 'row',
@@ -454,15 +482,16 @@ const s = StyleSheet.create({
   dropIndicator: {
     marginHorizontal: 10,
     marginBottom: 6,
-    paddingVertical: 10,
+    paddingVertical: 12,
     borderRadius: 8,
-    borderWidth: 1,
+    borderWidth: 2,
     borderStyle: 'dashed' as any,
     alignItems: 'center',
   },
   dropText: {
     fontSize: 11,
-    fontWeight: '600',
+    fontWeight: '700',
+    letterSpacing: 0.5,
   },
   list: {
     flex: 1,
@@ -481,7 +510,7 @@ const s = StyleSheet.create({
     gap: 6,
   },
   emptyIcon: {
-    color: '#2a2a3e',
+    color: '#333333',
     fontSize: 20,
     fontWeight: '900',
   },

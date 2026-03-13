@@ -54,7 +54,9 @@ import {
   AutomationTemplate,
   SUGGESTED_TEMPLATES,
   SUGGESTED_GROUPS,
+  TEMPLATE_CATEGORIES,
 } from '../lib/automationTemplates';
+import { AGENT_SPIRITS, SPIRIT_CATEGORIES, getSpiritById, type AgentSpirit } from '../lib/agentSpirits';
 import { supabase } from '../lib/supabase';
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -408,7 +410,7 @@ function SuggestedSection({
                 onPress={() => onApply(t)}
                 style={[sg.card, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
               >
-                <View style={[sg.iconBox, { backgroundColor: t.suggestedIconBg || '#1a1a1a' }]}>
+                <View style={[sg.iconBox, { backgroundColor: t.suggestedIconBg || '#000000' }]}>
                   <Text style={sg.iconEmoji}>{t.icon}</Text>
                 </View>
                 <Text style={sg.cardTitle}>{t.name}</Text>
@@ -483,7 +485,7 @@ const sg = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
     fontFamily: 'monospace',
-    backgroundColor: '#111118',
+    backgroundColor: '#222222',
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
@@ -498,7 +500,7 @@ const sg = StyleSheet.create({
     backgroundColor: '#0d0d0d',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
     padding: 14,
     gap: 8,
   },
@@ -628,7 +630,7 @@ const rh = StyleSheet.create({
   title: { color: '#fff', fontSize: 16, fontWeight: '800' },
   closeBtn: { padding: 4 },
   closeText: { color: '#555', fontSize: 16 },
-  divider: { height: 1, backgroundColor: '#1a1a1a' },
+  divider: { height: 1, backgroundColor: '#000000' },
   empty: { color: '#555', fontSize: 12, textAlign: 'center', padding: 24, fontFamily: 'monospace' },
   row: {
     flexDirection: 'row',
@@ -746,7 +748,7 @@ const tp = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: '#000000',
     paddingHorizontal: 12,
     paddingVertical: 10,
     gap: 8,
@@ -1100,7 +1102,7 @@ const mn = StyleSheet.create({
   subtitle: { color: '#555', fontSize: 11, marginTop: 3 },
   closeBtn: { padding: 4 },
   closeText: { color: '#555', fontSize: 16 },
-  divider: { height: 1, backgroundColor: '#1a1a1a' },
+  divider: { height: 1, backgroundColor: '#000000' },
   scroll: { maxHeight: 480 },
   unsaved: { alignItems: 'center', padding: 32, gap: 10 },
   unsavedIcon: { fontSize: 32 },
@@ -1367,7 +1369,7 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
               ? run.errorMessage.split('\n').filter(Boolean)
               : logLines;
             return (
-              <View key={`live-${run.id}`} style={{ backgroundColor: '#1a1a2e', borderWidth: 1, borderColor: '#6366f180', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+              <View key={`live-${run.id}`} style={{ backgroundColor: '#2a2a2a', borderWidth: 1, borderColor: '#6366f180', borderRadius: 8, padding: 10, marginBottom: 8 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                   <ActivityIndicator size="small" color="#6366f1" />
                   <Text style={{ color: '#ddd', fontSize: 13, fontWeight: '700' }}>
@@ -1673,7 +1675,7 @@ function RunRow({ run }: { run: AutomationRun }) {
         <View style={s.runDetail}>
           {/* Execution log */}
           {logSteps.length > 0 && (
-            <View style={{ backgroundColor: '#0a0a14', borderRadius: 4, padding: 6, marginBottom: 6, borderWidth: 1, borderColor: '#1a1a2e' }}>
+            <View style={{ backgroundColor: '#0a0a14', borderRadius: 4, padding: 6, marginBottom: 6, borderWidth: 1, borderColor: '#2a2a2a' }}>
               <Text style={{ color: '#666', fontSize: 9, fontWeight: '800', fontFamily: 'monospace', marginBottom: 3, letterSpacing: 1 }}>EXECUTION LOG</Text>
               {logSteps.map((step: string, i: number) => (
                 <Text key={i} style={{ color: step.includes('❌') ? '#ef4444' : step.includes('✓') || step.includes('✅') ? '#22c55e' : '#aaa', fontSize: 10, fontFamily: 'monospace', lineHeight: 14 }}>{step}</Text>
@@ -1801,6 +1803,10 @@ function AutomationFormModal({
   const [templateId, setTemplateId] = useState<string | null>(
     initialTemplate?.id ?? prefill?.templateId ?? null,
   );
+  const [selectedSpirit, setSelectedSpirit] = useState<string | null>(
+    initialTemplate?.spirit ?? (prefill as any)?.spirit ?? null,
+  );
+  const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -1841,6 +1847,7 @@ function AutomationFormModal({
     setModel(t.model);
     setOutputTarget(t.output_target as OutputTarget);
     setIncludeContext(t.include_context);
+    setSelectedSpirit(t.spirit ?? null);
 
     if (t.trigger_type === 'schedule' && t.cron_expression)
       setSelectedTrigger(getTriggerById(`schedule:${t.cron_expression}`) ?? null);
@@ -1913,6 +1920,10 @@ function AutomationFormModal({
       ? { ...(eventConfig || {}), linked_goal_id: finalGoalId }
       : eventConfig;
 
+    // Resolve spirit prompt for server-side injection
+    const spiritObj = selectedSpirit ? getSpiritById(selectedSpirit) : null;
+    const spiritPrompt = spiritObj?.systemPromptPrefix ?? null;
+
     if (isEdit && editing) {
       const result = await updateAutomation(editing.id, {
         name: name.trim(),
@@ -1924,6 +1935,8 @@ function AutomationFormModal({
         eventConfig: mergedEventConfig,
         includeContext,
         outputTarget,
+        spirit: selectedSpirit,
+        spiritPrompt,
       });
       setSaving(false);
       if (result.error) { setError(result.error); return; }
@@ -1942,6 +1955,8 @@ function AutomationFormModal({
         includeContext,
         outputTarget,
         templateId: templateId || undefined,
+        spirit: selectedSpirit || undefined,
+        spiritPrompt: spiritPrompt || undefined,
       };
       const result = await createAutomation(input);
       setSaving(false);
@@ -1968,24 +1983,48 @@ function AutomationFormModal({
               </Pressable>
             </View>
 
-            {/* Template gallery */}
+            {/* Template gallery — accordion by category */}
             <Text style={f.label}>TEMPLATES</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={f.templateScroll}>
-              {AUTOMATION_TEMPLATES.map((t) => (
-                <Pressable
-                  key={t.id}
-                  onPress={() => applyTemplate(t)}
-                  style={[
-                    f.templateChip,
-                    templateId === t.id && { borderColor: accentColor, backgroundColor: accentColor + '15' },
-                    Platform.OS === 'web' && { cursor: 'pointer' } as any,
-                  ]}
-                >
-                  <Text style={f.templateIcon}>{t.icon}</Text>
-                  <Text style={[f.templateName, templateId === t.id && { color: accentColor }]}>{t.name}</Text>
-                </Pressable>
-              ))}
-            </ScrollView>
+            {TEMPLATE_CATEGORIES.map((cat) => {
+              const catTemplates = AUTOMATION_TEMPLATES.filter((t) => t.category === cat.key);
+              if (catTemplates.length === 0) return null;
+              const isExpanded = expandedCategory === cat.key;
+              return (
+                <View key={cat.key} style={{ marginBottom: 6 }}>
+                  <Pressable
+                    onPress={() => setExpandedCategory(isExpanded ? null : cat.key)}
+                    style={[f.accordionHeader, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  >
+                    <Text style={f.accordionIcon}>{cat.icon}</Text>
+                    <Text style={f.accordionLabel}>{cat.label}</Text>
+                    <Text style={f.accordionCount}>{catTemplates.length}</Text>
+                    <Text style={f.accordionChevron}>{isExpanded ? '▴' : '▾'}</Text>
+                  </Pressable>
+                  {isExpanded && (
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={f.templateScroll}>
+                      {catTemplates.map((t) => (
+                        <Pressable
+                          key={t.id}
+                          onPress={() => applyTemplate(t)}
+                          style={[
+                            f.templateChip,
+                            templateId === t.id && { borderColor: accentColor, backgroundColor: accentColor + '15' },
+                            Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                          ]}
+                        >
+                          <Text style={f.templateIcon}>{t.icon}</Text>
+                          <Text style={[f.templateName, templateId === t.id && { color: accentColor }]}>{t.name}</Text>
+                          {t.spirit && (() => {
+                            const sp = getSpiritById(t.spirit);
+                            return sp ? <Text style={{ fontSize: 10, marginLeft: 2 }}>{sp.emoji}</Text> : null;
+                          })()}
+                        </Pressable>
+                      ))}
+                    </ScrollView>
+                  )}
+                </View>
+              );
+            })}
 
             {/* Name */}
             <Text style={f.label}>NAME</Text>
@@ -2058,6 +2097,46 @@ function AutomationFormModal({
               <View style={{ flex: 1 }} />
               <Text style={f.modelChevron}>▾</Text>
             </Pressable>
+
+            {/* Spirit */}
+            <Text style={f.label}>SOUL / SPIRIT</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 4 }}>
+              <View style={f.chipRow}>
+                <Pressable
+                  onPress={() => setSelectedSpirit(null)}
+                  style={[
+                    f.chip,
+                    !selectedSpirit && { borderColor: '#555', backgroundColor: '#ffffff08' },
+                    Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                  ]}
+                >
+                  <Text style={[f.chipText, !selectedSpirit && { color: '#aaa' }]}>None</Text>
+                </Pressable>
+                {AGENT_SPIRITS.map((sp) => (
+                  <Pressable
+                    key={sp.id}
+                    onPress={() => setSelectedSpirit(sp.id)}
+                    style={[
+                      f.chip,
+                      selectedSpirit === sp.id && { borderColor: sp.color, backgroundColor: sp.color + '20' },
+                      Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                    ]}
+                  >
+                    <Text style={[f.chipText, selectedSpirit === sp.id && { color: sp.color }]}>
+                      {sp.emoji} {sp.name}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </ScrollView>
+            {selectedSpirit && (() => {
+              const sp = getSpiritById(selectedSpirit);
+              return sp ? (
+                <Text style={{ color: '#555', fontSize: 10, marginBottom: 8, fontStyle: 'italic' }}>
+                  {sp.tagline}
+                </Text>
+              ) : null;
+            })()}
 
             {/* Output */}
             <Text style={f.label}>OUTPUT</Text>
@@ -2293,7 +2372,7 @@ const s = StyleSheet.create({
   },
   tabs: {
     flexDirection: 'row',
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderRadius: 8,
     padding: 3,
     gap: 2,
@@ -2350,7 +2429,7 @@ const s = StyleSheet.create({
     backgroundColor: '#0d0d0d',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
     padding: 32,
     alignItems: 'center',
     marginBottom: 8,
@@ -2370,7 +2449,7 @@ const s = StyleSheet.create({
   },
   emptyBtn: {
     marginTop: 16,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#333',
     borderRadius: 8,
@@ -2384,7 +2463,7 @@ const s = StyleSheet.create({
     backgroundColor: '#111',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
     overflow: 'hidden',
   },
   cardHeader: {
@@ -2428,7 +2507,7 @@ const s = StyleSheet.create({
 
   // Run history
   noRuns: { color: '#555', fontSize: 11, fontFamily: 'monospace', padding: 10, textAlign: 'center' },
-  runsList: { borderTopWidth: 1, borderTopColor: '#1a1a1a' },
+  runsList: { borderTopWidth: 1, borderTopColor: '#000000' },
   runRow: { borderBottomWidth: 1, borderBottomColor: '#0f0f0f' },
   runRowHeader: { flexDirection: 'row', alignItems: 'center', padding: 8, paddingHorizontal: 10, gap: 8 },
   runIcon: { fontSize: 12 },
@@ -2437,7 +2516,7 @@ const s = StyleSheet.create({
   runTokens: { color: '#555', fontSize: 10, fontFamily: 'monospace' },
   runCost: { color: '#f59e0b', fontSize: 10, fontFamily: 'monospace' },
   runChevron: { color: '#444', fontSize: 9, marginLeft: 'auto' },
-  runDetail: { paddingHorizontal: 10, paddingBottom: 10, backgroundColor: '#0a0a0a' },
+  runDetail: { paddingHorizontal: 10, paddingBottom: 10, backgroundColor: '#000000' },
   runOutput: { color: '#ccc', fontSize: 11, fontFamily: 'monospace', lineHeight: 16 },
   runError: { color: '#ef4444', fontSize: 11, fontFamily: 'monospace', marginTop: 4 },
   runMeta: { color: '#444', fontSize: 9, fontFamily: 'monospace', marginTop: 6 },
@@ -2489,7 +2568,7 @@ const f = StyleSheet.create({
     marginBottom: 6,
   },
   input: {
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#222',
     borderRadius: 8,
@@ -2538,7 +2617,7 @@ const f = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#222',
     borderRadius: 8,
@@ -2556,6 +2635,18 @@ const f = StyleSheet.create({
   chipText: { color: '#888', fontSize: 11, fontWeight: '600', fontFamily: 'monospace' },
 
   // Templates
+  // Accordion template categories
+  accordionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+  },
+  accordionIcon: { fontSize: 12 },
+  accordionLabel: { color: '#9090a8', fontSize: 11, fontWeight: '700', fontFamily: 'monospace', flex: 1 },
+  accordionCount: { color: '#555', fontSize: 10, fontWeight: '600', fontFamily: 'monospace', backgroundColor: '#1a1a1a', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4 },
+  accordionChevron: { color: '#555', fontSize: 10, marginLeft: 2 },
   templateScroll: { marginBottom: 4 },
   templateChip: {
     flexDirection: 'row',
@@ -2580,10 +2671,10 @@ const f = StyleSheet.create({
   memorySection: {
     marginTop: 16,
     padding: 12,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
   },
   memorySectionRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   memoryManageText: { fontSize: 11, fontWeight: '700' },

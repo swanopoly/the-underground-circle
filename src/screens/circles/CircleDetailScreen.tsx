@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import {
   View,
   Text,
@@ -10,22 +10,37 @@ import {
   ScrollView,
   NativeSyntheticEvent,
   NativeScrollEvent,
+  ActivityIndicator,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import ChatTab from './tabs/ChatTab';
-import FeedTab from './tabs/FeedTab';
-import MembersTab from './tabs/MembersTab';
-import ChallengesTab from './tabs/ChallengesTab';
-import OfficeTab, { AgentStats } from './tabs/OfficeTab';
-import WalletTab from './tabs/WalletTab';
-import ProfileTab from './tabs/ProfileTab';
-import RoomsTab from './tabs/RoomsTab';
-import AnalyticsTab from './tabs/AnalyticsTab';
-import IntegrationsTab from './tabs/IntegrationsTab';
-import BackpackTab from './tabs/BackpackTab';
+
+// Lazy-load all non-chat tabs — only mount when user navigates to them
+const OfficeTab = lazy(() => import('./tabs/OfficeTab'));
+const FeedTab = lazy(() => import('./tabs/FeedTab'));
+const MembersTab = lazy(() => import('./tabs/MembersTab'));
+const ChallengesTab = lazy(() => import('./tabs/ChallengesTab'));
+const WalletTab = lazy(() => import('./tabs/WalletTab'));
+const ProfileTab = lazy(() => import('./tabs/ProfileTab'));
+const RoomsTab = lazy(() => import('./tabs/RoomsTab'));
+const AnalyticsTab = lazy(() => import('./tabs/AnalyticsTab'));
+const IntegrationsTab = lazy(() => import('./tabs/IntegrationsTab'));
+const BackpackTab = lazy(() => import('./tabs/BackpackTab'));
 
 import { Circle } from '../../types';
 import ErrorBoundary from '../../components/ErrorBoundary';
+
+/** Mirrors OfficeTab's AgentStats — inlined to avoid importing from lazy module */
+interface AgentStats {
+  agentCount: number;
+  sessionCount: number;
+  costToday: number;
+  costWeek: number;
+  tokens: number;
+}
+
+// Only Chat stays mounted permanently; all other tabs mount on first visit
+const PERSISTENT_TABS = new Set(['CHAT']);
 
 const TAB_META: { key: string; label: string; icon: string }[] = [
   { key: 'CHAT', label: 'Chat', icon: '💬' },
@@ -63,21 +78,15 @@ export default function CircleDetailScreen({ route, navigation }: any) {
 
   const loadCircleData = async () => {
     try {
-      const { data: circleData } = await supabase
-        .from('circles')
-        .select('*')
-        .eq('id', circleId)
-        .single();
-      if (circleData) setCircle(circleData);
-
-      const { data: memberData } = await supabase
-        .from('circle_members')
-        .select('user_id')
-        .eq('circle_id', circleId);
-      if (memberData) {
-        setMemberCount(memberData.length);
-        setOnlineMembers(Math.max(1, Math.floor(memberData.length * 0.5)));
-        setActiveStreakCount(Math.max(1, Math.floor(memberData.length * 0.7)));
+      const [circleRes, memberRes] = await Promise.all([
+        supabase.from('circles').select('*').eq('id', circleId).single(),
+        supabase.from('circle_members').select('user_id').eq('circle_id', circleId),
+      ]);
+      if (circleRes.data) setCircle(circleRes.data);
+      if (memberRes.data) {
+        setMemberCount(memberRes.data.length);
+        setOnlineMembers(Math.max(1, Math.floor(memberRes.data.length * 0.5)));
+        setActiveStreakCount(Math.max(1, Math.floor(memberRes.data.length * 0.7)));
       }
     } catch (error) {
       console.error('Error loading circle data:', error);
@@ -190,64 +199,72 @@ export default function CircleDetailScreen({ route, navigation }: any) {
         </View>
       </View>
 
-      {/* Content — keep tabs mounted so state persists */}
+      {/* Content — Chat & Office stay mounted; other tabs mount on first visit */}
       <View style={[styles.tabContent, activeTab !== 'CHAT' && styles.hiddenTab]}>
         <ErrorBoundary>
           <ChatTab circleId={circleId} accentColor={accentColor} />
         </ErrorBoundary>
       </View>
 
-      <View style={[styles.tabContent, activeTab !== 'OFFICE' && styles.hiddenTab]}>
-        <ErrorBoundary>
-          <OfficeTab circleId={circleId} accentColor={accentColor} onAgentStats={setAgentStats} />
-        </ErrorBoundary>
-      </View>
-      <View style={[styles.tabContent, activeTab !== 'ROOMS' && styles.hiddenTab]}>
-        <ErrorBoundary>
-          <RoomsTab circleId={circleId} accentColor={accentColor} />
-        </ErrorBoundary>
-      </View>
-      <View style={[styles.tabContent, activeTab !== 'BACKPACK' && styles.hiddenTab]}>
-        <ErrorBoundary>
-          <BackpackTab circleId={circleId} accentColor={accentColor} />
-        </ErrorBoundary>
-      </View>
-      <View style={[styles.tabContent, activeTab !== 'FEED' && styles.hiddenTab]}>
-        <ErrorBoundary>
-          <FeedTab circleId={circleId} />
-        </ErrorBoundary>
-      </View>
-      <View style={[styles.tabContent, activeTab !== 'CHALLENGES' && styles.hiddenTab]}>
-        <ErrorBoundary>
-          <ChallengesTab circleId={circleId} />
-        </ErrorBoundary>
-      </View>
-      <View style={[styles.tabContent, activeTab !== 'MEMBERS' && styles.hiddenTab]}>
-        <ErrorBoundary>
-          <MembersTab circleId={circleId} />
-        </ErrorBoundary>
-      </View>
+      <LazyTab tabKey="OFFICE" activeTab={activeTab}>
+        <OfficeTab circleId={circleId} accentColor={accentColor} onAgentStats={setAgentStats} />
+      </LazyTab>
+      <LazyTab tabKey="ROOMS" activeTab={activeTab}>
+        <RoomsTab circleId={circleId} accentColor={accentColor} />
+      </LazyTab>
+      <LazyTab tabKey="BACKPACK" activeTab={activeTab}>
+        <BackpackTab circleId={circleId} accentColor={accentColor} />
+      </LazyTab>
+      <LazyTab tabKey="FEED" activeTab={activeTab}>
+        <FeedTab circleId={circleId} />
+      </LazyTab>
+      <LazyTab tabKey="CHALLENGES" activeTab={activeTab}>
+        <ChallengesTab circleId={circleId} />
+      </LazyTab>
+      <LazyTab tabKey="MEMBERS" activeTab={activeTab}>
+        <MembersTab circleId={circleId} />
+      </LazyTab>
+      <LazyTab tabKey="ANALYTICS" activeTab={activeTab}>
+        <AnalyticsTab circleId={circleId} />
+      </LazyTab>
+      <LazyTab tabKey="INTEGRATIONS" activeTab={activeTab}>
+        <IntegrationsTab circleId={circleId} />
+      </LazyTab>
+      <LazyTab tabKey="WALLET" activeTab={activeTab}>
+        <WalletTab circleId={circleId} />
+      </LazyTab>
+      <LazyTab tabKey="PROFILE" activeTab={activeTab}>
+        <ProfileTab circleId={circleId} navigation={navigation} />
+      </LazyTab>
+    </View>
+  );
+}
 
-      <View style={[styles.tabContent, activeTab !== 'ANALYTICS' && styles.hiddenTab]}>
-        <ErrorBoundary>
-          <AnalyticsTab circleId={circleId} />
-        </ErrorBoundary>
-      </View>
-      <View style={[styles.tabContent, activeTab !== 'INTEGRATIONS' && styles.hiddenTab]}>
-        <ErrorBoundary>
-          <IntegrationsTab circleId={circleId} />
-        </ErrorBoundary>
-      </View>
-      <View style={[styles.tabContent, activeTab !== 'WALLET' && styles.hiddenTab]}>
-        <ErrorBoundary>
-          <WalletTab circleId={circleId} />
-        </ErrorBoundary>
-      </View>
-      <View style={[styles.tabContent, activeTab !== 'PROFILE' && styles.hiddenTab]}>
-        <ErrorBoundary>
-          <ProfileTab circleId={circleId} navigation={navigation} />
-        </ErrorBoundary>
-      </View>
+// ─── Lazy Tab — only mounts on first visit, stays mounted after ─────────────
+
+const tabFallback = (
+  <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#000' }}>
+    <ActivityIndicator color="#6366f1" size="small" />
+  </View>
+);
+
+function LazyTab({ tabKey, activeTab, children }: { tabKey: string; activeTab: string; children: React.ReactNode }) {
+  const [hasVisited, setHasVisited] = useState(PERSISTENT_TABS.has(tabKey));
+  const isActive = activeTab === tabKey;
+
+  useEffect(() => {
+    if (isActive && !hasVisited) setHasVisited(true);
+  }, [isActive, hasVisited]);
+
+  if (!hasVisited) return null;
+
+  return (
+    <View style={[styles.tabContent, !isActive && styles.hiddenTab]}>
+      <ErrorBoundary>
+        <Suspense fallback={tabFallback}>
+          {children}
+        </Suspense>
+      </ErrorBoundary>
     </View>
   );
 }
@@ -397,7 +414,7 @@ function TabBarScroller({ tabs, activeTab, accentColor, isMobile, onTabPress }: 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
   },
   loadingText: {
     color: '#888',
@@ -410,7 +427,7 @@ const styles = StyleSheet.create({
   header: {
     paddingTop: Platform.OS === 'web' ? 4 : 44,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: '#2a2a2a',
     width: '100%',
     alignItems: 'center',
   },
@@ -569,7 +586,7 @@ const styles = StyleSheet.create({
     height: 28,
     alignItems: 'center' as any,
     justifyContent: 'center' as any,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     zIndex: 10,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -592,11 +609,11 @@ const styles = StyleSheet.create({
   },
   tabFadeLeft: {
     left: 24,
-    ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(to right, #0a0a0a, transparent)' } as any : {}),
+    ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(to right, #000000, transparent)' } as any : {}),
   },
   tabFadeRight: {
     right: 24,
-    ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(to left, #0a0a0a, transparent)' } as any : {}),
+    ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(to left, #000000, transparent)' } as any : {}),
   },
 
   // Tab pill style (replaces old underline tabs and hamburger menu)

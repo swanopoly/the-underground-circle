@@ -1,8 +1,9 @@
 /**
  * KanbanCard — HQ Dashboard task card with goal tag, priority badge, time-ago, peer review indicator
+ * Supports HTML5 drag-and-drop on web + move menu on mobile
  */
 
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { View, Text, Pressable, StyleSheet, Platform } from 'react-native';
 import { KanbanTask, TaskStatus, PRIORITY_COLORS, COLUMNS, DEFAULT_AGENT_ROSTER, MODEL_ICONS } from '../../../../types/kanban';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
@@ -66,9 +67,11 @@ function getDueDateInfo(dueDate: string | null): { label: string; color: string 
 export default function KanbanCard({ task, agents, goals, onPress, onMove, onDragStart, onDragEnd }: Props) {
   const [hovered, setHovered] = useState(false);
   const [showMoveBar, setShowMoveBar] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const isDone = task.status === 'done';
   const isPeerReview = task.status === 'peer_review';
   const dueDateInfo = !isDone ? getDueDateInfo(task.due_date) : null;
+  const dragRef = useRef<View>(null);
 
   const assignedAgent = task.assigned_agent_id
     ? agents.find(a => a.id === task.assigned_agent_id)
@@ -88,156 +91,188 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
 
   const pb = priorityBadge(task.priority);
 
-  const webDragProps = Platform.OS === 'web' ? {
-    draggable: true,
-    onDragStart: (e: any) => {
-      e.dataTransfer.setData('text/plain', task.id);
-      e.dataTransfer.effectAllowed = 'move';
+  // Attach native HTML5 drag events via ref — RNW View refs resolve to DOM elements
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const node = dragRef.current as unknown as HTMLElement | null;
+    if (!node?.addEventListener) return;
+
+    node.setAttribute('draggable', 'true');
+    node.style.cursor = 'grab';
+
+    const handleDragStart = (e: DragEvent) => {
+      e.dataTransfer!.setData('text/plain', task.id);
+      e.dataTransfer!.effectAllowed = 'move';
+      setIsDragging(true);
       onDragStart?.(task);
-    },
-    onDragEnd: () => onDragEnd?.(),
-  } : {};
+    };
+
+    const handleDragEnd = () => {
+      setIsDragging(false);
+      onDragEnd?.();
+    };
+
+    node.addEventListener('dragstart', handleDragStart);
+    node.addEventListener('dragend', handleDragEnd);
+
+    return () => {
+      node.removeEventListener('dragstart', handleDragStart);
+      node.removeEventListener('dragend', handleDragEnd);
+    };
+  }, [task.id, onDragStart, onDragEnd]);
 
   return (
     <View style={s.wrapper}>
-      <Pressable
-        onPress={onPress}
-        onHoverIn={() => setHovered(true)}
-        onHoverOut={() => setHovered(false)}
+      <View
+        ref={dragRef}
         style={[
           s.card,
-          hovered && s.cardHovered,
+          hovered && !isDragging && s.cardHovered,
           isDone && s.cardDone,
           isPeerReview && s.cardPeerReview,
+          isDragging && s.cardDragging,
         ]}
-        {...webDragProps}
       >
-        {/* Title */}
-        <Text style={[s.title, isDone && s.titleDone]} numberOfLines={2}>{task.title}</Text>
-
-        {/* Description preview */}
-        {task.description ? (
-          <Text style={s.descriptionPreview} numberOfLines={1}>
-            {task.description.length > 60 ? task.description.slice(0, 60) + '...' : task.description}
-          </Text>
-        ) : null}
-
-        {/* Goal tag */}
-        {goalData && (
-          <View style={s.goalTag}>
-            <View style={[s.goalDot, { backgroundColor: goalData.status === 'active' ? '#22c55e' : goalData.status === 'paused' ? '#f59e0b' : '#666680' }]} />
-            <Text style={s.goalName} numberOfLines={1}>{goalData.name}</Text>
-          </View>
-        )}
-
-        {/* Peer review indicator */}
-        {isPeerReview && (
-          <View style={s.reviewRow}>
-            <View style={s.reviewAvatars}>
-              {goalAgentIds.slice(0, 5).map((aid, i) => {
-                const approved = peerApprovals.includes(aid);
-                const agent = agents.find(a => a.id === aid);
-                const roster = DEFAULT_AGENT_ROSTER.find(r => agent?.name?.toLowerCase().includes(r.name.toLowerCase()));
-                return (
-                  <View
-                    key={i}
-                    style={[
-                      s.reviewAvatar,
-                      { backgroundColor: approved ? '#22c55e30' : '#1a1a28', borderColor: approved ? '#22c55e50' : '#2a2a3e' },
-                    ]}
-                  >
-                    {roster ? (
-                      <Text style={s.reviewAvatarEmoji}>{roster.emoji}</Text>
-                    ) : (
-                      <Text style={[s.reviewAvatarText, approved && { color: '#22c55e' }]}>
-                        {approved ? '\u2713' : (agent?.name || '?')[0].toUpperCase()}
-                      </Text>
-                    )}
-                  </View>
-                );
-              })}
+        <Pressable
+          onPress={onPress}
+          onHoverIn={() => setHovered(true)}
+          onHoverOut={() => setHovered(false)}
+          style={s.cardInner}
+        >
+          {/* Drag handle */}
+          {Platform.OS === 'web' && (
+            <View style={s.dragHandle}>
+              <Text style={s.dragHandleText}>⠿</Text>
             </View>
-            <Text style={[s.reviewCount, approvedCount >= totalReviewers && { color: '#22c55e' }]}>
-              {approvedCount}/{totalReviewers}
+          )}
+
+          {/* Title */}
+          <Text style={[s.title, isDone && s.titleDone]} numberOfLines={2}>{task.title}</Text>
+
+          {/* Description preview */}
+          {task.description ? (
+            <Text style={s.descriptionPreview} numberOfLines={1}>
+              {task.description.length > 60 ? task.description.slice(0, 60) + '...' : task.description}
             </Text>
-          </View>
-        )}
+          ) : null}
 
-        {/* Footer */}
-        <View style={s.footer}>
-          <View style={s.footerLeft}>
-            <Text style={s.toolIcon}>{'\u270E'}</Text>
-          </View>
+          {/* Goal tag */}
+          {goalData && (
+            <View style={s.goalTag}>
+              <View style={[s.goalDot, { backgroundColor: goalData.status === 'active' ? '#22c55e' : goalData.status === 'paused' ? '#f59e0b' : '#666680' }]} />
+              <Text style={s.goalName} numberOfLines={1}>{goalData.name}</Text>
+            </View>
+          )}
 
-          <View style={s.footerRight}>
-            {/* Agent avatar + model indicator */}
-            {assignedAgent ? (
-              <>
-                <View style={[s.avatar, { backgroundColor: assignedAgent.color || '#6366f1' }]}>
-                  <Text style={s.avatarText}>{assignedAgent.name[0].toUpperCase()}</Text>
-                </View>
-                {(() => {
-                  const roster = DEFAULT_AGENT_ROSTER.find(r =>
-                    assignedAgent.name?.toLowerCase().includes(r.name.toLowerCase())
-                  );
-                  const mi = roster ? MODEL_ICONS[roster.preferredModel] : null;
-                  return mi ? (
-                    <View style={[s.modelPill, { backgroundColor: mi.color + '15' }]}>
-                      <Text style={{ fontSize: 8, lineHeight: 10 }}>{mi.icon}</Text>
+          {/* Peer review indicator */}
+          {isPeerReview && (
+            <View style={s.reviewRow}>
+              <View style={s.reviewAvatars}>
+                {goalAgentIds.slice(0, 5).map((aid, i) => {
+                  const approved = peerApprovals.includes(aid);
+                  const agent = agents.find(a => a.id === aid);
+                  const roster = DEFAULT_AGENT_ROSTER.find(r => agent?.name?.toLowerCase().includes(r.name.toLowerCase()));
+                  return (
+                    <View
+                      key={i}
+                      style={[
+                        s.reviewAvatar,
+                        { backgroundColor: approved ? '#22c55e30' : '#1a1a28', borderColor: approved ? '#22c55e50' : '#333333' },
+                      ]}
+                    >
+                      {roster ? (
+                        <Text style={s.reviewAvatarEmoji}>{roster.emoji}</Text>
+                      ) : (
+                        <Text style={[s.reviewAvatarText, approved && { color: '#22c55e' }]}>
+                          {approved ? '\u2713' : (agent?.name || '?')[0].toUpperCase()}
+                        </Text>
+                      )}
                     </View>
-                  ) : null;
-                })()}
-              </>
-            ) : task.assignee ? (
-              <View style={[s.avatar, { backgroundColor: '#6366f1' }]}>
-                <Text style={s.avatarText}>
-                  {(task.assignee.display_name || task.assignee.username || '?')[0].toUpperCase()}
-                </Text>
+                  );
+                })}
               </View>
-            ) : null}
+              <Text style={[s.reviewCount, approvedCount >= totalReviewers && { color: '#22c55e' }]}>
+                {approvedCount}/{totalReviewers}
+              </Text>
+            </View>
+          )}
 
-            {/* Priority badge */}
-            <View style={[s.priorityBadge, { backgroundColor: pb.color + '18' }]}>
-              <Text style={[s.priorityText, { color: pb.color }]}>{pb.label}</Text>
+          {/* Footer */}
+          <View style={s.footer}>
+            <View style={s.footerLeft}>
+              <Text style={s.toolIcon}>{'\u270E'}</Text>
             </View>
 
-            {/* Comment count badge */}
-            {task.review_comments_count != null && task.review_comments_count > 0 && (
-              <View style={s.commentBadge}>
-                <Text style={s.commentText}>{'\uD83D\uDCAC'} {task.review_comments_count}</Text>
+            <View style={s.footerRight}>
+              {/* Agent avatar + model indicator */}
+              {assignedAgent ? (
+                <>
+                  <View style={[s.avatar, { backgroundColor: assignedAgent.color || '#6366f1' }]}>
+                    <Text style={s.avatarText}>{assignedAgent.name[0].toUpperCase()}</Text>
+                  </View>
+                  {(() => {
+                    const roster = DEFAULT_AGENT_ROSTER.find(r =>
+                      assignedAgent.name?.toLowerCase().includes(r.name.toLowerCase())
+                    );
+                    const mi = roster ? MODEL_ICONS[roster.preferredModel] : null;
+                    return mi ? (
+                      <View style={[s.modelPill, { backgroundColor: mi.color + '15' }]}>
+                        <Text style={{ fontSize: 8, lineHeight: 10 }}>{mi.icon}</Text>
+                      </View>
+                    ) : null;
+                  })()}
+                </>
+              ) : task.assignee ? (
+                <View style={[s.avatar, { backgroundColor: '#6366f1' }]}>
+                  <Text style={s.avatarText}>
+                    {(task.assignee.display_name || task.assignee.username || '?')[0].toUpperCase()}
+                  </Text>
+                </View>
+              ) : null}
+
+              {/* Priority badge */}
+              <View style={[s.priorityBadge, { backgroundColor: pb.color + '18' }]}>
+                <Text style={[s.priorityText, { color: pb.color }]}>{pb.label}</Text>
               </View>
-            )}
 
-            {/* Stale task indicator */}
-            {!isDone && isStale(task) && (
-              <Text style={s.staleIcon}>{'\u23F3'}</Text>
-            )}
+              {/* Comment count badge */}
+              {task.review_comments_count != null && task.review_comments_count > 0 && (
+                <View style={s.commentBadge}>
+                  <Text style={s.commentText}>{'\uD83D\uDCAC'} {task.review_comments_count}</Text>
+                </View>
+              )}
 
-            {/* Due date urgency */}
-            {dueDateInfo && (
-              <View style={[s.dueBadge, { backgroundColor: dueDateInfo.color + '15' }]}>
-                <Text style={[s.dueText, { color: dueDateInfo.color }]}>{dueDateInfo.label}</Text>
-              </View>
-            )}
+              {/* Stale task indicator */}
+              {!isDone && isStale(task) && (
+                <Text style={s.staleIcon}>{'\u23F3'}</Text>
+              )}
 
-            {/* Time ago / Completion time */}
-            {isDone && task.completed_at ? (
-              <Text style={s.completionText}>Done in {daysBetween(task.created_at, task.completed_at)}d</Text>
-            ) : (
-              <Text style={s.timeText}>{timeAgo(task.created_at)}</Text>
-            )}
+              {/* Due date urgency */}
+              {dueDateInfo && (
+                <View style={[s.dueBadge, { backgroundColor: dueDateInfo.color + '15' }]}>
+                  <Text style={[s.dueText, { color: dueDateInfo.color }]}>{dueDateInfo.label}</Text>
+                </View>
+              )}
 
-            {/* Move menu trigger (mobile) */}
-            <Pressable
-              onPress={(e: any) => { e.stopPropagation?.(); setShowMoveBar(p => !p); }}
-              style={[s.moveBtn, showMoveBar && s.moveBtnActive]}
-              hitSlop={6}
-            >
-              <Text style={s.moveBtnText}>{'...'}</Text>
-            </Pressable>
+              {/* Time ago / Completion time */}
+              {isDone && task.completed_at ? (
+                <Text style={s.completionText}>Done in {daysBetween(task.created_at, task.completed_at)}d</Text>
+              ) : (
+                <Text style={s.timeText}>{timeAgo(task.created_at)}</Text>
+              )}
+
+              {/* Move menu trigger (mobile fallback) */}
+              <Pressable
+                onPress={(e: any) => { e.stopPropagation?.(); setShowMoveBar(p => !p); }}
+                style={[s.moveBtn, showMoveBar && s.moveBtnActive]}
+                hitSlop={6}
+              >
+                <Text style={s.moveBtnText}>{'...'}</Text>
+              </Pressable>
+            </View>
           </View>
-        </View>
-      </Pressable>
+        </Pressable>
+      </View>
 
       {/* Move bar */}
       {showMoveBar && (
@@ -267,13 +302,14 @@ const s = StyleSheet.create({
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#1e1e2e',
-    padding: 12,
-    gap: 8,
     ...(Platform.OS === 'web' ? {
-      cursor: 'grab',
       transition: 'all 0.2s cubic-bezier(.4,0,.2,1)',
       boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
     } as any : {}),
+  },
+  cardInner: {
+    padding: 12,
+    gap: 8,
   },
   cardHovered: {
     borderColor: '#2a2a40',
@@ -283,12 +319,35 @@ const s = StyleSheet.create({
       boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
     } as any : {}),
   },
+  cardDragging: {
+    opacity: 0.4,
+    ...(Platform.OS === 'web' ? {
+      transform: [{ scale: 0.97 }],
+      boxShadow: '0 0 0 2px #6366f150',
+    } as any : {}),
+  },
   cardDone: {
     opacity: 0.45,
   },
   cardPeerReview: {
     borderColor: '#a855f730',
     backgroundColor: '#a855f706',
+  },
+  dragHandle: {
+    position: 'absolute' as any,
+    top: 4,
+    right: 6,
+    width: 16,
+    height: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    opacity: 0.3,
+    ...(Platform.OS === 'web' ? { cursor: 'grab' } as any : {}),
+  },
+  dragHandleText: {
+    color: '#888',
+    fontSize: 10,
+    lineHeight: 12,
   },
   title: {
     color: '#e4e4ed',

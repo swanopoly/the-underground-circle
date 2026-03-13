@@ -76,6 +76,8 @@ export interface CreateAutomationInput {
   outputTarget?: OutputTarget;
   webhookUrl?: string;
   templateId?: string;
+  spirit?: string;
+  spiritPrompt?: string;
 }
 
 // ─── Row mappers ─────────────────────────────────────────────────────────────
@@ -187,6 +189,8 @@ export async function createAutomation(input: CreateAutomationInput): Promise<{ 
       output_target: input.outputTarget || 'activity',
       webhook_url: input.webhookUrl || null,
       template_id: input.templateId || null,
+      spirit: input.spirit || null,
+      spirit_prompt: input.spiritPrompt || null,
       enabled: true,
       next_run_at: nextRun,
     })
@@ -208,6 +212,8 @@ export async function updateAutomation(id: string, updates: Partial<{
   includeContext: Record<string, boolean>;
   outputTarget: OutputTarget;
   webhookUrl: string;
+  spirit: string | null;
+  spiritPrompt: string | null;
 }>): Promise<{ error?: string }> {
   const payload: any = {};
   if (updates.name !== undefined) payload.name = updates.name;
@@ -220,6 +226,8 @@ export async function updateAutomation(id: string, updates: Partial<{
   if (updates.includeContext !== undefined) payload.include_context = updates.includeContext;
   if (updates.outputTarget !== undefined) payload.output_target = updates.outputTarget;
   if (updates.webhookUrl !== undefined) payload.webhook_url = updates.webhookUrl;
+  if (updates.spirit !== undefined) payload.spirit = updates.spirit;
+  if (updates.spiritPrompt !== undefined) payload.spirit_prompt = updates.spiritPrompt;
 
   const { error } = await supabase
     .from('circle_automations')

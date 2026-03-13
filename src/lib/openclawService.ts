@@ -62,6 +62,7 @@ async function invokeToolRaw(
     },
     body: JSON.stringify({ tool, args }),
   });
+  if (res.status === 404) return { content: [], isError: true } as any;
   return res.json();
 }
 
@@ -225,6 +226,7 @@ export async function listCronJobs(config: OpenClawConfig): Promise<{ ok: boolea
       },
       body: JSON.stringify({ tool: 'cron', parameters: { action: 'list', includeDisabled: true } }),
     });
+    if (res.status === 404) return { ok: false, jobs: [] };
     const data = await res.json();
     // The response has content[0].text which is a text summary, and details with structured data
     if (data?.result?.details?.jobs) {
@@ -595,11 +597,14 @@ export class OpenClawPoller {
   private config: OpenClawConfig;
   private interval: ReturnType<typeof setInterval> | null = null;
   private onUpdate: (update: OpenClawUpdate) => void;
+  private onError?: (error: string) => void;
   private pollCount = 0;
+  private consecutiveFailures = 0;
 
-  constructor(config: OpenClawConfig, onUpdate: (update: OpenClawUpdate) => void) {
+  constructor(config: OpenClawConfig, onUpdate: (update: OpenClawUpdate) => void, onError?: (error: string) => void) {
     this.config = config;
     this.onUpdate = onUpdate;
+    this.onError = onError;
   }
 
   start(intervalMs = 10000) {
@@ -628,7 +633,19 @@ export class OpenClawPoller {
         : Promise.resolve(null),
     ]);
 
-    if (sessionsResult.ok && sessionsResult.sessions) {
+    if (!sessionsResult.ok) {
+      this.consecutiveFailures++;
+      // After 3 consecutive failures, notify error handler so connection can be retried
+      if (this.consecutiveFailures >= 3 && this.onError) {
+        this.onError(sessionsResult.error || 'Connection lost');
+        this.stop(); // Stop polling — retry timer will restart it
+      }
+      return;
+    }
+
+    this.consecutiveFailures = 0;
+
+    if (sessionsResult.sessions) {
       // Enrich sessions with cost/token data from session_status
       const MAX_CONCURRENT = 10;
       const enriched: OpenClawSession[] = [];

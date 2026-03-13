@@ -566,8 +566,20 @@ Deno.serve(async (req: Request) => {
       const resolvedPrompt = substituteVariables(automation.prompt, vars);
       await logStep(`✓ Prompt resolved (${resolvedPrompt.length} chars)`);
 
-      // 5. Build system prompt
-      const systemPrompt = `You are BlackSwan 🦢 — an AI assistant for "${context.circle?.name || "Unknown"}" circle.
+      // 5. Build system prompt (with optional spirit injection)
+      let spiritPrefix = "";
+      if (automation.spirit) {
+        // Spirit prompts are stored client-side in agentSpirits.ts but we inject a
+        // lighter version server-side based on the spirit ID stored on the automation.
+        // The full spirit catalog isn't available at edge-fn runtime, so the client
+        // sends the spirit_prompt field when creating/updating the automation.
+        // Fallback: use the spirit name as a role hint.
+        spiritPrefix = automation.spirit_prompt
+          ? `${automation.spirit_prompt}\n\n---\n\n`
+          : `You are operating with the "${automation.spirit}" specialist mindset. Apply that expertise deeply.\n\n`;
+      }
+
+      const systemPrompt = `${spiritPrefix}You are BlackSwan 🦢 — an AI assistant for "${context.circle?.name || "Unknown"}" circle.
 You are running an automated task: "${automation.name}".
 Be concise, direct, and actionable. Use real data from the context below.
 Always prefix your response with 🦢.
