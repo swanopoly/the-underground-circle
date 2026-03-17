@@ -21,6 +21,14 @@ import {
   markClaudeCodeAgentOffline,
 } from './claudeCodeDetector';
 import {
+  CodexPoller,
+  codexSessionsToAgents,
+  detectCodexBridge,
+  publishCodexAgent,
+  updateCodexAgentStatus,
+  markCodexAgentOffline,
+} from './codexDetector';
+import {
   AgentConnection,
   loadConnections,
   saveConnections,
@@ -44,6 +52,8 @@ let _connections: AgentConnection[] = [];
 let _sessionsMap = new Map<string, any[]>();
 let _ccPoller: ClaudeCodePoller | null = null;
 let _ccPublished = false;
+let _codexPoller: CodexPoller | null = null;
+let _codexPublished = false;
 let _ocPollers = new Map<string, OpenClawPoller>();
 let _retryTimer: ReturnType<typeof setInterval> | null = null;
 let _ocReconnectTimer: ReturnType<typeof setInterval> | null = null;
@@ -152,7 +162,14 @@ export async function startAgentAutoConnect() {
     console.log('[agentAutoConnect] Claude Code bridge detected');
   }
 
-  // 5. Retry loop: re-detect Claude Code bridge + reconnect failed connections
+  // 5. Detect Codex bridge
+  const codexDetected = await detectCodexBridge();
+  if (codexDetected) {
+    _startCodexPoller();
+    console.log('[agentAutoConnect] Codex bridge detected');
+  }
+
+  // 6. Retry loop: re-detect bridges + reconnect failed connections
   _startRetryLoop();
 
   // 6. Listen for visibility changes — instantly retry when user comes back to tab
@@ -168,6 +185,7 @@ export function stopAgentAutoConnect() {
   if (_retryTimer) { clearInterval(_retryTimer); _retryTimer = null; }
   if (_ocReconnectTimer) { clearInterval(_ocReconnectTimer); _ocReconnectTimer = null; }
   if (_ccPoller) { _ccPoller.stop(); _ccPoller = null; }
+  if (_codexPoller) { _codexPoller.stop(); _codexPoller = null; }
   for (const [, poller] of _ocPollers) {
     poller.stop();
   }
@@ -175,6 +193,7 @@ export function stopAgentAutoConnect() {
   _connections = [];
   _sessionsMap.clear();
   _ccPublished = false;
+  _codexPublished = false;
   _circleId = null;
   _retryAttempt = 0;
   _stopVisibilityListener();
@@ -212,6 +231,26 @@ function _startRetryLoop() {
         markClaudeCodeAgentOffline(_circleId).catch(() => {});
       }
       console.log('[agentAutoConnect] Claude Code bridge went offline');
+    }
+
+    // Codex bridge detection (same interval)
+    const codexDetected = await detectCodexBridge();
+    if (codexDetected && !_codexPoller) {
+      _startCodexPoller();
+      console.log('[agentAutoConnect] Codex bridge came online');
+    } else if (!codexDetected && _codexPoller) {
+      _codexPoller.stop();
+      _codexPoller = null;
+      const existing = _sessionsMap.get('codex-auto') as OfficeAgent[] | undefined;
+      if (existing && existing.length > 0) {
+        const idled = existing.map(a => ({ ...a, status: 'idle' as const, activity: 'Session ended — idling' }));
+        _sessionsMap.set('codex-auto', idled);
+        _notify();
+      }
+      if (_codexPublished && _circleId) {
+        markCodexAgentOffline(_circleId).catch(() => {});
+      }
+      console.log('[agentAutoConnect] Codex bridge went offline');
     }
   }, CC_DETECT_INTERVAL);
 
@@ -281,6 +320,14 @@ function _startVisibilityListener() {
       }
     });
 
+    // Immediately check Codex bridge
+    detectCodexBridge().then(detected => {
+      if (detected && !_codexPoller) {
+        _startCodexPoller();
+        console.log('[agentAutoConnect] Codex bridge reconnected on tab focus');
+      }
+    });
+
     // Immediately retry failed OpenClaw connections
     const failedConns = _connections.filter(
       c => c.enabled && (c.status === 'error' || c.status === 'disconnected'),
@@ -321,6 +368,28 @@ function _startCCPoller() {
     }
   });
   _ccPoller.start(5000);
+}
+
+// ── Internal: Codex poller ───────────────────────────────────────────────────
+
+function _startCodexPoller() {
+  if (_codexPoller) return;
+  _codexPoller = new CodexPoller(sessions => {
+    _sessionsMap.set('codex-auto', codexSessionsToAgents(sessions) as any);
+    _notify();
+
+    // Publish to circle DB if we have a circleId
+    if (!_codexPublished && _circleId) {
+      _codexPublished = true;
+      publishCodexAgent(_circleId, sessions.length).catch(err =>
+        console.error('[agentAutoConnect] Failed to publish Codex agent:', err),
+      );
+    }
+    if (_codexPublished && _circleId) {
+      updateCodexAgentStatus(_circleId, sessions).catch(() => {});
+    }
+  });
+  _codexPoller.start(5000);
 }
 
 // ── Internal: Probe with fallback endpoints ─────────────────────────────────
