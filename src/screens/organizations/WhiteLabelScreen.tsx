@@ -22,9 +22,9 @@ import type { WhiteLabelConfig } from '../../types';
 const COLOR_FIELDS = [
   { key: 'primary_color', label: 'Primary Color', default: '#6366f1' },
   { key: 'accent_color', label: 'Accent Color', default: '#22c55e' },
-  { key: 'background_color', label: 'Background', default: '#0a0a0a' },
+  { key: 'background_color', label: 'Background', default: '#000000' },
   { key: 'card_color', label: 'Card Background', default: '#111111' },
-  { key: 'border_color', label: 'Border Color', default: '#1a1a2e' },
+  { key: 'border_color', label: 'Border Color', default: '#2a2a2a' },
   { key: 'text_color', label: 'Text Color', default: '#ffffff' },
 ] as const;
 
@@ -103,9 +103,9 @@ export default function WhiteLabelScreen({ route, navigation }: any) {
   }
 
   const previewPrimary = config.primary_color || '#6366f1';
-  const previewBg = config.background_color || '#0a0a0a';
+  const previewBg = config.background_color || '#000000';
   const previewCard = config.card_color || '#111111';
-  const previewBorder = config.border_color || '#1a1a2e';
+  const previewBorder = config.border_color || '#2a2a2a';
   const previewText = config.text_color || '#ffffff';
 
   return (
@@ -216,7 +216,7 @@ export default function WhiteLabelScreen({ route, navigation }: any) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   header: {
     flexDirection: 'row',
@@ -225,7 +225,7 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#2a2a2a',
   },
   backBtn: { paddingRight: 12 },
   backText: { color: '#6366f1', fontSize: 14, fontFamily: 'monospace' },
@@ -236,7 +236,7 @@ const styles = StyleSheet.create({
   input: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 14,
     color: '#fff',
@@ -246,7 +246,7 @@ const styles = StyleSheet.create({
   },
   previewContainer: {
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 12,
     padding: 16,
     marginBottom: 20,
@@ -278,7 +278,7 @@ const styles = StyleSheet.create({
   colorInput: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 8,
@@ -293,7 +293,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 14,
     marginBottom: 20,
@@ -310,7 +310,7 @@ const styles = StyleSheet.create({
   actionRow: { flexDirection: 'row', gap: 12, marginTop: 8 },
   resetBtn: {
     flex: 1,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     paddingVertical: 14,
     borderRadius: 10,
     alignItems: 'center',

@@ -225,7 +225,7 @@ export const NorthStarJournal: React.FC<Props> = ({ onComplete, isBlocking = tru
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
   },
   scrollContent: {
     flexGrow: 1,

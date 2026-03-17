@@ -98,7 +98,7 @@ const styles = StyleSheet.create({
   cube: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderBottomWidth: 3,
     borderRadius: 14,
     padding: 16,

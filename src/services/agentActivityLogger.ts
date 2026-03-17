@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 
-export type ActivitySource = 'discord' | 'webchat' | 'cron' | 'system';
+export type ActivitySource = 'discord' | 'webchat' | 'cron' | 'system' | 'github';
 export type ActivityType =
   | 'message_in'
   | 'message_out'

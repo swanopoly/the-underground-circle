@@ -543,6 +543,17 @@ export default function OfficeChat({
         addMsg('❌ Bridge not running. Start it with:\n  node scripts/claude-bridge.js', false, 'System');
         return;
       }
+      // Block dangerous commands client-side before sending to bridge
+      const BLOCKED = [
+        /\brm\s+(-[a-zA-Z]*\s+)*[~/]/,
+        /\bsudo\b/, /\bsu\s/, /\bpasswd\b/,
+        /\bmkfs\b/, /\bdd\s+.*of=/, /\bshutdown\b/, /\breboot\b/,
+        /\bcurl\b.*\|\s*(ba)?sh/, /\bwget\b.*\|\s*(ba)?sh/,
+      ];
+      if (BLOCKED.some(p => p.test(cmd))) {
+        addMsg('❌ Command blocked — contains a restricted pattern', false, 'System');
+        return;
+      }
       setProcessing(true);
       addMsg(`⏳ Running: ${cmd}`, false, 'Shell');
       try {
@@ -1065,7 +1076,7 @@ export default function OfficeChat({
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: '#0a0a12', borderWidth: 1, borderColor: '#1a1a2e',
+    backgroundColor: '#0a0a12', borderWidth: 1, borderColor: '#2a2a2a',
     borderRadius: 12, overflow: 'hidden', flex: 1, minHeight: 200,
   },
   containerFullscreen: {
@@ -1087,7 +1098,7 @@ const styles = StyleSheet.create({
   },
   minimized: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
-    backgroundColor: '#0a0a12', borderWidth: 1, borderColor: '#1a1a2e',
+    backgroundColor: '#0a0a12', borderWidth: 1, borderColor: '#2a2a2a',
     borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10,
   },
   minimizedIcon: { fontSize: 14 },
@@ -1098,7 +1109,7 @@ const styles = StyleSheet.create({
   },
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
-    paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#1a1a2e',
+    paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#2a2a2a',
   },
   headerIcon: { fontSize: 12 },
   headerTitle: { fontSize: 10, color: '#888', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1, flex: 1 },
@@ -1121,7 +1132,7 @@ const styles = StyleSheet.create({
   fullscreenBtnText: { color: '#6366f1', fontSize: 12, fontWeight: '800' },
   quickActionsBar: {
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#2a2a2a',
     paddingVertical: 4,
     paddingHorizontal: 8,
     backgroundColor: '#08080e',
@@ -1132,7 +1143,7 @@ const styles = StyleSheet.create({
   msgRowUser: { alignItems: 'flex-end' },
   msgAgent: { fontSize: 11, color: '#888', fontFamily: 'monospace', fontWeight: '700', marginLeft: 4, marginBottom: 2 },
   msgBubble: { maxWidth: '85%' as any, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 10 },
-  msgBubbleBot: { backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a2e', alignSelf: 'flex-start' },
+  msgBubbleBot: { backgroundColor: '#222222', borderWidth: 1, borderColor: '#2a2a2a', alignSelf: 'flex-start' },
   msgBubbleUser: { backgroundColor: '#6366f1', alignSelf: 'flex-end' },
   msgBubbleOC: { borderColor: '#6366f140' },
   msgBubbleTG: { borderColor: '#0088cc40' },
@@ -1141,10 +1152,10 @@ const styles = StyleSheet.create({
   msgTextUser: { color: '#fff' },
   inputRow: {
     flexDirection: 'row', alignItems: 'center', gap: 6, padding: 8,
-    borderTopWidth: 1, borderTopColor: '#1a1a2e',
+    borderTopWidth: 1, borderTopColor: '#2a2a2a',
   },
   input: {
-    flex: 1, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a2e',
+    flex: 1, backgroundColor: '#000000', borderWidth: 1, borderColor: '#2a2a2a',
     borderRadius: 10, paddingHorizontal: 14, paddingVertical: 12,
     color: '#ddd', fontFamily: 'monospace', fontSize: 14, minHeight: 48,
   },

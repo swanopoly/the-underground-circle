@@ -214,7 +214,7 @@ const styles = StyleSheet.create({
   // Poll options
   options: { gap: 6 },
   optionBtn: {
-    borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 10,
+    borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 10,
     overflow: 'hidden', position: 'relative', minHeight: 48,
     justifyContent: 'center',
   },
@@ -233,7 +233,7 @@ const styles = StyleSheet.create({
   yesNoRow: { flexDirection: 'row', gap: 8 },
   voteBtn: {
     flex: 1, paddingVertical: 12, borderRadius: 10, borderWidth: 1,
-    borderColor: '#1a1a2e', alignItems: 'center', minHeight: 48,
+    borderColor: '#2a2a2a', alignItems: 'center', minHeight: 48,
     justifyContent: 'center',
   },
   yesBtn: { backgroundColor: '#22c55e08' },
@@ -244,7 +244,7 @@ const styles = StyleSheet.create({
   footer: { gap: 8 },
   quorumRow: { gap: 4 },
   quorumBar: {
-    height: 4, backgroundColor: '#1a1a2e', borderRadius: 2, overflow: 'hidden',
+    height: 4, backgroundColor: '#2a2a2a', borderRadius: 2, overflow: 'hidden',
   },
   quorumFill: { height: '100%', borderRadius: 2 },
   quorumText: { fontSize: 11, color: '#666', fontFamily: 'monospace' },

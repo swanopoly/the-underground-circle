@@ -2,9 +2,14 @@ const { createClient } = require('@supabase/supabase-js');
 const fs = require('fs');
 const path = require('path');
 
-const supabaseUrl = 'https://rjkniqiqdtroeholxacg.supabase.co';
-// Falling back to anon key found in .env since service role isn't in env vars
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 'sb_publishable_P1towPg-vNOM8yAxB70lkg_t9_8Hf4v';
+const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!supabaseUrl || !supabaseKey) {
+  console.error('Missing required env vars: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
+  console.error('Set them in .env or pass them directly');
+  process.exit(1);
+}
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 

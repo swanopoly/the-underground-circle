@@ -502,7 +502,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                       isActive && { backgroundColor: col.color + '20', borderColor: col.color + '40' },
                     ]}
                   >
-                    <View style={[s.statusDot, isPast ? { backgroundColor: col.color } : { backgroundColor: '#2a2a3e' }]} />
+                    <View style={[s.statusDot, isPast ? { backgroundColor: col.color } : { backgroundColor: '#333333' }]} />
                     <Text style={[
                       s.statusStepText,
                       isActive ? { color: col.color } : isPast ? { color: '#9090a8' } : { color: '#444455' },

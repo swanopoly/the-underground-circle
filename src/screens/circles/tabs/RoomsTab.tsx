@@ -199,7 +199,7 @@ function ArrowScrollView({ children, style, scrollStyle, contentContainerStyle, 
 const arrowSt = StyleSheet.create({
   arrow: {
     width: 22, height: 28, justifyContent: 'center', alignItems: 'center',
-    backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 6,
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 6,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   arrowText: { color: '#aaa', fontSize: 18, lineHeight: 20, fontWeight: '700' },
@@ -457,12 +457,24 @@ function timeAgo(dateStr: string): string {
 // ─── Room APIs Config ─────────────────────────────────────────────────────────
 
 const ROOM_APIS = [
-  { id: 'storage',    label: 'Storage',    icon: '🗄',  color: '#6366f1', desc: 'File & blob storage. Put, get, list, delete objects.' },
-  { id: 'database',  label: 'Database',   icon: '🏛',  color: '#3b82f6', desc: 'Supabase Postgres. Query tables, run SQL, subscribe.' },
-  { id: 'messaging', label: 'Messaging',  icon: '📨',  color: '#22c55e', desc: 'Realtime channels. Publish events, broadcast messages.' },
-  { id: 'queues',    label: 'Queues',     icon: '📋',  color: '#f59e0b', desc: 'Task queues. Enqueue jobs, process with agents or workers.' },
-  { id: 'secrets',   label: 'Secrets',   icon: '🔒',  color: '#ef4444', desc: 'Encrypted KV store. Store API keys, tokens, credentials.' },
-  { id: 'containers',label: 'Containers', icon: '🐳',  color: '#00add8', desc: 'Run sandboxed code. Execute tasks, deploy agents.' },
+  { id: 'storage',    label: 'Storage',    icon: '🗄',  color: '#6366f1',
+    desc: 'File & blob storage. Put, get, list, delete objects.',
+    help: 'Upload and manage files scoped to this room. Each room gets its own storage bucket. Files are accessible to all room members and any agents assigned to this room. Use this for assets, documents, datasets, or any binary data your project needs.' },
+  { id: 'database',  label: 'Database',   icon: '🏛',  color: '#3b82f6',
+    desc: 'Supabase Postgres. Query tables, run SQL, subscribe.',
+    help: 'Query the room\'s data tables using the Supabase client. All queries are automatically scoped to this room via Row Level Security. You can read room files, messages, usage logs, and any custom data. Use the Supabase JS client or REST API with your auth token.' },
+  { id: 'messaging', label: 'Messaging',  icon: '📨',  color: '#22c55e',
+    desc: 'Realtime channels. Publish events, broadcast messages.',
+    help: 'Subscribe to real-time events in this room using Supabase Realtime. Events include new messages, file changes, agent activity, and custom broadcasts. Useful for building live dashboards, collaborative editing, or notifying agents of changes.' },
+  { id: 'queues',    label: 'Queues',     icon: '📋',  color: '#f59e0b',
+    desc: 'Task queues. Enqueue jobs, process with agents or workers.',
+    help: 'Push tasks to the room\'s job queue for async processing. Agents or workers can pick up tasks, execute them, and report results. Ideal for background jobs like code generation, data processing, or AI inference that shouldn\'t block the UI.' },
+  { id: 'secrets',   label: 'Secrets',   icon: '🔒',  color: '#ef4444',
+    desc: 'Encrypted KV store. Store API keys, tokens, credentials.',
+    help: 'Securely store sensitive values like API keys, tokens, and credentials. Secrets are encrypted at rest and only accessible by room members. Agents can read secrets at runtime to authenticate with external services without exposing keys in code.' },
+  { id: 'containers',label: 'Containers', icon: '🐳',  color: '#00add8',
+    desc: 'Run sandboxed code. Execute tasks, deploy agents.',
+    help: 'Execute code in isolated sandboxed environments. Specify a Docker image, mount files, and run commands. Output is captured and returned. Use this for running untrusted code, CI tasks, data pipelines, or spinning up temporary agent environments.' },
 ] as const;
 
 const INTEGRATIONS = [
@@ -765,6 +777,56 @@ const RIGHT_PANEL_TABS: [RightPanel, string][] = [
   ['usage',       'Usage'],
 ];
 
+// ─── Resize Handle ──────────────────────────────────────────────────────────
+
+function ResizeHandle({ onDrag }: { onDrag: (deltaX: number) => void }) {
+  const dragging = useRef(false);
+  const lastX = useRef(0);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const onMove = (e: MouseEvent) => {
+      if (!dragging.current) return;
+      const delta = lastX.current - e.clientX; // left drag = wider
+      lastX.current = e.clientX;
+      onDrag(delta);
+    };
+    const onUp = () => {
+      if (dragging.current) {
+        dragging.current = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [onDrag]);
+
+  const onMouseDown = (e: any) => {
+    dragging.current = true;
+    lastX.current = e.clientX || e.nativeEvent?.pageX || 0;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+
+  return (
+    <Pressable
+      onPressIn={Platform.OS === 'web' ? onMouseDown : undefined}
+      style={s.resizeHandle}
+    >
+      <View style={s.resizeGrip}>
+        <View style={s.resizeGripDot} />
+        <View style={s.resizeGripDot} />
+        <View style={s.resizeGripDot} />
+      </View>
+    </Pressable>
+  );
+}
+
 function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpdated }: {
   room: Room; accentColor: string; isMobile: boolean;
   onClose: () => void; onDelete: () => void; onRoomUpdated: (r: Room) => void;
@@ -778,6 +840,11 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
   const [saving, setSaving] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [showNewFile, setShowNewFile] = useState(false);
+  const [rightPanelWidth, setRightPanelWidth] = useState(320);
+
+  const handlePanelResize = useCallback((delta: number) => {
+    setRightPanelWidth(w => Math.min(700, Math.max(240, w + delta)));
+  }, []);
 
   // GitHub browsing state
   const [ghConnected, setGhConnected] = useState(false);
@@ -1239,7 +1306,7 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
               const tabLangColor = LANG_COLORS[tab.file_type] || '#888';
               return (
                 <Pressable key={tab.id} onPress={() => setActiveTabId(tab.id)}
-                  style={[s.editorTab, isActive && {backgroundColor:'#0d1117',borderBottomColor:tabLangColor}]}>
+                  style={[s.editorTab, isActive && {backgroundColor:'#000000',borderBottomColor:tabLangColor}]}>
                   <Text style={s.editorTabIcon}>{FILE_ICONS[tab.file_type]||'📄'}</Text>
                   <Text style={[s.editorTabName, isActive && {color:'#fff'}]} numberOfLines={1}>
                     {tab.name}{dirty?'●':''}
@@ -1316,7 +1383,9 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
 
         {/* Right Panel */}
         {!isMobile && (
-          <View style={s.rightPanel}>
+          <>
+          <ResizeHandle onDrag={handlePanelResize} />
+          <View style={[s.rightPanel, { width: rightPanelWidth }]}>
             {/* Panel tabs at top of right panel */}
             <ArrowScrollView style={s.rightPanelTabs} scrollStep={120}>
               {RIGHT_PANEL_TABS.map(([id,label]) => (
@@ -1359,12 +1428,13 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
               </View>
             )}
           </View>
+          </>
         )}
       </View>
 
       {/* Mobile: right panel as bottom sheet */}
       {isMobile && (
-        <View style={s.bottomSheet}>
+        <View style={[s.bottomSheet, rightPanel ? s.bottomSheetExpanded : s.bottomSheetCollapsed]}>
           <ArrowScrollView style={s.rightPanelTabs} scrollStep={120}>
             {RIGHT_PANEL_TABS.map(([id,label]) => (
               <Pressable key={id} onPress={() => setRightPanel(rightPanel===id ? null : id)}
@@ -1510,7 +1580,7 @@ function FileViewer({ file, editValue, onEdit }: {
     return (
       <View style={{flex:1,flexDirection:'row'}}>
         {/* Edit pane */}
-        <TextInput style={[s.codeEditor,{flex:1,borderRightWidth:1,borderRightColor:'#1a1a1a'}]}
+        <TextInput style={[s.codeEditor,{flex:1,borderRightWidth:1,borderRightColor:'#000000'}]}
           value={content} onChangeText={onEdit} multiline
           autoCapitalize="none" autoCorrect={false} spellCheck={false} />
         {/* Preview pane */}
@@ -1550,7 +1620,7 @@ function FileViewer({ file, editValue, onEdit }: {
     const ptLines = content.split('\n');
     const ptGw = gutterWidth(ptLines.length);
     return (
-      <View style={{flex:1,backgroundColor:'#0d1117'}}>
+      <View style={{flex:1,backgroundColor:'#000000'}}>
         <ScrollView style={{flex:1}}>
           <View style={{position:'relative',minHeight:ptLines.length*22+32}}>
             {/* Line numbers */}
@@ -1587,7 +1657,7 @@ function FileViewer({ file, editValue, onEdit }: {
   const langColor = LANG_COLORS[lang] || '#888';
 
   return (
-    <View style={{flex:1,backgroundColor:'#0d1117'}}>
+    <View style={{flex:1,backgroundColor:'#000000'}}>
       {/* Language pill */}
       <View style={{flexDirection:'row',alignItems:'center',paddingHorizontal:14,paddingTop:6,paddingBottom:4,gap:8}}>
         <View style={{backgroundColor:langColor+'20',paddingHorizontal:8,paddingVertical:2,borderRadius:4,borderWidth:1,borderColor:langColor+'40'}}>
@@ -2257,22 +2327,89 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor }: { msg: Roo
 
 // ─── APIs Panel ───────────────────────────────────────────────────────────────
 
+/** Tooltip that shows on hover/press with a ? icon */
+function HelpTip({ text, color }: { text: string; color: string }) {
+  const [show, setShow] = useState(false);
+  return (
+    <View style={{ position: 'relative' }}>
+      <Pressable
+        onPress={() => setShow(!show)}
+        {...(Platform.OS === 'web' ? { onHoverIn: () => setShow(true), onHoverOut: () => setShow(false) } : {})}
+        hitSlop={8}
+        style={[{
+          width: 18, height: 18, borderRadius: 9,
+          backgroundColor: color + '20', borderWidth: 1, borderColor: color + '40',
+          alignItems: 'center', justifyContent: 'center',
+        }, Platform.OS === 'web' && { cursor: 'help' } as any]}
+      >
+        <Text style={{ color: color + 'cc', fontSize: 10, fontWeight: '900', fontFamily: 'monospace' }}>?</Text>
+      </Pressable>
+      {show && (
+        <View style={{
+          position: 'absolute', top: 22, right: 0, zIndex: 100, width: 260,
+          backgroundColor: '#1a1a2e', borderWidth: 1, borderColor: color + '40',
+          borderRadius: 10, padding: 12,
+          ...(Platform.OS === 'web' ? { boxShadow: `0 4px 20px ${color}30` } as any : {}),
+        }}>
+          <Text style={{ color: '#ccc', fontSize: 11, lineHeight: 17, fontFamily: 'monospace' }}>{text}</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
 function APIsPanel({ room, accentColor }: { room: Room; accentColor: string }) {
   const [activeApi, setActiveApi] = useState<string>('storage');
-  const base = `rjkniqiqdtroeholxacg.supabase.co`;
+
+  // Use env var for project ref — never hardcode the Supabase URL
+  const projectUrl = (process.env.EXPO_PUBLIC_SUPABASE_URL || '').replace('https://', '').replace('http://', '');
+  // Show a safe placeholder in examples (project ref only, no full URL)
+  const projectRef = projectUrl.split('.')[0] || 'your-project';
+
+  const roomShort = room.id.slice(0, 8) + '...';
 
   const API_DETAILS: Record<string, { endpoint: string; example: string }> = {
-    storage:    { endpoint:`https://${base}/storage/v1/object/room-files/${room.id}/`, example:`// Upload\nawait room.storage.put('key', data)\n// Get\nawait room.storage.get('key')` },
-    database:   { endpoint:`https://${base}/rest/v1/room_files?room_id=eq.${room.id}`, example:`// Query files\nconst files = await room.db\n  .from('room_files')\n  .eq('room_id','${room.id}')\n  .select('*')` },
-    messaging:  { endpoint:`wss://${base}/realtime/v1/room:${room.id}`, example:`// Subscribe\nconst ch = supabase.channel('room:${room.id}')\n  .on('broadcast',{event:'*'},handler)\n  .subscribe()` },
-    queues:     { endpoint:`https://${base}/functions/v1/room-queue`, example:`// Enqueue task\nawait room.queue.push({\n  room_id: '${room.id}',\n  task: 'your_task',\n  payload: {}\n})` },
-    secrets:    { endpoint:`Encrypted KV — room_secrets table`, example:`// Set secret\nawait room.secrets.set('API_KEY','value')\n// Get\nconst key = await room.secrets.get('API_KEY')` },
-    containers: { endpoint:`https://${base}/functions/v1/room-exec`, example:`// Run sandboxed code\nawait room.exec({\n  image: 'python:3.12',\n  cmd: ['python', 'script.py'],\n  files: { 'script.py': code }\n})` },
+    storage: {
+      endpoint: `supabase.storage\n  .from('room-files')\n  .upload('{roomId}/file.txt', data)`,
+      example: `import { supabase } from './lib/supabase'\n\n// Upload a file\nconst { data, error } = await supabase\n  .storage.from('room-files')\n  .upload('${roomShort}/report.pdf', file)\n\n// Download\nconst { data: blob } = await supabase\n  .storage.from('room-files')\n  .download('${roomShort}/report.pdf')\n\n// List files\nconst { data: list } = await supabase\n  .storage.from('room-files')\n  .list('${roomShort}/')`,
+    },
+    database: {
+      endpoint: `supabase\n  .from('room_files')\n  .select('*')\n  .eq('room_id', roomId)`,
+      example: `import { supabase } from './lib/supabase'\n\n// Query room files\nconst { data: files } = await supabase\n  .from('room_files')\n  .select('id, name, content, language')\n  .eq('room_id', '${roomShort}')\n  .order('updated_at', { ascending: false })\n\n// Subscribe to changes\nsupabase\n  .channel('room-files')\n  .on('postgres_changes', {\n    event: '*',\n    schema: 'public',\n    table: 'room_files',\n    filter: \`room_id=eq.${roomShort}\`\n  }, (payload) => console.log(payload))\n  .subscribe()`,
+    },
+    messaging: {
+      endpoint: `supabase\n  .channel('room:{roomId}')\n  .on('broadcast', handler)\n  .subscribe()`,
+      example: `import { supabase } from './lib/supabase'\n\n// Subscribe to room events\nconst channel = supabase\n  .channel('room:${roomShort}')\n  .on('broadcast', { event: 'message' },\n    (payload) => {\n      console.log('New message:', payload)\n    })\n  .subscribe()\n\n// Send a message\nchannel.send({\n  type: 'broadcast',\n  event: 'message',\n  payload: { text: 'Hello room!' }\n})`,
+    },
+    queues: {
+      endpoint: `supabase.functions\n  .invoke('room-queue', { body: task })`,
+      example: `import { supabase } from './lib/supabase'\n\n// Enqueue a task\nconst { data } = await supabase.functions\n  .invoke('room-queue', {\n    body: {\n      room_id: '${roomShort}',\n      task: 'generate_summary',\n      payload: {\n        file_ids: ['...'],\n        model: 'claude-haiku'\n      }\n    }\n  })\n\nconsole.log('Task ID:', data.task_id)`,
+    },
+    secrets: {
+      endpoint: `supabase\n  .from('room_secrets')\n  .upsert({ room_id, key, value })`,
+      example: `import { supabase } from './lib/supabase'\n\n// Store a secret\nawait supabase.from('room_secrets')\n  .upsert({\n    room_id: '${roomShort}',\n    key: 'OPENAI_KEY',\n    value: 'sk-...',\n    created_by: userId\n  }, { onConflict: 'room_id,key' })\n\n// Read (only accessible by room members)\nconst { data } = await supabase\n  .from('room_secrets')\n  .select('key')\n  .eq('room_id', '${roomShort}')`,
+    },
+    containers: {
+      endpoint: `supabase.functions\n  .invoke('room-exec', { body: config })`,
+      example: `import { supabase } from './lib/supabase'\n\n// Run sandboxed code\nconst { data } = await supabase.functions\n  .invoke('room-exec', {\n    body: {\n      room_id: '${roomShort}',\n      image: 'python:3.12-slim',\n      cmd: ['python', 'main.py'],\n      files: {\n        'main.py': 'print("Hello!")',\n        'data.json': jsonStr\n      },\n      timeout: 30\n    }\n  })\n\nconsole.log('Output:', data.stdout)`,
+    },
+  };
+
+  const SECTION_HELP: Record<string, string> = {
+    storage: 'Files are stored in a Supabase Storage bucket, organized by room ID. Each file is access-controlled via RLS — only authenticated room members can read or write. Max file size depends on your Supabase plan.',
+    database: 'All database queries go through Supabase\'s PostgREST API with Row Level Security enforced. You can only access data in rooms you\'re a member of. Use the Supabase JS client for type-safe queries.',
+    messaging: 'Realtime messaging uses Supabase Channels (WebSocket). Messages are ephemeral by default — they\'re broadcast to connected clients but not stored. Use the database for persistent messages.',
+    queues: 'Tasks are processed by a Supabase Edge Function. Enqueue jobs with a payload, and agents or workers will process them asynchronously. Results are stored in the room_usage table.',
+    secrets: 'Secrets are stored in the room_secrets table with RLS protection. Only room members can read/write secrets. Values are stored server-side — the API panel never exposes raw secret values to the client.',
+    containers: 'Code runs in isolated containers via a Supabase Edge Function. Specify a Docker image, mount files, and set a timeout. Output (stdout/stderr) is captured and returned. Containers are destroyed after execution.',
   };
 
   return (
     <View style={s.panel}>
-      <Text style={s.panelTitle}>Room APIs</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingRight: 14 }}>
+        <Text style={s.panelTitle}>Room APIs</Text>
+        <HelpTip color={accentColor} text="Room APIs provide programmatic access to this room's resources. All endpoints are scoped to this room and protected by Row Level Security — you can only access rooms you're a member of. Use the Supabase JS client or REST API with your auth token." />
+      </View>
       <Text style={{color:'#666',fontSize:11,paddingHorizontal:14,marginBottom:10,lineHeight:16}}>
         Storage · Database · Messaging · Queues · Secrets · Containers — all scoped to this room.
       </Text>
@@ -2289,10 +2426,16 @@ function APIsPanel({ room, accentColor }: { room: Room; accentColor: string }) {
       {ROOM_APIS.filter(a=>a.id===activeApi).map(api => (
         <ScrollView key={api.id} style={{flex:1}} contentContainerStyle={{padding:14,gap:12}}>
           <View style={[s.apiCard,{borderColor:api.color+'40'}]}>
-            <Text style={[s.apiCardTitle,{color:api.color}]}>{api.icon} {api.label}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Text style={[s.apiCardTitle,{color:api.color}]}>{api.icon} {api.label}</Text>
+              <HelpTip color={api.color} text={api.help} />
+            </View>
             <Text style={s.apiCardDesc}>{api.desc}</Text>
           </View>
-          <Text style={s.apiLabel}>ENDPOINT</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Text style={s.apiLabel}>HOW TO USE</Text>
+            <HelpTip color={api.color} text={SECTION_HELP[api.id] || ''} />
+          </View>
           <View style={s.codeBlock}>
             <Text style={s.codeBlockText} selectable>{API_DETAILS[api.id]?.endpoint}</Text>
           </View>
@@ -2305,7 +2448,10 @@ function APIsPanel({ room, accentColor }: { room: Room; accentColor: string }) {
 
       {/* Integrations */}
       <View style={s.integrationsSection}>
-        <Text style={s.apiLabel}>INTEGRATIONS</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+          <Text style={s.apiLabel}>INTEGRATIONS</Text>
+          <HelpTip color="#888" text="Supported platforms and SDKs you can use with Room APIs. Use the Supabase client library for your language to interact with any Room API. All standard Supabase SDKs (JS, Python, Flutter, etc.) work out of the box." />
+        </View>
         <ArrowScrollView scrollStyle={{paddingHorizontal:4}}>
           {INTEGRATIONS.map(int => (
             <View key={int.name} style={s.integrationBadge}>
@@ -2322,14 +2468,15 @@ function APIsPanel({ room, accentColor }: { room: Room; accentColor: string }) {
 // ─── Secrets Panel ────────────────────────────────────────────────────────────
 
 function SecretsPanel({ roomId, accentColor }: { roomId: string; accentColor: string }) {
-  const [secrets, setSecrets] = useState<RoomSecret[]>([]);
+  // Only fetch key names + IDs — never pull secret values to the client
+  const [secrets, setSecrets] = useState<Array<{ id: string; key: string }>>([]);
   const [key, setKey] = useState('');
   const [val, setVal] = useState('');
   const [adding, setAdding] = useState(false);
 
   useEffect(() => {
-    supabase.from('room_secrets').select('id,room_id,key,value').eq('room_id', roomId)
-      .then(({ data }) => setSecrets(data || []));
+    supabase.from('room_secrets').select('id,key').eq('room_id', roomId)
+      .then(({ data }) => setSecrets((data || []).map(d => ({ id: d.id, key: d.key }))));
   }, [roomId]);
 
   const addSecret = async () => {
@@ -2338,9 +2485,9 @@ function SecretsPanel({ roomId, accentColor }: { roomId: string; accentColor: st
     const { data:{ user } } = await supabase.auth.getUser();
     const { data, error } = await supabase.from('room_secrets').upsert({
       room_id: roomId, key: key.trim(), value: val.trim(), created_by: user?.id||null,
-    }, { onConflict:'room_id,key' }).select('id,room_id,key,value').single();
+    }, { onConflict:'room_id,key' }).select('id,key').single();
     if (!error && data) {
-      setSecrets(p => [...p.filter(s=>s.key!==data.key), data]);
+      setSecrets(p => [...p.filter(s=>s.key!==data.key), { id: data.id, key: data.key }]);
       setKey(''); setVal('');
     }
     setAdding(false);
@@ -2353,7 +2500,10 @@ function SecretsPanel({ roomId, accentColor }: { roomId: string; accentColor: st
 
   return (
     <View style={s.panel}>
-      <Text style={s.panelTitle}>Secrets</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingRight: 14 }}>
+        <Text style={s.panelTitle}>Secrets</Text>
+        <HelpTip color="#ef4444" text="Secrets are stored server-side with Row Level Security. Only room members can add, view key names, or delete secrets. Secret values are never sent to the browser after saving — they can only be read server-side by Edge Functions or agents." />
+      </View>
       <Text style={{color:'#666',fontSize:11,padding:14,paddingTop:0,lineHeight:16}}>
         Encrypted KV store for this room. Store API keys, tokens, credentials.
       </Text>
@@ -2361,15 +2511,16 @@ function SecretsPanel({ roomId, accentColor }: { roomId: string; accentColor: st
         {secrets.map(sec => (
           <View key={sec.id} style={s.secretRow}>
             <Text style={s.secretKey}>{sec.key}</Text>
-            <Text style={s.secretVal}>{'•'.repeat(Math.min(sec.value.length,16))}</Text>
-            <Pressable onPress={()=>deleteSecret(sec.id)} hitSlop={8}>
+            <Text style={s.secretVal}>••••••••</Text>
+            <Pressable onPress={()=>deleteSecret(sec.id)} hitSlop={8}
+              style={Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}}>
               <Text style={{color:'#ef4444',fontSize:12}}>🗑</Text>
             </Pressable>
           </View>
         ))}
         {secrets.length===0 && <Text style={{color:'#555',fontSize:12,textAlign:'center',fontStyle:'italic'}}>No secrets yet</Text>}
       </ScrollView>
-      <View style={{padding:14,gap:8,borderTopWidth:1,borderTopColor:'#1a1a1a'}}>
+      <View style={{padding:14,gap:8,borderTopWidth:1,borderTopColor:'#000000'}}>
         <TextInput style={s.input} value={key} onChangeText={setKey}
           placeholder="SECRET_KEY" placeholderTextColor="#555" autoCapitalize="none" autoCorrect={false} />
         <TextInput style={s.input} value={val} onChangeText={setVal}
@@ -2406,7 +2557,10 @@ function UsagePanel({ roomId, accentColor }: { roomId: string; accentColor: stri
 
   return (
     <View style={s.panel}>
-      <Text style={s.panelTitle}>Usage</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingRight: 14 }}>
+        <Text style={s.panelTitle}>Usage</Text>
+        <HelpTip color="#f59e0b" text="Track resource consumption for this room. File count, messages sent, AI tokens used, and estimated cost. The activity log shows a chronological record of all operations performed by users and agents." />
+      </View>
       <ScrollView contentContainerStyle={{padding:14,gap:12}}>
         {/* Stats grid */}
         <View style={{flexDirection:'row',flexWrap:'wrap',gap:10}}>
@@ -2692,7 +2846,7 @@ const cvSt = StyleSheet.create({
   toolbar: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     paddingHorizontal: 12, paddingVertical: 8,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a2e',
+    borderBottomWidth: 1, borderBottomColor: '#2a2a2a',
     backgroundColor: '#080d1a', flexWrap: 'wrap',
   },
   toolbarTitle: { color: '#a78bfa', fontSize: 12, fontWeight: '800', letterSpacing: 0.5 },
@@ -2709,10 +2863,10 @@ const cvSt = StyleSheet.create({
   noteCount: { color: '#555', fontSize: 10, marginLeft: 'auto' as any },
   brainstormRow: {
     flexDirection: 'row', gap: 8, padding: 10,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a2e', backgroundColor: '#080d1a',
+    borderBottomWidth: 1, borderBottomColor: '#2a2a2a', backgroundColor: '#080d1a',
   },
   brainstormInput: {
-    flex: 1, backgroundColor: '#0d1117', borderWidth: 1, borderColor: '#8b5cf640',
+    flex: 1, backgroundColor: '#000000', borderWidth: 1, borderColor: '#8b5cf640',
     borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, color: '#fff', fontSize: 13,
   },
   brainstormBtn: {
@@ -2741,7 +2895,7 @@ const cvSt = StyleSheet.create({
   },
   stickyDeleteText: { color: 'rgba(0,0,0,0.4)', fontSize: 16, fontWeight: '700', lineHeight: 16 },
   stickyText: {
-    color: '#1a1a1a', fontSize: 13, lineHeight: 20, flex: 1,
+    color: '#000000', fontSize: 13, lineHeight: 20, flex: 1,
     textAlignVertical: 'top', minHeight: 90,
     ...(Platform.OS === 'web' ? { outlineWidth: 0, outlineStyle: 'none', resize: 'none', backgroundColor: 'transparent', borderWidth: 0 } as any : {}),
   },
@@ -2753,6 +2907,8 @@ const cvSt = StyleSheet.create({
 });
 
 // ─── Playground Panel (Langfuse-style prompt tester) ─────────────────────────
+
+const VARIANT_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444'];
 
 const PLAYGROUND_MODELS = [
   { id: 'claude-opus-4-6',     label: 'Claude Opus 4.6',    provider: 'Anthropic' },
@@ -2910,17 +3066,22 @@ function PlaygroundPanel({ roomId, accentColor, activeFile, circleId }: {
       {/* Header */}
       <View style={[s.panelHeader, { flexWrap: 'wrap', gap: 6 }]}>
         <Text style={[s.panelTitle, { paddingHorizontal: 0, paddingTop: 0, paddingBottom: 0 }]}>Playground</Text>
-        <Pressable onPress={addVariant} disabled={variants.length >= 4}
-          style={[pgSt.headerBtn, { opacity: variants.length < 4 ? 1 : 0.4 }]}>
-          <Text style={pgSt.headerBtnText}>+ Variant</Text>
-        </Pressable>
-        <Pressable onPress={saveAsFile} style={pgSt.headerBtn}>
-          <Text style={pgSt.headerBtnText}>Save</Text>
-        </Pressable>
-        <Pressable onPress={runAll} disabled={running}
-          style={[pgSt.runBtn, { backgroundColor: accentColor, opacity: running ? 0.6 : 1 }]}>
-          <Text style={pgSt.runBtnText}>{running ? 'Running...' : variants.length > 1 ? `▶ Run All (${variants.length})` : '▶ Run'}</Text>
-        </Pressable>
+        <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap', flex: 1, justifyContent: 'flex-end', alignItems: 'center' }}>
+          <Pressable onPress={addVariant} disabled={variants.length >= 4}
+            style={[pgSt.headerBtn, { opacity: variants.length < 4 ? 1 : 0.4 }]}>
+            <Text style={pgSt.headerBtnText}>+ Variant</Text>
+          </Pressable>
+          <Pressable onPress={saveAsFile} style={pgSt.headerBtn}>
+            <Text style={pgSt.headerBtnText}>Save</Text>
+          </Pressable>
+          <Pressable onPress={() => setVariants([makeVariant('Variant A')])} style={pgSt.headerBtn}>
+            <Text style={pgSt.headerBtnText}>Clear</Text>
+          </Pressable>
+          <Pressable onPress={runAll} disabled={running}
+            style={[pgSt.runBtn, { backgroundColor: accentColor, opacity: running ? 0.6 : 1 }]}>
+            <Text style={pgSt.runBtnText}>{running ? 'Running...' : variants.length > 1 ? `Run All (${variants.length})` : 'Run'}</Text>
+          </Pressable>
+        </View>
       </View>
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 12 }}>
@@ -2955,10 +3116,10 @@ function PlaygroundPanel({ roomId, accentColor, activeFile, circleId }: {
           </View>
         )}
 
-        {/* Variants — side by side on wide, stacked on narrow */}
-        <View style={[pgSt.variantsRow, variants.length === 1 && { flexDirection: 'column' }]}>
-          {variants.map(v => (
-            <View key={v.id} style={[pgSt.variantCard, variants.length > 1 && { flex: 1 }]}>
+        {/* Variants — stacked in panels, side by side only in wide desktop view */}
+        <View style={pgSt.variantsRow}>
+          {variants.map((v, vi) => (
+            <View key={v.id} style={[pgSt.variantCard, variants.length > 1 && { borderLeftWidth: 3, borderLeftColor: VARIANT_COLORS[vi % VARIANT_COLORS.length] }]}>
               {/* Variant header */}
               <View style={pgSt.variantHeader}>
                 <Text style={pgSt.variantLabel}>{v.label}</Text>
@@ -2975,51 +3136,91 @@ function PlaygroundPanel({ roomId, accentColor, activeFile, circleId }: {
                 )}
               </View>
 
-              {/* Model dropdown */}
+              {/* Model dropdown with provider groups */}
               {showModelPicker === v.id && (
                 <View style={pgSt.modelDropdown}>
-                  {PLAYGROUND_MODELS.map(m => (
-                    <Pressable key={m.id} onPress={() => { updateVariant(v.id, { model: m.id }); setShowModelPicker(null); }}
-                      style={[pgSt.modelOption, v.model === m.id && { backgroundColor: accentColor + '20' }]}>
-                      <Text style={pgSt.modelOptionProvider}>{m.provider}</Text>
-                      <Text style={[pgSt.modelOptionLabel, v.model === m.id && { color: accentColor }]}>{m.label}</Text>
-                    </Pressable>
-                  ))}
+                  {(() => {
+                    let lastProvider = '';
+                    return PLAYGROUND_MODELS.map(m => {
+                      const showGroup = m.provider !== lastProvider;
+                      lastProvider = m.provider;
+                      return (
+                        <View key={m.id}>
+                          {showGroup && (
+                            <View style={pgSt.modelGroupHeader}>
+                              <Text style={pgSt.modelGroupLabel}>{m.provider.toUpperCase()}</Text>
+                            </View>
+                          )}
+                          <Pressable onPress={() => { updateVariant(v.id, { model: m.id }); setShowModelPicker(null); }}
+                            style={[pgSt.modelOption, v.model === m.id && { backgroundColor: accentColor + '15' }]}>
+                            <Text style={[pgSt.modelOptionLabel, v.model === m.id && { color: accentColor }]}>{m.label}</Text>
+                          </Pressable>
+                        </View>
+                      );
+                    });
+                  })()}
                 </View>
               )}
 
               {/* Params */}
               {showAdvanced && (
-                <View style={pgSt.paramsRow}>
-                  <View style={pgSt.paramBox}>
-                    <Text style={pgSt.paramLabel}>TEMP</Text>
-                    <TextInput style={pgSt.paramInput}
-                      value={String(v.temperature)}
-                      onChangeText={val => updateVariant(v.id, { temperature: parseFloat(val) || 0 })}
-                      keyboardType="decimal-pad" />
-                  </View>
-                  <View style={pgSt.paramBox}>
-                    <Text style={pgSt.paramLabel}>MAX TOKENS</Text>
-                    <TextInput style={pgSt.paramInput}
-                      value={String(v.maxTokens)}
-                      onChangeText={val => updateVariant(v.id, { maxTokens: parseInt(val) || 1024 })}
-                      keyboardType="number-pad" />
+                <View style={pgSt.paramsSection}>
+                  <View style={pgSt.paramsRow}>
+                    <View style={pgSt.paramBox}>
+                      <Text style={pgSt.paramLabel}>TEMPERATURE</Text>
+                      <View style={pgSt.paramInputRow}>
+                        <TextInput style={[pgSt.paramInput, { flex: 1 }]}
+                          value={String(v.temperature)}
+                          onChangeText={val => updateVariant(v.id, { temperature: parseFloat(val) || 0 })}
+                          keyboardType="decimal-pad" />
+                        <View style={pgSt.paramPresets}>
+                          {[0, 0.3, 0.7, 1].map(t => (
+                            <Pressable key={t} onPress={() => updateVariant(v.id, { temperature: t })}
+                              style={[pgSt.paramPresetBtn, v.temperature === t && { backgroundColor: accentColor + '20', borderColor: accentColor + '50' }]}>
+                              <Text style={[pgSt.paramPresetText, v.temperature === t && { color: accentColor }]}>{t}</Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                      </View>
+                    </View>
+                    <View style={pgSt.paramBox}>
+                      <Text style={pgSt.paramLabel}>MAX TOKENS</Text>
+                      <View style={pgSt.paramInputRow}>
+                        <TextInput style={[pgSt.paramInput, { flex: 1 }]}
+                          value={String(v.maxTokens)}
+                          onChangeText={val => updateVariant(v.id, { maxTokens: parseInt(val) || 1024 })}
+                          keyboardType="number-pad" />
+                        <View style={pgSt.paramPresets}>
+                          {[256, 1024, 4096].map(t => (
+                            <Pressable key={t} onPress={() => updateVariant(v.id, { maxTokens: t })}
+                              style={[pgSt.paramPresetBtn, v.maxTokens === t && { backgroundColor: accentColor + '20', borderColor: accentColor + '50' }]}>
+                              <Text style={[pgSt.paramPresetText, v.maxTokens === t && { color: accentColor }]}>{t}</Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                      </View>
+                    </View>
                   </View>
                 </View>
               )}
 
               {activeTab === 'prompt' && (
                 <>
-                  <Text style={pgSt.fieldLabel}>System</Text>
-                  <TextInput style={pgSt.promptInput}
-                    value={v.system} onChangeText={text => updateVariant(v.id, { system: text })}
-                    multiline placeholder="System prompt... use {{variable}} for inputs"
-                    placeholderTextColor="#555" autoCapitalize="none" />
-                  <Text style={pgSt.fieldLabel}>User</Text>
-                  <TextInput style={[pgSt.promptInput, { minHeight: 100 }]}
-                    value={v.userMsg} onChangeText={text => updateVariant(v.id, { userMsg: text })}
-                    multiline placeholder="User message..."
-                    placeholderTextColor="#555" autoCapitalize="none" />
+                  <View style={pgSt.promptSection}>
+                    <Text style={pgSt.promptSectionLabel}>SYSTEM</Text>
+                    <TextInput style={pgSt.promptInput}
+                      value={v.system} onChangeText={text => updateVariant(v.id, { system: text })}
+                      multiline placeholder="System prompt... use {{variable}} for inputs"
+                      placeholderTextColor="#555" autoCapitalize="none" />
+                  </View>
+                  <View style={pgSt.promptDivider} />
+                  <View style={pgSt.promptSection}>
+                    <Text style={pgSt.promptSectionLabel}>USER</Text>
+                    <TextInput style={[pgSt.promptInput, { minHeight: 100 }]}
+                      value={v.userMsg} onChangeText={text => updateVariant(v.id, { userMsg: text })}
+                      multiline placeholder="User message..."
+                      placeholderTextColor="#555" autoCapitalize="none" />
+                  </View>
                 </>
               )}
 
@@ -3072,31 +3273,42 @@ const pgSt = StyleSheet.create({
   headerBtnText: { color: '#888', fontSize: 11, fontWeight: '700' },
   runBtn: { paddingHorizontal: 16, paddingVertical: 7, borderRadius: 8,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
-  runBtnText: { color: '#fff', fontSize: 12, fontWeight: '800' },
+  runBtnText: { color: '#fff', fontSize: 12, fontWeight: '800', letterSpacing: 0.3 },
   sectionLabel: { color: '#555', fontSize: 9, fontWeight: '800', letterSpacing: 1, marginBottom: 8 },
-  varSection: { backgroundColor: '#0d0d0d', borderRadius: 8, padding: 10, borderWidth: 1, borderColor: '#1a1a1a', gap: 6 },
+  varSection: { backgroundColor: '#0d0d0d', borderRadius: 8, padding: 10, borderWidth: 1, borderColor: '#000000', gap: 6 },
   varRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   varName: { color: '#a78bfa', fontSize: 11, fontFamily: MONO, fontWeight: '700', width: 90 },
   varInput: { flex: 1, backgroundColor: '#111', borderWidth: 1, borderColor: '#222', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5, color: '#fff', fontSize: 12 },
-  variantsRow: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
-  variantCard: { backgroundColor: '#0d0d0d', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#1a1a2e', gap: 6, minWidth: 200 },
+  variantsRow: { flexDirection: 'column', gap: 10 },
+  variantCard: { backgroundColor: '#0d0d0d', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#2a2a2a', gap: 8 },
   variantHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
   variantLabel: { color: '#fff', fontSize: 12, fontWeight: '800', flex: 1 },
   modelBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#111', borderWidth: 1, borderColor: '#333', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
   modelBtnText: { color: '#aaa', fontSize: 10, fontFamily: MONO },
-  modelDropdown: { backgroundColor: '#0d0d0d', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 8, overflow: 'hidden', marginBottom: 4 },
-  modelOption: { paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#111',
+  modelDropdown: { backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 8, overflow: 'hidden', marginBottom: 4 },
+  modelGroupHeader: { paddingHorizontal: 12, paddingTop: 10, paddingBottom: 4, backgroundColor: '#0f0f0f', borderBottomWidth: 1, borderBottomColor: '#000000' },
+  modelGroupLabel: { color: '#444', fontSize: 8, fontWeight: '900', letterSpacing: 1.5 },
+  modelOption: { paddingHorizontal: 12, paddingVertical: 7, paddingLeft: 20, borderBottomWidth: 1, borderBottomColor: '#111',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
   modelOptionProvider: { color: '#555', fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
-  modelOptionLabel: { color: '#ccc', fontSize: 12, fontWeight: '600', marginTop: 1 },
-  paramsRow: { flexDirection: 'row', gap: 8 },
+  modelOptionLabel: { color: '#ccc', fontSize: 12, fontWeight: '600' },
+  paramsSection: { backgroundColor: '#0a0a0a', borderRadius: 8, padding: 10, borderWidth: 1, borderColor: '#000000' },
+  paramsRow: { flexDirection: 'row', gap: 12 },
   paramBox: { flex: 1 },
-  paramLabel: { color: '#555', fontSize: 9, fontWeight: '800', letterSpacing: 0.5, marginBottom: 4 },
+  paramLabel: { color: '#555', fontSize: 9, fontWeight: '800', letterSpacing: 0.5, marginBottom: 6 },
   paramInput: { backgroundColor: '#111', borderWidth: 1, borderColor: '#333', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5, color: '#fff', fontSize: 12, fontFamily: MONO },
+  paramInputRow: { gap: 6 },
+  paramPresets: { flexDirection: 'row', gap: 4, marginTop: 4 },
+  paramPresetBtn: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 4, borderWidth: 1, borderColor: '#222', backgroundColor: '#111',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
+  paramPresetText: { color: '#666', fontSize: 9, fontWeight: '700', fontFamily: MONO },
+  promptSection: { gap: 4 },
+  promptSectionLabel: { color: '#666', fontSize: 9, fontWeight: '900', letterSpacing: 1, paddingLeft: 2 },
+  promptDivider: { height: 1, backgroundColor: '#000000', marginVertical: 2 },
   fieldLabel: { color: '#555', fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
   promptInput: {
-    backgroundColor: '#080d1a', borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 8,
+    backgroundColor: '#080d1a', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 8,
     paddingHorizontal: 10, paddingVertical: 8, color: '#e6e6e6', fontSize: 13,
     lineHeight: 20, minHeight: 70, textAlignVertical: 'top',
   },
@@ -3226,7 +3438,7 @@ function SessionsPanel({ roomId, roomName, accentColor }: { roomId: string; room
                   <Text style={{ color: '#aaa', fontSize: 12 }}>{name}</Text>
                   <Text style={{ color: '#6366f1', fontSize: 12, fontWeight: '700' }}>{count}</Text>
                 </View>
-                <View style={{ height: 4, backgroundColor: '#1a1a1a', borderRadius: 2 }}>
+                <View style={{ height: 4, backgroundColor: '#000000', borderRadius: 2 }}>
                   <View style={{ height: 4, borderRadius: 2, backgroundColor: accentColor,
                     width: `${Math.round((count / sessions.length) * 100)}%` as any }} />
                 </View>
@@ -3432,13 +3644,13 @@ function PermissionsPanel({ roomId, accentColor }: { roomId: string; accentColor
                 <Text style={{ color: ROLE_COLOR[member.role], fontSize: 9, fontWeight: '800', letterSpacing: 0.5 }}>{member.role.toUpperCase()}</Text>
               </View>
             </View>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 5, paddingHorizontal: 14, paddingBottom: 10 }}>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, paddingHorizontal: 14, paddingBottom: 10 }}>
               {ALL_PERMISSIONS.map(perm => {
                 const has = member.permissions.includes(perm);
                 return (
                   <Pressable key={perm} onPress={() => togglePermission(member.userId, perm)}
                     style={[panelTabSt.permBadge, has && { backgroundColor: accentColor + '20', borderColor: accentColor + '50' }]}>
-                    <Text style={[{ color: '#555', fontSize: 9, fontWeight: '700' }, has && { color: accentColor }]}>{perm}</Text>
+                    <Text style={[{ color: '#555', fontSize: 8, fontWeight: '700', letterSpacing: 0.3 }, has && { color: accentColor }]}>{perm.toUpperCase()}</Text>
                   </Pressable>
                 );
               })}
@@ -3592,24 +3804,24 @@ const panelTabSt = StyleSheet.create({
   tab: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: '#222', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
   tabText: { color: '#666', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
   filterInput: { flex: 1, backgroundColor: '#111', borderWidth: 1, borderColor: '#222', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, color: '#fff', fontSize: 11 },
-  empty: { color: '#555', fontSize: 12, textAlign: 'center', fontStyle: 'italic', marginTop: 20 },
+  empty: { color: '#444', fontSize: 12, textAlign: 'center', fontStyle: 'italic', marginTop: 24, marginBottom: 8 },
   logRow: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 5, borderBottomWidth: 1, borderBottomColor: '#111' },
   logDot: { width: 6, height: 6, borderRadius: 3 },
   logEvent: { color: '#888', fontSize: 11, fontFamily: MONO, flex: 1 },
   logAgent: { color: '#6366f1', fontSize: 10, fontWeight: '700' },
   logTokens: { color: '#f59e0b', fontSize: 10 },
   logTime: { color: '#444', fontSize: 10 },
-  traceRow: { backgroundColor: '#0d0d0d', borderRadius: 8, padding: 10, borderWidth: 1, borderColor: '#1a1a1a' },
-  addBox: { backgroundColor: '#0d0d0d', borderBottomWidth: 1, borderBottomColor: '#1a1a1a', padding: 14, maxHeight: 320 },
-  serviceRow: { backgroundColor: '#0d0d0d', borderRadius: 8, padding: 12, borderWidth: 1, borderColor: '#1a1a1a' },
+  traceRow: { backgroundColor: '#0d0d0d', borderRadius: 8, padding: 10, borderWidth: 1, borderColor: '#000000' },
+  addBox: { backgroundColor: '#0d0d0d', borderBottomWidth: 1, borderBottomColor: '#000000', padding: 14 },
+  serviceRow: { backgroundColor: '#0d0d0d', borderRadius: 8, padding: 12, borderWidth: 1, borderColor: '#000000' },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
-  typeBadge: { backgroundColor: '#1a1a1a', paddingHorizontal: 6, paddingVertical: 3, borderRadius: 4, borderWidth: 1, borderColor: '#2a2a2a' },
+  typeBadge: { backgroundColor: '#000000', paddingHorizontal: 6, paddingVertical: 3, borderRadius: 4, borderWidth: 1, borderColor: '#2a2a2a' },
   svcBtn: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, borderWidth: 1, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
   miniTab: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: '#222', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
   memberRow: { borderBottomWidth: 1, borderBottomColor: '#111' },
   memberAvatar: { width: 28, height: 28, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
   roleBadge: { paddingHorizontal: 6, paddingVertical: 3, borderRadius: 4, borderWidth: 1 },
-  permBadge: { paddingHorizontal: 7, paddingVertical: 4, borderRadius: 4, borderWidth: 1, borderColor: '#222', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
+  permBadge: { paddingHorizontal: 6, paddingVertical: 3, borderRadius: 4, borderWidth: 1, borderColor: '#222', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
 });
 
 // ─── GitHub Panel ─────────────────────────────────────────────────────────────
@@ -3818,7 +4030,7 @@ const ghSt = StyleSheet.create({
   connectText: { color:'#fff', fontSize:13, fontWeight:'700' },
   userHeader: {
     flexDirection:'row', alignItems:'center', padding:12, gap:8,
-    borderBottomWidth:1, borderBottomColor:'#1a1a1a',
+    borderBottomWidth:1, borderBottomColor:'#000000',
   },
   disconnectBtn: {
     paddingHorizontal:8, paddingVertical:4, borderRadius:6, backgroundColor:'#ef444420',
@@ -3826,7 +4038,7 @@ const ghSt = StyleSheet.create({
   },
   activeRepo: {
     flexDirection:'row', alignItems:'center', padding:10, gap:8,
-    borderBottomWidth:1, borderBottomColor:'#1a1a1a',
+    borderBottomWidth:1, borderBottomColor:'#000000',
   },
   closeRepoBtn: {
     paddingHorizontal:6, paddingVertical:3, borderRadius:4, backgroundColor:'#ffffff10',
@@ -3899,35 +4111,35 @@ const s = StyleSheet.create({
   center: { flex:1, justifyContent:'center', alignItems:'center', backgroundColor:'#050508' },
   loadingText: { color:'#666680', marginTop:8, fontSize:12, fontFamily:MONO },
 
-  // List — pixel-art header
-  listHeader: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', paddingHorizontal:16, paddingVertical:12, borderBottomWidth:2, borderBottomColor:'#1a1a2e' },
+  // List header
+  listHeader: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', paddingHorizontal:20, paddingVertical:14, borderBottomWidth:1, borderBottomColor:'#2a2a2a' },
   listTitle: { color:'#fff', fontSize:16, fontWeight:'900', fontFamily:MONO, letterSpacing:3, textTransform:'uppercase' as any },
-  listSub: { color:'#666680', fontSize:11, fontFamily:MONO },
+  listSub: { color:'#666680', fontSize:11, fontFamily:MONO, marginTop:2 },
   list: { flex:1 },
-  listContent: { padding:12 },
-  createBtn: { paddingHorizontal:12, paddingVertical:8, borderRadius:2, borderWidth:2, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
+  listContent: { padding:16 },
+  createBtn: { paddingHorizontal:14, paddingVertical:8, borderRadius:6, borderWidth:1, ...(Platform.OS==='web'?{cursor:'pointer',transition:'all 0.15s ease'} as any:{}) },
   createBtnText: { fontSize:12, fontWeight:'700', fontFamily:MONO },
 
   // Grid
-  grid: { flexDirection:'row', flexWrap:'wrap', gap:8 },
+  grid: { flexDirection:'row', flexWrap:'wrap', gap:12 },
   gridMobile: { flexDirection:'column' },
 
-  // Room Card — pixel-art: sharp corners, stepped shadow
-  card: { backgroundColor:'#111118', borderWidth:2, borderColor:'#2a2a3e', borderRadius:2, padding:12, minWidth:260, maxWidth:420, flex:1, ...(Platform.OS==='web'?{cursor:'pointer',boxShadow:'4px 4px 0px #050508'} as any:{shadowColor:'#050508',shadowOffset:{width:4,height:4},shadowOpacity:1,shadowRadius:0,elevation:4}) },
+  // Room Card
+  card: { backgroundColor:'#161618', borderWidth:1, borderColor:'#2a2a2a', borderRadius:10, padding:16, minWidth:260, maxWidth:420, flex:1, ...(Platform.OS==='web'?{cursor:'pointer',transition:'all 0.2s ease'} as any:{}) },
   cardMobile: { maxWidth:'100%' as any },
-  cardHeader: { flexDirection:'row', alignItems:'center', marginBottom:8, gap:6 },
-  cardIcon: { fontSize:14, fontFamily:MONO },
+  cardHeader: { flexDirection:'row', alignItems:'center', marginBottom:10, gap:8 },
+  cardIcon: { fontSize:16, fontFamily:MONO },
   cardName: { color:'#fff', fontSize:14, fontWeight:'700', fontFamily:MONO, flex:1 },
-  cardPath: { color:'#666680', fontSize:11, fontFamily:MONO, marginBottom:6 },
-  cardDesc: { color:'#555568', fontSize:11, fontFamily:MONO, marginBottom:8, lineHeight:16 },
-  cardFooter: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginBottom:8 },
-  cardTime: { color:'#333348', fontSize:10, fontFamily:MONO },
-  cardFiles: { backgroundColor:'#ffffff06', paddingHorizontal:8, paddingVertical:3, borderRadius:2, borderWidth:1, borderColor:'#1a1a2e' },
+  cardPath: { color:'#666680', fontSize:11, fontFamily:MONO, marginBottom:6, backgroundColor:'#ffffff06', paddingHorizontal:6, paddingVertical:2, borderRadius:4, alignSelf:'flex-start' as any },
+  cardDesc: { color:'#555568', fontSize:11, fontFamily:MONO, marginBottom:10, lineHeight:16 },
+  cardFooter: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginBottom:8, paddingTop:8, borderTopWidth:1, borderTopColor:'#000000' },
+  cardTime: { color:'#444460', fontSize:10, fontFamily:MONO },
+  cardFiles: { backgroundColor:'#ffffff08', paddingHorizontal:8, paddingVertical:3, borderRadius:6, borderWidth:1, borderColor:'#2a2a2a' },
   cardFilesText: { color:'#666680', fontSize:10, fontFamily:MONO },
   cardDelete: { paddingHorizontal:6, paddingVertical:2, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
   cardDeleteText: { fontSize:12, fontFamily:MONO, fontWeight:'700', color:'#ef444460' },
   cardApiBadges: { flexDirection:'row', gap:6 },
-  cardApiBadge: { fontSize:10, fontFamily:MONO, color:'#666680' },
+  cardApiBadge: { fontSize:10, fontFamily:MONO, color:'#555568' },
 
   // Lang badge — pixel
   langBadge: { paddingHorizontal:6, paddingVertical:3, borderRadius:2, borderWidth:2 },
@@ -3944,13 +4156,13 @@ const s = StyleSheet.create({
 
   // Modal — pixel borders
   overlay: { flex:1, backgroundColor:'rgba(0,0,0,0.85)', justifyContent:'center', alignItems:'center' },
-  modalBox: { backgroundColor:'#111118', borderWidth:2, borderColor:'#2a2a3e', borderRadius:2, padding:20, width:'90%', maxWidth:540, maxHeight:'90%', ...(Platform.OS==='web'?{boxShadow:'6px 6px 0px #050508'} as any:{}) },
+  modalBox: { backgroundColor:'#222222', borderWidth:2, borderColor:'#333333', borderRadius:2, padding:20, width:'90%', maxWidth:540, maxHeight:'90%', ...(Platform.OS==='web'?{boxShadow:'6px 6px 0px #050508'} as any:{}) },
   modalTitle: { color:'#fff', fontSize:16, fontWeight:'900', fontFamily:MONO, letterSpacing:1, marginBottom:4 },
   modalSub: { color:'#666680', fontSize:11, fontFamily:MONO, marginBottom:16, lineHeight:16 },
   label: { color:'#666680', fontSize:10, fontWeight:'700', fontFamily:MONO, marginBottom:6, marginTop:12, letterSpacing:1, textTransform:'uppercase' as any },
-  input: { backgroundColor:'#050508', borderWidth:2, borderColor:'#2a2a3e', borderRadius:2, paddingHorizontal:12, paddingVertical:10, color:'#fff', fontSize:13, fontFamily:MONO },
+  input: { backgroundColor:'#050508', borderWidth:2, borderColor:'#333333', borderRadius:2, paddingHorizontal:12, paddingVertical:10, color:'#fff', fontSize:13, fontFamily:MONO },
   langPicker: { marginBottom:4 },
-  langOpt: { paddingHorizontal:10, paddingVertical:6, borderRadius:2, borderWidth:2, borderColor:'#1a1a2e', marginRight:6, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
+  langOpt: { paddingHorizontal:10, paddingVertical:6, borderRadius:2, borderWidth:2, borderColor:'#2a2a2a', marginRight:6, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
   langOptText: { color:'#666680', fontSize:11, fontWeight:'700', fontFamily:MONO },
   modalActions: { flexDirection:'row', justifyContent:'flex-end', gap:8, marginTop:16 },
   cancelBtn: { paddingHorizontal:14, paddingVertical:8, borderRadius:2 },
@@ -3959,25 +4171,25 @@ const s = StyleSheet.create({
   submitText: { color:'#fff', fontSize:13, fontWeight:'700', fontFamily:MONO },
 
   // Detail Top Bar
-  detailBar: { flexDirection:'row', alignItems:'center', paddingHorizontal:14, paddingVertical:10, borderBottomWidth:1, borderBottomColor:'#1a1a1a', gap:10 },
+  detailBar: { flexDirection:'row', alignItems:'center', paddingHorizontal:14, paddingVertical:8, borderBottomWidth:1, borderBottomColor:'#2a2a2a', gap:10, backgroundColor:'#0d0d0d' },
   backBtn: { paddingHorizontal:10, paddingVertical:6, borderRadius:8, backgroundColor:'#ffffff08', ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
   backText: { color:'#888', fontSize:13, fontWeight:'600' },
   detailName: { color:'#fff', fontSize:15, fontWeight:'700', flex:1 },
   detailActions: { flexDirection:'row', gap:6 },
-  barBtn: { paddingHorizontal:10, paddingVertical:5, borderRadius:8, borderWidth:1, borderColor:'#333', ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
+  barBtn: { paddingHorizontal:10, paddingVertical:5, borderRadius:6, borderWidth:1, borderColor:'#333', ...(Platform.OS==='web'?{cursor:'pointer',transition:'all 0.15s ease'} as any:{}) },
 
   // Right Panel Tabs
-  rightPanelTabs: { flexDirection:'row', paddingHorizontal:8, paddingVertical:6, gap:4, borderBottomWidth:1, borderBottomColor:'#1a1a1a', backgroundColor:'#0a0a0a' },
-  rpTab: { paddingHorizontal:10, paddingVertical:5, borderRadius:8, borderWidth:1, borderColor:'#222', ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
-  rpTabText: { color:'#888', fontSize:11, fontWeight:'700' },
+  rightPanelTabs: { flexDirection:'row', paddingHorizontal:8, paddingVertical:6, gap:4, borderBottomWidth:1, borderBottomColor:'#2a2a2a', backgroundColor:'#111' },
+  rpTab: { paddingHorizontal:10, paddingVertical:5, borderRadius:6, borderWidth:1, borderColor:'#222', ...(Platform.OS==='web'?{cursor:'pointer',transition:'all 0.15s ease'} as any:{}) },
+  rpTabText: { color:'#888', fontSize:11, fontWeight:'600' },
 
   // Body
   body: { flex:1, flexDirection:'row' },
 
   // Sidebar
-  sidebar: { width:200, borderRightWidth:1, borderRightColor:'#1a1a1a', backgroundColor:'#0d0d0d' },
+  sidebar: { width:210, borderRightWidth:1, borderRightColor:'#2a2a2a', backgroundColor:'#0a0a0c' },
   sidebarMobile: { width:160 },
-  sidebarHeader: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', paddingHorizontal:12, paddingVertical:8, borderBottomWidth:1, borderBottomColor:'#1a1a1a' },
+  sidebarHeader: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', paddingHorizontal:12, paddingVertical:10, borderBottomWidth:1, borderBottomColor:'#2a2a2a' },
   sidebarTitle: { color:'#555', fontSize:10, fontWeight:'800', letterSpacing:1 },
   sidebarAdd: { padding:4, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
   sidebarScroll: { flex:1 },
@@ -3997,12 +4209,12 @@ const s = StyleSheet.create({
   fileRowAction: { fontSize:12, color:'#888' },
 
   // Drop hint
-  dropHint: { padding:12, margin:10, borderRadius:8, borderWidth:1, borderColor:'#1a1a1a', borderStyle:'dashed', alignItems:'center' },
+  dropHint: { padding:12, margin:10, borderRadius:8, borderWidth:1, borderColor:'#000000', borderStyle:'dashed', alignItems:'center' },
   dropHintText: { color:'#555', fontSize:10, textAlign:'center' },
 
   // Editor Pane
   editorPane: { flex:1, flexDirection:'column' },
-  tabBar: { maxHeight:36, borderBottomWidth:1, borderBottomColor:'#1a1a1a', backgroundColor:'#080808' },
+  tabBar: { maxHeight:36, borderBottomWidth:1, borderBottomColor:'#000000', backgroundColor:'#080808' },
   editorTab: { flexDirection:'row', alignItems:'center', paddingHorizontal:12, paddingVertical:8, gap:5, borderBottomWidth:2, borderBottomColor:'transparent', minWidth:120, maxWidth:180, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
   editorTabIcon: { fontSize:12 },
   editorTabName: { color:'#888', fontSize:12, flex:1 },
@@ -4010,7 +4222,7 @@ const s = StyleSheet.create({
   tabCloseText: { color:'#555', fontSize:14, lineHeight:14 },
 
   // File Toolbar
-  fileToolbar: { flexDirection:'row', alignItems:'center', paddingHorizontal:14, paddingVertical:6, borderBottomWidth:1, borderBottomColor:'#1a1a1a', backgroundColor:'#0d1117', gap:10 },
+  fileToolbar: { flexDirection:'row', alignItems:'center', paddingHorizontal:14, paddingVertical:6, borderBottomWidth:1, borderBottomColor:'#000000', backgroundColor:'#000000', gap:10 },
   fileToolbarPath: { color:'#888', fontSize:12, fontFamily:MONO, flex:1 },
   fileToolbarRight: { flexDirection:'row', alignItems:'center', gap:8 },
   fileToolbarMeta: { color:'#555', fontSize:11 },
@@ -4026,8 +4238,8 @@ const s = StyleSheet.create({
   noFileSub: { color:'#444', fontSize:12 },
 
   // Code
-  codeScroll: { flex:1, backgroundColor:'#0d1117' },
-  codeEditor: { flex:1, backgroundColor:'#0d1117', color:'#e6e6e6', fontFamily:MONO, fontSize:13, lineHeight:22, padding:16, textAlignVertical:'top' },
+  codeScroll: { flex:1, backgroundColor:'#000000' },
+  codeEditor: { flex:1, backgroundColor:'#000000', color:'#e6e6e6', fontFamily:MONO, fontSize:13, lineHeight:22, padding:16, textAlignVertical:'top' },
 
   // Markdown
   mdContent: { padding:20, gap:4 },
@@ -4041,7 +4253,7 @@ const s = StyleSheet.create({
 
   // CSV
   csvRow: { flexDirection:'row' },
-  csvCell: { minWidth:100, paddingHorizontal:10, paddingVertical:6, borderBottomWidth:1, borderBottomColor:'#1a1a1a', borderRightWidth:1, borderRightColor:'#1a1a1a' },
+  csvCell: { minWidth:100, paddingHorizontal:10, paddingVertical:6, borderBottomWidth:1, borderBottomColor:'#000000', borderRightWidth:1, borderRightColor:'#000000' },
   csvHead: { backgroundColor:'#111827' },
   csvHeadText: { color:'#a5b4fc', fontSize:12, fontWeight:'700', fontFamily:MONO },
   csvCellText: { color:'#ccc', fontSize:12, fontFamily:MONO },
@@ -4049,20 +4261,41 @@ const s = StyleSheet.create({
   // Image
   fileImage: { width:'100%' as any, maxWidth:700, height:380, borderRadius:8, backgroundColor:'#111' },
 
+  // Resize handle
+  resizeHandle: {
+    width: 6,
+    justifyContent: 'center' as const,
+    alignItems: 'center' as const,
+    backgroundColor: '#0d0d0d',
+    ...(Platform.OS === 'web' ? { cursor: 'col-resize', userSelect: 'none' } as any : {}),
+  },
+  resizeGrip: {
+    gap: 3,
+    alignItems: 'center' as const,
+  },
+  resizeGripDot: {
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
+    backgroundColor: '#444',
+  },
+
   // Right panel
-  rightPanel: { width:300, borderLeftWidth:1, borderLeftColor:'#1a1a1a' },
-  bottomSheet: { height:320, borderTopWidth:1, borderTopColor:'#1a1a1a' },
-  panel: { flex:1, backgroundColor:'#0a0a0a', flexDirection:'column' },
-  panelHeader: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', paddingHorizontal:14, paddingVertical:10, borderBottomWidth:1, borderBottomColor:'#1a1a1a' },
+  rightPanel: { width:320, borderLeftWidth:1, borderLeftColor:'#2a2a2a' },
+  bottomSheet: { borderTopWidth:1, borderTopColor:'#000000' },
+  bottomSheetExpanded: { flex:1, maxHeight:'55%' as any },
+  bottomSheetCollapsed: { height:45 },
+  panel: { flex:1, backgroundColor:'#000000', flexDirection:'column' },
+  panelHeader: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', paddingHorizontal:14, paddingVertical:10, borderBottomWidth:1, borderBottomColor:'#000000' },
   panelTitle: { color:'#fff', fontSize:13, fontWeight:'700', paddingHorizontal:14, paddingTop:12, paddingBottom:4 },
   panelBtn: { paddingHorizontal:10, paddingVertical:5, borderRadius:8, borderWidth:1, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
 
   // Chat
   taskBox: { padding:12, backgroundColor:'#0d1a0d', borderBottomWidth:1, borderBottomColor:'#1a2a1a' },
-  taskInput: { backgroundColor:'#0a0a0a', borderWidth:1, borderColor:'#1a3a1a', borderRadius:8, paddingHorizontal:12, paddingVertical:8, color:'#fff', fontSize:13, minHeight:50 },
+  taskInput: { backgroundColor:'#000000', borderWidth:1, borderColor:'#1a3a1a', borderRadius:8, paddingHorizontal:12, paddingVertical:8, color:'#fff', fontSize:13, minHeight:50 },
   taskSubmit: { marginTop:8, alignSelf:'flex-end', backgroundColor:'#22c55e20', borderWidth:1, borderColor:'#22c55e60', paddingHorizontal:14, paddingVertical:6, borderRadius:8 },
   msgList: { flex:1 },
-  msgInputRow: { flexDirection:'row', alignItems:'center', padding:12, gap:8, borderTopWidth:1, borderTopColor:'#1a1a1a' },
+  msgInputRow: { flexDirection:'row', alignItems:'center', padding:12, gap:8, borderTopWidth:1, borderTopColor:'#000000' },
   msgInput: { flex:1, backgroundColor:'#111', borderWidth:1, borderColor:'#222', borderRadius:10, paddingHorizontal:12, paddingVertical:8, color:'#fff', fontSize:13 },
   sendBtn: { width:36, height:36, borderRadius:18, justifyContent:'center', alignItems:'center', ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
 
@@ -4073,20 +4306,20 @@ const s = StyleSheet.create({
   apiCardTitle: { fontSize:14, fontWeight:'800', marginBottom:4 },
   apiCardDesc: { color:'#888', fontSize:12, lineHeight:18 },
   apiLabel: { color:'#555', fontSize:10, fontWeight:'800', letterSpacing:1 },
-  codeBlock: { backgroundColor:'#0d1117', borderRadius:8, padding:12, borderWidth:1, borderColor:'#1a1a2e' },
+  codeBlock: { backgroundColor:'#000000', borderRadius:8, padding:12, borderWidth:1, borderColor:'#2a2a2a' },
   codeBlockText: { color:'#ce9178', fontSize:12, fontFamily:MONO, lineHeight:18 },
-  integrationsSection: { padding:14, borderTopWidth:1, borderTopColor:'#1a1a1a', gap:8 },
+  integrationsSection: { padding:14, borderTopWidth:1, borderTopColor:'#000000', gap:8 },
   integrationBadge: { alignItems:'center', marginRight:10, gap:2 },
   integrationIcon: { fontSize:20 },
   integrationName: { color:'#555', fontSize:9, fontWeight:'700' },
 
   // Secrets
-  secretRow: { flexDirection:'row', alignItems:'center', gap:8, paddingVertical:8, borderBottomWidth:1, borderBottomColor:'#1a1a1a' },
+  secretRow: { flexDirection:'row', alignItems:'center', gap:8, paddingVertical:8, borderBottomWidth:1, borderBottomColor:'#000000' },
   secretKey: { color:'#a5b4fc', fontSize:12, fontWeight:'700', fontFamily:MONO, flex:1 },
   secretVal: { color:'#555', fontSize:12, fontFamily:MONO, flex:1 },
 
   // Usage
-  statBox: { alignItems:'center', backgroundColor:'#111', borderRadius:10, padding:12, flex:1, minWidth:70, borderWidth:1, borderColor:'#1a1a1a' },
+  statBox: { alignItems:'center', backgroundColor:'#111', borderRadius:10, padding:12, flex:1, minWidth:70, borderWidth:1, borderColor:'#000000' },
   statVal: { fontSize:18, fontWeight:'900', fontFamily:MONO },
   statLabel: { color:'#555', fontSize:9, fontWeight:'800', letterSpacing:0.5, marginTop:2 },
   usageRow: { flexDirection:'row', alignItems:'center', gap:8, paddingVertical:6, borderBottomWidth:1, borderBottomColor:'#111' },

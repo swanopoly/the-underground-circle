@@ -194,7 +194,7 @@ export const TIER_COLORS: Record<BadgeTier, { bg: string; border: string; glow: 
   bronze:    { bg: '#2a1a0a', border: '#cd7f32', glow: '#cd7f3260', label: 'BRONZE' },
   silver:    { bg: '#0f1520', border: '#c0c0c0', glow: '#c0c0c060', label: 'SILVER' },
   gold:      { bg: '#1a1500', border: '#ffd700', glow: '#ffd70060', label: 'GOLD' },
-  platinum:  { bg: '#1a1a2e', border: '#e5e4e2', glow: '#e5e4e260', label: 'PLATINUM' },
+  platinum:  { bg: '#2a2a2a', border: '#e5e4e2', glow: '#e5e4e260', label: 'PLATINUM' },
   legendary: { bg: '#001a0f', border: '#00FF9C', glow: '#00FF9C80', label: 'LEGENDARY' },
 };
 

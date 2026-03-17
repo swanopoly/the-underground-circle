@@ -34,6 +34,7 @@ import {
   deleteAutomation,
   toggleAutomation,
   triggerAutomation,
+  testAutomation,
   CircleAutomation,
   AutomationRun,
   AutomationStats,
@@ -1189,10 +1190,19 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
   }, []);
 
   // Filter state
-  const [activeTab, setActiveTab] = useState<'mine' | 'all'>('all');
+  const [activeTab, setActiveTab] = useState<'all' | 'active' | 'failed' | 'disabled' | 'mine'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearch, setShowSearch] = useState(false);
   const searchRef = useRef<TextInput>(null);
+
+  // Rate-limit manual triggers (10s cooldown per automation)
+  const triggerCooldowns = useRef<Record<string, number>>({});
+
+  // Delete confirmation
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+
+  // Suggested section toggle (collapsed by default when user has automations)
+  const [showSuggested, setShowSuggested] = useState(false);
 
   // Modal state
   const [showCreate, setShowCreate] = useState(false);
@@ -1212,8 +1222,20 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
   // Filtered automations
   const filteredAutomations = useMemo(() => {
     let list = automations;
-    if (activeTab === 'mine' && currentUserId) {
-      list = list.filter((a) => a.createdBy === currentUserId);
+    switch (activeTab) {
+      case 'mine':
+        if (currentUserId) list = list.filter((a) => a.createdBy === currentUserId);
+        break;
+      case 'active':
+        list = list.filter((a) => a.enabled);
+        break;
+      case 'failed':
+        list = list.filter((a) => a.lastError);
+        break;
+      case 'disabled':
+        list = list.filter((a) => !a.enabled);
+        break;
+      // 'all' — no filter
     }
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
@@ -1226,11 +1248,23 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
     return list;
   }, [automations, activeTab, currentUserId, searchQuery]);
 
+  // Count failed automations for alert badge
+  const failedCount = useMemo(() => automations.filter(a => a.lastError).length, [automations]);
+  const disabledCount = useMemo(() => automations.filter(a => !a.enabled).length, [automations]);
+
   const handleToggle = useCallback(async (id: string, enabled: boolean) => {
     await toggleAutomation(id, enabled);
   }, []);
 
   const handleTrigger = useCallback(async (id: string) => {
+    // Rate limit: 10s cooldown per automation
+    const now = Date.now();
+    const lastTrigger = triggerCooldowns.current[id] || 0;
+    if (now - lastTrigger < 10_000) {
+      return; // Silently ignore — button already shows disabled state
+    }
+    triggerCooldowns.current[id] = now;
+
     setTriggeringId(id);
     setExpandedId(id); // Auto-expand log so user sees progress
     const result = await triggerAutomation(id, circleId);
@@ -1238,13 +1272,35 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
     if (result.error) {
       console.warn('[Automation] Trigger error:', result.error);
     }
-    // Refresh stats after run completes
+    refreshStats();
+  }, [circleId, refreshStats]);
+
+  const handleTest = useCallback(async (id: string) => {
+    const now = Date.now();
+    const lastTrigger = triggerCooldowns.current[id] || 0;
+    if (now - lastTrigger < 10_000) return;
+    triggerCooldowns.current[id] = now;
+
+    setTriggeringId(id);
+    setExpandedId(id);
+    const result = await testAutomation(id, circleId);
+    setTriggeringId(null);
+    if (result.error) {
+      console.warn('[Automation] Test error:', result.error);
+    }
     refreshStats();
   }, [circleId, refreshStats]);
 
   const handleDelete = useCallback(async (id: string) => {
-    await deleteAutomation(id);
+    setDeleteConfirmId(id);
   }, []);
+
+  const confirmDelete = useCallback(async () => {
+    if (deleteConfirmId) {
+      await deleteAutomation(deleteConfirmId);
+      setDeleteConfirmId(null);
+    }
+  }, [deleteConfirmId]);
 
   const handleQuickCreate = (prompt: string, trigger: TriggerOption | null) => {
     setQuickPrompt(prompt);
@@ -1296,25 +1352,47 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
       {/* Quick create bar */}
       <QuickCreateBar onSubmit={handleQuickCreate} accentColor={accentColor} />
 
-      {/* Filter row: Mine / All + search + New */}
+      {/* Failed automations alert banner */}
+      {failedCount > 0 && activeTab !== 'failed' && (
+        <Pressable
+          onPress={() => setActiveTab('failed')}
+          style={[{ backgroundColor: '#200a0a', borderWidth: 1, borderColor: '#ef444440', borderRadius: 8, padding: 10, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 8 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        >
+          <Text style={{ fontSize: 14 }}>⚠️</Text>
+          <Text style={{ color: '#ef4444', fontSize: 12, fontWeight: '700', flex: 1 }}>
+            {failedCount} automation{failedCount > 1 ? 's' : ''} with errors
+          </Text>
+          <Text style={{ color: '#ef444480', fontSize: 11 }}>View →</Text>
+        </Pressable>
+      )}
+
+      {/* Filter row: status tabs + search + New */}
       <View style={s.filterRow}>
-        <View style={s.tabs}>
-          {(['mine', 'all'] as const).map((tab) => (
-            <Pressable
-              key={tab}
-              onPress={() => setActiveTab(tab)}
-              style={[
-                s.tab,
-                activeTab === tab && { backgroundColor: '#fff' },
-                Platform.OS === 'web' && { cursor: 'pointer' } as any,
-              ]}
-            >
-              <Text style={[s.tabText, activeTab === tab && { color: '#000' }]}>
-                {tab.charAt(0).toUpperCase() + tab.slice(1)}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flex: 1 }}>
+          <View style={s.tabs}>
+            {([
+              { key: 'all' as const, label: 'All', count: automations.length },
+              { key: 'active' as const, label: 'Active', count: automations.filter(a => a.enabled).length },
+              { key: 'failed' as const, label: 'Errors', count: failedCount },
+              { key: 'disabled' as const, label: 'Off', count: disabledCount },
+              { key: 'mine' as const, label: 'Mine', count: null },
+            ]).map(({ key, label, count }) => (
+              <Pressable
+                key={key}
+                onPress={() => setActiveTab(key)}
+                style={[
+                  s.tab,
+                  activeTab === key && { backgroundColor: key === 'failed' ? '#ef4444' : '#fff' },
+                  Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                ]}
+              >
+                <Text style={[s.tabText, activeTab === key && { color: key === 'failed' ? '#fff' : '#000' }]}>
+                  {label}{count != null && count > 0 ? ` ${count}` : ''}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </ScrollView>
 
         <View style={s.filterRight}>
           {showSearch ? (
@@ -1427,6 +1505,7 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
               accentColor={accentColor}
               onToggle={handleToggle}
               onTrigger={handleTrigger}
+              onTest={handleTest}
               onDelete={handleDelete}
               onEdit={() => setEditingAutomation(auto)}
               onDuplicate={() => setDuplicatingAutomation(auto)}
@@ -1437,8 +1516,51 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
         </View>
       )}
 
-      {/* Suggested templates (always shown below list) */}
-      <SuggestedSection onApply={handleApplySuggested} accentColor={accentColor} />
+      {/* Suggested templates — collapsed by default when user has automations */}
+      {automations.length > 0 ? (
+        <View style={{ marginTop: 16 }}>
+          <Pressable
+            onPress={() => setShowSuggested(!showSuggested)}
+            style={[{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={{ color: '#888', fontSize: 13, fontWeight: '700', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: 0.5, flex: 1 }}>
+              Suggested Automations
+            </Text>
+            <Text style={{ color: '#555', fontSize: 12 }}>{showSuggested ? '∧' : `${SUGGESTED_GROUPS.reduce((sum, g) => sum + g.templates.length, 0)} templates ∨`}</Text>
+          </Pressable>
+          {showSuggested && <SuggestedSection onApply={handleApplySuggested} accentColor={accentColor} />}
+        </View>
+      ) : (
+        <SuggestedSection onApply={handleApplySuggested} accentColor={accentColor} />
+      )}
+
+      {/* Delete confirmation dialog */}
+      {deleteConfirmId && (
+        <Modal transparent animationType="fade" onRequestClose={() => setDeleteConfirmId(null)}>
+          <Pressable style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center' }} onPress={() => setDeleteConfirmId(null)}>
+            <Pressable onPress={(e) => e.stopPropagation()} style={{ backgroundColor: '#1a1a1a', borderRadius: 12, padding: 20, maxWidth: 340, width: '90%', borderWidth: 1, borderColor: '#333' }}>
+              <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700', marginBottom: 8 }}>Delete Automation?</Text>
+              <Text style={{ color: '#999', fontSize: 13, marginBottom: 20, lineHeight: 18 }}>
+                This will permanently delete this automation and all its run history. This cannot be undone.
+              </Text>
+              <View style={{ flexDirection: 'row', gap: 10, justifyContent: 'flex-end' }}>
+                <Pressable
+                  onPress={() => setDeleteConfirmId(null)}
+                  style={[{ paddingHorizontal: 16, paddingVertical: 8, borderRadius: 6, backgroundColor: '#333' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <Text style={{ color: '#ccc', fontSize: 13, fontWeight: '600' }}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={confirmDelete}
+                  style={[{ paddingHorizontal: 16, paddingVertical: 8, borderRadius: 6, backgroundColor: '#ef4444' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>Delete</Text>
+                </Pressable>
+              </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
+      )}
 
       {/* ── Modals ── */}
 
@@ -1486,6 +1608,7 @@ function AutomationCard({
   accentColor,
   onToggle,
   onTrigger,
+  onTest,
   onDelete,
   onEdit,
   onDuplicate,
@@ -1499,6 +1622,7 @@ function AutomationCard({
   accentColor: string;
   onToggle: (id: string, enabled: boolean) => void;
   onTrigger: (id: string) => void;
+  onTest: (id: string) => void;
   onDelete: (id: string) => void;
   onEdit: () => void;
   onDuplicate: () => void;
@@ -1603,11 +1727,18 @@ function AutomationCard({
             <Text style={s.runBtnText}>▶ Run</Text>
           )}
         </Pressable>
+        <Pressable
+          onPress={() => onTest(auto.id)}
+          disabled={triggering}
+          style={[s.actionBtn, { borderColor: '#6366f140' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        >
+          <Text style={[s.actionBtnText, { fontSize: 9, color: '#6366f1' }]}>🧪 Test</Text>
+        </Pressable>
         <Pressable onPress={onEdit} style={[s.actionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
           <Text style={s.actionBtnText}>✏️</Text>
         </Pressable>
         <Pressable onPress={onMemoryNotes} style={[s.memoryBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-          <Text style={s.memoryBtnText}>🧠 Memory</Text>
+          <Text style={s.memoryBtnText}>🧠</Text>
         </Pressable>
         <Pressable onPress={onDuplicate} style={[s.actionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
           <Text style={s.actionBtnText}>📋</Text>
@@ -1645,7 +1776,32 @@ function RunHistory({ automationId }: { automationId: string }) {
 
 function RunRow({ run }: { run: AutomationRun }) {
   const [expanded, setExpanded] = useState(run.status === 'running');
-  const logSteps: string[] = (run.inputContext as any)?.log || [];
+  const [showPrompt, setShowPrompt] = useState(false);
+  const [showSystemPrompt, setShowSystemPrompt] = useState(false);
+  const [showContext, setShowContext] = useState(false);
+  const [showFullOutput, setShowFullOutput] = useState(false);
+  const ctx = run.inputContext as any;
+  const logSteps: string[] = ctx?.log || [];
+  const spirit = ctx?.spirit;
+  const isDryRun = ctx?.dryRun === true;
+  const inputTokens = ctx?.inputTokens || 0;
+  const outputTokens = ctx?.outputTokens || 0;
+  const members = ctx?.members || [];
+  const notCheckedIn = ctx?.notCheckedIn || [];
+  const todayCheckIns = ctx?.todayCheckIns || [];
+  const openTasks = ctx?.openTasks || [];
+  const stuckTasks = ctx?.stuckTasks || [];
+  const peerReviewTasks = ctx?.peerReviewTasks || [];
+  const goals = ctx?.goals || [];
+  const rooms = ctx?.rooms || [];
+  const wallets = ctx?.wallets || [];
+  const recentTrades = ctx?.recentTrades || [];
+  const eventPayload = ctx?.eventPayload;
+
+  const sectionHead = { color: '#666', fontSize: 9, fontWeight: '800' as const, fontFamily: 'monospace' as const, marginBottom: 3, letterSpacing: 1 };
+  const sectionBox = { backgroundColor: '#0a0a14', borderRadius: 4, padding: 6, marginBottom: 6, borderWidth: 1, borderColor: '#2a2a2a' };
+  const toggleStyle = [{ paddingVertical: 4, paddingHorizontal: 6, backgroundColor: '#111', borderRadius: 4, borderWidth: 1, borderColor: '#222', alignSelf: 'flex-start' as const, marginTop: 4 }, Platform.OS === 'web' && { cursor: 'pointer' } as any];
+  const toggleText = { color: '#6366f1', fontSize: 8, fontWeight: '700' as const, fontFamily: 'monospace' as const, letterSpacing: 0.5 };
 
   return (
     <View style={s.runRow}>
@@ -1656,6 +1812,7 @@ function RunRow({ run }: { run: AutomationRun }) {
         <Text style={s.runIcon}>
           {run.status === 'running' ? '🔄' : runStatusIcon(run.status)}
         </Text>
+        {isDryRun && <Text style={{ color: '#6366f1', fontSize: 8, fontWeight: '800', fontFamily: 'monospace', backgroundColor: '#6366f120', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 3 }}>TEST</Text>}
         <Text style={s.runTime}>{timeAgo(run.startedAt)}</Text>
         {run.durationMs != null && (
           <Text style={s.runDuration}>{(run.durationMs / 1000).toFixed(1)}s</Text>
@@ -1666,6 +1823,7 @@ function RunRow({ run }: { run: AutomationRun }) {
         {run.estimatedCost > 0 && (
           <Text style={s.runCost}>${run.estimatedCost.toFixed(4)}</Text>
         )}
+        {spirit && <Text style={{ fontSize: 10 }}>🧠</Text>}
         {run.status === 'running' && (
           <ActivityIndicator size="small" color="#6366f1" style={{ marginLeft: 4 }} />
         )}
@@ -1673,45 +1831,316 @@ function RunRow({ run }: { run: AutomationRun }) {
       </Pressable>
       {expanded && (
         <View style={s.runDetail}>
-          {/* Execution log */}
+          {/* ── Execution Log ── */}
           {logSteps.length > 0 && (
-            <View style={{ backgroundColor: '#0a0a14', borderRadius: 4, padding: 6, marginBottom: 6, borderWidth: 1, borderColor: '#2a2a2a' }}>
-              <Text style={{ color: '#666', fontSize: 9, fontWeight: '800', fontFamily: 'monospace', marginBottom: 3, letterSpacing: 1 }}>EXECUTION LOG</Text>
+            <View style={sectionBox}>
+              <Text style={sectionHead}>EXECUTION LOG</Text>
               {logSteps.map((step: string, i: number) => (
                 <Text key={i} style={{ color: step.includes('❌') ? '#ef4444' : step.includes('✓') || step.includes('✅') ? '#22c55e' : '#aaa', fontSize: 10, fontFamily: 'monospace', lineHeight: 14 }}>{step}</Text>
               ))}
             </View>
           )}
-          {/* AI output */}
+
+          {/* ── AI Output ── */}
           {run.outputText && (
-            <View style={{ marginBottom: 4 }}>
-              <Text style={{ color: '#666', fontSize: 9, fontWeight: '800', fontFamily: 'monospace', marginBottom: 2, letterSpacing: 1 }}>OUTPUT</Text>
-              <Text style={s.runOutput} selectable>{run.outputText.slice(0, 800)}</Text>
+            <View style={sectionBox}>
+              <Text style={sectionHead}>AI OUTPUT</Text>
+              <Text style={s.runOutput} selectable>{showFullOutput ? run.outputText : run.outputText.slice(0, 800)}</Text>
+              {run.outputText.length > 800 && (
+                <Pressable onPress={() => setShowFullOutput(!showFullOutput)} style={toggleStyle}>
+                  <Text style={toggleText}>{showFullOutput ? '▲ COLLAPSE' : `▼ SHOW FULL (${run.outputText.length} chars)`}</Text>
+                </Pressable>
+              )}
             </View>
           )}
-          {/* Error */}
-          {run.errorMessage && run.status !== 'running' && (
-            <Text style={s.runError}>{run.errorMessage}</Text>
+
+          {/* ── Token Breakdown ── */}
+          {(inputTokens > 0 || outputTokens > 0) && (
+            <View style={sectionBox}>
+              <Text style={sectionHead}>TOKEN BREAKDOWN</Text>
+              <View style={{ flexDirection: 'row', gap: 12 }}>
+                <View style={{ flex: 1, backgroundColor: '#111', borderRadius: 4, padding: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
+                  <Text style={{ color: '#888', fontSize: 7, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 0.5 }}>INPUT</Text>
+                  <Text style={{ color: '#6366f1', fontSize: 14, fontWeight: '900', fontFamily: 'monospace' }}>{inputTokens.toLocaleString()}</Text>
+                </View>
+                <View style={{ flex: 1, backgroundColor: '#111', borderRadius: 4, padding: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
+                  <Text style={{ color: '#888', fontSize: 7, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 0.5 }}>OUTPUT</Text>
+                  <Text style={{ color: '#22c55e', fontSize: 14, fontWeight: '900', fontFamily: 'monospace' }}>{outputTokens.toLocaleString()}</Text>
+                </View>
+                <View style={{ flex: 1, backgroundColor: '#111', borderRadius: 4, padding: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
+                  <Text style={{ color: '#888', fontSize: 7, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 0.5 }}>COST</Text>
+                  <Text style={{ color: '#f59e0b', fontSize: 14, fontWeight: '900', fontFamily: 'monospace' }}>${run.estimatedCost.toFixed(4)}</Text>
+                </View>
+              </View>
+            </View>
           )}
-          {/* Live progress for running */}
-          {run.status === 'running' && run.errorMessage && (
-            <View style={{ marginBottom: 4 }}>
-              <Text style={{ color: '#666', fontSize: 9, fontWeight: '800', fontFamily: 'monospace', marginBottom: 2, letterSpacing: 1 }}>PROGRESS</Text>
-              {run.errorMessage.split('\n').filter(Boolean).map((line: string, i: number) => (
-                <Text key={i} style={{ color: line.includes('✓') ? '#22c55e' : '#aaa', fontSize: 10, fontFamily: 'monospace', lineHeight: 14 }}>{line}</Text>
+
+          {/* ── Spirit / Agent ── */}
+          {spirit && (
+            <View style={sectionBox}>
+              <Text style={sectionHead}>AGENT SPIRIT</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Text style={{ fontSize: 14 }}>🧠</Text>
+                <View>
+                  <Text style={{ color: '#c084fc', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' }}>{spirit}</Text>
+                  {ctx?.spiritPrompt && <Text style={{ color: '#555', fontSize: 8, fontFamily: 'monospace', marginTop: 2 }} numberOfLines={2}>{ctx.spiritPrompt}</Text>}
+                </View>
+              </View>
+            </View>
+          )}
+
+          {/* ── User Prompt (what was sent to AI) ── */}
+          {(run.promptUsed || ctx?.userPrompt) && (
+            <View style={sectionBox}>
+              <Pressable onPress={() => setShowPrompt(!showPrompt)} style={[{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                <Text style={sectionHead}>USER PROMPT</Text>
+                <Text style={{ color: '#6366f1', fontSize: 8, fontFamily: 'monospace' }}>{showPrompt ? '▲ HIDE' : '▼ SHOW'}</Text>
+              </Pressable>
+              {showPrompt && (
+                <Text style={{ color: '#ccc', fontSize: 10, fontFamily: 'monospace', lineHeight: 14, marginTop: 4 }} selectable>
+                  {run.promptUsed || ctx?.userPrompt || ''}
+                </Text>
+              )}
+            </View>
+          )}
+
+          {/* ── System Prompt (full AI instructions) ── */}
+          {ctx?.systemPrompt && (
+            <View style={sectionBox}>
+              <Pressable onPress={() => setShowSystemPrompt(!showSystemPrompt)} style={[{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                <Text style={sectionHead}>SYSTEM PROMPT</Text>
+                <Text style={{ color: '#6366f1', fontSize: 8, fontFamily: 'monospace' }}>{showSystemPrompt ? '▲ HIDE' : `▼ SHOW (${ctx.systemPrompt.length} chars)`}</Text>
+              </Pressable>
+              {showSystemPrompt && (
+                <Text style={{ color: '#999', fontSize: 9, fontFamily: 'monospace', lineHeight: 13, marginTop: 4 }} selectable>
+                  {ctx.systemPrompt}
+                </Text>
+              )}
+            </View>
+          )}
+
+          {/* ── Circle Context Data ── */}
+          {ctx?.contextString && (
+            <View style={sectionBox}>
+              <Pressable onPress={() => setShowContext(!showContext)} style={[{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                <Text style={sectionHead}>CONTEXT DATA SENT TO AI</Text>
+                <Text style={{ color: '#6366f1', fontSize: 8, fontFamily: 'monospace' }}>{showContext ? '▲ HIDE' : '▼ SHOW'}</Text>
+              </Pressable>
+              {showContext && (
+                <Text style={{ color: '#888', fontSize: 9, fontFamily: 'monospace', lineHeight: 13, marginTop: 4 }} selectable>
+                  {ctx.contextString}
+                </Text>
+              )}
+            </View>
+          )}
+
+          {/* ── Members & Check-ins ── */}
+          {(members.length > 0 || todayCheckIns.length > 0) && (
+            <View style={sectionBox}>
+              <Text style={sectionHead}>CIRCLE SNAPSHOT</Text>
+              {members.length > 0 && (
+                <View style={{ marginBottom: 4 }}>
+                  <Text style={{ color: '#555', fontSize: 8, fontWeight: '700', fontFamily: 'monospace', marginBottom: 2 }}>
+                    MEMBERS ({members.length}) — {ctx?.checkedInCount || 0} checked in
+                  </Text>
+                  {members.map((m: any, i: number) => (
+                    <Text key={i} style={{ color: m.checkedIn ? '#22c55e' : '#555', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                      {m.checkedIn ? '● ' : '○ '}{m.name}{m.streak > 0 ? ` 🔥${m.streak}` : ''}{m.role !== 'member' ? ` (${m.role})` : ''}
+                    </Text>
+                  ))}
+                </View>
+              )}
+              {notCheckedIn.length > 0 && (
+                <View style={{ marginBottom: 4 }}>
+                  <Text style={{ color: '#ef4444', fontSize: 8, fontWeight: '700', fontFamily: 'monospace', marginBottom: 2 }}>NOT CHECKED IN ({notCheckedIn.length})</Text>
+                  <Text style={{ color: '#ef4444', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>{notCheckedIn.join(', ')}</Text>
+                </View>
+              )}
+              {todayCheckIns.length > 0 && (
+                <View>
+                  <Text style={{ color: '#22c55e', fontSize: 8, fontWeight: '700', fontFamily: 'monospace', marginBottom: 2 }}>TODAY'S CHECK-INS ({todayCheckIns.length})</Text>
+                  {todayCheckIns.map((c: any, i: number) => (
+                    <View key={i} style={{ marginBottom: 3 }}>
+                      <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '700', fontFamily: 'monospace' }}>{c.user}</Text>
+                      <Text style={{ color: '#666', fontSize: 8, fontFamily: 'monospace', lineHeight: 12 }} numberOfLines={3}>{c.content}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </View>
+          )}
+
+          {/* ── Open Tasks ── */}
+          {openTasks.length > 0 && (
+            <View style={sectionBox}>
+              <Text style={sectionHead}>OPEN TASKS ({openTasks.length})</Text>
+              {openTasks.map((t: any, i: number) => (
+                <Text key={i} style={{ color: '#aaa', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                  • {t.title}{t.assignee ? ` → ${t.assignee}` : ''}{t.priority ? ` [${t.priority}]` : ''}
+                </Text>
               ))}
             </View>
           )}
-          {/* Meta info */}
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 2 }}>
-            <Text style={s.runMeta}>Model: {run.modelUsed || '?'}</Text>
-            <Text style={s.runMeta}>Output: {run.outputTarget || '?'}</Text>
-            <Text style={s.runMeta}>Trigger: {run.triggerSource}</Text>
-            {(run.inputContext as any)?.memberCount != null && (
-              <Text style={s.runMeta}>Members: {(run.inputContext as any).memberCount}</Text>
+
+          {/* ── Stuck Tasks ── */}
+          {stuckTasks.length > 0 && (
+            <View style={sectionBox}>
+              <Text style={[sectionHead, { color: '#f59e0b' }]}>STUCK TASKS ({stuckTasks.length})</Text>
+              {stuckTasks.map((t: any, i: number) => (
+                <Text key={i} style={{ color: '#f59e0b', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                  {'\u26A0\uFE0F'} {t.title}{t.assignee ? ` → ${t.assignee}` : ''} [{t.status}]{t.daysSinceUpdate ? ` ${t.daysSinceUpdate}d stuck` : ''}
+                </Text>
+              ))}
+            </View>
+          )}
+
+          {/* ── Peer Review Tasks ── */}
+          {peerReviewTasks.length > 0 && (
+            <View style={sectionBox}>
+              <Text style={[sectionHead, { color: '#8b5cf6' }]}>TASKS IN REVIEW ({peerReviewTasks.length})</Text>
+              {peerReviewTasks.map((t: any, i: number) => (
+                <Text key={i} style={{ color: '#c084fc', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                  {'\uD83D\uDD0D'} {t.title}{t.assignee ? ` → ${t.assignee}` : ''} [{t.status}]
+                </Text>
+              ))}
+            </View>
+          )}
+
+          {/* ── Goals ── */}
+          {goals.length > 0 && (
+            <View style={sectionBox}>
+              <Text style={sectionHead}>GOALS ({goals.length})</Text>
+              {goals.map((g: any, i: number) => (
+                <Text key={i} style={{ color: g.status === 'active' ? '#22c55e' : '#888', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                  {'\uD83C\uDFAF'} {g.title || g.name} [{g.status}]{g.target_count ? ` ${g.current_count || 0}/${g.target_count}` : ''}
+                </Text>
+              ))}
+            </View>
+          )}
+
+          {/* ── Rooms ── */}
+          {rooms.length > 0 && (
+            <View style={sectionBox}>
+              <Text style={sectionHead}>PROJECT ROOMS ({rooms.length})</Text>
+              {rooms.map((r: any, i: number) => (
+                <Text key={i} style={{ color: '#38bdf8', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                  {'\uD83D\uDCBB'} {r.name}{r.fileCount ? ` (${r.fileCount} files)` : ''}{r.recentMessages ? ` ${r.recentMessages} msgs` : ''}
+                </Text>
+              ))}
+            </View>
+          )}
+
+          {/* ── Wallets ── */}
+          {wallets.length > 0 && (
+            <View style={sectionBox}>
+              <Text style={[sectionHead, { color: '#9945FF' }]}>CONNECTED WALLETS ({wallets.length})</Text>
+              {wallets.map((w: any, i: number) => (
+                <Text key={i} style={{ color: '#c084fc', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                  {'\u25CE'} {w.name} — {w.address?.slice(0, 8)}...{w.address?.slice(-4)}{w.portfolioUsd ? ` ($${w.portfolioUsd.toFixed(2)})` : ''}
+                </Text>
+              ))}
+            </View>
+          )}
+
+          {/* ── Recent Trades ── */}
+          {recentTrades.length > 0 && (
+            <View style={sectionBox}>
+              <Text style={[sectionHead, { color: '#22c55e' }]}>RECENT TRADES ({recentTrades.length})</Text>
+              {recentTrades.map((t: any, i: number) => (
+                <Text key={i} style={{ color: t.status === 'success' ? '#22c55e' : t.status === 'failed' ? '#ef4444' : '#888', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                  [{t.status}] {t.action}: {t.inputAmount} {'\u2192'} {t.outputAmount}
+                </Text>
+              ))}
+            </View>
+          )}
+
+          {/* ── Event Payload (if triggered by webhook/event) ── */}
+          {eventPayload && (
+            <View style={sectionBox}>
+              <Text style={sectionHead}>EVENT TRIGGER DATA</Text>
+              <Text style={{ color: '#888', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }} selectable>{eventPayload}</Text>
+            </View>
+          )}
+
+          {/* ── Error ── */}
+          {run.errorMessage && run.status !== 'running' && (
+            <View style={[sectionBox, { borderColor: '#ef444440' }]}>
+              <Text style={[sectionHead, { color: '#ef4444' }]}>ERROR</Text>
+              <Text style={s.runError}>{run.errorMessage}</Text>
+            </View>
+          )}
+
+          {/* ── Live Progress (for running) ── */}
+          {run.status === 'running' && run.errorMessage && (
+            <View style={sectionBox}>
+              <Text style={sectionHead}>LIVE PROGRESS</Text>
+              {run.errorMessage.split('\n').filter(Boolean).map((line: string, i: number) => (
+                <Text key={i} style={{ color: line.includes('✓') ? '#22c55e' : line.includes('❌') ? '#ef4444' : '#aaa', fontSize: 10, fontFamily: 'monospace', lineHeight: 14 }}>{line}</Text>
+              ))}
+            </View>
+          )}
+
+          {/* ── Meta Info ── */}
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 2 }}>
+            <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
+              <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>MODEL</Text>
+              <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{run.modelUsed || '?'}</Text>
+            </View>
+            <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
+              <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>OUTPUT TO</Text>
+              <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{run.outputTarget || ctx?.outputTarget || '?'}</Text>
+            </View>
+            <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
+              <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>TRIGGER</Text>
+              <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{run.triggerSource}</Text>
+            </View>
+            {ctx?.agent && (
+              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
+                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>AGENT</Text>
+                <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{ctx.agent}</Text>
+              </View>
             )}
-            {(run.inputContext as any)?.checkedInCount != null && (
-              <Text style={s.runMeta}>Checked in: {(run.inputContext as any).checkedInCount}</Text>
+            {ctx?.memberCount != null && (
+              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
+                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>MEMBERS</Text>
+                <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{ctx.checkedInCount || 0}/{ctx.memberCount} checked in</Text>
+              </View>
+            )}
+            {ctx?.openTaskCount != null && ctx.openTaskCount > 0 && (
+              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
+                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>TASKS</Text>
+                <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{ctx.openTaskCount} open</Text>
+              </View>
+            )}
+            {stuckTasks.length > 0 && (
+              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
+                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>STUCK</Text>
+                <Text style={{ color: '#f59e0b', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{stuckTasks.length} tasks</Text>
+              </View>
+            )}
+            {goals.length > 0 && (
+              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
+                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>GOALS</Text>
+                <Text style={{ color: '#22c55e', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{goals.length} active</Text>
+              </View>
+            )}
+            {rooms.length > 0 && (
+              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
+                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>ROOMS</Text>
+                <Text style={{ color: '#38bdf8', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{rooms.length} active</Text>
+              </View>
+            )}
+            {wallets.length > 0 && (
+              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
+                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>WALLETS</Text>
+                <Text style={{ color: '#9945FF', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{wallets.length} connected</Text>
+              </View>
+            )}
+            {run.startedAt && (
+              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
+                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>STARTED</Text>
+                <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{new Date(run.startedAt).toLocaleTimeString()}</Text>
+              </View>
             )}
           </View>
         </View>

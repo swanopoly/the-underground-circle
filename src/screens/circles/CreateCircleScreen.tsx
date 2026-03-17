@@ -599,7 +599,7 @@ function CheckInFormatOption({ label, selected, onPress }: { label: string; sele
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
   },
   scrollView: {
     flex: 1,
@@ -733,7 +733,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   input: {
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#2a2a2a',
     borderRadius: 10,
@@ -756,7 +756,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#2a2a2a',
     justifyContent: 'center',
@@ -789,7 +789,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   checkInOption: {
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#2a2a2a',
     borderRadius: 8,
@@ -817,7 +817,7 @@ const styles = StyleSheet.create({
   },
   tagTextInput: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#2a2a2a',
     borderRadius: 8,
@@ -858,7 +858,7 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#2a2a2a',
     justifyContent: 'center',
@@ -867,7 +867,7 @@ const styles = StyleSheet.create({
   },
   memberOptionHovered: {
     borderColor: '#555',
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
   },
   memberOptionText: {
     color: '#888',

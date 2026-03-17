@@ -255,7 +255,7 @@ export default function ReportsScreen({ route, navigation }: any) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   header: {
     flexDirection: 'row',
@@ -264,7 +264,7 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#2a2a2a',
   },
   backBtn: { paddingRight: 12 },
   backText: { color: '#6366f1', fontSize: 14, fontFamily: 'monospace' },
@@ -275,7 +275,7 @@ const styles = StyleSheet.create({
   typeCard: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 12,
     width: '48%',
@@ -294,7 +294,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
   },
   pillActive: { borderColor: '#6366f1', backgroundColor: '#6366f120' },
   pillText: { color: '#888', fontSize: 12, fontFamily: 'monospace' },
@@ -309,7 +309,7 @@ const styles = StyleSheet.create({
   scheduleEmpty: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 16,
     alignItems: 'center',
@@ -330,7 +330,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 12,
     marginBottom: 6,
@@ -350,7 +350,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 12,
     marginBottom: 6,

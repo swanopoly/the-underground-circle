@@ -9,10 +9,8 @@
 # EXPO_PUBLIC_SUPABASE_ANON_KEY
 # EXPO_PUBLIC_GEMINI_API_KEY
 
-# Temporary workaround: Bypass secrets scanning for known public/limited-scope keys
-# Remove this once env vars are properly configured in Netlify UI
-[build.environment]
-  SECRETS_SCAN_SMART_DETECTION_OMIT_VALUES = "AIzaSyBDMkKrkuD7s-H3fT5krGm-OoWP5kfYR8o"
+# Environment variables must be configured in Netlify UI (Site Settings → Environment variables)
+# Never hardcode API keys here
 
 # Security headers
 [[headers]]

@@ -25,7 +25,7 @@ interface AgentMetrics {
   errorCount: number;
   model: string;
   lastActive: string;
-  status: 'active' | 'idle' | 'error' | 'offline';
+  status: 'active' | 'idle' | 'error' | 'offline' | 'building';
 }
 
 type SortBy = 'sessions' | 'cost' | 'efficiency' | 'uptime' | 'messages';
@@ -372,7 +372,7 @@ function calculateAgentMetrics(agents: OfficeAgent[], sessions: OpenClawSession[
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     padding: 16,
   },
   emptyContainer: {
@@ -380,7 +380,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     padding: 40,
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
   },
   emptyIcon: {
     fontSize: 48,
@@ -407,7 +407,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0d0d14',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 12,
   },
@@ -478,7 +478,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     backgroundColor: '#0d0d14',
     marginRight: 8,
   },
@@ -496,7 +496,7 @@ const styles = StyleSheet.create({
   metricRow: {
     backgroundColor: '#0d0d14',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     overflow: 'hidden',
   },
@@ -508,7 +508,7 @@ const styles = StyleSheet.create({
   },
   metricHeaderExpanded: {
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#2a2a2a',
   },
   metricLeft: {
     flexDirection: 'row',
@@ -582,7 +582,7 @@ const styles = StyleSheet.create({
     marginTop: 12,
     paddingTop: 12,
     borderTopWidth: 1,
-    borderTopColor: '#1a1a2e',
+    borderTopColor: '#2a2a2a',
     gap: 6,
   },
   insightsTitle: {

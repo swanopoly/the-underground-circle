@@ -1042,7 +1042,7 @@ const s = StyleSheet.create({
   chevron: { fontSize: 6, color: C.accent, fontWeight: '900' },
 
   // ── BlackSwan pill ──
-  bsPill: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4, borderWidth: 1, borderColor: '#1a1a2e', marginLeft: 4 },
+  bsPill: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4, borderWidth: 1, borderColor: '#2a2a2a', marginLeft: 4 },
   bsPillLocal:    { backgroundColor: '#22c55e12', borderColor: '#22c55e40' },
   bsPillOffline:  { backgroundColor: '#11111a',   borderColor: '#2a2a3a' },
   bsPillChecking: { backgroundColor: '#6366f112', borderColor: '#6366f140' },

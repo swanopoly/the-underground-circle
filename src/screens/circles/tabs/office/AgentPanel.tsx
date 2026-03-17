@@ -12,12 +12,13 @@ import {
   SKIN_TONES, HAIR_COLORS, SHIRT_COLORS, SHOE_COLORS, EYE_COLORS,
 } from '../../../../lib/officeConfig';
 import {
-  SoulTemplate, SoulCategory, SOUL_CATEGORIES,
   getTemplatesByCategory, detectTemplate,
 } from '../../../../lib/soulTemplates';
+import { AGENT_SPIRITS, SPIRIT_CATEGORIES, getSpiritById, type AgentSpirit } from '../../../../lib/agentSpirits';
+import { updateAgentSpirit } from '../../../../lib/circleOffice';
 import { supabase } from '../../../../lib/supabase';
 
-const PANTS_COLORS = ['#2d2d3d', '#1a1a2e', '#3d2b1a', '#1e3a5f', '#2d1b4e', '#1a3d1a'];
+const PANTS_COLORS = ['#2d2d3d', '#2a2a2a', '#3d2b1a', '#1e3a5f', '#2d1b4e', '#1a3d1a'];
 
 interface Props {
   agent: OfficeAgent | null;
@@ -77,12 +78,14 @@ export default function AgentPanel({
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState('');
   const [showCustomize, setShowCustomize] = useState(false);
-  const [showSoul, setShowSoul] = useState(false);
-  const [soulCategory, setSoulCategory] = useState<SoulCategory>('role');
+  const [showSoul, setShowSoul] = useState(false); // kept for reset effect
   const [soulText, setSoulText] = useState('');
   const [soulSaving, setSoulSaving] = useState(false);
   const [soulStatus, setSoulStatus] = useState('');
   const [soulLoaded, setSoulLoaded] = useState<string | null>(null); // tracks which agent was loaded
+  const [showSpirits, setShowSpirits] = useState(false);
+  const [currentSpirit, setCurrentSpirit] = useState<string | null>(null);
+  const [dbAgentId, setDbAgentId] = useState<string | null>(null);
 
   useEffect(() => {
     if (agent) {
@@ -107,6 +110,23 @@ export default function AgentPanel({
     : undefined;
 
   const control = useAgentControl(circleId, sessionKey);
+
+  // Load spirit from DB agent when panel opens
+  useEffect(() => {
+    if (!agent || !circleId) return;
+    (async () => {
+      const { data } = await supabase
+        .from('circle_office_agents')
+        .select('id, spirit, spirit_emoji')
+        .eq('circle_id', circleId)
+        .ilike('name', agent.name)
+        .maybeSingle();
+      if (data) {
+        setDbAgentId(data.id);
+        setCurrentSpirit(data.spirit || null);
+      }
+    })();
+  }, [agent?.name, circleId]);
 
   // Load personality when agent panel opens for a specific agent
   useEffect(() => {
@@ -257,6 +277,142 @@ export default function AgentPanel({
         <Text style={[styles.connectionName, { color: PROVIDER_META[agent.providerType]?.color || '#888' }]}>{agent.connectionName}</Text>
         <Text style={styles.connectionType}>{PROVIDER_META[agent.providerType]?.label || agent.providerType}</Text>
       </View>
+
+      {/* Agent Spirit & Soul — unified section */}
+      <Pressable
+        onPress={() => setShowSpirits(!showSpirits)}
+        style={[styles.spiritRow, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+      >
+        <Text style={styles.spiritLabel}>
+          {showSpirits ? '▼' : '▶'} SPIRIT & SOUL
+        </Text>
+        {currentSpirit ? (
+          <View style={styles.spiritBadge}>
+            <Text style={styles.spiritBadgeText}>
+              {getSpiritById(currentSpirit)?.emoji} {getSpiritById(currentSpirit)?.name}
+            </Text>
+          </View>
+        ) : (
+          <Text style={styles.spiritNone}>none assigned</Text>
+        )}
+      </Pressable>
+
+      {showSpirits && (
+        <View style={styles.spiritPicker}>
+          <Text style={styles.spiritHint}>
+            Assign a specialty that shapes how {agent.name} thinks, responds, and what it knows.
+          </Text>
+          {currentSpirit && (
+            <Pressable
+              onPress={async () => {
+                if (dbAgentId) {
+                  await updateAgentSpirit(dbAgentId, null, null);
+                  setCurrentSpirit(null);
+                }
+              }}
+              style={[styles.spiritClearBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={styles.spiritClearText}>Clear spirit</Text>
+            </Pressable>
+          )}
+          {SPIRIT_CATEGORIES.map(cat => (
+            <View key={cat.key}>
+              <Text style={[styles.spiritCatLabel, { color: cat.color }]}>{cat.label}</Text>
+              <View style={styles.spiritGrid}>
+                {AGENT_SPIRITS.filter(s => s.category === cat.key).map(spirit => {
+                  const active = currentSpirit === spirit.id;
+                  return (
+                    <Pressable
+                      key={spirit.id}
+                      onPress={async () => {
+                        if (dbAgentId) {
+                          await updateAgentSpirit(dbAgentId, spirit.id, spirit.emoji);
+                          setCurrentSpirit(spirit.id);
+                        }
+                      }}
+                      style={[
+                        styles.spiritCard,
+                        active && { borderColor: spirit.color + '60', backgroundColor: spirit.color + '10' },
+                        Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                      ]}
+                    >
+                      <Text style={styles.spiritEmoji}>{spirit.emoji}</Text>
+                      <Text style={[styles.spiritName, active && { color: spirit.color }]} numberOfLines={1}>
+                        {spirit.name}
+                      </Text>
+                      <Text style={styles.spiritTagline} numberOfLines={1}>{spirit.tagline}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+          ))}
+
+          {/* Personality (Soul) — inline below spirit grid */}
+          {circleId && (
+            <View style={styles.soulInlineSection}>
+              <Text style={[styles.spiritCatLabel, { color: '#ec4899' }]}>Personality</Text>
+              <Text style={styles.spiritHint}>
+                Optional: fine-tune communication style. Prepended to every LLM call alongside the spirit.
+              </Text>
+
+              {/* Personality template quick-picks */}
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
+                {getTemplatesByCategory('personality').map(tmpl => {
+                  const isActive = detectTemplate(soulText)?.id === tmpl.id;
+                  return (
+                    <Pressable
+                      key={tmpl.id}
+                      onPress={() => setSoulText(tmpl.soulText)}
+                      style={[
+                        styles.personalityChip,
+                        isActive && { borderColor: '#ec4899', backgroundColor: '#ec489915' },
+                        Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                      ]}
+                    >
+                      <Text style={styles.personalityChipText}>
+                        {tmpl.emoji} {tmpl.name}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+
+              {/* Editable soul text */}
+              <TextInput
+                style={styles.soulInput}
+                value={soulText}
+                onChangeText={setSoulText}
+                placeholder="Pick a personality or write custom SOUL..."
+                placeholderTextColor="#444"
+                multiline
+                numberOfLines={3}
+              />
+
+              {/* Save / Clear row */}
+              <View style={styles.soulActions}>
+                <Pressable
+                  onPress={handleSaveSoul}
+                  disabled={soulSaving}
+                  style={[styles.soulSaveBtn, soulSaving && { opacity: 0.4 }]}
+                >
+                  <Text style={styles.soulSaveBtnText}>{soulSaving ? 'SAVING...' : 'SAVE SOUL'}</Text>
+                </Pressable>
+                {soulText.trim() ? (
+                  <Pressable onPress={() => setSoulText('')} style={styles.soulClearBtn}>
+                    <Text style={styles.soulClearBtnText}>CLEAR</Text>
+                  </Pressable>
+                ) : null}
+                {soulStatus ? (
+                  <Text style={{ fontSize: 8, color: soulStatus.startsWith('Error') ? '#ff5555' : '#22c55e', fontFamily: 'monospace' }}>
+                    {soulStatus}
+                  </Text>
+                ) : null}
+              </View>
+            </View>
+          )}
+        </View>
+      )}
 
       {/* Current activity */}
       <View style={styles.activityBar}>
@@ -485,122 +641,7 @@ export default function AgentPanel({
         </View>
       )}
 
-      {/* Agent Soul / Personality */}
-      {circleId && (
-        <View style={styles.customizeSection}>
-          <Pressable
-            onPress={() => setShowSoul(!showSoul)}
-            style={[styles.customizeToggle, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          >
-            <Text style={styles.customizeToggleText}>
-              {showSoul ? '▼' : '▶'} AGENT SOUL
-            </Text>
-            {(() => {
-              const active = detectTemplate(soulText);
-              return active ? (
-                <View style={styles.soulActiveBadge}>
-                  <Text style={styles.soulActiveBadgeText}>{active.emoji} {active.name}</Text>
-                </View>
-              ) : soulText.trim() ? (
-                <View style={styles.soulActiveBadge}>
-                  <Text style={styles.soulActiveBadgeText}>Custom</Text>
-                </View>
-              ) : null;
-            })()}
-          </Pressable>
-
-          {showSoul && (
-            <View style={styles.soulBody}>
-              <Text style={styles.soulHint}>
-                Define {agent.name}'s personality. Prepended to every LLM call.
-              </Text>
-
-              {/* Category tabs */}
-              <View style={styles.soulCategoryRow}>
-                {SOUL_CATEGORIES.map(cat => (
-                  <Pressable
-                    key={cat.key}
-                    onPress={() => setSoulCategory(cat.key)}
-                    style={[
-                      styles.soulCategoryTab,
-                      soulCategory === cat.key && { borderColor: cat.color, backgroundColor: cat.color + '15' },
-                      Platform.OS === 'web' && { cursor: 'pointer' } as any,
-                    ]}
-                  >
-                    <Text style={[
-                      styles.soulCategoryText,
-                      soulCategory === cat.key && { color: cat.color },
-                    ]}>
-                      {cat.icon} {cat.label}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-
-              {/* Template cards */}
-              <ScrollView style={{ maxHeight: 200 }} nestedScrollEnabled showsVerticalScrollIndicator={false}>
-                {getTemplatesByCategory(soulCategory).map(tmpl => {
-                  const isActive = detectTemplate(soulText)?.id === tmpl.id;
-                  const catColor = SOUL_CATEGORIES.find(c => c.key === tmpl.category)?.color || '#6366f1';
-                  return (
-                    <Pressable
-                      key={tmpl.id}
-                      onPress={() => setSoulText(tmpl.soulText)}
-                      style={[
-                        styles.soulCard,
-                        isActive && { borderColor: catColor, backgroundColor: catColor + '10' },
-                        Platform.OS === 'web' && { cursor: 'pointer' } as any,
-                      ]}
-                    >
-                      <View style={styles.soulCardHeader}>
-                        <Text style={{ fontSize: 14 }}>{tmpl.emoji}</Text>
-                        <Text style={[styles.soulCardName, isActive && { color: '#eee' }]} numberOfLines={1}>{tmpl.name}</Text>
-                        {isActive && <Text style={{ fontSize: 7, color: catColor, fontWeight: '800' }}>ACTIVE</Text>}
-                      </View>
-                      <Text style={styles.soulCardDesc} numberOfLines={1}>{tmpl.description}</Text>
-                    </Pressable>
-                  );
-                })}
-              </ScrollView>
-
-              {/* Editable text */}
-              <TextInput
-                style={styles.soulInput}
-                value={soulText}
-                onChangeText={setSoulText}
-                placeholder="Pick a template or write custom SOUL.md..."
-                placeholderTextColor="#444"
-                multiline
-                numberOfLines={4}
-              />
-
-              {/* Save / Clear row */}
-              <View style={styles.soulActions}>
-                <Pressable
-                  onPress={handleSaveSoul}
-                  disabled={soulSaving}
-                  style={[styles.soulSaveBtn, soulSaving && { opacity: 0.4 }]}
-                >
-                  <Text style={styles.soulSaveBtnText}>{soulSaving ? 'SAVING...' : 'SAVE SOUL'}</Text>
-                </Pressable>
-                {soulText.trim() ? (
-                  <Pressable
-                    onPress={() => setSoulText('')}
-                    style={styles.soulClearBtn}
-                  >
-                    <Text style={styles.soulClearBtnText}>CLEAR</Text>
-                  </Pressable>
-                ) : null}
-                {soulStatus ? (
-                  <Text style={{ fontSize: 8, color: soulStatus.startsWith('Error') ? '#ff5555' : '#22c55e', fontFamily: 'monospace' }}>
-                    {soulStatus}
-                  </Text>
-                ) : null}
-              </View>
-            </View>
-          )}
-        </View>
-      )}
+      {/* Agent Soul section removed — merged into SPIRIT & SOUL above */}
 
       {/* Kill switch / controls */}
       {circleId && sessionKey && (
@@ -625,7 +666,7 @@ const styles = StyleSheet.create({
     right: 0,
     backgroundColor: '#0d0d14',
     borderTopWidth: 1,
-    borderTopColor: '#1a1a2e',
+    borderTopColor: '#2a2a2a',
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
     paddingHorizontal: 20,
@@ -639,7 +680,7 @@ const styles = StyleSheet.create({
     bottom: 16,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
   },
   handleArea: {
     alignItems: 'center',
@@ -702,7 +743,7 @@ const styles = StyleSheet.create({
   },
   renameInput: {
     flex: 1,
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#6366f1',
     borderRadius: 6,
@@ -800,12 +841,12 @@ const styles = StyleSheet.create({
   activityBar: {
     flexDirection: 'row',
     gap: 8,
-    backgroundColor: '#111118',
+    backgroundColor: '#222222',
     padding: 10,
     borderRadius: 8,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
   },
   activityLabel: {
     fontSize: 10,
@@ -829,7 +870,7 @@ const styles = StyleSheet.create({
   gridCard: {
     backgroundColor: '#0a0a12',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     paddingVertical: 8,
     paddingHorizontal: 10,
@@ -932,7 +973,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderTopWidth: 1,
     borderBottomWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
   },
   tagsSectionTitle: {
     fontSize: 9,
@@ -945,7 +986,7 @@ const styles = StyleSheet.create({
   customizeSection: {
     marginTop: 12,
     borderTopWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     paddingTop: 10,
   },
   customizeToggle: {
@@ -970,7 +1011,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#0a0a12',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     marginBottom: 4,
   },
   custSectionTitle: {
@@ -1012,8 +1053,8 @@ const styles = StyleSheet.create({
     height: 60,
     borderRadius: 10,
     borderWidth: 1.5,
-    borderColor: '#1a1a2e',
-    backgroundColor: '#0a0a10',
+    borderColor: '#2a2a2a',
+    backgroundColor: '#000000',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 6,
@@ -1037,6 +1078,70 @@ const styles = StyleSheet.create({
   custItemLabelActive: {
     color: '#ddd',
   },
+  // Spirit styles
+  spiritRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 12, paddingVertical: 8,
+    borderBottomWidth: 1, borderBottomColor: '#15151e',
+  },
+  spiritLabel: {
+    color: '#555', fontSize: 9, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 1,
+  },
+  spiritBadge: {
+    paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8,
+    borderWidth: 1, borderColor: '#6366f140', backgroundColor: '#6366f110',
+  },
+  spiritBadgeText: {
+    color: '#c0c0d0', fontSize: 9, fontWeight: '600', fontFamily: 'monospace',
+  },
+  spiritNone: {
+    color: '#333', fontSize: 9, fontFamily: 'monospace',
+  },
+  spiritPicker: {
+    padding: 10, gap: 8, borderBottomWidth: 1, borderBottomColor: '#15151e',
+  },
+  spiritHint: {
+    color: '#555', fontSize: 9, fontFamily: 'monospace', lineHeight: 13,
+  },
+  spiritClearBtn: {
+    paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6,
+    backgroundColor: '#2a2a2a', alignSelf: 'flex-start',
+  },
+  spiritClearText: {
+    color: '#ef4444', fontSize: 9, fontWeight: '600', fontFamily: 'monospace',
+  },
+  spiritCatLabel: {
+    fontSize: 9, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 1,
+    marginBottom: 4, marginTop: 4,
+  },
+  spiritGrid: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 4,
+  },
+  spiritCard: {
+    width: '48%', padding: 8, borderRadius: 8,
+    borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#0c0c14',
+  },
+  spiritEmoji: { fontSize: 14, marginBottom: 2 },
+  spiritName: {
+    color: '#c0c0d0', fontSize: 10, fontWeight: '700', fontFamily: 'monospace',
+  },
+  spiritTagline: {
+    color: '#555', fontSize: 8, fontFamily: 'monospace', lineHeight: 11, marginTop: 1,
+  },
+
+  // Inline soul section (inside spirit picker)
+  soulInlineSection: {
+    marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: '#2a2a2a',
+  },
+  personalityChip: {
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12,
+    borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
+    marginRight: 6,
+  },
+  personalityChipText: {
+    fontSize: 9, color: '#aaa', fontFamily: 'monospace', fontWeight: '600',
+  },
+
   // Soul / personality styles
   soulActiveBadge: {
     paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8,
@@ -1057,14 +1162,14 @@ const styles = StyleSheet.create({
   },
   soulCategoryTab: {
     flex: 1, paddingVertical: 6, paddingHorizontal: 4, borderRadius: 6,
-    borderWidth: 1, borderColor: '#1a1a2e', backgroundColor: '#0a0a10',
+    borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
     alignItems: 'center',
   },
   soulCategoryText: {
     fontSize: 8, color: '#555', fontFamily: 'monospace', fontWeight: '700',
   },
   soulCard: {
-    backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a2e',
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#2a2a2a',
     borderRadius: 6, padding: 8, gap: 3, marginBottom: 4,
   },
   soulCardHeader: {
@@ -1077,7 +1182,7 @@ const styles = StyleSheet.create({
     fontSize: 8, color: '#555', fontFamily: 'monospace', lineHeight: 12,
   },
   soulInput: {
-    backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a2e',
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#2a2a2a',
     borderRadius: 6, padding: 8, color: '#ccc', fontFamily: 'monospace',
     fontSize: 9, minHeight: 80, textAlignVertical: 'top',
   },

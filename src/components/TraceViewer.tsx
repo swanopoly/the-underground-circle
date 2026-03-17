@@ -39,62 +39,69 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
     if (!circleId) return;
     setLoading(true);
 
-    // Join responses with messages to get the command text and sender
-    const { data: responses } = await supabase
-      .from('office_terminal_responses')
-      .select(`
-        id, message_id, agent_name, response_text, status, model,
-        token_count, input_tokens, output_tokens, cache_read_tokens,
-        latency_ms, created_at
-      `)
-      .eq('circle_id', circleId)
-      .order('created_at', { ascending: false })
-      .limit(50);
+    try {
+      // Join responses with messages to get the command text and sender
+      const { data: responses } = await supabase
+        .from('office_terminal_responses')
+        .select(`
+          id, message_id, agent_name, response_text, status, model,
+          token_count, input_tokens, output_tokens, cache_read_tokens,
+          latency_ms, created_at
+        `)
+        .eq('circle_id', circleId)
+        .order('created_at', { ascending: false })
+        .limit(50);
 
-    if (!responses || responses.length === 0) {
+      if (!responses || responses.length === 0) {
+        setTraces([]);
+        setLoading(false);
+        return;
+      }
+
+      // Get the message details for these responses
+      const messageIds = [...new Set(responses.map(r => r.message_id).filter(Boolean))];
+      const { data: messages } = messageIds.length > 0
+        ? await supabase
+            .from('office_terminal_messages')
+            .select('id, command_text, sender_id, model')
+            .in('id', messageIds)
+        : { data: [] as any[] };
+
+      // Get sender profiles
+      const senderIds = [...new Set((messages || []).map(m => m.sender_id).filter(Boolean))];
+      const { data: profiles } = senderIds.length > 0
+        ? await supabase.from('profiles').select('id, display_name, username').in('id', senderIds)
+        : { data: [] as any[] };
+
+      const messageMap = new Map((messages || []).map(m => [m.id, m]));
+      const profileMap = new Map((profiles || []).map(p => [p.id, p]));
+
+      const mapped: Trace[] = responses.map(r => {
+        const msg = r.message_id ? messageMap.get(r.message_id) : null;
+        const sender = msg?.sender_id ? profileMap.get(msg.sender_id) : null;
+        return {
+          id: r.id,
+          messageId: r.message_id,
+          agentName: r.agent_name || 'Unknown',
+          command: msg?.command_text || '(unknown command)',
+          responseText: r.response_text || '',
+          status: r.status,
+          model: r.model || msg?.model || null,
+          tokenCount: r.token_count || 0,
+          inputTokens: r.input_tokens || 0,
+          outputTokens: r.output_tokens || 0,
+          cacheReadTokens: r.cache_read_tokens || 0,
+          latencyMs: r.latency_ms,
+          senderName: sender?.display_name || sender?.username || 'User',
+          createdAt: r.created_at,
+        };
+      });
+
+      setTraces(mapped);
+    } catch (err) {
+      console.error('[TraceViewer] Failed to load traces:', err);
       setTraces([]);
-      setLoading(false);
-      return;
     }
-
-    // Get the message details for these responses
-    const messageIds = [...new Set(responses.map(r => r.message_id))];
-    const { data: messages } = await supabase
-      .from('office_terminal_messages')
-      .select('id, command_text, sender_id, model')
-      .in('id', messageIds);
-
-    // Get sender profiles
-    const senderIds = [...new Set((messages || []).map(m => m.sender_id).filter(Boolean))];
-    const { data: profiles } = senderIds.length > 0
-      ? await supabase.from('profiles').select('id, display_name, username').in('id', senderIds)
-      : { data: [] };
-
-    const messageMap = new Map((messages || []).map(m => [m.id, m]));
-    const profileMap = new Map((profiles || []).map(p => [p.id, p]));
-
-    const mapped: Trace[] = responses.map(r => {
-      const msg = messageMap.get(r.message_id);
-      const sender = msg?.sender_id ? profileMap.get(msg.sender_id) : null;
-      return {
-        id: r.id,
-        messageId: r.message_id,
-        agentName: r.agent_name || 'Unknown',
-        command: msg?.command_text || '(unknown command)',
-        responseText: r.response_text || '',
-        status: r.status,
-        model: r.model || msg?.model || null,
-        tokenCount: r.token_count || 0,
-        inputTokens: r.input_tokens || 0,
-        outputTokens: r.output_tokens || 0,
-        cacheReadTokens: r.cache_read_tokens || 0,
-        latencyMs: r.latency_ms,
-        senderName: sender?.display_name || sender?.username || 'User',
-        createdAt: r.created_at,
-      };
-    });
-
-    setTraces(mapped);
     setLoading(false);
   }, [circleId]);
 
@@ -273,12 +280,12 @@ function formatModelName(model: string): string {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     padding: 16,
   },
   emptyContainer: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 32,
@@ -354,7 +361,7 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   pill: {
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 4,
@@ -392,7 +399,7 @@ const styles = StyleSheet.create({
   responseBox: {
     backgroundColor: '#0d0d14',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 6,
     padding: 10,
   },

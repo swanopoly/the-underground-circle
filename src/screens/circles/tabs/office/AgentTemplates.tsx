@@ -248,7 +248,7 @@ export default function AgentTemplates({ circleId, onClose, onDeployed }: Props)
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -256,7 +256,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 16,
     borderBottomWidth: 1,
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
   },
   title: {
     color: '#eee',
@@ -276,7 +276,7 @@ const styles = StyleSheet.create({
   card: {
     backgroundColor: '#0d0d14',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 12,
     padding: 16,
     width: '47%' as any,
@@ -333,7 +333,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#111',
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     width: '100%',
     maxWidth: 400,
     padding: 24,
@@ -356,9 +356,9 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   fieldInput: {
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     padding: 10,
     color: '#eee',
@@ -385,7 +385,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     alignItems: 'center',
   },
-  confirmBtnDisabled: { backgroundColor: '#0a0a0a', borderColor: '#1a1a1a' },
+  confirmBtnDisabled: { backgroundColor: '#000000', borderColor: '#000000' },
   confirmBtnText: { color: '#00FF9C', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' },
   // Success
   successView: { alignItems: 'center', paddingVertical: 20 },

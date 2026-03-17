@@ -18,6 +18,8 @@ interface ActivityItem {
   id: string;
   agent_name: string;
   activity_type: string;
+  source: string | null;
+  source_detail: string | null;
   title: string | null;
   body: string | null;
   created_at: string;
@@ -43,7 +45,7 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
     try {
       const { data, error } = await supabase
         .from('agent_activity')
-        .select('id, agent_name, activity_type, title, body, created_at')
+        .select('id, agent_name, activity_type, source, source_detail, title, body, created_at')
         .eq('circle_id', circleId)
         .order('created_at', { ascending: false })
         .limit(60);
@@ -77,12 +79,14 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
     };
   }, [circleId, fetchActivity]);
 
-  const getAgentColor = (name: string): string => {
+  const getAgentColor = (name: string, source?: string | null): string => {
+    if (source === 'github') return '#238636';
     const agent = agents.find(a => a.name === name);
     return agent?.color || '#6366f1';
   };
 
-  const getAgentIcon = (name: string): string => {
+  const getAgentIcon = (name: string, source?: string | null): string => {
+    if (source === 'github') return '{>}';
     const agent = agents.find(a => a.name === name);
     return agent?.toolIcon || '>>';
   };
@@ -103,11 +107,13 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
       {/* Feed */}
       <ScrollView style={s.list} contentContainerStyle={s.listContent} showsVerticalScrollIndicator={false}>
         {items.map(item => {
-          const color = getAgentColor(item.agent_name);
-          const icon = getAgentIcon(item.agent_name);
+          const isGitHub = item.source === 'github';
+          const color = getAgentColor(item.agent_name, item.source);
+          const icon = getAgentIcon(item.agent_name, item.source);
           const isExpanded = expanded[item.id];
           const detail = item.body || item.title;
           const hasLongDetail = (detail?.length || 0) > 80;
+          const displayName = isGitHub ? (item.source_detail || 'GitHub') : item.agent_name;
 
           return (
             <View key={item.id} style={s.item}>
@@ -117,7 +123,8 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
                 </View>
                 <View style={s.itemContent}>
                   <View style={s.itemNameRow}>
-                    <Text style={s.itemAgent}>{item.agent_name}</Text>
+                    <Text style={s.itemAgent}>{displayName}</Text>
+                    {isGitHub && <Text style={[s.sourceBadge, { color: '#238636' }]}>GH</Text>}
                     <View style={s.readDot} />
                   </View>
                   <Text style={s.itemAction}>{item.title || item.activity_type}</Text>
@@ -248,6 +255,12 @@ const s = StyleSheet.create({
     borderRadius: 3,
     backgroundColor: '#333348',
   },
+  sourceBadge: {
+    fontSize: 9,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    letterSpacing: 0.5,
+  },
   itemAction: {
     color: '#9090a8',
     fontSize: 11,
@@ -286,7 +299,7 @@ const s = StyleSheet.create({
     fontWeight: '500',
   },
   emptySubtext: {
-    color: '#2a2a3e',
+    color: '#333333',
     fontSize: 11,
   },
 });

@@ -199,10 +199,27 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // ── POST /exec — run a shell command ─────────────────────────────────────
+  // ── POST /exec — run a shell command (restricted) ──────────────────────────
   if (url === '/exec' && req.method === 'POST') {
+    // Only allow requests from localhost origins
+    const origin = req.headers['origin'] || req.headers['referer'] || '';
+    const isLocal = !origin || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('app.chrisswanson.xyz');
+    if (!isLocal) {
+      res.writeHead(403, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
+      return;
+    }
+
     let body = '';
-    req.on('data', chunk => { body += chunk; });
+    req.on('data', chunk => {
+      body += chunk;
+      // Prevent body flooding (max 10KB)
+      if (body.length > 10240) {
+        res.writeHead(413, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Request body too large' }));
+        req.destroy();
+      }
+    });
     req.on('end', () => {
       let command;
       try {
@@ -218,6 +235,38 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ ok: false, error: 'Missing "command" field' }));
         return;
       }
+
+      // Block dangerous patterns that could damage the system
+      const BLOCKED_PATTERNS = [
+        /\brm\s+(-[a-zA-Z]*\s+)*\//,     // rm with absolute paths
+        /\brm\s+(-[a-zA-Z]*\s+)*~/,       // rm in home directory
+        /\brmdir\s+(-[a-zA-Z]*\s+)*\//,   // rmdir with absolute paths
+        /\bmkfs\b/,                         // format filesystems
+        /\bdd\s+.*of=/,                     // dd write operations
+        />\s*\/dev\/sd/,                     // write to block devices
+        /\bcurl\b.*\|\s*(ba)?sh/,           // curl pipe to shell
+        /\bwget\b.*\|\s*(ba)?sh/,           // wget pipe to shell
+        /\bchmod\s+777\b/,                  // world-writable permissions
+        /\bpasswd\b/,                        // password changes
+        /\buseradd\b/,                       // user creation
+        /\buserdel\b/,                       // user deletion
+        /\bsudo\b/,                          // privilege escalation
+        /\bsu\s+-?\s/,                       // switch user
+        /\/etc\/shadow/,                     // shadow file access
+        /\/etc\/passwd/,                     // passwd file access
+        /\benv\b.*SECRET|KEY|TOKEN|PASS/i,   // env var exfiltration
+        /\bcrontab\s+-[er]/,                 // crontab editing
+        /\bshutdown\b/,                      // system shutdown
+        /\breboot\b/,                        // system reboot
+      ];
+
+      const blocked = BLOCKED_PATTERNS.some(p => p.test(command));
+      if (blocked) {
+        res.writeHead(403, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Command blocked: contains restricted pattern' }));
+        return;
+      }
+
       exec(command, { timeout: 30000, maxBuffer: 1024 * 1024, shell: true }, (err, stdout, stderr) => {
         res.writeHead(200, CORS);
         if (err && err.killed) {
@@ -225,8 +274,8 @@ const server = http.createServer((req, res) => {
         } else {
           res.end(JSON.stringify({
             ok: !err || err.code === 0,
-            stdout: stdout || '',
-            stderr: stderr || '',
+            stdout: (stdout || '').slice(0, 65536), // Cap output at 64KB
+            stderr: (stderr || '').slice(0, 16384),  // Cap stderr at 16KB
             code: err ? err.code || 1 : 0,
           }));
         }

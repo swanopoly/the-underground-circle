@@ -16,6 +16,23 @@
 import { Animated, Platform } from 'react-native';
 
 if (Platform.OS === 'web') {
+  // Suppress known RN 0.81 deprecation warnings for shadow/textShadow/pointerEvents.
+  // These are cosmetic-only — styles still render fine. Hundreds of shadow props exist
+  // across PixelAgent.tsx and other pixel art components; wrapping each is impractical.
+  const SUPPRESSED = [
+    '"shadow*" style props are deprecated',
+    '"textShadow*" style props are deprecated',
+    'props.pointerEvents is deprecated',
+  ];
+  const origWarn = console.warn;
+  console.warn = function (...args: any[]) {
+    const msg = typeof args[0] === 'string' ? args[0] : '';
+    if (SUPPRESSED.some(s => msg.includes(s))) return;
+    origWarn.apply(console, args);
+  };
+}
+
+if (Platform.OS === 'web') {
   // 1. Kill all Animated.loop — return no-op
   const noopAnim: Animated.CompositeAnimation = {
     start: (cb?: Animated.EndCallback) => { cb?.({ finished: true }); },

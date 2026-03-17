@@ -351,7 +351,7 @@ const s = StyleSheet.create({
   // Hint box
   hintBox:     { backgroundColor: '#111', borderWidth: 1, borderColor: '#27272a', borderRadius: 10, padding: 12, marginTop: 12 },
   hintTitle:   { color: '#a1a1aa', fontSize: 12, marginBottom: 8 },
-  hintCmd:     { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#0a0a0a', borderRadius: 6, padding: 8 },
+  hintCmd:     { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#000000', borderRadius: 6, padding: 8 },
   hintCmdText: { color: '#6366f1', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', flex: 1 },
   copyBtn:     { backgroundColor: '#1e1e2e', borderRadius: 5, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderColor: '#6366f133' },
   copyBtnTxt:  { color: '#a5b4fc', fontSize: 11, fontWeight: '600' },

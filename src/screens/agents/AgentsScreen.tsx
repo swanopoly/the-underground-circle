@@ -490,7 +490,7 @@ export default function AgentsScreen({ navigation }: any) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -499,7 +499,7 @@ const styles = StyleSheet.create({
     paddingBottom: 20,
     paddingHorizontal: 24,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: '#000000',
     maxWidth: 480,
     alignSelf: 'center',
     width: '100%',
@@ -511,7 +511,7 @@ const styles = StyleSheet.create({
   tabs: {
     flexDirection: 'row',
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: '#000000',
     maxWidth: 480,
     alignSelf: 'center',
     width: '100%',
@@ -547,7 +547,7 @@ const styles = StyleSheet.create({
     width: 48,
     height: 48,
     borderRadius: 24,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: 12,
@@ -615,7 +615,7 @@ const styles = StyleSheet.create({
   modalField: { marginBottom: 16 },
   modalLabel: { color: '#888', fontSize: 11, fontWeight: '700', letterSpacing: 1, marginBottom: 6 },
   modalInput: {
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#222',
     borderRadius: 8,
@@ -629,7 +629,7 @@ const styles = StyleSheet.create({
   modalButton: { flex: 1, minHeight: 40 },
 
   responseBox: {
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#222',
     borderRadius: 8,

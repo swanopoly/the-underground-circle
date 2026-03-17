@@ -57,6 +57,10 @@ export type CircleOfficeAgent = {
   updatedAt: string;
   lastActiveAt?: string;
 
+  // Agent Spirit (role/specialty)
+  spirit?: string;         // e.g. 'Senior Software Engineer', 'Designer', 'Philosopher'
+  spirit_emoji?: string;   // e.g. '💻', '🎨', '🏛️'
+
   // Gateway (Phase 3)
   gatewayUrl?: string;
   isPublic?: boolean;
@@ -159,6 +163,8 @@ function fromRow(row: any, currentUserId?: string): CircleOfficeAgent {
     uptime_score:        row.uptime_score       ?? 1.0,
     last_command:        row.last_command       ?? undefined,
     last_command_at:     row.last_command_at    ?? undefined,
+    spirit: row.spirit ?? undefined,
+    spirit_emoji: row.spirit_emoji ?? undefined,
     isPublished: row.is_published,
     gatewayUrl: row.gateway_url ?? undefined,
     isPublic: row.is_public ?? false,
@@ -362,6 +368,28 @@ export function subscribeToCircleOffice(
     .subscribe();
 
   return () => { supabase.removeChannel(channel); };
+}
+
+// ─── Update agent spirit ──────────────────────────────────────────────────────
+
+export async function updateAgentSpirit(
+  agentId: string,
+  spirit: string | null,
+  spiritEmoji: string | null,
+): Promise<{ error?: string }> {
+  try {
+    const { error } = await supabase
+      .from('circle_office_agents')
+      .update({
+        spirit: spirit || null,
+        spirit_emoji: spiritEmoji || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', agentId);
+    return error ? { error: error.message } : {};
+  } catch (e: any) {
+    return { error: e.message };
+  }
 }
 
 // ─── Update gateway URL + public flag ────────────────────────────────────────

@@ -229,7 +229,7 @@ const styles = StyleSheet.create({
     color: '#555',
     fontSize: 9,
     fontFamily: 'monospace',
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     padding: 8,
     borderRadius: 4,
     marginBottom: 8,

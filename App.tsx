@@ -1,14 +1,25 @@
 import './src/lib/animationPatch'; // Must be first — patches Animated.loop for web
 import React, { useState, useEffect, useRef } from 'react';
 import { StatusBar, View, Text, StyleSheet, Animated, Platform } from 'react-native';
-import { NavigationContainer } from '@react-navigation/native';
+import { NavigationContainer, useNavigation } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Session } from '@supabase/supabase-js';
 import { supabase } from './src/lib/supabase';
 import AuthNavigator from './src/navigation/AuthNavigator';
 import MainNavigator from './src/navigation/MainNavigator';
 import ErrorBoundary from './src/components/ErrorBoundary';
+import AppHeader from './src/components/AppHeader';
 import { startAgentAutoConnect, stopAgentAutoConnect } from './src/lib/agentAutoConnect';
+
+function MainWithHeader() {
+  const navigation = useNavigation();
+  return (
+    <View style={{ flex: 1 }}>
+      <AppHeader navigation={navigation} />
+      <MainNavigator />
+    </View>
+  );
+}
 
 const NAV_STATE_KEY = 'uc_nav_state_v1';
 
@@ -86,12 +97,14 @@ export default function App() {
       setLoading(false);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setSession(session);
-      // Start agent auto-connect when user logs in, stop on logout
+      // Start agent auto-connect when user logs in
+      // Only stop on explicit SIGNED_OUT — token refresh events can briefly have null session
+      // which was killing all agent connections
       if (session) {
         startAgentAutoConnect();
-      } else {
+      } else if (event === 'SIGNED_OUT') {
         stopAgentAutoConnect();
       }
     });
@@ -126,7 +139,7 @@ export default function App() {
         }}
       >
         <StatusBar barStyle="light-content" />
-        {session ? <MainNavigator /> : <AuthNavigator />}
+        {session ? <MainWithHeader /> : <AuthNavigator />}
       </NavigationContainer>
     </ErrorBoundary>
   );
@@ -135,7 +148,7 @@ export default function App() {
 const styles = StyleSheet.create({
   loading: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     justifyContent: 'center',
     alignItems: 'center',
   },

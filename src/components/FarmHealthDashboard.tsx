@@ -450,8 +450,8 @@ const styles = StyleSheet.create({
   tabBar: {
     flexDirection: 'row',
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
-    backgroundColor: '#0a0a10',
+    borderBottomColor: '#2a2a2a',
+    backgroundColor: '#000000',
   },
   tab: {
     flex: 1,
@@ -514,7 +514,7 @@ const styles = StyleSheet.create({
   statCard: {
     flex: 1,
     minWidth: '45%',
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     borderLeftWidth: 3,
     borderRadius: 8,
     padding: 12,
@@ -548,7 +548,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingVertical: 6,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#2a2a2a',
   },
   costLabel: {
     fontSize: 12,
@@ -566,7 +566,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 12,
     padding: 12,
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     borderRadius: 8,
     borderWidth: 2,
   },
@@ -600,7 +600,7 @@ const styles = StyleSheet.create({
   },
   bottleneckCard: {
     padding: 12,
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     borderRadius: 8,
     borderWidth: 2,
   },
@@ -620,7 +620,7 @@ const styles = StyleSheet.create({
   // Performance
   legendRow: {
     padding: 10,
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     borderRadius: 8,
   },
   legendText: {
@@ -633,7 +633,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scoreCard: {
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     borderLeftWidth: 4,
     borderRadius: 8,
     padding: 14,
@@ -707,7 +707,7 @@ const styles = StyleSheet.create({
   breakdownBar: {
     flex: 1,
     height: 6,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     borderRadius: 3,
     overflow: 'hidden',
   },
@@ -728,7 +728,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingTop: 8,
     borderTopWidth: 1,
-    borderTopColor: '#1a1a2e',
+    borderTopColor: '#2a2a2a',
   },
   scoreRank: {
     fontSize: 10,
@@ -746,7 +746,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   workloadCard: {
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     borderLeftWidth: 4,
     borderRadius: 8,
     padding: 12,
@@ -784,7 +784,7 @@ const styles = StyleSheet.create({
   loadBar: {
     flex: 1,
     height: 10,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     borderRadius: 5,
     overflow: 'hidden',
   },
@@ -814,7 +814,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   optimizationCard: {
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     borderLeftWidth: 4,
     borderRadius: 8,
     padding: 12,
@@ -855,7 +855,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingTop: 8,
     borderTopWidth: 1,
-    borderTopColor: '#1a1a2e',
+    borderTopColor: '#2a2a2a',
   },
   savingsLabel: {
     fontSize: 10,
@@ -896,7 +896,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   issueCard: {
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     borderLeftWidth: 4,
     borderRadius: 8,
     padding: 12,

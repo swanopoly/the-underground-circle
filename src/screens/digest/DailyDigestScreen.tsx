@@ -297,7 +297,7 @@ export default function DailyDigestScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   scrollContent: { flexGrow: 1 },
   inner: {
     width: '100%',
@@ -336,7 +336,7 @@ const styles = StyleSheet.create({
     borderColor: '#222',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
   },
-  circleChipActive: { borderColor: '#fff', backgroundColor: '#1a1a1a' },
+  circleChipActive: { borderColor: '#fff', backgroundColor: '#000000' },
   circleChipText: { color: '#555', fontSize: 11, fontWeight: '700', letterSpacing: 1 },
   circleChipTextActive: { color: '#fff' },
   nudgeCard: { marginBottom: 12, borderColor: '#332200' },

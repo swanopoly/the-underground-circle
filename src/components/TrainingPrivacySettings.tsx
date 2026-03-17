@@ -169,7 +169,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#111',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     overflow: 'hidden',
   },
   header: {
@@ -204,7 +204,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingBottom: 14,
     borderTopWidth: 1,
-    borderTopColor: '#1a1a1a',
+    borderTopColor: '#000000',
   },
   explainText: {
     color: '#71717a',
@@ -235,7 +235,7 @@ const styles = StyleSheet.create({
   },
   divider: {
     height: 1,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     marginVertical: 10,
   },
   sectionTitle: {

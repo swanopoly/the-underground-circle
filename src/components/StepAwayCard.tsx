@@ -368,7 +368,7 @@ const styles = StyleSheet.create({
   stepAwayTrigger: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     borderWidth: 1,
     borderColor: '#6366f133',
     borderRadius: 10,
@@ -405,7 +405,7 @@ const styles = StyleSheet.create({
   optional: { color: '#555', fontWeight: '400', textTransform: 'none' },
 
   input: {
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     borderWidth: 1,
     borderColor: '#2a2a4a',
     borderRadius: 10,
@@ -427,14 +427,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 6,
     paddingHorizontal: 12, paddingVertical: 8,
     borderRadius: 8, borderWidth: 1, borderColor: '#2a2a4a',
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
   },
   toolChipIcon: { fontSize: 16 },
   toolChipLabel: { color: '#888', fontSize: 13, fontWeight: '500' },
 
   // Return time chips
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#2a2a4a', backgroundColor: '#1a1a2e' },
+  chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#2a2a4a', backgroundColor: '#2a2a2a' },
   chipActive: { borderColor: '#6366f1', backgroundColor: '#6366f122' },
   chipText: { color: '#666', fontSize: 13 },
   chipTextActive: { color: '#a5b4fc', fontWeight: '600' },
@@ -444,14 +444,14 @@ const styles = StyleSheet.create({
   verdictChip: {
     flex: 1, minWidth: '45%',
     padding: 12, borderRadius: 10, borderWidth: 1, borderColor: '#2a2a4a',
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
   },
   verdictChipLabel: { color: '#ddd', fontSize: 14, fontWeight: '600', marginBottom: 2 },
   verdictChipDesc: { color: '#666', fontSize: 12 },
 
   // Handoff ref
   handoffRef: {
-    backgroundColor: '#1a1a2e', borderRadius: 10, padding: 14,
+    backgroundColor: '#2a2a2a', borderRadius: 10, padding: 14,
     borderLeftWidth: 3, borderLeftColor: '#6366f1', marginBottom: 4,
   },
   handoffRefLabel: { color: '#666', fontSize: 12, marginBottom: 4 },

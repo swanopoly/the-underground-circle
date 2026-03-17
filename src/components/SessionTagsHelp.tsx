@@ -330,11 +330,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 12,
     marginBottom: 12,
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     padding: 10,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
   },
   categoryIcon: {
     width: 36,
@@ -396,12 +396,12 @@ const styles = StyleSheet.create({
 
   // Examples
   example: {
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     padding: 12,
     borderRadius: 8,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
   },
   exampleTitle: {
     fontSize: 13,

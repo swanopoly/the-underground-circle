@@ -108,7 +108,7 @@ export default function HaloBadge({ badge, earned = true, size = 'md', animate =
                 width: dim.inner,
                 height: dim.inner,
                 borderRadius: innerRadius,
-                backgroundColor: earned ? tier.border + '18' : '#0a0a0a',
+                backgroundColor: earned ? tier.border + '18' : '#000000',
                 borderColor: earned ? tier.border + '44' : '#222',
                 transform: badge.shape === 'diamond' ? [{ rotate: '-45deg' }] : [],
               },

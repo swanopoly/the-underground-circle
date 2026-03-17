@@ -650,7 +650,7 @@ export default function ConnectWalletScreen({ onComplete, skipAutoDetect }: { on
 }
 
 const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   scrollContent: { flexGrow: 1, justifyContent: 'center', padding: 20 },
   
   card: {
@@ -662,7 +662,7 @@ const s = StyleSheet.create({
   // Header
   header: { alignItems: 'center', marginBottom: 32 },
   walletIcon: {
-    width: 72, height: 72, borderRadius: 36, backgroundColor: '#1a1a2e',
+    width: 72, height: 72, borderRadius: 36, backgroundColor: '#2a2a2a',
     justifyContent: 'center', alignItems: 'center', marginBottom: 24,
   },
   walletIconText: { fontSize: 36 },
@@ -695,7 +695,7 @@ const s = StyleSheet.create({
   // Method selection
   methodOptions: { gap: 16, marginBottom: 32 },
   methodCard: {
-    backgroundColor: '#0a0a0a', borderRadius: 12, padding: 20,
+    backgroundColor: '#000000', borderRadius: 12, padding: 20,
     borderWidth: 1, borderColor: '#222', alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -711,7 +711,7 @@ const s = StyleSheet.create({
   // Wallet options
   walletOptions: { gap: 16, marginBottom: 24 },
   walletButton: {
-    backgroundColor: '#0a0a0a', borderRadius: 12, padding: 16,
+    backgroundColor: '#000000', borderRadius: 12, padding: 16,
     borderWidth: 1, borderColor: '#222',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -724,7 +724,7 @@ const s = StyleSheet.create({
   walletArrow: { color: '#666', fontSize: 24, marginLeft: 16 },
 
   comingSoonCard: {
-    backgroundColor: '#0a0a0a', borderRadius: 12, padding: 16,
+    backgroundColor: '#000000', borderRadius: 12, padding: 16,
     borderWidth: 1, borderColor: '#222', opacity: 0.6, alignItems: 'center',
   },
   comingSoonIcon: { fontSize: 32, marginBottom: 8 },
@@ -744,7 +744,7 @@ const s = StyleSheet.create({
   seedInputContainer: { marginBottom: 24 },
   inputLabel: { color: '#888', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 8 },
   seedInput: {
-    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#222', borderRadius: 10,
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#222', borderRadius: 10,
     padding: 16, color: '#fff', fontSize: 15, minHeight: 100, textAlignVertical: 'top',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     ...(Platform.OS === 'web' ? { outlineStyle: 'none', fontFamily: 'monospace' } as any : {}),
@@ -756,7 +756,7 @@ const s = StyleSheet.create({
   seedGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   seedWordItem: {
     flexDirection: 'row', alignItems: 'center', width: '48%',
-    backgroundColor: '#0a0a0a', borderRadius: 8, padding: 10,
+    backgroundColor: '#000000', borderRadius: 8, padding: 10,
     borderWidth: 1, borderColor: '#222',
   },
   seedWordNumber: { color: '#666', fontSize: 12, width: 20, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
@@ -773,7 +773,7 @@ const s = StyleSheet.create({
   verificationItem: {},
   verificationLabel: { color: '#888', fontSize: 12, fontWeight: '700', marginBottom: 6 },
   verificationInput: {
-    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#222', borderRadius: 10,
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#222', borderRadius: 10,
     padding: 12, color: '#fff', fontSize: 15,
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
@@ -804,7 +804,7 @@ const s = StyleSheet.create({
   chainsList: { maxHeight: 200, marginBottom: 24 },
   chainCard: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
-    backgroundColor: '#0a0a0a', borderRadius: 10, padding: 12,
+    backgroundColor: '#000000', borderRadius: 10, padding: 12,
     borderWidth: 1, borderColor: '#222', marginBottom: 8,
   },
   chainCardConnected: { borderColor: '#1a3a1a', backgroundColor: '#0d1a0d' },
@@ -814,7 +814,7 @@ const s = StyleSheet.create({
   chainDesc: { color: '#666', fontSize: 12 },
   chainStatus: {
     paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4,
-    backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#333',
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#333',
   },
   chainStatusConnected: { backgroundColor: '#0d1f0d', borderColor: '#1a3a1a' },
   chainStatusText: { color: '#666', fontSize: 10, fontWeight: '700', letterSpacing: 0.5 },

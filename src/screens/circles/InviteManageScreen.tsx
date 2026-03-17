@@ -231,7 +231,7 @@ export default function InviteManageScreen({ route, navigation }: any) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -239,7 +239,7 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#2a2a2a',
   },
   backBtn: { paddingRight: 12 },
   backText: { color: '#6366f1', fontSize: 14, fontFamily: 'monospace' },
@@ -265,7 +265,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     padding: 12,
     color: '#fff',
@@ -283,7 +283,7 @@ const styles = StyleSheet.create({
   inviteCard: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 14,
     marginBottom: 8,
@@ -314,7 +314,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: 4,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
   },
   statusAccepted: { backgroundColor: '#22c55e' + '20' },
   statusRevoked: { backgroundColor: '#ef4444' + '20' },

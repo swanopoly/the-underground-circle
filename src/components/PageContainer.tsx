@@ -13,7 +13,8 @@ interface PageContainerProps {
 export default function PageContainer({ children, scrollable = true, refreshing, onRefresh, centered, wide }: PageContainerProps) {
   const { width } = useWindowDimensions();
   const isDesktop = width > 768;
-  const maxW = wide ? (isDesktop ? 960 : undefined) : (isDesktop ? 640 : 480);
+  const isMedium = width > 560;
+  const maxW = wide ? (isDesktop ? 960 : (isMedium ? 640 : undefined)) : (isDesktop ? 640 : 480);
 
   const innerStyle = [styles.inner, maxW ? { maxWidth: maxW } : undefined];
 
@@ -43,7 +44,7 @@ export default function PageContainer({ children, scrollable = true, refreshing,
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
   },
   scrollContent: {
     flexGrow: 1,

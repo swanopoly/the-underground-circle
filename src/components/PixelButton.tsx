@@ -159,7 +159,7 @@ const styles = StyleSheet.create({
     left: '50%',
     transform: [{ translateX: '-50%' }],
     marginBottom: 8,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     borderWidth: 1,
     borderColor: '#6366f1',
     borderRadius: 6,

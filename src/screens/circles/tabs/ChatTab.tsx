@@ -1504,7 +1504,7 @@ function GlassmorphismCard({ category, expanded, onToggle, onPromptPress, accent
   const cardStyle = Platform.OS === 'web' ? {
     backgroundColor: expanded ? `${category.color}15` : '#11111180',
     backdropFilter: 'blur(10px)',
-    borderColor: expanded ? category.color + '40' : '#1a1a1a60',
+    borderColor: expanded ? category.color + '40' : '#00000060',
     boxShadow: expanded ? `0 8px 32px ${category.color}20` : 'none',
     transition: 'all 0.3s ease',
   } as any : {
@@ -1740,7 +1740,7 @@ function MessageRow({
 
       {/* Special effects for check-ins and achievements */}
       {(item.isCheckIn || item.isAchievement) && (
-        <View style={[styles.specialMessageGlow, { shadowColor: item.isAchievement ? '#ffd700' : accentColor }]} />
+        <View style={[styles.specialMessageGlow, Platform.OS === 'web' ? { boxShadow: `0 0 8px ${item.isAchievement ? '#ffd700' : accentColor}4d` } as any : { shadowColor: item.isAchievement ? '#ffd700' : accentColor }]} />
       )}
     </View>
   );
@@ -2263,7 +2263,7 @@ function EnhancedWalletOption({ icon, name, chain, active, address, accentColor,
       onHoverOut={() => setHovered(false)}
       style={[
         styles.enhancedWalletOption,
-        { borderColor: active ? accentColor : '#1a1a1a', backgroundColor: active ? accentColor + '15' : '#111' },
+        { borderColor: active ? accentColor : '#000000', backgroundColor: active ? accentColor + '15' : '#111' },
         optionStyle,
       ]}
     >
@@ -2608,7 +2608,7 @@ const checkInStyles = StyleSheet.create({
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   title: { color: '#fff', fontSize: 13, fontWeight: '700' },
   close: { color: '#666', fontSize: 16, padding: 4 },
-  input: { backgroundColor: '#0a0a0a', borderWidth: 1, borderRadius: 8, color: '#fff', fontSize: 13, padding: 10, minHeight: 60, textAlignVertical: 'top' },
+  input: { backgroundColor: '#000000', borderWidth: 1, borderRadius: 8, color: '#fff', fontSize: 13, padding: 10, minHeight: 60, textAlignVertical: 'top' },
   footer: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 },
   charCount: { color: '#555', fontSize: 11 },
   submitBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8 },
@@ -2623,7 +2623,7 @@ const checkInStyles = StyleSheet.create({
 
 const styles = StyleSheet.create({
   // Core layout
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   loadingPulse: { alignItems: 'center' },
   loadingText: { fontSize: 28, letterSpacing: 6, fontWeight: '800' },
@@ -2669,9 +2669,7 @@ const styles = StyleSheet.create({
   // Empty state
   emptyContainer: { padding: 20, maxWidth: 860, alignSelf: 'center', width: '100%' },
   heroSection: { alignItems: 'center', paddingTop: 100, paddingBottom: 20 },
-  heroSectionWeb: Platform.OS === 'web' ? {
-    backgroundImage: 'radial-gradient(circle at center, rgba(99, 102, 241, 0.1), transparent 70%)',
-  } as any : {},
+  heroSectionWeb: {},
   heroBotAvatar: {
     justifyContent: 'center',
     alignItems: 'center',
@@ -2700,7 +2698,7 @@ const styles = StyleSheet.create({
   quickPromptRow: { flexDirection: 'row', alignItems: 'center' },
   quickArrow: {
     width: 28, height: 28, borderRadius: 14,
-    backgroundColor: '#1a1a2e', borderWidth: 1, borderColor: '#2a2a3e',
+    backgroundColor: '#2a2a2a', borderWidth: 1, borderColor: '#333333',
     alignItems: 'center', justifyContent: 'center',
   },
   quickArrowText: { fontSize: 18, fontWeight: '700', marginTop: -1 },
@@ -2745,7 +2743,7 @@ const styles = StyleSheet.create({
   },
   categoryTitle: { fontSize: 12, fontWeight: '800', letterSpacing: 1.5 },
   categoryChevron: { fontSize: 14 },
-  categoryPrompts: { borderTopWidth: 1, borderTopColor: '#1a1a1a20' },
+  categoryPrompts: { borderTopWidth: 1, borderTopColor: '#00000020' },
 
   enhancedPromptItem: {
     flexDirection: 'row',
@@ -2770,7 +2768,7 @@ const styles = StyleSheet.create({
     padding: 14,
     marginBottom: 8,
     borderWidth: 1,
-    borderColor: '#1a1a1a60',
+    borderColor: '#00000060',
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(8px)' } as any : {}),
   },
   tipAccent: { width: 3, height: '100%', borderRadius: 2, marginRight: 12 },
@@ -2787,7 +2785,7 @@ const styles = StyleSheet.create({
   pinnedBannerChevron: { fontSize: 12, color: '#666' },
   pinnedList: { paddingHorizontal: 16, paddingBottom: 8, backgroundColor: '#0d0d14', gap: 6 },
   pinnedItem: {
-    backgroundColor: '#111118', borderRadius: 8, padding: 10,
+    backgroundColor: '#222222', borderRadius: 8, padding: 10,
     borderLeftWidth: 3, borderLeftColor: '#eab308',
   },
   pinnedItemText: { fontSize: 13, color: '#ccc', lineHeight: 18 },
@@ -2796,7 +2794,7 @@ const styles = StyleSheet.create({
   // Proposal section
   proposalSection: {
     paddingHorizontal: 16, paddingVertical: 8, gap: 8,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a2e',
+    borderBottomWidth: 1, borderBottomColor: '#2a2a2a',
   },
   proposalSectionTitle: {
     fontSize: 11, fontWeight: '800', color: '#888',
@@ -2817,7 +2815,7 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 2,
@@ -2836,7 +2834,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: '#11111180',
     borderWidth: 1,
-    borderColor: '#1a1a1a60',
+    borderColor: '#00000060',
     borderLeftWidth: 3,
     borderLeftColor: '#2a2a2a',
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(8px)' } as any : {}),
@@ -2913,9 +2911,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     inset: -4,
     borderRadius: 16,
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 5,
+    ...(Platform.OS !== 'web' ? { shadowOpacity: 0.3, shadowRadius: 8, elevation: 5 } : {}),
   } as any,
 
   // Reply indicator
@@ -2930,7 +2926,7 @@ const styles = StyleSheet.create({
     maxWidth: 860,
     alignSelf: 'center',
     width: '100%',
-    backgroundColor: '#0a0a0acc',
+    backgroundColor: '#000000cc',
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(10px)' } as any : {}),
   },
   quickBarScroll: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingVertical: 10 },
@@ -2957,7 +2953,7 @@ const styles = StyleSheet.create({
   },
   scrollArrowLeft: {
     left: 0,
-    backgroundColor: '#0a0a0af0',
+    backgroundColor: '#000000f0',
     borderRightWidth: 1,
     borderRightColor: '#ffffff10',
     borderTopRightRadius: 8,
@@ -2965,7 +2961,7 @@ const styles = StyleSheet.create({
   },
   scrollArrowRight: {
     right: 0,
-    backgroundColor: '#0a0a0af0',
+    backgroundColor: '#000000f0',
     borderLeftWidth: 1,
     borderLeftColor: '#ffffff10',
     borderTopLeftRadius: 8,
@@ -2979,7 +2975,7 @@ const styles = StyleSheet.create({
 
   // Enhanced crypto panel
   enhancedCryptoPanel: {
-    backgroundColor: '#0a0a0af0',
+    backgroundColor: '#000000f0',
     borderTopWidth: 1,
     padding: 20,
     maxWidth: 860,
@@ -3096,7 +3092,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     width: '100%',
     overflow: 'hidden',
-    backgroundColor: '#0a0a0af5',
+    backgroundColor: '#000000f5',
   },
   enhancedMentionItem: {
     flexDirection: 'row',
@@ -3105,14 +3101,14 @@ const styles = StyleSheet.create({
     padding: 12,
     paddingHorizontal: 16,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a60',
+    borderBottomColor: '#00000060',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background-color 0.2s' } as any : {}),
   },
   mentionAvatar: {
     width: 32,
     height: 32,
     borderRadius: 16,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -3129,7 +3125,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderTopWidth: 1,
-    backgroundColor: '#0a0a0af0',
+    backgroundColor: '#000000f0',
     maxWidth: 860,
     alignSelf: 'center',
     width: '100%',
@@ -3161,7 +3157,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     width: '100%',
     borderTopWidth: 1,
-    backgroundColor: '#0a0a0af0',
+    backgroundColor: '#000000f0',
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(8px)' } as any : {}),
   },
   typingDot: { width: 10, height: 10, borderRadius: 5 },
@@ -3172,7 +3168,7 @@ const styles = StyleSheet.create({
   enhancedInputBar: {
     borderTopWidth: 1,
     padding: 16,
-    backgroundColor: '#0a0a0af5',
+    backgroundColor: '#000000f5',
     maxWidth: 860,
     alignSelf: 'center',
     width: '100%',

@@ -34,6 +34,14 @@ export interface BackpackData {
   periodCosts: { today: number; week: number; month: number };
   budgetAlerts: ReturnType<typeof calculateBudgetAlerts>;
 
+  // Extended stats for compartment cards
+  traceCount: number;
+  totalTokensToday: number;
+  totalMessagesToday: number;
+  featuredTradeCount: number;
+  recentActivity: Array<{ type: string; text: string; time: string; color: string }>;
+  lastRefreshed: string;
+
   // User
   currentUserId: string;
   currentUserName: string;
@@ -139,6 +147,12 @@ export function useBackpackData(circleId: string): BackpackData {
   const [currentUserId, setCurrentUserId] = useState('');
   const [currentUserName, setCurrentUserName] = useState('');
   const [loading, setLoading] = useState(true);
+  const [traceCount, setTraceCount] = useState(0);
+  const [totalTokensToday, setTotalTokensToday] = useState(0);
+  const [totalMessagesToday, setTotalMessagesToday] = useState(0);
+  const [featuredTradeCount, setFeaturedTradeCount] = useState(0);
+  const [recentActivity, setRecentActivity] = useState<Array<{ type: string; text: string; time: string; color: string }>>([]);
+  const [lastRefreshed, setLastRefreshed] = useState('');
 
   // Debounce ref for realtime updates
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -227,6 +241,36 @@ export function useBackpackData(circleId: string): BackpackData {
         week: estimateCostFromTokens(weekTokens),
         month: estimateCostFromTokens(monthTokens),
       });
+
+      // ── Extended stats ──
+      setTraceCount(allResponses.length);
+      setTotalTokensToday(todayTokens);
+      setTotalMessagesToday(todayResponses.length);
+
+      // Featured trades count — table may not exist, safe query
+      if (user) {
+        try {
+          const { count } = await supabase
+            .from('featured_trades')
+            .select('*', { count: 'exact', head: true })
+            .eq('user_id', user.id)
+            .eq('status', 'active')
+            .gt('expires_at', new Date().toISOString());
+          setFeaturedTradeCount(count || 0);
+        } catch {
+          setFeaturedTradeCount(0);
+        }
+      }
+
+      // Build recent activity from latest responses
+      const recent = allResponses.slice(-8).reverse().map((r: any) => ({
+        type: 'terminal' as string,
+        text: `${r.agent_name || 'Agent'} responded (${r.token_count || 0} tokens)`,
+        time: timeSince(r.created_at),
+        color: r.status === 'done' ? '#22c55e' : r.status === 'error' ? '#ef4444' : '#f59e0b',
+      }));
+      setRecentActivity(recent);
+      setLastRefreshed(new Date().toISOString());
     } catch (err) {
       console.error('Backpack data load error:', err);
     } finally {
@@ -285,6 +329,12 @@ export function useBackpackData(circleId: string): BackpackData {
     budgetConfig,
     periodCosts,
     budgetAlerts,
+    traceCount,
+    totalTokensToday,
+    totalMessagesToday,
+    featuredTradeCount,
+    recentActivity,
+    lastRefreshed,
     currentUserId,
     currentUserName,
     loading,

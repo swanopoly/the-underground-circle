@@ -257,7 +257,7 @@ export default function DigestTab({ circleId }: DigestTabProps) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   scrollContent: { flexGrow: 1 },
   inner: {
     width: '100%',

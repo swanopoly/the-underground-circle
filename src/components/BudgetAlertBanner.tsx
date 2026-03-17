@@ -120,7 +120,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#0a0a1015',
+    backgroundColor: '#00000015',
   },
   actionText: {
     fontSize: 14,

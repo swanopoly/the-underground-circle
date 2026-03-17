@@ -263,14 +263,14 @@ export default function SwanBotScreen({ navigation }: any) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
   },
   header: {
     paddingTop: 60,
     paddingBottom: 14,
     paddingHorizontal: 20,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: '#000000',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
@@ -317,7 +317,7 @@ const styles = StyleSheet.create({
     gap: 6,
     padding: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: '#000000',
     maxWidth: 580,
     alignSelf: 'center',
     width: '100%',
@@ -367,7 +367,7 @@ const styles = StyleSheet.create({
   msgBubbleBot: {
     backgroundColor: '#151515',
     borderWidth: 1,
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
     borderTopLeftRadius: 4,
   },
   msgBubbleUser: {
@@ -427,9 +427,9 @@ const styles = StyleSheet.create({
   // Input
   inputBar: {
     borderTopWidth: 1,
-    borderTopColor: '#1a1a1a',
+    borderTopColor: '#000000',
     padding: 12,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     maxWidth: 580,
     alignSelf: 'center',
     width: '100%',

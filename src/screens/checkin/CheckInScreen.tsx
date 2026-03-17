@@ -488,10 +488,10 @@ export default function CheckInScreen({ route, navigation }: any) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   header: {
     paddingTop: 60, paddingBottom: 16, paddingHorizontal: 24,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
+    borderBottomWidth: 1, borderBottomColor: '#000000',
     flexDirection: 'row', alignItems: 'center', gap: 16,
     maxWidth: 480, alignSelf: 'center', width: '100%',
   },
@@ -500,7 +500,7 @@ const styles = StyleSheet.create({
   headerTitle: { color: '#fff', fontSize: 18, fontWeight: '900', letterSpacing: 3 },
   headerSubtitle: { color: '#666', fontSize: 11, letterSpacing: 2, marginTop: 2 },
   checkInBox: {
-    padding: 16, borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
+    padding: 16, borderBottomWidth: 1, borderBottomColor: '#000000',
     maxWidth: 480, alignSelf: 'center', width: '100%', gap: 12,
   },
   checkInInput: {
@@ -509,7 +509,7 @@ const styles = StyleSheet.create({
   },
   checkedInBanner: {
     backgroundColor: '#0d1f0d', padding: 12, alignItems: 'center',
-    borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
+    borderBottomWidth: 1, borderBottomColor: '#000000',
     maxWidth: 480, alignSelf: 'center', width: '100%',
   },
   checkedInText: { color: '#4a9a4a', fontSize: 12, fontWeight: '700', letterSpacing: 2 },
@@ -544,7 +544,7 @@ const styles = StyleSheet.create({
   proofContent: {
     marginTop: 6,
     padding: 10,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#222',
@@ -571,10 +571,10 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     borderWidth: 1,
     borderColor: '#222',
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  proofTypeChipActive: { borderColor: '#fff', backgroundColor: '#1a1a1a' },
+  proofTypeChipActive: { borderColor: '#fff', backgroundColor: '#000000' },
   proofTypeText: { color: '#555', fontSize: 10, fontWeight: '700' },
   proofTypeTextActive: { color: '#fff' },
   proofInput: {

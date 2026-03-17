@@ -76,19 +76,19 @@ export const OFFICE_THEMES: Record<string, OfficeTheme> = {
     id: 'underground',
     name: 'Underground HQ',
     environmentType: 'office',
-    floorColor: '#0a0a0f',
+    floorColor: '#000000',
     gridColor: '#ffffff04',
-    wallColor: '#111118',
-    wallBorder: '#1a1a2e',
+    wallColor: '#222222',
+    wallBorder: '#2a2a2a',
     accentGlow: '#6366f1',
     rugColor: '#1a0a2e',
     rugBorder: '#2d1b4e',
     deskColor: '#2a1f14',
     deskBorder: '#3d2b1a',
-    chairColor: '#1a1a2e',
-    chairBorder: '#2a2a3e',
+    chairColor: '#2a2a2a',
+    chairBorder: '#333333',
     windowSkyColor: '#0a1628',
-    windowCityColor: '#1a1a2e',
+    windowCityColor: '#2a2a2a',
   },
   cyberpunk: {
     id: 'cyberpunk',
@@ -390,24 +390,24 @@ export const SKIN_TONES = [
   // Neon / glowing
   '#ff00ff', '#00ff88', '#00ffff', '#ff4444', '#ffff00', '#aa55ff',
 ];
-export const HAIR_COLORS = ['#1a1a1a', '#4a3728', '#8b6914', '#c41e3a', '#2563eb', '#9333ea', '#22c55e', '#f59e0b', '#ec4899', '#ffffff'];
+export const HAIR_COLORS = ['#000000', '#4a3728', '#8b6914', '#c41e3a', '#2563eb', '#9333ea', '#22c55e', '#f59e0b', '#ec4899', '#ffffff'];
 export const SHIRT_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#3b82f6', '#14b8a6', '#f97316', '#64748b'];
-export const PANTS_COLORS = ['#2d2d3d', '#1a1a2e', '#3d2b1a', '#1e3a5f', '#2d1b4e', '#1a3d1a'];
-export const SHOE_COLORS = ['#1a1a1a', '#4a3728', '#2d2d3d', '#8b4513', '#ef4444', '#ffffff'];
-export const EYE_COLORS = ['#1a1a1a', '#4a3728', '#2563eb', '#22c55e', '#8b5cf6', '#ef4444'];
+export const PANTS_COLORS = ['#2d2d3d', '#2a2a2a', '#3d2b1a', '#1e3a5f', '#2d1b4e', '#1a3d1a'];
+export const SHOE_COLORS = ['#000000', '#4a3728', '#2d2d3d', '#8b4513', '#ef4444', '#ffffff'];
+export const EYE_COLORS = ['#000000', '#4a3728', '#2563eb', '#22c55e', '#8b5cf6', '#ef4444'];
 
 export const DEFAULT_APPEARANCE: AgentAppearance = {
   skinTone: '#f5d0a9',
   hairStyle: 'flat',
-  hairColor: '#1a1a1a',
+  hairColor: '#000000',
   shirtColor: '#6366f1',
   pantsColor: '#2d2d3d',
-  shoeColor: '#1a1a1a',
+  shoeColor: '#000000',
   accessory: 'none',
   hat: 'none',
   expression: 'neutral',
   backItem: 'none',
-  eyeColor: '#1a1a1a',
+  eyeColor: '#000000',
   facialHair: 'none',
   pet: 'none',
   aura: 'none',
@@ -475,9 +475,11 @@ export type FurnitureType =
   | 'spotify_jukebox' | 'discord_hub' | 'video_call' | 'message_board'
   | 'smart_tv' | 'weather_station' | 'twitch_stream' | 'pomodoro_room'
   | 'crypto_ticker' | 'github_feed' | 'calendar_widget' | 'world_clock'
-  | 'music_visualizer' | 'figma_board'
+  | 'music_visualizer' | 'figma_board' | 'email_hub'
   // Games
-  | 'poker_table' | 'chess_board' | 'coin_flip' | 'connect_four' | 'trivia_screen' | 'roulette_wheel';
+  | 'poker_table' | 'chess_board' | 'coin_flip' | 'connect_four' | 'trivia_screen' | 'roulette_wheel'
+  | 'retro_console'
+  | 'scrabble_board';
 
 export interface FurnitureItem {
   id: string;
@@ -519,6 +521,9 @@ export interface FurnitureItem {
   focusBurning?: boolean;        // focus_candle: lit state
   zenPattern?: number;           // zen_garden: pattern index
   hologramShape?: number;        // hologram: shape index
+  aquariumFed?: number;          // aquarium: last fed timestamp
+  terrariumFed?: number;         // terrarium: last fed timestamp
+  terrariumCreature?: number;    // terrarium: creature variant 0-3
   // Integration item state
   spotifyConnected?: boolean;      // spotify_jukebox: OAuth connected
   spotifyTrackName?: string;       // spotify_jukebox: current track name
@@ -567,6 +572,13 @@ export interface FurnitureItem {
   musicVisualizerActive?: boolean;  // music_visualizer: playing
   musicVisualizerStyle?: number;    // music_visualizer: 0=bars, 1=wave, 2=circle
   figmaBoardUrl?: string;           // figma_board: Figma file URL
+  // Email hub state
+  emailProvider?: string;            // email_hub: outlook/gmail/yahoo
+  emailConnected?: boolean;          // email_hub: connection status
+  emailUnread?: number;              // email_hub: unread count
+  emailSender?: string;              // email_hub: latest sender name
+  emailSubject?: string;             // email_hub: latest subject line
+  emailTime?: string;                // email_hub: latest email time
   figmaBoardConnected?: boolean;    // figma_board: connected state
   figmaBoardPreview?: string;       // figma_board: frame name
   // Game item state
@@ -626,6 +638,15 @@ export interface FurnitureItem {
   rouletteSolBet?: number;          // roulette_wheel: legacy SOL wager
   rouletteCryptoType?: string;      // roulette_wheel: crypto type
   rouletteCryptoAmount?: number;    // roulette_wheel: crypto wager
+  // Scrabble state
+  scrabbleActive?: boolean;         // scrabble_board: game in progress
+  scrabbleScore1?: number;          // scrabble_board: player 1 score
+  scrabbleScore2?: number;          // scrabble_board: player 2 / AI score
+  scrabbleTurn?: number;            // scrabble_board: 1 or 2
+  scrabbleWinner?: number;          // scrabble_board: 0=playing, 1=p1, 2=p2
+  scrabbleLastWord?: string;        // scrabble_board: last word played
+  // Retro console state
+  emulatorSystem?: string;          // retro_console: system id (gba, nes, snes, etc.)
   // Universal game state
   gameCryptoType?: string;          // any game: active crypto for wagers
   gameCryptoWager?: number;         // any game: current wager amount
@@ -652,6 +673,7 @@ export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
   { type: 'world_clock',      name: 'World Clock',      icon: '🌍', width: 100, height: 50,  category: 'connected', description: 'Multi-timezone display' },
   { type: 'music_visualizer', name: 'Music Visualizer', icon: '🎶', width: 90,  height: 60,  category: 'connected', description: 'Audio spectrum visualizer' },
   { type: 'figma_board',      name: 'Figma Board',      icon: '🎨', width: 100, height: 80,  category: 'connected', description: 'Preview your Figma designs' },
+  { type: 'email_hub',        name: 'Email Hub',        icon: '📧', width: 85,  height: 70,  category: 'connected', description: 'Outlook / Gmail inbox at a glance' },
   { type: 'smart_tv',        name: 'Smart TV',        icon: '📺', width: 120, height: 80,  category: 'connected', description: 'Stream YouTube, Netflix, Hulu & more' },
   { type: 'spotify_jukebox', name: 'Spotify Jukebox', icon: '🎧', width: 70,  height: 90,  category: 'connected', description: 'Connect Spotify — control playback' },
   { type: 'discord_hub',     name: 'Discord Hub',     icon: '💬', width: 80,  height: 70,  category: 'connected', description: 'Connect Discord server widget' },
@@ -667,6 +689,8 @@ export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
   { type: 'chess_board',    name: 'Chess',           icon: '♟️', width: 90,  height: 90,  category: 'games', description: 'Classic chess match' },
   { type: 'connect_four',   name: 'Connect Four',   icon: '🔴', width: 80,  height: 80,  category: 'games', description: 'Drop chips · 4 in a row' },
   { type: 'trivia_screen',  name: 'Trivia',         icon: '🧠', width: 90,  height: 60,  category: 'games', description: 'Quick trivia rounds · streak score' },
+  { type: 'retro_console',  name: 'Retro Console',  icon: '🎮', width: 100, height: 90,  category: 'games', description: 'GBA, GBC, NES, SNES, PS1 & more — load your ROMs' },
+  { type: 'scrabble_board', name: 'Scrabble',       icon: '🔤', width: 100, height: 100, category: 'games', description: 'Word tiles · score big · vs BlackSwan AI' },
   // ── Vibe (aesthetic & ambient) ──────────────────────────────────────────
   { type: 'fireplace',     name: 'Fireplace',       icon: '🔥', width: 80,  height: 70,  category: 'vibe', description: 'Crackling fire with embers' },
   { type: 'aquarium',      name: 'Aquarium',        icon: '🐠', width: 90,  height: 60,  category: 'vibe', description: 'Fish tank with swimming fish' },
@@ -738,8 +762,9 @@ export function isInteractiveFurniture(type: FurnitureType): boolean {
     'spotify_jukebox', 'discord_hub', 'video_call', 'message_board',
     'smart_tv', 'weather_station', 'twitch_stream', 'pomodoro_room',
     'crypto_ticker', 'github_feed', 'calendar_widget', 'world_clock',
-    'music_visualizer', 'figma_board',
+    'music_visualizer', 'figma_board', 'email_hub',
     'poker_table', 'chess_board', 'coin_flip', 'connect_four', 'trivia_screen', 'roulette_wheel',
+    'retro_console', 'scrabble_board',
   ].includes(type);
 }
 
@@ -918,12 +943,12 @@ export const THEME_OUTFITS: Record<EnvironmentType, ThemeOutfit> = {
 
 export const COLOR_SWATCHES: Record<string, string[]> = {
   floor: [
-    '#0a0a0f', '#0f0d08', '#0d0f08', '#080a10', '#0a0510', '#090409',
+    '#000000', '#0f0d08', '#0d0f08', '#080a10', '#0a0510', '#090409',
     '#010a10', '#0f0200', '#04040a', '#1a0e06', '#0d0818', '#040f04',
     '#02020a', '#0c0808', '#100810', '#060a0a', '#0a0a05', '#0f0b0b',
   ],
   walls: [
-    '#111118', '#1a1810', '#120820', '#0f1218', '#1a1508', '#2d1a08',
+    '#222222', '#1a1810', '#120820', '#0f1218', '#1a1508', '#2d1a08',
     '#180d28', '#071a07', '#05050f', '#120812', '#021018', '#1a0500',
     '#1e1e2e', '#2a2020', '#0a1a2a', '#1a0a1a', '#1a1a0a', '#0a1a0a',
   ],

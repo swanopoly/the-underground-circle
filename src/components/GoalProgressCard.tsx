@@ -37,7 +37,7 @@ const styles = StyleSheet.create({
   card: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 12,
     marginBottom: 6,
@@ -51,7 +51,7 @@ const styles = StyleSheet.create({
   type: { fontSize: 10, fontWeight: '700', fontFamily: 'monospace', textTransform: 'uppercase' },
   pct: { color: '#888', fontSize: 11, fontFamily: 'monospace' },
   title: { color: '#fff', fontSize: 13, fontWeight: '600', fontFamily: 'monospace', marginBottom: 8 },
-  barBg: { height: 4, backgroundColor: '#1a1a2e', borderRadius: 2, overflow: 'hidden', marginBottom: 4 },
+  barBg: { height: 4, backgroundColor: '#2a2a2a', borderRadius: 2, overflow: 'hidden', marginBottom: 4 },
   barFill: { height: '100%', borderRadius: 2 },
   values: { color: '#888', fontSize: 10, fontFamily: 'monospace' },
 });

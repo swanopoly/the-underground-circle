@@ -633,11 +633,11 @@ function Section({ title, accentColor, children }: { title: string; accentColor:
 const web = (s: any) => Platform.OS === 'web' ? s : {};
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     paddingTop: 60, paddingHorizontal: 16, paddingBottom: 14,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
+    borderBottomWidth: 1, borderBottomColor: '#000000',
     maxWidth: 580, alignSelf: 'center', width: '100%',
   },
   backBtn: {
@@ -659,7 +659,7 @@ const styles = StyleSheet.create({
   section: { marginBottom: 20 },
   sectionTitle: { fontSize: 10, fontWeight: '800', letterSpacing: 2, marginBottom: 8 },
   card: {
-    backgroundColor: '#111', borderWidth: 1, borderColor: '#1a1a1a',
+    backgroundColor: '#111', borderWidth: 1, borderColor: '#000000',
     borderRadius: 12, padding: 14,
   },
 
@@ -669,7 +669,7 @@ const styles = StyleSheet.create({
   emojiCatArrow: { color: '#444', fontSize: 10 },
   emojiGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingBottom: 10 },
   emojiBtn: {
-    width: 40, height: 40, borderRadius: 10, backgroundColor: '#0a0a0a',
+    width: 40, height: 40, borderRadius: 10, backgroundColor: '#000000',
     borderWidth: 1, borderColor: '#222', justifyContent: 'center', alignItems: 'center',
     ...web({ cursor: 'pointer', transition: 'all 0.15s ease' }),
   },
@@ -685,19 +685,19 @@ const styles = StyleSheet.create({
   hexRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
   hexLabel: { color: '#555', fontSize: 9, fontWeight: '800', letterSpacing: 2 },
   hexInput: {
-    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#222', borderRadius: 8,
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#222', borderRadius: 8,
     color: '#fff', fontSize: 13, fontWeight: '600', paddingHorizontal: 10, paddingVertical: 8,
   },
 
   // Name
   nameInput: {
-    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#222', borderRadius: 8,
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#222', borderRadius: 8,
     color: '#fff', fontSize: 15, fontWeight: '800', paddingHorizontal: 12, paddingVertical: 10,
     letterSpacing: 1,
   },
   namePreview: { color: '#333', fontSize: 10, fontWeight: '800', letterSpacing: 2, marginTop: 6 },
   descInput: {
-    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#222', borderRadius: 8,
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#222', borderRadius: 8,
     color: '#ccc', fontSize: 13, paddingHorizontal: 12, paddingVertical: 10, marginTop: 8,
     minHeight: 60, textAlignVertical: 'top',
   },
@@ -706,7 +706,7 @@ const styles = StyleSheet.create({
   typeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   typeChip: {
     paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8,
-    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#222',
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#222',
     ...web({ cursor: 'pointer', transition: 'all 0.15s ease' }),
   },
   typeChipText: { color: '#555', fontSize: 10, fontWeight: '800', letterSpacing: 1 },
@@ -720,7 +720,7 @@ const styles = StyleSheet.create({
   tagText: { fontSize: 10, fontWeight: '700', letterSpacing: 1 },
   suggestedTag: {
     paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6,
-    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#1a1a1a',
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#000000',
     ...web({ cursor: 'pointer' }),
   },
   suggestedTagText: { color: '#444', fontSize: 10, fontWeight: '700' },
@@ -756,7 +756,7 @@ const styles = StyleSheet.create({
   saveButtonContainer: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
     paddingHorizontal: 16, paddingBottom: Platform.OS === 'ios' ? 34 : 16, paddingTop: 10,
-    backgroundColor: '#0a0a0aE0',
+    backgroundColor: '#000000E0',
     maxWidth: 580, alignSelf: 'center', width: '100%',
   },
   saveButton: {

@@ -330,7 +330,7 @@ export default function GoalsScreen({ route, navigation }: any) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   header: {
     flexDirection: 'row',
@@ -339,7 +339,7 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#2a2a2a',
   },
   backBtn: { paddingRight: 12 },
   backText: { color: '#6366f1', fontSize: 14, fontFamily: 'monospace' },
@@ -357,7 +357,7 @@ const styles = StyleSheet.create({
   createForm: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 12,
     padding: 16,
     marginBottom: 16,
@@ -369,14 +369,14 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1a1a2e',
-    backgroundColor: '#0a0a0a',
+    borderColor: '#2a2a2a',
+    backgroundColor: '#000000',
   },
   typePillText: { color: '#888', fontSize: 11, fontFamily: 'monospace' },
   input: {
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 12,
     color: '#fff',
@@ -388,7 +388,7 @@ const styles = StyleSheet.create({
   formActions: { flexDirection: 'row', gap: 10, marginTop: 6 },
   cancelBtn: {
     flex: 1,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     paddingVertical: 12,
     borderRadius: 10,
     alignItems: 'center',
@@ -405,7 +405,7 @@ const styles = StyleSheet.create({
   goalRow: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 12,
     padding: 14,
     marginBottom: 8,
@@ -421,7 +421,7 @@ const styles = StyleSheet.create({
   progressSection: { marginTop: 10, marginLeft: 26 },
   progressBar: {
     height: 6,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     borderRadius: 3,
     overflow: 'hidden',
     marginBottom: 4,
@@ -433,9 +433,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 6,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
   },
   addChildText: { fontSize: 11, fontFamily: 'monospace' },
   deleteBtn: {

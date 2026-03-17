@@ -337,13 +337,12 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
-    // Resolve the user from JWT
+    // Resolve the user from JWT — never trust userId from request body
     const authHeader = req.headers.get("Authorization") || "";
     const token = authHeader.replace("Bearer ", "");
-    let userId: string | null = body.userId || null;
+    let userId: string | null = null;
 
-    if (token && !userId) {
-      // Create anon client to get user from JWT
+    if (token) {
       const anonClient = createClient(
         Deno.env.get("SUPABASE_URL")!,
         Deno.env.get("SUPABASE_ANON_KEY") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -355,7 +354,7 @@ Deno.serve(async (req: Request) => {
 
     if (!userId) {
       return new Response(
-        JSON.stringify({ error: "Not authenticated" }),
+        JSON.stringify({ error: "Not authenticated — valid JWT required" }),
         { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }

@@ -264,7 +264,7 @@ const s = StyleSheet.create({
   popover: {
     backgroundColor: '#15151e',
     borderWidth: 1,
-    borderColor: '#2a2a3e',
+    borderColor: '#333333',
     borderRadius: 10,
     padding: 14,
     width: 240,

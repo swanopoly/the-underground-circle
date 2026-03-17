@@ -117,10 +117,10 @@ function AgentRow({ agent }: { agent: CircleOfficeAgent }) {
         <Text style={rowStyles.name} numberOfLines={1}>{agent.name}</Text>
         <Text style={rowStyles.owner} numberOfLines={1}>{agent.ownerDisplayName}</Text>
       </View>
-      <Text style={[rowStyles.tokens, { color: tokenColor(agent.token_usage_today ?? 0) }]}>
-        {fmtTokens(agent.token_usage_today ?? 0)}
+      <Text style={[rowStyles.tokens, { color: tokenColor(agent.token_usage_total ?? 0) }]}>
+        {fmtTokens(agent.token_usage_total ?? 0)}
       </Text>
-      <Text style={rowStyles.msgs}>{agent.message_count_today ?? 0} msgs</Text>
+      <Text style={rowStyles.msgs}>{agent.message_count_total ?? 0} msgs</Text>
     </View>
   );
 }
@@ -132,7 +132,7 @@ const rowStyles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: '#000000',
     gap: 10,
   },
   dot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0 },
@@ -205,6 +205,7 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
   // Load latency percentiles and error rates from terminal responses
   const loadResponseAnalytics = useCallback(async () => {
     if (!circleId) return;
+    try {
     const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
 
     const { data: responses } = await supabase
@@ -298,6 +299,9 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
       }
       setUserUsage(usage.sort((a, b) => b.tokens - a.tokens));
     }
+    } catch (err) {
+      console.error('[OfficeAnalytics] Failed to load response analytics:', err);
+    }
   }, [circleId]);
 
   useEffect(() => { loadResponseAnalytics(); }, [loadResponseAnalytics]);
@@ -309,7 +313,10 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
 
   // Compute stats
   const totalTokensToday    = filtered.reduce((s, a) => s + (a.token_usage_today   ?? 0), 0);
+  const totalTokensAllTime  = filtered.reduce((s, a) => s + (a.token_usage_total   ?? 0), 0);
   const totalMessagesToday  = filtered.reduce((s, a) => s + (a.message_count_today ?? 0), 0);
+  const totalMessagesAllTime = filtered.reduce((s, a) => s + (a.message_count_total ?? 0), 0);
+  const totalCostAllTime    = totalTokensAllTime * 0.0000005;
   const onlineCount         = filtered.filter(a => a.status !== 'offline').length;
   const latencies           = filtered.map(a => a.last_response_ms).filter((v): v is number => v != null);
   const avgLatency          = latencies.length ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : null;
@@ -318,9 +325,9 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
   const mostActive          = filtered.reduce<CircleOfficeAgent | null>((best, a) =>
     (a.message_count_today ?? 0) > (best?.message_count_today ?? -1) ? a : best, null);
 
-  // Sort agents by messages desc for the list
+  // Sort agents by total usage desc for the list
   const sortedAgents = [...filtered].sort((a, b) =>
-    (b.message_count_today ?? 0) - (a.message_count_today ?? 0)
+    (b.token_usage_total ?? 0) - (a.token_usage_total ?? 0)
   );
 
   return (
@@ -346,7 +353,24 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
-        {/* Stats grid */}
+        {/* All-Time Cumulative Stats */}
+        <View style={styles.statsGrid}>
+          <StatCard
+            icon="◎"
+            value={fmtTokens(totalTokensAllTime)}
+            label="Total Tokens (All Time)"
+            valueColor="#f59e0b"
+            sub={`$${totalCostAllTime.toFixed(3)} total cost`}
+          />
+          <StatCard
+            icon="📨"
+            value={fmtTokens(totalMessagesAllTime)}
+            label="Total Messages (All Time)"
+            valueColor="#8b5cf6"
+          />
+        </View>
+
+        {/* Today Stats grid */}
         <View style={styles.statsGrid}>
           <StatCard
             icon="⚡"
@@ -483,7 +507,7 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
           <View style={styles.agentList}>
             <View style={styles.listHeader}>
               <Text style={styles.listTitle}>Agent Breakdown</Text>
-              <Text style={styles.listSub}>Sorted by activity today</Text>
+              <Text style={styles.listSub}>Sorted by total usage</Text>
             </View>
             {sortedAgents.map(agent => (
               <AgentRow key={agent.id} agent={agent} />
@@ -521,7 +545,7 @@ const styles = StyleSheet.create({
     padding: 12,
     gap: 8,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: '#000000',
   },
   toggleBtn: {
     flex: 1,
@@ -529,7 +553,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 20,
     alignItems: 'center',
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#2a2a2a',
   },
@@ -569,7 +593,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: '#000000',
   },
   listTitle: {
     color: '#e5e5e5',

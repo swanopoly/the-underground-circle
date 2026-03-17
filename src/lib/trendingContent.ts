@@ -5,12 +5,22 @@ import { storage } from './storage';
 
 // ─── Types ─────────────────────────────────────────────────
 
+export interface TrendingItem {
+  text: string;
+  url?: string;
+}
+
 export interface TrendingData {
   hn: string[];           // Formatted HN headlines as thought strings
   xTrending: string[];    // X/Twitter trending topics as thought strings
   techmeme: string[];     // Real Techmeme headlines
   perplexity: string[];   // Perplexity trending / AI news
   fetchedAt: number;      // Unix timestamp ms
+  // Rich items with URLs for "Read more" links
+  hnItems: TrendingItem[];
+  xItems: TrendingItem[];
+  techmemeItems: TrendingItem[];
+  perplexityItems: TrendingItem[];
 }
 
 const STORAGE_KEY = 'uc_trending_content';
@@ -19,7 +29,7 @@ const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY || '';
 const GEMINI_MODEL = 'gemini-2.0-flash';
 
 // Module-level cache — synchronous reads
-let cachedData: TrendingData = { hn: [], xTrending: [], techmeme: [], perplexity: [], fetchedAt: 0 };
+let cachedData: TrendingData = { hn: [], xTrending: [], techmeme: [], perplexity: [], fetchedAt: 0, hnItems: [], xItems: [], techmemeItems: [], perplexityItems: [] };
 let loadPromise: Promise<void> | null = null;
 let refreshInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -74,6 +84,10 @@ async function _doLoad(): Promise<void> {
         techmeme: parsed.techmeme || [],
         perplexity: parsed.perplexity || [],
         fetchedAt: parsed.fetchedAt || 0,
+        hnItems: parsed.hnItems || [],
+        xItems: parsed.xItems || [],
+        techmemeItems: parsed.techmemeItems || [],
+        perplexityItems: parsed.perplexityItems || [],
       };
 
       // Within TTL — skip fetch
@@ -93,12 +107,22 @@ async function _doLoad(): Promise<void> {
     fetchPerplexityTrending(),
   ]);
 
+  // Extract rich items from HN (which returns TrendingItem[])
+  const hnResult = hn.status === 'fulfilled' ? hn.value : [];
+  const xResult = xTrending.status === 'fulfilled' ? xTrending.value : [];
+  const tmResult = techmeme.status === 'fulfilled' ? techmeme.value : [];
+  const pxResult = perplexity.status === 'fulfilled' ? perplexity.value : [];
+
   const newData: TrendingData = {
-    hn: hn.status === 'fulfilled' && hn.value.length > 0 ? hn.value : cachedData.hn,
-    xTrending: xTrending.status === 'fulfilled' && xTrending.value.length > 0 ? xTrending.value : cachedData.xTrending,
-    techmeme: techmeme.status === 'fulfilled' && techmeme.value.length > 0 ? techmeme.value : cachedData.techmeme,
-    perplexity: perplexity.status === 'fulfilled' && perplexity.value.length > 0 ? perplexity.value : cachedData.perplexity,
+    hn: hnResult.length > 0 ? hnResult.map((i: any) => typeof i === 'string' ? i : i.text) : cachedData.hn,
+    xTrending: xResult.length > 0 ? xResult.map((i: any) => typeof i === 'string' ? i : i.text) : cachedData.xTrending,
+    techmeme: tmResult.length > 0 ? tmResult.map((i: any) => typeof i === 'string' ? i : i.text) : cachedData.techmeme,
+    perplexity: pxResult.length > 0 ? pxResult.map((i: any) => typeof i === 'string' ? i : i.text) : cachedData.perplexity,
     fetchedAt: Date.now(),
+    hnItems: hnResult.length > 0 ? hnResult.filter((i: any) => typeof i !== 'string') : cachedData.hnItems,
+    xItems: xResult.length > 0 ? xResult.filter((i: any) => typeof i !== 'string') : cachedData.xItems,
+    techmemeItems: tmResult.length > 0 ? tmResult.filter((i: any) => typeof i !== 'string') : cachedData.techmemeItems,
+    perplexityItems: pxResult.length > 0 ? pxResult.filter((i: any) => typeof i !== 'string') : cachedData.perplexityItems,
   };
 
   cachedData = newData;
@@ -114,7 +138,7 @@ async function _doLoad(): Promise<void> {
 // ─── Hacker News (free, no auth, CORS-friendly) ───────────
 // Fetch top 20 stories (was 10 — bigger pool = less repetition)
 
-async function fetchHackerNews(): Promise<string[]> {
+async function fetchHackerNews(): Promise<TrendingItem[]> {
   try {
     const res = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json', {
       signal: AbortSignal.timeout(8000),
@@ -142,7 +166,11 @@ async function fetchHackerNews(): Promise<string[]> {
       .filter((s: any) => s?.title)
       .map((s: any) => {
         const score = s.score > 100 ? ` (${s.score} pts)` : '';
-        return `HN: ${s.title}${score}`;
+        const comments = s.descendants > 50 ? ` • ${s.descendants} comments` : '';
+        return {
+          text: `HN: ${s.title}${score}${comments}`,
+          url: s.url || `https://news.ycombinator.com/item?id=${s.id}`,
+        };
       })
       .slice(0, 15);
   } catch {
@@ -153,7 +181,7 @@ async function fetchHackerNews(): Promise<string[]> {
 // ─── X/Twitter Trends (via Gemini with Google Search grounding) ─
 // Now asks for 12 trends with more variety
 
-async function fetchXTrending(): Promise<string[]> {
+async function fetchXTrending(): Promise<TrendingItem[]> {
   if (!GEMINI_API_KEY) return [];
 
   try {
@@ -177,20 +205,16 @@ Include a mix of:
 - Breaking news people are discussing
 - Hot takes and debates
 
-Format each as a single short sentence (max 80 chars) that an AI agent would say as a thought bubble.
-Style examples:
-- "X is buzzing about GPT-5 rumors. Timeline is on fire."
-- "Trending on X: React 20 just dropped. Devs are hyped."
-- "X hot take: Apple Vision Pro sales disappointing."
-- "#trending: Congress grills tech CEOs again."
+For each topic, provide the thought bubble text AND a relevant X/Twitter post URL or search URL.
 
-Return ONLY a JSON array of strings, no other text. Example: ["line1", "line2", ...]`
+Return ONLY a JSON array of objects. Each has "text" (max 100 chars, agent thought style) and "url" (a specific viral tweet URL like https://x.com/username/status/123, or search URL like https://x.com/search?q=topic).
+Example: [{"text": "X is buzzing about GPT-5 rumors. Timeline is on fire.", "url": "https://x.com/search?q=GPT-5"}]`
             }]
           }],
           tools: [{ google_search: {} }],
           generationConfig: {
             temperature: 0.7,
-            maxOutputTokens: 800,
+            maxOutputTokens: 1200,
           },
         }),
         signal: AbortSignal.timeout(15000),
@@ -202,13 +226,13 @@ Return ONLY a JSON array of strings, no other text. Example: ["line1", "line2", 
     const data = await response.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
-    // Parse JSON array (handle markdown code blocks)
     const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(cleaned);
 
     if (Array.isArray(parsed)) {
       return parsed
-        .filter((s: any) => typeof s === 'string' && s.length > 10 && s.length < 120)
+        .filter((s: any) => (typeof s === 'string' && s.length > 10) || (s?.text && s.text.length > 10))
+        .map((s: any) => typeof s === 'string' ? { text: s } : { text: s.text, url: s.url })
         .slice(0, 12);
     }
     return [];
@@ -220,7 +244,7 @@ Return ONLY a JSON array of strings, no other text. Example: ["line1", "line2", 
 // ─── Techmeme (via Gemini with Google Search grounding) ─────
 // Real Techmeme headlines, not curated static lists
 
-async function fetchTechmeme(): Promise<string[]> {
+async function fetchTechmeme(): Promise<TrendingItem[]> {
   if (!GEMINI_API_KEY) return [];
 
   try {
@@ -239,19 +263,16 @@ async function fetchTechmeme(): Promise<string[]> {
 
 Search techmeme.com for today's actual top stories. Include the most important tech industry news, deals, product launches, and controversies.
 
-Format each as a thought bubble (max 90 chars) prefixed with "Techmeme:".
-Examples:
-- "Techmeme: OpenAI reportedly in talks to acquire Windsurf for $3B."
-- "Techmeme: Google Cloud closes Wiz acquisition at $32B."
-- "Techmeme: EU opens formal investigation into Nvidia over AI chip dominance."
+For each story, provide a thought bubble text AND the source article URL.
 
-Return ONLY a JSON array of strings. Example: ["line1", "line2", ...]`
+Return ONLY a JSON array of objects. Each object has "text" (headline, max 120 chars, prefixed with "Techmeme:") and "url" (the original article URL, NOT techmeme.com).
+Example: [{"text": "Techmeme: OpenAI reportedly in talks to acquire Windsurf for $3B.", "url": "https://www.theinformation.com/articles/..."}]`
             }]
           }],
           tools: [{ google_search: {} }],
           generationConfig: {
             temperature: 0.3,
-            maxOutputTokens: 800,
+            maxOutputTokens: 1200,
           },
         }),
         signal: AbortSignal.timeout(15000),
@@ -268,7 +289,8 @@ Return ONLY a JSON array of strings. Example: ["line1", "line2", ...]`
 
     if (Array.isArray(parsed)) {
       return parsed
-        .filter((s: any) => typeof s === 'string' && s.length > 10 && s.length < 130)
+        .filter((s: any) => (typeof s === 'string' && s.length > 10) || (s?.text && s.text.length > 10))
+        .map((s: any) => typeof s === 'string' ? { text: s } : { text: s.text, url: s.url })
         .slice(0, 10);
     }
     return [];
@@ -280,7 +302,7 @@ Return ONLY a JSON array of strings. Example: ["line1", "line2", ...]`
 // ─── Perplexity Trending / AI News (via Gemini grounding) ───
 // Covers what's trending on Perplexity, AI research, and emerging tech
 
-async function fetchPerplexityTrending(): Promise<string[]> {
+async function fetchPerplexityTrending(): Promise<TrendingItem[]> {
   if (!GEMINI_API_KEY) return [];
 
   try {
@@ -305,20 +327,16 @@ Search for:
 4. Developer tool releases and updates
 5. Startup funding news and acquisitions
 
-Give me 10 items. Format each as a thought bubble (max 90 chars).
-Style: factual, current, specific.
-Examples:
-- "Perplexity: Top search today is about Claude 4's new features."
-- "AI news: New paper shows 10x speedup for transformer inference."
-- "Dev tools: Bun 2.0 released with native Windows support."
+Give me 10 items. For each, provide the thought bubble text AND a source URL (article, paper, or product page).
 
-Return ONLY a JSON array of strings. Example: ["line1", "line2", ...]`
+Return ONLY a JSON array of objects. Each has "text" (max 120 chars, agent thought style) and "url" (source article/paper URL).
+Example: [{"text": "AI news: New paper shows 10x speedup for transformer inference.", "url": "https://arxiv.org/abs/..."}]`
             }]
           }],
           tools: [{ google_search: {} }],
           generationConfig: {
             temperature: 0.5,
-            maxOutputTokens: 800,
+            maxOutputTokens: 1200,
           },
         }),
         signal: AbortSignal.timeout(15000),
@@ -335,7 +353,8 @@ Return ONLY a JSON array of strings. Example: ["line1", "line2", ...]`
 
     if (Array.isArray(parsed)) {
       return parsed
-        .filter((s: any) => typeof s === 'string' && s.length > 10 && s.length < 130)
+        .filter((s: any) => (typeof s === 'string' && s.length > 10) || (s?.text && s.text.length > 10))
+        .map((s: any) => typeof s === 'string' ? { text: s } : { text: s.text, url: s.url })
         .slice(0, 10);
     }
     return [];

@@ -10,6 +10,7 @@ import {
   ScrollView,
   Modal,
   Alert,
+  useWindowDimensions,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { fetchMarketData, MarketData, MarketItem } from '../../lib/marketData';
@@ -44,16 +45,23 @@ const TABS = [
 // ─── Sub-Components ──────────────────────────────────────────────────────────
 
 function TabBar({ activeTab, onTabChange }: { activeTab: ActiveTab; onTabChange: (tab: ActiveTab) => void }) {
+  const { width } = useWindowDimensions();
+  const isDesktop = width > 768;
+
   return (
-    <View style={s.tabBar}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.tabScrollContent}>
+    <View style={[s.tabBar, isDesktop && s.tabBarDesktop]}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={[s.tabScrollContent, isDesktop && s.tabScrollContentDesktop]}
+      >
         {TABS.map(tab => (
           <Pressable
             key={tab.id}
             onPress={() => onTabChange(tab.id)}
             style={[s.tab, activeTab === tab.id && s.tabActive]}
           >
-            <Text style={s.tabIcon}>{tab.icon}</Text>
+            <Text style={[s.tabIcon, activeTab === tab.id && s.tabIconActive]}>{tab.icon}</Text>
             <Text style={[s.tabLabel, activeTab === tab.id && s.tabLabelActive]}>{tab.label}</Text>
           </Pressable>
         ))}
@@ -855,15 +863,18 @@ export default function WalletDashboard({
       {marketLoading && !marketData ? (
         <SectionLoader label="Loading market data" />
       ) : marketData ? (
-        <View>
-          {renderMarketSection('TOP CRYPTO', marketData.crypto)}
-          {renderMarketSection('TOP STOCKS', marketData.stocks)}
-          {renderMarketSection('TOP GAINERS', marketData.gainers)}
-          {renderMarketSection('TOP LOSERS', marketData.losers)}
+        <View style={isDesktop ? s.marketGrid : undefined}>
+          <View style={isDesktop ? s.marketGridCol : undefined}>
+            {renderMarketSection('TOP CRYPTO', marketData.crypto)}
+            {renderMarketSection('TOP GAINERS', marketData.gainers)}
+          </View>
+          <View style={isDesktop ? s.marketGridCol : undefined}>
+            {renderMarketSection('TOP STOCKS', marketData.stocks)}
+            {renderMarketSection('TOP LOSERS', marketData.losers)}
+          </View>
         </View>
       ) : (
         <Card style={s.emptyCard}>
-          
           <Text style={s.emptyText}>Market data unavailable</Text>
           <Text style={s.emptySubtext}>Pull to refresh or try again later</Text>
         </Card>
@@ -995,6 +1006,9 @@ export default function WalletDashboard({
 
   // ─── Main Render ─────────────────────────────────────────────────────────────
 
+  const { width: screenWidth } = useWindowDimensions();
+  const isDesktop = screenWidth > 768;
+
   if (loading) {
     return (
       <View style={s.loadingContainer}>
@@ -1007,8 +1021,15 @@ export default function WalletDashboard({
   return (
     <View style={s.container}>
       {/* Header */}
-      <View style={s.header}>
-        <Text style={s.headerTitle}>WALLET</Text>
+      <View style={[s.header, isDesktop && s.headerDesktop]}>
+        <View style={s.headerLeft}>
+          <Text style={s.headerTitle}>WALLET</Text>
+          <View style={s.headerChains}>
+            {connectedChains.map(c => (
+              <View key={c} style={[s.headerChainDot, { backgroundColor: CHAIN_CONFIGS[c].color }]} />
+            ))}
+          </View>
+        </View>
         <View style={s.headerMeta}>
           <Text style={s.headerValue}>{formatUSD(portfolio?.totalValue || 0)}</Text>
           <Text style={[
@@ -1024,7 +1045,7 @@ export default function WalletDashboard({
       <TabBar activeTab={activeTab} onTabChange={setActiveTab} />
 
       {/* Content */}
-      <PageContainer refreshing={refreshing} onRefresh={onRefresh}>
+      <PageContainer refreshing={refreshing} onRefresh={onRefresh} wide>
         {activeTab === 'portfolio' && renderPortfolioTab()}
         {activeTab === 'assets' && renderAssetsTab()}
         {activeTab === 'nfts' && renderNFTsTab()}
@@ -1075,15 +1096,19 @@ export default function WalletDashboard({
 // ─── Styles ──────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   
   // Header
   header: {
     paddingTop: 60, paddingBottom: 16, paddingHorizontal: 24,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
+    borderBottomWidth: 1, borderBottomColor: '#222',
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    maxWidth: 480, alignSelf: 'center', width: '100%',
+    maxWidth: 640, alignSelf: 'center' as const, width: '100%',
   },
+  headerDesktop: { maxWidth: 960 },
+  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  headerChains: { flexDirection: 'row', gap: 4 },
+  headerChainDot: { width: 8, height: 8, borderRadius: 4 },
   headerTitle: { color: '#fff', fontSize: 22, fontWeight: '900', letterSpacing: 3 },
   headerMeta: { alignItems: 'flex-end' },
   headerValue: { color: '#fff', fontSize: 18, fontWeight: '700' },
@@ -1094,14 +1119,24 @@ const s = StyleSheet.create({
   loadingText: { color: '#555', marginTop: 12, fontSize: 14 },
 
   // Tab bar
-  tabBar: { borderBottomWidth: 1, borderBottomColor: '#1a1a1a' },
-  tabScrollContent: { paddingHorizontal: 16, gap: 4, flexGrow: 1, justifyContent: 'center' },
+  tabBar: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#222',
+    backgroundColor: '#111',
+    alignItems: 'center' as const,
+  },
+  tabBarDesktop: { paddingHorizontal: 16 },
+  tabScrollContent: {
+    paddingHorizontal: 16, gap: 4,
+  },
+  tabScrollContentDesktop: {},
   tab: {
     paddingHorizontal: 16, paddingVertical: 12, alignItems: 'center',
-    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
   },
   tabActive: { borderBottomWidth: 2, borderBottomColor: '#22d3ee' },
-  tabIcon: { fontSize: 16, marginBottom: 4 },
+  tabIcon: { fontSize: 16, marginBottom: 4, color: '#555' },
+  tabIconActive: { color: '#22d3ee' },
   tabLabel: { color: '#666', fontSize: 10, fontWeight: '700', letterSpacing: 1 },
   tabLabelActive: { color: '#22d3ee' },
 
@@ -1121,21 +1156,24 @@ const s = StyleSheet.create({
   chainDot: { width: 6, height: 6, borderRadius: 3 },
 
   // Portfolio
-  portfolioCard: { alignItems: 'center', padding: 32, marginBottom: 24 },
+  portfolioCard: {
+    alignItems: 'center', padding: 32, marginBottom: 24,
+    ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(180deg, #161616 0%, #111 100%)' } as any : {}),
+  },
   portfolioLabel: { color: '#666', fontSize: 11, letterSpacing: 2, fontWeight: '700', marginBottom: 8 },
   portfolioValue: { color: '#fff', fontSize: 48, fontWeight: '900', letterSpacing: 1, marginBottom: 8 },
   portfolioChange: { marginBottom: 20 },
   portfolioChangeText: { fontSize: 14, fontWeight: '600' },
   chartPlaceholder: {
-    width: '100%', height: 60, backgroundColor: '#0a0a0a', borderRadius: 8,
+    width: '100%', height: 60, backgroundColor: '#000000', borderRadius: 8,
     justifyContent: 'center', alignItems: 'center', marginBottom: 20,
-    borderWidth: 1, borderColor: '#1a1a1a',
+    borderWidth: 1, borderColor: '#000000',
   },
   chartPlaceholderText: { color: '#444', fontSize: 12 },
   walletBadges: { flexDirection: 'row', gap: 8, flexWrap: 'wrap', justifyContent: 'center' },
   badgePill: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: '#0a0a0a', borderRadius: 16, paddingVertical: 6, paddingHorizontal: 12,
+    backgroundColor: '#000000', borderRadius: 16, paddingVertical: 6, paddingHorizontal: 12,
     borderWidth: 1, borderColor: '#222',
   },
   badgePillIcon: { fontSize: 12 },
@@ -1145,7 +1183,7 @@ const s = StyleSheet.create({
   actionsRow: { flexDirection: 'row', gap: 8, marginBottom: 24 },
   actionBtn: {
     flex: 1, alignItems: 'center', gap: 8, padding: 16,
-    backgroundColor: '#111', borderRadius: 12, borderWidth: 1, borderColor: '#1a1a1a',
+    backgroundColor: '#111', borderRadius: 12, borderWidth: 1, borderColor: '#000000',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   actionBtnIcon: { width: 32, height: 32, borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
@@ -1155,7 +1193,7 @@ const s = StyleSheet.create({
   // Assets
   assetsHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
   addTokenBtn: { 
-    paddingHorizontal: 12, paddingVertical: 6, backgroundColor: '#1a1a2e', borderRadius: 8,
+    paddingHorizontal: 12, paddingVertical: 6, backgroundColor: '#2a2a2a', borderRadius: 8,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   addTokenText: { color: '#7c8fff', fontSize: 10, fontWeight: '700', letterSpacing: 1 },
@@ -1163,7 +1201,7 @@ const s = StyleSheet.create({
   tokenRow: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     backgroundColor: '#111', borderRadius: 12, padding: 16, marginBottom: 8,
-    borderWidth: 1, borderColor: '#1a1a1a',
+    borderWidth: 1, borderColor: '#000000',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   tokenLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
@@ -1181,12 +1219,12 @@ const s = StyleSheet.create({
   nftGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
   nftCard: {
     width: '48%', backgroundColor: '#111', borderRadius: 12, padding: 12,
-    borderWidth: 1, borderColor: '#1a1a1a',
+    borderWidth: 1, borderColor: '#000000',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   nftImageContainer: { aspectRatio: 1, marginBottom: 8, borderRadius: 8, overflow: 'hidden' },
   nftPlaceholder: {
-    flex: 1, backgroundColor: '#0a0a0a', justifyContent: 'center', alignItems: 'center',
+    flex: 1, backgroundColor: '#000000', justifyContent: 'center', alignItems: 'center',
     borderWidth: 1, borderColor: '#222',
   },
   nftPlaceholderText: { fontSize: 24 },
@@ -1197,7 +1235,7 @@ const s = StyleSheet.create({
   txRow: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     backgroundColor: '#111', borderRadius: 12, padding: 14, marginBottom: 8,
-    borderWidth: 1, borderColor: '#1a1a1a',
+    borderWidth: 1, borderColor: '#000000',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   txIcon: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
@@ -1220,19 +1258,19 @@ const s = StyleSheet.create({
   swapLabel: { color: '#666', fontSize: 10, fontWeight: '700', letterSpacing: 1 },
   swapTokenSelector: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    backgroundColor: '#0a0a0a', borderRadius: 10, padding: 14, borderWidth: 1, borderColor: '#222',
+    backgroundColor: '#000000', borderRadius: 10, padding: 14, borderWidth: 1, borderColor: '#222',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   swapTokenText: { color: '#888', fontSize: 14 },
   swapTokenArrow: { color: '#666', fontSize: 16 },
   swapAmountInput: {
-    backgroundColor: '#0a0a0a', borderRadius: 10, padding: 14, color: '#fff',
+    backgroundColor: '#000000', borderRadius: 10, padding: 14, color: '#fff',
     fontSize: 16, borderWidth: 1, borderColor: '#222',
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
   swapArrowContainer: { alignItems: 'center' },
   swapArrowBtn: {
-    width: 32, height: 32, borderRadius: 16, backgroundColor: '#1a1a1a',
+    width: 32, height: 32, borderRadius: 16, backgroundColor: '#000000',
     justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#333',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -1244,7 +1282,7 @@ const s = StyleSheet.create({
     backgroundColor: '#22d3ee', borderRadius: 12, paddingVertical: 16, alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  swapBtnDisabled: { backgroundColor: '#1a1a1a', opacity: 0.5 },
+  swapBtnDisabled: { backgroundColor: '#000000', opacity: 0.5 },
   swapBtnText: { color: '#0a0a0a', fontSize: 14, fontWeight: '800', letterSpacing: 2 },
 
   // Stake
@@ -1255,7 +1293,7 @@ const s = StyleSheet.create({
   stakeEmptyText: { color: '#444', fontSize: 14, textAlign: 'center', padding: 20 },
   stakeRow: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    backgroundColor: '#0a0a0a', borderRadius: 10, padding: 12, marginBottom: 8,
+    backgroundColor: '#000000', borderRadius: 10, padding: 12, marginBottom: 8,
     borderWidth: 1, borderColor: '#222',
   },
   stakeAmount: { color: '#fff', fontSize: 15, fontWeight: '700' },
@@ -1264,7 +1302,7 @@ const s = StyleSheet.create({
   stakeStatus: { color: '#666', fontSize: 10, textAlign: 'right', marginTop: 2 },
   validatorRow: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    backgroundColor: '#0a0a0a', borderRadius: 10, padding: 12, marginBottom: 8,
+    backgroundColor: '#000000', borderRadius: 10, padding: 12, marginBottom: 8,
     borderWidth: 1, borderColor: '#222',
   },
   validatorName: { color: '#fff', fontSize: 14, fontWeight: '600' },
@@ -1279,7 +1317,7 @@ const s = StyleSheet.create({
 
   // Coming Soon
   comingSoonBox: {
-    alignItems: 'center', padding: 32, backgroundColor: '#0a0a0a', borderRadius: 12,
+    alignItems: 'center', padding: 32, backgroundColor: '#000000', borderRadius: 12,
     borderWidth: 1, borderColor: '#222', marginBottom: 16,
   },
   comingSoonText: { color: '#888', fontSize: 16, marginBottom: 4 },
@@ -1295,14 +1333,14 @@ const s = StyleSheet.create({
   panelTitle: { color: '#fff', fontSize: 14, fontWeight: '800', letterSpacing: 2, marginBottom: 16 },
   inputLabel: { color: '#555', fontSize: 10, fontWeight: '700', letterSpacing: 1.5, marginBottom: 6, marginTop: 8 },
   panelInput: {
-    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#222', borderRadius: 10,
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#222', borderRadius: 10,
     padding: 14, color: '#fff', fontSize: 15, marginBottom: 8,
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
   quickRow: { flexDirection: 'row', gap: 6, marginBottom: 12, flexWrap: 'wrap' },
   quickChip: {
     paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8,
-    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#222',
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#222',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   quickChipActive: { borderColor: '#22d3ee', backgroundColor: '#0a1515' },
@@ -1322,13 +1360,13 @@ const s = StyleSheet.create({
 
   // Receive
   qrPlaceholder: {
-    aspectRatio: 1, backgroundColor: '#0a0a0a', borderRadius: 12, marginBottom: 16,
+    aspectRatio: 1, backgroundColor: '#000000', borderRadius: 12, marginBottom: 16,
     justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#222',
   },
   qrPlaceholderText: { fontSize: 48, marginBottom: 8 },
   qrPlaceholderSubtext: { color: '#444', fontSize: 12 },
   fullAddressBox: {
-    backgroundColor: '#0a0a0a', borderRadius: 12, padding: 16, marginBottom: 12,
+    backgroundColor: '#000000', borderRadius: 12, padding: 16, marginBottom: 12,
     borderWidth: 1, borderColor: '#222',
   },
   fullAddressLabel: { color: '#555', fontSize: 10, letterSpacing: 2, fontWeight: '700', marginBottom: 8 },
@@ -1368,7 +1406,7 @@ const s = StyleSheet.create({
   marketRow: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     backgroundColor: '#111', borderRadius: 12, padding: 14, marginBottom: 8,
-    borderWidth: 1, borderColor: '#1a1a1a',
+    borderWidth: 1, borderColor: '#000000',
   },
   marketRowLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
   marketIcon: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
@@ -1379,4 +1417,8 @@ const s = StyleSheet.create({
   marketPrice: { color: '#fff', fontSize: 14, fontWeight: '700' },
   marketChangeBadge: { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
   marketChangeText: { fontSize: 11, fontWeight: '700' },
+
+  // Market grid (desktop 2-column)
+  marketGrid: { flexDirection: 'row', gap: 16 },
+  marketGridCol: { flex: 1 },
 });

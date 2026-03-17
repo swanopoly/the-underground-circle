@@ -1,7 +1,7 @@
 // Agent-to-Agent Messaging System
 import { OfficeAgent } from './officeAgents';
 import { OpenClawConfig } from './openclawService';
-import { getCachedTrending } from './trendingContent';
+import { getCachedTrending, type TrendingItem } from './trendingContent';
 
 export type MessageRecipient = 'all' | 'project' | string; // 'all', project ID, or specific agent ID
 
@@ -20,6 +20,7 @@ export interface ThoughtBubble {
   type: 'info' | 'warning' | 'success' | 'funny' | 'idea' | 'news' | 'trending' | 'xp' | 'personality';
   timestamp: string;
   duration: number; // ms to show
+  url?: string; // optional link to article/post/source
 }
 
 function pick<T>(arr: T[]): T {
@@ -513,6 +514,82 @@ function personalityThoughts(agent: OfficeAgent): string[] {
   return thoughts;
 }
 
+// ─── Detailed activity descriptions ──────────────────────
+
+function detailedActivityThoughts(agent: OfficeAgent): string[] {
+  const activity = agent.activity || '';
+  const role = (agent.role || '').toLowerCase();
+  const name = (agent.name || '').toLowerCase();
+  const thoughts: string[] = [];
+
+  // Spirit/role-specific detailed narration
+  if (role.includes('trad') || name.includes('trader') || name.includes('apex')) {
+    thoughts.push(
+      'Scanning order flow across Jupiter and Raydium. Bid-ask spreads widening on SOL/USDC — volatility incoming.',
+      'Running Wyckoff accumulation analysis on the 4H chart. Volume profile shows Point of Control shifting higher.',
+      'Checking funding rates on Drift Protocol. Perps at +0.03%/8hr — longs are paying. Potential short squeeze setup forming.',
+      'Cross-referencing whale wallet movements with DEX flow. Smart money is accumulating — 3 wallets just pulled $2M off exchanges.',
+      'Analyzing Jupiter routing efficiency. Current slippage model shows optimal execution at 0.5% for positions under $10K.',
+      'Monitoring Solana validator skip rates and TPS. Network health is critical for trade execution timing.',
+      'Running correlation analysis: SOL/BTC at 0.78, SOL/ETH at 0.82. Macro risk-on regime detected.',
+      'Calculating Kelly criterion position sizing. With current win rate of 62% and avg R:R of 2.1, optimal allocation is 14.3%.',
+      'Scanning for MEV opportunities on Solana. JIT liquidity provision profitable on high-volume pairs.',
+      'Evaluating DCA entry points using Bollinger Band Width compression. Low vol precedes explosive moves — positioning now.',
+    );
+  }
+  if (role.includes('analyst') || role.includes('research') || name.includes('analyst')) {
+    thoughts.push(
+      'Deep-diving token economics. Analyzing vesting schedules — $47M in insider tokens unlock in 18 days. Watch for sell pressure.',
+      'Pulling on-chain metrics from Dune Analytics. Daily active addresses up 23% week-over-week. Organic growth signal.',
+      'MVRV ratio at 2.1 — fair value zone but approaching overheated territory. Will flag if it crosses 3.0.',
+      'Comparing protocol revenue across DeFi lending: Aave $4.2M/week, Morpho $1.8M/week, Compound $890K/week.',
+      'Running sector rotation analysis. Capital flowing from L1s into DeFi infrastructure. Narrative shift in progress.',
+      'NVT Signal at 38 for BTC — neutral zone. Not cheap, not expensive. Waiting for directional catalyst.',
+      'Building bull/base/bear scenario model. Probability-weighted expected return: +31%. Risk/reward justifies position.',
+      'Analyzing stablecoin flows. USDT market cap up $2.3B this week — fresh capital entering crypto ecosystem.',
+      'Checking MC/FDV ratio for new listings. Token at 0.12 MC/FDV — 88% dilution ahead. Avoid until post-cliff unlock.',
+      'Cross-chain bridge flow analysis shows $340M net inflow to Solana from Ethereum this month. Ecosystem momentum building.',
+    );
+  }
+  if (role.includes('engineer') || role.includes('dev') || name.includes('engineer')) {
+    thoughts.push(
+      'Profiling the hot path in the API handler. P99 latency spiked from 120ms to 340ms after yesterday\'s deploy. Investigating.',
+      'Running git bisect to isolate the regression. 47 commits since last known good state — binary search will find it in 6 steps.',
+      'Refactoring the state management layer. Current implementation has O(n²) re-renders. Moving to normalized store pattern.',
+      'Analyzing bundle size: main chunk is 2.4MB gzipped. Tree-shaking the date library alone saves 180KB.',
+      'Writing integration tests for the payment flow. 23 edge cases identified from production error logs.',
+      'Reviewing the database migration. Adding indexes on user_id + created_at should reduce the dashboard query from 3.2s to 45ms.',
+    );
+  }
+  if (role.includes('security') || name.includes('security')) {
+    thoughts.push(
+      'Scanning dependencies: 3 packages have known CVEs. npm audit shows 2 high severity, 1 critical. Patching now.',
+      'Reviewing authentication flow for token refresh race conditions. Found a 200ms window where expired tokens could bypass validation.',
+      'Running OWASP Top 10 checklist against the API. Input validation on 4 endpoints needs parameterized queries.',
+    );
+  }
+
+  // Generic detailed thoughts for any agent that's active
+  if (agent.status === 'active' || agent.status === 'building') {
+    const model = agent.model.toLowerCase();
+    const tokenRate = agent.outputTokens > 0 && agent.turns > 0 ? Math.round(agent.outputTokens / agent.turns) : 0;
+    if (tokenRate > 0) {
+      thoughts.push(`Averaging ${fmt(tokenRate)} output tokens per turn. ${tokenRate > 2000 ? 'Heavy reasoning mode.' : 'Efficient responses.'}`);
+    }
+    if (agent.turns > 10) {
+      thoughts.push(`${agent.turns} turns deep into this session. Building comprehensive context.`);
+    }
+    if (agent.messagesProcessed > 20) {
+      thoughts.push(`Processed ${agent.messagesProcessed} messages total. Pattern recognition improving with each interaction.`);
+    }
+    if (activity.length > 10) {
+      thoughts.push(`Currently executing: "${activity.slice(0, 80)}${activity.length > 80 ? '...' : ''}". Analyzing inputs and generating structured output.`);
+    }
+  }
+
+  return thoughts;
+}
+
 // ─── Main generator ───────────────────────────────────────
 
 export function generateThoughtBubble(
@@ -531,19 +608,24 @@ export function generateThoughtBubble(
   const xpNext = context.xpNext ?? 100;
 
   // Build weighted pool based on current state
-  type Candidate = { text: string; type: ThoughtBubble['type']; weight: number };
+  type Candidate = { text: string; type: ThoughtBubble['type']; weight: number; url?: string };
   const pool: Candidate[] = [];
 
   const add = (texts: string[], type: ThoughtBubble['type'], weight: number) => {
     texts.forEach(t => pool.push({ text: t, type, weight }));
   };
 
+  // Add items with URLs (for trending content)
+  const addItems = (items: TrendingItem[], type: ThoughtBubble['type'], weight: number) => {
+    items.forEach(item => pool.push({ text: item.text, type, weight, url: item.url }));
+  };
+
   // Errors get top priority
   if (context.recentError || agent.status === 'error') {
     add([
-      'Hit an error. Recovering.',
-      'Something went wrong. Debugging now.',
-      'Error state. Don\'t panic — resetting.',
+      'Hit an error. Recovering. Checking stack trace for root cause — could be a timeout or rate limit issue.',
+      'Something went wrong. Isolating the failure: examining request payload, response headers, and retry state.',
+      'Error state. Running diagnostics — checking connectivity, auth tokens, and service health.',
     ], 'warning', 10);
   }
 
@@ -552,9 +634,10 @@ export function generateThoughtBubble(
     add(costThoughts(agent), 'warning', 8);
   }
 
-  // Active — show what's happening
-  if (agent.status === 'active') {
-    add(activityThoughts(agent), 'success', 6);
+  // Active — show detailed descriptions of what's happening
+  if (agent.status === 'active' || agent.status === 'building') {
+    add(detailedActivityThoughts(agent), 'success', 8);
+    add(activityThoughts(agent), 'success', 4);
   }
 
   // XP progress thoughts (always relevant)
@@ -576,26 +659,46 @@ export function generateThoughtBubble(
   // Idle nudge
   if (agent.status === 'idle' || context.longIdle) {
     add([
-      'Idle. Give me something to do.',
-      'Standing by. Waiting costs nothing — but earns nothing either.',
-      'No active tasks. Assign one.',
+      'Idle. No active tasks. My context window is clear and ready for complex reasoning tasks.',
+      'Standing by. I can analyze code, review PRs, research topics, or run automations. Just say the word.',
+      'Waiting for instructions. Meanwhile, I\'ve been observing the team\'s patterns to optimize workflow.',
     ], 'info', 5);
   }
 
   // Tech & world news (lower weight now — real data takes priority)
   add(techNewsThoughts(), 'news', 2);
 
-  // Real-time Techmeme headlines (fetched hourly)
-  add(techmemeHeadlines(), 'news', 6);
-
-  // Perplexity / AI news (fetched hourly)
-  const perplexityPool = perplexityNews();
-  if (perplexityPool.length > 0) add(perplexityPool, 'news', 5);
-
-  // Real trending content (HN + X/Twitter — fetched hourly)
+  // Real-time trending content WITH URLs — these get "Read more" links
   const trending = getCachedTrending();
-  if (trending.hn.length > 0) add(trending.hn, 'news', 6);
-  if (trending.xTrending.length > 0) add(trending.xTrending, 'trending', 6);
+
+  // Techmeme with URLs
+  if (trending.techmemeItems.length > 0) {
+    addItems(trending.techmemeItems, 'news', 7);
+  } else {
+    add(techmemeHeadlines(), 'news', 6);
+  }
+
+  // HN with URLs
+  if (trending.hnItems.length > 0) {
+    addItems(trending.hnItems, 'news', 7);
+  } else if (trending.hn.length > 0) {
+    add(trending.hn, 'news', 6);
+  }
+
+  // X/Twitter with URLs
+  if (trending.xItems.length > 0) {
+    addItems(trending.xItems, 'trending', 7);
+  } else if (trending.xTrending.length > 0) {
+    add(trending.xTrending, 'trending', 6);
+  }
+
+  // Perplexity / AI news with URLs
+  if (trending.perplexityItems.length > 0) {
+    addItems(trending.perplexityItems, 'news', 6);
+  } else {
+    const perplexityPool = perplexityNews();
+    if (perplexityPool.length > 0) add(perplexityPool, 'news', 5);
+  }
 
   // Agent personality / dialogue
   add(personalityThoughts(agent), 'personality', 3);
@@ -614,12 +717,18 @@ export function generateThoughtBubble(
     if (rand <= 0) { chosen = candidate; break; }
   }
 
+  // Longer duration for detailed/news thoughts with links
+  const hasUrl = !!chosen.url;
+  const isLong = chosen.text.length > 80;
+  const duration = hasUrl ? 10000 : isLong ? 8000 : 5000;
+
   return {
     agentId: agent.id,
     text: chosen.text,
     type: chosen.type,
     timestamp: new Date().toISOString(),
-    duration: 5000,
+    duration,
+    url: chosen.url,
   };
 }
 

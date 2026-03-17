@@ -127,7 +127,7 @@ export default function AnalyticsTab({ circleId }: { circleId: string }) {
                 styles.bar,
                 {
                   height: Math.max(4, (day.total_check_ins / maxCheckIns) * 80),
-                  backgroundColor: day.total_check_ins > 0 ? '#6366f1' : '#1a1a2e',
+                  backgroundColor: day.total_check_ins > 0 ? '#6366f1' : '#2a2a2a',
                 },
               ]}
             />
@@ -193,7 +193,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
   },
   rangePillActive: { backgroundColor: '#6366f1' + '20', borderColor: '#6366f1' },
   rangePillText: { color: '#888', fontSize: 13, fontFamily: 'monospace' },
@@ -204,7 +204,7 @@ const styles = StyleSheet.create({
     minWidth: 140,
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 12,
     padding: 14,
   },
@@ -217,7 +217,7 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 12,
     padding: 16,
     height: 140,
@@ -231,7 +231,7 @@ const styles = StyleSheet.create({
   table: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 12,
     overflow: 'hidden',
   },
@@ -240,7 +240,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#2a2a2a',
     backgroundColor: '#0d0d1a',
   },
   tableHeaderText: { flex: 1, color: '#888', fontSize: 11, fontWeight: '700', fontFamily: 'monospace' },

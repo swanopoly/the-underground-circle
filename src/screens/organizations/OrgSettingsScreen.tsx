@@ -110,7 +110,7 @@ export default function OrgSettingsScreen({ route, navigation }: any) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -118,7 +118,7 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#2a2a2a',
   },
   backBtn: { paddingRight: 12 },
   backText: { color: '#6366f1', fontSize: 14, fontFamily: 'monospace' },
@@ -128,7 +128,7 @@ const styles = StyleSheet.create({
   input: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     padding: 12,
     color: '#fff',

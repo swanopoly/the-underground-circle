@@ -10,6 +10,7 @@ import {
   Modal,
   TextInput,
   FlatList,
+  useWindowDimensions,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { User, Achievement, UserAchievement, XPEvent, Integration, AgentBot, Friend } from '../../types';
@@ -237,9 +238,12 @@ export default function ProfileScreen({ navigation }: any) {
   const currentLevelXP = Math.pow(levelInfo.level - 1, 2) * 50;
   const nextLevelXP = levelInfo.level >= 100 ? currentLevelXP : Math.pow(levelInfo.level, 2) * 50;
 
+  const { width: screenWidth } = useWindowDimensions();
+  const isDesktop = screenWidth > 640;
+
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
+      <View style={[styles.header, isDesktop && styles.headerDesktop]}>
         <Text style={styles.headerTitle}>PROFILE</Text>
         <Pressable onPress={() => navigation.navigate('EditProfile')}>
           <Text style={styles.editButton}>EDIT</Text>
@@ -247,7 +251,7 @@ export default function ProfileScreen({ navigation }: any) {
       </View>
 
       <ScrollView contentContainerStyle={styles.scrollContent}>
-        <View style={styles.inner}>
+        <View style={[styles.inner, isDesktop && styles.innerDesktop]}>
           {/* Custom Banner */}
           {profile?.banner_url ? (
             <Pressable style={styles.bannerContainer} onPress={() => navigation.navigate('EditProfile')}>
@@ -343,41 +347,77 @@ export default function ProfileScreen({ navigation }: any) {
             <Text style={styles.xpTotal}>{fmt(xp)} TOTAL XP</Text>
           </Card>
 
-          {/* Karma Cards */}
-          <View style={styles.karmaRow}>
-            <Card style={styles.karmaCard}>
-              <Text style={styles.karmaEmoji}>🔥</Text>
-              <Text style={styles.karmaNumber}>{fmt(grindKarma)}</Text>
-              <Text style={styles.karmaLabel}>GRIND KARMA</Text>
-            </Card>
-            <Card style={styles.karmaCard}>
-              <Text style={styles.karmaEmoji}>💬</Text>
-              <Text style={styles.karmaNumber}>{fmt(socialKarma)}</Text>
-              <Text style={styles.karmaLabel}>SOCIAL KARMA</Text>
-            </Card>
-          </View>
+          {/* Karma + Stats combined on desktop */}
+          {isDesktop ? (
+            <View style={styles.karmaStatsRow}>
+              <Card style={styles.karmaCard}>
+                <Text style={styles.karmaEmoji}>🔥</Text>
+                <Text style={styles.karmaNumber}>{fmt(grindKarma)}</Text>
+                <Text style={styles.karmaLabel}>GRIND KARMA</Text>
+              </Card>
+              <Card style={styles.karmaCard}>
+                <Text style={styles.karmaEmoji}>💬</Text>
+                <Text style={styles.karmaNumber}>{fmt(socialKarma)}</Text>
+                <Text style={styles.karmaLabel}>SOCIAL KARMA</Text>
+              </Card>
+              <Card style={styles.statCardInline}>
+                <Text style={styles.statNumber}>
+                  {profile?.current_streak || 0}{(profile?.current_streak || 0) > 0 ? ' 🔥' : ''}
+                </Text>
+                <Text style={styles.statLabel}>STREAK</Text>
+              </Card>
+              <Card style={styles.statCardInline}>
+                <Text style={styles.statNumber}>{profile?.longest_streak || 0}</Text>
+                <Text style={styles.statLabel}>BEST</Text>
+              </Card>
+              <Card style={styles.statCardInline}>
+                <Text style={styles.statNumber}>{fmt(totalCheckIns)}</Text>
+                <Text style={styles.statLabel}>CHECK-INS</Text>
+              </Card>
+              <Card style={styles.statCardInline}>
+                <Text style={styles.statNumber}>{circlesJoined}</Text>
+                <Text style={styles.statLabel}>CIRCLES</Text>
+              </Card>
+            </View>
+          ) : (
+            <>
+              {/* Karma Cards */}
+              <View style={styles.karmaRow}>
+                <Card style={styles.karmaCard}>
+                  <Text style={styles.karmaEmoji}>🔥</Text>
+                  <Text style={styles.karmaNumber}>{fmt(grindKarma)}</Text>
+                  <Text style={styles.karmaLabel}>GRIND KARMA</Text>
+                </Card>
+                <Card style={styles.karmaCard}>
+                  <Text style={styles.karmaEmoji}>💬</Text>
+                  <Text style={styles.karmaNumber}>{fmt(socialKarma)}</Text>
+                  <Text style={styles.karmaLabel}>SOCIAL KARMA</Text>
+                </Card>
+              </View>
 
-          {/* Stats Grid */}
-          <View style={styles.statsGrid}>
-            <Card style={styles.statCard}>
-              <Text style={styles.statNumber}>
-                {profile?.current_streak || 0}{(profile?.current_streak || 0) > 0 ? ' 🔥' : ''}
-              </Text>
-              <Text style={styles.statLabel}>CURRENT STREAK</Text>
-            </Card>
-            <Card style={styles.statCard}>
-              <Text style={styles.statNumber}>{profile?.longest_streak || 0}</Text>
-              <Text style={styles.statLabel}>LONGEST STREAK</Text>
-            </Card>
-            <Card style={styles.statCard}>
-              <Text style={styles.statNumber}>{fmt(totalCheckIns)}</Text>
-              <Text style={styles.statLabel}>CHECK-INS</Text>
-            </Card>
-            <Card style={styles.statCard}>
-              <Text style={styles.statNumber}>{circlesJoined}</Text>
-              <Text style={styles.statLabel}>CIRCLES</Text>
-            </Card>
-          </View>
+              {/* Stats Grid */}
+              <View style={styles.statsGrid}>
+                <Card style={styles.statCard}>
+                  <Text style={styles.statNumber}>
+                    {profile?.current_streak || 0}{(profile?.current_streak || 0) > 0 ? ' 🔥' : ''}
+                  </Text>
+                  <Text style={styles.statLabel}>CURRENT STREAK</Text>
+                </Card>
+                <Card style={styles.statCard}>
+                  <Text style={styles.statNumber}>{profile?.longest_streak || 0}</Text>
+                  <Text style={styles.statLabel}>LONGEST STREAK</Text>
+                </Card>
+                <Card style={styles.statCard}>
+                  <Text style={styles.statNumber}>{fmt(totalCheckIns)}</Text>
+                  <Text style={styles.statLabel}>CHECK-INS</Text>
+                </Card>
+                <Card style={styles.statCard}>
+                  <Text style={styles.statNumber}>{circlesJoined}</Text>
+                  <Text style={styles.statLabel}>CIRCLES</Text>
+                </Card>
+              </View>
+            </>
+          )}
 
           {/* Pinned Achievements */}
           <View style={styles.sectionHeader}>
@@ -608,33 +648,39 @@ export default function ProfileScreen({ navigation }: any) {
             })}
           </ScrollView>
 
-          {/* Recent Activity */}
-          {recentActivity.length > 0 && (
-            <>
-              <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>RECENT ACTIVITY</Text>
+          {/* Activity + Rank side-by-side on desktop */}
+          <View style={isDesktop ? styles.activityRankRow : undefined}>
+            {/* Recent Activity */}
+            {recentActivity.length > 0 && (
+              <View style={isDesktop ? styles.activityRankCol : undefined}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>RECENT ACTIVITY</Text>
+                </View>
+                <Card style={styles.activityCard}>
+                  {recentActivity.map((event, i) => (
+                    <View key={event.id} style={[styles.activityItem, i > 0 && styles.activityBorder]}>
+                      <Text style={styles.activityText}>
+                        {getEventEmoji(event.event_type)} +{event.xp_amount} XP — {getEventLabel(event.event_type)}
+                      </Text>
+                      <Text style={styles.activityTime}>{getTimeAgo(event.created_at)}</Text>
+                    </View>
+                  ))}
+                </Card>
               </View>
-              <Card style={styles.activityCard}>
-                {recentActivity.map((event, i) => (
-                  <View key={event.id} style={[styles.activityItem, i > 0 && styles.activityBorder]}>
-                    <Text style={styles.activityText}>
-                      {getEventEmoji(event.event_type)} +{event.xp_amount} XP — {getEventLabel(event.event_type)}
-                    </Text>
-                    <Text style={styles.activityTime}>{getTimeAgo(event.created_at)}</Text>
-                  </View>
-                ))}
-              </Card>
-            </>
-          )}
+            )}
 
-          {/* Leaderboard Preview */}
-          {rank !== null && (
-            <Card style={styles.rankCard}>
-              <Text style={styles.rankLabel}>YOUR RANK</Text>
-              <Text style={styles.rankNumber}>#{rank}</Text>
-              <Text style={styles.rankOf}>of {totalUsers} users</Text>
-            </Card>
-          )}
+            {/* Leaderboard Preview */}
+            {rank !== null && (
+              <View style={isDesktop ? { width: 160, flexShrink: 0 } : undefined}>
+                {isDesktop && <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>RANK</Text></View>}
+                <Card style={styles.rankCard}>
+                  <Text style={styles.rankLabel}>YOUR RANK</Text>
+                  <Text style={styles.rankNumber}>#{rank}</Text>
+                  <Text style={styles.rankOf}>of {totalUsers} users</Text>
+                </Card>
+              </View>
+            )}
+          </View>
 
           {/* Bio Section */}
           <View style={styles.sectionHeader}>
@@ -698,25 +744,27 @@ export default function ProfileScreen({ navigation }: any) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingTop: 60, paddingBottom: 20, paddingHorizontal: 24,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
-    maxWidth: 480, alignSelf: 'center', width: '100%',
+    borderBottomWidth: 1, borderBottomColor: '#222',
+    maxWidth: 480, alignSelf: 'center' as const, width: '100%',
   },
+  headerDesktop: { maxWidth: 640 },
   headerTitle: { color: '#fff', fontSize: 22, fontWeight: '900', letterSpacing: 3 },
   editButton: { color: '#6366f1', fontSize: 14, fontWeight: '700', letterSpacing: 1 },
   scrollContent: { flexGrow: 1 },
-  inner: { width: '100%', maxWidth: 480, alignSelf: 'center', paddingHorizontal: 20, paddingTop: 20 },
+  inner: { width: '100%', maxWidth: 480, alignSelf: 'center' as const, paddingHorizontal: 20, paddingTop: 20 },
+  innerDesktop: { maxWidth: 640 },
 
   // Hero
   heroCard: { alignItems: 'center', padding: 28, marginBottom: 12 },
   heroSection: { alignItems: 'center' },
   avatarRing: { width: 88, height: 88, borderRadius: 44, borderWidth: 3, justifyContent: 'center', alignItems: 'center', marginBottom: 14 },
-  avatar: { width: 78, height: 78, borderRadius: 39, backgroundColor: '#1a1a2e', justifyContent: 'center', alignItems: 'center' },
+  avatar: { width: 78, height: 78, borderRadius: 39, backgroundColor: '#2a2a2a', justifyContent: 'center', alignItems: 'center' },
   avatarText: { color: '#fff', fontSize: 32, fontWeight: '900' },
   displayName: { color: '#fff', fontSize: 22, fontWeight: '700' },
   username: { color: '#666', fontSize: 14, marginTop: 2 },
@@ -728,7 +776,7 @@ const styles = StyleSheet.create({
   xpCard: { marginBottom: 12, padding: 18 },
   xpLevel: { color: '#fff', fontSize: 13, fontWeight: '800', letterSpacing: 2 },
   xpNumbers: { color: '#888', fontSize: 12, fontWeight: '600' },
-  xpBarBg: { height: 8, backgroundColor: '#1a1a1a', borderRadius: 4, overflow: 'hidden' },
+  xpBarBg: { height: 8, backgroundColor: '#000000', borderRadius: 4, overflow: 'hidden' },
   xpBarFill: {
     height: '100%', borderRadius: 4,
     backgroundColor: '#6366f1',
@@ -749,6 +797,14 @@ const styles = StyleSheet.create({
   statNumber: { color: '#fff', fontSize: 26, fontWeight: '900', marginBottom: 4 },
   statLabel: { color: '#666', fontSize: 9, letterSpacing: 1, fontWeight: '700', textAlign: 'center' },
 
+  // Desktop combined karma + stats row
+  karmaStatsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 16 },
+  statCardInline: { flex: 1, alignItems: 'center', padding: 14, minWidth: 80 },
+
+  // Desktop activity + rank side-by-side
+  activityRankRow: { flexDirection: 'row', gap: 16 },
+  activityRankCol: { flex: 1 },
+
   // Sections
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, marginTop: 8 },
   sectionTitle: { color: '#fff', fontSize: 14, fontWeight: '800', letterSpacing: 2 },
@@ -766,7 +822,7 @@ const styles = StyleSheet.create({
   // Activity
   activityCard: { marginBottom: 16, padding: 0 },
   activityItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 14 },
-  activityBorder: { borderTopWidth: 1, borderTopColor: '#1a1a1a' },
+  activityBorder: { borderTopWidth: 1, borderTopColor: '#000000' },
   activityText: { color: '#ccc', fontSize: 13, flex: 1 },
   activityTime: { color: '#444', fontSize: 11, marginLeft: 8 },
 
@@ -781,7 +837,7 @@ const styles = StyleSheet.create({
   bioCard: { marginBottom: 16 },
   bioText: { color: '#999', fontSize: 14, lineHeight: 20 },
   bioEditCard: { marginBottom: 16, gap: 12 },
-  bioInput: { backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#222', borderRadius: 10, padding: 14, color: '#fff', fontSize: 14, minHeight: 80, textAlignVertical: 'top' },
+  bioInput: { backgroundColor: '#000000', borderWidth: 1, borderColor: '#222', borderRadius: 10, padding: 14, color: '#fff', fontSize: 14, minHeight: 80, textAlignVertical: 'top' },
 
   signOutButton: { borderWidth: 1, borderColor: '#222' },
 
@@ -796,10 +852,10 @@ const styles = StyleSheet.create({
   modalLocked: { color: '#666', fontSize: 12 },
 
   // New customizable styles
-  bannerContainer: { marginBottom: -24, height: 120, marginHorizontal: 20, borderRadius: 14, overflow: 'hidden', zIndex: 0 },
+  bannerContainer: { marginBottom: -24, height: 140, marginHorizontal: 0, borderRadius: 14, overflow: 'hidden', zIndex: 0 },
   bannerPlaceholder: { 
     flex: 1, 
-    backgroundColor: '#1a1a1a', 
+    backgroundColor: '#000000', 
     justifyContent: 'center', 
     alignItems: 'center',
     borderWidth: 2,
@@ -850,7 +906,7 @@ const styles = StyleSheet.create({
     alignItems: 'center', 
     padding: 24,
     backgroundColor: '#0f0f0f',
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
   },
   emptyPinnedText: { color: '#666', fontSize: 14, fontWeight: '600' },
   emptyPinnedDesc: { color: '#444', fontSize: 12, textAlign: 'center', marginTop: 4, lineHeight: 16 },
@@ -884,7 +940,7 @@ const styles = StyleSheet.create({
     alignItems: 'center', 
     padding: 24,
     backgroundColor: '#0f0f0f',
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
   },
   emptyPlatformsText: { color: '#666', fontSize: 14, fontWeight: '600' },
   emptyPlatformsDesc: { color: '#444', fontSize: 12, textAlign: 'center', marginTop: 4, lineHeight: 16 },
@@ -928,7 +984,7 @@ const styles = StyleSheet.create({
     alignItems: 'center', 
     padding: 24,
     backgroundColor: '#0f0f0f',
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
   },
   emptyAgentsText: { color: '#666', fontSize: 14, fontWeight: '600' },
   emptyAgentsDesc: { color: '#444', fontSize: 12, textAlign: 'center', marginTop: 4, lineHeight: 16 },
@@ -952,7 +1008,7 @@ const styles = StyleSheet.create({
     width: 32, 
     height: 32, 
     borderRadius: 16, 
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     justifyContent: 'center',
     alignItems: 'center',
     marginLeft: -8,
@@ -965,7 +1021,7 @@ const styles = StyleSheet.create({
     alignItems: 'center', 
     padding: 24,
     backgroundColor: '#0f0f0f',
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
   },
   emptyFriendsText: { color: '#666', fontSize: 14, fontWeight: '600' },
   emptyFriendsDesc: { color: '#444', fontSize: 12, textAlign: 'center', marginTop: 4, lineHeight: 16 },
@@ -1000,7 +1056,7 @@ const styles = StyleSheet.create({
     padding: 24,
     marginBottom: 16,
     backgroundColor: '#0f0f0f',
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
   },
   inviteTitle: { 
     color: '#fff', 
@@ -1047,7 +1103,7 @@ const styles = StyleSheet.create({
   progressBarBg: {
     flex: 1,
     height: 8,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderRadius: 4,
     overflow: 'hidden',
     marginRight: 12,

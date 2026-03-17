@@ -285,9 +285,21 @@ export async function autoDiscoverLocalAgents(
       if (res.ok) {
         const data = await res.json().catch(() => null);
         if (data?.ok || data?.status === 'live') {
-          // Gateway is reachable — try to get token from a no-auth probe
-          // If token is needed, create connection with empty token (will fail auth
-          // but the diagnostic will guide the user)
+          // Verify this is actually an OpenClaw gateway by probing /tools/invoke
+          // (Claude Code MCP bridge also responds to /health but doesn't have /tools/invoke)
+          try {
+            const invokeRes = await fetch(`${endpoint}/tools/invoke`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ tool: 'ping', args: {} }),
+              signal: AbortSignal.timeout(3000),
+            });
+            // 404 means this endpoint doesn't have /tools/invoke — not OpenClaw
+            if (invokeRes.status === 404) continue;
+          } catch {
+            continue; // Can't reach /tools/invoke — skip
+          }
+
           const conn: AgentConnection = {
             id: generateId(),
             name: 'OpenClaw',
@@ -309,11 +321,22 @@ export async function autoDiscoverLocalAgents(
   return { discovered: null };
 }
 
+/** Validate that an endpoint URL is safe to connect to (http/https only, no file:/javascript: etc) */
+export function isValidEndpoint(endpoint: string): boolean {
+  try {
+    const url = new URL(endpoint);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Probe an endpoint's health without auth.
  * Returns true if the gateway is reachable and healthy.
  */
 export async function probeEndpointHealth(endpoint: string): Promise<boolean> {
+  if (!isValidEndpoint(endpoint)) return false;
   try {
     const res = await fetch(`${endpoint.replace(/\/$/, '')}/health`, {
       signal: AbortSignal.timeout(4000),

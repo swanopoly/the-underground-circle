@@ -31,16 +31,16 @@ export const GRID = {
 // ─── Colors ───────────────────────────────────────────────────────────────────
 
 export const PIXEL_COLORS = {
-  // Backgrounds
-  bg0: '#050508',      // Deepest black
-  bg1: '#0a0a0f',      // Panel background
-  bg2: '#111118',      // Card background
-  bg3: '#1a1a25',      // Elevated surface
+  // Backgrounds — matte black palette (neutral, no blue tint)
+  bg0: '#111111',      // Deepest matte black
+  bg1: '#000000',      // Panel / main background
+  bg2: '#222222',      // Card background
+  bg3: '#2a2a2a',      // Elevated surface
 
   // Borders
-  border0: '#1a1a2e',  // Subtle
-  border1: '#2a2a3e',  // Standard
-  border2: '#3a3a4e',  // Emphasis
+  border0: '#2a2a2a',  // Subtle
+  border1: '#333333',  // Standard
+  border2: '#3d3d3d',  // Emphasis
 
   // Text
   text0: '#fff',       // Primary

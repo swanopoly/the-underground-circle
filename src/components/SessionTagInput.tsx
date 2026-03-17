@@ -247,9 +247,9 @@ const styles = StyleSheet.create({
   },
   input: {
     flex: 1,
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
@@ -287,7 +287,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: 6,
     borderWidth: 1,
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
   },
   quickTagIcon: {
     fontSize: 10,
@@ -300,9 +300,9 @@ const styles = StyleSheet.create({
 
   // Suggestions
   suggestions: {
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     overflow: 'hidden',
     maxHeight: 200,
@@ -314,7 +314,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#2a2a2a',
   },
   suggestionDot: {
     width: 8,

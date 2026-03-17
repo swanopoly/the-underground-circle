@@ -155,7 +155,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#0d0d14',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     marginVertical: 8,
     overflow: 'hidden',
   },
@@ -166,7 +166,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
   },
   headerLeft: { flex: 1 },
   title: {
@@ -196,7 +196,7 @@ const styles = StyleSheet.create({
     minWidth: 48,
     alignItems: 'center',
   },
-  saveBtnDisabled: { backgroundColor: '#0a0a0a', borderColor: '#1a1a1a' },
+  saveBtnDisabled: { backgroundColor: '#000000', borderColor: '#000000' },
   saveBtnText: { color: '#00FF9C', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' },
   saveBtnTextDisabled: { color: '#333' },
   editor: {
@@ -206,7 +206,7 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     minHeight: 90,
     padding: 14,
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
   },
   // Modal
   modalBackdrop: {
@@ -220,7 +220,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#111',
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     width: '100%',
     maxWidth: 400,
     maxHeight: '70%',
@@ -243,7 +243,7 @@ const styles = StyleSheet.create({
   emptyHistory: { color: '#555', fontFamily: 'monospace', fontSize: 12, textAlign: 'center', marginTop: 20 },
   historyItem: {
     borderBottomWidth: 1,
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
     paddingVertical: 12,
   },
   historyMeta: { flexDirection: 'row', gap: 8, marginBottom: 4 },

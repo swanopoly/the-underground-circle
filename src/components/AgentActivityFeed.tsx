@@ -19,6 +19,7 @@ const SOURCE_ICONS: Record<ActivitySource, string> = {
   webchat: '💻',
   cron: '⏰',
   system: '⚙️',
+  github: '{>}',
 };
 
 const SOURCE_LABELS: Record<ActivitySource, string> = {
@@ -26,6 +27,7 @@ const SOURCE_LABELS: Record<ActivitySource, string> = {
   webchat: 'Web',
   cron: 'Cron',
   system: 'System',
+  github: 'GitHub',
 };
 
 const STATUS_COLORS: Record<string, string> = {

@@ -214,7 +214,7 @@ export default function SSOConfigScreen({ route, navigation }: any) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   header: {
     flexDirection: 'row',
@@ -223,7 +223,7 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#2a2a2a',
   },
   backBtn: { paddingRight: 12 },
   backText: { color: '#6366f1', fontSize: 14, fontFamily: 'monospace' },
@@ -232,7 +232,7 @@ const styles = StyleSheet.create({
   statusCard: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 12,
     padding: 16,
     flexDirection: 'row',
@@ -266,7 +266,7 @@ const styles = StyleSheet.create({
   input: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 14,
     color: '#fff',
@@ -277,7 +277,7 @@ const styles = StyleSheet.create({
   buttonRow: { flexDirection: 'row', gap: 12, marginBottom: 24 },
   testBtn: {
     flex: 1,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     paddingVertical: 14,
     borderRadius: 10,
     alignItems: 'center',
@@ -294,7 +294,7 @@ const styles = StyleSheet.create({
   guideCard: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 12,
     padding: 16,
   },

@@ -212,7 +212,7 @@ export function DiceRollerItem({ item, theme }: ItemProps) {
     <Animated.View style={{ width: 44, height: 44, backgroundColor: '#f5f5f5', borderWidth: 1, borderColor: '#d1d5db', borderRadius: 6, alignItems: 'center', justifyContent: 'center', transform: [{ rotate: rot }] }}>
       <View style={{ width: 34, height: 34, position: 'relative' }}>
         {dots.map(([dx, dy], i) => (
-          <View key={i} style={{ position: 'absolute', left: dx - 3, top: dy - 3, width: 6, height: 6, borderRadius: 3, backgroundColor: '#1a1a1a' }} />
+          <View key={i} style={{ position: 'absolute', left: dx - 3, top: dy - 3, width: 6, height: 6, borderRadius: 3, backgroundColor: '#000000' }} />
         ))}
       </View>
     </Animated.View>
@@ -438,9 +438,9 @@ export function SlotMachineItem({ item, theme }: ItemProps) {
   return (
     <View style={{ width: 56, height: 74, backgroundColor: '#7f1d1d', borderWidth: 1, borderColor: '#fbbf24', borderRadius: 6, alignItems: 'center', overflow: 'hidden' }}>
       <Text style={{ color: '#fbbf24', fontSize: 5, fontWeight: '900', fontFamily: 'monospace', marginTop: 2 }}>JACKPOT</Text>
-      <View style={{ flexDirection: 'row', gap: 1, marginTop: 2, backgroundColor: '#0a0a0f', borderRadius: 3, padding: 2, borderWidth: 1, borderColor: '#fbbf2440' }}>
+      <View style={{ flexDirection: 'row', gap: 1, marginTop: 2, backgroundColor: '#000000', borderRadius: 3, padding: 2, borderWidth: 1, borderColor: '#fbbf2440' }}>
         {display.map((idx, i) => (
-          <View key={i} style={{ width: 14, height: 18, backgroundColor: '#1a1a2e', borderRadius: 2, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#334155' }}>
+          <View key={i} style={{ width: 14, height: 18, backgroundColor: '#2a2a2a', borderRadius: 2, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#334155' }}>
             <Text style={{ fontSize: 10 }}>{SLOT_SYMBOLS[idx % SLOT_SYMBOLS.length]}</Text>
           </View>
         ))}
@@ -711,71 +711,136 @@ export function WhackAMoleItem({ item, theme }: ItemProps) {
 export function FireplaceItem({ item, theme }: ItemProps) {
   const flame1 = useRef(new Animated.Value(0)).current;
   const flame2 = useRef(new Animated.Value(0)).current;
+  const flame3 = useRef(new Animated.Value(0)).current;
   const ember1 = useRef(new Animated.Value(0)).current;
   const ember2 = useRef(new Animated.Value(0)).current;
+  const ember3 = useRef(new Animated.Value(0)).current;
+  const ember4 = useRef(new Animated.Value(0)).current;
   const glow = useRef(new Animated.Value(0)).current;
+  const smoke = useRef(new Animated.Value(0)).current;
+  const crackle = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     const f1 = animLoop(() => Animated.sequence([
-      Animated.timing(flame1, { toValue: 1, duration: 400 + Math.random() * 300, useNativeDriver: false }),
-      Animated.timing(flame1, { toValue: 0, duration: 300 + Math.random() * 200, useNativeDriver: false }),
+      Animated.timing(flame1, { toValue: 1, duration: 400, useNativeDriver: false }),
+      Animated.timing(flame1, { toValue: 0.3, duration: 350, useNativeDriver: false }),
     ]));
     const f2 = animLoop(() => Animated.sequence([
-      Animated.timing(flame2, { toValue: 1, duration: 500 + Math.random() * 200, useNativeDriver: false }),
-      Animated.timing(flame2, { toValue: 0, duration: 350 + Math.random() * 250, useNativeDriver: false }),
+      Animated.timing(flame2, { toValue: 1, duration: 550, useNativeDriver: false }),
+      Animated.timing(flame2, { toValue: 0.2, duration: 400, useNativeDriver: false }),
     ]));
-    const e1 = animLoop(() => {
-      ember1.setValue(0);
-      return Animated.timing(ember1, { toValue: 1, duration: 2000 + Math.random() * 1500, useNativeDriver: false });
-    });
-    const e2 = animLoop(() => {
-      ember2.setValue(0);
-      return Animated.timing(ember2, { toValue: 1, duration: 2500 + Math.random() * 1000, useNativeDriver: false });
-    });
+    const f3 = animLoop(() => Animated.sequence([
+      Animated.timing(flame3, { toValue: 1, duration: 480, useNativeDriver: false }),
+      Animated.timing(flame3, { toValue: 0.1, duration: 320, useNativeDriver: false }),
+    ]));
+    const e1 = animLoop(() => { ember1.setValue(0); return Animated.timing(ember1, { toValue: 1, duration: 2200, useNativeDriver: false }); });
+    const e2 = animLoop(() => { ember2.setValue(0); return Animated.timing(ember2, { toValue: 1, duration: 2800, useNativeDriver: false }); });
+    const e3 = animLoop(() => { ember3.setValue(0); return Animated.timing(ember3, { toValue: 1, duration: 3200, useNativeDriver: false }); });
+    const e4 = animLoop(() => { ember4.setValue(0); return Animated.timing(ember4, { toValue: 1, duration: 1800, useNativeDriver: false }); });
     const g = animLoop(() => Animated.sequence([
       Animated.timing(glow, { toValue: 1, duration: 1200, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
       Animated.timing(glow, { toValue: 0, duration: 1200, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
     ]));
-    f1.start(); f2.start(); e1.start(); e2.start(); g.start();
-    return () => { f1.stop(); f2.stop(); e1.stop(); e2.stop(); g.stop(); };
+    const sm = animLoop(() => { smoke.setValue(0); return Animated.timing(smoke, { toValue: 1, duration: 4000, useNativeDriver: false }); });
+    const cr = animLoop(() => Animated.sequence([
+      Animated.delay(2000),
+      Animated.timing(crackle, { toValue: 1, duration: 100, useNativeDriver: false }),
+      Animated.timing(crackle, { toValue: 0, duration: 200, useNativeDriver: false }),
+      Animated.delay(3000),
+    ]));
+
+    const anims = [f1, f2, f3, e1, e2, e3, e4, g, sm, cr];
+    anims.forEach(a => a.start());
+    return () => anims.forEach(a => a.stop());
   }, []);
 
   const intensity = item.fireplaceIntensity ?? 1;
-  const flameH1 = flame1.interpolate({ inputRange: [0, 1], outputRange: [14 + intensity * 4, 22 + intensity * 6] });
-  const flameH2 = flame2.interpolate({ inputRange: [0, 1], outputRange: [10 + intensity * 3, 18 + intensity * 5] });
-  const emberY1 = ember1.interpolate({ inputRange: [0, 1], outputRange: [0, -30] });
-  const emberOp1 = ember1.interpolate({ inputRange: [0, 0.3, 1], outputRange: [0, 1, 0] });
-  const emberX1 = ember1.interpolate({ inputRange: [0, 1], outputRange: [0, 6] });
-  const emberY2 = ember2.interpolate({ inputRange: [0, 1], outputRange: [0, -26] });
-  const emberOp2 = ember2.interpolate({ inputRange: [0, 0.2, 1], outputRange: [0, 1, 0] });
-  const emberX2 = ember2.interpolate({ inputRange: [0, 1], outputRange: [0, -5] });
-  const glowOp = glow.interpolate({ inputRange: [0, 1], outputRange: [0.15, 0.4] });
+  const mult = [0.5, 1, 1.5][intensity];
+  const flameH1 = flame1.interpolate({ inputRange: [0, 1], outputRange: [10 * mult, 24 * mult] });
+  const flameH2 = flame2.interpolate({ inputRange: [0, 1], outputRange: [8 * mult, 20 * mult] });
+  const flameH3 = flame3.interpolate({ inputRange: [0, 1], outputRange: [6 * mult, 16 * mult] });
+  const emberY1 = ember1.interpolate({ inputRange: [0, 1], outputRange: [0, -34] });
+  const emberOp1 = ember1.interpolate({ inputRange: [0, 0.2, 0.8, 1], outputRange: [0, 1, 0.6, 0] });
+  const emberX1 = ember1.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0, 8, 4] });
+  const emberY2 = ember2.interpolate({ inputRange: [0, 1], outputRange: [0, -28] });
+  const emberOp2 = ember2.interpolate({ inputRange: [0, 0.15, 0.7, 1], outputRange: [0, 1, 0.5, 0] });
+  const emberX2 = ember2.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0, -6, -3] });
+  const emberY3 = ember3.interpolate({ inputRange: [0, 1], outputRange: [0, -20] });
+  const emberOp3 = ember3.interpolate({ inputRange: [0, 0.3, 1], outputRange: [0, 0.8, 0] });
+  const emberX3 = ember3.interpolate({ inputRange: [0, 1], outputRange: [0, 10] });
+  const emberY4 = ember4.interpolate({ inputRange: [0, 1], outputRange: [0, -32] });
+  const emberOp4 = ember4.interpolate({ inputRange: [0, 0.25, 0.9, 1], outputRange: [0, 1, 0.3, 0] });
+  const glowOp = glow.interpolate({ inputRange: [0, 1], outputRange: [0.1 + intensity * 0.08, 0.3 + intensity * 0.12] });
+  const smokeY = smoke.interpolate({ inputRange: [0, 1], outputRange: [0, -40] });
+  const smokeOp = smoke.interpolate({ inputRange: [0, 0.1, 0.6, 1], outputRange: [0, 0.15, 0.08, 0] });
+  const crackleOp = crackle.interpolate({ inputRange: [0, 1], outputRange: [0, 0.9] });
 
   return (
-    <View style={{ width: 76, height: 64, alignItems: 'center', justifyContent: 'flex-end' }}>
-      {/* Ambient glow */}
-      <Animated.View style={{ position: 'absolute', bottom: 10, width: 60, height: 40, borderRadius: 20, backgroundColor: '#ff6600', opacity: glowOp }} />
-      {/* Mantle */}
-      <View style={{ position: 'absolute', top: 0, width: 72, height: 8, backgroundColor: '#5a3825', borderRadius: 2, borderWidth: 1, borderColor: '#3d2512' }} />
-      {/* Brick surround */}
-      <View style={{ position: 'absolute', top: 8, left: 2, width: 10, height: 50, backgroundColor: '#8b4513', borderWidth: 1, borderColor: '#5a3015' }} />
-      <View style={{ position: 'absolute', top: 8, right: 2, width: 10, height: 50, backgroundColor: '#8b4513', borderWidth: 1, borderColor: '#5a3015' }} />
-      {/* Hearth */}
-      <View style={{ width: 52, height: 44, backgroundColor: '#1a0a00', borderBottomLeftRadius: 4, borderBottomRightRadius: 4, overflow: 'hidden', marginBottom: 2, alignItems: 'center', justifyContent: 'flex-end' }}>
-        {/* Flames */}
-        <Animated.View style={{ position: 'absolute', bottom: 4, left: 10, width: 10, height: flameH1, backgroundColor: '#ff4500', borderRadius: 5, opacity: 0.9 }} />
-        <Animated.View style={{ position: 'absolute', bottom: 4, left: 20, width: 12, height: flameH2, backgroundColor: '#ff6600', borderRadius: 6 }} />
-        <Animated.View style={{ position: 'absolute', bottom: 4, right: 10, width: 10, height: flameH1, backgroundColor: '#ffaa00', borderRadius: 5, opacity: 0.8 }} />
-        <Animated.View style={{ position: 'absolute', bottom: 6, left: 16, width: 6, height: flameH2, backgroundColor: '#ffcc00', borderRadius: 3, opacity: 0.7 }} />
-        {/* Logs */}
-        <View style={{ width: 36, height: 6, backgroundColor: '#3d1a00', borderRadius: 3, marginBottom: 2, transform: [{ rotate: '-8deg' }] }} />
-        <View style={{ width: 30, height: 5, backgroundColor: '#4a2200', borderRadius: 2.5, marginBottom: 1, transform: [{ rotate: '5deg' }] }} />
+    <View style={{ width: 80, height: 68, alignItems: 'center', justifyContent: 'flex-end' }}>
+      {/* Ambient glow — warm light on floor */}
+      <Animated.View style={{ position: 'absolute', bottom: 6, width: 70, height: 44, borderRadius: 22, backgroundColor: '#ff6600', opacity: glowOp }} />
+      <Animated.View style={{ position: 'absolute', bottom: 2, width: 50, height: 20, borderRadius: 10, backgroundColor: '#ff440040' }} />
+      {/* Smoke wisps */}
+      <Animated.View style={{ position: 'absolute', bottom: 50, left: 30, width: 8, height: 8, borderRadius: 4, backgroundColor: '#9ca3af', opacity: smokeOp, transform: [{ translateY: smokeY }] }} />
+      <Animated.View style={{ position: 'absolute', bottom: 48, left: 40, width: 6, height: 6, borderRadius: 3, backgroundColor: '#6b7280', opacity: smokeOp, transform: [{ translateY: smokeY }] }} />
+      {/* Mantle — decorative shelf */}
+      <View style={{ position: 'absolute', top: 0, width: 76, height: 8, backgroundColor: '#5a3825', borderRadius: 2, borderWidth: 1, borderColor: '#3d2512', zIndex: 2 }}>
+        <View style={{ position: 'absolute', top: 2, left: 4, width: 30, height: 1, backgroundColor: '#4a2c1a', opacity: 0.3 }} />
       </View>
-      {/* Embers */}
-      <Animated.View style={{ position: 'absolute', bottom: 30, left: 28, width: 3, height: 3, borderRadius: 1.5, backgroundColor: '#ffaa00', opacity: emberOp1, transform: [{ translateY: emberY1 }, { translateX: emberX1 }] }} />
-      <Animated.View style={{ position: 'absolute', bottom: 28, right: 22, width: 2, height: 2, borderRadius: 1, backgroundColor: '#ff6600', opacity: emberOp2, transform: [{ translateY: emberY2 }, { translateX: emberX2 }] }} />
-      {/* Base */}
-      <View style={{ width: 76, height: 6, backgroundColor: '#5a3825', borderRadius: 1, borderWidth: 1, borderColor: '#3d2512' }} />
+      {/* Mantle decorations */}
+      <View style={{ position: 'absolute', top: -4, left: 10, width: 4, height: 6, backgroundColor: '#22c55e', borderRadius: 2, zIndex: 3 }} />
+      <View style={{ position: 'absolute', top: -2, right: 12, width: 6, height: 4, backgroundColor: '#fbbf24', borderRadius: 1, zIndex: 3 }} />
+      {/* Brick surround — with brick pattern */}
+      <View style={{ position: 'absolute', top: 8, left: 2, width: 12, height: 52, backgroundColor: '#8b4513', borderWidth: 1, borderColor: '#5a3015' }}>
+        {[0, 8, 16, 24, 32, 40].map(y => (
+          <View key={y} style={{ position: 'absolute', top: y, left: 1, right: 1, height: 6, borderBottomWidth: 1, borderBottomColor: '#6b3410', backgroundColor: y % 16 === 0 ? '#934d1a' : '#7d3f12' }} />
+        ))}
+      </View>
+      <View style={{ position: 'absolute', top: 8, right: 2, width: 12, height: 52, backgroundColor: '#8b4513', borderWidth: 1, borderColor: '#5a3015' }}>
+        {[0, 8, 16, 24, 32, 40].map(y => (
+          <View key={y} style={{ position: 'absolute', top: y, left: 1, right: 1, height: 6, borderBottomWidth: 1, borderBottomColor: '#6b3410', backgroundColor: y % 16 === 8 ? '#934d1a' : '#7d3f12' }} />
+        ))}
+      </View>
+      {/* Hearth — deepened firebox */}
+      <View style={{ width: 52, height: 48, backgroundColor: '#0d0500', borderBottomLeftRadius: 4, borderBottomRightRadius: 4, overflow: 'hidden', marginBottom: 2, alignItems: 'center', justifyContent: 'flex-end' }}>
+        {/* Back wall soot */}
+        <View style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 16, backgroundColor: '#1a0a00' }} />
+        {/* Ash bed */}
+        <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 5, backgroundColor: '#374151', opacity: 0.6 }} />
+        {/* Flames — 5 tongues of fire */}
+        <Animated.View style={{ position: 'absolute', bottom: 4, left: 6, width: 8, height: flameH1, backgroundColor: '#dc2626', borderRadius: 4, opacity: 0.9 }} />
+        <Animated.View style={{ position: 'absolute', bottom: 4, left: 14, width: 10, height: flameH2, backgroundColor: '#f97316', borderRadius: 5 }} />
+        <Animated.View style={{ position: 'absolute', bottom: 4, left: 22, width: 8, height: flameH3, backgroundColor: '#fbbf24', borderRadius: 4, opacity: 0.85 }} />
+        <Animated.View style={{ position: 'absolute', bottom: 4, right: 10, width: 10, height: flameH1, backgroundColor: '#ef4444', borderRadius: 5, opacity: 0.8 }} />
+        <Animated.View style={{ position: 'absolute', bottom: 6, left: 18, width: 6, height: flameH2, backgroundColor: '#fef08a', borderRadius: 3, opacity: 0.65 }} />
+        {/* Inner blue base flame */}
+        <Animated.View style={{ position: 'absolute', bottom: 4, left: 16, width: 14, height: flameH3, backgroundColor: '#3b82f6', borderRadius: 7, opacity: 0.25 }} />
+        {/* Crackle flash */}
+        <Animated.View style={{ position: 'absolute', bottom: 8, left: 20, width: 4, height: 4, borderRadius: 2, backgroundColor: '#fff', opacity: crackleOp }} />
+        {/* Logs — crossed */}
+        <View style={{ position: 'absolute', bottom: 2, left: 4, width: 38, height: 6, backgroundColor: '#3d1a00', borderRadius: 3, transform: [{ rotate: '-6deg' }] }}>
+          <View style={{ position: 'absolute', top: 1, left: 4, width: 8, height: 1, backgroundColor: '#5a2d0e', opacity: 0.5 }} />
+        </View>
+        <View style={{ position: 'absolute', bottom: 4, left: 8, width: 32, height: 5, backgroundColor: '#4a2200', borderRadius: 2.5, transform: [{ rotate: '8deg' }] }}>
+          <View style={{ position: 'absolute', top: 1, left: 10, width: 6, height: 1, backgroundColor: '#5a2d0e', opacity: 0.4 }} />
+        </View>
+        <View style={{ position: 'absolute', bottom: 1, left: 14, width: 22, height: 4, backgroundColor: '#2d1400', borderRadius: 2, transform: [{ rotate: '-3deg' }] }} />
+      </View>
+      {/* Embers — 4 rising sparks */}
+      <Animated.View style={{ position: 'absolute', bottom: 32, left: 26, width: 3, height: 3, borderRadius: 1.5, backgroundColor: '#fbbf24', opacity: emberOp1, transform: [{ translateY: emberY1 }, { translateX: emberX1 }] }} />
+      <Animated.View style={{ position: 'absolute', bottom: 30, right: 20, width: 2, height: 2, borderRadius: 1, backgroundColor: '#f97316', opacity: emberOp2, transform: [{ translateY: emberY2 }, { translateX: emberX2 }] }} />
+      <Animated.View style={{ position: 'absolute', bottom: 34, left: 34, width: 2, height: 2, borderRadius: 1, backgroundColor: '#ef4444', opacity: emberOp3, transform: [{ translateY: emberY3 }, { translateX: emberX3 }] }} />
+      <Animated.View style={{ position: 'absolute', bottom: 28, left: 38, width: 2.5, height: 2.5, borderRadius: 1.5, backgroundColor: '#fbbf24', opacity: emberOp4, transform: [{ translateY: emberY4 }] }} />
+      {/* Fire grate / base */}
+      <View style={{ width: 80, height: 6, backgroundColor: '#5a3825', borderRadius: 1, borderWidth: 1, borderColor: '#3d2512' }}>
+        <View style={{ position: 'absolute', top: 2, left: 8, width: 24, height: 1, backgroundColor: '#4a2c1a', opacity: 0.3 }} />
+      </View>
+      {/* Intensity indicator */}
+      <View style={{ position: 'absolute', bottom: 0, right: 4, flexDirection: 'row', gap: 1 }}>
+        {[0, 1, 2].map(i => (
+          <View key={i} style={{ width: 3, height: 3, borderRadius: 1, backgroundColor: i <= intensity ? '#f97316' : '#333' }} />
+        ))}
+      </View>
     </View>
   );
 }
@@ -783,73 +848,242 @@ export function FireplaceItem({ item, theme }: ItemProps) {
 // ─── Aquarium — Fish tank with swimming fish, bubbles, and swaying plant ─────
 
 export function AquariumItem({ item, theme }: ItemProps) {
+  // Fish animations — 5 fish with varied movement patterns
   const fish1X = useRef(new Animated.Value(0)).current;
+  const fish1Y = useRef(new Animated.Value(0)).current;
   const fish2X = useRef(new Animated.Value(1)).current;
+  const fish2Y = useRef(new Animated.Value(0)).current;
   const fish3X = useRef(new Animated.Value(0.5)).current;
+  const fish4X = useRef(new Animated.Value(0.3)).current;
+  const fish4Y = useRef(new Animated.Value(0)).current;
+  const fish5X = useRef(new Animated.Value(0.7)).current;
+  // Bubbles
   const bubble1 = useRef(new Animated.Value(0)).current;
   const bubble2 = useRef(new Animated.Value(0)).current;
+  const bubble3 = useRef(new Animated.Value(0)).current;
+  // Plants
   const plantSway = useRef(new Animated.Value(0)).current;
+  const plant2Sway = useRef(new Animated.Value(0)).current;
+  // Feeding animation
+  const feedAnim = useRef(new Animated.Value(0)).current;
+  const [feeding, setFeeding] = useState(false);
+  // Light caustics
+  const caustic = useRef(new Animated.Value(0)).current;
+  // Treasure chest
+  const chestOpen = useRef(new Animated.Value(0)).current;
+
+  const recentlyFed = item.aquariumFed && (Date.now() - item.aquariumFed) < 15000;
 
   useEffect(() => {
+    // Fish 1 — clownfish, swims full width with vertical bob
     const f1 = animLoop(() => Animated.sequence([
-      Animated.timing(fish1X, { toValue: 1, duration: 3500, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
-      Animated.timing(fish1X, { toValue: 0, duration: 3500, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(fish1X, { toValue: 1, duration: 4000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(fish1X, { toValue: 0, duration: 4000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
     ]));
+    const f1y = animLoop(() => Animated.sequence([
+      Animated.timing(fish1Y, { toValue: 1, duration: 2200, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(fish1Y, { toValue: -1, duration: 2600, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    // Fish 2 — blue tang, opposite direction
     const f2 = animLoop(() => Animated.sequence([
-      Animated.timing(fish2X, { toValue: 0, duration: 4200, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
-      Animated.timing(fish2X, { toValue: 1, duration: 4200, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(fish2X, { toValue: 0, duration: 5000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(fish2X, { toValue: 1, duration: 5000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
     ]));
+    const f2y = animLoop(() => Animated.sequence([
+      Animated.timing(fish2Y, { toValue: -1, duration: 3000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(fish2Y, { toValue: 1, duration: 2800, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    // Fish 3 — small pink
     const f3 = animLoop(() => Animated.sequence([
       Animated.timing(fish3X, { toValue: 1, duration: 2800, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
       Animated.timing(fish3X, { toValue: 0, duration: 2800, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
     ]));
+    // Fish 4 — yellow angel fish, diagonal
+    const f4 = animLoop(() => Animated.sequence([
+      Animated.timing(fish4X, { toValue: 0.9, duration: 3600, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(fish4X, { toValue: 0.1, duration: 3600, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    const f4y = animLoop(() => Animated.sequence([
+      Animated.timing(fish4Y, { toValue: 1, duration: 4200, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(fish4Y, { toValue: -1, duration: 3800, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    // Fish 5 — tiny green, fast
+    const f5 = animLoop(() => Animated.sequence([
+      Animated.timing(fish5X, { toValue: 0, duration: 1800, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(fish5X, { toValue: 1, duration: 1800, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    // Bubbles
     const b1 = animLoop(() => { bubble1.setValue(0); return Animated.timing(bubble1, { toValue: 1, duration: 2200, useNativeDriver: false }); });
     const b2 = animLoop(() => { bubble2.setValue(0); return Animated.timing(bubble2, { toValue: 1, duration: 2800, useNativeDriver: false }); });
+    const b3 = animLoop(() => { bubble3.setValue(0); return Animated.timing(bubble3, { toValue: 1, duration: 3400, useNativeDriver: false }); });
+    // Plants sway
     const ps = animLoop(() => Animated.sequence([
       Animated.timing(plantSway, { toValue: 1, duration: 2000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
       Animated.timing(plantSway, { toValue: -1, duration: 2000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
     ]));
-    f1.start(); f2.start(); f3.start(); b1.start(); b2.start(); ps.start();
-    return () => { f1.stop(); f2.stop(); f3.stop(); b1.stop(); b2.stop(); ps.stop(); };
+    const ps2 = animLoop(() => Animated.sequence([
+      Animated.timing(plant2Sway, { toValue: -1, duration: 2400, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(plant2Sway, { toValue: 1, duration: 2400, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    // Caustic light
+    const ca = animLoop(() => Animated.sequence([
+      Animated.timing(caustic, { toValue: 1, duration: 3000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(caustic, { toValue: 0, duration: 3000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    // Treasure chest open/close
+    const ch = animLoop(() => Animated.sequence([
+      Animated.timing(chestOpen, { toValue: 1, duration: 4000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.delay(2000),
+      Animated.timing(chestOpen, { toValue: 0, duration: 3000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.delay(5000),
+    ]));
+
+    const anims = [f1, f1y, f2, f2y, f3, f4, f4y, f5, b1, b2, b3, ps, ps2, ca, ch];
+    anims.forEach(a => a.start());
+    return () => anims.forEach(a => a.stop());
   }, []);
 
-  const f1Left = fish1X.interpolate({ inputRange: [0, 1], outputRange: [4, 62] });
-  const f2Left = fish2X.interpolate({ inputRange: [0, 1], outputRange: [8, 56] });
-  const f3Left = fish3X.interpolate({ inputRange: [0, 1], outputRange: [12, 50] });
-  const b1Y = bubble1.interpolate({ inputRange: [0, 1], outputRange: [38, 4] });
-  const b1Op = bubble1.interpolate({ inputRange: [0, 0.2, 0.9, 1], outputRange: [0, 0.8, 0.8, 0] });
-  const b2Y = bubble2.interpolate({ inputRange: [0, 1], outputRange: [34, 6] });
+  // Feeding effect
+  useEffect(() => {
+    if (recentlyFed && !feeding) {
+      setFeeding(true);
+      Animated.sequence([
+        Animated.timing(feedAnim, { toValue: 1, duration: 800, useNativeDriver: false }),
+        Animated.delay(4000),
+        Animated.timing(feedAnim, { toValue: 0, duration: 1200, useNativeDriver: false }),
+      ]).start(() => setFeeding(false));
+    }
+  }, [recentlyFed]);
+
+  // Interpolations
+  const f1Left = fish1X.interpolate({ inputRange: [0, 1], outputRange: [4, 68] });
+  const f1Top = fish1Y.interpolate({ inputRange: [-1, 1], outputRange: [10, 20] });
+  const f2Left = fish2X.interpolate({ inputRange: [0, 1], outputRange: [6, 62] });
+  const f2Top = fish2Y.interpolate({ inputRange: [-1, 1], outputRange: [22, 32] });
+  const f3Left = fish3X.interpolate({ inputRange: [0, 1], outputRange: [12, 56] });
+  const f4Left = fish4X.interpolate({ inputRange: [0, 1], outputRange: [6, 60] });
+  const f4Top = fish4Y.interpolate({ inputRange: [-1, 1], outputRange: [8, 28] });
+  const f5Left = fish5X.interpolate({ inputRange: [0, 1], outputRange: [20, 64] });
+  const b1Y = bubble1.interpolate({ inputRange: [0, 1], outputRange: [44, 2] });
+  const b1Op = bubble1.interpolate({ inputRange: [0, 0.15, 0.85, 1], outputRange: [0, 0.8, 0.8, 0] });
+  const b2Y = bubble2.interpolate({ inputRange: [0, 1], outputRange: [40, 4] });
   const b2Op = bubble2.interpolate({ inputRange: [0, 0.15, 0.85, 1], outputRange: [0, 0.6, 0.6, 0] });
-  const swayRot = plantSway.interpolate({ inputRange: [-1, 1], outputRange: ['-8deg', '8deg'] });
+  const b3Y = bubble3.interpolate({ inputRange: [0, 1], outputRange: [42, 6] });
+  const b3Op = bubble3.interpolate({ inputRange: [0, 0.2, 0.8, 1], outputRange: [0, 0.5, 0.5, 0] });
+  const swayRot = plantSway.interpolate({ inputRange: [-1, 1], outputRange: ['-10deg', '10deg'] });
+  const sway2Rot = plant2Sway.interpolate({ inputRange: [-1, 1], outputRange: ['-8deg', '8deg'] });
+  const causticOp = caustic.interpolate({ inputRange: [0, 1], outputRange: [0.03, 0.12] });
+  const chestLid = chestOpen.interpolate({ inputRange: [0, 1], outputRange: [0, -4] });
+  const feedOpacity = feedAnim.interpolate({ inputRange: [0, 0.3, 1], outputRange: [0, 1, 0] });
+
+  // When fed, fish swim toward top (food)
+  const fedPullUp = feeding ? feedAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0, -8, -2] }) : 0;
 
   return (
-    <View style={{ width: 84, height: 54, backgroundColor: '#0a1628', borderWidth: 2, borderColor: '#64748b', borderRadius: 6, overflow: 'hidden' }}>
-      {/* Water tint */}
-      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#0066aa20' }} />
-      {/* Gravel */}
-      <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 8, backgroundColor: '#78350f' }} />
-      <View style={{ position: 'absolute', bottom: 0, left: 6, width: 4, height: 3, borderRadius: 2, backgroundColor: '#92400e' }} />
-      <View style={{ position: 'absolute', bottom: 1, left: 18, width: 3, height: 2, borderRadius: 1, backgroundColor: '#a16207' }} />
-      {/* Plant */}
-      <Animated.View style={{ position: 'absolute', bottom: 6, left: 8, width: 4, height: 22, backgroundColor: '#15803d', borderRadius: 2, transform: [{ rotate: swayRot }], transformOrigin: 'bottom center' }} />
-      <Animated.View style={{ position: 'absolute', bottom: 10, left: 10, width: 3, height: 16, backgroundColor: '#22c55e', borderRadius: 1.5, transform: [{ rotate: swayRot }], transformOrigin: 'bottom center' }} />
-      {/* Fish */}
-      <Animated.View style={{ position: 'absolute', top: 14, left: f1Left, width: 10, height: 5, backgroundColor: '#f97316', borderRadius: 3 }}>
-        <View style={{ position: 'absolute', right: -3, top: 0, width: 0, height: 0, borderLeftWidth: 4, borderLeftColor: '#f97316', borderTopWidth: 2.5, borderTopColor: 'transparent', borderBottomWidth: 2.5, borderBottomColor: 'transparent' }} />
-        <View style={{ position: 'absolute', left: 2, top: 1, width: 2, height: 2, borderRadius: 1, backgroundColor: '#000' }} />
+    <View style={{ width: 90, height: 58, backgroundColor: '#081425', borderWidth: 2, borderColor: '#475569', borderRadius: 6, overflow: 'hidden' }}>
+      {/* Deep water gradient layers */}
+      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 20, backgroundColor: '#0c2040' }} />
+      <View style={{ position: 'absolute', top: 20, left: 0, right: 0, bottom: 0, backgroundColor: '#071830' }} />
+      {/* Caustic light ripples */}
+      <Animated.View style={{ position: 'absolute', top: 2, left: 10, width: 30, height: 6, backgroundColor: '#ffffff', opacity: causticOp, borderRadius: 3 }} />
+      <Animated.View style={{ position: 'absolute', top: 4, left: 50, width: 20, height: 4, backgroundColor: '#ffffff', opacity: causticOp, borderRadius: 2 }} />
+      {/* Gravel bed — layered */}
+      <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 10, backgroundColor: '#5c3d1a' }} />
+      <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 6, backgroundColor: '#6b4423' }} />
+      {/* Decorative gravel stones */}
+      <View style={{ position: 'absolute', bottom: 1, left: 5, width: 5, height: 3, borderRadius: 2, backgroundColor: '#8b6914' }} />
+      <View style={{ position: 'absolute', bottom: 0, left: 16, width: 4, height: 3, borderRadius: 2, backgroundColor: '#92400e' }} />
+      <View style={{ position: 'absolute', bottom: 1, left: 40, width: 3, height: 2, borderRadius: 1, backgroundColor: '#a16207' }} />
+      <View style={{ position: 'absolute', bottom: 0, left: 60, width: 5, height: 3, borderRadius: 2, backgroundColor: '#78350f' }} />
+      <View style={{ position: 'absolute', bottom: 2, left: 72, width: 3, height: 2, borderRadius: 1, backgroundColor: '#854d0e' }} />
+      {/* Coral / decoration */}
+      <View style={{ position: 'absolute', bottom: 8, left: 55, width: 6, height: 12, backgroundColor: '#dc2626', borderRadius: 3 }} />
+      <View style={{ position: 'absolute', bottom: 8, left: 58, width: 4, height: 8, backgroundColor: '#ef4444', borderRadius: 2 }} />
+      <View style={{ position: 'absolute', bottom: 8, left: 52, width: 3, height: 7, backgroundColor: '#f87171', borderRadius: 1.5 }} />
+      {/* Castle / cave decoration */}
+      <View style={{ position: 'absolute', bottom: 8, right: 6, width: 10, height: 14, backgroundColor: '#374151', borderTopLeftRadius: 3, borderTopRightRadius: 3 }}>
+        <View style={{ position: 'absolute', top: 2, left: 3, width: 4, height: 4, borderRadius: 2, backgroundColor: '#0a1628' }} />
+        <View style={{ position: 'absolute', top: 0, left: 1, width: 2, height: 3, backgroundColor: '#4b5563' }} />
+        <View style={{ position: 'absolute', top: 0, right: 1, width: 2, height: 3, backgroundColor: '#4b5563' }} />
+      </View>
+      {/* Treasure chest */}
+      <Animated.View style={{ position: 'absolute', bottom: 8, left: 30, width: 10, height: 6, backgroundColor: '#92400e', borderRadius: 1, borderWidth: 1, borderColor: '#f59e0b' }}>
+        <Animated.View style={{ position: 'absolute', top: chestLid, left: -1, width: 12, height: 4, backgroundColor: '#78350f', borderRadius: 1, borderWidth: 1, borderColor: '#f59e0b' }} />
+        <View style={{ position: 'absolute', top: 2, left: 4, width: 2, height: 2, borderRadius: 1, backgroundColor: '#fbbf24' }} />
       </Animated.View>
-      <Animated.View style={{ position: 'absolute', top: 26, left: f2Left, width: 8, height: 4, backgroundColor: '#3b82f6', borderRadius: 2.5 }}>
-        <View style={{ position: 'absolute', left: -2, top: 0, width: 0, height: 0, borderRightWidth: 3, borderRightColor: '#3b82f6', borderTopWidth: 2, borderTopColor: 'transparent', borderBottomWidth: 2, borderBottomColor: 'transparent' }} />
-        <View style={{ position: 'absolute', right: 1, top: 1, width: 1.5, height: 1.5, borderRadius: 1, backgroundColor: '#000' }} />
+      {/* Plants — tall kelp */}
+      <Animated.View style={{ position: 'absolute', bottom: 8, left: 6, width: 4, height: 26, backgroundColor: '#15803d', borderRadius: 2, transform: [{ rotate: swayRot }], transformOrigin: 'bottom center' }} />
+      <Animated.View style={{ position: 'absolute', bottom: 8, left: 9, width: 3, height: 20, backgroundColor: '#22c55e', borderRadius: 1.5, transform: [{ rotate: swayRot }], transformOrigin: 'bottom center' }} />
+      <Animated.View style={{ position: 'absolute', bottom: 8, left: 12, width: 2, height: 14, backgroundColor: '#16a34a', borderRadius: 1, transform: [{ rotate: swayRot }], transformOrigin: 'bottom center' }} />
+      {/* Short plants right side */}
+      <Animated.View style={{ position: 'absolute', bottom: 8, left: 44, width: 3, height: 10, backgroundColor: '#166534', borderRadius: 1, transform: [{ rotate: sway2Rot }], transformOrigin: 'bottom center' }} />
+      <Animated.View style={{ position: 'absolute', bottom: 8, left: 47, width: 2, height: 8, backgroundColor: '#22c55e', borderRadius: 1, transform: [{ rotate: sway2Rot }], transformOrigin: 'bottom center' }} />
+      {/* Food particles (visible when fed) */}
+      {feeding && (
+        <>
+          <Animated.View style={{ position: 'absolute', top: 6, left: 20, width: 2, height: 2, borderRadius: 1, backgroundColor: '#f59e0b', opacity: feedOpacity }} />
+          <Animated.View style={{ position: 'absolute', top: 4, left: 35, width: 2, height: 2, borderRadius: 1, backgroundColor: '#fbbf24', opacity: feedOpacity }} />
+          <Animated.View style={{ position: 'absolute', top: 8, left: 50, width: 1.5, height: 1.5, borderRadius: 1, backgroundColor: '#f59e0b', opacity: feedOpacity }} />
+          <Animated.View style={{ position: 'absolute', top: 5, left: 65, width: 2, height: 2, borderRadius: 1, backgroundColor: '#d97706', opacity: feedOpacity }} />
+          <Animated.View style={{ position: 'absolute', top: 10, left: 28, width: 1.5, height: 1.5, borderRadius: 1, backgroundColor: '#fbbf24', opacity: feedOpacity }} />
+        </>
+      )}
+      {/* Fish — 5 species */}
+      {/* Clownfish (orange with white stripe) */}
+      <Animated.View style={{ position: 'absolute', top: f1Top, left: f1Left, transform: feeding ? [{ translateY: fedPullUp as any }] : [] }}>
+        <View style={{ width: 12, height: 6, backgroundColor: '#f97316', borderRadius: 3 }}>
+          <View style={{ position: 'absolute', left: 4, top: 0, width: 2, height: 6, backgroundColor: '#fff', opacity: 0.8 }} />
+          <View style={{ position: 'absolute', right: -4, top: 0, width: 0, height: 0, borderLeftWidth: 5, borderLeftColor: '#ea580c', borderTopWidth: 3, borderTopColor: 'transparent', borderBottomWidth: 3, borderBottomColor: 'transparent' }} />
+          <View style={{ position: 'absolute', left: 2, top: 1.5, width: 2, height: 2, borderRadius: 1, backgroundColor: '#000' }} />
+          <View style={{ position: 'absolute', top: -2, left: 5, width: 4, height: 3, backgroundColor: '#f9731680', borderTopLeftRadius: 2, borderTopRightRadius: 2 }} />
+        </View>
       </Animated.View>
-      <Animated.View style={{ position: 'absolute', top: 18, left: f3Left, width: 7, height: 3.5, backgroundColor: '#ec4899', borderRadius: 2 }}>
-        <View style={{ position: 'absolute', left: 1, top: 0.5, width: 1.5, height: 1.5, borderRadius: 1, backgroundColor: '#000' }} />
+      {/* Blue tang */}
+      <Animated.View style={{ position: 'absolute', top: f2Top, left: f2Left, transform: feeding ? [{ translateY: fedPullUp as any }] : [] }}>
+        <View style={{ width: 10, height: 5, backgroundColor: '#2563eb', borderRadius: 3 }}>
+          <View style={{ position: 'absolute', left: -3, top: 0, width: 0, height: 0, borderRightWidth: 4, borderRightColor: '#1d4ed8', borderTopWidth: 2.5, borderTopColor: 'transparent', borderBottomWidth: 2.5, borderBottomColor: 'transparent' }} />
+          <View style={{ position: 'absolute', right: 2, top: 1, width: 2, height: 2, borderRadius: 1, backgroundColor: '#000' }} />
+          <View style={{ position: 'absolute', left: 2, top: 1, width: 4, height: 3, backgroundColor: '#1e40af', borderRadius: 1.5 }} />
+          <View style={{ position: 'absolute', right: 0, top: 2, width: 3, height: 1, backgroundColor: '#fbbf24' }} />
+        </View>
       </Animated.View>
-      {/* Bubbles */}
-      <Animated.View style={{ position: 'absolute', left: 30, top: b1Y, width: 4, height: 4, borderRadius: 2, borderWidth: 1, borderColor: '#ffffff40', opacity: b1Op }} />
-      <Animated.View style={{ position: 'absolute', left: 50, top: b2Y, width: 3, height: 3, borderRadius: 1.5, borderWidth: 1, borderColor: '#ffffff30', opacity: b2Op }} />
-      {/* Light shimmer */}
-      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, backgroundColor: '#ffffff08' }} />
+      {/* Pink tetra */}
+      <Animated.View style={{ position: 'absolute', top: 18, left: f3Left }}>
+        <View style={{ width: 8, height: 4, backgroundColor: '#ec4899', borderRadius: 2 }}>
+          <View style={{ position: 'absolute', left: 1, top: 0.5, width: 1.5, height: 1.5, borderRadius: 1, backgroundColor: '#000' }} />
+          <View style={{ position: 'absolute', right: -2, top: 0.5, width: 3, height: 3, backgroundColor: '#db277780', borderRadius: 1 }} />
+        </View>
+      </Animated.View>
+      {/* Yellow angel fish (taller body) */}
+      <Animated.View style={{ position: 'absolute', top: f4Top, left: f4Left, transform: feeding ? [{ translateY: fedPullUp as any }] : [] }}>
+        <View style={{ width: 8, height: 10, backgroundColor: '#eab308', borderRadius: 4 }}>
+          <View style={{ position: 'absolute', left: 2, top: 2, width: 2, height: 2, borderRadius: 1, backgroundColor: '#000' }} />
+          <View style={{ position: 'absolute', left: 1, top: 0, width: 6, height: 1.5, backgroundColor: '#ca8a04', borderRadius: 1 }} />
+          <View style={{ position: 'absolute', bottom: -2, left: 2, width: 4, height: 3, backgroundColor: '#eab30880', borderBottomLeftRadius: 2, borderBottomRightRadius: 2 }} />
+          <View style={{ position: 'absolute', top: 3, left: 0, width: 1, height: 4, backgroundColor: '#fbbf2480' }} />
+        </View>
+      </Animated.View>
+      {/* Tiny green guppy */}
+      <Animated.View style={{ position: 'absolute', top: 36, left: f5Left }}>
+        <View style={{ width: 5, height: 3, backgroundColor: '#22c55e', borderRadius: 1.5 }}>
+          <View style={{ position: 'absolute', left: 1, top: 0.5, width: 1, height: 1, borderRadius: 0.5, backgroundColor: '#000' }} />
+          <View style={{ position: 'absolute', right: -1.5, top: 0.5, width: 2, height: 2, backgroundColor: '#16a34a80', borderRadius: 1 }} />
+        </View>
+      </Animated.View>
+      {/* Bubbles — 3 streams */}
+      <Animated.View style={{ position: 'absolute', left: 25, top: b1Y, width: 4, height: 4, borderRadius: 2, borderWidth: 1, borderColor: '#ffffff50', opacity: b1Op }} />
+      <Animated.View style={{ position: 'absolute', left: 55, top: b2Y, width: 3, height: 3, borderRadius: 1.5, borderWidth: 1, borderColor: '#ffffff40', opacity: b2Op }} />
+      <Animated.View style={{ position: 'absolute', left: 38, top: b3Y, width: 2.5, height: 2.5, borderRadius: 1.5, borderWidth: 1, borderColor: '#ffffff30', opacity: b3Op }} />
+      {/* Surface light shimmer */}
+      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, backgroundColor: '#ffffff10' }} />
+      {/* Glass reflection */}
+      <View style={{ position: 'absolute', top: 4, left: 2, width: 1.5, height: 40, backgroundColor: '#ffffff08', borderRadius: 1 }} />
+      {/* Fed indicator */}
+      {recentlyFed && (
+        <View style={{ position: 'absolute', top: 1, right: 3 }}>
+          <Text style={{ fontSize: 6, color: '#fbbf24' }}>FED</Text>
+        </View>
+      )}
     </View>
   );
 }
@@ -877,16 +1111,16 @@ export function VinylPlayerItem({ item, theme }: ItemProps) {
   return (
     <View style={{ width: 56, height: 56, backgroundColor: '#2d1b0e', borderWidth: 1.5, borderColor: '#5a3825', borderRadius: 6, alignItems: 'center', justifyContent: 'center' }}>
       {/* Platter */}
-      <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#333', alignItems: 'center', justifyContent: 'center' }}>
+      <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: '#000000', borderWidth: 1, borderColor: '#333', alignItems: 'center', justifyContent: 'center' }}>
         {/* Record */}
         <Animated.View style={{ width: 38, height: 38, borderRadius: 19, backgroundColor: '#111', borderWidth: 1, borderColor: '#222', alignItems: 'center', justifyContent: 'center', transform: [{ rotate }] }}>
           {/* Grooves */}
-          <View style={{ width: 32, height: 32, borderRadius: 16, borderWidth: 0.5, borderColor: '#1a1a1a' }} />
-          <View style={{ position: 'absolute', width: 26, height: 26, borderRadius: 13, borderWidth: 0.5, borderColor: '#1a1a1a' }} />
-          <View style={{ position: 'absolute', width: 20, height: 20, borderRadius: 10, borderWidth: 0.5, borderColor: '#1a1a1a' }} />
+          <View style={{ width: 32, height: 32, borderRadius: 16, borderWidth: 0.5, borderColor: '#000000' }} />
+          <View style={{ position: 'absolute', width: 26, height: 26, borderRadius: 13, borderWidth: 0.5, borderColor: '#000000' }} />
+          <View style={{ position: 'absolute', width: 20, height: 20, borderRadius: 10, borderWidth: 0.5, borderColor: '#000000' }} />
           {/* Label */}
           <View style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: item.vinylPlaying ? '#ef4444' : '#666', alignItems: 'center', justifyContent: 'center' }}>
-            <View style={{ width: 3, height: 3, borderRadius: 1.5, backgroundColor: '#1a1a1a' }} />
+            <View style={{ width: 3, height: 3, borderRadius: 1.5, backgroundColor: '#000000' }} />
           </View>
         </Animated.View>
       </View>
@@ -1006,64 +1240,277 @@ export function GalaxyOrbItem({ item, theme }: ItemProps) {
 // ─── Terrarium — Mini garden with butterflies and growing plants ─────────────
 
 export function TerrariumItem({ item, theme }: ItemProps) {
+  // Butterflies
   const butterfly1 = useRef(new Animated.Value(0)).current;
   const butterfly2 = useRef(new Animated.Value(0)).current;
   const wingFlap = useRef(new Animated.Value(0)).current;
+  // Plants & flowers
   const plantGrow = useRef(new Animated.Value(0)).current;
+  const plantSway = useRef(new Animated.Value(0)).current;
+  // Creatures
+  const snailX = useRef(new Animated.Value(0)).current;
+  const ladybugX = useRef(new Animated.Value(0)).current;
+  const ladybugY = useRef(new Animated.Value(0)).current;
+  const frogBreathe = useRef(new Animated.Value(0)).current;
+  const frogJump = useRef(new Animated.Value(0)).current;
+  // Fireflies
+  const firefly1 = useRef(new Animated.Value(0)).current;
+  const firefly2 = useRef(new Animated.Value(0)).current;
+  const fireflyGlow = useRef(new Animated.Value(0)).current;
+  // Mist
+  const mist = useRef(new Animated.Value(0)).current;
+  // Feeding
+  const feedAnim = useRef(new Animated.Value(0)).current;
+  const [feeding, setFeeding] = useState(false);
+  // Water droplet
+  const droplet = useRef(new Animated.Value(0)).current;
+
+  const recentlyFed = item.terrariumFed && (Date.now() - item.terrariumFed) < 15000;
+  const creature = (item.terrariumCreature ?? 0) % 4; // 0=frog, 1=gecko, 2=beetle, 3=snail
 
   useEffect(() => {
+    // Butterflies
     const b1 = animLoop(() => Animated.sequence([
-      Animated.timing(butterfly1, { toValue: 1, duration: 4000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
-      Animated.timing(butterfly1, { toValue: 0, duration: 4000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(butterfly1, { toValue: 1, duration: 4500, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(butterfly1, { toValue: 0, duration: 4500, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
     ]));
     const b2 = animLoop(() => Animated.sequence([
-      Animated.timing(butterfly2, { toValue: 1, duration: 3200, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
-      Animated.timing(butterfly2, { toValue: 0, duration: 3200, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(butterfly2, { toValue: 1, duration: 3600, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(butterfly2, { toValue: 0, duration: 3600, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
     ]));
     const wf = animLoop(() => Animated.sequence([
-      Animated.timing(wingFlap, { toValue: 1, duration: 300, useNativeDriver: false }),
-      Animated.timing(wingFlap, { toValue: 0, duration: 300, useNativeDriver: false }),
+      Animated.timing(wingFlap, { toValue: 1, duration: 250, useNativeDriver: false }),
+      Animated.timing(wingFlap, { toValue: 0, duration: 250, useNativeDriver: false }),
     ]));
+    // Plants
     const pg = animLoop(() => Animated.sequence([
       Animated.timing(plantGrow, { toValue: 1, duration: 5000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
       Animated.timing(plantGrow, { toValue: 0, duration: 5000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
     ]));
-    b1.start(); b2.start(); wf.start(); pg.start();
-    return () => { b1.stop(); b2.stop(); wf.stop(); pg.stop(); };
+    const psw = animLoop(() => Animated.sequence([
+      Animated.timing(plantSway, { toValue: 1, duration: 3000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(plantSway, { toValue: -1, duration: 3000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    // Snail crawls across bottom
+    const sn = animLoop(() => Animated.sequence([
+      Animated.timing(snailX, { toValue: 1, duration: 12000, easing: Easing.linear, useNativeDriver: false }),
+      Animated.timing(snailX, { toValue: 0, duration: 12000, easing: Easing.linear, useNativeDriver: false }),
+    ]));
+    // Ladybug walks on plants
+    const lb = animLoop(() => Animated.sequence([
+      Animated.timing(ladybugX, { toValue: 1, duration: 6000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(ladybugX, { toValue: 0, duration: 6000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    const lby = animLoop(() => Animated.sequence([
+      Animated.timing(ladybugY, { toValue: 1, duration: 4000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(ladybugY, { toValue: 0, duration: 4000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    // Frog breathing
+    const fb = animLoop(() => Animated.sequence([
+      Animated.timing(frogBreathe, { toValue: 1, duration: 1500, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(frogBreathe, { toValue: 0, duration: 1500, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    // Frog jump (occasional)
+    const fj = animLoop(() => Animated.sequence([
+      Animated.delay(6000),
+      Animated.timing(frogJump, { toValue: 1, duration: 300, easing: Easing.out(Easing.ease), useNativeDriver: false }),
+      Animated.timing(frogJump, { toValue: 0, duration: 400, easing: Easing.bounce, useNativeDriver: false }),
+      Animated.delay(8000),
+    ]));
+    // Fireflies
+    const ff1 = animLoop(() => Animated.sequence([
+      Animated.timing(firefly1, { toValue: 1, duration: 5000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(firefly1, { toValue: 0, duration: 5000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    const ff2 = animLoop(() => Animated.sequence([
+      Animated.timing(firefly2, { toValue: 1, duration: 3800, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(firefly2, { toValue: 0, duration: 3800, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    const fg = animLoop(() => Animated.sequence([
+      Animated.timing(fireflyGlow, { toValue: 1, duration: 800, useNativeDriver: false }),
+      Animated.timing(fireflyGlow, { toValue: 0.2, duration: 1200, useNativeDriver: false }),
+    ]));
+    // Mist
+    const mi = animLoop(() => Animated.sequence([
+      Animated.timing(mist, { toValue: 1, duration: 6000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(mist, { toValue: 0, duration: 6000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    // Water droplet
+    const dr = animLoop(() => Animated.sequence([
+      Animated.delay(4000),
+      Animated.timing(droplet, { toValue: 1, duration: 600, useNativeDriver: false }),
+      Animated.delay(7000),
+      droplet.setValue(0) as any || Animated.delay(0),
+    ]));
+
+    const anims = [b1, b2, wf, pg, psw, sn, lb, lby, fb, fj, ff1, ff2, fg, mi, dr];
+    anims.forEach(a => a.start());
+    return () => anims.forEach(a => a.stop());
   }, []);
 
-  const b1X = butterfly1.interpolate({ inputRange: [0, 1], outputRange: [8, 40] });
-  const b1Y = butterfly1.interpolate({ inputRange: [0, 0.3, 0.7, 1], outputRange: [10, 4, 14, 8] });
-  const b2X = butterfly2.interpolate({ inputRange: [0, 1], outputRange: [36, 12] });
-  const b2Y = butterfly2.interpolate({ inputRange: [0, 0.5, 1], outputRange: [6, 16, 6] });
-  const wingScale = wingFlap.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1] });
-  const flowerScale = plantGrow.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1.1] });
+  // Feeding effect
+  useEffect(() => {
+    if (recentlyFed && !feeding) {
+      setFeeding(true);
+      Animated.sequence([
+        Animated.timing(feedAnim, { toValue: 1, duration: 600, useNativeDriver: false }),
+        Animated.delay(5000),
+        Animated.timing(feedAnim, { toValue: 0, duration: 1000, useNativeDriver: false }),
+      ]).start(() => setFeeding(false));
+    }
+  }, [recentlyFed]);
+
+  // Interpolations
+  const b1X = butterfly1.interpolate({ inputRange: [0, 1], outputRange: [6, 44] });
+  const b1Y = butterfly1.interpolate({ inputRange: [0, 0.25, 0.5, 0.75, 1], outputRange: [8, 3, 12, 5, 8] });
+  const b2X = butterfly2.interpolate({ inputRange: [0, 1], outputRange: [38, 10] });
+  const b2Y = butterfly2.interpolate({ inputRange: [0, 0.5, 1], outputRange: [5, 15, 5] });
+  const wingScale = wingFlap.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] });
+  const flowerScale = plantGrow.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1.15] });
+  const swayRot = plantSway.interpolate({ inputRange: [-1, 1], outputRange: ['-6deg', '6deg'] });
+  const snailLeft = snailX.interpolate({ inputRange: [0, 1], outputRange: [4, 36] });
+  const lbX = ladybugX.interpolate({ inputRange: [0, 1], outputRange: [14, 34] });
+  const lbY = ladybugY.interpolate({ inputRange: [0, 1], outputRange: [16, 22] });
+  const frogScale = frogBreathe.interpolate({ inputRange: [0, 1], outputRange: [1, 1.08] });
+  const frogY = frogJump.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0, -8, 0] });
+  const ff1X = firefly1.interpolate({ inputRange: [0, 1], outputRange: [12, 38] });
+  const ff1Y = firefly1.interpolate({ inputRange: [0, 0.5, 1], outputRange: [6, 14, 6] });
+  const ff2X = firefly2.interpolate({ inputRange: [0, 1], outputRange: [30, 8] });
+  const ff2Y = firefly2.interpolate({ inputRange: [0, 0.5, 1], outputRange: [10, 4, 10] });
+  const ffOp = fireflyGlow.interpolate({ inputRange: [0, 1], outputRange: [0.2, 1] });
+  const mistOp = mist.interpolate({ inputRange: [0, 1], outputRange: [0.05, 0.15] });
+  const dropY = droplet.interpolate({ inputRange: [0, 1], outputRange: [4, 26] });
+  const dropOp = droplet.interpolate({ inputRange: [0, 0.1, 0.9, 1], outputRange: [0, 0.8, 0.8, 0] });
+  const feedOp = feedAnim.interpolate({ inputRange: [0, 0.3, 1], outputRange: [0, 1, 0] });
+  // When fed, frog gets excited (extra jumps)
+  const fedExcite = feeding ? feedAnim.interpolate({ inputRange: [0, 0.2, 0.4, 0.6, 0.8, 1], outputRange: [0, -6, 0, -4, 0, 0] }) : 0;
 
   return (
-    <View style={{ width: 56, height: 46, alignItems: 'center', justifyContent: 'flex-end' }}>
+    <View style={{ width: 64, height: 52, alignItems: 'center', justifyContent: 'flex-end' }}>
       {/* Glass dome */}
-      <View style={{ width: 50, height: 38, borderTopLeftRadius: 25, borderTopRightRadius: 25, borderWidth: 1.5, borderColor: '#ffffff20', borderBottomWidth: 0, backgroundColor: '#ffffff06', overflow: 'hidden', alignItems: 'center', justifyContent: 'flex-end' }}>
-        {/* Soil */}
-        <View style={{ width: '100%', height: 10, backgroundColor: '#3d2012' }} />
-        {/* Plants */}
-        <View style={{ position: 'absolute', bottom: 8, left: 10, width: 3, height: 16, backgroundColor: '#15803d', borderRadius: 1 }} />
-        <Animated.View style={{ position: 'absolute', bottom: 22, left: 8, width: 7, height: 7, borderRadius: 3.5, backgroundColor: '#f472b6', transform: [{ scale: flowerScale }] }} />
-        <View style={{ position: 'absolute', bottom: 8, right: 12, width: 2, height: 12, backgroundColor: '#166534', borderRadius: 1 }} />
-        <View style={{ position: 'absolute', bottom: 8, left: 22, width: 2.5, height: 14, backgroundColor: '#22c55e', borderRadius: 1 }} />
-        <Animated.View style={{ position: 'absolute', bottom: 20, left: 20, width: 6, height: 6, borderRadius: 3, backgroundColor: '#fbbf24', transform: [{ scale: flowerScale }] }} />
-        {/* Mushroom */}
-        <View style={{ position: 'absolute', bottom: 8, right: 8, width: 3, height: 6, backgroundColor: '#f5f5dc' }} />
-        <View style={{ position: 'absolute', bottom: 13, right: 5, width: 9, height: 5, borderTopLeftRadius: 5, borderTopRightRadius: 5, backgroundColor: '#ef4444' }} />
-        {/* Butterflies */}
+      <View style={{ width: 58, height: 44, borderTopLeftRadius: 29, borderTopRightRadius: 29, borderWidth: 1.5, borderColor: '#ffffff18', borderBottomWidth: 0, backgroundColor: '#ffffff04', overflow: 'hidden' }}>
+        {/* Interior atmosphere - warm humid glow */}
+        <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#0a200a' }} />
+        {/* Mist layer */}
+        <Animated.View style={{ position: 'absolute', top: 6, left: 0, right: 0, height: 14, backgroundColor: '#ffffff', opacity: mistOp, borderRadius: 8 }} />
+        {/* Soil layers */}
+        <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 12, backgroundColor: '#3d2012' }} />
+        <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 6, backgroundColor: '#2d1a0e' }} />
+        <View style={{ position: 'absolute', bottom: 5, left: 4, width: 50, height: 2, backgroundColor: '#5a381a', opacity: 0.4 }} />
+        {/* Pebbles in soil */}
+        <View style={{ position: 'absolute', bottom: 2, left: 6, width: 3, height: 2, borderRadius: 1, backgroundColor: '#78716c' }} />
+        <View style={{ position: 'absolute', bottom: 1, left: 28, width: 2, height: 2, borderRadius: 1, backgroundColor: '#a8a29e' }} />
+        <View style={{ position: 'absolute', bottom: 3, left: 44, width: 2.5, height: 1.5, borderRadius: 1, backgroundColor: '#78716c' }} />
+        {/* Moss patches */}
+        <View style={{ position: 'absolute', bottom: 10, left: 2, width: 10, height: 3, borderRadius: 2, backgroundColor: '#166534', opacity: 0.6 }} />
+        <View style={{ position: 'absolute', bottom: 10, right: 4, width: 8, height: 2, borderRadius: 1, backgroundColor: '#15803d', opacity: 0.5 }} />
+        {/* Plants — varied heights and types */}
+        <Animated.View style={{ position: 'absolute', bottom: 10, left: 8, width: 3, height: 20, backgroundColor: '#15803d', borderRadius: 1, transform: [{ rotate: swayRot }], transformOrigin: 'bottom center' }} />
+        <Animated.View style={{ position: 'absolute', bottom: 10, left: 11, width: 2, height: 14, backgroundColor: '#22c55e', borderRadius: 1, transform: [{ rotate: swayRot }], transformOrigin: 'bottom center' }} />
+        {/* Fern fronds */}
+        <Animated.View style={{ position: 'absolute', bottom: 10, right: 10, width: 2, height: 16, backgroundColor: '#166534', borderRadius: 1, transform: [{ rotate: swayRot }], transformOrigin: 'bottom center' }}>
+          <View style={{ position: 'absolute', top: 2, right: -3, width: 4, height: 1.5, backgroundColor: '#16a34a', borderRadius: 1 }} />
+          <View style={{ position: 'absolute', top: 5, left: -3, width: 4, height: 1.5, backgroundColor: '#16a34a', borderRadius: 1 }} />
+          <View style={{ position: 'absolute', top: 8, right: -2, width: 3, height: 1, backgroundColor: '#22c55e', borderRadius: 1 }} />
+        </Animated.View>
+        <View style={{ position: 'absolute', bottom: 10, left: 24, width: 2.5, height: 16, backgroundColor: '#22c55e', borderRadius: 1 }} />
+        {/* Flowers */}
+        <Animated.View style={{ position: 'absolute', bottom: 26, left: 6, width: 8, height: 8, borderRadius: 4, backgroundColor: '#f472b6', transform: [{ scale: flowerScale }] }}>
+          <View style={{ position: 'absolute', top: 3, left: 3, width: 2, height: 2, borderRadius: 1, backgroundColor: '#fbbf24' }} />
+        </Animated.View>
+        <Animated.View style={{ position: 'absolute', bottom: 24, left: 22, width: 6, height: 6, borderRadius: 3, backgroundColor: '#fbbf24', transform: [{ scale: flowerScale }] }}>
+          <View style={{ position: 'absolute', top: 2, left: 2, width: 2, height: 2, borderRadius: 1, backgroundColor: '#f59e0b' }} />
+        </Animated.View>
+        <Animated.View style={{ position: 'absolute', bottom: 22, right: 8, width: 5, height: 5, borderRadius: 2.5, backgroundColor: '#a78bfa', transform: [{ scale: flowerScale }] }} />
+        {/* Mushrooms — cluster */}
+        <View style={{ position: 'absolute', bottom: 10, right: 4, width: 3, height: 7, backgroundColor: '#fef3c7' }} />
+        <View style={{ position: 'absolute', bottom: 16, right: 1, width: 9, height: 5, borderTopLeftRadius: 5, borderTopRightRadius: 5, backgroundColor: '#ef4444' }}>
+          <View style={{ position: 'absolute', top: 1, left: 2, width: 2, height: 2, borderRadius: 1, backgroundColor: '#fef2f2' }} />
+          <View style={{ position: 'absolute', top: 2, right: 2, width: 1.5, height: 1.5, borderRadius: 1, backgroundColor: '#fef2f2' }} />
+        </View>
+        {/* Tiny mushroom */}
+        <View style={{ position: 'absolute', bottom: 10, right: 12, width: 2, height: 4, backgroundColor: '#fef3c7' }} />
+        <View style={{ position: 'absolute', bottom: 13, right: 10, width: 6, height: 3, borderTopLeftRadius: 3, borderTopRightRadius: 3, backgroundColor: '#f97316' }} />
+        {/* Water droplet falling from dome */}
+        <Animated.View style={{ position: 'absolute', left: 30, top: dropY, width: 2, height: 3, borderRadius: 1, backgroundColor: '#60a5fa', opacity: dropOp }} />
+        {/* Tiny puddle */}
+        <View style={{ position: 'absolute', bottom: 10, left: 28, width: 6, height: 2, borderRadius: 1, backgroundColor: '#1e40af', opacity: 0.3 }} />
+        {/* Creatures */}
+        {/* Frog — sits on a rock, breathes, occasionally jumps */}
+        <Animated.View style={{ position: 'absolute', bottom: 10, left: 16, transform: [{ translateY: feeding ? fedExcite as any : frogY }, { scale: frogScale }] }}>
+          <View style={{ width: 8, height: 6, backgroundColor: '#22c55e', borderRadius: 3, borderTopLeftRadius: 4, borderTopRightRadius: 4 }}>
+            {/* Eyes */}
+            <View style={{ position: 'absolute', top: -2, left: 1, width: 3, height: 3, borderRadius: 1.5, backgroundColor: '#22c55e' }}>
+              <View style={{ position: 'absolute', top: 0.5, left: 0.5, width: 2, height: 2, borderRadius: 1, backgroundColor: '#000' }} />
+            </View>
+            <View style={{ position: 'absolute', top: -2, right: 1, width: 3, height: 3, borderRadius: 1.5, backgroundColor: '#22c55e' }}>
+              <View style={{ position: 'absolute', top: 0.5, left: 0.5, width: 2, height: 2, borderRadius: 1, backgroundColor: '#000' }} />
+            </View>
+            {/* Legs */}
+            <View style={{ position: 'absolute', bottom: -1, left: -2, width: 3, height: 2, backgroundColor: '#16a34a', borderRadius: 1 }} />
+            <View style={{ position: 'absolute', bottom: -1, right: -2, width: 3, height: 2, backgroundColor: '#16a34a', borderRadius: 1 }} />
+          </View>
+        </Animated.View>
+        {/* Snail — crawls along bottom */}
+        <Animated.View style={{ position: 'absolute', bottom: 10, left: snailLeft }}>
+          <View style={{ width: 6, height: 4, backgroundColor: '#d4a574', borderRadius: 2 }}>
+            {/* Shell */}
+            <View style={{ position: 'absolute', top: -3, left: 1, width: 5, height: 5, borderRadius: 2.5, backgroundColor: '#92400e', borderWidth: 0.5, borderColor: '#78350f' }}>
+              <View style={{ position: 'absolute', top: 1, left: 1, width: 3, height: 3, borderRadius: 1.5, backgroundColor: '#a16207' }} />
+            </View>
+            {/* Antenna */}
+            <View style={{ position: 'absolute', top: -4, right: 0, width: 1, height: 3, backgroundColor: '#d4a574' }} />
+            <View style={{ position: 'absolute', top: -5, right: -0.5, width: 2, height: 2, borderRadius: 1, backgroundColor: '#d4a574' }} />
+          </View>
+        </Animated.View>
+        {/* Ladybug on plant */}
+        <Animated.View style={{ position: 'absolute', left: lbX, top: lbY }}>
+          <View style={{ width: 4, height: 3, backgroundColor: '#dc2626', borderRadius: 2, borderTopLeftRadius: 2, borderTopRightRadius: 2 }}>
+            <View style={{ position: 'absolute', top: 0, left: 1.5, width: 1, height: 3, backgroundColor: '#000' }} />
+            <View style={{ position: 'absolute', top: 1, left: 0.5, width: 1, height: 1, borderRadius: 0.5, backgroundColor: '#000' }} />
+            <View style={{ position: 'absolute', top: 1, right: 0.5, width: 1, height: 1, borderRadius: 0.5, backgroundColor: '#000' }} />
+          </View>
+        </Animated.View>
+        {/* Fireflies — glowing dots */}
+        <Animated.View style={{ position: 'absolute', left: ff1X, top: ff1Y, width: 3, height: 3, borderRadius: 1.5, backgroundColor: '#fbbf24', opacity: ffOp, ...(Platform.OS === 'web' ? { boxShadow: '0 0 4px #fbbf24' } as any : { shadowColor: '#fbbf24', shadowRadius: 4, shadowOpacity: 0.8, shadowOffset: { width: 0, height: 0 } }) }} />
+        <Animated.View style={{ position: 'absolute', left: ff2X, top: ff2Y, width: 2, height: 2, borderRadius: 1, backgroundColor: '#a3e635', opacity: ffOp, ...(Platform.OS === 'web' ? { boxShadow: '0 0 3px #a3e635' } as any : { shadowColor: '#a3e635', shadowRadius: 3, shadowOpacity: 0.8, shadowOffset: { width: 0, height: 0 } }) }} />
+        {/* Butterflies — more detailed */}
         <Animated.View style={{ position: 'absolute', left: b1X, top: b1Y }}>
-          <Animated.View style={{ width: 4, height: 3, backgroundColor: '#c084fc', borderRadius: 1.5, transform: [{ scaleX: wingScale }] }} />
+          <Animated.View style={{ flexDirection: 'row', transform: [{ scaleX: wingScale }] }}>
+            <View style={{ width: 3, height: 4, backgroundColor: '#c084fc', borderTopLeftRadius: 2, borderBottomLeftRadius: 1, opacity: 0.9 }} />
+            <View style={{ width: 1, height: 3, backgroundColor: '#000000' }} />
+            <View style={{ width: 3, height: 4, backgroundColor: '#c084fc', borderTopRightRadius: 2, borderBottomRightRadius: 1, opacity: 0.9 }} />
+          </Animated.View>
         </Animated.View>
         <Animated.View style={{ position: 'absolute', left: b2X, top: b2Y }}>
-          <Animated.View style={{ width: 3.5, height: 2.5, backgroundColor: '#60a5fa', borderRadius: 1.5, transform: [{ scaleX: wingScale }] }} />
+          <Animated.View style={{ flexDirection: 'row', transform: [{ scaleX: wingScale }] }}>
+            <View style={{ width: 2.5, height: 3, backgroundColor: '#38bdf8', borderTopLeftRadius: 1.5, opacity: 0.85 }} />
+            <View style={{ width: 1, height: 2.5, backgroundColor: '#000000' }} />
+            <View style={{ width: 2.5, height: 3, backgroundColor: '#38bdf8', borderTopRightRadius: 1.5, opacity: 0.85 }} />
+          </Animated.View>
         </Animated.View>
+        {/* Food bits (when fed) */}
+        {feeding && (
+          <>
+            <Animated.View style={{ position: 'absolute', top: 18, left: 12, width: 2, height: 1.5, borderRadius: 1, backgroundColor: '#86efac', opacity: feedOp }} />
+            <Animated.View style={{ position: 'absolute', top: 20, left: 30, width: 1.5, height: 1.5, borderRadius: 1, backgroundColor: '#a7f3d0', opacity: feedOp }} />
+            <Animated.View style={{ position: 'absolute', top: 16, right: 14, width: 2, height: 1.5, borderRadius: 1, backgroundColor: '#86efac', opacity: feedOp }} />
+          </>
+        )}
+        {/* Glass reflection */}
+        <View style={{ position: 'absolute', top: 3, left: 3, width: 1.5, height: 20, backgroundColor: '#ffffff0a', borderRadius: 1 }} />
       </View>
-      {/* Base plate */}
-      <View style={{ width: 54, height: 6, backgroundColor: '#5a3825', borderRadius: 2, borderWidth: 1, borderColor: '#3d2512' }} />
+      {/* Base plate — wooden with grain */}
+      <View style={{ width: 62, height: 7, backgroundColor: '#5a3825', borderRadius: 2, borderWidth: 1, borderColor: '#3d2512' }}>
+        <View style={{ position: 'absolute', top: 2, left: 4, width: 20, height: 1, backgroundColor: '#4a2c1a', opacity: 0.3 }} />
+        <View style={{ position: 'absolute', top: 4, left: 10, width: 30, height: 1, backgroundColor: '#4a2c1a', opacity: 0.2 }} />
+      </View>
+      {/* Fed indicator */}
+      {recentlyFed && (
+        <View style={{ position: 'absolute', top: 0, right: 2 }}>
+          <Text style={{ fontSize: 5, color: '#22c55e' }}>FED</Text>
+        </View>
+      )}
     </View>
   );
 }
@@ -1186,7 +1633,7 @@ export function QuoteBoardItem({ item, theme }: ItemProps) {
   }, [item.quoteIndex]);
 
   return (
-    <View style={{ width: 96, height: 46, backgroundColor: '#111118', borderWidth: 1.5, borderColor: theme.accentGlow + '40', borderRadius: 6, padding: 6, justifyContent: 'center' }}>
+    <View style={{ width: 96, height: 46, backgroundColor: '#222222', borderWidth: 1.5, borderColor: theme.accentGlow + '40', borderRadius: 6, padding: 6, justifyContent: 'center' }}>
       {/* Accent bar */}
       <View style={{ position: 'absolute', left: 0, top: 6, bottom: 6, width: 3, backgroundColor: theme.accentGlow, borderRadius: 1 }} />
       <Animated.View style={{ opacity: fadeAnim, paddingLeft: 6 }}>
@@ -1224,13 +1671,13 @@ export function ProgressBarItem({ item, theme }: ItemProps) {
   const barColor = pct >= 100 ? '#22c55e' : pct >= 60 ? '#6366f1' : pct >= 30 ? '#f59e0b' : '#ef4444';
 
   return (
-    <View style={{ width: 96, height: 36, backgroundColor: '#0a0a12', borderWidth: 1.5, borderColor: '#1a1a2e', borderRadius: 6, padding: 4, justifyContent: 'center' }}>
+    <View style={{ width: 96, height: 36, backgroundColor: '#0a0a12', borderWidth: 1.5, borderColor: '#2a2a2a', borderRadius: 6, padding: 4, justifyContent: 'center' }}>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 3 }}>
         <Text style={{ fontSize: 6, color: '#888', fontFamily: 'monospace', fontWeight: '800' }}>PROGRESS</Text>
         <Text style={{ fontSize: 7, color: barColor, fontFamily: 'monospace', fontWeight: '900' }}>{pct}%</Text>
       </View>
       {/* Track */}
-      <View style={{ height: 10, backgroundColor: '#1a1a2e', borderRadius: 5, overflow: 'hidden' }}>
+      <View style={{ height: 10, backgroundColor: '#2a2a2a', borderRadius: 5, overflow: 'hidden' }}>
         <Animated.View style={{ height: '100%', width: fillWidth, backgroundColor: barColor, borderRadius: 5 }} />
         <Animated.View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: '#fff', opacity: shimmerOp, borderRadius: 5 }} />
       </View>
@@ -1333,7 +1780,7 @@ export function PixelDisplayItem({ item, theme }: ItemProps) {
       <Animated.View style={{ position: 'absolute', bottom: 2, left: 0, right: 0, height: 10, backgroundColor: '#1e4d7a', transform: [{ translateY: waveY }] }} />
     </View>,
     // Scene 2: Mountain range
-    <View key={2} style={{ width: '100%', height: '100%', backgroundColor: '#1a1a2e' }}>
+    <View key={2} style={{ width: '100%', height: '100%', backgroundColor: '#2a2a2a' }}>
       <View style={{ position: 'absolute', bottom: 0, left: 0, width: 0, height: 0, borderLeftWidth: 20, borderRightWidth: 20, borderBottomWidth: 22, borderLeftColor: 'transparent', borderRightColor: 'transparent', borderBottomColor: '#334155' }} />
       <View style={{ position: 'absolute', bottom: 0, left: 16, width: 0, height: 0, borderLeftWidth: 16, borderRightWidth: 16, borderBottomWidth: 28, borderLeftColor: 'transparent', borderRightColor: 'transparent', borderBottomColor: '#475569' }} />
       <View style={{ position: 'absolute', bottom: 0, right: 4, width: 0, height: 0, borderLeftWidth: 18, borderRightWidth: 18, borderBottomWidth: 18, borderLeftColor: 'transparent', borderRightColor: 'transparent', borderBottomColor: '#334155' }} />
@@ -1572,7 +2019,7 @@ export function VideoCallItem({ item, theme }: ItemProps) {
   const ringOp = ringPulse.interpolate({ inputRange: [0, 1], outputRange: [0.5, 0] });
 
   return (
-    <View style={{ width: 86, height: 66, backgroundColor: '#1a1a2e', borderWidth: 2, borderColor: active ? prov.color : '#333', borderRadius: 8, overflow: 'hidden', alignItems: 'center' }}>
+    <View style={{ width: 86, height: 66, backgroundColor: '#2a2a2a', borderWidth: 2, borderColor: active ? prov.color : '#333', borderRadius: 8, overflow: 'hidden', alignItems: 'center' }}>
       {/* Provider header */}
       <View style={{ width: '100%' as any, height: 14, backgroundColor: prov.color, alignItems: 'center', justifyContent: 'center' }}>
         <Text style={{ fontSize: 6, fontWeight: '800', color: '#fff', fontFamily: 'monospace' }}>{prov.icon} {prov.label}</Text>
@@ -1741,7 +2188,7 @@ export function SmartTVItem({ item, theme }: ItemProps) {
   return (
     <View style={{ width: w, height: h, alignItems: 'center' }}>
       {/* TV body */}
-      <View style={{ width: w, height: h - 10, backgroundColor: powered ? a.bg : '#0a0a0a', borderWidth: 2, borderColor: powered ? a.color + '80' : '#222', borderRadius: 4, overflow: 'hidden' }}>
+      <View style={{ width: w, height: h - 10, backgroundColor: powered ? a.bg : '#000000', borderWidth: 2, borderColor: powered ? a.color + '80' : '#222', borderRadius: 4, overflow: 'hidden' }}>
         {powered ? (
           <>
             {/* Embedded video (web only) — fills the entire TV screen */}
@@ -1852,7 +2299,7 @@ export function WeatherStationItem({ item, theme }: ItemProps) {
   const snowX = snowFlake.interpolate({ inputRange: [0, 0.5, 1], outputRange: [-3, 3, -3] });
 
   return (
-    <View style={{ width: 56, height: 46, backgroundColor: '#1a1a2e', borderWidth: 2, borderColor: cond.accent + '60', borderRadius: 8, overflow: 'hidden' }}>
+    <View style={{ width: 56, height: 46, backgroundColor: '#2a2a2a', borderWidth: 2, borderColor: cond.accent + '60', borderRadius: 8, overflow: 'hidden' }}>
       {/* Sky gradient */}
       <View style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 20, backgroundColor: cond.bg + '40' }} />
 
@@ -2016,7 +2463,7 @@ export function PomodoroRoomItem({ item, theme }: ItemProps) {
   const breatheScale = breathe.interpolate({ inputRange: [0, 1], outputRange: [0.95, 1.05] });
 
   return (
-    <Animated.View style={{ width: 66, height: 56, backgroundColor: '#1a1a2e', borderWidth: 2, borderColor: color + '80', borderRadius: 10, overflow: 'hidden', alignItems: 'center', transform: [{ scale: breatheScale }] }}>
+    <Animated.View style={{ width: 66, height: 56, backgroundColor: '#2a2a2a', borderWidth: 2, borderColor: color + '80', borderRadius: 10, overflow: 'hidden', alignItems: 'center', transform: [{ scale: breatheScale }] }}>
       {/* Header */}
       <View style={{ width: '100%' as any, height: 12, backgroundColor: color + '30', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 3 }}>
         <Text style={{ fontSize: 6 }}>🍅</Text>
@@ -2070,7 +2517,7 @@ export function CryptoTickerItem({ item, theme }: ItemProps) {
   const info: Record<string, { sym: string; color: string }> = { SOL: { sym: '◎', color: '#14F195' }, ETH: { sym: 'Ξ', color: '#627EEA' }, BTC: { sym: '₿', color: '#F7931A' }, USDC: { sym: '$', color: '#2775CA' }, MATIC: { sym: '⬡', color: '#8247E5' } };
   const tickX = scroll.interpolate({ inputRange: [0, 1], outputRange: [0, -60] });
   return (
-    <View style={{ width: 96, height: 46, backgroundColor: '#0a0a14', borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 6, overflow: 'hidden' }}>
+    <View style={{ width: 96, height: 46, backgroundColor: '#0a0a14', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 6, overflow: 'hidden' }}>
       <View style={{ backgroundColor: '#111', paddingHorizontal: 4, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
         <Text style={{ color: '#888', fontSize: 4, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 }}>CRYPTO</Text>
         <Animated.View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: '#22c55e', opacity: pulse }} />
@@ -2106,7 +2553,7 @@ export function GitHubFeedItem({ item, theme }: ItemProps) {
   const activity = item.githubActivity || 'No activity yet';
   const dotOp = dot.interpolate({ inputRange: [0, 1], outputRange: [0.3, 1] });
   return (
-    <View style={{ width: 86, height: 66, backgroundColor: '#0d1117', borderWidth: 1, borderColor: '#30363d', borderRadius: 8, overflow: 'hidden' }}>
+    <View style={{ width: 86, height: 66, backgroundColor: '#000000', borderWidth: 1, borderColor: '#30363d', borderRadius: 8, overflow: 'hidden' }}>
       <View style={{ backgroundColor: '#161b22', paddingHorizontal: 4, paddingVertical: 3, flexDirection: 'row', alignItems: 'center', gap: 2 }}>
         <Text style={{ fontSize: 7 }}>🐙</Text>
         <Text style={{ color: '#c9d1d9', fontSize: 4.5, fontWeight: '700', fontFamily: 'monospace', flex: 1 }} numberOfLines={1}>{repo}</Text>
@@ -2182,7 +2629,7 @@ export function WorldClockItem({ item, theme }: ItemProps) {
   const now = new Date();
   const dotOp = tick.interpolate({ inputRange: [0, 0.5, 1], outputRange: [1, 0.2, 1] });
   return (
-    <View style={{ width: 96, height: 46, backgroundColor: '#0a0a14', borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 6, overflow: 'hidden' }}>
+    <View style={{ width: 96, height: 46, backgroundColor: '#0a0a14', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 6, overflow: 'hidden' }}>
       <View style={{ backgroundColor: '#111', paddingHorizontal: 4, paddingVertical: 2 }}>
         <Text style={{ color: '#666', fontSize: 4, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 }}>🌍 WORLD CLOCK</Text>
       </View>
@@ -2232,7 +2679,7 @@ export function MusicVisualizerItem({ item, theme }: ItemProps) {
   const colors = ['#22c55e', '#3b82f6', '#8b5cf6'];
   const baseColor = colors[style % 3];
   return (
-    <View style={{ width: 86, height: 56, backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: baseColor + '40', borderRadius: 8, overflow: 'hidden' }}>
+    <View style={{ width: 86, height: 56, backgroundColor: '#000000', borderWidth: 1, borderColor: baseColor + '40', borderRadius: 8, overflow: 'hidden' }}>
       <Animated.View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: baseColor, opacity: glowOp }} />
       <View style={{ flex: 1, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'center', gap: 2, paddingBottom: 6, paddingHorizontal: 6 }}>
         {bars.map((bar, i) => {
@@ -2280,6 +2727,83 @@ export function FigmaBoardItem({ item, theme }: ItemProps) {
       ) : (
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
           <Text style={{ fontSize: 16 }}>🎨</Text>
+          <Text style={{ color: '#555', fontSize: 4, fontFamily: 'monospace', marginTop: 2 }}>TAP TO CONNECT</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+export function EmailHubItem({ item, theme }: ItemProps) {
+  const pulse = useRef(new Animated.Value(0)).current;
+  const slideIn = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const p = animLoop(() => { pulse.setValue(0); return Animated.sequence([Animated.timing(pulse, { toValue: 1, duration: 1500, useNativeDriver: false }), Animated.timing(pulse, { toValue: 0, duration: 1500, useNativeDriver: false })]); });
+    p.start();
+    const s = animLoop(() => { slideIn.setValue(0); return Animated.timing(slideIn, { toValue: 1, duration: 8000, easing: Easing.linear, useNativeDriver: false }); });
+    s.start();
+    return () => { p.stop(); s.stop(); };
+  }, []);
+  const provider = item.emailProvider || 'outlook';
+  const connected = item.emailConnected;
+  const unread = item.emailUnread || 0;
+  const sender = item.emailSender || '';
+  const subject = item.emailSubject || 'No new mail';
+  const time = item.emailTime || '';
+  const provColors: Record<string, { bg: string; accent: string; icon: string }> = {
+    outlook: { bg: '#0078D4', accent: '#0078D4', icon: '📧' },
+    gmail: { bg: '#EA4335', accent: '#EA4335', icon: '✉️' },
+    yahoo: { bg: '#6001D2', accent: '#6001D2', icon: '📬' },
+  };
+  const prov = provColors[provider] || provColors.outlook;
+  const badgePulse = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1] });
+  const scrollX = slideIn.interpolate({ inputRange: [0, 1], outputRange: [0, -60] });
+  return (
+    <View style={{ width: 81, height: 66, backgroundColor: '#0d0d12', borderWidth: 1, borderColor: connected ? prov.accent + '60' : '#2a2a2a', borderRadius: 8, overflow: 'hidden' }}>
+      {/* Header bar */}
+      <View style={{ backgroundColor: connected ? prov.bg : '#1a1a1a', paddingHorizontal: 4, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+          <Text style={{ fontSize: 5 }}>{prov.icon}</Text>
+          <Text style={{ color: '#fff', fontSize: 4.5, fontWeight: '800', fontFamily: 'monospace' }}>
+            {provider === 'outlook' ? 'Outlook' : provider === 'gmail' ? 'Gmail' : 'Yahoo'}
+          </Text>
+        </View>
+        {connected && unread > 0 && (
+          <Animated.View style={{ opacity: badgePulse, backgroundColor: '#ef4444', borderRadius: 4, paddingHorizontal: 3, paddingVertical: 0.5, minWidth: 10, alignItems: 'center' }}>
+            <Text style={{ color: '#fff', fontSize: 4, fontWeight: '900', fontFamily: 'monospace' }}>{unread > 99 ? '99+' : unread}</Text>
+          </Animated.View>
+        )}
+      </View>
+      {connected ? (
+        <View style={{ flex: 1, padding: 3 }}>
+          {/* Latest email preview */}
+          <View style={{ backgroundColor: '#111', borderRadius: 4, padding: 3, flex: 1, borderLeftWidth: 2, borderLeftColor: prov.accent }}>
+            {sender ? (
+              <>
+                <Text style={{ color: '#fff', fontSize: 4, fontWeight: '800', fontFamily: 'monospace' }} numberOfLines={1}>{sender}</Text>
+                <Animated.View style={{ transform: [{ translateX: scrollX }] }}>
+                  <Text style={{ color: '#999', fontSize: 3.5, fontFamily: 'monospace', marginTop: 1, width: 120 }} numberOfLines={1}>{subject}</Text>
+                </Animated.View>
+                <Text style={{ color: '#555', fontSize: 3, fontFamily: 'monospace', marginTop: 2 }}>{time}</Text>
+              </>
+            ) : (
+              <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+                <Text style={{ color: '#444', fontSize: 3.5, fontFamily: 'monospace' }}>Inbox empty</Text>
+              </View>
+            )}
+          </View>
+          {/* Bottom status */}
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 2 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+              <View style={{ width: 3, height: 3, borderRadius: 1.5, backgroundColor: '#22c55e' }} />
+              <Text style={{ color: '#555', fontSize: 3, fontFamily: 'monospace' }}>Synced</Text>
+            </View>
+            <Text style={{ color: '#444', fontSize: 3, fontFamily: 'monospace' }}>{unread} unread</Text>
+          </View>
+        </View>
+      ) : (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <Text style={{ fontSize: 16 }}>📧</Text>
           <Text style={{ color: '#555', fontSize: 4, fontFamily: 'monospace', marginTop: 2 }}>TAP TO CONNECT</Text>
         </View>
       )}
@@ -2372,7 +2896,7 @@ export function PokerTableItem({ item, theme }: ItemProps) {
   const renderCard = (card: string, w: number, h: number, faceDown?: boolean) => {
     if (faceDown) {
       return (
-        <View style={{ width: w, height: h, backgroundColor: '#1a1a2e', borderRadius: 2, borderWidth: 0.5, borderColor: '#8b5cf6', overflow: 'hidden' }}>
+        <View style={{ width: w, height: h, backgroundColor: '#2a2a2a', borderRadius: 2, borderWidth: 0.5, borderColor: '#8b5cf6', overflow: 'hidden' }}>
           {/* Crosshatch pattern */}
           <View style={{ position: 'absolute', top: 1, left: 1, right: 1, bottom: 1, backgroundColor: '#16213e', borderRadius: 1 }}>
             <View style={{ position: 'absolute', top: '20%' as any, left: '20%' as any, right: '20%' as any, bottom: '20%' as any, borderWidth: 0.5, borderColor: '#8b5cf640', borderRadius: 1 }} />
@@ -2398,7 +2922,7 @@ export function PokerTableItem({ item, theme }: ItemProps) {
   );
 
   return (
-    <View style={{ width: 130, height: 100, backgroundColor: '#0a0a0f', borderWidth: 2, borderColor: '#2d1b4e', borderRadius: 20, overflow: 'hidden' }}>
+    <View style={{ width: 130, height: 100, backgroundColor: '#000000', borderWidth: 2, borderColor: '#2d1b4e', borderRadius: 20, overflow: 'hidden' }}>
       {/* Felt surface — dark premium green */}
       <View style={{ position: 'absolute', top: 4, left: 4, right: 4, bottom: 4, backgroundColor: '#0d3320', borderRadius: 16, borderWidth: 1.5, borderColor: '#1a5c3a' }}>
         {/* Inner glow gradient */}
@@ -2594,7 +3118,7 @@ export function CoinFlipItem({ item, theme }: ItemProps) {
   const shimmerOp = shimmer.interpolate({ inputRange: [0, 0.3, 0.5, 0.7, 1], outputRange: [0, 0.6, 0, 0, 0] });
 
   return (
-    <View style={{ width: 56, height: 56, backgroundColor: '#1a1a2e', borderWidth: 2, borderColor: '#FFD700', borderRadius: 28, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+    <View style={{ width: 56, height: 56, backgroundColor: '#2a2a2a', borderWidth: 2, borderColor: '#FFD700', borderRadius: 28, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
       {/* Gold rim glow */}
       <Animated.View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 26, backgroundColor: '#FFD700', opacity: shimmerOp }} />
 
@@ -2991,6 +3515,177 @@ export function TriviaScreenItem({ item, theme }: ItemProps) {
           );
         })}
       </View>
+    </View>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  RETRO CONSOLE — Game Boy-style pixel art handheld
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export function RetroConsoleItem({ item, theme }: ItemProps) {
+  const screenGlow = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const l = animLoop(() => Animated.sequence([
+      Animated.timing(screenGlow, { toValue: 1, duration: 2000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(screenGlow, { toValue: 0, duration: 2000, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    return l.stop;
+  }, []);
+
+  const glowColor = screenGlow.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['#22c55e', '#4ade80'],
+  });
+
+  const system = item.emulatorSystem || 'gba';
+  const systemLabels: Record<string, string> = {
+    gba: 'GBA', gbc: 'GBC', gb: 'GB', nds: 'NDS', nes: 'NES', snes: 'SNES',
+    n64: 'N64', psx: 'PS1', segaDC: 'DC', segaMD: 'GEN', segaMS: 'SMS',
+    segaGG: 'GG', segaSaturn: 'SAT', atari2600: '2600',
+  };
+
+  return (
+    <View style={{ width: '100%' as any, height: '100%' as any, alignItems: 'center', justifyContent: 'center' }}>
+      {/* Console body */}
+      <View style={{
+        width: '85%' as any, height: '90%' as any, backgroundColor: '#1a1a2e',
+        borderRadius: 6, borderWidth: 1.5, borderColor: '#6366f1',
+        alignItems: 'center', paddingTop: 4, ...S,
+      }}>
+        {/* Screen area */}
+        <Animated.View style={{
+          width: '80%' as any, height: '45%' as any, backgroundColor: '#0a1628',
+          borderRadius: 3, borderWidth: 1, borderColor: glowColor,
+          alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
+        }}>
+          {/* Scanlines effect */}
+          {[0, 1, 2, 3, 4, 5].map(i => (
+            <View key={i} style={{
+              position: 'absolute', top: i * 6, left: 0, right: 0,
+              height: 1, backgroundColor: '#22c55e10',
+            }} />
+          ))}
+          {/* Screen content */}
+          <Text style={{ color: '#4ade80', fontSize: 5, fontFamily: 'monospace', fontWeight: 'bold' }}>
+            🎮 {systemLabels[system] || 'GBA'}
+          </Text>
+          <Text style={{ color: '#22c55e80', fontSize: 3, fontFamily: 'monospace', marginTop: 1 }}>
+            TAP TO PLAY
+          </Text>
+        </Animated.View>
+
+        {/* D-pad */}
+        <View style={{ flexDirection: 'row', marginTop: 4, alignItems: 'center', gap: 2 }}>
+          <View style={{
+            width: 14, height: 14, position: 'relative',
+          }}>
+            {/* D-pad cross */}
+            <View style={{ position: 'absolute', top: 4, left: 0, width: 14, height: 6, backgroundColor: '#334155', borderRadius: 1 }} />
+            <View style={{ position: 'absolute', top: 0, left: 4, width: 6, height: 14, backgroundColor: '#334155', borderRadius: 1 }} />
+          </View>
+          <View style={{ width: 20 }} />
+          {/* A/B buttons */}
+          <View style={{ flexDirection: 'row', gap: 3 }}>
+            <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: '#ef4444' }} />
+            <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: '#3b82f6', marginTop: 3 }} />
+          </View>
+        </View>
+
+        {/* Label */}
+        <Text style={{ color: '#6366f180', fontSize: 3, fontFamily: 'monospace', marginTop: 2 }}>
+          RETRO
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  SCRABBLE BOARD — Mini preview tile
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export function ScrabbleBoardItem({ item, theme }: ItemProps) {
+  const glow = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const l = animLoop(() => Animated.sequence([
+      Animated.timing(glow, { toValue: 1, duration: 2200, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+      Animated.timing(glow, { toValue: 0, duration: 2200, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]));
+    return l.stop;
+  }, []);
+
+  const borderGlow = glow.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['#c4a35a60', '#c4a35aCC'],
+  });
+
+  const score1 = item.scrabbleScore1 || 0;
+  const score2 = item.scrabbleScore2 || 0;
+  const active = item.scrabbleActive;
+  const lastWord = item.scrabbleLastWord || '';
+  const winner = item.scrabbleWinner || 0;
+
+  // Mini 5x5 board pattern for decoration
+  const decorTiles = ['S','C','R','A','B','B','L','E'];
+
+  return (
+    <View style={{ width: '100%' as any, height: '100%' as any, alignItems: 'center', justifyContent: 'center' }}>
+      <Animated.View style={{
+        width: '90%' as any, height: '92%' as any, backgroundColor: '#0f1419',
+        borderRadius: 5, borderWidth: 1.5, borderColor: borderGlow,
+        alignItems: 'center', justifyContent: 'center', overflow: 'hidden', ...S,
+      }}>
+        {/* Mini board grid */}
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', width: 40, height: 40, gap: 0.5, marginBottom: 2 }}>
+          {Array.from({ length: 25 }, (_, i) => {
+            const hasTile = i < decorTiles.length && (active || i < 5);
+            const colors = ['#5c1515', '#0d4a3a', '#3d1240', '#1e3a5f', '#0d1117'];
+            return (
+              <View key={i} style={{
+                width: 7, height: 7, borderRadius: 1,
+                backgroundColor: hasTile ? '#c4a35a' : colors[i % 5],
+                justifyContent: 'center', alignItems: 'center',
+              }}>
+                {hasTile && (
+                  <Text style={{ color: '#1a1207', fontSize: 4, fontFamily: 'monospace', fontWeight: '800' }}>
+                    {decorTiles[i] || ''}
+                  </Text>
+                )}
+              </View>
+            );
+          })}
+        </View>
+
+        {/* Score or status */}
+        {active ? (
+          <View style={{ flexDirection: 'row', gap: 4, alignItems: 'center' }}>
+            <Text style={{ color: '#22c55e', fontSize: 5, fontFamily: 'monospace', fontWeight: '800' }}>{score1}</Text>
+            <Text style={{ color: '#334155', fontSize: 4, fontFamily: 'monospace' }}>vs</Text>
+            <Text style={{ color: '#ef4444', fontSize: 5, fontFamily: 'monospace', fontWeight: '800' }}>{score2}</Text>
+          </View>
+        ) : winner ? (
+          <Text style={{ color: '#c4a35a', fontSize: 4, fontFamily: 'monospace', fontWeight: '800' }}>
+            {winner === 1 ? 'YOU WON' : 'AI WON'}
+          </Text>
+        ) : (
+          <Text style={{ color: '#c4a35a80', fontSize: 3.5, fontFamily: 'monospace' }}>
+            TAP TO PLAY
+          </Text>
+        )}
+
+        {/* Last word */}
+        {lastWord ? (
+          <Text style={{ color: '#64748b', fontSize: 3, fontFamily: 'monospace', marginTop: 1 }} numberOfLines={1}>
+            {lastWord}
+          </Text>
+        ) : null}
+
+        {/* Label */}
+        <Text style={{ color: '#c4a35a50', fontSize: 3, fontFamily: 'monospace', marginTop: 1 }}>
+          SCRABBLE
+        </Text>
+      </Animated.View>
     </View>
   );
 }

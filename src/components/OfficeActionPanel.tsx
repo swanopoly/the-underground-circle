@@ -550,9 +550,9 @@ function ProjectSelector({ onSelect, selected }: { onSelect: (id: string) => voi
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: '#0a0a10',
+    backgroundColor: '#000000',
     borderTopWidth: 1,
-    borderTopColor: '#1a1a2e',
+    borderTopColor: '#2a2a2a',
     paddingVertical: 8,
     paddingHorizontal: 12,
   },
@@ -608,7 +608,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   input: {
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     borderWidth: 1,
     borderColor: '#333',
     borderRadius: 8,
@@ -634,7 +634,7 @@ const styles = StyleSheet.create({
     borderColor: '#8b5cf6',
   },
   modalButtonSecondary: {
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     borderColor: '#333',
   },
   modalButtonText: {
@@ -654,7 +654,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
     padding: 10,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     borderRadius: 8,
     marginBottom: 6,
     borderWidth: 1,

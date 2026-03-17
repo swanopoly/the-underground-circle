@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Image,
   useWindowDimensions, Platform, Linking, Modal, TextInput,
@@ -26,6 +26,10 @@ import {
   OpenClawConfig, OpenClawPoller, OpenClawSession, OpenClawUpdate,
   testConnection, listAgents, listCronJobs, CronJob,
 } from '../../../lib/openclawService';
+import {
+  openOAuthPopup, checkOAuthStatus, disconnectOAuth, fetchCalendarEvents, fetchEmails,
+  OAuthProvider,
+} from '../../../lib/oauthConnect';
 import {
   AgentConnection, ProviderType, loadConnections, saveConnections, PROVIDER_META,
   autoDiscoverLocalAgents, probeEndpointHealth, getOpenClawEndpoint,
@@ -138,6 +142,8 @@ export interface AgentStats {
   costToday: number;
   costWeek: number;
   tokens: number;
+  tokensTotal: number;
+  messagesTotal: number;
 }
 
 interface Props {
@@ -262,6 +268,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [serviceDiscordChannel, setServiceDiscordChannel] = useState('');
   const [serviceTwitchChannel, setServiceTwitchChannel] = useState('');
   const [serviceCallProvider, setServiceCallProvider] = useState('zoom');
+  const [serviceCalendarProvider, setServiceCalendarProvider] = useState('google');
+  const [serviceEmailProvider, setServiceEmailProvider] = useState('outlook');
+  const [oauthConnecting, setOauthConnecting] = useState(false);
+  const [oauthStatus, setOauthStatus] = useState<{ connected: boolean; email: string } | null>(null);
+  const [oauthError, setOauthError] = useState('');
 
   // ─── Interactive furniture state ──────────────────────────────────────────
   const [interactInputId, setInteractInputId] = useState<string | null>(null);
@@ -822,6 +833,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     setAutoConnectCircleId(circleId);
 
     (async () => {
+      // ── Start localStorage reads immediately (don't wait for connections) ──
+      const storagePromise = Promise.all([
+        storage.getItem(STORAGE_KEY_AGENT_NAMES).catch(() => null),
+        storage.getItem(STORAGE_KEY_TELEGRAM).catch(() => null),
+        storage.getItem(STORAGE_KEY_FLOORS).catch(() => null),
+        storage.getItem(STORAGE_KEY_FLOORS_TS).catch(() => null),
+        storage.getItem(STORAGE_KEY_CURRENT_FLOOR).catch(() => null),
+        storage.getItem(STORAGE_KEY_APPEARANCES).catch(() => null),
+        storage.getItem(STORAGE_KEY_WHITEBOARD_NOTES).catch(() => null),
+      ]);
+
       // ── Pick up pre-connected agents from the app-level singleton ──
       if (isAutoConnectRunning()) {
         const preConns = getAutoConnectConnections();
@@ -915,16 +937,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       // Store unsubscribe for cleanup
       (initRef as any)._unsub = unsub;
 
-      // ── Batch all localStorage reads in parallel ──
-      const [namesRaw, tgRaw, floorsRaw, tsRaw, currentFloorRaw, appearancesRaw, notesRaw] = await Promise.all([
-        storage.getItem(STORAGE_KEY_AGENT_NAMES).catch(() => null),
-        storage.getItem(STORAGE_KEY_TELEGRAM).catch(() => null),
-        storage.getItem(STORAGE_KEY_FLOORS).catch(() => null),
-        storage.getItem(STORAGE_KEY_FLOORS_TS).catch(() => null),
-        storage.getItem(STORAGE_KEY_CURRENT_FLOOR).catch(() => null),
-        storage.getItem(STORAGE_KEY_APPEARANCES).catch(() => null),
-        storage.getItem(STORAGE_KEY_WHITEBOARD_NOTES).catch(() => null),
-      ]);
+      // ── Await localStorage reads (started earlier, runs in parallel with connections) ──
+      const [namesRaw, tgRaw, floorsRaw, tsRaw, currentFloorRaw, appearancesRaw, notesRaw] = await storagePromise;
 
       // Apply local-only state immediately (agent names, telegram, whiteboard)
       if (namesRaw) try { setAgentNames(JSON.parse(namesRaw)); } catch {}
@@ -1071,7 +1085,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // Get current floor data with safety checks (must be before agent filtering)
   const matchedFloor = floors.find(f => f.id === currentFloorId);
   const currentFloor = matchedFloor || floors[0] || DEFAULT_FLOORS[0];
-  const currentTheme = resolveTheme(currentFloor?.themeId || 'underground');
+  const currentThemeId = currentFloor?.themeId || 'underground';
+  const currentTheme = useMemo(() => resolveTheme(currentThemeId), [resolveTheme, currentThemeId]);
 
   // Fix stale currentFloorId that doesn't match any floor
   useEffect(() => {
@@ -1138,16 +1153,21 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   }
 
   // Apply custom names
-  const allAgents = rawAgents.map(a => agentNames[a.id] ? { ...a, name: agentNames[a.id] } : a);
+  const allAgents = useMemo(() =>
+    rawAgents.map(a => agentNames[a.id] ? { ...a, name: agentNames[a.id] } : a),
+    [rawAgents, agentNames]
+  );
 
   // Use enriched agents if available (has cached costs/tokens), fallback to fresh agents
   const userAgents = enrichedAgents.length > 0 ? enrichedAgents : allAgents;
   // Always include the default UC Agent alongside user agents
-  const displayAgents = [DEFAULT_AGENT, ...userAgents];
+  const displayAgents = useMemo(() => [DEFAULT_AGENT, ...userAgents], [userAgents]);
 
   // Resolve appearance — UC Agent gets crab look, user agents use stored appearances
-  const getAppearance = (agent: OfficeAgent) =>
-    agent.id === DEFAULT_AGENT.id ? (appearances[agent.name] || UC_AGENT_APPEARANCE) : appearances[agent.name];
+  const getAppearance = useCallback((agent: OfficeAgent) =>
+    agent.id === DEFAULT_AGENT.id ? (appearances[agent.name] || UC_AGENT_APPEARANCE) : appearances[agent.name],
+    [appearances]
+  );
 
   // Auto-assign random outfits to new agents + backfill pets/auras for existing agents
   useEffect(() => {
@@ -1200,8 +1220,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   );
 
   // Filter agents for current floor — but if none are assigned yet, show all on current floor
-  const floorFilteredAgents = displayAgents.filter(a => currentFloor?.agentIds?.includes(a.id));
-  const agents = floorFilteredAgents.length > 0 ? floorFilteredAgents : displayAgents;
+  const agents = useMemo(() => {
+    const filtered = displayAgents.filter(a => currentFloor?.agentIds?.includes(a.id));
+    return filtered.length > 0 ? filtered : displayAgents;
+  }, [displayAgents, currentFloor?.agentIds]);
 
   // Auto-assign new agents to first floor (runs only when agent count changes)
   const prevAgentCountRef = useRef(0);
@@ -1241,21 +1263,20 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       }
       
       try {
-        // Step 1: Enrich with session cache (costs/tokens from current session)
-        const cacheEnriched = await enrichAgentsWithCache(allAgents);
-        
-        // Step 2: Restore persistent identity (all-time data, custom names, etc.)
+        // Steps 1+2: Enrich with cache and restore identity in parallel
+        const [cacheEnriched] = await Promise.all([
+          enrichAgentsWithCache(allAgents),
+        ]);
         const fullyEnriched = await restoreAllAgents(cacheEnriched);
-        
+
+        // Unblock render immediately
         setEnrichedAgents(fullyEnriched);
-        
-        // Step 3: Record activity for each agent (updates identity store)
-        for (const agent of fullyEnriched) {
-          await recordAgentActivity(agent);
-        }
-        
-        // Step 4: Save snapshot to cache
-        await takeSnapshot(fullyEnriched, sessionTags);
+
+        // Steps 3+4: Fire-and-forget — record activity and snapshot don't block display
+        Promise.all([
+          ...fullyEnriched.map(agent => recordAgentActivity(agent)),
+          takeSnapshot(fullyEnriched, sessionTags),
+        ]).catch(() => {});
       } catch (error) {
         console.error('Failed to enrich agents:', error);
         setEnrichedAgents(allAgents);
@@ -1309,6 +1330,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         costToday: enrichedAgents.reduce((s, a) => s + a.costToday, 0),
         costWeek: enrichedAgents.reduce((s, a) => s + a.costWeek, 0),
         tokens: enrichedAgents.reduce((s, a) => s + a.tokensUsed, 0),
+        tokensTotal: enrichedAgents.reduce((s, a) => s + a.tokensUsed, 0),
+        messagesTotal: enrichedAgents.reduce((s, a) => s + a.messagesProcessed, 0),
       });
     }
   }, [enrichedAgents, onAgentStats]);
@@ -1364,10 +1387,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const scaledH = FLOOR_H * officeScale;
   const needsHScroll = rawScale < 0.55;
 
-  const handleAgentPress = (agent: OfficeAgent) => {
+  const handleAgentPress = useCallback((agent: OfficeAgent) => {
     if (editMode) return;
     setSelectedAgent(prev => prev?.id === agent.id ? null : agent);
-  };
+  }, [editMode]);
+
+  const handleOpenAutomate = useCallback(() => {
+    setTerminalInitialTab('automations');
+    setTerminalSize('full');
+  }, []);
 
   const handleFloorPress = (x: number, y: number) => {
     if (!editMode) return;
@@ -1398,7 +1426,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       return;
     }
     // Connected items — open service connector on first tap
-    const connectedTypes = ['smart_tv', 'spotify_jukebox', 'discord_hub', 'twitch_stream', 'video_call', 'crypto_ticker', 'github_feed', 'calendar_widget', 'world_clock', 'music_visualizer', 'figma_board'];
+    const connectedTypes = ['smart_tv', 'spotify_jukebox', 'discord_hub', 'twitch_stream', 'video_call', 'crypto_ticker', 'github_feed', 'calendar_widget', 'world_clock', 'music_visualizer', 'figma_board', 'email_hub'];
     if (item && connectedTypes.includes(item.type) && selectedFurnitureId !== id) {
       setServiceModalTargetId(id);
       setSelectedFurnitureId(id);
@@ -1410,7 +1438,20 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       setServiceDiscordChannel(item.discordChannel || '');
       setServiceTwitchChannel(item.twitchChannel || '');
       setServiceCallProvider(item.videoCallProvider || 'zoom');
+      setServiceCalendarProvider(item.calendarProvider || 'google');
+      setServiceEmailProvider(item.emailProvider || 'outlook');
+      setOauthStatus(null);
+      setOauthError('');
+      setOauthConnecting(false);
       setServiceModalVisible(true);
+      // Check OAuth status for calendar/email items
+      if (item.type === 'calendar_widget') {
+        const prov = (item.calendarProvider === 'outlook' ? 'microsoft' : 'google') as OAuthProvider;
+        checkOAuthStatus(prov).then(s => setOauthStatus(s)).catch(() => {});
+      } else if (item.type === 'email_hub') {
+        const prov = (item.emailProvider === 'gmail' ? 'google' : item.emailProvider === 'yahoo' ? 'yahoo' : 'microsoft') as OAuthProvider;
+        checkOAuthStatus(prov).then(s => setOauthStatus(s)).catch(() => {});
+      }
       return;
     }
     // Sticky note — open editor on first tap
@@ -1611,6 +1652,22 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       case 'video_call':
         updates.videoCallProvider = serviceCallProvider;
         updates.videoCallLink = serviceUrl || undefined;
+        break;
+      case 'calendar_widget':
+        updates.calendarProvider = serviceCalendarProvider;
+        // Real data is applied via OAuth callback above; this is fallback
+        if (!oauthStatus?.connected) {
+          updates.calendarEvent = 'Tap to refresh';
+          updates.calendarTime = '';
+          updates.calendarEvents = 0;
+        }
+        break;
+      case 'email_hub':
+        updates.emailProvider = serviceEmailProvider;
+        // Real data is applied via OAuth callback above; this is fallback
+        if (!oauthStatus?.connected) {
+          updates.emailConnected = false;
+        }
         break;
     }
     setFloors(prev => prev.map(f =>
@@ -2495,20 +2552,77 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       }
 
       case 'calendar_widget': {
-        // Cycle through demo events
-        const events = [
-          { name: 'Team Standup', time: '10:00 AM' },
-          { name: 'Design Review', time: '2:00 PM' },
-          { name: 'Sprint Planning', time: '11:30 AM' },
-          { name: '1:1 with Lead', time: '4:00 PM' },
-          { name: 'Deploy Window', time: '6:00 PM' },
-        ];
-        const curIdx = events.findIndex(e => e.name === item.calendarEvent);
-        const next = events[(curIdx + 1) % events.length];
-        updateFurnitureField({
-          calendarEvent: next.name,
-          calendarTime: next.time,
-          calendarEvents: Math.floor(Math.random() * 6) + 1,
+        // Try to fetch real calendar events
+        const calProv = item.calendarProvider === 'outlook' ? 'microsoft' : 'google' as OAuthProvider;
+        fetchCalendarEvents(calProv).then(calData => {
+          if (calData && calData.nextEvent) {
+            updateFurnitureField({
+              calendarEvent: calData.nextEvent.title,
+              calendarTime: calData.nextEvent.timeFormatted || '',
+              calendarEvents: calData.count,
+            });
+          } else {
+            // Fallback: cycle demo events
+            const events = [
+              { name: 'Team Standup', time: '10:00 AM' },
+              { name: 'Design Review', time: '2:00 PM' },
+              { name: 'Sprint Planning', time: '11:30 AM' },
+              { name: '1:1 with Lead', time: '4:00 PM' },
+              { name: 'Deploy Window', time: '6:00 PM' },
+            ];
+            const curIdx = events.findIndex(e => e.name === item.calendarEvent);
+            const next = events[(curIdx + 1) % events.length];
+            updateFurnitureField({
+              calendarEvent: next.name,
+              calendarTime: next.time,
+              calendarEvents: Math.floor(Math.random() * 6) + 1,
+            });
+          }
+        }).catch(() => {
+          // Fallback to demo
+          updateFurnitureField({
+            calendarEvent: 'No connection',
+            calendarTime: '',
+            calendarEvents: 0,
+          });
+        });
+        break;
+      }
+
+      case 'email_hub': {
+        // Try to fetch real emails
+        const emailProv = item.emailProvider === 'gmail' ? 'google' : item.emailProvider === 'outlook' ? 'microsoft' : 'yahoo' as OAuthProvider;
+        fetchEmails(emailProv).then(emailData => {
+          if (emailData && emailData.emails.length > 0) {
+            const latest = emailData.emails[0];
+            updateFurnitureField({
+              emailSender: latest.sender,
+              emailSubject: latest.subject,
+              emailTime: latest.timeFormatted || '',
+              emailUnread: emailData.unread,
+              emailConnected: true,
+            });
+          } else {
+            // Fallback: cycle demo emails
+            const emails = [
+              { sender: 'Team Updates', subject: 'Weekly sync notes', time: '9:30 AM' },
+              { sender: 'GitHub', subject: 'PR #142 merged to main', time: '10:15 AM' },
+              { sender: 'Jira', subject: 'PROJ-89 moved to In Review', time: '11:00 AM' },
+              { sender: 'Design Team', subject: 'New mockups ready', time: '1:45 PM' },
+              { sender: 'DevOps Alert', subject: 'Deploy succeeded: v2.4.1', time: '3:20 PM' },
+            ];
+            const curSender = item.emailSender || '';
+            const curIdx = emails.findIndex(e => e.sender === curSender);
+            const next = emails[(curIdx + 1) % emails.length];
+            updateFurnitureField({
+              emailSender: next.sender,
+              emailSubject: next.subject,
+              emailTime: next.time,
+              emailUnread: Math.floor(Math.random() * 12) + 1,
+            });
+          }
+        }).catch(() => {
+          updateFurnitureField({ emailConnected: false });
         });
         break;
       }
@@ -3228,10 +3342,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                             xpNext={xpNext}
                             turns={agent.turns || agent.messagesProcessed || 0}
                             tokens={agent.tokensUsed || 0}
-                            onAutomate={() => {
-                              setTerminalInitialTab('automations');
-                              setTerminalSize('full');
-                            }}
+                            onAutomate={handleOpenAutomate}
                           />
                         </View>
                       );
@@ -3923,7 +4034,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                  serviceModalType === 'spotify_jukebox' ? '🎧 CONNECT SPOTIFY' :
                  serviceModalType === 'discord_hub' ? '💬 CONNECT DISCORD' :
                  serviceModalType === 'twitch_stream' ? '🟣 CONNECT TWITCH' :
-                 serviceModalType === 'video_call' ? '📹 SET UP CALL' : '🔗 CONNECT SERVICE'}
+                 serviceModalType === 'video_call' ? '📹 SET UP CALL' :
+                 serviceModalType === 'calendar_widget' ? '📅 CONNECT CALENDAR' :
+                 serviceModalType === 'email_hub' ? '📧 CONNECT EMAIL' : '🔗 CONNECT SERVICE'}
               </Text>
               <Pressable onPress={() => { setServiceModalVisible(false); setServiceModalTargetId(null); }} style={nftStyles.closeBtn}>
                 <Text style={nftStyles.closeText}>✕</Text>
@@ -4114,6 +4227,239 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                     style={[svcStyles.openBtn, !serviceUrl && { opacity: 0.4 }, Platform.OS === 'web' && { cursor: serviceUrl ? 'pointer' : 'default' } as any]}
                   >
                     <Text style={svcStyles.openBtnText}>JOIN CALL ↗</Text>
+                  </Pressable>
+                </>
+              )}
+
+              {/* ── Google Calendar ── */}
+              {serviceModalType === 'calendar_widget' && (
+                <>
+                  <View style={svcStyles.serviceHero}>
+                    <Text style={{ fontSize: 40 }}>📅</Text>
+                    <Text style={[svcStyles.heroTitle, { color: serviceCalendarProvider === 'google' ? '#4285F4' : '#0078D4' }]}>
+                      {serviceCalendarProvider === 'google' ? 'Google Calendar' : 'Outlook Calendar'}
+                    </Text>
+                    <Text style={svcStyles.heroDesc}>Connect your real calendar to see upcoming events in your office</Text>
+                  </View>
+
+                  <Text style={svcStyles.sectionLabel}>SELECT PROVIDER</Text>
+                  <View style={svcStyles.appGrid}>
+                    {([
+                      { id: 'google', name: 'Google', icon: '📅', color: '#4285F4', oauth: 'google' as OAuthProvider },
+                      { id: 'outlook', name: 'Outlook', icon: '📆', color: '#0078D4', oauth: 'microsoft' as OAuthProvider },
+                    ] as const).map(cal => (
+                      <Pressable
+                        key={cal.id}
+                        onPress={() => { setServiceCalendarProvider(cal.id); setOauthStatus(null); setOauthError(''); }}
+                        style={[svcStyles.appCard, serviceCalendarProvider === cal.id && { borderColor: cal.color, backgroundColor: cal.color + '15' },
+                          Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                      >
+                        <Text style={svcStyles.appIcon}>{cal.icon}</Text>
+                        <Text style={[svcStyles.appName, serviceCalendarProvider === cal.id && { color: cal.color }]}>{cal.name}</Text>
+                        {serviceCalendarProvider === cal.id && <Text style={[svcStyles.appCheck, { color: cal.color }]}>✓</Text>}
+                      </Pressable>
+                    ))}
+                  </View>
+
+                  {oauthStatus?.connected && (
+                    <View style={{ backgroundColor: '#22c55e10', borderWidth: 1, borderColor: '#22c55e30', borderRadius: 10, padding: 14, marginBottom: 12 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#22c55e' }} />
+                        <Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' }}>CONNECTED</Text>
+                      </View>
+                      {oauthStatus.email ? <Text style={{ color: '#888', fontSize: 10, fontFamily: 'monospace', marginTop: 4 }}>{oauthStatus.email}</Text> : null}
+                      <Pressable
+                        onPress={async () => {
+                          const prov = serviceCalendarProvider === 'google' ? 'google' : 'microsoft' as OAuthProvider;
+                          await disconnectOAuth(prov);
+                          setOauthStatus(null);
+                        }}
+                        style={[{ marginTop: 8, paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#ef444420', borderRadius: 6, alignSelf: 'flex-start', borderWidth: 1, borderColor: '#ef444440' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                      >
+                        <Text style={{ color: '#ef4444', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>DISCONNECT</Text>
+                      </Pressable>
+                    </View>
+                  )}
+
+                  {oauthError ? (
+                    <View style={{ backgroundColor: '#ef444415', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                      <Text style={{ color: '#ef4444', fontSize: 10, fontFamily: 'monospace' }}>{oauthError}</Text>
+                    </View>
+                  ) : null}
+
+                  <Pressable
+                    onPress={async () => {
+                      if (oauthConnecting) return;
+                      setOauthConnecting(true);
+                      setOauthError('');
+                      try {
+                        const { data: { session } } = await supabase.auth.getSession();
+                        if (!session) { setOauthError('Please sign in first'); return; }
+                        const prov = serviceCalendarProvider === 'google' ? 'google' : 'microsoft' as OAuthProvider;
+                        const result = await openOAuthPopup(prov, 'calendar', session.access_token);
+                        if (result.success) {
+                          setOauthStatus({ connected: true, email: result.email });
+                          // Fetch real events and update furniture
+                          const calData = await fetchCalendarEvents(prov);
+                          if (calData && calData.nextEvent && serviceModalTargetId) {
+                            const updates: Record<string, any> = {
+                              calendarProvider: serviceCalendarProvider,
+                              calendarEvent: calData.nextEvent.title,
+                              calendarTime: calData.nextEvent.timeFormatted || '',
+                              calendarEvents: calData.count,
+                            };
+                            setFloors(prev => prev.map(f =>
+                              f.id === currentFloorId ? { ...f, furniture: f.furniture.map(item => item.id === serviceModalTargetId ? { ...item, ...updates } : item) } : f
+                            ));
+                          }
+                        } else if (result.error !== 'Window closed') {
+                          setOauthError(result.error || 'Connection failed');
+                        }
+                      } catch (err: any) {
+                        setOauthError(err.message || 'Connection failed');
+                      } finally {
+                        setOauthConnecting(false);
+                      }
+                    }}
+                    style={[svcStyles.connectBtn, {
+                      backgroundColor: oauthConnecting ? '#333' : (serviceCalendarProvider === 'google' ? '#4285F4' : '#0078D4'),
+                      flexDirection: 'row', justifyContent: 'center', gap: 8,
+                    }, Platform.OS === 'web' && { cursor: oauthConnecting ? 'wait' : 'pointer' } as any]}
+                  >
+                    {oauthConnecting && <ActivityIndicator size="small" color="#fff" />}
+                    <Text style={svcStyles.connectBtnText}>
+                      {oauthConnecting ? 'CONNECTING...' : oauthStatus?.connected ? 'RECONNECT' : `SIGN IN WITH ${serviceCalendarProvider === 'google' ? 'GOOGLE' : 'MICROSOFT'}`}
+                    </Text>
+                  </Pressable>
+
+                  <Pressable
+                    onPress={() => handleServiceOpen(serviceCalendarProvider === 'google' ? 'https://calendar.google.com' : 'https://outlook.live.com/calendar')}
+                    style={[svcStyles.openBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  >
+                    <Text style={svcStyles.openBtnText}>OPEN {serviceCalendarProvider === 'google' ? 'GOOGLE' : 'OUTLOOK'} CALENDAR ↗</Text>
+                  </Pressable>
+                </>
+              )}
+
+              {/* ── Email Hub ── */}
+              {serviceModalType === 'email_hub' && (
+                <>
+                  <View style={svcStyles.serviceHero}>
+                    <Text style={{ fontSize: 40 }}>📧</Text>
+                    <Text style={[svcStyles.heroTitle, { color: serviceEmailProvider === 'outlook' ? '#0078D4' : serviceEmailProvider === 'gmail' ? '#EA4335' : '#6001D2' }]}>
+                      {serviceEmailProvider === 'outlook' ? 'Outlook' : serviceEmailProvider === 'gmail' ? 'Gmail' : 'Yahoo Mail'}
+                    </Text>
+                    <Text style={svcStyles.heroDesc}>Connect your real inbox to see emails and unread count in your office</Text>
+                  </View>
+
+                  <Text style={svcStyles.sectionLabel}>SELECT EMAIL PROVIDER</Text>
+                  <View style={svcStyles.appGrid}>
+                    {([
+                      { id: 'outlook', name: 'Outlook', icon: '📧', color: '#0078D4', oauth: 'microsoft' as OAuthProvider, desc: 'Outlook, Hotmail, Live, Work' },
+                      { id: 'gmail', name: 'Gmail', icon: '✉️', color: '#EA4335', oauth: 'google' as OAuthProvider, desc: 'Gmail, Google Workspace' },
+                      { id: 'yahoo', name: 'Yahoo', icon: '📬', color: '#6001D2', oauth: 'yahoo' as OAuthProvider, desc: 'Yahoo Mail, AOL Mail' },
+                    ] as const).map(em => (
+                      <Pressable
+                        key={em.id}
+                        onPress={() => { setServiceEmailProvider(em.id); setOauthStatus(null); setOauthError(''); }}
+                        style={[svcStyles.appCard, serviceEmailProvider === em.id && { borderColor: em.color, backgroundColor: em.color + '15' },
+                          Platform.OS === 'web' && { cursor: 'pointer' } as any, { minWidth: 85 }]}
+                      >
+                        <Text style={svcStyles.appIcon}>{em.icon}</Text>
+                        <Text style={[svcStyles.appName, serviceEmailProvider === em.id && { color: em.color }]}>{em.name}</Text>
+                        <Text style={{ color: '#555', fontSize: 7, fontFamily: 'monospace', marginTop: 2, textAlign: 'center' }}>{em.desc}</Text>
+                        {serviceEmailProvider === em.id && <Text style={[svcStyles.appCheck, { color: em.color }]}>✓</Text>}
+                      </Pressable>
+                    ))}
+                  </View>
+
+                  {oauthStatus?.connected && (
+                    <View style={{ backgroundColor: '#22c55e10', borderWidth: 1, borderColor: '#22c55e30', borderRadius: 10, padding: 14, marginBottom: 12 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#22c55e' }} />
+                        <Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' }}>CONNECTED</Text>
+                      </View>
+                      {oauthStatus.email ? <Text style={{ color: '#888', fontSize: 10, fontFamily: 'monospace', marginTop: 4 }}>{oauthStatus.email}</Text> : null}
+                      <Pressable
+                        onPress={async () => {
+                          const prov = serviceEmailProvider === 'gmail' ? 'google' : serviceEmailProvider === 'outlook' ? 'microsoft' : 'yahoo' as OAuthProvider;
+                          await disconnectOAuth(prov);
+                          setOauthStatus(null);
+                        }}
+                        style={[{ marginTop: 8, paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#ef444420', borderRadius: 6, alignSelf: 'flex-start', borderWidth: 1, borderColor: '#ef444440' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                      >
+                        <Text style={{ color: '#ef4444', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>DISCONNECT</Text>
+                      </Pressable>
+                    </View>
+                  )}
+
+                  {oauthError ? (
+                    <View style={{ backgroundColor: '#ef444415', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                      <Text style={{ color: '#ef4444', fontSize: 10, fontFamily: 'monospace' }}>{oauthError}</Text>
+                    </View>
+                  ) : null}
+
+                  <Pressable
+                    onPress={async () => {
+                      if (oauthConnecting) return;
+                      setOauthConnecting(true);
+                      setOauthError('');
+                      try {
+                        const { data: { session } } = await supabase.auth.getSession();
+                        if (!session) { setOauthError('Please sign in first'); return; }
+                        const prov = serviceEmailProvider === 'gmail' ? 'google' : serviceEmailProvider === 'outlook' ? 'microsoft' : 'yahoo' as OAuthProvider;
+                        const result = await openOAuthPopup(prov, 'email', session.access_token);
+                        if (result.success) {
+                          setOauthStatus({ connected: true, email: result.email });
+                          // Fetch real emails and update furniture
+                          const emailData = await fetchEmails(prov);
+                          if (emailData && serviceModalTargetId) {
+                            const latest = emailData.emails[0];
+                            const updates: Record<string, any> = {
+                              emailProvider: serviceEmailProvider,
+                              emailConnected: true,
+                              emailUnread: emailData.unread,
+                              emailSender: latest?.sender || '',
+                              emailSubject: latest?.subject || 'No new mail',
+                              emailTime: latest?.timeFormatted || '',
+                            };
+                            setFloors(prev => prev.map(f =>
+                              f.id === currentFloorId ? { ...f, furniture: f.furniture.map(item => item.id === serviceModalTargetId ? { ...item, ...updates } : item) } : f
+                            ));
+                          }
+                        } else if (result.error !== 'Window closed') {
+                          setOauthError(result.error || 'Connection failed');
+                        }
+                      } catch (err: any) {
+                        setOauthError(err.message || 'Connection failed');
+                      } finally {
+                        setOauthConnecting(false);
+                      }
+                    }}
+                    style={[svcStyles.connectBtn, {
+                      backgroundColor: oauthConnecting ? '#333' : (serviceEmailProvider === 'outlook' ? '#0078D4' : serviceEmailProvider === 'gmail' ? '#EA4335' : '#6001D2'),
+                      flexDirection: 'row', justifyContent: 'center', gap: 8,
+                    }, Platform.OS === 'web' && { cursor: oauthConnecting ? 'wait' : 'pointer' } as any]}
+                  >
+                    {oauthConnecting && <ActivityIndicator size="small" color="#fff" />}
+                    <Text style={svcStyles.connectBtnText}>
+                      {oauthConnecting ? 'CONNECTING...' :
+                        oauthStatus?.connected ? 'RECONNECT' :
+                        `SIGN IN WITH ${serviceEmailProvider === 'gmail' ? 'GOOGLE' : serviceEmailProvider === 'outlook' ? 'MICROSOFT' : 'YAHOO'}`}
+                    </Text>
+                  </Pressable>
+
+                  <Pressable
+                    onPress={() => handleServiceOpen(
+                      serviceEmailProvider === 'outlook' ? 'https://outlook.live.com' :
+                      serviceEmailProvider === 'gmail' ? 'https://mail.google.com' :
+                      'https://mail.yahoo.com'
+                    )}
+                    style={[svcStyles.openBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  >
+                    <Text style={svcStyles.openBtnText}>
+                      OPEN {serviceEmailProvider === 'outlook' ? 'OUTLOOK' : serviceEmailProvider === 'gmail' ? 'GMAIL' : 'YAHOO MAIL'} ↗
+                    </Text>
                   </Pressable>
                 </>
               )}

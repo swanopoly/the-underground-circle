@@ -405,7 +405,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
   },
   canvas: {
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     position: 'relative',
     overflow: 'hidden',
     borderBottomWidth: 1,
@@ -440,7 +440,7 @@ const styles = StyleSheet.create({
     borderWidth: 3,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     shadowOpacity: 0.6,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 0 },
@@ -508,7 +508,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   statsPopup: {
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderRadius: 16,
     padding: 20,
     width: 300,

@@ -547,7 +547,7 @@ function CompletedCard({ session }: { session: CompletedSession }) {
 // ─── Styles ──────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#0a0a0a' },
+  root: { flex: 1, backgroundColor: '#000000' },
   content: { padding: 16, paddingBottom: 40 },
 
   // Header
@@ -595,7 +595,7 @@ const styles = StyleSheet.create({
   taskLabel: { color: '#555', fontSize: 10, fontWeight: '700', letterSpacing: 1, marginBottom: 3 },
   taskText: { color: '#e0e0e0', fontSize: 15, fontWeight: '600', lineHeight: 22 },
 
-  goalBlock: { backgroundColor: '#1a1a1a', borderRadius: 8, padding: 10, marginBottom: 10, flexDirection: 'row', gap: 8 },
+  goalBlock: { backgroundColor: '#000000', borderRadius: 8, padding: 10, marginBottom: 10, flexDirection: 'row', gap: 8 },
   goalLabel: { color: '#555', fontSize: 12, fontWeight: '700' },
   goalText: { color: '#aaa', fontSize: 13, flex: 1, lineHeight: 18 },
 
@@ -609,7 +609,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 4,
     paddingHorizontal: 10, paddingVertical: 6,
     borderRadius: 20, borderWidth: 1, borderColor: '#222',
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
   },
   reactionEmoji: { fontSize: 16 },
   reactionCount: { color: '#666', fontSize: 12, fontWeight: '600' },
@@ -625,7 +625,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#0d0d0d',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
     padding: 12,
     marginBottom: 8,
   },

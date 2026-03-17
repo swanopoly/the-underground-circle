@@ -405,7 +405,7 @@ function ChannelRow({ channel, onPress }: { channel: DiscordChannel; onPress: ()
 // ─── Styles ──────────────────────────────────────────────────────────
 
 const st = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 40 },
   loadingText: { color: '#555', fontSize: 12, marginTop: 8 },
   emptyText: { color: '#555', fontSize: 14 },
@@ -423,7 +423,7 @@ const st = StyleSheet.create({
   stepCard: {
     flexDirection: 'row', alignItems: 'flex-start', gap: 12,
     backgroundColor: '#111', borderRadius: 12, padding: 14,
-    borderWidth: 1, borderColor: '#1a1a1a', marginBottom: 8,
+    borderWidth: 1, borderColor: '#000000', marginBottom: 8,
   },
   stepNum: {
     color: '#5865F2', fontSize: 18, fontWeight: '900',
@@ -448,7 +448,7 @@ const st = StyleSheet.create({
 
   // Server header
   serverHeader: {
-    borderBottomWidth: 1, borderBottomColor: '#1a1a1a', padding: 16,
+    borderBottomWidth: 1, borderBottomColor: '#000000', padding: 16,
     maxWidth: 860, alignSelf: 'center', width: '100%',
   },
   serverInfo: { flexDirection: 'row', alignItems: 'center', gap: 12 },
@@ -456,7 +456,7 @@ const st = StyleSheet.create({
   serverName: { color: '#fff', fontSize: 16, fontWeight: '700' },
   serverMeta: { color: '#555', fontSize: 11, marginTop: 2 },
   refreshBtn: {
-    width: 36, height: 36, borderRadius: 18, backgroundColor: '#1a1a1a',
+    width: 36, height: 36, borderRadius: 18, backgroundColor: '#000000',
     justifyContent: 'center', alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -479,11 +479,11 @@ const st = StyleSheet.create({
   // Channel messages view
   channelHeader: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
-    padding: 14, borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
+    padding: 14, borderBottomWidth: 1, borderBottomColor: '#000000',
     maxWidth: 860, alignSelf: 'center', width: '100%',
   },
   backBtn: {
-    width: 32, height: 32, borderRadius: 16, backgroundColor: '#1a1a1a',
+    width: 32, height: 32, borderRadius: 16, backgroundColor: '#000000',
     justifyContent: 'center', alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -505,7 +505,7 @@ const st = StyleSheet.create({
 
   msgInputBar: {
     flexDirection: 'row', alignItems: 'flex-end', gap: 8,
-    padding: 12, borderTopWidth: 1, borderTopColor: '#1a1a1a',
+    padding: 12, borderTopWidth: 1, borderTopColor: '#000000',
     maxWidth: 860, alignSelf: 'center', width: '100%',
   },
   msgInput: {

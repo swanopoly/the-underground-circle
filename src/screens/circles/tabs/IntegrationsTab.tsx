@@ -19,8 +19,9 @@ const SlackTab = lazy(() => import('./SlackTab'));
 const TeamsTab = lazy(() => import('./TeamsTab'));
 const DiscordTab = lazy(() => import('./DiscordTab'));
 const GitHubTab = lazy(() => import('./GitHubTab'));
+const HeliusTab = lazy(() => import('./HeliusTab'));
 
-type PlatformKey = 'none' | 'github' | 'slack' | 'teams' | 'discord';
+type PlatformKey = 'none' | 'github' | 'slack' | 'teams' | 'discord' | 'helius';
 
 interface PlatformStatus {
   connected: boolean;
@@ -55,6 +56,13 @@ const PLATFORMS = [
     icon: '🎮',
     color: '#5865F2',
     description: 'Browse channels, send messages, and sync your server',
+  },
+  {
+    key: 'helius' as const,
+    label: 'Helius (Solana)',
+    icon: '◎',
+    color: '#9945FF',
+    description: 'Solana RPC, token balances, swaps via Jupiter, and trading bot',
   },
 ];
 
@@ -128,6 +136,7 @@ export default function IntegrationsTab({ circleId }: { circleId: string }) {
     slack: { connected: false },
     teams: { connected: false },
     discord: { connected: false },
+    helius: { connected: false },
   });
 
   useEffect(() => {
@@ -137,7 +146,7 @@ export default function IntegrationsTab({ circleId }: { circleId: string }) {
   const loadStatuses = async () => {
     setLoading(true);
     try {
-      const [slackConfig, teamsConfig, discordConfig, ghConns] = await Promise.all([
+      const [slackConfig, teamsConfig, discordConfig, ghConns, heliusKey] = await Promise.all([
         getSlackConfig(circleId).catch(() => null),
         getTeamsConfig(circleId).catch(() => null),
         getCircleDiscordConfig(circleId).catch(() => ({ guild_id: null, bot_token: null, webhook_url: null, connected_at: null })),
@@ -147,6 +156,11 @@ export default function IntegrationsTab({ circleId }: { circleId: string }) {
           .eq('circle_id', circleId)
           .eq('is_active', true)
           .then(r => r.data, () => null),
+        supabase.rpc('list_user_api_keys')
+          .then(r => {
+            const keys = r.data || [];
+            return keys.find((k: any) => k.provider === 'helius' && k.is_active) || null;
+          }, () => null),
       ]);
 
       setStatuses({
@@ -167,6 +181,10 @@ export default function IntegrationsTab({ circleId }: { circleId: string }) {
         discord: {
           connected: !!discordConfig?.guild_id,
           name: discordConfig?.guild_id ? 'Server connected' : undefined,
+        },
+        helius: {
+          connected: !!heliusKey,
+          name: heliusKey ? 'API key active' : undefined,
         },
       });
     } catch (err) {
@@ -197,6 +215,7 @@ export default function IntegrationsTab({ circleId }: { circleId: string }) {
               {activePlatform === 'slack' && <SlackTab circleId={circleId} />}
               {activePlatform === 'teams' && <TeamsTab circleId={circleId} />}
               {activePlatform === 'discord' && <DiscordTab circleId={circleId} />}
+              {activePlatform === 'helius' && <HeliusTab circleId={circleId} />}
             </Suspense>
           </View>
         </View>

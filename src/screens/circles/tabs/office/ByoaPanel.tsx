@@ -156,7 +156,7 @@ export default function ByoaPanel({ circleId, apiKey, onClose }: Props) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
   },
   header: {
     flexDirection: 'row',
@@ -165,7 +165,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 16,
     borderBottomWidth: 1,
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
   },
   title: {
     color: '#eee',
@@ -189,7 +189,7 @@ const styles = StyleSheet.create({
   endpointCard: {
     backgroundColor: '#0d0d14',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 14,
     marginBottom: 10,
@@ -227,14 +227,14 @@ const styles = StyleSheet.create({
   eventsCard: {
     backgroundColor: '#0d0d14',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     overflow: 'hidden',
   },
   eventRow: {
     padding: 12,
     borderBottomWidth: 1,
-    borderColor: '#1a1a1a',
+    borderColor: '#000000',
   },
   eventType: {
     color: '#06b6d4',
@@ -252,7 +252,7 @@ const styles = StyleSheet.create({
   connectCard: {
     backgroundColor: '#0d0d14',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 14,
     width: '47%' as any,
@@ -292,7 +292,7 @@ const styles = StyleSheet.create({
   mcpCard: {
     backgroundColor: '#0d0d14',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 14,
   },
@@ -331,7 +331,7 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     padding: 10,
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
   },
   codeText: {
     color: '#6366f1',

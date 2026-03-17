@@ -378,14 +378,14 @@ const rowStyles = StyleSheet.create({
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
   },
   deleteText: {
     color: '#52525b',
     fontSize: 10,
     fontWeight: '700',
   },
-  divider: { height: 1, backgroundColor: '#1a1a1a', marginTop: 10 },
+  divider: { height: 1, backgroundColor: '#000000', marginTop: 10 },
 });
 
 // ─── Agent Target Chip ────────────────────────────────────────────────────────
@@ -412,7 +412,7 @@ const chipStyles = StyleSheet.create({
   chip: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6,
-    backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#2a2a2a',
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#2a2a2a',
   },
   chipActive: { backgroundColor: '#6366f115', borderColor: '#6366f1' },
   dot: { width: 6, height: 6, borderRadius: 3, flexShrink: 0 },
@@ -479,13 +479,13 @@ const acStyles = StyleSheet.create({
   row: {
     flexDirection: 'row', flexWrap: 'wrap', gap: 6,
     paddingHorizontal: 12, paddingVertical: 6,
-    borderTopWidth: 1, borderTopColor: '#1a1a1a',
+    borderTopWidth: 1, borderTopColor: '#000000',
     backgroundColor: '#0d0d0d',
   },
   chip: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     paddingHorizontal: 8, paddingVertical: 4, borderRadius: 5,
-    backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#6366f133',
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#6366f133',
   },
   dot: { width: 5, height: 5, borderRadius: 3 },
   text: { color: '#a5b4fc', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' },
@@ -1172,7 +1172,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: '#000000',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -1181,7 +1181,7 @@ const styles = StyleSheet.create({
   termTabBar: {
     flexDirection: 'row',
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: '#000000',
     paddingHorizontal: 4,
   } as any,
   termTab: {
@@ -1244,10 +1244,10 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
   modelRow: {
-    borderTopWidth: 1, borderTopColor: '#1a1a1a', paddingVertical: 4,
-    backgroundColor: '#0a0a0a',
+    borderTopWidth: 1, borderTopColor: '#000000', paddingVertical: 4,
+    backgroundColor: '#000000',
   },
-  chipRow: { borderTopWidth: 1, borderTopColor: '#1a1a1a', paddingVertical: 6 },
+  chipRow: { borderTopWidth: 1, borderTopColor: '#000000', paddingVertical: 6 },
   chipsScroll: {
     paddingHorizontal: 12, gap: 6, flexDirection: 'row', alignItems: 'center',
   },

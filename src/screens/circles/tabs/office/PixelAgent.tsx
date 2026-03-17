@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import { View, Text, TextInput, StyleSheet, Animated, Pressable, Platform, Easing } from 'react-native';
 import { OfficeAgent, STATUS_COLORS } from '../../../../lib/officeAgents';
 import { AgentAppearance, DEFAULT_APPEARANCE, EnvironmentType, THEME_OUTFITS, NEON_SKIN_TONES } from '../../../../lib/officeConfig';
@@ -23,7 +23,7 @@ interface Props {
   onAutomate?: (taskText: string) => void; // inline task assignment
 }
 
-export default function PixelAgent({ agent, appearance, environmentType, onPress, selected, scale = 1, showThoughts = false, totalAgents = 1, dancing = false, xp = 0, xpNext = 100, turns = 0, tokens = 0, onAutomate }: Props) {
+function PixelAgentInner({ agent, appearance, environmentType, onPress, selected, scale = 1, showThoughts = false, totalAgents = 1, dancing = false, xp = 0, xpNext = 100, turns = 0, tokens = 0, onAutomate }: Props) {
   const a = appearance || { ...DEFAULT_APPEARANCE, shirtColor: agent.color, hairColor: agent.color };
 
   // Only apply theme outfits to agents using default appearance (not user-customized)
@@ -41,7 +41,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
   );
   const outfit = (environmentType && !isCustomized) ? THEME_OUTFITS[environmentType] : null;
   const showThemeHeadgear = outfit?.headgear && a.hat === 'none';
-  const effectiveBootColor = outfit?.bootColor || a.shoeColor || '#1a1a1a';
+  const effectiveBootColor = outfit?.bootColor || a.shoeColor || '#000000';
 
   // Neon/glowing skin detection
   const isNeonSkin = NEON_SKIN_TONES.includes(a.skinTone);
@@ -816,10 +816,10 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         )}
         {a.hat === 'tophat' && (
           <View style={styles.tophat}>
-            <View style={[styles.tophatTop, { backgroundColor: '#1a1a1a' }]}>
+            <View style={[styles.tophatTop, { backgroundColor: '#000000' }]}>
               <View style={styles.tophatBand} />
             </View>
-            <View style={[styles.tophatBrim, { backgroundColor: '#1a1a1a' }]} />
+            <View style={[styles.tophatBrim, { backgroundColor: '#000000' }]} />
           </View>
         )}
         {a.hat === 'beanie' && (
@@ -1008,8 +1008,8 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             )}
             {a.expression === 'angry' && (
               <View style={styles.browRow}>
-                <View style={[styles.brow, { transform: [{ rotate: '20deg' }], backgroundColor: '#1a1a1a' }]} />
-                <View style={[styles.brow, { transform: [{ rotate: '-20deg' }], backgroundColor: '#1a1a1a' }]} />
+                <View style={[styles.brow, { transform: [{ rotate: '20deg' }], backgroundColor: '#000000' }]} />
+                <View style={[styles.brow, { transform: [{ rotate: '-20deg' }], backgroundColor: '#000000' }]} />
               </View>
             )}
             {a.expression === 'surprised' && (
@@ -1450,7 +1450,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         </Animated.View>
 
         {/* Belt */}
-        <View style={[styles.belt, { backgroundColor: outfit?.beltColor || '#1a1a1a' }]}>
+        <View style={[styles.belt, { backgroundColor: outfit?.beltColor || '#000000' }]}>
           {/* Belt buckle */}
           <View style={styles.beltBuckle} />
           {outfit?.beltStyle === 'utility' && (
@@ -1724,7 +1724,7 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
         {(a.pet || 'none') === 'spider' && (
           <Animated.View style={[styles.petSpider, { transform: [{ translateX: Animated.add(petCrawl, petWander) }, { translateY: petCrawlY }] }]}>
             {/* Body */}
-            <View style={{ width: PX * 3, height: PX * 2.2, backgroundColor: '#1a1a1a', borderRadius: PX * 1.1, position: 'absolute', top: 0, left: PX * 0.5 }} />
+            <View style={{ width: PX * 3, height: PX * 2.2, backgroundColor: '#000000', borderRadius: PX * 1.1, position: 'absolute', top: 0, left: PX * 0.5 }} />
             {/* Head */}
             <View style={{ width: PX * 1.8, height: PX * 1.5, backgroundColor: '#2d2d2d', borderRadius: PX * 0.9, position: 'absolute', top: -PX * 0.8, left: PX * 1.1 }} />
             {/* Eyes — 8 red dots */}
@@ -1733,15 +1733,15 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
             <View style={{ width: PX * 0.35, height: PX * 0.35, backgroundColor: '#ef4444', borderRadius: PX * 0.2, position: 'absolute', top: -PX * 0.5, left: PX * 2.1 }} />
             <View style={{ width: PX * 0.35, height: PX * 0.35, backgroundColor: '#ef4444', borderRadius: PX * 0.2, position: 'absolute', top: -PX * 0.5, left: PX * 2.5 }} />
             {/* Legs — 4 per side, animated with petTail */}
-            <Animated.View style={{ position: 'absolute', top: PX * 0.2, left: -PX * 1.5, width: PX * 2, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-15deg', '15deg'] }) }] }} />
-            <Animated.View style={{ position: 'absolute', top: PX * 0.8, left: -PX * 1.8, width: PX * 2.3, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['10deg', '-10deg'] }) }] }} />
-            <Animated.View style={{ position: 'absolute', top: PX * 1.4, left: -PX * 1.6, width: PX * 2.1, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-12deg', '12deg'] }) }] }} />
-            <Animated.View style={{ position: 'absolute', top: PX * 1.8, left: -PX * 1.2, width: PX * 1.7, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['8deg', '-8deg'] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 0.2, left: -PX * 1.5, width: PX * 2, height: PX * 0.3, backgroundColor: '#000000', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-15deg', '15deg'] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 0.8, left: -PX * 1.8, width: PX * 2.3, height: PX * 0.3, backgroundColor: '#000000', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['10deg', '-10deg'] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 1.4, left: -PX * 1.6, width: PX * 2.1, height: PX * 0.3, backgroundColor: '#000000', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-12deg', '12deg'] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 1.8, left: -PX * 1.2, width: PX * 1.7, height: PX * 0.3, backgroundColor: '#000000', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['8deg', '-8deg'] }) }] }} />
             {/* Right legs */}
-            <Animated.View style={{ position: 'absolute', top: PX * 0.2, right: -PX * 1.5, width: PX * 2, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['15deg', '-15deg'] }) }] }} />
-            <Animated.View style={{ position: 'absolute', top: PX * 0.8, right: -PX * 1.8, width: PX * 2.3, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-10deg', '10deg'] }) }] }} />
-            <Animated.View style={{ position: 'absolute', top: PX * 1.4, right: -PX * 1.6, width: PX * 2.1, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['12deg', '-12deg'] }) }] }} />
-            <Animated.View style={{ position: 'absolute', top: PX * 1.8, right: -PX * 1.2, width: PX * 1.7, height: PX * 0.3, backgroundColor: '#1a1a1a', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-8deg', '8deg'] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 0.2, right: -PX * 1.5, width: PX * 2, height: PX * 0.3, backgroundColor: '#000000', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['15deg', '-15deg'] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 0.8, right: -PX * 1.8, width: PX * 2.3, height: PX * 0.3, backgroundColor: '#000000', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-10deg', '10deg'] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 1.4, right: -PX * 1.6, width: PX * 2.1, height: PX * 0.3, backgroundColor: '#000000', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['12deg', '-12deg'] }) }] }} />
+            <Animated.View style={{ position: 'absolute', top: PX * 1.8, right: -PX * 1.2, width: PX * 1.7, height: PX * 0.3, backgroundColor: '#000000', borderRadius: PX * 0.15, transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-8deg', '8deg'] }) }] }} />
             {/* Web thread dangling */}
             <Animated.View style={{ position: 'absolute', top: -PX * 4, left: PX * 1.8, width: PX * 0.15, height: PX * 3.5, backgroundColor: '#ffffff30', opacity: auraFlicker.interpolate({ inputRange: [0, 1], outputRange: [0.2, 0.5] }) }} />
           </Animated.View>
@@ -1956,6 +1956,26 @@ export default function PixelAgent({ agent, appearance, environmentType, onPress
     </Pressable>
   );
 }
+
+// Memoize to prevent re-renders when parent state changes but agent props are unchanged
+const PixelAgent = memo(PixelAgentInner, (prev, next) => {
+  return (
+    prev.agent.id === next.agent.id &&
+    prev.agent.status === next.agent.status &&
+    prev.agent.name === next.agent.name &&
+    prev.agent.turns === next.agent.turns &&
+    prev.agent.tokensUsed === next.agent.tokensUsed &&
+    prev.selected === next.selected &&
+    prev.dancing === next.dancing &&
+    prev.appearance === next.appearance &&
+    prev.environmentType === next.environmentType &&
+    prev.showThoughts === next.showThoughts &&
+    prev.xp === next.xp &&
+    prev.turns === next.turns &&
+    prev.tokens === next.tokens
+  );
+});
+export default PixelAgent;
 
 // ── CONFETTI BURST ────────────────────────────────────────────────────────
 
@@ -2246,7 +2266,7 @@ function MoodBubble({ emoji }: { emoji: string }) {
         paddingHorizontal: 3,
         paddingVertical: 1,
         borderWidth: 1,
-        borderColor: '#1a1a2e',
+        borderColor: '#2a2a2a',
       }}>
         <Text style={{ fontSize: 9 }}>{emoji}</Text>
       </View>
@@ -2556,7 +2576,7 @@ const styles = StyleSheet.create({
   angryMouth: {
     width: PX * 1.8,
     height: PX * 0.5,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderTopLeftRadius: 2,
     borderTopRightRadius: 2,
   },
@@ -2570,7 +2590,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     width: PX * 6,
     height: PX * 2.5,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderRadius: 1,
   },
   // Ears
@@ -2836,7 +2856,7 @@ const styles = StyleSheet.create({
   wetsuit: { position: 'absolute', top: 0, left: 0, width: PX * 7, height: PX * 5, opacity: 0.5, zIndex: 1 },
 
   // ── Theme Extras ────────────────────────────────────────────────
-  eyePatch: { position: 'absolute', top: PX * 0.5, left: PX * 0.8, width: PX * 2, height: PX * 1.8, backgroundColor: '#1a1a1a', borderRadius: PX * 0.5, zIndex: 2 },
+  eyePatch: { position: 'absolute', top: PX * 0.5, left: PX * 0.8, width: PX * 2, height: PX * 1.8, backgroundColor: '#000000', borderRadius: PX * 0.5, zIndex: 2 },
   scar: { position: 'absolute', top: PX * 0.5, right: PX * 1, width: PX * 0.5, height: PX * 3, backgroundColor: '#dc262640', borderRadius: 1, transform: [{ rotate: '15deg' }], zIndex: 2 },
   pocketWatch: { position: 'absolute', top: PX * 1.5, right: PX * 1, width: PX * 1, height: PX * 1, backgroundColor: '#d4a017', borderRadius: PX * 0.5, zIndex: 2 },
   leafBrooch: { position: 'absolute', top: PX * 0.5, right: PX * 1.5, width: PX * 1.2, height: PX * 1.2, backgroundColor: '#22c55e', borderRadius: PX * 0.6, zIndex: 2 },
@@ -2920,8 +2940,8 @@ const styles = StyleSheet.create({
   catHead: { position: 'absolute', bottom: PX * 2, left: PX * 0.2, width: PX * 2.2, height: PX * 2.2, backgroundColor: '#f59e0b', borderRadius: PX * 1 },
   catEyeLeft: { position: 'absolute', top: PX * 0.7, left: PX * 0.35, width: PX * 0.55, height: PX * 0.55, backgroundColor: '#22c55e', borderRadius: PX * 0.27 },
   catEyeRight: { position: 'absolute', top: PX * 0.7, right: PX * 0.35, width: PX * 0.55, height: PX * 0.55, backgroundColor: '#22c55e', borderRadius: PX * 0.27 },
-  catPupilL: { position: 'absolute', top: PX * 0.8, left: PX * 0.5, width: PX * 0.25, height: PX * 0.4, backgroundColor: '#1a1a1a', borderRadius: PX * 0.12 },
-  catPupilR: { position: 'absolute', top: PX * 0.8, right: PX * 0.5, width: PX * 0.25, height: PX * 0.4, backgroundColor: '#1a1a1a', borderRadius: PX * 0.12 },
+  catPupilL: { position: 'absolute', top: PX * 0.8, left: PX * 0.5, width: PX * 0.25, height: PX * 0.4, backgroundColor: '#000000', borderRadius: PX * 0.12 },
+  catPupilR: { position: 'absolute', top: PX * 0.8, right: PX * 0.5, width: PX * 0.25, height: PX * 0.4, backgroundColor: '#000000', borderRadius: PX * 0.12 },
   catNose: { position: 'absolute', top: PX * 1.2, left: PX * 0.85, width: PX * 0.4, height: PX * 0.25, backgroundColor: '#ec4899', borderRadius: PX * 0.2 },
   catMouth: { position: 'absolute', top: PX * 1.45, left: PX * 0.8, width: PX * 0.5, height: PX * 0.15, borderBottomWidth: 0.5, borderBottomColor: '#b4530960', borderRadius: PX * 0.1 },
   catWhiskerL1: { position: 'absolute', top: PX * 1.2, left: -PX * 0.6, width: PX * 1, height: 0.5, backgroundColor: '#d9770680', transform: [{ rotate: '-5deg' }] },
@@ -2947,10 +2967,10 @@ const styles = StyleSheet.create({
   dogCollarTag: { position: 'absolute', top: PX * 0.35, left: PX * 1.5, width: PX * 0.4, height: PX * 0.4, backgroundColor: '#fef08a', borderRadius: PX * 0.2 },
   dogHead: { position: 'absolute', bottom: PX * 2.3, left: PX * 0.2, width: PX * 2.8, height: PX * 2.8, backgroundColor: '#a07020', borderRadius: PX * 1.2 },
   dogSnout: { position: 'absolute', bottom: PX * 0.3, left: PX * 0.2, width: PX * 1.8, height: PX * 1.2, backgroundColor: '#c49a3a', borderRadius: PX * 0.5 },
-  dogNose: { position: 'absolute', bottom: PX * 1.1, left: PX * 0.5, width: PX * 0.6, height: PX * 0.4, backgroundColor: '#1a1a1a', borderRadius: PX * 0.3 },
+  dogNose: { position: 'absolute', bottom: PX * 1.1, left: PX * 0.5, width: PX * 0.6, height: PX * 0.4, backgroundColor: '#000000', borderRadius: PX * 0.3 },
   dogTongue: { position: 'absolute', bottom: PX * 0.1, left: PX * 0.7, width: PX * 0.5, height: PX * 0.6, backgroundColor: '#f472b6', borderBottomLeftRadius: PX * 0.25, borderBottomRightRadius: PX * 0.25 },
-  dogEyeLeft: { position: 'absolute', top: PX * 0.6, left: PX * 0.5, width: PX * 0.55, height: PX * 0.55, backgroundColor: '#1a1a1a', borderRadius: PX * 0.27 },
-  dogEyeRight: { position: 'absolute', top: PX * 0.6, right: PX * 0.5, width: PX * 0.55, height: PX * 0.55, backgroundColor: '#1a1a1a', borderRadius: PX * 0.27 },
+  dogEyeLeft: { position: 'absolute', top: PX * 0.6, left: PX * 0.5, width: PX * 0.55, height: PX * 0.55, backgroundColor: '#000000', borderRadius: PX * 0.27 },
+  dogEyeRight: { position: 'absolute', top: PX * 0.6, right: PX * 0.5, width: PX * 0.55, height: PX * 0.55, backgroundColor: '#000000', borderRadius: PX * 0.27 },
   dogBrowL: { position: 'absolute', top: PX * 0.35, left: PX * 0.35, width: PX * 0.6, height: PX * 0.2, backgroundColor: '#6b4f10', borderRadius: 1 },
   dogBrowR: { position: 'absolute', top: PX * 0.35, right: PX * 0.35, width: PX * 0.6, height: PX * 0.2, backgroundColor: '#6b4f10', borderRadius: 1 },
   dogEar: { position: 'absolute', top: PX * 0.1, width: PX * 1, height: PX * 1.5, backgroundColor: '#7a5510', borderRadius: PX * 0.5, borderTopLeftRadius: PX * 0.3, borderTopRightRadius: PX * 0.3 },
@@ -2966,7 +2986,7 @@ const styles = StyleSheet.create({
   birdBody: { position: 'absolute', bottom: PX * 0.6, left: PX * 1.2, width: PX * 2.5, height: PX * 2, backgroundColor: '#3b82f6', borderRadius: PX * 0.8 },
   birdChest: { position: 'absolute', bottom: PX * 0.2, left: PX * 0.3, width: PX * 1.5, height: PX * 1, backgroundColor: '#93c5fd', borderRadius: PX * 0.4, opacity: 0.7 },
   birdHead: { position: 'absolute', bottom: PX * 2, left: PX * 0.5, width: PX * 1.8, height: PX * 1.8, backgroundColor: '#3b82f6', borderRadius: PX * 0.9 },
-  birdEye: { position: 'absolute', top: PX * 0.4, left: PX * 0.35, width: PX * 0.5, height: PX * 0.5, backgroundColor: '#1a1a1a', borderRadius: PX * 0.25 },
+  birdEye: { position: 'absolute', top: PX * 0.4, left: PX * 0.35, width: PX * 0.5, height: PX * 0.5, backgroundColor: '#000000', borderRadius: PX * 0.25 },
   birdCrest: { position: 'absolute', top: -PX * 0.5, left: PX * 0.5, width: PX * 0.8, height: PX * 0.8, backgroundColor: '#ef4444', borderTopLeftRadius: PX * 0.4, borderTopRightRadius: PX * 0.4, transform: [{ rotate: '-10deg' }] },
   birdWingL: { position: 'absolute', bottom: PX * 1.2, left: PX * 0.2, width: PX * 1.5, height: PX * 1, backgroundColor: '#60a5fa', borderRadius: PX * 0.4, transformOrigin: 'right center' },
   birdWingR: { position: 'absolute', bottom: PX * 1.2, right: PX * 0.5, width: PX * 1.5, height: PX * 1, backgroundColor: '#60a5fa', borderRadius: PX * 0.4, transformOrigin: 'left center' },
@@ -3087,9 +3107,9 @@ const styles = StyleSheet.create({
   monocleFrame: { width: PX * 2, height: PX * 2, borderWidth: 1, borderColor: '#d4a017', borderRadius: PX, backgroundColor: '#ffffff15' },
   monocleChain: { position: 'absolute', bottom: -PX * 1.5, right: 0, width: PX * 0.3, height: PX * 2, backgroundColor: '#d4a01780' },
 
-  accessoryEyePatch: { position: 'absolute', top: PX * 0.5, left: PX * 0.8, width: PX * 2, height: PX * 1.8, backgroundColor: '#1a1a1a', borderRadius: PX * 0.5, zIndex: 2 },
+  accessoryEyePatch: { position: 'absolute', top: PX * 0.5, left: PX * 0.8, width: PX * 2, height: PX * 1.8, backgroundColor: '#000000', borderRadius: PX * 0.5, zIndex: 2 },
 
-  accessoryBandana: { position: 'absolute', bottom: 0, left: 0, right: 0, height: PX * 2, backgroundColor: '#1a1a1a', borderRadius: 1, zIndex: 2 },
+  accessoryBandana: { position: 'absolute', bottom: 0, left: 0, right: 0, height: PX * 2, backgroundColor: '#000000', borderRadius: 1, zIndex: 2 },
 
   // ── New Back Items ───────────────────────────────────────
   jetpack: { position: 'absolute', top: 30, right: 2, zIndex: -1, alignItems: 'center' as const },
@@ -3158,7 +3178,7 @@ const styles = StyleSheet.create({
   },
   dragonPupil: {
     position: 'absolute', top: PX * 0.55, left: PX * 0.85,
-    width: PX * 0.25, height: PX * 0.35, backgroundColor: '#1a1a1a',
+    width: PX * 0.25, height: PX * 0.35, backgroundColor: '#000000',
     borderRadius: PX * 0.12,
   },
   dragonSnout: {
@@ -3216,7 +3236,7 @@ const styles = StyleSheet.create({
   alienBelt: { position: 'absolute' as const, bottom: PX * 0.6, left: PX * 0.2, width: PX * 2.4, height: PX * 0.3, backgroundColor: '#6b7280', borderRadius: 1 },
   alienGem: { position: 'absolute' as const, bottom: PX * 0.5, left: PX * 1, width: PX * 0.4, height: PX * 0.4, backgroundColor: '#8b5cf6', borderRadius: PX * 0.2, shadowColor: '#8b5cf6', shadowRadius: 3, shadowOpacity: 0.8 },
   alienHead: { position: 'absolute', bottom: PX * 2, left: PX * 0.2, width: PX * 3.2, height: PX * 2.8, backgroundColor: '#22c55e', borderRadius: PX * 1.5, borderTopLeftRadius: PX * 1.8, borderTopRightRadius: PX * 1.8 },
-  alienEye: { position: 'absolute', top: PX * 0.7, width: PX * 0.9, height: PX * 0.9, backgroundColor: '#1a1a1a', borderRadius: PX * 0.45, shadowColor: '#1a1a1a', shadowRadius: 2, shadowOpacity: 0.5 },
+  alienEye: { position: 'absolute', top: PX * 0.7, width: PX * 0.9, height: PX * 0.9, backgroundColor: '#000000', borderRadius: PX * 0.45, shadowColor: '#000000', shadowRadius: 2, shadowOpacity: 0.5 },
   alienPupil: { position: 'absolute', top: PX * 0.85, width: PX * 0.4, height: PX * 0.4, backgroundColor: '#6366f1', borderRadius: PX * 0.2, shadowColor: '#6366f1', shadowRadius: 2, shadowOpacity: 0.8 },
   alienMouth: { position: 'absolute', bottom: PX * 0.4, left: PX * 1.2, width: PX * 0.6, height: PX * 0.25, backgroundColor: '#16a34a', borderRadius: PX * 0.12, opacity: 0.5 },
   alienAntennaL: { position: 'absolute', bottom: PX * 4.5, left: PX * 0.6, width: PX * 0.25, height: PX * 1, backgroundColor: '#22c55e', transform: [{ rotate: '-15deg' }] },
@@ -3389,7 +3409,7 @@ const styles = StyleSheet.create({
   },
   crabHelmetEye: {
     position: 'absolute', bottom: PX * 4.2,
-    width: PX * 0.8, height: PX * 0.8, backgroundColor: '#1a1a1a',
+    width: PX * 0.8, height: PX * 0.8, backgroundColor: '#000000',
     borderRadius: PX * 0.4,
   },
   crabHelmetClawL: {
@@ -3464,13 +3484,13 @@ const styles = StyleSheet.create({
   crabEye: {
     position: 'absolute', bottom: PX * 3.6,
     width: PX * 0.6, height: PX * 0.6, backgroundColor: '#fef3c7',
-    borderRadius: PX * 0.3, borderWidth: 0.5, borderColor: '#1a1a1a',
+    borderRadius: PX * 0.3, borderWidth: 0.5, borderColor: '#000000',
   },
   crabEyeL: { left: PX * 1.7 },
   crabEyeR: { left: PX * 3.7 },
   crabPupil: {
     position: 'absolute', bottom: PX * 3.7,
-    width: PX * 0.3, height: PX * 0.3, backgroundColor: '#1a1a1a',
+    width: PX * 0.3, height: PX * 0.3, backgroundColor: '#000000',
     borderRadius: PX * 0.15,
   },
   crabPupilL: { left: PX * 1.85 },
@@ -3516,8 +3536,8 @@ const styles = StyleSheet.create({
 
   // ── New Hats (pirate, cowboy, fez, mohawk spikes) ──────────
   pirateHat: { alignItems: 'center' as const, marginBottom: -6, zIndex: 5 },
-  pirateHatCrown: { width: PX * 7, height: PX * 3, backgroundColor: '#1a1a1a', borderTopLeftRadius: PX * 3, borderTopRightRadius: PX * 3 },
-  pirateHatBrim: { width: PX * 9, height: PX * 1.2, backgroundColor: '#1a1a1a', borderRadius: 1, marginTop: -1 },
+  pirateHatCrown: { width: PX * 7, height: PX * 3, backgroundColor: '#000000', borderTopLeftRadius: PX * 3, borderTopRightRadius: PX * 3 },
+  pirateHatBrim: { width: PX * 9, height: PX * 1.2, backgroundColor: '#000000', borderRadius: 1, marginTop: -1 },
   pirateHatSkull: { position: 'absolute', top: PX * 0.8, left: PX * 2.5, width: PX * 1.5, height: PX * 1.5, backgroundColor: '#ffffff60', borderRadius: PX * 0.75 },
 
   cowboyHat: { alignItems: 'center' as const, marginBottom: -6, zIndex: 5 },
@@ -3526,7 +3546,7 @@ const styles = StyleSheet.create({
 
   fez: { alignItems: 'center' as const, marginBottom: -6, zIndex: 5 },
   fezBody: { width: PX * 5, height: PX * 3.5, backgroundColor: '#dc2626', borderTopLeftRadius: 2, borderTopRightRadius: 2 },
-  fezTassel: { position: 'absolute', top: 0, right: -PX * 1.5, width: PX * 0.4, height: PX * 2, backgroundColor: '#1a1a1a', borderRadius: 1, transform: [{ rotate: '20deg' }] },
+  fezTassel: { position: 'absolute', top: 0, right: -PX * 1.5, width: PX * 0.4, height: PX * 2, backgroundColor: '#000000', borderRadius: 1, transform: [{ rotate: '20deg' }] },
 
   mohawkSpikes: { flexDirection: 'row' as const, alignItems: 'flex-end' as const, marginBottom: -6, zIndex: 5, gap: 1 },
   spike: { width: PX * 1.2, height: PX * 2, backgroundColor: '#9ca3af', borderTopLeftRadius: PX * 0.5, borderTopRightRadius: PX * 0.5 },
@@ -3539,7 +3559,7 @@ const styles = StyleSheet.create({
 
   accessoryPiercing: { position: 'absolute', bottom: PX * 0.5, right: PX * 0.8, width: PX * 0.6, height: PX * 0.6, backgroundColor: '#c0c0c0', borderRadius: PX * 0.3, borderWidth: 0.5, borderColor: '#9ca3af', zIndex: 3 },
 
-  accessoryVisor: { position: 'absolute', top: 0, left: -PX * 0.3, right: -PX * 0.3, height: PX * 1.8, backgroundColor: '#1a1a1acc', borderRadius: 2, zIndex: 3 },
+  accessoryVisor: { position: 'absolute', top: 0, left: -PX * 0.3, right: -PX * 0.3, height: PX * 1.8, backgroundColor: '#000000cc', borderRadius: 2, zIndex: 3 },
   visorStripe: { position: 'absolute', top: PX * 0.5, left: 0, right: 0, height: PX * 0.4, backgroundColor: '#3b82f680' },
 
   accessoryGasMask: { position: 'absolute', bottom: -PX * 0.5, left: 0, right: 0, height: PX * 3, backgroundColor: '#4b5563', borderRadius: 2, zIndex: 3 },
@@ -3552,9 +3572,9 @@ const styles = StyleSheet.create({
   smirkEyeL: { width: PX * 1.2, height: PX * 1.2 },
   smirkEyeR: { width: PX * 1.4, height: PX * 1, borderRadius: PX * 0.5 },
   cryingEye: { width: PX * 1.2, height: PX * 1.6, borderBottomLeftRadius: PX * 0.3, borderBottomRightRadius: PX * 0.3 },
-  surprisedMouth: { width: PX * 1.2, height: PX * 1.2, borderRadius: PX * 0.6, backgroundColor: '#1a1a1a' },
+  surprisedMouth: { width: PX * 1.2, height: PX * 1.2, borderRadius: PX * 0.6, backgroundColor: '#000000' },
   smirkMouth: { width: PX * 2, height: PX * 0.6, borderBottomRightRadius: 3, backgroundColor: '#c4956a', transform: [{ rotate: '5deg' }] },
-  cryingMouth: { width: PX * 2, height: PX * 0.8, borderTopLeftRadius: 3, borderTopRightRadius: 3, backgroundColor: '#1a1a1a' },
+  cryingMouth: { width: PX * 2, height: PX * 0.8, borderTopLeftRadius: 3, borderTopRightRadius: 3, backgroundColor: '#000000' },
   tear: { position: 'absolute', bottom: PX * 0.5, width: PX * 0.4, height: PX * 1, backgroundColor: '#60a5fa80', borderRadius: PX * 0.2 },
 
   // ── New Facial Hair ────────────────────────────────────────
@@ -3589,7 +3609,7 @@ const styles = StyleSheet.create({
   petSnake: { position: 'absolute', bottom: 14, right: -10, width: PX * 8, height: PX * 4, zIndex: -1 },
   snakeBody: { position: 'absolute', bottom: PX * 0.5, left: PX * 1, width: PX * 5, height: PX * 0.8, backgroundColor: '#22c55e', borderRadius: PX * 0.4, transform: [{ rotate: '-3deg' }] },
   snakeHead: { position: 'absolute', bottom: PX * 0.8, left: PX * 0.2, width: PX * 1.5, height: PX * 1.2, backgroundColor: '#22c55e', borderRadius: PX * 0.6 },
-  snakeEye: { position: 'absolute', top: PX * 0.2, left: PX * 0.3, width: PX * 0.4, height: PX * 0.4, backgroundColor: '#1a1a1a', borderRadius: PX * 0.2 },
+  snakeEye: { position: 'absolute', top: PX * 0.2, left: PX * 0.3, width: PX * 0.4, height: PX * 0.4, backgroundColor: '#000000', borderRadius: PX * 0.2 },
   snakeTongue: { position: 'absolute', bottom: PX * 0.1, left: -PX * 0.5, width: PX * 0.8, height: PX * 0.15, backgroundColor: '#ef4444' },
 
   petBat: { position: 'absolute', top: 6, right: -8, width: PX * 6, height: PX * 4, zIndex: 8 },
@@ -3600,7 +3620,7 @@ const styles = StyleSheet.create({
 
   petSkull: { position: 'absolute', bottom: 14, right: -8, width: PX * 5, height: PX * 5, zIndex: -1 },
   skullHead: { position: 'absolute', bottom: PX * 0.5, left: PX * 0.5, width: PX * 3, height: PX * 2.8, backgroundColor: '#f5f5f4', borderTopLeftRadius: PX * 1.5, borderTopRightRadius: PX * 1.5, borderRadius: PX * 0.5 },
-  skullEye: { position: 'absolute', top: PX * 0.6, width: PX * 0.8, height: PX * 0.8, backgroundColor: '#1a1a1a', borderRadius: PX * 0.4 },
+  skullEye: { position: 'absolute', top: PX * 0.6, width: PX * 0.8, height: PX * 0.8, backgroundColor: '#000000', borderRadius: PX * 0.4 },
   skullNose: { position: 'absolute', bottom: PX * 0.8, left: PX * 1.2, width: PX * 0.5, height: PX * 0.3, backgroundColor: '#d4d4d480', borderRadius: PX * 0.15 },
   skullTeeth: { position: 'absolute', bottom: 0, left: PX * 0.5, right: PX * 0.5, height: PX * 0.4, backgroundColor: '#e5e5e5', borderBottomLeftRadius: 1, borderBottomRightRadius: 1 },
   skullJaw: { position: 'absolute', bottom: 0, left: PX * 0.8, width: PX * 2.4, height: PX * 0.5, backgroundColor: '#e5e5e5', borderBottomLeftRadius: PX * 0.3, borderBottomRightRadius: PX * 0.3 },
@@ -3610,7 +3630,7 @@ const styles = StyleSheet.create({
   mushroomSpot1: { position: 'absolute', top: PX * 0.3, left: PX * 0.5, width: PX * 0.8, height: PX * 0.8, backgroundColor: '#ffffff60', borderRadius: PX * 0.4 },
   mushroomSpot2: { position: 'absolute', top: PX * 0.5, right: PX * 0.6, width: PX * 0.6, height: PX * 0.6, backgroundColor: '#ffffff40', borderRadius: PX * 0.3 },
   mushroomStem: { position: 'absolute', bottom: 0, left: PX * 1.2, width: PX * 1.2, height: PX * 1.5, backgroundColor: '#fef3c7', borderBottomLeftRadius: PX * 0.3, borderBottomRightRadius: PX * 0.3 },
-  mushroomEye: { position: 'absolute', bottom: PX * 1.8, width: PX * 0.4, height: PX * 0.4, backgroundColor: '#1a1a1a', borderRadius: PX * 0.2 },
+  mushroomEye: { position: 'absolute', bottom: PX * 1.8, width: PX * 0.4, height: PX * 0.4, backgroundColor: '#000000', borderRadius: PX * 0.2 },
 
   // ── New Auras (toxic, holy, void) ──────────────────────────
   auraToxic: { position: 'absolute', top: 0, left: -2, right: -2, bottom: 16, zIndex: -1 },

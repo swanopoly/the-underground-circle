@@ -221,14 +221,14 @@ export default function CirclesScreen({ navigation }: any) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
   },
   header: {
-    paddingTop: 60,
-    paddingBottom: 20,
+    paddingTop: 16,
+    paddingBottom: 16,
     paddingHorizontal: 24,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: '#21262d',
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-end',
@@ -283,7 +283,7 @@ const styles = StyleSheet.create({
     width: 48,
     height: 48,
     borderRadius: 24,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -324,7 +324,7 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   memberBadge: {
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#161b22',
     borderRadius: 12,
     paddingVertical: 4,
     paddingHorizontal: 10,
@@ -339,7 +339,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     borderTopWidth: 1,
-    borderTopColor: '#1a1a1a',
+    borderTopColor: '#21262d',
     paddingTop: 12,
   },
   inviteCode: {

@@ -297,6 +297,43 @@ export async function triggerAutomation(id: string, circleId: string): Promise<{
   }
 }
 
+/** Test/dry-run an automation — runs AI but doesn't route output or create tasks */
+export async function testAutomation(id: string, circleId: string): Promise<{ runId?: string; error?: string }> {
+  const { data: refreshed } = await supabase.auth.refreshSession();
+  const accessToken = refreshed?.session?.access_token;
+  const userId = refreshed?.user?.id;
+  if (!accessToken) return { error: 'Not authenticated' };
+
+  const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
+  const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
+
+  try {
+    const res = await fetch(`${supabaseUrl}/functions/v1/automation-executor`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+        'apikey': anonKey,
+      },
+      body: JSON.stringify({
+        automationId: id,
+        circleId,
+        triggerSource: 'manual',
+        triggeredBy: userId,
+        dryRun: true,
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      return { error: `${res.status}: ${text}` };
+    }
+    const data = await res.json();
+    return { runId: data?.runId };
+  } catch (e: any) {
+    return { error: e.message };
+  }
+}
+
 // ─── Load runs ──────────────────────────────────────────────────────────────
 
 export async function loadRuns(automationId: string, limit = 20): Promise<AutomationRun[]> {

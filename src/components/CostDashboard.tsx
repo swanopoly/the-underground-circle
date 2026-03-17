@@ -753,14 +753,14 @@ function formatDate(dateStr: string): string {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     padding: 16,
   },
 
   // Empty State
   emptyContainer: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#000000',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 32,
@@ -810,10 +810,10 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     borderWidth: 1,
     borderColor: '#333',
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
   },
   dateRangeBtnActive: {
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderWidth: 2,
   },
   dateRangeBtnText: {
@@ -830,7 +830,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 6,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#333',
   },
@@ -843,7 +843,7 @@ const styles = StyleSheet.create({
 
   // Summary Banner
   summaryBanner: {
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#333',
     borderLeftWidth: 3,
@@ -886,7 +886,7 @@ const styles = StyleSheet.create({
   },
   costCard: {
     flex: 1,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#333',
     borderRadius: 8,
@@ -927,7 +927,7 @@ const styles = StyleSheet.create({
 
   // Chart
   chartContainer: {
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#333',
     borderRadius: 8,
@@ -969,7 +969,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   spenderRow: {
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#333',
     borderRadius: 8,
@@ -1051,7 +1051,7 @@ const styles = StyleSheet.create({
   trendSummary: {
     flexDirection: 'row',
     justifyContent: 'space-around',
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#333',
     borderRadius: 8,
@@ -1075,7 +1075,7 @@ const styles = StyleSheet.create({
 
   // Model Breakdown
   modelRow: {
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#333',
     borderRadius: 8,
@@ -1128,7 +1128,7 @@ const styles = StyleSheet.create({
   tokenCard: {
     flex: 1,
     minWidth: '45%' as any,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#333',
     borderRadius: 8,
@@ -1147,7 +1147,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   tokenBarContainer: {
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#333',
     borderRadius: 8,
@@ -1227,7 +1227,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     padding: 14,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     borderWidth: 1,
     borderColor: '#333',
     borderRadius: 8,

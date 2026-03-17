@@ -449,7 +449,7 @@ const styles = StyleSheet.create({
     minWidth: 140,
     backgroundColor: '#0d0d14',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     padding: 12,
   },
@@ -501,7 +501,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: '#0d0d14',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
   },
   filterBtnActive: {
     backgroundColor: '#6366f1',
@@ -555,7 +555,7 @@ const styles = StyleSheet.create({
   groupCard: {
     backgroundColor: '#0d0d14',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 10,
     overflow: 'hidden',
   },
@@ -607,7 +607,7 @@ const styles = StyleSheet.create({
   },
   progressBar: {
     height: 4,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#2a2a2a',
     marginHorizontal: 12,
     marginBottom: 12,
     borderRadius: 2,
@@ -621,7 +621,7 @@ const styles = StyleSheet.create({
   // Agent List
   agentList: {
     borderTopWidth: 1,
-    borderTopColor: '#1a1a2e',
+    borderTopColor: '#2a2a2a',
     paddingTop: 8,
     paddingBottom: 4,
   },

@@ -14,9 +14,9 @@ import {
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import ChatTab from './tabs/ChatTab';
+import OfficeTab from './tabs/OfficeTab';
 
-// Lazy-load all non-chat tabs — only mount when user navigates to them
-const OfficeTab = lazy(() => import('./tabs/OfficeTab'));
+// Lazy-load all non-chat/office tabs — only mount when user navigates to them
 const FeedTab = lazy(() => import('./tabs/FeedTab'));
 const MembersTab = lazy(() => import('./tabs/MembersTab'));
 const ChallengesTab = lazy(() => import('./tabs/ChallengesTab'));
@@ -37,10 +37,12 @@ interface AgentStats {
   costToday: number;
   costWeek: number;
   tokens: number;
+  tokensTotal: number;
+  messagesTotal: number;
 }
 
-// Only Chat stays mounted permanently; all other tabs mount on first visit
-const PERSISTENT_TABS = new Set(['CHAT']);
+// Chat + Office stay mounted permanently; other tabs mount on first visit
+const PERSISTENT_TABS = new Set(['CHAT', 'OFFICE']);
 
 const TAB_META: { key: string; label: string; icon: string }[] = [
   { key: 'CHAT', label: 'Chat', icon: '💬' },
@@ -48,11 +50,11 @@ const TAB_META: { key: string; label: string; icon: string }[] = [
   { key: 'ROOMS', label: 'Rooms', icon: '🏠' },
   { key: 'BACKPACK', label: 'Backpack', icon: '🎒' },
   { key: 'FEED', label: 'Feed', icon: '📋' },
+  { key: 'WALLET', label: 'Wallet', icon: '💰' },
+  { key: 'INTEGRATIONS', label: 'Integrations', icon: '🔗' },
   { key: 'CHALLENGES', label: 'Challenges', icon: '🏆' },
   { key: 'MEMBERS', label: 'Members', icon: '👥' },
   { key: 'ANALYTICS', label: 'Analytics', icon: '📊' },
-  { key: 'INTEGRATIONS', label: 'Integrations', icon: '🔗' },
-  { key: 'WALLET', label: 'Wallet', icon: '💰' },
   { key: 'PROFILE', label: 'Profile', icon: '👤' },
 ];
 
@@ -61,7 +63,7 @@ type Tab = string;
 
 export default function CircleDetailScreen({ route, navigation }: any) {
   const { circleId, circleName } = route.params;
-  const [activeTab, setActiveTab] = useState<Tab>('CHAT');
+  const [activeTab, setActiveTab] = useState<Tab>('OFFICE');
   const [circle, setCircle] = useState<Circle | null>(null);
   const [memberCount, setMemberCount] = useState(0);
   const [activeStreakCount, setActiveStreakCount] = useState(0);
@@ -69,10 +71,49 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   const isMobile = winW < 700;
   const [onlineMembers, setOnlineMembers] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [agentStats, setAgentStats] = useState<AgentStats>({ agentCount: 0, sessionCount: 0, costToday: 0, costWeek: 0, tokens: 0 });
+  const [agentStats, setAgentStats] = useState<AgentStats>({ agentCount: 0, sessionCount: 0, costToday: 0, costWeek: 0, tokens: 0, tokensTotal: 0, messagesTotal: 0 });
 
   useEffect(() => {
     loadCircleData();
+    loadAgentStats();
+  }, [circleId]);
+
+  // Load agent stats immediately from DB (don't wait for Office tab)
+  const loadAgentStats = async () => {
+    try {
+      const { data: agents } = await supabase
+        .from('circle_office_agents')
+        .select('id, status, token_usage_today, token_usage_total, message_count_today, message_count_total')
+        .eq('circle_id', circleId);
+      if (agents && agents.length > 0) {
+        setAgentStats({
+          agentCount: agents.length,
+          sessionCount: agents.filter((a: any) => a.status !== 'offline').length,
+          costToday: agents.reduce((s: number, a: any) => s + (a.token_usage_today || 0), 0) * 0.0000005,
+          costWeek: 0,
+          tokens: agents.reduce((s: number, a: any) => s + (a.token_usage_today || 0), 0),
+          tokensTotal: agents.reduce((s: number, a: any) => s + (a.token_usage_total || 0), 0),
+          messagesTotal: agents.reduce((s: number, a: any) => s + (a.message_count_total || 0), 0),
+        });
+      }
+    } catch {}
+  };
+
+  // Realtime subscription for agent stats updates
+  useEffect(() => {
+    const channel = supabase
+      .channel(`circle-agent-stats-${circleId}`)
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'circle_office_agents',
+        filter: `circle_id=eq.${circleId}`,
+      }, () => {
+        // Reload stats whenever an agent is updated (token counts changed)
+        loadAgentStats();
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
   }, [circleId]);
 
 
@@ -177,8 +218,13 @@ export default function CircleDetailScreen({ route, navigation }: any) {
               </View>
               <View style={styles.statDivider} />
               <View style={styles.stat}>
-                <Text style={styles.statNum}>{agentStats.tokens > 0 ? (agentStats.tokens > 1000 ? `${(agentStats.tokens / 1000).toFixed(0)}K` : agentStats.tokens) : '—'}</Text>
-                <Text style={styles.statLbl}>Tokens</Text>
+                <Text style={[styles.statNum, { color: '#f59e0b' }]}>{agentStats.tokensTotal > 0 ? (agentStats.tokensTotal > 1_000_000 ? `${(agentStats.tokensTotal / 1_000_000).toFixed(1)}M` : agentStats.tokensTotal > 1000 ? `${(agentStats.tokensTotal / 1000).toFixed(0)}K` : agentStats.tokensTotal) : '—'}</Text>
+                <Text style={styles.statLbl}>Total Tokens</Text>
+              </View>
+              <View style={styles.statDivider} />
+              <View style={styles.stat}>
+                <Text style={styles.statNum}>{agentStats.messagesTotal > 0 ? agentStats.messagesTotal : '—'}</Text>
+                <Text style={styles.statLbl}>Total Messages</Text>
               </View>
               <View style={styles.statDivider} />
               <View style={styles.stat}>
@@ -206,9 +252,11 @@ export default function CircleDetailScreen({ route, navigation }: any) {
         </ErrorBoundary>
       </View>
 
-      <LazyTab tabKey="OFFICE" activeTab={activeTab}>
-        <OfficeTab circleId={circleId} accentColor={accentColor} onAgentStats={setAgentStats} />
-      </LazyTab>
+      <View style={[styles.tabContent, activeTab !== 'OFFICE' && styles.hiddenTab]}>
+        <ErrorBoundary>
+          <OfficeTab circleId={circleId} accentColor={accentColor} onAgentStats={setAgentStats} />
+        </ErrorBoundary>
+      </View>
       <LazyTab tabKey="ROOMS" activeTab={activeTab}>
         <RoomsTab circleId={circleId} accentColor={accentColor} />
       </LazyTab>

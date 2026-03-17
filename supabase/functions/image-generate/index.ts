@@ -189,17 +189,16 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    // Auth
+    // Auth — always require valid JWT, never allow anonymous access
     const authHeader = req.headers.get("Authorization") || "";
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
-    let apiKey = api_key;
-    let userId = "anonymous";
+    let userId: string | null = null;
 
-    if (!apiKey && authHeader) {
+    if (authHeader) {
       const userClient = createClient(
         Deno.env.get("SUPABASE_URL")!,
         Deno.env.get("SUPABASE_ANON_KEY")!,
@@ -208,11 +207,22 @@ Deno.serve(async (req: Request) => {
       const { data: auth } = await userClient.auth.getUser();
       if (auth.user) {
         userId = auth.user.id;
-        const resolvedProvider = provider === "replicate" ? "replicate" : "openai";
-        apiKey = await getUserApiKey(supabase, userId, resolvedProvider);
       }
     }
 
+    if (!userId) {
+      return new Response(
+        JSON.stringify({ error: "Not authenticated — valid JWT required" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    // Get API key — user's own key from DB, or request body for testing, or platform fallback
+    let apiKey = api_key;
+    if (!apiKey) {
+      const resolvedProvider = provider === "replicate" ? "replicate" : "openai";
+      apiKey = await getUserApiKey(supabase, userId, resolvedProvider);
+    }
     if (!apiKey) {
       // Fallback to platform key for OpenAI
       if (provider !== "replicate") {

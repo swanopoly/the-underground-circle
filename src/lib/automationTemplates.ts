@@ -10,7 +10,7 @@ export interface AutomationTemplate {
   name: string;
   icon: string;
   description: string;
-  category: 'accountability' | 'reporting' | 'engagement' | 'ops';
+  category: 'accountability' | 'reporting' | 'engagement' | 'ops' | 'trading' | 'learning';
   trigger_type: 'schedule' | 'event' | 'manual';
   cron_expression?: string;
   event_config?: { table?: string; event: string; provider?: string };
@@ -40,7 +40,7 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     model: 'claude-haiku',
     output_target: 'chat',
     prompt: "Review today's check-ins and recent task completions for {{circle_name}}. Summarize what each member accomplished, call out who hasn't checked in, and highlight any streaks at risk. Keep it under 200 words. Be direct.",
-    include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: false },
+    include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: false, rooms: true, goals: true },
     spirit: 'pm',
   },
   {
@@ -54,8 +54,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-haiku',
     output_target: 'chat',
-    prompt: 'Generate a weekly progress report for {{circle_name}}. Include: total check-ins this week, tasks completed vs created, streak changes, most active member, MVP nomination. End with one actionable recommendation for next week.',
-    include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true },
+    prompt: 'Generate a weekly progress report for {{circle_name}}. Include: total check-ins this week, tasks completed vs created, streak changes, most active member, MVP nomination. Review goal progress and room activity. End with one actionable recommendation for next week.',
+    include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true, rooms: true, goals: true },
     spirit: 'pm',
   },
   {
@@ -114,8 +114,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-haiku',
     output_target: 'activity',
-    prompt: "List all tasks completed today in {{circle_name}}. For each, note who completed it. End with the circle's overall open vs done task ratio. If no tasks were completed, say so briefly.",
-    include_context: { members: true, tasks: true },
+    prompt: "List all tasks completed today in {{circle_name}}. For each, note who completed it and which room/project it belongs to. End with the circle's overall open vs done task ratio. If no tasks were completed, say so briefly.",
+    include_context: { members: true, tasks: true, rooms: true },
     spirit: 'pm',
   },
   {
@@ -129,8 +129,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-haiku',
     output_target: 'chat',
-    prompt: "It's Monday. Write a motivational kickoff for {{circle_name}}. Reference last week's wins (tasks done, streaks maintained). Set the tone for the week. Be real, not generic. Quote a real entrepreneur or builder — not the usual suspects. Keep it under 150 words.",
-    include_context: { members: true, tasks: true, streaks: true, analytics: true },
+    prompt: "It's Monday. Write a motivational kickoff for {{circle_name}}. Reference last week's wins (tasks done, streaks maintained). Mention active rooms/projects and goal progress. Set the tone for the week. Be real, not generic. Quote a real entrepreneur or builder — not the usual suspects. Keep it under 150 words.",
+    include_context: { members: true, tasks: true, streaks: true, analytics: true, rooms: true, goals: true },
     spirit: 'coach',
   },
   {
@@ -144,8 +144,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-haiku',
     output_target: 'activity',
-    prompt: "Check {{circle_name}} for members who haven't checked in or completed tasks in 3+ days. List them with their last streak count. Suggest one re-engagement action. If everyone is active, say so briefly.",
-    include_context: { members: true, check_ins: true, tasks: true, streaks: true },
+    prompt: "Check {{circle_name}} for members who haven't checked in or completed tasks in 3+ days. List them with their last streak count. Check for stuck tasks (in_progress for 3+ days). Suggest one re-engagement action. If everyone is active, say so briefly.",
+    include_context: { members: true, check_ins: true, tasks: true, streaks: true, rooms: true },
     spirit: 'coach',
   },
   {
@@ -174,8 +174,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-sonnet',
     output_target: 'chat',
-    prompt: 'Generate a monthly retrospective for {{circle_name}}. Analyze: participation trends, streak patterns, task velocity, most improved member, biggest challenge. Provide 3 data-driven recommendations for next month. Format with headers and bullet points.',
-    include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true },
+    prompt: 'Generate a monthly retrospective for {{circle_name}}. Analyze: participation trends, streak patterns, task velocity, most improved member, biggest challenge. Review goal progress and room activity. Provide 3 data-driven recommendations for next month. Format with headers and bullet points.',
+    include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true, rooms: true, goals: true },
     spirit: 'strategist',
   },
   // ─── New templates ────────────────────────────────────────
@@ -205,8 +205,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-haiku',
     output_target: 'chat',
-    prompt: "Analyze today's progress for {{circle_name}}. Look at check-ins for mentions of goals, milestones, or blockers. Identify who is making progress and who might need help. Give 1 specific suggestion per struggling member. Be direct, under 200 words.",
-    include_context: { members: true, check_ins: true, tasks: true, streaks: true },
+    prompt: "Analyze today's progress for {{circle_name}}. Review goals: {{goals}}. Look at check-ins for mentions of goals, milestones, or blockers. Identify who is making progress and who might need help. Give 1 specific suggestion per struggling member. Be direct, under 200 words.",
+    include_context: { members: true, check_ins: true, tasks: true, streaks: true, goals: true },
     spirit: 'coach',
   },
   {
@@ -220,8 +220,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-haiku',
     output_target: 'chat',
-    prompt: "It's the weekend! Write a fun recap of {{circle_name}}'s week. Include: MVP (most tasks done or best streak), funniest/most interesting check-in, a random award (e.g. 'Most Likely to Deploy on Friday'), and a challenge for next week. Keep the tone playful. Under 200 words.",
-    include_context: { members: true, check_ins: true, tasks: true, streaks: true },
+    prompt: "It's the weekend! Write a fun recap of {{circle_name}}'s week. Include: MVP (most tasks done or best streak), funniest/most interesting check-in, a random award (e.g. 'Most Likely to Deploy on Friday'), room/project highlights, and a challenge for next week. Keep the tone playful. Under 200 words.",
+    include_context: { members: true, check_ins: true, tasks: true, streaks: true, rooms: true, goals: true },
     spirit: 'writer',
   },
   {
@@ -250,8 +250,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-sonnet',
     output_target: 'chat',
-    prompt: "Analyze {{circle_name}} and identify the ONE member who would benefit most from a nudge right now. Consider: haven't checked in, streak at risk, tasks overdue, or declining activity. Write a personalized, caring but direct message to that specific person. Use their name. One person only, under 100 words. If everyone is crushing it, give a short group shoutout instead.",
-    include_context: { members: true, check_ins: true, tasks: true, streaks: true },
+    prompt: "Analyze {{circle_name}} and identify the ONE member who would benefit most from a nudge right now. Consider: haven't checked in, streak at risk, tasks overdue, stuck tasks, or declining activity. Reference their room/project context. Write a personalized, caring but direct message to that specific person. Use their name. One person only, under 100 words. If everyone is crushing it, give a short group shoutout instead.",
+    include_context: { members: true, check_ins: true, tasks: true, streaks: true, rooms: true, goals: true },
     spirit: 'coach',
   },
   {
@@ -265,8 +265,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-sonnet',
     output_target: 'chat',
-    prompt: "Run a proactive check-in for {{circle_name}}. Review: 1) Who hasn't checked in today? 2) Who has tasks overdue by 2+ days? 3) Who has declining streak momentum? For each person who needs attention, write a brief, personalized nudge (use their name, reference their specific situation). For members who are on track, give a quick one-line acknowledgment. End with one team-level observation. Be a coach, not a bot. Under 300 words.",
-    include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true },
+    prompt: "Run a proactive check-in for {{circle_name}}. Review: 1) Who hasn't checked in today? 2) Who has tasks overdue by 2+ days? Stuck tasks: {{stuck_tasks}}. 3) Who has declining streak momentum? 4) What's the status of active goals? {{goals}} For each person who needs attention, write a brief, personalized nudge (use their name, reference their room/project and specific situation). For members who are on track, give a quick one-line acknowledgment. End with one team-level observation. Be a coach, not a bot. Under 300 words.",
+    include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true, rooms: true, goals: true },
     spirit: 'coach',
   },
   // ─── Boss Agent (Jon Snow) Automations ──────────────────────────────────────
@@ -282,7 +282,7 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     model: 'claude-haiku',
     output_target: 'activity',
     prompt: "You are Jon Snow, the Boss agent. Check all tasks in 'peer_review' status for {{circle_name}}. For each task, check if all assigned peer reviewers (from the task's goal) have approved. If ALL peers approved, promote the task to 'review' status and post a comment: '[AUTO_PROMOTED] Jon Snow promoted this task after all peer reviewers approved.' If some peers haven't reviewed yet, note which ones are pending. Report what you promoted and what's still waiting. Tasks in peer_review: {{tasks_in_peer_review}}",
-    include_context: { tasks: true },
+    include_context: { tasks: true, rooms: true, goals: true },
     spirit: 'tech-lead',
     suggested: false,
   },
@@ -297,8 +297,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'Jon Snow',
     model: 'claude-sonnet',
     output_target: 'activity',
-    prompt: "You are Jon Snow, the Boss agent for {{circle_name}}. Review each active goal that has auto_task_count > 0. For each goal, analyze how many tasks exist vs the target count. If more tasks are needed, generate new task titles and descriptions that advance the goal. Assign them round-robin to the goal's assigned agents. Output as JSON array: [{title, description, priority, assigned_agent_id, goal_id}]. Goals: {{goals}} Recent tasks: {{recent_tasks}}",
-    include_context: { tasks: true, members: true },
+    prompt: "You are Jon Snow, the Boss agent for {{circle_name}}. Review each active goal that has auto_task_count > 0. For each goal, analyze how many tasks exist vs the target count. If more tasks are needed, generate new task titles and descriptions that advance the goal. Consider the room/project context when generating tasks. Assign them round-robin to the goal's assigned agents. Output as JSON array: [{title, description, priority, assigned_agent_id, goal_id}]. Goals: {{goals}} Recent tasks: {{recent_tasks}} Rooms: {{rooms}}",
+    include_context: { tasks: true, members: true, rooms: true, goals: true },
     spirit: 'tech-lead',
     suggested: false,
   },
@@ -313,8 +313,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'Jon Snow',
     model: 'claude-haiku',
     output_target: 'activity',
-    prompt: "You are Jon Snow, the Boss agent for {{circle_name}}. Find tasks that have been stuck in 'in_progress', 'peer_review', or 'review' for more than 24 hours. For each stuck task: identify the assignee, how long it's been stuck, and suggest an action (reassign, break into subtasks, or escalate). If any task is stuck >48h, flag it as URGENT. Stuck tasks: {{stuck_tasks}}",
-    include_context: { tasks: true, members: true },
+    prompt: "You are Jon Snow, the Boss agent for {{circle_name}}. Find tasks that have been stuck in 'in_progress', 'peer_review', or 'review' for more than 24 hours. For each stuck task: identify the assignee, which room/project it's in, how long it's been stuck, and suggest an action (reassign, break into subtasks, or escalate). If any task is stuck >48h, flag it as URGENT. Stuck tasks: {{stuck_tasks}} Rooms: {{rooms}}",
+    include_context: { tasks: true, members: true, rooms: true, goals: true },
     spirit: 'tech-lead',
     suggested: false,
   },
@@ -348,8 +348,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-haiku',
     output_target: 'chat',
-    prompt: "It's focus time for {{circle_name}}. Review each member's active tasks and pick the single highest-priority item they should deep work on right now. Post a concise focus block: member name → task → suggested time block (25m, 50m, or 90m based on complexity). End with a reminder: phones off, notifications silenced. Go.",
-    include_context: { members: true, tasks: true },
+    prompt: "It's focus time for {{circle_name}}. Review each member's active tasks and pick the single highest-priority item they should deep work on right now. Consider which room/project they're working in. Post a concise focus block: member name → task → room/project → suggested time block (25m, 50m, or 90m based on complexity). End with a reminder: phones off, notifications silenced. Go.",
+    include_context: { members: true, tasks: true, rooms: true, goals: true },
     spirit: 'coach',
   },
   {
@@ -363,8 +363,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-sonnet',
     output_target: 'chat',
-    prompt: "Match members of {{circle_name}} into accountability pairs for this week. Pair people with complementary goals or similar struggles — someone strong in consistency with someone building that habit. For each pair: explain why they're matched, suggest one thing they should check in on daily, and set a micro-challenge they can do together. Rotate from last week's pairings.",
-    include_context: { members: true, check_ins: true, streaks: true, tasks: true },
+    prompt: "Match members of {{circle_name}} into accountability pairs for this week. Pair people with complementary goals or similar struggles — someone strong in consistency with someone building that habit. Consider who's working in the same rooms/projects. For each pair: explain why they're matched, suggest one thing they should check in on daily, and set a micro-challenge they can do together. Rotate from last week's pairings.",
+    include_context: { members: true, check_ins: true, streaks: true, tasks: true, rooms: true, goals: true },
     spirit: 'coach',
   },
   {
@@ -378,8 +378,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-haiku',
     output_target: 'chat',
-    prompt: "Good morning {{circle_name}}. Review yesterday's results — who completed their tasks, who fell short. Then post a fresh daily intentions prompt. Ask each member to reply with their TOP 3 for today (not 5, not 10 — three). Include a quick energy check: 🔋 How charged are you 1-10? Tailor the tone based on yesterday's momentum — celebratory if the group crushed it, urgent if they slacked.",
-    include_context: { members: true, check_ins: true, tasks: true },
+    prompt: "Good morning {{circle_name}}. Review yesterday's results — who completed their tasks, who fell short. Check goal progress and room activity. Then post a fresh daily intentions prompt. Ask each member to reply with their TOP 3 for today (not 5, not 10 — three). Include a quick energy check: 🔋 How charged are you 1-10? Tailor the tone based on yesterday's momentum — celebratory if the group crushed it, urgent if they slacked.",
+    include_context: { members: true, check_ins: true, tasks: true, rooms: true, goals: true },
     spirit: 'coach',
   },
   {
@@ -393,8 +393,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-haiku',
     output_target: 'chat',
-    prompt: "It's reflection time for {{circle_name}}. Review today's task completions and check-ins. Post an evening wrap: 🏆 Top win of the day (the single best thing someone accomplished), 📉 Biggest miss (diplomatically — what didn't get done), 💡 Lesson of the day (pattern you noticed), 👀 Tomorrow preview (what's on deck). Keep the vibe honest but encouraging.",
-    include_context: { members: true, check_ins: true, tasks: true, streaks: true },
+    prompt: "It's reflection time for {{circle_name}}. Review today's task completions, check-ins, and room activity. Post an evening wrap: 🏆 Top win of the day (the single best thing someone accomplished), 📉 Biggest miss (diplomatically — what didn't get done), 💡 Lesson of the day (pattern you noticed), 👀 Tomorrow preview (what's on deck based on goals and stuck tasks). Keep the vibe honest but encouraging.",
+    include_context: { members: true, check_ins: true, tasks: true, streaks: true, rooms: true, goals: true },
     spirit: 'mentor',
   },
   {
@@ -423,8 +423,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-sonnet',
     output_target: 'chat',
-    prompt: "Run a weekly goal review for {{circle_name}}. For each active goal: calculate a completion score (0-100%) based on tasks done vs total, assess momentum (accelerating/steady/stalling/stalled), and recommend ONE specific adjustment for next week. If any goal is >2 weeks old with <20% completion, flag it as at-risk and suggest either breaking it down or pivoting. End with the group's overall goal health score.",
-    include_context: { members: true, tasks: true, streaks: true, analytics: true },
+    prompt: "Run a weekly goal review for {{circle_name}}. Goals: {{goals}}. For each active goal: calculate a completion score (0-100%) based on tasks done vs total, assess momentum (accelerating/steady/stalling/stalled), and recommend ONE specific adjustment for next week. If any goal is >2 weeks old with <20% completion, flag it as at-risk and suggest either breaking it down or pivoting. End with the group's overall goal health score.",
+    include_context: { members: true, tasks: true, streaks: true, analytics: true, goals: true },
     spirit: 'pm',
   },
   {
@@ -438,8 +438,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-haiku',
     output_target: 'chat',
-    prompt: "Find tasks in {{circle_name}} that have been in 'todo' or 'backlog' for 3+ days without any activity. For each procrastinated task: tag the assignee, estimate how long the task actually takes (be honest — most things take 15-45 min), and issue a direct challenge: 'This takes ~20 min. Can you start it in the next 2 hours? Reply ✅ to commit.' If someone has 3+ stale tasks, call it out as a pattern.",
-    include_context: { members: true, tasks: true },
+    prompt: "Find tasks in {{circle_name}} that have been in 'todo' or 'backlog' for 3+ days without any activity. Also check for stuck tasks: {{stuck_tasks}}. For each procrastinated task: tag the assignee, note the room/project, estimate how long the task actually takes (be honest — most things take 15-45 min), and issue a direct challenge: 'This takes ~20 min. Can you start it in the next 2 hours? Reply ✅ to commit.' If someone has 3+ stale tasks, call it out as a pattern.",
+    include_context: { members: true, tasks: true, rooms: true },
     spirit: 'coach',
   },
   {
@@ -468,8 +468,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-sonnet',
     output_target: 'chat',
-    prompt: "It's Sunday planning for {{circle_name}}. Run a structured planning session: 1) LAST WEEK SCORECARD — tasks completed/total, streak health, goal progress %. 2) UNFINISHED BUSINESS — list every carry-over task and ask: keep, kill, or delegate? 3) THIS WEEK'S BIG 3 — for each member, suggest 3 high-impact tasks based on their goals. 4) POTENTIAL BLOCKERS — flag anything that could derail the week. 5) COMMITMENT — ask each member to reply with their #1 non-negotiable for the week.",
-    include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true },
+    prompt: "It's Sunday planning for {{circle_name}}. Goals: {{goals}}. Rooms: {{rooms}}. Run a structured planning session: 1) LAST WEEK SCORECARD — tasks completed/total, streak health, goal progress %. 2) UNFINISHED BUSINESS — list every carry-over task and ask: keep, kill, or delegate? 3) THIS WEEK'S BIG 3 — for each member, suggest 3 high-impact tasks based on their goals and rooms. 4) POTENTIAL BLOCKERS — flag stuck tasks and risks. 5) COMMITMENT — ask each member to reply with their #1 non-negotiable for the week.",
+    include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true, rooms: true, goals: true },
     spirit: 'pm',
   },
   {
@@ -513,70 +513,100 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-haiku',
     output_target: 'chat',
-    prompt: "Check all tasks and goals in {{circle_name}} that have due dates. Flag anything due in the next 48 hours: ⏰ [TASK] due in [TIME] — assigned to [MEMBER] — status: [STATUS]. If something is overdue, flag it as 🚨 OVERDUE. If a task due today hasn't been started, escalate: 'This is due TODAY and still in [status]. What's the plan?' Group by urgency: overdue → due today → due tomorrow.",
-    include_context: { members: true, tasks: true },
+    prompt: "Check all tasks and goals in {{circle_name}} that have due dates. Goals: {{goals}}. Flag anything due in the next 48 hours: ⏰ [TASK] due in [TIME] — assigned to [MEMBER] — room: [ROOM] — status: [STATUS]. If something is overdue, flag it as 🚨 OVERDUE. If a task due today hasn't been started, escalate: 'This is due TODAY and still in [status]. What's the plan?' Group by urgency: overdue → due today → due tomorrow.",
+    include_context: { members: true, tasks: true, rooms: true, goals: true },
     spirit: 'pm',
   },
 
-  // ─── GitHub & Dev Workflow ─────────────────────────────────────────────────
+  // ─── Dev Workflow (Room-centric) ──────────────────────────────────────────
   {
     id: 'pr-summary',
-    name: 'PR Summary Bot',
+    name: 'Room: PR Summary',
     icon: '🔀',
-    description: 'Auto-summarize new PRs with changes, risk assessment, and review priority',
+    description: 'Summarize new PRs and link them to the Room/project they affect',
     category: 'ops',
     trigger_type: 'event',
     event_config: { provider: 'github', event: 'pull_request_opened' },
     agent: 'BlackSwan',
     model: 'claude-sonnet',
     output_target: 'chat',
-    prompt: "A new PR was opened in {{circle_name}}. PR data: {{event}}. Generate a concise summary: 1) What changed (2-3 bullets), 2) Risk level (low/medium/high) based on files changed and complexity, 3) Suggested reviewer from the team, 4) Estimated review time. If it's a trivial change (typo, deps, config), say 'Auto-approve candidate' and explain why.",
-    include_context: { members: true, tasks: true },
+    prompt: "A new PR was opened for {{circle_name}}. PR data: {{event}}. Rooms: {{rooms}}. Match this PR to the Room it belongs to based on files changed vs room files. Generate: 1) Which Room this PR affects, 2) What changed (2-3 bullets), 3) Risk level (low/medium/high), 4) Which room member should review, 5) Impact on room tasks: {{stuck_tasks}}. Post the summary to the matching room's chat.",
+    include_context: { members: true, tasks: true, rooms: true, goals: true },
     spirit: 'sr-engineer',
   },
   {
     id: 'deploy-changelog',
-    name: 'Deploy Changelog',
+    name: 'Room: Deploy Changelog',
     icon: '🚀',
-    description: 'Generate a changelog when code is pushed to main/production',
+    description: 'Generate a per-room changelog when code is pushed',
     category: 'reporting',
     trigger_type: 'event',
     event_config: { provider: 'github', event: 'push' },
     agent: 'BlackSwan',
     model: 'claude-haiku',
     output_target: 'chat',
-    prompt: "New code was pushed to {{circle_name}}'s repo. Push data: {{event}}. Generate a user-friendly changelog: what's new, what's fixed, what changed. Group by category (features, fixes, chores). If the push is to a non-main branch, respond with SKIP.",
-    include_context: { members: true },
+    prompt: "New code was pushed for {{circle_name}}. Push data: {{event}}. Rooms: {{rooms}}. Match the changed files to Rooms and generate a per-room changelog: what shipped, what changed, what's still in progress. Link to room tasks that were completed by this push. If the push is to a non-main branch, note which room's feature branch it is. If not mappable, respond with SKIP.",
+    include_context: { members: true, rooms: true, tasks: true },
     spirit: 'writer',
   },
   {
     id: 'ci-failure-analyst',
-    name: 'CI Failure Analyst',
+    name: 'Room: CI Failure Analyst',
     icon: '🔧',
-    description: 'Analyze CI failures, diagnose root cause, and suggest fixes',
+    description: 'Diagnose CI failures and route the fix to the right Room',
     category: 'ops',
     trigger_type: 'event',
     event_config: { provider: 'github', event: 'ci_completed' },
     agent: 'BlackSwan',
     model: 'claude-sonnet',
     output_target: 'chat',
-    prompt: "A CI workflow just completed in {{circle_name}}. Event data: {{event}}. If it PASSED, respond with SKIP. If it FAILED: 1) Identify the failing step, 2) Diagnose the root cause from error logs, 3) Suggest a specific fix with file + code change, 4) Estimate if this is a flaky test or a real bug. Be actionable — developers should be able to fix this in <10 minutes from your response.",
-    include_context: { members: true },
+    prompt: "A CI workflow completed in {{circle_name}}. Event data: {{event}}. Rooms: {{rooms}}. If it PASSED, respond with SKIP. If it FAILED: 1) Identify which Room's code caused the failure based on changed files, 2) Diagnose root cause, 3) Suggest specific fix (file + code change), 4) Tag the room member who last touched that code, 5) Create or update a room task for the fix. Route this alert to the affected room.",
+    include_context: { members: true, rooms: true, tasks: true },
     spirit: 'devops',
   },
   {
     id: 'code-review-reminder',
-    name: 'Code Review Reminder',
+    name: 'Room: Code Review Reminder',
     icon: '👁️',
-    description: 'Nudge reviewers when PRs have been waiting too long',
+    description: 'Nudge room members when their PRs have been waiting too long',
     category: 'ops',
     trigger_type: 'schedule',
     cron_expression: 'twice_daily',
     agent: 'BlackSwan',
     model: 'claude-haiku',
     output_target: 'chat',
-    prompt: "Check for open PRs in {{circle_name}} that have been waiting for review for >24 hours. For each: tag the assigned reviewer, show how long it's been waiting, and note the PR size (files changed). If any PR is >48 hours old, escalate: '🚨 This PR is blocking — please review today.' If all PRs are reviewed, respond with SKIP.",
-    include_context: { members: true },
+    prompt: "Check open PRs for {{circle_name}}. Rooms: {{rooms}}. Tasks in review: {{tasks_in_peer_review}}. For each open PR, identify which Room it belongs to and tag that room's members. If a PR has been waiting >24h, escalate to the room: '🚨 [ROOM_NAME] has a PR blocking for [TIME].' Also check room tasks in peer_review status — if both a PR and a task are stuck, flag the connection. If all reviews are done, respond with SKIP.",
+    include_context: { members: true, rooms: true, tasks: true },
+    spirit: 'tech-lead',
+  },
+  {
+    id: 'room-daily-digest',
+    name: 'Room: Daily Dev Digest',
+    icon: '📋',
+    description: 'Per-room daily digest of commits, tasks moved, files changed, and blockers',
+    category: 'reporting',
+    trigger_type: 'schedule',
+    cron_expression: 'daily',
+    agent: 'BlackSwan',
+    model: 'claude-haiku',
+    output_target: 'chat',
+    prompt: "Generate a daily dev digest for each active Room in {{circle_name}}. Rooms: {{rooms}}. For each room: 1) FILES — what was added/changed today, 2) TASKS — moved forward, stuck, or completed, 3) MESSAGES — key decisions from room chat, 4) BLOCKERS — stuck tasks or open issues. Stuck tasks: {{stuck_tasks}}. End each room's section with a one-line next action. Skip rooms with no activity.",
+    include_context: { members: true, rooms: true, tasks: true, goals: true },
+    spirit: 'pm',
+  },
+  {
+    id: 'room-task-assigner',
+    name: 'Room: Smart Task Assignment',
+    icon: '📌',
+    description: 'Auto-assign new room tasks to members based on file expertise and workload',
+    category: 'ops',
+    trigger_type: 'event',
+    event_config: { table: 'tasks', event: 'INSERT' },
+    agent: 'BlackSwan',
+    model: 'claude-haiku',
+    output_target: 'activity',
+    prompt: "A new task was created in {{circle_name}}. Event data: {{event}}. Rooms: {{rooms}}. If this task is in a Room, analyze: 1) Which room member has worked on similar files, 2) Current workload — who has the fewest open tasks, 3) Who's been most active in this room recently. Suggest the best assignee with rationale. If the task is already assigned, respond with SKIP.",
+    include_context: { members: true, rooms: true, tasks: true },
     spirit: 'tech-lead',
   },
 
@@ -592,8 +622,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-sonnet',
     output_target: 'chat',
-    prompt: "Run a quarterly OKR check for {{circle_name}}. Map each active goal to its key results (tasks). Calculate: % of quarter elapsed vs % of goals completed. For each goal: on-track / at-risk / off-track status, specific blockers, and one recommended action. End with an overall confidence score for hitting quarterly targets. Be honest — sugar-coating helps no one.",
-    include_context: { members: true, tasks: true, streaks: true, analytics: true },
+    prompt: "Run a quarterly OKR check for {{circle_name}}. Goals: {{goals}}. Map each active goal to its key results (tasks). Calculate: % of quarter elapsed vs % of goals completed. For each goal: on-track / at-risk / off-track status, specific blockers, and one recommended action. End with an overall confidence score for hitting quarterly targets. Be honest — sugar-coating helps no one.",
+    include_context: { members: true, tasks: true, streaks: true, analytics: true, goals: true, rooms: true },
     spirit: 'strategist',
   },
   {
@@ -607,8 +637,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-sonnet',
     output_target: 'activity',
-    prompt: "Run a team health assessment for {{circle_name}}. Analyze the past 7 days: check-in consistency, task completion velocity, streak trends, response times in chat. Score each health dimension (1-5): Engagement, Productivity, Consistency, Collaboration, Momentum. Flag any member showing burnout signals (declining activity after high output) or disengagement (activity dropping 3+ consecutive days). Suggest 2 team-level improvements.",
-    include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true },
+    prompt: "Run a team health assessment for {{circle_name}}. Analyze the past 7 days: check-in consistency, task completion velocity, streak trends, room activity, goal progress. Score each health dimension (1-5): Engagement, Productivity, Consistency, Collaboration, Momentum. Flag any member showing burnout signals (declining activity after high output) or disengagement (activity dropping 3+ consecutive days). Suggest 2 team-level improvements.",
+    include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true, rooms: true, goals: true },
     spirit: 'researcher',
   },
   {
@@ -622,8 +652,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-sonnet',
     output_target: 'activity',
-    prompt: "Scan {{circle_name}}'s past week — check-ins, task descriptions, completed work, and chat discussions. Extract: 1) DECISIONS MADE — what was decided and why, 2) LESSONS LEARNED — what worked, what didn't, 3) BEST PRACTICES — recurring patterns of success, 4) TRIBAL KNOWLEDGE — anything mentioned that isn't documented elsewhere. Format as a structured knowledge entry that could be added to a wiki.",
-    include_context: { members: true, check_ins: true, tasks: true },
+    prompt: "Scan {{circle_name}}'s past week — check-ins, task descriptions, completed work, room messages, and chat discussions. Extract: 1) DECISIONS MADE — what was decided and why, 2) LESSONS LEARNED — what worked, what didn't, 3) BEST PRACTICES — recurring patterns of success, 4) TRIBAL KNOWLEDGE — anything mentioned that isn't documented elsewhere. Format as a structured knowledge entry that could be added to a wiki.",
+    include_context: { members: true, check_ins: true, tasks: true, rooms: true },
     spirit: 'researcher',
   },
   {
@@ -637,8 +667,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-sonnet',
     output_target: 'chat',
-    prompt: "A new member just joined {{circle_name}}. Create a personalized onboarding checklist for them: 1) SET UP — connect GitHub, set profile, join chat, 2) EXPLORE — review active goals, browse recent tasks, check the leaderboard, 3) FIRST ACTIONS — introduce yourself in chat, pick one task to start, set your first daily check-in, 4) THIS WEEK — what the team is working on, who to reach out to for help. Make it actionable with checkboxes. Event: {{event}}",
-    include_context: { members: true, tasks: true, streaks: true },
+    prompt: "A new member just joined {{circle_name}}. Create a personalized onboarding checklist for them: 1) SET UP — connect GitHub, set profile, join chat, 2) EXPLORE — review active goals, browse project rooms, check the leaderboard, 3) FIRST ACTIONS — introduce yourself in chat, pick one task to start, set your first daily check-in, 4) THIS WEEK — active rooms/projects, what the team is working on, who to reach out to for help. Make it actionable with checkboxes. Event: {{event}}",
+    include_context: { members: true, tasks: true, streaks: true, rooms: true, goals: true },
     spirit: 'mentor',
   },
   {
@@ -652,8 +682,8 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-sonnet',
     output_target: 'chat',
-    prompt: "Run a sprint retrospective for {{circle_name}}. Analyze the past week's data and structure as: ✅ WHAT WENT WELL — top 3 wins with specific data (who did what), ❌ WHAT DIDN'T GO WELL — missed targets, broken streaks, stalled tasks (be honest but not harsh), 🔧 ACTION ITEMS — 3 specific, assignable improvements for next week. End with: 'One thing to start, one thing to stop, one thing to continue.' Base everything on real data, not generic advice.",
-    include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true },
+    prompt: "Run a sprint retrospective for {{circle_name}}. Analyze the past week's data and structure as: ✅ WHAT WENT WELL — top 3 wins with specific data (who did what, which rooms/projects progressed), ❌ WHAT DIDN'T GO WELL — missed targets, broken streaks, stalled tasks, stuck tasks (be honest but not harsh), 🔧 ACTION ITEMS — 3 specific, assignable improvements for next week. End with: 'One thing to start, one thing to stop, one thing to continue.' Base everything on real data, not generic advice.",
+    include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true, rooms: true, goals: true },
     spirit: 'pm',
   },
   {
@@ -682,9 +712,86 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     agent: 'BlackSwan',
     model: 'claude-haiku',
     output_target: 'chat',
-    prompt: "Post a unique daily question for {{circle_name}} to discuss. Alternate between categories: Monday=productivity, Tuesday=learning, Wednesday=creative, Thursday=team, Friday=fun. Make it specific to their recent work when possible (reference tasks they completed or goals they're working on). Keep it to one compelling question that can be answered in 1-2 sentences. End with: 'Reply with your answer below 👇'",
-    include_context: { members: true, check_ins: true, tasks: true },
+    prompt: "Post a unique daily question for {{circle_name}} to discuss. Alternate between categories: Monday=productivity, Tuesday=learning, Wednesday=creative, Thursday=team, Friday=fun. Make it specific to their recent work when possible (reference tasks they completed, goals they're working on, or rooms/projects they're in). Keep it to one compelling question that can be answered in 1-2 sentences. End with: 'Reply with your answer below 👇'",
+    include_context: { members: true, check_ins: true, tasks: true, rooms: true, goals: true },
     spirit: 'mentor',
+  },
+
+  // ─── Trading & Wallet ──────────────────────────────────────────────────────
+  {
+    id: 'trading-portfolio-monitor',
+    name: 'Portfolio Monitor',
+    icon: '📊',
+    description: 'Monitor connected wallets — flag large swings, new tokens, and risk signals',
+    category: 'trading',
+    trigger_type: 'schedule',
+    cron_expression: 'every_6h',
+    agent: 'BlackSwan',
+    model: 'claude-haiku',
+    output_target: 'chat',
+    prompt: "Monitor Solana wallets for {{circle_name}} members. Connected wallets: {{wallets}}. Recent trades: {{recent_trades}}. For each connected wallet: portfolio value change (vs last check), top tokens by value, tokens with >10% swing, new tokens (airdrops/swaps), risk flags (low liquidity tokens). Format as a clean report. If no wallets connected, remind the circle.",
+    include_context: { members: true, analytics: true, trading: true },
+    spirit: 'researcher',
+  },
+  {
+    id: 'trading-price-alerts',
+    name: 'Price Alert Bot',
+    icon: '🚨',
+    description: 'Check token watchlists for price targets, stop-losses, and volume spikes',
+    category: 'trading',
+    trigger_type: 'schedule',
+    cron_expression: 'every_6h',
+    agent: 'BlackSwan',
+    model: 'claude-haiku',
+    output_target: 'chat',
+    prompt: "Check trading alerts for {{circle_name}}. Active alerts: {{trading_alerts}}. Wallets: {{wallets}}. For each alert: compare current price vs target. If an alert triggers (price crossed target), report it and propose a trade action. Output triggered alerts as chat message AND include a JSON trade action array for any recommended trades: [{\"action_type\": \"swap\", \"output_mint\": \"<mint>\", \"amount_sol\": <number>, \"user_id\": \"<user_id>\", \"reason\": \"Price alert triggered: <details>\"}]. Show: token, current price, target price, action (take profit / cut loss / hold). If no alerts triggered, respond SKIP.",
+    include_context: { members: true, trading: true },
+    spirit: 'researcher',
+  },
+  {
+    id: 'trading-daily-pnl',
+    name: 'Daily P&L Report',
+    icon: '💰',
+    description: 'Daily profit/loss report across all member wallets with leaderboard',
+    category: 'trading',
+    trigger_type: 'schedule',
+    cron_expression: 'daily',
+    agent: 'BlackSwan',
+    model: 'claude-sonnet',
+    output_target: 'chat',
+    prompt: "Generate daily P&L for {{circle_name}} traders. Wallets: {{wallets}}. Recent trades: {{recent_trades}}. Per member: portfolio value change, realized P&L (from swaps), unrealized P&L (open positions), best/worst trade, fees paid. Circle leaderboard by daily P&L. Risk flags for >50% concentration. Use 🟢 for gains, 🔴 for losses.",
+    include_context: { members: true, analytics: true, trading: true },
+    spirit: 'pm',
+  },
+  {
+    id: 'trading-whale-tracker',
+    name: 'Whale Tracker',
+    icon: '🐋',
+    description: 'Track large wallet movements on tokens your circle holds',
+    category: 'trading',
+    trigger_type: 'schedule',
+    cron_expression: 'every_6h',
+    agent: 'BlackSwan',
+    model: 'claude-sonnet',
+    output_target: 'chat',
+    prompt: "Track whale activity for {{circle_name}}'s held tokens. Wallets: {{wallets}}. Monitor large transfers (>$100k), DEX swaps, and liquidity changes on tokens the circle holds. For each whale move: wallet (shortened), action (buy/sell/add liquidity), amount, impact on price. Alert if a whale is accumulating or dumping a token the circle holds. If no activity, SKIP.",
+    include_context: { members: true, trading: true },
+    spirit: 'researcher',
+  },
+  {
+    id: 'trading-dca-executor',
+    name: 'DCA Bot',
+    icon: '🤖',
+    description: 'Auto dollar-cost average into target tokens on a schedule',
+    category: 'trading',
+    trigger_type: 'schedule',
+    cron_expression: 'daily',
+    agent: 'BlackSwan',
+    model: 'claude-haiku',
+    output_target: 'activity',
+    prompt: "Check DCA configs for {{circle_name}} members and propose swaps that are due. DCA configs: {{dca_configs}}. Wallets: {{wallets}}. Recent trades: {{recent_trades}}. For each active DCA config: check if interval has elapsed since last execution, check if max_price limit allows it. If a DCA buy is due, output it as a JSON array of trade actions. Each action: {\"action_type\": \"dca_buy\", \"output_mint\": \"<token_mint>\", \"amount_sol\": <number>, \"user_id\": \"<user_id>\", \"reason\": \"<why>\"}. If balance too low or above price limit, include with reason and amount_sol: 0. If no DCA is due, respond SKIP.",
+    include_context: { members: true, trading: true },
+    spirit: 'devops',
   },
 ];
 
@@ -693,6 +800,7 @@ export const TEMPLATE_CATEGORIES = [
   { key: 'reporting' as const, label: 'Reporting', icon: '📊' },
   { key: 'engagement' as const, label: 'Engagement', icon: '🎉' },
   { key: 'ops' as const, label: 'Operations', icon: '⚙️' },
+  { key: 'trading' as const, label: 'Trading', icon: '📈' },
 ];
 
 // ─── Suggested Template Groups ──────────────────────────────────────────────
@@ -738,7 +846,7 @@ Then give an overall AUTOMATION HEALTH SCORE (A/B/C/D/F) with:
 - Recommendations: 3 specific actions to improve the automation suite
 
 Format as a clean report with headers and bullet points.`,
-        include_context: { members: true, analytics: true },
+        include_context: { members: true, analytics: true, rooms: true },
     spirit: 'devops',
         suggested: true,
         suggestedIconBg: '#0d1a1a',
@@ -807,113 +915,144 @@ If nothing notable happened this week, respond with: "No significant LLM release
     ],
   },
 
-  // ── Dev Workflow ───────────────────────────────────────────────────────────
+  // ── Dev Workflow (Room-centric) ──────────────────────────────────────────
   {
     key: 'dev',
-    label: 'Dev Workflow',
+    label: 'Dev Rooms',
     icon: '{}',
     templates: [
       {
-        id: 'suggest-find-vulnerabilities',
-        name: 'Find vulnerabilities',
+        id: 'suggest-room-security-scan',
+        name: 'Room security scan',
         icon: '🛡️',
-        description: 'Review code for security vulnerabilities and flag exploitable weaknesses',
+        description: 'Scan a Room\'s files for vulnerabilities — SQL injection, XSS, exposed secrets',
         category: 'ops',
         trigger_type: 'manual',
-        event_config: { provider: 'github', event: 'pull_request_opened' },
         agent: 'BlackSwan',
         model: 'claude-sonnet',
         output_target: 'chat',
-        prompt: 'Review this PR for security vulnerabilities. Check for: SQL injection, XSS, auth bypasses, exposed secrets, unsafe dependencies, insecure direct object references. For each issue found, provide the file, line range, severity (critical/high/medium), and a recommended fix. PR context: {{event}}',
-        include_context: { members: true },
+        prompt: "Scan all project Rooms in {{circle_name}} for security vulnerabilities. Review the actual file contents in each room for: SQL injection, XSS, auth bypasses, exposed secrets, unsafe dependencies, insecure direct object references. Group findings by room. For each issue: file, line range, severity (critical/high/medium), and recommended fix with corrected code. If fixes are needed, use FILE_ACTIONS to write the fixed files back to the room. If a room is clean, say so briefly.",
+        include_context: { members: true, rooms: true, tasks: true },
     spirit: 'security',
         suggested: true,
         suggestedIconBg: '#0d2a1a',
       },
       {
-        id: 'suggest-assign-pr-reviewers',
-        name: 'Assign PR reviewers',
+        id: 'suggest-room-pr-reviewers',
+        name: 'Room PR reviewers',
         icon: '🔀',
-        description: 'Suggest reviewers based on code expertise and workload',
+        description: 'Assign PR reviewers based on which Room owns the changed files',
         category: 'ops',
         trigger_type: 'manual',
         event_config: { provider: 'github', event: 'pull_request_opened' },
         agent: 'BlackSwan',
         model: 'claude-haiku',
         output_target: 'chat',
-        prompt: 'Analyze this PR and recommend the best reviewers from {{circle_name}} based on who has worked on the changed files. If the PR is low-risk (only docs, tests, or style changes), auto-approve it. Otherwise list top 2 reviewers with rationale. PR context: {{event}}',
-        include_context: { members: true },
+        prompt: "A PR was opened in {{circle_name}}. PR: {{event}}. Rooms: {{rooms}}. Match changed files to Rooms. For each affected room, recommend the room member who has the most expertise on those files. If the PR spans multiple rooms, assign a lead reviewer per room. Low-risk changes (docs, tests, config): auto-approve candidate. Post reviewer assignments to each room.",
+        include_context: { members: true, rooms: true, tasks: true },
     spirit: 'tech-lead',
         suggested: true,
         suggestedIconBg: '#0d1a2a',
       },
       {
-        id: 'suggest-fix-ci-failures',
-        name: 'Fix CI failures',
+        id: 'suggest-room-ci-fixer',
+        name: 'Room CI fixer',
         icon: '⚙️',
-        description: 'Analyze recent CI failures and propose fixes',
+        description: 'Route CI failures to the Room that owns the broken code',
         category: 'ops',
         trigger_type: 'manual',
         event_config: { provider: 'github', event: 'ci_completed' },
         agent: 'BlackSwan',
         model: 'claude-sonnet',
         output_target: 'chat',
-        prompt: 'A CI run just completed for {{circle_name}}. CI data: {{event}}. If it failed, analyze the failure logs, identify the root cause, and propose an exact fix (file + code change). If all checks passed, respond with SKIP.',
-        include_context: { members: true },
+        prompt: "CI completed for {{circle_name}}. Data: {{event}}. Rooms: {{rooms}}. If passed, SKIP. If failed: 1) Which Room's files caused the failure, 2) Root cause analysis, 3) Exact fix (file + code change), 4) Tag the room member who should fix it, 5) Suggest creating a room task for the fix if it's non-trivial. Route the alert to the affected room.",
+        include_context: { members: true, rooms: true, tasks: true },
     spirit: 'devops',
         suggested: true,
         suggestedIconBg: '#0d1a2a',
       },
       {
-        id: 'suggest-find-critical-bugs',
-        name: 'Find critical bugs',
+        id: 'suggest-room-bug-finder',
+        name: 'Room bug finder',
         icon: '🐛',
-        description: 'Analyze recent commits for high-severity correctness bugs and submit safe fixes',
+        description: 'Scan each Room\'s codebase for critical bugs and auto-fix them',
         category: 'ops',
         trigger_type: 'schedule',
         cron_expression: 'daily',
         agent: 'BlackSwan',
         model: 'claude-sonnet',
         output_target: 'chat',
-        prompt: "Scan {{circle_name}}'s recent commits for critical correctness bugs: null pointer dereferences, off-by-one errors, race conditions, incorrect error handling, data loss risks. For each bug found: file + line, severity, root cause, proposed safe fix. Only report high/critical severity.",
-        include_context: { members: true, analytics: true },
+        prompt: "Scan each active Room in {{circle_name}} for critical bugs. Read the actual file contents and check for: null pointer dereferences, off-by-one errors, race conditions, incorrect error handling, data loss risks. Group findings by room with severity. For critical bugs, use FILE_ACTIONS to write the fixed files directly. For high bugs, describe the fix. Only report high/critical.",
+        include_context: { members: true, rooms: true, tasks: true },
     spirit: 'security',
         suggested: true,
         suggestedIconBg: '#2a1a0d',
       },
       {
-        id: 'suggest-add-test-coverage',
-        name: 'Add test coverage',
+        id: 'suggest-room-test-coverage',
+        name: 'Room test coverage',
         icon: '🧪',
-        description: 'Review recent changes and add tests for high-risk logic that lacks adequate coverage',
+        description: 'Per-room test gap analysis — find untested code and auto-write tests',
         category: 'ops',
         trigger_type: 'schedule',
         cron_expression: 'weekly',
         agent: 'BlackSwan',
         model: 'claude-sonnet',
         output_target: 'chat',
-        prompt: "Review {{circle_name}}'s recent commits and identify functions/components with high business logic complexity and no test coverage. For each, write the test spec (unit or integration) and output a ready-to-use test file. Prioritize auth, payments, and data mutation flows.",
-        include_context: { members: true, analytics: true },
+        prompt: "Analyze test coverage per Room in {{circle_name}}. Read the actual file contents and identify functions/components with high complexity and no tests. Write test files for the top 3 gaps per room. Prioritize: auth flows, data mutations, critical business logic. Use FILE_ACTIONS to create the test files directly in each room (e.g., create \"Button.test.tsx\" alongside \"Button.tsx\").",
+        include_context: { members: true, rooms: true, tasks: true },
     spirit: 'sr-engineer',
         suggested: true,
         suggestedIconBg: '#0d2a0d',
       },
       {
-        id: 'suggest-generate-docs',
-        name: 'Generate docs',
+        id: 'suggest-room-docs',
+        name: 'Room documentation',
         icon: '📄',
-        description: 'Create and update developer documentation for recently changed or under-documented code',
+        description: 'Auto-generate docs per Room — README, API refs, architecture notes',
         category: 'ops',
         trigger_type: 'schedule',
         cron_expression: 'weekly',
         agent: 'BlackSwan',
         model: 'claude-sonnet',
         output_target: 'chat',
-        prompt: "Review {{circle_name}}'s recent code changes and identify: new exports with no JSDoc, updated APIs with outdated docs, complex functions without comments. Generate complete documentation for the top 5 most critical gaps. Format as ready-to-paste JSDoc + README updates.",
-        include_context: { members: true, tasks: true },
+        prompt: "Generate documentation per Room in {{circle_name}}. Read the actual file contents and identify: undocumented exports, missing JSDoc, complex functions without comments. For each room, use FILE_ACTIONS to create or update a README.md file containing: project overview, file structure, key exports, setup instructions, and architecture notes. Also generate inline docs for the most complex files.",
+        include_context: { members: true, rooms: true, tasks: true },
     spirit: 'writer',
         suggested: true,
         suggestedIconBg: '#1a1a2a',
+      },
+      {
+        id: 'suggest-room-refactor',
+        name: 'Room code refactor',
+        icon: '♻️',
+        description: 'Analyze and refactor Room files — reduce duplication, improve patterns',
+        category: 'ops',
+        trigger_type: 'manual',
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'chat',
+        prompt: "Analyze the code in each Room of {{circle_name}} for refactoring opportunities. Read the actual file contents and identify: duplicated logic across files, overly complex functions (>50 lines), inconsistent patterns, unused variables/imports, missing error handling. For the top 3 improvements per room, use FILE_ACTIONS to write the refactored files directly. Explain each change briefly. Focus on readability and maintainability, not style.",
+        include_context: { members: true, rooms: true, tasks: true },
+    spirit: 'sr-engineer',
+        suggested: true,
+        suggestedIconBg: '#1a0d2a',
+      },
+      {
+        id: 'suggest-room-code-review',
+        name: 'Room code review',
+        icon: '👁️',
+        description: 'AI code review of recently changed files — catches bugs before they ship',
+        category: 'ops',
+        trigger_type: 'manual',
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'chat',
+        prompt: "Review the code in each Room of {{circle_name}}. Read all file contents carefully. For each file, evaluate: correctness (logic bugs, edge cases), security (injection, auth bypass), performance (N+1 queries, unnecessary re-renders), and maintainability. For any issues found, provide the exact fix. For critical issues, use FILE_ACTIONS to apply the fix directly. Format like a PR review with file-level comments.",
+        include_context: { members: true, rooms: true, tasks: true },
+    spirit: 'tech-lead',
+        suggested: true,
+        suggestedIconBg: '#0d2a1a',
       },
     ],
   },
@@ -935,8 +1074,8 @@ If nothing notable happened this week, respond with: "No significant LLM release
         agent: 'BlackSwan',
         model: 'claude-haiku',
         output_target: 'chat',
-        prompt: "Good morning {{circle_name}}. Review yesterday's results — who completed their tasks, who fell short. Post a daily intentions prompt asking each member for their TOP 3 today and a quick energy check (🔋 1-10). Tailor the tone based on yesterday's momentum.",
-        include_context: { members: true, check_ins: true, tasks: true },
+        prompt: "Good morning {{circle_name}}. Review yesterday's results — who completed their tasks, who fell short. Check goal and room progress. Post a daily intentions prompt asking each member for their TOP 3 today and a quick energy check (🔋 1-10). Tailor the tone based on yesterday's momentum.",
+        include_context: { members: true, check_ins: true, tasks: true, rooms: true, goals: true },
     spirit: 'coach',
         suggested: true,
         suggestedIconBg: '#1a200d',
@@ -952,8 +1091,8 @@ If nothing notable happened this week, respond with: "No significant LLM release
         agent: 'BlackSwan',
         model: 'claude-haiku',
         output_target: 'chat',
-        prompt: "Find tasks in {{circle_name}} sitting in 'todo' or 'backlog' for 3+ days. For each: tag the assignee, estimate real time (most things take 15-45 min), issue a challenge: 'Can you start this in the next 2 hours? Reply ✅ to commit.' Flag patterns of 3+ stale tasks.",
-        include_context: { members: true, tasks: true },
+        prompt: "Find tasks in {{circle_name}} sitting in 'todo' or 'backlog' for 3+ days. Check stuck tasks too. For each: tag the assignee, note the room/project, estimate real time (most things take 15-45 min), issue a challenge: 'Can you start this in the next 2 hours? Reply ✅ to commit.' Flag patterns of 3+ stale tasks.",
+        include_context: { members: true, tasks: true, rooms: true },
     spirit: 'coach',
         suggested: true,
         suggestedIconBg: '#2a1a00',
@@ -986,8 +1125,8 @@ If nothing notable happened this week, respond with: "No significant LLM release
         agent: 'BlackSwan',
         model: 'claude-sonnet',
         output_target: 'chat',
-        prompt: "Run Sunday planning for {{circle_name}}. 1) SCORECARD — tasks completed/total, streak health, goal %. 2) UNFINISHED — carryover tasks: keep, kill, or delegate? 3) BIG 3 — suggest each member's top 3 tasks. 4) BLOCKERS — flag risks. 5) Ask each member for their #1 non-negotiable.",
-        include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true },
+        prompt: "Run Sunday planning for {{circle_name}}. Goals: {{goals}}. Rooms: {{rooms}}. 1) SCORECARD — tasks completed/total, streak health, goal %. 2) UNFINISHED — carryover tasks: keep, kill, or delegate? 3) BIG 3 — suggest each member's top 3 tasks based on goals and rooms. 4) BLOCKERS — flag stuck tasks and risks. 5) Ask each member for their #1 non-negotiable.",
+        include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true, rooms: true, goals: true },
     spirit: 'pm',
         suggested: true,
         suggestedIconBg: '#0d1a20',
@@ -1012,8 +1151,8 @@ If nothing notable happened this week, respond with: "No significant LLM release
         agent: 'BlackSwan',
         model: 'claude-sonnet',
         output_target: 'chat',
-        prompt: "Review the past 7 days for {{circle_name}}. Award: 🏆 MVP, 🔥 Iron Will (longest streak), 🚀 Momentum (biggest improvement), 💪 Comeback (recovered from setback). Write hype paragraphs for each winner. Make it feel like a celebration.",
-        include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true },
+        prompt: "Review the past 7 days for {{circle_name}}. Award: 🏆 MVP, 🔥 Iron Will (longest streak), 🚀 Momentum (biggest improvement), 💪 Comeback (recovered from setback). Reference rooms/projects and goal progress. Write hype paragraphs for each winner. Make it feel like a celebration.",
+        include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true, rooms: true, goals: true },
     spirit: 'writer',
         suggested: true,
         suggestedIconBg: '#1a0d20',
@@ -1089,8 +1228,8 @@ If nothing notable happened this week, respond with: "No significant LLM release
         agent: 'BlackSwan',
         model: 'claude-haiku',
         output_target: 'chat',
-        prompt: "Generate a daily changelog digest for {{circle_name}}. Summarize yesterday's commits: what shipped, what changed, any risky changes, open PRs needing review. Flag anything that could break prod. Keep it under 250 words.",
-        include_context: { members: true, tasks: true, analytics: true },
+        prompt: "Generate a daily changelog digest for {{circle_name}}. Summarize yesterday's commits: what shipped, what changed, any risky changes, open PRs needing review. Include room/project context. Flag anything that could break prod. Keep it under 250 words.",
+        include_context: { members: true, tasks: true, analytics: true, rooms: true },
     spirit: 'sr-engineer',
         suggested: true,
         suggestedIconBg: '#000000',
@@ -1106,8 +1245,8 @@ If nothing notable happened this week, respond with: "No significant LLM release
         agent: 'BlackSwan',
         model: 'claude-sonnet',
         output_target: 'chat',
-        prompt: 'Weekly report for {{circle_name}}: total check-ins, tasks completed vs created, streak changes, most active member, MVP nomination, and one actionable recommendation for next week.',
-        include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true },
+        prompt: 'Weekly report for {{circle_name}}: total check-ins, tasks completed vs created, streak changes, goal progress, room activity, most active member, MVP nomination, and one actionable recommendation for next week.',
+        include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true, rooms: true, goals: true },
     spirit: 'pm',
         suggested: true,
         suggestedIconBg: '#0d1a1a',
@@ -1123,8 +1262,8 @@ If nothing notable happened this week, respond with: "No significant LLM release
         agent: 'BlackSwan',
         model: 'claude-sonnet',
         output_target: 'chat',
-        prompt: 'Monthly retro for {{circle_name}}. Analyze: participation trends, streak patterns, task velocity, most improved member, biggest challenge. Provide 3 data-driven recommendations for next month. Format with headers and bullets.',
-        include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true },
+        prompt: 'Monthly retro for {{circle_name}}. Analyze: participation trends, streak patterns, task velocity, goal progress, room activity, most improved member, biggest challenge. Provide 3 data-driven recommendations for next month. Format with headers and bullets.',
+        include_context: { members: true, check_ins: true, tasks: true, streaks: true, analytics: true, rooms: true, goals: true },
     spirit: 'strategist',
         suggested: true,
         suggestedIconBg: '#1a0d1a',
@@ -1140,8 +1279,8 @@ If nothing notable happened this week, respond with: "No significant LLM release
         agent: 'BlackSwan',
         model: 'claude-sonnet',
         output_target: 'chat',
-        prompt: "Goal review for {{circle_name}}. For each active goal: completion score (0-100%), momentum (accelerating/steady/stalling), one adjustment for next week. Flag goals >2 weeks old with <20% completion. End with overall goal health score.",
-        include_context: { members: true, tasks: true, streaks: true, analytics: true },
+        prompt: "Goal review for {{circle_name}}. Goals: {{goals}}. Rooms: {{rooms}}. For each active goal: completion score (0-100%), momentum (accelerating/steady/stalling), one adjustment for next week. Flag goals >2 weeks old with <20% completion. End with overall goal health score.",
+        include_context: { members: true, tasks: true, streaks: true, analytics: true, goals: true, rooms: true },
     spirit: 'pm',
         suggested: true,
         suggestedIconBg: '#0d200d',
@@ -1222,6 +1361,394 @@ If nothing notable happened this week, respond with: "No significant LLM release
     spirit: 'devops',
         suggested: true,
         suggestedIconBg: '#2a0d0d',
+      },
+    ],
+  },
+
+  // ── Trading & Wallet ───────────────────────────────────────────────────
+  {
+    key: 'trading',
+    label: 'Trading',
+    icon: '◎',
+    templates: [
+      {
+        id: 'suggest-portfolio-watchdog',
+        name: 'Portfolio watchdog',
+        icon: '📊',
+        description: 'Monitor wallet balances, flag large swings, and alert on significant changes',
+        category: 'trading',
+        trigger_type: 'schedule',
+        cron_expression: 'every_6h',
+        agent: 'BlackSwan',
+        model: 'claude-haiku',
+        output_target: 'chat',
+        prompt: `Monitor connected wallets for {{circle_name}} members. For each member with a connected Solana wallet, check:
+1. **Portfolio value** — current total vs last snapshot. Flag any change >5% in 24h
+2. **Token holdings** — list top tokens by value, highlight any token with >20% price swing
+3. **New tokens** — flag any tokens that appeared (possible airdrops or swaps)
+4. **Risk alerts** — any token with <$10k liquidity, rug-pull indicators, or suspicious activity
+5. **Gas spent** — total SOL spent on transaction fees today
+
+Format as a clean portfolio report per member. If no wallets connected, remind the circle to connect their wallets in the Wallet tab.`,
+        include_context: { members: true, analytics: true, trading: true },
+    spirit: 'researcher',
+        suggested: true,
+        suggestedIconBg: '#1a0d2a',
+      },
+      {
+        id: 'suggest-token-scanner',
+        name: 'Token scanner',
+        icon: '🔍',
+        description: 'Scan for trending tokens, new launches, and trading opportunities on Solana',
+        category: 'trading',
+        trigger_type: 'schedule',
+        cron_expression: 'every_6h',
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'chat',
+        prompt: `Scan the Solana ecosystem for {{circle_name}}'s trading bot. Report:
+1. **Trending tokens** — top 5 tokens by volume increase in the last 6h
+2. **New launches** — tokens launched in the last 24h with >$50k liquidity
+3. **Whale movements** — large transfers (>$100k) on tokens the circle's wallets hold
+4. **DeFi opportunities** — staking APY changes, new liquidity pools, yield farming
+5. **Risk flags** — tokens in the watchlist with declining liquidity or dev wallet dumps
+
+For each opportunity, include: token name, contract address, current price, 24h volume, liquidity, and a risk score (1-10). Only surface actionable intel.`,
+        include_context: { members: true, analytics: true, trading: true },
+    spirit: 'researcher',
+        suggested: true,
+        suggestedIconBg: '#0d1a2a',
+      },
+      {
+        id: 'suggest-dca-executor',
+        name: 'DCA bot',
+        icon: '🤖',
+        description: 'Dollar-cost average into tokens on a schedule — auto-swap SOL for target tokens',
+        category: 'trading',
+        trigger_type: 'schedule',
+        cron_expression: 'daily',
+        agent: 'BlackSwan',
+        model: 'claude-haiku',
+        output_target: 'activity',
+        prompt: `Execute DCA strategy for {{circle_name}}. Check each member's trading bot config:
+1. Review DCA targets (token + amount per interval)
+2. Check wallet SOL balance — enough for the swap + fees?
+3. Get current price and compare to member's price limits (if set)
+4. If conditions met, execute the swap via Helius/Jupiter
+5. Log: token bought, amount, price, tx hash, remaining balance
+
+If a member's balance is too low, alert them. If price is above their limit, skip and note why.
+Output as JSON: [{user_id, action, token, amount_sol, amount_token, price, tx_hash, status}]`,
+        include_context: { members: true, trading: true },
+    spirit: 'devops',
+        suggested: true,
+        suggestedIconBg: '#0d2a0d',
+      },
+      {
+        id: 'suggest-trade-alerts',
+        name: 'Trade alerts',
+        icon: '🚨',
+        description: 'Real-time alerts when tokens hit price targets, stop-losses, or volume spikes',
+        category: 'trading',
+        trigger_type: 'schedule',
+        cron_expression: 'every_6h',
+        agent: 'BlackSwan',
+        model: 'claude-haiku',
+        output_target: 'chat',
+        prompt: `Check price alerts for {{circle_name}}'s trading watchlist:
+1. For each token on the watchlist, check current price vs alert targets
+2. PRICE TARGET HIT — token reached the member's take-profit price
+3. STOP-LOSS TRIGGERED — token dropped below the member's stop price
+4. VOLUME SPIKE — 3x+ normal volume in the last hour (potential breakout or dump)
+5. LIQUIDITY WARNING — pool liquidity dropped >30% in 24h
+
+For triggered alerts: tag the member, show current price vs target, suggest action (take profit / cut loss / hold). If no alerts triggered, respond with SKIP.`,
+        include_context: { members: true, trading: true },
+    spirit: 'researcher',
+        suggested: true,
+        suggestedIconBg: '#2a1a0d',
+      },
+      {
+        id: 'suggest-copy-trade',
+        name: 'Copy trade tracker',
+        icon: '👀',
+        description: 'Track whale wallets and notable traders — alert when they make moves',
+        category: 'trading',
+        trigger_type: 'schedule',
+        cron_expression: 'every_6h',
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'chat',
+        prompt: `Monitor tracked wallets for {{circle_name}}'s copy trading:
+1. Check each tracked wallet's recent transactions (last 6h)
+2. For each trade: what they bought/sold, amount, price, DEX used
+3. Analyze the pattern — accumulating? distributing? new position?
+4. If a tracked wallet made a significant swap (>$1k): alert the circle with details
+5. Success rate — how have previous signals from this wallet performed?
+
+Format as a feed of trades with context. Only show wallets with new activity.`,
+        include_context: { members: true, trading: true },
+    spirit: 'researcher',
+        suggested: true,
+        suggestedIconBg: '#1a0d1a',
+      },
+      {
+        id: 'suggest-pnl-report',
+        name: 'P&L report',
+        icon: '💰',
+        description: 'Daily profit/loss report across all trading activity for circle members',
+        category: 'trading',
+        trigger_type: 'schedule',
+        cron_expression: 'daily',
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'chat',
+        prompt: `Generate a daily P&L report for {{circle_name}}'s traders:
+1. For each member with a connected wallet:
+   - Total portfolio value (now vs 24h ago)
+   - Realized P&L (from completed swaps today)
+   - Unrealized P&L (open positions vs entry price)
+   - Best trade (highest % gain)
+   - Worst trade (biggest % loss)
+   - Total fees paid (gas + DEX fees)
+2. Circle leaderboard — rank members by daily P&L
+3. Risk metrics — any member with >50% of portfolio in one token
+4. Weekly trend — is the circle net profitable this week?
+
+Format as a clean financial report. Use 🟢 for gains, 🔴 for losses.`,
+        include_context: { members: true, analytics: true, trading: true },
+    spirit: 'pm',
+        suggested: true,
+        suggestedIconBg: '#0d2a1a',
+      },
+    ],
+  },
+
+  // ── Knowledge & Learning ──────────────────────────────────────────────────
+  {
+    key: 'learning',
+    label: 'Knowledge & Learning',
+    icon: '🧠',
+    templates: [
+      {
+        id: 'suggest-tech-radar',
+        name: 'Tech radar',
+        icon: '📡',
+        description: 'Scan dev blogs, Hacker News, and release feeds for relevant tech updates',
+        category: 'learning',
+        trigger_type: 'schedule',
+        cron_expression: 'daily',
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'chat',
+        prompt: `Tech radar scan for {{circle_name}}. Based on the team's tech stack (check rooms and recent tasks for technologies used), research and report:
+
+1. **New Releases** — major version bumps in frameworks/libraries the team uses (React, Expo, Supabase, Three.js, etc.)
+2. **Security Advisories** — any CVEs or vulnerability reports affecting dependencies
+3. **Trending Tools** — new dev tools gaining traction in the team's ecosystem
+4. **Breaking Changes** — upcoming deprecations or migration requirements
+5. **Industry Shifts** — significant technical trends relevant to the project
+
+For each item: title, one-line summary, relevance to this team (high/medium/low), action needed (update/watch/none). Store key findings as knowledge for future reference. Max 10 items, sorted by relevance.`,
+        include_context: { members: true, rooms: true, tasks: true, analytics: true },
+        spirit: 'researcher',
+        suggested: true,
+        suggestedIconBg: '#0d1a2a',
+      },
+      {
+        id: 'suggest-dependency-monitor',
+        name: 'Dependency monitor',
+        icon: '📦',
+        description: 'Track package updates, deprecations, and security vulnerabilities in project dependencies',
+        category: 'learning',
+        trigger_type: 'schedule',
+        cron_expression: 'weekly',
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'chat',
+        prompt: `Dependency audit for {{circle_name}}. Analyze the project's dependency tree:
+
+1. **Outdated Packages** — list packages more than 2 major versions behind, with migration difficulty (easy/medium/hard)
+2. **Security Vulnerabilities** — check for known CVEs in current dependency versions. Severity: critical/high/medium/low
+3. **Deprecated Packages** — identify packages marked deprecated or unmaintained (no commits in 12+ months)
+4. **Size Bloat** — flag unusually large dependencies that could be replaced with lighter alternatives
+5. **Duplicate Dependencies** — packages that serve the same purpose and could be consolidated
+
+For each finding: package name, current version, recommended action, estimated effort. Create tasks for critical items.`,
+        include_context: { rooms: true, tasks: true },
+        spirit: 'security',
+        suggested: true,
+        suggestedIconBg: '#1a0d0d',
+      },
+      {
+        id: 'suggest-market-intelligence',
+        name: 'Market intelligence',
+        icon: '🌐',
+        description: 'Daily crypto market report — macro trends, sector rotation, sentiment analysis, key events',
+        category: 'learning',
+        trigger_type: 'schedule',
+        cron_expression: 'daily',
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'chat',
+        prompt: `Daily market intelligence brief for {{circle_name}}. Compile and analyze:
+
+1. **Macro Overview** — BTC dominance, total crypto market cap trend, Fear & Greed Index reading, DXY direction
+2. **Solana Ecosystem** — SOL price + 24h change, network TPS, notable protocol launches/updates, TVL changes
+3. **Sector Rotation** — which sectors are outperforming (DeFi, AI, memecoins, DePIN, L2s, gaming)
+4. **Narrative Detection** — emerging themes from crypto Twitter/news that could drive price action in 24-72h
+5. **Key Events** — token unlocks, protocol upgrades, regulatory news, ETF flow data
+6. **Sentiment Score** — aggregate market sentiment 1-100 with brief reasoning
+7. **Actionable Intel** — 2-3 specific observations the team should watch
+
+Store key learnings as spirit knowledge. Reference the team's current holdings and watchlist from trading data.`,
+        include_context: { members: true, trading: true, analytics: true },
+        spirit: 'analyst',
+        suggested: true,
+        suggestedIconBg: '#0d1a1a',
+      },
+      {
+        id: 'suggest-trading-journal-review',
+        name: 'Trading journal review',
+        icon: '📔',
+        description: 'AI reviews trade history to identify winning patterns, mistakes, and strategy improvements',
+        category: 'learning',
+        trigger_type: 'schedule',
+        cron_expression: 'weekly',
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'chat',
+        prompt: `Weekly trading journal review for {{circle_name}}. Analyze all trades from the past 7 days:
+
+1. **Performance Summary** — win rate, average return, total P&L, best/worst trade
+2. **Pattern Recognition** — what market conditions led to winners vs losers? Time of day? Token category? Position size?
+3. **Strategy Scoring** — score each strategy used (DCA, momentum, mean reversion, copy trade): win rate + avg return per strategy
+4. **Mistakes Identified** — common errors: chasing pumps, holding losers too long, position sizing too large, ignoring stops
+5. **Regime Analysis** — was the market trending/ranging/volatile this week? Which strategies worked in this regime?
+6. **Learning Points** — 3 specific, actionable learnings to improve next week's trading
+7. **Strategy Adjustments** — recommend parameter changes: tighter stops? larger DCA amounts? different entry criteria?
+
+Save high-confidence learnings as spirit knowledge entries. These will inform future trade proposals. Format as a structured report.`,
+        include_context: { members: true, trading: true, analytics: true },
+        spirit: 'trader',
+        suggested: true,
+        suggestedIconBg: '#1a0d2a',
+      },
+      {
+        id: 'suggest-spirit-evolution',
+        name: 'Spirit knowledge builder',
+        icon: '🧬',
+        description: 'Continuously evolve spirit knowledge by researching latest developments in each domain',
+        category: 'learning',
+        trigger_type: 'schedule',
+        cron_expression: 'weekly',
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'activity',
+        prompt: `Knowledge evolution cycle for {{circle_name}}. Research and synthesize new knowledge for each active spirit:
+
+**For Engineering spirits (sr-engineer, devops, security):**
+- Latest framework updates and best practices
+- New CI/CD patterns and tools gaining adoption
+- Security advisories and emerging threat vectors
+- Performance optimization techniques
+
+**For Trading spirits (trader, analyst):**
+- New DeFi protocols and yield opportunities on Solana
+- Updated market microstructure insights
+- New on-chain analytics tools and data sources (Birdeye, DexScreener, Nansen updates)
+- Risk management framework refinements
+- Regulatory developments affecting crypto trading
+
+**For Leadership spirits (pm, tech-lead, coach):**
+- AI-enhanced project management patterns
+- Team velocity optimization techniques
+- Remote collaboration best practices
+
+For each spirit: identify 2-3 new learnings with sources. Grade confidence (high/medium/low). Format as structured knowledge entries that can be injected into spirit prompts. Focus on actionable, specific knowledge — not generic advice.`,
+        include_context: { members: true, rooms: true, tasks: true, analytics: true, trading: true, goals: true },
+        spirit: 'researcher',
+        suggested: true,
+        suggestedIconBg: '#1a1a0d',
+      },
+      {
+        id: 'suggest-onchain-patterns',
+        name: 'On-chain pattern scanner',
+        icon: '🔗',
+        description: 'Detect on-chain patterns — whale accumulation, smart money flows, liquidity shifts',
+        category: 'learning',
+        trigger_type: 'schedule',
+        cron_expression: 'every_6h',
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'chat',
+        prompt: `On-chain pattern analysis for {{circle_name}}. Analyze blockchain activity:
+
+1. **Whale Movements** — large wallet transfers (>$100K) in tokens the circle tracks. Classify: accumulation, distribution, exchange deposit (likely sell), exchange withdrawal (likely hold)
+2. **Smart Money Flows** — track net flow direction of top profitable wallets. Are they buying or selling?
+3. **Liquidity Changes** — significant LP additions/removals. Flag any token where >10% of liquidity was removed
+4. **New Token Activity** — tokens with rapid holder growth (>100 new holders/hour) or unusual volume spikes (>5x normal)
+5. **Exchange Flows** — net SOL/USDC flow direction across major exchanges. Inflow = selling pressure, outflow = accumulation
+6. **Confluence Score** — for each token in the watchlist: combine whale activity + liquidity health + holder growth into a 0-100 score
+
+Only report actionable findings. Skip tokens with no significant activity. Save pattern insights as spirit knowledge.`,
+        include_context: { trading: true, analytics: true },
+        spirit: 'analyst',
+        suggested: true,
+        suggestedIconBg: '#0d2a1a',
+      },
+      {
+        id: 'suggest-sentiment-pulse',
+        name: 'Sentiment pulse',
+        icon: '💭',
+        description: 'Real-time social sentiment scoring for tracked tokens from Twitter, Discord, news',
+        category: 'learning',
+        trigger_type: 'schedule',
+        cron_expression: 'every_6h',
+        agent: 'BlackSwan',
+        model: 'claude-haiku',
+        output_target: 'chat',
+        prompt: `Sentiment pulse for {{circle_name}}. For each token in the trading watchlist and portfolio:
+
+1. **Social Buzz Score** (0-100) — estimated social volume and engagement trending direction
+2. **Sentiment Ratio** — bullish vs bearish signal ratio from available data
+3. **Narrative Alignment** — is this token part of a trending narrative? (AI, memecoins, DePIN, RWA, gaming)
+4. **Influencer Activity** — any notable figures or large accounts discussing this token
+5. **News Impact** — recent news articles or announcements that could affect price
+6. **Contrarian Signals** — extreme greed (>80) may indicate distribution phase; extreme fear (<20) may indicate accumulation opportunity
+
+Output a sentiment dashboard: token | buzz | sentiment | narrative | signal (bullish/neutral/bearish). Flag any token with a dramatic sentiment shift (>30 point change in 24h). If no significant changes, respond with SKIP.`,
+        include_context: { trading: true },
+        spirit: 'analyst',
+        suggested: true,
+        suggestedIconBg: '#1a0d1a',
+      },
+      {
+        id: 'suggest-pr-impact-analyzer',
+        name: 'PR impact analyzer',
+        icon: '🔬',
+        description: 'Analyze PR diffs for risk, complexity, test coverage gaps, and breaking changes',
+        category: 'learning',
+        trigger_type: 'event',
+        event_config: { provider: 'github', event: 'pull_request_opened' },
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'chat',
+        prompt: `Analyze the pull request for {{circle_name}}. PR data: {{event}}.
+
+1. **Risk Score** (1-10) — based on: files changed, lines modified, complexity delta, areas touched (auth, payments, data migrations = high risk)
+2. **Breaking Changes** — any API signature changes, removed exports, schema migrations, env var changes
+3. **Test Coverage** — are new code paths tested? Suggest specific test cases for untested logic
+4. **Security Review** — check for: SQL injection, XSS, exposed secrets, auth bypasses, insecure dependencies
+5. **Performance Impact** — any new database queries, API calls, or heavy computations in hot paths?
+6. **Dependencies** — new packages added? Check for size, maintenance status, known vulnerabilities
+7. **Summary** — 3-sentence TL;DR of what this PR does and its impact
+
+Post as a structured review comment. Flag anything that should block merge.`,
+        include_context: { rooms: true, tasks: true },
+        spirit: 'sr-engineer',
+        suggested: true,
+        suggestedIconBg: '#0d0d2a',
       },
     ],
   },

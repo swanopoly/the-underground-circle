@@ -196,7 +196,7 @@ function PlanCard({ name, price, features, color, onUpgrade }: {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: '#000000' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -204,7 +204,7 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#2a2a2a',
   },
   backBtn: { paddingRight: 12 },
   backText: { color: '#6366f1', fontSize: 14, fontFamily: 'monospace' },
@@ -213,7 +213,7 @@ const styles = StyleSheet.create({
   planCard: {
     backgroundColor: '#111',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 12,
     padding: 20,
     marginBottom: 16,
@@ -226,7 +226,7 @@ const styles = StyleSheet.create({
   usageHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
   usageLabel: { color: '#ccc', fontSize: 12, fontFamily: 'monospace' },
   usageCount: { color: '#888', fontSize: 12, fontFamily: 'monospace' },
-  barBg: { height: 8, backgroundColor: '#1a1a2e', borderRadius: 4, overflow: 'hidden' },
+  barBg: { height: 8, backgroundColor: '#2a2a2a', borderRadius: 4, overflow: 'hidden' },
   barFill: { height: '100%', borderRadius: 4 },
   upgradeSection: { marginBottom: 20 },
   upgradeTitle: { color: '#fff', fontSize: 15, fontWeight: '700', fontFamily: 'monospace', marginBottom: 12 },
@@ -262,7 +262,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#2a2a2a',
   },
   eventType: { color: '#ccc', fontSize: 12, fontFamily: 'monospace' },
   eventDate: { color: '#888', fontSize: 12, fontFamily: 'monospace' },

@@ -124,7 +124,7 @@ const styles = StyleSheet.create({
     paddingTop: 14,
     paddingBottom: 4,
     borderTopWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     marginTop: 10,
   },
   sectionTitle: {
@@ -179,7 +179,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#0a0a12',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
+    borderColor: '#2a2a2a',
     borderRadius: 6,
     paddingHorizontal: 8,
   },

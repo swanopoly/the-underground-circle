@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, Pressable, Platform, Image } from 'react-native';
 import { OfficeTheme, OFFICE_THEMES, FurnitureItem, FurnitureType, EnvironmentType, isInteractiveFurniture, FURNITURE_CATALOG } from '../../../../lib/officeConfig';
 import type { OfficeAgent } from '../../../../lib/officeAgents';
@@ -16,7 +16,9 @@ import {
   PokerTableItem, CoinFlipItem, RouletteWheelItem, ChessBoardItem,
   ConnectFourItem, TriviaScreenItem,
   CryptoTickerItem, GitHubFeedItem, CalendarWidgetItem, WorldClockItem,
-  MusicVisualizerItem, FigmaBoardItem,
+  MusicVisualizerItem, FigmaBoardItem, EmailHubItem,
+  RetroConsoleItem,
+  ScrabbleBoardItem,
 } from './InteractiveFurniture';
 import { THEME_BACKGROUNDS } from '../../../../lib/themeBackgrounds';
 
@@ -156,7 +158,7 @@ function CastleWall({ theme }: { theme: OfficeTheme }) {
   });
   return (
     <>
-      <View style={[s.wallTop, { backgroundColor: '#0a0a0a', overflow: 'hidden' }]}>
+      <View style={[s.wallTop, { backgroundColor: '#000000', overflow: 'hidden' }]}>
         {rows}
         {/* Mortar crack details */}
         {[{ x: 180, y: 48, w: 12 }, { x: 420, y: 96, w: 8 }, { x: 650, y: 24, w: 15 }].map((c, i) => (
@@ -281,7 +283,7 @@ function GothicCathedralWall({ theme }: { theme: OfficeTheme }) {
             {/* Flame */}
             <Text style={{ fontSize: 10, marginBottom: -2 }}>🕯️</Text>
             {/* Iron holder */}
-            <View style={{ width: 6, height: 16, backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#333' }} />
+            <View style={{ width: 6, height: 16, backgroundColor: '#000000', borderWidth: 1, borderColor: '#333' }} />
             <View style={{ width: 14, height: 3, backgroundColor: '#222', borderRadius: 1, borderWidth: 1, borderColor: '#333' }} />
           </View>
         ))}
@@ -1571,7 +1573,7 @@ function CyberDesk({ x, y, theme }: { x: number; y: number; theme: OfficeTheme }
         <View style={{ position: 'absolute' as const, top: 12, left: 8, width: 14, height: 1, backgroundColor: '#ff00ff18' }} />
       </View>
       {/* Energy drink */}
-      <View style={{ position: 'absolute' as const, top: -8, left: 52, width: 8, height: 12, backgroundColor: '#1a1a2e', borderRadius: 1, borderWidth: 1, borderColor: '#00ffff30' }} />
+      <View style={{ position: 'absolute' as const, top: -8, left: 52, width: 8, height: 12, backgroundColor: '#2a2a2a', borderRadius: 1, borderWidth: 1, borderColor: '#00ffff30' }} />
       {/* Gaming chair */}
       <View style={{ position: 'absolute' as const, top: 24, left: 16 }}>
         <View style={{
@@ -1716,7 +1718,7 @@ function ShipDecor({ theme }: { theme: OfficeTheme }) {
         <View style={{ width: 3, height: 80, backgroundColor: theme.deskBorder }} />
         <View style={{
           position: 'absolute' as const, top: 0, left: 3, width: 40, height: 28,
-          backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#333',
+          backgroundColor: '#000000', borderWidth: 1, borderColor: '#333',
         }}>
           <Text style={{ fontSize: 14, textAlign: 'center' as const, marginTop: 2 }}>☠️</Text>
         </View>
@@ -1943,7 +1945,7 @@ function MansionDecor({ theme }: { theme: OfficeTheme }) {
             backgroundColor: '#f5f0e0', borderWidth: 1, borderColor: theme.deskBorder,
             alignItems: 'center' as const, justifyContent: 'center' as const,
           }}>
-            <View style={{ width: 1, height: 6, backgroundColor: '#1a1a1a', transform: [{ rotate: '30deg' }] }} />
+            <View style={{ width: 1, height: 6, backgroundColor: '#000000', transform: [{ rotate: '30deg' }] }} />
           </View>
           {/* Pendulum area */}
           <View style={{ position: 'absolute' as const, bottom: 8, left: 10, width: 10, height: 10, borderRadius: 5, backgroundColor: theme.accentGlow + '40' }} />
@@ -2375,7 +2377,7 @@ function renderFloorPattern(env: EnvironmentType, theme: OfficeTheme): React.Rea
 //  PIXEL ART ACCESSORY STRIP — fills gap between wall & first desk row
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function AccessoryStrip({ theme }: { theme: OfficeTheme }) {
+const AccessoryStrip = React.memo(function AccessoryStrip({ theme }: { theme: OfficeTheme }) {
   const Y = 193; // just below wallTop (190px)
   const accent = theme.accentGlow || '#6366f1';
   return (
@@ -2554,7 +2556,7 @@ function AccessoryStrip({ theme }: { theme: OfficeTheme }) {
       </View>
     </View>
   );
-}
+});
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  PLACED FURNITURE RENDERER
@@ -2961,8 +2963,8 @@ function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme, agents?
       );
     case 'neonsign':
       return (
-        <View style={[s.fNeonSign, { borderColor: theme.accentGlow, shadowColor: theme.accentGlow }]}>
-          <Text style={[s.fNeonText, { color: theme.accentGlow, textShadowColor: theme.accentGlow }]}>
+        <View style={[s.fNeonSign, { borderColor: theme.accentGlow }, Platform.OS === 'web' ? { boxShadow: `0 0 8px ${theme.accentGlow}` } as any : { shadowColor: theme.accentGlow }]}>
+          <Text style={[s.fNeonText, { color: theme.accentGlow }, Platform.OS === 'web' ? { textShadow: `0 0 6px ${theme.accentGlow}` } as any : { textShadowColor: theme.accentGlow }]}>
             {item.label || 'THE END'}
           </Text>
         </View>
@@ -3101,12 +3103,15 @@ function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme, agents?
     case 'chess_board': return <ChessBoardItem item={item} theme={theme} />;
     case 'connect_four': return <ConnectFourItem item={item} theme={theme} />;
     case 'trivia_screen': return <TriviaScreenItem item={item} theme={theme} />;
+    case 'retro_console': return <RetroConsoleItem item={item} theme={theme} />;
+    case 'scrabble_board': return <ScrabbleBoardItem item={item} theme={theme} />;
     case 'crypto_ticker': return <CryptoTickerItem item={item} theme={theme} />;
     case 'github_feed': return <GitHubFeedItem item={item} theme={theme} />;
     case 'calendar_widget': return <CalendarWidgetItem item={item} theme={theme} />;
     case 'world_clock': return <WorldClockItem item={item} theme={theme} />;
     case 'music_visualizer': return <MusicVisualizerItem item={item} theme={theme} />;
     case 'figma_board': return <FigmaBoardItem item={item} theme={theme} />;
+    case 'email_hub': return <EmailHubItem item={item} theme={theme} />;
     default:
       return <Text style={{ fontSize: 20 }}>📦</Text>;
   }
@@ -3116,13 +3121,21 @@ function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme, agents?
 //  MAIN FLOOR COMPONENT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorPress, onFurniturePress, onFurnitureMove, onFurnitureResize, onFurnitureInteract, agents, selectedFurnitureId, editMode }: Props) {
+function OfficeFloorInner({ theme: themeProp, furniture = [], onFloorPress, onFurniturePress, onFurnitureMove, onFurnitureResize, onFurnitureInteract, agents, selectedFurnitureId, editMode }: Props) {
   const theme = themeProp || OFFICE_THEMES.underground;
   const env = theme.environmentType || 'office';
 
   const bgSource = THEME_BACKGROUNDS[env] || null;
   const useSprite = !!bgSource;
-  const floorPattern = useSprite ? null : renderFloorPattern(env, theme);
+
+  // Memoize expensive wall/decor/desk rendering — only recalculate when theme changes
+  const floorPattern = useMemo(() => useSprite ? null : renderFloorPattern(env, theme), [useSprite, env, theme]);
+  const wallElement = useMemo(() => useSprite ? null : renderWall(env, theme), [useSprite, env, theme]);
+  const windowElement = useMemo(() => useSprite ? null : renderWindow(env, theme), [useSprite, env, theme]);
+  const decorElement = useMemo(() => useSprite ? null : renderDecor(env, theme), [useSprite, env, theme]);
+  const deskElements = useMemo(() => DESK_POSITIONS.map((pos, i) => (
+    <React.Fragment key={i}>{renderDesk(env, pos.x, pos.y, theme)}</React.Fragment>
+  )), [env, theme]);
 
   const floorRef = React.useRef<any>(null);
 
@@ -3160,9 +3173,9 @@ export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorP
       ) : (
         <>
           {floorPattern}
-          {renderWall(env, theme)}
-          {renderWindow(env, theme)}
-          {renderDecor(env, theme)}
+          {wallElement}
+          {windowElement}
+          {decorElement}
         </>
       )}
 
@@ -3170,9 +3183,7 @@ export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorP
       <AccessoryStrip theme={theme} />
 
       {/* Environment desks (always render as Views for agent positioning) */}
-      {DESK_POSITIONS.map((pos, i) => (
-        <React.Fragment key={i}>{renderDesk(env, pos.x, pos.y, theme)}</React.Fragment>
-      ))}
+      {deskElements}
 
       {/* User-placed furniture (2D rendering + click handlers) */}
       {furniture.map(item => (
@@ -3194,6 +3205,9 @@ export default function OfficeFloor({ theme: themeProp, furniture = [], onFloorP
     </Pressable>
   );
 }
+
+const OfficeFloor = React.memo(OfficeFloorInner);
+export default OfficeFloor;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  STYLES
@@ -3238,7 +3252,7 @@ const s = StyleSheet.create({
   floorLabel: { fontSize: 7, color: '#444', fontFamily: 'monospace', letterSpacing: 2 },
 
   placedWrap: { position: 'absolute', zIndex: 8 },
-  placedSelected: { zIndex: 20, ...(Platform.OS === 'web' ? { outline: '2px solid #3b82f6', outlineOffset: 2, borderRadius: 2 } as any : { borderWidth: 2, borderColor: '#3b82f6', borderRadius: 2 }) },
+  placedSelected: { zIndex: 20, ...(Platform.OS === 'web' ? { outlineStyle: 'solid', outlineWidth: 2, outlineColor: '#3b82f6', outlineOffset: 2, borderRadius: 2 } as any : { borderWidth: 2, borderColor: '#3b82f6', borderRadius: 2 }) },
   placedInteractive: { zIndex: 12 },
   fInteractive: { alignItems: 'center' as const, justifyContent: 'center' as const, borderWidth: 1, overflow: 'hidden' as const },
   editDeleteBtn: { position: 'absolute', top: -20, left: '50%' as any, marginLeft: -22, width: 44, height: 18, borderRadius: 4, backgroundColor: '#ef4444', alignItems: 'center', justifyContent: 'center', zIndex: 12, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
@@ -3308,7 +3322,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderRadius: 4,
     ...(Platform.OS === 'web' ? { boxShadow: '0 0 8px currentColor' } as any : {}),
   },
-  fNeonText: { fontSize: 9, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1, textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 6 },
+  fNeonText: { fontSize: 9, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1, ...(Platform.OS === 'web' ? { textShadow: '0 0 6px currentColor' } as any : { textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 6 }) },
   fTrophy: { width: 54, height: 38, borderWidth: 1, flexDirection: 'row', alignItems: 'flex-end', gap: 2, paddingHorizontal: 4, paddingBottom: 2 },
   fTrophyItem: { width: 14, height: 20, borderRadius: 2, alignItems: 'center', justifyContent: 'center' },
   fTrophyIcon: { fontSize: 7 },
@@ -3343,7 +3357,7 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { boxShadow: '2px 3px 6px rgba(0,0,0,0.25)' } as any : { elevation: 4 }),
   },
   fStickyFold: { position: 'absolute', top: 0, right: 0, width: 14, height: 14, borderBottomLeftRadius: 6, borderBottomWidth: 1, zIndex: 2 },
-  fStickyText: { color: '#1a1a1a', fontSize: 7, fontFamily: 'monospace', lineHeight: 10, flex: 1 },
+  fStickyText: { color: '#000000', fontSize: 7, fontFamily: 'monospace', lineHeight: 10, flex: 1 },
   fStickyGif: { width: '100%' as any, height: '100%' as any, borderRadius: 2 },
   fStickyDrawingImg: { width: '100%' as any, height: '100%' as any, borderRadius: 2 },
   fStickyEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 2 },

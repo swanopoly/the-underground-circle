@@ -51,7 +51,7 @@ function XpBar({ current, target, color, height = 8 }: {
 }
 
 const xpSt = StyleSheet.create({
-  track: { flex: 1, backgroundColor: '#1a1a2e', overflow: 'hidden', position: 'relative' },
+  track: { flex: 1, backgroundColor: '#2a2a2a', overflow: 'hidden', position: 'relative' },
   fill:  { position: 'absolute', top: 0, left: 0, bottom: 0 },
   shimmer: { position: 'absolute', top: 0, width: 40, backgroundColor: '#ffffff', opacity: 0.2 },
   tick: { position: 'absolute', top: 0, bottom: 0, width: 1, backgroundColor: '#00000040' },
@@ -95,7 +95,7 @@ function BadgeCard({ badge, earned, earnedAt }: {
       onPressOut={() => setPressed(false)}
       style={[
         bcSt.card,
-        { borderColor: earned ? tc.border + '55' : '#1a1a2e', opacity: earned ? 1 : 0.45 },
+        { borderColor: earned ? tc.border + '55' : '#2a2a2a', opacity: earned ? 1 : 0.45 },
         pressed && earned && { backgroundColor: tc.bg + 'dd', transform: [{ scale: 0.97 }] },
       ]}
     >
@@ -453,7 +453,7 @@ const s = StyleSheet.create({
   header: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     paddingHorizontal: 20, paddingTop: 20, paddingBottom: 16,
-    borderBottomWidth: 1, borderColor: '#1a1a2e',
+    borderBottomWidth: 1, borderColor: '#2a2a2a',
   },
   title: { color: '#eee', fontSize: 18, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 3 },
   subtitle: { color: '#444', fontSize: 10, fontFamily: 'monospace', marginTop: 2, letterSpacing: 1 },
@@ -485,10 +485,10 @@ const s = StyleSheet.create({
   // Stats
   statsCard: {
     margin: 16, marginBottom: 12,
-    backgroundColor: '#0c0c18', borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 14,
+    backgroundColor: '#0c0c18', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 14,
     flexDirection: 'row',
   },
-  divider: { width: 1, backgroundColor: '#1a1a2e', marginVertical: 10 },
+  divider: { width: 1, backgroundColor: '#2a2a2a', marginVertical: 10 },
 
   // Next rank
   nextCard: {
@@ -509,7 +509,7 @@ const s = StyleSheet.create({
   // Tier overview
   tierOverviewCard: {
     marginHorizontal: 16, marginBottom: 12, padding: 16,
-    backgroundColor: '#0c0c18', borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 14, gap: 8,
+    backgroundColor: '#0c0c18', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 14, gap: 8,
   },
   tierRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   tierDot: { width: 7, height: 7, borderRadius: 3.5 },
@@ -520,7 +520,7 @@ const s = StyleSheet.create({
   // Timeline
   timelineCard: {
     marginHorizontal: 16, marginBottom: 12, padding: 16,
-    backgroundColor: '#0c0c18', borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 14, gap: 4,
+    backgroundColor: '#0c0c18', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 14, gap: 4,
   },
   timelineRow: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
@@ -540,7 +540,7 @@ const s = StyleSheet.create({
   // Tier filter
   tierFilterScroll: { flexGrow: 0, marginBottom: 4 },
   tierFilterContent: { paddingHorizontal: 16, gap: 8, paddingVertical: 8 },
-  tierBtn: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: '#1a1a2e' },
+  tierBtn: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: '#2a2a2a' },
   tierBtnText: { color: '#555', fontSize: 10, fontWeight: '700', fontFamily: 'monospace' },
 
   // Badge list
@@ -549,7 +549,7 @@ const s = StyleSheet.create({
   // XP key
   keyCard: {
     margin: 16, marginBottom: 12, padding: 16,
-    backgroundColor: '#0c0c18', borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 14,
+    backgroundColor: '#0c0c18', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 14,
   },
   keySubtitle: { color: '#555', fontSize: 10, fontFamily: 'monospace', marginBottom: 12, lineHeight: 14 },
   keyRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 7, borderBottomWidth: 1, borderColor: '#111' },

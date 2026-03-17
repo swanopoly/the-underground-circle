@@ -172,6 +172,92 @@ export async function getRepoInfo(
   return { repo: data, error };
 }
 
+// ─── Webhook Management ──────────────────────────────────────────────────────
+
+export interface GitHubWebhook {
+  id: number;
+  active: boolean;
+  events: string[];
+  config: { url: string; content_type: string; insecure_ssl: string };
+}
+
+/** Create a webhook on a repo pointing to our edge function */
+export async function createWebhook(
+  token: string,
+  owner: string,
+  repo: string,
+  webhookUrl: string,
+  secret: string,
+  events: string[] = ['push', 'pull_request', 'issues', 'release', 'workflow_run'],
+): Promise<{ webhook: GitHubWebhook | null; error: string | null }> {
+  try {
+    const res = await fetch(`${API}/repos/${owner}/${repo}/hooks`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github.v3+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'web',
+        active: true,
+        events,
+        config: {
+          url: webhookUrl,
+          content_type: 'json',
+          secret,
+          insecure_ssl: '0',
+        },
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      return { webhook: null, error: (body as any).message || `HTTP ${res.status}` };
+    }
+    const data = await res.json();
+    return { webhook: data as GitHubWebhook, error: null };
+  } catch (e: any) {
+    return { webhook: null, error: e.message || 'Network error' };
+  }
+}
+
+/** Delete a webhook from a repo */
+export async function deleteWebhook(
+  token: string,
+  owner: string,
+  repo: string,
+  hookId: number,
+): Promise<{ error: string | null }> {
+  try {
+    const res = await fetch(`${API}/repos/${owner}/${repo}/hooks/${hookId}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github.v3+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+    if (!res.ok && res.status !== 404) {
+      const body = await res.json().catch(() => ({}));
+      return { error: (body as any).message || `HTTP ${res.status}` };
+    }
+    return { error: null };
+  } catch (e: any) {
+    return { error: e.message || 'Network error' };
+  }
+}
+
+/** List webhooks on a repo (to check existing) */
+export async function listWebhooks(
+  token: string,
+  owner: string,
+  repo: string,
+): Promise<{ webhooks: GitHubWebhook[]; error: string | null }> {
+  const { data, error } = await ghFetch<GitHubWebhook[]>(`/repos/${owner}/${repo}/hooks`, token);
+  return { webhooks: data || [], error };
+}
+
 // ─── Tree Helpers ─────────────────────────────────────────────────────────────
 
 /** Group a flat tree into folder → entries[] map (blobs only, sorted) */
