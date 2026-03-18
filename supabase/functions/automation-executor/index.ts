@@ -1228,6 +1228,138 @@ Deno.serve(async (req: Request) => {
         }
       }
 
+      // 3d. Nudge Inactive Members — check commit activity per member
+      const isNudgeInactive = (automation.prompt || "").includes("{{inactive_members}}") ||
+        automation.name?.toLowerCase().includes("nudge inactive");
+      let inactiveMembersContext = "";
+      if (isNudgeInactive) {
+        try {
+          const threeDaysAgo = new Date();
+          threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+
+          // Get all members with their usernames
+          const { data: membersRaw } = await supabase
+            .from("circle_members")
+            .select("user_id, user:profiles(display_name, username)")
+            .eq("circle_id", circleId);
+          const membersList = membersRaw || [];
+
+          // Get recent commit authors from GitHub events
+          const { data: recentCommits } = await supabase
+            .from("circle_github_events")
+            .select("author")
+            .eq("circle_id", circleId)
+            .eq("event_type", "push")
+            .gte("created_at", threeDaysAgo.toISOString());
+
+          const activeAuthors = new Set((recentCommits || []).map((c: any) => (c.author || "").toLowerCase()));
+
+          // Find members who haven't pushed in >3 days
+          const inactiveMembers = membersList.filter((m: any) => {
+            const username = (m.user?.username || "").toLowerCase();
+            const displayName = (m.user?.display_name || "").toLowerCase();
+            return !activeAuthors.has(username) && !activeAuthors.has(displayName);
+          });
+
+          if (inactiveMembers.length === 0) {
+            // Everyone is active — skip the AI call
+            const skipMsg = "🦢 Everyone in the circle has pushed code recently. Keep shipping!";
+            await logStep("ℹ️ No inactive members found — skipping nudge");
+
+            if (!dryRun) {
+              const target = automation.output_target || "chat";
+              await routeOutput(supabase, target, circleId, automation.agent || "BlackSwan", skipMsg, automation.webhook_url, automation.name);
+              await supabase.from("agent_activity").insert({
+                circle_id: circleId,
+                agent_name: automation.agent || "BlackSwan",
+                source: "cron",
+                source_detail: `automation:${automation.name}`,
+                activity_type: "task_completed",
+                title: `🤖 ${automation.name}`,
+                body: skipMsg,
+                status: "completed",
+                metadata: { automation_id: automationId, run_id: runId, inactive_count: 0 },
+              });
+            }
+
+            if (runId) {
+              logSteps.push(`[${((Date.now() - startTime) / 1000).toFixed(1)}s] ✅ All members active — completed`);
+              await supabase.from("automation_runs").update({
+                status: "completed",
+                completed_at: new Date().toISOString(),
+                duration_ms: Date.now() - startTime,
+                error_message: logSteps.join("\n"),
+              }).eq("id", runId);
+            }
+            return new Response(
+              JSON.stringify({ ok: true, run_id: runId, inactive_count: 0, skipped: true }),
+              { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+            );
+          }
+
+          inactiveMembersContext = inactiveMembers.map((m: any) => {
+            const name = m.user?.display_name || m.user?.username || "Unknown";
+            return `- ${name} (@${m.user?.username || "unknown"})`;
+          }).join("\n");
+          await logStep(`✓ Found ${inactiveMembers.length} inactive member(s) (no commits in 3+ days)`);
+        } catch (nudgeErr: any) {
+          await logStep(`⚠ Inactive members check failed: ${nudgeErr.message}`);
+        }
+      }
+
+      // 3e. Deploy Failure Alert — check for failed workflow_run events
+      const isDeployFailure = (automation.prompt || "").includes("{{deploy_failures}}") ||
+        automation.name?.toLowerCase().includes("deploy failure");
+      let deployFailuresContext = "";
+      if (isDeployFailure) {
+        try {
+          const { data: failedRuns } = await supabase
+            .from("circle_github_events")
+            .select("id, title, body, author, url, ref, created_at")
+            .eq("circle_id", circleId)
+            .eq("event_type", "workflow_run")
+            .eq("processed", false)
+            .order("created_at", { ascending: false })
+            .limit(10);
+
+          // Filter for failures — action/conclusion stored in body or title
+          const failures = (failedRuns || []).filter((e: any) => {
+            const bodyLower = (e.body || "").toLowerCase();
+            const titleLower = (e.title || "").toLowerCase();
+            return bodyLower.includes("failure") || bodyLower.includes("failed") ||
+                   titleLower.includes("failure") || titleLower.includes("failed");
+          });
+
+          if (failures.length === 0) {
+            await logStep("ℹ️ No deploy failures found — skipping alert");
+
+            if (runId) {
+              logSteps.push(`[${((Date.now() - startTime) / 1000).toFixed(1)}s] ✅ No failures — completed`);
+              await supabase.from("automation_runs").update({
+                status: "completed",
+                completed_at: new Date().toISOString(),
+                duration_ms: Date.now() - startTime,
+                error_message: logSteps.join("\n"),
+              }).eq("id", runId);
+            }
+            return new Response(
+              JSON.stringify({ ok: true, run_id: runId, deploy_failures: 0, skipped: true }),
+              { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+            );
+          }
+
+          deployFailuresContext = failures.map((e: any) =>
+            `- ${e.title} (by ${e.author}, ${e.created_at})${e.url ? `\n  ${e.url}` : ""}`
+          ).join("\n");
+          await logStep(`✓ Found ${failures.length} deploy failure(s)`);
+
+          // Store IDs to mark processed after output
+          (context as any)._deployFailureIds = failures.map((e: any) => e.id);
+        } catch (deployErr: any) {
+          await logStep(`⚠ Deploy failure check failed: ${deployErr.message}`);
+        }
+      }
+
       // 4. Substitute variables in prompt
       const contextString = buildContextString(context);
       const vars: Record<string, string> = {
@@ -1283,6 +1415,12 @@ Deno.serve(async (req: Request) => {
       }
       if (githubEventsContext) {
         vars.github_events = githubEventsContext;
+      }
+      if (inactiveMembersContext) {
+        vars.inactive_members = inactiveMembersContext;
+      }
+      if (deployFailuresContext) {
+        vars.deploy_failures = deployFailuresContext;
       }
 
       const resolvedPrompt = substituteVariables(automation.prompt, vars);
@@ -1366,6 +1504,20 @@ ${contextString}`;
           await logStep(`✓ Marked ${eventIds.length} GitHub event(s) as processed`);
         } catch (markErr: any) {
           await logStep(`⚠ Failed to mark GitHub events as processed: ${markErr.message}`);
+        }
+      }
+
+      // 6a-df. Mark deploy failure events as processed
+      if (isDeployFailure && (context as any)._deployFailureIds?.length > 0 && !dryRun) {
+        try {
+          const eventIds: string[] = (context as any)._deployFailureIds;
+          await supabase
+            .from("circle_github_events")
+            .update({ processed: true, processed_at: new Date().toISOString() })
+            .in("id", eventIds);
+          await logStep(`✓ Marked ${eventIds.length} deploy failure event(s) as processed`);
+        } catch (markErr: any) {
+          await logStep(`⚠ Failed to mark deploy failure events as processed: ${markErr.message}`);
         }
       }
 

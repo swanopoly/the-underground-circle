@@ -18,8 +18,12 @@ import {
   listRepos,
   createWebhook,
   deleteWebhook,
+  connectViaOAuth,
+  getOAuthStatus,
+  getConnectedRepos,
   type GitHubRepo,
   type GitHubUser,
+  type GitHubOAuthStatus,
 } from '../../../lib/github';
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
@@ -66,6 +70,10 @@ export default function GitHubTab({ circleId }: { circleId: string }) {
   const [loading, setLoading] = useState(false);
   const [connectingRepo, setConnectingRepo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [oauthStatus, setOauthStatus] = useState<GitHubOAuthStatus | null>(null);
+  const [oauthLoading, setOauthLoading] = useState(false);
+  const [showPatSection, setShowPatSection] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
 
   useEffect(() => {
     loadState();
@@ -90,6 +98,10 @@ export default function GitHubTab({ circleId }: { circleId: string }) {
   const loadState = async () => {
     setMode('loading');
     try {
+      // Get current user for OAuth
+      const { data: { user: authUser } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+      if (authUser) setUserId(authUser.id);
+
       // Check for existing connections
       const { data: conns } = await supabase
         .from('circle_github_connections')
@@ -110,7 +122,23 @@ export default function GitHubTab({ circleId }: { circleId: string }) {
         setRecentEvents(events || []);
         setMode('connected');
       } else {
-        // Check for stored PAT
+        // Check OAuth status first (preferred), then fall back to PAT
+        if (authUser) {
+          const oauth = await getOAuthStatus(authUser.id);
+          setOauthStatus(oauth);
+          if (oauth.connected) {
+            // OAuth connected — use OAuth repos
+            const { repos: oauthRepos } = await getConnectedRepos(authUser.id);
+            if (oauthRepos.length > 0) {
+              setGhUser({ login: oauth.github_username || '', avatar_url: '', name: oauth.github_username || null });
+              setRepos(oauthRepos.filter(r => !r.archived));
+              setMode('repos');
+              return;
+            }
+          }
+        }
+
+        // Fall back to stored PAT
         const stored = await getStoredToken(circleId);
         if (stored) {
           setToken(stored);
@@ -122,6 +150,29 @@ export default function GitHubTab({ circleId }: { circleId: string }) {
     } catch (err) {
       console.error('GitHub load error:', err);
       setMode('setup');
+    }
+  };
+
+  const handleOAuthConnect = async () => {
+    if (!userId) {
+      setError('Not authenticated');
+      return;
+    }
+    setOauthLoading(true);
+    setError(null);
+    try {
+      const { url, error: oauthErr } = await connectViaOAuth(circleId, userId);
+      if (oauthErr || !url) {
+        setError(oauthErr || 'Failed to start OAuth flow');
+        return;
+      }
+      if (Platform.OS === 'web') {
+        window.open(url, '_blank');
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setOauthLoading(false);
     }
   };
 
@@ -424,6 +475,9 @@ export default function GitHubTab({ circleId }: { circleId: string }) {
         <View style={styles.userCard}>
           <Text style={styles.userLogin}>@{ghUser.login}</Text>
           <Text style={styles.userName}>{ghUser.name || ''}</Text>
+          {oauthStatus?.connected && (
+            <Text style={styles.oauthBadge}>Connected via OAuth</Text>
+          )}
           <Pressable onPress={handleBrowseRepos} style={styles.primaryBtn}>
             {loading ? (
               <ActivityIndicator color="#fff" size="small" />
@@ -434,32 +488,61 @@ export default function GitHubTab({ circleId }: { circleId: string }) {
         </View>
       ) : (
         <View style={styles.tokenSection}>
-          <Text style={styles.tokenLabel}>GitHub Personal Access Token</Text>
-          <Text style={styles.tokenHint}>
-            Create a token at github.com/settings/tokens with "repo" and
-            "admin:repo_hook" scopes.
-          </Text>
-          <TextInput
-            style={styles.tokenInput}
-            value={tokenInput}
-            onChangeText={setTokenInput}
-            placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
-            placeholderTextColor="#555"
-            secureTextEntry
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
+          {/* OAuth — primary option */}
           <Pressable
-            onPress={handleValidateToken}
-            style={[styles.primaryBtn, !tokenInput.trim() && styles.btnDisabled]}
-            disabled={!tokenInput.trim() || loading}
+            onPress={handleOAuthConnect}
+            style={[styles.oauthBtn, oauthLoading && styles.btnDisabled]}
+            disabled={oauthLoading}
           >
-            {loading ? (
+            {oauthLoading ? (
               <ActivityIndicator color="#fff" size="small" />
             ) : (
-              <Text style={styles.primaryBtnText}>Validate & Connect</Text>
+              <Text style={styles.oauthBtnText}>Connect with GitHub</Text>
             )}
           </Pressable>
+          <Text style={styles.oauthHint}>
+            Securely connect via GitHub OAuth. No tokens to manage.
+          </Text>
+
+          {/* PAT — collapsible secondary option */}
+          <Pressable
+            onPress={() => setShowPatSection(!showPatSection)}
+            style={styles.patToggle}
+          >
+            <Text style={styles.patToggleText}>
+              {showPatSection ? '▾' : '▸'} or use a Personal Access Token
+            </Text>
+          </Pressable>
+
+          {showPatSection && (
+            <View style={{ gap: 8 }}>
+              <Text style={styles.tokenHint}>
+                Create a token at github.com/settings/tokens with "repo" and
+                "admin:repo_hook" scopes.
+              </Text>
+              <TextInput
+                style={styles.tokenInput}
+                value={tokenInput}
+                onChangeText={setTokenInput}
+                placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+                placeholderTextColor="#555"
+                secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <Pressable
+                onPress={handleValidateToken}
+                style={[styles.primaryBtn, !tokenInput.trim() && styles.btnDisabled]}
+                disabled={!tokenInput.trim() || loading}
+              >
+                {loading ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text style={styles.primaryBtnText}>Validate & Connect</Text>
+                )}
+              </Pressable>
+            </View>
+          )}
         </View>
       )}
 
@@ -518,14 +601,44 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
 
-  // Token setup
-  tokenSection: { gap: 8 },
-  tokenLabel: {
-    color: '#ccc',
-    fontSize: 13,
-    fontWeight: '600',
+  // OAuth
+  oauthBtn: {
+    backgroundColor: '#238636',
+    borderRadius: 8,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  oauthBtnText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
     fontFamily: 'monospace',
   },
+  oauthHint: {
+    color: '#666',
+    fontSize: 11,
+    fontFamily: 'monospace',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  oauthBadge: {
+    color: '#22c55e',
+    fontSize: 11,
+    fontFamily: 'monospace',
+    marginBottom: 4,
+  },
+  patToggle: {
+    marginTop: 16,
+    paddingVertical: 8,
+  },
+  patToggleText: {
+    color: '#888',
+    fontSize: 12,
+    fontFamily: 'monospace',
+  },
+
+  // Token setup
+  tokenSection: { gap: 8 },
   tokenHint: {
     color: '#666',
     fontSize: 11,

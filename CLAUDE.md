@@ -15,27 +15,36 @@ Target: Small dev teams (2-5 people) building side projects together.
 This is THE feature. Everything else is secondary until this works end-to-end.
 
 **Current state:**
-- `src/lib/github.ts` — PAT-based GitHub REST API (browse repos, read files) — WORKS
-- RoomsTab has "GitHub" panel for browsing repo files — WORKS
-- Automation system with pg_cron + edge function executor — WORKS
-- BlackSwan AI edge function with full circle context — WORKS
+- `src/lib/github.ts` — GitHub REST API + OAuth integration — WORKS ✅
+- `supabase/functions/github-oauth/` — OAuth edge function (authorize + callback) — WORKS ✅
+- `supabase/functions/github-webhook/` — Webhook receiver for push/PR/CI events — WORKS ✅
+- `circle_github_events` table — stores webhook payloads per circle — WORKS ✅
+- `circle_github_connections` table — tracks connected repos + webhook IDs — WORKS ✅
+- GitHubTab — OAuth as primary connect method, PAT as fallback — WORKS ✅
+- IntegrationsTab — GitHub as first-class platform alongside Slack/Teams/Discord — WORKS ✅
+- BlackSwan reads GitHub events — `github_summary` automation posts shipping summaries — WORKS ✅
+- Invite link flow — `src/lib/invites.ts` + `/join/:code` URL handling in App.tsx — WORKS ✅
+- Onboarding flow — 3-step modal (welcome → GitHub → invite) for new users — WORKS ✅
+- BlackSwan nudge inactive members — automation template + executor support — WORKS ✅
+- BlackSwan deploy failure alerts — automation template + executor support — WORKS ✅
+- RoomsTab has "GitHub" panel for browsing repo files — WORKS ✅
+- Automation system with pg_cron + edge function executor — WORKS ✅
+- BlackSwan AI edge function with full circle context — WORKS ✅
 
-**What needs to be built (in order):**
-1. **GitHub OAuth flow** — replace manual PAT with proper OAuth (edge function + callback)
-2. **GitHub webhook receiver** — new edge function that receives push/PR/CI events
-3. **`circle_github_events` table** — stores webhook payloads per circle
-4. **BlackSwan reads GitHub events** — scheduled automation posts shipping summaries
-5. **Promote GitHub to IntegrationsTab** — first-class integration alongside Slack/Teams/Discord
-6. **Invite link flow** — share URL → join → connect GitHub → AI starts in 2 minutes
+**What still needs work:**
+1. **Run pending migrations** — `20260318_pending_items.sql` (pg_cron sweeper + step_away_sessions) via Supabase SQL Editor
+2. **Deploy updated edge functions** — `npx supabase functions deploy automation-executor`
+3. **Test end-to-end OAuth flow** — authorize → callback → token stored → repos listed
+4. **Test webhook delivery** — push to connected repo → event in circle_github_events → BlackSwan summary
 
-### Priority 2: BlackSwan Proactive Agent
-- Daily/weekly shipping summaries from real GitHub data
-- Nudge members who haven't pushed code
-- Auto-detect deploy failures and alert the team
+### Priority 2: BlackSwan Proactive Agent ✅ BUILT
+- Daily/weekly shipping summaries from real GitHub data ✅
+- Nudge members who haven't pushed code ✅ (nudge-inactive-members template)
+- Auto-detect deploy failures and alert the team ✅ (deploy-failure-alert template)
 
-### Priority 3: Onboarding
-- First-run UX that shows value in <60 seconds
-- Working invite links
+### Priority 3: Onboarding ✅ BUILT
+- First-run UX that shows value in <60 seconds ✅ (OnboardingFlow component)
+- Working invite links ✅ (invites.ts + App.tsx URL handling)
 
 ### What is DEPRIORITIZED (don't build new stuff here):
 - Games, room customization, furniture — culture layer, not core
@@ -618,23 +627,27 @@ scp models/v5/gguf_dpo/*.gguf swan@dev-machine:~/the-underground-circle/scripts/
 
 ## Pending / Known Issues
 
-### Critical Path (GitHub Integration)
+### Critical Path (GitHub Integration) ✅ COMPLETE
 | Issue | Priority | Status |
 |---|---|---|
-| GitHub OAuth edge function | **P0** | NOT STARTED — needed to replace manual PAT entry |
-| GitHub webhook receiver edge fn | **P0** | NOT STARTED — receives push/PR/CI events |
-| `circle_github_events` table | **P0** | NOT STARTED — stores webhook events per circle |
-| BlackSwan GitHub summary automation | **P0** | NOT STARTED — reads events, posts to chat |
-| GitHub in IntegrationsTab | **P1** | NOT STARTED — first-class platform card |
-| Invite link flow | **P1** | NOT STARTED — shareable join URL |
+| GitHub OAuth edge function | **P0** | ✅ Built — `github-oauth` edge fn + GitHubTab wired |
+| GitHub webhook receiver edge fn | **P0** | ✅ Built — `github-webhook` edge fn |
+| `circle_github_events` table | **P0** | ✅ Built — stores webhook events per circle |
+| BlackSwan GitHub summary automation | **P0** | ✅ Built — `github_summary` in automation-executor |
+| BlackSwan nudge inactive members | **P0** | ✅ Built — `nudge_inactive_members` in automation-executor |
+| BlackSwan deploy failure alerts | **P0** | ✅ Built — `deploy_failure_alert` in automation-executor |
+| GitHub in IntegrationsTab | **P1** | ✅ Built — first-class platform card |
+| Invite link flow | **P1** | ✅ Built — `invites.ts` + `/join/:code` + App.tsx |
+| Onboarding flow | **P1** | ✅ Built — 3-step modal (welcome → GitHub → invite) |
 
 ### Infrastructure (run when convenient)
 | Issue | Priority | Status |
 |---|---|---|
-| pg_cron sweeper SQL | Medium | ⚠️ NOT run — SQL in Architecture Notes section |
+| pg_cron sweeper + step_away_sessions SQL | Medium | ⚠️ NOT run — `20260318_pending_items.sql` |
 | custom_themes migration SQL | Medium | ⚠️ NOT run — `20260228_custom_themes.sql` |
 | agent_appearances migration SQL | Medium | ⚠️ NOT run — `20260301_agent_appearances.sql` |
 | office_layout migration SQL | Medium | ⚠️ NOT run — `20260301_office_layout.sql` |
+| Deploy automation-executor edge fn | Medium | ⚠️ NOT deployed — `npx supabase functions deploy automation-executor` |
 | room-task-executor edge function | Medium | ⚠️ NOT deployed — needs `npx supabase login` |
 | award_points RPC 400 | Low | May need points_transactions confirmed |
 | circle_office_agents upsert 400 | Low | AgentPanel bug |

@@ -11,6 +11,7 @@ import ErrorBoundary from './src/components/ErrorBoundary';
 import AppHeader from './src/components/AppHeader';
 import { startAgentAutoConnect, stopAgentAutoConnect } from './src/lib/agentAutoConnect';
 import { acceptInvite, lookupInvite } from './src/lib/invites';
+import OnboardingFlow, { isOnboardingComplete } from './src/components/OnboardingFlow';
 
 const PENDING_INVITE_KEY = 'uc_pending_invite';
 
@@ -110,6 +111,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [navReady, setNavReady] = useState(false);
   const [initialNavState, setInitialNavState] = useState<object | undefined>(undefined);
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
@@ -158,6 +160,10 @@ export default function App() {
         startAgentAutoConnect();
         // Redeem pending invite if user just logged in with one
         handlePendingInvite(session.user.id);
+        // Show onboarding for new users
+        if (!isOnboardingComplete()) {
+          setShowOnboarding(true);
+        }
       }
     }).catch(() => {
       setLoading(false);
@@ -211,6 +217,12 @@ export default function App() {
         <StatusBar barStyle="light-content" />
         {session ? <MainWithHeader /> : <AuthNavigator />}
       </NavigationContainer>
+      {showOnboarding && session && (
+        <OnboardingFlow
+          userId={session.user.id}
+          onComplete={() => setShowOnboarding(false)}
+        />
+      )}
     </ErrorBoundary>
   );
 }

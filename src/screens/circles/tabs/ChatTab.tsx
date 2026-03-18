@@ -252,14 +252,14 @@ function ChatLoadingWave() {
     _chatWaveStyleInjected = true;
     const style = document.createElement('style');
     style.textContent = `
-      @keyframes uc-chat-wave {
+      @keyframes uc-wave {
         0%, 100% { transform: translateY(0) scale(1); opacity: 0.4; }
-        30% { transform: translateY(-26px) scale(1.3); opacity: 1; }
-        60% { transform: translateY(6px) scale(0.9); opacity: 0.7; }
+        30% { transform: translateY(-18px) scale(1.3); opacity: 1; }
+        60% { transform: translateY(4px) scale(0.9); opacity: 0.7; }
       }
-      .uc-chat-dot {
-        width: 18px; height: 18px; border-radius: 50%;
-        animation: uc-chat-wave 1.4s ease-in-out infinite;
+      .uc-wave-dot {
+        width: 10px; height: 10px; border-radius: 50%;
+        animation: uc-wave 1.4s ease-in-out infinite;
       }
     `;
     document.head.appendChild(style);
@@ -271,8 +271,12 @@ function ChatLoadingWave() {
         {WAVE_COLORS_CHAT.map((color, i) => (
           <div
             key={i}
-            className="uc-chat-dot"
-            style={{ backgroundColor: color, animationDelay: `${i * 0.12}s` }}
+            className="uc-wave-dot"
+            style={{
+              backgroundColor: color,
+              animationDelay: `${i * 0.12}s`,
+              boxShadow: `0 0 12px ${color}60`,
+            }}
           />
         ))}
       </View>
@@ -318,16 +322,16 @@ function TypingDots() {
 const chatLoadStyles = StyleSheet.create({
   dotsRow: {
     flexDirection: 'row',
-    gap: 14,
+    gap: 10,
     alignItems: 'center',
     justifyContent: 'center',
+    height: 40,
     marginTop: 24,
   },
   nativeDot: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    opacity: 0.7,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
   },
 });
 

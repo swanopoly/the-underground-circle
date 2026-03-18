@@ -8,7 +8,7 @@
  * Owner can drag their own agent to reposition it.
  */
 
-import React, { useRef, useState, useCallback } from 'react';
+import React, { useRef, useState, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, Pressable,
   PanResponder, Animated, Modal, Platform,
@@ -16,6 +16,58 @@ import {
 } from 'react-native';
 import { CircleOfficeAgent } from '../lib/circleOffice';
 import { updateAgentPosition } from '../lib/officeTerminal';
+
+// ─── Inject CSS keyframes for building effects (web only, once) ─────────────
+
+let _buildingCssInjected = false;
+function injectBuildingCSS() {
+  if (Platform.OS !== 'web' || _buildingCssInjected) return;
+  _buildingCssInjected = true;
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes uc-building-glow {
+      0%, 100% { box-shadow: 0 0 12px #f59e0b66, 0 0 24px #f59e0b33; }
+      50% { box-shadow: 0 0 20px #f59e0baa, 0 0 40px #f59e0b55, 0 0 60px #f59e0b22; }
+    }
+    @keyframes uc-spark-orbit {
+      0% { transform: rotate(0deg) translateX(38px) scale(1); opacity: 1; }
+      50% { transform: rotate(180deg) translateX(38px) scale(1.4); opacity: 0.6; }
+      100% { transform: rotate(360deg) translateX(38px) scale(1); opacity: 1; }
+    }
+    @keyframes uc-building-badge-pulse {
+      0%, 100% { opacity: 1; transform: translateX(-50%) scale(1); }
+      50% { opacity: 0.85; transform: translateX(-50%) scale(1.08); }
+    }
+    .uc-building-ring {
+      animation: uc-building-glow 1.2s ease-in-out infinite !important;
+    }
+    .uc-building-spark {
+      position: absolute;
+      width: 5px; height: 5px; border-radius: 50%;
+      top: 50%; left: 50%;
+      margin-top: -2.5px; margin-left: -2.5px;
+      animation: uc-spark-orbit 2s linear infinite;
+      pointer-events: none;
+    }
+    .uc-building-badge {
+      position: absolute;
+      top: -20px; left: 50%;
+      transform: translateX(-50%);
+      background: #f59e0b;
+      color: #000;
+      font-size: 8px;
+      font-weight: 800;
+      letter-spacing: 1px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      white-space: nowrap;
+      animation: uc-building-badge-pulse 1s ease-in-out infinite;
+      pointer-events: none;
+      z-index: 20;
+    }
+  `;
+  document.head.appendChild(style);
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -81,13 +133,16 @@ function AgentToken({ agent, isOwn, canvasW, canvasH, onDragEnd, onPress }: Agen
   const ringColor  = STATUS_COLORS[agent.status] || STATUS_COLORS.offline;
   const sprite     = getSprite(agent.id);
 
+  // Inject CSS for building effects (web only)
+  useEffect(() => { if (isBuilding) injectBuildingCSS(); }, [isBuilding]);
+
   const pulseAnim = useRef(new Animated.Value(1)).current;
   React.useEffect(() => {
     if (isBuilding) {
       const loop = Animated.loop(
         Animated.sequence([
-          Animated.timing(pulseAnim, { toValue: 1.15, duration: 600, useNativeDriver: true }),
-          Animated.timing(pulseAnim, { toValue: 1.0,  duration: 600, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1.22, duration: 500, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1.0,  duration: 500, useNativeDriver: true }),
         ])
       );
       loop.start();
@@ -139,19 +194,50 @@ function AgentToken({ agent, isOwn, canvasW, canvasH, onDragEnd, onPress }: Agen
       ]}
     >
       <Pressable onPress={() => onPress(agent)} style={styles.agentTokenInner}>
+        {/* BUILDING floating badge (web: CSS animated, native: static) */}
+        {isBuilding && Platform.OS === 'web' && (
+          <div className="uc-building-badge">BUILDING</div>
+        )}
+        {isBuilding && Platform.OS !== 'web' && (
+          <View style={styles.buildingBadgeNative}>
+            <Text style={styles.buildingBadgeText}>BUILDING</Text>
+          </View>
+        )}
+
         {/* Status ring — shadow color matches status */}
-        <View style={[
-          styles.statusRing,
-          { borderColor: ringColor, shadowColor: ringColor },
-          Platform.OS === 'web' && ({ boxShadow: `0 0 10px ${ringColor}88` } as any),
-        ]}>
+        <View
+          style={[
+            styles.statusRing,
+            { borderColor: ringColor, shadowColor: ringColor },
+            Platform.OS === 'web' && ({
+              boxShadow: isBuilding
+                ? `0 0 20px ${ringColor}aa, 0 0 40px ${ringColor}55`
+                : `0 0 10px ${ringColor}88`,
+            } as any),
+            isBuilding && { borderWidth: 4 },
+          ]}
+          // @ts-ignore — web className for CSS animation
+          className={isBuilding && Platform.OS === 'web' ? 'uc-building-ring' : undefined}
+        >
           {/* Sprite */}
           <Text style={styles.sprite}>{sprite}</Text>
         </View>
+
+        {/* Orbiting sparks when building (web only) */}
+        {isBuilding && Platform.OS === 'web' && (
+          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }} pointerEvents="none">
+            <div className="uc-building-spark" style={{ background: '#f59e0b', animationDelay: '0s' }} />
+            <div className="uc-building-spark" style={{ background: '#fbbf24', animationDelay: '0.66s' }} />
+            <div className="uc-building-spark" style={{ background: '#fb923c', animationDelay: '1.33s' }} />
+          </View>
+        )}
+
         {/* Label */}
         <View style={styles.agentLabel}>
-          <Text style={styles.agentName} numberOfLines={1}>{agent.name}</Text>
-          <Text style={styles.agentOwner} numberOfLines={1}>{agent.ownerDisplayName}</Text>
+          <Text style={[styles.agentName, isBuilding && styles.agentNameBuilding]} numberOfLines={1}>{agent.name}</Text>
+          <Text style={styles.agentOwner} numberOfLines={1}>
+            {isBuilding ? (agent.currentTask || 'Working...') : agent.ownerDisplayName}
+          </Text>
         </View>
         {/* Own badge */}
         {isOwn && <View style={styles.ownBadge}><Text style={styles.ownBadgeText}>YOU</Text></View>}
@@ -335,8 +421,14 @@ export default function PixelOfficeCanvas({ agents, currentUserId, onPositionCha
       <View style={styles.legend}>
         {Object.entries(STATUS_COLORS).map(([status, color]) => (
           <View key={status} style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: color }]} />
-            <Text style={styles.legendText}>{status}</Text>
+            <View style={[
+              styles.legendDot,
+              { backgroundColor: color },
+              status === 'building' && styles.legendDotBuilding,
+            ]} />
+            <Text style={[styles.legendText, status === 'building' && { color: '#f59e0b', fontWeight: '700' }]}>
+              {status}
+            </Text>
           </View>
         ))}
         <Text style={styles.legendHint}>Drag your agent to reposition</Text>
@@ -464,6 +556,25 @@ const styles = StyleSheet.create({
     fontSize: 9,
     textAlign: 'center',
   },
+  agentNameBuilding: {
+    color: '#f59e0b',
+  },
+  buildingBadgeNative: {
+    position: 'absolute',
+    top: -18,
+    alignSelf: 'center',
+    backgroundColor: '#f59e0b',
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    zIndex: 20,
+  },
+  buildingBadgeText: {
+    color: '#000',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
   ownBadge: {
     position: 'absolute',
     top: -6,
@@ -498,6 +609,14 @@ const styles = StyleSheet.create({
   },
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   legendDot: { width: 8, height: 8, borderRadius: 4 },
+  legendDotBuilding: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: '#f59e0b88',
+    ...(Platform.OS === 'web' ? { boxShadow: '0 0 6px #f59e0b88' } as any : {}),
+  },
   legendText: { color: '#52525b', fontSize: 10, textTransform: 'capitalize' },
   legendHint: { color: '#3f3f46', fontSize: 10, marginLeft: 'auto' },
   // Modal / popup
