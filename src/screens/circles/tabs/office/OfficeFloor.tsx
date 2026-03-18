@@ -62,6 +62,7 @@ interface Props {
   onFurnitureMove?: (id: string, x: number, y: number) => void;
   onFurnitureResize?: (id: string, w: number, h: number) => void;
   onFurnitureInteract?: (id: string, type: FurnitureType) => void;
+  onPokerAction?: (id: string, action: string, amount?: number) => void;
   agents?: OfficeAgent[];
   selectedFurnitureId?: string | null;
   editMode?: boolean;
@@ -2576,18 +2577,19 @@ function findParentScale(el: HTMLElement): number {
 
 const MIN_ITEM_SIZE = 16;
 
-function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract, editMode, selected, agents }: {
+function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract, onPokerAction, editMode, selected, agents }: {
   item: FurnitureItem;
   theme: OfficeTheme;
   onPress: () => void;
   onMove?: (x: number, y: number) => void;
   onResize?: (w: number, h: number) => void;
   onInteract?: () => void;
+  onPokerAction?: (action: string, amount?: number) => void;
   editMode?: boolean;
   selected?: boolean;
   agents?: OfficeAgent[];
 }) {
-  const content = renderFurnitureContent(item, theme, agents);
+  const content = renderFurnitureContent(item, theme, agents, item.type === 'poker_table' ? onPokerAction : undefined);
   const isInteractive = isInteractiveFurniture(item.type);
 
   // Look up the catalog natural size for this item type
@@ -2823,7 +2825,7 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract,
   );
 }
 
-function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme, agents?: OfficeAgent[]) {
+function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme, agents?: OfficeAgent[], onPokerAction?: (action: string, amount?: number) => void) {
   switch (item.type) {
     case 'plant':
       return (
@@ -3097,7 +3099,7 @@ function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme, agents?
     case 'weather_station': return <WeatherStationItem item={item} theme={theme} />;
     case 'twitch_stream': return <TwitchStreamItem item={item} theme={theme} />;
     case 'pomodoro_room': return <PomodoroRoomItem item={item} theme={theme} />;
-    case 'poker_table': return <PokerTableItem item={item} theme={theme} />;
+    case 'poker_table': return <PokerTableItem item={item} theme={theme} onPokerAction={onPokerAction} />;
     case 'coin_flip': return <CoinFlipItem item={item} theme={theme} />;
     case 'roulette_wheel': return <RouletteWheelItem item={item} theme={theme} />;
     case 'chess_board': return <ChessBoardItem item={item} theme={theme} />;
@@ -3121,7 +3123,7 @@ function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme, agents?
 //  MAIN FLOOR COMPONENT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function OfficeFloorInner({ theme: themeProp, furniture = [], onFloorPress, onFurniturePress, onFurnitureMove, onFurnitureResize, onFurnitureInteract, agents, selectedFurnitureId, editMode }: Props) {
+function OfficeFloorInner({ theme: themeProp, furniture = [], onFloorPress, onFurniturePress, onFurnitureMove, onFurnitureResize, onFurnitureInteract, onPokerAction, agents, selectedFurnitureId, editMode }: Props) {
   const theme = themeProp || OFFICE_THEMES.underground;
   const env = theme.environmentType || 'office';
 
@@ -3195,6 +3197,7 @@ function OfficeFloorInner({ theme: themeProp, furniture = [], onFloorPress, onFu
           onMove={onFurnitureMove ? (x, y) => onFurnitureMove(item.id, x, y) : undefined}
           onResize={onFurnitureResize ? (w, h) => onFurnitureResize(item.id, w, h) : undefined}
           onInteract={onFurnitureInteract ? () => onFurnitureInteract(item.id, item.type) : undefined}
+          onPokerAction={onPokerAction ? (action, amount) => onPokerAction(item.id, action, amount) : undefined}
           editMode={editMode}
           selected={selectedFurnitureId === item.id}
           agents={agents}

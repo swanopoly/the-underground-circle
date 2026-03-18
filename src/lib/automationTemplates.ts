@@ -10,7 +10,7 @@ export interface AutomationTemplate {
   name: string;
   icon: string;
   description: string;
-  category: 'accountability' | 'reporting' | 'engagement' | 'ops' | 'trading' | 'learning';
+  category: 'accountability' | 'reporting' | 'engagement' | 'ops' | 'trading' | 'learning' | 'github';
   trigger_type: 'schedule' | 'event' | 'manual';
   cron_expression?: string;
   event_config?: { table?: string; event: string; provider?: string };
@@ -793,6 +793,36 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     include_context: { members: true, trading: true },
     spirit: 'devops',
   },
+  {
+    id: 'github-daily-summary',
+    name: 'Daily GitHub Summary',
+    icon: '🐙',
+    description: 'BlackSwan summarizes daily GitHub activity — commits, PRs, CI status',
+    category: 'github',
+    trigger_type: 'schedule',
+    cron_expression: '0 9 * * 1-5',
+    agent: 'BlackSwan',
+    model: 'claude-haiku',
+    output_target: 'chat',
+    prompt: "You are BlackSwan, the team accountability AI for The Underground Circle. Summarize the following GitHub activity for the team. Call out who shipped, what changed, any failed CI, and any PRs waiting for review. Be direct, useful, and under 300 words.\n\nGitHub Events:\n{{github_events}}",
+    include_context: { members: true },
+    spirit: 'pm',
+  },
+  {
+    id: 'github-pr-reminder',
+    name: 'PR Review Reminder',
+    icon: '👁️',
+    description: 'Remind team about open PRs waiting for review',
+    category: 'github',
+    trigger_type: 'schedule',
+    cron_expression: '0 14 * * 1-5',
+    agent: 'BlackSwan',
+    model: 'claude-haiku',
+    output_target: 'chat',
+    prompt: "Check the recent GitHub events for open pull requests in {{circle_name}}. List any PRs that are still open and waiting for review. For each, mention: who opened it, when, and the title. If no PRs are waiting, say so briefly.\n\nGitHub Events:\n{{github_events}}",
+    include_context: { members: true },
+    spirit: 'pm',
+  },
 ];
 
 export const TEMPLATE_CATEGORIES = [
@@ -801,6 +831,7 @@ export const TEMPLATE_CATEGORIES = [
   { key: 'engagement' as const, label: 'Engagement', icon: '🎉' },
   { key: 'ops' as const, label: 'Operations', icon: '⚙️' },
   { key: 'trading' as const, label: 'Trading', icon: '📈' },
+  { key: 'github' as const, label: 'GitHub', icon: '🐙' },
 ];
 
 // ─── Suggested Template Groups ──────────────────────────────────────────────

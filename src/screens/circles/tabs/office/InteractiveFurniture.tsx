@@ -2816,7 +2816,7 @@ export function EmailHubItem({ item, theme }: ItemProps) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ── Poker Table (Enhanced) ──────────────────────────────────────────────────
-export function PokerTableItem({ item, theme }: ItemProps) {
+export function PokerTableItem({ item, theme, onPokerAction }: ItemProps & { onPokerAction?: (action: string, amount?: number) => void }) {
   const potPulse = useRef(new Animated.Value(0)).current;
   const bsGlow = useRef(new Animated.Value(0)).current;
   const dealerSpin = useRef(new Animated.Value(0)).current;
@@ -2866,19 +2866,15 @@ export function PokerTableItem({ item, theme }: ItemProps) {
   const handsPlayed = item.pokerHandsPlayed || 0;
   const blinds = item.pokerBlinds || 25;
   const dealer = item.pokerDealer || 'player';
-  const cryptoType = item.pokerCryptoType || item.gameCryptoType || '';
-  const cryptoAmount = item.pokerCryptoAmount || item.gameCryptoWager || 0;
-  const bsEnabled = item.pokerBlackswanEnabled || item.gameBlackswanActive;
+  const bsEnabled = item.pokerBlackswanEnabled ?? true;
   const bsChips = item.pokerBlackswanChips ?? 2000;
   const bsFolded = item.pokerBlackswanFolded;
   const bsLine = item.pokerBlackswanLine || '';
   const winnerName = item.pokerWinnerName || '';
   const community = item.pokerCommunity || '';
+  const playerTurn = item.pokerPlayerTurn || false;
+  const currentBet = item.pokerCurrentBet || 0;
 
-  const cryptoColors: Record<string, string> = { SOL: '#14F195', ETH: '#627EEA', BTC: '#F7931A', USDC: '#2775CA', MATIC: '#8247E5' };
-  const cryptoSymbols: Record<string, string> = { SOL: '◎', ETH: 'Ξ', BTC: '₿', USDC: '$', MATIC: '⬡' };
-  const cColor = cryptoColors[cryptoType] || '#14F195';
-  const cSymbol = cryptoSymbols[cryptoType] || '◎';
   const dealerRotate = dealerSpin.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
 
   const communityCards = community ? community.split(' ') : [];
@@ -2886,6 +2882,9 @@ export function PokerTableItem({ item, theme }: ItemProps) {
   const isWaiting = phase === 'waiting';
   const playerWon = isShowdown && winnerName === 'YOU';
   const bsCards = isShowdown && !bsFolded && item.pokerBlackswanHand ? item.pokerBlackswanHand.split(' ') : [];
+
+  const toCall = Math.max(0, currentBet - (item.pokerPlayerBet || 0));
+  const canCheck = toCall === 0;
 
   const phaseLabel: Record<string, string> = {
     waiting: 'TAP TO DEAL', deal: 'PRE-FLOP', flop: 'FLOP',
@@ -2897,7 +2896,6 @@ export function PokerTableItem({ item, theme }: ItemProps) {
     if (faceDown) {
       return (
         <View style={{ width: w, height: h, backgroundColor: '#2a2a2a', borderRadius: 2, borderWidth: 0.5, borderColor: '#8b5cf6', overflow: 'hidden' }}>
-          {/* Crosshatch pattern */}
           <View style={{ position: 'absolute', top: 1, left: 1, right: 1, bottom: 1, backgroundColor: '#16213e', borderRadius: 1 }}>
             <View style={{ position: 'absolute', top: '20%' as any, left: '20%' as any, right: '20%' as any, bottom: '20%' as any, borderWidth: 0.5, borderColor: '#8b5cf640', borderRadius: 1 }} />
           </View>
@@ -2912,22 +2910,27 @@ export function PokerTableItem({ item, theme }: ItemProps) {
     );
   };
 
-  // Chip stack renderer
-  const renderChipStack = (count: number, colors: string[]) => (
-    <View style={{ alignItems: 'center' }}>
-      {colors.map((color, i) => (
-        <View key={i} style={{ width: 8, height: 3, borderRadius: 4, backgroundColor: color, borderWidth: 0.5, borderColor: '#ffffff40', marginTop: i > 0 ? -1.5 : 0 }} />
-      ))}
-    </View>
-  );
+  // Chip stack renderer — visual stack of colored chips
+  const renderChipStack = (amount: number, small?: boolean) => {
+    const sz = small ? 5 : 8;
+    const h = small ? 2 : 3;
+    const stackColors = amount >= 500 ? ['#fbbf24', '#22c55e', '#3b82f6', '#ef4444']
+      : amount >= 100 ? ['#22c55e', '#3b82f6', '#ef4444']
+      : ['#3b82f6', '#ef4444'];
+    return (
+      <View style={{ alignItems: 'center' }}>
+        {stackColors.map((color, i) => (
+          <View key={i} style={{ width: sz, height: h, borderRadius: sz, backgroundColor: color, borderWidth: 0.5, borderColor: '#ffffff40', marginTop: i > 0 ? -(h * 0.5) : 0 }} />
+        ))}
+      </View>
+    );
+  };
 
   return (
     <View style={{ width: 130, height: 100, backgroundColor: '#000000', borderWidth: 2, borderColor: '#2d1b4e', borderRadius: 20, overflow: 'hidden' }}>
       {/* Felt surface — dark premium green */}
       <View style={{ position: 'absolute', top: 4, left: 4, right: 4, bottom: 4, backgroundColor: '#0d3320', borderRadius: 16, borderWidth: 1.5, borderColor: '#1a5c3a' }}>
-        {/* Inner glow gradient */}
         <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 14, backgroundColor: '#0d332010' }} />
-        {/* Subtle center spotlight */}
         <View style={{ position: 'absolute', top: '25%' as any, left: '25%' as any, right: '25%' as any, bottom: '25%' as any, borderRadius: 30, backgroundColor: '#1a5c3a15' }} />
       </View>
 
@@ -2937,19 +2940,20 @@ export function PokerTableItem({ item, theme }: ItemProps) {
       <View style={{ position: 'absolute', top: '12%' as any, left: 2, width: 1.5, bottom: '12%' as any, backgroundColor: '#d4a03430', borderRadius: 1 }} />
       <View style={{ position: 'absolute', top: '12%' as any, right: 2, width: 1.5, bottom: '12%' as any, backgroundColor: '#d4a03430', borderRadius: 1 }} />
 
-      {/* Dealer button — sleek */}
+      {/* Dealer button */}
       <Animated.View style={{ position: 'absolute', top: dealer === 'blackswan' ? 18 : 70, left: dealer === 'blackswan' ? 28 : 58, width: 9, height: 9, borderRadius: 5, backgroundColor: '#fbbf24', borderWidth: 1, borderColor: '#f59e0b', alignItems: 'center', justifyContent: 'center', zIndex: 5, transform: [{ rotate: dealerRotate }], ...({ boxShadow: '0 0 4px #fbbf2480' } as any) }}>
         <Text style={{ color: '#78350f', fontSize: 4, fontWeight: '900' }}>D</Text>
       </Animated.View>
 
       {/* Phase banner — top center */}
       <View style={{ position: 'absolute', top: 3, left: 0, right: 0, alignItems: 'center', zIndex: 4 }}>
-        <View style={{ backgroundColor: isShowdown ? (playerWon ? '#05966920' : '#dc262620') : '#0f172a', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 2, borderWidth: 0.5, borderColor: isShowdown ? (playerWon ? '#22c55e40' : '#ef444440') : '#334155', flexDirection: 'row', alignItems: 'center', gap: 3, ...({ boxShadow: '0 2px 6px #00000040' } as any) }}>
+        <View style={{ backgroundColor: isShowdown ? (playerWon ? '#05966920' : '#dc262620') : playerTurn ? '#1e1b4b' : '#0f172a', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 2, borderWidth: 0.5, borderColor: isShowdown ? (playerWon ? '#22c55e40' : '#ef444440') : playerTurn ? '#7c3aed60' : '#334155', flexDirection: 'row', alignItems: 'center', gap: 3, ...({ boxShadow: '0 2px 6px #00000040' } as any) }}>
           {isWaiting && <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: '#fbbf24' }} />}
-          <Animated.Text style={{ color: isShowdown ? (playerWon ? '#4ade80' : '#f87171') : isWaiting ? '#fbbf24' : '#e2e8f0', fontSize: 5.5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.8, opacity: isShowdown ? winFlash : 1 }}>
-            {phaseLabel[phase] || phase.toUpperCase()}
+          {playerTurn && <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: '#22c55e' }} />}
+          <Animated.Text style={{ color: isShowdown ? (playerWon ? '#4ade80' : '#f87171') : isWaiting ? '#fbbf24' : playerTurn ? '#c4b5fd' : '#e2e8f0', fontSize: 5.5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.8, opacity: isShowdown ? winFlash : 1 }}>
+            {playerTurn ? 'YOUR TURN' : phaseLabel[phase] || phase.toUpperCase()}
           </Animated.Text>
-          {phase !== 'waiting' && phase !== 'showdown' && (
+          {phase !== 'waiting' && phase !== 'showdown' && !playerTurn && (
             <Text style={{ color: '#64748b', fontSize: 3.5, fontFamily: 'monospace' }}>{blinds}/{blinds * 2}</Text>
           )}
         </View>
@@ -2962,25 +2966,65 @@ export function PokerTableItem({ item, theme }: ItemProps) {
         </View>
       )}
 
-      {/* Center pot — chip stack + amount */}
-      <View style={{ position: 'absolute', top: 36, left: 0, right: 0, alignItems: 'center', zIndex: 2 }}>
-        {pot > 0 && (
-          <Animated.View style={{ opacity: potPulse, flexDirection: 'row', alignItems: 'center', gap: 3 }}>
-            {renderChipStack(pot, ['#ef4444', '#3b82f6', '#22c55e', '#fbbf24'])}
-            <View style={{ alignItems: 'center' }}>
-              <Text style={{ color: '#fbbf24', fontSize: 7, fontWeight: '900', fontFamily: 'monospace', ...({ textShadow: '0 0 6px #fbbf2440' } as any) }}>{pot.toLocaleString()}</Text>
-              {cryptoAmount > 0 && (
-                <Text style={{ color: cColor, fontSize: 3.5, fontWeight: '800', fontFamily: 'monospace' }}>{cSymbol}{cryptoAmount}</Text>
-              )}
-            </View>
-          </Animated.View>
-        )}
-        {isWaiting && pot === 0 && (
-          <View style={{ alignItems: 'center', marginTop: 4 }}>
-            <Text style={{ color: '#475569', fontSize: 4, fontFamily: 'monospace', fontWeight: '600' }}>TEXAS HOLD'EM</Text>
+      {/* Center area — pot OR action buttons */}
+      <View style={{ position: 'absolute', top: 36, left: 0, right: 0, alignItems: 'center', zIndex: 6 }}>
+        {playerTurn ? (
+          /* ── ACTION BUTTONS ── */
+          <View style={{ flexDirection: 'row', gap: 2, alignItems: 'center' }}>
+            <Pressable
+              onPress={() => onPokerAction?.('fold')}
+              style={({ pressed }: { pressed: boolean }) => ({ backgroundColor: pressed ? '#dc2626' : '#7f1d1d', borderRadius: 3, paddingHorizontal: 5, paddingVertical: 3, borderWidth: 0.5, borderColor: '#ef4444', ...({ cursor: 'pointer' } as any) })}
+            >
+              <Text style={{ color: '#fca5a5', fontSize: 4.5, fontWeight: '900', fontFamily: 'monospace' }}>FOLD</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => onPokerAction?.(canCheck ? 'check' : 'call')}
+              style={({ pressed }: { pressed: boolean }) => ({ backgroundColor: pressed ? '#059669' : '#064e3b', borderRadius: 3, paddingHorizontal: 5, paddingVertical: 3, borderWidth: 0.5, borderColor: '#22c55e', ...({ cursor: 'pointer' } as any) })}
+            >
+              <Text style={{ color: '#86efac', fontSize: 4.5, fontWeight: '900', fontFamily: 'monospace' }}>
+                {canCheck ? 'CHECK' : `CALL ${toCall}`}
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={() => onPokerAction?.('raise', Math.max(blinds * 4, currentBet * 2))}
+              style={({ pressed }: { pressed: boolean }) => ({ backgroundColor: pressed ? '#7c3aed' : '#3b0764', borderRadius: 3, paddingHorizontal: 5, paddingVertical: 3, borderWidth: 0.5, borderColor: '#8b5cf6', ...({ cursor: 'pointer' } as any) })}
+            >
+              <Text style={{ color: '#c4b5fd', fontSize: 4.5, fontWeight: '900', fontFamily: 'monospace' }}>RAISE</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => onPokerAction?.('allin')}
+              style={({ pressed }: { pressed: boolean }) => ({ backgroundColor: pressed ? '#b91c1c' : '#450a0a', borderRadius: 3, paddingHorizontal: 5, paddingVertical: 3, borderWidth: 0.5, borderColor: '#fbbf24', ...({ cursor: 'pointer' } as any) })}
+            >
+              <Text style={{ color: '#fbbf24', fontSize: 4.5, fontWeight: '900', fontFamily: 'monospace' }}>ALL IN</Text>
+            </Pressable>
           </View>
+        ) : (
+          /* ── POT DISPLAY ── */
+          <>
+            {pot > 0 && (
+              <Animated.View style={{ opacity: potPulse, flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                {renderChipStack(pot)}
+                <Text style={{ color: '#fbbf24', fontSize: 7, fontWeight: '900', fontFamily: 'monospace', ...({ textShadow: '0 0 6px #fbbf2440' } as any) }}>{pot.toLocaleString()}</Text>
+              </Animated.View>
+            )}
+            {isWaiting && pot === 0 && (
+              <View style={{ alignItems: 'center', marginTop: 4 }}>
+                <Text style={{ color: '#475569', fontSize: 4, fontFamily: 'monospace', fontWeight: '600' }}>TEXAS HOLD'EM</Text>
+              </View>
+            )}
+          </>
         )}
       </View>
+
+      {/* Pot amount below action buttons when player turn */}
+      {playerTurn && pot > 0 && (
+        <View style={{ position: 'absolute', top: 50, left: 0, right: 0, alignItems: 'center', zIndex: 2 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+            {renderChipStack(pot, true)}
+            <Text style={{ color: '#fbbf24', fontSize: 4, fontWeight: '800', fontFamily: 'monospace' }}>POT {pot.toLocaleString()}</Text>
+          </View>
+        </View>
+      )}
 
       {/* Player hand — bottom center */}
       {hand ? (
@@ -2999,21 +3043,25 @@ export function PokerTableItem({ item, theme }: ItemProps) {
       ) : null}
 
       {/* Player action badge */}
-      {action && phase !== 'waiting' && phase !== 'showdown' && (
-        <View style={{ position: 'absolute', bottom: 33, right: 14, backgroundColor: action === 'RAISE' ? '#dc262680' : action === 'FOLD' ? '#47556980' : '#05966980', borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1.5, zIndex: 4, ...({ boxShadow: '0 1px 4px #00000030' } as any) }}>
+      {action && phase !== 'waiting' && phase !== 'showdown' && !playerTurn && (
+        <View style={{ position: 'absolute', bottom: 33, right: 14, backgroundColor: action.includes('RAISE') ? '#dc262680' : action.includes('FOLD') ? '#47556980' : '#05966980', borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1.5, zIndex: 4, ...({ boxShadow: '0 1px 4px #00000030' } as any) }}>
           <Text style={{ color: '#f8fafc', fontSize: 3.5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.5 }}>{action}</Text>
         </View>
       )}
 
-      {/* BlackSwan seat — top left */}
+      {/* BlackSwan seat — top left with chip stack */}
       {bsEnabled && (
-        <View style={{ position: 'absolute', top: 15, left: 6, alignItems: 'center', zIndex: 2 }}>
+        <View style={{ position: 'absolute', top: 14, left: 6, alignItems: 'center', zIndex: 2 }}>
           <Animated.View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: '#0f0a1a', borderWidth: 1.5, borderColor: bsFolded ? '#334155' : '#7c3aed', alignItems: 'center', justifyContent: 'center', opacity: bsFolded ? 0.35 : bsGlow, ...({ boxShadow: bsFolded ? 'none' : '0 0 6px #7c3aed60' } as any) }}>
             <Text style={{ fontSize: 9 }}>🦢</Text>
           </Animated.View>
-          <Text style={{ color: bsFolded ? '#475569' : '#a78bfa', fontSize: 3.5, fontWeight: '900', fontFamily: 'monospace', marginTop: 1 }}>
-            {bsFolded ? 'FOLD' : bsChips.toLocaleString()}
-          </Text>
+          {/* BlackSwan chip stack */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 1.5, marginTop: 1 }}>
+            {!bsFolded && renderChipStack(bsChips, true)}
+            <Text style={{ color: bsFolded ? '#475569' : '#a78bfa', fontSize: 3.5, fontWeight: '900', fontFamily: 'monospace' }}>
+              {bsFolded ? 'FOLD' : bsChips.toLocaleString()}
+            </Text>
+          </View>
           {phase !== 'waiting' && !bsFolded && (
             <View style={{ flexDirection: 'row', gap: 1, marginTop: 1 }}>
               {bsCards.length > 0 ? (
@@ -3034,27 +3082,29 @@ export function PokerTableItem({ item, theme }: ItemProps) {
         </View>
       )}
 
-      {/* Empty seats — subtle ring */}
+      {/* Empty seats — subtle ring with "+" invite hint */}
       {[{ t: 14, l: 106 }, { t: 48, l: 4 }, { t: 48, l: 112 }].map((pos, i) => (
         <View key={i} style={{ position: 'absolute', top: pos.t, left: pos.l, width: 12, height: 12, borderRadius: 6, backgroundColor: '#0f172a', borderWidth: 1, borderColor: '#1e293b', alignItems: 'center', justifyContent: 'center' }}>
-          <View style={{ width: 6, height: 6, borderRadius: 3, borderWidth: 0.5, borderColor: '#334155' }} />
+          <Text style={{ color: '#334155', fontSize: 5, fontWeight: '600' }}>+</Text>
         </View>
       ))}
 
-      {/* Bottom HUD — chips + record */}
+      {/* Bottom HUD — player seat with chip stack + record */}
       <View style={{ position: 'absolute', bottom: 1, left: 0, right: 0, height: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 6, zIndex: 3 }}>
-        {/* Chip count */}
+        {/* Player chip count with visual stack */}
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
-          <View style={{ width: 7, height: 3, borderRadius: 3, backgroundColor: '#fbbf24', borderWidth: 0.5, borderColor: '#f59e0b' }} />
+          {renderChipStack(chips, true)}
           <Text style={{ color: '#fbbf24', fontSize: 5, fontWeight: '900', fontFamily: 'monospace', ...({ textShadow: '0 0 4px #fbbf2430' } as any) }}>{chips.toLocaleString()}</Text>
           {handsPlayed > 0 && (
-            <Text style={{ color: '#475569', fontSize: 3, fontFamily: 'monospace', marginLeft: 2 }}>{handsWon}W</Text>
+            <Text style={{ color: '#475569', fontSize: 3, fontFamily: 'monospace', marginLeft: 2 }}>{handsWon}W/{handsPlayed}</Text>
           )}
         </View>
-        {/* Crypto wager */}
-        {cryptoAmount > 0 && (
-          <View style={{ backgroundColor: '#0f172a80', borderRadius: 3, paddingHorizontal: 3, paddingVertical: 1, borderWidth: 0.5, borderColor: cColor + '30' }}>
-            <Text style={{ color: cColor, fontSize: 4, fontWeight: '900', fontFamily: 'monospace' }}>{cSymbol}{cryptoAmount}</Text>
+        {/* Phase indicator */}
+        {phase !== 'waiting' && phase !== 'showdown' && (
+          <View style={{ flexDirection: 'row', gap: 1 }}>
+            {['deal', 'flop', 'turn', 'river'].map((p, i) => (
+              <View key={p} style={{ width: 3, height: 3, borderRadius: 1.5, backgroundColor: ['deal', 'flop', 'turn', 'river'].indexOf(phase) >= i ? '#22c55e' : '#1e293b' }} />
+            ))}
           </View>
         )}
       </View>
@@ -3065,17 +3115,25 @@ export function PokerTableItem({ item, theme }: ItemProps) {
           <View style={{ backgroundColor: '#1e1b4b', borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1.5, borderWidth: 0.5, borderColor: '#7c3aed40', ...({ boxShadow: '0 2px 6px #00000040' } as any) }}>
             <Text style={{ color: '#c4b5fd', fontSize: 3, fontFamily: 'monospace', fontWeight: '600' }} numberOfLines={2}>{bsLine}</Text>
           </View>
-          {/* Speech bubble triangle */}
           <View style={{ position: 'absolute', left: 4, bottom: -3, width: 0, height: 0, borderLeftWidth: 3, borderRightWidth: 3, borderTopWidth: 3, borderLeftColor: 'transparent', borderRightColor: 'transparent', borderTopColor: '#1e1b4b' }} />
         </View>
       ) : null}
 
-      {/* YOU label */}
+      {/* YOU label with avatar circle */}
       {hand ? (
-        <View style={{ position: 'absolute', bottom: 7, left: '50%' as any, transform: [{ translateX: -6 }], zIndex: 2 }}>
-          <Text style={{ color: '#94a3b8', fontSize: 3.5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 }}>YOU</Text>
+        <View style={{ position: 'absolute', bottom: 6, left: '50%' as any, transform: [{ translateX: -8 }], zIndex: 2, alignItems: 'center' }}>
+          <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#1e293b', borderWidth: 1, borderColor: playerTurn ? '#22c55e' : '#475569', alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ color: playerTurn ? '#22c55e' : '#94a3b8', fontSize: 4, fontWeight: '900' }}>Y</Text>
+          </View>
         </View>
       ) : null}
+
+      {/* Showdown: tap to continue hint */}
+      {isShowdown && (
+        <View style={{ position: 'absolute', bottom: 14, left: 0, right: 0, alignItems: 'center', zIndex: 4 }}>
+          <Text style={{ color: '#475569', fontSize: 3, fontFamily: 'monospace' }}>TAP FOR NEW HAND</Text>
+        </View>
+      )}
     </View>
   );
 }

@@ -493,6 +493,115 @@ function estimateTokens(command: string, response: string): number {
   return Math.ceil(totalChars / 4);
 }
 
+// ─── Agent Task Tracking: Auto-create tasks from agent prompts ─────────────
+
+/** Create a task when an agent starts processing a prompt */
+async function createAgentTask(
+  circleId: string,
+  senderId: string,
+  agentName: string,
+  command: string,
+  messageId: string,
+  model?: string | null,
+): Promise<string | null> {
+  try {
+    const title = `${agentName}: ${command.slice(0, 80)}${command.length > 80 ? '...' : ''}`;
+    const description = [
+      `**Prompt**`,
+      `\`\`\``,
+      command,
+      `\`\`\``,
+      ``,
+      `**Agent:** ${agentName}`,
+      model ? `**Model:** ${model}` : '',
+      `**Message ID:** ${messageId}`,
+      `**Started:** ${new Date().toISOString()}`,
+      ``,
+      `---`,
+      `*Processing...*`,
+    ].filter(Boolean).join('\n');
+
+    const { data, error } = await supabase
+      .from('tasks')
+      .insert({
+        circle_id: circleId,
+        created_by: senderId,
+        title,
+        description,
+        status: 'in_progress',
+        priority: 'normal',
+        position: 0,
+      })
+      .select('id')
+      .single();
+
+    if (error) {
+      console.warn('[agentInvocation] Failed to create agent task:', error.message);
+      return null;
+    }
+    return data?.id || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Update the task with response data and mark done/failed */
+async function completeAgentTask(
+  taskId: string,
+  agentName: string,
+  command: string,
+  responseText: string | undefined,
+  tokenCount: number,
+  latencyMs: number | undefined,
+  model: string | undefined,
+  success: boolean,
+  messageId: string,
+  tokens?: TokenBreakdown,
+): Promise<void> {
+  try {
+    const duration = latencyMs ? `${(latencyMs / 1000).toFixed(1)}s` : 'N/A';
+    const tokenStr = tokenCount > 0 ? tokenCount.toLocaleString() : 'N/A';
+    const tokenBreakdown = tokens
+      ? `  - Input: ${tokens.inputTokens.toLocaleString()}\n  - Output: ${tokens.outputTokens.toLocaleString()}\n  - Cache Read: ${tokens.cacheReadTokens.toLocaleString()}\n  - Cache Write: ${tokens.cacheCreationTokens.toLocaleString()}`
+      : '';
+
+    const description = [
+      `**Prompt**`,
+      `\`\`\``,
+      command,
+      `\`\`\``,
+      ``,
+      `**Agent:** ${agentName}`,
+      model ? `**Model:** ${model}` : '',
+      `**Status:** ${success ? 'Completed' : 'Failed'}`,
+      `**Duration:** ${duration}`,
+      `**Tokens:** ${tokenStr}`,
+      tokenBreakdown ? `**Token Breakdown:**\n${tokenBreakdown}` : '',
+      `**Message ID:** ${messageId}`,
+      `**Completed:** ${new Date().toISOString()}`,
+      ``,
+      `---`,
+      ``,
+      `**Response**`,
+      `\`\`\``,
+      (responseText || '(no response)').slice(0, 4000),
+      `\`\`\``,
+    ].filter(Boolean).join('\n');
+
+    await supabase
+      .from('tasks')
+      .update({
+        description,
+        status: success ? 'done' : 'review',
+        completed_at: success ? new Date().toISOString() : null,
+      })
+      .eq('id', taskId);
+  } catch {}
+}
+
+// Module-level map: messageId → taskId (for linking command → response)
+const pendingAgentTasks = new Map<string, string>();
+
 // ─── Invoke & Stream: Main entry point ──────────────────────────────────────
 
 /**
@@ -562,6 +671,17 @@ export async function invokeAndStream(
 
   const via = blackSwan ? 'swanbot-ai' : claudeCode ? `bridge:${resolvedUrl}` : byoLLM ? `llm-proxy:${agent.provider}` : resolvedUrl;
   console.log(`[agentInvocation] Starting: ${agent.name} ← "${req.command}" via ${via}`);
+
+  // Step 0: Create a tracking task for this prompt
+  const taskId = await createAgentTask(
+    req.circleId,
+    req.senderId || req.messageId,
+    agent.name,
+    req.command,
+    req.messageId,
+    req.model,
+  );
+  if (taskId) pendingAgentTasks.set(req.messageId, taskId);
 
   // Step 1: Create response row
   const responseId = await invokeAgent(req.messageId, agent.id, agent.name);
@@ -640,6 +760,15 @@ export async function invokeAndStream(
     if (!result.success) {
       console.error(`[agentInvocation] Agent error: ${result.error}`);
       await streamResponse(responseId, result.error || 'Invocation failed', 'error');
+      // Mark task as failed
+      const failedTaskId = pendingAgentTasks.get(req.messageId);
+      if (failedTaskId) {
+        pendingAgentTasks.delete(req.messageId);
+        completeAgentTask(
+          failedTaskId, agent.name, req.command,
+          result.error, 0, undefined, undefined, false, req.messageId,
+        ).catch(() => {});
+      }
       return result;
     }
 
@@ -660,6 +789,17 @@ export async function invokeAndStream(
     await markMessageDone(req.messageId);
     console.log(`[agentInvocation] Complete: ${agent.name}`);
 
+    // Step 5: Complete the tracking task
+    const completedTaskId = pendingAgentTasks.get(req.messageId);
+    if (completedTaskId) {
+      pendingAgentTasks.delete(req.messageId);
+      completeAgentTask(
+        completedTaskId, agent.name, req.command,
+        result.responseText, result.tokenCount || 0, result.latencyMs,
+        result.model, true, req.messageId, result.tokens,
+      ).catch(() => {});
+    }
+
     return {
       success: true,
       responseId,
@@ -670,6 +810,17 @@ export async function invokeAndStream(
   } catch (err: any) {
     console.error(`[agentInvocation] Exception: ${err.message}`);
     await streamResponse(responseId, `Error: ${err.message}`, 'error');
+
+    // Mark task as failed
+    const failedTaskId = pendingAgentTasks.get(req.messageId);
+    if (failedTaskId) {
+      pendingAgentTasks.delete(req.messageId);
+      completeAgentTask(
+        failedTaskId, agent.name, req.command,
+        err.message, 0, undefined, undefined, false, req.messageId,
+      ).catch(() => {});
+    }
+
     return {
       success: false,
       error: err.message,

@@ -31,6 +31,7 @@ import { getPointsForModel } from '../lib/badges';
 import AutomationsPanel from './AutomationsPanel';
 import { ProviderKey, PROVIDER_MODELS, LLMProvider, ThinkingLevel } from '../lib/llmProviders';
 import { PROVIDER_META } from '../lib/connectionManager';
+import { detectClaudeCodeBridge, execBridgeCommand } from '../lib/claudeCodeDetector';
 
 // ─── Thinking levels (inspired by OpenClaw) ──────────────────────────────────
 
@@ -497,9 +498,386 @@ const STATUS_DOT: Record<string, string> = {
   idle: '#22c55e', building: '#f59e0b', offline: '#52525b', error: '#ef4444',
 };
 
+// ─── Local Shell Panel ───────────────────────────────────────────────────────
+
+interface ShellEntry {
+  id: string;
+  command: string;
+  cwd: string;
+  stdout: string;
+  stderr: string;
+  code: number;
+  ok: boolean;
+  timestamp: string;
+  durationMs: number;
+}
+
+function LocalShellPanel() {
+  const [entries, setEntries] = useState<ShellEntry[]>([]);
+  const [input, setInput] = useState('');
+  const [sending, setSending] = useState(false);
+  const [cwd, setCwd] = useState('~');
+  const [bridgeOk, setBridgeOk] = useState<boolean | null>(null);
+  const [cmdHistory, setCmdHistory] = useState<string[]>([]);
+  const [historyIdx, setHistoryIdx] = useState(-1);
+  const scrollRef = useRef<ScrollView>(null);
+  const inputRef = useRef<TextInput>(null);
+
+  // Check bridge connection on mount + periodically
+  useEffect(() => {
+    const check = () => detectClaudeCodeBridge().then(setBridgeOk);
+    check();
+    const interval = setInterval(check, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Detect initial working directory
+  useEffect(() => {
+    execBridgeCommand('pwd').then(res => {
+      if (res.ok && res.stdout) setCwd(res.stdout.trim());
+    });
+  }, []);
+
+  const handleSend = useCallback(async () => {
+    const cmd = input.trim();
+    if (!cmd || sending) return;
+
+    setSending(true);
+    setInput('');
+    setCmdHistory(prev => [cmd, ...prev].slice(0, 100));
+    setHistoryIdx(-1);
+
+    // Handle 'clear' locally
+    if (cmd === 'clear' || cmd === 'cls') {
+      setEntries([]);
+      setSending(false);
+      return;
+    }
+
+    const start = Date.now();
+
+    // Handle 'cd' — update cwd and verify
+    const cdMatch = cmd.match(/^cd\s+(.+)/);
+
+    // Build the actual command with cwd prefix
+    const fullCmd = cwd && cwd !== '~'
+      ? `cd ${JSON.stringify(cwd)} && ${cmd}`
+      : cmd;
+
+    const res = await execBridgeCommand(fullCmd);
+    const durationMs = Date.now() - start;
+
+    const entry: ShellEntry = {
+      id: `shell-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      command: cmd,
+      cwd,
+      stdout: res.stdout?.trim() || '',
+      stderr: res.stderr?.trim() || '',
+      code: res.code ?? (res.ok ? 0 : 1),
+      ok: res.ok ?? false,
+      timestamp: new Date().toISOString(),
+      durationMs,
+    };
+
+    // Handle error from bridge being down
+    if (res.error && !res.stdout && !res.stderr) {
+      entry.stderr = res.error;
+      entry.ok = false;
+      entry.code = -1;
+    }
+
+    setEntries(prev => [...prev, entry]);
+
+    // Update cwd if cd was used (or any command might change it)
+    if (cdMatch || cmd.includes('cd ')) {
+      const pwdRes = await execBridgeCommand(
+        cwd && cwd !== '~' ? `cd ${JSON.stringify(cwd)} && ${cmd} && pwd` : `${cmd} && pwd`
+      );
+      if (pwdRes.ok && pwdRes.stdout) {
+        const lines = pwdRes.stdout.trim().split('\n');
+        setCwd(lines[lines.length - 1].trim());
+      }
+    }
+
+    setSending(false);
+    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
+  }, [input, sending, cwd]);
+
+  const handleKeyPress = useCallback((e: any) => {
+    const key = e.nativeEvent?.key;
+    if (key === 'ArrowUp') {
+      const newIdx = Math.min(historyIdx + 1, cmdHistory.length - 1);
+      if (newIdx >= 0 && cmdHistory[newIdx]) {
+        setHistoryIdx(newIdx);
+        setInput(cmdHistory[newIdx]);
+      }
+    } else if (key === 'ArrowDown') {
+      const newIdx = Math.max(historyIdx - 1, -1);
+      setHistoryIdx(newIdx);
+      setInput(newIdx === -1 ? '' : cmdHistory[newIdx] ?? '');
+    }
+  }, [historyIdx, cmdHistory]);
+
+  const mono = Platform.OS === 'ios' ? 'Courier' : 'monospace';
+
+  return (
+    <View style={{ flex: 1, backgroundColor: '#0a0a0a' }}>
+      {/* Connection status bar */}
+      <View style={shellStyles.statusBar}>
+        <View style={[
+          shellStyles.statusDot,
+          { backgroundColor: bridgeOk === null ? '#f59e0b' : bridgeOk ? '#22c55e' : '#ef4444' },
+        ]} />
+        <Text style={shellStyles.statusText}>
+          {bridgeOk === null ? 'Connecting...' : bridgeOk ? 'Bridge connected (localhost:7778)' : 'Bridge offline — run: node scripts/claude-bridge.js'}
+        </Text>
+        {cwd !== '~' && (
+          <Text style={shellStyles.cwdText} numberOfLines={1}>{cwd}</Text>
+        )}
+      </View>
+
+      {/* Output area */}
+      <ScrollView
+        ref={scrollRef}
+        style={{ flex: 1 }}
+        contentContainerStyle={{ padding: 12, gap: 2 }}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Welcome message */}
+        {entries.length === 0 && (
+          <View style={shellStyles.welcomeBox}>
+            <Text style={[shellStyles.welcomeTitle, { fontFamily: mono }]}>Local Shell</Text>
+            <Text style={[shellStyles.welcomeText, { fontFamily: mono }]}>
+              Connected to your local machine via the Claude Code bridge.{'\n'}
+              Commands run in a shell with safety guards.{'\n'}
+              Type "clear" to reset. Use {'\u2191'}/{'\u2193'} for history.
+            </Text>
+          </View>
+        )}
+
+        {entries.map(entry => (
+          <View key={entry.id} style={shellStyles.entry}>
+            {/* Command line */}
+            <View style={shellStyles.cmdRow}>
+              <Text style={[shellStyles.promptChar, { fontFamily: mono }]}>$</Text>
+              <Text style={[shellStyles.cmdText, { fontFamily: mono }]}>{entry.command}</Text>
+              <Text style={[
+                shellStyles.exitCode,
+                { fontFamily: mono, color: entry.ok ? '#22c55e40' : '#ef444480' },
+              ]}>
+                {entry.code !== 0 ? `[${entry.code}]` : ''} {entry.durationMs}ms
+              </Text>
+            </View>
+
+            {/* stdout */}
+            {entry.stdout ? (
+              <Text style={[shellStyles.stdout, { fontFamily: mono }]} selectable>
+                {entry.stdout}
+              </Text>
+            ) : null}
+
+            {/* stderr */}
+            {entry.stderr ? (
+              <Text style={[
+                shellStyles.stderr,
+                { fontFamily: mono, color: entry.ok ? '#f59e0b' : '#ef4444' },
+              ]} selectable>
+                {entry.stderr}
+              </Text>
+            ) : null}
+          </View>
+        ))}
+
+        {/* Active command indicator */}
+        {sending && (
+          <View style={shellStyles.cmdRow}>
+            <Text style={[shellStyles.promptChar, { fontFamily: mono }]}>$</Text>
+            <PendingDots />
+          </View>
+        )}
+      </ScrollView>
+
+      {/* Input bar */}
+      <View style={shellStyles.inputRow}>
+        <Text style={[shellStyles.inputPrompt, { fontFamily: mono }]}>
+          {cwd.split('/').pop() || '~'} $
+        </Text>
+        <TextInput
+          ref={inputRef}
+          style={[shellStyles.input, { fontFamily: mono }]}
+          value={input}
+          onChangeText={(v) => { setInput(v); setHistoryIdx(-1); }}
+          placeholder={bridgeOk ? 'Enter shell command...' : 'Bridge offline...'}
+          placeholderTextColor="#3f3f46"
+          multiline={false}
+          returnKeyType="send"
+          onSubmitEditing={handleSend}
+          onKeyPress={handleKeyPress}
+          editable={!sending && bridgeOk === true}
+          autoCorrect={false}
+          autoCapitalize="none"
+        />
+        <Pressable
+          style={[shellStyles.sendBtn, (!input.trim() || sending || !bridgeOk) && shellStyles.sendBtnDisabled]}
+          onPress={handleSend}
+          disabled={!input.trim() || sending || !bridgeOk}
+        >
+          <Text style={shellStyles.sendIcon}>{sending ? '\u23F3' : '\u21B5'}</Text>
+        </Pressable>
+      </View>
+
+      {cmdHistory.length > 0 && (
+        <View style={shellStyles.historyHint}>
+          <Text style={[shellStyles.historyHintText, { fontFamily: mono }]}>
+            {'\u2191\u2193'} history  ·  {cmdHistory.length} cmd{cmdHistory.length !== 1 ? 's' : ''}
+          </Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+const shellStyles = StyleSheet.create({
+  statusBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: '#111111',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1f1f1f',
+  },
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  statusText: {
+    color: '#6b6b80',
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontWeight: '600',
+  },
+  cwdText: {
+    color: '#444455',
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    marginLeft: 'auto',
+    maxWidth: 200,
+  },
+  welcomeBox: {
+    paddingVertical: 16,
+    gap: 6,
+  },
+  welcomeTitle: {
+    color: '#22c55e',
+    fontSize: 14,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
+  welcomeText: {
+    color: '#3f3f46',
+    fontSize: 11,
+    lineHeight: 18,
+  },
+  entry: {
+    paddingVertical: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: '#0f0f0f',
+  },
+  cmdRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 6,
+  },
+  promptChar: {
+    color: '#22c55e',
+    fontSize: 12,
+    fontWeight: '700',
+    flexShrink: 0,
+  },
+  cmdText: {
+    color: '#e5e5e5',
+    fontSize: 12,
+    flex: 1,
+    lineHeight: 18,
+  },
+  exitCode: {
+    fontSize: 9,
+    fontWeight: '600',
+    marginLeft: 'auto',
+    flexShrink: 0,
+  },
+  stdout: {
+    color: '#86efac',
+    fontSize: 11,
+    lineHeight: 16,
+    paddingLeft: 18,
+    marginTop: 2,
+  },
+  stderr: {
+    fontSize: 11,
+    lineHeight: 16,
+    paddingLeft: 18,
+    marginTop: 2,
+  },
+  inputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#111',
+    borderTopWidth: 1,
+    borderTopColor: '#1f1f1f',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  inputPrompt: {
+    color: '#22c55e',
+    fontSize: 12,
+    fontWeight: '700',
+    flexShrink: 0,
+  },
+  input: {
+    flex: 1,
+    color: '#e5e5e5',
+    fontSize: 13,
+    paddingVertical: 4,
+    minHeight: 32,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+  },
+  sendBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    backgroundColor: '#22c55e',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  sendBtnDisabled: {
+    backgroundColor: '#1f1f1f',
+    opacity: 0.5,
+  },
+  sendIcon: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  historyHint: {
+    paddingHorizontal: 14,
+    paddingBottom: 4,
+    backgroundColor: '#111',
+  },
+  historyHintText: {
+    color: '#27272a',
+    fontSize: 9,
+  },
+});
+
 // ─── Terminal sub-tabs ────────────────────────────────────────────────────────
 
-type TerminalTab = 'commands' | 'automations';
+type TerminalTab = 'commands' | 'automations' | 'shell';
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
@@ -972,10 +1350,19 @@ export default function OfficeTerminal({
         >
           <Text style={[styles.termTabText, terminalTab === 'automations' && styles.termTabTextActive]}>⚡ AUTOMATIONS</Text>
         </Pressable>
+        <Pressable
+          onPress={() => setTerminalTab('shell')}
+          style={[styles.termTab, terminalTab === 'shell' && styles.termTabActive,
+            Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        >
+          <Text style={[styles.termTabText, terminalTab === 'shell' && styles.termTabTextActive]}>💻 LOCAL SHELL</Text>
+        </Pressable>
       </View>
 
-      {/* Automations view */}
-      {terminalTab === 'automations' ? (
+      {/* Local Shell view */}
+      {terminalTab === 'shell' ? (
+        <LocalShellPanel />
+      ) : terminalTab === 'automations' ? (
         <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
           <AutomationsPanel circleId={circleId} />
         </ScrollView>

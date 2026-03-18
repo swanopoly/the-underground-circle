@@ -6,6 +6,7 @@
  */
 
 import { storage } from './storage';
+import { supabase } from './supabase';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -287,4 +288,56 @@ export function groupTreeByFolder(tree: GitHubTreeEntry[]): Record<string, GitHu
     });
   }
   return sorted;
+}
+
+// ─── OAuth Integration ───────────────────────────────────────────────────────
+
+const SUPABASE_FUNCTIONS_URL = 'https://rjkniqiqdtroeholxacg.supabase.co/functions/v1';
+
+export interface GitHubOAuthStatus {
+  connected: boolean;
+  github_username?: string;
+  github_user_id?: number;
+  connected_at?: string;
+}
+
+/** Start GitHub OAuth flow — opens GitHub authorization page */
+export async function connectViaOAuth(circleId: string, userId: string): Promise<{ url?: string; error?: string }> {
+  try {
+    const res = await fetch(
+      `${SUPABASE_FUNCTIONS_URL}/github-oauth?action=authorize&circle_id=${circleId}&user_id=${userId}`,
+    );
+    const data = await res.json();
+    if (data.error) return { error: data.error };
+    return { url: data.url };
+  } catch (e: any) {
+    return { error: e.message || 'Failed to start OAuth flow' };
+  }
+}
+
+/** Check if user has connected GitHub via OAuth */
+export async function getOAuthStatus(userId: string): Promise<GitHubOAuthStatus> {
+  try {
+    const res = await fetch(
+      `${SUPABASE_FUNCTIONS_URL}/github-oauth?action=status&user_id=${userId}`,
+    );
+    const data = await res.json();
+    return data;
+  } catch {
+    return { connected: false };
+  }
+}
+
+/** List repos for a user connected via OAuth */
+export async function getConnectedRepos(userId: string): Promise<{ repos: GitHubRepo[]; github_username?: string; error?: string }> {
+  try {
+    const res = await fetch(
+      `${SUPABASE_FUNCTIONS_URL}/github-oauth?action=list_repos&user_id=${userId}`,
+    );
+    const data = await res.json();
+    if (data.error) return { repos: [], error: data.error };
+    return { repos: data.repos || [], github_username: data.github_username };
+  } catch (e: any) {
+    return { repos: [], error: e.message || 'Failed to fetch repos' };
+  }
 }

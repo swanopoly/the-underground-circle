@@ -184,12 +184,22 @@ export const BLACKSWAN_PLAYER: Omit<PokerPlayer, 'chips' | 'hand' | 'folded'> = 
 /** BlackSwan makes a poker decision based on hand strength and pot odds */
 export function blackswanDecide(
   hand: string,
+  communityCards: string[],
   pot: number,
   currentBet: number,
   chips: number,
   phase: PokerPhase,
 ): 'fold' | 'call' | 'raise' {
-  const strength = handStrength(hand);
+  // Pre-flop: use simple hand strength. Post-flop: evaluate with community cards
+  let strength: number;
+  if (communityCards.length === 0) {
+    strength = handStrength(hand);
+  } else {
+    const allCards = [...hand.split(' ').filter(Boolean), ...communityCards];
+    const eval_ = evaluatePokerHand(allCards);
+    // Map evaluation score to a 0-30 range for decision thresholds
+    strength = Math.min(30, Math.floor(eval_.score / 30) + eval_.rank * 3);
+  }
   const potOdds = currentBet > 0 ? pot / currentBet : 10;
 
   // BlackSwan plays aggressively with strong hands, cautious otherwise

@@ -165,9 +165,197 @@ function TaskSearchBar({
   );
 }
 
+// ─── Agent Tasks Panel (shows auto-created tasks from agent invocations) ────
+
+function isAgentTask(task: KanbanTask): boolean {
+  return (task.description || '').includes('**Agent:**');
+}
+
+function parseAgentTaskMeta(task: KanbanTask): {
+  agentName: string;
+  model: string;
+  duration: string;
+  tokens: string;
+  prompt: string;
+  response: string;
+  status: 'processing' | 'done' | 'failed';
+} {
+  const desc = task.description || '';
+  const agentMatch = desc.match(/\*\*Agent:\*\*\s*(.+)/);
+  const modelMatch = desc.match(/\*\*Model:\*\*\s*(.+)/);
+  const durationMatch = desc.match(/\*\*Duration:\*\*\s*(.+)/);
+  const tokensMatch = desc.match(/\*\*Tokens:\*\*\s*(.+)/);
+  const statusMatch = desc.match(/\*\*Status:\*\*\s*(.+)/);
+
+  // Extract prompt (between first ``` pair)
+  const promptMatch = desc.match(/\*\*Prompt\*\*\s*```\s*([\s\S]*?)```/);
+  // Extract response (between last ``` pair after **Response**)
+  const responseMatch = desc.match(/\*\*Response\*\*\s*```\s*([\s\S]*?)```/);
+
+  const isProcessing = desc.includes('*Processing...*');
+  const isFailed = statusMatch?.[1]?.includes('Failed') || task.status === 'review';
+
+  return {
+    agentName: agentMatch?.[1] || 'Agent',
+    model: modelMatch?.[1] || '',
+    duration: durationMatch?.[1] || '',
+    tokens: tokensMatch?.[1] || '',
+    prompt: promptMatch?.[1]?.trim() || '',
+    response: responseMatch?.[1]?.trim() || '',
+    status: isProcessing ? 'processing' : isFailed ? 'failed' : 'done',
+  };
+}
+
+function AgentTasksPanel({
+  tasksByColumn,
+  agents,
+  onCardPress,
+}: {
+  tasksByColumn: TasksByColumn;
+  agents: CircleOfficeAgent[];
+  onCardPress: (task: KanbanTask) => void;
+}) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // Collect all agent tasks sorted by newest first
+  const agentTasks = useMemo(() => {
+    const all: KanbanTask[] = [];
+    for (const col of Object.values(tasksByColumn)) {
+      for (const t of col) {
+        if (isAgentTask(t)) all.push(t);
+      }
+    }
+    return all.sort((a, b) =>
+      new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    ).slice(0, 50);
+  }, [tasksByColumn]);
+
+  const processingCount = agentTasks.filter(t => {
+    const meta = parseAgentTaskMeta(t);
+    return meta.status === 'processing';
+  }).length;
+
+  return (
+    <View style={at.container}>
+      <View style={at.header}>
+        <View style={at.headerLeft}>
+          <Text style={at.headerIcon}>{'\u2699'}</Text>
+          <Text style={at.headerTitle}>AGENT TASKS</Text>
+          <View style={at.countBadge}>
+            <Text style={at.countText}>{agentTasks.length}</Text>
+          </View>
+          {processingCount > 0 && (
+            <View style={at.liveBadge}>
+              <View style={at.liveDot} />
+              <Text style={at.liveText}>{processingCount} active</Text>
+            </View>
+          )}
+        </View>
+      </View>
+
+      <ScrollView style={at.list} contentContainerStyle={at.listContent} showsVerticalScrollIndicator={false}>
+        {agentTasks.map(task => {
+          const meta = parseAgentTaskMeta(task);
+          const agent = agents.find(a => a.name === meta.agentName);
+          const color = agent?.color || '#6366f1';
+          const isExpanded = expandedId === task.id;
+          const timeStr = timeAgo(task.created_at);
+
+          return (
+            <Pressable
+              key={task.id}
+              onPress={() => onCardPress(task)}
+              style={[at.card, meta.status === 'processing' && at.cardActive]}
+            >
+              {/* Status + Agent row */}
+              <View style={at.cardTopRow}>
+                <View style={at.statusRow}>
+                  <View style={[
+                    at.statusDot,
+                    meta.status === 'processing' ? at.statusProcessing :
+                    meta.status === 'failed' ? at.statusFailed :
+                    at.statusDone,
+                  ]} />
+                  <Text style={[at.agentName, { color }]}>{meta.agentName}</Text>
+                </View>
+                <Text style={at.timeText}>{timeStr}</Text>
+              </View>
+
+              {/* Prompt preview */}
+              <Text style={at.promptText} numberOfLines={isExpanded ? 6 : 2}>
+                {meta.prompt || task.title}
+              </Text>
+
+              {/* Metrics row (only for completed) */}
+              {meta.status !== 'processing' && (meta.tokens || meta.duration) && (
+                <View style={at.metricsRow}>
+                  {meta.model ? <Text style={at.metricText}>{meta.model}</Text> : null}
+                  {meta.duration && meta.duration !== 'N/A' ? (
+                    <Text style={at.metricText}>{meta.duration}</Text>
+                  ) : null}
+                  {meta.tokens && meta.tokens !== 'N/A' ? (
+                    <Text style={at.metricText}>{meta.tokens} tok</Text>
+                  ) : null}
+                </View>
+              )}
+
+              {/* Processing indicator */}
+              {meta.status === 'processing' && (
+                <Text style={at.processingText}>Processing...</Text>
+              )}
+
+              {/* Response preview (expandable) */}
+              {meta.response && (
+                <Pressable
+                  onPress={(e) => {
+                    e.stopPropagation?.();
+                    setExpandedId(isExpanded ? null : task.id);
+                  }}
+                  style={at.responseToggle}
+                >
+                  <Text style={at.responseToggleText}>
+                    {isExpanded ? 'Hide response' : 'Show response'}
+                  </Text>
+                </Pressable>
+              )}
+              {isExpanded && meta.response && (
+                <View style={at.responseBox}>
+                  <Text style={at.responseText} numberOfLines={20}>
+                    {meta.response}
+                  </Text>
+                </View>
+              )}
+            </Pressable>
+          );
+        })}
+
+        {agentTasks.length === 0 && (
+          <View style={at.empty}>
+            <Text style={at.emptyIcon}>{'\u2699'}</Text>
+            <Text style={at.emptyText}>No agent tasks yet</Text>
+            <Text style={at.emptySubtext}>Tasks auto-created from agent prompts appear here</Text>
+          </View>
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+function timeAgo(dateStr: string): string {
+  const ms = Date.now() - new Date(dateStr).getTime();
+  const secs = Math.floor(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h`;
+  return `${Math.floor(hrs / 24)}d`;
+}
+
 const MOBILE_BREAKPOINT = 768;
 
-type MobileTab = 'goals' | 'activity' | 'board';
+type MobileTab = 'goals' | 'activity' | 'agents' | 'board';
+type CenterTab = 'activity' | 'agents';
 
 export default function FeedTab({ circleId }: { circleId: string }) {
   const kanban = useKanbanData(circleId);
@@ -180,6 +368,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
   const [showCreate, setShowCreate] = useState(false);
   const [createInColumn, setCreateInColumn] = useState<TaskStatus>('todo');
   const [mobileTab, setMobileTab] = useState<MobileTab>('board');
+  const [centerTab, setCenterTab] = useState<CenterTab>('activity');
   const { width } = useWindowDimensions();
   const isMobile = width < MOBILE_BREAKPOINT;
   const searchInputRef = useRef<TextInput>(null);
@@ -451,6 +640,15 @@ export default function FeedTab({ circleId }: { circleId: string }) {
               <ActivityFeedPanel circleId={circleId} agents={agents} />
             </View>
           )}
+          {mobileTab === 'agents' && (
+            <View style={s.mobilePanel}>
+              <AgentTasksPanel
+                tasksByColumn={filteredTasksByColumn}
+                agents={agents}
+                onCardPress={setDetailTask}
+              />
+            </View>
+          )}
           {mobileTab === 'board' && (
             <KanbanBoard
               columns={COLUMNS}
@@ -475,6 +673,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
           {([
             { key: 'goals' as MobileTab, label: 'Goals', icon: '\u2299' },
             { key: 'activity' as MobileTab, label: 'Activity', icon: '\u26A1' },
+            { key: 'agents' as MobileTab, label: 'Agents', icon: '\u2699' },
             { key: 'board' as MobileTab, label: 'Board', icon: '\u25A6' },
           ]).map(tab => {
             const isActive = mobileTab === tab.key;
@@ -558,7 +757,32 @@ export default function FeedTab({ circleId }: { circleId: string }) {
           onEditGoal={setEditGoal}
         />
 
-        <ActivityFeedPanel circleId={circleId} agents={agents} />
+        {/* Center panel: Activity / Agent Tasks toggle */}
+        <View style={ct.wrapper}>
+          <View style={ct.tabs}>
+            <Pressable
+              onPress={() => setCenterTab('activity')}
+              style={[ct.tab, centerTab === 'activity' && ct.tabActive]}
+            >
+              <Text style={[ct.tabText, centerTab === 'activity' && ct.tabTextActive]}>{'\u26A1'} Activity</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => setCenterTab('agents')}
+              style={[ct.tab, centerTab === 'agents' && ct.tabActive]}
+            >
+              <Text style={[ct.tabText, centerTab === 'agents' && ct.tabTextActive]}>{'\u2699'} Agent Tasks</Text>
+            </Pressable>
+          </View>
+          {centerTab === 'activity' ? (
+            <ActivityFeedPanel circleId={circleId} agents={agents} />
+          ) : (
+            <AgentTasksPanel
+              tasksByColumn={filteredTasksByColumn}
+              agents={agents}
+              onCardPress={setDetailTask}
+            />
+          )}
+        </View>
 
         <KanbanBoard
           columns={COLUMNS}
@@ -861,6 +1085,223 @@ const s = StyleSheet.create({
   },
   mobileTabLabelActive: {
     color: '#c0c0d0',
+  },
+});
+
+// ─── Center Tab Switcher (Desktop: Activity ↔ Agent Tasks) ──────────────────
+
+const ct = StyleSheet.create({
+  wrapper: {
+    width: 260,
+    backgroundColor: '#0d0d16',
+  },
+  tabs: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#15151e',
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: 8,
+    alignItems: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
+  },
+  tabActive: {
+    borderBottomWidth: 2,
+    borderBottomColor: '#6366f1',
+  },
+  tabText: {
+    color: '#444455',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
+  tabTextActive: {
+    color: '#c0c0d0',
+  },
+});
+
+// ─── Agent Tasks Panel Styles ───────────────────────────────────────────────
+
+const at = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#0d0d16',
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#15151e',
+  },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  headerIcon: {
+    fontSize: 13,
+  },
+  headerTitle: {
+    color: '#9090a8',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+    fontFamily: 'monospace',
+  },
+  countBadge: {
+    backgroundColor: '#1a1a28',
+    borderRadius: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+  },
+  countText: {
+    color: '#6b6b80',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  liveBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#22c55e12',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+  },
+  liveDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: '#22c55e',
+  },
+  liveText: {
+    color: '#22c55e',
+    fontSize: 9,
+    fontWeight: '700',
+  },
+  list: {
+    flex: 1,
+  },
+  listContent: {
+    padding: 8,
+    gap: 6,
+  },
+  card: {
+    backgroundColor: '#111119',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1a1a28',
+    padding: 10,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
+  },
+  cardActive: {
+    borderColor: '#22c55e30',
+    backgroundColor: '#0d1a14',
+  },
+  cardTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  statusProcessing: {
+    backgroundColor: '#22c55e',
+  },
+  statusDone: {
+    backgroundColor: '#6366f1',
+  },
+  statusFailed: {
+    backgroundColor: '#ef4444',
+  },
+  agentName: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  timeText: {
+    color: '#444455',
+    fontSize: 9,
+    fontWeight: '600',
+  },
+  promptText: {
+    color: '#9090a8',
+    fontSize: 11,
+    lineHeight: 15,
+    marginBottom: 4,
+  },
+  metricsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 2,
+  },
+  metricText: {
+    color: '#555566',
+    fontSize: 9,
+    fontWeight: '600',
+    fontFamily: 'monospace',
+  },
+  processingText: {
+    color: '#22c55e',
+    fontSize: 10,
+    fontWeight: '600',
+    fontStyle: 'italic',
+    marginTop: 2,
+  },
+  responseToggle: {
+    marginTop: 4,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  responseToggleText: {
+    color: '#6366f1',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  responseBox: {
+    marginTop: 6,
+    backgroundColor: '#0a0a12',
+    borderRadius: 6,
+    padding: 8,
+    borderWidth: 1,
+    borderColor: '#15151e',
+  },
+  responseText: {
+    color: '#6b6b80',
+    fontSize: 10,
+    lineHeight: 14,
+    fontFamily: 'monospace',
+  },
+  empty: {
+    alignItems: 'center',
+    paddingVertical: 32,
+    gap: 6,
+  },
+  emptyIcon: {
+    fontSize: 20,
+    opacity: 0.3,
+  },
+  emptyText: {
+    color: '#333348',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  emptySubtext: {
+    color: '#333333',
+    fontSize: 11,
+    textAlign: 'center',
   },
 });
 

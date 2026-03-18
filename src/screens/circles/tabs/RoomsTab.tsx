@@ -21,6 +21,7 @@ import { getSwanBotResponse as getAIResponse } from '../../../lib/swanbot';
 import {
   getStoredToken, storeToken, removeToken, validateToken as ghValidateToken,
   listRepos, getRepoTree, getFileContent, groupTreeByFolder,
+  connectViaOAuth, getOAuthStatus, getConnectedRepos,
   type GitHubUser, type GitHubRepo, type GitHubTreeEntry,
 } from '../../../lib/github';
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -93,6 +94,9 @@ interface RoomTask {
   enabled: boolean;
   lastRun: string | null;
   nextRun: string | null;
+  taskType: string;
+  lastResult: any;
+  status: string;
 }
 
 interface StickyNote {
@@ -3664,6 +3668,24 @@ function PermissionsPanel({ roomId, accentColor }: { roomId: string; accentColor
 
 // ─── Tasks Panel ──────────────────────────────────────────────────────────────
 
+const TASK_TYPES = [
+  { key: 'general', emoji: '💬', label: 'General' },
+  { key: 'web_research', emoji: '🔍', label: 'Web Research' },
+  { key: 'run_script', emoji: '⚙️', label: 'Run Script' },
+  { key: 'file_ops', emoji: '📁', label: 'File Ops' },
+  { key: 'db_query', emoji: '🗄️', label: 'DB Query' },
+  { key: 'api_call', emoji: '🌐', label: 'API Call' },
+] as const;
+
+const TASK_TYPE_MAP: Record<string, { emoji: string; label: string }> = {
+  general: { emoji: '💬', label: 'General' },
+  web_research: { emoji: '🔍', label: 'Research' },
+  run_script: { emoji: '⚙️', label: 'Script' },
+  file_ops: { emoji: '📁', label: 'Files' },
+  db_query: { emoji: '🗄️', label: 'DB' },
+  api_call: { emoji: '🌐', label: 'API' },
+};
+
 function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: string }) {
   const [tasks, setTasks] = useState<RoomTask[]>([]);
   const [showAdd, setShowAdd] = useState(false);
@@ -3671,18 +3693,43 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
   const [schedule, setSchedule] = useState('0 9 * * *');
   const [agent, setAgent] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [taskType, setTaskType] = useState<string>('general');
   const [loading, setLoading] = useState(true);
+  const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
 
-  useEffect(() => {
+  const fetchTasks = useCallback(() => {
     supabase.from('room_tasks').select('*').eq('room_id', roomId).order('created_at')
       .then(({ data }) => {
         if (data) setTasks(data.map((t: any) => ({
           id: t.id, name: t.name, schedule: t.schedule,
           agent: t.agent, prompt: t.prompt, enabled: t.enabled,
           lastRun: t.last_run_at, nextRun: t.next_run_at,
+          taskType: t.task_type || 'general',
+          lastResult: t.last_result,
+          status: t.status || 'idle',
         })));
         setLoading(false);
       });
+  }, [roomId]);
+
+  useEffect(() => { fetchTasks(); }, [fetchTasks]);
+
+  // Realtime subscription for live status updates
+  useEffect(() => {
+    const ch = supabase.channel(`room_tasks_live_${roomId}`)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'room_tasks', filter: `room_id=eq.${roomId}` },
+        (payload: any) => {
+          const t = payload.new;
+          setTasks(prev => prev.map(task => task.id === t.id ? {
+            ...task, status: t.status || task.status,
+            lastRun: t.last_run_at || task.lastRun,
+            lastResult: t.last_result || task.lastResult,
+            enabled: t.enabled ?? task.enabled,
+          } : task));
+          if (t.status === 'done' || t.status === 'error') setRunningTaskId(null);
+        })
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
   }, [roomId]);
 
   const addTask = async () => {
@@ -3693,12 +3740,20 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
       schedule: schedule.trim() || 'once',
       agent: agent.trim() || 'Assistant',
       prompt: prompt.trim(), enabled: true,
+      task_type: taskType,
       created_by: user?.id || null,
     }).select().single();
     if (!error && data) {
-      setTasks(p => [...p, { id: data.id, name: data.name, schedule: data.schedule, agent: data.agent, prompt: data.prompt, enabled: data.enabled, lastRun: data.last_run_at, nextRun: data.next_run_at }]);
+      setTasks(p => [...p, {
+        id: data.id, name: data.name, schedule: data.schedule,
+        agent: data.agent, prompt: data.prompt, enabled: data.enabled,
+        lastRun: data.last_run_at, nextRun: data.next_run_at,
+        taskType: data.task_type || 'general',
+        lastResult: data.last_result,
+        status: data.status || 'idle',
+      }]);
     }
-    setName(''); setSchedule('0 9 * * *'); setAgent(''); setPrompt('');
+    setName(''); setSchedule('0 9 * * *'); setAgent(''); setPrompt(''); setTaskType('general');
     setShowAdd(false);
   };
 
@@ -3712,6 +3767,27 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
   const deleteTask = async (id: string) => {
     await supabase.from('room_tasks').delete().eq('id', id);
     setTasks(p => p.filter(t => t.id !== id));
+  };
+
+  const runTask = async (task: RoomTask) => {
+    setRunningTaskId(task.id);
+    try {
+      await supabase.functions.invoke('room-task-executor', {
+        body: {
+          taskId: task.id,
+          roomId,
+          prompt: task.prompt,
+          agentName: task.agent,
+          task_type: task.taskType,
+          taskName: task.name,
+        },
+      });
+      fetchTasks();
+    } catch (err) {
+      console.error('Run task error:', err);
+    } finally {
+      setRunningTaskId(null);
+    }
   };
 
   const PRESETS = [
@@ -3734,6 +3810,20 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
         <ScrollView style={panelTabSt.addBox} keyboardShouldPersistTaps="handled">
           <TextInput style={s.input} value={name} onChangeText={setName}
             placeholder="Task name" placeholderTextColor="#555" />
+
+          <Text style={[s.label, { marginTop: 8 }]}>Task Type</Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 5, marginBottom: 6 }}>
+            {TASK_TYPES.map(tt => {
+              const sel = taskType === tt.key;
+              return (
+                <Pressable key={tt.key} onPress={() => setTaskType(tt.key)}
+                  style={[panelTabSt.miniTab, sel && { backgroundColor: accentColor + '20', borderColor: accentColor + '60' },
+                    !sel && { backgroundColor: '#0d0d0d', borderColor: '#222' }]}>
+                  <Text style={[{ color: '#666', fontSize: 10 }, sel && { color: accentColor }]}>{tt.emoji} {tt.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
 
           <Text style={[s.label, { marginTop: 8 }]}>Schedule</Text>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 5, marginBottom: 6 }}>
@@ -3769,31 +3859,66 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
             </Text>
           </View>
         )}
-        {tasks.map(task => (
-          <View key={task.id} style={[panelTabSt.serviceRow, { opacity: task.enabled ? 1 : 0.5 }]}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-              <View style={[panelTabSt.statusDot, { backgroundColor: task.enabled ? '#22c55e' : '#6b7280' }]} />
-              <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700', flex: 1 }}>{task.name}</Text>
-              <View style={panelTabSt.typeBadge}>
-                <Text style={{ color: '#888', fontSize: 9, fontWeight: '700' }}>{task.schedule}</Text>
+        {tasks.map(task => {
+          const tt = TASK_TYPE_MAP[task.taskType] || TASK_TYPE_MAP.general;
+          const isRunning = runningTaskId === task.id || task.status === 'running';
+          const statusDotColor = isRunning ? '#f59e0b' : task.status === 'done' ? '#22c55e'
+            : task.status === 'error' ? '#ef4444' : task.enabled ? '#6366f1' : '#6b7280';
+          const resultPreview = task.lastResult?.preview
+            || task.lastResult?.error
+            || (task.lastResult ? JSON.stringify(task.lastResult).slice(0, 120) : null);
+          return (
+            <View key={task.id} style={[panelTabSt.serviceRow, { opacity: task.enabled ? 1 : 0.5 }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                <View style={[panelTabSt.statusDot, { backgroundColor: statusDotColor }]} />
+                <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700', flex: 1 }} numberOfLines={1}>{task.name}</Text>
+                <View style={panelTabSt.typeBadge}>
+                  <Text style={{ color: '#888', fontSize: 9, fontWeight: '700' }}>{tt.emoji} {tt.label}</Text>
+                </View>
+                <View style={panelTabSt.typeBadge}>
+                  <Text style={{ color: '#888', fontSize: 9, fontWeight: '700' }}>{task.schedule}</Text>
+                </View>
+              </View>
+              <Text style={{ color: '#666', fontSize: 11, marginBottom: 4 }} numberOfLines={2}>{task.prompt}</Text>
+              <Text style={{ color: '#6366f1', fontSize: 10, marginBottom: 4, fontFamily: MONO }}>
+                {'\u2192'} {task.agent}
+                {task.status !== 'idle' && <Text style={{ color: statusDotColor }}> {'\u00B7'} {task.status.toUpperCase()}</Text>}
+              </Text>
+              {resultPreview && (
+                <View style={{ backgroundColor: '#0a0a12', borderRadius: 4, padding: 8, marginBottom: 6,
+                  borderWidth: 1, borderColor: task.lastResult?.error ? '#ef444430' : '#1a1a2e' }}>
+                  <Text style={{ color: task.lastResult?.error ? '#ef4444' : '#888', fontSize: 10, fontFamily: MONO }} numberOfLines={2}>
+                    {resultPreview}
+                  </Text>
+                  {task.lastRun && (
+                    <Text style={{ color: '#555', fontSize: 9, marginTop: 3, fontFamily: MONO }}>
+                      {new Date(task.lastRun).toLocaleString()}
+                    </Text>
+                  )}
+                </View>
+              )}
+              <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                <Pressable onPress={() => runTask(task)} disabled={isRunning}
+                  style={[panelTabSt.svcBtn, { backgroundColor: isRunning ? '#f59e0b18' : accentColor + '20',
+                    borderColor: isRunning ? '#f59e0b40' : accentColor + '50', opacity: isRunning ? 0.6 : 1 }]}>
+                  <Text style={{ color: isRunning ? '#f59e0b' : accentColor, fontSize: 11, fontWeight: '700', fontFamily: MONO }}>
+                    {isRunning ? '... RUNNING' : '\u25B6 RUN'}
+                  </Text>
+                </Pressable>
+                <Pressable onPress={() => toggleTask(task.id)}
+                  style={[panelTabSt.svcBtn, { backgroundColor: task.enabled ? '#ef444420' : '#22c55e20',
+                    borderColor: task.enabled ? '#ef444450' : '#22c55e50' }]}>
+                  <Text style={{ color: task.enabled ? '#ef4444' : '#22c55e', fontSize: 11, fontWeight: '700' }}>
+                    {task.enabled ? 'Disable' : 'Enable'}
+                  </Text>
+                </Pressable>
+                <Pressable onPress={() => deleteTask(task.id)} style={{ marginLeft: 'auto' as any }} hitSlop={8}>
+                  <Text style={{ color: '#ef4444', fontSize: 12, fontFamily: MONO, fontWeight: '700' }}>X</Text>
+                </Pressable>
               </View>
             </View>
-            <Text style={{ color: '#666', fontSize: 11, marginBottom: 4 }} numberOfLines={2}>{task.prompt}</Text>
-            <Text style={{ color: '#6366f1', fontSize: 10, marginBottom: 6, fontFamily: MONO }}>→ {task.agent}</Text>
-            <View style={{ flexDirection: 'row', gap: 8 }}>
-              <Pressable onPress={() => toggleTask(task.id)}
-                style={[panelTabSt.svcBtn, { backgroundColor: task.enabled ? '#ef444420' : '#22c55e20',
-                  borderColor: task.enabled ? '#ef444450' : '#22c55e50' }]}>
-                <Text style={{ color: task.enabled ? '#ef4444' : '#22c55e', fontSize: 11, fontWeight: '700' }}>
-                  {task.enabled ? 'Disable' : 'Enable'}
-                </Text>
-              </Pressable>
-              <Pressable onPress={() => deleteTask(task.id)} style={{ marginLeft: 'auto' as any }} hitSlop={8}>
-                <Text style={{ color: '#ef4444', fontSize: 12 }}>🗑</Text>
-              </Pressable>
-            </View>
-          </View>
-        ))}
+          );
+        })}
       </ScrollView>
     </View>
   );
@@ -3842,19 +3967,76 @@ function GitHubPanel({ circleId, accentColor, ghConnected, ghUser, ghRepo,
   const [repos, setRepos] = useState<GitHubRepo[]>([]);
   const [loadingRepos, setLoadingRepos] = useState(false);
   const [repoFilter, setRepoFilter] = useState('');
+  const [showPatFallback, setShowPatFallback] = useState(false);
+  const [oauthChecked, setOauthChecked] = useState(false);
 
   useEffect(() => {
     if (ghConnected) loadRepos();
   }, [ghConnected]);
 
+  // Check for ?github_connected=1 callback on mount
+  useEffect(() => {
+    if (Platform.OS === 'web') {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('github_connected') === '1') {
+          window.history.replaceState({}, '', window.location.pathname);
+          // OAuth just completed — try loading repos via OAuth
+          loadReposViaOAuth();
+        }
+      } catch {}
+    }
+  }, []);
+
   const loadRepos = async () => {
     const token = await getStoredToken(circleId);
-    if (!token) return;
+    if (!token) {
+      // Try OAuth repos as fallback
+      await loadReposViaOAuth();
+      return;
+    }
     setLoadingRepos(true);
     const { repos: r, error: e } = await listRepos(token);
     setRepos(r);
     if (e) setError(e);
     setLoadingRepos(false);
+  };
+
+  const loadReposViaOAuth = async () => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+      if (!user) return;
+      setLoadingRepos(true);
+      const { repos: r, github_username, error: e } = await getConnectedRepos(user.id);
+      if (e || r.length === 0) { setLoadingRepos(false); return; }
+      setRepos(r);
+      if (github_username) {
+        onConnected({ login: github_username, avatar_url: '', name: github_username });
+      }
+      setOauthChecked(true);
+      setLoadingRepos(false);
+    } catch {
+      setLoadingRepos(false);
+    }
+  };
+
+  const handleOAuthConnect = async () => {
+    setConnecting(true);
+    setError('');
+    try {
+      const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+      if (!user) { setError('Not authenticated'); setConnecting(false); return; }
+      const { url, error: e } = await connectViaOAuth(circleId, user.id);
+      if (e || !url) { setError(e || 'OAuth failed'); setConnecting(false); return; }
+      // Store circle_id so callback knows where to return
+      if (Platform.OS === 'web') {
+        try { localStorage.setItem('uc_github_oauth_circle', circleId); } catch {}
+        window.open(url, '_self');
+      }
+    } catch (e: any) {
+      setError(e.message || 'OAuth error');
+      setConnecting(false);
+    }
   };
 
   const handleConnect = async () => {
@@ -3884,43 +4066,59 @@ function GitHubPanel({ circleId, accentColor, ghConnected, ghUser, ghRepo,
       <ScrollView style={{flex:1}} contentContainerStyle={{padding:16}}>
         <Text style={{color:'#fff',fontSize:14,fontWeight:'700',marginBottom:8}}>Connect GitHub</Text>
         <Text style={{color:'#666',fontSize:12,lineHeight:18,marginBottom:16}}>
-          Enter a Personal Access Token to browse repositories including private ones.{'\n'}
-          Generate one at github.com/settings/tokens with &quot;repo&quot; scope.
+          Connect your GitHub account to browse repos, receive webhooks, and let BlackSwan track your team's shipping.
         </Text>
 
-        <Text style={ghSt.label}>Personal Access Token</Text>
-        <TextInput
-          style={ghSt.input}
-          value={tokenInput}
-          onChangeText={setTokenInput}
-          placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
-          placeholderTextColor="#555"
-          secureTextEntry
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
+        {error ? <Text style={{color:'#ef4444',fontSize:11,marginBottom:8}}>{error}</Text> : null}
 
-        {error ? <Text style={{color:'#ef4444',fontSize:11,marginTop:8}}>{error}</Text> : null}
-
-        <Pressable onPress={handleConnect} disabled={connecting}
+        {/* Primary: OAuth */}
+        <Pressable onPress={handleOAuthConnect} disabled={connecting}
           style={[ghSt.connectBtn,{backgroundColor:accentColor,opacity:connecting?0.5:1}]}>
-          <Text style={ghSt.connectText}>{connecting ? 'Connecting...' : 'Connect to GitHub'}</Text>
+          <Text style={ghSt.connectText}>{connecting ? 'Connecting...' : 'Connect with GitHub'}</Text>
         </Pressable>
 
-        <View style={{marginTop:24,gap:10}}>
-          <Text style={{color:'#555',fontSize:10,fontWeight:'800',letterSpacing:1}}>HOW TO GET A TOKEN</Text>
-          {[
-            'Go to github.com → Settings → Developer settings',
-            'Click "Personal access tokens" → "Tokens (classic)"',
-            'Generate new token with "repo" scope',
-            'Copy and paste the token above',
-          ].map((step, i) => (
-            <View key={i} style={{flexDirection:'row',gap:8}}>
-              <Text style={{color:accentColor,fontSize:11,fontWeight:'700'}}>{i+1}.</Text>
-              <Text style={{color:'#888',fontSize:11,flex:1}}>{step}</Text>
+        {/* Fallback: PAT */}
+        <Pressable onPress={() => setShowPatFallback(!showPatFallback)}
+          style={{marginTop:20, paddingVertical:6}}>
+          <Text style={{color:'#555',fontSize:10,fontWeight:'800',letterSpacing:1}}>
+            {showPatFallback ? '▼ HIDE PAT OPTION' : '▶ USE PERSONAL ACCESS TOKEN INSTEAD'}
+          </Text>
+        </Pressable>
+
+        {showPatFallback && (
+          <View style={{marginTop:8}}>
+            <Text style={ghSt.label}>Personal Access Token</Text>
+            <TextInput
+              style={ghSt.input}
+              value={tokenInput}
+              onChangeText={setTokenInput}
+              placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+              placeholderTextColor="#555"
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <Pressable onPress={handleConnect} disabled={connecting}
+              style={[ghSt.connectBtn,{backgroundColor:'#333',opacity:connecting?0.5:1,marginTop:8}]}>
+              <Text style={ghSt.connectText}>{connecting ? 'Connecting...' : 'Connect with PAT'}</Text>
+            </Pressable>
+
+            <View style={{marginTop:16,gap:10}}>
+              <Text style={{color:'#555',fontSize:10,fontWeight:'800',letterSpacing:1}}>HOW TO GET A TOKEN</Text>
+              {[
+                'Go to github.com → Settings → Developer settings',
+                'Click "Personal access tokens" → "Tokens (classic)"',
+                'Generate new token with "repo" scope',
+                'Copy and paste the token above',
+              ].map((step, i) => (
+                <View key={i} style={{flexDirection:'row',gap:8}}>
+                  <Text style={{color:accentColor,fontSize:11,fontWeight:'700'}}>{i+1}.</Text>
+                  <Text style={{color:'#888',fontSize:11,flex:1}}>{step}</Text>
+                </View>
+              ))}
             </View>
-          ))}
-        </View>
+          </View>
+        )}
       </ScrollView>
     );
   }

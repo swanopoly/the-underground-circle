@@ -1164,6 +1164,70 @@ Deno.serve(async (req: Request) => {
         // Memory notes table may not exist yet — that's fine
       }
 
+      // 3c. GitHub Summary — fetch unprocessed events if this is a github_summary automation
+      let githubEventsContext = "";
+      const isGitHubSummary = (automation.prompt || "").includes("{{github_events}}") ||
+        automation.name?.toLowerCase().includes("github summary");
+      if (isGitHubSummary) {
+        try {
+          const { data: ghEvents } = await supabase
+            .from("circle_github_events")
+            .select("id, event_type, action, title, body, author, url, ref, commits_count, additions, deletions, created_at")
+            .eq("circle_id", circleId)
+            .eq("processed", false)
+            .order("created_at", { ascending: false })
+            .limit(20);
+
+          if (!ghEvents || ghEvents.length === 0) {
+            // No events — post a simple "no activity" message and complete
+            const noActivityMsg = "🦢 No new GitHub activity since last check.";
+            await logStep("ℹ️ No unprocessed GitHub events found");
+
+            if (!dryRun) {
+              const noActivityTarget = automation.output_target || "chat";
+              await routeOutput(supabase, noActivityTarget, circleId, automation.agent || "BlackSwan", noActivityMsg, automation.webhook_url, automation.name);
+              await supabase.from("agent_activity").insert({
+                circle_id: circleId,
+                agent_name: automation.agent || "BlackSwan",
+                source: "cron",
+                source_detail: `automation:${automation.name}`,
+                activity_type: "task_completed",
+                title: `🤖 ${automation.name}`,
+                body: noActivityMsg,
+                status: "completed",
+                metadata: { automation_id: automationId, run_id: runId, github_events: 0 },
+              });
+            }
+
+            // Mark run completed
+            if (runId) {
+              logSteps.push(`[${((Date.now() - startTime) / 1000).toFixed(1)}s] ✅ No events — completed`);
+              await supabase.from("automation_runs").update({
+                status: "completed",
+                completed_at: new Date().toISOString(),
+                duration_ms: Date.now() - startTime,
+                error_message: logSteps.join("\n"),
+              }).eq("id", runId);
+            }
+            return new Response(
+              JSON.stringify({ ok: true, run_id: runId, github_events: 0, skipped: true }),
+              { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+            );
+          }
+
+          // Build context string from events
+          githubEventsContext = ghEvents.map((e: any) =>
+            `- [${e.event_type}${e.action ? `:${e.action}` : ""}] ${e.title} (by ${e.author}, ${e.created_at})${e.url ? `\n  ${e.url}` : ""}`
+          ).join("\n");
+          await logStep(`✓ Found ${ghEvents.length} unprocessed GitHub event(s)`);
+
+          // Store event IDs so we can mark them processed after AI response
+          (context as any)._githubEventIds = ghEvents.map((e: any) => e.id);
+        } catch (ghErr: any) {
+          await logStep(`⚠ GitHub events fetch failed: ${ghErr.message}`);
+        }
+      }
+
       // 4. Substitute variables in prompt
       const contextString = buildContextString(context);
       const vars: Record<string, string> = {
@@ -1216,6 +1280,9 @@ Deno.serve(async (req: Request) => {
       };
       if (eventPayload) {
         vars.event = JSON.stringify(eventPayload);
+      }
+      if (githubEventsContext) {
+        vars.github_events = githubEventsContext;
       }
 
       const resolvedPrompt = substituteVariables(automation.prompt, vars);
@@ -1287,6 +1354,20 @@ ${contextString}`;
       await logStep(`⏳ Calling ${modelId}...`);
       const aiResult = await callClaude(systemPrompt, resolvedPrompt, modelKey);
       await logStep(`✓ AI responded — ${aiResult.totalTokens} tokens (${aiResult.inputTokens} in / ${aiResult.outputTokens} out) · $${aiResult.estimatedCost.toFixed(4)}`);
+
+      // 6a-gh. Mark GitHub events as processed (if github_summary)
+      if (isGitHubSummary && (context as any)._githubEventIds?.length > 0 && !dryRun) {
+        try {
+          const eventIds: string[] = (context as any)._githubEventIds;
+          await supabase
+            .from("circle_github_events")
+            .update({ processed: true, processed_at: new Date().toISOString() })
+            .in("id", eventIds);
+          await logStep(`✓ Marked ${eventIds.length} GitHub event(s) as processed`);
+        } catch (markErr: any) {
+          await logStep(`⚠ Failed to mark GitHub events as processed: ${markErr.message}`);
+        }
+      }
 
       // 6b. Parse & queue trade actions (if trading automation)
       if (contextFlags.trading) {

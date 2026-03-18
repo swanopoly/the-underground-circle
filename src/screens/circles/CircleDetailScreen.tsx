@@ -29,6 +29,7 @@ const BackpackTab = lazy(() => import('./tabs/BackpackTab'));
 
 import { Circle } from '../../types';
 import ErrorBoundary from '../../components/ErrorBoundary';
+import { createLinkInvite } from '../../lib/invites';
 
 /** Mirrors OfficeTab's AgentStats — inlined to avoid importing from lazy module */
 interface AgentStats {
@@ -36,9 +37,12 @@ interface AgentStats {
   sessionCount: number;
   costToday: number;
   costWeek: number;
-  tokens: number;
-  tokensTotal: number;
+  tokens: number;        // tokens used today
+  tokensTotal: number;   // tokens used all-time
   messagesTotal: number;
+  messagesToday: number;
+  inputTokens: number;
+  outputTokens: number;
 }
 
 // Chat + Office stay mounted permanently; other tabs mount on first visit
@@ -61,9 +65,83 @@ const TAB_META: { key: string; label: string; icon: string }[] = [
 const TABS = TAB_META.map(t => t.key) as readonly string[];
 type Tab = string;
 
+// ── Live Token Ticker ────────────────────────────────────────────────────────
+// Animated token/cost counter that updates in real-time via Supabase subscription
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2) + 'B';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+  return String(n);
+}
+
+function LiveTokenTicker({ stats, accentColor, isMobile }: { stats: AgentStats; accentColor: string; isMobile: boolean }) {
+  const hasActivity = stats.agentCount > 0;
+  const isLive = stats.sessionCount > 0;
+
+  return (
+    <View style={styles.statsRow}>
+      {/* Live indicator */}
+      <View style={styles.stat}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+          <View style={[styles.liveDot, { backgroundColor: isLive ? '#22c55e' : '#333' }]} />
+          <Text style={[styles.statNum, { color: isLive ? '#22c55e' : '#555', fontSize: 11 }]}>
+            {isLive ? `${stats.sessionCount} LIVE` : 'OFF'}
+          </Text>
+        </View>
+        <Text style={styles.statLbl}>{stats.agentCount} agent{stats.agentCount !== 1 ? 's' : ''}</Text>
+      </View>
+
+      <View style={styles.statDivider} />
+
+      {/* Tokens Today */}
+      <View style={styles.stat}>
+        <Text style={[styles.statNum, { color: stats.tokens > 0 ? '#f59e0b' : '#555' }]}>
+          {stats.tokens > 0 ? formatTokens(stats.tokens) : '—'}
+        </Text>
+        <Text style={styles.statLbl}>Today</Text>
+      </View>
+
+      <View style={styles.statDivider} />
+
+      {/* Cost Today */}
+      <View style={styles.stat}>
+        <Text style={[styles.statNum, { color: stats.costToday > 0 ? '#22c55e' : '#555' }]}>
+          {stats.costToday > 0 ? `$${stats.costToday.toFixed(2)}` : '$0'}
+        </Text>
+        <Text style={styles.statLbl}>Cost</Text>
+      </View>
+
+      <View style={styles.statDivider} />
+
+      {/* Messages Today */}
+      <View style={styles.stat}>
+        <Text style={[styles.statNum, { color: stats.messagesToday > 0 ? '#06b6d4' : '#555' }]}>
+          {stats.messagesToday > 0 ? formatTokens(stats.messagesToday) : '—'}
+        </Text>
+        <Text style={styles.statLbl}>Msgs</Text>
+      </View>
+
+      {/* All-time Tokens — desktop only */}
+      {!isMobile && (
+        <>
+          <View style={styles.statDivider} />
+          <View style={styles.stat}>
+            <Text style={[styles.statNum, { color: '#a78bfa' }]}>
+              {stats.tokensTotal > 0 ? formatTokens(stats.tokensTotal) : '—'}
+            </Text>
+            <Text style={styles.statLbl}>All-time</Text>
+          </View>
+        </>
+      )}
+    </View>
+  );
+}
+
 export default function CircleDetailScreen({ route, navigation }: any) {
   const { circleId, circleName } = route.params;
-  const [activeTab, setActiveTab] = useState<Tab>('OFFICE');
+  const [activeTab, setActiveTab] = useState<Tab>('FEED');
+  const [inviteCopied, setInviteCopied] = useState(false);
   const [circle, setCircle] = useState<Circle | null>(null);
   const [memberCount, setMemberCount] = useState(0);
   const [activeStreakCount, setActiveStreakCount] = useState(0);
@@ -71,7 +149,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   const isMobile = winW < 700;
   const [onlineMembers, setOnlineMembers] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [agentStats, setAgentStats] = useState<AgentStats>({ agentCount: 0, sessionCount: 0, costToday: 0, costWeek: 0, tokens: 0, tokensTotal: 0, messagesTotal: 0 });
+  const [agentStats, setAgentStats] = useState<AgentStats>({ agentCount: 0, sessionCount: 0, costToday: 0, costWeek: 0, tokens: 0, tokensTotal: 0, messagesTotal: 0, messagesToday: 0, inputTokens: 0, outputTokens: 0 });
 
   useEffect(() => {
     loadCircleData();
@@ -83,37 +161,66 @@ export default function CircleDetailScreen({ route, navigation }: any) {
     try {
       const { data: agents } = await supabase
         .from('circle_office_agents')
-        .select('id, status, token_usage_today, token_usage_total, message_count_today, message_count_total')
+        .select('id, status, provider, token_usage_today, token_usage_total, message_count_today, message_count_total, last_active_at, last_response_ms')
         .eq('circle_id', circleId);
       if (agents && agents.length > 0) {
+        const tokensToday = agents.reduce((s: number, a: any) => s + (a.token_usage_today || 0), 0);
+        const tokensTotal = agents.reduce((s: number, a: any) => s + (a.token_usage_total || 0), 0);
+        const messagesToday = agents.reduce((s: number, a: any) => s + (a.message_count_today || 0), 0);
+        const messagesTotal = agents.reduce((s: number, a: any) => s + (a.message_count_total || 0), 0);
+        // Estimate cost using model-aware rates: ~$3/MTok input average for Claude models
+        // Use a blended rate since we don't have per-agent model info at this level
+        const costPerToken = 0.000003; // ~$3/MTok blended (input-heavy estimate)
+        const costToday = tokensToday * costPerToken;
+        const activeAgents = agents.filter((a: any) => {
+          if (a.status === 'offline') return false;
+          // Also check last_active_at — if stale (>1h), count as offline
+          if (a.last_active_at) {
+            const age = Date.now() - new Date(a.last_active_at).getTime();
+            if (age > 3_600_000) return false;
+          }
+          return true;
+        });
         setAgentStats({
           agentCount: agents.length,
-          sessionCount: agents.filter((a: any) => a.status !== 'offline').length,
-          costToday: agents.reduce((s: number, a: any) => s + (a.token_usage_today || 0), 0) * 0.0000005,
+          sessionCount: activeAgents.length,
+          costToday,
           costWeek: 0,
-          tokens: agents.reduce((s: number, a: any) => s + (a.token_usage_today || 0), 0),
-          tokensTotal: agents.reduce((s: number, a: any) => s + (a.token_usage_total || 0), 0),
-          messagesTotal: agents.reduce((s: number, a: any) => s + (a.message_count_total || 0), 0),
+          tokens: tokensToday,
+          tokensTotal,
+          messagesTotal,
+          messagesToday,
+          inputTokens: 0,
+          outputTokens: 0,
         });
+      } else {
+        setAgentStats({ agentCount: 0, sessionCount: 0, costToday: 0, costWeek: 0, tokens: 0, tokensTotal: 0, messagesTotal: 0, messagesToday: 0, inputTokens: 0, outputTokens: 0 });
       }
     } catch {}
   };
 
-  // Realtime subscription for agent stats updates
+  // Realtime subscription — debounced reload to prevent flicker
   useEffect(() => {
+    let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+    const debouncedReload = () => {
+      if (reloadTimer) clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => loadAgentStats(), 2000);
+    };
+
     const channel = supabase
       .channel(`circle-agent-stats-${circleId}`)
       .on('postgres_changes', {
-        event: 'UPDATE',
+        event: '*',
         schema: 'public',
         table: 'circle_office_agents',
         filter: `circle_id=eq.${circleId}`,
-      }, () => {
-        // Reload stats whenever an agent is updated (token counts changed)
-        loadAgentStats();
-      })
+      }, debouncedReload)
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
+
+    return () => {
+      if (reloadTimer) clearTimeout(reloadTimer);
+      supabase.removeChannel(channel);
+    };
   }, [circleId]);
 
 
@@ -171,6 +278,26 @@ export default function CircleDetailScreen({ route, navigation }: any) {
             </View>
 
             <Pressable
+              onPress={async () => {
+                try {
+                  const { url, error } = await createLinkInvite(circleId, { maxUses: 0, expiresInDays: 7 });
+                  if (error || !url) return;
+                  if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.clipboard) {
+                    await navigator.clipboard.writeText(url);
+                  }
+                  // Brief visual feedback — the button text changes
+                  setInviteCopied(true);
+                  setTimeout(() => setInviteCopied(false), 2000);
+                } catch {}
+              }}
+              style={[styles.gearBtn, { marginRight: 4 }]}
+              accessibilityLabel="Copy invite link"
+              accessibilityRole="button"
+            >
+              <Text style={styles.gearText}>{inviteCopied ? '✅' : '🔗'}</Text>
+            </Pressable>
+
+            <Pressable
               onPress={() => navigation.navigate('CircleSettings', { circleId })}
               style={styles.gearBtn}
               accessibilityLabel="Circle settings"
@@ -180,59 +307,8 @@ export default function CircleDetailScreen({ route, navigation }: any) {
             </Pressable>
           </View>
 
-          {/* DAO / Agent Dashboard Bar — desktop only */}
-          {!isMobile && (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.statsRow}>
-              <View style={styles.stat}>
-                <Pressable
-                  onPress={() => navigation.navigate('CircleSettings', { circleId })}
-                  style={[styles.iconBubble, { backgroundColor: accentColor + '20', borderColor: accentColor + '50' }]}
-                >
-                  <Text style={styles.iconText}>{circleIcon}</Text>
-                </Pressable>
-              </View>
-              <View style={styles.statDivider} />
-              <View style={styles.stat}>
-                <Text style={styles.statNum}>🤖 {agentStats.agentCount || '—'}</Text>
-                <Text style={styles.statLbl}>Agents</Text>
-              </View>
-              <View style={styles.statDivider} />
-              <View style={styles.stat}>
-                <Text style={styles.statNum}>{agentStats.sessionCount || '—'}</Text>
-                <Text style={styles.statLbl}>Sessions</Text>
-              </View>
-              <View style={styles.statDivider} />
-              <View style={styles.stat}>
-                <Text style={[styles.statNum, { color: agentStats.costToday > 0 ? '#22c55e' : '#888' }]}>${agentStats.costToday > 0 ? agentStats.costToday.toFixed(2) : '—'}</Text>
-                <Text style={styles.statLbl}>Cost Today</Text>
-              </View>
-              <View style={styles.statDivider} />
-              <View style={styles.stat}>
-                <Text style={styles.statNum}>${agentStats.costWeek > 0 ? agentStats.costWeek.toFixed(2) : '—'}</Text>
-                <Text style={styles.statLbl}>Cost This Week</Text>
-              </View>
-              <View style={styles.statDivider} />
-              <View style={styles.stat}>
-                <Text style={[styles.statNum, { color: '#f59e0b' }]}>◎ —</Text>
-                <Text style={styles.statLbl}>Treasury (SOL)</Text>
-              </View>
-              <View style={styles.statDivider} />
-              <View style={styles.stat}>
-                <Text style={[styles.statNum, { color: '#f59e0b' }]}>{agentStats.tokensTotal > 0 ? (agentStats.tokensTotal > 1_000_000 ? `${(agentStats.tokensTotal / 1_000_000).toFixed(1)}M` : agentStats.tokensTotal > 1000 ? `${(agentStats.tokensTotal / 1000).toFixed(0)}K` : agentStats.tokensTotal) : '—'}</Text>
-                <Text style={styles.statLbl}>Total Tokens</Text>
-              </View>
-              <View style={styles.statDivider} />
-              <View style={styles.stat}>
-                <Text style={styles.statNum}>{agentStats.messagesTotal > 0 ? agentStats.messagesTotal : '—'}</Text>
-                <Text style={styles.statLbl}>Total Messages</Text>
-              </View>
-              <View style={styles.statDivider} />
-              <View style={styles.stat}>
-                <Text style={[styles.statNum, { color: agentStats.agentCount > 0 ? '#22c55e' : '#888' }]}>{agentStats.agentCount > 0 ? '● Live' : '⚙️ Connect'}</Text>
-                <Text style={styles.statLbl}>{agentStats.agentCount > 0 ? 'OpenClaw' : 'in Office tab'}</Text>
-              </View>
-            </ScrollView>
-          )}
+          {/* Live Token Ticker — shows on both mobile and desktop */}
+          <LiveTokenTicker stats={agentStats} accentColor={accentColor} isMobile={isMobile} />
 
           {/* Tab Bar — horizontal scrollable pills with arrow indicators */}
           <TabBarScroller
@@ -570,6 +646,11 @@ const styles = StyleSheet.create({
     width: 1,
     height: 20,
     backgroundColor: '#ffffff0a',
+  },
+  liveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
   },
 
   // Icon Bubble

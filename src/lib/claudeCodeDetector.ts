@@ -260,11 +260,19 @@ export async function updateClaudeCodeAgentStatus(
         ? `${sessions.length} session(s) idle`
         : 'Session ended — idling';
 
+    // Aggregate token/message counts from all sessions
+    const totalTokens = sessions.reduce((sum, s) =>
+      sum + (s.totalInputTokens || 0) + (s.totalOutputTokens || 0), 0);
+    const totalMessages = sessions.reduce((sum, s) =>
+      sum + (s.messageCount || 0), 0);
+
     await supabase
       .from('circle_office_agents')
       .update({
         status,
         current_task: currentTask,
+        token_usage_today: totalTokens,
+        message_count_today: totalMessages,
         last_active_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })

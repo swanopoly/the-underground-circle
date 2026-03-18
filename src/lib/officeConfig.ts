@@ -605,6 +605,9 @@ export interface FurnitureItem {
   pokerPlayerCount?: number;        // poker_table: seats taken
   pokerWinnerName?: string;         // poker_table: last round winner
   pokerCommunity?: string;          // poker_table: community cards "A♠ K♥ Q♦"
+  pokerPlayerTurn?: boolean;        // poker_table: true when waiting for player action
+  pokerCurrentBet?: number;         // poker_table: current bet to call
+  pokerPlayerBet?: number;          // poker_table: player's bet in current round
   chessPosition?: string;           // chess_board: FEN-like display state
   chessTurn?: string;               // chess_board: white/black
   chessGameOver?: boolean;          // chess_board: game ended

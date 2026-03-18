@@ -70,7 +70,7 @@ import {
   BLACKSWAN_AGENT_ID,
 } from '../../../lib/circleOffice';
 import {
-  evaluatePokerHand, blackswanDecide, blackswanRaise, getBlackswanLine,
+  evaluatePokerHand, blackswanDecide, blackswanRaise, getBlackswanLine, PokerPhase,
   CHESS_INITIAL_BOARD, getChessLegalMoves, applyChessMove, isCheckmate, isStalemate, isInCheck,
   checkConnectFourWin, isConnectFourFull, connectFourAI,
 } from '../../../lib/circleGames';
@@ -144,6 +144,9 @@ export interface AgentStats {
   tokens: number;
   tokensTotal: number;
   messagesTotal: number;
+  messagesToday: number;
+  inputTokens: number;
+  outputTokens: number;
 }
 
 interface Props {
@@ -1321,17 +1324,51 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     return () => clearInterval(interval);
   }, [enrichedAgents]);
 
+  // Sync live agent token data to DB (every 30s) so the token ticker is accurate
+  useEffect(() => {
+    if (enrichedAgents.length === 0) return;
+
+    const syncToDB = async () => {
+      try {
+        const { data: auth } = await supabase.auth.getUser();
+        if (!auth.user) return;
+        for (const agent of enrichedAgents) {
+          if (agent.tokensUsed <= 0 && agent.messagesProcessed <= 0) continue;
+          // Only sync agents we own (skip db:: agents, they already have DB data)
+          if (agent.connectionId === 'db-agent') continue;
+          await supabase
+            .from('circle_office_agents')
+            .update({
+              token_usage_today: agent.tokensUsed,
+              message_count_today: agent.turns || agent.messagesProcessed,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('circle_id', circleId)
+            .eq('owner_id', auth.user.id)
+            .ilike('name', agent.name);
+        }
+      } catch {}
+    };
+    // Initial sync after enrichment
+    syncToDB();
+    const interval = setInterval(syncToDB, 30000);
+    return () => clearInterval(interval);
+  }, [enrichedAgents, circleId]);
+
   // Push agent stats to parent (use enrichedAgents for accurate totals)
   useEffect(() => {
     if (onAgentStats && enrichedAgents.length > 0) {
       onAgentStats({
         agentCount: enrichedAgents.length,
-        sessionCount: enrichedAgents.filter(a => a.status === 'active').length,
+        sessionCount: enrichedAgents.filter(a => a.status === 'active' || a.status === 'building').length,
         costToday: enrichedAgents.reduce((s, a) => s + a.costToday, 0),
         costWeek: enrichedAgents.reduce((s, a) => s + a.costWeek, 0),
         tokens: enrichedAgents.reduce((s, a) => s + a.tokensUsed, 0),
         tokensTotal: enrichedAgents.reduce((s, a) => s + a.tokensUsed, 0),
         messagesTotal: enrichedAgents.reduce((s, a) => s + a.messagesProcessed, 0),
+        messagesToday: enrichedAgents.reduce((s, a) => s + a.turns, 0),
+        inputTokens: enrichedAgents.reduce((s, a) => s + a.inputTokens, 0),
+        outputTokens: enrichedAgents.reduce((s, a) => s + a.outputTokens, 0),
       });
     }
   }, [enrichedAgents, onAgentStats]);
@@ -2108,27 +2145,59 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
       case 'poker_table': {
         const phase = item.pokerPhase || 'waiting';
-        const phases = ['waiting', 'deal', 'flop', 'turn', 'river', 'showdown'];
-        const nextPhaseIdx = (phases.indexOf(phase) + 1) % phases.length;
-        const nextPhase = phases[nextPhaseIdx] as string;
-        const bsEnabled = item.pokerBlackswanEnabled || item.gameBlackswanActive;
-        const blinds = item.pokerBlinds || 25;
+        // If waiting for player action, tap does nothing — action buttons handle it
+        if (item.pokerPlayerTurn) return;
 
-        // Deck helper — deal random cards without duplicates
-        const usedCards = new Set<string>();
-        const suits = ['♠', '♥', '♦', '♣'];
-        const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
-        const randomCard = () => {
-          let card: string;
-          do { card = `${ranks[Math.floor(Math.random() * ranks.length)]}${suits[Math.floor(Math.random() * suits.length)]}`; }
-          while (usedCards.has(card));
-          usedCards.add(card);
-          return card;
-        };
+        if (phase === 'waiting') {
+          // Deal new hand
+          const bsEnabled = item.pokerBlackswanEnabled ?? true;
+          const blinds = item.pokerBlinds || 25;
+          const usedCards = new Set<string>();
+          const suits = ['♠', '♥', '♦', '♣'];
+          const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
+          const randomCard = () => {
+            let card: string;
+            do { card = `${ranks[Math.floor(Math.random() * ranks.length)]}${suits[Math.floor(Math.random() * suits.length)]}`; }
+            while (usedCards.has(card));
+            usedCards.add(card);
+            return card;
+          };
+          const playerHand = `${randomCard()} ${randomCard()}`;
+          const bsHand = bsEnabled ? `${randomCard()} ${randomCard()}` : '';
+          const smallBlind = blinds;
+          const bigBlind = blinds * 2;
+          const isDealer = (item.pokerDealer || 'player') === 'player';
+          // Dealer posts small blind, non-dealer posts big blind
+          const playerPost = isDealer ? smallBlind : bigBlind;
+          const bsPost = bsEnabled ? (isDealer ? bigBlind : smallBlind) : 0;
+          const playerChips = (item.pokerChips ?? 2000) - playerPost;
+          const bsChips = bsEnabled ? (item.pokerBlackswanChips ?? 2000) - bsPost : (item.pokerBlackswanChips ?? 2000);
+          const potTotal = playerPost + bsPost;
+          const bsLine = bsEnabled ? getBlackswanLine('deal') : '';
 
-        if (nextPhase === 'waiting') {
-          // Reset round — keep chips, toggle BlackSwan if not enabled
-          const handsPlayed = (item.pokerHandsPlayed || 0);
+          updateFurnitureField({
+            pokerPhase: 'deal',
+            pokerHand: playerHand,
+            pokerPot: potTotal,
+            pokerChips: Math.max(0, playerChips),
+            pokerBlackswanHand: bsHand,
+            pokerBlackswanChips: Math.max(0, bsChips),
+            pokerBlackswanFolded: false,
+            pokerBlackswanLine: bsLine,
+            pokerCommunity: '',
+            pokerAction: '',
+            pokerHandRank: '',
+            pokerBsHandRank: '',
+            pokerHandsPlayed: (item.pokerHandsPlayed || 0) + 1,
+            pokerBlinds: blinds,
+            pokerPlayerTurn: true,
+            pokerCurrentBet: bigBlind,
+            pokerPlayerBet: playerPost,
+            pokerWinnerName: '',
+          });
+          addFloorEffect('pulse');
+        } else if (phase === 'showdown') {
+          // Reset round — toggle dealer, always enable BlackSwan
           updateFurnitureField({
             pokerPhase: 'waiting',
             pokerHand: '',
@@ -2142,121 +2211,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             pokerAction: '',
             pokerHandRank: '',
             pokerBsHandRank: '',
-            pokerBlackswanEnabled: !bsEnabled,
+            pokerBlackswanEnabled: true,
             pokerDealer: (item.pokerDealer === 'player') ? 'blackswan' : 'player',
-          });
-          if (!bsEnabled) addFloorEffect('pulse');
-        } else if (nextPhase === 'deal') {
-          // Mark existing community cards as used
-          // Deal fresh cards
-          const playerHand = `${randomCard()} ${randomCard()}`;
-          const bsHand = bsEnabled ? `${randomCard()} ${randomCard()}` : '';
-          const ante = blinds * 2;
-          const playerChips = (item.pokerChips ?? 2000) - ante;
-          const bsChips = bsEnabled ? (item.pokerBlackswanChips ?? 2000) - ante : (item.pokerBlackswanChips ?? 2000);
-          const potTotal = bsEnabled ? ante * 2 : ante;
-
-          const bsLine = bsEnabled ? getBlackswanLine('deal') : '';
-
-          updateFurnitureField({
-            pokerPhase: 'deal',
-            pokerHand: playerHand,
-            pokerPot: potTotal,
-            pokerChips: Math.max(0, playerChips),
-            pokerBlackswanHand: bsHand,
-            pokerBlackswanChips: Math.max(0, bsChips),
-            pokerBlackswanFolded: false,
-            pokerBlackswanLine: bsLine,
-            pokerCommunity: '',
-            pokerAction: 'ANTE',
-            pokerHandRank: '',
-            pokerBsHandRank: '',
-            pokerHandsPlayed: (item.pokerHandsPlayed || 0) + 1,
-            pokerBlinds: blinds,
-          });
-          addFloorEffect('pulse');
-        } else if (nextPhase === 'showdown') {
-          // Evaluate hands using proper poker hand evaluator
-          const communityCards = (item.pokerCommunity || '').split(' ').filter(Boolean);
-          const playerCards = (item.pokerHand || '').split(' ').filter(Boolean);
-          const bsCards = (item.pokerBlackswanHand || '').split(' ').filter(Boolean);
-
-          const playerEval = evaluatePokerHand([...playerCards, ...communityCards]);
-          const bsEval = bsEnabled && !item.pokerBlackswanFolded
-            ? evaluatePokerHand([...bsCards, ...communityCards])
-            : { rank: -1, name: 'Folded', score: -1 };
-
-          const playerWins = item.pokerBlackswanFolded || playerEval.score >= bsEval.score;
-          const pot = item.pokerPot || 100;
-
-          const bsLine = bsEnabled
-            ? getBlackswanLine(playerWins ? 'lose' : 'win')
-            : '';
-
-          updateFurnitureField({
-            pokerPhase: 'showdown',
-            pokerChips: (item.pokerChips ?? 2000) + (playerWins ? pot : 0),
-            pokerBlackswanChips: bsEnabled ? (item.pokerBlackswanChips ?? 2000) + (playerWins ? 0 : pot) : undefined,
-            pokerWinnerName: playerWins ? 'YOU' : 'BlackSwan',
-            pokerBlackswanLine: bsLine,
-            pokerHandRank: playerEval.name,
-            pokerBsHandRank: bsEval.name,
-            pokerAction: playerWins ? 'WIN' : 'LOSE',
-            pokerHandsWon: (item.pokerHandsWon || 0) + (playerWins ? 1 : 0),
-          });
-          if (playerWins) addFloorEffect('fireworks');
-        } else {
-          // Flop/turn/river — deal community cards, BlackSwan AI decides
-          const bet = blinds * 2;
-          const chips = (item.pokerChips ?? 2000) - bet;
-
-          // Add community cards (mark existing as used first)
-          const existingCommunity = item.pokerCommunity || '';
-          const existingCards = existingCommunity ? existingCommunity.split(' ').filter(Boolean) : [];
-          for (const c of existingCards) usedCards.add(c);
-          // Also mark player and BS hands as used
-          for (const c of (item.pokerHand || '').split(' ').filter(Boolean)) usedCards.add(c);
-          for (const c of (item.pokerBlackswanHand || '').split(' ').filter(Boolean)) usedCards.add(c);
-
-          const newCount = nextPhase === 'flop' ? 3 : 1;
-          const newCards = Array.from({ length: newCount }, () => randomCard());
-          const allCommunity = [...existingCards, ...newCards].join(' ');
-
-          // BlackSwan AI decision using real hand evaluation
-          let bsFolded = item.pokerBlackswanFolded || false;
-          let bsChips = item.pokerBlackswanChips ?? 2000;
-          let bsLine = '';
-          let bsBet = 0;
-          let bsAction = '';
-          if (bsEnabled && !bsFolded) {
-            const bsHand = item.pokerBlackswanHand || '';
-            const decision = blackswanDecide(bsHand, item.pokerPot || 0, bet, bsChips, nextPhase as any);
-            if (decision === 'fold') {
-              bsFolded = true;
-              bsLine = getBlackswanLine('fold');
-              bsAction = 'FOLD';
-            } else if (decision === 'raise') {
-              const raiseAmt = blackswanRaise(item.pokerPot || 0, bsChips);
-              bsBet = Math.min(bet + raiseAmt, bsChips);
-              bsChips -= bsBet;
-              bsLine = getBlackswanLine('raise');
-              bsAction = 'RAISE';
-            } else {
-              bsBet = Math.min(bet, bsChips);
-              bsChips -= bsBet;
-              bsAction = 'CALL';
-            }
-          }
-
-          updateFurnitureField({
-            pokerPhase: nextPhase,
-            pokerPot: (item.pokerPot || 0) + bet + bsBet,
-            pokerChips: Math.max(0, chips),
-            pokerBlackswanChips: bsChips,
-            pokerBlackswanFolded: bsFolded,
-            pokerBlackswanLine: bsLine,
-            pokerCommunity: allCommunity,
-            pokerAction: bsAction || 'CALL',
+            pokerPlayerTurn: false,
+            pokerCurrentBet: 0,
+            pokerPlayerBet: 0,
           });
         }
         break;
@@ -2671,6 +2630,198 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         break;
     }
   }, [floors, currentFloorId, interactInputId, currentUserId, currentUserName, circleId, displayAgents]);
+
+  // ─── Poker player action handler ────────────────────────────────────────
+  const handlePokerAction = useCallback((id: string, action: string, amount?: number) => {
+    const currentFloor = floors.find(f => f.id === currentFloorId);
+    const item = currentFloor?.furniture.find(f => f.id === id);
+    if (!item || !item.pokerPlayerTurn) return;
+
+    const updateFurnitureField = (fields: Partial<FurnitureItem>) => {
+      setFloors(prev => prev.map(f =>
+        f.id === currentFloorId ? {
+          ...f,
+          furniture: f.furniture.map(fi => fi.id === id ? { ...fi, ...fields } : fi),
+        } : f
+      ));
+    };
+    const addFloorEffect = (effectType: string) => {
+      const eff = { id: `eff_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, type: effectType, x: item.x, y: item.y, createdAt: Date.now() };
+      setFloorEffects(prev => [...prev, eff]);
+    };
+
+    const phase = (item.pokerPhase || 'deal') as PokerPhase;
+    const bsEnabled = item.pokerBlackswanEnabled ?? true;
+    const blinds = item.pokerBlinds || 25;
+    const currentBet = item.pokerCurrentBet || blinds * 2;
+    const playerBetSoFar = item.pokerPlayerBet || 0;
+    let playerChips = item.pokerChips ?? 2000;
+    let pot = item.pokerPot || 0;
+
+    // Deck helper
+    const usedCards = new Set<string>();
+    const suits = ['♠', '♥', '♦', '♣'];
+    const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
+    const randomCard = () => {
+      let card: string;
+      do { card = `${ranks[Math.floor(Math.random() * ranks.length)]}${suits[Math.floor(Math.random() * suits.length)]}`; }
+      while (usedCards.has(card));
+      usedCards.add(card);
+      return card;
+    };
+    // Mark used cards
+    for (const c of (item.pokerHand || '').split(' ').filter(Boolean)) usedCards.add(c);
+    for (const c of (item.pokerBlackswanHand || '').split(' ').filter(Boolean)) usedCards.add(c);
+    for (const c of (item.pokerCommunity || '').split(' ').filter(Boolean)) usedCards.add(c);
+
+    // ── Handle player fold ──
+    if (action === 'fold') {
+      const bsLine = bsEnabled ? getBlackswanLine('win') : '';
+      updateFurnitureField({
+        pokerPhase: 'showdown',
+        pokerPlayerTurn: false,
+        pokerAction: 'FOLD',
+        pokerWinnerName: 'BlackSwan',
+        pokerBlackswanLine: bsLine,
+        pokerHandRank: 'Folded',
+        pokerBsHandRank: '',
+        pokerBlackswanChips: (item.pokerBlackswanChips ?? 2000) + pot,
+        pokerHandsWon: item.pokerHandsWon || 0,
+      });
+      return;
+    }
+
+    // ── Calculate player bet ──
+    let playerBet = 0;
+    let playerAction = '';
+    if (action === 'allin') {
+      playerBet = playerChips;
+      playerChips = 0;
+      playerAction = 'ALL-IN';
+    } else if (action === 'raise') {
+      const raiseAmount = amount || Math.max(currentBet * 2, blinds * 4);
+      const totalToCall = Math.max(0, currentBet - playerBetSoFar);
+      playerBet = Math.min(totalToCall + raiseAmount, playerChips);
+      playerChips -= playerBet;
+      playerAction = 'RAISE';
+    } else if (action === 'call') {
+      const toCall = Math.max(0, currentBet - playerBetSoFar);
+      playerBet = Math.min(toCall, playerChips);
+      playerChips -= playerBet;
+      playerAction = toCall === 0 ? 'CHECK' : 'CALL';
+    } else if (action === 'check') {
+      playerBet = 0;
+      playerAction = 'CHECK';
+    }
+    pot += playerBet;
+
+    // ── BlackSwan responds ──
+    let bsFolded = item.pokerBlackswanFolded || false;
+    let bsChips = item.pokerBlackswanChips ?? 2000;
+    let bsLine = '';
+    let bsBet = 0;
+    let bsAction = '';
+    const communityCards = (item.pokerCommunity || '').split(' ').filter(Boolean);
+
+    if (bsEnabled && !bsFolded) {
+      const bsHand = item.pokerBlackswanHand || '';
+      const bsCallAmount = action === 'raise' || action === 'allin'
+        ? Math.max(0, playerBetSoFar + playerBet - (item.pokerCurrentBet || 0))
+        : 0;
+      const decision = blackswanDecide(bsHand, communityCards, pot, bsCallAmount || currentBet, bsChips, phase);
+      if (decision === 'fold') {
+        bsFolded = true;
+        bsLine = getBlackswanLine('fold');
+        bsAction = 'FOLD';
+        // BlackSwan folds — player wins pot
+        const bsWinLine = getBlackswanLine('fold');
+        updateFurnitureField({
+          pokerPhase: 'showdown',
+          pokerPlayerTurn: false,
+          pokerAction: playerAction,
+          pokerPot: pot,
+          pokerChips: playerChips + pot,
+          pokerBlackswanChips: bsChips,
+          pokerBlackswanFolded: true,
+          pokerBlackswanLine: bsWinLine,
+          pokerWinnerName: 'YOU',
+          pokerHandRank: '',
+          pokerBsHandRank: 'Folded',
+          pokerHandsWon: (item.pokerHandsWon || 0) + 1,
+          pokerPlayerBet: 0,
+          pokerCurrentBet: 0,
+        });
+        addFloorEffect('fireworks');
+        return;
+      } else if (decision === 'raise') {
+        const raiseAmt = blackswanRaise(pot, bsChips);
+        bsBet = Math.min(bsCallAmount + raiseAmt, bsChips);
+        bsChips -= bsBet;
+        bsLine = getBlackswanLine('raise');
+        bsAction = 'RAISE';
+      } else {
+        bsBet = Math.min(bsCallAmount || currentBet, bsChips);
+        bsChips -= bsBet;
+        bsAction = 'CALL';
+      }
+      pot += bsBet;
+    }
+
+    // ── Determine next phase ──
+    const phases: PokerPhase[] = ['deal', 'flop', 'turn', 'river', 'showdown'];
+    const phaseIdx = phases.indexOf(phase);
+    const nextPhase = phases[Math.min(phaseIdx + 1, phases.length - 1)];
+
+    if (nextPhase === 'showdown') {
+      // Final evaluation
+      const allCommunity = communityCards;
+      const playerCards = (item.pokerHand || '').split(' ').filter(Boolean);
+      const bsCards = (item.pokerBlackswanHand || '').split(' ').filter(Boolean);
+      const playerEval = evaluatePokerHand([...playerCards, ...allCommunity]);
+      const bsEval = bsEnabled && !bsFolded
+        ? evaluatePokerHand([...bsCards, ...allCommunity])
+        : { rank: -1, name: 'Folded', score: -1 };
+      const playerWins = bsFolded || playerEval.score >= bsEval.score;
+      const endLine = bsEnabled ? getBlackswanLine(playerWins ? 'lose' : 'win') : '';
+
+      updateFurnitureField({
+        pokerPhase: 'showdown',
+        pokerPlayerTurn: false,
+        pokerPot: pot,
+        pokerChips: playerChips + (playerWins ? pot : 0),
+        pokerBlackswanChips: bsChips + (playerWins ? 0 : pot),
+        pokerBlackswanFolded: bsFolded,
+        pokerBlackswanLine: endLine,
+        pokerWinnerName: playerWins ? 'YOU' : 'BlackSwan',
+        pokerHandRank: playerEval.name,
+        pokerBsHandRank: bsEval.name,
+        pokerAction: playerWins ? 'WIN' : 'LOSE',
+        pokerHandsWon: (item.pokerHandsWon || 0) + (playerWins ? 1 : 0),
+        pokerPlayerBet: 0,
+        pokerCurrentBet: 0,
+      });
+      if (playerWins) addFloorEffect('fireworks');
+    } else {
+      // Deal community cards for next phase
+      const newCount = nextPhase === 'flop' ? 3 : 1;
+      const newCards = Array.from({ length: newCount }, () => randomCard());
+      const allCommunity = [...communityCards, ...newCards].join(' ');
+
+      updateFurnitureField({
+        pokerPhase: nextPhase,
+        pokerPlayerTurn: true,
+        pokerPot: pot,
+        pokerChips: playerChips,
+        pokerBlackswanChips: bsChips,
+        pokerBlackswanFolded: bsFolded,
+        pokerBlackswanLine: bsLine || bsAction,
+        pokerCommunity: allCommunity,
+        pokerAction: `${playerAction}${bsAction ? ' / ' + bsAction : ''}`,
+        pokerCurrentBet: 0,
+        pokerPlayerBet: 0,
+      });
+    }
+  }, [floors, currentFloorId]);
 
   const handleInteractSubmit = useCallback(() => {
     if (!interactInputId || !interactInputText.trim() || !currentUserId || !currentUserName) return;
@@ -3288,6 +3439,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                       onFurnitureMove={editMode ? handleFurnitureMove : undefined}
                       onFurnitureResize={editMode ? handleFurnitureResize : undefined}
                       onFurnitureInteract={handleFurnitureInteract}
+                      onPokerAction={handlePokerAction}
                       agents={displayAgents}
                       selectedFurnitureId={editMode ? selectedFurnitureId : null}
                     />
