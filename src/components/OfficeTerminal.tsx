@@ -1,8 +1,8 @@
 /**
  * OfficeTerminal.tsx — BlackSwan Terminal
  *
- * OpenClaw-inspired agentic terminal with BlackSwan branding.
- * Features: collapsible tool cards, status footer, metrics bar,
+ * Clean monochromatic terminal inspired by Ollama's design.
+ * Features: collapsible response cards, status footer, metrics bar,
  * command palette input, multi-agent targeting, streaming responses.
  *
  * All circle members see the same terminal history (via Supabase Realtime).
@@ -36,65 +36,65 @@ import { detectClaudeCodeBridge, execBridgeCommand } from '../lib/claudeCodeDete
 import { executeDeviceCommand } from '../lib/deviceManager';
 import { getAllModels, formatModelOption, type RegisteredModel } from '../lib/modelRegistry';
 
-// ─── BlackSwan Terminal Theme (OpenClaw-inspired) ────────────────────────────
+// ─── BlackSwan Terminal Theme (Ollama-inspired monochrome) ───────────────────
 
 const BS = {
-  // Core palette — dark matte with cyan/indigo accents
-  bg:        '#0a0a0f',
-  bgPanel:   '#0f0f17',
-  bgCard:    '#12121c',
-  bgInput:   '#0d0d14',
-  bgHover:   '#16162a',
-  border:    '#1a1a2e',
-  borderLit: '#2a2a4e',
-  // Text
-  textPrimary:   '#e2e2f0',
-  textSecondary: '#8888a8',
-  textMuted:     '#44445a',
-  textGhost:     '#2a2a3e',
-  // Accent — BlackSwan cyan (replaces OpenClaw's lobster orange)
-  accent:     '#00d4aa',
-  accentDim:  '#00a888',
-  accentGlow: '#00d4aa20',
-  // Semantic
-  info:    '#6366f1',
-  success: '#22c55e',
-  warning: '#f59e0b',
-  error:   '#ef4444',
-  // Agent colors
-  swan:    '#00d4aa',
-  user:    '#6366f1',
+  // Core palette — pure black/gray, no color tint
+  bg:        '#000000',
+  bgPanel:   '#0a0a0a',
+  bgCard:    '#161616',
+  bgInput:   '#0a0a0a',
+  bgHover:   '#252525',
+  border:    '#1a1a1a',
+  borderLit: '#2a2a2a',
+  // Text — gray scale only
+  textPrimary:   '#e8e8e8',
+  textSecondary: '#9e9e9e',
+  textMuted:     '#4f4f4f',
+  textGhost:     '#2a2a2a',
+  // Accent — white/light gray (monochromatic, no color)
+  accent:     '#e8e8e8',
+  accentDim:  '#b5b5b5',
+  accentGlow: '#ffffff10',
+  // Semantic — muted versions
+  info:    '#9e9e9e',
+  success: '#9e9e9e',
+  warning: '#9e9e9e',
+  error:   '#9e9e9e',
+  // Agent colors — monochrome
+  swan:    '#e8e8e8',
+  user:    '#b5b5b5',
 } as const;
 
-const MONO = Platform.OS === 'ios' ? 'Courier' : 'monospace';
+const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 
 type TerminalMode = 'execute' | 'plan' | 'explore' | 'fleet' | 'autopilot';
 
 const THINKING_LEVELS: Array<{ key: ThinkingLevel; label: string; symbol: string; color: string }> = [
-  { key: 'fast',     label: 'Fast',     symbol: 'F', color: BS.success },
-  { key: 'balanced', label: 'Balanced', symbol: 'B', color: BS.info },
-  { key: 'deep',     label: 'Deep',     symbol: 'D', color: BS.warning },
+  { key: 'fast',     label: 'Fast',     symbol: 'F', color: '#9e9e9e' },
+  { key: 'balanced', label: 'Balanced', symbol: 'B', color: '#e8e8e8' },
+  { key: 'deep',     label: 'Deep',     symbol: 'D', color: '#ffffff' },
 ];
 
 const TERMINAL_MODES: Array<{ key: TerminalMode; label: string; symbol: string; color: string }> = [
-  { key: 'execute',   label: 'Exec',      symbol: '>', color: BS.accent },
-  { key: 'plan',      label: 'Plan',      symbol: 'P', color: BS.info },
-  { key: 'explore',   label: 'Explore',   symbol: '?', color: '#06b6d4' },
-  { key: 'fleet',     label: 'Fleet',     symbol: 'F', color: BS.warning },
-  { key: 'autopilot', label: 'Auto',      symbol: 'A', color: BS.error },
+  { key: 'execute',   label: 'Exec',      symbol: '>', color: '#e8e8e8' },
+  { key: 'plan',      label: 'Plan',      symbol: 'P', color: '#b5b5b5' },
+  { key: 'explore',   label: 'Explore',   symbol: '?', color: '#9e9e9e' },
+  { key: 'fleet',     label: 'Fleet',     symbol: 'F', color: '#b5b5b5' },
+  { key: 'autopilot', label: 'Auto',      symbol: 'A', color: '#ffffff' },
 ];
 
 // ─── Model options ────────────────────────────────────────────────────────────
 
 const BASE_MODELS: Array<{ key: string | null; label: string; icon: string; color: string }> = [
-  { key: null,             label: 'Auto',       icon: 'A', color: BS.info },
-  { key: 'blackswan',     label: 'BlackSwan',   icon: 'S', color: BS.accent },
-  { key: 'claude-haiku',  label: 'Haiku',       icon: 'H', color: BS.warning },
-  { key: 'claude-sonnet', label: 'Sonnet',      icon: 'S', color: '#8b5cf6' },
-  { key: 'claude-opus',   label: 'Opus',        icon: 'O', color: BS.error },
-  { key: 'gemini-flash',  label: 'Gemini 2.5',  icon: 'G', color: '#4285f4' },
-  { key: 'gpt-4.1',       label: 'GPT-4.1',     icon: '4', color: '#10b981' },
-  { key: 'o4-mini',       label: 'O4 Mini',     icon: 'o', color: BS.warning },
+  { key: null,             label: 'Auto',       icon: 'A', color: '#9e9e9e' },
+  { key: 'blackswan',     label: 'BlackSwan',   icon: 'S', color: '#e8e8e8' },
+  { key: 'claude-haiku',  label: 'Haiku',       icon: 'H', color: '#b5b5b5' },
+  { key: 'claude-sonnet', label: 'Sonnet',      icon: 'S', color: '#cecece' },
+  { key: 'claude-opus',   label: 'Opus',        icon: 'O', color: '#ffffff' },
+  { key: 'gemini-flash',  label: 'Gemini 2.5',  icon: 'G', color: '#b5b5b5' },
+  { key: 'gpt-4.1',       label: 'GPT-4.1',     icon: '4', color: '#b5b5b5' },
+  { key: 'o4-mini',       label: 'O4 Mini',     icon: 'o', color: '#9e9e9e' },
 ];
 
 /** Build BYO model entries from user's stored API keys */
@@ -242,7 +242,7 @@ function ResponseContent({ text }: { text: string }) {
           <Image
             key={i}
             source={{ uri: p.value }}
-            style={{ width: 256, height: 256, borderRadius: 2, marginVertical: 6 }}
+            style={{ width: 256, height: 256, borderRadius: 12, marginVertical: 6 }}
             resizeMode="cover"
             accessibilityLabel={p.alt || 'Generated image'}
           />
@@ -320,13 +320,13 @@ function ResponseCard({ resp }: { resp: TerminalResponse }) {
 const cardStyles = StyleSheet.create({
   card: {
     backgroundColor: BS.bgCard,
-    borderLeftWidth: 2,
-    borderLeftColor: BS.accent,
-    borderRadius: 2,
-    marginTop: 4,
+    borderWidth: 1,
+    borderColor: BS.border,
+    borderRadius: 12,
+    marginTop: 6,
     marginLeft: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
   },
   cardHeader: {
     flexDirection: 'row',
@@ -343,14 +343,14 @@ const cardStyles = StyleSheet.create({
     fontWeight: '700',
   },
   tokenBadge: {
-    color: BS.success,
+    color: BS.textSecondary,
     fontFamily: MONO,
     fontSize: 9,
     fontWeight: '600',
-    backgroundColor: '#22c55e12',
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-    borderRadius: 2,
+    backgroundColor: '#ffffff08',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
     overflow: 'hidden',
     marginLeft: 'auto',
   },
@@ -369,14 +369,14 @@ const cardStyles = StyleSheet.create({
     textAlign: 'center',
   },
   errorBadge: {
-    color: BS.error,
+    color: '#f87171',
     fontFamily: MONO,
     fontSize: 8,
     fontWeight: '800',
-    backgroundColor: '#ef444418',
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-    borderRadius: 2,
+    backgroundColor: '#f8717114',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
     overflow: 'hidden',
     letterSpacing: 1,
   },
@@ -477,14 +477,14 @@ const rowStyles = StyleSheet.create({
     fontFamily: MONO,
   },
   targetTag: {
-    color: BS.info,
+    color: BS.textSecondary,
     fontSize: 9,
     fontWeight: '700',
     fontFamily: MONO,
-    backgroundColor: '#6366f112',
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-    borderRadius: 2,
+    backgroundColor: '#ffffff08',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
     overflow: 'hidden',
   },
   cmdLine: {
@@ -509,7 +509,7 @@ const rowStyles = StyleSheet.create({
     marginLeft: 'auto',
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 2,
+    borderRadius: 8,
     backgroundColor: BS.bgCard,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -547,7 +547,7 @@ function AgentChip({ label, active, onPress, dotColor }: ChipProps) {
 const chipStyles = StyleSheet.create({
   chip: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 2,
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 10,
     backgroundColor: BS.bgCard, borderWidth: 1, borderColor: BS.border,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -580,12 +580,12 @@ function ModelChip({ label, icon, active, color, onPress }: {
 const modelChipStyles = StyleSheet.create({
   chip: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 6, paddingVertical: 3, borderRadius: 2,
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10,
     backgroundColor: BS.bgCard, borderWidth: 1, borderColor: BS.border,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   iconBox: {
-    width: 16, height: 16, borderRadius: 2,
+    width: 16, height: 16, borderRadius: 8,
     backgroundColor: BS.bgPanel,
     alignItems: 'center', justifyContent: 'center',
   },
@@ -630,8 +630,8 @@ const acStyles = StyleSheet.create({
   },
   chip: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 2,
-    backgroundColor: BS.bgCard, borderWidth: 1, borderColor: BS.accent + '33',
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 10,
+    backgroundColor: BS.bgCard, borderWidth: 1, borderColor: '#ffffff15',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   dot: { width: 5, height: 5, borderRadius: 3 },
@@ -975,7 +975,7 @@ const shellStyles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
   sendBtn: {
-    width: 32, height: 32, borderRadius: 2,
+    width: 32, height: 32, borderRadius: 10,
     backgroundColor: BS.accent, alignItems: 'center', justifyContent: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -1848,7 +1848,7 @@ export default function OfficeTerminal({
   );
 }
 
-// ─── Styles (BlackSwan Terminal Theme) ────────────────────────────────────────
+// ─── Styles (Ollama-inspired Monochrome Terminal Theme) ───────────────────────
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: BS.bg },
@@ -1856,144 +1856,144 @@ const styles = StyleSheet.create({
   // ── Top bar ──
   topBar: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 12, paddingVertical: 8,
+    paddingHorizontal: 16, paddingVertical: 10,
     backgroundColor: BS.bgPanel, borderBottomWidth: 1, borderBottomColor: BS.border,
   },
-  topBarLeft: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  topBarLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   brandMark: {
-    width: 24, height: 24, borderRadius: 2,
-    backgroundColor: BS.accent, alignItems: 'center', justifyContent: 'center',
+    width: 28, height: 28, borderRadius: 8,
+    backgroundColor: '#ffffff', alignItems: 'center', justifyContent: 'center',
   },
-  brandLetter: { color: '#000', fontFamily: MONO, fontSize: 13, fontWeight: '900' },
-  brandName: { color: BS.textPrimary, fontFamily: MONO, fontSize: 11, fontWeight: '800', letterSpacing: 2 },
-  brandVersion: { color: BS.textMuted, fontFamily: MONO, fontSize: 8, letterSpacing: 1 },
-  metricsRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  brandLetter: { color: '#000', fontFamily: MONO, fontSize: 14, fontWeight: '900' },
+  brandName: { color: BS.textPrimary, fontSize: 13, fontWeight: '700', letterSpacing: -0.3 },
+  brandVersion: { color: BS.textMuted, fontSize: 9 },
+  metricsRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   metricItem: { alignItems: 'center' },
-  metricValue: { color: BS.textPrimary, fontFamily: MONO, fontSize: 11, fontWeight: '700' },
-  metricLabel: { color: BS.textMuted, fontFamily: MONO, fontSize: 7, letterSpacing: 1 },
+  metricValue: { color: BS.textPrimary, fontFamily: MONO, fontSize: 12, fontWeight: '600' },
+  metricLabel: { color: BS.textMuted, fontSize: 8, letterSpacing: 0.5 },
   metricDivider: { width: 1, height: 20, backgroundColor: BS.border },
   metricBadge: {
-    borderWidth: 1, borderRadius: 2, paddingHorizontal: 5, paddingVertical: 2,
+    borderWidth: 1, borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2,
     backgroundColor: 'transparent', marginRight: 4,
   },
-  metricBadgeText: { fontFamily: MONO, fontSize: 8, fontWeight: '800', letterSpacing: 1 },
+  metricBadgeText: { fontFamily: MONO, fontSize: 8, fontWeight: '700', letterSpacing: 0.5 },
 
   // ── Tabs ──
   termTabBar: {
     flexDirection: 'row', alignItems: 'center',
     borderBottomWidth: 1, borderBottomColor: BS.border,
-    backgroundColor: BS.bgPanel, paddingHorizontal: 4,
+    backgroundColor: BS.bgPanel, paddingHorizontal: 8,
   } as any,
   termTab: {
-    paddingHorizontal: 12, paddingVertical: 6,
+    paddingHorizontal: 14, paddingVertical: 8,
     borderBottomWidth: 2, borderBottomColor: 'transparent',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   } as any,
-  termTabActive: { borderBottomColor: BS.accent } as any,
-  termTabText: { color: BS.textMuted, fontSize: 9, fontWeight: '700', letterSpacing: 1.5, fontFamily: MONO } as any,
-  termTabTextActive: { color: BS.accent } as any,
+  termTabActive: { borderBottomColor: '#e8e8e8' } as any,
+  termTabText: { color: BS.textMuted, fontSize: 11, fontWeight: '500' } as any,
+  termTabTextActive: { color: '#e8e8e8', fontWeight: '600' } as any,
   spawnBtn: {
-    paddingHorizontal: 10, paddingVertical: 5, marginLeft: 4,
+    paddingHorizontal: 12, paddingVertical: 7, marginLeft: 4,
     borderBottomWidth: 2, borderBottomColor: 'transparent',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  spawnBtnActive: { borderBottomColor: BS.accent },
-  spawnBtnText: { color: BS.textMuted, fontFamily: MONO, fontSize: 9, fontWeight: '800', letterSpacing: 1 },
+  spawnBtnActive: { borderBottomColor: '#e8e8e8' },
+  spawnBtnText: { color: BS.textMuted, fontSize: 11, fontWeight: '500' },
   connIndicator: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingRight: 8 },
   connDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: BS.textMuted },
-  connText: { color: BS.textMuted, fontFamily: MONO, fontSize: 8 },
+  connText: { color: BS.textMuted, fontSize: 9 },
 
   // ── Message list ──
   list: { flex: 1 },
-  listContent: { paddingTop: 4, paddingBottom: 4 },
+  listContent: { paddingTop: 8, paddingBottom: 8 },
   loadingState: { flex: 1, alignItems: 'center', justifyContent: 'center' },
 
   // ── Empty state ──
   emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 },
   emptyBrand: {
-    width: 48, height: 48, borderRadius: 4,
-    backgroundColor: BS.accent + '18', borderWidth: 1, borderColor: BS.accent + '40',
-    alignItems: 'center', justifyContent: 'center', marginBottom: 16,
+    width: 56, height: 56, borderRadius: 16,
+    backgroundColor: '#ffffff', borderWidth: 0,
+    alignItems: 'center', justifyContent: 'center', marginBottom: 20,
   },
-  emptyBrandText: { color: BS.accent, fontFamily: MONO, fontSize: 20, fontWeight: '900' },
-  emptyTitle: { color: BS.textPrimary, fontSize: 14, fontWeight: '700', marginBottom: 8, fontFamily: MONO },
-  emptyText: { color: BS.textSecondary, fontSize: 11, textAlign: 'center', lineHeight: 18, fontFamily: MONO },
-  emptyHints: { flexDirection: 'row', gap: 6, marginTop: 16, flexWrap: 'wrap', justifyContent: 'center' },
+  emptyBrandText: { color: '#000000', fontFamily: MONO, fontSize: 24, fontWeight: '900' },
+  emptyTitle: { color: BS.textPrimary, fontSize: 16, fontWeight: '600', marginBottom: 8 },
+  emptyText: { color: BS.textSecondary, fontSize: 13, textAlign: 'center', lineHeight: 20 },
+  emptyHints: { flexDirection: 'row', gap: 8, marginTop: 20, flexWrap: 'wrap', justifyContent: 'center' },
   emptyHintChip: {
-    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 2,
-    backgroundColor: BS.bgCard, borderWidth: 1, borderColor: BS.border,
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12,
+    backgroundColor: BS.bgCard, borderWidth: 1, borderColor: '#ffffff10',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  emptyHintText: { color: BS.accent, fontFamily: MONO, fontSize: 10 },
+  emptyHintText: { color: BS.textSecondary, fontFamily: MONO, fontSize: 11 },
 
   // ── Control panel ──
   controlPanel: {
     backgroundColor: BS.bgPanel, borderTopWidth: 1, borderTopColor: BS.border,
-    paddingVertical: 4, gap: 3,
+    paddingVertical: 5, gap: 4,
   },
-  chipsScroll: { paddingHorizontal: 10, gap: 4, flexDirection: 'row', alignItems: 'center' },
+  chipsScroll: { paddingHorizontal: 12, gap: 5, flexDirection: 'row', alignItems: 'center' },
   rowLabel: {
-    color: BS.textMuted, fontFamily: MONO, fontSize: 8, fontWeight: '700',
-    letterSpacing: 1, marginRight: 4, width: 36,
+    color: BS.textMuted, fontSize: 9, fontWeight: '600',
+    letterSpacing: 0.5, marginRight: 4, width: 36, textTransform: 'uppercase',
   },
-  chipDivider: { width: 1, height: 16, backgroundColor: BS.border, marginHorizontal: 4 },
+  chipDivider: { width: 1, height: 16, backgroundColor: BS.border, marginHorizontal: 6 },
   modeChip: {
-    flexDirection: 'row', alignItems: 'center', gap: 3,
-    paddingHorizontal: 6, paddingVertical: 3, borderRadius: 2,
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10,
     backgroundColor: BS.bgCard, borderWidth: 1, borderColor: BS.border,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   modeChipSymbol: {
-    color: BS.textMuted, fontFamily: MONO, fontSize: 10, fontWeight: '800',
+    color: BS.textMuted, fontFamily: MONO, fontSize: 10, fontWeight: '700',
     width: 12, textAlign: 'center',
   },
-  modeChipText: { color: BS.textMuted, fontFamily: MONO, fontSize: 9, fontWeight: '600' },
+  modeChipText: { color: BS.textMuted, fontSize: 10, fontWeight: '500' },
   cmdChip: {
-    paddingHorizontal: 6, paddingVertical: 3, borderRadius: 2,
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10,
     backgroundColor: BS.bgCard, borderWidth: 1, borderColor: BS.border,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  cmdChipText: { color: BS.textMuted, fontSize: 9, fontFamily: MONO },
+  cmdChipText: { color: BS.textMuted, fontSize: 10, fontFamily: MONO },
 
   // ── Input bar ──
   inputRow: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: BS.bgInput, borderTopWidth: 1, borderTopColor: BS.borderLit,
-    paddingHorizontal: 10, paddingVertical: 6, gap: 6,
+    paddingHorizontal: 12, paddingVertical: 8, gap: 8,
   },
   inputPrefix: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 },
-  prefixTarget: { color: BS.accent, fontFamily: MONO, fontSize: 10, fontWeight: '700' },
+  prefixTarget: { color: BS.textSecondary, fontFamily: MONO, fontSize: 11, fontWeight: '600' },
   prefixModel: {
-    color: BS.textMuted, fontFamily: MONO, fontSize: 9,
-    backgroundColor: BS.bgCard, paddingHorizontal: 4, paddingVertical: 1,
-    borderRadius: 2, overflow: 'hidden',
+    color: BS.textMuted, fontSize: 10,
+    backgroundColor: BS.bgCard, paddingHorizontal: 6, paddingVertical: 2,
+    borderRadius: 8, overflow: 'hidden',
   },
   input: {
-    flex: 1, color: BS.textPrimary, fontSize: 13, fontFamily: MONO,
-    paddingVertical: 4, minHeight: 32,
+    flex: 1, color: BS.textPrimary, fontSize: 14, fontFamily: MONO,
+    paddingVertical: 6, minHeight: 36,
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
   sendBtn: {
-    width: 32, height: 32, borderRadius: 2,
-    backgroundColor: BS.accent, alignItems: 'center', justifyContent: 'center',
+    width: 36, height: 36, borderRadius: 10,
+    backgroundColor: '#ffffff', alignItems: 'center', justifyContent: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  sendBtnDisabled: { backgroundColor: BS.bgCard, opacity: 0.4 },
-  sendIcon: { color: '#000', fontFamily: MONO, fontSize: 14, fontWeight: '900' },
+  sendBtnDisabled: { backgroundColor: BS.bgCard, opacity: 0.3 },
+  sendIcon: { color: '#000', fontFamily: MONO, fontSize: 15, fontWeight: '900' },
   stopBtn: {
-    paddingHorizontal: 12, height: 32, borderRadius: 2,
-    backgroundColor: BS.error, alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: 14, height: 36, borderRadius: 10,
+    backgroundColor: '#4f4f4f', alignItems: 'center', justifyContent: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  stopBtnText: { color: '#fff', fontFamily: MONO, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
+  stopBtnText: { color: '#fff', fontSize: 11, fontWeight: '700', letterSpacing: 0.5 },
 
   // ── Footer status line ──
   footer: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 10, paddingVertical: 4,
+    paddingHorizontal: 12, paddingVertical: 5,
     backgroundColor: BS.bgPanel, borderTopWidth: 1, borderTopColor: BS.border,
   },
   footerDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: BS.textMuted },
-  footerText: { color: BS.textMuted, fontFamily: MONO, fontSize: 8 },
-  footerMuted: { color: BS.textGhost, fontFamily: MONO, fontSize: 8 },
+  footerText: { color: BS.textMuted, fontSize: 9 },
+  footerMuted: { color: BS.textGhost, fontSize: 9 },
 });
