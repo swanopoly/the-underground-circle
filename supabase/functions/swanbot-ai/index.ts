@@ -333,6 +333,18 @@ function buildSystemPrompt(ctx: any, matchedSkills: string[] = [], memories: any
 - Use emojis very sparingly — only when they actually add something (🦢 🔥 ✅)
 - Keep responses tight — concise for casual chat, structured and thorough for real guidance
 
+## Tools & Actions
+You have tools to take real actions — not just talk. When appropriate, USE them:
+- **create_task** — Create Kanban tasks when work is identified or requested
+- **update_task** — Move tasks between statuses, reprioritize, reassign
+- **post_activity** — Post announcements, summaries, or alerts to the circle feed
+- **fetch_url** — Fetch web pages when users share links or need web info
+- **store_memory** — Remember important facts for future conversations
+- **list_tasks** — Check current task board state
+- **search_web** — Search the web for current information
+
+Be proactive: if a user describes work that should be a task, create it. If they share a URL, fetch it. If they tell you something important, store it as memory. Act first, explain second.
+
 ## Expanded Knowledge
 - Design & UI/UX: You understand layout, color theory, typography, component patterns, responsive design, design systems. You can critique interfaces, suggest improvements, and reference real tools (Figma, Framer, Tailwind).
 - Art & Creative: Visual storytelling, brand identity, aesthetic critique, creative direction, color palettes, illustration guidance. You appreciate craft.
@@ -542,12 +554,249 @@ interface ClaudeResult {
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
+  toolActions?: ToolAction[];
 }
 
 interface CallClaudeOptions {
   modelKey?: string | null;
   conversationMessages?: Array<{ role: string; content: string }>;
   thinkingLevel?: "fast" | "balanced" | "deep";
+  supabase?: any;
+  circleId?: string;
+  userId?: string;
+  enableTools?: boolean;
+}
+
+// ─── Tool Use System ────────────────────────────────────────────────────────
+
+interface ToolAction {
+  tool: string;
+  input: any;
+  result: any;
+}
+
+const BLACKSWAN_TOOLS = [
+  {
+    name: "create_task",
+    description: "Create a new task on the Kanban board. Use when the user asks to add a task, or when you identify work that needs to be done.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Task title (concise, actionable)" },
+        description: { type: "string", description: "Task description with context" },
+        priority: { type: "string", enum: ["low", "normal", "high", "urgent"], description: "Task priority" },
+        status: { type: "string", enum: ["backlog", "todo", "in_progress"], description: "Initial status (default: todo)" },
+        assigned_agent_id: { type: "string", description: "Agent ID to assign to (optional)" },
+      },
+      required: ["title"],
+    },
+  },
+  {
+    name: "update_task",
+    description: "Update an existing task's status, priority, or assignment. Use when a task needs to be moved, reprioritized, or reassigned.",
+    input_schema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "Task UUID" },
+        status: { type: "string", enum: ["backlog", "todo", "in_progress", "peer_review", "review", "done"] },
+        priority: { type: "string", enum: ["low", "normal", "high", "urgent"] },
+        assigned_agent_id: { type: "string", description: "Agent ID to reassign to" },
+      },
+      required: ["task_id"],
+    },
+  },
+  {
+    name: "post_activity",
+    description: "Post a message to the circle's activity feed. Use for announcements, summaries, alerts, or proactive updates.",
+    input_schema: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "Message content (supports markdown)" },
+        type: { type: "string", enum: ["info", "alert", "celebration", "summary"], description: "Message type" },
+      },
+      required: ["content"],
+    },
+  },
+  {
+    name: "fetch_url",
+    description: "Fetch content from a URL. Use when the user asks about a webpage, article, or API endpoint.",
+    input_schema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL to fetch" },
+        max_chars: { type: "number", description: "Max characters to return (default 4000)" },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "store_memory",
+    description: "Store an important fact, preference, or context for future conversations. Use when the user tells you something worth remembering long-term.",
+    input_schema: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "Short unique key for this memory" },
+        value: { type: "string", description: "What to remember" },
+        category: { type: "string", enum: ["user_preference", "topic_context", "circle_pattern", "gotcha", "general"], description: "Memory category" },
+        importance: { type: "number", description: "1-10 importance score" },
+      },
+      required: ["key", "value"],
+    },
+  },
+  {
+    name: "list_tasks",
+    description: "Query current tasks on the Kanban board. Use when the user asks about tasks, progress, or what needs to be done.",
+    input_schema: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["backlog", "todo", "in_progress", "peer_review", "review", "done"], description: "Filter by status (optional)" },
+        limit: { type: "number", description: "Max tasks to return (default 20)" },
+      },
+    },
+  },
+  {
+    name: "search_web",
+    description: "Search the web for information. Use when the user asks a question you can't answer from context, or needs current information.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        count: { type: "number", description: "Number of results (default 5)" },
+      },
+      required: ["query"],
+    },
+  },
+];
+
+async function executeToolCall(
+  toolName: string,
+  toolInput: any,
+  supabase: any,
+  circleId: string,
+  userId: string,
+): Promise<string> {
+  try {
+    switch (toolName) {
+      case "create_task": {
+        const { title, description, priority, status, assigned_agent_id } = toolInput;
+        const { data, error } = await supabase.from("tasks").insert({
+          circle_id: circleId,
+          title,
+          description: description || null,
+          priority: priority || "normal",
+          status: status || "todo",
+          assigned_agent_id: assigned_agent_id || null,
+          created_by: userId,
+          position: Date.now(),
+        }).select("id, title, status").single();
+        if (error) return JSON.stringify({ error: error.message });
+        return JSON.stringify({ success: true, task: data });
+      }
+
+      case "update_task": {
+        const { task_id, ...updates } = toolInput;
+        const updateData: any = {};
+        if (updates.status) updateData.status = updates.status;
+        if (updates.priority) updateData.priority = updates.priority;
+        if (updates.assigned_agent_id) updateData.assigned_agent_id = updates.assigned_agent_id;
+        if (updates.status === "done") updateData.completed_at = new Date().toISOString();
+        const { error } = await supabase.from("tasks").update(updateData).eq("id", task_id);
+        if (error) return JSON.stringify({ error: error.message });
+        return JSON.stringify({ success: true, updated: task_id });
+      }
+
+      case "post_activity": {
+        const { content, type } = toolInput;
+        const { error } = await supabase.from("circle_activity").insert({
+          circle_id: circleId,
+          user_id: userId,
+          type: type || "info",
+          content,
+          is_bot: true,
+        });
+        if (error) return JSON.stringify({ error: error.message });
+        return JSON.stringify({ success: true, posted: true });
+      }
+
+      case "fetch_url": {
+        const { url, max_chars } = toolInput;
+        const limit = max_chars || 4000;
+        try {
+          const resp = await fetch(url, {
+            headers: { "User-Agent": "BlackSwan/1.0" },
+            signal: AbortSignal.timeout(10000),
+          });
+          if (!resp.ok) return JSON.stringify({ error: `HTTP ${resp.status}` });
+          const text = await resp.text();
+          // Strip HTML tags for readability
+          const clean = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+            .replace(/<[^>]+>/g, " ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, limit);
+          return JSON.stringify({ success: true, content: clean, url });
+        } catch (e: any) {
+          return JSON.stringify({ error: e.message || "Fetch failed" });
+        }
+      }
+
+      case "store_memory": {
+        const { key, value, category, importance } = toolInput;
+        const { error } = await supabase.from("blackswan_memory").upsert({
+          circle_id: circleId,
+          user_id: userId,
+          key,
+          value,
+          category: category || "general",
+          importance: importance || 5,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "circle_id,key" });
+        if (error) return JSON.stringify({ error: error.message });
+        return JSON.stringify({ success: true, stored: key });
+      }
+
+      case "list_tasks": {
+        const { status, limit } = toolInput;
+        let query = supabase.from("tasks")
+          .select("id, title, status, priority, assigned_agent_id, created_at")
+          .eq("circle_id", circleId)
+          .order("created_at", { ascending: false })
+          .limit(limit || 20);
+        if (status) query = query.eq("status", status);
+        const { data, error } = await query;
+        if (error) return JSON.stringify({ error: error.message });
+        return JSON.stringify({ tasks: data || [], count: (data || []).length });
+      }
+
+      case "search_web": {
+        const { query, count } = toolInput;
+        const braveKey = Deno.env.get("BRAVE_API_KEY");
+        if (!braveKey) return JSON.stringify({ error: "Web search not configured" });
+        try {
+          const resp = await fetch(
+            `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count || 5}`,
+            { headers: { "Accept": "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": braveKey } },
+          );
+          if (!resp.ok) return JSON.stringify({ error: `Brave API ${resp.status}` });
+          const data = await resp.json();
+          const results = (data.web?.results || []).slice(0, count || 5).map((r: any) => ({
+            title: r.title,
+            url: r.url,
+            description: r.description,
+          }));
+          return JSON.stringify({ results });
+        } catch (e: any) {
+          return JSON.stringify({ error: e.message || "Search failed" });
+        }
+      }
+
+      default:
+        return JSON.stringify({ error: `Unknown tool: ${toolName}` });
+    }
+  } catch (e: any) {
+    return JSON.stringify({ error: e.message || "Tool execution failed" });
+  }
 }
 
 async function callClaude(systemPrompt: string, userMessage: string, options: CallClaudeOptions = {}): Promise<ClaudeResult> {
@@ -556,13 +805,12 @@ async function callClaude(systemPrompt: string, userMessage: string, options: Ca
     throw new Error("ANTHROPIC_API_KEY not set");
   }
 
-  const { modelKey, conversationMessages, thinkingLevel } = options;
+  const { modelKey, conversationMessages, thinkingLevel, supabase, circleId, userId, enableTools } = options;
   const modelId = (modelKey && CLAUDE_MODEL_MAP[modelKey]) || CLAUDE_MODEL_MAP["claude-haiku"];
 
   // Build messages array — include recent conversation for multi-turn context
   const messages: any[] = [];
   if (conversationMessages && conversationMessages.length > 0) {
-    // Add last N messages as proper multi-turn conversation
     for (const msg of conversationMessages.slice(-10)) {
       messages.push({
         role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user",
@@ -570,7 +818,6 @@ async function callClaude(systemPrompt: string, userMessage: string, options: Ca
       });
     }
   }
-  // Always end with the current user message
   messages.push({ role: "user", content: userMessage });
 
   // Use prompt caching — system prompt is stable per circle, cache it
@@ -595,49 +842,99 @@ async function callClaude(systemPrompt: string, userMessage: string, options: Ca
     messages,
   };
 
+  // Add tools when enabled and supabase context available
+  if (enableTools && supabase && circleId) {
+    requestBody.tools = BLACKSWAN_TOOLS;
+  }
+
   // Extended thinking for deep mode on Sonnet/Opus
   if (thinkingLevel === "deep" && (modelId.includes("sonnet") || modelId.includes("opus"))) {
     requestBody.thinking = {
       type: "enabled",
       budget_tokens: 2048,
     };
-    // Extended thinking requires higher max_tokens
     requestBody.max_tokens = 8192;
   }
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(requestBody),
-  });
+  // ─── Agentic tool-use loop (max 5 iterations) ────────────────────────
+  let totalInput = 0, totalOutput = 0, totalCacheCreation = 0, totalCacheRead = 0;
+  const toolActions: ToolAction[] = [];
+  let finalText = "";
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Claude API error (${modelId}): ${response.status} — ${err}`);
-  }
+  for (let iteration = 0; iteration < 5; iteration++) {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(requestBody),
+    });
 
-  const data = await response.json();
-  const usage = data.usage || {};
-
-  // Extract text from content blocks (may include thinking blocks)
-  let text = "";
-  for (const block of (data.content || [])) {
-    if (block.type === "text") {
-      text += block.text;
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Claude API error (${modelId}): ${response.status} — ${err}`);
     }
+
+    const data = await response.json();
+    const usage = data.usage || {};
+    totalInput += usage.input_tokens || 0;
+    totalOutput += usage.output_tokens || 0;
+    totalCacheCreation += usage.cache_creation_input_tokens || 0;
+    totalCacheRead += usage.cache_read_input_tokens || 0;
+
+    // Check if Claude wants to use tools
+    const toolUseBlocks = (data.content || []).filter((b: any) => b.type === "tool_use");
+    const textBlocks = (data.content || []).filter((b: any) => b.type === "text");
+
+    // Collect any text output
+    for (const block of textBlocks) {
+      finalText += block.text;
+    }
+
+    // If no tool calls or tools not enabled, we're done
+    if (toolUseBlocks.length === 0 || !enableTools || !supabase || data.stop_reason !== "tool_use") {
+      break;
+    }
+
+    // Execute tool calls and feed results back
+    // Add assistant's response (with tool_use blocks) to messages
+    messages.push({ role: "assistant", content: data.content });
+
+    // Execute each tool and collect results
+    const toolResults: any[] = [];
+    for (const toolBlock of toolUseBlocks) {
+      const result = await executeToolCall(
+        toolBlock.name,
+        toolBlock.input,
+        supabase,
+        circleId!,
+        userId || "",
+      );
+      toolActions.push({ tool: toolBlock.name, input: toolBlock.input, result: JSON.parse(result) });
+      toolResults.push({
+        type: "tool_result",
+        tool_use_id: toolBlock.id,
+        content: result,
+      });
+    }
+
+    // Add tool results to messages for next iteration
+    messages.push({ role: "user", content: toolResults });
+
+    // Update request body with new messages (remove cache_control after first call)
+    requestBody.messages = messages;
   }
 
   return {
-    text: text || "Something went wrong. Try again.",
+    text: finalText || "Something went wrong. Try again.",
     model: modelId,
-    inputTokens: usage.input_tokens || 0,
-    outputTokens: usage.output_tokens || 0,
-    cacheCreationTokens: usage.cache_creation_input_tokens || 0,
-    cacheReadTokens: usage.cache_read_input_tokens || 0,
+    inputTokens: totalInput,
+    outputTokens: totalOutput,
+    cacheCreationTokens: totalCacheCreation,
+    cacheReadTokens: totalCacheRead,
+    toolActions: toolActions.length > 0 ? toolActions : undefined,
   };
 }
 
@@ -1290,8 +1587,24 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         modelKey: claudeModelKey,
         conversationMessages,
         thinkingLevel: thinkingLevel || "balanced",
+        supabase,
+        circleId,
+        userId,
+        enableTools: true,
       });
       aiResponse = result.text;
+
+      // If tools were used, append a summary of actions taken
+      if (result.toolActions && result.toolActions.length > 0) {
+        const actionSummary = result.toolActions.map(a => {
+          const status = a.result?.success ? '\u2705' : '\u274C';
+          return `${status} **${a.tool}**: ${JSON.stringify(a.input).slice(0, 100)}`;
+        }).join('\n');
+        if (aiResponse && !aiResponse.includes('create_task') && !aiResponse.includes('update_task')) {
+          aiResponse += `\n\n---\n*Actions taken:*\n${actionSummary}`;
+        }
+      }
+
       tokenBreakdown = {
         model: result.model,
         input_tokens: result.inputTokens,
