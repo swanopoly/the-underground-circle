@@ -479,7 +479,9 @@ export type FurnitureType =
   // Games
   | 'poker_table' | 'chess_board' | 'coin_flip' | 'connect_four' | 'trivia_screen' | 'roulette_wheel'
   | 'retro_console'
-  | 'scrabble_board';
+  | 'scrabble_board'
+  // Farm & Pet
+  | 'farm_plot' | 'office_pet';
 
 export interface FurnitureItem {
   id: string;
@@ -654,6 +656,27 @@ export interface FurnitureItem {
   gameCryptoType?: string;          // any game: active crypto for wagers
   gameCryptoWager?: number;         // any game: current wager amount
   gameBlackswanActive?: boolean;    // any game: BlackSwan AI enabled
+  // Farm plot state
+  farmPlots?: string;               // farm_plot: 9-char string (0=empty,1=seed,2=sprout,3=growing,4=ready,5=dead)
+  farmCrops?: string;               // farm_plot: 9-char crop types (t=tomato,w=wheat,p=pumpkin,c=crystal,0=none)
+  farmPlantedAt?: string;           // farm_plot: JSON array of 9 timestamps
+  farmWaterLevel?: number;          // farm_plot: 0-100
+  farmLastWatered?: number;         // farm_plot: timestamp
+  farmHarvested?: number;           // farm_plot: total harvests
+  farmGold?: number;                // farm_plot: earned gold
+  // Office pet state
+  petType?: string;                 // office_pet: cat|dog|dragon|blob|fox
+  petName?: string;                 // office_pet: custom name
+  petHunger?: number;               // office_pet: 0-100 (100=full)
+  petHappiness?: number;            // office_pet: 0-100
+  petEnergy?: number;               // office_pet: 0-100
+  petXp?: number;                   // office_pet: lifetime XP
+  petStage?: string;                // office_pet: egg|baby|teen|adult|legendary
+  petLastFed?: number;              // office_pet: timestamp
+  petLastPlayed?: number;           // office_pet: timestamp
+  petLastSlept?: number;            // office_pet: timestamp
+  petMood?: string;                 // office_pet: happy|neutral|sad|sick|sleeping|dead
+  petBornAt?: number;               // office_pet: timestamp
 }
 
 export type FurnitureCategory = 'games' | 'connected' | 'vibe' | 'productivity' | 'fun' | 'furniture';
@@ -694,6 +717,8 @@ export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
   { type: 'trivia_screen',  name: 'Trivia',         icon: '🧠', width: 90,  height: 60,  category: 'games', description: 'Quick trivia rounds · streak score' },
   { type: 'retro_console',  name: 'Retro Console',  icon: '🎮', width: 100, height: 90,  category: 'games', description: 'GBA, GBC, NES, SNES, PS1 & more — load your ROMs' },
   { type: 'scrabble_board', name: 'Scrabble',       icon: '🔤', width: 100, height: 100, category: 'games', description: 'Word tiles · score big · vs BlackSwan AI' },
+  { type: 'farm_plot',     name: 'Farm Plot',      icon: '🌾', width: 110, height: 100, category: 'games', description: 'Plant crops · water · harvest gold' },
+  { type: 'office_pet',    name: 'Office Pet',     icon: '🐣', width: 90,  height: 90,  category: 'games', description: 'Tamagotchi pet · feed · play · evolve' },
   // ── Vibe (aesthetic & ambient) ──────────────────────────────────────────
   { type: 'fireplace',     name: 'Fireplace',       icon: '🔥', width: 80,  height: 70,  category: 'vibe', description: 'Crackling fire with embers' },
   { type: 'aquarium',      name: 'Aquarium',        icon: '🐠', width: 90,  height: 60,  category: 'vibe', description: 'Fish tank with swimming fish' },
@@ -768,6 +793,7 @@ export function isInteractiveFurniture(type: FurnitureType): boolean {
     'music_visualizer', 'figma_board', 'email_hub',
     'poker_table', 'chess_board', 'coin_flip', 'connect_four', 'trivia_screen', 'roulette_wheel',
     'retro_console', 'scrabble_board',
+    'farm_plot', 'office_pet',
   ].includes(type);
 }
 

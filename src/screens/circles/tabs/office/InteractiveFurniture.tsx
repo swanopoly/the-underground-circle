@@ -3,6 +3,11 @@ import { View, Text, Animated, Easing, Pressable, Platform, Linking } from 'reac
 import { animLoop } from '../../../../lib/animationHelpers';
 import type { FurnitureItem, OfficeTheme } from '../../../../lib/officeConfig';
 import type { OfficeAgent } from '../../../../lib/officeAgents';
+import {
+  CROP_INFO, CropType, getPlotState, getPlotGrowthPercent, harvestPlot,
+  PET_INFO, PetType, PetStage, MOOD_EMOJI, computePetStats, getPetStage,
+  feedPet, playWithPet, restPet, PET_STAGE_XP,
+} from '../../../../lib/circleGames';
 
 interface ItemProps { item: FurnitureItem; theme: OfficeTheme; }
 interface DataItemProps extends ItemProps { agents?: OfficeAgent[]; }
@@ -2816,111 +2821,31 @@ export function EmailHubItem({ item, theme }: ItemProps) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ── Poker Table (Enhanced) ──────────────────────────────────────────────────
-export function PokerTableItem({ item, theme, onPokerAction }: ItemProps & { onPokerAction?: (action: string, amount?: number) => void }) {
-  const potPulse = useRef(new Animated.Value(0)).current;
-  const bsGlow = useRef(new Animated.Value(0)).current;
+export function PokerTableItem({ item, theme }: ItemProps & { onPokerAction?: (action: string, amount?: number) => void }) {
   const dealerSpin = useRef(new Animated.Value(0)).current;
-  const winFlash = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    const pp = animLoop(() => {
-      potPulse.setValue(0.85);
-      return Animated.sequence([
-        Animated.timing(potPulse, { toValue: 1, duration: 1800, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
-        Animated.timing(potPulse, { toValue: 0.85, duration: 1800, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
-      ]);
-    });
-    pp.start();
-    const bg = animLoop(() => {
-      bsGlow.setValue(0.5);
-      return Animated.sequence([
-        Animated.timing(bsGlow, { toValue: 1, duration: 1000, useNativeDriver: false }),
-        Animated.timing(bsGlow, { toValue: 0.5, duration: 1000, useNativeDriver: false }),
-      ]);
-    });
-    bg.start();
     const ds = animLoop(() => {
       dealerSpin.setValue(0);
       return Animated.timing(dealerSpin, { toValue: 1, duration: 8000, easing: Easing.linear, useNativeDriver: false });
     });
     ds.start();
-    const wf = animLoop(() => {
-      winFlash.setValue(0);
-      return Animated.sequence([
-        Animated.timing(winFlash, { toValue: 1, duration: 800, useNativeDriver: false }),
-        Animated.timing(winFlash, { toValue: 0, duration: 800, useNativeDriver: false }),
-      ]);
-    });
-    wf.start();
-    return () => { pp.stop(); bg.stop(); ds.stop(); wf.stop(); };
+    return () => ds.stop();
   }, []);
 
-  const chips = item.pokerChips ?? 2000;
-  const hand = item.pokerHand || '';
-  const pot = item.pokerPot || 0;
-  const phase = item.pokerPhase || 'waiting';
-  const action = item.pokerAction || '';
-  const handRank = item.pokerHandRank || '';
-  const bsHandRank = item.pokerBsHandRank || '';
+  const chips = item.pokerChips ?? 5000;
   const handsWon = item.pokerHandsWon || 0;
   const handsPlayed = item.pokerHandsPlayed || 0;
-  const blinds = item.pokerBlinds || 25;
-  const dealer = item.pokerDealer || 'player';
-  const bsEnabled = item.pokerBlackswanEnabled ?? true;
-  const bsChips = item.pokerBlackswanChips ?? 2000;
-  const bsFolded = item.pokerBlackswanFolded;
-  const bsLine = item.pokerBlackswanLine || '';
-  const winnerName = item.pokerWinnerName || '';
-  const community = item.pokerCommunity || '';
-  const playerTurn = item.pokerPlayerTurn || false;
-  const currentBet = item.pokerCurrentBet || 0;
-
   const dealerRotate = dealerSpin.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
 
-  const communityCards = community ? community.split(' ') : [];
-  const isShowdown = phase === 'showdown';
-  const isWaiting = phase === 'waiting';
-  const playerWon = isShowdown && winnerName === 'YOU';
-  const bsCards = isShowdown && !bsFolded && item.pokerBlackswanHand ? item.pokerBlackswanHand.split(' ') : [];
-
-  const toCall = Math.max(0, currentBet - (item.pokerPlayerBet || 0));
-  const canCheck = toCall === 0;
-
-  const phaseLabel: Record<string, string> = {
-    waiting: 'TAP TO DEAL', deal: 'PRE-FLOP', flop: 'FLOP',
-    turn: 'TURN', river: 'RIVER', showdown: winnerName ? `${winnerName} WINS` : 'SHOWDOWN',
-  };
-
-  // Modern card renderer
-  const renderCard = (card: string, w: number, h: number, faceDown?: boolean) => {
-    if (faceDown) {
-      return (
-        <View style={{ width: w, height: h, backgroundColor: '#2a2a2a', borderRadius: 2, borderWidth: 0.5, borderColor: '#8b5cf6', overflow: 'hidden' }}>
-          <View style={{ position: 'absolute', top: 1, left: 1, right: 1, bottom: 1, backgroundColor: '#16213e', borderRadius: 1 }}>
-            <View style={{ position: 'absolute', top: '20%' as any, left: '20%' as any, right: '20%' as any, bottom: '20%' as any, borderWidth: 0.5, borderColor: '#8b5cf640', borderRadius: 1 }} />
-          </View>
-        </View>
-      );
-    }
-    const isRed = card.includes('\u2665') || card.includes('\u2666');
-    return (
-      <View style={{ width: w, height: h, backgroundColor: '#f8f9fa', borderRadius: 2, borderWidth: 0.5, borderColor: '#dee2e6', alignItems: 'center', justifyContent: 'center', ...({ boxShadow: '0 1px 3px #00000030' } as any) }}>
-        <Text style={{ fontSize: w * 0.38, fontWeight: '900', color: isRed ? '#e63946' : '#1d3557', fontFamily: 'monospace', letterSpacing: -0.5 }}>{card}</Text>
-      </View>
-    );
-  };
-
-  // Chip stack renderer — visual stack of colored chips
-  const renderChipStack = (amount: number, small?: boolean) => {
-    const sz = small ? 5 : 8;
-    const h = small ? 2 : 3;
-    const stackColors = amount >= 500 ? ['#fbbf24', '#22c55e', '#3b82f6', '#ef4444']
-      : amount >= 100 ? ['#22c55e', '#3b82f6', '#ef4444']
-      : ['#3b82f6', '#ef4444'];
+  // Chip stack renderer
+  const renderChipStack = () => {
+    const stackColors = chips >= 500 ? ['#fbbf24', '#22c55e', '#3b82f6', '#ef4444']
+      : chips >= 100 ? ['#22c55e', '#3b82f6', '#ef4444'] : ['#3b82f6', '#ef4444'];
     return (
       <View style={{ alignItems: 'center' }}>
         {stackColors.map((color, i) => (
-          <View key={i} style={{ width: sz, height: h, borderRadius: sz, backgroundColor: color, borderWidth: 0.5, borderColor: '#ffffff40', marginTop: i > 0 ? -(h * 0.5) : 0 }} />
+          <View key={i} style={{ width: 8, height: 3, borderRadius: 8, backgroundColor: color, borderWidth: 0.5, borderColor: '#ffffff40', marginTop: i > 0 ? -1.5 : 0 }} />
         ))}
       </View>
     );
@@ -2928,212 +2853,51 @@ export function PokerTableItem({ item, theme, onPokerAction }: ItemProps & { onP
 
   return (
     <View style={{ width: 130, height: 100, backgroundColor: '#000000', borderWidth: 2, borderColor: '#2d1b4e', borderRadius: 20, overflow: 'hidden' }}>
-      {/* Felt surface — dark premium green */}
+      {/* Felt surface */}
       <View style={{ position: 'absolute', top: 4, left: 4, right: 4, bottom: 4, backgroundColor: '#0d3320', borderRadius: 16, borderWidth: 1.5, borderColor: '#1a5c3a' }}>
         <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 14, backgroundColor: '#0d332010' }} />
         <View style={{ position: 'absolute', top: '25%' as any, left: '25%' as any, right: '25%' as any, bottom: '25%' as any, borderRadius: 30, backgroundColor: '#1a5c3a15' }} />
       </View>
 
-      {/* Table rail — premium gold accent */}
+      {/* Rails */}
       <View style={{ position: 'absolute', top: 2, left: '12%' as any, right: '12%' as any, height: 1.5, backgroundColor: '#d4a03460', borderRadius: 1 }} />
       <View style={{ position: 'absolute', bottom: 2, left: '12%' as any, right: '12%' as any, height: 1.5, backgroundColor: '#d4a03460', borderRadius: 1 }} />
-      <View style={{ position: 'absolute', top: '12%' as any, left: 2, width: 1.5, bottom: '12%' as any, backgroundColor: '#d4a03430', borderRadius: 1 }} />
-      <View style={{ position: 'absolute', top: '12%' as any, right: 2, width: 1.5, bottom: '12%' as any, backgroundColor: '#d4a03430', borderRadius: 1 }} />
 
-      {/* Dealer button */}
-      <Animated.View style={{ position: 'absolute', top: dealer === 'blackswan' ? 18 : 70, left: dealer === 'blackswan' ? 28 : 58, width: 9, height: 9, borderRadius: 5, backgroundColor: '#fbbf24', borderWidth: 1, borderColor: '#f59e0b', alignItems: 'center', justifyContent: 'center', zIndex: 5, transform: [{ rotate: dealerRotate }], ...({ boxShadow: '0 0 4px #fbbf2480' } as any) }}>
+      {/* Spinning dealer button */}
+      <Animated.View style={{ position: 'absolute', top: 12, right: 14, width: 9, height: 9, borderRadius: 5, backgroundColor: '#fbbf24', borderWidth: 1, borderColor: '#f59e0b', alignItems: 'center', justifyContent: 'center', zIndex: 5, transform: [{ rotate: dealerRotate }] }}>
         <Text style={{ color: '#78350f', fontSize: 4, fontWeight: '900' }}>D</Text>
       </Animated.View>
 
-      {/* Phase banner — top center */}
-      <View style={{ position: 'absolute', top: 3, left: 0, right: 0, alignItems: 'center', zIndex: 4 }}>
-        <View style={{ backgroundColor: isShowdown ? (playerWon ? '#05966920' : '#dc262620') : playerTurn ? '#1e1b4b' : '#0f172a', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 2, borderWidth: 0.5, borderColor: isShowdown ? (playerWon ? '#22c55e40' : '#ef444440') : playerTurn ? '#7c3aed60' : '#334155', flexDirection: 'row', alignItems: 'center', gap: 3, ...({ boxShadow: '0 2px 6px #00000040' } as any) }}>
-          {isWaiting && <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: '#fbbf24' }} />}
-          {playerTurn && <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: '#22c55e' }} />}
-          <Animated.Text style={{ color: isShowdown ? (playerWon ? '#4ade80' : '#f87171') : isWaiting ? '#fbbf24' : playerTurn ? '#c4b5fd' : '#e2e8f0', fontSize: 5.5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.8, opacity: isShowdown ? winFlash : 1 }}>
-            {playerTurn ? 'YOUR TURN' : phaseLabel[phase] || phase.toUpperCase()}
-          </Animated.Text>
-          {phase !== 'waiting' && phase !== 'showdown' && !playerTurn && (
-            <Text style={{ color: '#64748b', fontSize: 3.5, fontFamily: 'monospace' }}>{blinds}/{blinds * 2}</Text>
-          )}
-        </View>
+      {/* Decorative face-down cards */}
+      <View style={{ position: 'absolute', top: 22, left: '50%' as any, transform: [{ translateX: -16 }], flexDirection: 'row', gap: 2, zIndex: 2 }}>
+        {['-3deg', '3deg'].map((rot, i) => (
+          <View key={i} style={{ width: 14, height: 18, backgroundColor: '#2a2a2a', borderRadius: 2, borderWidth: 0.5, borderColor: '#8b5cf6', transform: [{ rotate: rot }], overflow: 'hidden' }}>
+            <View style={{ position: 'absolute', top: 1, left: 1, right: 1, bottom: 1, backgroundColor: '#16213e', borderRadius: 1 }} />
+          </View>
+        ))}
       </View>
 
-      {/* Community cards — centered */}
-      {communityCards.length > 0 && (
-        <View style={{ position: 'absolute', top: 17, left: 0, right: 0, flexDirection: 'row', justifyContent: 'center', gap: 2, zIndex: 2 }}>
-          {communityCards.map((card, i) => <View key={i}>{renderCard(card, 14, 18)}</View>)}
-        </View>
-      )}
-
-      {/* Center area — pot OR action buttons */}
-      <View style={{ position: 'absolute', top: 36, left: 0, right: 0, alignItems: 'center', zIndex: 6 }}>
-        {playerTurn ? (
-          /* ── ACTION BUTTONS ── */
-          <View style={{ flexDirection: 'row', gap: 2, alignItems: 'center' }}>
-            <Pressable
-              onPress={() => onPokerAction?.('fold')}
-              style={({ pressed }: { pressed: boolean }) => ({ backgroundColor: pressed ? '#dc2626' : '#7f1d1d', borderRadius: 3, paddingHorizontal: 5, paddingVertical: 3, borderWidth: 0.5, borderColor: '#ef4444', ...({ cursor: 'pointer' } as any) })}
-            >
-              <Text style={{ color: '#fca5a5', fontSize: 4.5, fontWeight: '900', fontFamily: 'monospace' }}>FOLD</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => onPokerAction?.(canCheck ? 'check' : 'call')}
-              style={({ pressed }: { pressed: boolean }) => ({ backgroundColor: pressed ? '#059669' : '#064e3b', borderRadius: 3, paddingHorizontal: 5, paddingVertical: 3, borderWidth: 0.5, borderColor: '#22c55e', ...({ cursor: 'pointer' } as any) })}
-            >
-              <Text style={{ color: '#86efac', fontSize: 4.5, fontWeight: '900', fontFamily: 'monospace' }}>
-                {canCheck ? 'CHECK' : `CALL ${toCall}`}
-              </Text>
-            </Pressable>
-            <Pressable
-              onPress={() => onPokerAction?.('raise', Math.max(blinds * 4, currentBet * 2))}
-              style={({ pressed }: { pressed: boolean }) => ({ backgroundColor: pressed ? '#7c3aed' : '#3b0764', borderRadius: 3, paddingHorizontal: 5, paddingVertical: 3, borderWidth: 0.5, borderColor: '#8b5cf6', ...({ cursor: 'pointer' } as any) })}
-            >
-              <Text style={{ color: '#c4b5fd', fontSize: 4.5, fontWeight: '900', fontFamily: 'monospace' }}>RAISE</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => onPokerAction?.('allin')}
-              style={({ pressed }: { pressed: boolean }) => ({ backgroundColor: pressed ? '#b91c1c' : '#450a0a', borderRadius: 3, paddingHorizontal: 5, paddingVertical: 3, borderWidth: 0.5, borderColor: '#fbbf24', ...({ cursor: 'pointer' } as any) })}
-            >
-              <Text style={{ color: '#fbbf24', fontSize: 4.5, fontWeight: '900', fontFamily: 'monospace' }}>ALL IN</Text>
-            </Pressable>
-          </View>
-        ) : (
-          /* ── POT DISPLAY ── */
-          <>
-            {pot > 0 && (
-              <Animated.View style={{ opacity: potPulse, flexDirection: 'row', alignItems: 'center', gap: 3 }}>
-                {renderChipStack(pot)}
-                <Text style={{ color: '#fbbf24', fontSize: 7, fontWeight: '900', fontFamily: 'monospace', ...({ textShadow: '0 0 6px #fbbf2440' } as any) }}>{pot.toLocaleString()}</Text>
-              </Animated.View>
-            )}
-            {isWaiting && pot === 0 && (
-              <View style={{ alignItems: 'center', marginTop: 4 }}>
-                <Text style={{ color: '#475569', fontSize: 4, fontFamily: 'monospace', fontWeight: '600' }}>TEXAS HOLD'EM</Text>
-              </View>
-            )}
-          </>
-        )}
-      </View>
-
-      {/* Pot amount below action buttons when player turn */}
-      {playerTurn && pot > 0 && (
-        <View style={{ position: 'absolute', top: 50, left: 0, right: 0, alignItems: 'center', zIndex: 2 }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
-            {renderChipStack(pot, true)}
-            <Text style={{ color: '#fbbf24', fontSize: 4, fontWeight: '800', fontFamily: 'monospace' }}>POT {pot.toLocaleString()}</Text>
-          </View>
-        </View>
-      )}
-
-      {/* Player hand — bottom center */}
-      {hand ? (
-        <View style={{ position: 'absolute', bottom: 13, left: '50%' as any, transform: [{ translateX: -17 }], zIndex: 3, alignItems: 'center' }}>
-          <View style={{ flexDirection: 'row', gap: 2 }}>
-            {hand.split(' ').slice(0, 2).map((card, i) => (
-              <View key={i} style={{ transform: [{ rotate: i === 0 ? '-3deg' : '3deg' }] }}>{renderCard(card, 15, 19)}</View>
-            ))}
-          </View>
-          {isShowdown && handRank ? (
-            <View style={{ backgroundColor: playerWon ? '#05966930' : '#0f172a', borderRadius: 3, paddingHorizontal: 4, paddingVertical: 0.5, marginTop: 1.5, borderWidth: 0.5, borderColor: playerWon ? '#22c55e40' : '#334155' }}>
-              <Text style={{ color: playerWon ? '#4ade80' : '#fbbf24', fontSize: 3.5, fontWeight: '900', fontFamily: 'monospace' }}>{handRank}</Text>
-            </View>
-          ) : null}
-        </View>
-      ) : null}
-
-      {/* Player action badge */}
-      {action && phase !== 'waiting' && phase !== 'showdown' && !playerTurn && (
-        <View style={{ position: 'absolute', bottom: 33, right: 14, backgroundColor: action.includes('RAISE') ? '#dc262680' : action.includes('FOLD') ? '#47556980' : '#05966980', borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1.5, zIndex: 4, ...({ boxShadow: '0 1px 4px #00000030' } as any) }}>
-          <Text style={{ color: '#f8fafc', fontSize: 3.5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.5 }}>{action}</Text>
-        </View>
-      )}
-
-      {/* BlackSwan seat — top left with chip stack */}
-      {bsEnabled && (
-        <View style={{ position: 'absolute', top: 14, left: 6, alignItems: 'center', zIndex: 2 }}>
-          <Animated.View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: '#0f0a1a', borderWidth: 1.5, borderColor: bsFolded ? '#334155' : '#7c3aed', alignItems: 'center', justifyContent: 'center', opacity: bsFolded ? 0.35 : bsGlow, ...({ boxShadow: bsFolded ? 'none' : '0 0 6px #7c3aed60' } as any) }}>
-            <Text style={{ fontSize: 9 }}>🦢</Text>
-          </Animated.View>
-          {/* BlackSwan chip stack */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 1.5, marginTop: 1 }}>
-            {!bsFolded && renderChipStack(bsChips, true)}
-            <Text style={{ color: bsFolded ? '#475569' : '#a78bfa', fontSize: 3.5, fontWeight: '900', fontFamily: 'monospace' }}>
-              {bsFolded ? 'FOLD' : bsChips.toLocaleString()}
-            </Text>
-          </View>
-          {phase !== 'waiting' && !bsFolded && (
-            <View style={{ flexDirection: 'row', gap: 1, marginTop: 1 }}>
-              {bsCards.length > 0 ? (
-                bsCards.slice(0, 2).map((c, i) => <View key={i}>{renderCard(c, 9, 11)}</View>)
-              ) : (
-                <>
-                  {renderCard('', 9, 11, true)}
-                  {renderCard('', 9, 11, true)}
-                </>
-              )}
-            </View>
-          )}
-          {isShowdown && bsHandRank && !bsFolded ? (
-            <View style={{ backgroundColor: '#7c3aed20', borderRadius: 2, paddingHorizontal: 3, paddingVertical: 0.5, marginTop: 1, borderWidth: 0.5, borderColor: '#7c3aed30' }}>
-              <Text style={{ color: '#c4b5fd', fontSize: 2.5, fontWeight: '900', fontFamily: 'monospace' }}>{bsHandRank}</Text>
-            </View>
-          ) : null}
-        </View>
-      )}
-
-      {/* Empty seats — subtle ring with "+" invite hint */}
-      {[{ t: 14, l: 106 }, { t: 48, l: 4 }, { t: 48, l: 112 }].map((pos, i) => (
-        <View key={i} style={{ position: 'absolute', top: pos.t, left: pos.l, width: 12, height: 12, borderRadius: 6, backgroundColor: '#0f172a', borderWidth: 1, borderColor: '#1e293b', alignItems: 'center', justifyContent: 'center' }}>
-          <Text style={{ color: '#334155', fontSize: 5, fontWeight: '600' }}>+</Text>
+      {/* Seat indicators */}
+      {[{ t: 14, l: 8 }, { t: 14, l: 106 }, { t: 48, l: 8 }, { t: 48, l: 106 }].map((pos, i) => (
+        <View key={i} style={{ position: 'absolute', top: pos.t, left: pos.l, width: 14, height: 14, borderRadius: 7, backgroundColor: '#0f172a', borderWidth: 1, borderColor: i === 0 ? '#7c3aed' : '#1e293b', alignItems: 'center', justifyContent: 'center' }}>
+          <Text style={{ fontSize: i === 0 ? 7 : 5, color: i === 0 ? '#7c3aed' : '#334155' }}>{i === 0 ? '🦢' : '+'}</Text>
         </View>
       ))}
 
-      {/* Bottom HUD — player seat with chip stack + record */}
-      <View style={{ position: 'absolute', bottom: 1, left: 0, right: 0, height: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 6, zIndex: 3 }}>
-        {/* Player chip count with visual stack */}
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
-          {renderChipStack(chips, true)}
-          <Text style={{ color: '#fbbf24', fontSize: 5, fontWeight: '900', fontFamily: 'monospace', ...({ textShadow: '0 0 4px #fbbf2430' } as any) }}>{chips.toLocaleString()}</Text>
-          {handsPlayed > 0 && (
-            <Text style={{ color: '#475569', fontSize: 3, fontFamily: 'monospace', marginLeft: 2 }}>{handsWon}W/{handsPlayed}</Text>
-          )}
-        </View>
-        {/* Phase indicator */}
-        {phase !== 'waiting' && phase !== 'showdown' && (
-          <View style={{ flexDirection: 'row', gap: 1 }}>
-            {['deal', 'flop', 'turn', 'river'].map((p, i) => (
-              <View key={p} style={{ width: 3, height: 3, borderRadius: 1.5, backgroundColor: ['deal', 'flop', 'turn', 'river'].indexOf(phase) >= i ? '#22c55e' : '#1e293b' }} />
-            ))}
-          </View>
-        )}
+      {/* Center: TEXAS HOLD'EM + tap to play */}
+      <View style={{ position: 'absolute', top: 38, left: 0, right: 0, alignItems: 'center', zIndex: 3 }}>
+        <Text style={{ color: '#c4b5fd', fontSize: 5.5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1.5 }}>♠ TEXAS HOLD'EM ♠</Text>
+        <Text style={{ color: '#fbbf24', fontSize: 4.5, fontWeight: '800', fontFamily: 'monospace', marginTop: 3, letterSpacing: 1 }}>TAP TO PLAY</Text>
       </View>
 
-      {/* BlackSwan trash talk — speech bubble */}
-      {bsEnabled && bsLine ? (
-        <View style={{ position: 'absolute', top: 6, left: 26, maxWidth: 50, zIndex: 5 }}>
-          <View style={{ backgroundColor: '#1e1b4b', borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1.5, borderWidth: 0.5, borderColor: '#7c3aed40', ...({ boxShadow: '0 2px 6px #00000040' } as any) }}>
-            <Text style={{ color: '#c4b5fd', fontSize: 3, fontFamily: 'monospace', fontWeight: '600' }} numberOfLines={2}>{bsLine}</Text>
-          </View>
-          <View style={{ position: 'absolute', left: 4, bottom: -3, width: 0, height: 0, borderLeftWidth: 3, borderRightWidth: 3, borderTopWidth: 3, borderLeftColor: 'transparent', borderRightColor: 'transparent', borderTopColor: '#1e1b4b' }} />
-        </View>
-      ) : null}
-
-      {/* YOU label with avatar circle */}
-      {hand ? (
-        <View style={{ position: 'absolute', bottom: 6, left: '50%' as any, transform: [{ translateX: -8 }], zIndex: 2, alignItems: 'center' }}>
-          <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#1e293b', borderWidth: 1, borderColor: playerTurn ? '#22c55e' : '#475569', alignItems: 'center', justifyContent: 'center' }}>
-            <Text style={{ color: playerTurn ? '#22c55e' : '#94a3b8', fontSize: 4, fontWeight: '900' }}>Y</Text>
-          </View>
-        </View>
-      ) : null}
-
-      {/* Showdown: tap to continue hint */}
-      {isShowdown && (
-        <View style={{ position: 'absolute', bottom: 14, left: 0, right: 0, alignItems: 'center', zIndex: 4 }}>
-          <Text style={{ color: '#475569', fontSize: 3, fontFamily: 'monospace' }}>TAP FOR NEW HAND</Text>
-        </View>
-      )}
+      {/* Bottom: chip count + record */}
+      <View style={{ position: 'absolute', bottom: 4, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, zIndex: 3 }}>
+        {renderChipStack()}
+        <Text style={{ color: '#fbbf24', fontSize: 5, fontWeight: '900', fontFamily: 'monospace' }}>{chips.toLocaleString()}</Text>
+        {handsPlayed > 0 && (
+          <Text style={{ color: '#475569', fontSize: 3.5, fontFamily: 'monospace' }}>{handsWon}W/{handsPlayed}</Text>
+        )}
+      </View>
     </View>
   );
 }
@@ -3744,6 +3508,393 @@ export function ScrabbleBoardItem({ item, theme }: ItemProps) {
           SCRABBLE
         </Text>
       </Animated.View>
+    </View>
+  );
+}
+
+// ─── Farm Plot ──────────────────────────────────────────────────────────────
+
+const CROP_TYPES: CropType[] = ['t', 'w', 'p', 'c'];
+
+export function FarmPlotItem({ item, theme }: ItemProps) {
+  const plots = (item.farmPlots || '000000000').split('');
+  const crops = (item.farmCrops || '000000000').split('');
+  const plantedAtArr: number[] = (() => {
+    try { return JSON.parse(item.farmPlantedAt || '[]'); } catch { return []; }
+  })();
+  const [waterLevel, setWaterLevel] = useState(item.farmWaterLevel ?? 80);
+  const [gold, setGold] = useState(item.farmGold ?? 0);
+  const [harvested, setHarvested] = useState(item.farmHarvested ?? 0);
+  const [localPlots, setLocalPlots] = useState(plots);
+  const [localCrops, setLocalCrops] = useState(crops);
+  const [localPlanted, setLocalPlanted] = useState<number[]>(
+    plantedAtArr.length === 9 ? plantedAtArr : Array(9).fill(0)
+  );
+  const [selectedCrop, setSelectedCrop] = useState<CropType>('t');
+  const [showCropPicker, setShowCropPicker] = useState<number | null>(null);
+  const [tick, setTick] = useState(0);
+
+  // Water decay + growth tick
+  useEffect(() => {
+    const iv = setInterval(() => {
+      setWaterLevel(w => Math.max(0, w - 0.5));
+      setTick(t => t + 1);
+    }, 3000);
+    return () => clearInterval(iv);
+  }, []);
+
+  const waterPulse = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const l = animLoop(() => Animated.sequence([
+      Animated.timing(waterPulse, { toValue: 1, duration: 2000, useNativeDriver: false }),
+      Animated.timing(waterPulse, { toValue: 0, duration: 2000, useNativeDriver: false }),
+    ]));
+    l.start();
+    return () => l.stop();
+  }, []);
+
+  const handlePlot = (i: number) => {
+    const crop = localCrops[i] as CropType | '0';
+    if (crop === '0' || !localPlanted[i]) {
+      setShowCropPicker(showCropPicker === i ? null : i);
+      return;
+    }
+    const state = getPlotState(localPlanted[i], crop as CropType, waterLevel);
+    if (state === '4') {
+      // Harvest
+      const reward = harvestPlot(crop as CropType);
+      setGold(g => g + reward);
+      setHarvested(h => h + 1);
+      setLocalPlots(p => { const n = [...p]; n[i] = '0'; return n; });
+      setLocalCrops(c => { const n = [...c]; n[i] = '0'; return n; });
+      setLocalPlanted(a => { const n = [...a]; n[i] = 0; return n; });
+    } else if (state === '5') {
+      // Clear dead
+      setLocalPlots(p => { const n = [...p]; n[i] = '0'; return n; });
+      setLocalCrops(c => { const n = [...c]; n[i] = '0'; return n; });
+      setLocalPlanted(a => { const n = [...a]; n[i] = 0; return n; });
+    }
+  };
+
+  const plantCrop = (i: number, crop: CropType) => {
+    setLocalPlots(p => { const n = [...p]; n[i] = '1'; return n; });
+    setLocalCrops(c => { const n = [...c]; n[i] = crop; return n; });
+    setLocalPlanted(a => { const n = [...a]; n[i] = Date.now(); return n; });
+    setShowCropPicker(null);
+  };
+
+  const waterFarm = () => {
+    setWaterLevel(w => Math.min(100, w + 25));
+  };
+
+  const getPlotVisual = (i: number) => {
+    const crop = localCrops[i] as CropType | '0';
+    if (crop === '0' || !localPlanted[i]) return { emoji: '', bg: '#3d2b1a', border: '#5a3f22' };
+    const state = getPlotState(localPlanted[i], crop as CropType, waterLevel);
+    const info = CROP_INFO[crop as CropType];
+    switch (state) {
+      case '1': return { emoji: '\u{1F331}', bg: '#2d1f0e', border: '#5a3f22' }; // seedling
+      case '2': return { emoji: '\u{1F33F}', bg: '#1a3a1a', border: '#2d5a2d' }; // sprout
+      case '3': return { emoji: '\u{1F33B}', bg: '#1a3a1a', border: info?.color || '#22c55e' }; // growing
+      case '4': return { emoji: info?.icon || '\u2728', bg: '#1a3a1a', border: '#f59e0b' }; // ready!
+      case '5': return { emoji: '\u{1F342}', bg: '#2a1a0e', border: '#6b3a1a' }; // dead
+      default: return { emoji: '', bg: '#3d2b1a', border: '#5a3f22' };
+    }
+  };
+
+  const waterColor = waterLevel > 60 ? '#3b82f6' : waterLevel > 30 ? '#f59e0b' : '#ef4444';
+
+  return (
+    <View style={{ width: 106, height: 96, backgroundColor: '#2a1a0e', borderWidth: 1, borderColor: '#5a3f22', borderRadius: 6, padding: 3 }}>
+      {/* Header */}
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+        <Text style={{ color: '#22c55e', fontSize: 5, fontWeight: '900', fontFamily: 'monospace' }}>FARM</Text>
+        <View style={{ flexDirection: 'row', gap: 3, alignItems: 'center' }}>
+          <Text style={{ color: '#f59e0b', fontSize: 5, fontWeight: '900', fontFamily: 'monospace' }}>{gold}g</Text>
+          <Text style={{ color: '#666', fontSize: 4, fontFamily: 'monospace' }}>{harvested}h</Text>
+        </View>
+      </View>
+
+      {/* Water bar */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2, marginBottom: 2 }}>
+        <Pressable onPress={(e) => { e.stopPropagation?.(); waterFarm(); }} style={{ ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
+          <Text style={{ fontSize: 6 }}>{'\u{1F4A7}'}</Text>
+        </Pressable>
+        <View style={{ flex: 1, height: 3, backgroundColor: '#1a1a28', borderRadius: 2, overflow: 'hidden' }}>
+          <Animated.View style={{
+            width: `${waterLevel}%` as any,
+            height: '100%',
+            backgroundColor: waterColor,
+            borderRadius: 2,
+            opacity: waterPulse.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1] }),
+          }} />
+        </View>
+        <Text style={{ color: waterColor, fontSize: 4, fontWeight: '700', fontFamily: 'monospace' }}>{Math.round(waterLevel)}%</Text>
+      </View>
+
+      {/* 3x3 Grid */}
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 2, justifyContent: 'center' }}>
+        {Array.from({ length: 9 }).map((_, i) => {
+          const visual = getPlotVisual(i);
+          const crop = localCrops[i] as CropType | '0';
+          const pct = crop !== '0' && localPlanted[i] ? getPlotGrowthPercent(localPlanted[i], crop as CropType) : 0;
+          const isReady = crop !== '0' && localPlanted[i] && getPlotState(localPlanted[i], crop as CropType, waterLevel) === '4';
+          return (
+            <Pressable
+              key={i}
+              onPress={(e) => { e.stopPropagation?.(); handlePlot(i); }}
+              style={{
+                width: 28, height: 22, borderRadius: 3,
+                backgroundColor: visual.bg,
+                borderWidth: 1, borderColor: visual.border,
+                alignItems: 'center', justifyContent: 'center',
+                ...(isReady ? { borderColor: '#f59e0b', borderWidth: 2 } : {}),
+                ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+              }}
+            >
+              {visual.emoji ? (
+                <Text style={{ fontSize: 10 }}>{visual.emoji}</Text>
+              ) : (
+                <Text style={{ fontSize: 6, color: '#5a3f2240' }}>+</Text>
+              )}
+              {/* Growth bar */}
+              {crop !== '0' && pct > 0 && pct < 100 && (
+                <View style={{ position: 'absolute', bottom: 1, left: 2, right: 2, height: 2, backgroundColor: '#0a0a12', borderRadius: 1, overflow: 'hidden' }}>
+                  <View style={{ width: `${pct}%` as any, height: '100%', backgroundColor: '#22c55e', borderRadius: 1 }} />
+                </View>
+              )}
+            </Pressable>
+          );
+        })}
+      </View>
+
+      {/* Crop picker popup */}
+      {showCropPicker !== null && (
+        <View style={{
+          position: 'absolute', bottom: 4, left: 4, right: 4,
+          backgroundColor: '#1a1a28', borderWidth: 1, borderColor: '#2a2a3e',
+          borderRadius: 4, padding: 3, flexDirection: 'row', gap: 2, justifyContent: 'center', zIndex: 10,
+        }}>
+          {CROP_TYPES.map(c => (
+            <Pressable
+              key={c}
+              onPress={(e) => { e.stopPropagation?.(); plantCrop(showCropPicker, c); }}
+              style={{
+                alignItems: 'center', padding: 2, borderRadius: 3,
+                backgroundColor: selectedCrop === c ? CROP_INFO[c].color + '20' : 'transparent',
+                ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+              }}
+            >
+              <Text style={{ fontSize: 8 }}>{CROP_INFO[c].icon}</Text>
+              <Text style={{ color: CROP_INFO[c].color, fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>{CROP_INFO[c].gold}g</Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+// ─── Office Pet (Tamagotchi) ────────────────────────────────────────────────
+
+const PET_TYPES: PetType[] = ['cat', 'dog', 'dragon', 'blob', 'fox'];
+
+export function OfficePetItem({ item, theme }: ItemProps) {
+  const petType = (item.petType || 'cat') as PetType;
+  const [name, setName] = useState(item.petName || PET_INFO[petType]?.name || 'Pet');
+  const [hunger, setHunger] = useState(item.petHunger ?? 80);
+  const [happiness, setHappiness] = useState(item.petHappiness ?? 80);
+  const [energy, setEnergy] = useState(item.petEnergy ?? 80);
+  const [xp, setXp] = useState(item.petXp ?? 0);
+  const [lastFed, setLastFed] = useState(item.petLastFed ?? Date.now());
+  const [lastPlayed, setLastPlayed] = useState(item.petLastPlayed ?? Date.now());
+  const [lastSlept, setLastSlept] = useState(item.petLastSlept ?? Date.now());
+  const [showActions, setShowActions] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
+  const [activePetType, setActivePetType] = useState(petType);
+  const [actionFlash, setActionFlash] = useState<string | null>(null);
+
+  // Stat decay tick
+  useEffect(() => {
+    const iv = setInterval(() => {
+      const stats = computePetStats(hunger, happiness, energy, lastFed, lastPlayed, lastSlept);
+      setHunger(stats.hunger);
+      setHappiness(stats.happiness);
+      setEnergy(stats.energy);
+    }, 5000);
+    return () => clearInterval(iv);
+  }, [lastFed, lastPlayed, lastSlept]);
+
+  const stats = computePetStats(hunger, happiness, energy, lastFed, lastPlayed, lastSlept);
+  const stage = getPetStage(xp);
+  const petInfo = PET_INFO[activePetType];
+  const petEmoji = petInfo?.stages[stage] || '\u{1F95A}';
+  const moodEmoji = MOOD_EMOJI[stats.mood];
+  const nextStageXp = stage === 'legendary' ? xp : PET_STAGE_XP[
+    stage === 'egg' ? 'baby' : stage === 'baby' ? 'teen' : stage === 'teen' ? 'adult' : 'legendary'
+  ];
+  const xpProgress = stage === 'legendary' ? 100 : Math.min(100, (xp / nextStageXp) * 100);
+
+  // Bounce animation
+  const bounce = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (stats.mood === 'dead' || stats.mood === 'sleeping') return;
+    const l = animLoop(() => Animated.sequence([
+      Animated.timing(bounce, { toValue: -3, duration: 400, easing: Easing.out(Easing.quad), useNativeDriver: false }),
+      Animated.timing(bounce, { toValue: 0, duration: 400, easing: Easing.in(Easing.quad), useNativeDriver: false }),
+      Animated.delay(stats.mood === 'happy' ? 800 : 2000),
+    ]));
+    l.start();
+    return () => l.stop();
+  }, [stats.mood]);
+
+  const flash = (emoji: string) => {
+    setActionFlash(emoji);
+    setTimeout(() => setActionFlash(null), 800);
+  };
+
+  const handleFeed = () => {
+    const result = feedPet();
+    setHunger(h => Math.min(100, h + result.hungerGain));
+    setLastFed(Date.now());
+    setXp(x => x + result.xp);
+    flash('\u{1F356}');
+    setShowActions(false);
+  };
+
+  const handlePlay = () => {
+    const result = playWithPet();
+    setHappiness(h => Math.min(100, h + result.happinessGain));
+    setEnergy(e => Math.max(0, e - result.energyCost));
+    setLastPlayed(Date.now());
+    setXp(x => x + result.xp);
+    flash('\u{1F3BE}');
+    setShowActions(false);
+  };
+
+  const handleRest = () => {
+    const result = restPet();
+    setEnergy(e => Math.min(100, e + result.energyGain));
+    setLastSlept(Date.now());
+    setXp(x => x + result.xp);
+    flash('\u{1F4A4}');
+    setShowActions(false);
+  };
+
+  const handleReset = () => {
+    setHunger(80); setHappiness(80); setEnergy(80);
+    setXp(0);
+    setLastFed(Date.now()); setLastPlayed(Date.now()); setLastSlept(Date.now());
+    setShowPicker(false); setShowActions(false);
+  };
+
+  const statBar = (value: number, color: string, icon: string) => (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 1 }}>
+      <Text style={{ fontSize: 5 }}>{icon}</Text>
+      <View style={{ flex: 1, height: 3, backgroundColor: '#1a1a28', borderRadius: 2, overflow: 'hidden' }}>
+        <View style={{ width: `${value}%` as any, height: '100%', backgroundColor: value < 20 ? '#ef4444' : color, borderRadius: 2 }} />
+      </View>
+    </View>
+  );
+
+  return (
+    <View style={{ width: 86, height: 86, backgroundColor: '#12121e', borderWidth: 1, borderColor: petInfo?.color + '40' || '#333', borderRadius: 8, padding: 3, alignItems: 'center' }}>
+      {/* Header */}
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%', alignItems: 'center', marginBottom: 1 }}>
+        <Pressable onPress={(e) => { e.stopPropagation?.(); setShowPicker(p => !p); }} style={{ ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
+          <Text style={{ color: petInfo?.color || '#ccc', fontSize: 4, fontWeight: '900', fontFamily: 'monospace' }}>{name}</Text>
+        </Pressable>
+        <Text style={{ fontSize: 5 }}>{moodEmoji}</Text>
+      </View>
+
+      {/* Pet display */}
+      <Pressable
+        onPress={(e) => { e.stopPropagation?.(); setShowActions(a => !a); }}
+        style={{ alignItems: 'center', justifyContent: 'center', flex: 1, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
+      >
+        <Animated.View style={{ transform: [{ translateY: bounce }] }}>
+          <Text style={{ fontSize: 24 }}>{petEmoji}</Text>
+        </Animated.View>
+        {actionFlash && (
+          <View style={{ position: 'absolute', top: -2, right: 0 }}>
+            <Text style={{ fontSize: 10 }}>{actionFlash}</Text>
+          </View>
+        )}
+      </Pressable>
+
+      {/* Stage + XP */}
+      <View style={{ width: '100%', marginBottom: 2 }}>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Text style={{ color: '#6b6b80', fontSize: 4, fontWeight: '700', fontFamily: 'monospace', textTransform: 'uppercase' }}>{stage}</Text>
+          <Text style={{ color: '#6b6b80', fontSize: 3, fontFamily: 'monospace' }}>{xp}xp</Text>
+        </View>
+        <View style={{ height: 2, backgroundColor: '#1a1a28', borderRadius: 1, overflow: 'hidden', marginTop: 1 }}>
+          <View style={{ width: `${xpProgress}%` as any, height: '100%', backgroundColor: petInfo?.color || '#6366f1', borderRadius: 1 }} />
+        </View>
+      </View>
+
+      {/* Stat bars */}
+      <View style={{ width: '100%', gap: 1 }}>
+        {statBar(stats.hunger, '#22c55e', '\u{1F356}')}
+        {statBar(stats.happiness, '#f59e0b', '\u{1F3BE}')}
+        {statBar(stats.energy, '#3b82f6', '\u26A1')}
+      </View>
+
+      {/* Action buttons popup */}
+      {showActions && (
+        <View style={{
+          position: 'absolute', bottom: -2, left: -2, right: -2,
+          backgroundColor: '#1a1a28', borderWidth: 1, borderColor: '#2a2a3e',
+          borderRadius: 4, padding: 3, flexDirection: 'row', gap: 3, justifyContent: 'center', zIndex: 10,
+        }}>
+          <Pressable onPress={(e) => { e.stopPropagation?.(); handleFeed(); }}
+            style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#22c55e15', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
+            <Text style={{ fontSize: 8 }}>{'\u{1F356}'}</Text>
+            <Text style={{ color: '#22c55e', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>FEED</Text>
+          </Pressable>
+          <Pressable onPress={(e) => { e.stopPropagation?.(); handlePlay(); }}
+            style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#f59e0b15', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
+            <Text style={{ fontSize: 8 }}>{'\u{1F3BE}'}</Text>
+            <Text style={{ color: '#f59e0b', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>PLAY</Text>
+          </Pressable>
+          <Pressable onPress={(e) => { e.stopPropagation?.(); handleRest(); }}
+            style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#3b82f615', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
+            <Text style={{ fontSize: 8 }}>{'\u{1F4A4}'}</Text>
+            <Text style={{ color: '#3b82f6', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>REST</Text>
+          </Pressable>
+          {stats.mood === 'dead' && (
+            <Pressable onPress={(e) => { e.stopPropagation?.(); handleReset(); }}
+              style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#ef444415', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
+              <Text style={{ fontSize: 8 }}>{'\u{1F95A}'}</Text>
+              <Text style={{ color: '#ef4444', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>NEW</Text>
+            </Pressable>
+          )}
+        </View>
+      )}
+
+      {/* Pet type picker */}
+      {showPicker && (
+        <View style={{
+          position: 'absolute', top: 10, left: -2, right: -2,
+          backgroundColor: '#1a1a28', borderWidth: 1, borderColor: '#2a2a3e',
+          borderRadius: 4, padding: 3, flexDirection: 'row', gap: 2, justifyContent: 'center', zIndex: 10,
+        }}>
+          {PET_TYPES.map(pt => (
+            <Pressable
+              key={pt}
+              onPress={(e) => { e.stopPropagation?.(); setActivePetType(pt); setName(PET_INFO[pt].name); setShowPicker(false); handleReset(); }}
+              style={{
+                alignItems: 'center', padding: 2, borderRadius: 3,
+                backgroundColor: activePetType === pt ? PET_INFO[pt].color + '20' : 'transparent',
+                ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+              }}
+            >
+              <Text style={{ fontSize: 10 }}>{PET_INFO[pt].stages.baby}</Text>
+              <Text style={{ color: PET_INFO[pt].color, fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>{PET_INFO[pt].name}</Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
     </View>
   );
 }

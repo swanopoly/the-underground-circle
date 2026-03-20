@@ -133,6 +133,7 @@ async function invokeBlackSwan(
   circleId: string,
   senderId: string,
   model?: string | null,
+  targetAgentName?: string,
 ): Promise<AgentInvocationResult> {
   const start = Date.now();
 
@@ -144,7 +145,7 @@ async function invokeBlackSwan(
 
   try {
     const { data, error } = await supabase.functions.invoke('swanbot-ai', {
-      body: { message: command, circleId, userId: senderId, model: cleanModel || null },
+      body: { message: command, circleId, userId: senderId, model: cleanModel || null, targetAgentName: targetAgentName || undefined },
     });
 
     const latencyMs = Date.now() - start;
@@ -185,6 +186,10 @@ async function invokeBlackSwan(
 
 function isClaudeCodeAgent(agent: CircleOfficeAgent): boolean {
   return agent.provider === 'claude-code';
+}
+
+function isGeminiCliAgent(agent: CircleOfficeAgent): boolean {
+  return agent.provider === 'gemini' && (agent.gatewayUrl?.includes('localhost:7780') || agent.name === 'Gemini CLI');
 }
 
 async function invokeClaudeCode(
@@ -245,6 +250,70 @@ async function invokeClaudeCode(
     return {
       success: false,
       error: err.message || 'Claude Code bridge not reachable',
+    };
+  }
+}
+
+// ─── Gemini CLI: Invoke via local bridge ──────────────────────────────────────
+
+async function invokeGeminiCli(
+  command: string,
+  bridgeUrl: string = 'http://localhost:7780',
+): Promise<AgentInvocationResult> {
+  const start = Date.now();
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 35000);
+
+    const response = await fetch(`${bridgeUrl}/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+    const latencyMs = Date.now() - start;
+
+    if (!response.ok) {
+      return {
+        success: false,
+        error: `Gemini CLI bridge error: HTTP ${response.status}`,
+      };
+    }
+
+    const data = await response.json();
+
+    if (!data.ok) {
+      return {
+        success: false,
+        error: data.error || 'Gemini CLI command failed',
+      };
+    }
+
+    const responseText = (data.response || '').trim()
+      || 'Command executed (no output)';
+
+    const tokenCount = estimateTokens(command, responseText);
+
+    return {
+      success: true,
+      responseText,
+      tokenCount,
+      latencyMs,
+      model: data.model || 'gemini-2.5-pro',
+    };
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      return {
+        success: false,
+        error: 'Gemini CLI bridge command timed out (35s)',
+      };
+    }
+    return {
+      success: false,
+      error: err.message || 'Gemini CLI bridge not reachable',
     };
   }
 }
@@ -645,6 +714,7 @@ export async function invokeAndStream(
   // Detect agent type for routing
   const blackSwan = isBlackSwanAgent(agent);
   const claudeCode = isClaudeCodeAgent(agent);
+  const geminiCli = isGeminiCliAgent(agent);
   const byoLLM = isBYOLLMAgent(agent);
 
   // Resolve the actual gateway URL to use:
@@ -652,7 +722,7 @@ export async function invokeAndStream(
   // 2. Fall back to the passed-in gatewayUrl (caller's local)
   // Resolve gateway URL: agent's stored URL > caller's URL > fail
   const resolvedUrl = agent.gatewayUrl || gatewayUrl;
-  if (!resolvedUrl && !blackSwan && !claudeCode && !byoLLM) {
+  if (!resolvedUrl && !blackSwan && !claudeCode && !geminiCli && !byoLLM) {
     return {
       success: false,
       error: `No gateway URL for ${agent.name} — configure one in ⚙️ → Connections`,
@@ -662,14 +732,14 @@ export async function invokeAndStream(
   // Cross-machine guard: if agent is not ours and not public, fail clearly
   // BlackSwan is always public (server-side edge function)
   // Claude Code is local-only but invoked by its owner
-  if (!blackSwan && !claudeCode && !byoLLM && !agent.isOwn && !agent.isPublic) {
+  if (!blackSwan && !claudeCode && !geminiCli && !byoLLM && !agent.isOwn && !agent.isPublic) {
     return {
       success: false,
       error: `${agent.name} is local-only — they need to set up a public URL to receive cross-machine commands`,
     };
   }
 
-  const via = blackSwan ? 'swanbot-ai' : claudeCode ? `bridge:${resolvedUrl}` : byoLLM ? `llm-proxy:${agent.provider}` : resolvedUrl;
+  const via = blackSwan ? 'swanbot-ai' : claudeCode ? `bridge:${resolvedUrl}` : geminiCli ? `gemini-bridge:${resolvedUrl}` : byoLLM ? `llm-proxy:${agent.provider}` : resolvedUrl;
   console.log(`[agentInvocation] Starting: ${agent.name} ← "${req.command}" via ${via}`);
 
   // Step 0: Create a tracking task for this prompt
@@ -735,12 +805,16 @@ export async function invokeAndStream(
           result = { success: false, error: `Gemini fallback failed: ${err.message}` };
         }
       } else {
-        console.log(`[agentInvocation] Invoking BlackSwan via swanbot-ai edge function (model: ${req.model || 'auto'})`);
-        result = await invokeBlackSwan(req.command, req.circleId, req.senderId || req.messageId, req.model);
+        console.log(`[agentInvocation] Invoking BlackSwan via swanbot-ai edge function (model: ${req.model || 'auto'}, agent: ${agent.name})`);
+        result = await invokeBlackSwan(req.command, req.circleId, req.senderId || req.messageId, req.model, agent.name);
       }
     } else if (claudeCode) {
       console.log(`[agentInvocation] Invoking Claude Code via bridge: ${resolvedUrl}/exec`);
       result = await invokeClaudeCode(req.command, resolvedUrl);
+    } else if (geminiCli) {
+      const geminiUrl = resolvedUrl || 'http://localhost:7780';
+      console.log(`[agentInvocation] Invoking Gemini CLI via bridge: ${geminiUrl}/send`);
+      result = await invokeGeminiCli(req.command, geminiUrl);
     } else if (byoLLM) {
       console.log(`[agentInvocation] Invoking BYO LLM: ${agent.provider} (model: ${req.model || 'default'})`);
       result = await invokeBYOLLM(req.command, agent.provider, req.model, req.circleId, req.senderId);

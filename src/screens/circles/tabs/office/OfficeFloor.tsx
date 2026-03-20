@@ -19,6 +19,8 @@ import {
   MusicVisualizerItem, FigmaBoardItem, EmailHubItem,
   RetroConsoleItem,
   ScrabbleBoardItem,
+  FarmPlotItem,
+  OfficePetItem,
 } from './InteractiveFurniture';
 import { THEME_BACKGROUNDS } from '../../../../lib/themeBackgrounds';
 
@@ -3107,6 +3109,8 @@ function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme, agents?
     case 'trivia_screen': return <TriviaScreenItem item={item} theme={theme} />;
     case 'retro_console': return <RetroConsoleItem item={item} theme={theme} />;
     case 'scrabble_board': return <ScrabbleBoardItem item={item} theme={theme} />;
+    case 'farm_plot': return <FarmPlotItem item={item} theme={theme} />;
+    case 'office_pet': return <OfficePetItem item={item} theme={theme} />;
     case 'crypto_ticker': return <CryptoTickerItem item={item} theme={theme} />;
     case 'github_feed': return <GitHubFeedItem item={item} theme={theme} />;
     case 'calendar_widget': return <CalendarWidgetItem item={item} theme={theme} />;

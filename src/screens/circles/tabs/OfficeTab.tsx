@@ -70,7 +70,6 @@ import {
   BLACKSWAN_AGENT_ID,
 } from '../../../lib/circleOffice';
 import {
-  evaluatePokerHand, blackswanDecide, blackswanRaise, getBlackswanLine, PokerPhase,
   CHESS_INITIAL_BOARD, getChessLegalMoves, applyChessMove, isCheckmate, isStalemate, isInCheck,
   checkConnectFourWin, isConnectFourFull, connectFourAI,
 } from '../../../lib/circleGames';
@@ -122,6 +121,7 @@ import {
 const RetroEmulator = React.lazy(() => import('../../../components/RetroEmulator'));
 const ScrabbleGame = React.lazy(() => import('../../../components/ScrabbleGame'));
 const PhoneMessenger = React.lazy(() => import('../../../components/PhoneMessenger'));
+const PokerGame = React.lazy(() => import('../../../components/poker/PokerGame'));
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -132,9 +132,10 @@ const STORAGE_KEY_APPEARANCES = '@office_appearances';
 const STORAGE_KEY_WHITEBOARD_NOTES = '@office_whiteboard_notes';
 
 // Track whether Supabase profile columns exist (migrations may not be run yet)
-// Once a write fails with 400, stop retrying to avoid console spam
+// Reset each mount — a transient error shouldn't permanently disable sync
 let _profileHasOfficeLayout = true;
 let _profileHasAgentAppearance = true;
+let _profileHasOfficePreferences = true;
 
 export interface AgentStats {
   agentCount: number;
@@ -195,7 +196,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   const [appearances, setAppearances] = useState<Record<string, AgentAppearance>>({});
   const appearancesLoadedRef = useRef(false);
-  const [connectionsCollapsed, setConnectionsCollapsed] = useState(false);
+  const prefsLoadedRef = useRef(false);
   const [editMode, setEditMode] = useState(false);
   const [placingType, setPlacingType] = useState<string | null>(null);
   const [activeCatalogCat, setActiveCatalogCat] = useState<string>('connected');
@@ -256,6 +257,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   // ─── Scrabble state ────────────────────────────────────────────────
   const [scrabbleVisible, setScrabbleVisible] = useState(false);
+  const [pokerVisible, setPokerVisible] = useState(false);
 
   // ─── Phone messenger state ─────────────────────────────────────────
   const [phoneVisible, setPhoneVisible] = useState(false);
@@ -775,6 +777,23 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     return { endpoint: conn.endpoint, token: conn.token };
   }, [connections]);
 
+  // Helper: push partial office preferences to Supabase (merges into existing JSONB)
+  const pushOfficePreferences = useCallback((partial: Record<string, unknown>) => {
+    if (!_profileHasOfficePreferences) return;
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!user) return;
+      supabase.from('profiles').select('office_preferences').eq('id', user.id).single().then(({ data, error }) => {
+        if (error) { _profileHasOfficePreferences = false; return; }
+        const current = (data?.office_preferences || {}) as Record<string, unknown>;
+        const merged = { ...current, ...partial, updatedAt: Date.now() };
+        supabase.from('profiles').update({ office_preferences: merged }).eq('id', user.id).then(
+          ({ error: e2 }) => { if (e2) _profileHasOfficePreferences = false; },
+          () => { _profileHasOfficePreferences = false; },
+        );
+      });
+    }).catch(() => {});
+  }, []);
+
   // ─── Telegram handlers ──────────────────────────────
 
   const handleTelegramConnect = useCallback(async () => {
@@ -807,10 +826,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     setTelegramConnected(true);
     setTelegramConnecting(false);
 
-    storage.setItem(STORAGE_KEY_TELEGRAM, JSON.stringify({
-      botToken: botToken.trim(), chatId: chatId.trim(),
-    })).catch(() => {});
-  }, [telegramConfig]);
+    const tgData = { botToken: botToken.trim(), chatId: chatId.trim() };
+    storage.setItem(STORAGE_KEY_TELEGRAM, JSON.stringify(tgData)).catch(() => {});
+    pushOfficePreferences({ telegramConfig: tgData });
+  }, [telegramConfig, pushOfficePreferences]);
 
   const handleTelegramDisconnect = useCallback(() => {
     if (tgPollerRef.current) { tgPollerRef.current.stop(); tgPollerRef.current = null; }
@@ -834,6 +853,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
     // Tell the auto-connect service which circle we're in (for DB publishing)
     setAutoConnectCircleId(circleId);
+
+    // Reset Supabase column flags each mount — transient errors shouldn't
+    // permanently disable sync for the rest of the session
+    _profileHasOfficeLayout = true;
+    _profileHasAgentAppearance = true;
+    _profileHasOfficePreferences = true;
 
     (async () => {
       // ── Start localStorage reads immediately (don't wait for connections) ──
@@ -970,15 +995,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       try {
         const { data: { user: authUser } } = await supabase.auth.getUser();
         if (authUser) {
-          // Fetch both profile columns in parallel (wrap builders so TS sees Promise)
+          // Fetch all profile columns in parallel (wrap builders so TS sees Promise)
           const layoutP = _profileHasOfficeLayout
             ? supabase.from('profiles').select('office_layout').eq('id', authUser.id).single().then(r => r)
             : Promise.resolve({ data: null, error: null } as any);
           const appearanceP = _profileHasAgentAppearance
             ? supabase.from('profiles').select('agent_appearance').eq('id', authUser.id).single().then(r => r)
             : Promise.resolve({ data: null, error: null } as any);
+          const prefsP = _profileHasOfficePreferences
+            ? supabase.from('profiles').select('office_preferences').eq('id', authUser.id).single().then(r => r)
+            : Promise.resolve({ data: null, error: null } as any);
 
-          const [layoutRes, appearanceRes] = await Promise.all([layoutP, appearanceP]);
+          const [layoutRes, appearanceRes, prefsRes] = await Promise.all([layoutP, appearanceP, prefsP]);
 
           // Merge floors
           if (layoutRes.error) {
@@ -1002,21 +1030,50 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             }
           }
 
-          // Merge appearances
+          // Merge appearances — always call setAppearances so downstream
+          // auto-assignment logic can populate missing agents
           if (appearanceRes.error) {
             _profileHasAgentAppearance = false;
-            if (Object.keys(localAppearances).length > 0) setAppearances(localAppearances);
+            setAppearances(localAppearances);
           } else {
             const remoteApp = appearanceRes.data?.agent_appearance || {};
             setAppearances({ ...localAppearances, ...remoteApp });
           }
+
+          // Merge office preferences (agent names, telegram, whiteboard)
+          if (prefsRes.error) {
+            _profileHasOfficePreferences = false;
+          } else if (prefsRes.data?.office_preferences) {
+            const remote = prefsRes.data.office_preferences as {
+              agentNames?: Record<string, string>;
+              telegramConfig?: { botToken?: string; chatId?: string };
+              whiteboardNotes?: string[];
+            };
+            // Remote agent names override local (more durable)
+            if (remote.agentNames && Object.keys(remote.agentNames).length > 0) {
+              const localNames = namesRaw ? (() => { try { return JSON.parse(namesRaw); } catch { return {}; } })() : {};
+              setAgentNames({ ...localNames, ...remote.agentNames });
+            }
+            // Remote telegram config overrides local
+            if (remote.telegramConfig?.botToken || remote.telegramConfig?.chatId) {
+              setTelegramConfig({
+                botToken: remote.telegramConfig.botToken || '',
+                chatId: remote.telegramConfig.chatId || '',
+              });
+            }
+            // Remote whiteboard notes override local if non-empty
+            if (remote.whiteboardNotes && remote.whiteboardNotes.length > 0) {
+              setWhiteboardNotes(remote.whiteboardNotes);
+            }
+          }
         } else {
-          if (Object.keys(localAppearances).length > 0) setAppearances(localAppearances);
+          setAppearances(localAppearances);
         }
       } catch {
-        if (Object.keys(localAppearances).length > 0) setAppearances(localAppearances);
+        setAppearances(localAppearances);
       }
       appearancesLoadedRef.current = true;
+      prefsLoadedRef.current = true;
 
       // Apply floors
       if (bestFloors.length > 0) setFloors(bestFloors);
@@ -1117,6 +1174,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   if (ccAutoAgents && ccAutoAgents.length > 0) {
     rawAgents.push(...ccAutoAgents);
   }
+  // Merge auto-detected Codex sessions (bridge on localhost:7779)
+  const codexAutoAgents = sessionsRef.current.get('codex-auto') as unknown as OfficeAgent[] | undefined;
+  if (codexAutoAgents && codexAutoAgents.length > 0) {
+    rawAgents.push(...codexAutoAgents);
+  }
+  // Merge auto-detected Gemini CLI sessions (bridge on localhost:7780)
+  const geminiAutoAgents = sessionsRef.current.get('gemini-cli-auto') as unknown as OfficeAgent[] | undefined;
+  if (geminiAutoAgents && geminiAutoAgents.length > 0) {
+    rawAgents.push(...geminiAutoAgents);
+  }
 
   // Merge DB-backed agents that have no corresponding live session
   // This keeps idle/building agents visible as pixel agents even when the bridge disconnects
@@ -1152,7 +1219,20 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       connectionId: 'db-agent',
       connectionName: dbAgent.name,
       providerType: (dbAgent.provider || 'generic-agent') as ProviderType,
+      spirit: dbAgent.spirit ?? undefined,
     });
+  }
+
+  // Enrich live agents with spirit from their CircleOfficeAgent record (matched by name)
+  const spiritByName = new Map(
+    mergedCircleAgents
+      .filter(a => a.spirit)
+      .map(a => [a.name, a.spirit!])
+  );
+  for (const agent of rawAgents) {
+    if (!agent.spirit && spiritByName.has(agent.name)) {
+      agent.spirit = spiritByName.get(agent.name);
+    }
   }
 
   // Apply custom names
@@ -1166,11 +1246,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // Always include the default UC Agent alongside user agents
   const displayAgents = useMemo(() => [DEFAULT_AGENT, ...userAgents], [userAgents]);
 
-  // Resolve appearance — UC Agent gets crab look, user agents use stored appearances
-  const getAppearance = useCallback((agent: OfficeAgent) =>
-    agent.id === DEFAULT_AGENT.id ? (appearances[agent.name] || UC_AGENT_APPEARANCE) : appearances[agent.name],
-    [appearances]
-  );
+  // Resolve appearance — lookup by id first, fall back to name for legacy data
+  const getAppearance = useCallback((agent: OfficeAgent) => {
+    if (agent.id === DEFAULT_AGENT.id) return appearances[agent.id] || appearances[agent.name] || UC_AGENT_APPEARANCE;
+    return appearances[agent.id] || appearances[agent.name];
+  }, [appearances]);
 
   // Auto-assign random outfits to new agents + backfill pets/auras for existing agents
   useEffect(() => {
@@ -1180,11 +1260,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     const auraPool: AgentAppearance['aura'][] = ['fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow', 'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy'];
     const updates: Record<string, AgentAppearance> = {};
     for (const agent of userAgents) {
-      if (!appearances[agent.name]) {
-        updates[agent.name] = generateRandomAppearance();
+      // Check by id first, then fall back to legacy name-based key and migrate
+      const existing = appearances[agent.id] || appearances[agent.name];
+      if (!existing) {
+        updates[agent.id] = generateRandomAppearance();
       } else {
+        // Migrate legacy name-keyed appearance to id-keyed
+        if (!appearances[agent.id] && appearances[agent.name]) {
+          updates[agent.id] = existing;
+        }
         // Backfill: give existing agents a pet/aura if they don't have one
-        const existing = appearances[agent.name];
         let changed = false;
         const patched = { ...existing };
         if (!existing.pet || existing.pet === 'none') {
@@ -1195,13 +1280,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           patched.aura = pick(auraPool);
           changed = true;
         }
-        if (changed) updates[agent.name] = patched;
+        if (changed) updates[agent.id] = patched;
       }
     }
     if (Object.keys(updates).length > 0) {
       setAppearances(prev => ({ ...prev, ...updates }));
     }
-  }, [userAgents.map(a => a.name).join(',')]); // re-run only when agent list changes
+  }, [userAgents.map(a => a.id).join(',')]); // re-run only when agent list changes
 
   // ─── Reward tracking — award points as agent turns accumulate ──────────
   const { points: userPoints } = useUserRewards(userId);
@@ -1375,27 +1460,26 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   // Save appearances when changed — localStorage + Supabase
   useEffect(() => {
-    if (Object.keys(appearances).length > 0) {
-      storage.setItem(STORAGE_KEY_APPEARANCES, JSON.stringify(appearances)).catch(() => {});
-      // Async push to Supabase (skip if column doesn't exist)
-      if (_profileHasAgentAppearance) {
-        supabase.auth.getUser().then(({ data: { user } }) => {
-          if (user) {
-            supabase.from('profiles').update({ agent_appearance: appearances }).eq('id', user.id).then(
-              ({ error }) => { if (error) _profileHasAgentAppearance = false; },
-              () => { _profileHasAgentAppearance = false; },
-            );
-          }
-        }).catch(() => {});
-      }
+    if (!appearancesLoadedRef.current) return; // skip until init is done
+    storage.setItem(STORAGE_KEY_APPEARANCES, JSON.stringify(appearances)).catch(() => {});
+    // Async push to Supabase (skip if column doesn't exist)
+    if (_profileHasAgentAppearance && Object.keys(appearances).length > 0) {
+      supabase.auth.getUser().then(({ data: { user } }) => {
+        if (user) {
+          supabase.from('profiles').update({ agent_appearance: appearances }).eq('id', user.id).then(
+            ({ error }) => { if (error) _profileHasAgentAppearance = false; },
+            () => { _profileHasAgentAppearance = false; },
+          );
+        }
+      }).catch(() => {});
     }
   }, [appearances]);
 
-  // Save whiteboard notes when changed
+  // Save whiteboard notes when changed — localStorage + Supabase
   useEffect(() => {
-    if (whiteboardNotes.length > 0) {
-      storage.setItem(STORAGE_KEY_WHITEBOARD_NOTES, JSON.stringify(whiteboardNotes)).catch(() => {});
-    }
+    if (!prefsLoadedRef.current) return;
+    storage.setItem(STORAGE_KEY_WHITEBOARD_NOTES, JSON.stringify(whiteboardNotes)).catch(() => {});
+    pushOfficePreferences({ whiteboardNotes });
   }, [whiteboardNotes]);
 
   // Fetch cron jobs from all connected OpenClaw instances
@@ -2144,80 +2228,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       // ─── Game Items ──────────────────────────────────────────────────
 
       case 'poker_table': {
-        const phase = item.pokerPhase || 'waiting';
-        // If waiting for player action, tap does nothing — action buttons handle it
-        if (item.pokerPlayerTurn) return;
-
-        if (phase === 'waiting') {
-          // Deal new hand
-          const bsEnabled = item.pokerBlackswanEnabled ?? true;
-          const blinds = item.pokerBlinds || 25;
-          const usedCards = new Set<string>();
-          const suits = ['♠', '♥', '♦', '♣'];
-          const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
-          const randomCard = () => {
-            let card: string;
-            do { card = `${ranks[Math.floor(Math.random() * ranks.length)]}${suits[Math.floor(Math.random() * suits.length)]}`; }
-            while (usedCards.has(card));
-            usedCards.add(card);
-            return card;
-          };
-          const playerHand = `${randomCard()} ${randomCard()}`;
-          const bsHand = bsEnabled ? `${randomCard()} ${randomCard()}` : '';
-          const smallBlind = blinds;
-          const bigBlind = blinds * 2;
-          const isDealer = (item.pokerDealer || 'player') === 'player';
-          // Dealer posts small blind, non-dealer posts big blind
-          const playerPost = isDealer ? smallBlind : bigBlind;
-          const bsPost = bsEnabled ? (isDealer ? bigBlind : smallBlind) : 0;
-          const playerChips = (item.pokerChips ?? 2000) - playerPost;
-          const bsChips = bsEnabled ? (item.pokerBlackswanChips ?? 2000) - bsPost : (item.pokerBlackswanChips ?? 2000);
-          const potTotal = playerPost + bsPost;
-          const bsLine = bsEnabled ? getBlackswanLine('deal') : '';
-
-          updateFurnitureField({
-            pokerPhase: 'deal',
-            pokerHand: playerHand,
-            pokerPot: potTotal,
-            pokerChips: Math.max(0, playerChips),
-            pokerBlackswanHand: bsHand,
-            pokerBlackswanChips: Math.max(0, bsChips),
-            pokerBlackswanFolded: false,
-            pokerBlackswanLine: bsLine,
-            pokerCommunity: '',
-            pokerAction: '',
-            pokerHandRank: '',
-            pokerBsHandRank: '',
-            pokerHandsPlayed: (item.pokerHandsPlayed || 0) + 1,
-            pokerBlinds: blinds,
-            pokerPlayerTurn: true,
-            pokerCurrentBet: bigBlind,
-            pokerPlayerBet: playerPost,
-            pokerWinnerName: '',
-          });
-          addFloorEffect('pulse');
-        } else if (phase === 'showdown') {
-          // Reset round — toggle dealer, always enable BlackSwan
-          updateFurnitureField({
-            pokerPhase: 'waiting',
-            pokerHand: '',
-            pokerPot: 0,
-            pokerBetAmount: 0,
-            pokerBlackswanFolded: false,
-            pokerBlackswanHand: '',
-            pokerBlackswanLine: '',
-            pokerWinnerName: '',
-            pokerCommunity: '',
-            pokerAction: '',
-            pokerHandRank: '',
-            pokerBsHandRank: '',
-            pokerBlackswanEnabled: true,
-            pokerDealer: (item.pokerDealer === 'player') ? 'blackswan' : 'player',
-            pokerPlayerTurn: false,
-            pokerCurrentBet: 0,
-            pokerPlayerBet: 0,
-          });
-        }
+        setPokerVisible(true);
         break;
       }
 
@@ -2631,197 +2642,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     }
   }, [floors, currentFloorId, interactInputId, currentUserId, currentUserName, circleId, displayAgents]);
 
-  // ─── Poker player action handler ────────────────────────────────────────
-  const handlePokerAction = useCallback((id: string, action: string, amount?: number) => {
-    const currentFloor = floors.find(f => f.id === currentFloorId);
-    const item = currentFloor?.furniture.find(f => f.id === id);
-    if (!item || !item.pokerPlayerTurn) return;
-
-    const updateFurnitureField = (fields: Partial<FurnitureItem>) => {
-      setFloors(prev => prev.map(f =>
-        f.id === currentFloorId ? {
-          ...f,
-          furniture: f.furniture.map(fi => fi.id === id ? { ...fi, ...fields } : fi),
-        } : f
-      ));
-    };
-    const addFloorEffect = (effectType: string) => {
-      const eff = { id: `eff_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, type: effectType, x: item.x, y: item.y, createdAt: Date.now() };
-      setFloorEffects(prev => [...prev, eff]);
-    };
-
-    const phase = (item.pokerPhase || 'deal') as PokerPhase;
-    const bsEnabled = item.pokerBlackswanEnabled ?? true;
-    const blinds = item.pokerBlinds || 25;
-    const currentBet = item.pokerCurrentBet || blinds * 2;
-    const playerBetSoFar = item.pokerPlayerBet || 0;
-    let playerChips = item.pokerChips ?? 2000;
-    let pot = item.pokerPot || 0;
-
-    // Deck helper
-    const usedCards = new Set<string>();
-    const suits = ['♠', '♥', '♦', '♣'];
-    const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
-    const randomCard = () => {
-      let card: string;
-      do { card = `${ranks[Math.floor(Math.random() * ranks.length)]}${suits[Math.floor(Math.random() * suits.length)]}`; }
-      while (usedCards.has(card));
-      usedCards.add(card);
-      return card;
-    };
-    // Mark used cards
-    for (const c of (item.pokerHand || '').split(' ').filter(Boolean)) usedCards.add(c);
-    for (const c of (item.pokerBlackswanHand || '').split(' ').filter(Boolean)) usedCards.add(c);
-    for (const c of (item.pokerCommunity || '').split(' ').filter(Boolean)) usedCards.add(c);
-
-    // ── Handle player fold ──
-    if (action === 'fold') {
-      const bsLine = bsEnabled ? getBlackswanLine('win') : '';
-      updateFurnitureField({
-        pokerPhase: 'showdown',
-        pokerPlayerTurn: false,
-        pokerAction: 'FOLD',
-        pokerWinnerName: 'BlackSwan',
-        pokerBlackswanLine: bsLine,
-        pokerHandRank: 'Folded',
-        pokerBsHandRank: '',
-        pokerBlackswanChips: (item.pokerBlackswanChips ?? 2000) + pot,
-        pokerHandsWon: item.pokerHandsWon || 0,
-      });
-      return;
-    }
-
-    // ── Calculate player bet ──
-    let playerBet = 0;
-    let playerAction = '';
-    if (action === 'allin') {
-      playerBet = playerChips;
-      playerChips = 0;
-      playerAction = 'ALL-IN';
-    } else if (action === 'raise') {
-      const raiseAmount = amount || Math.max(currentBet * 2, blinds * 4);
-      const totalToCall = Math.max(0, currentBet - playerBetSoFar);
-      playerBet = Math.min(totalToCall + raiseAmount, playerChips);
-      playerChips -= playerBet;
-      playerAction = 'RAISE';
-    } else if (action === 'call') {
-      const toCall = Math.max(0, currentBet - playerBetSoFar);
-      playerBet = Math.min(toCall, playerChips);
-      playerChips -= playerBet;
-      playerAction = toCall === 0 ? 'CHECK' : 'CALL';
-    } else if (action === 'check') {
-      playerBet = 0;
-      playerAction = 'CHECK';
-    }
-    pot += playerBet;
-
-    // ── BlackSwan responds ──
-    let bsFolded = item.pokerBlackswanFolded || false;
-    let bsChips = item.pokerBlackswanChips ?? 2000;
-    let bsLine = '';
-    let bsBet = 0;
-    let bsAction = '';
-    const communityCards = (item.pokerCommunity || '').split(' ').filter(Boolean);
-
-    if (bsEnabled && !bsFolded) {
-      const bsHand = item.pokerBlackswanHand || '';
-      const bsCallAmount = action === 'raise' || action === 'allin'
-        ? Math.max(0, playerBetSoFar + playerBet - (item.pokerCurrentBet || 0))
-        : 0;
-      const decision = blackswanDecide(bsHand, communityCards, pot, bsCallAmount || currentBet, bsChips, phase);
-      if (decision === 'fold') {
-        bsFolded = true;
-        bsLine = getBlackswanLine('fold');
-        bsAction = 'FOLD';
-        // BlackSwan folds — player wins pot
-        const bsWinLine = getBlackswanLine('fold');
-        updateFurnitureField({
-          pokerPhase: 'showdown',
-          pokerPlayerTurn: false,
-          pokerAction: playerAction,
-          pokerPot: pot,
-          pokerChips: playerChips + pot,
-          pokerBlackswanChips: bsChips,
-          pokerBlackswanFolded: true,
-          pokerBlackswanLine: bsWinLine,
-          pokerWinnerName: 'YOU',
-          pokerHandRank: '',
-          pokerBsHandRank: 'Folded',
-          pokerHandsWon: (item.pokerHandsWon || 0) + 1,
-          pokerPlayerBet: 0,
-          pokerCurrentBet: 0,
-        });
-        addFloorEffect('fireworks');
-        return;
-      } else if (decision === 'raise') {
-        const raiseAmt = blackswanRaise(pot, bsChips);
-        bsBet = Math.min(bsCallAmount + raiseAmt, bsChips);
-        bsChips -= bsBet;
-        bsLine = getBlackswanLine('raise');
-        bsAction = 'RAISE';
-      } else {
-        bsBet = Math.min(bsCallAmount || currentBet, bsChips);
-        bsChips -= bsBet;
-        bsAction = 'CALL';
-      }
-      pot += bsBet;
-    }
-
-    // ── Determine next phase ──
-    const phases: PokerPhase[] = ['deal', 'flop', 'turn', 'river', 'showdown'];
-    const phaseIdx = phases.indexOf(phase);
-    const nextPhase = phases[Math.min(phaseIdx + 1, phases.length - 1)];
-
-    if (nextPhase === 'showdown') {
-      // Final evaluation
-      const allCommunity = communityCards;
-      const playerCards = (item.pokerHand || '').split(' ').filter(Boolean);
-      const bsCards = (item.pokerBlackswanHand || '').split(' ').filter(Boolean);
-      const playerEval = evaluatePokerHand([...playerCards, ...allCommunity]);
-      const bsEval = bsEnabled && !bsFolded
-        ? evaluatePokerHand([...bsCards, ...allCommunity])
-        : { rank: -1, name: 'Folded', score: -1 };
-      const playerWins = bsFolded || playerEval.score >= bsEval.score;
-      const endLine = bsEnabled ? getBlackswanLine(playerWins ? 'lose' : 'win') : '';
-
-      updateFurnitureField({
-        pokerPhase: 'showdown',
-        pokerPlayerTurn: false,
-        pokerPot: pot,
-        pokerChips: playerChips + (playerWins ? pot : 0),
-        pokerBlackswanChips: bsChips + (playerWins ? 0 : pot),
-        pokerBlackswanFolded: bsFolded,
-        pokerBlackswanLine: endLine,
-        pokerWinnerName: playerWins ? 'YOU' : 'BlackSwan',
-        pokerHandRank: playerEval.name,
-        pokerBsHandRank: bsEval.name,
-        pokerAction: playerWins ? 'WIN' : 'LOSE',
-        pokerHandsWon: (item.pokerHandsWon || 0) + (playerWins ? 1 : 0),
-        pokerPlayerBet: 0,
-        pokerCurrentBet: 0,
-      });
-      if (playerWins) addFloorEffect('fireworks');
-    } else {
-      // Deal community cards for next phase
-      const newCount = nextPhase === 'flop' ? 3 : 1;
-      const newCards = Array.from({ length: newCount }, () => randomCard());
-      const allCommunity = [...communityCards, ...newCards].join(' ');
-
-      updateFurnitureField({
-        pokerPhase: nextPhase,
-        pokerPlayerTurn: true,
-        pokerPot: pot,
-        pokerChips: playerChips,
-        pokerBlackswanChips: bsChips,
-        pokerBlackswanFolded: bsFolded,
-        pokerBlackswanLine: bsLine || bsAction,
-        pokerCommunity: allCommunity,
-        pokerAction: `${playerAction}${bsAction ? ' / ' + bsAction : ''}`,
-        pokerCurrentBet: 0,
-        pokerPlayerBet: 0,
-      });
-    }
-  }, [floors, currentFloorId]);
+  // ─── Poker player action handler (legacy — game now runs in fullscreen modal) ──
+  const handlePokerAction = useCallback((_id: string, _action: string, _amount?: number) => {
+    // Poker actions now handled by PokerGame component
+  }, []);
 
   const handleInteractSubmit = useCallback(() => {
     if (!interactInputId || !interactInputText.trim() || !currentUserId || !currentUserName) return;
@@ -2871,12 +2695,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     const updated = { ...agentNames, [agentId]: newName };
     setAgentNames(updated);
     storage.setItem(STORAGE_KEY_AGENT_NAMES, JSON.stringify(updated)).catch(() => {});
-    
+    pushOfficePreferences({ agentNames: updated });
+
     // Update selected agent if it's the one being renamed
     if (selectedAgent?.id === agentId) {
       setSelectedAgent(prev => prev ? { ...prev, name: newName } : null);
     }
-  }, [agentNames, selectedAgent]);
+  }, [agentNames, selectedAgent, pushOfficePreferences]);
 
   // ─── Floor action handlers ──────────────────────────────
 
@@ -2969,75 +2794,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   return (
     <View style={styles.container}>
-      {/* Title bar */}
-      <View style={styles.titleBar}>
-        <View style={styles.titleInner}>
-          {/* Edit mode toggle */}
-          <Pressable
-            onPress={() => { setEditMode(!editMode); setPlacingType(null); setSelectedFurnitureId(null); }}
-            style={[styles.modeBtn, editMode && styles.modeBtnActive,
-              Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          >
-            <Text style={[styles.modeBtnText, editMode && styles.modeBtnTextActive]}>
-              {editMode ? '✓' : '🔧'}
-            </Text>
-          </Pressable>
-          {!isDesktop ? (
-            <View style={styles.titleCenterMobile}>
-              <Text style={{ fontSize: 14 }}>🏢</Text>
-              {connectedConns.map(c => (
-                <View key={c.id} style={[styles.connMiniDot, { backgroundColor: PROVIDER_META[c.provider].color }]} />
-              ))}
-              <Text style={styles.titleStatText}>
-                {anyConnected ? `${userAgents.length} live` : 'OFFICE'}
-              </Text>
-              {telegramConnected && <Text style={styles.tgBadge}>✈️</Text>}
-            </View>
-          ) : (
-            <>
-              <View style={styles.titleCenter}>
-                <Text style={{ fontSize: 16 }}>🏢</Text>
-                <Text style={styles.titleText}>THE OFFICE</Text>
-              </View>
-              <View style={styles.titleRight}>
-                {telegramConnected && (
-                  <>
-                    <Text style={styles.tgBadge}>✈️</Text>
-                    <Text style={styles.titleStatText}>{telegramMessages.length} msgs</Text>
-                  </>
-                )}
-                {connectedConns.map(c => (
-                  <View key={c.id} style={[styles.connMiniDot, { backgroundColor: PROVIDER_META[c.provider].color }]} />
-                ))}
-                <Text style={styles.titleStatText}>
-                  {connections.length > 0 ? `${connectedCount}/${connections.length} connected` : '0 connected'}
-                </Text>
-                <Text style={styles.titleStatText}>
-                  {userAgents.length > 0 ? `${userAgents.length} agents` : ''}
-                </Text>
-              </View>
-            </>
-          )}
-          {/* Reconnect All button (show when there are disconnected enabled connections) */}
-          {connections.some(c => c.enabled && c.status !== 'connected' && c.status !== 'connecting') && (
-            <Pressable
-              onPress={handleReconnectAll}
-              style={[styles.reconnectBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-            >
-              <Text style={styles.reconnectBtnText}>🔌</Text>
-            </Pressable>
-          )}
-          <Pressable onPress={() => setShowRewards(true)} style={[styles.iconBtn,
-            Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-            <Text style={styles.iconBtnText}>🏆</Text>
-          </Pressable>
-          <Pressable onPress={() => setShowCustomize(true)} style={[styles.iconBtn,
-            Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-            <Text style={styles.iconBtnText}>{'⚙️'}</Text>
-          </Pressable>
-        </View>
-      </View>
-
       {/* HITL Approval Banner */}
       <HitlApprovalBanner approvals={pendingApprovals} circleId={circleId} />
 
@@ -3050,10 +2806,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         />
       )}
 
-      {/* Floor Selector */}
+      {/* Combined floor selector + action bar */}
       {viewMode === 'office' && (
         <View style={styles.floorBar}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.floorList}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.floorList} style={{ flex: 1 }}>
             {[...floors].sort((a, b) => a.order - b.order).map((floor) => {
               const floorAgentCount = displayAgents.filter(a => floor.agentIds?.includes(a.id)).length;
               const isActive = floor.id === currentFloorId;
@@ -3077,7 +2833,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                     )}
                     <View style={[styles.floorThemeDot, { backgroundColor: resolveTheme(floor.themeId).accentGlow }]} />
                   </Pressable>
-                  {/* Delete button — only show in edit mode and when >1 floor */}
                   {editMode && floors.length > 1 && (
                     <Pressable
                       onPress={() => handleDeleteFloor(floor.id)}
@@ -3096,6 +2851,41 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               <Text style={styles.floorAddBtnText}>+ FLOOR</Text>
             </Pressable>
           </ScrollView>
+          <View style={styles.barActions}>
+            {connections.some(c => c.enabled && c.status !== 'connected' && c.status !== 'connecting') && (
+              <Pressable
+                onPress={handleReconnectAll}
+                style={[styles.toolbarBtn, styles.reconnectBtnStyle, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              >
+                <Text style={styles.toolbarBtnIcon}>🔌</Text>
+                <Text style={[styles.toolbarBtnText, { color: '#6366f1' }]}>Reconnect</Text>
+              </Pressable>
+            )}
+            <Pressable
+              onPress={() => { setEditMode(!editMode); setPlacingType(null); setSelectedFurnitureId(null); }}
+              style={[editMode ? [styles.toolbarBtn, styles.toolbarBtnActiveGreen] : styles.toolbarBtn,
+                Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              {editMode ? (
+                <Text style={[styles.toolbarBtnText, { color: '#22c55e' }]}>✓ Done</Text>
+              ) : (
+                <>
+                  <Text style={styles.toolbarBtnIcon}>🪑</Text>
+                  <Text style={styles.toolbarBtnText}>Add Items</Text>
+                </>
+              )}
+            </Pressable>
+            <Pressable onPress={() => setShowRewards(true)} style={[styles.toolbarBtn,
+              Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+              <Text style={styles.toolbarBtnIcon}>🏆</Text>
+              <Text style={styles.toolbarBtnText}>Achievements</Text>
+            </Pressable>
+            <Pressable onPress={() => setShowCustomize(true)} style={[styles.toolbarBtn,
+              Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+              <Text style={styles.toolbarBtnIcon}>🔧</Text>
+              <Text style={styles.toolbarBtnText}>Customize</Text>
+            </Pressable>
+          </View>
         </View>
       )}
 
@@ -3223,54 +3013,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </View>
       )}
 
-      {/* Connections Bar - collapsible */}
-      {connections.length > 0 && viewMode === 'office' && (
-        <View style={styles.connectionsBar}>
-          <Pressable onPress={() => setConnectionsCollapsed(!connectionsCollapsed)} style={styles.connectionsToggle}>
-            <Text style={styles.connectionsToggleText}>{connectionsCollapsed ? '▶' : '▼'} {connections.filter(c => c.status === 'connected').length}/{connections.length}</Text>
-          </Pressable>
-          {!connectionsCollapsed && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.connectionsBarInner}>
-            {connections.map(conn => {
-              const isLocal = conn.endpoint.includes('localhost') || conn.endpoint.includes('127.0.0.1');
-              const isProduction = typeof window !== 'undefined' && !window.location.hostname.includes('localhost');
-              const skipped = isProduction && isLocal;
-              const statusColor = conn.status === 'connected' ? '#22c55e'
-                : conn.status === 'connecting' ? '#eab308'
-                : conn.status === 'error' ? '#ef4444'
-                : skipped ? '#f59e0b'
-                : '#6b7280';
-              const statusLabel = skipped ? 'local only'
-                : conn.status === 'connected' ? `${conn.sessionCount ?? 0} sessions`
-                : conn.status === 'connecting' ? 'connecting...'
-                : conn.status === 'error' ? 'error'
-                : 'offline';
-              return (
-                <Pressable
-                  key={conn.id}
-                  onPress={() => {
-                    if (skipped || conn.status === 'disconnected' || conn.status === 'error') {
-                      setShowCustomize(true);
-                    }
-                  }}
-                  style={[styles.connectionChip, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                >
-                  <View style={[styles.connectionChipDot, { backgroundColor: PROVIDER_META[conn.provider].color }]} />
-                  <View style={[styles.connectionChipStatus, { backgroundColor: statusColor }]} />
-                  <Text style={styles.connectionChipName} numberOfLines={1}>{conn.name}</Text>
-                  <Text style={[styles.connectionChipLabel, { color: statusColor }]}>{statusLabel}</Text>
-                  {skipped && <Text style={styles.connectionChipLocal}>🏠</Text>}
-                </Pressable>
-              );
-            })}
-            <Pressable
-              onPress={() => setShowCustomize(true)}
-              style={[styles.connectionAddChip, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-            >
-              <Text style={styles.connectionAddChipText}>+</Text>
-            </Pressable>
-          </ScrollView>}
-        </View>
-      )}
 
       {/* Main Content — Office Floor View */}
       <View style={styles.mainContent}>
@@ -3400,7 +3142,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                           <View style={[styles.mobileCardStatus, { backgroundColor: statusColor }]} />
                           <Text style={[styles.mobileCardStatusText, { color: statusColor }]}>{agent.status}</Text>
                         </View>
-                        <Text style={styles.mobileCardRole}>{agent.role} · {PROVIDER_META[agent.providerType].icon} {agent.connectionName}</Text>
+                        <Text style={styles.mobileCardRole}>{agent.role} · {PROVIDER_META[agent.providerType]?.icon || '⚡'} {agent.connectionName}</Text>
                         <Text style={styles.mobileCardModel}>{agent.model}</Text>
                       </View>
                       <View style={styles.mobileCardRight}>
@@ -3626,7 +3368,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                         selectedAgent?.id === agent.id && { backgroundColor: agent.color + '20', borderColor: agent.color + '60' },
                         Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                     >
-                      <View style={[styles.quickProviderDot, { backgroundColor: PROVIDER_META[agent.providerType].color }]} />
+                      <View style={[styles.quickProviderDot, { backgroundColor: PROVIDER_META[agent.providerType]?.color || '#6b7280' }]} />
                       <View style={[styles.quickDot, {
                         backgroundColor: agent.status === 'active' ? '#22c55e' : agent.status === 'idle' ? '#eab308' : agent.status === 'error' ? '#ef4444' : '#6b7280',
                       }]} />
@@ -4151,6 +3893,30 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                 fi.scrabbleScore2 = state.score2;
                 fi.scrabbleTurn = state.turn;
                 fi.scrabbleWinner = state.gameOver ? state.winner : undefined;
+              }
+            }}
+          />
+        </React.Suspense>
+      )}
+
+      {/* ─── Poker Game Modal (lazy) ──────────────────────────────────── */}
+      {pokerVisible && (
+        <React.Suspense fallback={null}>
+          <PokerGame
+            visible={pokerVisible}
+            onClose={() => setPokerVisible(false)}
+            agents={displayAgents}
+            circleId={circleId}
+            currentUserId={currentUserId || ''}
+            currentUserName={currentUserName || ''}
+            onStateChange={(summary) => {
+              const fl = floors.find((f: OfficeFloor) => f.id === currentFloorId);
+              const fi = fl?.furniture.find((f: FurnitureItem) => f.type === 'poker_table');
+              if (fi) {
+                fi.pokerChips = summary.playerChips;
+                fi.pokerPhase = summary.phase;
+                fi.pokerHandsWon = summary.handsWon;
+                fi.pokerHandsPlayed = summary.handsPlayed;
               }
             }}
           />
@@ -5211,28 +4977,6 @@ const svcStyles = StyleSheet.create({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#050508' },
-  titleBar: {
-    alignItems: 'center', paddingHorizontal: 8, paddingVertical: 2,
-    borderBottomWidth: 1, borderBottomColor: '#2a2a2a',
-  },
-  titleInner: { flexDirection: 'row', alignItems: 'center', width: '100%', gap: 3 },
-  titleCenter: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
-  titleCenterMobile: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4 },
-  titleRight: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  titleIcon: { fontSize: 12 },
-  titleText: { fontSize: 10, fontWeight: '900', color: '#888', fontFamily: 'monospace', letterSpacing: 2 },
-  onlineIndicator: { width: 5, height: 5, borderRadius: 2.5 },
-  connMiniDot: { width: 4, height: 4, borderRadius: 2 },
-  titleStatText: { fontSize: 10, color: '#888', fontFamily: 'monospace' },
-  modeBtn: {
-    paddingHorizontal: 6, paddingVertical: 4, borderRadius: 6,
-    borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
-    minWidth: 28, minHeight: 28, alignItems: 'center' as any, justifyContent: 'center' as any,
-    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
-  },
-  modeBtnActive: { borderColor: '#22c55e40', backgroundColor: '#22c55e15' },
-  modeBtnText: { fontSize: 10, color: '#666', fontFamily: 'monospace', fontWeight: '700' },
-  modeBtnTextActive: { color: '#22c55e' },
   tagsActionBtn: {
     flex: 1,
     backgroundColor: '#00FF9C18',
@@ -5254,30 +4998,35 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   tagsActionBtnTextSecondary: { color: '#6366f1' },
-  iconBtn: {
-    width: 30, height: 30, borderRadius: 7, backgroundColor: '#222222',
-    borderWidth: 1, borderColor: '#2a2a2a', alignItems: 'center', justifyContent: 'center', marginLeft: 3,
+  toolbarBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 8, paddingVertical: 5, borderRadius: 6,
+    backgroundColor: '#181818', borderWidth: 1, borderColor: '#2a2a2a',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  iconBtnText: { fontSize: 14 },
-  reconnectBtn: {
-    width: 30, height: 30, borderRadius: 7, backgroundColor: '#6366f115',
-    borderWidth: 1, borderColor: '#6366f140', alignItems: 'center', justifyContent: 'center', marginLeft: 3,
-    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  toolbarBtnActiveGreen: {
+    borderColor: '#22c55e40', backgroundColor: '#22c55e15',
   },
-  reconnectBtnText: { fontSize: 13 },
-  tgBadge: { fontSize: 9, marginRight: 1 },
+  toolbarBtnIcon: { fontSize: 13 },
+  toolbarBtnText: { fontSize: 11, fontWeight: '700', color: '#888', fontFamily: 'monospace' },
+  reconnectBtnStyle: {
+    backgroundColor: '#6366f110', borderColor: '#6366f130',
+  },
+  tgBadge: { fontSize: 7, marginRight: 1 },
 
-  // Floor selector
+  // Combined floor + actions bar
   floorBar: {
-    paddingHorizontal: 8, paddingVertical: 2,
-    borderBottomWidth: 1, borderBottomColor: '#2a2a2a', backgroundColor: '#08080d',
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 8, paddingVertical: 5,
+    borderBottomWidth: 1, borderBottomColor: '#1a1a1a', backgroundColor: '#08080d',
+    gap: 8,
   },
   floorList: { gap: 4, flexDirection: 'row', alignItems: 'center' },
+  barActions: { flexDirection: 'row', alignItems: 'center', gap: 5, flexShrink: 0 },
   floorChip: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 8, paddingVertical: 3,
-    borderRadius: 6, borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
+    paddingHorizontal: 8, paddingVertical: 4,
+    borderRadius: 5, borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
   },
   floorChipActive: {
     borderColor: '#6366f160', backgroundColor: '#6366f115',
@@ -5289,7 +5038,7 @@ const styles = StyleSheet.create({
     color: '#fff', fontWeight: '700',
   },
   floorThemeDot: {
-    width: 6, height: 6, borderRadius: 3,
+    width: 7, height: 7, borderRadius: 4,
   },
   floorAgentBadge: {
     backgroundColor: '#22c55e20',
@@ -5301,17 +5050,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   floorAgentBadgeText: {
-    fontSize: 9,
+    fontSize: 10,
     fontWeight: '700',
     color: '#22c55e',
     fontFamily: 'monospace',
   },
   floorAddBtn: {
-    paddingHorizontal: 12, paddingVertical: 6,
-    borderRadius: 8, borderWidth: 1, borderColor: '#22c55e40', backgroundColor: '#22c55e10',
+    paddingHorizontal: 12, paddingVertical: 5,
+    borderRadius: 6, borderWidth: 1, borderColor: '#22c55e40', backgroundColor: '#22c55e10',
   },
   floorAddBtnText: {
-    fontSize: 9, color: '#22c55e', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1,
+    fontSize: 11, color: '#22c55e', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1,
   },
 
   // Connections bar
@@ -5341,10 +5090,10 @@ const styles = StyleSheet.create({
   connectionAddChipText: { fontSize: 14, color: '#22c55e', fontWeight: '700' },
 
   editToolbar: {
-    paddingHorizontal: 12, paddingVertical: 10,
-    borderBottomWidth: 1, borderBottomColor: '#2a2a2a', backgroundColor: '#0a0a12',
+    paddingHorizontal: 8, paddingVertical: 4,
+    borderBottomWidth: 1, borderBottomColor: '#1a1a1a', backgroundColor: '#0a0a12',
   },
-  editLabel: { fontSize: 10, color: '#888', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1, marginBottom: 8 },
+  editLabel: { fontSize: 8, color: '#888', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1, marginBottom: 4 },
   editItems: { gap: 8, flexDirection: 'row', paddingRight: 12 },
   editItem: {
     alignItems: 'center', justifyContent: 'center',

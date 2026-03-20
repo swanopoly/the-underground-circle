@@ -30,7 +30,7 @@ import {
 } from '../../../../services/customThemes';
 import {
   SoulTemplate, SoulCategory, SOUL_CATEGORIES, SOUL_TEMPLATES,
-  getTemplatesByCategory, detectTemplate, findTemplate,
+  detectTemplate, findTemplate,
 } from '../../../../lib/soulTemplates';
 import { AGENT_SPIRITS, SPIRIT_CATEGORIES, getSpiritById } from '../../../../lib/agentSpirits';
 import { updateAgentSpirit } from '../../../../lib/circleOffice';
@@ -195,7 +195,7 @@ export default function CustomizePanel({
   const isWide = screenWidth > 768;
   const isOwner = userEmail === OWNER_EMAIL;
   const [tab, setTab] = useState<Tab>('theme');
-  const [selectedAgentId, setSelectedAgentId] = useState(agents[0]?.name || '');
+  const [selectedAgentId, setSelectedAgentId] = useState(agents[0]?.id || '');
 
   // Custom souls state
   const [customSouls, setCustomSouls] = useState<CustomSoul[]>([]);
@@ -226,7 +226,7 @@ export default function CustomizePanel({
   const [personalitySaving, setPersonalitySaving] = useState(false);
   const [personalityStatus, setPersonalityStatus] = useState('');
   const [personalityLoaded, setPersonalityLoaded] = useState(false);
-  const [soulCategory, setSoulCategory] = useState<SoulCategory>('role');
+  const [soulCategory, setSoulCategory] = useState<SoulCategory>('personality');
   const [showSoulTemplates, setShowSoulTemplates] = useState(true);
 
   // Agent spirit state (synced with AgentPanel via DB)
@@ -238,12 +238,14 @@ export default function CustomizePanel({
   useEffect(() => {
     if (tab !== 'agents' || !circleId || !selectedAgentId) return;
     if (spiritLoaded === selectedAgentId) return;
+    const agentName = selectedAgent?.name;
+    if (!agentName) return;
     (async () => {
       const { data } = await supabase
         .from('circle_office_agents')
         .select('id, spirit, spirit_emoji')
         .eq('circle_id', circleId)
-        .ilike('name', selectedAgentId)
+        .ilike('name', agentName)
         .maybeSingle();
       if (data) {
         setAgentDbId(data.id);
@@ -498,7 +500,7 @@ export default function CustomizePanel({
   };
 
 
-  const selectedAgent = agents.find(a => a.name === selectedAgentId);
+  const selectedAgent = agents.find(a => a.id === selectedAgentId);
   const currentAppearance = visible ? (appearances[selectedAgentId] || {
     ...DEFAULT_APPEARANCE,
     shirtColor: selectedAgent?.color || '#6366f1',
@@ -812,10 +814,10 @@ export default function CustomizePanel({
                 {agents.map(agent => (
                   <Pressable
                     key={agent.id}
-                    onPress={() => { setSelectedAgentId(agent.name); setSpiritLoaded(null); }}
-                    style={[styles.agentChip, selectedAgentId === agent.name && { borderColor: agent.color, backgroundColor: agent.color + '15' }]}
+                    onPress={() => { setSelectedAgentId(agent.id); setSpiritLoaded(null); }}
+                    style={[styles.agentChip, selectedAgentId === agent.id && { borderColor: agent.color, backgroundColor: agent.color + '15' }]}
                   >
-                    <Text style={[styles.agentChipText, selectedAgentId === agent.name && { color: agent.color }]}>
+                    <Text style={[styles.agentChipText, selectedAgentId === agent.id && { color: agent.color }]}>
                       {agent.name}
                     </Text>
                   </Pressable>
@@ -1080,7 +1082,7 @@ export default function CustomizePanel({
               {/* Agent Spirit — synced with AgentPanel popup */}
               <Text style={[styles.sectionTitle, { marginTop: 16 }]}>AGENT SPIRIT</Text>
               <Text style={styles.connectionHint}>
-                Assign a specialty that shapes how this agent thinks and responds. Synced with the agent popup.
+                Technical expertise — what the agent knows. Defines its domain knowledge and reasoning approach.
               </Text>
 
               {/* Current spirit badge */}
@@ -1152,7 +1154,7 @@ export default function CustomizePanel({
               {/* Agent Personality / SOUL.md Editor */}
               <Text style={[styles.sectionTitle, { marginTop: 16 }]}>AGENT SOUL</Text>
               <Text style={styles.connectionHint}>
-                Pick a template or write your own. This personality is prepended to the system prompt for all LLM calls.
+                Communication style — how the agent talks. Pick a personality or write your own. Combined with the Spirit above for every LLM call.
               </Text>
 
               {/* Template browser toggle */}
@@ -1175,33 +1177,11 @@ export default function CustomizePanel({
 
               {showSoulTemplates && (
                 <View style={styles.soulTemplateSection}>
-                  {/* Category tabs */}
-                  <View style={styles.soulCategoryRow}>
-                    {SOUL_CATEGORIES.map(cat => (
-                      <Pressable
-                        key={cat.key}
-                        onPress={() => setSoulCategory(cat.key)}
-                        style={[
-                          styles.soulCategoryTab,
-                          soulCategory === cat.key && { borderColor: cat.color, backgroundColor: cat.color + '15' },
-                          Platform.OS === 'web' && { cursor: 'pointer' } as any,
-                        ]}
-                      >
-                        <Text style={[
-                          styles.soulCategoryText,
-                          soulCategory === cat.key && { color: cat.color },
-                        ]}>
-                          {cat.icon} {cat.label}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
-
-                  {/* Template grid */}
+                  {/* Personality templates — no category tabs needed (spirits handle expertise) */}
                   <View style={styles.soulGrid}>
-                    {getTemplatesByCategory(soulCategory).map(tmpl => {
+                    {SOUL_TEMPLATES.map(tmpl => {
                       const isActive = detectTemplate(personalityText)?.id === tmpl.id;
-                      const catColor = SOUL_CATEGORIES.find(c => c.key === tmpl.category)?.color || '#6366f1';
+                      const catColor = '#ec4899';
                       return (
                         <Pressable
                           key={tmpl.id}
@@ -1277,7 +1257,7 @@ export default function CustomizePanel({
                     <View>
                       <Text style={styles.sectionTitle}>SOUL WORKSHOP</Text>
                       <Text style={styles.connectionHint}>
-                        Craft custom agent personalities. Duplicate a template or build from scratch.
+                        Craft communication styles that pair with Spirits. Spirit = expertise, Soul = personality.
                       </Text>
                     </View>
                     <Pressable onPress={handleNewSoul} style={styles.quickConnectBtn}>
@@ -1345,38 +1325,16 @@ export default function CustomizePanel({
                     </>
                   )}
 
-                  {/* Template Library */}
-                  <Text style={[styles.sectionTitle, { marginTop: 16 }]}>TEMPLATE LIBRARY</Text>
+                  {/* Template Library — personality templates only (spirits handle expertise) */}
+                  <Text style={[styles.sectionTitle, { marginTop: 16 }]}>PERSONALITY TEMPLATES</Text>
                   <Text style={styles.connectionHint}>
-                    Duplicate any template to create your own custom version.
+                    Communication styles that pair with Spirits. Duplicate any to customize.
                   </Text>
 
-                  {/* Category tabs */}
-                  <View style={styles.soulCategoryRow}>
-                    {SOUL_CATEGORIES.map(cat => (
-                      <Pressable
-                        key={cat.key}
-                        onPress={() => setSoulCategory(cat.key)}
-                        style={[
-                          styles.soulCategoryTab,
-                          soulCategory === cat.key && { borderColor: cat.color, backgroundColor: cat.color + '15' },
-                          Platform.OS === 'web' && { cursor: 'pointer' } as any,
-                        ]}
-                      >
-                        <Text style={[
-                          styles.soulCategoryText,
-                          soulCategory === cat.key && { color: cat.color },
-                        ]}>
-                          {cat.icon} {cat.label}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
-
-                  {/* Template grid */}
+                  {/* Template grid — all personality templates */}
                   <View style={[soulWkStyles.templateGrid, isWide && soulWkStyles.templateGridWide]}>
-                    {getTemplatesByCategory(soulCategory).map(tmpl => {
-                      const catColor = SOUL_CATEGORIES.find(c => c.key === tmpl.category)?.color || '#6366f1';
+                    {SOUL_TEMPLATES.map(tmpl => {
+                      const catColor = '#ec4899';
                       const isActive = detectTemplate(personalityText)?.id === tmpl.id;
                       return (
                         <View

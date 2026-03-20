@@ -534,3 +534,116 @@ export function connectFourAI(boardStr: string, aiPlayer: number): number {
   }
   return availCols[0];
 }
+
+// ─── Farm Plot Game ──────────────────────────────────────────────────────────
+
+export type CropType = 't' | 'w' | 'p' | 'c'; // tomato, wheat, pumpkin, crystal
+export type PlotState = '0' | '1' | '2' | '3' | '4' | '5'; // empty, seed, sprout, growing, ready, dead
+
+export const CROP_INFO: Record<CropType, { name: string; icon: string; growTime: number; gold: number; color: string }> = {
+  t: { name: 'Tomato',  icon: '\u{1F345}', growTime: 30000,   gold: 5,   color: '#ef4444' }, // 30s
+  w: { name: 'Wheat',   icon: '\u{1F33E}', growTime: 60000,   gold: 12,  color: '#f59e0b' }, // 60s
+  p: { name: 'Pumpkin', icon: '\u{1F383}', growTime: 120000,  gold: 30,  color: '#f97316' }, // 2min
+  c: { name: 'Crystal', icon: '\u{1F48E}', growTime: 300000,  gold: 100, color: '#8b5cf6' }, // 5min
+};
+
+export const EMPTY_FARM = '000000000';
+export const EMPTY_CROPS = '000000000';
+
+export function getPlotGrowthPercent(plantedAt: number, cropType: CropType): number {
+  if (!plantedAt) return 0;
+  const elapsed = Date.now() - plantedAt;
+  const growTime = CROP_INFO[cropType]?.growTime || 60000;
+  return Math.min(100, (elapsed / growTime) * 100);
+}
+
+export function getPlotState(plantedAt: number, cropType: CropType, waterLevel: number): PlotState {
+  if (!plantedAt || cropType === '0' as any) return '0';
+  if (waterLevel <= 0) return '5'; // dead — no water
+  const pct = getPlotGrowthPercent(plantedAt, cropType);
+  if (pct < 15) return '1';  // seed
+  if (pct < 45) return '2';  // sprout
+  if (pct < 90) return '3';  // growing
+  return '4';                 // ready to harvest
+}
+
+export function harvestPlot(cropType: CropType): number {
+  return CROP_INFO[cropType]?.gold || 0;
+}
+
+// ─── Office Pet (Tamagotchi) ─────────────────────────────────────────────────
+
+export type PetType = 'cat' | 'dog' | 'dragon' | 'blob' | 'fox';
+export type PetStage = 'egg' | 'baby' | 'teen' | 'adult' | 'legendary';
+export type PetMood = 'happy' | 'neutral' | 'sad' | 'sick' | 'sleeping' | 'dead';
+
+export const PET_INFO: Record<PetType, { name: string; stages: Record<PetStage, string>; color: string }> = {
+  cat:    { name: 'Cat',    color: '#f59e0b', stages: { egg: '\u{1F95A}', baby: '\u{1F431}', teen: '\u{1F408}', adult: '\u{1F408}\u200D\u2B1B', legendary: '\u{1F981}' } },
+  dog:    { name: 'Dog',    color: '#8b5cf6', stages: { egg: '\u{1F95A}', baby: '\u{1F436}', teen: '\u{1F415}', adult: '\u{1F415}\u200D\u{1F9BA}', legendary: '\u{1F43A}' } },
+  dragon: { name: 'Dragon', color: '#ef4444', stages: { egg: '\u{1F95A}', baby: '\u{1F432}', teen: '\u{1F409}', adult: '\u{1F525}', legendary: '\u2604\uFE0F' } },
+  blob:   { name: 'Blob',   color: '#22c55e', stages: { egg: '\u{1F95A}', baby: '\u{1F7E2}', teen: '\u{1F47E}', adult: '\u{1F9A0}', legendary: '\u{1F30C}' } },
+  fox:    { name: 'Fox',    color: '#f97316', stages: { egg: '\u{1F95A}', baby: '\u{1F98A}', teen: '\u{1F98A}', adult: '\u{1F98A}', legendary: '\u{1F525}' } },
+};
+
+export const PET_STAGE_XP: Record<PetStage, number> = {
+  egg: 0,
+  baby: 50,
+  teen: 200,
+  adult: 500,
+  legendary: 1500,
+};
+
+export const MOOD_EMOJI: Record<PetMood, string> = {
+  happy: '\u{1F60A}',
+  neutral: '\u{1F610}',
+  sad: '\u{1F622}',
+  sick: '\u{1F922}',
+  sleeping: '\u{1F634}',
+  dead: '\u{1F480}',
+};
+
+const DECAY_RATE = 2; // points per minute
+const CRITICAL_THRESHOLD = 20;
+
+export function computePetStats(
+  hunger: number, happiness: number, energy: number,
+  lastFed: number, lastPlayed: number, lastSlept: number,
+): { hunger: number; happiness: number; energy: number; mood: PetMood } {
+  const now = Date.now();
+  const minutesSinceFed = (now - (lastFed || now)) / 60000;
+  const minutesSincePlayed = (now - (lastPlayed || now)) / 60000;
+  const minutesSinceSlept = (now - (lastSlept || now)) / 60000;
+
+  const h = Math.max(0, Math.min(100, hunger - minutesSinceFed * DECAY_RATE));
+  const hp = Math.max(0, Math.min(100, happiness - minutesSincePlayed * DECAY_RATE));
+  const e = Math.max(0, Math.min(100, energy - minutesSinceSlept * (DECAY_RATE * 0.5)));
+
+  const avg = (h + hp + e) / 3;
+  let mood: PetMood = 'happy';
+  if (avg <= 0) mood = 'dead';
+  else if (avg < CRITICAL_THRESHOLD) mood = 'sick';
+  else if (avg < 35) mood = 'sad';
+  else if (avg < 60) mood = 'neutral';
+
+  return { hunger: Math.round(h), happiness: Math.round(hp), energy: Math.round(e), mood };
+}
+
+export function getPetStage(xp: number): PetStage {
+  if (xp >= PET_STAGE_XP.legendary) return 'legendary';
+  if (xp >= PET_STAGE_XP.adult) return 'adult';
+  if (xp >= PET_STAGE_XP.teen) return 'teen';
+  if (xp >= PET_STAGE_XP.baby) return 'baby';
+  return 'egg';
+}
+
+export function feedPet(): { hungerGain: number; xp: number } {
+  return { hungerGain: 30, xp: 5 };
+}
+
+export function playWithPet(): { happinessGain: number; xp: number; energyCost: number } {
+  return { happinessGain: 25, xp: 8, energyCost: 10 };
+}
+
+export function restPet(): { energyGain: number; xp: number } {
+  return { energyGain: 40, xp: 3 };
+}

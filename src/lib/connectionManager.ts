@@ -3,7 +3,8 @@ import { supabase } from './supabase';
 
 export type ProviderType =
   | 'openclaw' | 'claude-code' | 'generic-agent' | 'codex' | 'gemini' | 'cursor' | 'blackswan-local'
-  | 'openai' | 'anthropic' | 'openrouter' | 'groq' | 'ollama' | 'replicate' | 'figma';
+  | 'openai' | 'anthropic' | 'openrouter' | 'groq' | 'ollama' | 'replicate' | 'figma'
+  | 'github-models' | 'huggingface';
 
 export interface AgentConnection {
   id: string;
@@ -36,10 +37,12 @@ export const PROVIDER_META: Record<ProviderType, { icon: string; label: string; 
   'groq':           { icon: '⚡', label: 'Groq',           color: '#f97316', defaultEndpoint: 'https://api.groq.com/openai/v1', isLLM: true },
   'ollama':         { icon: '🦙', label: 'Ollama',         color: '#0ea5e9', defaultEndpoint: 'http://localhost:11434',          isLLM: true },
   'codex':          { icon: '🧠', label: 'OpenAI Codex',   color: '#10a37f', defaultEndpoint: 'https://api.openai.com/v1',      isLLM: true },
-  'gemini':         { icon: '♊', label: 'Google Gemini',   color: '#4285f4', defaultEndpoint: 'https://generativelanguage.googleapis.com/v1beta', isLLM: true },
+  'gemini':         { icon: '♊', label: 'Google Gemini',   color: '#4285f4', defaultEndpoint: 'http://localhost:7780' },
   // ── Creative tools ──
   'replicate':      { icon: '🎨', label: 'Replicate',      color: '#ec4899', defaultEndpoint: 'https://api.replicate.com/v1',   isLLM: true },
   'figma':          { icon: '🎨', label: 'Figma',          color: '#a259ff', defaultEndpoint: 'https://api.figma.com' },
+  'github-models':  { icon: '🐙', label: 'GitHub Models',  color: '#6e40c9', defaultEndpoint: 'https://models.inference.ai.azure.com', isLLM: true },
+  'huggingface':    { icon: '🤗', label: 'Hugging Face',   color: '#ffbd45', defaultEndpoint: 'https://router.huggingface.co/v1',    isLLM: true },
 };
 
 const STORAGE_KEY = '@office_connections';

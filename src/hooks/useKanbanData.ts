@@ -9,7 +9,7 @@ import { supabase } from '../lib/supabase';
 import { awardXP, getXPForAction } from '../lib/gamification';
 import { loadCircleOfficeAgents, CircleOfficeAgent } from '../lib/circleOffice';
 import {
-  KanbanTask, TaskComment, TaskStatus, TaskPriority,
+  KanbanTask, TaskComment, TaskAttachment, TaskStatus, TaskPriority,
   TasksByColumn, groupByColumn, normalizeStatus,
 } from '../types/kanban';
 
@@ -36,14 +36,28 @@ export interface KanbanData {
   requestChanges: (taskId: string) => Promise<void>;
   // Comments
   fetchComments: (taskId: string) => Promise<TaskComment[]>;
-  addComment: (taskId: string, content: string) => Promise<void>;
+  addComment: (taskId: string, content: string, attachments?: TaskAttachment[]) => Promise<void>;
+  uploadTaskFile: (taskId: string, file: File) => Promise<TaskAttachment | null>;
+  // Agent
+  runAgentOnTask: (taskId: string, agentId?: string, options?: AgentRunOptions) => Promise<string | null>;
   // Refresh
   refresh: () => void;
+}
+
+export type ThinkingLevel = 'fast' | 'balanced' | 'deep';
+export type AgentModel = 'auto' | 'blackswan' | 'claude-haiku' | 'claude-sonnet' | 'claude-opus';
+export type AgentMode = 'execute' | 'plan';
+
+export interface AgentRunOptions {
+  thinkingLevel?: ThinkingLevel;
+  model?: AgentModel;
+  mode?: AgentMode;
 }
 
 export interface CreateTaskFields {
   title: string;
   description?: string;
+  image_url?: string | null;
   priority?: TaskPriority;
   status?: TaskStatus;
   assigned_to?: string | null;
@@ -142,6 +156,7 @@ export function useKanbanData(circleId: string): KanbanData {
       created_by: currentUserId,
       title: fields.title.trim(),
       description: fields.description?.trim() || null,
+      image_url: fields.image_url || null,
       priority: fields.priority || 'normal',
       status,
       assigned_to: fields.assigned_to || null,
@@ -238,15 +253,167 @@ export function useKanbanData(circleId: string): KanbanData {
     return data || [];
   }, []);
 
-  const addComment = useCallback(async (taskId: string, content: string) => {
-    if (!currentUserId || !content.trim()) return;
-    const { error } = await supabase.from('task_comments').insert({
+  const addComment = useCallback(async (taskId: string, content: string, attachments?: TaskAttachment[]) => {
+    if (!currentUserId || (!content.trim() && (!attachments || attachments.length === 0))) return;
+    const insert: any = {
       task_id: taskId,
       user_id: currentUserId,
       content: content.trim(),
-    });
+    };
+    if (attachments && attachments.length > 0) {
+      insert.attachments = attachments;
+    }
+    const { error } = await supabase.from('task_comments').insert(insert);
     if (error) console.error('addComment error:', error);
   }, [currentUserId]);
+
+  // ─── Upload file for task comment ─────────────────────────────────
+  const uploadTaskFile = useCallback(async (taskId: string, file: File): Promise<TaskAttachment | null> => {
+    try {
+      const ext = file.name.split('.').pop()?.toLowerCase() || 'bin';
+      const path = `${taskId}/${Date.now()}-${file.name}`;
+      const { error: uploadError } = await supabase.storage
+        .from('task-images')
+        .upload(path, file, { cacheControl: '3600', upsert: false });
+      if (uploadError) { console.error('uploadTaskFile error:', uploadError); return null; }
+      const { data: urlData } = supabase.storage.from('task-images').getPublicUrl(path);
+      if (!urlData?.publicUrl) return null;
+
+      const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'];
+      const codeExts = ['ts', 'tsx', 'js', 'jsx', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'h', 'css', 'html', 'json', 'yaml', 'yml', 'toml', 'sql', 'sh', 'md'];
+      const type: TaskAttachment['type'] = imageExts.includes(ext) ? 'image'
+        : codeExts.includes(ext) ? 'code' : 'file';
+
+      return {
+        url: urlData.publicUrl,
+        name: file.name,
+        type,
+        mime: file.type || undefined,
+        size: file.size || undefined,
+        language: type === 'code' ? ext : undefined,
+      };
+    } catch (err) {
+      console.error('uploadTaskFile unexpected:', err);
+      return null;
+    }
+  }, []);
+
+  // ─── Run agent on task ──────────────────────────────────────────────
+  const runAgentOnTask = useCallback(async (taskId: string, agentId?: string, options?: AgentRunOptions): Promise<string | null> => {
+    const task = tasks.find(t => t.id === taskId);
+    if (!task || !currentUserId) return null;
+
+    const targetAgentId = agentId || 'blackswan-default';
+    const targetAgent = agents.find(a => a.id === targetAgentId);
+    const targetAgentName = targetAgent?.name || 'BlackSwan';
+
+    const thinkingLevel = options?.thinkingLevel || 'balanced';
+    const model = options?.model && options.model !== 'auto' ? options.model : undefined;
+    const mode = options?.mode || 'execute';
+
+    // Fetch existing comments for full context
+    let commentHistory = '';
+    try {
+      const existingComments = await fetchComments(taskId);
+      if (existingComments.length > 0) {
+        const recent = existingComments.slice(-15);
+        commentHistory = '\n\n--- COMMENT HISTORY ---\n' + recent.map(c => {
+          const author = c.agent_id ? `[Agent]` : (c.user?.display_name || c.user?.username || 'User');
+          return `${author}: ${c.content}`;
+        }).join('\n');
+      }
+    } catch {} // non-critical
+
+    // Build rich prompt with full task context
+    const parts: string[] = [];
+
+    if (mode === 'plan') {
+      parts.push(`You are in PLANNING MODE. Analyze this task and return a structured implementation plan.`);
+      parts.push(`Do NOT execute — only plan. Your plan should include:`);
+      parts.push(`1. A brief analysis of what needs to be done`);
+      parts.push(`2. Step-by-step implementation plan with clear deliverables`);
+      parts.push(`3. Dependencies or blockers`);
+      parts.push(`4. Estimated complexity (simple / moderate / complex)`);
+      parts.push(`5. Recommended approach and alternatives considered`);
+      parts.push(`Format the plan with clear headings and numbered steps.`);
+    } else {
+      parts.push(`You have been assigned a task. Read it carefully, figure out what needs to be done, and provide a complete, actionable answer.`);
+    }
+
+    parts.push(``);
+    parts.push(`=== TASK ===`);
+    parts.push(`Title: ${task.title}`);
+    parts.push(`Status: ${task.status}`);
+    parts.push(`Priority: ${task.priority}`);
+    if (task.description) parts.push(`Description: ${task.description}`);
+    if (task.image_url) parts.push(`Image: ${task.image_url}`);
+    if (task.due_date) parts.push(`Due: ${task.due_date}`);
+    if (task.assignee) parts.push(`Assigned to: ${task.assignee.display_name || task.assignee.username}`);
+    if (task.goal) parts.push(`Goal: ${task.goal.name} (${task.goal.status})`);
+    if (commentHistory) parts.push(commentHistory);
+
+    if (mode !== 'plan') {
+      parts.push(``);
+      parts.push(`=== INSTRUCTIONS ===`);
+      parts.push(`1. Analyze what this task is asking for`);
+      parts.push(`2. Do the work — write the code, draft the content, research the answer, build the plan, or whatever the task requires`);
+      parts.push(`3. Return your complete deliverable, not just a summary of what you would do`);
+      parts.push(`4. If the task asks for code, write the full working code`);
+      parts.push(`5. If the task asks for content, write the full content`);
+      parts.push(`6. If you need information you don't have, say exactly what's missing and provide the best answer you can with what you know`);
+      parts.push(`7. Be direct. No filler. Deliver the actual work product.`);
+    }
+
+    const message = parts.join('\n');
+
+    try {
+      const { data, error } = await supabase.functions.invoke('swanbot-ai', {
+        body: { message, circleId, userId: currentUserId, targetAgentName, thinkingLevel, model },
+      });
+
+      if (error) {
+        console.error('runAgentOnTask error:', error);
+        return null;
+      }
+
+      const response = data?.reply || data?.response || data?.message || 'Agent completed task (no output)';
+
+      // Extract code blocks as attachments
+      const codeBlockRegex = /```(\w+)?\n([\s\S]*?)```/g;
+      const attachments: TaskAttachment[] = [];
+      let match;
+      while ((match = codeBlockRegex.exec(response)) !== null) {
+        const lang = match[1] || 'text';
+        const code = match[2].trim();
+        if (code.length > 10) {
+          attachments.push({
+            url: '', // inline code, no URL needed
+            name: `code.${lang}`,
+            type: 'code',
+            language: lang,
+          });
+        }
+      }
+
+      // Post the response as a comment with agent attribution + attachments
+      const modeTag = mode === 'plan' ? '[PLAN]' : '[EXEC]';
+      const modelTag = model ? ` | ${model}` : '';
+      const thinkTag = thinkingLevel !== 'balanced' ? ` | ${thinkingLevel}` : '';
+      const insert: any = {
+        task_id: taskId,
+        user_id: currentUserId,
+        agent_id: targetAgentId,
+        content: `[AGENT: ${targetAgentName}] ${modeTag}${modelTag}${thinkTag}\n${response}`,
+      };
+      if (attachments.length > 0) insert.attachments = attachments;
+      await supabase.from('task_comments').insert(insert);
+
+      return response;
+    } catch (err) {
+      console.error('runAgentOnTask unexpected:', err);
+      return null;
+    }
+  }, [tasks, agents, currentUserId, circleId, fetchComments]);
 
   const refresh = useCallback(() => {
     fetchTasks();
@@ -258,6 +425,6 @@ export function useKanbanData(circleId: string): KanbanData {
     tasks, tasksByColumn, members, agents, currentUserId, loading,
     createTask, moveTask, updateTask, deleteTask,
     approveTask, requestChanges,
-    fetchComments, addComment, refresh,
+    fetchComments, addComment, uploadTaskFile, runAgentOnTask, refresh,
   };
 }

@@ -5,16 +5,17 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, TextInput, Pressable, ScrollView, StyleSheet,
-  Platform, KeyboardAvoidingView,
+  Platform, KeyboardAvoidingView, Image, ActivityIndicator,
 } from 'react-native';
 import {
-  KanbanTask, TaskComment, TaskStatus, TaskPriority,
+  KanbanTask, TaskComment, TaskAttachment, TaskStatus, TaskPriority,
   COLUMNS, PRIORITY_COLORS, PRIORITY_LABELS, DEFAULT_AGENT_ROSTER,
 } from '../../../../types/kanban';
-import type { KanbanData, KanbanMember } from '../../../../hooks/useKanbanData';
+import type { KanbanData, KanbanMember, ThinkingLevel, AgentModel, AgentMode } from '../../../../hooks/useKanbanData';
 import type { GoalWithCount } from '../../../../hooks/useGoals';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
 import { supabase } from '../../../../lib/supabase';
+import SpawnAgentPanel from '../../../../components/SpawnAgentPanel';
 
 // ─── Automation Report Section Parser ────────────────────────────────────────
 
@@ -325,6 +326,39 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
   const [showAssignees, setShowAssignees] = useState(false);
   const commentsRef = useRef<ScrollView>(null);
 
+  // Image upload state
+  const [uploading, setUploading] = useState(false);
+  const [imageExpanded, setImageExpanded] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Agent run state
+  const [agentRunning, setAgentRunning] = useState(false);
+  const [agentResult, setAgentResult] = useState<string | null>(null);
+  const [agentError, setAgentError] = useState<string | null>(null);
+  const [selectedAgentId, setSelectedAgentId] = useState<string>('blackswan-default');
+  const [showAgentPicker, setShowAgentPicker] = useState(false);
+  const [showSpawnAgent, setShowSpawnAgent] = useState(false);
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>('balanced');
+  const [agentModel, setAgentModel] = useState<AgentModel>('auto');
+  const [agentMode, setAgentMode] = useState<AgentMode>('execute');
+  const [commentAttachments, setCommentAttachments] = useState<TaskAttachment[]>([]);
+  const [commentUploading, setCommentUploading] = useState(false);
+  const commentFileRef = useRef<HTMLInputElement | null>(null);
+
+  // Cleanup file inputs on unmount
+  useEffect(() => {
+    return () => {
+      if (fileInputRef.current) {
+        try { document.body.removeChild(fileInputRef.current); } catch {}
+        fileInputRef.current = null;
+      }
+      if (commentFileRef.current) {
+        try { document.body.removeChild(commentFileRef.current); } catch {}
+        commentFileRef.current = null;
+      }
+    };
+  }, []);
+
   // Sync edited fields when task updates
   useEffect(() => {
     if (!editing) {
@@ -370,10 +404,23 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
   };
 
   const handleAddComment = async () => {
-    if (!commentText.trim()) return;
-    await kanban.addComment(task.id, commentText);
+    if (!commentText.trim() && commentAttachments.length === 0) return;
+    await kanban.addComment(task.id, commentText, commentAttachments.length > 0 ? commentAttachments : undefined);
     setCommentText('');
+    setCommentAttachments([]);
   };
+
+  const handleCommentFileUpload = useCallback(async (file: File) => {
+    setCommentUploading(true);
+    try {
+      const attachment = await kanban.uploadTaskFile(task.id, file);
+      if (attachment) {
+        setCommentAttachments(prev => [...prev, attachment]);
+      }
+    } finally {
+      setCommentUploading(false);
+    }
+  }, [task.id, kanban]);
 
   const handleDelete = async () => {
     await kanban.deleteTask(task.id);
@@ -404,6 +451,67 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
     await kanban.moveTask(task.id, 'peer_review');
     await kanban.addComment(task.id, '[SENT_BACK] \u{1F504} Sent back to peer review');
   };
+
+  // ─── Image Upload ────────────────────────────────────────────────────
+  const handleImageUpload = useCallback(async (file: File) => {
+    if (!file || !kanban.currentUserId) return;
+    setUploading(true);
+    try {
+      const ext = file.name.split('.').pop() || 'png';
+      const path = `${task.id}/${Date.now()}.${ext}`;
+      const { error: uploadError } = await supabase.storage
+        .from('task-images')
+        .upload(path, file, { cacheControl: '3600', upsert: false });
+
+      if (uploadError) {
+        console.error('Image upload error:', uploadError);
+        return;
+      }
+
+      const { data: urlData } = supabase.storage
+        .from('task-images')
+        .getPublicUrl(path);
+
+      if (urlData?.publicUrl) {
+        await kanban.updateTask(task.id, { image_url: urlData.publicUrl } as any);
+      }
+    } catch (err) {
+      console.error('Image upload unexpected:', err);
+    } finally {
+      setUploading(false);
+    }
+  }, [task.id, kanban]);
+
+  const handleRemoveImage = useCallback(async () => {
+    await kanban.updateTask(task.id, { image_url: null } as any);
+  }, [task.id, kanban]);
+
+  // ─── Run Agent ──────────────────────────────────────────────────────
+  const handleRunAgent = useCallback(async () => {
+    setAgentRunning(true);
+    setAgentResult(null);
+    setAgentError(null);
+    try {
+      const result = await kanban.runAgentOnTask(task.id, selectedAgentId, {
+        thinkingLevel,
+        model: agentModel,
+        mode: agentMode,
+      });
+      if (result) {
+        setAgentResult(result);
+      } else {
+        setAgentError('Agent returned no response');
+      }
+    } catch (err) {
+      setAgentError('Agent failed to run');
+      console.error('handleRunAgent error:', err);
+    } finally {
+      setAgentRunning(false);
+    }
+  }, [task.id, selectedAgentId, thinkingLevel, agentModel, agentMode, kanban]);
+
+  const selectedAgent = kanban.agents.find(a => a.id === selectedAgentId)
+    || { id: 'blackswan-default', name: 'BlackSwan', color: '#22c55e' };
 
   const assignedAgent = assignedAgentId
     ? kanban.agents.find(a => a.id === assignedAgentId)
@@ -610,6 +718,245 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
               </Text>
             )}
 
+            {/* Image */}
+            <Text style={s.sectionLabel}>Image</Text>
+            {task.image_url ? (
+              <View style={s.imageSection}>
+                <Pressable onPress={() => setImageExpanded(e => !e)}>
+                  <Image
+                    source={{ uri: task.image_url }}
+                    style={imageExpanded ? s.imageExpanded : s.imagePreview}
+                    resizeMode={imageExpanded ? 'contain' : 'cover'}
+                  />
+                </Pressable>
+                {editing && (
+                  <Pressable onPress={handleRemoveImage} style={s.removeImageBtn}>
+                    <Text style={s.removeImageText}>Remove image</Text>
+                  </Pressable>
+                )}
+              </View>
+            ) : (
+              <View>
+                {editing && Platform.OS === 'web' && (
+                  <View>
+                    <Pressable
+                      onPress={() => fileInputRef.current?.click()}
+                      style={s.addImageBtn}
+                      disabled={uploading}
+                    >
+                      {uploading ? (
+                        <ActivityIndicator size="small" color="#6366f1" />
+                      ) : (
+                        <Text style={s.addImageText}>+ Add Image</Text>
+                      )}
+                    </Pressable>
+                  </View>
+                )}
+                {!editing && (
+                  <Text style={s.fieldEmpty}>No image</Text>
+                )}
+              </View>
+            )}
+            {/* Hidden file input for web image upload */}
+            {Platform.OS === 'web' && (
+              <View style={{ height: 0, overflow: 'hidden' }}>
+                {(() => {
+                  // Render a hidden HTML file input via ref
+                  if (typeof document !== 'undefined' && !fileInputRef.current) {
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.accept = 'image/*';
+                    input.style.display = 'none';
+                    input.onchange = (e: any) => {
+                      const file = e.target?.files?.[0];
+                      if (file) handleImageUpload(file);
+                      input.value = '';
+                    };
+                    document.body.appendChild(input);
+                    fileInputRef.current = input;
+                  }
+                  return null;
+                })()}
+              </View>
+            )}
+
+            {/* Run Agent */}
+            <Text style={s.sectionLabel}>AI Agent</Text>
+            <View style={s.agentSection}>
+              {/* Mode toggle: Plan vs Execute */}
+              <View style={s.modeRow}>
+                {([
+                  { key: 'plan' as AgentMode, label: 'PLAN', icon: '\u{1F4CB}', desc: 'Analyze first' },
+                  { key: 'execute' as AgentMode, label: 'EXECUTE', icon: '\u26A1', desc: 'Do the work' },
+                ] as const).map(m => {
+                  const active = agentMode === m.key;
+                  return (
+                    <Pressable
+                      key={m.key}
+                      onPress={() => setAgentMode(m.key)}
+                      style={[s.modeBtn, active && s.modeBtnActive]}
+                    >
+                      <Text style={s.modeBtnIcon}>{m.icon}</Text>
+                      <View>
+                        <Text style={[s.modeBtnLabel, active && s.modeBtnLabelActive]}>{m.label}</Text>
+                        <Text style={s.modeBtnDesc}>{m.desc}</Text>
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              {/* Thinking level */}
+              <View style={s.controlRow}>
+                <Text style={s.controlLabel}>Thinking</Text>
+                <View style={s.thinkingRow}>
+                  {([
+                    { key: 'fast' as ThinkingLevel, label: 'FAST', icon: '\u26A1', color: '#f59e0b' },
+                    { key: 'balanced' as ThinkingLevel, label: 'BALANCED', icon: '\u{1F3AF}', color: '#6366f1' },
+                    { key: 'deep' as ThinkingLevel, label: 'DEEP', icon: '\u{1F9E0}', color: '#ec4899' },
+                  ] as const).map(t => {
+                    const active = thinkingLevel === t.key;
+                    return (
+                      <Pressable
+                        key={t.key}
+                        onPress={() => setThinkingLevel(t.key)}
+                        style={[s.thinkingBtn, active && { backgroundColor: t.color + '15', borderColor: t.color + '30' }]}
+                      >
+                        <Text style={{ fontSize: 11 }}>{t.icon}</Text>
+                        <Text style={[s.thinkingBtnText, active && { color: t.color }]}>{t.label}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+
+              {/* Model picker */}
+              <View style={s.controlRow}>
+                <Text style={s.controlLabel}>Model</Text>
+                <View style={s.thinkingRow}>
+                  {([
+                    { key: 'auto' as AgentModel, label: 'AUTO', color: '#22c55e' },
+                    { key: 'blackswan' as AgentModel, label: 'BSwan', color: '#22c55e' },
+                    { key: 'claude-haiku' as AgentModel, label: 'Haiku', color: '#f59e0b' },
+                    { key: 'claude-sonnet' as AgentModel, label: 'Sonnet', color: '#8b5cf6' },
+                    { key: 'claude-opus' as AgentModel, label: 'Opus', color: '#ef4444' },
+                  ] as const).map(m => {
+                    const active = agentModel === m.key;
+                    return (
+                      <Pressable
+                        key={m.key}
+                        onPress={() => setAgentModel(m.key)}
+                        style={[s.thinkingBtn, active && { backgroundColor: m.color + '15', borderColor: m.color + '30' }]}
+                      >
+                        <Text style={[s.thinkingBtnText, active && { color: m.color }]}>{m.label}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+
+              {/* Agent picker + run */}
+              <View style={s.agentPickerRow}>
+                <Pressable onPress={() => setShowAgentPicker(p => !p)} style={s.agentPickerToggle}>
+                  <View style={[s.agentPickerDot, { backgroundColor: (selectedAgent as any).color || '#22c55e' }]} />
+                  <Text style={s.agentPickerName}>{(selectedAgent as any).name || 'BlackSwan'}</Text>
+                  <Text style={s.agentPickerArrow}>{showAgentPicker ? '\u25B2' : '\u25BC'}</Text>
+                </Pressable>
+                <Pressable
+                  onPress={handleRunAgent}
+                  style={[
+                    s.runAgentBtn,
+                    agentRunning && { opacity: 0.5 },
+                    agentMode === 'plan' && { backgroundColor: '#6366f115', borderColor: '#6366f130' },
+                  ]}
+                  disabled={agentRunning}
+                >
+                  {agentRunning ? (
+                    <View style={s.runAgentLoadingRow}>
+                      <ActivityIndicator size="small" color={agentMode === 'plan' ? '#6366f1' : '#22c55e'} />
+                      <Text style={[s.runAgentBtnText, agentMode === 'plan' && { color: '#6366f1' }]}>
+                        {agentMode === 'plan' ? 'Planning...' : 'Working...'}
+                      </Text>
+                    </View>
+                  ) : (
+                    <Text style={[s.runAgentBtnText, agentMode === 'plan' && { color: '#6366f1' }]}>
+                      {agentMode === 'plan' ? 'GENERATE PLAN' : 'RUN AGENT'}
+                    </Text>
+                  )}
+                </Pressable>
+              </View>
+
+              {/* Agent picker dropdown */}
+              {showAgentPicker && (
+                <View style={s.agentPickerList}>
+                  <Pressable
+                    onPress={() => { setSelectedAgentId('blackswan-default'); setShowAgentPicker(false); }}
+                    style={[s.agentPickerOption, selectedAgentId === 'blackswan-default' && s.agentPickerOptionActive]}
+                  >
+                    <View style={[s.agentPickerDot, { backgroundColor: '#22c55e' }]} />
+                    <Text style={s.agentPickerOptionText}>BlackSwan</Text>
+                    <Text style={s.agentPickerDefault}>default</Text>
+                  </Pressable>
+                  {kanban.agents.filter(a => a.id !== 'blackswan-default').map(a => (
+                    <Pressable
+                      key={a.id}
+                      onPress={() => { setSelectedAgentId(a.id); setShowAgentPicker(false); }}
+                      style={[s.agentPickerOption, selectedAgentId === a.id && s.agentPickerOptionActive]}
+                    >
+                      <View style={[s.agentPickerDot, { backgroundColor: a.color || '#6366f1' }]} />
+                      <Text style={s.agentPickerOptionText}>{a.name}</Text>
+                    </Pressable>
+                  ))}
+                  <Pressable
+                    onPress={() => { setShowAgentPicker(false); setShowSpawnAgent(true); }}
+                    style={[s.agentPickerOption, { borderTopWidth: 1, borderTopColor: '#1a1a2e', marginTop: 4, paddingTop: 8 }]}
+                  >
+                    <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '700', fontFamily: 'monospace' }}>+ NEW AGENT</Text>
+                  </Pressable>
+                </View>
+              )}
+
+              {/* Spawn Agent Panel */}
+              {showSpawnAgent && (
+                <View style={s.spawnAgentContainer}>
+                  <SpawnAgentPanel
+                    circleId={task.circle_id}
+                    onCreated={(agentId, agentName) => {
+                      setShowSpawnAgent(false);
+                      setSelectedAgentId(agentId);
+                      kanban.refresh();
+                    }}
+                    onCancel={() => setShowSpawnAgent(false)}
+                  />
+                </View>
+              )}
+
+              {/* Agent result */}
+              {agentResult && (
+                <View style={s.agentResultBox}>
+                  <View style={s.agentResultHeader}>
+                    <Text style={s.agentResultLabel}>
+                      {agentMode === 'plan' ? 'Plan' : 'Agent Output'}
+                    </Text>
+                    {agentMode === 'plan' && (
+                      <Pressable
+                        onPress={() => { setAgentMode('execute'); handleRunAgent(); }}
+                        style={s.approveAndRunBtn}
+                      >
+                        <Text style={s.approveAndRunText}>{'\u26A1'} Approve & Execute</Text>
+                      </Pressable>
+                    )}
+                  </View>
+                  <Text style={s.agentResultText} selectable>{agentResult}</Text>
+                </View>
+              )}
+              {agentError && (
+                <View style={s.agentErrorBox}>
+                  <Text style={s.agentErrorText}>{agentError}</Text>
+                </View>
+              )}
+            </View>
+
             {/* Priority */}
             <Text style={s.sectionLabel}>Priority</Text>
             {editing ? (
@@ -795,6 +1142,46 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                       <Text style={s.commentTime}>{timeSince(c.created_at)}</Text>
                     </View>
                     <Text style={[s.commentContent, isAction && { color: actionColor }]}>{c.content}</Text>
+                    {/* Render attachments */}
+                    {c.attachments && c.attachments.length > 0 && (
+                      <View style={s.commentAttachments}>
+                        {c.attachments.map((att, ai) => {
+                          if (att.type === 'image') {
+                            return (
+                              <View key={ai} style={s.commentAttImage}>
+                                <Image source={{ uri: att.url }} style={s.commentAttImageImg} resizeMode="cover" />
+                                <Text style={s.commentAttImageName}>{att.name}</Text>
+                              </View>
+                            );
+                          }
+                          if (att.type === 'code') {
+                            return (
+                              <View key={ai} style={s.commentAttCode}>
+                                <View style={s.commentAttCodeHeader}>
+                                  <Text style={s.commentAttCodeLang}>{att.language || 'code'}</Text>
+                                  <Text style={s.commentAttCodeName}>{att.name}</Text>
+                                </View>
+                              </View>
+                            );
+                          }
+                          return (
+                            <Pressable
+                              key={ai}
+                              onPress={() => att.url ? (window as any).open?.(att.url, '_blank') : null}
+                              style={s.commentAttFile}
+                            >
+                              <Text style={s.commentAttFileIcon}>{'\u{1F4CE}'}</Text>
+                              <Text style={s.commentAttFileName}>{att.name}</Text>
+                              {att.size != null && (
+                                <Text style={s.commentAttFileSize}>
+                                  {att.size < 1024 ? `${att.size}B` : att.size < 1048576 ? `${(att.size / 1024).toFixed(1)}KB` : `${(att.size / 1048576).toFixed(1)}MB`}
+                                </Text>
+                              )}
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    )}
                   </View>
                 );
               })}
@@ -805,8 +1192,59 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
             </View>
           </ScrollView>
 
+          {/* Pending attachment previews */}
+          {commentAttachments.length > 0 && (
+            <View style={s.pendingAttachments}>
+              {commentAttachments.map((att, i) => (
+                <View key={i} style={s.pendingAttItem}>
+                  {att.type === 'image' ? (
+                    <Image source={{ uri: att.url }} style={s.pendingAttThumb} resizeMode="cover" />
+                  ) : (
+                    <View style={s.pendingAttFileBadge}>
+                      <Text style={s.pendingAttFileIcon}>{att.type === 'code' ? '</>' : '\u{1F4CE}'}</Text>
+                    </View>
+                  )}
+                  <Text style={s.pendingAttName} numberOfLines={1}>{att.name}</Text>
+                  <Pressable onPress={() => setCommentAttachments(prev => prev.filter((_, j) => j !== i))} style={s.pendingAttRemove}>
+                    <Text style={s.pendingAttRemoveText}>x</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </View>
+          )}
+
           {/* Comment input */}
           <View style={s.commentInput}>
+            {Platform.OS === 'web' && (
+              <Pressable
+                onPress={() => {
+                  if (commentFileRef.current) {
+                    commentFileRef.current.click();
+                  } else if (typeof document !== 'undefined') {
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.accept = 'image/*,.ts,.tsx,.js,.jsx,.py,.rs,.go,.java,.c,.cpp,.h,.css,.html,.json,.yaml,.yml,.toml,.sql,.sh,.md,.txt,.pdf,.zip';
+                    input.style.display = 'none';
+                    input.onchange = (e: any) => {
+                      const file = e.target?.files?.[0];
+                      if (file) handleCommentFileUpload(file);
+                      input.value = '';
+                    };
+                    document.body.appendChild(input);
+                    commentFileRef.current = input;
+                    input.click();
+                  }
+                }}
+                style={s.attachBtn}
+                disabled={commentUploading}
+              >
+                {commentUploading ? (
+                  <ActivityIndicator size="small" color="#6366f1" />
+                ) : (
+                  <Text style={s.attachBtnText}>{'\u{1F4CE}'}</Text>
+                )}
+              </Pressable>
+            )}
             <TextInput
               style={s.commentField}
               value={commentText}
@@ -818,8 +1256,8 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
             />
             <Pressable
               onPress={handleAddComment}
-              style={[s.commentSend, !commentText.trim() && { opacity: 0.3 }]}
-              disabled={!commentText.trim()}
+              style={[s.commentSend, (!commentText.trim() && commentAttachments.length === 0) && { opacity: 0.3 }]}
+              disabled={!commentText.trim() && commentAttachments.length === 0}
             >
               <Text style={s.commentSendText}>Send</Text>
             </Pressable>
@@ -1288,6 +1726,277 @@ const s = StyleSheet.create({
     fontWeight: '600',
   },
 
+  // Image section
+  imageSection: {
+    gap: 8,
+  },
+  imagePreview: {
+    width: '100%' as any,
+    height: 160,
+    borderRadius: 10,
+    backgroundColor: '#1a1a28',
+  },
+  imageExpanded: {
+    width: '100%' as any,
+    height: 360,
+    borderRadius: 10,
+    backgroundColor: '#1a1a28',
+  },
+  addImageBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0c0c14',
+    borderWidth: 1,
+    borderColor: '#1a1a28',
+    borderStyle: 'dashed' as any,
+    borderRadius: 10,
+    paddingVertical: 16,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'border-color 0.15s' } as any : {}),
+  },
+  addImageText: {
+    color: '#555566',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  removeImageBtn: {
+    alignSelf: 'flex-start',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  removeImageText: {
+    color: '#ef444460',
+    fontSize: 11,
+    fontWeight: '500',
+  },
+
+  // Agent section
+  agentSection: {
+    gap: 10,
+  },
+  agentPickerRow: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+  },
+  agentPickerToggle: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#0c0c14',
+    borderWidth: 1,
+    borderColor: '#1a1a28',
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  agentPickerDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  agentPickerName: {
+    color: '#c0c0d0',
+    fontSize: 13,
+    flex: 1,
+  },
+  agentPickerArrow: {
+    color: '#555566',
+    fontSize: 10,
+  },
+  agentPickerList: {
+    backgroundColor: '#0c0c14',
+    borderWidth: 1,
+    borderColor: '#1a1a28',
+    borderRadius: 10,
+    maxHeight: 220,
+    overflow: 'hidden',
+  },
+  agentPickerOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 9,
+    paddingHorizontal: 14,
+    borderTopWidth: 1,
+    borderTopColor: '#15151e',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background 0.15s' } as any : {}),
+  },
+  agentPickerOptionActive: {
+    backgroundColor: '#15151e',
+  },
+  agentPickerOptionText: {
+    color: '#c0c0d0',
+    fontSize: 13,
+    flex: 1,
+  },
+  agentPickerDefault: {
+    color: '#22c55e',
+    fontSize: 9,
+    fontWeight: '700',
+    textTransform: 'uppercase' as any,
+    letterSpacing: 0.5,
+  },
+  runAgentBtn: {
+    backgroundColor: '#22c55e15',
+    borderWidth: 1,
+    borderColor: '#22c55e30',
+    borderRadius: 10,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
+  },
+  runAgentBtnText: {
+    color: '#22c55e',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 1,
+    textTransform: 'uppercase' as any,
+  },
+  runAgentLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  agentResultBox: {
+    backgroundColor: '#0a0a12',
+    borderWidth: 1,
+    borderColor: '#22c55e20',
+    borderRadius: 10,
+    padding: 14,
+    gap: 6,
+  },
+  agentResultLabel: {
+    color: '#22c55e',
+    fontSize: 10,
+    fontWeight: '700',
+    textTransform: 'uppercase' as any,
+    letterSpacing: 0.5,
+  },
+  agentResultText: {
+    color: '#e4e4ed',
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  agentErrorBox: {
+    backgroundColor: '#ef444410',
+    borderWidth: 1,
+    borderColor: '#ef444420',
+    borderRadius: 10,
+    padding: 12,
+  },
+  agentErrorText: {
+    color: '#ef4444',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  spawnAgentContainer: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#22c55e30',
+    borderRadius: 10,
+    overflow: 'hidden',
+    maxHeight: 500,
+  },
+
+  // Mode toggle (Plan / Execute)
+  modeRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  modeBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#0c0c14',
+    borderWidth: 1,
+    borderColor: '#1a1a28',
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
+  },
+  modeBtnActive: {
+    backgroundColor: '#6366f108',
+    borderColor: '#6366f130',
+  },
+  modeBtnIcon: {
+    fontSize: 16,
+  },
+  modeBtnLabel: {
+    color: '#555566',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  modeBtnLabelActive: {
+    color: '#c0c0d0',
+  },
+  modeBtnDesc: {
+    color: '#444455',
+    fontSize: 10,
+  },
+
+  // Thinking level + Model picker shared
+  controlRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  controlLabel: {
+    color: '#555566',
+    fontSize: 10,
+    fontWeight: '700',
+    textTransform: 'uppercase' as any,
+    letterSpacing: 0.5,
+    minWidth: 52,
+  },
+  thinkingRow: {
+    flexDirection: 'row',
+    gap: 4,
+    flex: 1,
+    flexWrap: 'wrap',
+  },
+  thinkingBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 5,
+    paddingHorizontal: 8,
+    borderWidth: 1,
+    borderColor: '#1a1a28',
+    borderRadius: 8,
+    backgroundColor: '#0c0c14',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
+  },
+  thinkingBtnText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#555566',
+    letterSpacing: 0.3,
+  },
+
+  // Agent result header with approve button
+  agentResultHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  approveAndRunBtn: {
+    backgroundColor: '#22c55e15',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
+  },
+  approveAndRunText: {
+    color: '#22c55e',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+
   // Comments
   commentSection: {
     marginTop: 28,
@@ -1386,5 +2095,150 @@ const s = StyleSheet.create({
     color: '#fff',
     fontSize: 12,
     fontWeight: '600',
+  },
+
+  // Attach button
+  attachBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    backgroundColor: '#1a1a28',
+    justifyContent: 'center',
+    alignItems: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background 0.15s' } as any : {}),
+  },
+  attachBtnText: {
+    fontSize: 16,
+  },
+
+  // Pending attachment previews
+  pendingAttachments: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 4,
+    backgroundColor: '#0e0e16',
+    borderTopWidth: 1,
+    borderTopColor: '#1a1a28',
+  },
+  pendingAttItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#1a1a28',
+    borderRadius: 8,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    maxWidth: 180,
+  },
+  pendingAttThumb: {
+    width: 24,
+    height: 24,
+    borderRadius: 4,
+  },
+  pendingAttFileBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 4,
+    backgroundColor: '#0c0c14',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  pendingAttFileIcon: {
+    fontSize: 10,
+    color: '#6b6b80',
+  },
+  pendingAttName: {
+    color: '#9090a8',
+    fontSize: 11,
+    flex: 1,
+  },
+  pendingAttRemove: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#ef444420',
+    justifyContent: 'center',
+    alignItems: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  pendingAttRemoveText: {
+    color: '#ef4444',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+
+  // Comment attachment rendering
+  commentAttachments: {
+    paddingLeft: 26,
+    marginTop: 8,
+    gap: 6,
+  },
+  commentAttImage: {
+    borderRadius: 8,
+    overflow: 'hidden',
+    backgroundColor: '#1a1a28',
+  },
+  commentAttImageImg: {
+    width: '100%' as any,
+    height: 140,
+    borderRadius: 8,
+  },
+  commentAttImageName: {
+    color: '#555566',
+    fontSize: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  commentAttCode: {
+    backgroundColor: '#0a0a12',
+    borderWidth: 1,
+    borderColor: '#1e1e2e',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  commentAttCodeHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: '#0c0c16',
+  },
+  commentAttCodeLang: {
+    color: '#8b5cf6',
+    fontSize: 10,
+    fontWeight: '700',
+    textTransform: 'uppercase' as any,
+    letterSpacing: 0.5,
+  },
+  commentAttCodeName: {
+    color: '#555566',
+    fontSize: 10,
+  },
+  commentAttFile: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#1a1a28',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    alignSelf: 'flex-start',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background 0.15s' } as any : {}),
+  },
+  commentAttFileIcon: {
+    fontSize: 12,
+  },
+  commentAttFileName: {
+    color: '#a5b4fc',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  commentAttFileSize: {
+    color: '#555566',
+    fontSize: 10,
   },
 });

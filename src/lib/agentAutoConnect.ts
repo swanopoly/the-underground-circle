@@ -29,6 +29,14 @@ import {
   markCodexAgentOffline,
 } from './codexDetector';
 import {
+  GeminiCliPoller,
+  geminiSessionsToAgents,
+  detectGeminiCliBridge,
+  publishGeminiCliAgent,
+  updateGeminiCliAgentStatus,
+  markGeminiCliAgentOffline,
+} from './geminiCliDetector';
+import {
   AgentConnection,
   loadConnections,
   saveConnections,
@@ -54,6 +62,8 @@ let _ccPoller: ClaudeCodePoller | null = null;
 let _ccPublished = false;
 let _codexPoller: CodexPoller | null = null;
 let _codexPublished = false;
+let _geminiPoller: GeminiCliPoller | null = null;
+let _geminiPublished = false;
 let _ocPollers = new Map<string, OpenClawPoller>();
 let _retryTimer: ReturnType<typeof setInterval> | null = null;
 let _ocReconnectTimer: ReturnType<typeof setInterval> | null = null;
@@ -169,6 +179,13 @@ export async function startAgentAutoConnect() {
     console.log('[agentAutoConnect] Codex bridge detected');
   }
 
+  // 5b. Detect Gemini CLI bridge
+  const geminiDetected = await detectGeminiCliBridge();
+  if (geminiDetected) {
+    _startGeminiPoller();
+    console.log('[agentAutoConnect] Gemini CLI bridge detected');
+  }
+
   // 6. Retry loop: re-detect bridges + reconnect failed connections
   _startRetryLoop();
 
@@ -186,6 +203,7 @@ export function stopAgentAutoConnect() {
   if (_ocReconnectTimer) { clearInterval(_ocReconnectTimer); _ocReconnectTimer = null; }
   if (_ccPoller) { _ccPoller.stop(); _ccPoller = null; }
   if (_codexPoller) { _codexPoller.stop(); _codexPoller = null; }
+  if (_geminiPoller) { _geminiPoller.stop(); _geminiPoller = null; }
   for (const [, poller] of _ocPollers) {
     poller.stop();
   }
@@ -194,6 +212,7 @@ export function stopAgentAutoConnect() {
   _sessionsMap.clear();
   _ccPublished = false;
   _codexPublished = false;
+  _geminiPublished = false;
   _circleId = null;
   _retryAttempt = 0;
   _stopVisibilityListener();
@@ -251,6 +270,26 @@ function _startRetryLoop() {
         markCodexAgentOffline(_circleId).catch(() => {});
       }
       console.log('[agentAutoConnect] Codex bridge went offline');
+    }
+
+    // Gemini CLI bridge detection (same interval)
+    const geminiDetected = await detectGeminiCliBridge();
+    if (geminiDetected && !_geminiPoller) {
+      _startGeminiPoller();
+      console.log('[agentAutoConnect] Gemini CLI bridge came online');
+    } else if (!geminiDetected && _geminiPoller) {
+      _geminiPoller.stop();
+      _geminiPoller = null;
+      const existing = _sessionsMap.get('gemini-cli-auto') as OfficeAgent[] | undefined;
+      if (existing && existing.length > 0) {
+        const idled = existing.map(a => ({ ...a, status: 'idle' as const, activity: 'Session ended — idling' }));
+        _sessionsMap.set('gemini-cli-auto', idled);
+        _notify();
+      }
+      if (_geminiPublished && _circleId) {
+        markGeminiCliAgentOffline(_circleId).catch(() => {});
+      }
+      console.log('[agentAutoConnect] Gemini CLI bridge went offline');
     }
   }, CC_DETECT_INTERVAL);
 
@@ -328,6 +367,14 @@ function _startVisibilityListener() {
       }
     });
 
+    // Immediately check Gemini CLI bridge
+    detectGeminiCliBridge().then(detected => {
+      if (detected && !_geminiPoller) {
+        _startGeminiPoller();
+        console.log('[agentAutoConnect] Gemini CLI bridge reconnected on tab focus');
+      }
+    });
+
     // Immediately retry failed OpenClaw connections
     const failedConns = _connections.filter(
       c => c.enabled && (c.status === 'error' || c.status === 'disconnected'),
@@ -390,6 +437,28 @@ function _startCodexPoller() {
     }
   });
   _codexPoller.start(5000);
+}
+
+// ── Internal: Gemini CLI poller ──────────────────────────────────────────────
+
+function _startGeminiPoller() {
+  if (_geminiPoller) return;
+  _geminiPoller = new GeminiCliPoller(sessions => {
+    _sessionsMap.set('gemini-cli-auto', geminiSessionsToAgents(sessions) as any);
+    _notify();
+
+    // Publish to circle DB if we have a circleId
+    if (!_geminiPublished && _circleId) {
+      _geminiPublished = true;
+      publishGeminiCliAgent(_circleId, sessions.length).catch(err =>
+        console.error('[agentAutoConnect] Failed to publish Gemini CLI agent:', err),
+      );
+    }
+    if (_geminiPublished && _circleId) {
+      updateGeminiCliAgentStatus(_circleId, sessions).catch(() => {});
+    }
+  });
+  _geminiPoller.start(5000);
 }
 
 // ── Internal: Probe with fallback endpoints ─────────────────────────────────
