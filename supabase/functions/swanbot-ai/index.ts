@@ -679,15 +679,25 @@ async function executeToolCall(
     switch (toolName) {
       case "create_task": {
         const { title, description, priority, status, assigned_agent_id } = toolInput;
+        // Get max position in target column to append at end
+        const targetStatus = status || "todo";
+        const { data: maxPosData } = await supabase.from("tasks")
+          .select("position")
+          .eq("circle_id", circleId)
+          .eq("status", targetStatus)
+          .order("position", { ascending: false })
+          .limit(1)
+          .single();
+        const nextPosition = (maxPosData?.position ?? -1) + 1;
         const { data, error } = await supabase.from("tasks").insert({
           circle_id: circleId,
           title,
           description: description || null,
           priority: priority || "normal",
-          status: status || "todo",
+          status: targetStatus,
           assigned_agent_id: assigned_agent_id || null,
           created_by: userId,
-          position: Date.now(),
+          position: nextPosition,
         }).select("id, title, status").single();
         if (error) return JSON.stringify({ error: error.message });
         return JSON.stringify({ success: true, task: data });

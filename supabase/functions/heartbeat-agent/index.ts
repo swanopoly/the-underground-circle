@@ -93,19 +93,29 @@ async function executeHeartbeatTool(
   toolInput: any,
   supabase: any,
   circleId: string,
+  ownerId: string,
 ): Promise<string> {
   try {
     switch (toolName) {
       case "create_task": {
         const { title, description, priority, status } = toolInput;
+        const targetStatus = status || "todo";
+        const { data: maxPosData } = await supabase.from("tasks")
+          .select("position")
+          .eq("circle_id", circleId)
+          .eq("status", targetStatus)
+          .order("position", { ascending: false })
+          .limit(1)
+          .single();
+        const nextPosition = (maxPosData?.position ?? -1) + 1;
         const { data, error } = await supabase.from("tasks").insert({
           circle_id: circleId,
           title,
           description: description || null,
           priority: priority || "normal",
-          status: status || "todo",
-          created_by: "00000000-0000-0000-0000-000000000000", // system user
-          position: Date.now(),
+          status: targetStatus,
+          created_by: ownerId,
+          position: nextPosition,
         }).select("id, title").single();
         if (error) return JSON.stringify({ error: error.message });
         return JSON.stringify({ success: true, task: data });
@@ -274,6 +284,9 @@ async function runHeartbeat(supabase: any, circleId: string) {
   if (!ctx.circle) return { skipped: true, reason: "Circle not found" };
   if (ctx.totalMembers === 0) return { skipped: true, reason: "No members" };
 
+  // Find circle owner (or first member) for task creation attribution
+  const ownerId = (ctx.members.find((m: any) => m.role === "owner") || ctx.members[0])?.user_id;
+
   // Build the heartbeat prompt
   const systemPrompt = `You are BlackSwan's Heartbeat — an autonomous daemon that monitors circle health and takes proactive action.
 
@@ -379,7 +392,7 @@ What needs attention? Take action if needed, or say "All clear." if everything i
     const toolResults: any[] = [];
 
     for (const toolBlock of toolUseBlocks) {
-      const result = await executeHeartbeatTool(toolBlock.name, toolBlock.input, supabase, circleId);
+      const result = await executeHeartbeatTool(toolBlock.name, toolBlock.input, supabase, circleId, ownerId);
       actions.push({ tool: toolBlock.name, input: toolBlock.input, result: JSON.parse(result) });
       toolResults.push({ type: "tool_result", tool_use_id: toolBlock.id, content: result });
     }
