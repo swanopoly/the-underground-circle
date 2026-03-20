@@ -10,7 +10,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { exec } = require('child_process');
+const { exec, execSync } = require('child_process');
 
 const PORT = 7778;
 const CLAUDE_DIR = path.join(os.homedir(), '.claude', 'projects');
@@ -28,6 +28,118 @@ const CORS = {
 
 let cachedSessions = [];
 let lastScanTime = '';
+
+// ── Device discovery cache (10s TTL) ────────────────────────────────────────
+const deviceCache = { data: null, timestamp: 0 };
+const DEVICE_CACHE_TTL = 10_000;
+
+function isWSL() {
+  try {
+    const ver = fs.readFileSync('/proc/version', 'utf-8');
+    return /microsoft|wsl/i.test(ver);
+  } catch { return false; }
+}
+
+function safeExec(cmd) {
+  try {
+    return execSync(cmd, { timeout: 10000, maxBuffer: 512 * 1024, encoding: 'utf-8' }).trim();
+  } catch { return ''; }
+}
+
+function discoverDevices() {
+  const now = Date.now();
+  if (deviceCache.data && (now - deviceCache.timestamp) < DEVICE_CACHE_TTL) {
+    return deviceCache.data;
+  }
+
+  const wsl = isWSL();
+  const result = { printers: [], serialPorts: [], usbDevices: [], networkPrinters: [], timestamp: new Date().toISOString() };
+
+  // --- Printers ---
+  const lpOut = safeExec('lpstat -p -d 2>/dev/null');
+  if (lpOut) {
+    const defaultMatch = lpOut.match(/system default destination:\s*(\S+)/);
+    const defaultPrinter = defaultMatch ? defaultMatch[1] : '';
+    const printerLines = lpOut.match(/^printer\s+(\S+)\s+(.*)$/gm) || [];
+    for (const line of printerLines) {
+      const m = line.match(/^printer\s+(\S+)\s+(.*)/);
+      if (m) {
+        result.printers.push({ name: m[1], status: m[2].trim(), isDefault: m[1] === defaultPrinter });
+      }
+    }
+  }
+  if (wsl) {
+    const psOut = safeExec('powershell.exe -c "Get-Printer | ConvertTo-Json" 2>/dev/null');
+    if (psOut) {
+      try {
+        let parsed = JSON.parse(psOut);
+        if (!Array.isArray(parsed)) parsed = [parsed];
+        for (const p of parsed) {
+          result.printers.push({ name: p.Name, status: p.PrinterStatus || 'unknown', isDefault: false, source: 'windows' });
+        }
+      } catch {}
+    }
+  }
+
+  // --- Serial ports ---
+  const serialGlobs = ['/dev/ttyUSB*', '/dev/ttyACM*', '/dev/ttyS*'];
+  for (const pattern of serialGlobs) {
+    const found = safeExec(`ls ${pattern} 2>/dev/null`);
+    if (found) {
+      for (const p of found.split('\n').filter(Boolean)) {
+        result.serialPorts.push({ path: p, description: path.basename(p) });
+      }
+    }
+  }
+  // /dev/serial/by-id symlinks
+  const byId = safeExec('ls -la /dev/serial/by-id/ 2>/dev/null');
+  if (byId) {
+    const idLines = byId.split('\n').filter(l => l.includes('->'));
+    for (const line of idLines) {
+      const parts = line.split(/\s+/);
+      const name = parts[parts.length - 3] || '';
+      const target = parts[parts.length - 1] || '';
+      if (name && target) {
+        const resolved = path.resolve('/dev/serial/by-id', target);
+        // Avoid duplicates
+        if (!result.serialPorts.find(s => s.path === resolved)) {
+          result.serialPorts.push({ path: resolved, description: name });
+        }
+      }
+    }
+  }
+  if (wsl) {
+    const comPorts = safeExec('powershell.exe -c "[System.IO.Ports.SerialPort]::GetPortNames()" 2>/dev/null');
+    if (comPorts) {
+      for (const p of comPorts.split('\n').map(s => s.trim()).filter(Boolean)) {
+        result.serialPorts.push({ path: p, description: `Windows ${p}`, source: 'windows' });
+      }
+    }
+  }
+
+  // --- USB devices ---
+  const usbOut = safeExec('lsusb 2>/dev/null');
+  if (usbOut) {
+    for (const line of usbOut.split('\n').filter(Boolean)) {
+      result.usbDevices.push({ raw: line.trim() });
+    }
+  }
+
+  // --- Network printers (mDNS) ---
+  const mdnsOut = safeExec('avahi-browse -tpr _ipp._tcp 2>/dev/null');
+  if (mdnsOut) {
+    for (const line of mdnsOut.split('\n').filter(l => l.startsWith('='))) {
+      const parts = line.split(';');
+      if (parts.length >= 8) {
+        result.networkPrinters.push({ name: parts[3], host: parts[6], address: parts[7], port: parts[8] });
+      }
+    }
+  }
+
+  deviceCache.data = result;
+  deviceCache.timestamp = now;
+  return result;
+}
 
 // ── Tail-read a file and parse JSONL lines ──────────────────────────────────
 
@@ -284,8 +396,380 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ── GET /devices — Discover all connected devices ──────────────────────────
+  if (url === '/devices' && req.method === 'GET') {
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify(discoverDevices()));
+    return;
+  }
+
+  // ── GET /devices/printers — List printers with status ─────────────────────
+  if (url === '/devices/printers' && req.method === 'GET') {
+    const lpOut = safeExec('lpstat -p -d 2>/dev/null');
+    const printers = [];
+    if (lpOut) {
+      const defaultMatch = lpOut.match(/system default destination:\s*(\S+)/);
+      const defaultPrinter = defaultMatch ? defaultMatch[1] : '';
+      const printerLines = lpOut.match(/^printer\s+(\S+)\s+(.*)$/gm) || [];
+      for (const line of printerLines) {
+        const m = line.match(/^printer\s+(\S+)\s+(.*)/);
+        if (m) {
+          printers.push({ name: m[1], status: m[2].trim(), isDefault: m[1] === defaultPrinter });
+        }
+      }
+    }
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ printers }));
+    return;
+  }
+
+  // ── POST /devices/print — Print a file or text ────────────────────────────
+  if (url === '/devices/print' && req.method === 'POST') {
+    const origin = req.headers['origin'] || req.headers['referer'] || '';
+    const isLocal = !origin || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('app.chrisswanson.xyz');
+    if (!isLocal) {
+      res.writeHead(403, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
+      return;
+    }
+
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 10240) {
+        res.writeHead(413, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Request body too large' }));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      let parsed;
+      try { parsed = JSON.parse(body); } catch {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON body' }));
+        return;
+      }
+
+      const { printer, text, file, copies } = parsed;
+      if (!text && !file) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Must provide "text" or "file"' }));
+        return;
+      }
+
+      let filePath = file;
+      if (text) {
+        filePath = path.join(os.tmpdir(), `claude-print-${Date.now()}.txt`);
+        fs.writeFileSync(filePath, text, 'utf-8');
+      }
+
+      const parts = ['lp'];
+      if (printer) parts.push('-d', printer);
+      if (copies && copies > 1) parts.push('-n', String(copies));
+      parts.push('--', filePath);
+
+      exec(parts.join(' '), { timeout: 15000 }, (err, stdout, stderr) => {
+        // Clean up temp file
+        if (text) try { fs.unlinkSync(filePath); } catch {}
+
+        if (err) {
+          res.writeHead(500, CORS);
+          res.end(JSON.stringify({ ok: false, error: stderr || err.message }));
+        } else {
+          const jobMatch = (stdout || '').match(/request id is (\S+)/);
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, jobId: jobMatch ? jobMatch[1] : 'unknown' }));
+        }
+      });
+    });
+    return;
+  }
+
+  // ── GET /devices/serial — List serial ports ───────────────────────────────
+  if (url === '/devices/serial' && req.method === 'GET') {
+    const ports = [];
+    const wsl = isWSL();
+
+    const serialGlobs = ['/dev/ttyUSB*', '/dev/ttyACM*', '/dev/ttyS*'];
+    for (const pattern of serialGlobs) {
+      const found = safeExec(`ls ${pattern} 2>/dev/null`);
+      if (found) {
+        for (const p of found.split('\n').filter(Boolean)) {
+          ports.push({ path: p, description: path.basename(p) });
+        }
+      }
+    }
+
+    const byId = safeExec('ls -la /dev/serial/by-id/ 2>/dev/null');
+    if (byId) {
+      const idLines = byId.split('\n').filter(l => l.includes('->'));
+      for (const line of idLines) {
+        const parts = line.split(/\s+/);
+        const name = parts[parts.length - 3] || '';
+        const target = parts[parts.length - 1] || '';
+        if (name && target) {
+          const resolved = path.resolve('/dev/serial/by-id', target);
+          if (!ports.find(s => s.path === resolved)) {
+            ports.push({ path: resolved, description: name });
+          }
+        }
+      }
+    }
+
+    if (wsl) {
+      const comPorts = safeExec('powershell.exe -c "[System.IO.Ports.SerialPort]::GetPortNames()" 2>/dev/null');
+      if (comPorts) {
+        for (const p of comPorts.split('\n').map(s => s.trim()).filter(Boolean)) {
+          ports.push({ path: p, description: `Windows ${p}`, source: 'windows' });
+        }
+      }
+    }
+
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ports }));
+    return;
+  }
+
+  // ── POST /devices/serial/send — Send data to a serial port ────────────────
+  if (url === '/devices/serial/send' && req.method === 'POST') {
+    const origin = req.headers['origin'] || req.headers['referer'] || '';
+    const isLocal = !origin || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('app.chrisswanson.xyz');
+    if (!isLocal) {
+      res.writeHead(403, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
+      return;
+    }
+
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 10240) {
+        res.writeHead(413, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Request body too large' }));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      let parsed;
+      try { parsed = JSON.parse(body); } catch {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON body' }));
+        return;
+      }
+
+      const { port, data, baudRate } = parsed;
+      if (!port || !data) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Missing "port" or "data"' }));
+        return;
+      }
+
+      // Validate port path to prevent injection
+      if (!/^(\/dev\/tty[A-Za-z0-9\/]+|COM\d+)$/.test(port)) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid port path' }));
+        return;
+      }
+
+      let cmd;
+      if (baudRate) {
+        cmd = `stty -F ${port} ${baudRate} raw -echo 2>/dev/null; echo -ne ${JSON.stringify(data)} > ${port}`;
+      } else {
+        cmd = `echo -ne ${JSON.stringify(data)} > ${port}`;
+      }
+
+      exec(cmd, { timeout: 10000 }, (err, stdout, stderr) => {
+        if (err) {
+          res.writeHead(500, CORS);
+          res.end(JSON.stringify({ ok: false, error: stderr || err.message }));
+        } else {
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true }));
+        }
+      });
+    });
+    return;
+  }
+
+  // ── GET /devices/3dprinter — Detect 3D printer services ───────────────────
+  if (url === '/devices/3dprinter' && req.method === 'GET') {
+    const services = [];
+
+    // Check OctoPrint
+    const octoPrint = safeExec('curl -s http://localhost:5000/api/version 2>/dev/null');
+    if (octoPrint) {
+      try {
+        const info = JSON.parse(octoPrint);
+        services.push({ type: 'octoprint', url: 'http://localhost:5000', status: 'online', version: info.server || info.text || 'unknown' });
+      } catch {
+        if (octoPrint.length > 0) services.push({ type: 'octoprint', url: 'http://localhost:5000', status: 'responding' });
+      }
+    }
+
+    // Check Klipper/Moonraker
+    const moonraker = safeExec('curl -s http://localhost:7125/server/info 2>/dev/null');
+    if (moonraker) {
+      try {
+        const info = JSON.parse(moonraker);
+        services.push({ type: 'klipper', url: 'http://localhost:7125', status: 'online', version: info.result?.software_version || 'unknown' });
+      } catch {
+        if (moonraker.length > 0) services.push({ type: 'klipper', url: 'http://localhost:7125', status: 'responding' });
+      }
+    }
+
+    // Check serial ports for common 3D printer USB vendor/product IDs
+    const usbOut = safeExec('lsusb 2>/dev/null');
+    if (usbOut) {
+      const printerIds = [
+        { pattern: /2c99/i, brand: 'Prusa' },
+        { pattern: /1a86:7523/i, brand: 'CH340 (common 3D printer)' },
+        { pattern: /0403:6001/i, brand: 'FTDI (common 3D printer)' },
+        { pattern: /2341/i, brand: 'Arduino/3D printer' },
+        { pattern: /1d50:6029/i, brand: 'Marlin USB' },
+      ];
+      for (const line of usbOut.split('\n')) {
+        for (const { pattern, brand } of printerIds) {
+          if (pattern.test(line)) {
+            services.push({ type: 'serial', status: 'detected', description: `${brand}: ${line.trim()}` });
+          }
+        }
+      }
+    }
+
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ services }));
+    return;
+  }
+
+  // ── POST /devices/3dprinter/command — Send G-code to a 3D printer ─────────
+  if (url === '/devices/3dprinter/command' && req.method === 'POST') {
+    const origin = req.headers['origin'] || req.headers['referer'] || '';
+    const isLocal = !origin || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('app.chrisswanson.xyz');
+    if (!isLocal) {
+      res.writeHead(403, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
+      return;
+    }
+
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 10240) {
+        res.writeHead(413, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Request body too large' }));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      let parsed;
+      try { parsed = JSON.parse(body); } catch {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON body' }));
+        return;
+      }
+
+      const { target, command, apiKey, port } = parsed;
+      if (!target || !command) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Missing "target" or "command"' }));
+        return;
+      }
+
+      if (target === 'octoprint') {
+        const headers = apiKey ? `-H "X-Api-Key: ${apiKey}"` : '';
+        const payload = JSON.stringify({ command });
+        const cmd = `curl -s -X POST http://localhost:5000/api/printer/command ${headers} -H "Content-Type: application/json" -d '${payload}'`;
+        exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(500, CORS);
+            res.end(JSON.stringify({ ok: false, error: stderr || err.message }));
+          } else {
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({ ok: true, response: stdout || undefined }));
+          }
+        });
+      } else if (target === 'klipper') {
+        const payload = JSON.stringify({ script: command });
+        const cmd = `curl -s -X POST http://localhost:7125/printer/gcode/script -H "Content-Type: application/json" -d '${payload}'`;
+        exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(500, CORS);
+            res.end(JSON.stringify({ ok: false, error: stderr || err.message }));
+          } else {
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({ ok: true, response: stdout || undefined }));
+          }
+        });
+      } else if (target === 'serial') {
+        if (!port) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Serial target requires "port"' }));
+          return;
+        }
+        if (!/^(\/dev\/tty[A-Za-z0-9\/]+|COM\d+)$/.test(port)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid port path' }));
+          return;
+        }
+        // Send G-code with newline terminator
+        const gcode = command.endsWith('\n') ? command : command + '\n';
+        const cmd = `echo -ne ${JSON.stringify(gcode)} > ${port}`;
+        exec(cmd, { timeout: 10000 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(500, CORS);
+            res.end(JSON.stringify({ ok: false, error: stderr || err.message }));
+          } else {
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({ ok: true }));
+          }
+        });
+      } else {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid target. Use "octoprint", "klipper", or "serial"' }));
+      }
+    });
+    return;
+  }
+
+  // ── GET /devices/network — Scan local network for devices ─────────────────
+  if (url === '/devices/network' && req.method === 'GET') {
+    const devices = [];
+
+    // ARP table
+    const arpOut = safeExec('arp -a 2>/dev/null');
+    if (arpOut) {
+      for (const line of arpOut.split('\n').filter(Boolean)) {
+        const m = line.match(/^(\S+)\s+\(([^)]+)\)\s+at\s+(\S+)/);
+        if (m) {
+          devices.push({ hostname: m[1] !== '?' ? m[1] : undefined, ip: m[2], mac: m[3] !== '<incomplete>' ? m[3] : undefined });
+        }
+      }
+    }
+
+    // mDNS discovery
+    const mdnsOut = safeExec('avahi-browse -tpr _http._tcp 2>/dev/null');
+    if (mdnsOut) {
+      for (const line of mdnsOut.split('\n').filter(l => l.startsWith('='))) {
+        const parts = line.split(';');
+        if (parts.length >= 8) {
+          const existing = devices.find(d => d.ip === parts[7]);
+          if (existing) {
+            existing.services = existing.services || [];
+            existing.services.push(parts[3]);
+          } else {
+            devices.push({ hostname: parts[6] || undefined, ip: parts[7], services: [parts[3]] });
+          }
+        }
+      }
+    }
+
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ devices }));
+    return;
+  }
+
   res.writeHead(404, CORS);
-  res.end(JSON.stringify({ error: 'Not found. Use /health, /sessions, or POST /exec' }));
+  res.end(JSON.stringify({ error: 'Not found. Use /health, /sessions, /exec, or /devices/*' }));
 });
 
 server.on('error', (err) => {
@@ -304,7 +788,15 @@ server.listen(PORT, () => {
   console.log(`  Scanning ${CLAUDE_DIR}`);
   console.log(`  Found ${cachedSessions.length} active session(s)\n`);
   console.log(`  Endpoints:`);
-  console.log(`    GET  /health   — Bridge status`);
-  console.log(`    GET  /sessions — Active Claude Code sessions`);
-  console.log(`    POST /exec     — Run a shell command\n`);
+  console.log(`    GET  /health              — Bridge status`);
+  console.log(`    GET  /sessions            — Active Claude Code sessions`);
+  console.log(`    POST /exec                — Run a shell command`);
+  console.log(`    GET  /devices             — Discover all connected devices`);
+  console.log(`    GET  /devices/printers    — List printers with status`);
+  console.log(`    POST /devices/print       — Print a file or text`);
+  console.log(`    GET  /devices/serial      — List serial ports`);
+  console.log(`    POST /devices/serial/send — Send data to serial port`);
+  console.log(`    GET  /devices/3dprinter   — Detect 3D printer services`);
+  console.log(`    POST /devices/3dprinter/command — Send G-code`);
+  console.log(`    GET  /devices/network     — Scan local network\n`);
 });

@@ -10,7 +10,7 @@ import { supabase } from './supabase';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type LLMProvider = 'openai' | 'anthropic' | 'openrouter' | 'groq' | 'ollama' | 'replicate';
+export type LLMProvider = 'openai' | 'anthropic' | 'openrouter' | 'groq' | 'ollama' | 'replicate' | 'github-models' | 'huggingface';
 
 export interface ProviderKey {
   id: string;
@@ -50,10 +50,12 @@ export type ThinkingLevel = 'fast' | 'balanced' | 'deep';
 
 export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
   openai: [
-    { id: 'gpt-4o',      label: 'GPT-4o',      provider: 'openai', contextWindow: 128000, costTier: 'mid' },
-    { id: 'gpt-4o-mini', label: 'GPT-4o Mini',  provider: 'openai', contextWindow: 128000, costTier: 'cheap' },
-    { id: 'o3-mini',     label: 'o3 Mini',       provider: 'openai', contextWindow: 200000, costTier: 'mid' },
-    { id: 'o1',          label: 'o1',             provider: 'openai', contextWindow: 200000, costTier: 'expensive' },
+    { id: 'gpt-4.1',      label: 'GPT-4.1',      provider: 'openai', contextWindow: 1047576, costTier: 'mid' },
+    { id: 'gpt-4.1-mini', label: 'GPT-4.1 Mini', provider: 'openai', contextWindow: 1047576, costTier: 'cheap' },
+    { id: 'gpt-4o',       label: 'GPT-4o',        provider: 'openai', contextWindow: 128000,  costTier: 'mid' },
+    { id: 'gpt-4o-mini',  label: 'GPT-4o Mini',   provider: 'openai', contextWindow: 128000,  costTier: 'cheap' },
+    { id: 'o4-mini',      label: 'O4 Mini',       provider: 'openai', contextWindow: 200000,  costTier: 'mid' },
+    { id: 'o3-mini',      label: 'O3 Mini',       provider: 'openai', contextWindow: 200000,  costTier: 'mid' },
   ],
   anthropic: [
     { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', provider: 'anthropic', contextWindow: 200000, costTier: 'mid' },
@@ -61,10 +63,12 @@ export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
     { id: 'claude-opus-4-6',   label: 'Claude Opus 4.6',   provider: 'anthropic', contextWindow: 200000, costTier: 'expensive' },
   ],
   openrouter: [
-    { id: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6', provider: 'openrouter', contextWindow: 200000, costTier: 'mid' },
-    { id: 'openai/gpt-4o',              label: 'GPT-4o',             provider: 'openrouter', contextWindow: 128000, costTier: 'mid' },
-    { id: 'meta-llama/llama-3.3-70b',   label: 'Llama 3.3 70B',      provider: 'openrouter', contextWindow: 131072, costTier: 'cheap' },
+    { id: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6', provider: 'openrouter', contextWindow: 200000,  costTier: 'mid' },
+    { id: 'openai/gpt-4o',              label: 'GPT-4o',             provider: 'openrouter', contextWindow: 128000,  costTier: 'mid' },
+    { id: 'google/gemini-2.5-pro',      label: 'Gemini 2.5 Pro',     provider: 'openrouter', contextWindow: 1048576, costTier: 'mid' },
     { id: 'google/gemini-2.5-flash',    label: 'Gemini 2.5 Flash',   provider: 'openrouter', contextWindow: 1048576, costTier: 'cheap' },
+    { id: 'meta-llama/llama-3.3-70b',   label: 'Llama 3.3 70B',      provider: 'openrouter', contextWindow: 131072, costTier: 'cheap' },
+    { id: 'Qwen/Qwen3-235B-A22B',      label: 'Qwen 3 235B MoE',    provider: 'openrouter', contextWindow: 131072, costTier: 'mid' },
   ],
   groq: [
     { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B',  provider: 'groq', contextWindow: 128000, costTier: 'cheap' },
@@ -73,12 +77,34 @@ export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
   ollama: [
     { id: 'blackswan',   label: 'BlackSwan (Local)', provider: 'ollama', contextWindow: 4096,  costTier: 'free' },
     { id: 'llama3.2',    label: 'Llama 3.2',         provider: 'ollama', contextWindow: 131072, costTier: 'free' },
+    { id: 'qwen3',       label: 'Qwen 3',            provider: 'ollama', contextWindow: 40960,  costTier: 'free' },
     { id: 'qwen2.5',     label: 'Qwen 2.5',          provider: 'ollama', contextWindow: 32768,  costTier: 'free' },
     { id: 'mistral',     label: 'Mistral',            provider: 'ollama', contextWindow: 32768,  costTier: 'free' },
   ],
   replicate: [
     { id: 'flux-schnell', label: 'Flux Schnell (fast)', provider: 'replicate', contextWindow: 0, costTier: 'cheap' },
     { id: 'flux-dev',     label: 'Flux Dev (quality)',   provider: 'replicate', contextWindow: 0, costTier: 'mid' },
+  ],
+  'github-models': [
+    { id: 'gpt-4.1',                      label: 'GPT-4.1',         provider: 'github-models', contextWindow: 1047576, costTier: 'free' },
+    { id: 'gpt-4.1-mini',                 label: 'GPT-4.1 Mini',    provider: 'github-models', contextWindow: 1047576, costTier: 'free' },
+    { id: 'gpt-4o',                       label: 'GPT-4o',          provider: 'github-models', contextWindow: 128000,  costTier: 'free' },
+    { id: 'gpt-4o-mini',                  label: 'GPT-4o Mini',     provider: 'github-models', contextWindow: 128000,  costTier: 'free' },
+    { id: 'Meta-Llama-3.1-405B-Instruct', label: 'Llama 3.1 405B',  provider: 'github-models', contextWindow: 128000,  costTier: 'free' },
+    { id: 'Meta-Llama-3.1-70B-Instruct',  label: 'Llama 3.1 70B',   provider: 'github-models', contextWindow: 128000,  costTier: 'free' },
+    { id: 'Mistral-Large-2411',            label: 'Mistral Large',    provider: 'github-models', contextWindow: 128000,  costTier: 'free' },
+    { id: 'Phi-4',                         label: 'Phi-4',            provider: 'github-models', contextWindow: 16384,   costTier: 'free' },
+    { id: 'cohere-command-r-plus',         label: 'Command R+',       provider: 'github-models', contextWindow: 128000,  costTier: 'free' },
+  ],
+  huggingface: [
+    { id: 'meta-llama/Llama-3.3-70B-Instruct',     label: 'Llama 3.3 70B',   provider: 'huggingface', contextWindow: 131072, costTier: 'mid' },
+    { id: 'mistralai/Mistral-Large-2411',           label: 'Mistral Large',    provider: 'huggingface', contextWindow: 128000, costTier: 'mid' },
+    { id: 'Qwen/Qwen3-235B-A22B',                   label: 'Qwen 3 235B MoE', provider: 'huggingface', contextWindow: 131072, costTier: 'mid' },
+    { id: 'Qwen/Qwen3-32B',                         label: 'Qwen 3 32B',      provider: 'huggingface', contextWindow: 131072, costTier: 'mid' },
+    { id: 'deepseek-ai/DeepSeek-R1',               label: 'DeepSeek R1',      provider: 'huggingface', contextWindow: 131072, costTier: 'mid' },
+    { id: 'google/gemma-2-27b-it',                  label: 'Gemma 2 27B',      provider: 'huggingface', contextWindow: 8192,   costTier: 'cheap' },
+    { id: 'meta-llama/Llama-3.1-8B-Instruct',      label: 'Llama 3.1 8B',    provider: 'huggingface', contextWindow: 131072, costTier: 'free' },
+    { id: 'mistralai/Mistral-7B-Instruct-v0.3',    label: 'Mistral 7B',       provider: 'huggingface', contextWindow: 32768,  costTier: 'free' },
   ],
 };
 
@@ -90,7 +116,9 @@ export const PROVIDER_HELP: Record<LLMProvider, { url: string; hint: string }> =
   openrouter: { url: 'https://openrouter.ai/keys',                   hint: 'Get your API key from OpenRouter — access 2000+ models' },
   groq:       { url: 'https://console.groq.com/keys',                hint: 'Get your API key from Groq — ultra-fast inference' },
   ollama:     { url: 'https://ollama.com/download',                   hint: 'Install Ollama locally — free, runs on your machine' },
-  replicate:  { url: 'https://replicate.com/account/api-tokens',     hint: 'Get your API token from Replicate — AI image generation' },
+  replicate:      { url: 'https://replicate.com/account/api-tokens',     hint: 'Get your API token from Replicate — AI image generation' },
+  'github-models': { url: 'https://github.com/settings/tokens',            hint: 'Use a GitHub PAT with models scope — free tier with rate limits' },
+  huggingface:     { url: 'https://huggingface.co/settings/tokens',          hint: 'Get your HF token — free tier available, PRO ($9/mo) gets 20x credits' },
 };
 
 // ─── API Key CRUD ───────────────────────────────────────────────────────────

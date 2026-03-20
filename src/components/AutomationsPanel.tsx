@@ -136,10 +136,21 @@ const TRIGGER_CATALOG: { category: string; icon: string; items: TriggerOption[] 
     category: 'GitHub',
     icon: '🐙',
     items: [
-      { id: 'webhook:github:push',                 label: 'New push to branch',   description: 'Code pushed to a branch',          icon: '📤', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'push' },
-      { id: 'webhook:github:ci_completed',         label: 'CI completed',         description: 'GitHub Actions workflow finished',  icon: '🔧', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'ci_completed' },
-      { id: 'webhook:github:pull_request_opened',  label: 'PR opened',            description: 'Pull request opened',              icon: '🔀', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'pull_request_opened' },
-      { id: 'webhook:github:pull_request_merged',  label: 'PR merged',            description: 'Pull request merged',              icon: '✅', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'pull_request_merged' },
+      { id: 'webhook:github:push',                 label: 'New push to branch',    description: 'Code pushed to a branch',                  icon: '📤', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'push' },
+      { id: 'webhook:github:ci_completed',         label: 'CI completed',          description: 'GitHub Actions workflow finished',          icon: '🔧', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'ci_completed' },
+      { id: 'webhook:github:ci_failed',            label: 'CI failed',             description: 'GitHub Actions workflow failed',             icon: '❌', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'ci_failed' },
+      { id: 'webhook:github:pull_request_opened',  label: 'PR opened',             description: 'Pull request opened',                      icon: '🔀', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'pull_request_opened' },
+      { id: 'webhook:github:pull_request_merged',  label: 'PR merged',             description: 'Pull request merged',                      icon: '✅', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'pull_request_merged' },
+      { id: 'webhook:github:pr_approved',          label: 'PR approved',           description: 'Pull request review approved',              icon: '👍', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'pr_approved' },
+      { id: 'webhook:github:pr_changes_requested', label: 'PR changes requested',  description: 'Reviewer requested changes on PR',          icon: '✏️', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'pr_changes_requested' },
+      { id: 'webhook:github:check_failed',         label: 'Check failed',          description: 'CI check run failed',                      icon: '🚫', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'check_failed' },
+      { id: 'webhook:github:deploy_success',       label: 'Deploy succeeded',      description: 'Deployment completed successfully',         icon: '🚀', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'deploy_success' },
+      { id: 'webhook:github:deploy_failure',       label: 'Deploy failed',         description: 'Deployment failed',                        icon: '💥', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'deploy_failure' },
+      { id: 'webhook:github:security_alert',       label: 'Security alert',        description: 'Code scanning, secret, or dependency alert', icon: '🛡️', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'security_alert' },
+      { id: 'webhook:github:star',                 label: 'Repo starred',          description: 'Someone starred the repo',                  icon: '⭐', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'star' },
+      { id: 'webhook:github:fork',                 label: 'Repo forked',           description: 'Someone forked the repo',                   icon: '🍴', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'fork' },
+      { id: 'webhook:github:discussion',           label: 'Discussion created',    description: 'New discussion in the repo',                icon: '💬', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'discussion' },
+      { id: 'webhook:github:issue_labeled',         label: 'Issue labeled',         description: 'A label was added to an issue',             icon: '🏷️', category: 'GitHub', triggerType: 'webhook', webhookProvider: 'github', webhookEvent: 'issue_labeled' },
     ],
   },
   {
@@ -171,8 +182,17 @@ function getTriggerById(id: string): TriggerOption | undefined {
 // Smart trigger detection from natural language description
 function detectTrigger(text: string): TriggerOption | null {
   const t = text.toLowerCase();
-  if (/\bci\b|pipeline|github action|build fail/.test(t))       return getTriggerById('webhook:github:ci_completed') ?? null;
+  if (/\bcopilot\b|issue.*label|label.*issue/.test(t))                  return getTriggerById('webhook:github:issue_labeled') ?? null;
+  if (/\bsecurity\b|vulnerab|scanning|dependabot|secret.?leak/.test(t)) return getTriggerById('webhook:github:security_alert') ?? null;
+  if (/\bdeploy.*(fail|broke|error)/.test(t))                    return getTriggerById('webhook:github:deploy_failure') ?? null;
+  if (/\bdeploy/.test(t))                                        return getTriggerById('webhook:github:deploy_success') ?? null;
+  if (/\bci.*(fail|broke|error)|build fail/.test(t))             return getTriggerById('webhook:github:ci_failed') ?? null;
+  if (/\bci\b|pipeline|github action/.test(t))                   return getTriggerById('webhook:github:ci_completed') ?? null;
+  if (/\bapproved?\b|review.?approv/.test(t))                    return getTriggerById('webhook:github:pr_approved') ?? null;
   if (/\bpr\b|pull request|merge/.test(t))                       return getTriggerById('webhook:github:pull_request_opened') ?? null;
+  if (/\bstar|starred/.test(t))                                  return getTriggerById('webhook:github:star') ?? null;
+  if (/\bfork/.test(t))                                          return getTriggerById('webhook:github:fork') ?? null;
+  if (/\bdiscussion/.test(t))                                    return getTriggerById('webhook:github:discussion') ?? null;
   if (/\bgithub\b|push|commit|branch/.test(t))                   return getTriggerById('webhook:github:push') ?? null;
   if (/\bslack\b/.test(t))                                       return getTriggerById('webhook:slack:message') ?? null;
   if (/\blinear\b/.test(t))                                      return getTriggerById('webhook:linear:issue_created') ?? null;

@@ -27,7 +27,7 @@ export function createDefaultFloor(id: string, name: string, themeId: string, or
 }
 
 export const DEFAULT_FLOORS: OfficeFloor[] = [
-  createDefaultFloor('floor_1', '1F - Main', 'gothic-cathedral', 0),
+  createDefaultFloor('floor_1', 'Deck 1 - Bridge', 'gothic-cathedral', 0),
 ];
 
 // ─── Office Themes ───────────────────────────────────────────────────────────
@@ -717,8 +717,8 @@ export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
   { type: 'trivia_screen',  name: 'Trivia',         icon: '🧠', width: 90,  height: 60,  category: 'games', description: 'Quick trivia rounds · streak score' },
   { type: 'retro_console',  name: 'Retro Console',  icon: '🎮', width: 100, height: 90,  category: 'games', description: 'GBA, GBC, NES, SNES, PS1 & more — load your ROMs' },
   { type: 'scrabble_board', name: 'Scrabble',       icon: '🔤', width: 100, height: 100, category: 'games', description: 'Word tiles · score big · vs BlackSwan AI' },
-  { type: 'farm_plot',     name: 'Farm Plot',      icon: '🌾', width: 110, height: 100, category: 'games', description: 'Plant crops · water · harvest gold' },
-  { type: 'office_pet',    name: 'Office Pet',     icon: '🐣', width: 90,  height: 90,  category: 'games', description: 'Tamagotchi pet · feed · play · evolve' },
+  { type: 'farm_plot',     name: 'Galaxy Farm',    icon: '🌌', width: 200, height: 180, category: 'games', description: 'Grow data crops on your planet · harvest stardust' },
+  { type: 'office_pet',    name: 'AI Companion',   icon: '🛸', width: 140, height: 130, category: 'games', description: 'Raise a cosmic companion · feed · play · evolve' },
   // ── Vibe (aesthetic & ambient) ──────────────────────────────────────────
   { type: 'fireplace',     name: 'Fireplace',       icon: '🔥', width: 80,  height: 70,  category: 'vibe', description: 'Crackling fire with embers' },
   { type: 'aquarium',      name: 'Aquarium',        icon: '🐠', width: 90,  height: 60,  category: 'vibe', description: 'Fish tank with swimming fish' },

@@ -14,6 +14,13 @@ const XP_AMOUNTS: Record<string, number> = {
   streak_7day:     2_000,
   streak_30day:    10_000,
   badge_earned:    5_000,   // bonus XP for unlocking a badge
+  farm_harvest:    25,      // harvest a data crop
+  farm_rare_harvest: 75,    // harvest a tier 3-4 crop
+  pet_feed:        10,      // feed your companion
+  pet_trick:       15,      // perform a trick
+  pet_evolve:      200,     // pet reaches new stage
+  pet_legendary:   1_000,   // pet reaches legendary
+  station_alive:   100,     // daily bonus for keeping farm+pet alive
 };
 
 // Titles map to XP level (level = floor(sqrt(xp/50)) + 1).

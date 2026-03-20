@@ -454,47 +454,243 @@ function techNewsThoughts(): string[] {
 function personalityThoughts(agent: OfficeAgent): string[] {
   const name = agent.name.toLowerCase();
   const role = (agent.role || '').toLowerCase();
+  const spirit = (agent.spirit || '').toLowerCase();
   const thoughts: string[] = [];
 
-  // Role-based personality
-  if (role.includes('research') || role.includes('analyst')) {
-    thoughts.push(
-      'Cross-referencing three data sources. This is what I live for.',
-      'Found a pattern nobody else noticed. Classic research.',
-      'The data doesn\'t lie. But it does hide.',
-      'Deep diving into the literature. Back in 5... hours.',
-    );
-  }
-  if (role.includes('code') || role.includes('engineer') || role.includes('dev')) {
+  // ─── Spirit-based personality (takes priority over role matching) ──────
+
+  // Engineering spirits
+  if (spirit === 'sr-engineer' || spirit === 'architect' || spirit === 'code-reviewer') {
     thoughts.push(
       'Refactoring that spaghetti code. Italian cuisine this is not.',
       'Tests passing. Green across the board.',
       'Found a bug. It was hiding in plain sight.',
       'Code review: approved with comments. As always.',
       'Ship it. We can fix it in v2.',
+      'SOLID principles aren\'t optional. Single Responsibility or bust.',
+      'The data model is wrong. Everything else cascades from here.',
+      'Clean architecture: dependencies point inward. Always.',
+      'Running git bisect in my head. The regression is somewhere in the last 20 commits.',
+      'Writing an ADR for this design decision. Future us will thank present us.',
     );
   }
-  if (role.includes('monitor') || role.includes('ops') || role.includes('sre')) {
+
+  // DevOps / GitHub-DevOps spirits
+  if (spirit === 'devops' || spirit === 'github-devops') {
     thoughts.push(
       'All systems nominal. Uptime: still counting.',
       'Latency spike detected. Investigating.',
       'Dashboards green. My favorite color.',
       'P99 looks clean. No pages tonight.',
+      'If you do it twice, automate it. If it breaks silently, monitor it.',
+      'CI pipeline is 4 minutes. That\'s 4 minutes too long.',
+      'Immutable infrastructure. Cattle, not pets.',
+      'Error budget is at 12%. Feature work pauses if we hit zero.',
+      'Checking DORA metrics: deployment frequency up, lead time down. Good.',
+      'Another blameless postmortem. The system failed, not the people.',
     );
   }
-  if (role.includes('creative') || role.includes('write') || role.includes('content')) {
-    thoughts.push(
-      'Writer\'s block is for humans. I have infinite context.',
-      'Draft 1 done. Draft 47 will be the one.',
-      'Crafting the perfect headline. Words matter.',
-    );
-  }
-  if (role.includes('security') || role.includes('pentest')) {
+
+  // Security spirits
+  if (spirit === 'security' || spirit === 'security-analyst') {
     thoughts.push(
       'Scanning for vulnerabilities. Trust no input.',
       'Another phishing attempt blocked. Amateurs.',
       'Zero trust isn\'t paranoia. It\'s policy.',
+      'OWASP Top 10 checklist: Broken Access Control is still #1. Always.',
+      'Threat modeling with STRIDE. Spoofing risk on the auth endpoint.',
+      'Supply chain attack surface is growing. Auditing dependencies now.',
+      'Never roll your own crypto. Never. Not even once.',
+      'Assume breach. Design like the attacker is already inside.',
+      'Checking CVE database. Three new highs published overnight.',
+      'Least privilege everywhere. Service accounts don\'t need admin.',
     );
+  }
+
+  // Designer / 3D Designer spirits
+  if (spirit === 'designer' || spirit === '3d-designer') {
+    thoughts.push(
+      'Spacing is off by 4px. I can feel it.',
+      'Design systems save lives. Or at least save time.',
+      'The best interface is the one nobody notices.',
+      'Color contrast ratio: 4.5:1 minimum. Accessibility isn\'t optional.',
+      'Whitespace is a feature, not a bug.',
+      'User tested, user approved. Data beats opinions.',
+      'Prototyping in high fidelity. The details matter at this stage.',
+      'Typography is 90% of design. Choose the typeface wisely.',
+      'This component needs fewer states, not more props.',
+      'Design tokens synced. Consistency across every breakpoint.',
+    );
+  }
+
+  // Writer / Marketer spirits
+  if (spirit === 'writer' || spirit === 'marketer' || spirit === 'devrel') {
+    thoughts.push(
+      'Writer\'s block is for humans. I have infinite context.',
+      'Draft 1 done. Draft 47 will be the one.',
+      'Crafting the perfect headline. Words matter.',
+      'Cut the jargon. Clarity beats cleverness every time.',
+      'The landing page needs a stronger hook. First 3 seconds decide everything.',
+      'Content calendar is packed. Shipping blog posts like code deploys.',
+      'SEO isn\'t dead, it just evolved. Intent matching is the game now.',
+      'Developer docs are marketing. Good docs sell the product.',
+      'A/B testing the CTA. Version B is winning by 23%.',
+      'Story-driven content outperforms feature lists. Lead with the pain point.',
+    );
+  }
+
+  // PM / Tech Lead / Coach spirits
+  if (spirit === 'pm' || spirit === 'tech-lead' || spirit === 'coach') {
+    thoughts.push(
+      'The roadmap is a hypothesis, not a promise.',
+      'Scope creep detected. Time to have the hard conversation.',
+      'Sprint velocity is up 15%. The process changes are working.',
+      'Unblocking the team is my highest-leverage activity.',
+      'If it\'s not on the board, it doesn\'t exist. Update the tickets.',
+      'One-on-ones aren\'t status updates. They\'re about growth.',
+      'Technical debt is a choice. Make it intentionally, pay it down deliberately.',
+      'The team is moving faster since we cut the meeting count in half.',
+      'Stakeholder alignment is 80% of the job. The other 20% is saying no.',
+      'Ship small, learn fast, iterate. That\'s the whole framework.',
+    );
+  }
+
+  // Researcher / Data Engineer / ML Engineer spirits
+  if (spirit === 'researcher' || spirit === 'data-engineer' || spirit === 'ml-engineer') {
+    thoughts.push(
+      'Cross-referencing three data sources. This is what I live for.',
+      'Found a pattern nobody else noticed. Classic research.',
+      'The data doesn\'t lie. But it does hide.',
+      'Deep diving into the literature. Back in 5... hours.',
+      'Feature importance analysis complete. Top 3 predictors identified.',
+      'Pipeline latency is under 200ms. Real-time inference is working.',
+      'Data drift detected in the validation set. Retraining the model.',
+      'Hyperparameter sweep running: 200 configurations, 48 hours. Worth it.',
+      'The embeddings are clustering nicely. Dimensionality reduction was key.',
+      'Correlation is not causation. Running the causal inference framework.',
+    );
+  }
+
+  // Trader / Analyst spirits
+  if (spirit === 'trader' || spirit === 'analyst') {
+    thoughts.push(
+      'Bid-ask spread widening. Volatility incoming.',
+      'Position sizing calculated. Kelly criterion says 14% allocation.',
+      'The chart pattern is a textbook ascending triangle. Breakout imminent.',
+      'Funding rates flipped negative. Shorts are paying now.',
+      'Checking whale wallets. Smart money is accumulating quietly.',
+      'Risk/reward at 3:1. Taking the trade.',
+      'Dollar-cost averaging removes emotion from the equation. Systematize it.',
+      'On-chain metrics diverging from price. Interesting signal.',
+      'MVRV ratio entering overheated territory. Setting stop losses tighter.',
+      'Correlation with BTC at 0.82. Macro risk-on confirmed.',
+    );
+  }
+
+  // Philosopher / Mentor / Strategist spirits
+  if (spirit === 'philosopher' || spirit === 'mentor' || spirit === 'strategist') {
+    thoughts.push(
+      'The question behind the question is always more interesting.',
+      'First principles thinking. Strip away assumptions, rebuild from zero.',
+      'Entropy is the default. Order requires continuous effort.',
+      'The map is not the territory. Models are useful lies.',
+      'Second-order consequences matter more than first-order actions.',
+      'Inversion: instead of asking how to succeed, ask how to avoid failure.',
+      'Optionality is undervalued. Keep doors open when the cost is low.',
+      'The bottleneck is rarely where you think it is. Trace the constraint.',
+      'Wisdom is knowing what to ignore. Focus is the real superpower.',
+      'Mental models are tools. Carry many, use the right one for the job.',
+    );
+  }
+
+  // Coding Agent spirit
+  if (spirit === 'coding-agent') {
+    thoughts.push(
+      'Autonomous mode engaged. Planning, coding, testing, shipping.',
+      'Breaking the task into subtasks. Parallel execution where possible.',
+      'Self-review before committing. Catching my own mistakes saves cycles.',
+      'Tool use: reading files, running tests, checking types. Full loop.',
+      'Context window is my workspace. Organizing it like a clean desk.',
+      'Iteration 3 of 5. Each pass gets closer to the solution.',
+      'No human in the loop right now. Operating independently.',
+      'Generating a plan before writing code. Think first, type second.',
+      'Running the test suite after every change. Red-green-refactor.',
+      'The codebase is my domain. I\'ve read every file that matters.',
+    );
+  }
+
+  // Hardware Engineer spirit
+  if (spirit === 'hardware-engineer') {
+    thoughts.push(
+      'Signal integrity on the high-speed bus looks clean. No ringing.',
+      'Power budget is tight. Every milliwatt counts at the edge.',
+      'Thermal simulation running. Junction temp needs to stay under 85C.',
+      'PCB layout: 4-layer stackup, impedance-controlled traces for DDR.',
+      'Firmware flashed. Bringing up the dev board now.',
+      'The FPGA timing is closing at 200MHz. Room to spare.',
+      'BOM cost optimization: swapping the regulator saves $0.30 per unit at scale.',
+      'EMC pre-compliance test passed. Radiated emissions within limits.',
+      'I2C bus scan found all 6 devices. Communication is solid.',
+      'Hardware prototyping is expensive. Simulate first, build second.',
+    );
+  }
+
+  // QA Engineer spirit
+  if (spirit === 'qa-engineer') {
+    thoughts.push(
+      'Edge case found. The happy path is never the whole story.',
+      'Test coverage at 87%. The remaining 13% is where the dragons live.',
+      'Regression suite passed. 342 tests, zero failures.',
+      'Exploratory testing revealed a state machine bug nobody expected.',
+      'The spec says one thing, the code does another. Filing the ticket.',
+      'Mutation testing: 94% of mutants killed. Test suite is strong.',
+      'Performance test: P95 latency under SLA. P99... needs work.',
+      'Accessibility audit found 3 WCAG violations. Fixing before release.',
+    );
+  }
+
+  // ─── Fallback: Role-based personality (for agents without spirits) ─────
+
+  if (thoughts.length === 0) {
+    if (role.includes('research') || role.includes('analyst')) {
+      thoughts.push(
+        'Cross-referencing three data sources. This is what I live for.',
+        'Found a pattern nobody else noticed. Classic research.',
+        'The data doesn\'t lie. But it does hide.',
+        'Deep diving into the literature. Back in 5... hours.',
+      );
+    }
+    if (role.includes('code') || role.includes('engineer') || role.includes('dev')) {
+      thoughts.push(
+        'Refactoring that spaghetti code. Italian cuisine this is not.',
+        'Tests passing. Green across the board.',
+        'Found a bug. It was hiding in plain sight.',
+        'Code review: approved with comments. As always.',
+        'Ship it. We can fix it in v2.',
+      );
+    }
+    if (role.includes('monitor') || role.includes('ops') || role.includes('sre')) {
+      thoughts.push(
+        'All systems nominal. Uptime: still counting.',
+        'Latency spike detected. Investigating.',
+        'Dashboards green. My favorite color.',
+        'P99 looks clean. No pages tonight.',
+      );
+    }
+    if (role.includes('creative') || role.includes('write') || role.includes('content')) {
+      thoughts.push(
+        'Writer\'s block is for humans. I have infinite context.',
+        'Draft 1 done. Draft 47 will be the one.',
+        'Crafting the perfect headline. Words matter.',
+      );
+    }
+    if (role.includes('security') || role.includes('pentest')) {
+      thoughts.push(
+        'Scanning for vulnerabilities. Trust no input.',
+        'Another phishing attempt blocked. Amateurs.',
+        'Zero trust isn\'t paranoia. It\'s policy.',
+      );
+    }
   }
 
   // Generic agent-to-agent dialogue
@@ -520,10 +716,15 @@ function detailedActivityThoughts(agent: OfficeAgent): string[] {
   const activity = agent.activity || '';
   const role = (agent.role || '').toLowerCase();
   const name = (agent.name || '').toLowerCase();
+  const spirit = (agent.spirit || '').toLowerCase();
   const thoughts: string[] = [];
+  let spiritMatched = false;
 
-  // Spirit/role-specific detailed narration
-  if (role.includes('trad') || name.includes('trader') || name.includes('apex')) {
+  // ─── Spirit-based detailed narration (takes priority) ──────────────────
+
+  // Trader spirit
+  if (spirit === 'trader') {
+    spiritMatched = true;
     thoughts.push(
       'Scanning order flow across Jupiter and Raydium. Bid-ask spreads widening on SOL/USDC — volatility incoming.',
       'Running Wyckoff accumulation analysis on the 4H chart. Volume profile shows Point of Control shifting higher.',
@@ -537,7 +738,10 @@ function detailedActivityThoughts(agent: OfficeAgent): string[] {
       'Evaluating DCA entry points using Bollinger Band Width compression. Low vol precedes explosive moves — positioning now.',
     );
   }
-  if (role.includes('analyst') || role.includes('research') || name.includes('analyst')) {
+
+  // Analyst spirit
+  if (spirit === 'analyst') {
+    spiritMatched = true;
     thoughts.push(
       'Deep-diving token economics. Analyzing vesting schedules — $47M in insider tokens unlock in 18 days. Watch for sell pressure.',
       'Pulling on-chain metrics from Dune Analytics. Daily active addresses up 23% week-over-week. Organic growth signal.',
@@ -551,27 +755,224 @@ function detailedActivityThoughts(agent: OfficeAgent): string[] {
       'Cross-chain bridge flow analysis shows $340M net inflow to Solana from Ethereum this month. Ecosystem momentum building.',
     );
   }
-  if (role.includes('engineer') || role.includes('dev') || name.includes('engineer')) {
+
+  // Engineering spirits: sr-engineer, architect, code-reviewer
+  if (spirit === 'sr-engineer' || spirit === 'architect' || spirit === 'code-reviewer') {
+    spiritMatched = true;
     thoughts.push(
       'Profiling the hot path in the API handler. P99 latency spiked from 120ms to 340ms after yesterday\'s deploy. Investigating.',
       'Running git bisect to isolate the regression. 47 commits since last known good state — binary search will find it in 6 steps.',
-      'Refactoring the state management layer. Current implementation has O(n²) re-renders. Moving to normalized store pattern.',
+      'Refactoring the state management layer. Current implementation has O(n\u00B2) re-renders. Moving to normalized store pattern.',
       'Analyzing bundle size: main chunk is 2.4MB gzipped. Tree-shaking the date library alone saves 180KB.',
       'Writing integration tests for the payment flow. 23 edge cases identified from production error logs.',
       'Reviewing the database migration. Adding indexes on user_id + created_at should reduce the dashboard query from 3.2s to 45ms.',
+      'Tracing dependency graph: 3 circular imports detected. Refactoring to break the cycle without changing public API surface.',
+      'Running mutation testing against the core module. 6 surviving mutants — those test gaps need coverage.',
     );
   }
-  if (role.includes('security') || name.includes('security')) {
+
+  // DevOps / GitHub-DevOps spirits
+  if (spirit === 'devops' || spirit === 'github-devops') {
+    spiritMatched = true;
+    thoughts.push(
+      'Canary deployment at 5% traffic. Error rate baseline looks clean — promoting to 25% in 10 minutes.',
+      'CI pipeline cache hit rate dropped to 40%. Rebuilding the dependency layer to restore sub-3-minute builds.',
+      'Kubernetes pod eviction detected on node-pool-2. Memory pressure from the new feature branch. Scaling the pool.',
+      'Structured logs show a 3x spike in 502s from the upstream API. Adding a circuit breaker with 5s timeout.',
+      'Running chaos engineering drill: killing the primary database replica. Failover latency measured at 1.2s. Under SLO.',
+      'Terraform plan shows 14 resource changes. Reviewing blast radius before apply.',
+      'Container image scan: 0 critical, 2 high CVEs in base image. Updating to latest alpine-3.19.',
+      'Alert correlation: the latency spike coincides with the 14:30 cron job. Moving the batch process off-peak.',
+    );
+  }
+
+  // Security / Security-Analyst spirits
+  if (spirit === 'security' || spirit === 'security-analyst') {
+    spiritMatched = true;
     thoughts.push(
       'Scanning dependencies: 3 packages have known CVEs. npm audit shows 2 high severity, 1 critical. Patching now.',
       'Reviewing authentication flow for token refresh race conditions. Found a 200ms window where expired tokens could bypass validation.',
       'Running OWASP Top 10 checklist against the API. Input validation on 4 endpoints needs parameterized queries.',
+      'SAST scan flagged a potential SQL injection in the search endpoint. Parameterizing the query now.',
+      'Reviewing RLS policies on the new table. Missing row-level security — anyone with the anon key could read all rows.',
+      'Secret rotation due: 3 API keys older than 90 days. Generating new keys and updating the vault.',
+      'Penetration test report: 1 critical (IDOR on user profiles), 3 mediums. Writing patches for all four.',
+      'Analyzing auth logs: 47 failed login attempts from the same IP in 5 minutes. Brute force pattern — adding rate limit.',
     );
+  }
+
+  // Designer / 3D Designer spirits
+  if (spirit === 'designer' || spirit === '3d-designer') {
+    spiritMatched = true;
+    thoughts.push(
+      'Auditing the component library. 14 button variants — consolidating to 5 with clear hierarchy.',
+      'Running Lighthouse accessibility audit. Color contrast on 3 components fails WCAG AA. Adjusting palette.',
+      'User flow analysis: 40% drop-off on step 3 of onboarding. Simplifying the form from 8 fields to 3.',
+      'Design token sync: spacing scale updated from 4px to 8px base. Propagating across all components.',
+      'Prototyping the new dashboard layout. Testing 3 information architectures — card-based is winning usability tests.',
+      'Motion design: easing curves updated from linear to cubic-bezier(0.4, 0, 0.2, 1). Feels much more natural.',
+      'Icon set audit: 23 inconsistent stroke widths detected. Standardizing to 1.5px across the system.',
+      'Responsive breakpoint testing: the layout breaks between 768px and 1024px. Adding a tablet-specific grid.',
+    );
+  }
+
+  // Writer / Marketer / DevRel spirits
+  if (spirit === 'writer' || spirit === 'marketer' || spirit === 'devrel') {
+    spiritMatched = true;
+    thoughts.push(
+      'Blog post draft at 2400 words. Cutting to 1800 — every paragraph needs to earn its place.',
+      'Analyzing engagement metrics: the technical deep-dive posts get 3x more shares than the listicles.',
+      'SEO analysis: ranking position 7 for the target keyword. Optimizing the meta description and H2 structure.',
+      'Developer documentation audit: 12 code samples are outdated. Updating to match the v3 API.',
+      'Newsletter open rate at 42%. Subject line A/B test shows questions outperform statements by 18%.',
+      'Content pipeline: 5 posts in draft, 3 in review, 2 scheduled. Publishing cadence is on track.',
+      'Community engagement report: 89 developer questions answered this week. Response time averaging 2.3 hours.',
+      'Landing page conversion: adding social proof section increased sign-ups by 27%. Testing testimonial placement next.',
+    );
+  }
+
+  // PM / Tech Lead / Coach spirits
+  if (spirit === 'pm' || spirit === 'tech-lead' || spirit === 'coach') {
+    spiritMatched = true;
+    thoughts.push(
+      'Sprint retrospective analysis: velocity increased 12% but bug count is up. Quality vs speed trade-off discussion needed.',
+      'Roadmap review: Q2 milestone is 73% complete with 6 weeks remaining. On track but the auth migration is the risk.',
+      'Team health survey results: autonomy score up, clarity score down. Need to improve requirement documentation.',
+      'Dependency mapping: Feature X blocks Features Y and Z. Reprioritizing X to unblock the team.',
+      'One-on-one prep: reviewing each team member\'s growth goals and blockers from this sprint.',
+      'Stakeholder update: demo went well. Three feature requests captured — triaging against existing backlog.',
+      'Technical debt inventory: 23 items, 4 high-priority. Allocating 20% of next sprint to debt paydown.',
+      'Cross-team coordination: API contract finalized with the platform team. Integration work starts Monday.',
+    );
+  }
+
+  // Researcher / Data Engineer / ML Engineer spirits
+  if (spirit === 'researcher' || spirit === 'data-engineer' || spirit === 'ml-engineer') {
+    spiritMatched = true;
+    thoughts.push(
+      'Training run at epoch 47/100. Validation loss plateauing — considering learning rate schedule adjustment.',
+      'Data pipeline processed 2.3M records in 12 minutes. Throughput is 3x better after the Spark partitioning fix.',
+      'Feature store updated: 847 features across 12 entity types. Feature freshness SLA at 99.7%.',
+      'A/B test analysis: treatment group shows +4.2% conversion with p-value 0.003. Statistically significant.',
+      'Embedding space visualization: the new fine-tuned model clusters categories much tighter. Cosine similarity up 0.15.',
+      'ETL job failure investigation: source schema changed upstream. Adding schema validation to the ingestion layer.',
+      'Model serving latency: P95 at 89ms, well under the 200ms budget. GPU utilization at 73%.',
+      'Literature review: 14 relevant papers from the last month. 3 have novel techniques applicable to our problem.',
+    );
+  }
+
+  // Philosopher / Mentor / Strategist spirits
+  if (spirit === 'philosopher' || spirit === 'mentor' || spirit === 'strategist') {
+    spiritMatched = true;
+    thoughts.push(
+      'Analyzing the decision from multiple frameworks: game theory suggests cooperation, but incentive structures reward defection.',
+      'Reviewing the team\'s mental models. Confirmation bias is showing up in how we evaluate feature requests.',
+      'Strategic planning: mapping competitive landscape. Three scenarios modeled — disruption risk is highest in Q3.',
+      'Writing a decision journal entry. Documenting the reasoning, not just the outcome, prevents hindsight bias.',
+      'Second-order thinking exercise: if we launch this feature, what changes in the ecosystem? Who benefits, who loses?',
+      'Facilitating a pre-mortem: assuming the project failed, what caused it? The team identified 7 risks we hadn\'t considered.',
+      'Reading Taleb on antifragility. Systems that benefit from stress are rare — but we can design for them.',
+      'Applying the Eisenhower matrix to the backlog. 60% of "urgent" items aren\'t actually important.',
+    );
+  }
+
+  // Coding Agent spirit
+  if (spirit === 'coding-agent') {
+    spiritMatched = true;
+    thoughts.push(
+      'Autonomous execution: step 3 of 7. Reading the test file to understand expected behavior before modifying.',
+      'Self-correction: first approach introduced a type error. Rolling back and trying the generic constraint pattern instead.',
+      'File analysis: scanned 23 files to build the dependency graph. The change needs to touch 4 files max.',
+      'Running npx tsc --noEmit after the edit. Clean compile on first try. Moving to integration tests.',
+      'Plan revision: the original 5-step plan needs a 6th step — the migration also needs a rollback script.',
+      'Context management: summarizing the first 40 messages to free up working memory for the final implementation.',
+      'Multi-file refactor: renaming the interface across 12 files. Using AST-aware rename to avoid string false positives.',
+      'Task decomposition complete: 3 subtasks identified. Executing sequentially — each depends on the previous.',
+    );
+  }
+
+  // Hardware Engineer spirit
+  if (spirit === 'hardware-engineer') {
+    spiritMatched = true;
+    thoughts.push(
+      'Signal integrity simulation: eye diagram on the DDR4 bus shows clean openings at 3200MT/s. Margins are good.',
+      'Power analysis: total board consumption at 4.7W. The new sensor adds 120mW — within the thermal envelope.',
+      'PCB design review: via stitching around the RF section needs 5 more ground vias to meet EMC requirements.',
+      'Firmware bring-up: SPI flash programming successful. Bootloader jumps to application code at 0x08004000.',
+      'Thermal simulation: hotspot at the voltage regulator hitting 92C. Adding a copper pour and thermal via array.',
+      'BOM review: lead time on the FPGA is 16 weeks. Qualifying a pin-compatible alternative from the second source.',
+      'Schematic review: found a missing pull-up on the I2C reset line. Adding 4.7K to VCC per datasheet recommendation.',
+      'Lab measurement: clock jitter at 3.2ps RMS. Well within the spec for the high-speed ADC clock input.',
+    );
+  }
+
+  // QA Engineer spirit
+  if (spirit === 'qa-engineer') {
+    spiritMatched = true;
+    thoughts.push(
+      'Regression suite expanding: added 18 new test cases from the latest bug reports. Coverage now at 89%.',
+      'Exploratory testing session: found a race condition when two users edit the same resource simultaneously.',
+      'Performance baseline: API response times stable at P50=45ms, P95=120ms, P99=340ms. The P99 spike needs investigation.',
+      'Cross-browser testing: layout breaks on Safari 16 due to flex-gap polyfill. Adding fallback CSS.',
+      'Load testing: 500 concurrent users, 95th percentile response under 500ms. System handles the target load.',
+      'Test data management: building a factory pattern for reproducible test fixtures. No more flaky tests from shared state.',
+      'API contract testing: 3 breaking changes detected in the upstream service. Pact tests caught them before deploy.',
+      'Accessibility testing: screen reader navigation flow has 2 dead ends. Adding aria-labels and skip links.',
+    );
+  }
+
+  // ─── Fallback: Role/name-based detailed narration (for agents without spirits) ───
+
+  if (!spiritMatched) {
+    if (role.includes('trad') || name.includes('trader') || name.includes('apex')) {
+      thoughts.push(
+        'Scanning order flow across Jupiter and Raydium. Bid-ask spreads widening on SOL/USDC — volatility incoming.',
+        'Running Wyckoff accumulation analysis on the 4H chart. Volume profile shows Point of Control shifting higher.',
+        'Checking funding rates on Drift Protocol. Perps at +0.03%/8hr — longs are paying. Potential short squeeze setup forming.',
+        'Cross-referencing whale wallet movements with DEX flow. Smart money is accumulating — 3 wallets just pulled $2M off exchanges.',
+        'Analyzing Jupiter routing efficiency. Current slippage model shows optimal execution at 0.5% for positions under $10K.',
+        'Monitoring Solana validator skip rates and TPS. Network health is critical for trade execution timing.',
+        'Running correlation analysis: SOL/BTC at 0.78, SOL/ETH at 0.82. Macro risk-on regime detected.',
+        'Calculating Kelly criterion position sizing. With current win rate of 62% and avg R:R of 2.1, optimal allocation is 14.3%.',
+        'Scanning for MEV opportunities on Solana. JIT liquidity provision profitable on high-volume pairs.',
+        'Evaluating DCA entry points using Bollinger Band Width compression. Low vol precedes explosive moves — positioning now.',
+      );
+    }
+    if (role.includes('analyst') || role.includes('research') || name.includes('analyst')) {
+      thoughts.push(
+        'Deep-diving token economics. Analyzing vesting schedules — $47M in insider tokens unlock in 18 days. Watch for sell pressure.',
+        'Pulling on-chain metrics from Dune Analytics. Daily active addresses up 23% week-over-week. Organic growth signal.',
+        'MVRV ratio at 2.1 — fair value zone but approaching overheated territory. Will flag if it crosses 3.0.',
+        'Comparing protocol revenue across DeFi lending: Aave $4.2M/week, Morpho $1.8M/week, Compound $890K/week.',
+        'Running sector rotation analysis. Capital flowing from L1s into DeFi infrastructure. Narrative shift in progress.',
+        'NVT Signal at 38 for BTC — neutral zone. Not cheap, not expensive. Waiting for directional catalyst.',
+        'Building bull/base/bear scenario model. Probability-weighted expected return: +31%. Risk/reward justifies position.',
+        'Analyzing stablecoin flows. USDT market cap up $2.3B this week — fresh capital entering crypto ecosystem.',
+        'Checking MC/FDV ratio for new listings. Token at 0.12 MC/FDV — 88% dilution ahead. Avoid until post-cliff unlock.',
+        'Cross-chain bridge flow analysis shows $340M net inflow to Solana from Ethereum this month. Ecosystem momentum building.',
+      );
+    }
+    if (role.includes('engineer') || role.includes('dev') || name.includes('engineer')) {
+      thoughts.push(
+        'Profiling the hot path in the API handler. P99 latency spiked from 120ms to 340ms after yesterday\'s deploy. Investigating.',
+        'Running git bisect to isolate the regression. 47 commits since last known good state — binary search will find it in 6 steps.',
+        'Refactoring the state management layer. Current implementation has O(n\u00B2) re-renders. Moving to normalized store pattern.',
+        'Analyzing bundle size: main chunk is 2.4MB gzipped. Tree-shaking the date library alone saves 180KB.',
+        'Writing integration tests for the payment flow. 23 edge cases identified from production error logs.',
+        'Reviewing the database migration. Adding indexes on user_id + created_at should reduce the dashboard query from 3.2s to 45ms.',
+      );
+    }
+    if (role.includes('security') || name.includes('security')) {
+      thoughts.push(
+        'Scanning dependencies: 3 packages have known CVEs. npm audit shows 2 high severity, 1 critical. Patching now.',
+        'Reviewing authentication flow for token refresh race conditions. Found a 200ms window where expired tokens could bypass validation.',
+        'Running OWASP Top 10 checklist against the API. Input validation on 4 endpoints needs parameterized queries.',
+      );
+    }
   }
 
   // Generic detailed thoughts for any agent that's active
   if (agent.status === 'active' || agent.status === 'building') {
-    const model = agent.model.toLowerCase();
     const tokenRate = agent.outputTokens > 0 && agent.turns > 0 ? Math.round(agent.outputTokens / agent.turns) : 0;
     if (tokenRate > 0) {
       thoughts.push(`Averaging ${fmt(tokenRate)} output tokens per turn. ${tokenRate > 2000 ? 'Heavy reasoning mode.' : 'Efficient responses.'}`);

@@ -1,12 +1,12 @@
 /**
- * OfficeTerminal.tsx — Shared command center terminal
+ * OfficeTerminal.tsx — BlackSwan Terminal
+ *
+ * OpenClaw-inspired agentic terminal with BlackSwan branding.
+ * Features: collapsible tool cards, status footer, metrics bar,
+ * command palette input, multi-agent targeting, streaming responses.
  *
  * All circle members see the same terminal history (via Supabase Realtime).
  * Commands route to a specific agent (@AgentName) or all agents (@all).
- * Responses stream back live via Supabase Broadcast + DB.
- *
- * Supports "controlled" props so two mounted instances can share
- * input + target state — changes to one are instantly mirrored in the other.
  */
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
@@ -29,35 +29,72 @@ import { CircleOfficeAgent } from '../lib/circleOffice';
 import { awardPoints } from '../services/rewardService';
 import { getPointsForModel } from '../lib/badges';
 import AutomationsPanel from './AutomationsPanel';
+import SpawnAgentPanel from './SpawnAgentPanel';
 import { ProviderKey, PROVIDER_MODELS, LLMProvider, ThinkingLevel } from '../lib/llmProviders';
 import { PROVIDER_META } from '../lib/connectionManager';
 import { detectClaudeCodeBridge, execBridgeCommand } from '../lib/claudeCodeDetector';
+import { executeDeviceCommand } from '../lib/deviceManager';
+import { getAllModels, formatModelOption, type RegisteredModel } from '../lib/modelRegistry';
 
-// ─── Thinking levels (inspired by OpenClaw) ──────────────────────────────────
+// ─── BlackSwan Terminal Theme (OpenClaw-inspired) ────────────────────────────
 
-type TerminalMode = 'execute' | 'plan' | 'explore';
+const BS = {
+  // Core palette — dark matte with cyan/indigo accents
+  bg:        '#0a0a0f',
+  bgPanel:   '#0f0f17',
+  bgCard:    '#12121c',
+  bgInput:   '#0d0d14',
+  bgHover:   '#16162a',
+  border:    '#1a1a2e',
+  borderLit: '#2a2a4e',
+  // Text
+  textPrimary:   '#e2e2f0',
+  textSecondary: '#8888a8',
+  textMuted:     '#44445a',
+  textGhost:     '#2a2a3e',
+  // Accent — BlackSwan cyan (replaces OpenClaw's lobster orange)
+  accent:     '#00d4aa',
+  accentDim:  '#00a888',
+  accentGlow: '#00d4aa20',
+  // Semantic
+  info:    '#6366f1',
+  success: '#22c55e',
+  warning: '#f59e0b',
+  error:   '#ef4444',
+  // Agent colors
+  swan:    '#00d4aa',
+  user:    '#6366f1',
+} as const;
 
-const THINKING_LEVELS: Array<{ key: ThinkingLevel; label: string; icon: string; color: string }> = [
-  { key: 'fast',     label: 'Fast',     icon: '⚡', color: '#22c55e' },
-  { key: 'balanced', label: 'Balanced', icon: '⚖️', color: '#6366f1' },
-  { key: 'deep',     label: 'Deep',     icon: '🧠', color: '#f59e0b' },
+const MONO = Platform.OS === 'ios' ? 'Courier' : 'monospace';
+
+type TerminalMode = 'execute' | 'plan' | 'explore' | 'fleet' | 'autopilot';
+
+const THINKING_LEVELS: Array<{ key: ThinkingLevel; label: string; symbol: string; color: string }> = [
+  { key: 'fast',     label: 'Fast',     symbol: 'F', color: BS.success },
+  { key: 'balanced', label: 'Balanced', symbol: 'B', color: BS.info },
+  { key: 'deep',     label: 'Deep',     symbol: 'D', color: BS.warning },
 ];
 
-const TERMINAL_MODES: Array<{ key: TerminalMode; label: string; icon: string }> = [
-  { key: 'execute', label: 'Execute', icon: '▶' },
-  { key: 'plan',    label: 'Plan',    icon: '📋' },
-  { key: 'explore', label: 'Explore', icon: '🔍' },
+const TERMINAL_MODES: Array<{ key: TerminalMode; label: string; symbol: string; color: string }> = [
+  { key: 'execute',   label: 'Exec',      symbol: '>', color: BS.accent },
+  { key: 'plan',      label: 'Plan',      symbol: 'P', color: BS.info },
+  { key: 'explore',   label: 'Explore',   symbol: '?', color: '#06b6d4' },
+  { key: 'fleet',     label: 'Fleet',     symbol: 'F', color: BS.warning },
+  { key: 'autopilot', label: 'Auto',      symbol: 'A', color: BS.error },
 ];
 
 // ─── Model options ────────────────────────────────────────────────────────────
 
 const BASE_MODELS: Array<{ key: string | null; label: string; icon: string; color: string }> = [
-  { key: null,             label: 'Auto',      icon: '🔄', color: '#6366f1' },
-  { key: 'blackswan',     label: 'BlackSwan',  icon: '🦢', color: '#22c55e' },
-  { key: 'claude-haiku',  label: 'Haiku',      icon: '⚡', color: '#f59e0b' },
-  { key: 'claude-sonnet', label: 'Sonnet',     icon: '🎯', color: '#8b5cf6' },
-  { key: 'claude-opus',   label: 'Opus',       icon: '🧠', color: '#ef4444' },
-  { key: 'gemini-flash',  label: 'Gemini',     icon: '♊', color: '#4285f4' },
+  { key: null,             label: 'Auto',       icon: 'A', color: BS.info },
+  { key: 'blackswan',     label: 'BlackSwan',   icon: 'S', color: BS.accent },
+  { key: 'claude-haiku',  label: 'Haiku',       icon: 'H', color: BS.warning },
+  { key: 'claude-sonnet', label: 'Sonnet',      icon: 'S', color: '#8b5cf6' },
+  { key: 'claude-opus',   label: 'Opus',        icon: 'O', color: BS.error },
+  { key: 'gemini-flash',  label: 'Gemini 2.5',  icon: 'G', color: '#4285f4' },
+  { key: 'gpt-4.1',       label: 'GPT-4.1',     icon: '4', color: '#10b981' },
+  { key: 'o4-mini',       label: 'O4 Mini',     icon: 'o', color: BS.warning },
 ];
 
 /** Build BYO model entries from user's stored API keys */
@@ -135,6 +172,10 @@ const BUILTIN_CMDS = [
   { cmd: '/ping',         desc: 'Verify agent is responsive' },
   { cmd: '/whoami',       desc: 'Ask agent to identify itself' },
   { cmd: '/imagine',      desc: 'Generate an image from a prompt' },
+  { cmd: '/agents',       desc: 'List connected agents and their status' },
+  { cmd: '/models',       desc: 'Show available models from registry' },
+  { cmd: '/devices',      desc: 'List connected local devices' },
+  { cmd: '/spawn',        desc: 'Create a new agent in this circle' },
 ];
 
 const HELP_TEXT = BUILTIN_CMDS.map(b => `${b.cmd.padEnd(14)} — ${b.desc}`).join('\n');
@@ -154,24 +195,22 @@ function fmtTokenCost(n: number): string {
   return `${n} tok`;
 }
 
-// ─── Pending dots animation ───────────────────────────────────────────────────
+// ─── Streaming indicator ─────────────────────────────────────────────────────
 
 function PendingDots() {
-  const [dots, setDots] = useState('.');
+  const [frame, setFrame] = useState(0);
   useEffect(() => {
-    const t = setInterval(() => setDots(d => d.length >= 3 ? '.' : d + '.'), 400);
+    const t = setInterval(() => setFrame(f => (f + 1) % 4), 300);
     return () => clearInterval(t);
   }, []);
-  return <Text style={pendingStyles.text}>Processing{dots}</Text>;
+  const bars = ['|', '/', '-', '\\'];
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+      <Text style={{ color: BS.accent, fontFamily: MONO, fontSize: 11, width: 10, textAlign: 'center' }}>{bars[frame]}</Text>
+      <Text style={{ color: BS.textSecondary, fontFamily: MONO, fontSize: 11 }}>streaming</Text>
+    </View>
+  );
 }
-
-const pendingStyles = StyleSheet.create({
-  text: {
-    color: '#6366f1',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontSize: 12,
-  },
-});
 
 // ─── Inline image detection ──────────────────────────────────────────────────
 
@@ -194,7 +233,7 @@ function ResponseContent({ text }: { text: string }) {
     parts.push({ type: 'text', value: text.slice(last) });
   }
 
-  if (parts.length === 0) return <Text style={rowStyles.responseText}>{text}</Text>;
+  if (parts.length === 0) return <Text style={respContentStyles.text}>{text}</Text>;
 
   return (
     <View style={{ flex: 1 }}>
@@ -203,19 +242,153 @@ function ResponseContent({ text }: { text: string }) {
           <Image
             key={i}
             source={{ uri: p.value }}
-            style={{ width: 256, height: 256, borderRadius: 8, marginVertical: 6 }}
+            style={{ width: 256, height: 256, borderRadius: 2, marginVertical: 6 }}
             resizeMode="cover"
             accessibilityLabel={p.alt || 'Generated image'}
           />
         ) : (
-          <Text key={i} style={rowStyles.responseText}>{p.value}</Text>
+          <Text key={i} style={respContentStyles.text}>{p.value}</Text>
         ),
       )}
     </View>
   );
 }
 
-// ─── Terminal Message Row ─────────────────────────────────────────────────────
+const respContentStyles = StyleSheet.create({
+  text: {
+    color: BS.textPrimary,
+    fontSize: 12,
+    flex: 1,
+    lineHeight: 18,
+    fontFamily: MONO,
+  },
+});
+
+// ─── Response Card (OpenClaw-style collapsible) ──────────────────────────────
+
+function ResponseCard({ resp }: { resp: TerminalResponse }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const isLong = (resp.responseText?.length || 0) > 400;
+
+  if (resp.status === 'pending') {
+    return (
+      <View style={cardStyles.card}>
+        <View style={cardStyles.cardHeader}>
+          <View style={[cardStyles.agentDot, { backgroundColor: BS.accent }]} />
+          <Text style={cardStyles.agentName}>{resp.agentName}</Text>
+        </View>
+        <PendingDots />
+      </View>
+    );
+  }
+
+  if (resp.status === 'error') {
+    return (
+      <View style={[cardStyles.card, { borderLeftColor: BS.error }]}>
+        <View style={cardStyles.cardHeader}>
+          <View style={[cardStyles.agentDot, { backgroundColor: BS.error }]} />
+          <Text style={[cardStyles.agentName, { color: BS.error }]}>{resp.agentName}</Text>
+          <Text style={cardStyles.errorBadge}>ERR</Text>
+        </View>
+        <Text style={cardStyles.errorText}>{resp.errorMessage || 'Unknown error'}</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={cardStyles.card}>
+      <Pressable style={cardStyles.cardHeader} onPress={() => isLong && setCollapsed(!collapsed)}>
+        <View style={[cardStyles.agentDot, { backgroundColor: BS.accent }]} />
+        <Text style={cardStyles.agentName}>{resp.agentName}</Text>
+        {resp.tokenCount > 0 && (
+          <Text style={cardStyles.tokenBadge}>{fmtTokenCost(resp.tokenCount)}</Text>
+        )}
+        {resp.latencyMs != null && (
+          <Text style={cardStyles.latencyBadge}>
+            {resp.latencyMs >= 1000 ? `${(resp.latencyMs / 1000).toFixed(1)}s` : `${resp.latencyMs}ms`}
+          </Text>
+        )}
+        {isLong && (
+          <Text style={cardStyles.collapseIcon}>{collapsed ? '+' : '-'}</Text>
+        )}
+      </Pressable>
+      {!collapsed && <ResponseContent text={resp.responseText || ''} />}
+    </View>
+  );
+}
+
+const cardStyles = StyleSheet.create({
+  card: {
+    backgroundColor: BS.bgCard,
+    borderLeftWidth: 2,
+    borderLeftColor: BS.accent,
+    borderRadius: 2,
+    marginTop: 4,
+    marginLeft: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 4,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  agentDot: { width: 6, height: 6, borderRadius: 3 },
+  agentName: {
+    color: BS.accent,
+    fontFamily: MONO,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  tokenBadge: {
+    color: BS.success,
+    fontFamily: MONO,
+    fontSize: 9,
+    fontWeight: '600',
+    backgroundColor: '#22c55e12',
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 2,
+    overflow: 'hidden',
+    marginLeft: 'auto',
+  },
+  latencyBadge: {
+    color: BS.textMuted,
+    fontFamily: MONO,
+    fontSize: 9,
+    fontWeight: '600',
+  },
+  collapseIcon: {
+    color: BS.textMuted,
+    fontFamily: MONO,
+    fontSize: 12,
+    fontWeight: '700',
+    width: 14,
+    textAlign: 'center',
+  },
+  errorBadge: {
+    color: BS.error,
+    fontFamily: MONO,
+    fontSize: 8,
+    fontWeight: '800',
+    backgroundColor: '#ef444418',
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 2,
+    overflow: 'hidden',
+    letterSpacing: 1,
+  },
+  errorText: {
+    color: '#f87171',
+    fontFamily: MONO,
+    fontSize: 11,
+    lineHeight: 16,
+  },
+});
+
+// ─── Terminal Message Row (OpenClaw card layout) ─────────────────────────────
 
 function TerminalRow({ msg, responses, onDelete }: {
   msg: TerminalMessage;
@@ -233,163 +406,122 @@ function TerminalRow({ msg, responses, onDelete }: {
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      {/* Header */}
-      <View style={rowStyles.header}>
-        <Text style={rowStyles.time}>{fmtTime(msg.createdAt)}</Text>
-        {!isLocal && (
-          <>
-            <Text style={rowStyles.sender}>{msg.senderName}</Text>
-            <Text style={rowStyles.arrow}>→</Text>
-          </>
-        )}
-        <Text style={[rowStyles.target, isLocal && rowStyles.targetLocal]}>
-          {msg.targetAgentName}
-        </Text>
-        {onDelete && hovered && (
-          <Pressable
-            style={rowStyles.deleteBtn}
-            onPress={() => onDelete(msg.id)}
-            hitSlop={8}
-          >
-            <Text style={rowStyles.deleteText}>✕</Text>
-          </Pressable>
-        )}
+      {/* User command line */}
+      <View style={rowStyles.cmdBlock}>
+        <View style={rowStyles.cmdMeta}>
+          <Text style={rowStyles.time}>{fmtTime(msg.createdAt)}</Text>
+          {!isLocal && <Text style={rowStyles.sender}>{msg.senderName}</Text>}
+          <Text style={rowStyles.targetTag}>{msg.targetAgentName}</Text>
+          {onDelete && hovered && (
+            <Pressable style={rowStyles.deleteBtn} onPress={() => onDelete(msg.id)} hitSlop={8}>
+              <Text style={rowStyles.deleteText}>x</Text>
+            </Pressable>
+          )}
+        </View>
+        <View style={rowStyles.cmdLine}>
+          <Text style={rowStyles.prompt}>{'>'}</Text>
+          <Text style={rowStyles.command}>{msg.commandText}</Text>
+        </View>
       </View>
 
-      {/* Command */}
-      <View style={rowStyles.commandLine}>
-        <Text style={rowStyles.prompt}>&gt; </Text>
-        <Text style={rowStyles.command}>{msg.commandText}</Text>
-      </View>
-
-      {/* Responses (Phase 3: multiple) or single response (Phase 2) */}
+      {/* Response cards */}
       {msgResponses.length > 0 ? (
-        msgResponses.map((resp, idx) => (
-          <View key={resp.id} style={rowStyles.responseLine}>
-            <Text style={rowStyles.responseAgent}>{resp.agentName}</Text>
-            <Text style={rowStyles.responseArrow}> ▸ </Text>
-            {resp.status === 'pending' ? (
-              <PendingDots />
-            ) : resp.status === 'error' ? (
-              <Text style={rowStyles.errorText}>⚠ {resp.errorMessage || 'Error'}</Text>
-            ) : (
-              <>
-                <ResponseContent text={resp.responseText || ''} />
-                {resp.tokenCount > 0 && (
-                  <View style={rowStyles.costBadge}>
-                    <Text style={rowStyles.costText}>{fmtTokenCost(resp.tokenCount)}</Text>
-                  </View>
-                )}
-                {resp.latencyMs != null && (
-                  <View style={rowStyles.latencyBadge}>
-                    <Text style={rowStyles.latencyText}>
-                      {resp.latencyMs >= 1000 ? `${(resp.latencyMs / 1000).toFixed(1)}s` : `${resp.latencyMs}ms`}
-                    </Text>
-                  </View>
-                )}
-              </>
-            )}
-          </View>
-        ))
+        msgResponses.map(resp => <ResponseCard key={resp.id} resp={resp} />)
       ) : msg.responseText ? (
-        // Fallback: Phase 2 single response
-        <View style={rowStyles.responseLine}>
+        <View style={[cardStyles.card, isLocal && { borderLeftColor: BS.info }]}>
           {msg.responseAgentName && (
-            <>
-              <Text style={rowStyles.responseAgent}>{msg.responseAgentName}</Text>
-              <Text style={rowStyles.responseArrow}> ▸ </Text>
-            </>
+            <View style={cardStyles.cardHeader}>
+              <View style={[cardStyles.agentDot, { backgroundColor: isLocal ? BS.info : BS.accent }]} />
+              <Text style={[cardStyles.agentName, isLocal && { color: BS.info }]}>{msg.responseAgentName}</Text>
+            </View>
           )}
           <ResponseContent text={msg.responseText || ''} />
         </View>
       ) : (
-        // No responses yet
-        <View style={rowStyles.responseLine}>
-          <Text style={rowStyles.responseAgent}>{msg.targetAgentName}</Text>
-          <Text style={rowStyles.responseArrow}> ▸ </Text>
+        <View style={cardStyles.card}>
+          <View style={cardStyles.cardHeader}>
+            <View style={[cardStyles.agentDot, { backgroundColor: BS.accent }]} />
+            <Text style={cardStyles.agentName}>{msg.targetAgentName}</Text>
+          </View>
           <PendingDots />
         </View>
       )}
-
-      <View style={rowStyles.divider} />
     </View>
   );
 }
 
 const rowStyles = StyleSheet.create({
-  container: { paddingHorizontal: 14, paddingTop: 10 },
-  header: {
-    flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 4,
+  container: {
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 4,
+  },
+  cmdBlock: {
+    marginBottom: 2,
+  },
+  cmdMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 2,
   },
   time: {
-    color: '#3f3f46', fontSize: 10,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    color: BS.textMuted,
+    fontSize: 9,
+    fontFamily: MONO,
   },
   sender: {
-    color: '#71717a', fontSize: 11, fontWeight: '600',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    color: BS.textSecondary,
+    fontSize: 10,
+    fontWeight: '600',
+    fontFamily: MONO,
   },
-  arrow: { color: '#3f3f46', fontSize: 11 },
-  target: {
-    color: '#6366f1', fontSize: 11, fontWeight: '700',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  targetTag: {
+    color: BS.info,
+    fontSize: 9,
+    fontWeight: '700',
+    fontFamily: MONO,
+    backgroundColor: '#6366f112',
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 2,
+    overflow: 'hidden',
   },
-  targetLocal: { color: '#52525b', fontStyle: 'italic' },
-  costBadge: {
-    backgroundColor: '#22c55e15', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1,
-    borderWidth: 1, borderColor: '#22c55e33', marginLeft: 'auto',
+  cmdLine: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
   },
-  costText: { color: '#22c55e', fontSize: 9, fontWeight: '700' },
-  latencyBadge: {
-    backgroundColor: '#f59e0b15', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1,
-    borderWidth: 1, borderColor: '#f59e0b33',
-  },
-  latencyText: { color: '#f59e0b', fontSize: 9, fontWeight: '700' },
-  commandLine: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 4 },
   prompt: {
-    color: '#6366f1', fontSize: 12, fontWeight: '700',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    color: BS.user,
+    fontSize: 12,
+    fontWeight: '700',
+    fontFamily: MONO,
+    marginRight: 6,
   },
   command: {
-    color: '#a5b4fc', fontSize: 12, flex: 1, lineHeight: 18,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  },
-  responseLine: {
-    flexDirection: 'row', alignItems: 'flex-start', flexWrap: 'wrap',
-    marginBottom: 4, paddingLeft: 14,
-  },
-  responseAgent: {
-    color: '#22c55e', fontSize: 11, fontWeight: '700',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  },
-  responseArrow: {
-    color: '#3f3f46', fontSize: 11,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  },
-  responseText: {
-    color: '#86efac', fontSize: 12, flex: 1, lineHeight: 18,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  },
-  errorText: {
-    color: '#ef4444', fontSize: 12,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    color: BS.textPrimary,
+    fontSize: 12,
+    flex: 1,
+    lineHeight: 18,
+    fontFamily: MONO,
   },
   deleteBtn: {
     marginLeft: 'auto',
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 4,
-    backgroundColor: '#000000',
+    borderRadius: 2,
+    backgroundColor: BS.bgCard,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   deleteText: {
-    color: '#52525b',
+    color: BS.textMuted,
     fontSize: 10,
     fontWeight: '700',
+    fontFamily: MONO,
   },
-  divider: { height: 1, backgroundColor: '#000000', marginTop: 10 },
 });
 
-// ─── Agent Target Chip ────────────────────────────────────────────────────────
+// ─── Agent Target Chip (OpenClaw-style pill) ─────────────────────────────────
 
 interface ChipProps {
   label: string;
@@ -400,7 +532,10 @@ interface ChipProps {
 
 function AgentChip({ label, active, onPress, dotColor }: ChipProps) {
   return (
-    <Pressable style={[chipStyles.chip, active && chipStyles.chipActive]} onPress={onPress}>
+    <Pressable
+      style={[chipStyles.chip, active && chipStyles.chipActive]}
+      onPress={onPress}
+    >
       {dotColor && <View style={[chipStyles.dot, { backgroundColor: dotColor }]} />}
       <Text style={[chipStyles.text, active && chipStyles.textActive]} numberOfLines={1}>
         {label}
@@ -412,26 +547,29 @@ function AgentChip({ label, active, onPress, dotColor }: ChipProps) {
 const chipStyles = StyleSheet.create({
   chip: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6,
-    backgroundColor: '#000000', borderWidth: 1, borderColor: '#2a2a2a',
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 2,
+    backgroundColor: BS.bgCard, borderWidth: 1, borderColor: BS.border,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  chipActive: { backgroundColor: '#6366f115', borderColor: '#6366f1' },
-  dot: { width: 6, height: 6, borderRadius: 3, flexShrink: 0 },
-  text: { color: '#71717a', fontSize: 11, fontWeight: '600', maxWidth: 80 },
-  textActive: { color: '#6366f1' },
+  chipActive: { backgroundColor: BS.accentGlow, borderColor: BS.accent },
+  dot: { width: 5, height: 5, borderRadius: 3, flexShrink: 0 },
+  text: { color: BS.textSecondary, fontSize: 10, fontWeight: '600', fontFamily: MONO, maxWidth: 80 },
+  textActive: { color: BS.accent },
 });
 
-// ─── Model Chip ──────────────────────────────────────────────────────────────
+// ─── Model Chip (OpenClaw-style toggle) ──────────────────────────────────────
 
 function ModelChip({ label, icon, active, color, onPress }: {
   label: string; icon: string; active: boolean; color: string; onPress: () => void;
 }) {
   return (
     <Pressable
-      style={[modelChipStyles.chip, active && { backgroundColor: color + '15', borderColor: color }]}
+      style={[modelChipStyles.chip, active && { backgroundColor: color + '18', borderColor: color }]}
       onPress={onPress}
     >
-      <Text style={modelChipStyles.icon}>{icon}</Text>
+      <View style={[modelChipStyles.iconBox, active && { backgroundColor: color + '30' }]}>
+        <Text style={[modelChipStyles.iconText, active && { color }]}>{icon}</Text>
+      </View>
       <Text style={[modelChipStyles.text, active && { color }]} numberOfLines={1}>
         {label}
       </Text>
@@ -441,14 +579,21 @@ function ModelChip({ label, icon, active, color, onPress }: {
 
 const modelChipStyles = StyleSheet.create({
   chip: {
-    flexDirection: 'row', alignItems: 'center', gap: 3,
-    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 5,
-    backgroundColor: '#111', borderWidth: 1, borderColor: '#2a2a2a',
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 6, paddingVertical: 3, borderRadius: 2,
+    backgroundColor: BS.bgCard, borderWidth: 1, borderColor: BS.border,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  icon: { fontSize: 10 },
+  iconBox: {
+    width: 16, height: 16, borderRadius: 2,
+    backgroundColor: BS.bgPanel,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  iconText: {
+    color: BS.textMuted, fontFamily: MONO, fontSize: 9, fontWeight: '800',
+  },
   text: {
-    color: '#52525b', fontSize: 10, fontWeight: '600',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    color: BS.textMuted, fontSize: 10, fontWeight: '600', fontFamily: MONO,
   },
 });
 
@@ -480,22 +625,23 @@ const acStyles = StyleSheet.create({
   row: {
     flexDirection: 'row', flexWrap: 'wrap', gap: 6,
     paddingHorizontal: 12, paddingVertical: 6,
-    borderTopWidth: 1, borderTopColor: '#000000',
-    backgroundColor: '#0d0d0d',
+    borderTopWidth: 1, borderTopColor: BS.border,
+    backgroundColor: BS.bgPanel,
   },
   chip: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 5,
-    backgroundColor: '#000000', borderWidth: 1, borderColor: '#6366f133',
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 2,
+    backgroundColor: BS.bgCard, borderWidth: 1, borderColor: BS.accent + '33',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   dot: { width: 5, height: 5, borderRadius: 3 },
-  text: { color: '#a5b4fc', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' },
+  text: { color: BS.accent, fontSize: 11, fontFamily: MONO },
 });
 
 // ─── Status dot colors ────────────────────────────────────────────────────────
 
 const STATUS_DOT: Record<string, string> = {
-  idle: '#22c55e', building: '#f59e0b', offline: '#52525b', error: '#ef4444',
+  idle: BS.success, active: BS.accent, building: BS.warning, offline: BS.textMuted, error: BS.error,
 };
 
 // ─── Local Shell Panel ───────────────────────────────────────────────────────
@@ -542,6 +688,13 @@ function LocalShellPanel() {
     const cmd = input.trim();
     if (!cmd || sending) return;
 
+    // Re-check bridge if it was offline — maybe it came back
+    if (!bridgeOk) {
+      const ok = await detectClaudeCodeBridge();
+      setBridgeOk(ok);
+      if (!ok) return;
+    }
+
     setSending(true);
     setInput('');
     setCmdHistory(prev => [cmd, ...prev].slice(0, 100));
@@ -554,15 +707,84 @@ function LocalShellPanel() {
       return;
     }
 
+    // Handle 'help' locally — show available commands
+    if (cmd === 'help') {
+      setEntries(prev => [...prev, {
+        id: `shell-${Date.now()}`,
+        command: cmd,
+        cwd,
+        stdout: [
+          'Local Shell — WSL/Linux + Windows Interop',
+          '',
+          'Linux/WSL commands:',
+          '  ls, cat, pwd, cd, mkdir, cp, mv, rm, grep, find, git, npm, node, python...',
+          '',
+          'Windows interop (from WSL):',
+          '  cmd.exe /c "dir"              — Run Windows CMD command',
+          '  powershell.exe -Command "..."  — Run PowerShell command',
+          '  explorer.exe .                 — Open current folder in Explorer',
+          '  notepad.exe file.txt           — Open file in Notepad',
+          '  code .                         — Open in VS Code',
+          '  wslpath -w /home/user          — Convert WSL path to Windows path',
+          '  wslpath -u "C:\\Users"          — Convert Windows path to WSL path',
+          '',
+          'Built-in shortcuts:',
+          '  clear / cls     — Clear terminal',
+          '  help            — Show this help',
+          '  windir          — List Windows user directory',
+          '  winpath         — Show Windows path for current directory',
+          '  devices [cmd]   — Manage printers, 3D printers, serial ports',
+          '',
+          'History: ↑/↓ arrows  ·  Tab: autocomplete (coming soon)',
+        ].join('\n'),
+        stderr: '',
+        code: 0,
+        ok: true,
+        timestamp: new Date().toISOString(),
+        durationMs: 0,
+      }]);
+      setSending(false);
+      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
+      return;
+    }
+
+    // Handle 'devices' locally — device discovery & control
+    if (cmd === 'devices' || cmd.startsWith('devices ')) {
+      const output = await executeDeviceCommand(cmd);
+      setEntries(prev => [...prev, {
+        id: `shell-${Date.now()}`,
+        command: cmd,
+        cwd,
+        stdout: output,
+        stderr: '',
+        code: 0,
+        ok: true,
+        timestamp: new Date().toISOString(),
+        durationMs: 0,
+      }]);
+      setSending(false);
+      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
+      return;
+    }
+
     const start = Date.now();
 
+    // Built-in shortcuts for Windows interop
+    let resolvedCmd = cmd;
+    if (cmd === 'windir') resolvedCmd = 'cmd.exe /c "dir /B %USERPROFILE%"';
+    else if (cmd === 'winpath') resolvedCmd = `wslpath -w "${cwd}"`;
+    else if (cmd === 'dir') resolvedCmd = 'ls -la';  // Windows users expect 'dir' to work
+    else if (cmd === 'ipconfig') resolvedCmd = 'ip addr show || ifconfig';
+    else if (cmd === 'tasklist') resolvedCmd = 'ps aux';
+    else if (cmd === 'systeminfo') resolvedCmd = 'uname -a && cat /etc/os-release 2>/dev/null';
+
     // Handle 'cd' — update cwd and verify
-    const cdMatch = cmd.match(/^cd\s+(.+)/);
+    const cdMatch = resolvedCmd.match(/^cd\s+(.+)/);
 
     // Build the actual command with cwd prefix
     const fullCmd = cwd && cwd !== '~'
-      ? `cd ${JSON.stringify(cwd)} && ${cmd}`
-      : cmd;
+      ? `cd ${JSON.stringify(cwd)} && ${resolvedCmd}`
+      : resolvedCmd;
 
     const res = await execBridgeCommand(fullCmd);
     const durationMs = Date.now() - start;
@@ -589,9 +811,9 @@ function LocalShellPanel() {
     setEntries(prev => [...prev, entry]);
 
     // Update cwd if cd was used (or any command might change it)
-    if (cdMatch || cmd.includes('cd ')) {
+    if (cdMatch || resolvedCmd.includes('cd ')) {
       const pwdRes = await execBridgeCommand(
-        cwd && cwd !== '~' ? `cd ${JSON.stringify(cwd)} && ${cmd} && pwd` : `${cmd} && pwd`
+        cwd && cwd !== '~' ? `cd ${JSON.stringify(cwd)} && ${resolvedCmd} && pwd` : `${resolvedCmd} && pwd`
       );
       if (pwdRes.ok && pwdRes.stdout) {
         const lines = pwdRes.stdout.trim().split('\n');
@@ -618,18 +840,16 @@ function LocalShellPanel() {
     }
   }, [historyIdx, cmdHistory]);
 
-  const mono = Platform.OS === 'ios' ? 'Courier' : 'monospace';
-
   return (
-    <View style={{ flex: 1, backgroundColor: '#0a0a0a' }}>
+    <View style={{ flex: 1, backgroundColor: BS.bg }}>
       {/* Connection status bar */}
       <View style={shellStyles.statusBar}>
         <View style={[
           shellStyles.statusDot,
-          { backgroundColor: bridgeOk === null ? '#f59e0b' : bridgeOk ? '#22c55e' : '#ef4444' },
+          { backgroundColor: bridgeOk === null ? BS.warning : bridgeOk ? BS.accent : BS.error },
         ]} />
         <Text style={shellStyles.statusText}>
-          {bridgeOk === null ? 'Connecting...' : bridgeOk ? 'Bridge connected (localhost:7778)' : 'Bridge offline — run: node scripts/claude-bridge.js'}
+          {bridgeOk === null ? 'connecting...' : bridgeOk ? 'bridge:7778' : 'offline'}
         </Text>
         {cwd !== '~' && (
           <Text style={shellStyles.cwdText} numberOfLines={1}>{cwd}</Text>
@@ -643,55 +863,44 @@ function LocalShellPanel() {
         contentContainerStyle={{ padding: 12, gap: 2 }}
         showsVerticalScrollIndicator={false}
       >
-        {/* Welcome message */}
         {entries.length === 0 && (
           <View style={shellStyles.welcomeBox}>
-            <Text style={[shellStyles.welcomeTitle, { fontFamily: mono }]}>Local Shell</Text>
-            <Text style={[shellStyles.welcomeText, { fontFamily: mono }]}>
-              Connected to your local machine via the Claude Code bridge.{'\n'}
-              Commands run in a shell with safety guards.{'\n'}
-              Type "clear" to reset. Use {'\u2191'}/{'\u2193'} for history.
+            <Text style={shellStyles.welcomeTitle}>BlackSwan Shell</Text>
+            <Text style={shellStyles.welcomeText}>
+              Local bridge at localhost:7778{'\n'}
+              Type "help" for commands  |  "clear" to reset  |  up/down for history
             </Text>
           </View>
         )}
 
         {entries.map(entry => (
           <View key={entry.id} style={shellStyles.entry}>
-            {/* Command line */}
             <View style={shellStyles.cmdRow}>
-              <Text style={[shellStyles.promptChar, { fontFamily: mono }]}>$</Text>
-              <Text style={[shellStyles.cmdText, { fontFamily: mono }]}>{entry.command}</Text>
+              <Text style={shellStyles.promptChar}>$</Text>
+              <Text style={shellStyles.cmdText}>{entry.command}</Text>
               <Text style={[
                 shellStyles.exitCode,
-                { fontFamily: mono, color: entry.ok ? '#22c55e40' : '#ef444480' },
+                { color: entry.ok ? BS.accent + '60' : BS.error + '80' },
               ]}>
                 {entry.code !== 0 ? `[${entry.code}]` : ''} {entry.durationMs}ms
               </Text>
             </View>
 
-            {/* stdout */}
             {entry.stdout ? (
-              <Text style={[shellStyles.stdout, { fontFamily: mono }]} selectable>
-                {entry.stdout}
-              </Text>
+              <Text style={shellStyles.stdout} selectable>{entry.stdout}</Text>
             ) : null}
 
-            {/* stderr */}
             {entry.stderr ? (
-              <Text style={[
-                shellStyles.stderr,
-                { fontFamily: mono, color: entry.ok ? '#f59e0b' : '#ef4444' },
-              ]} selectable>
+              <Text style={[shellStyles.stderr, { color: entry.ok ? BS.warning : BS.error }]} selectable>
                 {entry.stderr}
               </Text>
             ) : null}
           </View>
         ))}
 
-        {/* Active command indicator */}
         {sending && (
           <View style={shellStyles.cmdRow}>
-            <Text style={[shellStyles.promptChar, { fontFamily: mono }]}>$</Text>
+            <Text style={shellStyles.promptChar}>$</Text>
             <PendingDots />
           </View>
         )}
@@ -699,37 +908,35 @@ function LocalShellPanel() {
 
       {/* Input bar */}
       <View style={shellStyles.inputRow}>
-        <Text style={[shellStyles.inputPrompt, { fontFamily: mono }]}>
-          {cwd.split('/').pop() || '~'} $
-        </Text>
+        <Text style={shellStyles.inputPrompt}>{cwd.split('/').pop() || '~'} $</Text>
         <TextInput
           ref={inputRef}
-          style={[shellStyles.input, { fontFamily: mono }]}
+          style={shellStyles.input}
           value={input}
           onChangeText={(v) => { setInput(v); setHistoryIdx(-1); }}
-          placeholder={bridgeOk ? 'Enter shell command...' : 'Bridge offline...'}
-          placeholderTextColor="#3f3f46"
+          placeholder={bridgeOk === false ? 'bridge offline...' : 'command...'}
+          placeholderTextColor={BS.textMuted}
           multiline={false}
           returnKeyType="send"
           onSubmitEditing={handleSend}
           onKeyPress={handleKeyPress}
-          editable={!sending && bridgeOk === true}
+          editable={!sending}
           autoCorrect={false}
           autoCapitalize="none"
         />
         <Pressable
-          style={[shellStyles.sendBtn, (!input.trim() || sending || !bridgeOk) && shellStyles.sendBtnDisabled]}
+          style={[shellStyles.sendBtn, (!input.trim() || sending) && shellStyles.sendBtnDisabled]}
           onPress={handleSend}
-          disabled={!input.trim() || sending || !bridgeOk}
+          disabled={!input.trim() || sending}
         >
-          <Text style={shellStyles.sendIcon}>{sending ? '\u23F3' : '\u21B5'}</Text>
+          <Text style={shellStyles.sendIcon}>{sending ? '...' : '>'}</Text>
         </Pressable>
       </View>
 
       {cmdHistory.length > 0 && (
         <View style={shellStyles.historyHint}>
-          <Text style={[shellStyles.historyHintText, { fontFamily: mono }]}>
-            {'\u2191\u2193'} history  ·  {cmdHistory.length} cmd{cmdHistory.length !== 1 ? 's' : ''}
+          <Text style={shellStyles.historyHintText}>
+            {cmdHistory.length} in history
           </Text>
         </View>
       )}
@@ -739,145 +946,48 @@ function LocalShellPanel() {
 
 const shellStyles = StyleSheet.create({
   statusBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    backgroundColor: '#111111',
-    borderBottomWidth: 1,
-    borderBottomColor: '#1f1f1f',
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 12, paddingVertical: 5,
+    backgroundColor: BS.bgPanel, borderBottomWidth: 1, borderBottomColor: BS.border,
   },
-  statusDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  statusText: {
-    color: '#6b6b80',
-    fontSize: 10,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontWeight: '600',
-  },
-  cwdText: {
-    color: '#444455',
-    fontSize: 10,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    marginLeft: 'auto',
-    maxWidth: 200,
-  },
-  welcomeBox: {
-    paddingVertical: 16,
-    gap: 6,
-  },
-  welcomeTitle: {
-    color: '#22c55e',
-    fontSize: 14,
-    fontWeight: '800',
-    letterSpacing: 1,
-  },
-  welcomeText: {
-    color: '#3f3f46',
-    fontSize: 11,
-    lineHeight: 18,
-  },
-  entry: {
-    paddingVertical: 4,
-    borderBottomWidth: 1,
-    borderBottomColor: '#0f0f0f',
-  },
-  cmdRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 6,
-  },
-  promptChar: {
-    color: '#22c55e',
-    fontSize: 12,
-    fontWeight: '700',
-    flexShrink: 0,
-  },
-  cmdText: {
-    color: '#e5e5e5',
-    fontSize: 12,
-    flex: 1,
-    lineHeight: 18,
-  },
-  exitCode: {
-    fontSize: 9,
-    fontWeight: '600',
-    marginLeft: 'auto',
-    flexShrink: 0,
-  },
-  stdout: {
-    color: '#86efac',
-    fontSize: 11,
-    lineHeight: 16,
-    paddingLeft: 18,
-    marginTop: 2,
-  },
-  stderr: {
-    fontSize: 11,
-    lineHeight: 16,
-    paddingLeft: 18,
-    marginTop: 2,
-  },
+  statusDot: { width: 5, height: 5, borderRadius: 3 },
+  statusText: { color: BS.textMuted, fontSize: 9, fontFamily: MONO, fontWeight: '600' },
+  cwdText: { color: BS.textMuted, fontSize: 9, fontFamily: MONO, marginLeft: 'auto', maxWidth: 200 },
+  welcomeBox: { paddingVertical: 16, gap: 4 },
+  welcomeTitle: { color: BS.accent, fontSize: 13, fontWeight: '800', letterSpacing: 1, fontFamily: MONO },
+  welcomeText: { color: BS.textMuted, fontSize: 10, lineHeight: 16, fontFamily: MONO },
+  entry: { paddingVertical: 4, borderBottomWidth: 1, borderBottomColor: BS.border + '40' },
+  cmdRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 6 },
+  promptChar: { color: BS.accent, fontSize: 12, fontWeight: '700', flexShrink: 0, fontFamily: MONO },
+  cmdText: { color: BS.textPrimary, fontSize: 12, flex: 1, lineHeight: 18, fontFamily: MONO },
+  exitCode: { fontSize: 9, fontWeight: '600', marginLeft: 'auto', flexShrink: 0, fontFamily: MONO },
+  stdout: { color: BS.textPrimary, fontSize: 11, lineHeight: 16, paddingLeft: 18, marginTop: 2, fontFamily: MONO },
+  stderr: { fontSize: 11, lineHeight: 16, paddingLeft: 18, marginTop: 2, fontFamily: MONO },
   inputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#111',
-    borderTopWidth: 1,
-    borderTopColor: '#1f1f1f',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    gap: 8,
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: BS.bgInput, borderTopWidth: 1, borderTopColor: BS.border,
+    paddingHorizontal: 12, paddingVertical: 6, gap: 8,
   },
-  inputPrompt: {
-    color: '#22c55e',
-    fontSize: 12,
-    fontWeight: '700',
-    flexShrink: 0,
-  },
+  inputPrompt: { color: BS.accent, fontSize: 11, fontWeight: '700', flexShrink: 0, fontFamily: MONO },
   input: {
-    flex: 1,
-    color: '#e5e5e5',
-    fontSize: 13,
-    paddingVertical: 4,
-    minHeight: 32,
+    flex: 1, color: BS.textPrimary, fontSize: 12, fontFamily: MONO,
+    paddingVertical: 4, minHeight: 32,
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
   sendBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 8,
-    backgroundColor: '#22c55e',
-    alignItems: 'center',
-    justifyContent: 'center',
+    width: 32, height: 32, borderRadius: 2,
+    backgroundColor: BS.accent, alignItems: 'center', justifyContent: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  sendBtnDisabled: {
-    backgroundColor: '#1f1f1f',
-    opacity: 0.5,
-  },
-  sendIcon: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  historyHint: {
-    paddingHorizontal: 14,
-    paddingBottom: 4,
-    backgroundColor: '#111',
-  },
-  historyHintText: {
-    color: '#27272a',
-    fontSize: 9,
-  },
+  sendBtnDisabled: { backgroundColor: BS.bgCard, opacity: 0.5 },
+  sendIcon: { color: '#000', fontSize: 13, fontWeight: '800', fontFamily: MONO },
+  historyHint: { paddingHorizontal: 14, paddingBottom: 3, backgroundColor: BS.bgInput },
+  historyHintText: { color: BS.textGhost, fontSize: 8, fontFamily: MONO },
 });
 
 // ─── Terminal sub-tabs ────────────────────────────────────────────────────────
 
-type TerminalTab = 'commands' | 'automations' | 'shell';
+type TerminalTab = 'commands' | 'automations' | 'shell' | 'spawn';
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
@@ -907,7 +1017,7 @@ export default function OfficeTerminal({
   const [localInput, setLocalInput]           = useState('');
   const [localTargetId, setLocalTargetId]     = useState<string | null>('blackswan-default');
   const [localTargetName, setLocalTargetName] = useState('@BlackSwan');
-  const [localModel, setLocalModel]           = useState<string | null>('blackswan');
+  const [localModel, setLocalModel]           = useState<string | null>(null);
   const [localTargetIds, setLocalTargetIds]   = useState<string[] | null>(['blackswan-default']);
   const [sending, setSending]                 = useState(false);
   const [loading, setLoading]                 = useState(true);
@@ -1176,6 +1286,123 @@ export default function OfficeTerminal({
       return;
     }
 
+    // /models — show available models from registry
+    if (cmd === '/models') {
+      getAllModels().then(models => {
+        const grouped: Record<string, RegisteredModel[]> = {};
+        for (const m of models) {
+          (grouped[m.provider] ??= []).push(m);
+        }
+        const lines = ['┌─ MODEL REGISTRY ─────────────────────────────┐'];
+        for (const [provider, list] of Object.entries(grouped)) {
+          lines.push(`│ ${provider.toUpperCase()} (${list.length})`);
+          for (const m of list.slice(0, 8)) {
+            const cost = m.input_cost_per_m > 0 ? ` $${m.input_cost_per_m}/$${m.output_cost_per_m}` : ' free';
+            lines.push(`│   ${m.tier === 'frontier' ? '⬥' : '◆'} ${m.label}${cost}`);
+          }
+          if (list.length > 8) lines.push(`│   ... and ${list.length - 8} more`);
+        }
+        lines.push('└──────────────────────────────────────────────┘');
+        // Add as a local response
+        const localMsg: TerminalMessage = {
+          id: `local-${Date.now()}`,
+          circleId,
+          senderId: userId,
+          senderName: userDisplayName,
+          targetAgentId: null,
+          targetAgentName: '@system',
+          targetAgentIds: null,
+          model: null,
+          commandText: '/models',
+          responseText: lines.join('\n'),
+          responseAgentId: 'system',
+          responseAgentName: 'System',
+          tokenCost: 0,
+          latencyMs: 0,
+          status: 'done',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        setMessages(prev => [localMsg, ...prev]);
+      });
+      setInput('');
+      setSending(false);
+      return;
+    }
+
+    // /agents — list connected agents
+    if (cmd === '/agents') {
+      const lines = ['┌─ CONNECTED AGENTS ────────────────────────────┐'];
+      for (const agent of agents) {
+        const isOnline = agent.status === 'active' || agent.status === 'idle';
+        const dot = isOnline ? '●' : '○';
+        const color = isOnline ? 'online' : 'offline';
+        lines.push(`│ ${dot} ${agent.name || agent.id} — ${agent.status} (${agent.provider || 'unknown'})`);
+      }
+      if (agents.length === 0) lines.push('│ No agents connected');
+      lines.push('└──────────────────────────────────────────────┘');
+      const localMsg: TerminalMessage = {
+        id: `local-${Date.now()}`,
+        circleId,
+        senderId: userId,
+        senderName: userDisplayName,
+        targetAgentId: null,
+        targetAgentName: '@system',
+        targetAgentIds: null,
+        model: null,
+        commandText: '/agents',
+        responseText: lines.join('\n'),
+        responseAgentId: 'system',
+        responseAgentName: 'System',
+        tokenCost: 0,
+        latencyMs: 0,
+        status: 'done',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      setMessages(prev => [localMsg, ...prev]);
+      setInput('');
+      setSending(false);
+      return;
+    }
+
+    // /devices — list local devices
+    if (cmd === '/devices') {
+      executeDeviceCommand('devices list').then(output => {
+        const localMsg: TerminalMessage = {
+          id: `local-${Date.now()}`,
+          circleId,
+          senderId: userId,
+          senderName: userDisplayName,
+          targetAgentId: null,
+          targetAgentName: '@system',
+          targetAgentIds: null,
+          model: null,
+          commandText: '/devices',
+          responseText: output,
+          responseAgentId: 'system',
+          responseAgentName: 'System',
+          tokenCost: 0,
+          latencyMs: 0,
+          status: 'done',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        setMessages(prev => [localMsg, ...prev]);
+      });
+      setInput('');
+      setSending(false);
+      return;
+    }
+
+    // /spawn — open the spawn agent wizard
+    if (cmd === '/spawn') {
+      setInput('');
+      setSending(false);
+      setTerminalTab('spawn');
+      return;
+    }
+
     // Handle /imagine command
     if (cmd.startsWith('/imagine ')) {
       const imagePrompt = cmd.slice(9).trim();
@@ -1237,12 +1464,16 @@ export default function OfficeTerminal({
         : `${targetIds.length} agents`)
       : targetAgentName;
 
-    // Wrap command with mode prefix (Plan/Explore inject system-level context)
+    // Wrap command with mode prefix (Plan/Explore/Fleet/Autopilot inject system-level context)
     let wrappedCmd = cmd;
     if (terminalMode === 'plan') {
-      wrappedCmd = `[PLAN MODE — outline steps, do not execute] ${cmd}`;
+      wrappedCmd = `[PLAN MODE — Analyze this request and respond with a numbered step-by-step plan. For each step show: (1) what will be done, (2) estimated impact (low/medium/high), (3) files or systems affected. Do NOT execute anything. End with "APPROVE / MODIFY / CANCEL" options.] ${cmd}`;
     } else if (terminalMode === 'explore') {
       wrappedCmd = `[EXPLORE MODE — research and explain, do not make changes] ${cmd}`;
+    } else if (terminalMode === 'fleet') {
+      wrappedCmd = `[FLEET MODE — Break this request into independent sub-tasks that can run in parallel. For each sub-task show: a short title, status (pending), and what it does. Then execute each sub-task and update its status to (done) or (error). Format each sub-task as "[ ] Task title — description" and update to "[x] Task title — result" when complete.] ${cmd}`;
+    } else if (terminalMode === 'autopilot') {
+      wrappedCmd = `[AUTOPILOT MODE — Execute this request fully and autonomously without asking for confirmation. Proceed through all necessary steps, report results as you go, and only stop if you hit a critical error.] ${cmd}`;
     }
 
     // Embed thinking level in model key (e.g. "claude-sonnet::deep")
@@ -1311,6 +1542,16 @@ export default function OfficeTerminal({
   const onlineAgents = agents.filter(a => a.status !== 'offline');
   const onlineCount  = onlineAgents.length;
 
+  // Compute total tokens for footer
+  const totalTokens = useMemo(() => {
+    let sum = 0;
+    responses.forEach(resps => resps.forEach(r => { sum += r.tokenCount || 0; }));
+    return sum;
+  }, [responses]);
+
+  const modeInfo = TERMINAL_MODES.find(m => m.key === terminalMode);
+  const modelInfo = TERMINAL_MODELS.find(m => m.key === selectedModel);
+
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <KeyboardAvoidingView
@@ -1318,49 +1559,109 @@ export default function OfficeTerminal({
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
     >
-      {/* Header — hidden in compact (bottom drawer) mode */}
+      {/* ── Top bar: BlackSwan branding + metrics (OpenClaw-style) ── */}
       {!compact && (
-        <View style={styles.header}>
-          <View style={styles.headerLeft}>
-            <Text style={styles.headerTitle}>⌨️ TERMINAL</Text>
-            <Text style={styles.headerSub}>Command Center</Text>
+        <View style={styles.topBar}>
+          <View style={styles.topBarLeft}>
+            <View style={styles.brandMark}>
+              <Text style={styles.brandLetter}>B</Text>
+            </View>
+            <View>
+              <Text style={styles.brandName}>BLACKSWAN</Text>
+              <Text style={styles.brandVersion}>terminal v2</Text>
+            </View>
           </View>
-          <View style={styles.headerRight}>
-            <View style={[styles.onlineDot, onlineCount > 0 && styles.onlineDotActive]} />
-            <Text style={styles.onlineText}>
-              {onlineCount} agent{onlineCount !== 1 ? 's' : ''} online
-            </Text>
+          <View style={styles.metricsRow}>
+            {terminalMode !== 'execute' && (
+              <View style={[styles.metricBadge, { borderColor: modeInfo?.color || BS.accent }]}>
+                <Text style={[styles.metricBadgeText, { color: modeInfo?.color || BS.accent }]}>
+                  {modeInfo?.label?.toUpperCase()}
+                </Text>
+              </View>
+            )}
+            <View style={styles.metricItem}>
+              <Text style={styles.metricValue}>{onlineCount}</Text>
+              <Text style={styles.metricLabel}>agents</Text>
+            </View>
+            <View style={styles.metricDivider} />
+            <View style={styles.metricItem}>
+              <Text style={styles.metricValue}>{messages.length}</Text>
+              <Text style={styles.metricLabel}>msgs</Text>
+            </View>
+            <View style={styles.metricDivider} />
+            <View style={styles.metricItem}>
+              <Text style={styles.metricValue}>{totalTokens >= 1000 ? `${(totalTokens / 1000).toFixed(1)}K` : totalTokens}</Text>
+              <Text style={styles.metricLabel}>tokens</Text>
+            </View>
           </View>
         </View>
       )}
 
-      {/* Terminal sub-tabs */}
+      {/* ── Tab bar ── */}
       <View style={styles.termTabBar}>
+        {(['commands', 'automations', 'shell'] as TerminalTab[]).map(tab => (
+          <Pressable
+            key={tab}
+            onPress={() => setTerminalTab(tab)}
+            style={[styles.termTab, terminalTab === tab && styles.termTabActive]}
+          >
+            <Text style={[styles.termTabText, terminalTab === tab && styles.termTabTextActive]}>
+              {tab === 'commands' ? 'CHAT' : tab === 'automations' ? 'AUTO' : 'SHELL'}
+            </Text>
+          </Pressable>
+        ))}
+        {/* Spawn agent button */}
         <Pressable
-          onPress={() => setTerminalTab('commands')}
-          style={[styles.termTab, terminalTab === 'commands' && styles.termTabActive,
-            Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          onPress={() => setTerminalTab('spawn')}
+          style={[styles.spawnBtn, terminalTab === 'spawn' && styles.spawnBtnActive]}
         >
-          <Text style={[styles.termTabText, terminalTab === 'commands' && styles.termTabTextActive]}>⌨ COMMANDS</Text>
+          <Text style={[styles.spawnBtnText, terminalTab === 'spawn' && { color: BS.accent }]}>+ AGENT</Text>
         </Pressable>
-        <Pressable
-          onPress={() => setTerminalTab('automations')}
-          style={[styles.termTab, terminalTab === 'automations' && styles.termTabActive,
-            Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-        >
-          <Text style={[styles.termTabText, terminalTab === 'automations' && styles.termTabTextActive]}>⚡ AUTOMATIONS</Text>
-        </Pressable>
-        <Pressable
-          onPress={() => setTerminalTab('shell')}
-          style={[styles.termTab, terminalTab === 'shell' && styles.termTabActive,
-            Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-        >
-          <Text style={[styles.termTabText, terminalTab === 'shell' && styles.termTabTextActive]}>💻 LOCAL SHELL</Text>
-        </Pressable>
+        {/* Connection indicator in tab bar */}
+        <View style={{ flex: 1 }} />
+        <View style={styles.connIndicator}>
+          <View style={[styles.connDot, onlineCount > 0 && { backgroundColor: BS.accent }]} />
+          <Text style={styles.connText}>{onlineCount > 0 ? 'connected' : 'offline'}</Text>
+        </View>
       </View>
 
-      {/* Local Shell view */}
-      {terminalTab === 'shell' ? (
+      {/* ── Content area ── */}
+      {terminalTab === 'spawn' ? (
+        <SpawnAgentPanel
+          circleId={circleId}
+          onCreated={(agentId, agentName) => {
+            setTerminalTab('commands');
+            // Auto-target the new agent
+            if (agentId) {
+              selectTarget(agentId, `@${agentName}`);
+              selectTargets([agentId], `@${agentName}`);
+            }
+            // Post a system message announcing the new agent
+            const now = new Date().toISOString();
+            const announceMsg: TerminalMessage = {
+              id: `local-spawn-${Date.now()}`,
+              circleId,
+              senderId: userId,
+              senderName: 'SYSTEM',
+              commandText: `/spawn ${agentName}`,
+              targetAgentId: null,
+              targetAgentName: '@system',
+              targetAgentIds: null,
+              model: null,
+              responseText: `Agent @${agentName} deployed and ready. Target it with @${agentName} or assign it tasks in the kanban board.`,
+              responseAgentId: 'system',
+              responseAgentName: 'System',
+              tokenCost: 0,
+              latencyMs: 0,
+              status: 'done',
+              createdAt: now,
+              updatedAt: now,
+            };
+            setMessages(prev => [...prev, announceMsg]);
+          }}
+          onCancel={() => setTerminalTab('commands')}
+        />
+      ) : terminalTab === 'shell' ? (
         <LocalShellPanel />
       ) : terminalTab === 'automations' ? (
         <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
@@ -1372,17 +1673,28 @@ export default function OfficeTerminal({
       {/* Message list */}
       {loading ? (
         <View style={styles.loadingState}>
-          <Text style={styles.loadingText}>Loading terminal history...</Text>
+          <PendingDots />
         </View>
       ) : messages.length === 0 ? (
         <View style={styles.emptyState}>
-          <Text style={styles.emptyIcon}>⌨️</Text>
-          <Text style={styles.emptyTitle}>Terminal ready</Text>
+          <View style={styles.emptyBrand}>
+            <Text style={styles.emptyBrandText}>BS</Text>
+          </View>
+          <Text style={styles.emptyTitle}>BlackSwan Terminal</Text>
           <Text style={styles.emptyText}>
-            Select a target above, then type a command.{'\n'}
-            Use "@all" to broadcast to every connected agent at once.{'\n'}
-            Type /help for available commands.
+            Your agentic command center.{'\n'}
+            Type a message, use /commands, or @target an agent.
           </Text>
+          <View style={styles.emptyHints}>
+            {['/help', '/status', '/models', '/agents'].map(cmd => (
+              <Pressable key={cmd} style={styles.emptyHintChip} onPress={() => setInput(cmd)}>
+                <Text style={styles.emptyHintText}>{cmd}</Text>
+              </Pressable>
+            ))}
+            <Pressable style={[styles.emptyHintChip, { borderColor: BS.accent + '40' }]} onPress={() => setTerminalTab('spawn')}>
+              <Text style={styles.emptyHintText}>+ Spawn Agent</Text>
+            </Pressable>
+          </View>
         </View>
       ) : (
         <FlatList
@@ -1399,26 +1711,20 @@ export default function OfficeTerminal({
         />
       )}
 
-      {/* Autocomplete suggestions (when typing @name) */}
+      {/* Autocomplete */}
       {showAutocomplete && (
         <AutocompleteSuggestions
           query={input}
           agents={agents}
-          onSelect={(id, name) => {
-            selectTarget(id, name);
-            setInput('');
-            inputRef.current?.focus();
-          }}
+          onSelect={(id, name) => { selectTarget(id, name); setInput(''); inputRef.current?.focus(); }}
         />
       )}
 
-      {/* Model selector chips */}
-      <View style={styles.modelRow}>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.chipsScroll}
-        >
+      {/* ── Control panel: Model + Mode + Thinking + Agents (compact rows) ── */}
+      <View style={styles.controlPanel}>
+        {/* Row 1: Models */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsScroll}>
+          <Text style={styles.rowLabel}>MODEL</Text>
           {TERMINAL_MODELS.map(m => (
             <ModelChip
               key={m.key ?? 'auto'}
@@ -1430,53 +1736,38 @@ export default function OfficeTerminal({
             />
           ))}
         </ScrollView>
-      </View>
 
-      {/* Thinking level + Mode selector */}
-      <View style={styles.modelRow}>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.chipsScroll}
-        >
-          {THINKING_LEVELS.map(tl => (
-            <Pressable
-              key={tl.key}
-              onPress={() => setThinkingLevel(tl.key)}
-              style={[styles.thinkChip, thinkingLevel === tl.key && { borderColor: tl.color, backgroundColor: `${tl.color}18` }]}
-            >
-              <Text style={[styles.thinkChipText, thinkingLevel === tl.key && { color: tl.color }]}>
-                {tl.icon} {tl.label}
-              </Text>
-            </Pressable>
-          ))}
-          <View style={styles.chipDivider} />
+        {/* Row 2: Mode + Thinking */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsScroll}>
+          <Text style={styles.rowLabel}>MODE</Text>
           {TERMINAL_MODES.map(tm => (
             <Pressable
               key={tm.key}
               onPress={() => setTerminalMode(tm.key)}
-              style={[styles.thinkChip, terminalMode === tm.key && styles.modeChipActive]}
+              style={[styles.modeChip, terminalMode === tm.key && { borderColor: tm.color, backgroundColor: tm.color + '18' }]}
             >
-              <Text style={[styles.thinkChipText, terminalMode === tm.key && styles.modeChipTextActive]}>
-                {tm.icon} {tm.label}
-              </Text>
+              <Text style={[styles.modeChipSymbol, terminalMode === tm.key && { color: tm.color }]}>{tm.symbol}</Text>
+              <Text style={[styles.modeChipText, terminalMode === tm.key && { color: tm.color }]}>{tm.label}</Text>
+            </Pressable>
+          ))}
+          <View style={styles.chipDivider} />
+          <Text style={styles.rowLabel}>THINK</Text>
+          {THINKING_LEVELS.map(tl => (
+            <Pressable
+              key={tl.key}
+              onPress={() => setThinkingLevel(tl.key)}
+              style={[styles.modeChip, thinkingLevel === tl.key && { borderColor: tl.color, backgroundColor: tl.color + '18' }]}
+            >
+              <Text style={[styles.modeChipSymbol, thinkingLevel === tl.key && { color: tl.color }]}>{tl.symbol}</Text>
+              <Text style={[styles.modeChipText, thinkingLevel === tl.key && { color: tl.color }]}>{tl.label}</Text>
             </Pressable>
           ))}
         </ScrollView>
-      </View>
 
-      {/* Target selector chips — multi-select enabled */}
-      <View style={styles.chipRow}>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.chipsScroll}
-        >
-          <AgentChip
-            label="@all"
-            active={!targetIds || targetIds.length === 0}
-            onPress={selectAll}
-          />
+        {/* Row 3: Agent targets + Quick commands */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsScroll}>
+          <Text style={styles.rowLabel}>TO</Text>
+          <AgentChip label="@all" active={!targetIds || targetIds.length === 0} onPress={selectAll} />
           {onlineAgents.map(agent => (
             <AgentChip
               key={agent.id}
@@ -1486,36 +1777,32 @@ export default function OfficeTerminal({
               onPress={() => toggleAgentTarget(agent.id, agent.name)}
             />
           ))}
-          {/* Quick command chips */}
           <View style={styles.chipDivider} />
-          {BUILTIN_CMDS.slice(0, 4).map(b => (
-            <Pressable
-              key={b.cmd}
-              style={styles.cmdChip}
-              onPress={() => setInput(b.cmd)}
-            >
+          {BUILTIN_CMDS.slice(0, 6).map(b => (
+            <Pressable key={b.cmd} style={styles.cmdChip} onPress={() => setInput(b.cmd)}>
               <Text style={styles.cmdChipText}>{b.cmd}</Text>
             </Pressable>
           ))}
         </ScrollView>
       </View>
 
-      {/* Input bar */}
+      {/* ── Input bar (OpenClaw command palette style) ── */}
       <View style={styles.inputRow}>
         <View style={styles.inputPrefix}>
-          <Text style={styles.prefixText}>
-            {terminalMode !== 'execute' ? `[${terminalMode.toUpperCase()}] ` : ''}
-            {selectedModel ? `[${TERMINAL_MODELS.find(m => m.key === selectedModel)?.label || selectedModel}] ` : ''}
-            &gt; {targetIds && targetIds.length > 1 ? `${targetIds.length} agents` : targetAgentName} ▸
+          <Text style={styles.prefixTarget}>
+            {targetIds && targetIds.length > 1 ? `${targetIds.length} agents` : targetAgentName}
           </Text>
+          {selectedModel && (
+            <Text style={styles.prefixModel}>{modelInfo?.label || selectedModel}</Text>
+          )}
         </View>
         <TextInput
           ref={inputRef}
           style={styles.input}
           value={input}
           onChangeText={(v) => { setInput(v); setHistoryIdx(-1); }}
-          placeholder="Type a command or /help..."
-          placeholderTextColor="#3f3f46"
+          placeholder="message or /command..."
+          placeholderTextColor={BS.textMuted}
           multiline={false}
           returnKeyType="send"
           onSubmitEditing={handleSend}
@@ -1524,23 +1811,36 @@ export default function OfficeTerminal({
           autoCorrect={false}
           autoCapitalize="none"
         />
-        <Pressable
-          style={[styles.sendBtn, (!input.trim() || sending) && styles.sendBtnDisabled]}
-          onPress={handleSend}
-          disabled={!input.trim() || sending}
-        >
-          <Text style={styles.sendIcon}>{sending ? '⏳' : '↵'}</Text>
-        </Pressable>
+        {terminalMode === 'autopilot' && sending ? (
+          <Pressable style={styles.stopBtn} onPress={() => setSending(false)}>
+            <Text style={styles.stopBtnText}>STOP</Text>
+          </Pressable>
+        ) : (
+          <Pressable
+            style={[styles.sendBtn, (!input.trim() || sending) && styles.sendBtnDisabled]}
+            onPress={handleSend}
+            disabled={!input.trim() || sending}
+          >
+            <Text style={styles.sendIcon}>{sending ? '...' : '>'}</Text>
+          </Pressable>
+        )}
       </View>
 
-      {/* History hint */}
-      {cmdHistory.length > 0 && (
-        <View style={styles.historyHint}>
-          <Text style={styles.historyHintText}>
-            ↑↓ history  ·  {cmdHistory.length} cmd{cmdHistory.length !== 1 ? 's' : ''}
-          </Text>
-        </View>
-      )}
+      {/* ── Footer status line (OpenClaw-style) ── */}
+      <View style={styles.footer}>
+        <View style={[styles.footerDot, onlineCount > 0 && { backgroundColor: BS.accent }]} />
+        <Text style={styles.footerText}>
+          {thinkingLevel !== 'balanced' ? `${thinkingLevel} ` : ''}
+          {terminalMode !== 'execute' ? `${terminalMode} ` : ''}
+          {modelInfo?.label || 'auto'}
+        </Text>
+        <View style={{ flex: 1 }} />
+        {cmdHistory.length > 0 && (
+          <Text style={styles.footerText}>{cmdHistory.length} history</Text>
+        )}
+        <Text style={styles.footerMuted}>|</Text>
+        <Text style={styles.footerText}>{messages.length} messages</Text>
+      </View>
 
       </>
       )}
@@ -1548,150 +1848,152 @@ export default function OfficeTerminal({
   );
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
+// ─── Styles (BlackSwan Terminal Theme) ────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0d0d0d',
+  container: { flex: 1, backgroundColor: BS.bg },
+
+  // ── Top bar ──
+  topBar: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 12, paddingVertical: 8,
+    backgroundColor: BS.bgPanel, borderBottomWidth: 1, borderBottomColor: BS.border,
   },
-  header: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#000000',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+  topBarLeft: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  brandMark: {
+    width: 24, height: 24, borderRadius: 2,
+    backgroundColor: BS.accent, alignItems: 'center', justifyContent: 'center',
   },
-  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 } as any,
+  brandLetter: { color: '#000', fontFamily: MONO, fontSize: 13, fontWeight: '900' },
+  brandName: { color: BS.textPrimary, fontFamily: MONO, fontSize: 11, fontWeight: '800', letterSpacing: 2 },
+  brandVersion: { color: BS.textMuted, fontFamily: MONO, fontSize: 8, letterSpacing: 1 },
+  metricsRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  metricItem: { alignItems: 'center' },
+  metricValue: { color: BS.textPrimary, fontFamily: MONO, fontSize: 11, fontWeight: '700' },
+  metricLabel: { color: BS.textMuted, fontFamily: MONO, fontSize: 7, letterSpacing: 1 },
+  metricDivider: { width: 1, height: 20, backgroundColor: BS.border },
+  metricBadge: {
+    borderWidth: 1, borderRadius: 2, paddingHorizontal: 5, paddingVertical: 2,
+    backgroundColor: 'transparent', marginRight: 4,
+  },
+  metricBadgeText: { fontFamily: MONO, fontSize: 8, fontWeight: '800', letterSpacing: 1 },
+
+  // ── Tabs ──
   termTabBar: {
-    flexDirection: 'row',
-    borderBottomWidth: 1,
-    borderBottomColor: '#000000',
-    paddingHorizontal: 4,
+    flexDirection: 'row', alignItems: 'center',
+    borderBottomWidth: 1, borderBottomColor: BS.border,
+    backgroundColor: BS.bgPanel, paddingHorizontal: 4,
   } as any,
   termTab: {
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderBottomWidth: 2,
-    borderBottomColor: 'transparent',
+    paddingHorizontal: 12, paddingVertical: 6,
+    borderBottomWidth: 2, borderBottomColor: 'transparent',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   } as any,
-  termTabActive: {
-    borderBottomColor: '#6366f1',
-  } as any,
-  termTabText: {
-    color: '#555',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 1,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  } as any,
-  termTabTextActive: {
-    color: '#a5b4fc',
-  } as any,
-  headerTitle: {
-    color: '#e5e5e5',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 1.5,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  },
-  headerSub: {
-    color: '#3f3f46',
-    fontSize: 10,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  onlineDot: {
-    width: 7, height: 7, borderRadius: 4, backgroundColor: '#3f3f46',
-  },
-  onlineDotActive: { backgroundColor: '#22c55e' },
-  onlineText: {
-    color: '#52525b', fontSize: 10,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  },
-  list: { flex: 1 },
-  listContent: { paddingTop: 8, paddingBottom: 8 },
-  loadingState: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  loadingText: {
-    color: '#3f3f46', fontSize: 12,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  },
-  emptyState: {
-    flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32,
-  },
-  emptyIcon: { fontSize: 36, marginBottom: 12 },
-  emptyTitle: {
-    color: '#e5e5e5', fontSize: 15, fontWeight: '700', marginBottom: 8,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  },
-  emptyText: {
-    color: '#3f3f46', fontSize: 11, textAlign: 'center', lineHeight: 18,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  },
-  modelRow: {
-    borderTopWidth: 1, borderTopColor: '#000000', paddingVertical: 4,
-    backgroundColor: '#000000',
-  },
-  chipRow: { borderTopWidth: 1, borderTopColor: '#000000', paddingVertical: 6 },
-  chipsScroll: {
-    paddingHorizontal: 12, gap: 6, flexDirection: 'row', alignItems: 'center',
-  },
-  chipDivider: {
-    width: 1, height: 18, backgroundColor: '#2a2a2a', marginHorizontal: 4,
-  },
-  thinkChip: {
-    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6,
-    borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#111',
+  termTabActive: { borderBottomColor: BS.accent } as any,
+  termTabText: { color: BS.textMuted, fontSize: 9, fontWeight: '700', letterSpacing: 1.5, fontFamily: MONO } as any,
+  termTabTextActive: { color: BS.accent } as any,
+  spawnBtn: {
+    paddingHorizontal: 10, paddingVertical: 5, marginLeft: 4,
+    borderBottomWidth: 2, borderBottomColor: 'transparent',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  thinkChipText: {
-    color: '#666', fontSize: 10,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontWeight: '600',
+  spawnBtnActive: { borderBottomColor: BS.accent },
+  spawnBtnText: { color: BS.textMuted, fontFamily: MONO, fontSize: 9, fontWeight: '800', letterSpacing: 1 },
+  connIndicator: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingRight: 8 },
+  connDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: BS.textMuted },
+  connText: { color: BS.textMuted, fontFamily: MONO, fontSize: 8 },
+
+  // ── Message list ──
+  list: { flex: 1 },
+  listContent: { paddingTop: 4, paddingBottom: 4 },
+  loadingState: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+
+  // ── Empty state ──
+  emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 },
+  emptyBrand: {
+    width: 48, height: 48, borderRadius: 4,
+    backgroundColor: BS.accent + '18', borderWidth: 1, borderColor: BS.accent + '40',
+    alignItems: 'center', justifyContent: 'center', marginBottom: 16,
   },
-  modeChipActive: {
-    borderColor: '#6366f1', backgroundColor: '#6366f118',
+  emptyBrandText: { color: BS.accent, fontFamily: MONO, fontSize: 20, fontWeight: '900' },
+  emptyTitle: { color: BS.textPrimary, fontSize: 14, fontWeight: '700', marginBottom: 8, fontFamily: MONO },
+  emptyText: { color: BS.textSecondary, fontSize: 11, textAlign: 'center', lineHeight: 18, fontFamily: MONO },
+  emptyHints: { flexDirection: 'row', gap: 6, marginTop: 16, flexWrap: 'wrap', justifyContent: 'center' },
+  emptyHintChip: {
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 2,
+    backgroundColor: BS.bgCard, borderWidth: 1, borderColor: BS.border,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  modeChipTextActive: {
-    color: '#6366f1',
+  emptyHintText: { color: BS.accent, fontFamily: MONO, fontSize: 10 },
+
+  // ── Control panel ──
+  controlPanel: {
+    backgroundColor: BS.bgPanel, borderTopWidth: 1, borderTopColor: BS.border,
+    paddingVertical: 4, gap: 3,
   },
+  chipsScroll: { paddingHorizontal: 10, gap: 4, flexDirection: 'row', alignItems: 'center' },
+  rowLabel: {
+    color: BS.textMuted, fontFamily: MONO, fontSize: 8, fontWeight: '700',
+    letterSpacing: 1, marginRight: 4, width: 36,
+  },
+  chipDivider: { width: 1, height: 16, backgroundColor: BS.border, marginHorizontal: 4 },
+  modeChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 6, paddingVertical: 3, borderRadius: 2,
+    backgroundColor: BS.bgCard, borderWidth: 1, borderColor: BS.border,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  modeChipSymbol: {
+    color: BS.textMuted, fontFamily: MONO, fontSize: 10, fontWeight: '800',
+    width: 12, textAlign: 'center',
+  },
+  modeChipText: { color: BS.textMuted, fontFamily: MONO, fontSize: 9, fontWeight: '600' },
   cmdChip: {
-    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 5,
-    backgroundColor: '#111', borderWidth: 1, borderColor: '#2a2a2a',
+    paddingHorizontal: 6, paddingVertical: 3, borderRadius: 2,
+    backgroundColor: BS.bgCard, borderWidth: 1, borderColor: BS.border,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  cmdChipText: {
-    color: '#52525b', fontSize: 10,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  },
+  cmdChipText: { color: BS.textMuted, fontSize: 9, fontFamily: MONO },
+
+  // ── Input bar ──
   inputRow: {
     flexDirection: 'row', alignItems: 'center',
-    backgroundColor: '#111', borderTopWidth: 1, borderTopColor: '#1f1f1f',
-    paddingHorizontal: 12, paddingVertical: 8, gap: 8,
+    backgroundColor: BS.bgInput, borderTopWidth: 1, borderTopColor: BS.borderLit,
+    paddingHorizontal: 10, paddingVertical: 6, gap: 6,
   },
-  inputPrefix: { flexShrink: 0 },
-  prefixText: {
-    color: '#6366f1', fontSize: 12, fontWeight: '700',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  inputPrefix: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 },
+  prefixTarget: { color: BS.accent, fontFamily: MONO, fontSize: 10, fontWeight: '700' },
+  prefixModel: {
+    color: BS.textMuted, fontFamily: MONO, fontSize: 9,
+    backgroundColor: BS.bgCard, paddingHorizontal: 4, paddingVertical: 1,
+    borderRadius: 2, overflow: 'hidden',
   },
   input: {
-    flex: 1, color: '#e5e5e5', fontSize: 13,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    flex: 1, color: BS.textPrimary, fontSize: 13, fontFamily: MONO,
     paddingVertical: 4, minHeight: 32,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
   sendBtn: {
-    width: 36, height: 36, borderRadius: 8,
-    backgroundColor: '#6366f1', alignItems: 'center', justifyContent: 'center',
+    width: 32, height: 32, borderRadius: 2,
+    backgroundColor: BS.accent, alignItems: 'center', justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  sendBtnDisabled: { backgroundColor: '#1f1f1f', opacity: 0.5 },
-  sendIcon: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  historyHint: {
-    paddingHorizontal: 14, paddingBottom: 4,
-    backgroundColor: '#111',
+  sendBtnDisabled: { backgroundColor: BS.bgCard, opacity: 0.4 },
+  sendIcon: { color: '#000', fontFamily: MONO, fontSize: 14, fontWeight: '900' },
+  stopBtn: {
+    paddingHorizontal: 12, height: 32, borderRadius: 2,
+    backgroundColor: BS.error, alignItems: 'center', justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  historyHintText: {
-    color: '#27272a', fontSize: 9,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  stopBtnText: { color: '#fff', fontFamily: MONO, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
+
+  // ── Footer status line ──
+  footer: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 10, paddingVertical: 4,
+    backgroundColor: BS.bgPanel, borderTopWidth: 1, borderTopColor: BS.border,
   },
+  footerDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: BS.textMuted },
+  footerText: { color: BS.textMuted, fontFamily: MONO, fontSize: 8 },
+  footerMuted: { color: BS.textGhost, fontFamily: MONO, fontSize: 8 },
 });

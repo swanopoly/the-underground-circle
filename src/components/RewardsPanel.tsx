@@ -10,6 +10,7 @@ import {
   getNextBadge, getEarnedBadges, formatPoints, getPointsForModel,
 } from '../lib/badges';
 import HaloBadge from './HaloBadge';
+import PixelBadgeIcon, { hasPixelSprite } from './PixelBadgeIcon';
 
 interface Props {
   onClose?: () => void;
@@ -203,20 +204,20 @@ export default function RewardsPanel({ onClose }: Props) {
   }));
 
   const currentIcon = currentBadge
-    ? (currentBadge.name.includes('Demon')   ? '👾'
-     : currentBadge.name.includes('Spartan') ? '🏆'
-     : currentBadge.name.includes('Major')   ? '💫'
-     : currentBadge.name.includes('Captain') ? '🌟'
-     : currentBadge.name.includes('Commander') ? '⚜️'
-     : currentBadge.name.includes('Lieutenant') ? '🔥'
-     : currentBadge.name.includes('Warrant') ? '👁'
-     : currentBadge.name.includes('Master Sgt') ? '🌀'
-     : currentBadge.name.includes('Gunnery') ? '💠'
-     : currentBadge.name.includes('Staff')   ? '🔱'
-     : currentBadge.name.includes('Sergeant') ? '⚔️'
-     : currentBadge.name.includes('Corporal') ? '🎯'
-     : currentBadge.name.includes('Private')  ? '🛡️'
-     : '⚡')
+    ? (currentBadge.name.includes('Demon')   ? '💀'
+     : currentBadge.name.includes('Spartan') ? '⚡🏆'
+     : currentBadge.name.includes('Major')   ? '🌌'
+     : currentBadge.name.includes('Captain') ? '💎'
+     : currentBadge.name.includes('Commander') ? '👑'
+     : currentBadge.name.includes('Lieutenant') ? '⭐'
+     : currentBadge.name.includes('Warrant') ? '👁‍🗨'
+     : currentBadge.name.includes('Master Sgt') ? '⚡'
+     : currentBadge.name.includes('Gunnery') ? '🔥'
+     : currentBadge.name.includes('Staff')   ? '🦅'
+     : currentBadge.name.includes('Sergeant') ? '🗡️'
+     : currentBadge.name.includes('Corporal') ? '🏹'
+     : currentBadge.name.includes('Private')  ? '⚔️'
+     : '🌱')
     : '💀';
 
   const badgeColor = currentBadge ? TIER_COLORS[currentBadge.tier].border : '#444';
@@ -242,7 +243,17 @@ export default function RewardsPanel({ onClose }: Props) {
         <View style={[s.rankHero, { borderColor: badgeColor + '40' }]}>
           <View style={s.rankHeroLeft}>
             <View style={[s.rankIconWrap, { backgroundColor: badgeColor + '18', borderColor: badgeColor + '55' }]}>
-              <Text style={s.rankIcon}>{currentIcon}</Text>
+              {currentBadge && hasPixelSprite(currentBadge.id) ? (
+                <PixelBadgeIcon
+                  badgeId={currentBadge.id}
+                  tier={currentBadge.tier}
+                  size={28}
+                  animate
+                  earned
+                />
+              ) : (
+                <Text style={s.rankIcon}>{currentIcon}</Text>
+              )}
             </View>
             <View style={s.rankHeroInfo}>
               <Text style={s.rankHeroLabel}>CURRENT RANK</Text>

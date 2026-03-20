@@ -537,53 +537,127 @@ export function connectFourAI(boardStr: string, aiPlayer: number): number {
 
 // ─── Farm Plot Game ──────────────────────────────────────────────────────────
 
-export type CropType = 't' | 'w' | 'p' | 'c'; // tomato, wheat, pumpkin, crystal
+export type CropType = 't' | 'w' | 'p' | 'c' | 's' | 'n' | 'f' | 'r'; // tomato, wheat, pumpkin, crystal, strawberry, corn, mushroom, rose
 export type PlotState = '0' | '1' | '2' | '3' | '4' | '5'; // empty, seed, sprout, growing, ready, dead
 
-export const CROP_INFO: Record<CropType, { name: string; icon: string; growTime: number; gold: number; color: string }> = {
-  t: { name: 'Tomato',  icon: '\u{1F345}', growTime: 30000,   gold: 5,   color: '#ef4444' }, // 30s
-  w: { name: 'Wheat',   icon: '\u{1F33E}', growTime: 60000,   gold: 12,  color: '#f59e0b' }, // 60s
-  p: { name: 'Pumpkin', icon: '\u{1F383}', growTime: 120000,  gold: 30,  color: '#f97316' }, // 2min
-  c: { name: 'Crystal', icon: '\u{1F48E}', growTime: 300000,  gold: 100, color: '#8b5cf6' }, // 5min
+export const CROP_INFO: Record<CropType, { name: string; icon: string; growTime: number; gold: number; color: string; tier: number }> = {
+  t: { name: 'Starfruit',      icon: '\u{1F31F}', growTime: 30000,   gold: 5,   color: '#fbbf24', tier: 1 }, // 30s
+  w: { name: 'Nebula Grain',   icon: '\u2728',    growTime: 60000,   gold: 12,  color: '#c084fc', tier: 1 }, // 60s
+  s: { name: 'Comet Berry',    icon: '\u2604\uFE0F', growTime: 45000,   gold: 8,   color: '#38bdf8', tier: 1 }, // 45s
+  n: { name: 'Solar Stalk',    icon: '\u2600\uFE0F', growTime: 90000,   gold: 20,  color: '#fb923c', tier: 2 }, // 90s
+  p: { name: 'Void Melon',     icon: '\u{1F7E3}', growTime: 120000,  gold: 30,  color: '#a855f7', tier: 2 }, // 2min
+  f: { name: 'Neural Shroom',  icon: '\u{1F9E0}', growTime: 180000,  gold: 50,  color: '#f472b6', tier: 3 }, // 3min
+  r: { name: 'Quantum Bloom',  icon: '\u{1F4AB}', growTime: 240000,  gold: 75,  color: '#34d399', tier: 3 }, // 4min
+  c: { name: 'Dark Matter',    icon: '\u{1F48E}', growTime: 300000,  gold: 100, color: '#818cf8', tier: 4 }, // 5min
 };
 
-export const EMPTY_FARM = '000000000';
-export const EMPTY_CROPS = '000000000';
+export const CROP_TYPES: CropType[] = ['t', 'w', 's', 'n', 'p', 'f', 'r', 'c'];
+export const GRID_SIZE = 16; // 4x4 grid
+export const EMPTY_FARM = '0'.repeat(GRID_SIZE);
+export const EMPTY_CROPS = '0'.repeat(GRID_SIZE);
 
-export function getPlotGrowthPercent(plantedAt: number, cropType: CropType): number {
+// ── Farm shop items ──────────────────────────────────────────────────────────
+
+export type FarmUpgrade = 'sprinkler' | 'scarecrow' | 'fertilizer' | 'greenhouse' | 'golden_hoe';
+
+export const FARM_SHOP: Record<FarmUpgrade, { name: string; icon: string; cost: number; desc: string }> = {
+  sprinkler:  { name: 'Hydro Drone',      icon: '\u{1F6F8}', cost: 50,  desc: 'Auto-irrigates every 30s' },
+  scarecrow:  { name: 'Force Field',      icon: '\u{1F6E1}\uFE0F', cost: 80,  desc: 'Crops survive cosmic storms' },
+  fertilizer: { name: 'Quantum Boost',    icon: '\u26A1',    cost: 30,  desc: 'Next 5 crops grow 2x faster' },
+  greenhouse: { name: 'Bio Dome',         icon: '\u{1F52E}', cost: 200, desc: 'All crops +50% yield' },
+  golden_hoe: { name: 'Plasma Harvester', icon: '\u{1F52E}', cost: 500, desc: 'Chance to double harvest' },
+};
+
+// ── Farm season system ───────────────────────────────────────────────────────
+
+export type FarmSeason = 'spring' | 'summer' | 'autumn' | 'winter';
+
+export const SEASON_INFO: Record<FarmSeason, { icon: string; color: string; growBonus: number; waterDecay: number }> = {
+  spring: { icon: '\u{1F31F}', color: '#c084fc', growBonus: 1.2,  waterDecay: 1.0 },  // Nova Phase
+  summer: { icon: '\u2600\uFE0F', color: '#fbbf24', growBonus: 1.0,  waterDecay: 1.5 },  // Solar Flare
+  autumn: { icon: '\u{1F30C}', color: '#818cf8', growBonus: 0.8,  waterDecay: 0.7 },  // Nebula Drift
+  winter: { icon: '\u{1F311}', color: '#64748b', growBonus: 0.5,  waterDecay: 0.4 },  // Dark Cycle
+};
+
+export function getCurrentSeason(): FarmSeason {
+  // Cycle through seasons every 10 minutes
+  const cycle = Math.floor(Date.now() / 600000) % 4;
+  return (['spring', 'summer', 'autumn', 'winter'] as FarmSeason[])[cycle];
+}
+
+// ── Farm weather events ──────────────────────────────────────────────────────
+
+export type WeatherEvent = 'sunny' | 'rain' | 'storm' | 'drought';
+
+export const WEATHER_INFO: Record<WeatherEvent, { icon: string; effect: string }> = {
+  sunny:   { icon: '\u{1F6F8}', effect: 'Clear orbit' },
+  rain:    { icon: '\u{1F320}', effect: 'Meteor shower +20 energy' },
+  storm:   { icon: '\u26A1',    effect: 'Ion storm — random crop lost' },
+  drought: { icon: '\u{1F525}', effect: 'Solar drain — energy 2x decay' },
+};
+
+export function rollWeather(): WeatherEvent {
+  const r = Math.random();
+  if (r < 0.5) return 'sunny';
+  if (r < 0.75) return 'rain';
+  if (r < 0.9) return 'storm';
+  return 'drought';
+}
+
+export function getPlotGrowthPercent(plantedAt: number, cropType: CropType, growBonus = 1.0): number {
   if (!plantedAt) return 0;
   const elapsed = Date.now() - plantedAt;
-  const growTime = CROP_INFO[cropType]?.growTime || 60000;
+  const growTime = (CROP_INFO[cropType]?.growTime || 60000) / growBonus;
   return Math.min(100, (elapsed / growTime) * 100);
 }
 
-export function getPlotState(plantedAt: number, cropType: CropType, waterLevel: number): PlotState {
+export function getPlotState(plantedAt: number, cropType: CropType, waterLevel: number, growBonus = 1.0): PlotState {
   if (!plantedAt || cropType === '0' as any) return '0';
   if (waterLevel <= 0) return '5'; // dead — no water
-  const pct = getPlotGrowthPercent(plantedAt, cropType);
+  const pct = getPlotGrowthPercent(plantedAt, cropType, growBonus);
   if (pct < 15) return '1';  // seed
   if (pct < 45) return '2';  // sprout
   if (pct < 90) return '3';  // growing
   return '4';                 // ready to harvest
 }
 
-export function harvestPlot(cropType: CropType): number {
-  return CROP_INFO[cropType]?.gold || 0;
+export function harvestPlot(cropType: CropType, hasGreenhouse = false, hasGoldenHoe = false): number {
+  let gold = CROP_INFO[cropType]?.gold || 0;
+  if (hasGreenhouse) gold = Math.ceil(gold * 1.5);
+  if (hasGoldenHoe && Math.random() < 0.2) gold *= 2; // 20% chance double
+  return gold;
 }
+
+// ── Farm achievements ────────────────────────────────────────────────────────
+
+export const FARM_ACHIEVEMENTS = [
+  { id: 'first_harvest', name: 'First Signal',     icon: '\u{1F4E1}', req: 1,    desc: 'Harvest your first data crop' },
+  { id: 'farmer_10',     name: 'Star Farmer',      icon: '\u{1F31F}', req: 10,   desc: 'Harvest 10 data crops' },
+  { id: 'farmer_50',     name: 'Galaxy Grower',    icon: '\u{1F30C}', req: 50,   desc: 'Harvest 50 data crops' },
+  { id: 'gold_100',      name: 'Data Miner',       icon: '\u{1F4B0}', req: 100,  desc: 'Earn 100 stardust' },
+  { id: 'gold_1000',     name: 'Cosmic Tycoon',    icon: '\u{1F451}', req: 1000, desc: 'Earn 1000 stardust' },
+  { id: 'all_crops',     name: 'Xenobotanist',     icon: '\u{1F52C}', req: 8,    desc: 'Grow all 8 data species' },
+];
 
 // ─── Office Pet (Tamagotchi) ─────────────────────────────────────────────────
 
-export type PetType = 'cat' | 'dog' | 'dragon' | 'blob' | 'fox';
+export type PetType = 'cat' | 'dog' | 'dragon' | 'blob' | 'fox' | 'penguin' | 'bunny' | 'owl';
 export type PetStage = 'egg' | 'baby' | 'teen' | 'adult' | 'legendary';
-export type PetMood = 'happy' | 'neutral' | 'sad' | 'sick' | 'sleeping' | 'dead';
+export type PetMood = 'happy' | 'neutral' | 'sad' | 'sick' | 'sleeping' | 'dead' | 'excited' | 'dirty';
+export type PetAccessory = 'none' | 'hat' | 'bow' | 'crown' | 'sunglasses' | 'scarf' | 'wings' | 'halo';
 
 export const PET_INFO: Record<PetType, { name: string; stages: Record<PetStage, string>; color: string }> = {
-  cat:    { name: 'Cat',    color: '#f59e0b', stages: { egg: '\u{1F95A}', baby: '\u{1F431}', teen: '\u{1F408}', adult: '\u{1F408}\u200D\u2B1B', legendary: '\u{1F981}' } },
-  dog:    { name: 'Dog',    color: '#8b5cf6', stages: { egg: '\u{1F95A}', baby: '\u{1F436}', teen: '\u{1F415}', adult: '\u{1F415}\u200D\u{1F9BA}', legendary: '\u{1F43A}' } },
-  dragon: { name: 'Dragon', color: '#ef4444', stages: { egg: '\u{1F95A}', baby: '\u{1F432}', teen: '\u{1F409}', adult: '\u{1F525}', legendary: '\u2604\uFE0F' } },
-  blob:   { name: 'Blob',   color: '#22c55e', stages: { egg: '\u{1F95A}', baby: '\u{1F7E2}', teen: '\u{1F47E}', adult: '\u{1F9A0}', legendary: '\u{1F30C}' } },
-  fox:    { name: 'Fox',    color: '#f97316', stages: { egg: '\u{1F95A}', baby: '\u{1F98A}', teen: '\u{1F98A}', adult: '\u{1F98A}', legendary: '\u{1F525}' } },
+  cat:     { name: 'Cat',     color: '#f59e0b', stages: { egg: '\u{1F95A}', baby: '\u{1F431}', teen: '\u{1F408}', adult: '\u{1F408}\u200D\u2B1B', legendary: '\u{1F981}' } },
+  dog:     { name: 'Dog',     color: '#8b5cf6', stages: { egg: '\u{1F95A}', baby: '\u{1F436}', teen: '\u{1F415}', adult: '\u{1F415}\u200D\u{1F9BA}', legendary: '\u{1F43A}' } },
+  dragon:  { name: 'Dragon',  color: '#ef4444', stages: { egg: '\u{1F95A}', baby: '\u{1F432}', teen: '\u{1F409}', adult: '\u{1F525}', legendary: '\u2604\uFE0F' } },
+  blob:    { name: 'Blob',    color: '#22c55e', stages: { egg: '\u{1F95A}', baby: '\u{1F7E2}', teen: '\u{1F47E}', adult: '\u{1F9A0}', legendary: '\u{1F30C}' } },
+  fox:     { name: 'Fox',     color: '#f97316', stages: { egg: '\u{1F95A}', baby: '\u{1F98A}', teen: '\u{1F98A}', adult: '\u{1F98A}', legendary: '\u{1F525}' } },
+  penguin: { name: 'Penguin', color: '#38bdf8', stages: { egg: '\u{1F95A}', baby: '\u{1F427}', teen: '\u{1F427}', adult: '\u{1F427}', legendary: '\u2744\uFE0F' } },
+  bunny:   { name: 'Bunny',   color: '#f472b6', stages: { egg: '\u{1F95A}', baby: '\u{1F430}', teen: '\u{1F407}', adult: '\u{1F407}', legendary: '\u{1F31F}' } },
+  owl:     { name: 'Owl',     color: '#a78bfa', stages: { egg: '\u{1F95A}', baby: '\u{1F426}', teen: '\u{1F989}', adult: '\u{1F989}', legendary: '\u{1F31C}' } },
 };
+
+export const PET_TYPES: PetType[] = ['cat', 'dog', 'dragon', 'blob', 'fox', 'penguin', 'bunny', 'owl'];
 
 export const PET_STAGE_XP: Record<PetStage, number> = {
   egg: 0,
@@ -595,37 +669,88 @@ export const PET_STAGE_XP: Record<PetStage, number> = {
 
 export const MOOD_EMOJI: Record<PetMood, string> = {
   happy: '\u{1F60A}',
+  excited: '\u{1F929}',
   neutral: '\u{1F610}',
   sad: '\u{1F622}',
   sick: '\u{1F922}',
+  dirty: '\u{1F4A9}',
   sleeping: '\u{1F634}',
   dead: '\u{1F480}',
 };
 
+export const PET_ACCESSORY_INFO: Record<PetAccessory, { icon: string; cost: number; name: string }> = {
+  none:       { icon: '',                name: 'None',        cost: 0 },
+  hat:        { icon: '\u{1F3A9}',       name: 'Top Hat',     cost: 30 },
+  bow:        { icon: '\u{1F380}',       name: 'Bow',         cost: 20 },
+  crown:      { icon: '\u{1F451}',       name: 'Crown',       cost: 100 },
+  sunglasses: { icon: '\u{1F576}\uFE0F', name: 'Sunglasses',  cost: 40 },
+  scarf:      { icon: '\u{1F9E3}',       name: 'Scarf',       cost: 25 },
+  wings:      { icon: '\u{1FABD}',       name: 'Wings',       cost: 150 },
+  halo:       { icon: '\u{1F607}',       name: 'Halo',        cost: 200 },
+};
+
+// ── Pet food items ───────────────────────────────────────────────────────────
+
+export type PetFood = 'kibble' | 'treat' | 'steak' | 'fish' | 'cake';
+
+export const PET_FOOD_INFO: Record<PetFood, { icon: string; hungerGain: number; happinessGain: number; xp: number; cost: number; name: string }> = {
+  kibble: { icon: '\u{1F35A}', hungerGain: 20, happinessGain: 5,  xp: 3,  cost: 0,   name: 'Kibble' },
+  treat:  { icon: '\u{1F36A}', hungerGain: 15, happinessGain: 15, xp: 5,  cost: 5,   name: 'Treat' },
+  steak:  { icon: '\u{1F356}', hungerGain: 40, happinessGain: 10, xp: 8,  cost: 15,  name: 'Steak' },
+  fish:   { icon: '\u{1F41F}', hungerGain: 30, happinessGain: 20, xp: 10, cost: 20,  name: 'Fish' },
+  cake:   { icon: '\u{1F382}', hungerGain: 10, happinessGain: 40, xp: 15, cost: 30,  name: 'Cake' },
+};
+
+export const PET_FOOD_TYPES: PetFood[] = ['kibble', 'treat', 'steak', 'fish', 'cake'];
+
+// ── Pet tricks ───────────────────────────────────────────────────────────────
+
+export type PetTrick = 'sit' | 'roll' | 'shake' | 'spin' | 'dance' | 'fetch';
+
+export const PET_TRICK_INFO: Record<PetTrick, { name: string; icon: string; xpReward: number; minStage: PetStage }> = {
+  sit:   { name: 'Sit',       icon: '\u{1F43E}', xpReward: 5,  minStage: 'baby' },
+  roll:  { name: 'Roll Over', icon: '\u{1F300}', xpReward: 8,  minStage: 'baby' },
+  shake: { name: 'Shake',     icon: '\u{1F91D}', xpReward: 10, minStage: 'teen' },
+  spin:  { name: 'Spin',      icon: '\u{1F4AB}', xpReward: 12, minStage: 'teen' },
+  dance: { name: 'Dance',     icon: '\u{1F57A}', xpReward: 20, minStage: 'adult' },
+  fetch: { name: 'Fetch',     icon: '\u{1F3BE}', xpReward: 25, minStage: 'adult' },
+};
+
 const DECAY_RATE = 2; // points per minute
 const CRITICAL_THRESHOLD = 20;
+const POOP_INTERVAL = 180000; // poop every 3 minutes after eating
+const DIRTY_PENALTY = 0.5; // extra decay per minute when dirty
 
 export function computePetStats(
   hunger: number, happiness: number, energy: number,
   lastFed: number, lastPlayed: number, lastSlept: number,
-): { hunger: number; happiness: number; energy: number; mood: PetMood } {
+  cleanliness?: number, lastCleaned?: number,
+): { hunger: number; happiness: number; energy: number; cleanliness: number; mood: PetMood } {
   const now = Date.now();
   const minutesSinceFed = (now - (lastFed || now)) / 60000;
   const minutesSincePlayed = (now - (lastPlayed || now)) / 60000;
   const minutesSinceSlept = (now - (lastSlept || now)) / 60000;
+  const minutesSinceCleaned = (now - (lastCleaned || now)) / 60000;
 
-  const h = Math.max(0, Math.min(100, hunger - minutesSinceFed * DECAY_RATE));
-  const hp = Math.max(0, Math.min(100, happiness - minutesSincePlayed * DECAY_RATE));
+  // Cleanliness decays over time and faster after eating
+  const cleanBase = cleanliness ?? 100;
+  const cl = Math.max(0, Math.min(100, cleanBase - minutesSinceCleaned * 1.5));
+  const dirtyPenalty = cl < 30 ? DIRTY_PENALTY : 0;
+
+  const h = Math.max(0, Math.min(100, hunger - minutesSinceFed * (DECAY_RATE + dirtyPenalty)));
+  const hp = Math.max(0, Math.min(100, happiness - minutesSincePlayed * (DECAY_RATE + dirtyPenalty)));
   const e = Math.max(0, Math.min(100, energy - minutesSinceSlept * (DECAY_RATE * 0.5)));
 
   const avg = (h + hp + e) / 3;
   let mood: PetMood = 'happy';
   if (avg <= 0) mood = 'dead';
+  else if (cl < 15) mood = 'dirty';
   else if (avg < CRITICAL_THRESHOLD) mood = 'sick';
   else if (avg < 35) mood = 'sad';
   else if (avg < 60) mood = 'neutral';
+  else if (avg > 85 && cl > 70) mood = 'excited';
 
-  return { hunger: Math.round(h), happiness: Math.round(hp), energy: Math.round(e), mood };
+  return { hunger: Math.round(h), happiness: Math.round(hp), energy: Math.round(e), cleanliness: Math.round(cl), mood };
 }
 
 export function getPetStage(xp: number): PetStage {
@@ -636,8 +761,9 @@ export function getPetStage(xp: number): PetStage {
   return 'egg';
 }
 
-export function feedPet(): { hungerGain: number; xp: number } {
-  return { hungerGain: 30, xp: 5 };
+export function feedPet(food: PetFood = 'kibble'): { hungerGain: number; happinessGain: number; xp: number; cost: number } {
+  const info = PET_FOOD_INFO[food];
+  return { hungerGain: info.hungerGain, happinessGain: info.happinessGain, xp: info.xp, cost: info.cost };
 }
 
 export function playWithPet(): { happinessGain: number; xp: number; energyCost: number } {
@@ -647,3 +773,33 @@ export function playWithPet(): { happinessGain: number; xp: number; energyCost: 
 export function restPet(): { energyGain: number; xp: number } {
   return { energyGain: 40, xp: 3 };
 }
+
+export function bathPet(): { cleanlinessGain: number; happinessGain: number; xp: number } {
+  return { cleanlinessGain: 80, happinessGain: 10, xp: 5 };
+}
+
+export function medicinePet(): { hungerGain: number; happinessGain: number; energyGain: number; xp: number; cost: number } {
+  return { hungerGain: 20, happinessGain: 15, energyGain: 20, xp: 10, cost: 25 };
+}
+
+export function doTrick(trick: PetTrick, stage: PetStage): { success: boolean; xp: number; happinessGain: number } {
+  const info = PET_TRICK_INFO[trick];
+  const stages: PetStage[] = ['egg', 'baby', 'teen', 'adult', 'legendary'];
+  const canDo = stages.indexOf(stage) >= stages.indexOf(info.minStage);
+  if (!canDo) return { success: false, xp: 0, happinessGain: 0 };
+  const success = Math.random() > 0.3; // 70% success rate
+  return { success, xp: success ? info.xpReward : 2, happinessGain: success ? 15 : -5 };
+}
+
+// ── Pet achievements ─────────────────────────────────────────────────────────
+
+export const PET_ACHIEVEMENTS = [
+  { id: 'first_feed',  name: 'First Signal',     icon: '\u{1F4E1}', desc: 'Feed your companion for the first time' },
+  { id: 'teen_stage',  name: 'Evolving',         icon: '\u{1F31F}', desc: 'Reach teen stage' },
+  { id: 'adult_stage', name: 'Fully Evolved',    icon: '\u{1F4AA}', desc: 'Reach adult stage' },
+  { id: 'legendary',   name: 'Cosmic Legend',    icon: '\u{1F30C}', desc: 'Reach legendary stage' },
+  { id: 'trick_5',     name: 'Star Performer',   icon: '\u{1F3BE}', desc: 'Perform 5 tricks' },
+  { id: 'revive',      name: 'Respawn',          icon: '\u{1F495}', desc: 'Revive a fallen companion' },
+  { id: 'all_food',    name: 'Cosmic Foodie',    icon: '\u{1F37D}\uFE0F', desc: 'Try all food types' },
+  { id: 'accessorize', name: 'Space Fashion',    icon: '\u{1F451}', desc: 'Buy an accessory' },
+];

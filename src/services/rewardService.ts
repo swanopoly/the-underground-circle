@@ -147,11 +147,17 @@ export function useAgentPointsTracker(
   agentModel: string,
   onNewBadges: (badges: Badge[]) => void,
 ) {
-  const lastTurns = useRef(0);
+  const lastTurns = useRef(-1); // -1 = not yet seeded
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (!userId || agentTurns <= lastTurns.current) return;
+    if (!userId) return;
+    // Seed on first render — don't re-award historical turns
+    if (lastTurns.current < 0) {
+      lastTurns.current = agentTurns;
+      return;
+    }
+    if (agentTurns <= lastTurns.current) return;
 
     const delta = agentTurns - lastTurns.current;
     lastTurns.current = agentTurns;
@@ -183,11 +189,24 @@ export function useAllAgentPointsTracker(
   onNewBadges: (badges: Badge[]) => void,
 ) {
   const prevTurnsRef = useRef<Map<string, number>>(new Map());
+  const seededRef = useRef(false);
   const pendingPointsRef = useRef(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!userId || agents.length === 0) return;
+
+    // First render: seed prevTurnsRef with current values so we only
+    // award points for NEW turns, not re-award all historical turns.
+    if (!seededRef.current) {
+      seededRef.current = true;
+      for (const agent of agents) {
+        if (agent.id === 'default::blackswan') continue;
+        const currentTurns = agent.turns || agent.messagesProcessed || 0;
+        if (currentTurns > 0) prevTurnsRef.current.set(agent.id, currentTurns);
+      }
+      return; // skip awarding on first render
+    }
 
     let newPoints = 0;
 

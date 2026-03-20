@@ -1,9 +1,12 @@
 /**
- * soulTemplates.ts — Templated SOUL.md personalities for agents
+ * soulTemplates.ts — Personality / communication style templates for agents
  *
- * Each template defines a complete personality profile that gets prepended
- * to the system prompt for all LLM calls. Users can pick a template and
- * optionally customize the text before saving.
+ * ARCHITECTURE:
+ *   Spirit (agentSpirits.ts) = WHAT the agent knows (technical expertise)
+ *   Soul   (this file)       = HOW the agent communicates (tone & style)
+ *
+ * Both get prepended to the system prompt. They are complementary, not redundant.
+ * Role & Specialty templates were removed — use Spirits for technical expertise.
  */
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -21,10 +24,10 @@ export interface SoulTemplate {
 }
 
 // ─── Category metadata ───────────────────────────────────────────────────────
+// Only 'personality' is actively shown in the UI.
+// 'role' and 'specialty' kept for backwards compat with detectTemplate() on saved texts.
 
 export const SOUL_CATEGORIES: Array<{ key: SoulCategory; label: string; icon: string; color: string }> = [
-  { key: 'role',        label: 'Roles',         icon: '🎭', color: '#6366f1' },
-  { key: 'specialty',   label: 'Specialties',   icon: '🎯', color: '#f59e0b' },
   { key: 'personality', label: 'Personalities',  icon: '✨', color: '#ec4899' },
 ];
 
@@ -698,8 +701,13 @@ Every problem is a story with characters, conflict, and resolution. You make inf
 ];
 
 // ─── All templates combined ──────────────────────────────────────────────────
-
+// Primary export: only personality templates (role/specialty → use Spirits instead)
 export const SOUL_TEMPLATES: SoulTemplate[] = [
+  ...PERSONALITY_TEMPLATES,
+];
+
+// Legacy: role + specialty kept for detectTemplate() on previously-saved soul text
+const ALL_TEMPLATES_WITH_LEGACY: SoulTemplate[] = [
   ...ROLE_TEMPLATES,
   ...SPECIALTY_TEMPLATES,
   ...PERSONALITY_TEMPLATES,
@@ -714,7 +722,7 @@ export function getTemplatesByCategory(category: SoulCategory): SoulTemplate[] {
 // ─── Helper: find template by ID ─────────────────────────────────────────────
 
 export function findTemplate(id: string): SoulTemplate | undefined {
-  return SOUL_TEMPLATES.find(t => t.id === id);
+  return ALL_TEMPLATES_WITH_LEGACY.find(t => t.id === id);
 }
 
 // ─── Helper: combine multiple templates into one SOUL ────────────────────────
@@ -724,11 +732,11 @@ export function combineTemplates(templates: SoulTemplate[]): string {
 }
 
 // ─── Helper: detect which template matches text (for showing active state) ──
+// Checks all templates including legacy role/specialty for backwards compat
 
 export function detectTemplate(text: string): SoulTemplate | null {
-  // Check if the text starts with any template's soulText
   const trimmed = text.trim();
-  for (const t of SOUL_TEMPLATES) {
+  for (const t of ALL_TEMPLATES_WITH_LEGACY) {
     if (trimmed.startsWith(t.soulText.trim().slice(0, 40))) {
       return t;
     }

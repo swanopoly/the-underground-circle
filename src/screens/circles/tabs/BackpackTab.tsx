@@ -46,8 +46,9 @@ const LLMBenchmarkPanel = lazy(() => import('../../../components/LLMBenchmarkPan
 const TradingBotPanel = lazy(() => import('../../../components/TradingBotPanel'));
 const Backpack3DScene = lazy(() => import('../../../components/backpack3d/Backpack3DScene'));
 const SplineBackpackScene = lazy(() => import('../../../components/backpack3d/SplineBackpackScene'));
+const DevicePanel = lazy(() => import('../../../components/DevicePanel'));
 
-type Compartment = 'none' | 'cost' | 'terminal' | 'farm' | 'performance' | 'projects' | 'analytics' | 'canvas' | 'prompts' | 'traces' | 'llm-bench' | 'trading';
+type Compartment = 'none' | 'cost' | 'terminal' | 'farm' | 'performance' | 'projects' | 'analytics' | 'canvas' | 'prompts' | 'traces' | 'llm-bench' | 'trading' | 'devices';
 
 // Pixel-art icon blocks instead of emoji
 const COMPARTMENTS: {
@@ -68,6 +69,7 @@ const COMPARTMENTS: {
   { key: 'prompts',     label: 'Prompts',          iconLabel: 'P',  color: '#14b8a6', description: 'Prompt library & management' },
   { key: 'llm-bench',   label: 'LLM Bench',        iconLabel: '|=|', color: '#f59e0b', description: 'BlackSwan vs industry models' },
   { key: 'trading',     label: 'Trading Bot',      iconLabel: '◎',   color: '#9945FF', description: 'Solana trading, DCA, alerts & P&L' },
+  { key: 'devices',     label: 'Devices',          iconLabel: '🖨',   color: '#38bdf8', description: 'Printers, 3D printers, serial & USB' },
 ];
 
 interface Props {
@@ -199,6 +201,11 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
               circleId={circleId}
               userId={data.currentUserId}
               accentColor={accentColor}
+            />
+          )}
+          {activeCompartment === 'devices' && (
+            <DevicePanel
+              circleId={circleId}
             />
           )}
           </Suspense>
@@ -438,6 +445,9 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
                   ? `${data.featuredTradeCount} active trades`
                   : 'Solana trading & DCA';
                 hasActivity = data.featuredTradeCount > 0;
+                break;
+              case 'devices':
+                miniStat = 'Printers · 3D · Serial · USB';
                 break;
             }
 

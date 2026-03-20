@@ -2889,6 +2889,21 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         </View>
       )}
 
+      {/* Planetary Station Status Bar */}
+      {viewMode === 'office' && !editMode && (
+        <View style={{ flexDirection: 'row', paddingHorizontal: 8, paddingVertical: 4, backgroundColor: '#08081a', borderBottomWidth: 1, borderBottomColor: '#1e1e3a', alignItems: 'center', gap: 8 }}>
+          <Text style={{ color: '#818cf8', fontSize: 10, fontWeight: '900', fontFamily: 'monospace' }}>
+            {'\u{1F30C}'} STATION {(circleId || '').slice(0, 4).toUpperCase() || 'X1'}
+          </Text>
+          <Text style={{ color: '#64748b', fontSize: 8, fontFamily: 'monospace', flex: 1 }}>
+            Keep your farm & companion alive for bonus XP {'\u2B50'}
+          </Text>
+          <Text style={{ color: '#c084fc', fontSize: 9, fontWeight: '700', fontFamily: 'monospace' }}>
+            {userXp} XP
+          </Text>
+        </View>
+      )}
+
       {/* Edit toolbar */}
       {viewMode === 'office' && editMode && (
         <View style={styles.editToolbar}>

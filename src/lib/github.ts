@@ -189,7 +189,14 @@ export async function createWebhook(
   repo: string,
   webhookUrl: string,
   secret: string,
-  events: string[] = ['push', 'pull_request', 'issues', 'release', 'workflow_run'],
+  events: string[] = [
+    'push', 'pull_request', 'pull_request_review', 'issues',
+    'release', 'workflow_run', 'check_run', 'check_suite',
+    'deployment', 'deployment_status',
+    'code_scanning_alert', 'secret_scanning_alert', 'dependabot_alert',
+    'projects_v2_item', 'discussion', 'discussion_comment',
+    'star', 'fork',
+  ],
 ): Promise<{ webhook: GitHubWebhook | null; error: string | null }> {
   try {
     const res = await fetch(`${API}/repos/${owner}/${repo}/hooks`, {
@@ -259,6 +266,88 @@ export async function listWebhooks(
   return { webhooks: data || [], error };
 }
 
+// ─── Pull Request Analysis ────────────────────────────────────────────────────
+
+export interface GitHubPRFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string;
+}
+
+/** Fetch the raw diff for a pull request */
+export async function getPullRequestDiff(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  token: string,
+): Promise<{ diff?: string; error?: string }> {
+  try {
+    const res = await fetch(`${API}/repos/${owner}/${repo}/pulls/${pullNumber}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github.v3.diff',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return { error: body || `HTTP ${res.status}` };
+    }
+    const diff = await res.text();
+    // Truncate to ~50KB to keep token costs manageable
+    const maxLen = 50_000;
+    return { diff: diff.length > maxLen ? diff.slice(0, maxLen) + '\n...[truncated]' : diff };
+  } catch (e: any) {
+    return { error: e.message || 'Network error' };
+  }
+}
+
+/** Fetch the list of files changed in a pull request */
+export async function getPullRequestFiles(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  token: string,
+): Promise<{ files?: GitHubPRFile[]; error?: string }> {
+  const { data, error } = await ghFetch<GitHubPRFile[]>(
+    `/repos/${owner}/${repo}/pulls/${pullNumber}/files`,
+    token,
+  );
+  if (error || !data) return { error: error || 'No data' };
+  return { files: data };
+}
+
+/** Post a comment on a pull request (uses the Issues API) */
+export async function createPullRequestComment(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  body: string,
+  token: string,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${API}/repos/${owner}/${repo}/issues/${pullNumber}/comments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github.v3+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ body }),
+    });
+    if (!res.ok) {
+      const respBody = await res.json().catch(() => ({}));
+      return { success: false, error: (respBody as any).message || `HTTP ${res.status}` };
+    }
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Network error' };
+  }
+}
+
 // ─── Tree Helpers ─────────────────────────────────────────────────────────────
 
 /** Group a flat tree into folder → entries[] map (blobs only, sorted) */
@@ -288,6 +377,154 @@ export function groupTreeByFolder(tree: GitHubTreeEntry[]): Record<string, GitHu
     });
   }
   return sorted;
+}
+
+// ─── Copilot Coding Agent ────────────────────────────────────────────────────
+
+const COPILOT_BOT_LOGIN = 'copilot-swe-agent[bot]';
+
+/** Assign a GitHub issue to the Copilot coding agent for autonomous PR creation */
+export async function assignIssueToCopilot(
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  token: string,
+  options?: {
+    customInstructions?: string;
+    baseBranch?: string;
+  },
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // If custom instructions or base branch are provided, add them as a comment first
+    if (options?.customInstructions || options?.baseBranch) {
+      const commentParts: string[] = [];
+      if (options.baseBranch) {
+        commentParts.push(`Base branch: \`${options.baseBranch}\``);
+      }
+      if (options.customInstructions) {
+        commentParts.push(`Instructions for Copilot:\n${options.customInstructions}`);
+      }
+      await fetch(`${API}/repos/${owner}/${repo}/issues/${issueNumber}/comments`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github.v3+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ body: commentParts.join('\n\n') }),
+      });
+    }
+
+    // Assign the Copilot bot to the issue
+    const res = await fetch(`${API}/repos/${owner}/${repo}/issues/${issueNumber}/assignees`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github.v3+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ assignees: [COPILOT_BOT_LOGIN] }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      return { success: false, error: (body as any).message || `HTTP ${res.status}` };
+    }
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Network error' };
+  }
+}
+
+/** Create a new GitHub issue and immediately assign it to the Copilot coding agent */
+export async function createIssueAndAssignToCopilot(
+  owner: string,
+  repo: string,
+  title: string,
+  body: string,
+  token: string,
+  options?: {
+    labels?: string[];
+    customInstructions?: string;
+    baseBranch?: string;
+  },
+): Promise<{ issueNumber?: number; error?: string }> {
+  try {
+    // Build the issue body, appending instructions/branch if provided
+    let fullBody = body;
+    if (options?.baseBranch) {
+      fullBody += `\n\n**Base branch:** \`${options.baseBranch}\``;
+    }
+    if (options?.customInstructions) {
+      fullBody += `\n\n**Instructions for Copilot:**\n${options.customInstructions}`;
+    }
+
+    // Create the issue
+    const createRes = await fetch(`${API}/repos/${owner}/${repo}/issues`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github.v3+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        title,
+        body: fullBody,
+        labels: options?.labels || [],
+      }),
+    });
+    if (!createRes.ok) {
+      const createBody = await createRes.json().catch(() => ({}));
+      return { error: (createBody as any).message || `HTTP ${createRes.status}` };
+    }
+    const issue = await createRes.json();
+    const issueNumber = (issue as any).number as number;
+
+    // Assign Copilot to the newly created issue
+    const assignRes = await fetch(`${API}/repos/${owner}/${repo}/issues/${issueNumber}/assignees`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github.v3+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ assignees: [COPILOT_BOT_LOGIN] }),
+    });
+    if (!assignRes.ok) {
+      const assignBody = await assignRes.json().catch(() => ({}));
+      return { issueNumber, error: `Issue created (#${issueNumber}) but Copilot assignment failed: ${(assignBody as any).message || `HTTP ${assignRes.status}`}` };
+    }
+
+    return { issueNumber };
+  } catch (e: any) {
+    return { error: e.message || 'Network error' };
+  }
+}
+
+/** Check if the Copilot coding agent is available/enabled for a repo */
+export async function checkCopilotAgentStatus(
+  owner: string,
+  repo: string,
+  token: string,
+): Promise<{ available: boolean; error?: string }> {
+  try {
+    // Check if copilot-swe-agent[bot] can be assigned by listing assignees
+    const { data, error } = await ghFetch<Array<{ login: string }>>(
+      `/repos/${owner}/${repo}/assignees`,
+      token,
+    );
+    if (error) return { available: false, error };
+
+    const hasCopilot = (data || []).some(
+      (user) => user.login === COPILOT_BOT_LOGIN,
+    );
+    return { available: hasCopilot };
+  } catch (e: any) {
+    return { available: false, error: e.message || 'Network error' };
+  }
 }
 
 // ─── OAuth Integration ───────────────────────────────────────────────────────

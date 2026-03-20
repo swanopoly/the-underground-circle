@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { View, Text, Pressable, StyleSheet, Platform } from 'react-native';
+import { View, Text, Pressable, StyleSheet, Platform, Image } from 'react-native';
 import { KanbanTask, TaskStatus, PRIORITY_COLORS, COLUMNS, DEFAULT_AGENT_ROSTER, MODEL_ICONS } from '../../../../types/kanban';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
 import type { GoalWithCount } from '../../../../hooks/useGoals';
@@ -155,6 +155,11 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
               {task.description.length > 60 ? task.description.slice(0, 60) + '...' : task.description}
             </Text>
           ) : null}
+
+          {/* Image thumbnail */}
+          {task.image_url && (
+            <Image source={{ uri: task.image_url }} style={s.thumbnail} resizeMode="cover" />
+          )}
 
           {/* Goal tag */}
           {goalData && (
@@ -364,6 +369,13 @@ const s = StyleSheet.create({
     fontSize: 9,
     lineHeight: 13,
     marginTop: -4,
+  },
+  thumbnail: {
+    width: '100%' as any,
+    height: 80,
+    borderRadius: 4,
+    marginTop: 4,
+    backgroundColor: '#1a1a28',
   },
   goalTag: {
     flexDirection: 'row',

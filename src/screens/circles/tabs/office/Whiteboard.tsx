@@ -131,8 +131,14 @@ const TAB_LIST: { key: TabKey; label: string }[] = [
   { key: 'ops', label: 'OPS' },
 ];
 
-const COLLAPSED_H = 48;
-const EXPANDED_H = 320;
+const COLLAPSED_H = 46;
+const EXPANDED_H = 260;
+
+function fmtTok(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+  return String(n);
+}
 
 export default function Whiteboard({
   editable, notes = [], onNotesChange,
@@ -220,6 +226,11 @@ export default function Whiteboard({
     return Array.from(map.values());
   }, [activities]);
 
+  // Live ticker stats (matches OfficeTab liveStats)
+  const liveCount = useMemo(() => agents.filter(a => a.status === 'active' || a.status === 'building').length, [agents]);
+  const totalTokens = useMemo(() => agents.reduce((s, a) => s + a.tokensUsed, 0), [agents]);
+  const totalMsgs = useMemo(() => agents.reduce((s, a) => s + a.turns, 0), [agents]);
+
   // Farm metrics
   const farmMetrics = useMemo(() => calculateFarmMetrics(agents, []), [agents]);
   const healthCheck = useMemo(() => performHealthCheck(agents, []), [agents]);
@@ -255,7 +266,7 @@ export default function Whiteboard({
 
   // Health
   const healthLabel = healthCheck.passed
-    ? (farmMetrics.healthStatus === 'excellent' ? 'HEALTHY' : 'ATTENTION')
+    ? (farmMetrics.healthStatus === 'excellent' ? 'HEALTHY' : 'OK')
     : 'CRITICAL';
   const healthLabelColor = healthCheck.passed
     ? (farmMetrics.healthStatus === 'excellent' ? C.active : C.idle)
@@ -296,69 +307,111 @@ export default function Whiteboard({
         borderRadius: 0,
       }} />
 
-      {/* ── ALWAYS VISIBLE: summary bar ── */}
+      {/* ── ALWAYS VISIBLE: stats + XP bar ── */}
       <Pressable
         onPress={toggleExpand}
         onLongPress={() => editable && setEditing(true)}
-        style={s.header}
+        style={s.headerWrap}
       >
-        <View style={[s.healthDot, { backgroundColor: healthLabelColor }]} />
-        <Text style={s.title}>COMMAND CENTER</Text>
-        <Text style={[s.healthLabel, { color: healthLabelColor }]}>{healthLabel}</Text>
-        <View style={s.scorePill}>
-          <Text style={s.scoreVal}>{farmMetrics.averageScore}</Text>
-          <Text style={s.scoreGrade}>{farmMetrics.averageScore >= 90 ? 'S' : farmMetrics.averageScore >= 80 ? 'A' : farmMetrics.averageScore >= 70 ? 'B' : farmMetrics.averageScore >= 60 ? 'C' : 'D'}</Text>
-        </View>
-        {runningTasks.length > 0 && (
-          <View style={s.liveBadge}>
-            <View style={s.liveDot} />
-            <Text style={s.liveBadgeText}>{runningTasks.length} LIVE</Text>
+        {/* Row 1: CMD stats dashboard strip */}
+        <View style={s.statsStrip}>
+          <View style={s.statsRow}>
+            {/* Status cell */}
+            <View style={[s.statCell, { backgroundColor: healthLabelColor + '10', borderColor: healthLabelColor + '30' }]}>
+              <View style={s.statValRow}>
+                <View style={[s.healthDot, { backgroundColor: healthLabelColor }]} />
+                <Text style={[s.statValue, { color: healthLabelColor }]}>{healthLabel}</Text>
+              </View>
+              <Text style={s.statLabel}>STATUS</Text>
+            </View>
+
+            {/* Live count cell */}
+            <View style={[s.statCell, { backgroundColor: liveCount > 0 ? '#22c55e08' : '#ffffff04', borderColor: liveCount > 0 ? '#22c55e25' : '#ffffff10' }]}>
+              <View style={s.statValRow}>
+                <View style={[s.cmdDot, { backgroundColor: liveCount > 0 ? '#22c55e' : '#333' }]} />
+                <Text style={[s.statValue, { color: liveCount > 0 ? '#22c55e' : '#555' }]}>{liveCount}</Text>
+              </View>
+              <Text style={s.statLabel}>LIVE</Text>
+            </View>
+
+            {/* Agents cell */}
+            <View style={[s.statCell, { backgroundColor: '#8b5cf608', borderColor: '#8b5cf620' }]}>
+              <Text style={[s.statValue, { color: '#a78bfa' }]}>{agents.length}</Text>
+              <Text style={s.statLabel}>AGENTS</Text>
+            </View>
+
+            {/* Tokens cell */}
+            <View style={[s.statCell, { backgroundColor: totalTokens > 0 ? '#f59e0b08' : '#ffffff04', borderColor: totalTokens > 0 ? '#f59e0b20' : '#ffffff10' }]}>
+              <Text style={[s.statValue, { color: totalTokens > 0 ? '#f59e0b' : '#444' }]}>
+                {totalTokens > 0 ? fmtTok(totalTokens) : '—'}
+              </Text>
+              <Text style={s.statLabel}>TOKENS</Text>
+            </View>
+
+            {/* Cost cell */}
+            <View style={[s.statCell, { backgroundColor: farmMetrics.totalCostToday > 0 ? '#22c55e08' : '#ffffff04', borderColor: farmMetrics.totalCostToday > 0 ? '#22c55e20' : '#ffffff10' }]}>
+              <Text style={[s.statValue, { color: farmMetrics.totalCostToday > 0 ? '#22c55e' : '#444' }]}>
+                ${farmMetrics.totalCostToday.toFixed(2)}
+              </Text>
+              <Text style={s.statLabel}>COST</Text>
+            </View>
+
+            {/* Output cell */}
+            <View style={[s.statCell, { backgroundColor: totalMsgs > 0 ? '#06b6d408' : '#ffffff04', borderColor: totalMsgs > 0 ? '#06b6d420' : '#ffffff10' }]}>
+              <Text style={[s.statValue, { color: totalMsgs > 0 ? '#06b6d4' : '#444' }]}>
+                {totalMsgs > 0 ? fmtTok(totalMsgs) : '—'}
+              </Text>
+              <Text style={s.statLabel}>OUTPUT</Text>
+            </View>
+
+            {/* Connections cell */}
+            <View style={[s.statCell, { backgroundColor: '#6366f108', borderColor: '#6366f120' }]}>
+              <Text style={[s.statValue, { color: connectedCount > 0 ? '#818cf8' : '#555' }]}>{connectedCount}/{totalConnections || 0}</Text>
+              <Text style={s.statLabel}>LINKS</Text>
+            </View>
           </View>
-        )}
-        <View style={{ flex: 1 }} />
-        <Text style={s.connText}>🔌 {connectedCount}/{totalConnections || 0}</Text>
-        <Text style={s.timeText}>{timeStr}</Text>
-        {/* BlackSwan status pill */}
-        <View style={[
-          s.bsPill,
-          bsStatus === 'local'    && s.bsPillLocal,
-          bsStatus === 'offline'  && s.bsPillOffline,
-          bsStatus === 'checking' && s.bsPillChecking,
-        ]}>
-          <Text style={[
-            s.bsPillText,
-            bsStatus === 'local'   && { color: '#22c55e' },
-            bsStatus === 'offline' && { color: '#555' },
-            bsStatus === 'checking' && { color: '#6366f1' },
-          ]}>
-            {bsStatus === 'local' ? '🦢 LOCAL' : bsStatus === 'checking' ? '🦢 …' : '🦢 OFF'}
-          </Text>
+
+          {/* Right side: time + BS pill + chevron */}
+          <View style={s.statsTrailing}>
+            <Text style={s.timeText}>{timeStr}</Text>
+            <View style={[
+              s.bsPill,
+              bsStatus === 'local'    && s.bsPillLocal,
+              bsStatus === 'offline'  && s.bsPillOffline,
+              bsStatus === 'checking' && s.bsPillChecking,
+            ]}>
+              <Text style={[
+                s.bsPillText,
+                bsStatus === 'local'   && { color: '#22c55e' },
+                bsStatus === 'offline' && { color: '#555' },
+                bsStatus === 'checking' && { color: '#6366f1' },
+              ]}>
+                {bsStatus === 'local' ? '🦢' : bsStatus === 'checking' ? '…' : '🦢'}
+              </Text>
+            </View>
+            <Animated.View style={{ transform: [{ rotate: expandBtnRotate }], marginLeft: 2 }}>
+              <Text style={s.chevron}>▼</Text>
+            </Animated.View>
+          </View>
         </View>
-        {/* Expand/collapse chevron */}
-        <Animated.View style={{ transform: [{ rotate: expandBtnRotate }], marginLeft: 4 }}>
-          <Text style={s.chevron}>▼</Text>
-        </Animated.View>
+
+        {/* Row 2: Inline XP bar + achievement */}
+        <View style={s.xpInline}>
+          <View style={[s.xpInlineBadge, { backgroundColor: badgeColor + '18', borderColor: badgeColor + '40' }]}>
+            <Text style={s.xpInlineIcon}>{reward.currentBadge ? (reward.currentBadge.name.includes('Legend') ? '👑' : reward.currentBadge.name.includes('Master') ? '⚔️' : reward.currentBadge.name.includes('Expert') ? '🔥' : reward.currentBadge.name.includes('Veteran') ? '🛡️' : reward.currentBadge.name.includes('Recruit') ? '🌱' : '⭐') : '💀'}</Text>
+            <Text style={[s.xpInlineName, { color: badgeColor }]}>{(reward.currentBadge?.name ?? 'UNRANKED').toUpperCase()}</Text>
+          </View>
+          <View style={s.xpInlineTrack}>
+            <View style={[s.xpInlineFill, { width: `${reward.progressPct}%` as any, backgroundColor: badgeColor }]} />
+          </View>
+          <Text style={[s.xpInlinePct, { color: badgeColor }]}>{reward.progressPct}%</Text>
+          <Text style={s.xpInlineXp}>{formatPoints(reward.lifetimeXP)} XP</Text>
+        </View>
       </Pressable>
-
-      {/* Status Distribution Bar — always visible */}
-      <StatusBar agents={agents} farmMetrics={farmMetrics} />
-
-      {/* Key Metrics Row — only visible when expanded */}
-      {expanded && (
-        <View style={s.metricsRow}>
-          <MiniMetric label="COST" value={`$${farmMetrics.totalCostToday.toFixed(2)}`} color={C.error} />
-          <MiniMetric label="TOKENS" value={farmMetrics.totalTokensUsed > 0 ? `${(farmMetrics.totalTokensUsed / 1000).toFixed(0)}K` : '0'} color={C.pink} />
-          <MiniMetric label="TASKS" value={`${todayStats.completed}✓ ${todayStats.failed}✗`} color={C.active} />
-          <MiniMetric label="RATE" value={todayStats.rate !== null ? `${todayStats.rate}%` : '—'} color={C.accent} />
-        </View>
-      )}
 
       {/* ── EXPANDED: full details ── */}
       <Animated.View style={{ opacity: contentOpacity, transform: [{ translateY: contentTranslateY }], flex: 1 }}>
         <ScrollView showsVerticalScrollIndicator={false} onStartShouldSetResponder={() => true}>
-          {/* XP Bar — RPG style */}
-          <RpgXpBar reward={reward} badgeColor={badgeColor} />
-
           {/* Tab bar */}
           <View style={s.tabBar}>
             {TAB_LIST.map(t => (
@@ -1018,66 +1071,125 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderColor: C.accent + '30',
     borderRadius: 0,
-    paddingHorizontal: 8,
-    paddingTop: 6,
-    paddingBottom: 4,
+    paddingHorizontal: 6,
+    paddingTop: 3,
+    paddingBottom: 3,
     overflow: 'hidden',
   } as any,
 });
 
 const s = StyleSheet.create({
   // ── Header ──
-  header: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 4, paddingBottom: 4, borderBottomWidth: 0, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
-  healthDot: { width: 6, height: 6, borderRadius: 3 },
-  title: { fontSize: 9, fontWeight: '900', fontFamily: 'monospace', color: C.text, letterSpacing: 1.5, opacity: 0.9 },
-  healthLabel: { fontSize: 7, fontWeight: '800', fontFamily: 'monospace' },
-  scorePill: { flexDirection: 'row', alignItems: 'center', gap: 2, backgroundColor: C.surface, paddingHorizontal: 5, paddingVertical: 2, borderRadius: 8 },
-  scoreVal: { fontSize: 8, fontWeight: '900', fontFamily: 'monospace', color: C.text },
-  scoreGrade: { fontSize: 6, fontWeight: '800', fontFamily: 'monospace', color: C.idle },
-  liveBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: C.live + '12', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 8 },
-  liveDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: C.live },
-  liveBadgeText: { fontSize: 6, fontWeight: '800', fontFamily: 'monospace', color: C.live },
-  connText: { fontSize: 6, fontFamily: 'monospace', color: C.textSec, fontWeight: '600' },
-  timeText: { fontSize: 6, fontFamily: 'monospace', color: C.textTert, fontWeight: '700' },
-  chevron: { fontSize: 6, color: C.accent, fontWeight: '900' },
+  headerWrap: { marginBottom: 0, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
+  // Stats strip: centered row of stat cells
+  statsStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: 2,
+  } as any,
+  statsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+    flex: 1,
+  } as any,
+  statCell: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 0.5,
+    minWidth: 26,
+  } as any,
+  statValRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  } as any,
+  statValue: {
+    fontSize: 7,
+    fontWeight: '900',
+    fontFamily: 'monospace',
+    letterSpacing: 0.3,
+  } as any,
+  statLabel: {
+    fontSize: 4,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    color: '#555566',
+    letterSpacing: 0.8,
+    marginTop: 1,
+  } as any,
+  statsTrailing: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    marginLeft: 4,
+  } as any,
+  healthDot: { width: 4, height: 4, borderRadius: 2 },
+  title: { fontSize: 7, fontWeight: '900', fontFamily: 'monospace', color: C.text, letterSpacing: 1, opacity: 0.9 },
+  healthLabel: { fontSize: 5.5, fontWeight: '800', fontFamily: 'monospace' },
+  liveBadge: { flexDirection: 'row', alignItems: 'center', gap: 2, backgroundColor: C.live + '12', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 6 },
+  liveDot: { width: 3, height: 3, borderRadius: 1.5, backgroundColor: C.live },
+  liveBadgeText: { fontSize: 5, fontWeight: '800', fontFamily: 'monospace', color: C.live },
+  connText: { fontSize: 5, fontFamily: 'monospace', color: C.textSec, fontWeight: '600' },
+  timeText: { fontSize: 5, fontFamily: 'monospace', color: C.textTert, fontWeight: '700' },
+  chevron: { fontSize: 5, color: C.accent, fontWeight: '900' },
+  // Inline stat values (kept for compatibility)
+  cmdDiv: { fontSize: 6, color: '#333', marginHorizontal: 1 },
+  cmdVal: { fontSize: 6, fontWeight: '800', fontFamily: 'monospace' },
+  cmdDot: { width: 4, height: 4, borderRadius: 2 },
+
+  // ── Inline XP (always visible) ──
+  xpInline: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingTop: 1, paddingBottom: 0 },
+  xpInlineBadge: { flexDirection: 'row', alignItems: 'center', gap: 2, paddingHorizontal: 4, paddingVertical: 1, borderRadius: 4, borderWidth: 1 },
+  xpInlineIcon: { fontSize: 7 },
+  xpInlineName: { fontSize: 5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.5 },
+  xpInlineTrack: { flex: 1, height: 4, backgroundColor: C.border, borderRadius: 2, overflow: 'hidden' },
+  xpInlineFill: { height: '100%' as any, borderRadius: 2 },
+  xpInlinePct: { fontSize: 5.5, fontWeight: '800', fontFamily: 'monospace' },
+  xpInlineXp: { fontSize: 5, fontWeight: '700', fontFamily: 'monospace', color: C.textSec },
 
   // ── BlackSwan pill ──
-  bsPill: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4, borderWidth: 1, borderColor: '#2a2a2a', marginLeft: 4 },
+  bsPill: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 3, paddingVertical: 0, borderRadius: 3, borderWidth: 1, borderColor: '#2a2a2a', marginLeft: 2 },
   bsPillLocal:    { backgroundColor: '#22c55e12', borderColor: '#22c55e40' },
   bsPillOffline:  { backgroundColor: '#11111a',   borderColor: '#2a2a3a' },
   bsPillChecking: { backgroundColor: '#6366f112', borderColor: '#6366f140' },
-  bsPillText: { fontSize: 6, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 0.3 },
+  bsPillText: { fontSize: 5, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 0.3 },
 
   // ── Notes header ──
-  headerBar: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6, paddingBottom: 4 },
-  headerIcon: { fontSize: 10 },
-  headerTitle: { fontSize: 10, fontWeight: '800', fontFamily: 'monospace', color: C.text, letterSpacing: 1 },
-  headerBtn: { marginLeft: 'auto', backgroundColor: C.accent + '18', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
-  headerBtnText: { fontSize: 8, fontWeight: '800', fontFamily: 'monospace', color: C.accent },
+  headerBar: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 4, paddingBottom: 2 },
+  headerIcon: { fontSize: 8 },
+  headerTitle: { fontSize: 8, fontWeight: '800', fontFamily: 'monospace', color: C.text, letterSpacing: 1 },
+  headerBtn: { marginLeft: 'auto', backgroundColor: C.accent + '18', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 6, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
+  headerBtnText: { fontSize: 7, fontWeight: '800', fontFamily: 'monospace', color: C.accent },
 
   // ── Status Bar ──
-  statusWrap: { marginBottom: 5 },
-  statusTrack: { flexDirection: 'row', height: 3, borderRadius: 1.5, overflow: 'hidden', backgroundColor: C.border, opacity: 0.8 },
+  statusWrap: { marginBottom: 3 },
+  statusTrack: { flexDirection: 'row', height: 2, borderRadius: 1, overflow: 'hidden', backgroundColor: C.border, opacity: 0.8 },
   statusSeg: { height: '100%' as any },
-  statusLabels: { flexDirection: 'row', gap: 6, marginTop: 3 },
-  statusLabel: { fontSize: 5.5, fontWeight: '700', fontFamily: 'monospace', opacity: 0.85 },
+  statusLabels: { flexDirection: 'row', gap: 5, marginTop: 2 },
+  statusLabel: { fontSize: 5, fontWeight: '700', fontFamily: 'monospace', opacity: 0.85 },
 
   // ── Metrics Row ──
-  metricsRow: { flexDirection: 'row', gap: 4, marginBottom: 2 },
-  miniMetric: { flex: 1, alignItems: 'center', backgroundColor: C.surface, borderRadius: 6, paddingVertical: 3 },
-  miniMetricVal: { fontSize: 7, fontWeight: '900', fontFamily: 'monospace' },
-  miniMetricLabel: { fontSize: 4.5, fontWeight: '700', fontFamily: 'monospace', color: C.textTert, letterSpacing: 0.3, marginTop: 1 },
+  metricsRow: { flexDirection: 'row', gap: 3, marginBottom: 2 },
+  miniMetric: { flex: 1, alignItems: 'center', backgroundColor: C.surface, borderRadius: 4, paddingVertical: 2 },
+  miniMetricVal: { fontSize: 6, fontWeight: '900', fontFamily: 'monospace' },
+  miniMetricLabel: { fontSize: 4, fontWeight: '700', fontFamily: 'monospace', color: C.textTert, letterSpacing: 0.3, marginTop: 0 },
 
   // ── XP Row (RPG) ──
-  xpCard: { backgroundColor: C.surface, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6, marginBottom: 6, borderWidth: 1, borderColor: C.border },
-  xpTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 5 },
-  xpLevelBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, borderWidth: 1 },
-  xpLevelIcon: { fontSize: 10 },
-  xpLevelName: { fontSize: 7, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.8 },
-  xpRightCol: { alignItems: 'flex-end', gap: 1 },
-  xpTotalLabel: { fontSize: 5, fontFamily: 'monospace', color: C.textTert, fontWeight: '600' },
-  xpTotalVal: { fontSize: 9, fontWeight: '900', fontFamily: 'monospace' },
-  xpTrackWrap: { position: 'relative', height: 8, backgroundColor: C.border, borderRadius: 4, overflow: 'hidden', marginBottom: 3 },
+  xpCard: { backgroundColor: C.surface, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 4, marginBottom: 4, borderWidth: 1, borderColor: C.border },
+  xpTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 },
+  xpLevelBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 4, paddingVertical: 1, borderRadius: 4, borderWidth: 1 },
+  xpLevelIcon: { fontSize: 8 },
+  xpLevelName: { fontSize: 6, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.8 },
+  xpRightCol: { alignItems: 'flex-end', gap: 0 },
+  xpTotalLabel: { fontSize: 4.5, fontFamily: 'monospace', color: C.textTert, fontWeight: '600' },
+  xpTotalVal: { fontSize: 7, fontWeight: '900', fontFamily: 'monospace' },
+  xpTrackWrap: { position: 'relative', height: 6, backgroundColor: C.border, borderRadius: 3, overflow: 'hidden', marginBottom: 2 },
   xpTrackFill: { position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: 4 },
   xpTrackShimmer: { position: 'absolute', top: 0, bottom: 0, width: 40, opacity: 0.35 },
   xpSegments: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, flexDirection: 'row' },
@@ -1092,31 +1204,31 @@ const s = StyleSheet.create({
   xpVal: { fontSize: 5, fontWeight: '700', fontFamily: 'monospace', color: C.textSec },
 
   // ── Tab bar ──
-  tabBar: { flexDirection: 'row', gap: 0, marginBottom: 6, borderBottomWidth: 1, borderBottomColor: C.border },
+  tabBar: { flexDirection: 'row', gap: 0, marginBottom: 4, borderBottomWidth: 1, borderBottomColor: C.border },
   tabItem: {
-    paddingHorizontal: 8, paddingVertical: 4, borderBottomWidth: 2, borderBottomColor: 'transparent',
+    paddingHorizontal: 6, paddingVertical: 2, borderBottomWidth: 2, borderBottomColor: 'transparent',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   tabItemActive: { borderBottomColor: C.accent },
-  tabLabel: { fontSize: 7, fontWeight: '700', fontFamily: 'monospace', color: C.textTert },
+  tabLabel: { fontSize: 6, fontWeight: '700', fontFamily: 'monospace', color: C.textTert },
   tabLabelActive: { color: C.accent },
   tabContent: { flex: 1, overflow: 'hidden' },
   scroll: { flex: 1 },
 
   // ── Sections ──
-  sec: { marginBottom: 8 },
-  secTitle: { fontSize: 5.5, fontWeight: '800', fontFamily: 'monospace', color: C.textTert, letterSpacing: 1, marginBottom: 4, opacity: 0.7 },
+  sec: { marginBottom: 6 },
+  secTitle: { fontSize: 5, fontWeight: '800', fontFamily: 'monospace', color: C.textTert, letterSpacing: 1, marginBottom: 3, opacity: 0.7 },
 
   // ── Alerts ──
-  alertCard: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: C.surface, borderRadius: 6, padding: 5, marginBottom: 4, borderLeftWidth: 2 },
-  alertIcon: { fontSize: 7, fontWeight: '800' },
-  alertText: { fontSize: 7, fontFamily: 'monospace', color: C.text, flex: 1, opacity: 0.9 },
+  alertCard: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: C.surface, borderRadius: 4, padding: 4, marginBottom: 3, borderLeftWidth: 2 },
+  alertIcon: { fontSize: 6, fontWeight: '800' },
+  alertText: { fontSize: 6, fontFamily: 'monospace', color: C.text, flex: 1, opacity: 0.9 },
 
   // ── Metric Grid ──
   metricGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 2 },
-  metricCell: { width: '32%' as any, alignItems: 'center', paddingVertical: 4, backgroundColor: C.surface, borderRadius: 5, marginBottom: 2 },
-  metricCellVal: { fontSize: 10, fontWeight: '900', fontFamily: 'monospace' },
-  metricCellLabel: { fontSize: 5, fontWeight: '700', fontFamily: 'monospace', color: C.textTert, letterSpacing: 0.3, marginTop: 1, opacity: 0.7 },
+  metricCell: { width: '32%' as any, alignItems: 'center', paddingVertical: 3, backgroundColor: C.surface, borderRadius: 4, marginBottom: 2 },
+  metricCellVal: { fontSize: 8, fontWeight: '900', fontFamily: 'monospace' },
+  metricCellLabel: { fontSize: 4.5, fontWeight: '700', fontFamily: 'monospace', color: C.textTert, letterSpacing: 0.3, marginTop: 0, opacity: 0.7 },
 
   // ── Running Tasks ──
   runRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 4, paddingVertical: 2 },

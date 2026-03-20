@@ -31,6 +31,7 @@ export interface OfficeAgent {
   connectionId: string;
   connectionName: string;
   providerType: ProviderType;
+  spirit?: string;  // Agent spirit ID from agentSpirits.ts (e.g. 'sr-engineer', 'trader')
 }
 
 export const STATUS_COLORS: Record<AgentStatus, string> = {

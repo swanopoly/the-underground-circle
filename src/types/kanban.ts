@@ -10,6 +10,7 @@ export interface KanbanTask {
   circle_id: string;
   title: string;
   description: string | null;
+  image_url?: string | null;
   priority: TaskPriority;
   status: TaskStatus;
   assigned_to: string | null;
@@ -29,12 +30,22 @@ export interface KanbanTask {
   goal?: { id: string; name: string; status: string } | null;
 }
 
+export interface TaskAttachment {
+  url: string;
+  name: string;
+  type: 'image' | 'file' | 'code';
+  mime?: string;
+  size?: number;
+  language?: string; // for code attachments
+}
+
 export interface TaskComment {
   id: string;
   task_id: string;
   user_id: string;
   agent_id: string | null;
   content: string;
+  attachments?: TaskAttachment[] | null;
   created_at: string;
   user?: { username: string; display_name: string };
 }
@@ -133,7 +144,10 @@ export const MODEL_ICONS: Record<string, { icon: string; label: string; color: s
   'claude-haiku':  { icon: '\u26A1', label: 'Haiku',  color: '#f59e0b' },
   'claude-sonnet': { icon: '\u{1F3AF}', label: 'Sonnet', color: '#8b5cf6' },
   'claude-opus':   { icon: '\u{1F9E0}', label: 'Opus',   color: '#ef4444' },
+  'gpt-4.1':       { icon: '\u2726', label: 'GPT-4.1', color: '#10b981' },
   'gpt-4o':        { icon: '\u2728', label: 'GPT-4o', color: '#10b981' },
+  'o4-mini':       { icon: '\u{1F9EE}', label: 'O4 Mini', color: '#f59e0b' },
+  'gemini-2.5-flash': { icon: '\u264A', label: 'Gemini 2.5', color: '#4285f4' },
   'gemini-flash':  { icon: '\u264A', label: 'Gemini', color: '#4285f4' },
   'blackswan':     { icon: '\u{1F9A2}', label: 'BlackSwan', color: '#22c55e' },
 };

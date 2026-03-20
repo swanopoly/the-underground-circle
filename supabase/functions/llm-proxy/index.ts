@@ -1,7 +1,7 @@
 // llm-proxy — Unified LLM Proxy Edge Function
 //
 // Routes requests to any LLM provider using user-stored API keys.
-// Supports: OpenAI, Anthropic, OpenRouter, Groq, Ollama
+// Supports: OpenAI, Anthropic, OpenRouter, Groq, Ollama, GitHub Models, Hugging Face
 // All keys are stored encrypted in user_api_keys table.
 //
 // Deploy: npx supabase functions deploy llm-proxy
@@ -15,7 +15,7 @@ const corsHeaders = {
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-type Provider = "openai" | "anthropic" | "openrouter" | "groq" | "ollama";
+type Provider = "openai" | "anthropic" | "openrouter" | "groq" | "ollama" | "github-models" | "huggingface";
 
 interface LLMProxyRequest {
   provider: Provider;
@@ -50,19 +50,29 @@ const PROVIDER_ENDPOINTS: Record<string, string> = {
   openai: "https://api.openai.com/v1/chat/completions",
   openrouter: "https://openrouter.ai/api/v1/chat/completions",
   groq: "https://api.groq.com/openai/v1/chat/completions",
+  "github-models": "https://models.inference.ai.azure.com/chat/completions",
+  huggingface: "https://router.huggingface.co/v1/chat/completions",
 };
 
 // OpenAI-compatible providers (same request/response format)
-const OPENAI_COMPATIBLE: Provider[] = ["openai", "openrouter", "groq", "ollama"];
+const OPENAI_COMPATIBLE: Provider[] = ["openai", "openrouter", "groq", "ollama", "github-models", "huggingface"];
 
 // ─── Cost estimation ────────────────────────────────────────────────────────
 
 const MODEL_COSTS: Record<string, [number, number]> = {
   // OpenAI
+  "gpt-4.1": [2.00, 8.00],
+  "gpt-4.1-mini": [0.40, 1.60],
+  "gpt-4.1-nano": [0.10, 0.40],
   "gpt-4o": [2.50, 10.00],
   "gpt-4o-mini": [0.15, 0.60],
+  "o3": [10.00, 40.00],
+  "o4-mini": [1.10, 4.40],
   "o1": [15.00, 60.00],
   "o3-mini": [1.10, 4.40],
+  // Google
+  "gemini-2.5-pro": [1.25, 10.00],
+  "gemini-2.5-flash": [0.15, 0.60],
   // Anthropic
   "claude-opus-4-6": [15.00, 75.00],
   "claude-sonnet-4-6": [3.00, 15.00],
@@ -71,6 +81,20 @@ const MODEL_COSTS: Record<string, [number, number]> = {
   "llama-3.3-70b-versatile": [0.59, 0.79],
   "mixtral-8x7b-32768": [0.24, 0.24],
   // OpenRouter (pass-through — use underlying model costs)
+  // GitHub Models (free tier — zero cost)
+  "Meta-Llama-3.1-405B-Instruct": [0, 0],
+  "Meta-Llama-3.1-70B-Instruct": [0, 0],
+  "Mistral-Large-2411": [0, 0],
+  "Phi-4": [0, 0],
+  "cohere-command-r-plus": [0, 0],
+  // Hugging Face (free tier for small models, cheap for large)
+  "meta-llama/Llama-3.3-70B-Instruct": [0.59, 0.79],
+  "mistralai/Mistral-Large-2411": [2.00, 6.00],
+  "Qwen/Qwen2.5-72B-Instruct": [0.59, 0.79],
+  "deepseek-ai/DeepSeek-R1": [0.55, 2.19],
+  "google/gemma-2-27b-it": [0.27, 0.27],
+  "meta-llama/Llama-3.1-8B-Instruct": [0, 0],
+  "mistralai/Mistral-7B-Instruct-v0.3": [0, 0],
 };
 
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number {

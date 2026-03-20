@@ -2918,10 +2918,13 @@ const PLAYGROUND_MODELS = [
   { id: 'claude-opus-4-6',     label: 'Claude Opus 4.6',    provider: 'Anthropic' },
   { id: 'claude-sonnet-4-6',   label: 'Claude Sonnet 4.6',  provider: 'Anthropic' },
   { id: 'claude-haiku-4-5',    label: 'Claude Haiku 4.5',   provider: 'Anthropic' },
+  { id: 'gpt-4.1',             label: 'GPT-4.1',            provider: 'OpenAI' },
   { id: 'gpt-4o',              label: 'GPT-4o',             provider: 'OpenAI' },
-  { id: 'gpt-4o-mini',         label: 'GPT-4o mini',        provider: 'OpenAI' },
-  { id: 'gemini-1.5-pro',      label: 'Gemini 1.5 Pro',     provider: 'Google' },
-  { id: 'gemini-2.0-flash',    label: 'Gemini 2.0 Flash',   provider: 'Google' },
+  { id: 'gpt-4o-mini',         label: 'GPT-4o Mini',        provider: 'OpenAI' },
+  { id: 'o4-mini',             label: 'O4 Mini',            provider: 'OpenAI' },
+  { id: 'gemini-2.5-pro',      label: 'Gemini 2.5 Pro',     provider: 'Google' },
+  { id: 'gemini-2.5-flash',    label: 'Gemini 2.5 Flash',   provider: 'Google' },
+  { id: 'qwen3-32b',           label: 'Qwen 3 32B',         provider: 'Qwen' },
   { id: 'deepseek-r1',         label: 'DeepSeek R1',        provider: 'DeepSeek' },
 ];
 

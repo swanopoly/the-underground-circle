@@ -26,7 +26,7 @@ export interface TrendingData {
 const STORAGE_KEY = 'uc_trending_content';
 const TTL_MS = 60 * 60 * 1000; // 1 hour — fresh content every hour
 const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY || '';
-const GEMINI_MODEL = 'gemini-2.0-flash';
+const GEMINI_MODEL = 'gemini-2.5-flash';
 
 // Module-level cache — synchronous reads
 let cachedData: TrendingData = { hn: [], xTrending: [], techmeme: [], perplexity: [], fetchedAt: 0, hnItems: [], xItems: [], techmemeItems: [], perplexityItems: [] };

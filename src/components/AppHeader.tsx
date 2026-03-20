@@ -9,6 +9,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
+import { createLinkInvite } from '../lib/invites';
 
 interface AppHeaderProps {
   navigation: any;
@@ -39,6 +40,29 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
     })();
   }, []);
 
+  // Detect if we're inside a circle to show its name + id
+  const [circleName, setCircleName] = useState('');
+  const [circleId, setCircleId] = useState('');
+  const [inviteCopied, setInviteCopied] = useState(false);
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('state', () => {
+      try {
+        const state = navigation.getState?.();
+        if (state && state.routes) {
+          const current = state.routes[state.index];
+          if (current?.name === 'CircleDetail') {
+            setCircleName((current.params as any)?.circleName || '');
+            setCircleId((current.params as any)?.circleId || '');
+          } else {
+            setCircleName('');
+            setCircleId('');
+          }
+        }
+      } catch {}
+    });
+    return unsubscribe;
+  }, [navigation]);
+
   const initials = username ? username.charAt(0).toUpperCase() : '?';
 
   return (
@@ -66,21 +90,54 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
             />
           </Pressable>
 
-          {isDesktop && (
-            <Text style={styles.titleText}>{title || 'Dashboard'}</Text>
-          )}
         </View>
 
-        {/* Center: title on mobile */}
-        {!isDesktop && (
-          <Text style={styles.titleTextMobile} numberOfLines={1}>
-            {title || 'Dashboard'}
+        {/* Center: circle name or dashboard title */}
+        <View style={styles.centerTitle} pointerEvents="none">
+          <Text style={styles.centerTitleText} numberOfLines={1}>
+            {circleName ? circleName.toUpperCase() : (title || 'Dashboard')}
           </Text>
-        )}
+        </View>
 
         {/* Right section: nav items + profile */}
         <View style={styles.rightSection}>
-          {isDesktop && (
+          {circleId ? (
+            <>
+              <Pressable
+                onPress={() => navigation.goBack()}
+                style={({ pressed }) => [styles.headerIcon, pressed && styles.headerIconPressed]}
+              >
+                <Text style={styles.headerIconText}>←</Text>
+              </Pressable>
+              <Pressable
+                onPress={async () => {
+                  try {
+                    const { url, error } = await createLinkInvite(circleId, { maxUses: 0, expiresInDays: 7 });
+                    if (error || !url) {
+                      if (Platform.OS === 'web') alert('Could not create invite link: ' + (error || 'Unknown error'));
+                      return;
+                    }
+                    if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.clipboard) {
+                      await navigator.clipboard.writeText(url);
+                    }
+                    setInviteCopied(true);
+                    setTimeout(() => setInviteCopied(false), 3000);
+                  } catch (err: any) {
+                    if (Platform.OS === 'web') alert('Failed to create invite: ' + (err?.message || 'Check console'));
+                  }
+                }}
+                style={({ pressed }) => [styles.headerIcon, pressed && styles.headerIconPressed]}
+              >
+                <Text style={styles.headerIconText}>{inviteCopied ? '✅' : '🔗'}</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => navigation.navigate('CircleSettings', { circleId })}
+                style={({ pressed }) => [styles.headerIcon, pressed && styles.headerIconPressed]}
+              >
+                <Text style={styles.headerIconText}>⚙️</Text>
+              </Pressable>
+            </>
+          ) : isDesktop ? (
             <>
               <HeaderIconButton
                 label="+"
@@ -95,7 +152,7 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
                 onPress={() => navigation.navigate('Friends')}
               />
             </>
-          )}
+          ) : null}
 
           {/* Profile avatar */}
           <Pressable
@@ -259,6 +316,21 @@ const styles = StyleSheet.create({
     flex: 1,
     textAlign: 'center',
     marginHorizontal: 8,
+  },
+  centerTitle: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  centerTitleText: {
+    color: '#f0f6fc',
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: 1,
   },
   rightSection: {
     flexDirection: 'row',

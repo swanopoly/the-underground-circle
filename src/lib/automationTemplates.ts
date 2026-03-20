@@ -535,6 +535,42 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     spirit: 'sr-engineer',
   },
   {
+    id: 'pr-risk-analysis',
+    name: 'PR Summary & Risk Analysis',
+    icon: '🛡️',
+    description: 'When a PR is opened, BlackSwan analyzes the diff and posts a summary with risk flags (security concerns, breaking changes, missing tests, large file changes)',
+    category: 'github',
+    trigger_type: 'event',
+    event_config: { provider: 'github', event: 'pull_request' },
+    agent: 'BlackSwan',
+    model: 'claude-sonnet',
+    output_target: 'chat',
+    prompt: `A pull request was opened or updated in {{circle_name}}. PR event data: {{event}}.
+
+Analyze this PR and produce a structured summary:
+
+## Summary
+- Summarize what the PR does in 2-3 bullets
+
+## Risk Flags
+Check for and flag each of these:
+- **Security risks**: hardcoded secrets, API keys, tokens, SQL injection, XSS, insecure deserialization, auth bypasses
+- **Breaking changes**: changed function signatures, removed exports, schema migrations, env var changes, API contract changes
+- **Missing test coverage**: new code paths without corresponding test files or test updates
+- **Large file changes**: any single file with >200 lines changed (flag with exact line count)
+- **Dependency changes**: new packages added — check for size, maintenance status, known issues
+
+## Overall Risk Rating
+Rate the PR: **LOW** / **MEDIUM** / **HIGH**
+- LOW: cosmetic, docs, config, well-tested feature
+- MEDIUM: new feature without full tests, moderate refactor, dependency updates
+- HIGH: auth/payment changes, schema migrations, security-sensitive code, 500+ lines changed with no tests
+
+If the PR action is not "opened" or "synchronize", respond with SKIP.`,
+    include_context: { members: true, tasks: true, rooms: true },
+    spirit: 'sr-engineer',
+  },
+  {
     id: 'deploy-changelog',
     name: 'Room: Deploy Changelog',
     icon: '🚀',
@@ -608,6 +644,25 @@ export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
     prompt: "A new task was created in {{circle_name}}. Event data: {{event}}. Rooms: {{rooms}}. If this task is in a Room, analyze: 1) Which room member has worked on similar files, 2) Current workload — who has the fewest open tasks, 3) Who's been most active in this room recently. Suggest the best assignee with rationale. If the task is already assigned, respond with SKIP.",
     include_context: { members: true, rooms: true, tasks: true },
     spirit: 'tech-lead',
+  },
+
+  // ─── Copilot Coding Agent ────────────────────────────────────────────────
+  {
+    id: 'copilot-auto-assign',
+    name: 'Auto-assign Bugs to Copilot',
+    icon: '🤖',
+    description: "When an issue is labeled 'easy-fix' or 'copilot', automatically assign it to GitHub Copilot for autonomous PR creation",
+    category: 'github',
+    trigger_type: 'event',
+    event_config: { provider: 'github', event: 'issue_labeled' },
+    agent: 'BlackSwan',
+    model: 'claude-haiku',
+    output_target: 'activity',
+    prompt: "A label was added to a GitHub issue in {{circle_name}}. Event data: {{event}}. Check if the label is 'easy-fix', 'copilot', 'good-first-issue', or 'auto-fix'. If it matches, assign the issue to GitHub Copilot coding agent (copilot-swe-agent[bot]) for autonomous PR creation using the assignIssueToCopilot function. Post a confirmation: 'Assigned issue #[NUMBER] to Copilot — PR incoming.' If the label doesn't match, respond with SKIP.",
+    include_context: { members: true, tasks: true },
+    spirit: 'devops',
+    suggested: true,
+    suggestedIconBg: '#0d1a2a',
   },
 
   // ─── Strategic & Growth ────────────────────────────────────────────────────
@@ -1001,6 +1056,44 @@ If nothing notable happened this week, respond with: "No significant LLM release
     spirit: 'security',
         suggested: true,
         suggestedIconBg: '#0d2a1a',
+      },
+      {
+        id: 'suggest-pr-risk-analysis',
+        name: 'PR risk analysis',
+        icon: '🛡️',
+        description: 'Analyze PR diffs for security risks, breaking changes, missing tests, and large file changes',
+        category: 'github',
+        trigger_type: 'event',
+        event_config: { provider: 'github', event: 'pull_request' },
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'chat',
+        prompt: `A pull request was opened or updated in {{circle_name}}. PR event data: {{event}}.
+
+Analyze this PR and produce a structured summary:
+
+## Summary
+- Summarize what the PR does in 2-3 bullets
+
+## Risk Flags
+Check for and flag each of these:
+- **Security risks**: hardcoded secrets, API keys, tokens, SQL injection, XSS, insecure deserialization, auth bypasses
+- **Breaking changes**: changed function signatures, removed exports, schema migrations, env var changes, API contract changes
+- **Missing test coverage**: new code paths without corresponding test files or test updates
+- **Large file changes**: any single file with >200 lines changed (flag with exact line count)
+- **Dependency changes**: new packages added — check for size, maintenance status, known issues
+
+## Overall Risk Rating
+Rate the PR: **LOW** / **MEDIUM** / **HIGH**
+- LOW: cosmetic, docs, config, well-tested feature
+- MEDIUM: new feature without full tests, moderate refactor, dependency updates
+- HIGH: auth/payment changes, schema migrations, security-sensitive code, 500+ lines changed with no tests
+
+If the PR action is not "opened" or "synchronize", respond with SKIP.`,
+        include_context: { members: true, tasks: true, rooms: true },
+    spirit: 'sr-engineer',
+        suggested: true,
+        suggestedIconBg: '#1a0d0d',
       },
       {
         id: 'suggest-room-pr-reviewers',
@@ -1409,6 +1502,32 @@ If nothing notable happened this week, respond with: "No significant LLM release
     spirit: 'devops',
         suggested: true,
         suggestedIconBg: '#2a0d1a',
+      },
+      {
+        id: 'suggest-copilot-auto-assign',
+        name: 'Auto-assign bugs to Copilot',
+        icon: '🤖',
+        description: "When an issue is labeled 'easy-fix' or 'copilot', automatically assign it to GitHub Copilot for autonomous PR creation",
+        category: 'github',
+        trigger_type: 'event',
+        event_config: { provider: 'github', event: 'issue_labeled' },
+        agent: 'BlackSwan',
+        model: 'claude-haiku',
+        output_target: 'activity',
+        prompt: `A label was added to a GitHub issue in {{circle_name}}. Event data: {{event}}.
+
+Check if the label is one of: 'easy-fix', 'copilot', 'good-first-issue', 'auto-fix'.
+
+If it matches:
+1. Assign the issue to GitHub Copilot coding agent (copilot-swe-agent[bot]) for autonomous PR creation
+2. Post a confirmation: 'Assigned issue #[NUMBER] "[TITLE]" to Copilot coding agent — autonomous PR incoming.'
+3. If the issue has a base branch preference in the body, note it
+
+If the label doesn't match any of those, respond with SKIP.`,
+        include_context: { members: true, tasks: true },
+    spirit: 'devops',
+        suggested: true,
+        suggestedIconBg: '#0d1a2a',
       },
       {
         id: 'suggest-clean-feature-flags',

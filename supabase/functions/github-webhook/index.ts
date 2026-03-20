@@ -187,6 +187,305 @@ function parseWorkflowRunEvent(payload: any): ParsedEvent {
   };
 }
 
+function parsePullRequestReviewEvent(payload: any): ParsedEvent {
+  const review = payload.review || {};
+  const pr = payload.pull_request || {};
+  const action = payload.action || "submitted";
+  const actor = payload.sender?.login || "unknown";
+  const avatar = payload.sender?.avatar_url || "";
+
+  const state = review.state || "commented";
+  const verb =
+    state === "approved"
+      ? "approved"
+      : state === "changes_requested"
+        ? "requested changes on"
+        : "reviewed";
+
+  return {
+    title: `${actor} ${verb} PR #${pr.number}: ${(pr.title || "").slice(0, 80)}`,
+    body: review.body?.slice(0, 500) || null,
+    author: actor,
+    authorAvatar: avatar,
+    url: review.html_url || pr.html_url || "",
+    ref: pr.head?.ref || null,
+    commitsCount: 0,
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+function parseCheckRunEvent(payload: any): ParsedEvent {
+  const checkRun = payload.check_run || {};
+  const action = payload.action || "completed";
+  const actor = payload.sender?.login || "unknown";
+  const avatar = payload.sender?.avatar_url || "";
+
+  const conclusion = checkRun.conclusion || "in_progress";
+  const status =
+    conclusion === "success"
+      ? "passed"
+      : conclusion === "failure"
+        ? "failed"
+        : conclusion;
+
+  return {
+    title: `Check "${checkRun.name || "check"}" ${status} on ${checkRun.head_sha?.slice(0, 7) || "unknown"}`,
+    body: checkRun.output?.summary?.slice(0, 500) || null,
+    author: actor,
+    authorAvatar: avatar,
+    url: checkRun.html_url || "",
+    ref: null,
+    commitsCount: 0,
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+function parseCheckSuiteEvent(payload: any): ParsedEvent {
+  const suite = payload.check_suite || {};
+  const action = payload.action || "completed";
+  const actor = payload.sender?.login || "unknown";
+  const avatar = payload.sender?.avatar_url || "";
+
+  const conclusion = suite.conclusion || "in_progress";
+  const status =
+    conclusion === "success"
+      ? "passed"
+      : conclusion === "failure"
+        ? "failed"
+        : conclusion;
+
+  return {
+    title: `Check suite ${status} on ${suite.head_branch || "unknown"} (${suite.head_sha?.slice(0, 7) || ""})`,
+    body: `${suite.latest_check_runs_count || 0} check(s) — conclusion: ${conclusion}`,
+    author: actor,
+    authorAvatar: avatar,
+    url: suite.url || "",
+    ref: suite.head_branch || null,
+    commitsCount: 0,
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+function parseDeploymentEvent(payload: any): ParsedEvent {
+  const deployment = payload.deployment || {};
+  const action = payload.action || "created";
+  const actor = payload.sender?.login || "unknown";
+  const avatar = payload.sender?.avatar_url || "";
+
+  return {
+    title: `${actor} ${action} deployment to ${deployment.environment || "unknown"}`,
+    body: deployment.description?.slice(0, 500) || null,
+    author: actor,
+    authorAvatar: avatar,
+    url: deployment.url || "",
+    ref: deployment.ref || null,
+    commitsCount: 0,
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+function parseDeploymentStatusEvent(payload: any): ParsedEvent {
+  const status = payload.deployment_status || {};
+  const deployment = payload.deployment || {};
+  const actor = payload.sender?.login || "unknown";
+  const avatar = payload.sender?.avatar_url || "";
+
+  const state = status.state || "pending";
+  const env = deployment.environment || status.environment || "unknown";
+
+  return {
+    title: `Deployment to ${env} is ${state}`,
+    body: status.description?.slice(0, 500) || null,
+    author: actor,
+    authorAvatar: avatar,
+    url: status.target_url || status.log_url || deployment.url || "",
+    ref: deployment.ref || null,
+    commitsCount: 0,
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+function parseCodeScanningAlertEvent(payload: any): ParsedEvent {
+  const alert = payload.alert || {};
+  const action = payload.action || "created";
+  const actor = payload.sender?.login || "unknown";
+  const avatar = payload.sender?.avatar_url || "";
+
+  const severity = alert.rule?.severity || alert.rule?.security_severity_level || "unknown";
+  const ruleName = alert.rule?.description || alert.rule?.id || "unknown rule";
+
+  return {
+    title: `[SECURITY] Code scanning alert ${action}: ${ruleName}`,
+    body: `Severity: ${severity}\nTool: ${alert.tool?.name || "unknown"}\nState: ${alert.state || action}`,
+    author: actor,
+    authorAvatar: avatar,
+    url: alert.html_url || "",
+    ref: alert.most_recent_instance?.ref || null,
+    commitsCount: 0,
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+function parseSecretScanningAlertEvent(payload: any): ParsedEvent {
+  const alert = payload.alert || {};
+  const action = payload.action || "created";
+  const actor = payload.sender?.login || "unknown";
+  const avatar = payload.sender?.avatar_url || "";
+
+  return {
+    title: `[SECURITY] Secret scanning alert ${action}: ${alert.secret_type_display_name || alert.secret_type || "unknown secret"}`,
+    body: `State: ${alert.state || action}\nSecret type: ${alert.secret_type || "unknown"}`,
+    author: actor,
+    authorAvatar: avatar,
+    url: alert.html_url || "",
+    ref: null,
+    commitsCount: 0,
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+function parseDependabotAlertEvent(payload: any): ParsedEvent {
+  const alert = payload.alert || {};
+  const action = payload.action || "created";
+  const actor = payload.sender?.login || "unknown";
+  const avatar = payload.sender?.avatar_url || "";
+
+  const severity = alert.security_advisory?.severity || alert.security_vulnerability?.severity || "unknown";
+  const pkg = alert.security_vulnerability?.package?.name || alert.dependency?.package?.name || "unknown package";
+  const advisory = alert.security_advisory?.summary || "";
+
+  return {
+    title: `[SECURITY] Dependabot alert ${action}: ${pkg} (${severity})`,
+    body: advisory ? advisory.slice(0, 500) : `Vulnerability in ${pkg} — severity: ${severity}`,
+    author: actor,
+    authorAvatar: avatar,
+    url: alert.html_url || "",
+    ref: null,
+    commitsCount: 0,
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+function parseProjectsV2ItemEvent(payload: any): ParsedEvent {
+  const item = payload.projects_v2_item || {};
+  const action = payload.action || "created";
+  const actor = payload.sender?.login || "unknown";
+  const avatar = payload.sender?.avatar_url || "";
+
+  return {
+    title: `${actor} ${action} project board item`,
+    body: `Content type: ${item.content_type || "unknown"}`,
+    author: actor,
+    authorAvatar: avatar,
+    url: "",
+    ref: null,
+    commitsCount: 0,
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+function parseDiscussionEvent(payload: any): ParsedEvent {
+  const discussion = payload.discussion || {};
+  const action = payload.action || "created";
+  const actor = payload.sender?.login || "unknown";
+  const avatar = payload.sender?.avatar_url || "";
+
+  return {
+    title: `${actor} ${action} discussion: ${(discussion.title || "").slice(0, 80)}`,
+    body: discussion.body?.slice(0, 500) || null,
+    author: actor,
+    authorAvatar: avatar,
+    url: discussion.html_url || "",
+    ref: null,
+    commitsCount: 0,
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+function parseDiscussionCommentEvent(payload: any): ParsedEvent {
+  const comment = payload.comment || {};
+  const discussion = payload.discussion || {};
+  const action = payload.action || "created";
+  const actor = payload.sender?.login || "unknown";
+  const avatar = payload.sender?.avatar_url || "";
+
+  return {
+    title: `${actor} ${action} comment on discussion: ${(discussion.title || "").slice(0, 80)}`,
+    body: comment.body?.slice(0, 500) || null,
+    author: actor,
+    authorAvatar: avatar,
+    url: comment.html_url || discussion.html_url || "",
+    ref: null,
+    commitsCount: 0,
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+function parseStarEvent(payload: any): ParsedEvent {
+  const action = payload.action || "created";
+  const actor = payload.sender?.login || "unknown";
+  const avatar = payload.sender?.avatar_url || "";
+  const repoName = payload.repository?.full_name || "";
+  const stars = payload.repository?.stargazers_count || 0;
+
+  const verb = action === "created" ? "starred" : "unstarred";
+
+  return {
+    title: `${actor} ${verb} ${repoName} (${stars} stars)`,
+    body: null,
+    author: actor,
+    authorAvatar: avatar,
+    url: payload.repository?.html_url || "",
+    ref: null,
+    commitsCount: 0,
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+function parseForkEvent(payload: any): ParsedEvent {
+  const forkee = payload.forkee || {};
+  const actor = payload.sender?.login || "unknown";
+  const avatar = payload.sender?.avatar_url || "";
+  const repoName = payload.repository?.full_name || "";
+  const forks = payload.repository?.forks_count || 0;
+
+  return {
+    title: `${actor} forked ${repoName} (${forks} forks)`,
+    body: `Fork: ${forkee.full_name || ""}`,
+    author: actor,
+    authorAvatar: avatar,
+    url: forkee.html_url || payload.repository?.html_url || "",
+    ref: null,
+    commitsCount: 0,
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+// ─── Security Priority Helper ────────────────────────────────────────────────
+
+const SECURITY_EVENTS = new Set([
+  "code_scanning_alert",
+  "secret_scanning_alert",
+  "dependabot_alert",
+]);
+
+function isSecurityEvent(eventType: string): boolean {
+  return SECURITY_EVENTS.has(eventType);
+}
+
 // ─── Chat Message Formatter ──────────────────────────────────────────────────
 
 function formatChatMessage(
@@ -195,18 +494,30 @@ function formatChatMessage(
   parsed: ParsedEvent,
   repoFullName: string
 ): string {
-  const icon =
-    eventType === "push"
-      ? "git-push"
-      : eventType === "pull_request"
-        ? "git-pr"
-        : eventType === "issues"
-          ? "git-issue"
-          : eventType === "release"
-            ? "git-release"
-            : "git-ci";
+  const iconMap: Record<string, string> = {
+    push: "git-push",
+    pull_request: "git-pr",
+    pull_request_review: "git-review",
+    issues: "git-issue",
+    release: "git-release",
+    workflow_run: "git-ci",
+    check_run: "git-ci",
+    check_suite: "git-ci",
+    deployment: "git-deploy",
+    deployment_status: "git-deploy",
+    code_scanning_alert: "git-security",
+    secret_scanning_alert: "git-security",
+    dependabot_alert: "git-security",
+    projects_v2_item: "git-project",
+    discussion: "git-discussion",
+    discussion_comment: "git-discussion",
+    star: "git-star",
+    fork: "git-fork",
+  };
+  const icon = iconMap[eventType] || "git-event";
 
-  const header = `[${icon}] **${repoFullName}**`;
+  const securityPrefix = isSecurityEvent(eventType) ? "**[HIGH PRIORITY]** " : "";
+  const header = `[${icon}] ${securityPrefix}**${repoFullName}**`;
 
   let msg = `${header}\n${parsed.title}`;
 
@@ -328,6 +639,9 @@ Deno.serve(async (req: Request) => {
       case "pull_request":
         parsed = parsePullRequestEvent(payload);
         break;
+      case "pull_request_review":
+        parsed = parsePullRequestReviewEvent(payload);
+        break;
       case "issues":
         parsed = parseIssuesEvent(payload);
         break;
@@ -336,6 +650,42 @@ Deno.serve(async (req: Request) => {
         break;
       case "workflow_run":
         parsed = parseWorkflowRunEvent(payload);
+        break;
+      case "check_run":
+        parsed = parseCheckRunEvent(payload);
+        break;
+      case "check_suite":
+        parsed = parseCheckSuiteEvent(payload);
+        break;
+      case "deployment":
+        parsed = parseDeploymentEvent(payload);
+        break;
+      case "deployment_status":
+        parsed = parseDeploymentStatusEvent(payload);
+        break;
+      case "code_scanning_alert":
+        parsed = parseCodeScanningAlertEvent(payload);
+        break;
+      case "secret_scanning_alert":
+        parsed = parseSecretScanningAlertEvent(payload);
+        break;
+      case "dependabot_alert":
+        parsed = parseDependabotAlertEvent(payload);
+        break;
+      case "projects_v2_item":
+        parsed = parseProjectsV2ItemEvent(payload);
+        break;
+      case "discussion":
+        parsed = parseDiscussionEvent(payload);
+        break;
+      case "discussion_comment":
+        parsed = parseDiscussionCommentEvent(payload);
+        break;
+      case "star":
+        parsed = parseStarEvent(payload);
+        break;
+      case "fork":
+        parsed = parseForkEvent(payload);
         break;
       default:
         // Store unknown events with basic info
@@ -351,6 +701,9 @@ Deno.serve(async (req: Request) => {
           deletions: 0,
         };
     }
+
+    // Flag security events as high priority in the stored record
+    const priority = isSecurityEvent(eventType) ? "high" : "normal";
 
     // Insert event record (idempotent via delivery_id unique index)
     const { data: event, error: insertErr } = await supabase
@@ -370,6 +723,7 @@ Deno.serve(async (req: Request) => {
         commits_count: parsed.commitsCount,
         additions: parsed.additions,
         deletions: parsed.deletions,
+        priority,
         payload: payload,
       })
       .select("id")
@@ -422,10 +776,10 @@ Deno.serve(async (req: Request) => {
         agent_name: "BlackSwan",
         source: "github",
         source_detail: `${repoOwner}/${repoName}`,
-        activity_type: "task_completed",
+        activity_type: isSecurityEvent(eventType) ? "alert" : "task_completed",
         title: parsed.title,
         body: (parsed.body || "").slice(0, 2000),
-        status: "completed",
+        status: isSecurityEvent(eventType) ? "needs_attention" : "completed",
         metadata: {
           event_type: eventType,
           action,
@@ -433,6 +787,7 @@ Deno.serve(async (req: Request) => {
           url: parsed.url,
           author: parsed.author,
           ref: parsed.ref,
+          priority,
         },
       });
     }
@@ -451,12 +806,21 @@ Deno.serve(async (req: Request) => {
         const cfg = a.event_config || {};
         if (cfg.provider !== "github") return false;
         const evt = cfg.event;
-        // Direct event type match (push, pull_request, issues, release, workflow_run)
+        // Direct event type match (push, pull_request, issues, release, workflow_run, etc.)
         if (evt === eventType || evt === "*") return true;
         // UI-friendly event names → GitHub event mapping
         if (evt === "ci_completed" && eventType === "workflow_run" && payload.workflow_run?.conclusion === "success") return true;
+        if (evt === "ci_failed" && eventType === "workflow_run" && payload.workflow_run?.conclusion === "failure") return true;
         if (evt === "pull_request_opened" && eventType === "pull_request" && action === "opened") return true;
         if (evt === "pull_request_merged" && eventType === "pull_request" && action === "closed" && payload.pull_request?.merged) return true;
+        if (evt === "pr_approved" && eventType === "pull_request_review" && payload.review?.state === "approved") return true;
+        if (evt === "pr_changes_requested" && eventType === "pull_request_review" && payload.review?.state === "changes_requested") return true;
+        if (evt === "check_failed" && eventType === "check_run" && payload.check_run?.conclusion === "failure") return true;
+        if (evt === "check_passed" && eventType === "check_run" && payload.check_run?.conclusion === "success") return true;
+        if (evt === "deploy_success" && eventType === "deployment_status" && payload.deployment_status?.state === "success") return true;
+        if (evt === "deploy_failure" && eventType === "deployment_status" && payload.deployment_status?.state === "failure") return true;
+        if (evt === "security_alert" && SECURITY_EVENTS.has(eventType)) return true;
+        if (evt === "issue_labeled" && eventType === "issues" && action === "labeled") return true;
         return false;
       });
 

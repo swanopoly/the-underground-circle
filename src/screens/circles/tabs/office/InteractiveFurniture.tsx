@@ -4,9 +4,13 @@ import { animLoop } from '../../../../lib/animationHelpers';
 import type { FurnitureItem, OfficeTheme } from '../../../../lib/officeConfig';
 import type { OfficeAgent } from '../../../../lib/officeAgents';
 import {
-  CROP_INFO, CropType, getPlotState, getPlotGrowthPercent, harvestPlot,
-  PET_INFO, PetType, PetStage, MOOD_EMOJI, computePetStats, getPetStage,
-  feedPet, playWithPet, restPet, PET_STAGE_XP,
+  CROP_INFO, CropType, CROP_TYPES, getPlotState, getPlotGrowthPercent, harvestPlot,
+  FARM_SHOP, FarmUpgrade, getCurrentSeason, SEASON_INFO, rollWeather, WeatherEvent, WEATHER_INFO,
+  FARM_ACHIEVEMENTS, GRID_SIZE,
+  PET_INFO, PetType, PET_TYPES, PetStage, PetFood, PetTrick, PetAccessory,
+  MOOD_EMOJI, computePetStats, getPetStage,
+  feedPet, playWithPet, restPet, bathPet, medicinePet, doTrick, PET_STAGE_XP,
+  PET_FOOD_INFO, PET_FOOD_TYPES, PET_TRICK_INFO, PET_ACCESSORY_INFO, PET_ACHIEVEMENTS,
 } from '../../../../lib/circleGames';
 
 interface ItemProps { item: FurnitureItem; theme: OfficeTheme; }
@@ -3514,34 +3518,72 @@ export function ScrabbleBoardItem({ item, theme }: ItemProps) {
 
 // ─── Farm Plot ──────────────────────────────────────────────────────────────
 
-const CROP_TYPES: CropType[] = ['t', 'w', 'p', 'c'];
-
 export function FarmPlotItem({ item, theme }: ItemProps) {
-  const plots = (item.farmPlots || '000000000').split('');
-  const crops = (item.farmCrops || '000000000').split('');
   const plantedAtArr: number[] = (() => {
     try { return JSON.parse(item.farmPlantedAt || '[]'); } catch { return []; }
   })();
   const [waterLevel, setWaterLevel] = useState(item.farmWaterLevel ?? 80);
   const [gold, setGold] = useState(item.farmGold ?? 0);
   const [harvested, setHarvested] = useState(item.farmHarvested ?? 0);
-  const [localPlots, setLocalPlots] = useState(plots);
-  const [localCrops, setLocalCrops] = useState(crops);
-  const [localPlanted, setLocalPlanted] = useState<number[]>(
-    plantedAtArr.length === 9 ? plantedAtArr : Array(9).fill(0)
+  const [localCrops, setLocalCrops] = useState<string[]>(
+    (item.farmCrops || '0'.repeat(GRID_SIZE)).split('').slice(0, GRID_SIZE)
   );
-  const [selectedCrop, setSelectedCrop] = useState<CropType>('t');
+  const [localPlanted, setLocalPlanted] = useState<number[]>(
+    plantedAtArr.length === GRID_SIZE ? plantedAtArr : Array(GRID_SIZE).fill(0)
+  );
   const [showCropPicker, setShowCropPicker] = useState<number | null>(null);
+  const [showShop, setShowShop] = useState(false);
+  const [upgrades, setUpgrades] = useState<Set<FarmUpgrade>>(new Set());
+  const [fertilizerUses, setFertilizerUses] = useState(0);
+  const [weather, setWeather] = useState<WeatherEvent>('sunny');
+  const [lastWeatherChange, setLastWeatherChange] = useState(Date.now());
+  const [harvestFlash, setHarvestFlash] = useState<number | null>(null);
+  const [cropsGrown, setCropsGrown] = useState<Set<string>>(new Set());
   const [tick, setTick] = useState(0);
 
-  // Water decay + growth tick
+  const season = getCurrentSeason();
+  const seasonInfo = SEASON_INFO[season];
+  const growBonus = seasonInfo.growBonus * (fertilizerUses > 0 ? 2 : 1);
+
+  // Water decay + growth tick + weather
   useEffect(() => {
     const iv = setInterval(() => {
-      setWaterLevel(w => Math.max(0, w - 0.5));
+      const waterDecay = seasonInfo.waterDecay * (weather === 'drought' ? 2 : 1);
+      if (!upgrades.has('sprinkler')) {
+        setWaterLevel(w => Math.max(0, w - 0.5 * waterDecay));
+      }
+      // Sprinkler auto-waters
+      if (upgrades.has('sprinkler')) {
+        setWaterLevel(w => Math.min(100, Math.max(w, 60)));
+      }
+      // Rain adds water
+      if (weather === 'rain') {
+        setWaterLevel(w => Math.min(100, w + 0.3));
+      }
+      // Scarecrow prevents death
       setTick(t => t + 1);
     }, 3000);
     return () => clearInterval(iv);
-  }, []);
+  }, [weather, upgrades, seasonInfo]);
+
+  // Weather changes every 2 minutes
+  useEffect(() => {
+    const iv = setInterval(() => {
+      const newWeather = rollWeather();
+      setWeather(newWeather);
+      setLastWeatherChange(Date.now());
+      // Storm can destroy a random crop
+      if (newWeather === 'storm' && !upgrades.has('scarecrow')) {
+        const plantedIdx = localCrops.map((c, i) => c !== '0' && localPlanted[i] ? i : -1).filter(i => i >= 0);
+        if (plantedIdx.length > 0) {
+          const victim = plantedIdx[Math.floor(Math.random() * plantedIdx.length)];
+          setLocalCrops(c => { const n = [...c]; n[victim] = '0'; return n; });
+          setLocalPlanted(a => { const n = [...a]; n[victim] = 0; return n; });
+        }
+      }
+    }, 120000);
+    return () => clearInterval(iv);
+  }, [localCrops, localPlanted, upgrades]);
 
   const waterPulse = useRef(new Animated.Value(0)).current;
   useEffect(() => {
@@ -3553,179 +3595,253 @@ export function FarmPlotItem({ item, theme }: ItemProps) {
     return () => l.stop();
   }, []);
 
+  const effectiveWater = upgrades.has('scarecrow') ? Math.max(waterLevel, 1) : waterLevel;
+
   const handlePlot = (i: number) => {
     const crop = localCrops[i] as CropType | '0';
     if (crop === '0' || !localPlanted[i]) {
       setShowCropPicker(showCropPicker === i ? null : i);
+      setShowShop(false);
       return;
     }
-    const state = getPlotState(localPlanted[i], crop as CropType, waterLevel);
+    const state = getPlotState(localPlanted[i], crop as CropType, effectiveWater, growBonus);
     if (state === '4') {
-      // Harvest
-      const reward = harvestPlot(crop as CropType);
+      const reward = harvestPlot(crop as CropType, upgrades.has('greenhouse'), upgrades.has('golden_hoe'));
       setGold(g => g + reward);
       setHarvested(h => h + 1);
-      setLocalPlots(p => { const n = [...p]; n[i] = '0'; return n; });
+      setCropsGrown(s => new Set(s).add(crop));
+      if (fertilizerUses > 0) setFertilizerUses(f => f - 1);
       setLocalCrops(c => { const n = [...c]; n[i] = '0'; return n; });
       setLocalPlanted(a => { const n = [...a]; n[i] = 0; return n; });
+      setHarvestFlash(i);
+      setTimeout(() => setHarvestFlash(null), 600);
     } else if (state === '5') {
-      // Clear dead
-      setLocalPlots(p => { const n = [...p]; n[i] = '0'; return n; });
       setLocalCrops(c => { const n = [...c]; n[i] = '0'; return n; });
       setLocalPlanted(a => { const n = [...a]; n[i] = 0; return n; });
     }
   };
 
   const plantCrop = (i: number, crop: CropType) => {
-    setLocalPlots(p => { const n = [...p]; n[i] = '1'; return n; });
     setLocalCrops(c => { const n = [...c]; n[i] = crop; return n; });
     setLocalPlanted(a => { const n = [...a]; n[i] = Date.now(); return n; });
     setShowCropPicker(null);
   };
 
-  const waterFarm = () => {
-    setWaterLevel(w => Math.min(100, w + 25));
+  const buyUpgrade = (u: FarmUpgrade) => {
+    const cost = FARM_SHOP[u].cost;
+    if (gold < cost || (u !== 'fertilizer' && upgrades.has(u))) return;
+    setGold(g => g - cost);
+    if (u === 'fertilizer') { setFertilizerUses(f => f + 5); }
+    else { setUpgrades(s => new Set(s).add(u)); }
   };
 
   const getPlotVisual = (i: number) => {
     const crop = localCrops[i] as CropType | '0';
-    if (crop === '0' || !localPlanted[i]) return { emoji: '', bg: '#3d2b1a', border: '#5a3f22' };
-    const state = getPlotState(localPlanted[i], crop as CropType, waterLevel);
+    if (crop === '0' || !localPlanted[i]) return { emoji: '', bg: '#0d0d1a', border: '#1e1e3a' };
+    const state = getPlotState(localPlanted[i], crop as CropType, effectiveWater, growBonus);
     const info = CROP_INFO[crop as CropType];
     switch (state) {
-      case '1': return { emoji: '\u{1F331}', bg: '#2d1f0e', border: '#5a3f22' }; // seedling
-      case '2': return { emoji: '\u{1F33F}', bg: '#1a3a1a', border: '#2d5a2d' }; // sprout
-      case '3': return { emoji: '\u{1F33B}', bg: '#1a3a1a', border: info?.color || '#22c55e' }; // growing
-      case '4': return { emoji: info?.icon || '\u2728', bg: '#1a3a1a', border: '#f59e0b' }; // ready!
-      case '5': return { emoji: '\u{1F342}', bg: '#2a1a0e', border: '#6b3a1a' }; // dead
-      default: return { emoji: '', bg: '#3d2b1a', border: '#5a3f22' };
+      case '1': return { emoji: '\u{1F300}', bg: '#0a0a1e', border: '#2a2a4e' };    // seed → spiral
+      case '2': return { emoji: '\u2728',    bg: '#0a0e1e', border: '#2a3a5e' };     // sprout → sparkles
+      case '3': return { emoji: '\u{1F4AB}', bg: '#0e0a1e', border: info?.color || '#818cf8' }; // growing → dizzy
+      case '4': return { emoji: info?.icon || '\u2728', bg: '#0a0e1e', border: '#c084fc' }; // ready
+      case '5': return { emoji: '\u{1F4A8}', bg: '#0a0a12', border: '#333' };        // dead → poof
+      default: return { emoji: '', bg: '#0d0d1a', border: '#1e1e3a' };
     }
   };
 
-  const waterColor = waterLevel > 60 ? '#3b82f6' : waterLevel > 30 ? '#f59e0b' : '#ef4444';
+  const waterColor = waterLevel > 60 ? '#818cf8' : waterLevel > 30 ? '#c084fc' : '#ef4444';
+  const earnedAchievements = FARM_ACHIEVEMENTS.filter(a => {
+    if (a.id === 'first_harvest') return harvested >= 1;
+    if (a.id === 'farmer_10') return harvested >= 10;
+    if (a.id === 'farmer_50') return harvested >= 50;
+    if (a.id === 'gold_100') return gold >= 100;
+    if (a.id === 'gold_1000') return gold >= 1000;
+    if (a.id === 'all_crops') return cropsGrown.size >= 8;
+    return false;
+  });
 
   return (
-    <View style={{ width: 106, height: 96, backgroundColor: '#2a1a0e', borderWidth: 1, borderColor: '#5a3f22', borderRadius: 6, padding: 3 }}>
-      {/* Header */}
-      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
-        <Text style={{ color: '#22c55e', fontSize: 5, fontWeight: '900', fontFamily: 'monospace' }}>FARM</Text>
-        <View style={{ flexDirection: 'row', gap: 3, alignItems: 'center' }}>
-          <Text style={{ color: '#f59e0b', fontSize: 5, fontWeight: '900', fontFamily: 'monospace' }}>{gold}g</Text>
-          <Text style={{ color: '#666', fontSize: 4, fontFamily: 'monospace' }}>{harvested}h</Text>
+    <View style={{ width: 200, height: 180, backgroundColor: '#08081a', borderWidth: 1, borderColor: '#1e1e3a', borderRadius: 8, padding: 4 }}>
+      {/* Header row */}
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+          <Text style={{ color: '#c084fc', fontSize: 7, fontWeight: '900', fontFamily: 'monospace' }}>{'\u{1F30C}'} GALAXYFARM</Text>
+          <Text style={{ fontSize: 6 }}>{seasonInfo.icon}</Text>
+          <Text style={{ fontSize: 6 }}>{WEATHER_INFO[weather].icon}</Text>
+        </View>
+        <View style={{ flexDirection: 'row', gap: 4, alignItems: 'center' }}>
+          <Text style={{ color: '#fbbf24', fontSize: 7, fontWeight: '900', fontFamily: 'monospace' }}>{'\u2B50'}{gold}</Text>
+          <Pressable onPress={(e) => { e.stopPropagation?.(); setShowShop(s => !s); setShowCropPicker(null); }}
+            style={{ backgroundColor: '#818cf820', borderRadius: 4, paddingHorizontal: 3, paddingVertical: 1, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
+            <Text style={{ color: '#818cf8', fontSize: 5, fontWeight: '900', fontFamily: 'monospace' }}>TECH LAB</Text>
+          </Pressable>
         </View>
       </View>
 
-      {/* Water bar */}
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2, marginBottom: 2 }}>
-        <Pressable onPress={(e) => { e.stopPropagation?.(); waterFarm(); }} style={{ ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
-          <Text style={{ fontSize: 6 }}>{'\u{1F4A7}'}</Text>
+      {/* Stats row */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, marginBottom: 3 }}>
+        <Pressable onPress={(e) => { e.stopPropagation?.(); setWaterLevel(w => Math.min(100, w + 25)); }}
+          style={{ ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
+          <Text style={{ fontSize: 8 }}>{'\u{1F4A7}'}</Text>
         </Pressable>
-        <View style={{ flex: 1, height: 3, backgroundColor: '#1a1a28', borderRadius: 2, overflow: 'hidden' }}>
+        <View style={{ flex: 1, height: 5, backgroundColor: '#0a0a18', borderRadius: 3, overflow: 'hidden' }}>
           <Animated.View style={{
-            width: `${waterLevel}%` as any,
-            height: '100%',
-            backgroundColor: waterColor,
-            borderRadius: 2,
+            width: `${waterLevel}%` as any, height: '100%', backgroundColor: waterColor, borderRadius: 3,
             opacity: waterPulse.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1] }),
           }} />
         </View>
-        <Text style={{ color: waterColor, fontSize: 4, fontWeight: '700', fontFamily: 'monospace' }}>{Math.round(waterLevel)}%</Text>
+        <Text style={{ color: waterColor, fontSize: 5, fontWeight: '700', fontFamily: 'monospace' }}>{Math.round(waterLevel)}%</Text>
+        <Text style={{ color: '#666', fontSize: 5, fontFamily: 'monospace' }}>{harvested}{'\u2B50'}</Text>
       </View>
 
-      {/* 3x3 Grid */}
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 2, justifyContent: 'center' }}>
-        {Array.from({ length: 9 }).map((_, i) => {
+      {/* Upgrade indicators */}
+      {upgrades.size > 0 && (
+        <View style={{ flexDirection: 'row', gap: 2, marginBottom: 2 }}>
+          {Array.from(upgrades).map(u => (
+            <Text key={u} style={{ fontSize: 6 }}>{FARM_SHOP[u].icon}</Text>
+          ))}
+          {fertilizerUses > 0 && <Text style={{ color: '#a855f7', fontSize: 4, fontFamily: 'monospace' }}>x{fertilizerUses}</Text>}
+        </View>
+      )}
+
+      {/* 4x4 Grid */}
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 2, justifyContent: 'center', flex: 1 }}>
+        {Array.from({ length: GRID_SIZE }).map((_, i) => {
           const visual = getPlotVisual(i);
           const crop = localCrops[i] as CropType | '0';
-          const pct = crop !== '0' && localPlanted[i] ? getPlotGrowthPercent(localPlanted[i], crop as CropType) : 0;
-          const isReady = crop !== '0' && localPlanted[i] && getPlotState(localPlanted[i], crop as CropType, waterLevel) === '4';
+          const pct = crop !== '0' && localPlanted[i] ? getPlotGrowthPercent(localPlanted[i], crop as CropType, growBonus) : 0;
+          const isReady = crop !== '0' && localPlanted[i] && getPlotState(localPlanted[i], crop as CropType, effectiveWater, growBonus) === '4';
+          const isFlashing = harvestFlash === i;
           return (
             <Pressable
               key={i}
               onPress={(e) => { e.stopPropagation?.(); handlePlot(i); }}
               style={{
-                width: 28, height: 22, borderRadius: 3,
-                backgroundColor: visual.bg,
-                borderWidth: 1, borderColor: visual.border,
+                width: 40, height: 28, borderRadius: 3,
+                backgroundColor: isFlashing ? '#c084fc30' : visual.bg,
+                borderWidth: isReady ? 2 : 1, borderColor: isReady ? '#c084fc' : visual.border,
                 alignItems: 'center', justifyContent: 'center',
-                ...(isReady ? { borderColor: '#f59e0b', borderWidth: 2 } : {}),
                 ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
               }}
             >
               {visual.emoji ? (
-                <Text style={{ fontSize: 10 }}>{visual.emoji}</Text>
+                <Text style={{ fontSize: 14 }}>{visual.emoji}</Text>
               ) : (
-                <Text style={{ fontSize: 6, color: '#5a3f2240' }}>+</Text>
+                <Text style={{ fontSize: 8, color: '#818cf830' }}>+</Text>
               )}
-              {/* Growth bar */}
               {crop !== '0' && pct > 0 && pct < 100 && (
                 <View style={{ position: 'absolute', bottom: 1, left: 2, right: 2, height: 2, backgroundColor: '#0a0a12', borderRadius: 1, overflow: 'hidden' }}>
-                  <View style={{ width: `${pct}%` as any, height: '100%', backgroundColor: '#22c55e', borderRadius: 1 }} />
+                  <View style={{ width: `${pct}%` as any, height: '100%', backgroundColor: '#818cf8', borderRadius: 1 }} />
                 </View>
               )}
+              {isReady && <Text style={{ position: 'absolute', top: -2, right: -1, fontSize: 6 }}>{'\u2728'}</Text>}
             </Pressable>
           );
         })}
       </View>
 
-      {/* Crop picker popup */}
+      {/* Achievement badges */}
+      {earnedAchievements.length > 0 && (
+        <View style={{ flexDirection: 'row', gap: 1, marginTop: 2 }}>
+          {earnedAchievements.map(a => (
+            <Text key={a.id} style={{ fontSize: 5 }}>{a.icon}</Text>
+          ))}
+        </View>
+      )}
+
+      {/* Crop picker */}
       {showCropPicker !== null && (
         <View style={{
-          position: 'absolute', bottom: 4, left: 4, right: 4,
-          backgroundColor: '#1a1a28', borderWidth: 1, borderColor: '#2a2a3e',
-          borderRadius: 4, padding: 3, flexDirection: 'row', gap: 2, justifyContent: 'center', zIndex: 10,
+          position: 'absolute', bottom: 6, left: 4, right: 4,
+          backgroundColor: '#0a0a1e', borderWidth: 1, borderColor: '#2a2a4e',
+          borderRadius: 6, padding: 4, flexDirection: 'row', flexWrap: 'wrap', gap: 3, justifyContent: 'center', zIndex: 10,
         }}>
+          <Text style={{ color: '#818cf8', fontSize: 4, fontFamily: 'monospace', width: '100%', textAlign: 'center', marginBottom: 2 }}>PLANT DATA SEED</Text>
           {CROP_TYPES.map(c => (
-            <Pressable
-              key={c}
-              onPress={(e) => { e.stopPropagation?.(); plantCrop(showCropPicker, c); }}
-              style={{
-                alignItems: 'center', padding: 2, borderRadius: 3,
-                backgroundColor: selectedCrop === c ? CROP_INFO[c].color + '20' : 'transparent',
-                ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
-              }}
-            >
-              <Text style={{ fontSize: 8 }}>{CROP_INFO[c].icon}</Text>
-              <Text style={{ color: CROP_INFO[c].color, fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>{CROP_INFO[c].gold}g</Text>
+            <Pressable key={c} onPress={(e) => { e.stopPropagation?.(); plantCrop(showCropPicker, c); }}
+              style={{ alignItems: 'center', padding: 2, borderRadius: 4, backgroundColor: CROP_INFO[c].color + '15',
+                ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}), }}>
+              <Text style={{ fontSize: 10 }}>{CROP_INFO[c].icon}</Text>
+              <Text style={{ color: CROP_INFO[c].color, fontSize: 4, fontWeight: '700', fontFamily: 'monospace' }}>{CROP_INFO[c].gold}{'\u2B50'}</Text>
             </Pressable>
           ))}
+        </View>
+      )}
+
+      {/* Shop popup */}
+      {showShop && (
+        <View style={{
+          position: 'absolute', top: 20, left: 4, right: 4,
+          backgroundColor: '#0a0a1e', borderWidth: 1, borderColor: '#818cf840',
+          borderRadius: 6, padding: 4, zIndex: 10,
+        }}>
+          <Text style={{ color: '#818cf8', fontSize: 6, fontWeight: '900', fontFamily: 'monospace', textAlign: 'center', marginBottom: 3 }}>{'\u{1F6F8}'} TECH LAB</Text>
+          {(Object.entries(FARM_SHOP) as [FarmUpgrade, typeof FARM_SHOP[FarmUpgrade]][]).map(([key, info]) => {
+            const owned = key !== 'fertilizer' && upgrades.has(key);
+            const canAfford = gold >= info.cost;
+            return (
+              <Pressable key={key} onPress={(e) => { e.stopPropagation?.(); if (!owned && canAfford) buyUpgrade(key); }}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 3, padding: 2, borderRadius: 3, marginBottom: 2,
+                  backgroundColor: owned ? '#818cf810' : canAfford ? '#c084fc10' : 'transparent', opacity: owned ? 0.5 : canAfford ? 1 : 0.4,
+                  ...(Platform.OS === 'web' && !owned && canAfford ? { cursor: 'pointer' } as any : {}), }}>
+                <Text style={{ fontSize: 8 }}>{info.icon}</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ color: '#ddd', fontSize: 5, fontWeight: '700', fontFamily: 'monospace' }}>{info.name}</Text>
+                  <Text style={{ color: '#888', fontSize: 3, fontFamily: 'monospace' }}>{info.desc}</Text>
+                </View>
+                <Text style={{ color: owned ? '#818cf8' : '#c084fc', fontSize: 5, fontWeight: '700', fontFamily: 'monospace' }}>
+                  {owned ? '\u2713' : `${info.cost}\u2B50`}
+                </Text>
+              </Pressable>
+            );
+          })}
         </View>
       )}
     </View>
   );
 }
 
-// ─── Office Pet (Tamagotchi) ────────────────────────────────────────────────
-
-const PET_TYPES: PetType[] = ['cat', 'dog', 'dragon', 'blob', 'fox'];
+// ─── AI Companion (Cosmic Tamagotchi) ───────────────────────────────────────
 
 export function OfficePetItem({ item, theme }: ItemProps) {
   const petType = (item.petType || 'cat') as PetType;
-  const [name, setName] = useState(item.petName || PET_INFO[petType]?.name || 'Pet');
+  const [name, setName] = useState(item.petName || PET_INFO[petType]?.name || 'Companion');
   const [hunger, setHunger] = useState(item.petHunger ?? 80);
   const [happiness, setHappiness] = useState(item.petHappiness ?? 80);
   const [energy, setEnergy] = useState(item.petEnergy ?? 80);
+  const [cleanliness, setCleanliness] = useState(100);
+  const [lastCleaned, setLastCleaned] = useState(Date.now());
   const [xp, setXp] = useState(item.petXp ?? 0);
+  const [gold, setGold] = useState(0);
   const [lastFed, setLastFed] = useState(item.petLastFed ?? Date.now());
   const [lastPlayed, setLastPlayed] = useState(item.petLastPlayed ?? Date.now());
   const [lastSlept, setLastSlept] = useState(item.petLastSlept ?? Date.now());
   const [showActions, setShowActions] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
+  const [showFood, setShowFood] = useState(false);
+  const [showTricks, setShowTricks] = useState(false);
+  const [showAccessories, setShowAccessories] = useState(false);
   const [activePetType, setActivePetType] = useState(petType);
+  const [accessory, setAccessory] = useState<PetAccessory>('none');
   const [actionFlash, setActionFlash] = useState<string | null>(null);
+  const [trickCount, setTrickCount] = useState(0);
+  const [foodsTried, setFoodsTried] = useState<Set<PetFood>>(new Set());
+  const [earnedAchievements, setEarnedAchievements] = useState<string[]>([]);
 
   // Stat decay tick
   useEffect(() => {
     const iv = setInterval(() => {
-      const stats = computePetStats(hunger, happiness, energy, lastFed, lastPlayed, lastSlept);
-      setHunger(stats.hunger);
-      setHappiness(stats.happiness);
-      setEnergy(stats.energy);
+      const s = computePetStats(hunger, happiness, energy, lastFed, lastPlayed, lastSlept, cleanliness, lastCleaned);
+      setHunger(s.hunger);
+      setHappiness(s.happiness);
+      setEnergy(s.energy);
+      setCleanliness(s.cleanliness);
     }, 5000);
     return () => clearInterval(iv);
-  }, [lastFed, lastPlayed, lastSlept]);
+  }, [lastFed, lastPlayed, lastSlept, lastCleaned]);
 
-  const stats = computePetStats(hunger, happiness, energy, lastFed, lastPlayed, lastSlept);
+  const stats = computePetStats(hunger, happiness, energy, lastFed, lastPlayed, lastSlept, cleanliness, lastCleaned);
   const stage = getPetStage(xp);
   const petInfo = PET_INFO[activePetType];
   const petEmoji = petInfo?.stages[stage] || '\u{1F95A}';
@@ -3734,6 +3850,20 @@ export function OfficePetItem({ item, theme }: ItemProps) {
     stage === 'egg' ? 'baby' : stage === 'baby' ? 'teen' : stage === 'teen' ? 'adult' : 'legendary'
   ];
   const xpProgress = stage === 'legendary' ? 100 : Math.min(100, (xp / nextStageXp) * 100);
+  const accessoryIcon = PET_ACCESSORY_INFO[accessory]?.icon || '';
+
+  // Check achievements
+  useEffect(() => {
+    const a: string[] = [];
+    if (foodsTried.size > 0) a.push('first_feed');
+    if (stage === 'teen' || stage === 'adult' || stage === 'legendary') a.push('teen_stage');
+    if (stage === 'adult' || stage === 'legendary') a.push('adult_stage');
+    if (stage === 'legendary') a.push('legendary');
+    if (trickCount >= 5) a.push('trick_5');
+    if (foodsTried.size >= 5) a.push('all_food');
+    if (accessory !== 'none') a.push('accessorize');
+    setEarnedAchievements(a);
+  }, [foodsTried, stage, trickCount, accessory]);
 
   // Bounce animation
   const bounce = useRef(new Animated.Value(0)).current;
@@ -3742,7 +3872,7 @@ export function OfficePetItem({ item, theme }: ItemProps) {
     const l = animLoop(() => Animated.sequence([
       Animated.timing(bounce, { toValue: -3, duration: 400, easing: Easing.out(Easing.quad), useNativeDriver: false }),
       Animated.timing(bounce, { toValue: 0, duration: 400, easing: Easing.in(Easing.quad), useNativeDriver: false }),
-      Animated.delay(stats.mood === 'happy' ? 800 : 2000),
+      Animated.delay(stats.mood === 'happy' || stats.mood === 'excited' ? 600 : 2000),
     ]));
     l.start();
     return () => l.stop();
@@ -3753,13 +3883,19 @@ export function OfficePetItem({ item, theme }: ItemProps) {
     setTimeout(() => setActionFlash(null), 800);
   };
 
-  const handleFeed = () => {
-    const result = feedPet();
+  const closeAllPopups = () => { setShowActions(false); setShowFood(false); setShowTricks(false); setShowAccessories(false); setShowPicker(false); };
+
+  const handleFeed = (food: PetFood) => {
+    const result = feedPet(food);
+    if (gold < result.cost) return;
+    setGold(g => g - result.cost);
     setHunger(h => Math.min(100, h + result.hungerGain));
+    setHappiness(hp => Math.min(100, hp + result.happinessGain));
     setLastFed(Date.now());
     setXp(x => x + result.xp);
-    flash('\u{1F356}');
-    setShowActions(false);
+    setFoodsTried(s => new Set(s).add(food));
+    flash(PET_FOOD_INFO[food].icon);
+    closeAllPopups();
   };
 
   const handlePlay = () => {
@@ -3769,7 +3905,7 @@ export function OfficePetItem({ item, theme }: ItemProps) {
     setLastPlayed(Date.now());
     setXp(x => x + result.xp);
     flash('\u{1F3BE}');
-    setShowActions(false);
+    closeAllPopups();
   };
 
   const handleRest = () => {
@@ -3778,46 +3914,101 @@ export function OfficePetItem({ item, theme }: ItemProps) {
     setLastSlept(Date.now());
     setXp(x => x + result.xp);
     flash('\u{1F4A4}');
-    setShowActions(false);
+    closeAllPopups();
+  };
+
+  const handleBath = () => {
+    const result = bathPet();
+    setCleanliness(c => Math.min(100, c + result.cleanlinessGain));
+    setHappiness(hp => Math.min(100, hp + result.happinessGain));
+    setLastCleaned(Date.now());
+    setXp(x => x + result.xp);
+    flash('\u{1F6BF}');
+    closeAllPopups();
+  };
+
+  const handleMedicine = () => {
+    if (gold < 25) return;
+    const result = medicinePet();
+    setGold(g => g - result.cost);
+    setHunger(h => Math.min(100, h + result.hungerGain));
+    setHappiness(hp => Math.min(100, hp + result.happinessGain));
+    setEnergy(e => Math.min(100, e + result.energyGain));
+    setXp(x => x + result.xp);
+    flash('\u{1F48A}');
+    closeAllPopups();
+  };
+
+  const handleTrick = (trick: PetTrick) => {
+    const result = doTrick(trick, stage);
+    if (result.success) {
+      setXp(x => x + result.xp);
+      setHappiness(hp => Math.min(100, hp + result.happinessGain));
+      setTrickCount(t => t + 1);
+      flash(PET_TRICK_INFO[trick].icon);
+    } else {
+      setHappiness(hp => Math.max(0, hp + result.happinessGain));
+      flash('\u274C');
+    }
+    closeAllPopups();
+  };
+
+  const handleBuyAccessory = (acc: PetAccessory) => {
+    const info = PET_ACCESSORY_INFO[acc];
+    if (gold < info.cost) return;
+    setGold(g => g - info.cost);
+    setAccessory(acc);
+    flash(info.icon);
+    closeAllPopups();
   };
 
   const handleReset = () => {
-    setHunger(80); setHappiness(80); setEnergy(80);
-    setXp(0);
-    setLastFed(Date.now()); setLastPlayed(Date.now()); setLastSlept(Date.now());
-    setShowPicker(false); setShowActions(false);
+    setHunger(80); setHappiness(80); setEnergy(80); setCleanliness(100);
+    setXp(0); setGold(0);
+    setLastFed(Date.now()); setLastPlayed(Date.now()); setLastSlept(Date.now()); setLastCleaned(Date.now());
+    setAccessory('none');
+    closeAllPopups();
+    setEarnedAchievements(prev => [...prev, 'revive']);
   };
 
   const statBar = (value: number, color: string, icon: string) => (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 1 }}>
       <Text style={{ fontSize: 5 }}>{icon}</Text>
-      <View style={{ flex: 1, height: 3, backgroundColor: '#1a1a28', borderRadius: 2, overflow: 'hidden' }}>
+      <View style={{ flex: 1, height: 3, backgroundColor: '#0a0a18', borderRadius: 2, overflow: 'hidden' }}>
         <View style={{ width: `${value}%` as any, height: '100%', backgroundColor: value < 20 ? '#ef4444' : color, borderRadius: 2 }} />
       </View>
     </View>
   );
 
+  const CP = Platform.OS === 'web' ? { cursor: 'pointer' } as any : {};
+
   return (
-    <View style={{ width: 86, height: 86, backgroundColor: '#12121e', borderWidth: 1, borderColor: petInfo?.color + '40' || '#333', borderRadius: 8, padding: 3, alignItems: 'center' }}>
+    <View style={{ width: 140, height: 130, backgroundColor: '#08081a', borderWidth: 1, borderColor: (petInfo?.color || '#333') + '40', borderRadius: 8, padding: 4, alignItems: 'center' }}>
       {/* Header */}
       <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%', alignItems: 'center', marginBottom: 1 }}>
-        <Pressable onPress={(e) => { e.stopPropagation?.(); setShowPicker(p => !p); }} style={{ ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
-          <Text style={{ color: petInfo?.color || '#ccc', fontSize: 4, fontWeight: '900', fontFamily: 'monospace' }}>{name}</Text>
+        <Pressable onPress={(e) => { e.stopPropagation?.(); closeAllPopups(); setShowPicker(p => !p); }} style={{ ...CP }}>
+          <Text style={{ color: petInfo?.color || '#c084fc', fontSize: 5, fontWeight: '900', fontFamily: 'monospace' }}>
+            {'\u{1F30C}'} {name}
+          </Text>
         </Pressable>
-        <Text style={{ fontSize: 5 }}>{moodEmoji}</Text>
+        <View style={{ flexDirection: 'row', gap: 2, alignItems: 'center' }}>
+          <Text style={{ color: '#fbbf24', fontSize: 5, fontWeight: '700', fontFamily: 'monospace' }}>{'\u2B50'}{gold}</Text>
+          <Text style={{ fontSize: 6 }}>{moodEmoji}</Text>
+        </View>
       </View>
 
       {/* Pet display */}
       <Pressable
-        onPress={(e) => { e.stopPropagation?.(); setShowActions(a => !a); }}
-        style={{ alignItems: 'center', justifyContent: 'center', flex: 1, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
+        onPress={(e) => { e.stopPropagation?.(); closeAllPopups(); setShowActions(a => !a); }}
+        style={{ alignItems: 'center', justifyContent: 'center', flex: 1, ...CP }}
       >
         <Animated.View style={{ transform: [{ translateY: bounce }] }}>
-          <Text style={{ fontSize: 24 }}>{petEmoji}</Text>
+          <Text style={{ fontSize: 28 }}>{petEmoji}</Text>
+          {accessoryIcon ? <Text style={{ position: 'absolute', top: -6, right: -4, fontSize: 10 }}>{accessoryIcon}</Text> : null}
         </Animated.View>
         {actionFlash && (
-          <View style={{ position: 'absolute', top: -2, right: 0 }}>
-            <Text style={{ fontSize: 10 }}>{actionFlash}</Text>
+          <View style={{ position: 'absolute', top: -2, right: 4 }}>
+            <Text style={{ fontSize: 12 }}>{actionFlash}</Text>
           </View>
         )}
       </Pressable>
@@ -3825,68 +4016,190 @@ export function OfficePetItem({ item, theme }: ItemProps) {
       {/* Stage + XP */}
       <View style={{ width: '100%', marginBottom: 2 }}>
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Text style={{ color: '#6b6b80', fontSize: 4, fontWeight: '700', fontFamily: 'monospace', textTransform: 'uppercase' }}>{stage}</Text>
+          <Text style={{ color: '#818cf8', fontSize: 4, fontWeight: '700', fontFamily: 'monospace', textTransform: 'uppercase' }}>{stage}</Text>
           <Text style={{ color: '#6b6b80', fontSize: 3, fontFamily: 'monospace' }}>{xp}xp</Text>
         </View>
-        <View style={{ height: 2, backgroundColor: '#1a1a28', borderRadius: 1, overflow: 'hidden', marginTop: 1 }}>
-          <View style={{ width: `${xpProgress}%` as any, height: '100%', backgroundColor: petInfo?.color || '#6366f1', borderRadius: 1 }} />
+        <View style={{ height: 2, backgroundColor: '#0a0a18', borderRadius: 1, overflow: 'hidden', marginTop: 1 }}>
+          <View style={{ width: `${xpProgress}%` as any, height: '100%', backgroundColor: petInfo?.color || '#818cf8', borderRadius: 1 }} />
         </View>
       </View>
 
       {/* Stat bars */}
       <View style={{ width: '100%', gap: 1 }}>
-        {statBar(stats.hunger, '#22c55e', '\u{1F356}')}
-        {statBar(stats.happiness, '#f59e0b', '\u{1F3BE}')}
-        {statBar(stats.energy, '#3b82f6', '\u26A1')}
+        {statBar(stats.hunger, '#22c55e', '\u{1F35A}')}
+        {statBar(stats.happiness, '#c084fc', '\u{1F49C}')}
+        {statBar(stats.energy, '#38bdf8', '\u26A1')}
+        {statBar(stats.cleanliness, '#818cf8', '\u2728')}
       </View>
 
-      {/* Action buttons popup */}
+      {/* Achievement badges */}
+      {earnedAchievements.length > 0 && (
+        <View style={{ flexDirection: 'row', gap: 1, marginTop: 1 }}>
+          {PET_ACHIEVEMENTS.filter(a => earnedAchievements.includes(a.id)).map(a => (
+            <Text key={a.id} style={{ fontSize: 5 }}>{a.icon}</Text>
+          ))}
+        </View>
+      )}
+
+      {/* Main action buttons popup */}
       {showActions && (
         <View style={{
           position: 'absolute', bottom: -2, left: -2, right: -2,
-          backgroundColor: '#1a1a28', borderWidth: 1, borderColor: '#2a2a3e',
-          borderRadius: 4, padding: 3, flexDirection: 'row', gap: 3, justifyContent: 'center', zIndex: 10,
+          backgroundColor: '#0a0a1e', borderWidth: 1, borderColor: '#2a2a4e',
+          borderRadius: 4, padding: 3, zIndex: 10,
         }}>
-          <Pressable onPress={(e) => { e.stopPropagation?.(); handleFeed(); }}
-            style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#22c55e15', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
-            <Text style={{ fontSize: 8 }}>{'\u{1F356}'}</Text>
-            <Text style={{ color: '#22c55e', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>FEED</Text>
-          </Pressable>
-          <Pressable onPress={(e) => { e.stopPropagation?.(); handlePlay(); }}
-            style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#f59e0b15', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
-            <Text style={{ fontSize: 8 }}>{'\u{1F3BE}'}</Text>
-            <Text style={{ color: '#f59e0b', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>PLAY</Text>
-          </Pressable>
-          <Pressable onPress={(e) => { e.stopPropagation?.(); handleRest(); }}
-            style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#3b82f615', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
-            <Text style={{ fontSize: 8 }}>{'\u{1F4A4}'}</Text>
-            <Text style={{ color: '#3b82f6', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>REST</Text>
-          </Pressable>
-          {stats.mood === 'dead' && (
-            <Pressable onPress={(e) => { e.stopPropagation?.(); handleReset(); }}
-              style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#ef444415', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
-              <Text style={{ fontSize: 8 }}>{'\u{1F95A}'}</Text>
-              <Text style={{ color: '#ef4444', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>NEW</Text>
+          <View style={{ flexDirection: 'row', gap: 2, justifyContent: 'center', flexWrap: 'wrap' }}>
+            <Pressable onPress={(e) => { e.stopPropagation?.(); setShowActions(false); setShowFood(true); }}
+              style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#22c55e15', ...CP }}>
+              <Text style={{ fontSize: 8 }}>{'\u{1F35A}'}</Text>
+              <Text style={{ color: '#22c55e', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>FEED</Text>
             </Pressable>
-          )}
+            <Pressable onPress={(e) => { e.stopPropagation?.(); handlePlay(); }}
+              style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#c084fc15', ...CP }}>
+              <Text style={{ fontSize: 8 }}>{'\u{1F3BE}'}</Text>
+              <Text style={{ color: '#c084fc', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>PLAY</Text>
+            </Pressable>
+            <Pressable onPress={(e) => { e.stopPropagation?.(); handleRest(); }}
+              style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#38bdf815', ...CP }}>
+              <Text style={{ fontSize: 8 }}>{'\u{1F4A4}'}</Text>
+              <Text style={{ color: '#38bdf8', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>REST</Text>
+            </Pressable>
+            <Pressable onPress={(e) => { e.stopPropagation?.(); handleBath(); }}
+              style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#818cf815', ...CP }}>
+              <Text style={{ fontSize: 8 }}>{'\u{1F6BF}'}</Text>
+              <Text style={{ color: '#818cf8', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>BATH</Text>
+            </Pressable>
+            <Pressable onPress={(e) => { e.stopPropagation?.(); setShowActions(false); setShowTricks(true); }}
+              style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#fbbf2415', ...CP }}>
+              <Text style={{ fontSize: 8 }}>{'\u{1F3AA}'}</Text>
+              <Text style={{ color: '#fbbf24', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>TRICK</Text>
+            </Pressable>
+            <Pressable onPress={(e) => { e.stopPropagation?.(); setShowActions(false); setShowAccessories(true); }}
+              style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#f472b615', ...CP }}>
+              <Text style={{ fontSize: 8 }}>{'\u{1F451}'}</Text>
+              <Text style={{ color: '#f472b6', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>GEAR</Text>
+            </Pressable>
+            {stats.mood === 'sick' && (
+              <Pressable onPress={(e) => { e.stopPropagation?.(); handleMedicine(); }}
+                style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#ef444415', ...CP }}>
+                <Text style={{ fontSize: 8 }}>{'\u{1F48A}'}</Text>
+                <Text style={{ color: '#ef4444', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>MED</Text>
+              </Pressable>
+            )}
+            {stats.mood === 'dead' && (
+              <Pressable onPress={(e) => { e.stopPropagation?.(); handleReset(); }}
+                style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#ef444415', ...CP }}>
+                <Text style={{ fontSize: 8 }}>{'\u{1F95A}'}</Text>
+                <Text style={{ color: '#ef4444', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>RESPAWN</Text>
+              </Pressable>
+            )}
+          </View>
+        </View>
+      )}
+
+      {/* Food picker popup */}
+      {showFood && (
+        <View style={{
+          position: 'absolute', bottom: -2, left: -2, right: -2,
+          backgroundColor: '#0a0a1e', borderWidth: 1, borderColor: '#2a2a4e',
+          borderRadius: 4, padding: 3, zIndex: 10,
+        }}>
+          <Text style={{ color: '#818cf8', fontSize: 4, fontWeight: '900', fontFamily: 'monospace', textAlign: 'center', marginBottom: 2 }}>FEED COMPANION</Text>
+          <View style={{ flexDirection: 'row', gap: 2, justifyContent: 'center', flexWrap: 'wrap' }}>
+            {PET_FOOD_TYPES.map(f => {
+              const info = PET_FOOD_INFO[f];
+              const canAfford = gold >= info.cost;
+              return (
+                <Pressable key={f} onPress={(e) => { e.stopPropagation?.(); if (canAfford) handleFeed(f); }}
+                  style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: canAfford ? '#22c55e10' : '#333', opacity: canAfford ? 1 : 0.4, ...CP }}>
+                  <Text style={{ fontSize: 8 }}>{info.icon}</Text>
+                  <Text style={{ color: '#ccc', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>{info.name}</Text>
+                  <Text style={{ color: info.cost > 0 ? '#fbbf24' : '#22c55e', fontSize: 3, fontFamily: 'monospace' }}>
+                    {info.cost > 0 ? `${info.cost}\u2B50` : 'FREE'}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <Pressable onPress={(e) => { e.stopPropagation?.(); setShowFood(false); setShowActions(true); }} style={{ marginTop: 2, alignItems: 'center', ...CP }}>
+            <Text style={{ color: '#666', fontSize: 3, fontFamily: 'monospace' }}>BACK</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* Tricks popup */}
+      {showTricks && (
+        <View style={{
+          position: 'absolute', bottom: -2, left: -2, right: -2,
+          backgroundColor: '#0a0a1e', borderWidth: 1, borderColor: '#2a2a4e',
+          borderRadius: 4, padding: 3, zIndex: 10,
+        }}>
+          <Text style={{ color: '#fbbf24', fontSize: 4, fontWeight: '900', fontFamily: 'monospace', textAlign: 'center', marginBottom: 2 }}>TRICKS</Text>
+          <View style={{ flexDirection: 'row', gap: 2, justifyContent: 'center', flexWrap: 'wrap' }}>
+            {(Object.entries(PET_TRICK_INFO) as [PetTrick, typeof PET_TRICK_INFO[PetTrick]][]).map(([key, info]) => {
+              const stages: PetStage[] = ['egg', 'baby', 'teen', 'adult', 'legendary'];
+              const canDo = stages.indexOf(stage) >= stages.indexOf(info.minStage);
+              return (
+                <Pressable key={key} onPress={(e) => { e.stopPropagation?.(); if (canDo) handleTrick(key); }}
+                  style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: canDo ? '#fbbf2410' : '#333', opacity: canDo ? 1 : 0.3, ...CP }}>
+                  <Text style={{ fontSize: 8 }}>{info.icon}</Text>
+                  <Text style={{ color: '#ccc', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>{info.name}</Text>
+                  <Text style={{ color: '#fbbf24', fontSize: 3, fontFamily: 'monospace' }}>+{info.xpReward}xp</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <Pressable onPress={(e) => { e.stopPropagation?.(); setShowTricks(false); setShowActions(true); }} style={{ marginTop: 2, alignItems: 'center', ...CP }}>
+            <Text style={{ color: '#666', fontSize: 3, fontFamily: 'monospace' }}>BACK</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* Accessories popup */}
+      {showAccessories && (
+        <View style={{
+          position: 'absolute', bottom: -2, left: -2, right: -2,
+          backgroundColor: '#0a0a1e', borderWidth: 1, borderColor: '#2a2a4e',
+          borderRadius: 4, padding: 3, zIndex: 10,
+        }}>
+          <Text style={{ color: '#f472b6', fontSize: 4, fontWeight: '900', fontFamily: 'monospace', textAlign: 'center', marginBottom: 2 }}>SPACE GEAR</Text>
+          <View style={{ flexDirection: 'row', gap: 2, justifyContent: 'center', flexWrap: 'wrap' }}>
+            {(Object.entries(PET_ACCESSORY_INFO) as [PetAccessory, typeof PET_ACCESSORY_INFO[PetAccessory]][]).filter(([k]) => k !== 'none').map(([key, info]) => {
+              const owned = accessory === key;
+              const canAfford = gold >= info.cost;
+              return (
+                <Pressable key={key} onPress={(e) => { e.stopPropagation?.(); if (owned) { setAccessory('none'); } else if (canAfford) { handleBuyAccessory(key as PetAccessory); } }}
+                  style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: owned ? '#f472b620' : canAfford ? '#f472b610' : '#333', opacity: owned || canAfford ? 1 : 0.3, ...CP }}>
+                  <Text style={{ fontSize: 8 }}>{info.icon}</Text>
+                  <Text style={{ color: '#ccc', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>{info.name}</Text>
+                  <Text style={{ color: owned ? '#f472b6' : '#fbbf24', fontSize: 3, fontFamily: 'monospace' }}>
+                    {owned ? 'EQUIPPED' : `${info.cost}\u2B50`}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <Pressable onPress={(e) => { e.stopPropagation?.(); setShowAccessories(false); setShowActions(true); }} style={{ marginTop: 2, alignItems: 'center', ...CP }}>
+            <Text style={{ color: '#666', fontSize: 3, fontFamily: 'monospace' }}>BACK</Text>
+          </Pressable>
         </View>
       )}
 
       {/* Pet type picker */}
       {showPicker && (
         <View style={{
-          position: 'absolute', top: 10, left: -2, right: -2,
-          backgroundColor: '#1a1a28', borderWidth: 1, borderColor: '#2a2a3e',
-          borderRadius: 4, padding: 3, flexDirection: 'row', gap: 2, justifyContent: 'center', zIndex: 10,
+          position: 'absolute', top: 12, left: -4, right: -4,
+          backgroundColor: '#0a0a1e', borderWidth: 1, borderColor: '#2a2a4e',
+          borderRadius: 4, padding: 3, flexDirection: 'row', gap: 2, justifyContent: 'center', flexWrap: 'wrap', zIndex: 10,
         }}>
           {PET_TYPES.map(pt => (
             <Pressable
               key={pt}
-              onPress={(e) => { e.stopPropagation?.(); setActivePetType(pt); setName(PET_INFO[pt].name); setShowPicker(false); handleReset(); }}
+              onPress={(e) => { e.stopPropagation?.(); setActivePetType(pt); setName(PET_INFO[pt].name); closeAllPopups(); handleReset(); }}
               style={{
                 alignItems: 'center', padding: 2, borderRadius: 3,
                 backgroundColor: activePetType === pt ? PET_INFO[pt].color + '20' : 'transparent',
-                ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+                ...CP,
               }}
             >
               <Text style={{ fontSize: 10 }}>{PET_INFO[pt].stages.baby}</Text>

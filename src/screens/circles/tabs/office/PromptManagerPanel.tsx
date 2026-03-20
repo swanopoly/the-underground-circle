@@ -26,7 +26,8 @@ type DetailTab = 'edit' | 'versions' | 'labels' | 'test';
 // ─── Known models for config dropdown ───────────────────────────────────────
 const MODEL_OPTIONS = [
   'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5',
-  'gpt-4o', 'gpt-4o-mini', 'gemini-2.0-flash', 'gemini-2.0-pro',
+  'gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini', 'o4-mini',
+  'gemini-2.5-flash', 'gemini-2.5-pro',
 ];
 
 // ─── Label colors ───────────────────────────────────────────────────────────

@@ -467,8 +467,8 @@ export default function GitHubTab({ circleId }: { circleId: string }) {
     <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
       <Text style={styles.sectionTitle}>GitHub Integration</Text>
       <Text style={styles.desc}>
-        Connect GitHub repos to receive push, PR, issue, release, and CI events
-        in your circle's chat and activity feed.
+        Connect GitHub repos to receive push, PR, CI, deploy, security alerts,
+        and community events in your circle's chat and activity feed.
       </Text>
 
       {ghUser ? (
@@ -568,9 +568,22 @@ function eventIcon(type: string): string {
   switch (type) {
     case 'push': return '>';
     case 'pull_request': return '#';
+    case 'pull_request_review': return 'R';
     case 'issues': return '!';
     case 'release': return '@';
     case 'workflow_run': return '*';
+    case 'check_run': return 'C';
+    case 'check_suite': return 'C';
+    case 'deployment': return 'D';
+    case 'deployment_status': return 'D';
+    case 'code_scanning_alert': return '~';
+    case 'secret_scanning_alert': return '~';
+    case 'dependabot_alert': return '~';
+    case 'projects_v2_item': return 'P';
+    case 'discussion': return 'Q';
+    case 'discussion_comment': return 'Q';
+    case 'star': return 'S';
+    case 'fork': return 'F';
     default: return '-';
   }
 }

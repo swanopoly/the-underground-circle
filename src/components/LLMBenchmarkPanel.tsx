@@ -4,13 +4,25 @@
  * Horizontal bar chart showing benchmark scores for various LLMs,
  * from top-tier (Opus, GPT-4) down to small models and BlackSwan.
  * Tracks training progress over time as BlackSwan improves.
+ *
+ * Includes a "Model Explorer" tab that fetches trending text-generation
+ * models from the Hugging Face Hub API.
  */
 
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, Pressable } from 'react-native';
+import React, { useState, useEffect, useCallback } from 'react';
+import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, TextInput } from 'react-native';
 import {
   PIXEL_COLORS, GRID, PX,
 } from '../lib/pixelDesign';
+import {
+  fetchTrendingModels,
+  searchModels,
+  fetchModelDetails,
+  formatCount,
+  shortModelName,
+  type HFModel,
+  type HFModelDetail,
+} from '../lib/huggingfaceHub';
 
 // ─── Benchmark Categories ────────────────────────────────────────────
 
@@ -95,6 +107,13 @@ const MODELS: ModelScore[] = [
     scores: { overall: 91, mmlu: 91, humaneval: 85, gsm8k: 93, hellaswag: 95, arc: 95 },
   },
   {
+    name: 'Qwen 3 235B MoE',
+    tier: 'frontier',
+    color: '#9333ea',
+    params: '235B (22B active)',
+    scores: { overall: 90, mmlu: 90, humaneval: 84, gsm8k: 92, hellaswag: 94, arc: 94 },
+  },
+  {
     name: 'Grok 3',
     tier: 'frontier',
     color: '#ef4444',
@@ -102,6 +121,13 @@ const MODELS: ModelScore[] = [
     scores: { overall: 89, mmlu: 88, humaneval: 84, gsm8k: 92, hellaswag: 94, arc: 93 },
   },
   // ─── Frontier (2025 gen) ───
+  {
+    name: 'GPT-4.1',
+    tier: 'frontier',
+    color: '#10b981',
+    params: '~1.8T',
+    scores: { overall: 89, mmlu: 89, humaneval: 88, gsm8k: 95, hellaswag: 95, arc: 96 },
+  },
   {
     name: 'GPT-4o',
     tier: 'frontier',
@@ -260,7 +286,10 @@ interface Props {
   accentColor?: string;
 }
 
+type PanelTab = 'benchmarks' | 'explorer';
+
 export default function LLMBenchmarkPanel({ accentColor = '#6366f1' }: Props) {
+  const [activeTab, setActiveTab] = useState<PanelTab>('benchmarks');
   const [activeBenchmark, setActiveBenchmark] = useState<BenchmarkKey>('overall');
   const [showAllTiers, setShowAllTiers] = useState(true);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
@@ -282,10 +311,46 @@ export default function LLMBenchmarkPanel({ accentColor = '#6366f1' }: Props) {
           <Text style={styles.headerIconText}>|=|</Text>
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>LLM BENCHMARK COMPARISON</Text>
-          <Text style={styles.headerSub}>Track BlackSwan training progress vs industry models</Text>
+          <Text style={styles.headerTitle}>LLM BENCH</Text>
+          <Text style={styles.headerSub}>Benchmarks & trending models from Hugging Face</Text>
         </View>
       </View>
+
+      {/* Tab selector */}
+      <View style={styles.tabRow}>
+        <Pressable
+          onPress={() => setActiveTab('benchmarks')}
+          style={[
+            styles.tabBtn,
+            activeTab === 'benchmarks' && { backgroundColor: accentColor + '15', borderColor: accentColor + '40' },
+          ]}
+        >
+          <Text style={[
+            styles.tabBtnText,
+            activeTab === 'benchmarks' && { color: accentColor },
+          ]}>BENCHMARKS</Text>
+        </Pressable>
+        <Pressable
+          onPress={() => setActiveTab('explorer')}
+          style={[
+            styles.tabBtn,
+            activeTab === 'explorer' && { backgroundColor: '#f59e0b15', borderColor: '#f59e0b40' },
+          ]}
+        >
+          <Text style={[
+            styles.tabBtnText,
+            activeTab === 'explorer' && { color: '#f59e0b' },
+          ]}>MODEL EXPLORER</Text>
+        </Pressable>
+      </View>
+
+      {/* Model Explorer Tab */}
+      {activeTab === 'explorer' && (
+        <ModelExplorer accentColor={accentColor} />
+      )}
+
+      {/* Benchmarks Tab */}
+      {activeTab === 'benchmarks' && (<>
 
       {/* Benchmark selector */}
       <View style={styles.benchmarkRow}>
@@ -453,7 +518,295 @@ export default function LLMBenchmarkPanel({ accentColor = '#6366f1' }: Props) {
           {'Scores update after each training round + benchmark eval.'}
         </Text>
       </View>
+
+      </>)}
     </ScrollView>
+  );
+}
+
+// ─── Model Explorer Component ─────────────────────────────────────────
+
+function ModelExplorer({ accentColor }: { accentColor: string }) {
+  const [models, setModels] = useState<HFModel[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [expandedModelId, setExpandedModelId] = useState<string | null>(null);
+  const [expandedDetail, setExpandedDetail] = useState<HFModelDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+
+  // Fetch trending models on mount
+  useEffect(() => {
+    loadTrending();
+  }, []);
+
+  const loadTrending = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchTrendingModels(20);
+      setModels(data);
+    } catch (err: any) {
+      setError(err.message || 'Failed to fetch trending models');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const handleSearch = useCallback(async () => {
+    const q = searchQuery.trim();
+    if (!q) {
+      loadTrending();
+      return;
+    }
+    setIsSearching(true);
+    setError(null);
+    try {
+      const data = await searchModels(q, 20);
+      setModels(data);
+    } catch (err: any) {
+      setError(err.message || 'Search failed');
+    } finally {
+      setIsSearching(false);
+    }
+  }, [searchQuery, loadTrending]);
+
+  const handleExpand = useCallback(async (modelId: string) => {
+    if (expandedModelId === modelId) {
+      setExpandedModelId(null);
+      setExpandedDetail(null);
+      return;
+    }
+    setExpandedModelId(modelId);
+    setExpandedDetail(null);
+    setDetailLoading(true);
+    try {
+      const detail = await fetchModelDetails(modelId);
+      setExpandedDetail(detail);
+    } catch {
+      // Detail fetch failed — just show basic info
+    } finally {
+      setDetailLoading(false);
+    }
+  }, [expandedModelId]);
+
+  const handleClearSearch = useCallback(() => {
+    setSearchQuery('');
+    loadTrending();
+  }, [loadTrending]);
+
+  // Determine pipeline tag color
+  const tagColor = (tag: string): string => {
+    if (tag === 'text-generation') return '#22c55e';
+    if (tag === 'text2text-generation') return '#06b6d4';
+    if (tag === 'image-text-to-text') return '#ec4899';
+    if (tag === 'feature-extraction') return '#8b5cf6';
+    return PIXEL_COLORS.text2;
+  };
+
+  return (
+    <View style={explorerStyles.wrapper}>
+      {/* Search bar */}
+      <View style={explorerStyles.searchRow}>
+        <View style={explorerStyles.searchInputWrap}>
+          <Text style={explorerStyles.searchPrefix}>{'>'}</Text>
+          <TextInput
+            style={explorerStyles.searchInput}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            onSubmitEditing={handleSearch}
+            placeholder="Search HF models..."
+            placeholderTextColor={PIXEL_COLORS.text3}
+            returnKeyType="search"
+          />
+          {searchQuery.length > 0 && (
+            <Pressable onPress={handleClearSearch} style={explorerStyles.clearBtn}>
+              <Text style={explorerStyles.clearBtnText}>X</Text>
+            </Pressable>
+          )}
+        </View>
+        <Pressable onPress={handleSearch} style={explorerStyles.searchBtn}>
+          <Text style={explorerStyles.searchBtnText}>
+            {isSearching ? '...' : 'SEARCH'}
+          </Text>
+        </Pressable>
+      </View>
+
+      {/* Section label */}
+      <View style={explorerStyles.sectionLabelRow}>
+        <Text style={explorerStyles.sectionLabel}>
+          {searchQuery.trim() ? 'SEARCH RESULTS' : 'TRENDING ON HUGGING FACE'}
+        </Text>
+        {!loading && !searchQuery.trim() && (
+          <Pressable onPress={loadTrending} style={explorerStyles.refreshBtn}>
+            <Text style={explorerStyles.refreshBtnText}>REFRESH</Text>
+          </Pressable>
+        )}
+      </View>
+
+      {/* Loading state */}
+      {loading && (
+        <View style={explorerStyles.centerState}>
+          <ActivityIndicator color="#f59e0b" size="small" />
+          <Text style={explorerStyles.stateText}>Fetching models from Hugging Face...</Text>
+        </View>
+      )}
+
+      {/* Error state */}
+      {error && !loading && (
+        <View style={explorerStyles.errorCard}>
+          <Text style={explorerStyles.errorIcon}>!</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={explorerStyles.errorTitle}>FETCH FAILED</Text>
+            <Text style={explorerStyles.errorText}>{error}</Text>
+          </View>
+          <Pressable onPress={loadTrending} style={explorerStyles.retryBtn}>
+            <Text style={explorerStyles.retryBtnText}>RETRY</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* Model list */}
+      {!loading && !error && models.length === 0 && (
+        <View style={explorerStyles.centerState}>
+          <Text style={explorerStyles.stateText}>No models found</Text>
+        </View>
+      )}
+
+      {!loading && !error && models.map((model, i) => {
+        const isExpanded = expandedModelId === model.id;
+        return (
+          <View key={model.id}>
+            <Pressable
+              onPress={() => handleExpand(model.id)}
+              style={[
+                explorerStyles.modelCard,
+                isExpanded && explorerStyles.modelCardExpanded,
+              ]}
+            >
+              {/* Rank / trending indicator */}
+              <View style={explorerStyles.modelRank}>
+                <Text style={explorerStyles.modelRankText}>#{i + 1}</Text>
+                {model.trendingScore != null && model.trendingScore > 0 && (
+                  <Text style={explorerStyles.trendingArrow}>^</Text>
+                )}
+              </View>
+
+              {/* Model info */}
+              <View style={explorerStyles.modelInfo}>
+                <Text style={explorerStyles.modelName} numberOfLines={1}>
+                  {shortModelName(model.id)}
+                </Text>
+                <Text style={explorerStyles.modelAuthor} numberOfLines={1}>
+                  {model.author || 'unknown'}
+                </Text>
+              </View>
+
+              {/* Stats */}
+              <View style={explorerStyles.modelStats}>
+                <View style={explorerStyles.statItem}>
+                  <Text style={explorerStyles.statValue}>{formatCount(model.downloads)}</Text>
+                  <Text style={explorerStyles.statLabel}>DL</Text>
+                </View>
+                <View style={explorerStyles.statItem}>
+                  <Text style={explorerStyles.statValue}>{formatCount(model.likes)}</Text>
+                  <Text style={explorerStyles.statLabel}>LIKE</Text>
+                </View>
+              </View>
+
+              {/* Pipeline tag */}
+              {model.pipeline_tag && (
+                <View style={[explorerStyles.pipelineTag, { borderColor: tagColor(model.pipeline_tag) + '40' }]}>
+                  <Text style={[explorerStyles.pipelineTagText, { color: tagColor(model.pipeline_tag) }]} numberOfLines={1}>
+                    {model.pipeline_tag}
+                  </Text>
+                </View>
+              )}
+
+              {/* Arrow */}
+              <Text style={explorerStyles.expandArrow}>{isExpanded ? 'v' : '>'}</Text>
+            </Pressable>
+
+            {/* Expanded detail */}
+            {isExpanded && (
+              <View style={explorerStyles.detailPanel}>
+                {detailLoading && (
+                  <View style={explorerStyles.detailLoading}>
+                    <ActivityIndicator color="#f59e0b" size="small" />
+                  </View>
+                )}
+
+                {/* Basic info always available */}
+                <View style={explorerStyles.detailRow}>
+                  <Text style={explorerStyles.detailKey}>ID</Text>
+                  <Text style={explorerStyles.detailVal} selectable>{model.id}</Text>
+                </View>
+
+                {model.lastModified && (
+                  <View style={explorerStyles.detailRow}>
+                    <Text style={explorerStyles.detailKey}>Updated</Text>
+                    <Text style={explorerStyles.detailVal}>
+                      {new Date(model.lastModified).toLocaleDateString()}
+                    </Text>
+                  </View>
+                )}
+
+                {/* Tags */}
+                {model.tags.length > 0 && (
+                  <View style={explorerStyles.tagsRow}>
+                    {model.tags.slice(0, 8).map(tag => (
+                      <View key={tag} style={explorerStyles.tagChip}>
+                        <Text style={explorerStyles.tagChipText}>{tag}</Text>
+                      </View>
+                    ))}
+                    {model.tags.length > 8 && (
+                      <Text style={explorerStyles.tagMore}>+{model.tags.length - 8}</Text>
+                    )}
+                  </View>
+                )}
+
+                {/* Extra details from fetchModelDetails */}
+                {expandedDetail?.safetensors?.total != null && (
+                  <View style={explorerStyles.detailRow}>
+                    <Text style={explorerStyles.detailKey}>Parameters</Text>
+                    <Text style={explorerStyles.detailVal}>
+                      {formatCount(expandedDetail.safetensors.total)}
+                    </Text>
+                  </View>
+                )}
+
+                {expandedDetail?.createdAt && (
+                  <View style={explorerStyles.detailRow}>
+                    <Text style={explorerStyles.detailKey}>Created</Text>
+                    <Text style={explorerStyles.detailVal}>
+                      {new Date(expandedDetail.createdAt).toLocaleDateString()}
+                    </Text>
+                  </View>
+                )}
+
+                {/* HF link */}
+                <View style={explorerStyles.detailRow}>
+                  <Text style={explorerStyles.detailKey}>Link</Text>
+                  <Text style={[explorerStyles.detailVal, { color: '#f59e0b' }]} selectable>
+                    huggingface.co/{model.id}
+                  </Text>
+                </View>
+              </View>
+            )}
+          </View>
+        );
+      })}
+
+      {/* Footer */}
+      {!loading && models.length > 0 && (
+        <View style={explorerStyles.footer}>
+          <Text style={explorerStyles.footerText}>
+            {models.length} models :: data from Hugging Face Hub API
+          </Text>
+        </View>
+      )}
+    </View>
   );
 }
 
@@ -504,6 +857,29 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: PIXEL_COLORS.text2,
     marginTop: 2,
+  },
+
+  // Tab selector
+  tabRow: {
+    flexDirection: 'row',
+    gap: GRID.sm,
+    marginBottom: GRID.lg,
+  },
+  tabBtn: {
+    flex: 1,
+    paddingVertical: GRID.sm + 2,
+    borderWidth: 2,
+    borderColor: PIXEL_COLORS.border1,
+    borderRadius: 2,
+    backgroundColor: PIXEL_COLORS.bg2,
+    alignItems: 'center',
+  },
+  tabBtnText: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    fontWeight: '700',
+    color: PIXEL_COLORS.text2,
+    letterSpacing: 1,
   },
 
   // Benchmark selector
@@ -752,5 +1128,327 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: PIXEL_COLORS.text2,
     lineHeight: 16,
+  },
+});
+
+// ─── Model Explorer Styles ────────────────────────────────────────────
+
+const explorerStyles = StyleSheet.create({
+  wrapper: {
+    gap: GRID.sm,
+  },
+
+  // Search
+  searchRow: {
+    flexDirection: 'row',
+    gap: GRID.sm,
+    marginBottom: GRID.sm,
+  },
+  searchInputWrap: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: PIXEL_COLORS.bg2,
+    borderWidth: 2,
+    borderColor: PIXEL_COLORS.border1,
+    borderRadius: 2,
+    paddingHorizontal: GRID.sm,
+  },
+  searchPrefix: {
+    fontFamily: 'monospace',
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#f59e0b',
+    marginRight: GRID.xs,
+  },
+  searchInput: {
+    flex: 1,
+    fontFamily: 'monospace',
+    fontSize: 11,
+    color: PIXEL_COLORS.text0,
+    paddingVertical: GRID.sm,
+    outlineStyle: 'none',
+  } as any,
+  clearBtn: {
+    width: 20,
+    height: 20,
+    borderRadius: 2,
+    backgroundColor: PIXEL_COLORS.bg3,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  clearBtnText: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    fontWeight: '700',
+    color: PIXEL_COLORS.text2,
+  },
+  searchBtn: {
+    paddingHorizontal: GRID.md,
+    paddingVertical: GRID.sm,
+    backgroundColor: '#f59e0b15',
+    borderWidth: 2,
+    borderColor: '#f59e0b30',
+    borderRadius: 2,
+    justifyContent: 'center',
+  },
+  searchBtnText: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#f59e0b',
+    letterSpacing: 1,
+  },
+
+  // Section label
+  sectionLabelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: GRID.sm,
+  },
+  sectionLabel: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    fontWeight: '700',
+    color: PIXEL_COLORS.text2,
+    letterSpacing: 2,
+  },
+  refreshBtn: {
+    paddingHorizontal: GRID.sm,
+    paddingVertical: GRID.xs,
+    borderWidth: 1,
+    borderColor: PIXEL_COLORS.border1,
+    borderRadius: 2,
+    backgroundColor: PIXEL_COLORS.bg2,
+  },
+  refreshBtnText: {
+    fontFamily: 'monospace',
+    fontSize: 8,
+    fontWeight: '700',
+    color: PIXEL_COLORS.text2,
+    letterSpacing: 1,
+  },
+
+  // States
+  centerState: {
+    paddingVertical: GRID.xxl,
+    alignItems: 'center',
+    gap: GRID.sm,
+  },
+  stateText: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    color: PIXEL_COLORS.text2,
+  },
+  errorCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: GRID.sm,
+    padding: GRID.md,
+    backgroundColor: '#ef444410',
+    borderWidth: 2,
+    borderColor: '#ef444430',
+    borderRadius: 2,
+  },
+  errorIcon: {
+    fontFamily: 'monospace',
+    fontSize: 14,
+    fontWeight: '900',
+    color: '#ef4444',
+    width: 20,
+    textAlign: 'center',
+  },
+  errorTitle: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#ef4444',
+    letterSpacing: 1,
+  },
+  errorText: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    color: PIXEL_COLORS.text2,
+    marginTop: 2,
+  },
+  retryBtn: {
+    paddingHorizontal: GRID.md,
+    paddingVertical: GRID.sm,
+    borderWidth: 1,
+    borderColor: '#ef444430',
+    borderRadius: 2,
+  },
+  retryBtnText: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#ef4444',
+    letterSpacing: 1,
+  },
+
+  // Model card
+  modelCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: GRID.sm,
+    paddingVertical: GRID.sm + 2,
+    paddingHorizontal: GRID.sm,
+    backgroundColor: PIXEL_COLORS.bg2,
+    borderWidth: 1,
+    borderColor: PIXEL_COLORS.border0,
+    borderRadius: 2,
+  },
+  modelCardExpanded: {
+    borderColor: '#f59e0b30',
+    backgroundColor: '#f59e0b08',
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
+  },
+  modelRank: {
+    width: 28,
+    alignItems: 'center',
+  },
+  modelRankText: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    fontWeight: '700',
+    color: PIXEL_COLORS.text2,
+  },
+  trendingArrow: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#22c55e',
+    marginTop: -2,
+  },
+  modelInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  modelName: {
+    fontFamily: 'monospace',
+    fontSize: 11,
+    fontWeight: '700',
+    color: PIXEL_COLORS.text0,
+  },
+  modelAuthor: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    color: PIXEL_COLORS.text2,
+    marginTop: 1,
+  },
+  modelStats: {
+    flexDirection: 'row',
+    gap: GRID.md,
+  },
+  statItem: {
+    alignItems: 'center',
+  },
+  statValue: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    fontWeight: '700',
+    color: PIXEL_COLORS.text1,
+  },
+  statLabel: {
+    fontFamily: 'monospace',
+    fontSize: 7,
+    fontWeight: '600',
+    color: PIXEL_COLORS.text3,
+    letterSpacing: 1,
+    marginTop: 1,
+  },
+  pipelineTag: {
+    paddingHorizontal: GRID.xs + 2,
+    paddingVertical: 2,
+    borderWidth: 1,
+    borderRadius: 2,
+    backgroundColor: PIXEL_COLORS.bg3,
+    maxWidth: 100,
+  },
+  pipelineTagText: {
+    fontFamily: 'monospace',
+    fontSize: 7,
+    fontWeight: '600',
+  },
+  expandArrow: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    fontWeight: '700',
+    color: PIXEL_COLORS.text3,
+    width: 16,
+    textAlign: 'center',
+  },
+
+  // Expanded detail panel
+  detailPanel: {
+    backgroundColor: PIXEL_COLORS.bg2,
+    borderWidth: 1,
+    borderTopWidth: 0,
+    borderColor: '#f59e0b30',
+    borderBottomLeftRadius: 2,
+    borderBottomRightRadius: 2,
+    padding: GRID.md,
+    gap: GRID.sm,
+    marginBottom: GRID.xs,
+  },
+  detailLoading: {
+    paddingVertical: GRID.sm,
+    alignItems: 'center',
+  },
+  detailRow: {
+    flexDirection: 'row',
+    gap: GRID.md,
+  },
+  detailKey: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    fontWeight: '700',
+    color: PIXEL_COLORS.text2,
+    width: 70,
+    letterSpacing: 1,
+  },
+  detailVal: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    color: PIXEL_COLORS.text1,
+    flex: 1,
+  },
+  tagsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: GRID.xs,
+    marginTop: GRID.xs,
+  },
+  tagChip: {
+    paddingHorizontal: GRID.xs + 2,
+    paddingVertical: 2,
+    backgroundColor: PIXEL_COLORS.bg3,
+    borderWidth: 1,
+    borderColor: PIXEL_COLORS.border1,
+    borderRadius: 2,
+  },
+  tagChipText: {
+    fontFamily: 'monospace',
+    fontSize: 8,
+    color: PIXEL_COLORS.text2,
+  },
+  tagMore: {
+    fontFamily: 'monospace',
+    fontSize: 8,
+    color: PIXEL_COLORS.text3,
+    alignSelf: 'center',
+  },
+
+  // Footer
+  footer: {
+    paddingVertical: GRID.lg,
+    alignItems: 'center',
+  },
+  footerText: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    color: PIXEL_COLORS.text3,
   },
 });
