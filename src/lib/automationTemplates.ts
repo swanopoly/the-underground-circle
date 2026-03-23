@@ -921,6 +921,7 @@ export const TEMPLATE_CATEGORIES = [
   { key: 'ops' as const, label: 'Operations', icon: '⚙️' },
   { key: 'trading' as const, label: 'Trading', icon: '📈' },
   { key: 'github' as const, label: 'GitHub', icon: '🐙' },
+  { key: 'learning' as const, label: 'AI Tools', icon: '🤗' },
 ];
 
 // ─── Suggested Template Groups ──────────────────────────────────────────────
@@ -1933,6 +1934,154 @@ Post as a structured review comment. Flag anything that should block merge.`,
         spirit: 'sr-engineer',
         suggested: true,
         suggestedIconBg: '#0d0d2a',
+      },
+    ],
+  },
+  // ── HuggingSwan / AI Tools ─────────────────────────────────────────────────
+  {
+    key: 'huggingswan',
+    label: 'HuggingSwan AI Tools',
+    icon: '🤗',
+    templates: [
+      {
+        id: 'suggest-hf-daily-digest-summary',
+        name: 'Daily digest summary',
+        icon: '📝',
+        description: 'Summarize all check-ins and activity from the past 24h into a concise digest using HuggingFace summarization.',
+        category: 'learning',
+        trigger_type: 'schedule',
+        cron_expression: 'daily',
+        agent: 'BlackSwan',
+        model: 'claude-haiku',
+        output_target: 'activity',
+        prompt: `You have access to HuggingFace AI tools. Gather all check-ins and activity from the last 24 hours and use the hf_summarize tool to create a concise daily digest.
+
+Circle: {{circle_name}}
+Members: {{members}}
+Recent check-ins: {{check_ins}}
+Recent tasks: {{recent_tasks}}
+
+Create a 3-4 sentence summary of what happened today. Post it as a daily digest.`,
+        include_context: { members: true, check_ins: true, tasks: true, analytics: true },
+        spirit: 'pm',
+        suggested: true,
+        suggestedIconBg: '#1a0a2e',
+      },
+      {
+        id: 'suggest-hf-pr-sentiment-check',
+        name: 'PR sentiment analyzer',
+        icon: '🔍',
+        description: 'Analyze sentiment of GitHub PR comments and flag toxic or frustrated messages using HuggingFace classification.',
+        category: 'learning',
+        trigger_type: 'event',
+        event_config: { provider: 'github', event: 'pull_request' },
+        agent: 'BlackSwan',
+        model: 'claude-haiku',
+        output_target: 'activity',
+        prompt: `A GitHub event occurred: {{event}}
+
+Use the hf_classify tool to analyze the sentiment of any PR comments or descriptions. If the sentiment is negative or frustrated, flag it and suggest how to address the concern constructively.
+
+Focus on: is anyone frustrated? Is there disagreement? How can the team resolve it?`,
+        include_context: { tasks: true, rooms: true },
+        spirit: 'coach',
+        suggested: true,
+        suggestedIconBg: '#0a1a2e',
+      },
+      {
+        id: 'suggest-hf-standup-image',
+        name: 'Visual standup report',
+        icon: '🖼️',
+        description: 'Generate a visual status image summarizing the team\'s progress using FLUX text-to-image.',
+        category: 'learning',
+        trigger_type: 'schedule',
+        cron_expression: 'daily',
+        agent: 'BlackSwan',
+        model: 'claude-haiku',
+        output_target: 'activity',
+        prompt: `Generate a visual standup report for the circle.
+
+Circle: {{circle_name}}
+Tasks completed today: {{recent_tasks}}
+Goals: {{goals}}
+Stuck tasks: {{stuck_tasks}}
+
+First, summarize the team's status in 2-3 bullet points. Then use the hf_generate_image tool to create an abstract visualization representing the team's energy and progress. Use a prompt like "abstract data visualization, [team mood], modern minimalist digital art".`,
+        include_context: { members: true, tasks: true, goals: true, streaks: true },
+        spirit: 'designer',
+        suggested: true,
+        suggestedIconBg: '#2a0a1a',
+      },
+      {
+        id: 'suggest-hf-code-review-translate',
+        name: 'Multilingual code review',
+        icon: '🌍',
+        description: 'Auto-translate code review comments for international team members using HuggingFace translation.',
+        category: 'learning',
+        trigger_type: 'event',
+        event_config: { provider: 'github', event: 'push' },
+        agent: 'BlackSwan',
+        model: 'claude-haiku',
+        output_target: 'chat',
+        prompt: `A code event occurred: {{event}}
+
+If there are review comments or commit messages, use the hf_translate tool to translate key points for non-English team members. Default target: Spanish (es_XX) and French (fr_XX).
+
+Also summarize the technical changes in plain language.`,
+        include_context: { rooms: true, members: true },
+        spirit: 'sr-engineer',
+        suggested: true,
+        suggestedIconBg: '#0a2a1a',
+      },
+      {
+        id: 'suggest-hf-weekly-report-gen',
+        name: 'AI weekly report generator',
+        icon: '📊',
+        description: 'Generate a comprehensive weekly report with AI summarization, sentiment analysis, and a visual header image.',
+        category: 'learning',
+        trigger_type: 'schedule',
+        cron_expression: 'weekly',
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'activity',
+        prompt: `Generate a comprehensive weekly report for the circle using multiple AI tools.
+
+Circle: {{circle_name}}
+Members: {{members}}
+Goals: {{goals}}
+Tasks: {{recent_tasks}}
+Stuck tasks: {{stuck_tasks}}
+Streaks: {{streaks}}
+
+Steps:
+1. Use hf_summarize to create an executive summary of the week's activity
+2. Use hf_classify with labels "productive,stalled,accelerating,at-risk" to assess team momentum
+3. Use hf_generate_image to create a banner image: "weekly progress report, [team mood], corporate infographic style, clean minimal"
+4. Compile into a formatted report with: Executive Summary, Team Momentum, Key Wins, Blockers, Next Week Focus`,
+        include_context: { members: true, check_ins: true, tasks: true, goals: true, streaks: true, analytics: true },
+        spirit: 'pm',
+        suggested: true,
+        suggestedIconBg: '#1a1a0a',
+      },
+      {
+        id: 'suggest-hf-ask-open-model',
+        name: 'Second opinion from open models',
+        icon: '🧠',
+        description: 'Get a second opinion on architectural decisions from Llama, DeepSeek, or Qwen via HuggingFace.',
+        category: 'learning',
+        trigger_type: 'manual',
+        agent: 'BlackSwan',
+        model: 'claude-haiku',
+        output_target: 'chat',
+        prompt: `The user wants a second opinion from an open-source model. Use the hf_chat tool to ask the same question to a different model.
+
+Try using: meta-llama/Llama-3.3-70B-Instruct for general advice, or deepseek-ai/DeepSeek-R1 for reasoning tasks.
+
+Compare the open model's answer with your own analysis. Note where they agree and disagree.`,
+        include_context: { tasks: true, rooms: true },
+        spirit: 'architect',
+        suggested: true,
+        suggestedIconBg: '#0d1a2a',
       },
     ],
   },

@@ -29,6 +29,7 @@ import { CircleOfficeAgent } from '../lib/circleOffice';
 import { awardPoints } from '../services/rewardService';
 import { getPointsForModel } from '../lib/badges';
 import AutomationsPanel from './AutomationsPanel';
+import TrainingDashboard from './TrainingDashboard';
 import SpawnAgentPanel from './SpawnAgentPanel';
 import { ProviderKey, PROVIDER_MODELS, LLMProvider, ThinkingLevel } from '../lib/llmProviders';
 import { PROVIDER_META } from '../lib/connectionManager';
@@ -1181,7 +1182,7 @@ const shellStyles = StyleSheet.create({
 
 // ─── Terminal sub-tabs ────────────────────────────────────────────────────────
 
-type TerminalTab = 'commands' | 'automations' | 'shell' | 'spawn' | 'key';
+type TerminalTab = 'commands' | 'automations' | 'shell' | 'spawn' | 'key' | 'train';
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
@@ -1804,6 +1805,13 @@ export default function OfficeTerminal({
             </Text>
           </Pressable>
         ))}
+        {/* Train tab */}
+        <Pressable
+          onPress={() => setTerminalTab('train')}
+          style={[styles.spawnBtn, terminalTab === 'train' && styles.spawnBtnActive]}
+        >
+          <Text style={[styles.spawnBtnText, terminalTab === 'train' && { color: BS.accent }]}>TRAIN</Text>
+        </Pressable>
         {/* Key reference button */}
         <Pressable
           onPress={() => setTerminalTab('key')}
@@ -1864,6 +1872,8 @@ export default function OfficeTerminal({
         />
       ) : terminalTab === 'shell' ? (
         <LocalShellPanel />
+      ) : terminalTab === 'train' ? (
+        <TrainingDashboard circleId={circleId} />
       ) : terminalTab === 'key' ? (
         <CommandKeyPanel onRunCommand={(cmd) => { setInput(cmd); setTerminalTab('commands'); }} />
       ) : terminalTab === 'automations' ? (
