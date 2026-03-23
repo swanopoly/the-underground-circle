@@ -37,7 +37,7 @@ function scanCodexProcesses() {
     // Look for codex CLI processes
     const cmd = process.platform === 'win32'
       ? 'tasklist /FI "IMAGENAME eq codex*" /FO CSV'
-      : 'ps aux | grep -E "codex|openai" | grep -v grep';
+      : 'ps aux | grep -E "codex|openai" | grep -v grep | grep -v "codex-bridge" | grep -v "node scripts"';
 
     exec(cmd, (err, stdout) => {
       if (err || !stdout.trim()) {
@@ -45,7 +45,13 @@ function scanCodexProcesses() {
         return;
       }
 
-      const lines = stdout.trim().split('\n').filter(l => l.includes('codex'));
+      // Filter out bridge process and node scripts to avoid self-detection
+      const lines = stdout.trim().split('\n').filter(l =>
+        l.includes('codex') &&
+        !l.includes('codex-bridge') &&
+        !l.includes('node scripts') &&
+        !l.includes('node /')  // Exclude node process running the bridge
+      );
       const sessions = lines.map((line, i) => {
         const pid = extractPid(line);
         return {
