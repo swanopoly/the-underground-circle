@@ -9,7 +9,7 @@
  * and Giza's dark depth aesthetic.
  */
 
-import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import CompartmentErrorBoundary from '../../../components/CompartmentErrorBoundary';
 import {
   View,
@@ -17,7 +17,6 @@ import {
   StyleSheet,
   Pressable,
   ScrollView,
-  ActivityIndicator,
   Animated,
   Platform,
   useWindowDimensions,
@@ -29,26 +28,26 @@ import {
   pixelCard, pixelInset, pixelHeader, pixelLabel, pixelBody, pixelMuted,
   iconBoxStyle,
 } from '../../../lib/pixelDesign';
+import { LoadingScreen } from '../../../components/LoadingWave';
+import CostDashboard from '../../../components/CostDashboard';
+import AgentPerformanceMetrics from '../../../components/AgentPerformanceMetrics';
+import FarmHealthDashboard from '../../../components/FarmHealthDashboard';
+import OfficeAnalyticsPanel from '../../../components/OfficeAnalyticsPanel';
+import PixelOfficeCanvas from '../../../components/PixelOfficeCanvas';
+import OfficeTerminal from '../../../components/OfficeTerminal';
+import SessionTagsDashboard from '../../../components/SessionTagsDashboard';
+import SharedMemoryPanel from '../../../components/SharedMemoryPanel';
+import ProjectRoomsPanel from '../../../components/ProjectRoomsPanel';
+import PromptManagerPanel from './office/PromptManagerPanel';
+import TraceViewer from '../../../components/TraceViewer';
+import LLMBenchmarkPanel from '../../../components/LLMBenchmarkPanel';
+import TradingBotPanel from '../../../components/TradingBotPanel';
+import Backpack3DScene from '../../../components/backpack3d/Backpack3DScene';
+import SplineBackpackScene from '../../../components/backpack3d/SplineBackpackScene';
+import DevicePanel from '../../../components/DevicePanel';
+import ModelLabPanel from '../../../components/ModelLabPanel';
 
-// Lazy-load dashboard components — only one is visible at a time
-const CostDashboard = lazy(() => import('../../../components/CostDashboard'));
-const AgentPerformanceMetrics = lazy(() => import('../../../components/AgentPerformanceMetrics'));
-const FarmHealthDashboard = lazy(() => import('../../../components/FarmHealthDashboard'));
-const OfficeAnalyticsPanel = lazy(() => import('../../../components/OfficeAnalyticsPanel'));
-const PixelOfficeCanvas = lazy(() => import('../../../components/PixelOfficeCanvas'));
-const OfficeTerminal = lazy(() => import('../../../components/OfficeTerminal'));
-const SessionTagsDashboard = lazy(() => import('../../../components/SessionTagsDashboard'));
-const SharedMemoryPanel = lazy(() => import('../../../components/SharedMemoryPanel'));
-const ProjectRoomsPanel = lazy(() => import('../../../components/ProjectRoomsPanel'));
-const PromptManagerPanel = lazy(() => import('./office/PromptManagerPanel'));
-const TraceViewer = lazy(() => import('../../../components/TraceViewer'));
-const LLMBenchmarkPanel = lazy(() => import('../../../components/LLMBenchmarkPanel'));
-const TradingBotPanel = lazy(() => import('../../../components/TradingBotPanel'));
-const Backpack3DScene = lazy(() => import('../../../components/backpack3d/Backpack3DScene'));
-const SplineBackpackScene = lazy(() => import('../../../components/backpack3d/SplineBackpackScene'));
-const DevicePanel = lazy(() => import('../../../components/DevicePanel'));
-
-type Compartment = 'none' | 'cost' | 'terminal' | 'farm' | 'performance' | 'projects' | 'analytics' | 'canvas' | 'prompts' | 'traces' | 'llm-bench' | 'trading' | 'devices';
+type Compartment = 'none' | 'cost' | 'terminal' | 'farm' | 'performance' | 'projects' | 'analytics' | 'canvas' | 'prompts' | 'traces' | 'llm-bench' | 'model-lab' | 'trading' | 'devices';
 
 // Pixel-art icon blocks instead of emoji
 const COMPARTMENTS: {
@@ -60,16 +59,17 @@ const COMPARTMENTS: {
 }[] = [
   { key: 'cost',        label: 'Cost Tracker',   iconLabel: '$',  color: '#f59e0b', description: 'Spending analytics & budget alerts' },
   { key: 'terminal',    label: 'Command Center',  iconLabel: '>_', color: '#22c55e', description: 'Terminal & agent commands' },
-  { key: 'traces',      label: 'Traces',          iconLabel: '?',  color: '#06b6d4', description: 'Request traces & replay' },
-  { key: 'farm',        label: 'Agent Farm',       iconLabel: '+',  color: '#ec4899', description: 'Health monitoring & status' },
-  { key: 'performance', label: 'Performance',      iconLabel: '#',  color: '#6366f1', description: 'Top performers & metrics' },
-  { key: 'projects',    label: 'Projects',         iconLabel: '[]', color: '#f97316', description: 'Tags, memory & project rooms' },
-  { key: 'analytics',   label: 'Analytics',        iconLabel: '//', color: '#3b82f6', description: 'Deep office analytics' },
-  { key: 'canvas',      label: 'Canvas',           iconLabel: '::',  color: '#8b5cf6', description: 'Pixel agent visualization' },
-  { key: 'prompts',     label: 'Prompts',          iconLabel: 'P',  color: '#14b8a6', description: 'Prompt library & management' },
-  { key: 'llm-bench',   label: 'LLM Bench',        iconLabel: '|=|', color: '#f59e0b', description: 'BlackSwan vs industry models' },
-  { key: 'trading',     label: 'Trading Bot',      iconLabel: '◎',   color: '#9945FF', description: 'Solana trading, DCA, alerts & P&L' },
-  { key: 'devices',     label: 'Devices',          iconLabel: '🖨',   color: '#38bdf8', description: 'Printers, 3D printers, serial & USB' },
+  { key: 'traces',      label: 'Traces',          iconLabel: '?',  color: '#3b82f6', description: 'Request traces & replay' },
+  { key: 'farm',        label: 'Agent Farm',       iconLabel: '+',  color: '#22c55e', description: 'Health monitoring & status' },
+  { key: 'performance', label: 'Performance',      iconLabel: '#',  color: '#fbbf24', description: 'Top performers & metrics' },
+  { key: 'projects',    label: 'Projects',         iconLabel: '[]', color: '#6366f1', description: 'Tags, memory & project rooms' },
+  { key: 'analytics',   label: 'Analytics',        iconLabel: '//', color: '#a855f7', description: 'Deep office analytics' },
+  { key: 'canvas',      label: 'Canvas',           iconLabel: '::',  color: '#22d3ee', description: 'Pixel agent visualization' },
+  { key: 'prompts',     label: 'Prompts',          iconLabel: 'P',  color: '#f43f5e', description: 'Prompt library & management' },
+  { key: 'llm-bench',   label: 'LLM Bench',        iconLabel: '|=|', color: '#3b82f6', description: 'BlackSwan vs industry models' },
+  { key: 'model-lab',   label: 'Model Lab',        iconLabel: '🧬',  color: '#8b5cf6', description: 'Train, optimize & deploy custom LLMs' },
+  { key: 'trading',     label: 'Trading Bot',      iconLabel: '◎',   color: '#22d3ee', description: 'Solana trading, DCA, alerts & P&L' },
+  { key: 'devices',     label: 'Devices',          iconLabel: '🖨',   color: '#a855f7', description: 'Printers, 3D printers, serial & USB' },
 ];
 
 interface Props {
@@ -111,7 +111,6 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
 
         <View style={styles.compartmentContent}>
           <CompartmentErrorBoundary name={meta.label} color={meta.color} onBack={handleBack}>
-          <Suspense fallback={<View style={styles.loadingContainer}><ActivityIndicator color="#6366f1" size="small" /></View>}>
           {activeCompartment === 'cost' && (
             <CostDashboard
               sessions={data.enrichedSessions}
@@ -196,6 +195,9 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
               accentColor={accentColor}
             />
           )}
+          {activeCompartment === 'model-lab' && (
+            <ModelLabPanel circleId={circleId} />
+          )}
           {activeCompartment === 'trading' && (
             <TradingBotPanel
               circleId={circleId}
@@ -208,7 +210,6 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
               circleId={circleId}
             />
           )}
-          </Suspense>
           </CompartmentErrorBoundary>
         </View>
       </View>
@@ -217,12 +218,7 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
 
   // ─── Overview — The open backpack ──────────────────────────────
   if (data.loading) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator color="#6366f1" size="large" />
-        <Text style={styles.loadingText}>Packing your backpack...</Text>
-      </View>
-    );
+    return <LoadingScreen />;
   }
 
   // Compute quick stats
@@ -274,7 +270,7 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
             label="Agents"
             value={String(data.agentCount)}
             subtitle={`${activeAgents} active`}
-            color="#22c55e"
+            color="#6366f1"
             onPress={() => setActiveCompartment('farm')}
             delay={100}
           />
@@ -303,9 +299,9 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
       {data.budgetAlerts.length > 0 && (
         <View style={[styles.alertBanner, {
           borderColor: data.budgetAlerts[0].level === 'critical' ? '#ef4444' :
-                        data.budgetAlerts[0].level === 'danger' ? '#f59e0b' : '#6366f140',
-          backgroundColor: data.budgetAlerts[0].level === 'critical' ? '#ef444410' :
-                            data.budgetAlerts[0].level === 'danger' ? '#f59e0b10' : '#6366f108',
+                        data.budgetAlerts[0].level === 'danger' ? '#f59e0b' : '#ffffff15',
+          backgroundColor: data.budgetAlerts[0].level === 'critical' ? '#ef444415' :
+                            data.budgetAlerts[0].level === 'danger' ? '#f59e0b15' : '#ffffff08',
         }]}>
           <Text style={styles.alertIcon}>!</Text>
           <Text style={styles.alertText}>{data.budgetAlerts[0].message}</Text>
@@ -364,32 +360,18 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
 
         {/* Spline View — real 3D model */}
         {viewMode === 'spline' && Platform.OS === 'web' ? (
-          <Suspense fallback={
-            <View style={styles.scene3dLoading}>
-              <ActivityIndicator color="#6366f1" size="small" />
-              <Text style={styles.loadingText}>Loading Spline backpack...</Text>
-            </View>
-          }>
             <SplineBackpackScene
               data={data}
               onOpenCompartment={(key: string) => setActiveCompartment(key as Compartment)}
             />
-          </Suspense>
         ) : null}
 
         {/* Procedural 3D View */}
         {viewMode === '3d' && Platform.OS === 'web' ? (
-          <Suspense fallback={
-            <View style={styles.scene3dLoading}>
-              <ActivityIndicator color="#6366f1" size="small" />
-              <Text style={styles.loadingText}>Loading 3D backpack...</Text>
-            </View>
-          }>
             <Backpack3DScene
               data={data}
               onOpenCompartment={(key: string) => setActiveCompartment(key as Compartment)}
             />
-          </Suspense>
         ) : null}
 
         {/* List View (2D cards) */}
@@ -439,6 +421,10 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
                 break;
               case 'llm-bench':
                 miniStat = '29 models · 6 benchmarks';
+                break;
+              case 'model-lab':
+                miniStat = 'Train · Optimize · Deploy';
+                hasActivity = true;
                 break;
               case 'trading':
                 miniStat = data.featuredTradeCount > 0
@@ -665,8 +651,8 @@ const styles = StyleSheet.create({
     backgroundColor: PIXEL_COLORS.bg2,
   },
   viewToggleActive: {
-    borderColor: '#6366f140',
-    backgroundColor: '#6366f110',
+    borderColor: '#6366f1',
+    backgroundColor: '#6366f115',
   },
   viewToggleText: {
     fontSize: 10,
@@ -683,7 +669,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     gap: 12,
-    backgroundColor: '#0a0a12',
+    backgroundColor: '#0a0a0a',
     borderRadius: 4,
   },
   compartmentGrid: { gap: GRID.sm },
