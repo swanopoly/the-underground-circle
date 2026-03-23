@@ -788,6 +788,44 @@ const BLACKSWAN_TOOLS = [
       required: ["text"],
     },
   },
+  // ── Zero-Shot Classification ─────────────────────────────────────────
+  {
+    name: "hf_zero_shot",
+    description: "Classify text into custom categories without training. Use when you need to categorize messages, issues, or content into specific labels the user defines.",
+    input_schema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Text to classify" },
+        labels: { type: "string", description: "Comma-separated labels (e.g. 'bug,feature,question,improvement')" },
+      },
+      required: ["text", "labels"],
+    },
+  },
+  // ── Speech Recognition ──────────────────────────────────────────────
+  {
+    name: "hf_transcribe",
+    description: "Transcribe audio to text using Whisper. Use when the user shares audio files or voice notes that need transcription.",
+    input_schema: {
+      type: "object",
+      properties: {
+        audio_url: { type: "string", description: "URL of audio file to transcribe" },
+      },
+      required: ["audio_url"],
+    },
+  },
+  // ── Sentence Similarity ─────────────────────────────────────────────
+  {
+    name: "hf_similarity",
+    description: "Compare how similar two texts are. Use for finding duplicate tasks, matching issues, or comparing descriptions.",
+    input_schema: {
+      type: "object",
+      properties: {
+        text1: { type: "string", description: "First text" },
+        text2: { type: "string", description: "Second text" },
+      },
+      required: ["text1", "text2"],
+    },
+  },
   // ── Code Generation (Qwen3-Coder) ──────────────────────────────────────
   {
     name: "hf_code",
@@ -1045,6 +1083,48 @@ async function executeToolCall(
         if (result.error) return JSON.stringify({ error: result.error });
         const dims = Array.isArray(result.result) ? result.result.length : 0;
         return JSON.stringify({ success: true, dimensions: dims, model: result.model, note: `Generated ${dims}-dimensional embedding vector.` });
+      }
+
+      case "hf_zero_shot": {
+        const labels = toolInput.labels.split(",").map((l: string) => l.trim());
+        const result = await callHfProxy("zero-shot-classification", toolInput.text, "facebook/bart-large-mnli", {
+          candidate_labels: labels,
+        });
+        if (result.error) return JSON.stringify({ error: result.error });
+        await logHfActivity(supabase, circleId, "hf_zero_shot", toolInput.text.slice(0, 80), result.result);
+        return JSON.stringify({ success: true, classification: result.result, model: result.model });
+      }
+
+      case "hf_transcribe": {
+        const result = await callHfProxy("speech-to-text", toolInput.audio_url, "openai/whisper-large-v3");
+        if (result.error) return JSON.stringify({ error: result.error });
+        const transcript = result.result?.text || JSON.stringify(result.result);
+        await logHfActivity(supabase, circleId, "hf_transcribe", "audio transcription", { transcript: transcript.slice(0, 200) });
+        return JSON.stringify({ success: true, transcript, model: result.model });
+      }
+
+      case "hf_similarity": {
+        // Get embeddings for both texts and compute cosine similarity
+        const [emb1, emb2] = await Promise.all([
+          callHfProxy("embeddings", toolInput.text1),
+          callHfProxy("embeddings", toolInput.text2),
+        ]);
+        if (emb1.error) return JSON.stringify({ error: emb1.error });
+        if (emb2.error) return JSON.stringify({ error: emb2.error });
+
+        // Compute cosine similarity
+        let similarity = 0;
+        if (Array.isArray(emb1.result) && Array.isArray(emb2.result)) {
+          const v1 = emb1.result.flat();
+          const v2 = emb2.result.flat();
+          const dot = v1.reduce((s: number, a: number, i: number) => s + a * (v2[i] || 0), 0);
+          const mag1 = Math.sqrt(v1.reduce((s: number, a: number) => s + a * a, 0));
+          const mag2 = Math.sqrt(v2.reduce((s: number, a: number) => s + a * a, 0));
+          similarity = mag1 && mag2 ? dot / (mag1 * mag2) : 0;
+        }
+        const pct = (similarity * 100).toFixed(1);
+        await logHfActivity(supabase, circleId, "hf_similarity", `${pct}% similar`, { similarity, text1: toolInput.text1.slice(0, 50), text2: toolInput.text2.slice(0, 50) });
+        return JSON.stringify({ success: true, similarity, percentage: `${pct}%`, interpretation: similarity > 0.8 ? "Very similar" : similarity > 0.5 ? "Somewhat similar" : "Not similar" });
       }
 
       case "hf_code": {
