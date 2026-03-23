@@ -158,16 +158,20 @@ export default function AgentControlCard({
   const handleDisconnect = useCallback(async () => {
     setSaving(true);
     try {
+      // Kill agent process + bridge if running
       if (onRunCommand) {
-        await onRunCommand(KILL_COMMANDS[provider] || 'true');
+        await onRunCommand(KILL_COMMANDS[provider] || 'true').catch(() => {});
         const port = BRIDGE_PORTS[provider] || 7778;
-        await onRunCommand(`lsof -ti:${port} | xargs kill -9 2>/dev/null; echo "✓ Bridge on :${port} killed"`);
+        await onRunCommand(`lsof -ti:${port} | xargs kill -9 2>/dev/null; echo "✓ Bridge on :${port} killed"`).catch(() => {});
       }
+      // DELETE the agent from the circle (not just mark offline — removes the pixel agent)
       const { data: auth } = await supabase.auth.getUser();
       if (auth.user) {
-        await supabase.from('circle_office_agents').update({
-          status: 'offline', current_task: 'Disconnected — bridge killed', updated_at: new Date().toISOString(),
-        }).eq('circle_id', circleId).eq('owner_id', auth.user.id).eq('name', agent.name);
+        await supabase.from('circle_office_agents')
+          .delete()
+          .eq('circle_id', circleId)
+          .eq('owner_id', auth.user.id)
+          .eq('name', agent.name);
       }
     } catch {}
     setSaving(false);
