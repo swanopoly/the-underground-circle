@@ -1237,10 +1237,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   }
 
   // Merge DB-backed agents that have no corresponding live session
-  // This keeps idle/building agents visible as pixel agents even when the bridge disconnects
+  // Keep ALL user's agents visible as pixel agents — even idle/offline ones stay on the floor
   const liveAgentNames = new Set(rawAgents.map(a => a.name));
   const myDbAgents = mergedCircleAgents.filter(a =>
-    a.ownerId === currentUserId && a.status !== 'offline' && !liveAgentNames.has(a.name)
+    a.ownerId === currentUserId && !liveAgentNames.has(a.name)
   );
   for (const dbAgent of myDbAgents) {
     rawAgents.push({

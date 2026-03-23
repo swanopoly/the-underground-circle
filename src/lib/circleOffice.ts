@@ -126,15 +126,10 @@ export function createBlackSwanAgent(circleId: string): CircleOfficeAgent {
 
 // ─── DB row mapper ────────────────────────────────────────────────────────────
 
-const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour — idle agents go offline after this
-
 function fromRow(row: any, currentUserId?: string): CircleOfficeAgent {
-  // Auto-transition idle → offline after 1 hour of no activity
-  let status = row.status || 'offline';
-  if (status === 'idle' && row.last_active_at) {
-    const idleMs = Date.now() - new Date(row.last_active_at).getTime();
-    if (idleMs > IDLE_TIMEOUT_MS) status = 'offline';
-  }
+  // Keep agents visible regardless of idle time — never auto-transition to offline
+  // Users can manually disconnect via the AgentControlCard if needed
+  let status = row.status || 'idle';
 
   return {
     id: row.id,
