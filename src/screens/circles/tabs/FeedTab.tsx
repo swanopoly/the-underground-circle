@@ -401,6 +401,7 @@ function AgentTasksPanel({
   onCardPress: (task: KanbanTask) => void;
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [filterAgent, setFilterAgent] = useState<string | null>(null);
 
   // Collect all agent tasks sorted by newest first
   const agentTasks = useMemo(() => {
@@ -415,10 +416,37 @@ function AgentTasksPanel({
     ).slice(0, 50);
   }, [tasksByColumn]);
 
-  const processingCount = agentTasks.filter(t => {
-    const meta = parseAgentTaskMeta(t);
-    return meta.status === 'processing';
-  }).length;
+  const filteredTasks = filterAgent
+    ? agentTasks.filter(t => parseAgentTaskMeta(t).agentName === filterAgent)
+    : agentTasks;
+
+  const processingCount = agentTasks.filter(t => parseAgentTaskMeta(t).status === 'processing').length;
+
+  // Extract unique agent names + match to agent records for spirit info
+  const activeAgentNames = useMemo(() => {
+    const names = new Set(agentTasks.map(t => parseAgentTaskMeta(t).agentName));
+    return Array.from(names);
+  }, [agentTasks]);
+
+  // Extract tool calls from task descriptions
+  const parseToolCalls = (desc: string): string[] => {
+    const tools: string[] = [];
+    const toolMatches = desc.match(/\*\*([a-z_]+)\*\*:/g);
+    if (toolMatches) {
+      for (const m of toolMatches) {
+        tools.push(m.replace(/\*\*/g, '').replace(':', ''));
+      }
+    }
+    // Also check for action summaries
+    const actionMatches = desc.match(/[✅❌] \*\*([a-z_]+)\*\*/g);
+    if (actionMatches) {
+      for (const m of actionMatches) {
+        const tool = m.replace(/[✅❌] \*\*/g, '').replace(/\*\*/g, '');
+        if (!tools.includes(tool)) tools.push(tool);
+      }
+    }
+    return tools;
+  };
 
   return (
     <View style={at.container}>
@@ -427,7 +455,7 @@ function AgentTasksPanel({
           <Text style={at.headerIcon}>{'\u2699'}</Text>
           <Text style={at.headerTitle}>AGENT TASKS</Text>
           <View style={at.countBadge}>
-            <Text style={at.countText}>{agentTasks.length}</Text>
+            <Text style={at.countText}>{filteredTasks.length}</Text>
           </View>
           {processingCount > 0 && (
             <View style={at.liveBadge}>
@@ -438,13 +466,40 @@ function AgentTasksPanel({
         </View>
       </View>
 
+      {/* Agent filter chips with spirit info */}
+      {activeAgentNames.length > 1 && (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ paddingHorizontal: 8, marginBottom: 4, maxHeight: 32 }}>
+          <Pressable
+            onPress={() => setFilterAgent(null)}
+            style={[at.filterChip, !filterAgent && at.filterChipActive]}
+          >
+            <Text style={[at.filterChipText, !filterAgent && { color: '#fff' }]}>All</Text>
+          </Pressable>
+          {activeAgentNames.map(name => {
+            const agent = agents.find(a => a.name === name);
+            const isActive = filterAgent === name;
+            return (
+              <Pressable
+                key={name}
+                onPress={() => setFilterAgent(isActive ? null : name)}
+                style={[at.filterChip, isActive && { borderColor: agent?.color || '#6366f1', backgroundColor: (agent?.color || '#6366f1') + '20' }]}
+              >
+                {agent?.spirit_emoji && <Text style={{ fontSize: 11, marginRight: 3 }}>{agent.spirit_emoji}</Text>}
+                <Text style={[at.filterChipText, isActive && { color: agent?.color || '#fff' }]}>{name}</Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+      )}
+
       <ScrollView style={at.list} contentContainerStyle={at.listContent} showsVerticalScrollIndicator={false}>
-        {agentTasks.map(task => {
+        {filteredTasks.map(task => {
           const meta = parseAgentTaskMeta(task);
           const agent = agents.find(a => a.name === meta.agentName);
           const color = agent?.color || '#e8e8e8';
           const isExpanded = expandedId === task.id;
           const timeStr = timeAgo(task.created_at);
+          const toolCalls = parseToolCalls(task.description || '');
 
           return (
             <Pressable
@@ -452,7 +507,7 @@ function AgentTasksPanel({
               onPress={() => onCardPress(task)}
               style={[at.card, meta.status === 'processing' && at.cardActive]}
             >
-              {/* Status + Agent row */}
+              {/* Status + Agent + Spirit row */}
               <View style={at.cardTopRow}>
                 <View style={at.statusRow}>
                   <View style={[
@@ -461,7 +516,11 @@ function AgentTasksPanel({
                     meta.status === 'failed' ? at.statusFailed :
                     at.statusDone,
                   ]} />
+                  {agent?.spirit_emoji && <Text style={{ fontSize: 12, marginRight: 3 }}>{agent.spirit_emoji}</Text>}
                   <Text style={[at.agentName, { color }]}>{meta.agentName}</Text>
+                  {agent?.spirit && (
+                    <Text style={at.spiritBadge}>{agent.spirit.replace(/-/g, ' ')}</Text>
+                  )}
                 </View>
                 <Text style={at.timeText}>{timeStr}</Text>
               </View>
@@ -470,6 +529,17 @@ function AgentTasksPanel({
               <Text style={at.promptText} numberOfLines={isExpanded ? 6 : 2}>
                 {meta.prompt || task.title}
               </Text>
+
+              {/* Tool call chips */}
+              {toolCalls.length > 0 && (
+                <View style={at.toolRow}>
+                  {toolCalls.map((tool, i) => (
+                    <View key={i} style={at.toolChip}>
+                      <Text style={at.toolChipText}>{tool}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
 
               {/* Metrics row (only for completed) */}
               {meta.status !== 'processing' && (meta.tokens || meta.duration) && (
@@ -514,7 +584,7 @@ function AgentTasksPanel({
           );
         })}
 
-        {agentTasks.length === 0 && (
+        {filteredTasks.length === 0 && (
           <View style={at.empty}>
             <Text style={at.emptyIcon}>{'\u2699'}</Text>
             <Text style={at.emptyText}>No agent tasks yet</Text>
@@ -1501,6 +1571,62 @@ const at = StyleSheet.create({
     color: '#333333',
     fontSize: 11,
     textAlign: 'center',
+  },
+  // Spirit + filter styles
+  spiritBadge: {
+    color: '#4b5563',
+    fontSize: 8,
+    fontWeight: '600',
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+    backgroundColor: '#1a1a1a',
+    borderRadius: 3,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    marginLeft: 4,
+    textTransform: 'capitalize' as any,
+    overflow: 'hidden' as any,
+  },
+  filterChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0a0a0a',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#1a1a1a',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginRight: 4,
+  },
+  filterChipActive: {
+    backgroundColor: '#6366f1',
+    borderColor: '#6366f1',
+  },
+  filterChipText: {
+    color: '#6b7280',
+    fontSize: 10,
+    fontWeight: '600',
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+  },
+  toolRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 3,
+    marginBottom: 4,
+  },
+  toolChip: {
+    backgroundColor: '#6366f110',
+    borderRadius: 3,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderWidth: 1,
+    borderColor: '#6366f130',
+  },
+  toolChipText: {
+    color: '#a5b4fc',
+    fontSize: 8,
+    fontWeight: '600',
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+    letterSpacing: 0.3,
   },
 });
 
