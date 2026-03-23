@@ -147,24 +147,28 @@ export async function startAgentAutoConnect() {
   // 1. Load saved connections
   let conns = await loadConnections();
 
-  // 2. Auto-discover OpenClaw gateway (tries both proxy and direct endpoints)
-  const { discovered } = await autoDiscoverLocalAgents(conns);
-  if (discovered) {
-    const existingOpenClaw = conns.find(c => c.provider === 'openclaw');
-    if (existingOpenClaw?.token) {
-      discovered.token = existingOpenClaw.token;
+  // 2. Auto-discover OpenClaw gateway (silently — skip if not running)
+  try {
+    const { discovered } = await autoDiscoverLocalAgents(conns);
+    if (discovered) {
+      const existingOpenClaw = conns.find(c => c.provider === 'openclaw');
+      if (existingOpenClaw?.token) {
+        discovered.token = existingOpenClaw.token;
+      }
+      conns = [...conns, discovered];
+      saveConnections(conns);
+      console.log('[agentAutoConnect] Auto-discovered OpenClaw at', discovered.endpoint);
     }
-    conns = [...conns, discovered];
-    saveConnections(conns);
-    console.log('[agentAutoConnect] Auto-discovered OpenClaw at', discovered.endpoint);
+  } catch {
+    // OpenClaw not running — that's fine, skip silently
   }
 
   _connections = conns;
   _notify();
 
-  // 3. Auto-connect all enabled connections
+  // 3. Auto-connect enabled connections (skip OpenClaw if no gateway found)
   for (const conn of conns) {
-    if (conn.enabled) {
+    if (conn.enabled && conn.status !== 'error') {
       _connectWithFallback(conn);
     }
   }
@@ -316,24 +320,28 @@ function _startRetryLoop() {
     _ocReconnectTimer = setInterval(async () => {
       if (!_running) return;
 
+      // Only retry connections that were previously connected (not ones that never connected)
       const failedConns = _connections.filter(
-        c => c.enabled && (c.status === 'error' || c.status === 'disconnected'),
+        c => c.enabled && (c.status === 'error' || c.status === 'disconnected') && c.lastConnected,
       );
 
       if (failedConns.length === 0) {
-        _retryAttempt = 0; // All connected, reset backoff
+        _retryAttempt = 0;
         return;
       }
 
       let anySuccess = false;
       for (const conn of failedConns) {
-        // Try the saved endpoint first, then fallbacks
-        const healthy = await _probeWithFallbacks(conn);
-        if (healthy) {
-          await _connectWithFallback(conn);
-          if (_connections.find(c => c.id === conn.id)?.status === 'connected') {
-            anySuccess = true;
+        try {
+          const healthy = await _probeWithFallbacks(conn);
+          if (healthy) {
+            await _connectWithFallback(conn);
+            if (_connections.find(c => c.id === conn.id)?.status === 'connected') {
+              anySuccess = true;
+            }
           }
+        } catch {
+          // Silent — don't spam console with connection errors
         }
       }
 

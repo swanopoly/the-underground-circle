@@ -40,11 +40,13 @@ export async function detectCodexBridge(): Promise<boolean> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch(`${BRIDGE_URL}/health`, { signal: controller.signal });
+    // Check sessions endpoint, not just health — only detect if actual sessions exist
+    const res = await fetch(`${BRIDGE_URL}/sessions`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return false;
     const data = await res.json();
-    return data?.ok === true;
+    const sessions = data?.sessions || [];
+    return sessions.length > 0; // Only "detected" when real sessions exist
   } catch {
     return false;
   }
