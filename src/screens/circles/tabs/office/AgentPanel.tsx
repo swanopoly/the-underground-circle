@@ -4,7 +4,6 @@ import { OfficeAgent, STATUS_COLORS } from '../../../../lib/officeAgents';
 import { PROVIDER_META } from '../../../../lib/connectionManager';
 import { SessionTag } from '../../../../lib/sessionTags';
 import SessionTagInput from '../../../../components/SessionTagInput';
-import AgentKillSwitch from '../../../../components/AgentKillSwitch';
 import AgentControlCard from '../../../../components/AgentControlCard';
 import { useAgentControl } from '../../../../services/hitlService';
 import PixelAgent from './PixelAgent';
@@ -70,6 +69,81 @@ function cacheHitPct(cachedTokens: number, totalInputTokens: number): string {
   if (!totalInputTokens) return '—';
   return Math.round((cachedTokens / totalInputTokens) * 100) + '%';
 }
+
+// ── SECTION: agent-quick-terminal — Inline AI chat with this specific agent ──
+
+function AgentQuickTerminal({ agentName, agentId, circleId }: { agentName: string; agentId: string; circleId: string }) {
+  const [input, setInput] = useState('');
+  const [output, setOutput] = useState('');
+  const [sending, setSending] = useState(false);
+
+  const handleSend = async () => {
+    if (!input.trim() || sending) return;
+    setSending(true);
+    setOutput('');
+    try {
+      const { data, error } = await supabase.functions.invoke('swanbot-ai', {
+        body: {
+          message: `@${agentName}: ${input}`,
+          circleId,
+          userId: (await supabase.auth.getUser()).data.user?.id,
+          targetAgentName: agentName,
+        },
+      });
+      if (error) throw error;
+      setOutput(data?.response || data?.text || JSON.stringify(data).slice(0, 500));
+    } catch (e: any) {
+      setOutput(`Error: ${e.message || 'Failed to reach agent'}`);
+    }
+    setSending(false);
+  };
+
+  return (
+    <View style={qtStyles.container} nativeID="section-agent-quick-terminal">
+      <Text style={qtStyles.label}>TALK TO {agentName.toUpperCase()}</Text>
+      <View style={qtStyles.inputRow}>
+        <Text style={qtStyles.prompt}>{'>'}</Text>
+        <TextInput
+          style={qtStyles.input}
+          value={input}
+          onChangeText={setInput}
+          placeholder={`Ask ${agentName} something...`}
+          placeholderTextColor="#3b3b5b"
+          onSubmitEditing={handleSend}
+          returnKeyType="send"
+          autoCapitalize="none"
+          multiline={false}
+        />
+        <Pressable
+          onPress={handleSend}
+          disabled={sending || !input.trim()}
+          style={[qtStyles.sendBtn, (!input.trim() || sending) && { opacity: 0.4 }]}
+        >
+          <Text style={qtStyles.sendText}>{sending ? '...' : '>'}</Text>
+        </Pressable>
+      </View>
+      {output ? (
+        <ScrollView style={qtStyles.output} nestedScrollEnabled>
+          <Text style={qtStyles.outputText} selectable>{output}</Text>
+        </ScrollView>
+      ) : null}
+    </View>
+  );
+}
+
+const qtStyles = StyleSheet.create({
+  container: { marginTop: 12, borderTopWidth: 1, borderTopColor: '#1a1a2e', paddingTop: 10 },
+  label: { color: '#6b7280', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: Platform.OS === 'web' ? 'monospace' : undefined, marginBottom: 6, paddingHorizontal: 12 },
+  inputRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#08081a', borderRadius: 8, borderWidth: 1, borderColor: '#1e1e3a', marginHorizontal: 12, paddingHorizontal: 8 },
+  prompt: { color: '#8b5cf6', fontSize: 14, fontWeight: '800', fontFamily: Platform.OS === 'web' ? 'monospace' : undefined, marginRight: 6 },
+  input: { flex: 1, color: '#e8e8f8', fontSize: 12, fontFamily: Platform.OS === 'web' ? 'monospace' : undefined, paddingVertical: 8, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any,
+  sendBtn: { backgroundColor: '#8b5cf6', borderRadius: 5, paddingHorizontal: 10, paddingVertical: 4 },
+  sendText: { color: '#fff', fontSize: 11, fontWeight: '800', fontFamily: Platform.OS === 'web' ? 'monospace' : undefined },
+  output: { backgroundColor: '#08081a', borderRadius: 8, borderWidth: 1, borderColor: '#1e1e3a', padding: 10, marginHorizontal: 12, marginTop: 6, maxHeight: 180 },
+  outputText: { color: '#c9d1e8', fontSize: 11, fontFamily: Platform.OS === 'web' ? 'monospace' : undefined, lineHeight: 16 },
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
 
 export default function AgentPanel({
   agent, onClose, isDesktop, onRenameAgent,
@@ -659,6 +733,11 @@ export default function AgentPanel({
             embedded
           />
         </View>
+      )}
+
+      {/* ── SECTION: agent-quick-terminal — Inline command to this agent ── */}
+      {circleId && (
+        <AgentQuickTerminal agentName={agent.name} agentId={agent.id} circleId={circleId} />
       )}
 
       </ScrollView>

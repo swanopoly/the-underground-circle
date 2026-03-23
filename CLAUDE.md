@@ -297,6 +297,37 @@ supabase/
 
 ---
 
+## Coding Conventions
+
+### Section Naming (nativeID)
+**Every significant section/container View MUST have a `nativeID` attribute** for identification. This makes it easy to reference specific UI sections when discussing changes.
+
+Format: `nativeID="section-{area}-{purpose}"`
+
+Examples:
+```
+nativeID="section-agent-controls"          — Agent power controls container
+nativeID="section-agent-bridge-status"     — Bridge health indicator
+nativeID="section-agent-power-buttons"     — Kill/Resume/Disconnect buttons
+nativeID="section-agent-quick-terminal"    — Inline AI chat in AgentPanel
+nativeID="section-agent-no-bridge"         — Bridge offline warning
+nativeID="section-feed-activity"           — Activity feed in FeedTab
+nativeID="section-feed-agent-tasks"        — Agent tasks panel in FeedTab
+nativeID="section-feed-ai-tools"           — HuggingSwan activity panel
+nativeID="section-office-toolbar"          — Office floor toolbar
+nativeID="section-terminal-input"          — Terminal command input
+```
+
+When creating new sections, always add `nativeID` so team members can reference it by name instead of line numbers.
+
+### Component Organization
+- Business logic hooks at the top of the component
+- Callbacks and handlers in the middle
+- Render sections clearly labeled with `{/* ── SECTION: name — description ── */}` comments
+- Styles at the bottom of the file
+
+---
+
 ## Architecture Notes
 
 ### Web Platform Stability (Critical — DO NOT REVERT)

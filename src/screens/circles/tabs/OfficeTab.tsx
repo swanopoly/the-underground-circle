@@ -110,7 +110,7 @@ import { fetchNFTs } from '../../../lib/crypto';
 import { NFT } from '../../../types';
 import AgentSetupWizard from '../../../components/AgentSetupWizard';
 import ConnectAgentModal from '../../../components/ConnectAgentModal';
-import AgentControlCard from '../../../components/AgentControlCard';
+// AgentControlCard is now embedded inside AgentPanel (not used directly here)
 import BadgeCelebration from '../../../components/BadgeCelebration';
 import RewardsPanel from '../../../components/RewardsPanel';
 import { useAllAgentPointsTracker, useUserRewards } from '../../../services/rewardService';
@@ -168,7 +168,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [userId, setUserId] = useState<string | undefined>();
   const [userEmail, setUserEmail] = useState<string | undefined>();
   const pendingApprovals = useAgentApprovals(circleId);
-  const [showControlCard, setShowControlCard] = useState(false);
+  // showControlCard removed — controls now embedded in AgentPanel
 
   // Agent control hook for selected agent
   const selectedSessionKey = selectedAgent?.sessionKey || '';
@@ -208,7 +208,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const handleDisconnectAgent = React.useCallback(() => {
     if (!selectedAgent) return;
     setSelectedAgent(null);
-    setShowControlCard(false);
   }, [selectedAgent]);
 
   // Load custom themes from Supabase

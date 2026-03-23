@@ -55,6 +55,7 @@ const BRIDGE_PORTS: Record<string, number> = {
   'claude-code': 7778,
   'codex': 7779,
   'gemini': 7780,
+  'openclaw': 18789,
 };
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -200,8 +201,8 @@ export default function AgentControlCard({
         <Text style={c.activityText} numberOfLines={2}>{agent.activity}</Text>
       ) : null}
 
-      {/* ── Power buttons ───────────────────────────────────────────────────── */}
-      <View style={c.powerRow}>
+      {/* ── SECTION: agent-power-buttons — Kill/Resume/Disconnect ─────── */}
+      <View style={c.powerRow} nativeID="section-agent-power-buttons">
         {isPaused ? (
           <Pressable style={[c.powerBtn, c.btnResume]} onPress={handleResume} disabled={saving}>
             <Text style={c.btnText}>{saving ? '...' : '▶ RESUME'}</Text>
@@ -214,9 +215,11 @@ export default function AgentControlCard({
         <Pressable style={[c.powerBtn, c.btnDisconnect]} onPress={handleDisconnect} disabled={saving}>
           <Text style={c.btnText}>⏻ DISCONNECT</Text>
         </Pressable>
-        <Pressable style={[c.powerBtn, c.btnPanel]} onPress={onOpenPanel}>
-          <Text style={c.btnText}>⚙ FULL PANEL</Text>
-        </Pressable>
+        {!embedded && (
+          <Pressable style={[c.powerBtn, c.btnPanel]} onPress={onOpenPanel}>
+            <Text style={c.btnText}>⚙ FULL PANEL</Text>
+          </Pressable>
+        )}
       </View>
 
       {/* ── Remote shell ────────────────────────────────────────────────────── */}

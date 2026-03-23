@@ -152,9 +152,14 @@ export function useAgentControl(
           event: '*',
           schema: 'public',
           table: 'agent_controls',
-          filter: 'circle_id=eq.' + circleId,
+          filter: `circle_id=eq.${circleId}`,
         },
-        () => getAgentControl(circleId, sessionKey).then(setControl),
+        (payload: any) => {
+          // Only refetch if this change is for our session
+          if (!payload.new?.session_key || payload.new.session_key === sessionKey) {
+            getAgentControl(circleId, sessionKey).then(setControl);
+          }
+        },
       )
       .subscribe();
     return () => { supabase.removeChannel(channel); };
