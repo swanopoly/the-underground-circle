@@ -32,6 +32,7 @@ import { loadAgentIdentities, type AgentIdentity } from '../../../lib/agentIdent
 import { storage } from '../../../lib/storage';
 import { useCircleAutomations, useDashboardStats } from '../../../services/automationService';
 
+import { supabase } from '../../../lib/supabase';
 import AgentTopBar from './kanban/AgentTopBar';
 import OrchestraPanel from './kanban/OrchestraPanel';
 import GoalsPanel from './kanban/GoalsPanel';
@@ -42,7 +43,7 @@ import GoalDetailModal from './kanban/GoalDetailModal';
 
 // ─── Water Flow Loading Animation ─────────────────────────────────────────
 
-const WAVE_COLORS = ['#6366f1', '#a855f7', '#ec4899', '#f43f5e', '#f59e0b', '#22c55e', '#06b6d4'];
+const WAVE_COLORS = ['#6366f1', '#a855f7', '#3b82f6', '#22c55e', '#f59e0b', '#ec4899', '#22d3ee'];
 let _loadingStyleInjected = false;
 
 function FeedLoadingAnimation() {
@@ -128,7 +129,7 @@ function TaskSearchBar({
           ref={searchInputRef as any}
           style={fb.searchInput}
           placeholder="Search tasks..."
-          placeholderTextColor="#444455"
+          placeholderTextColor="#444444"
           value={searchText}
           onChangeText={onSearchChange}
           maxLength={100}
@@ -144,7 +145,7 @@ function TaskSearchBar({
           const active = filterPriority === p;
           return (
             <Pressable key={p} onPress={() => onFilterPriority(active ? null : p)} style={[fb.filterChip, active && fb.filterChipActive]}>
-              <Text style={[fb.filterChipText, active && { color: '#e4e4ed' }]}>{PRIORITY_LABELS[p]}</Text>
+              <Text style={[fb.filterChipText, active && { color: '#e8e8e8' }]}>{PRIORITY_LABELS[p]}</Text>
             </Pressable>
           );
         })}
@@ -206,6 +207,190 @@ function parseAgentTaskMeta(task: KanbanTask): {
   };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// HuggingSwan Activity Panel — shows HF tool invocations from agent_activity
+// ═══════════════════════════════════════════════════════════════════════════════
+
+type HfActivity = {
+  id: string;
+  title: string;
+  body: string;
+  status: string;
+  metadata: any;
+  created_at: string;
+};
+
+function HuggingSwanPanel({ circleId }: { circleId: string }) {
+  const [activities, setActivities] = useState<HfActivity[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase
+        .from('agent_activity')
+        .select('id, title, body, status, metadata, created_at')
+        .eq('circle_id', circleId)
+        .eq('activity_type', 'tool_call')
+        .or('agent_name.eq.HuggingSwan,agent_name.eq.HF Proxy')
+        .order('created_at', { ascending: false })
+        .limit(30);
+      if (!cancelled) {
+        setActivities(data || []);
+        setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [circleId]);
+
+  // Realtime subscription
+  useEffect(() => {
+    const channel = supabase
+      .channel(`hf-activity-${circleId}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'agent_activity',
+        filter: `circle_id=eq.${circleId}`,
+      }, (payload: any) => {
+        const row = payload.new;
+        if (row.activity_type === 'tool_call' && (row.agent_name === 'HuggingSwan' || row.agent_name === 'HF Proxy')) {
+          setActivities(prev => [row, ...prev].slice(0, 30));
+        }
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [circleId]);
+
+  const parseBody = (body: string) => {
+    try { return JSON.parse(body); } catch { return null; }
+  };
+
+  if (loading) {
+    return (
+      <View style={hs.container}>
+        <Text style={hs.loading}>Loading HuggingSwan activity...</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={hs.container}>
+      <View style={hs.header}>
+        <Text style={hs.headerIcon}>🤗</Text>
+        <Text style={hs.headerTitle}>HUGGINGSWAN AI TOOLS</Text>
+        <View style={[at.countBadge, { marginLeft: 8 }]}>
+          <Text style={at.countText}>{activities.length}</Text>
+        </View>
+      </View>
+
+      {activities.length === 0 ? (
+        <View style={hs.emptyState}>
+          <Text style={hs.emptyText}>
+            No AI tool activity yet. Ask BlackSwan to generate an image,
+            summarize text, classify sentiment, or translate — it will use
+            Hugging Face models automatically.
+          </Text>
+          <View style={hs.chipRow}>
+            {['"generate an image of a sunset"', '"summarize this PR"', '"classify: is this a bug?"', '"translate to French"'].map(hint => (
+              <View key={hint} style={hs.hintChip}>
+                <Text style={hs.hintText}>{hint}</Text>
+              </View>
+            ))}
+          </View>
+        </View>
+      ) : (
+        <ScrollView style={hs.list} showsVerticalScrollIndicator={false}>
+          {activities.map(act => {
+            const parsed = parseBody(act.body);
+            const tool = act.metadata?.tool || act.title.split(':')[0] || 'tool';
+            const isImage = tool.includes('image') && parsed?.image_url;
+            const time = timeAgo(act.created_at);
+
+            return (
+              <View key={act.id} style={hs.card}>
+                <View style={hs.cardHeader}>
+                  <Text style={hs.toolBadge}>
+                    {tool.replace('hf_', '').replace(/_/g, ' ').toUpperCase()}
+                  </Text>
+                  <Text style={hs.cardTime}>{time}</Text>
+                </View>
+                <Text style={hs.cardTitle} numberOfLines={2}>{act.title}</Text>
+
+                {/* Image preview */}
+                {isImage && parsed.image_url && (
+                  <View style={hs.imageWrap}>
+                    {Platform.OS === 'web' ? (
+                      <img
+                        src={parsed.image_url}
+                        style={{ width: '100%', maxHeight: 200, objectFit: 'contain', borderRadius: 6 } as any}
+                        alt="Generated"
+                      />
+                    ) : null}
+                  </View>
+                )}
+
+                {/* Summary text */}
+                {parsed?.summary && (
+                  <Text style={hs.resultText} numberOfLines={4}>{parsed.summary}</Text>
+                )}
+
+                {/* Translation result */}
+                {parsed?.translated && (
+                  <Text style={hs.resultText}>{parsed.translated}</Text>
+                )}
+
+                {/* Classification result */}
+                {parsed?.classification && Array.isArray(parsed.classification) && (
+                  <View style={hs.chipRow}>
+                    {(Array.isArray(parsed.classification[0]) ? parsed.classification[0] : parsed.classification).slice(0, 3).map((c: any, i: number) => (
+                      <View key={i} style={hs.classBadge}>
+                        <Text style={hs.classLabel}>{c.label}</Text>
+                        <Text style={hs.classScore}>{(c.score * 100).toFixed(0)}%</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+
+                {/* Chat reply */}
+                {parsed?.reply && (
+                  <Text style={hs.resultText} numberOfLines={4}>{parsed.reply}</Text>
+                )}
+              </View>
+            );
+          })}
+        </ScrollView>
+      )}
+    </View>
+  );
+}
+
+const hs = StyleSheet.create({
+  container: { flex: 1 },
+  loading: { color: '#6b7280', textAlign: 'center', marginTop: 40, fontFamily: Platform.OS === 'web' ? 'monospace' : undefined },
+  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 8 },
+  headerIcon: { fontSize: 16, marginRight: 6 },
+  headerTitle: { color: '#e8e8e8', fontSize: 11, fontWeight: '700', letterSpacing: 1, fontFamily: Platform.OS === 'web' ? 'monospace' : undefined },
+  emptyState: { padding: 16, alignItems: 'center' },
+  emptyText: { color: '#6b7280', fontSize: 12, textAlign: 'center', lineHeight: 18, marginBottom: 12 },
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, justifyContent: 'center' },
+  hintChip: { backgroundColor: '#1a1a2e', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderColor: '#2a2a4a' },
+  hintText: { color: '#9ca3af', fontSize: 10, fontFamily: Platform.OS === 'web' ? 'monospace' : undefined, fontStyle: 'italic' },
+  list: { flex: 1, paddingHorizontal: 8 },
+  card: { backgroundColor: '#0a0a0a', borderRadius: 8, borderWidth: 1, borderColor: '#1a1a1a', padding: 10, marginBottom: 6 },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  toolBadge: { backgroundColor: '#6366f120', color: '#a5b4fc', fontSize: 9, fontWeight: '700', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 3, overflow: 'hidden', fontFamily: Platform.OS === 'web' ? 'monospace' : undefined, letterSpacing: 0.5 },
+  cardTime: { color: '#4b5563', fontSize: 10, fontFamily: Platform.OS === 'web' ? 'monospace' : undefined },
+  cardTitle: { color: '#9ca3af', fontSize: 11, lineHeight: 16, marginBottom: 4 },
+  imageWrap: { borderRadius: 6, overflow: 'hidden', marginTop: 4, backgroundColor: '#111' },
+  resultText: { color: '#d1d5db', fontSize: 11, lineHeight: 16, marginTop: 4, fontFamily: Platform.OS === 'web' ? 'monospace' : undefined },
+  classBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1e293b', borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2 },
+  classLabel: { color: '#d1d5db', fontSize: 10, fontWeight: '600', marginRight: 4 },
+  classScore: { color: '#6b7280', fontSize: 10 },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+
 function AgentTasksPanel({
   tasksByColumn,
   agents,
@@ -257,7 +442,7 @@ function AgentTasksPanel({
         {agentTasks.map(task => {
           const meta = parseAgentTaskMeta(task);
           const agent = agents.find(a => a.name === meta.agentName);
-          const color = agent?.color || '#6366f1';
+          const color = agent?.color || '#e8e8e8';
           const isExpanded = expandedId === task.id;
           const timeStr = timeAgo(task.created_at);
 
@@ -354,8 +539,8 @@ function timeAgo(dateStr: string): string {
 
 const MOBILE_BREAKPOINT = 768;
 
-type MobileTab = 'goals' | 'activity' | 'agents' | 'board';
-type CenterTab = 'activity' | 'agents';
+type MobileTab = 'goals' | 'activity' | 'agents' | 'board' | 'ai-tools';
+type CenterTab = 'activity' | 'agents' | 'ai-tools';
 
 export default function FeedTab({ circleId }: { circleId: string }) {
   const kanban = useKanbanData(circleId);
@@ -444,7 +629,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
         ownerUsername: '',
         provider: oa.providerType || 'generic-agent',
         name: oa.name,
-        color: oa.color || providerInfo?.color || '#6366f1',
+        color: oa.color || providerInfo?.color || '#e8e8e8',
         toolIcon: providerInfo?.icon || '🤖',
         status: (oa.status || 'idle') as AgentStatus,
         currentTask: undefined,
@@ -487,11 +672,11 @@ export default function FeedTab({ circleId }: { circleId: string }) {
       if (t.assigned_agent_id && !seen.has('agent:' + t.assigned_agent_id)) {
         seen.add('agent:' + t.assigned_agent_id);
         const agent = agents.find(a => a.id === t.assigned_agent_id);
-        opts.push({ id: 'agent:' + t.assigned_agent_id, label: agent?.name || 'Agent', color: agent?.color || '#6366f1' });
+        opts.push({ id: 'agent:' + t.assigned_agent_id, label: agent?.name || 'Agent', color: agent?.color || '#e8e8e8' });
       }
       if (t.assigned_to && !seen.has(t.assigned_to)) {
         seen.add(t.assigned_to);
-        opts.push({ id: t.assigned_to, label: (t as any).assignee?.display_name || (t as any).assignee?.username || 'User', color: '#6366f1' });
+        opts.push({ id: t.assigned_to, label: (t as any).assignee?.display_name || (t as any).assignee?.username || 'User', color: '#e8e8e8' });
       }
     }
     return opts;
@@ -649,6 +834,11 @@ export default function FeedTab({ circleId }: { circleId: string }) {
               />
             </View>
           )}
+          {mobileTab === 'ai-tools' && (
+            <View style={s.mobilePanel}>
+              <HuggingSwanPanel circleId={circleId} />
+            </View>
+          )}
           {mobileTab === 'board' && (
             <KanbanBoard
               columns={COLUMNS}
@@ -674,6 +864,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
             { key: 'goals' as MobileTab, label: 'Goals', icon: '\u2299' },
             { key: 'activity' as MobileTab, label: 'Activity', icon: '\u26A1' },
             { key: 'agents' as MobileTab, label: 'Agents', icon: '\u2699' },
+            { key: 'ai-tools' as MobileTab, label: 'AI Tools', icon: '\uD83E\uDD17' },
             { key: 'board' as MobileTab, label: 'Board', icon: '\u25A6' },
           ]).map(tab => {
             const isActive = mobileTab === tab.key;
@@ -772,9 +963,17 @@ export default function FeedTab({ circleId }: { circleId: string }) {
             >
               <Text style={[ct.tabText, centerTab === 'agents' && ct.tabTextActive]}>{'\u2699'} Agent Tasks</Text>
             </Pressable>
+            <Pressable
+              onPress={() => setCenterTab('ai-tools')}
+              style={[ct.tab, centerTab === 'ai-tools' && ct.tabActive]}
+            >
+              <Text style={[ct.tabText, centerTab === 'ai-tools' && ct.tabTextActive]}>{'\uD83E\uDD17'} AI Tools</Text>
+            </Pressable>
           </View>
           {centerTab === 'activity' ? (
             <ActivityFeedPanel circleId={circleId} agents={agents} />
+          ) : centerTab === 'ai-tools' ? (
+            <HuggingSwanPanel circleId={circleId} />
           ) : (
             <AgentTasksPanel
               tasksByColumn={filteredTasksByColumn}
@@ -908,7 +1107,7 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
           <TextInput
             style={m.titleInput}
             placeholder="Task title"
-            placeholderTextColor="#444455"
+            placeholderTextColor="#444444"
             value={title}
             onChangeText={(t) => { setTitle(t); setError(''); }}
             maxLength={200}
@@ -919,7 +1118,7 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
           <TextInput
             style={[m.input, m.textArea]}
             placeholder="Add details..."
-            placeholderTextColor="#333348"
+            placeholderTextColor="#333333"
             value={description}
             onChangeText={setDescription}
             multiline
@@ -935,11 +1134,11 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
                   onPress={() => setSelectedGoalId(null)}
                   style={[m.chip, !selectedGoalId && m.chipActive]}
                 >
-                  <Text style={[m.chipText, !selectedGoalId && { color: '#e4e4ed' }]}>None</Text>
+                  <Text style={[m.chipText, !selectedGoalId && { color: '#e8e8e8' }]}>None</Text>
                 </Pressable>
                 {goals.map(g => {
                   const active = selectedGoalId === g.id;
-                  const gColor = g.status === 'active' ? '#22c55e' : g.status === 'paused' ? '#f59e0b' : '#666680';
+                  const gColor = g.status === 'active' ? '#22c55e' : g.status === 'paused' ? '#f59e0b' : '#666666';
                   return (
                     <Pressable
                       key={g.id}
@@ -981,7 +1180,7 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
               onPress={() => { setAssignedTo(null); setAssignedAgentId(null); }}
               style={[m.chip, !assignedTo && !assignedAgentId && m.chipActive]}
             >
-              <Text style={[m.chipText, !assignedTo && !assignedAgentId && { color: '#e4e4ed' }]}>Nobody</Text>
+              <Text style={[m.chipText, !assignedTo && !assignedAgentId && { color: '#e8e8e8' }]}>Nobody</Text>
             </Pressable>
             {members.map(mem => (
               <Pressable
@@ -989,7 +1188,7 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
                 onPress={() => { setAssignedTo(mem.id); setAssignedAgentId(null); }}
                 style={[m.chip, assignedTo === mem.id && m.chipActive]}
               >
-                <Text style={[m.chipText, assignedTo === mem.id && { color: '#e4e4ed' }]}>
+                <Text style={[m.chipText, assignedTo === mem.id && { color: '#e8e8e8' }]}>
                   {mem.display_name || mem.username}
                 </Text>
               </Pressable>
@@ -998,10 +1197,10 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
               <Pressable
                 key={a.id}
                 onPress={() => { setAssignedAgentId(a.id); setAssignedTo(null); }}
-                style={[m.chip, assignedAgentId === a.id && { backgroundColor: (a.color || '#6366f1') + '15', borderColor: (a.color || '#6366f1') + '30' }]}
+                style={[m.chip, assignedAgentId === a.id && { backgroundColor: (a.color || '#e8e8e8') + '15', borderColor: (a.color || '#e8e8e8') + '30' }]}
               >
-                <View style={[m.chipDot, { backgroundColor: a.color || '#6366f1' }]} />
-                <Text style={[m.chipText, assignedAgentId === a.id && { color: a.color || '#6366f1' }]}>{a.name}</Text>
+                <View style={[m.chipDot, { backgroundColor: a.color || '#e8e8e8' }]} />
+                <Text style={[m.chipText, assignedAgentId === a.id && { color: a.color || '#e8e8e8' }]}>{a.name}</Text>
               </Pressable>
             ))}
           </View>
@@ -1011,7 +1210,7 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
           <TextInput
             style={m.input}
             placeholder="YYYY-MM-DD"
-            placeholderTextColor="#333348"
+            placeholderTextColor="#333333"
             value={dueDate}
             onChangeText={setDueDate}
             maxLength={10}
@@ -1035,8 +1234,8 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
 // ─── Styles ─────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#08080e' },
-  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#08080e' },
+  container: { flex: 1, backgroundColor: '#080808' },
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#080808' },
   loadingDots: { flexDirection: 'row', gap: 10, alignItems: 'center', height: 40 },
   loadingDot: { width: 10, height: 10, borderRadius: 5 },
   body: {
@@ -1052,9 +1251,9 @@ const s = StyleSheet.create({
   },
   mobileTabBar: {
     flexDirection: 'row',
-    backgroundColor: '#0a0a12',
+    backgroundColor: '#0a0a0a',
     borderTopWidth: 1,
-    borderTopColor: '#15151e',
+    borderTopColor: '#151515',
     paddingVertical: 6,
     paddingHorizontal: 12,
   },
@@ -1063,28 +1262,28 @@ const s = StyleSheet.create({
     alignItems: 'center',
     gap: 3,
     paddingVertical: 6,
-    borderRadius: 8,
+    borderRadius: 12,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   mobileTabBtnActive: {
-    backgroundColor: '#15151e',
+    backgroundColor: '#151515',
   },
   mobileTabIcon: {
     fontSize: 16,
-    color: '#444455',
+    color: '#444444',
   },
   mobileTabIconActive: {
-    color: '#e4e4ed',
+    color: '#6366f1',
   },
   mobileTabLabel: {
     fontSize: 10,
     fontWeight: '600',
-    color: '#444455',
+    color: '#444444',
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
   mobileTabLabelActive: {
-    color: '#c0c0d0',
+    color: '#c0c0c0',
   },
 });
 
@@ -1093,12 +1292,12 @@ const s = StyleSheet.create({
 const ct = StyleSheet.create({
   wrapper: {
     width: 260,
-    backgroundColor: '#0d0d16',
+    backgroundColor: '#0d0d0d',
   },
   tabs: {
     flexDirection: 'row',
     borderBottomWidth: 1,
-    borderBottomColor: '#15151e',
+    borderBottomColor: '#151515',
   },
   tab: {
     flex: 1,
@@ -1111,14 +1310,14 @@ const ct = StyleSheet.create({
     borderBottomColor: '#6366f1',
   },
   tabText: {
-    color: '#444455',
+    color: '#444444',
     fontSize: 10,
     fontWeight: '700',
     letterSpacing: 0.5,
     textTransform: 'uppercase',
   },
   tabTextActive: {
-    color: '#c0c0d0',
+    color: '#c0c0c0',
   },
 });
 
@@ -1127,7 +1326,7 @@ const ct = StyleSheet.create({
 const at = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0d0d16',
+    backgroundColor: '#0d0d0d',
   },
   header: {
     flexDirection: 'row',
@@ -1136,7 +1335,7 @@ const at = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#15151e',
+    borderBottomColor: '#151515',
   },
   headerLeft: {
     flexDirection: 'row',
@@ -1147,20 +1346,20 @@ const at = StyleSheet.create({
     fontSize: 13,
   },
   headerTitle: {
-    color: '#9090a8',
+    color: '#909090',
     fontSize: 11,
     fontWeight: '700',
     letterSpacing: 1,
     fontFamily: 'monospace',
   },
   countBadge: {
-    backgroundColor: '#1a1a28',
-    borderRadius: 8,
+    backgroundColor: '#1a1a1a',
+    borderRadius: 12,
     paddingHorizontal: 6,
     paddingVertical: 1,
   },
   countText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 10,
     fontWeight: '700',
   },
@@ -1168,10 +1367,10 @@ const at = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: '#22c55e12',
+    backgroundColor: '#ffffff08',
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 8,
+    borderRadius: 12,
   },
   liveDot: {
     width: 5,
@@ -1192,16 +1391,16 @@ const at = StyleSheet.create({
     gap: 6,
   },
   card: {
-    backgroundColor: '#111119',
-    borderRadius: 8,
+    backgroundColor: '#111111',
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     padding: 10,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
   },
   cardActive: {
-    borderColor: '#22c55e30',
-    backgroundColor: '#0d1a14',
+    borderColor: '#ffffff15',
+    backgroundColor: '#0d0d0d',
   },
   cardTopRow: {
     flexDirection: 'row',
@@ -1220,10 +1419,10 @@ const at = StyleSheet.create({
     borderRadius: 3,
   },
   statusProcessing: {
-    backgroundColor: '#22c55e',
+    backgroundColor: '#f59e0b',
   },
   statusDone: {
-    backgroundColor: '#6366f1',
+    backgroundColor: '#22c55e',
   },
   statusFailed: {
     backgroundColor: '#ef4444',
@@ -1233,12 +1432,12 @@ const at = StyleSheet.create({
     fontWeight: '700',
   },
   timeText: {
-    color: '#444455',
+    color: '#444444',
     fontSize: 9,
     fontWeight: '600',
   },
   promptText: {
-    color: '#9090a8',
+    color: '#909090',
     fontSize: 11,
     lineHeight: 15,
     marginBottom: 4,
@@ -1249,13 +1448,13 @@ const at = StyleSheet.create({
     marginTop: 2,
   },
   metricText: {
-    color: '#555566',
+    color: '#555555',
     fontSize: 9,
     fontWeight: '600',
     fontFamily: 'monospace',
   },
   processingText: {
-    color: '#22c55e',
+    color: '#f59e0b',
     fontSize: 10,
     fontWeight: '600',
     fontStyle: 'italic',
@@ -1272,14 +1471,14 @@ const at = StyleSheet.create({
   },
   responseBox: {
     marginTop: 6,
-    backgroundColor: '#0a0a12',
-    borderRadius: 6,
+    backgroundColor: '#0a0a0a',
+    borderRadius: 12,
     padding: 8,
     borderWidth: 1,
-    borderColor: '#15151e',
+    borderColor: '#151515',
   },
   responseText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 10,
     lineHeight: 14,
     fontFamily: 'monospace',
@@ -1294,7 +1493,7 @@ const at = StyleSheet.create({
     opacity: 0.3,
   },
   emptyText: {
-    color: '#333348',
+    color: '#333333',
     fontSize: 12,
     fontWeight: '500',
   },
@@ -1307,9 +1506,9 @@ const at = StyleSheet.create({
 
 const fb = StyleSheet.create({
   filterBar: {
-    backgroundColor: '#0a0a12',
+    backgroundColor: '#0a0a0a',
     borderBottomWidth: 1,
-    borderBottomColor: '#15151e',
+    borderBottomColor: '#151515',
     paddingHorizontal: 12,
     paddingTop: 8,
     paddingBottom: 6,
@@ -1318,14 +1517,14 @@ const fb = StyleSheet.create({
   searchRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#111119',
-    borderRadius: 8,
+    backgroundColor: '#111111',
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     paddingHorizontal: 8,
   },
   searchIcon: {
-    color: '#444455',
+    color: '#444444',
     fontSize: 13,
     fontWeight: '700',
     fontFamily: 'monospace',
@@ -1333,7 +1532,7 @@ const fb = StyleSheet.create({
   },
   searchInput: {
     flex: 1,
-    color: '#c0c0d0',
+    color: '#c0c0c0',
     fontSize: 12,
     paddingVertical: 7,
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
@@ -1341,12 +1540,12 @@ const fb = StyleSheet.create({
   clearBtn: {
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 6,
-    backgroundColor: '#1e1e2e',
+    borderRadius: 12,
+    backgroundColor: '#1e1e1e',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   clearBtnText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 10,
     fontWeight: '600',
   },
@@ -1361,15 +1560,15 @@ const fb = StyleSheet.create({
     gap: 4,
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 6,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#1e1e2e',
-    backgroundColor: '#0c0c14',
+    borderColor: '#1e1e1e',
+    backgroundColor: '#0c0c0c',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
   },
   filterChipActive: {
-    backgroundColor: '#1a1a28',
-    borderColor: '#3a3a50',
+    backgroundColor: '#1a1a1a',
+    borderColor: '#3a3a3a',
   },
   filterChipDot: {
     width: 5,
@@ -1377,19 +1576,19 @@ const fb = StyleSheet.create({
     borderRadius: 3,
   },
   filterChipText: {
-    color: '#555566',
+    color: '#555555',
     fontSize: 10,
     fontWeight: '600',
   },
   taskCount: {
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 6,
-    backgroundColor: '#111119',
+    borderRadius: 12,
+    backgroundColor: '#111111',
     marginLeft: 4,
   },
   taskCountText: {
-    color: '#555566',
+    color: '#555555',
     fontSize: 10,
     fontWeight: '700',
     fontFamily: 'monospace',
@@ -1411,10 +1610,10 @@ const m = StyleSheet.create({
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(4px)' } as any : {}),
   },
   modal: {
-    backgroundColor: '#111119',
+    backgroundColor: '#111111',
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#1e1e2e',
+    borderColor: '#1e1e1e',
     width: '92%',
     maxWidth: 480,
     maxHeight: '85%',
@@ -1431,7 +1630,7 @@ const m = StyleSheet.create({
     marginBottom: 20,
   },
   headerTitle: {
-    color: '#e4e4ed',
+    color: '#e8e8e8',
     fontSize: 18,
     fontWeight: '600',
   },
@@ -1454,37 +1653,37 @@ const m = StyleSheet.create({
   },
   errorBox: {
     backgroundColor: '#ef444415',
-    borderRadius: 10,
+    borderRadius: 12,
     padding: 12,
     marginBottom: 14,
   },
   errorText: {
-    color: '#f87171',
+    color: '#ef4444',
     fontSize: 13,
     textAlign: 'center',
   },
   titleInput: {
-    color: '#e4e4ed',
+    color: '#e8e8e8',
     fontSize: 16,
     fontWeight: '500',
     paddingVertical: 12,
     paddingHorizontal: 14,
-    backgroundColor: '#0c0c14',
-    borderRadius: 10,
+    backgroundColor: '#0c0c0c',
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     marginBottom: 10,
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
   input: {
-    color: '#c0c0d0',
+    color: '#c0c0c0',
     fontSize: 14,
     paddingVertical: 10,
     paddingHorizontal: 14,
-    backgroundColor: '#0c0c14',
-    borderRadius: 10,
+    backgroundColor: '#0c0c0c',
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     marginBottom: 10,
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
@@ -1493,7 +1692,7 @@ const m = StyleSheet.create({
     textAlignVertical: 'top',
   },
   sectionLabel: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 12,
     fontWeight: '600',
     marginBottom: 8,
@@ -1513,13 +1712,13 @@ const m = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: '#1e1e2e',
-    backgroundColor: '#0c0c14',
+    borderColor: '#1e1e1e',
+    backgroundColor: '#0c0c0c',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
   },
   chipActive: {
-    borderColor: '#3a3a50',
-    backgroundColor: '#1a1a28',
+    borderColor: '#3a3a3a',
+    backgroundColor: '#1a1a1a',
   },
   chipDot: {
     width: 6,
@@ -1527,7 +1726,7 @@ const m = StyleSheet.create({
     borderRadius: 3,
   },
   chipText: {
-    color: '#555566',
+    color: '#555555',
     fontSize: 12,
     fontWeight: '600',
   },
@@ -1537,7 +1736,7 @@ const m = StyleSheet.create({
   },
   createBtn: {
     backgroundColor: '#6366f1',
-    borderRadius: 10,
+    borderRadius: 12,
     paddingVertical: 12,
     alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'opacity 0.15s' } as any : {}),
@@ -1553,7 +1752,7 @@ const m = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   cancelBtnText: {
-    color: '#555566',
+    color: '#555555',
     fontSize: 13,
     fontWeight: '500',
   },

@@ -119,6 +119,34 @@ When discussing trades:
 - Reference Helius/Jupiter for Solana execution`,
   },
   {
+    id: "huggingswan",
+    trigger: /\b(generate image|draw|create image|picture of|make.*image|logo|diagram|summarize|classify|sentiment|translate|text.to.speech|speak|read aloud|embedding|hugging ?face|flux|stable diffusion|llama|qwen|mistral|deepseek|open.?source model|second opinion)\b/i,
+    prompt: `## HuggingSwan — Hugging Face AI Tools
+You have access to Hugging Face inference tools. USE THEM when the user asks for any of these:
+
+**Image Generation** (hf_generate_image): "generate an image of...", "draw...", "create a logo...", "make a diagram..."
+- Be descriptive in prompts. Add style keywords: "digital art", "photorealistic", "minimalist", "pixel art"
+- Default model: FLUX.1-schnell (fast). For higher quality, use: black-forest-labs/FLUX.1-dev
+
+**Summarization** (hf_summarize): "summarize this...", "tldr", "give me the gist"
+- Works on articles, PRs, long messages, docs
+
+**Classification** (hf_classify): "what's the sentiment...", "categorize this...", "is this a bug or feature?"
+- Use zero-shot with custom labels for flexible categorization
+
+**Translation** (hf_translate): "translate to French...", "say this in Spanish..."
+- Language codes: en_XX, fr_XX, es_XX, de_DE, zh_CN, ja_XX, ko_KR, pt_XX, ru_RU, ar_AR
+
+**Text to Speech** (hf_text_to_speech): "read this aloud", "generate audio"
+
+**Chat with Open Models** (hf_chat): "ask Llama...", "what does DeepSeek think...", "get a second opinion"
+- Great for comparing answers across models
+
+**Embeddings** (hf_embeddings): "find similar...", "embed this text"
+
+Always use the appropriate tool — don't just describe what you could do, actually DO it.`,
+  },
+  {
     id: "status-report",
     trigger: /\b(status|standup|update|how are we|how'?s (the|our|everyone)|report|recap|summary|progress|what happened|catch me up)\b/i,
     spiritBoost: ["pm", "tech-lead", "coach"],
@@ -666,6 +694,91 @@ const BLACKSWAN_TOOLS = [
       required: ["query"],
     },
   },
+  // ── HuggingSwan: Hugging Face AI Tools ──────────────────────────────────
+  {
+    name: "hf_generate_image",
+    description: "Generate an image from a text prompt using FLUX or Stable Diffusion on Hugging Face. Use when the user asks to create, draw, or generate any image, logo, diagram, or visual.",
+    input_schema: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "Image generation prompt — be descriptive" },
+        model: { type: "string", description: "HF model ID (default: black-forest-labs/FLUX.1-schnell)" },
+      },
+      required: ["prompt"],
+    },
+  },
+  {
+    name: "hf_summarize",
+    description: "Summarize a long text using Hugging Face. Use when asked to summarize articles, PRs, documents, chat logs, or any long text.",
+    input_schema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Text to summarize" },
+        max_length: { type: "number", description: "Max summary length in tokens (default 150)" },
+      },
+      required: ["text"],
+    },
+  },
+  {
+    name: "hf_classify",
+    description: "Classify or analyze sentiment of text using Hugging Face. Use for sentiment analysis, content categorization, mood detection, or text classification.",
+    input_schema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Text to classify" },
+        task: { type: "string", enum: ["sentiment", "text-classification", "zero-shot"], description: "Classification type (default: sentiment)" },
+        labels: { type: "string", description: "Comma-separated labels for zero-shot (e.g. 'bug,feature,question')" },
+      },
+      required: ["text"],
+    },
+  },
+  {
+    name: "hf_translate",
+    description: "Translate text between languages using Hugging Face. Use when asked to translate text.",
+    input_schema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Text to translate" },
+        src_lang: { type: "string", description: "Source language code (e.g. en_XX, fr_XX, es_XX, de_DE, zh_CN, ja_XX)" },
+        tgt_lang: { type: "string", description: "Target language code" },
+      },
+      required: ["text", "tgt_lang"],
+    },
+  },
+  {
+    name: "hf_text_to_speech",
+    description: "Convert text to speech audio using Hugging Face. Use when asked to generate audio, read aloud, or create speech.",
+    input_schema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Text to convert to speech" },
+      },
+      required: ["text"],
+    },
+  },
+  {
+    name: "hf_chat",
+    description: "Chat with an open-source LLM on Hugging Face (Llama, Qwen, Mistral, DeepSeek, etc). Use when the user wants a second opinion, or to compare with a different AI model.",
+    input_schema: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "Message to send" },
+        model: { type: "string", description: "HF model ID (default: Qwen/Qwen2.5-7B-Instruct-1M). Try: meta-llama/Llama-3.3-70B-Instruct, deepseek-ai/DeepSeek-R1, mistralai/Mistral-7B-Instruct-v0.3" },
+      },
+      required: ["message"],
+    },
+  },
+  {
+    name: "hf_embeddings",
+    description: "Generate text embeddings for semantic search or similarity comparison. Use when asked to find similar texts, cluster content, or build search indexes.",
+    input_schema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Text to embed" },
+      },
+      required: ["text"],
+    },
+  },
 ];
 
 async function executeToolCall(
@@ -801,12 +914,152 @@ async function executeToolCall(
         }
       }
 
+      // ── HuggingSwan: HF Tool Execution ──────────────────────────────────
+      case "hf_generate_image": {
+        const result = await callHfProxy("text-to-image", toolInput.prompt, toolInput.model);
+        if (result.error) return JSON.stringify({ error: result.error });
+        await logHfActivity(supabase, circleId, "hf_generate_image", toolInput.prompt, result);
+        return JSON.stringify({
+          success: true,
+          image_url: result.result?.image,
+          model: result.model,
+          note: "Image generated. The image data URL is included — display it to the user.",
+        });
+      }
+
+      case "hf_summarize": {
+        const result = await callHfProxy("summarization", toolInput.text, undefined, {
+          max_length: toolInput.max_length || 150,
+        });
+        if (result.error) return JSON.stringify({ error: result.error });
+        const summary = Array.isArray(result.result) ? result.result[0]?.summary_text : result.result?.summary_text || JSON.stringify(result.result);
+        await logHfActivity(supabase, circleId, "hf_summarize", toolInput.text.slice(0, 100), { summary });
+        return JSON.stringify({ success: true, summary, model: result.model });
+      }
+
+      case "hf_classify": {
+        const task = toolInput.task || "sentiment";
+        let hfTask = task;
+        let inputs: any = toolInput.text;
+        let model: string | undefined;
+
+        if (task === "zero-shot" && toolInput.labels) {
+          hfTask = "zero-shot-classification";
+          model = "facebook/bart-large-mnli";
+          inputs = { inputs: toolInput.text, parameters: { candidate_labels: toolInput.labels.split(",").map((l: string) => l.trim()) } };
+        }
+
+        const result = await callHfProxy(hfTask, inputs, model);
+        if (result.error) return JSON.stringify({ error: result.error });
+        await logHfActivity(supabase, circleId, "hf_classify", toolInput.text.slice(0, 100), result.result);
+        return JSON.stringify({ success: true, classification: result.result, model: result.model });
+      }
+
+      case "hf_translate": {
+        const result = await callHfProxy("translation", toolInput.text, undefined, {
+          src_lang: toolInput.src_lang || "en_XX",
+          tgt_lang: toolInput.tgt_lang,
+        });
+        if (result.error) return JSON.stringify({ error: result.error });
+        const translated = Array.isArray(result.result) ? result.result[0]?.translation_text : result.result;
+        await logHfActivity(supabase, circleId, "hf_translate", toolInput.text.slice(0, 100), { translated });
+        return JSON.stringify({ success: true, translated, from: toolInput.src_lang || "en_XX", to: toolInput.tgt_lang, model: result.model });
+      }
+
+      case "hf_text_to_speech": {
+        const result = await callHfProxy("text-to-speech", toolInput.text);
+        if (result.error) return JSON.stringify({ error: result.error });
+        await logHfActivity(supabase, circleId, "hf_text_to_speech", toolInput.text.slice(0, 100), { generated: true });
+        return JSON.stringify({
+          success: true,
+          audio_data: result.result?.data || result.result,
+          model: result.model,
+          note: "Audio generated as base64 data URL.",
+        });
+      }
+
+      case "hf_chat": {
+        const model = toolInput.model || "Qwen/Qwen2.5-7B-Instruct-1M";
+        const result = await callHfProxy("chat", { messages: [{ role: "user", content: toolInput.message }] }, model);
+        if (result.error) return JSON.stringify({ error: result.error });
+        const reply = result.result?.choices?.[0]?.message?.content || JSON.stringify(result.result);
+        await logHfActivity(supabase, circleId, "hf_chat", toolInput.message.slice(0, 100), { model, reply: reply.slice(0, 200) });
+        return JSON.stringify({ success: true, reply, model: result.model });
+      }
+
+      case "hf_embeddings": {
+        const result = await callHfProxy("embeddings", toolInput.text);
+        if (result.error) return JSON.stringify({ error: result.error });
+        const dims = Array.isArray(result.result) ? result.result.length : 0;
+        return JSON.stringify({ success: true, dimensions: dims, model: result.model, note: `Generated ${dims}-dimensional embedding vector.` });
+      }
+
       default:
         return JSON.stringify({ error: `Unknown tool: ${toolName}` });
     }
   } catch (e: any) {
     return JSON.stringify({ error: e.message || "Tool execution failed" });
   }
+}
+
+// ── HuggingSwan: Internal HF proxy caller ─────────────────────────────────
+
+async function callHfProxy(
+  task: string,
+  inputs: any,
+  model?: string,
+  options?: Record<string, any>,
+): Promise<{ result?: any; model?: string; error?: string }> {
+  const hfToken = Deno.env.get("HF_TOKEN");
+  if (!hfToken) return { error: "HF_TOKEN not configured — ask your admin to set it" };
+
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+  try {
+    const resp = await fetch(`${supabaseUrl}/functions/v1/hf-proxy`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${serviceKey}`,
+      },
+      body: JSON.stringify({ task, inputs, model, options }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.text();
+      return { error: `HF proxy error: ${resp.status} — ${err}` };
+    }
+
+    const data = await resp.json();
+    if (data.error) return { error: data.error };
+    return { result: data.result, model: data.model };
+  } catch (e: any) {
+    return { error: e.message || "HF proxy call failed" };
+  }
+}
+
+// ── HuggingSwan: Activity logging ─────────────────────────────────────────
+
+async function logHfActivity(
+  supabase: any,
+  circleId: string,
+  tool: string,
+  inputPreview: string,
+  result: any,
+): Promise<void> {
+  try {
+    await supabase.from("agent_activity").insert({
+      circle_id: circleId,
+      agent_name: "HuggingSwan",
+      source: "blackswan",
+      activity_type: "tool_call",
+      title: `${tool}: ${inputPreview}...`,
+      body: JSON.stringify(result).slice(0, 2000),
+      status: "completed",
+      metadata: { tool, hf: true },
+    });
+  } catch {} // Non-critical
 }
 
 async function callClaude(systemPrompt: string, userMessage: string, options: CallClaudeOptions = {}): Promise<ClaudeResult> {
