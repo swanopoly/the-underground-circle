@@ -879,12 +879,16 @@ async function executeToolCall(
 
       case "post_activity": {
         const { content, type } = toolInput;
-        const { error } = await supabase.from("circle_activity").insert({
+        const { error } = await supabase.from("agent_activity").insert({
           circle_id: circleId,
-          user_id: userId,
-          type: type || "info",
-          content,
-          is_bot: true,
+          agent_name: "BlackSwan",
+          source: "blackswan",
+          source_detail: type || "info",
+          activity_type: "message_out",
+          title: content.slice(0, 200),
+          body: content,
+          status: "completed",
+          metadata: { type: type || "info", posted_by: userId },
         });
         if (error) return JSON.stringify({ error: error.message });
         return JSON.stringify({ success: true, posted: true });
@@ -1211,12 +1215,20 @@ async function callClaude(systemPrompt: string, userMessage: string, options: Ca
     requestBody.max_tokens = 8192;
   }
 
-  // ─── Agentic tool-use loop (max 5 iterations) ────────────────────────
+  // ─── Agentic tool-use loop with guardrails ──────────────────────────
   let totalInput = 0, totalOutput = 0, totalCacheCreation = 0, totalCacheRead = 0;
   const toolActions: ToolAction[] = [];
   let finalText = "";
+  const MAX_ITERATIONS = 8;
+  const MAX_TOKENS_BUDGET = 50000; // Abort if cumulative tokens exceed this
+  const toolCallHistory: string[] = []; // For loop detection
 
-  for (let iteration = 0; iteration < 5; iteration++) {
+  for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+    // Guardrail: token budget check
+    if (totalInput + totalOutput > MAX_TOKENS_BUDGET) {
+      finalText += "\n\n*[Stopped: token budget exceeded]*";
+      break;
+    }
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -1257,16 +1269,42 @@ async function callClaude(systemPrompt: string, userMessage: string, options: Ca
     // Add assistant's response (with tool_use blocks) to messages
     messages.push({ role: "assistant", content: data.content });
 
+    // Guardrail: loop detection — same tool+args 3 times = abort
+    for (const toolBlock of toolUseBlocks) {
+      const sig = `${toolBlock.name}:${JSON.stringify(toolBlock.input).slice(0, 200)}`;
+      toolCallHistory.push(sig);
+      const repeatCount = toolCallHistory.filter(s => s === sig).length;
+      if (repeatCount >= 3) {
+        finalText += `\n\n*[Stopped: detected repeated tool call "${toolBlock.name}" — possible loop]*`;
+        // Return early — don't execute the repeated call
+        return {
+          text: finalText || "Stopped due to repeated tool calls.",
+          model: modelId,
+          inputTokens: totalInput,
+          outputTokens: totalOutput,
+          cacheCreationTokens: totalCacheCreation,
+          cacheReadTokens: totalCacheRead,
+          toolActions: toolActions.length > 0 ? toolActions : undefined,
+        };
+      }
+    }
+
     // Execute each tool and collect results
     const toolResults: any[] = [];
     for (const toolBlock of toolUseBlocks) {
-      const result = await executeToolCall(
-        toolBlock.name,
-        toolBlock.input,
-        supabase,
-        circleId!,
-        userId || "",
-      );
+      let result: string;
+      try {
+        result = await executeToolCall(
+          toolBlock.name,
+          toolBlock.input,
+          supabase,
+          circleId!,
+          userId || "",
+        );
+      } catch (toolErr: any) {
+        // Return structured error to LLM so it can reason about it
+        result = JSON.stringify({ error: toolErr.message || "Tool execution failed", retryable: true });
+      }
       toolActions.push({ tool: toolBlock.name, input: toolBlock.input, result: JSON.parse(result) });
       toolResults.push({
         type: "tool_result",

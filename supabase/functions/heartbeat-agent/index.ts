@@ -134,11 +134,16 @@ async function executeHeartbeatTool(
 
       case "post_activity": {
         const { content, type } = toolInput;
-        const { error } = await supabase.from("circle_activity").insert({
+        const { error } = await supabase.from("agent_activity").insert({
           circle_id: circleId,
-          type: type || "info",
-          content: `🦢 **[Heartbeat]** ${content}`,
-          is_bot: true,
+          agent_name: "BlackSwan Heartbeat",
+          source: "cron",
+          source_detail: type || "info",
+          activity_type: "message_out",
+          title: content.slice(0, 200),
+          body: `🦢 **[Heartbeat]** ${content}`,
+          status: "completed",
+          metadata: { type: type || "info", heartbeat: true },
         });
         if (error) return JSON.stringify({ error: error.message });
         return JSON.stringify({ success: true });
@@ -159,11 +164,16 @@ async function executeHeartbeatTool(
 
       case "nudge_member": {
         const { member_name, message } = toolInput;
-        await supabase.from("circle_activity").insert({
+        await supabase.from("agent_activity").insert({
           circle_id: circleId,
-          type: "alert",
-          content: `🦢 **@${member_name}** — ${message}`,
-          is_bot: true,
+          agent_name: "BlackSwan Heartbeat",
+          source: "cron",
+          source_detail: "nudge",
+          activity_type: "message_out",
+          title: `Nudge: @${member_name}`,
+          body: `🦢 **@${member_name}** — ${message}`,
+          status: "completed",
+          metadata: { nudged: member_name },
         });
         return JSON.stringify({ success: true, nudged: member_name });
       }
@@ -215,8 +225,8 @@ async function gatherHeartbeatContext(supabase: any, circleId: string) {
       .gte("created_at", oneDayAgo)
       .order("created_at", { ascending: false })
       .limit(10),
-    supabase.from("circle_activity")
-      .select("content, type, is_bot, created_at")
+    supabase.from("agent_activity")
+      .select("title, body, source_detail, activity_type, created_at")
       .eq("circle_id", circleId)
       .gte("created_at", oneDayAgo)
       .order("created_at", { ascending: false })
@@ -343,7 +353,7 @@ ${ctx.reviewTasks.map((t: any) => `- 👀 "${t.title}"`).join("\n") || "None."}
 ${ctx.githubEvents.length > 0 ? ctx.githubEvents.map((e: any) => `- ${e.event_type}: ${e.title || e.action} by ${e.author}`).join("\n") : "None."}
 
 ### Recent Heartbeat Activity
-${ctx.recentActivity.filter((a: any) => a.is_bot).length > 0 ? ctx.recentActivity.filter((a: any) => a.is_bot).map((a: any) => `- ${(a.content || "").slice(0, 80)}`).join("\n") : "No recent bot activity."}
+${ctx.recentActivity.length > 0 ? ctx.recentActivity.map((a: any) => `- ${(a.title || a.body || "").slice(0, 80)}`).join("\n") : "No recent bot activity."}
 
 ### Memories
 ${ctx.memories.length > 0 ? ctx.memories.map((m: any) => `- [${m.category}] ${m.value}`).join("\n") : "None stored yet."}

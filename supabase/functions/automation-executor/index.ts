@@ -43,41 +43,75 @@ async function callClaude(systemPrompt: string, userMessage: string, modelKey: s
 
   const modelId = CLAUDE_MODEL_MAP[modelKey] || CLAUDE_MODEL_MAP["claude-haiku"];
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: modelId,
-      max_tokens: 1024,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userMessage }],
-    }),
-  });
+  // Retry with exponential backoff for transient errors (429, 503, network)
+  const MAX_RETRIES = 3;
+  const FALLBACK_MODELS = ["claude-haiku-4-5-20251001"]; // Fallback to cheaper model on persistent failure
+  let lastError: Error | null = null;
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Anthropic API ${res.status}: ${err}`);
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const useModel = attempt < MAX_RETRIES - 1 ? modelId : (FALLBACK_MODELS[0] || modelId);
+
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: useModel,
+          max_tokens: 1024,
+          system: systemPrompt,
+          messages: [{ role: "user", content: userMessage }],
+        }),
+      });
+
+      // Non-retryable errors: bad request, auth, not found
+      if (res.status === 400 || res.status === 401 || res.status === 403 || res.status === 404) {
+        const err = await res.text();
+        throw new Error(`Anthropic API ${res.status}: ${err}`);
+      }
+
+      // Retryable errors: rate limit, server errors, overloaded
+      if (!res.ok) {
+        const err = await res.text();
+        lastError = new Error(`Anthropic API ${res.status}: ${err}`);
+        if (attempt < MAX_RETRIES - 1) {
+          const backoffMs = Math.pow(2, attempt + 1) * 1000; // 2s, 4s
+          await new Promise(r => setTimeout(r, backoffMs));
+          continue;
+        }
+        throw lastError;
+      }
+
+      const data = await res.json();
+      const usage = data.usage || {};
+      const inputTokens = usage.input_tokens || 0;
+      const outputTokens = usage.output_tokens || 0;
+      const costs = MODEL_COSTS[useModel] || [0.80, 4.00];
+      const estimatedCost = (inputTokens * costs[0] + outputTokens * costs[1]) / 1_000_000;
+
+      return {
+        text: data.content?.[0]?.text || "No response generated.",
+        model: useModel,
+        inputTokens,
+        outputTokens,
+        totalTokens: inputTokens + outputTokens,
+        estimatedCost,
+      };
+    } catch (e: any) {
+      lastError = e;
+      if (attempt < MAX_RETRIES - 1 && (e.message?.includes("fetch") || e.message?.includes("network"))) {
+        const backoffMs = Math.pow(2, attempt + 1) * 1000;
+        await new Promise(r => setTimeout(r, backoffMs));
+        continue;
+      }
+      throw e;
+    }
   }
 
-  const data = await res.json();
-  const usage = data.usage || {};
-  const inputTokens = usage.input_tokens || 0;
-  const outputTokens = usage.output_tokens || 0;
-  const costs = MODEL_COSTS[modelId] || [0.80, 4.00];
-  const estimatedCost = (inputTokens * costs[0] + outputTokens * costs[1]) / 1_000_000;
-
-  return {
-    text: data.content?.[0]?.text || "No response generated.",
-    model: modelId,
-    inputTokens,
-    outputTokens,
-    totalTokens: inputTokens + outputTokens,
-    estimatedCost,
-  };
+  throw lastError || new Error("callClaude: all retries exhausted");
 }
 
 // ─── Context gathering (lighter version of swanbot-ai) ───────────────────────

@@ -36,23 +36,45 @@ function timeAgo(dateStr: string): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
+interface AutomationRun {
+  id: string;
+  status: string;
+  error_message: string | null;
+  output_text: string | null;
+  model_used: string | null;
+  estimated_cost: number | null;
+  duration_ms: number | null;
+  trigger_source: string | null;
+  created_at: string;
+}
+
 export default function ActivityFeedPanel({ circleId, agents }: Props) {
   const [items, setItems] = useState<ActivityItem[]>([]);
+  const [runs, setRuns] = useState<AutomationRun[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchActivity = useCallback(async () => {
     try {
-      const { data, error } = await supabase
-        .from('agent_activity')
-        .select('id, agent_name, activity_type, source, source_detail, title, body, created_at')
-        .eq('circle_id', circleId)
-        .order('created_at', { ascending: false })
-        .limit(60);
+      // Fetch both activity and recent automation runs in parallel
+      const [actRes, runRes] = await Promise.all([
+        supabase
+          .from('agent_activity')
+          .select('id, agent_name, activity_type, source, source_detail, title, body, created_at')
+          .eq('circle_id', circleId)
+          .order('created_at', { ascending: false })
+          .limit(60),
+        supabase
+          .from('automation_runs')
+          .select('id, status, error_message, output_text, model_used, estimated_cost, duration_ms, trigger_source, created_at')
+          .eq('circle_id', circleId)
+          .in('status', ['failed', 'completed'])
+          .order('created_at', { ascending: false })
+          .limit(10),
+      ]);
 
-      if (!error && data) {
-        setItems(data);
-      }
+      if (!actRes.error && actRes.data) setItems(actRes.data);
+      if (!runRes.error && runRes.data) setRuns(runRes.data);
     } catch (err) {
       console.error('ActivityFeed fetch error:', err);
     }
@@ -61,11 +83,15 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
   useEffect(() => {
     fetchActivity();
 
-    // Realtime subscription
+    // Realtime subscription — both activity and automation runs
     const channel = supabase
       .channel(`activity-feed-${circleId}`)
       .on('postgres_changes', {
         event: 'INSERT', schema: 'public', table: 'agent_activity',
+        filter: `circle_id=eq.${circleId}`,
+      }, () => fetchActivity())
+      .on('postgres_changes', {
+        event: '*', schema: 'public', table: 'automation_runs',
         filter: `circle_id=eq.${circleId}`,
       }, () => fetchActivity())
       .subscribe();
@@ -106,6 +132,35 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
 
       {/* Feed */}
       <ScrollView style={s.list} contentContainerStyle={s.listContent} showsVerticalScrollIndicator={false}>
+        {/* Failed/recent automation runs */}
+        {runs.filter(r => r.status === 'failed').map(run => (
+          <View key={`run-${run.id}`} style={[s.item, { borderLeftWidth: 3, borderLeftColor: '#ef4444' }]}>
+            <View style={s.itemRow}>
+              <View style={[s.iconCircle, { backgroundColor: '#ef444420' }]}>
+                <Text style={[s.iconText, { color: '#ef4444' }]}>!</Text>
+              </View>
+              <View style={s.itemContent}>
+                <View style={s.itemNameRow}>
+                  <Text style={[s.itemAgent, { color: '#ef4444' }]}>Automation Failed</Text>
+                  <Text style={[s.sourceBadge, { color: '#ef4444' }]}>{run.trigger_source || 'auto'}</Text>
+                </View>
+                <Text style={s.itemAction}>{run.model_used || 'Unknown model'} {run.duration_ms ? `(${(run.duration_ms / 1000).toFixed(1)}s)` : ''}</Text>
+                {run.error_message && (
+                  <Text style={[s.itemDetail, { color: '#fca5a5' }]} numberOfLines={expanded[`run-${run.id}`] ? undefined : 2}>
+                    {run.error_message}
+                  </Text>
+                )}
+                {run.error_message && (run.error_message.length > 80) && !expanded[`run-${run.id}`] && (
+                  <Text style={s.moreLink} onPress={() => setExpanded(p => ({ ...p, [`run-${run.id}`]: true }))}>
+                    see error details...
+                  </Text>
+                )}
+                <Text style={s.timestamp}>{timeAgo(run.created_at)}</Text>
+              </View>
+            </View>
+          </View>
+        ))}
+
         {items.map(item => {
           const isGitHub = item.source === 'github';
           const color = getAgentColor(item.agent_name, item.source);
