@@ -1562,10 +1562,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   const handleAgentPress = useCallback((agent: OfficeAgent) => {
     if (editMode) return;
-    const toggling = selectedAgent?.id === agent.id;
-    setSelectedAgent(toggling ? null : agent);
-    setShowControlCard(!toggling);
-  }, [editMode, selectedAgent?.id]);
+    setSelectedAgent(prev => prev?.id === agent.id ? null : agent);
+  }, [editMode]);
 
   const handleOpenAutomate = useCallback(() => {
     setTerminalInitialTab('automations');
@@ -3558,26 +3556,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         )}
       </View>
 
-      {/* Agent control card (floating popup) */}
-      {showControlCard && selectedAgent && !editMode && (
-        <View style={{ position: 'absolute', top: 80, right: 16, zIndex: 200 }}>
-          <AgentControlCard
-            agent={selectedAgent}
-            circleId={circleId}
-            control={agentControl}
-            onClose={() => setShowControlCard(false)}
-            onOpenPanel={() => setShowControlCard(false)}
-            onDisconnect={handleDisconnectAgent}
-            onRunCommand={handleRunCommand}
-          />
-        </View>
-      )}
-
-      {/* Agent detail panel */}
+      {/* Agent detail panel (includes bridge status + power controls + remote shell) */}
       {!editMode && (
         <AgentPanel
           agent={selectedAgent}
-          onClose={() => { setSelectedAgent(null); setShowControlCard(false); }}
+          onClose={() => { setSelectedAgent(null); }}
           isDesktop={isDesktop}
           onRenameAgent={handleRenameAgent}
           sessionTags={sessionTags}
@@ -3587,6 +3570,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
           appearances={appearances}
           onAppearanceChange={(id, a) => setAppearances(prev => ({ ...prev, [id]: a }))}
           environmentType={currentTheme.environmentType}
+          onRunCommand={handleRunCommand}
         />
       )}
 

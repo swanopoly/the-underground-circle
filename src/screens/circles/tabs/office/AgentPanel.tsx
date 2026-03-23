@@ -5,6 +5,7 @@ import { PROVIDER_META } from '../../../../lib/connectionManager';
 import { SessionTag } from '../../../../lib/sessionTags';
 import SessionTagInput from '../../../../components/SessionTagInput';
 import AgentKillSwitch from '../../../../components/AgentKillSwitch';
+import AgentControlCard from '../../../../components/AgentControlCard';
 import { useAgentControl } from '../../../../services/hitlService';
 import PixelAgent from './PixelAgent';
 import {
@@ -32,6 +33,7 @@ interface Props {
   appearances?: Record<string, AgentAppearance>;
   onAppearanceChange?: (id: string, appearance: AgentAppearance) => void;
   environmentType?: EnvironmentType;
+  onRunCommand?: (cmd: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;
 }
 
 function formatTokens(n: number): string {
@@ -72,7 +74,7 @@ function cacheHitPct(cachedTokens: number, totalInputTokens: number): string {
 export default function AgentPanel({
   agent, onClose, isDesktop, onRenameAgent,
   sessionTags, onAddSessionTag, onRemoveSessionTag, circleId,
-  appearances, onAppearanceChange, environmentType,
+  appearances, onAppearanceChange, environmentType, onRunCommand,
 }: Props) {
   const slideAnim = useRef(new Animated.Value(400)).current;
   const [editing, setEditing] = useState(false);
@@ -351,7 +353,7 @@ export default function AgentPanel({
           {/* Personality (Soul) — inline below spirit grid */}
           {circleId && (
             <View style={styles.soulInlineSection}>
-              <Text style={[styles.spiritCatLabel, { color: '#ec4899' }]}>Personality</Text>
+              <Text style={[styles.spiritCatLabel, { color: '#a855f7' }]}>Personality</Text>
               <Text style={styles.spiritHint}>
                 Optional: fine-tune communication style. Prepended to every LLM call alongside the spirit.
               </Text>
@@ -366,7 +368,7 @@ export default function AgentPanel({
                       onPress={() => setSoulText(tmpl.soulText)}
                       style={[
                         styles.personalityChip,
-                        isActive && { borderColor: '#ec4899', backgroundColor: '#ec489915' },
+                        isActive && { borderColor: '#6366f1', backgroundColor: '#6366f115' },
                         Platform.OS === 'web' && { cursor: 'pointer' } as any,
                       ]}
                     >
@@ -404,7 +406,7 @@ export default function AgentPanel({
                   </Pressable>
                 ) : null}
                 {soulStatus ? (
-                  <Text style={{ fontSize: 8, color: soulStatus.startsWith('Error') ? '#ff5555' : '#22c55e', fontFamily: 'monospace' }}>
+                  <Text style={{ fontSize: 8, color: soulStatus.startsWith('Error') ? '#ef4444' : '#22c55e', fontFamily: 'monospace' }}>
                     {soulStatus}
                   </Text>
                 ) : null}
@@ -442,7 +444,7 @@ export default function AgentPanel({
       {/* Cost + Performance grid */}
       <View style={styles.gridRow}>
         <View style={styles.gridCard}>
-          <Text style={[styles.gridValue, { color: '#22c55e' }]}>${agent.costToday.toFixed(2)}</Text>
+          <Text style={[styles.gridValue, { color: '#22d3ee' }]}>${agent.costToday.toFixed(2)}</Text>
           <Text style={styles.gridLabel}>Cost Today</Text>
         </View>
         <View style={styles.gridCard}>
@@ -462,7 +464,7 @@ export default function AgentPanel({
           <Text style={styles.gridLabel}>Output Tokens</Text>
         </View>
         <View style={styles.gridCard}>
-          <Text style={[styles.gridValue, { color: '#f59e0b' }]}>
+          <Text style={[styles.gridValue, { color: '#22c55e' }]}>
             {cacheHitPct(agent.cachedTokens, agent.inputTokens)}
           </Text>
           <Text style={styles.gridLabel}>Cache Hit</Text>
@@ -627,7 +629,7 @@ export default function AgentPanel({
                 <ItemScroll label="AURA" items={['none', 'fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow', 'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy'].map(au => {
                   const emojis: Record<string, string> = { none: '🚫', fire: '🔥', ice: '🧊', electric: '⚡', nature: '🌿', shadow: '🌑', rainbow: '🌈', glitch: '📟', cosmic: '✨', toxic: '☢️', holy: '🕊️', void: '🕳️', galaxy: '🌌' };
                   const names: Record<string, string> = { none: 'NONE', fire: 'FIRE', ice: 'ICE', electric: 'BOLT', nature: 'LEAF', shadow: 'SHADOW', rainbow: 'RAINBOW', glitch: 'GLITCH', cosmic: 'COSMIC', toxic: 'TOXIC', holy: 'HOLY', void: 'VOID', galaxy: 'GALAXY' };
-                  const glowColors: Record<string, string> = { fire: '#ff6600', ice: '#00bfff', electric: '#ffff00', nature: '#22c55e', shadow: '#6b21a8', rainbow: '#ff69b4', cosmic: '#c084fc', toxic: '#22c55e', holy: '#ffd700', galaxy: '#818cf8' };
+                  const glowColors: Record<string, string> = { fire: '#ef4444', ice: '#22d3ee', electric: '#f59e0b', nature: '#22c55e', shadow: '#6f6f6f', rainbow: '#a855f7', cosmic: '#6366f1', toxic: '#22c55e', holy: '#ffd700', galaxy: '#a855f7' };
                   return { key: au, emoji: emojis[au], name: names[au], active: (a.aura || 'none') === au, glow: glowColors[au] };
                 })} />
                 <ItemScroll label="HAND ITEM" items={['none', 'lightsaber', 'coffee', 'laptop', 'flag', 'wand', 'crab_claws', 'sword_hand', 'pizza', 'microphone', 'torch'].map(hi => {
@@ -643,14 +645,20 @@ export default function AgentPanel({
 
       {/* Agent Soul section removed — merged into SPIRIT & SOUL above */}
 
-      {/* Kill switch / controls */}
+      {/* ── SECTION: agent-controls — Bridge status + power + remote shell ── */}
       {circleId && sessionKey && (
-        <AgentKillSwitch
-          control={control}
-          circleId={circleId}
-          sessionKey={sessionKey}
-          agentName={agent.name}
-        />
+        <View style={{ marginTop: 8 }} nativeID="section-agent-controls">
+          <AgentControlCard
+            agent={agent}
+            circleId={circleId}
+            control={control}
+            onClose={() => {}}
+            onOpenPanel={() => {}}
+            onDisconnect={onClose}
+            onRunCommand={onRunCommand}
+            embedded
+          />
+        </View>
       )}
 
       </ScrollView>
@@ -664,7 +672,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: '#0d0d14',
+    backgroundColor: '#0a0a0a',
     borderTopWidth: 1,
     borderTopColor: '#2a2a2a',
     borderTopLeftRadius: 16,
@@ -758,9 +766,9 @@ const styles = StyleSheet.create({
     width: 28,
     height: 28,
     borderRadius: 6,
-    backgroundColor: '#22c55e20',
+    backgroundColor: '#22c55e15',
     borderWidth: 1,
-    borderColor: '#22c55e40',
+    borderColor: '#22c55e30',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -841,7 +849,7 @@ const styles = StyleSheet.create({
   activityBar: {
     flexDirection: 'row',
     gap: 8,
-    backgroundColor: '#222222',
+    backgroundColor: '#161616',
     padding: 10,
     borderRadius: 8,
     marginBottom: 12,
@@ -868,7 +876,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   gridCard: {
-    backgroundColor: '#0a0a12',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
     borderColor: '#2a2a2a',
     borderRadius: 8,
@@ -1008,7 +1016,7 @@ const styles = StyleSheet.create({
   custPreview: {
     alignItems: 'center',
     paddingVertical: 8,
-    backgroundColor: '#0a0a12',
+    backgroundColor: '#0a0a0a',
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#2a2a2a',
@@ -1082,23 +1090,23 @@ const styles = StyleSheet.create({
   spiritRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 12, paddingVertical: 8,
-    borderBottomWidth: 1, borderBottomColor: '#15151e',
+    borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
   },
   spiritLabel: {
     color: '#555', fontSize: 9, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 1,
   },
   spiritBadge: {
     paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8,
-    borderWidth: 1, borderColor: '#6366f140', backgroundColor: '#6366f110',
+    borderWidth: 1, borderColor: '#6366f140', backgroundColor: '#6366f115',
   },
   spiritBadgeText: {
-    color: '#c0c0d0', fontSize: 9, fontWeight: '600', fontFamily: 'monospace',
+    color: '#6366f1', fontSize: 9, fontWeight: '600', fontFamily: 'monospace',
   },
   spiritNone: {
     color: '#333', fontSize: 9, fontFamily: 'monospace',
   },
   spiritPicker: {
-    padding: 10, gap: 8, borderBottomWidth: 1, borderBottomColor: '#15151e',
+    padding: 10, gap: 8, borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
   },
   spiritHint: {
     color: '#555', fontSize: 9, fontFamily: 'monospace', lineHeight: 13,
@@ -1119,11 +1127,11 @@ const styles = StyleSheet.create({
   },
   spiritCard: {
     width: '48%', padding: 8, borderRadius: 8,
-    borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#0c0c14',
+    borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#0a0a0a',
   },
   spiritEmoji: { fontSize: 14, marginBottom: 2 },
   spiritName: {
-    color: '#c0c0d0', fontSize: 10, fontWeight: '700', fontFamily: 'monospace',
+    color: '#6366f1', fontSize: 10, fontWeight: '700', fontFamily: 'monospace',
   },
   spiritTagline: {
     color: '#555', fontSize: 8, fontFamily: 'monospace', lineHeight: 11, marginTop: 1,
@@ -1145,7 +1153,7 @@ const styles = StyleSheet.create({
   // Soul / personality styles
   soulActiveBadge: {
     paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8,
-    borderWidth: 1, borderColor: '#6366f140', backgroundColor: '#6366f110',
+    borderWidth: 1, borderColor: '#6366f140', backgroundColor: '#6366f115',
     marginLeft: 8,
   },
   soulActiveBadgeText: {

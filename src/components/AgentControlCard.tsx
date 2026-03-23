@@ -28,6 +28,7 @@ type Props = {
   onOpenPanel: () => void;
   onDisconnect: () => void;
   onRunCommand?: (cmd: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;
+  embedded?: boolean;  // When true, skip card container + header (embedded in AgentPanel)
 };
 
 const QUICK_COMMANDS = [
@@ -59,7 +60,7 @@ const BRIDGE_PORTS: Record<string, number> = {
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function AgentControlCard({
-  agent, circleId, control, onClose, onOpenPanel, onDisconnect, onRunCommand,
+  agent, circleId, control, onClose, onOpenPanel, onDisconnect, onRunCommand, embedded = false,
 }: Props) {
   const [cmdInput, setCmdInput] = useState('');
   const [cmdOutput, setCmdOutput] = useState('');
@@ -180,24 +181,10 @@ export default function AgentControlCard({
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  return (
-    <View style={c.card}>
-      {/* ── Header ──────────────────────────────────────────────────────────── */}
-      <View style={c.header}>
-        <Text style={[c.agentName, { color: agent.color || '#e8e8e8' }]} numberOfLines={1}>
-          {agent.name}
-        </Text>
-        <View style={[c.statusPill, { backgroundColor: statusColor + '20', borderColor: statusColor + '60' }]}>
-          <View style={[c.statusDot, { backgroundColor: statusColor }]} />
-          <Text style={[c.statusLabel, { color: statusColor }]}>{statusLabel}</Text>
-        </View>
-        <Pressable onPress={onClose} style={c.closeBtn} hitSlop={8}>
-          <Text style={c.closeBtnText}>✕</Text>
-        </Pressable>
-      </View>
-
-      {/* ── Connection status ───────────────────────────────────────────────── */}
-      <View style={c.connRow}>
+  const content = (
+    <>
+      {/* ── SECTION: agent-bridge-status — Connection health ─────────────── */}
+      <View style={c.connRow} nativeID="section-agent-bridge-status">
         <View style={[c.connDot, { backgroundColor: bridgeOk ? '#22c55e' : bridgeOk === false ? '#ef4444' : '#4b5563' }]} />
         <Text style={c.connText}>{statusMsg || 'Checking bridge...'}</Text>
       </View>
@@ -283,15 +270,40 @@ export default function AgentControlCard({
         </View>
       )}
 
-      {/* No bridge warning */}
+      {/* ── SECTION: agent-no-bridge — Bridge offline warning ──────────── */}
       {bridgeOk === false && (
-        <View style={c.noBridge}>
+        <View style={c.noBridge} nativeID="section-agent-no-bridge">
           <Text style={c.noBridgeText}>
             Bridge not reachable on :{BRIDGE_PORTS[provider] || 7778}.{'\n'}
             Start the bridge: node scripts/{provider === 'codex' ? 'codex' : provider === 'gemini' ? 'gemini' : 'claude'}-bridge.js
           </Text>
         </View>
       )}
+    </>
+  );
+
+  // When embedded in AgentPanel, skip the card container
+  if (embedded) {
+    return <View nativeID="section-agent-controls-embedded">{content}</View>;
+  }
+
+  // Standalone floating card mode
+  return (
+    <View style={c.card} nativeID="section-agent-control-card">
+      {/* ── SECTION: agent-control-header ────────────────────────────────── */}
+      <View style={c.header} nativeID="section-agent-control-header">
+        <Text style={[c.agentName, { color: agent.color || '#e8e8e8' }]} numberOfLines={1}>
+          {agent.name}
+        </Text>
+        <View style={[c.statusPill, { backgroundColor: statusColor + '20', borderColor: statusColor + '60' }]}>
+          <View style={[c.statusDot, { backgroundColor: statusColor }]} />
+          <Text style={[c.statusLabel, { color: statusColor }]}>{statusLabel}</Text>
+        </View>
+        <Pressable onPress={onClose} style={c.closeBtn} hitSlop={8}>
+          <Text style={c.closeBtnText}>✕</Text>
+        </Pressable>
+      </View>
+      {content}
     </View>
   );
 }
