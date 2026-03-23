@@ -658,6 +658,200 @@ interface ShellEntry {
   durationMs: number;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CommandKeyPanel — accordion-style command reference
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const COMMAND_SECTIONS = [
+  {
+    title: 'Agent Commands',
+    icon: '🤖',
+    commands: [
+      { cmd: '/status',    desc: 'Ask agent for current task status', hint: 'What are you working on?' },
+      { cmd: '/stop',      desc: 'Ask agent to stop current task', hint: 'Gracefully halt work' },
+      { cmd: '/summarize', desc: 'Summarize recent work', hint: 'Get a recap of what was done' },
+      { cmd: '/plan',      desc: 'Outline next steps', hint: 'Ask agent to plan ahead' },
+      { cmd: '/ping',      desc: 'Verify agent is responsive', hint: 'Quick health check' },
+      { cmd: '/whoami',    desc: 'Agent identity & capabilities', hint: 'What model, what tools?' },
+    ],
+  },
+  {
+    title: 'Discovery',
+    icon: '🔍',
+    commands: [
+      { cmd: '/agents',  desc: 'List connected agents and status', hint: 'See who is online' },
+      { cmd: '/models',  desc: 'Show available AI models', hint: 'From registry + BYO keys' },
+      { cmd: '/devices', desc: 'List local connected devices', hint: 'Printers, serial, USB' },
+      { cmd: '/cost',    desc: 'Token usage & cost breakdown', hint: 'How much has been spent' },
+    ],
+  },
+  {
+    title: 'Create & Generate',
+    icon: '✨',
+    commands: [
+      { cmd: '/spawn',   desc: 'Create a new agent in this circle', hint: 'Deploy a new AI agent' },
+      { cmd: '/imagine',  desc: 'Generate an image from a prompt', hint: '/imagine a sunset over mountains' },
+    ],
+  },
+  {
+    title: 'Targeting',
+    icon: '🎯',
+    commands: [
+      { cmd: '@AgentName', desc: 'Send command to a specific agent', hint: 'Click agent chips below input' },
+      { cmd: '@all',       desc: 'Broadcast to all online agents', hint: 'Every agent responds' },
+      { cmd: '@BlackSwan', desc: 'Talk to the circle\'s AI', hint: 'Always available' },
+    ],
+  },
+  {
+    title: 'Modes',
+    icon: '⚡',
+    commands: [
+      { cmd: 'Exec',      desc: 'Direct execution mode (default)', hint: 'Agent acts immediately' },
+      { cmd: 'Plan',      desc: 'Planning mode — think before acting', hint: 'Agent outlines steps first' },
+      { cmd: 'Explore',   desc: 'Research mode — gather info', hint: 'Agent investigates before answering' },
+      { cmd: 'Fleet',     desc: 'Multi-agent coordination', hint: 'Agents collaborate on tasks' },
+      { cmd: 'Autopilot', desc: 'Autonomous loop — agent keeps working', hint: 'Runs until you hit STOP' },
+    ],
+  },
+  {
+    title: 'Thinking Levels',
+    icon: '🧠',
+    commands: [
+      { cmd: 'Fast',     desc: 'Quick responses, lower cost', hint: 'Best for simple questions' },
+      { cmd: 'Balanced', desc: 'Default — good quality + speed', hint: 'Everyday usage' },
+      { cmd: 'Deep',     desc: 'Maximum reasoning, higher cost', hint: 'Complex problems, code review' },
+    ],
+  },
+  {
+    title: 'Shell (Local Bridge)',
+    icon: '💻',
+    commands: [
+      { cmd: 'pwd',          desc: 'Print working directory', hint: 'Where is the agent running?' },
+      { cmd: 'git status',   desc: 'Git repository status', hint: 'See uncommitted changes' },
+      { cmd: 'git log -5',   desc: 'Recent commit history', hint: 'Last 5 commits' },
+      { cmd: 'ls -la',       desc: 'List files in directory', hint: 'See what\'s in the folder' },
+      { cmd: 'df -h /',      desc: 'Disk space usage', hint: 'How much storage is left' },
+      { cmd: 'uptime',       desc: 'System uptime', hint: 'How long has the machine been on' },
+    ],
+  },
+  {
+    title: 'Tips',
+    icon: '💡',
+    commands: [
+      { cmd: 'Arrow Up/Down', desc: 'Cycle through command history', hint: 'Like a real terminal' },
+      { cmd: 'Tab',           desc: 'Autocomplete agent names', hint: 'Start typing @ to see suggestions' },
+      { cmd: 'Enter',         desc: 'Send command', hint: 'Or click the > button' },
+    ],
+  },
+];
+
+function CommandKeyPanel({ onRunCommand }: { onRunCommand: (cmd: string) => void }) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({ 'Agent Commands': true });
+
+  const toggleSection = (title: string) => {
+    setExpanded(prev => ({ ...prev, [title]: !prev[title] }));
+  };
+
+  return (
+    <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+      <View style={{ padding: 12 }}>
+        <Text style={{ color: BS.accent, fontSize: 16, fontWeight: '700', fontFamily: MONO, marginBottom: 4 }}>
+          Command Reference
+        </Text>
+        <Text style={{ color: BS.textMuted, fontSize: 11, fontFamily: MONO, marginBottom: 12 }}>
+          Tap any command to use it
+        </Text>
+
+        {COMMAND_SECTIONS.map(section => {
+          const isOpen = expanded[section.title] ?? false;
+          return (
+            <View key={section.title} style={{ marginBottom: 2 }}>
+              {/* Accordion header */}
+              <Pressable
+                onPress={() => toggleSection(section.title)}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  paddingVertical: 8,
+                  paddingHorizontal: 10,
+                  backgroundColor: isOpen ? BS.bgCard : 'transparent',
+                  borderRadius: 6,
+                  borderWidth: isOpen ? 1 : 0,
+                  borderColor: BS.border,
+                  ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+                }}
+              >
+                <Text style={{ fontSize: 14, marginRight: 8 }}>{section.icon}</Text>
+                <Text style={{
+                  color: isOpen ? BS.accent : BS.textSecondary,
+                  fontSize: 12,
+                  fontWeight: '700',
+                  fontFamily: MONO,
+                  letterSpacing: 0.5,
+                  flex: 1,
+                }}>
+                  {section.title.toUpperCase()}
+                </Text>
+                <Text style={{ color: BS.textMuted, fontSize: 11, fontFamily: MONO }}>
+                  {section.commands.length}
+                </Text>
+                <Text style={{ color: BS.textMuted, fontSize: 12, marginLeft: 8, fontFamily: MONO }}>
+                  {isOpen ? '▾' : '▸'}
+                </Text>
+              </Pressable>
+
+              {/* Accordion content */}
+              {isOpen && (
+                <View style={{ paddingLeft: 4, paddingTop: 4, paddingBottom: 8 }}>
+                  {section.commands.map(c => (
+                    <Pressable
+                      key={c.cmd}
+                      onPress={() => {
+                        if (c.cmd.startsWith('/') || c.cmd.startsWith('@')) {
+                          onRunCommand(c.cmd);
+                        }
+                      }}
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'flex-start',
+                        paddingVertical: 6,
+                        paddingHorizontal: 8,
+                        borderRadius: 4,
+                        ...(Platform.OS === 'web' ? { cursor: c.cmd.startsWith('/') || c.cmd.startsWith('@') ? 'pointer' : 'default' } as any : {}),
+                      }}
+                    >
+                      <Text style={{
+                        color: c.cmd.startsWith('/') ? BS.accent : BS.textSecondary,
+                        fontSize: 12,
+                        fontWeight: '600',
+                        fontFamily: MONO,
+                        width: 110,
+                        flexShrink: 0,
+                      }}>
+                        {c.cmd}
+                      </Text>
+                      <View style={{ flex: 1, marginLeft: 8 }}>
+                        <Text style={{ color: BS.textSecondary, fontSize: 11, fontFamily: MONO, lineHeight: 16 }}>
+                          {c.desc}
+                        </Text>
+                        <Text style={{ color: BS.textMuted, fontSize: 10, fontFamily: MONO, fontStyle: 'italic', lineHeight: 14 }}>
+                          {c.hint}
+                        </Text>
+                      </View>
+                    </Pressable>
+                  ))}
+                </View>
+              )}
+            </View>
+          );
+        })}
+      </View>
+    </ScrollView>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+
 function LocalShellPanel() {
   const [entries, setEntries] = useState<ShellEntry[]>([]);
   const [input, setInput] = useState('');
@@ -987,7 +1181,7 @@ const shellStyles = StyleSheet.create({
 
 // ─── Terminal sub-tabs ────────────────────────────────────────────────────────
 
-type TerminalTab = 'commands' | 'automations' | 'shell' | 'spawn';
+type TerminalTab = 'commands' | 'automations' | 'shell' | 'spawn' | 'key';
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
@@ -1610,6 +1804,13 @@ export default function OfficeTerminal({
             </Text>
           </Pressable>
         ))}
+        {/* Key reference button */}
+        <Pressable
+          onPress={() => setTerminalTab('key')}
+          style={[styles.spawnBtn, terminalTab === 'key' && styles.spawnBtnActive]}
+        >
+          <Text style={[styles.spawnBtnText, terminalTab === 'key' && { color: BS.accent }]}>? KEY</Text>
+        </Pressable>
         {/* Spawn agent button */}
         <Pressable
           onPress={() => setTerminalTab('spawn')}
@@ -1663,6 +1864,8 @@ export default function OfficeTerminal({
         />
       ) : terminalTab === 'shell' ? (
         <LocalShellPanel />
+      ) : terminalTab === 'key' ? (
+        <CommandKeyPanel onRunCommand={(cmd) => { setInput(cmd); setTerminalTab('commands'); }} />
       ) : terminalTab === 'automations' ? (
         <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
           <AutomationsPanel circleId={circleId} />
