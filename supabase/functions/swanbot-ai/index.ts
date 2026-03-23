@@ -120,7 +120,7 @@ When discussing trades:
   },
   {
     id: "huggingswan",
-    trigger: /\b(generate image|draw|create image|picture of|make.*image|logo|diagram|summarize|classify|sentiment|translate|text.to.speech|speak|read aloud|embedding|hugging ?face|flux|stable diffusion|llama|qwen|mistral|deepseek|open.?source model|second opinion)\b/i,
+    trigger: /\b(generate image|draw|create image|picture of|make.*image|logo|diagram|summarize|classify|sentiment|translate|text.to.speech|speak|read aloud|embedding|hugging ?face|flux|stable diffusion|llama|qwen|mistral|deepseek|open.?source model|second opinion|write code|generate code|code review|fix.*bug|vision|analyze image|describe image|ocr|caption|answer.*question|qa )\b/i,
     prompt: `## HuggingSwan — Hugging Face AI Tools
 You have access to Hugging Face inference tools. USE THEM when the user asks for any of these:
 
@@ -143,6 +143,15 @@ You have access to Hugging Face inference tools. USE THEM when the user asks for
 - Great for comparing answers across models
 
 **Embeddings** (hf_embeddings): "find similar...", "embed this text"
+
+**Code Generation** (hf_code): "write a Python script...", "fix this bug...", "generate React component..."
+- Uses Qwen3-Coder-Next by default — specialized for code tasks
+
+**Vision Analysis** (hf_vision): "what's in this image...", "describe this screenshot...", "OCR this..."
+- Pass an image URL and optionally a question about it
+
+**Question Answering** (hf_qa): "based on this text, what is..."
+- Extracts specific answers from provided context/documents
 
 Always use the appropriate tool — don't just describe what you could do, actually DO it.`,
   },
@@ -779,6 +788,46 @@ const BLACKSWAN_TOOLS = [
       required: ["text"],
     },
   },
+  // ── Code Generation (Qwen3-Coder) ──────────────────────────────────────
+  {
+    name: "hf_code",
+    description: "Generate code using Qwen3-Coder or other code-specialized models. Use when asked to write code, fix bugs, generate boilerplate, or review code.",
+    input_schema: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "Code generation prompt — be specific about language, framework, and requirements" },
+        language: { type: "string", description: "Programming language (e.g., python, typescript, rust)" },
+        model: { type: "string", description: "HF model ID (default: Qwen/Qwen3-Coder-Next)" },
+      },
+      required: ["prompt"],
+    },
+  },
+  // ── Vision Analysis ────────────────────────────────────────────────────
+  {
+    name: "hf_vision",
+    description: "Analyze images, describe their contents, extract text (OCR), or answer questions about visual content. Use when the user provides an image URL or asks about image contents.",
+    input_schema: {
+      type: "object",
+      properties: {
+        image_url: { type: "string", description: "URL of the image to analyze" },
+        question: { type: "string", description: "Question about the image (optional — if omitted, generates a caption)" },
+      },
+      required: ["image_url"],
+    },
+  },
+  // ── Question Answering ─────────────────────────────────────────────────
+  {
+    name: "hf_qa",
+    description: "Answer questions based on a given context/document. Use when the user provides a passage and asks a specific question about it.",
+    input_schema: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "The question to answer" },
+        context: { type: "string", description: "The passage or document to find the answer in" },
+      },
+      required: ["question", "context"],
+    },
+  },
 ];
 
 async function executeToolCall(
@@ -992,6 +1041,49 @@ async function executeToolCall(
         if (result.error) return JSON.stringify({ error: result.error });
         const dims = Array.isArray(result.result) ? result.result.length : 0;
         return JSON.stringify({ success: true, dimensions: dims, model: result.model, note: `Generated ${dims}-dimensional embedding vector.` });
+      }
+
+      case "hf_code": {
+        const codeModel = toolInput.model || "Qwen/Qwen3-Coder-Next";
+        const codePrompt = toolInput.language
+          ? `Write ${toolInput.language} code: ${toolInput.prompt}`
+          : toolInput.prompt;
+        const result = await callHfProxy("chat", {
+          messages: [
+            { role: "system", content: "You are an expert programmer. Write clean, well-commented code. Return ONLY the code unless asked for explanations." },
+            { role: "user", content: codePrompt },
+          ],
+        }, codeModel);
+        if (result.error) return JSON.stringify({ error: result.error });
+        const code = result.result?.choices?.[0]?.message?.content || "";
+        await logHfActivity(supabase, circleId, "hf_code", toolInput.prompt.slice(0, 100), { language: toolInput.language, model: codeModel });
+        return JSON.stringify({ success: true, code, model: result.model });
+      }
+
+      case "hf_vision": {
+        const task = toolInput.question ? "visual-question-answering" : "image-to-text";
+        const inputs = toolInput.question
+          ? { image: toolInput.image_url, question: toolInput.question }
+          : toolInput.image_url;
+        const result = await callHfProxy(task, inputs);
+        if (result.error) return JSON.stringify({ error: result.error });
+        const answer = Array.isArray(result.result)
+          ? result.result[0]?.generated_text || result.result[0]?.answer || JSON.stringify(result.result[0])
+          : result.result?.generated_text || JSON.stringify(result.result);
+        await logHfActivity(supabase, circleId, "hf_vision", (toolInput.question || "caption").slice(0, 80), { answer: answer.slice(0, 200) });
+        return JSON.stringify({ success: true, answer, model: result.model });
+      }
+
+      case "hf_qa": {
+        const result = await callHfProxy("question-answering", {
+          question: toolInput.question,
+          context: toolInput.context,
+        });
+        if (result.error) return JSON.stringify({ error: result.error });
+        const qaAnswer = result.result?.answer || JSON.stringify(result.result);
+        const score = result.result?.score;
+        await logHfActivity(supabase, circleId, "hf_qa", toolInput.question.slice(0, 80), { answer: qaAnswer, score });
+        return JSON.stringify({ success: true, answer: qaAnswer, confidence: score, model: result.model });
       }
 
       default:
@@ -1826,11 +1918,50 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       effectiveModel = "claude-sonnet";
     }
 
-    if (!isClaudeModel && !effectiveModel?.startsWith("claude-")) {
+    // Map terminal model keys to HF model IDs for open model routing
+    const HF_MODEL_MAP: Record<string, string> = {
+      "qwen3.5":      "Qwen/Qwen3.5-72B-Instruct",
+      "qwen3-coder":  "Qwen/Qwen3-Coder-Next",
+      "nemotron":     "nvidia/Nemotron-3-8B-Instruct",
+      "kimi-k2.5":    "moonshotai/Kimi-K2.5",
+      "glm-5":        "THUDM/GLM-5",
+      "glm-flash":    "THUDM/GLM-4.7-Flash",
+      "minimax":      "MiniMaxAI/MiniMax-M2.5",
+      "deepseek-r1":  "deepseek-ai/DeepSeek-R1",
+      "llama-3.3":    "meta-llama/Llama-3.3-70B-Instruct",
+      "gpt-oss":      "gpt-oss/gpt-oss-120B",
+      "mistral":      "mistralai/Mistral-Large-2411",
+    };
+
+    const hfModelId = effectiveModel ? HF_MODEL_MAP[effectiveModel] : null;
+
+    // Route to HuggingFace if user selected an open model
+    if (hfModelId && !isClaudeModel) {
+      const hfResult = await callHfProxy("chat", {
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: message },
+        ],
+      }, hfModelId);
+
+      if (!hfResult.error && hfResult.result) {
+        aiResponse = hfResult.result?.choices?.[0]?.message?.content || JSON.stringify(hfResult.result);
+        const est = Math.ceil((systemPrompt.length + message.length + (aiResponse?.length || 0)) / 4);
+        tokenBreakdown = {
+          model: hfModelId,
+          input_tokens: Math.ceil((systemPrompt.length + message.length) / 4),
+          output_tokens: Math.ceil((aiResponse?.length || 0) / 4),
+          cache_creation_tokens: 0,
+          cache_read_tokens: 0,
+          total_tokens: est,
+        };
+      }
+    }
+
+    if (!aiResponse && !isClaudeModel && !hfModelId) {
       // Try BlackSwan LLM first (zero cost)
       aiResponse = await callBlackSwanLLM(systemPrompt, message);
       if (aiResponse) {
-        // Estimate tokens for BlackSwan (local, no real usage data)
         const est = Math.ceil((systemPrompt.length + message.length + aiResponse.length) / 4);
         tokenBreakdown = {
           model: "blackswan",

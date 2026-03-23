@@ -323,7 +323,7 @@ export default function ModelLabPanel({ circleId }: { circleId: string }) {
 
       {/* Quick filters */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
-        {['Qwen', 'Llama', 'Mistral', 'DeepSeek', 'Gemma', 'Phi', 'FLUX', 'Whisper'].map(q => (
+        {['Qwen3.5', 'Nemotron', 'Kimi', 'GLM-5', 'MiniMax', 'gpt-oss', 'Llama', 'DeepSeek', 'Mistral', 'FLUX', 'Whisper'].map(q => (
           <Pressable key={q} onPress={() => setHfSearch(q)} style={s.filterChip}>
             <Text style={s.filterChipText}>{q}</Text>
           </Pressable>

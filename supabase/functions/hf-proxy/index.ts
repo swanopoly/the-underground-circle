@@ -17,8 +17,9 @@ const corsHeaders = {
 
 // Task-specific default models
 const DEFAULT_MODELS: Record<string, string> = {
-  'chat':              'Qwen/Qwen2.5-7B-Instruct-1M',
-  'text-generation':   'Qwen/Qwen2.5-7B-Instruct-1M',
+  'chat':              'Qwen/Qwen3.5-72B-Instruct',
+  'text-generation':   'Qwen/Qwen3.5-27B-Instruct',
+  'code':              'Qwen/Qwen3-Coder-Next',
   'text-to-image':     'black-forest-labs/FLUX.1-schnell',
   'summarization':     'facebook/bart-large-cnn',
   'sentiment':         'distilbert-base-uncased-finetuned-sst-2-english',
@@ -28,6 +29,7 @@ const DEFAULT_MODELS: Record<string, string> = {
   'translation':       'facebook/mbart-large-50-many-to-many-mmt',
   'speech-to-text':    'openai/whisper-large-v3',
   'text-to-speech':    'espnet/kan-bayashi_ljspeech_vits',
+  'vision':            'Qwen/Qwen2.5-VL-7B-Instruct',
 };
 
 // Tasks that return binary (image/audio) instead of JSON

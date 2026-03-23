@@ -88,14 +88,24 @@ const TERMINAL_MODES: Array<{ key: TerminalMode; label: string; symbol: string; 
 // ─── Model options ────────────────────────────────────────────────────────────
 
 const BASE_MODELS: Array<{ key: string | null; label: string; icon: string; color: string }> = [
-  { key: null,             label: 'Auto',       icon: 'A', color: '#9e9e9e' },
-  { key: 'blackswan',     label: 'BlackSwan',   icon: 'S', color: '#e8e8e8' },
-  { key: 'claude-haiku',  label: 'Haiku',       icon: 'H', color: '#b5b5b5' },
-  { key: 'claude-sonnet', label: 'Sonnet',      icon: 'S', color: '#cecece' },
-  { key: 'claude-opus',   label: 'Opus',        icon: 'O', color: '#ffffff' },
-  { key: 'gemini-flash',  label: 'Gemini 2.5',  icon: 'G', color: '#b5b5b5' },
-  { key: 'gpt-4.1',       label: 'GPT-4.1',     icon: '4', color: '#b5b5b5' },
-  { key: 'o4-mini',       label: 'O4 Mini',     icon: 'o', color: '#9e9e9e' },
+  { key: null,             label: 'Auto',           icon: 'A', color: '#9e9e9e' },
+  { key: 'blackswan',     label: 'BlackSwan',       icon: 'S', color: '#e8e8e8' },
+  { key: 'claude-haiku',  label: 'Haiku',           icon: 'H', color: '#b5b5b5' },
+  { key: 'claude-sonnet', label: 'Sonnet',          icon: 'S', color: '#cecece' },
+  { key: 'claude-opus',   label: 'Opus',            icon: 'O', color: '#ffffff' },
+  { key: 'gemini-flash',  label: 'Gemini 2.5',      icon: 'G', color: '#b5b5b5' },
+  { key: 'gpt-4.1',       label: 'GPT-4.1',         icon: '4', color: '#b5b5b5' },
+  { key: 'o4-mini',       label: 'O4 Mini',         icon: 'o', color: '#9e9e9e' },
+  // HuggingSwan open models (via HF Inference Router)
+  { key: 'qwen3.5',       label: 'Qwen 3.5',        icon: 'Q', color: '#c4b5fd' },
+  { key: 'qwen3-coder',   label: 'Qwen Coder',      icon: 'C', color: '#a78bfa' },
+  { key: 'nemotron',      label: 'Nemotron 3',       icon: 'N', color: '#86efac' },
+  { key: 'kimi-k2.5',     label: 'Kimi K2.5',        icon: 'K', color: '#67e8f9' },
+  { key: 'glm-5',         label: 'GLM 5',            icon: '5', color: '#fca5a5' },
+  { key: 'minimax',       label: 'MiniMax M2.5',     icon: 'M', color: '#fdba74' },
+  { key: 'deepseek-r1',   label: 'DeepSeek R1',      icon: 'D', color: '#93c5fd' },
+  { key: 'llama-3.3',     label: 'Llama 3.3',        icon: 'L', color: '#d9f99d' },
+  { key: 'gpt-oss',       label: 'gpt-oss',          icon: 'g', color: '#e5e5e5' },
 ];
 
 /** Build BYO model entries from user's stored API keys */

@@ -60,63 +60,63 @@ const MODELS: ModelScore[] = [
   {
     name: 'GPT-5.4',
     tier: 'frontier',
-    color: '#10b981',
+    color: '#f59e0b',
     params: '~2T',
     scores: { overall: 96, mmlu: 97, humaneval: 93, gsm8k: 98, hellaswag: 97, arc: 98 },
   },
   {
     name: 'Claude Opus 4.6',
     tier: 'frontier',
-    color: '#d4a574',
+    color: '#f59e0b',
     params: '~2T',
     scores: { overall: 95, mmlu: 95, humaneval: 92, gsm8k: 97, hellaswag: 97, arc: 97 },
   },
   {
     name: 'Gemini 3.1 Pro',
     tier: 'frontier',
-    color: '#4285f4',
+    color: '#eab308',
     params: '~1.5T',
     scores: { overall: 94, mmlu: 94, humaneval: 90, gsm8k: 96, hellaswag: 97, arc: 96 },
   },
   {
     name: 'Claude Sonnet 4.6',
     tier: 'frontier',
-    color: '#b99a74',
+    color: '#d97706',
     params: '~500B',
     scores: { overall: 92, mmlu: 89, humaneval: 92, gsm8k: 95, hellaswag: 96, arc: 95 },
   },
   {
     name: 'GPT-5.2',
     tier: 'frontier',
-    color: '#74b9a5',
+    color: '#f59e0b',
     params: '~1.5T',
     scores: { overall: 93, mmlu: 93, humaneval: 90, gsm8k: 96, hellaswag: 96, arc: 96 },
   },
   {
     name: 'DeepSeek V3.2',
     tier: 'frontier',
-    color: '#0ea5e9',
+    color: '#ca8a04',
     params: 'MoE 671B',
     scores: { overall: 90, mmlu: 89, humaneval: 86, gsm8k: 93, hellaswag: 95, arc: 94 },
   },
   {
     name: 'Qwen3.5-397B MoE',
     tier: 'frontier',
-    color: '#a855f7',
+    color: '#eab308',
     params: '397B (17B active)',
     scores: { overall: 91, mmlu: 91, humaneval: 85, gsm8k: 93, hellaswag: 95, arc: 95 },
   },
   {
     name: 'Qwen 3 235B MoE',
     tier: 'frontier',
-    color: '#9333ea',
+    color: '#d97706',
     params: '235B (22B active)',
     scores: { overall: 90, mmlu: 90, humaneval: 84, gsm8k: 92, hellaswag: 94, arc: 94 },
   },
   {
     name: 'Grok 3',
     tier: 'frontier',
-    color: '#ef4444',
+    color: '#ca8a04',
     params: '~1T',
     scores: { overall: 89, mmlu: 88, humaneval: 84, gsm8k: 92, hellaswag: 94, arc: 93 },
   },
@@ -124,14 +124,14 @@ const MODELS: ModelScore[] = [
   {
     name: 'GPT-4.1',
     tier: 'frontier',
-    color: '#10b981',
+    color: '#d97706',
     params: '~1.8T',
     scores: { overall: 89, mmlu: 89, humaneval: 88, gsm8k: 95, hellaswag: 95, arc: 96 },
   },
   {
     name: 'GPT-4o',
     tier: 'frontier',
-    color: '#74c5a5',
+    color: '#ca8a04',
     params: '~1.8T',
     scores: { overall: 88, mmlu: 88, humaneval: 87, gsm8k: 94, hellaswag: 95, arc: 96 },
   },
@@ -139,49 +139,49 @@ const MODELS: ModelScore[] = [
   {
     name: 'Qwen3.5-122B MoE',
     tier: 'mid',
-    color: '#9333ea',
+    color: '#3b82f6',
     params: '122B (10B active)',
     scores: { overall: 83, mmlu: 86, humaneval: 76, gsm8k: 88, hellaswag: 88, arc: 87 },
   },
   {
     name: 'Llama 4 Scout',
     tier: 'mid',
-    color: '#0066cc',
+    color: '#60a5fa',
     params: 'MoE 109B (17B active)',
     scores: { overall: 82, mmlu: 84, humaneval: 74, gsm8k: 87, hellaswag: 87, arc: 86 },
   },
   {
     name: 'Qwen2.5-72B',
     tier: 'mid',
-    color: '#a074d4',
+    color: '#3b82f6',
     params: '72B',
     scores: { overall: 81, mmlu: 85, humaneval: 74, gsm8k: 86, hellaswag: 86, arc: 85 },
   },
   {
     name: 'Llama 3.1 70B',
     tier: 'mid',
-    color: '#5b8dd9',
+    color: '#2563eb',
     params: '70B',
     scores: { overall: 80, mmlu: 82, humaneval: 73, gsm8k: 84, hellaswag: 87, arc: 86 },
   },
   {
     name: 'Qwen3.5-27B',
     tier: 'mid',
-    color: '#7c3aed',
+    color: '#60a5fa',
     params: '27B',
     scores: { overall: 79, mmlu: 83, humaneval: 71, gsm8k: 85, hellaswag: 84, arc: 83 },
   },
   {
     name: 'GPT-4o-mini',
     tier: 'mid',
-    color: '#74c5a5',
+    color: '#3b82f6',
     params: '~8B',
     scores: { overall: 79, mmlu: 82, humaneval: 72, gsm8k: 87, hellaswag: 85, arc: 84 },
   },
   {
     name: 'Claude Haiku 4.5',
     tier: 'mid',
-    color: '#c5a974',
+    color: '#60a5fa',
     params: '~20B',
     scores: { overall: 78, mmlu: 80, humaneval: 70, gsm8k: 85, hellaswag: 84, arc: 82 },
   },
@@ -189,94 +189,144 @@ const MODELS: ModelScore[] = [
   {
     name: 'Qwen3.5-9B',
     tier: 'small',
-    color: '#6d28d9',
+    color: '#707070',
     params: '9B',
     scores: { overall: 74, mmlu: 78, humaneval: 62, gsm8k: 80, hellaswag: 82, arc: 80 },
   },
   {
     name: 'Llama 3.1 8B',
     tier: 'small',
-    color: '#5ba4d9',
+    color: '#686868',
     params: '8B',
     scores: { overall: 65, mmlu: 68, humaneval: 40, gsm8k: 58, hellaswag: 82, arc: 79 },
   },
   {
     name: 'Qwen2.5-7B',
     tier: 'small',
-    color: '#9b74d4',
+    color: '#606060',
     params: '7B',
     scores: { overall: 68, mmlu: 74, humaneval: 55, gsm8k: 65, hellaswag: 80, arc: 76 },
   },
   {
     name: 'Mistral-7B',
     tier: 'small',
-    color: '#f97316',
+    color: '#585858',
     params: '7B',
     scores: { overall: 61, mmlu: 63, humaneval: 32, gsm8k: 52, hellaswag: 83, arc: 76 },
   },
   {
     name: 'Qwen3.5-4B',
     tier: 'small',
-    color: '#5b21b6',
+    color: '#505050',
     params: '4B',
     scores: { overall: 66, mmlu: 71, humaneval: 52, gsm8k: 72, hellaswag: 76, arc: 72 },
   },
   {
     name: 'Phi-3 Mini',
     tier: 'small',
-    color: '#22c55e',
+    color: '#484848',
     params: '3.8B',
     scores: { overall: 64, mmlu: 69, humaneval: 48, gsm8k: 75, hellaswag: 73, arc: 60 },
   },
   {
     name: 'Qwen2.5-3B',
     tier: 'small',
-    color: '#8b5cf6',
+    color: '#404040',
     params: '3B',
     scores: { overall: 57, mmlu: 63, humaneval: 38, gsm8k: 55, hellaswag: 72, arc: 58 },
   },
   {
     name: 'Qwen3.5-2B',
     tier: 'small',
-    color: '#4c1d95',
+    color: '#383838',
     params: '2B',
     scores: { overall: 58, mmlu: 62, humaneval: 42, gsm8k: 62, hellaswag: 70, arc: 60 },
   },
   {
     name: 'Llama 3.2 3B',
     tier: 'small',
-    color: '#4a8ad4',
+    color: '#303030',
     params: '3B',
     scores: { overall: 54, mmlu: 58, humaneval: 30, gsm8k: 48, hellaswag: 71, arc: 60 },
   },
   {
     name: 'Qwen3.5-0.8B',
     tier: 'small',
-    color: '#3b0764',
+    color: '#282828',
     params: '0.8B',
     scores: { overall: 42, mmlu: 45, humaneval: 25, gsm8k: 40, hellaswag: 58, arc: 48 },
+  },
+  // ─── New Open Models (2025-2026) ───
+  {
+    name: 'Qwen 3.5 72B',
+    tier: 'frontier',
+    color: '#c4b5fd',
+    params: '72B',
+    scores: { overall: 89, mmlu: 88, humaneval: 85, gsm8k: 92, hellaswag: 87, arc: 88 },
+  },
+  {
+    name: 'NVIDIA Nemotron 3',
+    tier: 'mid',
+    color: '#86efac',
+    params: '8B',
+    scores: { overall: 65, mmlu: 67, humaneval: 55, gsm8k: 62, hellaswag: 76, arc: 68 },
+  },
+  {
+    name: 'Kimi K2.5',
+    tier: 'mid',
+    color: '#67e8f9',
+    params: 'MoE',
+    scores: { overall: 80, mmlu: 82, humaneval: 74, gsm8k: 78, hellaswag: 84, arc: 80 },
+  },
+  {
+    name: 'GLM 5',
+    tier: 'frontier',
+    color: '#fca5a5',
+    params: 'MoE',
+    scores: { overall: 85, mmlu: 86, humaneval: 80, gsm8k: 84, hellaswag: 86, arc: 84 },
+  },
+  {
+    name: 'MiniMax M2.5',
+    tier: 'mid',
+    color: '#fdba74',
+    params: 'MoE',
+    scores: { overall: 78, mmlu: 80, humaneval: 70, gsm8k: 76, hellaswag: 82, arc: 78 },
+  },
+  {
+    name: 'gpt-oss 120B',
+    tier: 'frontier',
+    color: '#e5e5e5',
+    params: '120B',
+    scores: { overall: 82, mmlu: 84, humaneval: 76, gsm8k: 80, hellaswag: 85, arc: 82 },
+  },
+  {
+    name: 'Qwen3-Coder',
+    tier: 'mid',
+    color: '#a78bfa',
+    params: 'Code',
+    scores: { overall: 75, mmlu: 68, humaneval: 90, gsm8k: 72, hellaswag: 74, arc: 70 },
   },
   // ─── BlackSwan Family ───
   {
     name: 'BlackSwan v3',
     tier: 'blackswan',
-    color: '#ef4444',
+    color: '#a855f7',
     params: '3B (QLoRA)',
     scores: { overall: 38, mmlu: 42, humaneval: 18, gsm8k: 30, hellaswag: 55, arc: 42 },
   },
   {
     name: 'BlackSwan Mini',
     tier: 'blackswan',
-    color: '#f59e0b',
+    color: '#6366f1',
     params: '7B Qwen2.5 (QLoRA)',
-    scores: { overall: 0, mmlu: 0, humaneval: 0, gsm8k: 0, hellaswag: 0, arc: 0 }, // v4 — training in progress
+    scores: { overall: 0, mmlu: 0, humaneval: 0, gsm8k: 0, hellaswag: 0, arc: 0 },
   },
   {
     name: 'BlackSwan',
     tier: 'blackswan',
-    color: '#ef4444',
+    color: '#22c55e',
     params: '27B Qwen3.5 (QLoRA)',
-    scores: { overall: 0, mmlu: 0, humaneval: 0, gsm8k: 0, hellaswag: 0, arc: 0 }, // v5 — planned
+    scores: { overall: 0, mmlu: 0, humaneval: 0, gsm8k: 0, hellaswag: 0, arc: 0 },
   },
 ];
 
@@ -487,19 +537,19 @@ export default function LLMBenchmarkPanel({ accentColor = '#6366f1' }: Props) {
         <Text style={styles.legendTitle}>TIERS</Text>
         <View style={styles.legendRow}>
           <View style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: '#d4a574' }]} />
+            <View style={[styles.legendDot, { backgroundColor: '#f59e0b' }]} />
             <Text style={styles.legendText}>Frontier (500B+)</Text>
           </View>
           <View style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: '#5b8dd9' }]} />
+            <View style={[styles.legendDot, { backgroundColor: '#3b82f6' }]} />
             <Text style={styles.legendText}>Mid (8-72B)</Text>
           </View>
           <View style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: '#22c55e' }]} />
+            <View style={[styles.legendDot, { backgroundColor: '#6f6f6f' }]} />
             <Text style={styles.legendText}>Small (3-8B)</Text>
           </View>
           <View style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: '#f59e0b' }]} />
+            <View style={[styles.legendDot, { backgroundColor: '#22c55e' }]} />
             <Text style={styles.legendText}>BlackSwan</Text>
           </View>
         </View>
@@ -599,9 +649,9 @@ function ModelExplorer({ accentColor }: { accentColor: string }) {
   // Determine pipeline tag color
   const tagColor = (tag: string): string => {
     if (tag === 'text-generation') return '#22c55e';
-    if (tag === 'text2text-generation') return '#06b6d4';
-    if (tag === 'image-text-to-text') return '#ec4899';
-    if (tag === 'feature-extraction') return '#8b5cf6';
+    if (tag === 'text2text-generation') return '#3b82f6';
+    if (tag === 'image-text-to-text') return '#a855f7';
+    if (tag === 'feature-extraction') return '#f59e0b';
     return PIXEL_COLORS.text2;
   };
 
@@ -788,7 +838,7 @@ function ModelExplorer({ accentColor }: { accentColor: string }) {
                 {/* HF link */}
                 <View style={explorerStyles.detailRow}>
                   <Text style={explorerStyles.detailKey}>Link</Text>
-                  <Text style={[explorerStyles.detailVal, { color: '#f59e0b' }]} selectable>
+                  <Text style={[explorerStyles.detailVal, { color: '#3b82f6' }]} selectable>
                     huggingface.co/{model.id}
                   </Text>
                 </View>
@@ -832,9 +882,9 @@ const styles = StyleSheet.create({
   headerIcon: {
     width: 36,
     height: 36,
-    backgroundColor: '#f59e0b15',
+    backgroundColor: '#ffffff08',
     borderWidth: 2,
-    borderColor: '#f59e0b30',
+    borderColor: '#ffffff15',
     borderRadius: 2,
     alignItems: 'center',
     justifyContent: 'center',
@@ -843,7 +893,7 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
     fontSize: 12,
     fontWeight: '700',
-    color: '#f59e0b',
+    color: '#6366f1',
   },
   headerTitle: {
     fontFamily: 'monospace',
@@ -944,9 +994,9 @@ const styles = StyleSheet.create({
     borderRadius: 2,
   },
   barRowBlackSwan: {
-    backgroundColor: '#f59e0b08',
+    backgroundColor: '#ffffff05',
     borderWidth: 1,
-    borderColor: '#f59e0b20',
+    borderColor: '#ffffff10',
     borderRadius: 2,
   },
   barRank: {
@@ -993,16 +1043,16 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#f59e0b08',
+    backgroundColor: '#ffffff05',
     borderWidth: 1,
-    borderColor: '#f59e0b20',
+    borderColor: '#ffffff10',
     borderStyle: 'dashed',
     height: '100%',
   },
   barTBDText: {
     fontFamily: 'monospace',
     fontSize: 8,
-    color: '#f59e0b60',
+    color: '#ffffff30',
     letterSpacing: 2,
   },
   barScore: {
@@ -1111,7 +1161,7 @@ const styles = StyleSheet.create({
   noteCard: {
     backgroundColor: PIXEL_COLORS.bg2,
     borderWidth: 1,
-    borderColor: '#f59e0b20',
+    borderColor: '#ffffff10',
     borderRadius: 2,
     padding: GRID.md,
   },
@@ -1119,7 +1169,7 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
     fontSize: 9,
     fontWeight: '700',
-    color: '#f59e0b',
+    color: '#22c55e',
     letterSpacing: 1,
     marginBottom: GRID.sm,
   },
@@ -1186,9 +1236,9 @@ const explorerStyles = StyleSheet.create({
   searchBtn: {
     paddingHorizontal: GRID.md,
     paddingVertical: GRID.sm,
-    backgroundColor: '#f59e0b15',
+    backgroundColor: '#ffffff08',
     borderWidth: 2,
-    borderColor: '#f59e0b30',
+    borderColor: '#ffffff15',
     borderRadius: 2,
     justifyContent: 'center',
   },
@@ -1276,14 +1326,14 @@ const explorerStyles = StyleSheet.create({
     paddingHorizontal: GRID.md,
     paddingVertical: GRID.sm,
     borderWidth: 1,
-    borderColor: '#ef444430',
+    borderColor: '#ffffff15',
     borderRadius: 2,
   },
   retryBtnText: {
     fontFamily: 'monospace',
     fontSize: 9,
     fontWeight: '700',
-    color: '#ef4444',
+    color: '#f59e0b',
     letterSpacing: 1,
   },
 
@@ -1300,8 +1350,8 @@ const explorerStyles = StyleSheet.create({
     borderRadius: 2,
   },
   modelCardExpanded: {
-    borderColor: '#f59e0b30',
-    backgroundColor: '#f59e0b08',
+    borderColor: '#ffffff15',
+    backgroundColor: '#ffffff05',
     borderBottomLeftRadius: 0,
     borderBottomRightRadius: 0,
   },
@@ -1386,7 +1436,7 @@ const explorerStyles = StyleSheet.create({
     backgroundColor: PIXEL_COLORS.bg2,
     borderWidth: 1,
     borderTopWidth: 0,
-    borderColor: '#f59e0b30',
+    borderColor: '#ffffff15',
     borderBottomLeftRadius: 2,
     borderBottomRightRadius: 2,
     padding: GRID.md,
