@@ -74,11 +74,13 @@ export default function AgentControlCard({
   const isOnline = agent.status === 'active' || agent.status === 'building' || agent.status === 'idle';
   const provider = agent.providerType || 'claude-code';
 
-  // Check bridge health on mount
-  useEffect(() => {
+  // Check bridge health on mount + every 15s
+  const checkBridge = useCallback(() => {
     const port = BRIDGE_PORTS[provider] || 7778;
-    fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(2000) })
-      .then(r => r.json())
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    fetch(`http://localhost:${port}/health`, { signal: controller.signal })
+      .then(r => { clearTimeout(timeout); return r.json(); })
       .then(d => {
         setBridgeOk(true);
         const sessions = d.sessions ?? 0;
@@ -87,10 +89,17 @@ export default function AgentControlCard({
           : 'Bridge connected — no active sessions');
       })
       .catch(() => {
+        clearTimeout(timeout);
         setBridgeOk(false);
         setStatusMsg('Bridge offline — cannot reach local agent');
       });
   }, [provider]);
+
+  useEffect(() => {
+    checkBridge();
+    const interval = setInterval(checkBridge, 15000);
+    return () => clearInterval(interval);
+  }, [checkBridge]);
 
   // ── Status ─────────────────────────────────────────────────────────────────
 
@@ -188,6 +197,9 @@ export default function AgentControlCard({
       <View style={c.connRow} nativeID="section-agent-bridge-status">
         <View style={[c.connDot, { backgroundColor: bridgeOk ? '#22c55e' : bridgeOk === false ? '#ef4444' : '#4b5563' }]} />
         <Text style={c.connText}>{statusMsg || 'Checking bridge...'}</Text>
+        <Pressable onPress={checkBridge} style={{ padding: 4, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
+          <Text style={{ color: '#6b7280', fontSize: 10, fontFamily: MONO }}>refresh</Text>
+        </Pressable>
       </View>
 
       {/* ── Provider info ───────────────────────────────────────────────────── */}
