@@ -60,15 +60,19 @@ let _connections: AgentConnection[] = [];
 let _sessionsMap = new Map<string, any[]>();
 let _ccPoller: ClaudeCodePoller | null = null;
 let _ccPublished = false;
+let _ccStarting = false;   // Prevents duplicate poller creation
 let _codexPoller: CodexPoller | null = null;
 let _codexPublished = false;
+let _codexStarting = false; // Prevents duplicate poller creation
 let _geminiPoller: GeminiCliPoller | null = null;
 let _geminiPublished = false;
+let _geminiStarting = false; // Prevents duplicate poller creation
 let _ocPollers = new Map<string, OpenClawPoller>();
 let _retryTimer: ReturnType<typeof setInterval> | null = null;
 let _ocReconnectTimer: ReturnType<typeof setInterval> | null = null;
 let _circleId: string | null = null;
 let _visibilityHandler: (() => void) | null = null;
+let _visibilityDebounce = false; // Prevents duplicate reconnect attempts
 let _retryAttempt = 0; // for exponential backoff
 
 // Listeners that want to know when sessions/connections change
@@ -211,8 +215,12 @@ export function stopAgentAutoConnect() {
   _connections = [];
   _sessionsMap.clear();
   _ccPublished = false;
+  _ccStarting = false;
   _codexPublished = false;
+  _codexStarting = false;
   _geminiPublished = false;
+  _geminiStarting = false;
+  _visibilityDebounce = false;
   _circleId = null;
   _retryAttempt = 0;
   _stopVisibilityListener();
@@ -227,19 +235,26 @@ function _startRetryLoop() {
   if (_retryTimer) clearInterval(_retryTimer);
   if (_ocReconnectTimer) clearInterval(_ocReconnectTimer);
 
-  // Claude Code bridge detection — every 10s
+  // Bridge detection — every 10s, all three in parallel
   _retryTimer = setInterval(async () => {
     if (!_running) return;
-    const detected = await detectClaudeCodeBridge();
 
-    if (detected && !_ccPoller) {
+    // Detect all bridges in parallel instead of sequentially
+    const [ccDetected, codexDetected, geminiDetected] = await Promise.all([
+      detectClaudeCodeBridge().catch(() => false),
+      detectCodexBridge().catch(() => false),
+      detectGeminiCliBridge().catch(() => false),
+    ]);
+
+    // Claude Code bridge
+    if (ccDetected && !_ccPoller) {
       _startCCPoller();
-      _retryAttempt = 0; // Reset backoff on success
+      _retryAttempt = 0;
       console.log('[agentAutoConnect] Claude Code bridge came online');
-    } else if (!detected && _ccPoller) {
+    } else if (!ccDetected && _ccPoller) {
       _ccPoller.stop();
       _ccPoller = null;
-      // Mark existing CC sessions as idle (not remove)
+      _ccStarting = false;
       const existing = _sessionsMap.get('claude-code-auto') as OfficeAgent[] | undefined;
       if (existing && existing.length > 0) {
         const idled = existing.map(a => ({ ...a, status: 'idle' as const, activity: 'Session ended — idling' }));
@@ -252,14 +267,14 @@ function _startRetryLoop() {
       console.log('[agentAutoConnect] Claude Code bridge went offline');
     }
 
-    // Codex bridge detection (same interval)
-    const codexDetected = await detectCodexBridge();
+    // Codex bridge
     if (codexDetected && !_codexPoller) {
       _startCodexPoller();
       console.log('[agentAutoConnect] Codex bridge came online');
     } else if (!codexDetected && _codexPoller) {
       _codexPoller.stop();
       _codexPoller = null;
+      _codexStarting = false;
       const existing = _sessionsMap.get('codex-auto') as OfficeAgent[] | undefined;
       if (existing && existing.length > 0) {
         const idled = existing.map(a => ({ ...a, status: 'idle' as const, activity: 'Session ended — idling' }));
@@ -272,14 +287,14 @@ function _startRetryLoop() {
       console.log('[agentAutoConnect] Codex bridge went offline');
     }
 
-    // Gemini CLI bridge detection (same interval)
-    const geminiDetected = await detectGeminiCliBridge();
+    // Gemini CLI bridge
     if (geminiDetected && !_geminiPoller) {
       _startGeminiPoller();
       console.log('[agentAutoConnect] Gemini CLI bridge came online');
     } else if (!geminiDetected && _geminiPoller) {
       _geminiPoller.stop();
       _geminiPoller = null;
+      _geminiStarting = false;
       const existing = _sessionsMap.get('gemini-cli-auto') as OfficeAgent[] | undefined;
       if (existing && existing.length > 0) {
         const idled = existing.map(a => ({ ...a, status: 'idle' as const, activity: 'Session ended — idling' }));
@@ -347,35 +362,35 @@ function _startVisibilityListener() {
   _visibilityHandler = () => {
     if (document.visibilityState !== 'visible') return;
     if (!_running) return;
+    // Debounce: prevent duplicate reconnect attempts if visibility fires rapidly
+    if (_visibilityDebounce) return;
+    _visibilityDebounce = true;
+    setTimeout(() => { _visibilityDebounce = false; }, 2000);
 
     console.log('[agentAutoConnect] Tab became visible — checking connections...');
-    _retryAttempt = 0; // Reset backoff immediately
+    _retryAttempt = 0;
 
-    // Immediately check Claude Code bridge
-    detectClaudeCodeBridge().then(detected => {
-      if (detected && !_ccPoller) {
+    // Check all bridges in parallel
+    Promise.all([
+      detectClaudeCodeBridge().catch(() => false),
+      detectCodexBridge().catch(() => false),
+      detectGeminiCliBridge().catch(() => false),
+    ]).then(([cc, codex, gemini]) => {
+      if (cc && !_ccPoller) {
         _startCCPoller();
         console.log('[agentAutoConnect] Claude Code bridge reconnected on tab focus');
       }
-    });
-
-    // Immediately check Codex bridge
-    detectCodexBridge().then(detected => {
-      if (detected && !_codexPoller) {
+      if (codex && !_codexPoller) {
         _startCodexPoller();
         console.log('[agentAutoConnect] Codex bridge reconnected on tab focus');
       }
-    });
-
-    // Immediately check Gemini CLI bridge
-    detectGeminiCliBridge().then(detected => {
-      if (detected && !_geminiPoller) {
+      if (gemini && !_geminiPoller) {
         _startGeminiPoller();
         console.log('[agentAutoConnect] Gemini CLI bridge reconnected on tab focus');
       }
     });
 
-    // Immediately retry failed OpenClaw connections
+    // Retry failed OpenClaw connections
     const failedConns = _connections.filter(
       c => c.enabled && (c.status === 'error' || c.status === 'disconnected'),
     );
@@ -398,7 +413,8 @@ function _stopVisibilityListener() {
 // ── Internal: Claude Code poller ─────────────────────────────────────────────
 
 function _startCCPoller() {
-  if (_ccPoller) return;
+  if (_ccPoller || _ccStarting) return;
+  _ccStarting = true;
   _ccPoller = new ClaudeCodePoller(sessions => {
     _sessionsMap.set('claude-code-auto', bridgeSessionsToAgents(sessions) as any);
     _notify();
@@ -415,12 +431,14 @@ function _startCCPoller() {
     }
   });
   _ccPoller.start(5000);
+  _ccStarting = false;
 }
 
 // ── Internal: Codex poller ───────────────────────────────────────────────────
 
 function _startCodexPoller() {
-  if (_codexPoller) return;
+  if (_codexPoller || _codexStarting) return;
+  _codexStarting = true;
   _codexPoller = new CodexPoller(sessions => {
     _sessionsMap.set('codex-auto', codexSessionsToAgents(sessions) as any);
     _notify();
@@ -437,12 +455,14 @@ function _startCodexPoller() {
     }
   });
   _codexPoller.start(5000);
+  _codexStarting = false;
 }
 
 // ── Internal: Gemini CLI poller ──────────────────────────────────────────────
 
 function _startGeminiPoller() {
-  if (_geminiPoller) return;
+  if (_geminiPoller || _geminiStarting) return;
+  _geminiStarting = true;
   _geminiPoller = new GeminiCliPoller(sessions => {
     _sessionsMap.set('gemini-cli-auto', geminiSessionsToAgents(sessions) as any);
     _notify();
@@ -459,6 +479,7 @@ function _startGeminiPoller() {
     }
   });
   _geminiPoller.start(5000);
+  _geminiStarting = false;
 }
 
 // ── Internal: Probe with fallback endpoints ─────────────────────────────────

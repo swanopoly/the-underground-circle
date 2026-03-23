@@ -214,7 +214,7 @@ export async function updateCodexAgentStatus(
       })
       .eq('circle_id', circleId)
       .eq('owner_id', auth.user.id)
-      .ilike('name', CODEX_AGENT_NAME);
+      .eq('name', CODEX_AGENT_NAME);
   } catch {}
 }
 
@@ -232,6 +232,6 @@ export async function markCodexAgentOffline(circleId: string): Promise<void> {
       })
       .eq('circle_id', circleId)
       .eq('owner_id', auth.user.id)
-      .ilike('name', CODEX_AGENT_NAME);
+      .eq('name', CODEX_AGENT_NAME);
   } catch {}
 }

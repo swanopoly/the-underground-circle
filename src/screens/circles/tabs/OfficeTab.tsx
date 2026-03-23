@@ -86,7 +86,7 @@ import {
   AgentLiveState,
   ConnectionStatus,
 } from '../../../lib/agentPresence';
-const OfficeTerminal = React.lazy(() => import('../../../components/OfficeTerminal'));
+import OfficeTerminal from '../../../components/OfficeTerminal';
 import {
   subscribeToTerminalCommands,
   respondToCommand,
@@ -108,20 +108,22 @@ import {
 import { supabase } from '../../../lib/supabase';
 import { fetchNFTs } from '../../../lib/crypto';
 import { NFT } from '../../../types';
-const AgentSetupWizard = React.lazy(() => import('../../../components/AgentSetupWizard'));
-const BadgeCelebration = React.lazy(() => import('../../../components/BadgeCelebration'));
-const RewardsPanel = React.lazy(() => import('../../../components/RewardsPanel'));
+import AgentSetupWizard from '../../../components/AgentSetupWizard';
+import ConnectAgentModal from '../../../components/ConnectAgentModal';
+import BadgeCelebration from '../../../components/BadgeCelebration';
+import RewardsPanel from '../../../components/RewardsPanel';
 import { useAllAgentPointsTracker, useUserRewards } from '../../../services/rewardService';
 import { Badge, getNextBadge } from '../../../lib/badges';
 import {
   RippleEffect, ConfettiEffect, RocketEffect, DiceEffect,
   PulseEffect, ShakeEffect, FireworksEffect,
 } from './office/FloorEffects';
-// Lazy-load heavy interactive components — only loaded when user clicks the furniture
-const RetroEmulator = React.lazy(() => import('../../../components/RetroEmulator'));
-const ScrabbleGame = React.lazy(() => import('../../../components/ScrabbleGame'));
-const PhoneMessenger = React.lazy(() => import('../../../components/PhoneMessenger'));
-const PokerGame = React.lazy(() => import('../../../components/poker/PokerGame'));
+import RetroEmulator from '../../../components/RetroEmulator';
+import ScrabbleGame from '../../../components/ScrabbleGame';
+import PhoneMessenger from '../../../components/PhoneMessenger';
+import PokerGame from '../../../components/poker/PokerGame';
+import HuggingFaceExplorer from './office/HuggingFaceExplorer';
+import HfToolRunner from './office/HfToolRunner';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -262,6 +264,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // ─── Phone messenger state ─────────────────────────────────────────
   const [phoneVisible, setPhoneVisible] = useState(false);
 
+  // ─── Hugging Face state ───────────────────────────────────────────
+  const [hfExplorerVisible, setHfExplorerVisible] = useState(false);
+  const [hfRunnerVisible, setHfRunnerVisible] = useState(false);
+
   // ─── Service connector state ────────────────────────────────────────────
   const [serviceModalVisible, setServiceModalVisible] = useState(false);
   const [serviceModalTargetId, setServiceModalTargetId] = useState<string | null>(null);
@@ -287,6 +293,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   // ─── Setup wizard ─────────────────────────────────────────────────────────
   const [showSetupWizard, setShowSetupWizard] = useState(false);
+
+  // ─── Cloud agent connect modal ─────────────────────────────────────────────
+  const [showConnectAgent, setShowConnectAgent] = useState(false);
 
   // ─── Multi-connection state ──────────────────────────────
   const [connections, setConnections] = useState<AgentConnection[]>([]);
@@ -357,7 +366,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         name: conn.name,
         provider: conn.provider,
         toolIcon: PROVIDER_DISPLAY[conn.provider]?.icon || '🤖',
-        color: conn.color || PROVIDER_DISPLAY[conn.provider]?.color || '#6366f1',
+        color: conn.color || PROVIDER_DISPLAY[conn.provider]?.color || '#e8e8e8',
         status: 'idle' as const,
       }));
 
@@ -2013,7 +2022,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         break;
 
       case 'lava_lamp': {
-        const colors = ['#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#8b5cf6', '#ec4899', '#14b8a6'];
+        const colors = ['#ef4444', '#22c55e', '#6366f1', '#f59e0b', '#a855f7', '#22d3ee', '#ffffff'];
         const currentIdx = colors.indexOf(item.lavaColor || '#ef4444');
         const nextColor = colors[(currentIdx + 1) % colors.length];
         updateFurnitureField({ lavaColor: nextColor });
@@ -2637,6 +2646,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         break;
       }
 
+      case 'hf_explorer':
+        setHfExplorerVisible(true);
+        break;
+
+      case 'hf_runner':
+        setHfRunnerVisible(true);
+        break;
+
       default:
         break;
     }
@@ -2880,6 +2897,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               <Text style={styles.toolbarBtnIcon}>🏆</Text>
               <Text style={styles.toolbarBtnText}>Achievements</Text>
             </Pressable>
+            <Pressable onPress={() => setShowConnectAgent(true)} style={[styles.toolbarBtn,
+              Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+              <Text style={styles.toolbarBtnIcon}>☁️</Text>
+              <Text style={styles.toolbarBtnText}>Connect Agent</Text>
+            </Pressable>
             <Pressable onPress={() => setShowCustomize(true)} style={[styles.toolbarBtn,
               Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
               <Text style={styles.toolbarBtnIcon}>🔧</Text>
@@ -2898,15 +2920,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
             </Text>
             <View style={styles.editToolbarActions}>
               {placingType && (
-                <Pressable onPress={() => setPlacingType(null)} style={[styles.editActionBtn, { borderColor: '#f59e0b55' }]}>
-                  <Text style={[styles.editActionBtnText, { color: '#f59e0b' }]}>CANCEL</Text>
+                <Pressable onPress={() => setPlacingType(null)} style={[styles.editActionBtn, { borderColor: '#ffffff25' }]}>
+                  <Text style={[styles.editActionBtnText, { color: '#9e9e9e' }]}>CANCEL</Text>
                 </Pressable>
               )}
               {currentFloor.furniture.length > 0 && (
                 <Pressable onPress={() => {
                   setFloors(prev => prev.map(f => f.id === currentFloorId ? { ...f, furniture: [] } : f));
-                }} style={[styles.editActionBtn, { borderColor: '#ef444455' }]}>
-                  <Text style={[styles.editActionBtnText, { color: '#ef4444' }]}>CLEAR ALL</Text>
+                }} style={[styles.editActionBtn, { borderColor: '#ffffff25' }]}>
+                  <Text style={[styles.editActionBtnText, { color: '#9e9e9e' }]}>CLEAR ALL</Text>
                 </Pressable>
               )}
             </View>
@@ -2918,8 +2940,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               cat => FURNITURE_CATALOG.some(f => f.category === cat)
             );
             const catColors: Record<string, string> = {
-              games: '#ef4444', connected: '#1DB954', vibe: '#8b5cf6', productivity: '#3b82f6',
-              fun: '#f59e0b', furniture: '#6b7280',
+              games: '#ef4444', connected: '#22c55e', vibe: '#a855f7', productivity: '#3b82f6',
+              fun: '#f59e0b', furniture: '#6f6f6f',
             };
             const catIcons: Record<string, string> = {
               games: '🃏', connected: '🔗', vibe: '✨', productivity: '📊',
@@ -3068,7 +3090,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                   if (connectingConns.length > 0) {
                     return (
                       <>
-                        <ActivityIndicator color="#6366f1" size="large" style={{ marginBottom: 16 }} />
+                        <ActivityIndicator color="#e8e8e8" size="large" style={{ marginBottom: 16 }} />
                         <Text style={styles.mobileEmptyTitle}>Connecting...</Text>
                         <Text style={styles.mobileEmptyText}>
                           Reaching {connectingConns[0].name}
@@ -3082,8 +3104,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                         <Text style={styles.mobileEmptyIcon}>⚠️</Text>
                         <Text style={styles.mobileEmptyTitle}>Connection failed</Text>
                         {errorConns.map(c => (
-                          <View key={c.id} style={{ marginBottom: 8, padding: 10, backgroundColor: '#1a0a0a', borderRadius: 8, borderWidth: 1, borderColor: '#ef444430', width: '100%' }}>
-                            <Text style={{ color: '#ef4444', fontSize: 11, fontWeight: '700', fontFamily: 'monospace' }}>{c.name}</Text>
+                          <View key={c.id} style={{ marginBottom: 8, padding: 10, backgroundColor: '#161616', borderRadius: 8, borderWidth: 1, borderColor: '#ffffff15', width: '100%' }}>
+                            <Text style={{ color: '#9e9e9e', fontSize: 11, fontWeight: '700', fontFamily: 'monospace' }}>{c.name}</Text>
                             <Text style={{ color: '#888', fontSize: 10, fontFamily: 'monospace', marginTop: 2 }}>{c.error || 'Could not reach endpoint'}</Text>
                             <Text style={{ color: '#555', fontSize: 9, fontFamily: 'monospace', marginTop: 2 }}>{c.endpoint}</Text>
                           </View>
@@ -3093,9 +3115,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                         </Text>
                         <Pressable
                           onPress={() => savedConns.forEach(c => connectOne(c))}
-                          style={[{ backgroundColor: '#6366f120', borderWidth: 1, borderColor: '#6366f140', borderRadius: 8, paddingHorizontal: 20, paddingVertical: 10, marginBottom: 12 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                          style={[{ backgroundColor: '#ffffff10', borderWidth: 1, borderColor: '#ffffff20', borderRadius: 8, paddingHorizontal: 20, paddingVertical: 10, marginBottom: 12 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                         >
-                          <Text style={{ color: '#6366f1', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' }}>↻ RETRY CONNECTION</Text>
+                          <Text style={{ color: '#e8e8e8', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' }}>↻ RETRY CONNECTION</Text>
                         </Pressable>
                       </>
                     );
@@ -3121,7 +3143,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               </View>
             ) : (
               displayAgents.map((agent) => {
-                const statusColor = agent.status === 'active' ? '#22c55e' : agent.status === 'idle' ? '#eab308' : agent.status === 'error' ? '#ef4444' : '#6b7280';
+                const statusColor = agent.status === 'active' ? '#22c55e' : agent.status === 'idle' ? '#f59e0b' : agent.status === 'error' ? '#ef4444' : '#6f6f6f';
                 const isSelected = selectedAgent?.id === agent.id;
                 return (
                   <Pressable
@@ -3158,7 +3180,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
             {/* Agent Activity Feed */}
             <View style={{ paddingHorizontal: 12, paddingTop: 16, paddingBottom: 8 }}>
-              <Text style={{ color: '#6B7280', fontSize: 11, fontFamily: 'monospace', letterSpacing: 1, marginBottom: 8, textTransform: 'uppercase' }}>
+              <Text style={{ color: '#6f6f6f', fontSize: 11, fontFamily: 'monospace', letterSpacing: 1, marginBottom: 8, textTransform: 'uppercase' }}>
                 ⚡ Agent Activity
               </Text>
               <AgentActivityFeed circleId={circleId} maxHeight={320} />
@@ -3198,9 +3220,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                             </Text>
                             <Pressable
                               onPress={() => connections.filter(c => c.enabled).forEach(c => connectOne(c))}
-                              style={{ marginTop: 12, backgroundColor: '#6366f120', borderWidth: 1, borderColor: '#6366f140', borderRadius: 8, paddingVertical: 8, paddingHorizontal: 20, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
+                              style={{ marginTop: 12, backgroundColor: '#ffffff10', borderWidth: 1, borderColor: '#ffffff20', borderRadius: 8, paddingVertical: 8, paddingHorizontal: 20, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
                             >
-                              <Text style={{ color: '#6366f1', fontWeight: '700', fontSize: 12, fontFamily: 'monospace' }}>↻ RETRY</Text>
+                              <Text style={{ color: '#e8e8e8', fontWeight: '700', fontSize: 12, fontFamily: 'monospace' }}>↻ RETRY</Text>
                             </Pressable>
                           </>
                         ) : (
@@ -3210,9 +3232,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                             <Text style={styles.emptyText}>Connect your AI agent to show up in the circle office</Text>
                             <Pressable
                               onPress={() => setShowSetupWizard(true)}
-                              style={{ marginTop: 16, backgroundColor: '#6366f1', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 24, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
+                              style={{ marginTop: 16, backgroundColor: '#252525', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 24, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
                             >
-                              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Connect Agent →</Text>
+                              <Text style={{ color: '#e8e8e8', fontWeight: '700', fontSize: 14 }}>Connect Agent →</Text>
                             </Pressable>
                           </>
                         )}
@@ -3258,12 +3280,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                                   onPress={() => setInteractAgentTarget(a.id)}
                                   style={{
                                     paddingHorizontal: 4, paddingVertical: 2, borderRadius: 3,
-                                    backgroundColor: interactAgentTarget === a.id ? (currentTheme.accentGlow + '40') : '#1e293b',
-                                    borderWidth: 1, borderColor: interactAgentTarget === a.id ? currentTheme.accentGlow : '#334155',
+                                    backgroundColor: interactAgentTarget === a.id ? (currentTheme.accentGlow + '40') : '#161616',
+                                    borderWidth: 1, borderColor: interactAgentTarget === a.id ? currentTheme.accentGlow : '#252525',
                                     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
                                   }}
                                 >
-                                  <Text style={{ color: interactAgentTarget === a.id ? currentTheme.accentGlow : '#94a3b8', fontSize: 6, fontFamily: 'monospace' }}>@{a.name}</Text>
+                                  <Text style={{ color: interactAgentTarget === a.id ? currentTheme.accentGlow : '#9e9e9e', fontSize: 6, fontFamily: 'monospace' }}>@{a.name}</Text>
                                 </Pressable>
                               ))}
                             </View>
@@ -3274,11 +3296,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                               onChangeText={setInteractInputText}
                               onSubmitEditing={handleInteractSubmit}
                               placeholder={isConsole ? 'Command...' : 'Task for all agents...'}
-                              placeholderTextColor="#64748b"
+                              placeholderTextColor="#6f6f6f"
                               autoFocus
                               style={{
                                 width: 120, height: 20, fontSize: 8, fontFamily: 'monospace',
-                                color: '#e2e8f0', backgroundColor: '#0f172a', borderWidth: 1,
+                                color: '#e8e8e8', backgroundColor: '#000000', borderWidth: 1,
                                 borderColor: currentTheme.accentGlow + '60', borderRadius: 4,
                                 paddingHorizontal: 4, paddingVertical: 2,
                               }}
@@ -3296,7 +3318,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                               onPress={() => { setInteractInputId(null); setInteractInputText(''); }}
                               style={{ paddingHorizontal: 4, paddingVertical: 3, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
                             >
-                              <Text style={{ color: '#ef4444', fontSize: 7, fontWeight: '900', fontFamily: 'monospace' }}>✕</Text>
+                              <Text style={{ color: '#9e9e9e', fontSize: 7, fontWeight: '900', fontFamily: 'monospace' }}>✕</Text>
                             </Pressable>
                           </View>
                         </View>
@@ -3368,9 +3390,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                         selectedAgent?.id === agent.id && { backgroundColor: agent.color + '20', borderColor: agent.color + '60' },
                         Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                     >
-                      <View style={[styles.quickProviderDot, { backgroundColor: PROVIDER_META[agent.providerType]?.color || '#6b7280' }]} />
+                      <View style={[styles.quickProviderDot, { backgroundColor: PROVIDER_META[agent.providerType]?.color || '#6f6f6f' }]} />
                       <View style={[styles.quickDot, {
-                        backgroundColor: agent.status === 'active' ? '#22c55e' : agent.status === 'idle' ? '#eab308' : agent.status === 'error' ? '#ef4444' : '#6b7280',
+                        backgroundColor: agent.status === 'active' ? '#22c55e' : agent.status === 'idle' ? '#f59e0b' : agent.status === 'error' ? '#ef4444' : '#6f6f6f',
                       }]} />
                       <Text style={[styles.quickName, selectedAgent?.id === agent.id && { color: agent.color }]}>{agent.name}</Text>
                       <Text style={styles.quickCost}>${agent.costToday.toFixed(2)}</Text>
@@ -3401,7 +3423,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               accessibilityRole="button"
               accessibilityLabel="Open automations"
             >
-              <Text style={[styles.chatToggleText, { color: '#06b6d4' }]}>⚡ AUTOMATIONS</Text>
+              <Text style={[styles.chatToggleText, { color: '#f59e0b' }]}>⚡ AUTOMATIONS</Text>
             </Pressable>
             {terminalSize !== 'closed' && (
               <View style={styles.terminalSizeButtons}>
@@ -3427,7 +3449,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         {/* Terminal - half size (mirrors the Terminal tab — shared state) */}
         {terminalSize === 'half' && (
           <View style={styles.chatPane}>
-            <React.Suspense fallback={<ActivityIndicator color="#6366f1" style={{ flex: 1 }} />}>
             <OfficeTerminal
               circleId={circleId}
               userId={currentUserId}
@@ -3448,7 +3469,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               initialTab={terminalInitialTab}
               compact
             />
-            </React.Suspense>
           </View>
         )}
 
@@ -3470,7 +3490,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                 <Text style={styles.terminalFullscreenBtnText}>✕ Close</Text>
               </Pressable>
             </View>
-            <React.Suspense fallback={<ActivityIndicator color="#6366f1" style={{ flex: 1 }} />}>
             <OfficeTerminal
               circleId={circleId}
               userId={currentUserId}
@@ -3490,7 +3509,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               byoProviderKeys={providerKeys}
               initialTab={terminalInitialTab}
             />
-            </React.Suspense>
           </View>
         )}
       </View>
@@ -3590,25 +3608,20 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       {/* Rewards Panel Modal (lazy) */}
       {showRewards && (
         <Modal visible={showRewards} animationType="slide" presentationStyle="pageSheet">
-          <React.Suspense fallback={null}>
             <RewardsPanel onClose={() => setShowRewards(false)} />
-          </React.Suspense>
         </Modal>
       )}
 
       {/* Badge celebration overlay (lazy) */}
       {celebrationBadge && (
-        <React.Suspense fallback={null}>
           <BadgeCelebration
             badge={celebrationBadge}
             onDismiss={() => setCelebrationBadge(null)}
           />
-        </React.Suspense>
       )}
 
       {/* Agent setup wizard (lazy) */}
       {showSetupWizard && (
-        <React.Suspense fallback={null}>
           <AgentSetupWizard
             visible={showSetupWizard}
             onClose={() => setShowSetupWizard(false)}
@@ -3617,7 +3630,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               setShowSetupWizard(false);
             }}
           />
-        </React.Suspense>
+      )}
+
+      {/* Cloud agent connect modal */}
+      {showConnectAgent && (
+        <ConnectAgentModal
+          circleId={circleId}
+          onClose={() => setShowConnectAgent(false)}
+        />
       )}
 
       {/* Customization panel */}
@@ -3710,7 +3730,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               <>
                 {nftsLoading ? (
                   <View style={nftStyles.emptyState}>
-                    <ActivityIndicator color="#6366f1" size="large" />
+                    <ActivityIndicator color="#e8e8e8" size="large" />
                     <Text style={nftStyles.emptyText}>Loading NFTs...</Text>
                   </View>
                 ) : userNfts.length === 0 ? (
@@ -3869,18 +3889,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
       {/* ─── Retro Emulator Modal (lazy) ──────────────────────────────── */}
       {emulatorVisible && (
-        <React.Suspense fallback={null}>
           <RetroEmulator
             visible={emulatorVisible}
             onClose={() => setEmulatorVisible(false)}
             initialSystem={emulatorSystem}
           />
-        </React.Suspense>
       )}
 
       {/* ─── Scrabble Game Modal (lazy) ──────────────────────────────── */}
       {scrabbleVisible && (
-        <React.Suspense fallback={null}>
           <ScrabbleGame
             visible={scrabbleVisible}
             onClose={() => setScrabbleVisible(false)}
@@ -3896,12 +3913,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               }
             }}
           />
-        </React.Suspense>
       )}
 
       {/* ─── Poker Game Modal (lazy) ──────────────────────────────────── */}
       {pokerVisible && (
-        <React.Suspense fallback={null}>
           <PokerGame
             visible={pokerVisible}
             onClose={() => setPokerVisible(false)}
@@ -3920,12 +3935,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               }
             }}
           />
-        </React.Suspense>
       )}
 
       {/* ─── Phone Messenger Modal (lazy) ──────────────────────────────── */}
       {phoneVisible && (
-        <React.Suspense fallback={null}>
           <PhoneMessenger
             visible={phoneVisible}
             onClose={() => setPhoneVisible(false)}
@@ -3939,7 +3952,30 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               }
             }}
           />
-        </React.Suspense>
+      )}
+
+      {/* ─── Hugging Face Explorer Modal (lazy) ────────────────────────── */}
+      {hfExplorerVisible && (
+        <Modal visible={hfExplorerVisible} animationType="slide" transparent={false}>
+            <HuggingFaceExplorer
+              circleId={circleId}
+              onClose={() => setHfExplorerVisible(false)}
+              onAdded={() => {
+                setHfExplorerVisible(false);
+                setHfRunnerVisible(true);
+              }}
+            />
+        </Modal>
+      )}
+
+      {/* ─── Hugging Face Runner Modal (lazy) ─────────────────────────── */}
+      {hfRunnerVisible && (
+        <Modal visible={hfRunnerVisible} animationType="slide" transparent={false}>
+            <HfToolRunner
+              circleId={circleId}
+              onClose={() => setHfRunnerVisible(false)}
+            />
+        </Modal>
       )}
 
       {/* ─── Service Connector Modal ──────────────────────────────────────── */}
@@ -4180,7 +4216,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                   </View>
 
                   {oauthStatus?.connected && (
-                    <View style={{ backgroundColor: '#22c55e10', borderWidth: 1, borderColor: '#22c55e30', borderRadius: 10, padding: 14, marginBottom: 12 }}>
+                    <View style={{ backgroundColor: '#22c55e10', borderWidth: 1, borderColor: '#22c55e25', borderRadius: 10, padding: 14, marginBottom: 12 }}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                         <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#22c55e' }} />
                         <Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' }}>CONNECTED</Text>
@@ -4192,7 +4228,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                           await disconnectOAuth(prov);
                           setOauthStatus(null);
                         }}
-                        style={[{ marginTop: 8, paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#ef444420', borderRadius: 6, alignSelf: 'flex-start', borderWidth: 1, borderColor: '#ef444440' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                        style={[{ marginTop: 8, paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#ef444415', borderRadius: 6, alignSelf: 'flex-start', borderWidth: 1, borderColor: '#ef444430' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                       >
                         <Text style={{ color: '#ef4444', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>DISCONNECT</Text>
                       </Pressable>
@@ -4200,7 +4236,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                   )}
 
                   {oauthError ? (
-                    <View style={{ backgroundColor: '#ef444415', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                    <View style={{ backgroundColor: '#ef444410', borderRadius: 8, padding: 10, marginBottom: 8 }}>
                       <Text style={{ color: '#ef4444', fontSize: 10, fontFamily: 'monospace' }}>{oauthError}</Text>
                     </View>
                   ) : null}
@@ -4292,7 +4328,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                   </View>
 
                   {oauthStatus?.connected && (
-                    <View style={{ backgroundColor: '#22c55e10', borderWidth: 1, borderColor: '#22c55e30', borderRadius: 10, padding: 14, marginBottom: 12 }}>
+                    <View style={{ backgroundColor: '#22c55e10', borderWidth: 1, borderColor: '#22c55e25', borderRadius: 10, padding: 14, marginBottom: 12 }}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                         <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#22c55e' }} />
                         <Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' }}>CONNECTED</Text>
@@ -4304,7 +4340,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                           await disconnectOAuth(prov);
                           setOauthStatus(null);
                         }}
-                        style={[{ marginTop: 8, paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#ef444420', borderRadius: 6, alignSelf: 'flex-start', borderWidth: 1, borderColor: '#ef444440' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                        style={[{ marginTop: 8, paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#ef444415', borderRadius: 6, alignSelf: 'flex-start', borderWidth: 1, borderColor: '#ef444430' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                       >
                         <Text style={{ color: '#ef4444', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>DISCONNECT</Text>
                       </Pressable>
@@ -4312,7 +4348,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                   )}
 
                   {oauthError ? (
-                    <View style={{ backgroundColor: '#ef444415', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                    <View style={{ backgroundColor: '#ef444410', borderRadius: 8, padding: 10, marginBottom: 8 }}>
                       <Text style={{ color: '#ef4444', fontSize: 10, fontFamily: 'monospace' }}>{oauthError}</Text>
                     </View>
                   ) : null}
@@ -4443,7 +4479,7 @@ function CircleOfficePanel({
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={coStyles.compactScroll}>
           {agents.map(agent => {
             const display = PROVIDER_DISPLAY[agent.provider] || PROVIDER_DISPLAY['generic-agent'];
-            const statusColor = agent.status === 'building' ? '#22c55e' : agent.status === 'idle' ? '#eab308' : '#444';
+            const statusColor = agent.status === 'building' ? '#22c55e' : agent.status === 'idle' ? '#f59e0b' : '#444';
             return (
               <View key={agent.id} style={[coStyles.compactChip, { borderColor: display.color + '44' }]}>
                 {/* Live pulse for building */}
@@ -4522,7 +4558,7 @@ function CircleOfficePanel({
               </View>
               <View style={coStyles.statusChip}>
                 <View style={[coStyles.statusDot, {
-                  backgroundColor: isBuilding ? '#22c55e' : isOnline ? '#22c55e' : '#333',
+                  backgroundColor: isBuilding ? '#3b82f6' : isOnline ? '#22c55e' : '#333',
                 }]} />
                 <Text style={[coStyles.statusText, isOffline && { color: '#444' }]}>
                   {isBuilding ? 'building' : isOnline ? 'online' : lastSeen.text}
@@ -4597,7 +4633,7 @@ const pmStyles = StyleSheet.create({
     marginBottom: 6,
   },
   subtitle: {
-    color: '#71717a',
+    color: '#6f6f6f',
     fontSize: 12,
     lineHeight: 17,
     marginBottom: 20,
@@ -4642,10 +4678,10 @@ const pmStyles = StyleSheet.create({
     borderColor: '#6366f1',
   },
   providerIcon: { fontSize: 20, marginBottom: 4 },
-  providerLabel: { color: '#71717a', fontSize: 10, fontWeight: '600' },
+  providerLabel: { color: '#6f6f6f', fontSize: 10, fontWeight: '600' },
   providerLabelActive: { color: '#6366f1' },
   submitBtn: {
-    backgroundColor: '#6366f1',
+    backgroundColor: '#252525',
     borderRadius: 10,
     paddingVertical: 13,
     alignItems: 'center',
@@ -4666,8 +4702,8 @@ const coStyles = StyleSheet.create({
   compactBar: {
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: 12, paddingVertical: 8,
-    borderTopWidth: 1, borderTopColor: '#1a1a2a',
-    backgroundColor: '#080810',
+    borderTopWidth: 1, borderTopColor: '#1a1a1a',
+    backgroundColor: '#000000',
     gap: 10,
   },
   compactLabel: { color: '#444', fontSize: 11, fontWeight: '700', letterSpacing: 0.5 },
@@ -4675,7 +4711,7 @@ const coStyles = StyleSheet.create({
   compactChip: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
     paddingHorizontal: 10, paddingVertical: 6,
-    borderRadius: 20, borderWidth: 1, backgroundColor: '#0d0d1a',
+    borderRadius: 20, borderWidth: 1, backgroundColor: '#0a0a0a',
     position: 'relative',
   },
   buildingDot: {
@@ -4700,7 +4736,7 @@ const coStyles = StyleSheet.create({
   connectionLabel: { fontSize: 11, fontWeight: '600' },
   panelStats: { flexDirection: 'row', gap: 10 },
   statBuilding: { color: '#22c55e', fontSize: 12, fontWeight: '600' },
-  statIdle: { color: '#22c55e', fontSize: 12 },
+  statIdle: { color: '#f59e0b', fontSize: 12 },
   statOffline: { color: '#444', fontSize: 12 },
 
   agentCard: {
@@ -4739,7 +4775,7 @@ const coStyles = StyleSheet.create({
   publishBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     margin: 8, padding: 14,
-    backgroundColor: '#0d0d1a', borderRadius: 12, borderWidth: 1,
+    backgroundColor: '#0a0a0a', borderRadius: 12, borderWidth: 1,
     borderStyle: 'dashed',
   },
   publishBtnIcon: { fontSize: 24 },
@@ -4749,7 +4785,7 @@ const coStyles = StyleSheet.create({
 
 const nftStyles = StyleSheet.create({
   overlay: { flex: 1, backgroundColor: '#00000088', justifyContent: 'center', alignItems: 'center' },
-  card: { width: 380, maxHeight: 500, backgroundColor: '#0d0d14', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 16, overflow: 'hidden' },
+  card: { width: 380, maxHeight: 500, backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 16, overflow: 'hidden' },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderColor: '#2a2a2a' },
   headerText: { color: '#eee', fontSize: 14, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 2 },
   closeBtn: { padding: 6 },
@@ -4765,20 +4801,20 @@ const nftStyles = StyleSheet.create({
   nftName: { color: '#ccc', fontSize: 9, fontFamily: 'monospace', fontWeight: '700', marginTop: 4, textAlign: 'center' },
   nftCollection: { color: '#555', fontSize: 7, fontFamily: 'monospace', textAlign: 'center' },
   clearBtn: { margin: 12, padding: 10, backgroundColor: '#2a2a2a', borderRadius: 8, alignItems: 'center' },
-  clearText: { color: '#ef4444', fontSize: 10, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
+  clearText: { color: '#9e9e9e', fontSize: 10, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
 });
 
 const imgPickerStyles = StyleSheet.create({
   tabRow: { flexDirection: 'row', borderBottomWidth: 1, borderColor: '#2a2a2a' },
   tab: { flex: 1, paddingVertical: 10, alignItems: 'center', backgroundColor: '#000000' },
-  tabActive: { backgroundColor: '#0d0d14', borderBottomWidth: 2, borderBottomColor: '#6366f1' },
+  tabActive: { backgroundColor: '#0a0a0a', borderBottomWidth: 2, borderBottomColor: '#6366f1' },
   tabText: { color: '#555', fontSize: 10, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
   tabTextActive: { color: '#eee' },
   uploadArea: { padding: 40, alignItems: 'center', gap: 12 },
   uploadTitle: { color: '#ccc', fontSize: 14, fontFamily: 'monospace', fontWeight: '700' },
   uploadHint: { color: '#555', fontSize: 10, fontFamily: 'monospace', textAlign: 'center' },
   uploadBtn: { marginTop: 8, paddingHorizontal: 24, paddingVertical: 10, backgroundColor: '#6366f1', borderRadius: 8 },
-  uploadBtnText: { color: '#fff', fontSize: 11, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
+  uploadBtnText: { color: '#e8e8e8', fontSize: 11, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
 });
 
 const stickyStyles = StyleSheet.create({
@@ -4801,7 +4837,7 @@ const stickyStyles = StyleSheet.create({
   clearDrawText: { color: '#888', fontSize: 9, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
   gifArea: { padding: 12, gap: 10 },
   gifInput: {
-    backgroundColor: '#0d0d14', borderWidth: 1, borderColor: '#222',
+    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#222',
     borderRadius: 8, padding: 10, color: '#ddd', fontSize: 12, fontFamily: 'monospace',
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
@@ -4810,10 +4846,10 @@ const stickyStyles = StyleSheet.create({
   gifHint: { height: 120, alignItems: 'center', justifyContent: 'center', gap: 8 },
   gifHintText: { color: '#555', fontSize: 10, fontFamily: 'monospace', textAlign: 'center' },
   saveBtn: {
-    margin: 12, paddingVertical: 12, borderRadius: 8, backgroundColor: '#6366f1',
+    margin: 12, paddingVertical: 12, borderRadius: 8, backgroundColor: '#252525',
     alignItems: 'center',
   },
-  saveBtnText: { color: '#fff', fontSize: 12, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
+  saveBtnText: { color: '#e8e8e8', fontSize: 12, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
 });
 
 // ─── Service Connector Modal Styles ──────────────────────────────────────────
@@ -4912,7 +4948,7 @@ const svcStyles = StyleSheet.create({
     marginTop: 14,
   },
   openBtn: {
-    backgroundColor: '#6366f1',
+    backgroundColor: '#252525',
     borderRadius: 8,
     paddingVertical: 12,
     alignItems: 'center',
@@ -4920,7 +4956,7 @@ const svcStyles = StyleSheet.create({
     marginBottom: 12,
   },
   openBtnText: {
-    color: '#fff',
+    color: '#e8e8e8',
     fontSize: 11,
     fontWeight: '900',
     fontFamily: 'monospace',
@@ -4960,14 +4996,14 @@ const svcStyles = StyleSheet.create({
     letterSpacing: 1,
   },
   saveBtn: {
-    backgroundColor: '#22c55e',
+    backgroundColor: '#252525',
     borderRadius: 8,
     paddingVertical: 14,
     alignItems: 'center',
     marginTop: 8,
   },
   saveBtnText: {
-    color: '#fff',
+    color: '#e8e8e8',
     fontSize: 12,
     fontWeight: '900',
     fontFamily: 'monospace',
@@ -4976,22 +5012,22 @@ const svcStyles = StyleSheet.create({
 });
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#050508' },
+  container: { flex: 1, backgroundColor: '#000000' },
   tagsActionBtn: {
     flex: 1,
-    backgroundColor: '#00FF9C18',
+    backgroundColor: '#6366f118',
     borderWidth: 1,
-    borderColor: '#00FF9C40',
+    borderColor: '#6366f140',
     borderRadius: 8,
     paddingVertical: 10,
     alignItems: 'center',
   },
   tagsActionBtnSecondary: {
-    backgroundColor: '#6366f118',
-    borderColor: '#6366f140',
+    backgroundColor: '#ffffff10',
+    borderColor: '#ffffff20',
   },
   tagsActionBtnText: {
-    color: '#00FF9C',
+    color: '#6366f1',
     fontSize: 10,
     fontWeight: '800',
     fontFamily: 'monospace',
@@ -5005,12 +5041,12 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   toolbarBtnActiveGreen: {
-    borderColor: '#22c55e40', backgroundColor: '#22c55e15',
+    borderColor: '#ffffff20', backgroundColor: '#ffffff10',
   },
   toolbarBtnIcon: { fontSize: 13 },
   toolbarBtnText: { fontSize: 11, fontWeight: '700', color: '#888', fontFamily: 'monospace' },
   reconnectBtnStyle: {
-    backgroundColor: '#6366f110', borderColor: '#6366f130',
+    backgroundColor: '#ffffff08', borderColor: '#ffffff15',
   },
   tgBadge: { fontSize: 7, marginRight: 1 },
 
@@ -5018,7 +5054,7 @@ const styles = StyleSheet.create({
   floorBar: {
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: 8, paddingVertical: 5,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a1a', backgroundColor: '#08080d',
+    borderBottomWidth: 1, borderBottomColor: '#1a1a1a', backgroundColor: '#000000',
     gap: 8,
   },
   floorList: { gap: 4, flexDirection: 'row', alignItems: 'center' },
@@ -5029,7 +5065,7 @@ const styles = StyleSheet.create({
     borderRadius: 5, borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
   },
   floorChipActive: {
-    borderColor: '#6366f160', backgroundColor: '#6366f115',
+    borderColor: '#ffffff30', backgroundColor: '#ffffff10',
   },
   floorChipText: {
     fontSize: 11, color: '#888', fontFamily: 'monospace', fontWeight: '600',
@@ -5041,7 +5077,7 @@ const styles = StyleSheet.create({
     width: 7, height: 7, borderRadius: 4,
   },
   floorAgentBadge: {
-    backgroundColor: '#22c55e20',
+    backgroundColor: '#ffffff10',
     borderRadius: 8,
     paddingHorizontal: 5,
     paddingVertical: 1,
@@ -5052,21 +5088,21 @@ const styles = StyleSheet.create({
   floorAgentBadgeText: {
     fontSize: 10,
     fontWeight: '700',
-    color: '#22c55e',
+    color: '#6366f1',
     fontFamily: 'monospace',
   },
   floorAddBtn: {
     paddingHorizontal: 12, paddingVertical: 5,
-    borderRadius: 6, borderWidth: 1, borderColor: '#22c55e40', backgroundColor: '#22c55e10',
+    borderRadius: 6, borderWidth: 1, borderColor: '#6366f130', backgroundColor: '#6366f115',
   },
   floorAddBtnText: {
-    fontSize: 11, color: '#22c55e', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1,
+    fontSize: 11, color: '#6366f1', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1,
   },
 
   // Connections bar
   connectionsBar: {
     paddingHorizontal: 12, paddingVertical: 4,
-    borderBottomWidth: 1, borderBottomColor: '#2a2a2a', backgroundColor: '#08080d',
+    borderBottomWidth: 1, borderBottomColor: '#2a2a2a', backgroundColor: '#000000',
     flexDirection: 'row', alignItems: 'center',
   },
   connectionsToggle: { paddingRight: 8, paddingVertical: 2 },
@@ -5075,7 +5111,7 @@ const styles = StyleSheet.create({
   connectionChip: {
     flexDirection: 'row', alignItems: 'center', gap: 5,
     paddingHorizontal: 10, paddingVertical: 6,
-    borderRadius: 8, borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#0d0d14',
+    borderRadius: 8, borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#0a0a0a',
   },
   connectionChipDot: { width: 6, height: 6, borderRadius: 3 },
   connectionChipStatus: { width: 5, height: 5, borderRadius: 3 },
@@ -5084,14 +5120,14 @@ const styles = StyleSheet.create({
   connectionChipLocal: { fontSize: 10, marginLeft: 2 },
   connectionAddChip: {
     width: 28, height: 28, borderRadius: 14, borderWidth: 1,
-    borderColor: '#22c55e40', backgroundColor: '#22c55e10',
+    borderColor: '#ffffff20', backgroundColor: '#ffffff08',
     alignItems: 'center', justifyContent: 'center',
   },
-  connectionAddChipText: { fontSize: 14, color: '#22c55e', fontWeight: '700' },
+  connectionAddChipText: { fontSize: 14, color: '#6366f1', fontWeight: '700' },
 
   editToolbar: {
     paddingHorizontal: 8, paddingVertical: 4,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a1a', backgroundColor: '#0a0a12',
+    borderBottomWidth: 1, borderBottomColor: '#1a1a1a', backgroundColor: '#0a0a0a',
   },
   editLabel: { fontSize: 8, color: '#888', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1, marginBottom: 4 },
   editItems: { gap: 8, flexDirection: 'row', paddingRight: 12 },
@@ -5103,7 +5139,7 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   editItemActive: {
-    borderColor: '#6366f160', backgroundColor: '#6366f115',
+    borderColor: '#ffffff30', backgroundColor: '#ffffff10',
     ...(Platform.OS === 'web' ? { boxShadow: '0 0 12px rgba(99,102,241,0.3)' } as any : {}),
   },
   editItemIcon: { fontSize: 28 },
@@ -5123,7 +5159,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row' as const, alignItems: 'center' as const, gap: 4,
     paddingHorizontal: 10, paddingVertical: 5,
     borderRadius: 8, borderWidth: 1, borderColor: '#2a2a2a',
-    backgroundColor: '#0d0d14',
+    backgroundColor: '#0a0a0a',
   },
   editCatTabText: {
     fontSize: 8, fontFamily: 'monospace', fontWeight: '800' as const, letterSpacing: 1,
@@ -5136,7 +5172,7 @@ const styles = StyleSheet.create({
   },
   editScrollArrow: {
     width: 24, height: 80, borderRadius: 6, borderWidth: 1,
-    backgroundColor: '#0d0d1490', alignItems: 'center' as const, justifyContent: 'center' as const,
+    backgroundColor: '#0a0a0a90', alignItems: 'center' as const, justifyContent: 'center' as const,
     zIndex: 2,
   },
   editScrollArrowLeft: { marginRight: 4 },
@@ -5145,14 +5181,14 @@ const styles = StyleSheet.create({
     fontSize: 22, fontWeight: '700' as const,
   },
   floorChipWrap: { flexDirection: 'row', alignItems: 'center', marginRight: 4 },
-  floorDeleteBtn: { marginLeft: -2, marginRight: 6, width: 14, height: 14, borderRadius: 7, backgroundColor: '#ef444422', borderWidth: 1, borderColor: '#ef444444', alignItems: 'center', justifyContent: 'center', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
+  floorDeleteBtn: { marginLeft: -2, marginRight: 6, width: 14, height: 14, borderRadius: 7, backgroundColor: '#ffffff10', borderWidth: 1, borderColor: '#ffffff20', alignItems: 'center', justifyContent: 'center', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
   floorDeleteBtnText: { fontSize: 7, color: '#ef4444', fontWeight: '800', lineHeight: 14 },
   clearBtn: {
     marginTop: 6, paddingVertical: 4, paddingHorizontal: 10, borderRadius: 4,
-    backgroundColor: '#ef444420', alignSelf: 'flex-start',
+    backgroundColor: '#ffffff10', alignSelf: 'flex-start',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  clearBtnText: { fontSize: 8, color: '#ef4444', fontFamily: 'monospace', fontWeight: '700' },
+  clearBtnText: { fontSize: 8, color: '#9e9e9e', fontFamily: 'monospace', fontWeight: '700' },
   mainContent: { flex: 1 },
 
   // Mobile agent cards
@@ -5166,12 +5202,12 @@ const styles = StyleSheet.create({
   mobileEmptyText: { fontSize: 14, color: '#666', fontFamily: 'monospace', textAlign: 'center', paddingHorizontal: 24 },
   mobileEmptyBtn: {
     marginTop: 8, paddingHorizontal: 24, paddingVertical: 14, borderRadius: 12,
-    backgroundColor: '#6366f1', minHeight: 48,
+    backgroundColor: '#252525', minHeight: 48,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  mobileEmptyBtnText: { fontSize: 14, color: '#fff', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1 },
+  mobileEmptyBtnText: { fontSize: 14, color: '#e8e8e8', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1 },
   mobileAgentCard: {
-    backgroundColor: '#222222', borderWidth: 1, borderColor: '#2a2a2a',
+    backgroundColor: '#161616', borderWidth: 1, borderColor: '#2a2a2a',
     borderRadius: 14, padding: 16, gap: 10,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -5189,7 +5225,7 @@ const styles = StyleSheet.create({
   mobileCardRole: { fontSize: 13, color: '#888', fontFamily: 'monospace' },
   mobileCardModel: { fontSize: 12, color: '#666', fontFamily: 'monospace' },
   mobileCardRight: { alignItems: 'flex-end', gap: 2 },
-  mobileCardCost: { fontSize: 16, fontWeight: '900', color: '#22c55e', fontFamily: 'monospace' },
+  mobileCardCost: { fontSize: 16, fontWeight: '900', color: '#22d3ee', fontFamily: 'monospace' },
   mobileCardCostLabel: { fontSize: 11, color: '#666', fontFamily: 'monospace' },
   mobileCardActivity: { fontSize: 13, color: '#777', fontFamily: 'monospace', paddingLeft: 62 },
   officeScroll: { flex: 1 },
@@ -5217,7 +5253,7 @@ const styles = StyleSheet.create({
   quickCost: { fontSize: 8, color: '#444', fontFamily: 'monospace' },
   chatToggle: {
     borderTopWidth: 1, borderTopColor: '#2a2a2a',
-    backgroundColor: '#0a0a12',
+    backgroundColor: '#0a0a0a',
   },
   terminalBar: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
@@ -5252,7 +5288,7 @@ const styles = StyleSheet.create({
     bottom: 280,
     left: 12,
     right: 12,
-    backgroundColor: '#0d0d14',
+    backgroundColor: '#0a0a0a',
     borderWidth: 2,
     borderColor: '#6366f1',
     borderRadius: 12,

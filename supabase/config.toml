@@ -387,6 +387,11 @@ s3_access_key = "env(S3_ACCESS_KEY)"
 # Configures AWS_SECRET_ACCESS_KEY for S3 bucket
 s3_secret_key = "env(S3_SECRET_KEY)"
 
+[functions.agent-connect]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/agent-connect/index.ts"
+
 [functions.automation-executor]
 enabled = true
 verify_jwt = false
