@@ -600,6 +600,9 @@ export class OpenClawPoller {
   private onError?: (error: string) => void;
   private pollCount = 0;
   private consecutiveFailures = 0;
+  private baseIntervalMs = 10000;
+  private currentIntervalMs = 10000;
+  private static readonly MAX_INTERVAL_MS = 60000; // Cap at 60s
 
   constructor(config: OpenClawConfig, onUpdate: (update: OpenClawUpdate) => void, onError?: (error: string) => void) {
     this.config = config;
@@ -608,12 +611,21 @@ export class OpenClawPoller {
   }
 
   start(intervalMs = 10000) {
+    this.baseIntervalMs = intervalMs;
+    this.currentIntervalMs = intervalMs;
     this.poll();
     this.interval = setInterval(() => this.poll(), intervalMs);
   }
 
   stop() {
     if (this.interval) { clearInterval(this.interval); this.interval = null; }
+  }
+
+  /** Reschedule with exponential backoff interval */
+  private reschedule(intervalMs: number) {
+    if (this.interval) clearInterval(this.interval);
+    this.currentIntervalMs = intervalMs;
+    this.interval = setInterval(() => this.poll(), intervalMs);
   }
 
   updateConfig(config: OpenClawConfig) {
@@ -635,15 +647,27 @@ export class OpenClawPoller {
 
     if (!sessionsResult.ok) {
       this.consecutiveFailures++;
+      // Exponential backoff: 10s → 20s → 40s → 60s cap
+      const backoffMs = Math.min(
+        this.baseIntervalMs * Math.pow(2, this.consecutiveFailures - 1),
+        OpenClawPoller.MAX_INTERVAL_MS,
+      );
+      if (backoffMs !== this.currentIntervalMs) {
+        this.reschedule(backoffMs);
+      }
       // After 3 consecutive failures, notify error handler so connection can be retried
       if (this.consecutiveFailures >= 3 && this.onError) {
         this.onError(sessionsResult.error || 'Connection lost');
-        this.stop(); // Stop polling — retry timer will restart it
+        this.stop();
       }
       return;
     }
 
     this.consecutiveFailures = 0;
+    // Reset to base interval on success (if we had backed off)
+    if (this.currentIntervalMs !== this.baseIntervalMs) {
+      this.reschedule(this.baseIntervalMs);
+    }
 
     if (sessionsResult.sessions) {
       // Enrich sessions with cost/token data from session_status

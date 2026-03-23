@@ -17,6 +17,7 @@ import {
 import {
   AgentType, ConnectToken, HookConfig,
   listConnectTokens, createConnectToken, deleteConnectToken, generateHookConfig,
+  generateTeamConfig, generateMcpCommand,
 } from '../lib/agentConnect';
 import { supabase } from '../lib/supabase';
 
@@ -228,6 +229,44 @@ export default function ConnectAgentModal({ circleId, onClose }: Props) {
             This token authenticates your agent. Keep it private.
           </Text>
         </View>
+
+        {/* MCP Server option (Claude Code only) */}
+        {selectedAgent === 'claude-code' && (
+          <View style={[s.tokenInfo, { marginTop: 12, borderColor: '#6366f140' }]}>
+            <Text style={s.tokenLabel}>Alternative: MCP Server</Text>
+            <Text style={[s.codeText, { marginBottom: 4 }]} selectable>
+              {generateMcpCommand(token.token)}
+            </Text>
+            <Text style={s.tokenHint}>
+              Persistent connection with circle tools (get tasks, post updates).
+            </Text>
+          </View>
+        )}
+
+        {/* Team config option (Claude Code only) */}
+        {selectedAgent === 'claude-code' && (
+          <View style={[s.tokenInfo, { marginTop: 12, borderColor: '#22c55e40' }]}>
+            <Text style={s.tokenLabel}>For Teams: Commit to your repo</Text>
+            <Text style={s.tokenHint}>
+              Save this as .claude/settings.json in your repo. Every developer
+              who sets UC_CONNECT_TOKEN in their env auto-connects to the circle.
+            </Text>
+            <Pressable
+              style={[s.copyBtn, { marginTop: 8, backgroundColor: '#374151' }]}
+              onPress={async () => {
+                try {
+                  if (Platform.OS === 'web' && navigator.clipboard) {
+                    await navigator.clipboard.writeText(generateTeamConfig());
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 3000);
+                  }
+                } catch {}
+              }}
+            >
+              <Text style={s.copyBtnText}>Copy Team Config</Text>
+            </Pressable>
+          </View>
+        )}
       </View>
     );
   };

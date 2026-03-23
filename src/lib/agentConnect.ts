@@ -127,55 +127,32 @@ export function generateHookConfig(
 // Our edge function detects this format and extracts the data automatically.
 
 function generateClaudeCodeHook(token: string): HookConfig {
-  const configSnippet = JSON.stringify({
-    hooks: {
-      SessionStart: [
-        {
-          matcher: "",
-          hooks: [
-            {
-              type: "http",
-              url: AGENT_CONNECT_URL,
-              timeout: 3,
-              headers: {
-                "Authorization": `Bearer ${token}`,
-              },
-            },
-          ],
-        },
-      ],
-      PostToolUse: [
-        {
-          matcher: "",
-          hooks: [
-            {
-              type: "http",
-              url: AGENT_CONNECT_URL,
-              timeout: 3,
-              headers: {
-                "Authorization": `Bearer ${token}`,
-              },
-            },
-          ],
-        },
-      ],
-      SessionEnd: [
-        {
-          matcher: "",
-          hooks: [
-            {
-              type: "http",
-              url: AGENT_CONNECT_URL,
-              timeout: 3,
-              headers: {
-                "Authorization": `Bearer ${token}`,
-              },
-            },
-          ],
-        },
-      ],
-    },
-  }, null, 2);
+  // Build the hook object that uses $UC_CONNECT_TOKEN env var
+  const hookEntry = {
+    type: "http",
+    url: AGENT_CONNECT_URL,
+    timeout: 3,
+    headers: { "Authorization": "Bearer $UC_CONNECT_TOKEN" },
+    allowedEnvVars: ["UC_CONNECT_TOKEN"],
+  };
+  const matcherWrap = [{ matcher: "", hooks: [hookEntry] }];
+
+  const configSnippet =
+`# Step 1: Set your connect token as an env var
+# Add to ~/.bashrc or ~/.zshrc:
+export UC_CONNECT_TOKEN="${token}"
+
+# Step 2: Add this to ~/.claude/settings.json:
+${JSON.stringify({ hooks: {
+  SessionStart: matcherWrap,
+  PostToolUse: matcherWrap,
+  SessionEnd: matcherWrap,
+} }, null, 2)}
+
+# --- OR use the MCP server (alternative) ---
+# claude mcp add --transport stdio uc-connect \\
+#   --env UC_CONNECT_TOKEN=${token} \\
+#   -- node scripts/mcp-agent-connect.js`;
 
   return {
     agentType: 'claude-code',
@@ -184,13 +161,41 @@ function generateClaudeCodeHook(token: string): HookConfig {
     configPath: '~/.claude/settings.json',
     configSnippet,
     instructions: [
-      'Open your Claude Code settings file:',
-      '  ~/.claude/settings.json',
-      'Add the "hooks" section from the config below.',
+      'Set your connect token as an env var in ~/.bashrc:',
+      `  export UC_CONNECT_TOKEN="${token}"`,
+      'Then add the hooks to ~/.claude/settings.json.',
       'If you already have hooks, merge the arrays.',
-      'That\'s it — Claude Code auto-sends session data on every event.',
+      'Claude Code auto-sends session data on every event.',
     ],
   };
+}
+
+/** Generate a project-level .claude/settings.json for team repos */
+export function generateTeamConfig(): string {
+  // Uses env var so each developer uses their own token
+  const hookEntry = {
+    type: "http",
+    url: AGENT_CONNECT_URL,
+    timeout: 3,
+    headers: { "Authorization": "Bearer $UC_CONNECT_TOKEN" },
+    allowedEnvVars: ["UC_CONNECT_TOKEN"],
+  };
+  const matcherWrap = [{ matcher: "", hooks: [hookEntry] }];
+
+  return JSON.stringify({
+    hooks: {
+      SessionStart: matcherWrap,
+      PostToolUse: matcherWrap,
+      SessionEnd: matcherWrap,
+    },
+  }, null, 2);
+}
+
+/** Generate MCP server add command */
+export function generateMcpCommand(token: string): string {
+  return `claude mcp add --transport stdio uc-connect \\
+  --env UC_CONNECT_TOKEN=${token} \\
+  -- node scripts/mcp-agent-connect.js`;
 }
 
 // ── Codex: curl-based hooks ──────────────────────────────────────────────────
