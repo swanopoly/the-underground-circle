@@ -59,7 +59,7 @@ import { calculatePeriodCosts } from '../../../lib/costCalculations';
 import OfficeActionPanel from '../../../components/OfficeActionPanel';
 import AgentActivityFeed from '../../../components/AgentActivityFeed';
 import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
-import { useAgentApprovals } from '../../../services/hitlService';
+import { useAgentApprovals, useAgentControl } from '../../../services/hitlService';
 import {
   CircleOfficeAgent,
   loadCircleOfficeAgents,
@@ -110,6 +110,7 @@ import { fetchNFTs } from '../../../lib/crypto';
 import { NFT } from '../../../types';
 import AgentSetupWizard from '../../../components/AgentSetupWizard';
 import ConnectAgentModal from '../../../components/ConnectAgentModal';
+import AgentControlCard from '../../../components/AgentControlCard';
 import BadgeCelebration from '../../../components/BadgeCelebration';
 import RewardsPanel from '../../../components/RewardsPanel';
 import { useAllAgentPointsTracker, useUserRewards } from '../../../services/rewardService';
@@ -167,6 +168,48 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [userId, setUserId] = useState<string | undefined>();
   const [userEmail, setUserEmail] = useState<string | undefined>();
   const pendingApprovals = useAgentApprovals(circleId);
+  const [showControlCard, setShowControlCard] = useState(false);
+
+  // Agent control hook for selected agent
+  const selectedSessionKey = selectedAgent?.sessionKey || '';
+  const agentControl = useAgentControl(circleId, selectedSessionKey);
+
+  // Remote shell: execute command on agent's machine via bridge /exec
+  const handleRunCommand = React.useCallback(async (cmd: string) => {
+    if (!selectedAgent) return { ok: false, stdout: '', stderr: 'No agent selected' };
+
+    // Determine bridge URL based on provider type
+    let bridgeUrl = '';
+    if (selectedAgent.providerType === 'claude-code' || selectedAgent.connectionId?.includes('claude-code')) {
+      bridgeUrl = 'http://localhost:7778';
+    } else if (selectedAgent.providerType === 'codex') {
+      bridgeUrl = 'http://localhost:7779';
+    } else if (selectedAgent.providerType === 'gemini') {
+      bridgeUrl = 'http://localhost:7780';
+    } else {
+      // Try Claude Code bridge as default (most common)
+      bridgeUrl = 'http://localhost:7778';
+    }
+
+    try {
+      const res = await fetch(`${bridgeUrl}/exec`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd }),
+      });
+      const data = await res.json();
+      return { ok: data.ok, stdout: data.stdout || '', stderr: data.stderr || '' };
+    } catch (e: any) {
+      return { ok: false, stdout: '', stderr: e.message || 'Bridge not reachable' };
+    }
+  }, [selectedAgent]);
+
+  // Disconnect handler — stops poller and marks agent offline
+  const handleDisconnectAgent = React.useCallback(() => {
+    if (!selectedAgent) return;
+    setSelectedAgent(null);
+    setShowControlCard(false);
+  }, [selectedAgent]);
 
   // Load custom themes from Supabase
   const { themes: customThemeRecords, refresh: refreshCustomThemes } = useCustomThemes(circleId);
@@ -1519,8 +1562,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   const handleAgentPress = useCallback((agent: OfficeAgent) => {
     if (editMode) return;
-    setSelectedAgent(prev => prev?.id === agent.id ? null : agent);
-  }, [editMode]);
+    const toggling = selectedAgent?.id === agent.id;
+    setSelectedAgent(toggling ? null : agent);
+    setShowControlCard(!toggling);
+  }, [editMode, selectedAgent?.id]);
 
   const handleOpenAutomate = useCallback(() => {
     setTerminalInitialTab('automations');
@@ -3513,11 +3558,26 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         )}
       </View>
 
+      {/* Agent control card (floating popup) */}
+      {showControlCard && selectedAgent && !editMode && (
+        <View style={{ position: 'absolute', top: 80, right: 16, zIndex: 200 }}>
+          <AgentControlCard
+            agent={selectedAgent}
+            circleId={circleId}
+            control={agentControl}
+            onClose={() => setShowControlCard(false)}
+            onOpenPanel={() => setShowControlCard(false)}
+            onDisconnect={handleDisconnectAgent}
+            onRunCommand={handleRunCommand}
+          />
+        </View>
+      )}
+
       {/* Agent detail panel */}
       {!editMode && (
         <AgentPanel
           agent={selectedAgent}
-          onClose={() => setSelectedAgent(null)}
+          onClose={() => { setSelectedAgent(null); setShowControlCard(false); }}
           isDesktop={isDesktop}
           onRenameAgent={handleRenameAgent}
           sessionTags={sessionTags}
