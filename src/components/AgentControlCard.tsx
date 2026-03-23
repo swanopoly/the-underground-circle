@@ -55,33 +55,123 @@ export default function AgentControlCard({
   const isPaused = control?.is_paused ?? false;
   const isOnline = agent.status === 'active' || agent.status === 'building' || agent.status === 'idle';
 
+  const [killOutput, setKillOutput] = useState('');
+
+  // Map provider type to the process name to kill
+  const getKillCommand = (provider: string): string => {
+    const processMap: Record<string, string> = {
+      'claude-code': 'pkill -f "claude" 2>/dev/null; echo "Claude Code processes terminated"',
+      'codex': 'pkill -f "codex" 2>/dev/null; echo "Codex processes terminated"',
+      'gemini': 'pkill -f "gemini" 2>/dev/null; echo "Gemini CLI processes terminated"',
+      'openclaw': 'pkill -f "openclaw" 2>/dev/null; echo "OpenClaw processes terminated"',
+    };
+    return processMap[provider] || `echo "No kill command for provider: ${provider}"`;
+  };
+
   // ── Power controls ─────────────────────────────────────────────────────────
 
-  const handlePauseToggle = useCallback(async () => {
+  const handlePause = useCallback(async () => {
     setSaving(true);
+    setKillOutput('');
     try {
-      await upsertAgentControl(circleId, agent.sessionKey, agent.name, {
-        is_paused: !isPaused,
-      });
-    } catch {}
-    setSaving(false);
-  }, [circleId, agent.sessionKey, agent.name, isPaused]);
+      // 1. Kill the agent process on the remote machine via bridge /exec
+      if (onRunCommand) {
+        const killCmd = getKillCommand(agent.providerType || 'claude-code');
+        const result = await onRunCommand(killCmd);
+        setKillOutput(result.stdout || result.stderr || 'Process kill signal sent');
+      }
 
-  const handleDisconnect = useCallback(async () => {
-    // Mark offline in DB
-    try {
+      // 2. Mark paused in DB
+      await upsertAgentControl(circleId, agent.sessionKey, agent.name, {
+        is_paused: true,
+      });
+
+      // 3. Mark agent offline in circle_office_agents
       const { data: auth } = await supabase.auth.getUser();
       if (auth.user) {
         await supabase
           .from('circle_office_agents')
-          .update({ status: 'offline', current_task: 'Disconnected by user', updated_at: new Date().toISOString() })
+          .update({
+            status: 'offline',
+            current_task: 'Paused by user — process terminated',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('circle_id', circleId)
+          .eq('owner_id', auth.user.id)
+          .eq('name', agent.name);
+      }
+    } catch (e: any) {
+      setKillOutput(`Error: ${e.message}`);
+    }
+    setSaving(false);
+  }, [circleId, agent.sessionKey, agent.name, agent.providerType, onRunCommand]);
+
+  const handleResume = useCallback(async () => {
+    setSaving(true);
+    setKillOutput('');
+    try {
+      // Mark unpaused in DB — the agent will need to be manually restarted
+      await upsertAgentControl(circleId, agent.sessionKey, agent.name, {
+        is_paused: false,
+      });
+
+      // Mark agent idle so it shows as available
+      const { data: auth } = await supabase.auth.getUser();
+      if (auth.user) {
+        await supabase
+          .from('circle_office_agents')
+          .update({
+            status: 'idle',
+            current_task: 'Resumed — waiting for new session',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('circle_id', circleId)
+          .eq('owner_id', auth.user.id)
+          .eq('name', agent.name);
+      }
+      setKillOutput('Agent unpaused. Start a new session to reconnect.');
+    } catch (e: any) {
+      setKillOutput(`Error: ${e.message}`);
+    }
+    setSaving(false);
+  }, [circleId, agent.sessionKey, agent.name]);
+
+  const handleDisconnect = useCallback(async () => {
+    setSaving(true);
+    setKillOutput('');
+    try {
+      // 1. Kill the agent process
+      if (onRunCommand) {
+        const killCmd = getKillCommand(agent.providerType || 'claude-code');
+        await onRunCommand(killCmd);
+      }
+
+      // 2. Also kill the bridge itself for a hard disconnect
+      if (onRunCommand) {
+        const bridgePort = agent.providerType === 'codex' ? 7779
+          : agent.providerType === 'gemini' ? 7780
+          : 7778;
+        await onRunCommand(`lsof -ti:${bridgePort} | xargs kill -9 2>/dev/null; echo "Bridge on port ${bridgePort} killed"`);
+      }
+
+      // 3. Mark offline in DB
+      const { data: auth } = await supabase.auth.getUser();
+      if (auth.user) {
+        await supabase
+          .from('circle_office_agents')
+          .update({
+            status: 'offline',
+            current_task: 'Disconnected — bridge and agent terminated',
+            updated_at: new Date().toISOString(),
+          })
           .eq('circle_id', circleId)
           .eq('owner_id', auth.user.id)
           .eq('name', agent.name);
       }
     } catch {}
+    setSaving(false);
     onDisconnect();
-  }, [circleId, agent.name, onDisconnect]);
+  }, [circleId, agent.name, agent.providerType, onRunCommand, onDisconnect]);
 
   // ── Remote shell ───────────────────────────────────────────────────────────
 
@@ -143,15 +233,22 @@ export default function AgentControlCard({
         {agent.connectionName ? ` via ${agent.connectionName}` : ''}
       </Text>
 
+      {/* Kill output */}
+      {killOutput ? (
+        <View style={s.killOutputBox}>
+          <Text style={s.killOutputText}>{killOutput}</Text>
+        </View>
+      ) : null}
+
       {/* Power buttons */}
       <View style={s.powerRow}>
         <Pressable
           style={[s.powerBtn, isPaused ? s.powerBtnResume : s.powerBtnPause]}
-          onPress={handlePauseToggle}
+          onPress={isPaused ? handleResume : handlePause}
           disabled={saving}
         >
           <Text style={s.powerBtnText}>
-            {saving ? '...' : isPaused ? '▶ RESUME' : '⏸ PAUSE'}
+            {saving ? '...' : isPaused ? '▶ RESUME' : '⏸ KILL AGENT'}
           </Text>
         </Pressable>
 
@@ -294,7 +391,21 @@ const s = StyleSheet.create({
     borderRadius: 6,
     alignItems: 'center',
   },
-  powerBtnPause: { backgroundColor: '#f59e0b20', borderWidth: 1, borderColor: '#f59e0b40' },
+  powerBtnPause: { backgroundColor: '#ef444420', borderWidth: 1, borderColor: '#ef444440' },
+  killOutputBox: {
+    backgroundColor: '#0d1117',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#f59e0b40',
+    padding: 8,
+    marginBottom: 8,
+  },
+  killOutputText: {
+    color: '#f59e0b',
+    fontSize: 10,
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+    lineHeight: 14,
+  },
   powerBtnResume: { backgroundColor: '#22c55e20', borderWidth: 1, borderColor: '#22c55e40' },
   powerBtnDisconnect: { backgroundColor: '#ef444420', borderWidth: 1, borderColor: '#ef444440' },
   powerBtnPanel: { backgroundColor: '#6366f120', borderWidth: 1, borderColor: '#6366f140' },
