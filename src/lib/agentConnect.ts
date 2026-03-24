@@ -254,31 +254,61 @@ function generateGeminiHook(token: string): HookConfig {
   };
 }
 
-// ── Cursor: cron/task based ──────────────────────────────────────────────────
+// ── Cursor: native hooks + MCP server (same as Claude Code!) ─────────────────
 
 function generateCursorHook(token: string): HookConfig {
-  const curlCmd = buildCurlCmd(token, 'cursor');
+  // Cursor has the SAME hooks system as Claude Code
+  const hookEntry = {
+    type: "http",
+    url: AGENT_CONNECT_URL,
+    timeout: 3,
+    headers: { "Authorization": `Bearer ${token}` },
+  };
 
-  const configSnippet = `# Cursor doesn't have a native hooks system yet.
-# Use one of these options:
+  const hooksConfig = JSON.stringify({
+    agent: {
+      sessionStart: [{ hooks: [hookEntry] }],
+      afterFileEdit: [{ hooks: [hookEntry] }],
+      afterAgentResponse: [{ hooks: [hookEntry] }],
+      stop: [{ hooks: [hookEntry] }],
+    },
+  }, null, 2);
 
-# Option A: Shell alias (fires on every launch)
-alias cursor='${curlCmd} && command cursor'
+  const mcpConfig = JSON.stringify({
+    mcpServers: {
+      "underground-circle": {
+        type: "stdio",
+        command: "node",
+        args: ["scripts/mcp-agent-connect.js"],
+        env: { "UC_CONNECT_TOKEN": token, "UC_AGENT_TYPE": "cursor" },
+      },
+    },
+  }, null, 2);
 
-# Option B: Cron job (heartbeat every 5 min while Cursor runs)
-# Add to crontab -e:
-*/5 * * * * pgrep -x cursor > /dev/null && ${curlCmd}`;
+  const configSnippet = `# ── Option A: Cursor Hooks (real-time tracking) ──
+# Save as ~/.cursor/hooks.json (user) or .cursor/hooks.json (project):
+${hooksConfig}
+
+# ── Option B: MCP Server (bidirectional — Cursor can call circle tools) ──
+# Add to ~/.cursor/mcp.json:
+${mcpConfig}
+
+# ── Option C: Auto-detect via Cursor Bridge ──
+# Start the bridge (reads agent transcripts automatically):
+# node scripts/cursor-bridge.js`;
 
   return {
     agentType: 'cursor',
     label: 'Cursor',
-    description: 'Connect Cursor via shell alias or cron',
-    configPath: '~/.bashrc or crontab',
+    description: 'Native hooks + MCP server + auto-detect bridge',
+    configPath: '~/.cursor/hooks.json or ~/.cursor/mcp.json',
     configSnippet,
     instructions: [
-      'Cursor doesn\'t have native hooks yet.',
-      'Option A: Add the shell alias to ~/.bashrc or ~/.zshrc',
-      'Option B: Add the cron job to fire while Cursor is running',
+      'Pick one (or use all three):',
+      'A) Save hooks.json to ~/.cursor/hooks.json for real-time tracking',
+      'B) Add MCP server to ~/.cursor/mcp.json for bidirectional tools',
+      'C) Run the Cursor bridge: node scripts/cursor-bridge.js',
+      'The bridge auto-reads agent transcripts from ~/.cursor/projects/',
     ],
   };
 }

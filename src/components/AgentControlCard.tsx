@@ -55,6 +55,7 @@ const BRIDGE_PORTS: Record<string, number> = {
   'claude-code': 7778,
   'codex': 7779,
   'gemini': 7780,
+  'cursor': 7781,
   'openclaw': 18789,
 };
 

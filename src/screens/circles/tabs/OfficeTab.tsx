@@ -179,17 +179,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     if (!selectedAgent) return { ok: false, stdout: '', stderr: 'No agent selected' };
 
     // Determine bridge URL based on provider type
-    let bridgeUrl = '';
-    if (selectedAgent.providerType === 'claude-code' || selectedAgent.connectionId?.includes('claude-code')) {
-      bridgeUrl = 'http://localhost:7778';
-    } else if (selectedAgent.providerType === 'codex') {
-      bridgeUrl = 'http://localhost:7779';
-    } else if (selectedAgent.providerType === 'gemini') {
-      bridgeUrl = 'http://localhost:7780';
-    } else {
-      // Try Claude Code bridge as default (most common)
-      bridgeUrl = 'http://localhost:7778';
-    }
+    const bridgePorts: Record<string, number> = {
+      'claude-code': 7778, 'codex': 7779, 'gemini': 7780, 'cursor': 7781,
+    };
+    const port = bridgePorts[selectedAgent.providerType || ''] || 7778;
+    const bridgeUrl = `http://localhost:${port}`;
 
     try {
       const res = await fetch(`${bridgeUrl}/exec`, {
@@ -1234,6 +1228,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const geminiAutoAgents = sessionsRef.current.get('gemini-cli-auto') as unknown as OfficeAgent[] | undefined;
   if (geminiAutoAgents && geminiAutoAgents.length > 0) {
     rawAgents.push(...geminiAutoAgents);
+  }
+  // Merge auto-detected Cursor sessions (bridge on localhost:7781)
+  const cursorAutoAgents = sessionsRef.current.get('cursor-auto') as unknown as OfficeAgent[] | undefined;
+  if (cursorAutoAgents && cursorAutoAgents.length > 0) {
+    rawAgents.push(...cursorAutoAgents);
   }
 
   // Merge DB-backed agents that have no corresponding live session

@@ -37,6 +37,14 @@ import {
   markGeminiCliAgentOffline,
 } from './geminiCliDetector';
 import {
+  CursorPoller,
+  cursorSessionsToAgents,
+  detectCursorBridge,
+  publishCursorAgent,
+  updateCursorAgentStatus,
+  markCursorAgentOffline,
+} from './cursorDetector';
+import {
   AgentConnection,
   loadConnections,
   saveConnections,
@@ -66,7 +74,10 @@ let _codexPublished = false;
 let _codexStarting = false; // Prevents duplicate poller creation
 let _geminiPoller: GeminiCliPoller | null = null;
 let _geminiPublished = false;
-let _geminiStarting = false; // Prevents duplicate poller creation
+let _geminiStarting = false;
+let _cursorPoller: CursorPoller | null = null;
+let _cursorPublished = false;
+let _cursorStarting = false;
 let _ocPollers = new Map<string, OpenClawPoller>();
 let _retryTimer: ReturnType<typeof setInterval> | null = null;
 let _ocReconnectTimer: ReturnType<typeof setInterval> | null = null;
@@ -194,6 +205,13 @@ export async function startAgentAutoConnect() {
     console.log('[agentAutoConnect] Gemini CLI bridge detected');
   }
 
+  // 5c. Detect Cursor bridge
+  const cursorDetected = await detectCursorBridge();
+  if (cursorDetected) {
+    _startCursorPoller();
+    console.log('[agentAutoConnect] Cursor bridge detected');
+  }
+
   // 6. Retry loop: re-detect bridges + reconnect failed connections
   _startRetryLoop();
 
@@ -212,6 +230,7 @@ export function stopAgentAutoConnect() {
   if (_ccPoller) { _ccPoller.stop(); _ccPoller = null; }
   if (_codexPoller) { _codexPoller.stop(); _codexPoller = null; }
   if (_geminiPoller) { _geminiPoller.stop(); _geminiPoller = null; }
+  if (_cursorPoller) { _cursorPoller.stop(); _cursorPoller = null; }
   for (const [, poller] of _ocPollers) {
     poller.stop();
   }
@@ -224,6 +243,8 @@ export function stopAgentAutoConnect() {
   _codexStarting = false;
   _geminiPublished = false;
   _geminiStarting = false;
+  _cursorPublished = false;
+  _cursorStarting = false;
   _visibilityDebounce = false;
   _circleId = null;
   _retryAttempt = 0;
@@ -244,10 +265,11 @@ function _startRetryLoop() {
     if (!_running) return;
 
     // Detect all bridges in parallel instead of sequentially
-    const [ccDetected, codexDetected, geminiDetected] = await Promise.all([
+    const [ccDetected, codexDetected, geminiDetected, cursorDetected] = await Promise.all([
       detectClaudeCodeBridge().catch(() => false),
       detectCodexBridge().catch(() => false),
       detectGeminiCliBridge().catch(() => false),
+      detectCursorBridge().catch(() => false),
     ]);
 
     // Claude Code bridge
@@ -309,6 +331,26 @@ function _startRetryLoop() {
         markGeminiCliAgentOffline(_circleId).catch(() => {});
       }
       console.log('[agentAutoConnect] Gemini CLI bridge went offline');
+    }
+
+    // Cursor bridge
+    if (cursorDetected && !_cursorPoller) {
+      _startCursorPoller();
+      console.log('[agentAutoConnect] Cursor bridge came online');
+    } else if (!cursorDetected && _cursorPoller) {
+      _cursorPoller.stop();
+      _cursorPoller = null;
+      _cursorStarting = false;
+      const existing = _sessionsMap.get('cursor-auto') as OfficeAgent[] | undefined;
+      if (existing && existing.length > 0) {
+        const idled = existing.map(a => ({ ...a, status: 'idle' as const, activity: 'Session ended — idling' }));
+        _sessionsMap.set('cursor-auto', idled);
+        _notify();
+      }
+      if (_cursorPublished && _circleId) {
+        markCursorAgentOffline(_circleId).catch(() => {});
+      }
+      console.log('[agentAutoConnect] Cursor bridge went offline');
     }
   }, CC_DETECT_INTERVAL);
 
@@ -383,7 +425,8 @@ function _startVisibilityListener() {
       detectClaudeCodeBridge().catch(() => false),
       detectCodexBridge().catch(() => false),
       detectGeminiCliBridge().catch(() => false),
-    ]).then(([cc, codex, gemini]) => {
+      detectCursorBridge().catch(() => false),
+    ]).then(([cc, codex, gemini, cursor]) => {
       if (cc && !_ccPoller) {
         _startCCPoller();
         console.log('[agentAutoConnect] Claude Code bridge reconnected on tab focus');
@@ -395,6 +438,10 @@ function _startVisibilityListener() {
       if (gemini && !_geminiPoller) {
         _startGeminiPoller();
         console.log('[agentAutoConnect] Gemini CLI bridge reconnected on tab focus');
+      }
+      if (cursor && !_cursorPoller) {
+        _startCursorPoller();
+        console.log('[agentAutoConnect] Cursor bridge reconnected on tab focus');
       }
     });
 
@@ -488,6 +535,29 @@ function _startGeminiPoller() {
   });
   _geminiPoller.start(5000);
   _geminiStarting = false;
+}
+
+// ── Internal: Cursor poller ───────────────────────────────────────────────
+
+function _startCursorPoller() {
+  if (_cursorPoller || _cursorStarting) return;
+  _cursorStarting = true;
+  _cursorPoller = new CursorPoller(sessions => {
+    _sessionsMap.set('cursor-auto', cursorSessionsToAgents(sessions) as any);
+    _notify();
+
+    if (!_cursorPublished && _circleId) {
+      _cursorPublished = true;
+      publishCursorAgent(_circleId, sessions.length).catch(err =>
+        console.error('[agentAutoConnect] Failed to publish Cursor agent:', err),
+      );
+    }
+    if (_cursorPublished && _circleId) {
+      updateCursorAgentStatus(_circleId, sessions).catch(() => {});
+    }
+  });
+  _cursorPoller.start(5000);
+  _cursorStarting = false;
 }
 
 // ── Internal: Probe with fallback endpoints ─────────────────────────────────
