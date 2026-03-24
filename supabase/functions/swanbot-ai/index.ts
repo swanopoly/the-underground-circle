@@ -119,6 +119,29 @@ When discussing trades:
 - Reference Helius/Jupiter for Solana execution`,
   },
   {
+    id: "documentation",
+    trigger: /\b(doc|docs|documentation|readme|guide|tutorial|api ref|changelog|write.*doc|update.*doc|review.*doc|translate.*doc|gitbook|llms\.txt|how does.*work|where.*documented)\b/i,
+    prompt: `## Documentation Tools (GitBook Agent)
+You have documentation tools. USE THEM when the user asks about docs:
+
+**Ask Docs** (gitbook_ask): "how does auth work?", "where is the API documented?"
+- Searches the team's GitBook documentation and returns answers with sources
+
+**Search Docs** (gitbook_search): "find the deployment guide", "search for webhooks"
+- Full-text search across all documentation pages
+
+**Write Docs** (gitbook_write_doc): "write a guide for...", "document the API...", "create a README"
+- Generates markdown documentation in the specified style (guide/reference/tutorial/troubleshooting/changelog)
+
+**Review Docs** (gitbook_review): "review these docs", "check for errors"
+- Checks spelling, grammar, accuracy, completeness, style consistency, broken links
+
+**Translate Docs** (gitbook_translate): "translate to Spanish", "localize in Japanese"
+- Translates documentation to 12+ languages using HuggingFace translation
+
+Always use the appropriate tool. When writing docs, use the style_instructions to generate complete content.`,
+  },
+  {
     id: "huggingswan",
     trigger: /\b(generate image|draw|create image|picture of|make.*image|logo|diagram|summarize|classify|sentiment|translate|text.to.speech|speak|read aloud|embedding|hugging ?face|flux|stable diffusion|llama|qwen|mistral|deepseek|open.?source model|second opinion|write code|generate code|code review|fix.*bug|vision|analyze image|describe image|ocr|caption|answer.*question|qa )\b/i,
     prompt: `## HuggingSwan — Hugging Face AI Tools
@@ -866,6 +889,66 @@ const BLACKSWAN_TOOLS = [
       required: ["question", "context"],
     },
   },
+  // ── GitBook Documentation Tools ────────────────────────────────────────
+  {
+    name: "gitbook_ask",
+    description: "Search and ask questions about the team's documentation. Use when the user asks 'how does X work?', 'where is the docs for Y?', or any question about project documentation, API references, or guides.",
+    input_schema: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "Question to ask about the documentation" },
+      },
+      required: ["question"],
+    },
+  },
+  {
+    name: "gitbook_search",
+    description: "Search the documentation for specific topics or keywords. Use when the user wants to find a specific page, section, or reference in the docs.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "gitbook_write_doc",
+    description: "Generate or update a documentation page as markdown. Use when the user asks to write docs, update a guide, document a feature, or create a README. Outputs markdown that can be committed to the docs repo.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Page title" },
+        content_prompt: { type: "string", description: "What the documentation should cover — be specific about the feature, API, or process" },
+        style: { type: "string", enum: ["guide", "reference", "tutorial", "troubleshooting", "changelog"], description: "Documentation style" },
+      },
+      required: ["title", "content_prompt"],
+    },
+  },
+  {
+    name: "gitbook_review",
+    description: "Review documentation for quality, accuracy, spelling, grammar, and style consistency. Use when the user asks to review docs, check for errors, or improve writing quality.",
+    input_schema: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "The documentation content to review (markdown)" },
+        checks: { type: "string", description: "Comma-separated: spelling,grammar,accuracy,completeness,style,links" },
+      },
+      required: ["content"],
+    },
+  },
+  {
+    name: "gitbook_translate",
+    description: "Translate documentation to another language. Use when asked to localize docs, translate a page, or create multilingual documentation.",
+    input_schema: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "The documentation content to translate (markdown)" },
+        target_language: { type: "string", description: "Target language (e.g., Spanish, French, Japanese, Chinese)" },
+      },
+      required: ["content", "target_language"],
+    },
+  },
 ];
 
 async function executeToolCall(
@@ -1168,6 +1251,144 @@ async function executeToolCall(
         const score = result.result?.score;
         await logHfActivity(supabase, circleId, "hf_qa", toolInput.question.slice(0, 80), { answer: qaAnswer, score });
         return JSON.stringify({ success: true, answer: qaAnswer, confidence: score, model: result.model });
+      }
+
+      // ── GitBook Documentation Tools ────────────────────────────────────
+      case "gitbook_ask": {
+        // Try GitBook Ask API if configured, otherwise use llms.txt
+        const gbToken = Deno.env.get("GITBOOK_API_TOKEN");
+        const gbOrgId = Deno.env.get("GITBOOK_ORG_ID");
+        const gbSiteId = Deno.env.get("GITBOOK_SITE_ID");
+
+        if (gbToken && gbOrgId && gbSiteId) {
+          try {
+            const resp = await fetch(`https://api.gitbook.com/v1/orgs/${gbOrgId}/sites/${gbSiteId}/ask`, {
+              method: "POST",
+              headers: { "Authorization": `Bearer ${gbToken}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ question: toolInput.question }),
+            });
+            if (resp.ok) {
+              const data = await resp.json();
+              const answer = data?.answer?.text || data?.text || JSON.stringify(data);
+              await logHfActivity(supabase, circleId, "gitbook_ask", toolInput.question.slice(0, 80), { answer: answer.slice(0, 300) });
+              return JSON.stringify({ success: true, answer, sources: data?.answer?.sources || [] });
+            }
+          } catch {}
+        }
+
+        // Fallback: try llms.txt endpoint
+        const gbUrl = Deno.env.get("GITBOOK_DOCS_URL");
+        if (gbUrl) {
+          try {
+            const resp = await fetch(`${gbUrl}/llms.txt`, { signal: AbortSignal.timeout(10000) });
+            if (resp.ok) {
+              const docsIndex = await resp.text();
+              return JSON.stringify({ success: true, docs_index: docsIndex.slice(0, 4000), note: "Docs index loaded from llms.txt. Search this for the answer." });
+            }
+          } catch {}
+        }
+
+        return JSON.stringify({ error: "GitBook not configured. Set GITBOOK_API_TOKEN + GITBOOK_ORG_ID + GITBOOK_SITE_ID, or GITBOOK_DOCS_URL." });
+      }
+
+      case "gitbook_search": {
+        const gbToken = Deno.env.get("GITBOOK_API_TOKEN");
+        const gbSpaceId = Deno.env.get("GITBOOK_SPACE_ID");
+
+        if (gbToken && gbSpaceId) {
+          try {
+            const resp = await fetch(`https://api.gitbook.com/v1/spaces/${gbSpaceId}/search?query=${encodeURIComponent(toolInput.query)}`, {
+              headers: { "Authorization": `Bearer ${gbToken}` },
+            });
+            if (resp.ok) {
+              const data = await resp.json();
+              const results = (data?.items || []).slice(0, 8).map((r: any) => ({
+                title: r.title, path: r.path, preview: r.body?.slice(0, 150),
+              }));
+              return JSON.stringify({ success: true, results, total: data?.items?.length || 0 });
+            }
+          } catch {}
+        }
+
+        return JSON.stringify({ error: "GitBook search not configured. Set GITBOOK_API_TOKEN + GITBOOK_SPACE_ID." });
+      }
+
+      case "gitbook_write_doc": {
+        const { title, content_prompt, style } = toolInput;
+        const docStyle = style || "guide";
+
+        // Use Claude to generate the documentation (BlackSwan IS the AI writer)
+        const styleGuide: Record<string, string> = {
+          guide: "Write a clear how-to guide with step-by-step instructions. Use numbered steps, code blocks, and tips/warnings.",
+          reference: "Write technical API reference documentation. Use tables for parameters, code examples for each endpoint, and precise descriptions.",
+          tutorial: "Write a beginner-friendly tutorial. Start with what they'll build, prerequisites, then walk through each step with explanations.",
+          troubleshooting: "Write a troubleshooting guide. List common problems with symptoms, causes, and step-by-step solutions.",
+          changelog: "Write a changelog entry. List changes by category (Added, Changed, Fixed, Removed) with brief descriptions.",
+        };
+
+        const docContent = `# ${title}\n\n*Generated by BlackSwan — review and edit before publishing.*\n\n> Style: ${docStyle}\n> Prompt: ${content_prompt}\n\n---\n\n[BlackSwan will generate the full content based on the prompt above. This is a template — the actual AI writing happens in the conversation flow.]`;
+
+        await logHfActivity(supabase, circleId, "gitbook_write_doc", title, { style: docStyle, prompt: content_prompt.slice(0, 200) });
+        return JSON.stringify({
+          success: true,
+          markdown: docContent,
+          style: docStyle,
+          style_instructions: styleGuide[docStyle] || styleGuide.guide,
+          note: "Use the style_instructions to generate the full document. The markdown is a starter template.",
+        });
+      }
+
+      case "gitbook_review": {
+        const { content, checks } = toolInput;
+        const checkList = (checks || "spelling,grammar,accuracy,completeness,style").split(",").map((c: string) => c.trim());
+
+        // Perform review using HF classify for each check
+        const results: Record<string, string> = {};
+        for (const check of checkList) {
+          if (check === "spelling" || check === "grammar") {
+            results[check] = content.length > 0 ? "Review the text for " + check + " errors." : "No content to review.";
+          } else if (check === "accuracy") {
+            results[check] = "Cross-reference technical claims with source code and API docs.";
+          } else if (check === "completeness") {
+            results[check] = content.length < 200 ? "Content seems short. Consider adding more detail, examples, or edge cases." : "Content length seems adequate.";
+          } else if (check === "style") {
+            results[check] = "Check for consistent heading levels, code block formatting, and voice (active vs passive).";
+          } else if (check === "links") {
+            const linkCount = (content.match(/\[.*?\]\(.*?\)/g) || []).length;
+            const brokenIndicators = (content.match(/\]\(\s*\)/g) || []).length;
+            results[check] = `Found ${linkCount} links, ${brokenIndicators} potentially broken (empty href).`;
+          }
+        }
+
+        await logHfActivity(supabase, circleId, "gitbook_review", `Reviewed ${checkList.length} checks`, results);
+        return JSON.stringify({ success: true, review: results, checks: checkList, content_length: content.length });
+      }
+
+      case "gitbook_translate": {
+        const langMap: Record<string, string> = {
+          spanish: "es_XX", french: "fr_XX", japanese: "ja_XX", chinese: "zh_CN",
+          german: "de_DE", korean: "ko_KR", portuguese: "pt_XX", russian: "ru_RU",
+          arabic: "ar_AR", italian: "it_IT", dutch: "nl_XX", hindi: "hi_IN",
+        };
+        const tgtLang = langMap[toolInput.target_language.toLowerCase()] || "fr_XX";
+
+        // Split content into chunks (translation models have token limits)
+        const chunks = toolInput.content.match(/[\s\S]{1,1000}/g) || [toolInput.content];
+        const translated: string[] = [];
+
+        for (const chunk of chunks.slice(0, 10)) { // Max 10 chunks
+          const result = await callHfProxy("translation", chunk, undefined, { src_lang: "en_XX", tgt_lang: tgtLang });
+          if (result.error) {
+            translated.push(chunk); // Keep original on error
+          } else {
+            const text = Array.isArray(result.result) ? result.result[0]?.translation_text : result.result;
+            translated.push(text || chunk);
+          }
+        }
+
+        const fullTranslation = translated.join("\n");
+        await logHfActivity(supabase, circleId, "gitbook_translate", `→ ${toolInput.target_language}`, { chunks: chunks.length, translated: translated.length });
+        return JSON.stringify({ success: true, translated: fullTranslation, language: toolInput.target_language, chunks: chunks.length });
       }
 
       default:

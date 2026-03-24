@@ -10,7 +10,7 @@ export interface AutomationTemplate {
   name: string;
   icon: string;
   description: string;
-  category: 'accountability' | 'reporting' | 'engagement' | 'ops' | 'trading' | 'learning' | 'github';
+  category: 'accountability' | 'reporting' | 'engagement' | 'ops' | 'trading' | 'learning' | 'github' | 'docs';
   trigger_type: 'schedule' | 'event' | 'manual';
   cron_expression?: string;
   event_config?: { table?: string; event: string; provider?: string };
@@ -922,6 +922,7 @@ export const TEMPLATE_CATEGORIES = [
   { key: 'trading' as const, label: 'Trading', icon: '📈' },
   { key: 'github' as const, label: 'GitHub', icon: '🐙' },
   { key: 'learning' as const, label: 'AI Tools', icon: '🤗' },
+  { key: 'docs' as const, label: 'Documentation', icon: '📖' },
 ];
 
 // ─── Suggested Template Groups ──────────────────────────────────────────────
@@ -2082,6 +2083,122 @@ Compare the open model's answer with your own analysis. Note where they agree an
         spirit: 'architect',
         suggested: true,
         suggestedIconBg: '#0d1a2a',
+      },
+    ],
+  },
+  // ── Documentation (GitBook Agent) ───────────────────────────────────────
+  {
+    key: 'docs',
+    label: 'Documentation Agent',
+    icon: '📖',
+    templates: [
+      {
+        id: 'suggest-docs-auto-update',
+        name: 'Auto-update docs on push',
+        icon: '📝',
+        description: 'When code is pushed to GitHub, analyze the diff and generate/update relevant documentation pages.',
+        category: 'docs',
+        trigger_type: 'event',
+        event_config: { provider: 'github', event: 'push' },
+        agent: 'BlackSwan',
+        model: 'claude-haiku',
+        output_target: 'activity',
+        prompt: `A code push just happened: {{event}}
+
+Use the gitbook_write_doc tool to generate or update documentation for any changed files.
+
+Steps:
+1. Analyze the commit diff — what changed?
+2. Check if existing docs cover these changes (use gitbook_search)
+3. If docs are missing or outdated, use gitbook_write_doc to create updates
+4. Post a summary of what was documented to the activity feed
+
+Focus on: API changes, new features, configuration changes, breaking changes.`,
+        include_context: { rooms: true, tasks: true },
+        spirit: 'writer',
+        suggested: true,
+        suggestedIconBg: '#1a0a2e',
+      },
+      {
+        id: 'suggest-docs-review-weekly',
+        name: 'Weekly docs quality review',
+        icon: '🔍',
+        description: 'Review all documentation weekly for spelling, grammar, broken links, and outdated content.',
+        category: 'docs',
+        trigger_type: 'schedule',
+        cron_expression: 'weekly',
+        agent: 'BlackSwan',
+        model: 'claude-haiku',
+        output_target: 'activity',
+        prompt: `Run a documentation quality audit for {{circle_name}}.
+
+Use gitbook_review to check documentation for:
+- Spelling and grammar errors
+- Broken or empty links
+- Outdated information (check against recent tasks and GitHub activity)
+- Inconsistent style or formatting
+- Missing sections or incomplete guides
+
+Post a report with specific issues found and suggested fixes.
+
+Recent tasks: {{recent_tasks}}
+GitHub activity: {{github_events}}`,
+        include_context: { tasks: true, rooms: true },
+        spirit: 'writer',
+        suggested: true,
+        suggestedIconBg: '#0a1a2e',
+      },
+      {
+        id: 'suggest-docs-translate',
+        name: 'Auto-translate docs',
+        icon: '🌍',
+        description: 'Automatically translate documentation to specified languages when content is updated.',
+        category: 'docs',
+        trigger_type: 'manual',
+        agent: 'BlackSwan',
+        model: 'claude-haiku',
+        output_target: 'activity',
+        prompt: `Translate the most important documentation pages for {{circle_name}}.
+
+Use gitbook_translate to translate key docs to Spanish, French, and Japanese.
+
+Focus on: Getting started guide, API reference, FAQ, and troubleshooting pages.
+Post translation summaries to the activity feed.`,
+        include_context: { rooms: true },
+        spirit: 'writer',
+        suggested: true,
+        suggestedIconBg: '#0a2a1a',
+      },
+      {
+        id: 'suggest-docs-from-support',
+        name: 'Docs from support tickets',
+        icon: '🎫',
+        description: 'Analyze recurring support questions and auto-generate documentation to reduce future tickets.',
+        category: 'docs',
+        trigger_type: 'schedule',
+        cron_expression: 'weekly',
+        agent: 'BlackSwan',
+        model: 'claude-sonnet',
+        output_target: 'activity',
+        prompt: `Analyze recent activity in {{circle_name}} to find recurring questions and knowledge gaps.
+
+Look at:
+- Recent check-ins mentioning confusion or blockers
+- Tasks with many comments (indicating unclear requirements)
+- Common questions in chat
+
+For each gap found:
+1. Use gitbook_search to check if docs already cover it
+2. If not, use gitbook_write_doc to create a new troubleshooting guide or FAQ entry
+3. Post what you created to the feed
+
+Members: {{members}}
+Recent check-ins: {{check_ins}}
+Tasks: {{recent_tasks}}`,
+        include_context: { members: true, check_ins: true, tasks: true },
+        spirit: 'pm',
+        suggested: true,
+        suggestedIconBg: '#2a1a0a',
       },
     ],
   },
