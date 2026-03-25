@@ -1,0 +1,383 @@
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  Pressable,
+  TextInput,
+  ActivityIndicator,
+  Alert,
+} from 'react-native';
+import { supabase } from '../../../../lib/supabase';
+
+interface McpServer {
+  id: string;
+  name: string;
+  url: string;
+  type: 'sse' | 'http';
+  status: string;
+}
+
+interface Props {
+  circleId: string;
+  onClose: () => void;
+}
+
+export default function McpPanel({ circleId, onClose }: Props) {
+  const [servers, setServers] = useState<McpServer[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [newName, setNewName] = useState('');
+  const [newUrl, setNewUrl] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [testing, setTesting] = useState<string | null>(null);
+
+  useEffect(() => {
+    loadServers();
+  }, [circleId]);
+
+  const loadServers = async () => {
+    setLoading(true);
+    const { data, error } = await supabase
+      .from('circle_mcp_servers')
+      .select('*')
+      .eq('circle_id', circleId)
+      .order('created_at', { ascending: false });
+
+    if (error) console.error('Error loading MCP servers:', error);
+    else setServers(data || []);
+    setLoading(false);
+  };
+
+  const handleAddServer = async () => {
+    if (!newName.trim() || !newUrl.trim()) return;
+    setAdding(true);
+    try {
+      const type = newUrl.startsWith('http') ? 'http' : 'sse';
+      const { error } = await supabase.from('circle_mcp_servers').insert({
+        circle_id: circleId,
+        name: newName.trim(),
+        url: newUrl.trim(),
+        type,
+      });
+
+      if (error) throw error;
+
+      setNewName('');
+      setNewUrl('');
+      loadServers();
+
+      // Log activity
+      await supabase.from('agent_activity').insert({
+        circle_id: circleId,
+        agent_name: 'System',
+        source: 'system',
+        activity_type: 'task_started',
+        content: `Registered new MCP Server: ${newName}`,
+      });
+
+    } catch (e: any) {
+      Alert.alert('Error', e.message);
+    }
+    setAdding(false);
+  };
+
+  const handleDeleteServer = async (id: string) => {
+    const { error } = await supabase
+      .from('circle_mcp_servers')
+      .delete()
+      .eq('id', id);
+
+    if (error) Alert.alert('Error', error.message);
+    else loadServers();
+  };
+
+  const testConnection = async (server: McpServer) => {
+    setTesting(server.id);
+    try {
+      const response = await fetch(server.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2024-11-05',
+            capabilities: {},
+            clientInfo: { name: 'Underground Circle Host', version: '1.0.0' }
+          }
+        }),
+      });
+
+      const data = await response.json();
+      if (data.result) {
+        Alert.alert('Success', `Connected to ${data.result.serverInfo?.name || 'MCP Server'} (v${data.result.serverInfo?.version})`);
+      } else {
+        throw new Error(data.error?.message || 'Invalid MCP response');
+      }
+    } catch (e: any) {
+      Alert.alert('Connection Failed', e.message);
+    }
+    setTesting(null);
+  };
+
+  return (
+    <View style={styles.container}>
+      <View style={styles.header}>
+        <View>
+          <Text style={styles.title}>MCP HUB</Text>
+          <Text style={styles.subtitle}>Model Context Protocol — Bridge local tools to your agents</Text>
+        </View>
+        <Pressable onPress={onClose} style={styles.closeBtn}>
+          <Text style={styles.closeText}>✕</Text>
+        </Pressable>
+      </View>
+
+      <ScrollView contentContainerStyle={styles.scroll}>
+        <View style={styles.form}>
+          <Text style={styles.label}>REGISTER EXTERNAL MCP SERVER</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="Server Name (e.g. My Local Files)"
+            placeholderTextColor="#6f6f6f"
+            value={newName}
+            onChangeText={setNewName}
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="URL (e.g. http://localhost:3000/mcp)"
+            placeholderTextColor="#6f6f6f"
+            value={newUrl}
+            onChangeText={setNewUrl}
+            autoCapitalize="none"
+          />
+          <Pressable 
+            style={[styles.addBtn, (!newName || !newUrl || adding) && styles.btnDisabled]} 
+            onPress={handleAddServer}
+            disabled={!newName || !newUrl || adding}
+          >
+            {adding ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.addBtnText}>ADD SERVER</Text>}
+          </Pressable>
+        </View>
+
+        <View style={styles.listSection}>
+          <Text style={styles.label}>CONNECTED SERVERS</Text>
+          {loading ? (
+            <ActivityIndicator size="small" color="#e8e8e8" style={{ marginTop: 20 }} />
+          ) : servers.length === 0 ? (
+            <View style={styles.empty}>
+              <Text style={styles.emptyText}>No MCP servers registered.</Text>
+            </View>
+          ) : (
+            servers.map((server) => (
+              <View key={server.id} style={styles.serverCard}>
+                <View style={styles.serverInfo}>
+                  <Text style={styles.serverName}>{server.name}</Text>
+                  <Text style={styles.serverUrl} numberOfLines={1}>{server.url}</Text>
+                  <View style={styles.badge}>
+                    <Text style={styles.badgeText}>{server.type.toUpperCase()}</Text>
+                  </View>
+                </View>
+                <View style={styles.serverActions}>
+                  <Pressable 
+                    onPress={() => testConnection(server)} 
+                    style={styles.actionBtn}
+                    disabled={testing === server.id}
+                  >
+                    {testing === server.id ? (
+                      <ActivityIndicator size="small" color="#e8e8e8" />
+                    ) : (
+                      <Text style={styles.actionBtnText}>TEST</Text>
+                    )}
+                  </Pressable>
+                  <Pressable onPress={() => handleDeleteServer(server.id)} style={styles.deleteBtn}>
+                    <Text style={styles.deleteBtnText}>✕</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ))
+          )}
+        </View>
+
+        <View style={styles.infoBox}>
+          <Text style={styles.infoTitle}>💡 Pro Tip: Local Data Access</Text>
+          <Text style={styles.infoText}>
+            Run an MCP server locally (e.g. using @modelcontextprotocol/server-filesystem) and expose it via ngrok or cloudflared to give your Circle agents access to your local codebase.
+          </Text>
+        </View>
+      </ScrollView>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#161616',
+  },
+  title: {
+    color: '#e8e8e8',
+    fontSize: 18,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+  },
+  subtitle: {
+    color: '#9e9e9e',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  closeBtn: {
+    padding: 10,
+  },
+  closeText: {
+    color: '#9e9e9e',
+    fontSize: 20,
+  },
+  scroll: {
+    padding: 16,
+  },
+  form: {
+    backgroundColor: '#161616',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: '#252525',
+  },
+  label: {
+    color: '#6f6f6f',
+    fontSize: 11,
+    fontWeight: 'bold',
+    marginBottom: 12,
+    letterSpacing: 0.5,
+  },
+  input: {
+    backgroundColor: '#000000',
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    color: '#e8e8e8',
+    fontSize: 14,
+    borderWidth: 1,
+    borderColor: '#252525',
+    marginBottom: 12,
+  },
+  addBtn: {
+    backgroundColor: '#6366f1',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  btnDisabled: {
+    opacity: 0.5,
+  },
+  addBtnText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  listSection: {
+    marginBottom: 24,
+  },
+  empty: {
+    padding: 30,
+    alignItems: 'center',
+    backgroundColor: '#16161640',
+    borderRadius: 12,
+    borderStyle: 'dashed',
+    borderWidth: 1,
+    borderColor: '#252525',
+  },
+  emptyText: {
+    color: '#6f6f6f',
+    fontSize: 14,
+  },
+  serverCard: {
+    backgroundColor: '#161616',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: '#252525',
+  },
+  serverInfo: {
+    flex: 1,
+    marginRight: 12,
+  },
+  serverName: {
+    color: '#e8e8e8',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  serverUrl: {
+    color: '#6f6f6f',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  badge: {
+    backgroundColor: '#6366f120',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    alignSelf: 'flex-start',
+    marginTop: 6,
+  },
+  badgeText: {
+    color: '#6366f1',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  serverActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  actionBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#22c55e60',
+  },
+  actionBtnText: {
+    color: '#22c55e',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  deleteBtn: {
+    padding: 6,
+  },
+  deleteBtnText: {
+    color: '#ef4444',
+    fontSize: 16,
+  },
+  infoBox: {
+    backgroundColor: '#3b82f610',
+    padding: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#3b82f625',
+  },
+  infoTitle: {
+    color: '#e8e8e8',
+    fontSize: 14,
+    fontWeight: 'bold',
+    marginBottom: 6,
+  },
+  infoText: {
+    color: '#9e9e9e',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+});

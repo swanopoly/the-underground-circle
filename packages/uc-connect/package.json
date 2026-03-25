@@ -1,0 +1,29 @@
+{
+  "name": "@underground-circle/connect",
+  "version": "1.0.0",
+  "description": "Auto-connect your AI agents to The Underground Circle",
+  "author": "Chris Swanson",
+  "license": "MIT",
+  "bin": {
+    "uc-connect": "./bin/cli.js"
+  },
+  "keywords": [
+    "ai-agents",
+    "claude-code",
+    "codex",
+    "gemini",
+    "cursor",
+    "underground-circle"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/swanopoly/the-underground-circle"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "lib/"
+  ]
+}
