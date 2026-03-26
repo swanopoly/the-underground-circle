@@ -159,26 +159,29 @@ export default function AgentPanel({
   const [soulSaving, setSoulSaving] = useState(false);
   const [soulStatus, setSoulStatus] = useState('');
   const [soulLoaded, setSoulLoaded] = useState<string | null>(null); // tracks which agent was loaded
-  const [showSpirits, setShowSpirits] = useState(false);
+  const [showSpirits, setShowSpirits] = useState(true);
+  const personalityScrollRef = useRef<ScrollView>(null);
+  const personalityScrollX = useRef(0);
   const [currentSpirit, setCurrentSpirit] = useState<string | null>(null);
   const [dbAgentId, setDbAgentId] = useState<string | null>(null);
 
   useEffect(() => {
     if (agent) {
+      slideAnim.setValue(isDesktop ? 420 : 400);
       Animated.spring(slideAnim, {
         toValue: 0,
         useNativeDriver: Platform.OS !== 'web',
-        tension: 80,
-        friction: 12,
+        tension: 120,
+        friction: 16,
       }).start();
     } else {
       Animated.timing(slideAnim, {
-        toValue: 400,
+        toValue: isDesktop ? 420 : 400,
         duration: 200,
         useNativeDriver: Platform.OS !== 'web',
       }).start();
     }
-  }, [agent]);
+  }, [agent, isDesktop]);
 
   // Extract sessionKey early so hooks always run in same order
   const sessionKey = agent
@@ -298,13 +301,24 @@ export default function AgentPanel({
   return (
     <Animated.View style={[
       styles.panel,
-      { transform: [{ translateY: slideAnim }] },
+      isDesktop
+        ? { transform: [{ translateX: slideAnim }] }
+        : { transform: [{ translateY: slideAnim }] },
       isDesktop && styles.panelDesktop,
     ]}>
-      {/* Handle */}
-      <Pressable onPress={onClose} style={styles.handleArea}>
-        <View style={styles.handle} />
-      </Pressable>
+      {/* Close button (desktop: top-right X, mobile: drag handle) */}
+      {isDesktop ? (
+        <View style={styles.desktopHeader}>
+          <Text style={styles.desktopHeaderTitle}>AGENT PANEL</Text>
+          <Pressable onPress={onClose} style={[styles.desktopCloseBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+            <Text style={styles.desktopCloseBtnText}>✕</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <Pressable onPress={onClose} style={styles.handleArea}>
+          <View style={styles.handle} />
+        </Pressable>
+      )}
 
       <ScrollView style={styles.scrollContent} showsVerticalScrollIndicator={false}>
       {/* Agent header */}
@@ -380,13 +394,36 @@ export default function AgentPanel({
         <Text style={styles.connectionType}>{PROVIDER_META[agent.providerType]?.label || agent.providerType}</Text>
       </View>
 
+      {/* ── Bridge controls + remote shell (moved up for quick access) ── */}
+      {circleId && sessionKey && (
+        <View style={{ marginTop: 8 }} nativeID="section-agent-controls">
+          <AgentControlCard
+            agent={agent}
+            circleId={circleId}
+            control={control}
+            onClose={() => {}}
+            onOpenPanel={() => {}}
+            onDisconnect={onClose}
+            onRunCommand={onRunCommand}
+            embedded
+          />
+        </View>
+      )}
+
+      {/* ── Quick terminal — talk to this agent ── */}
+      {circleId && (
+        <AgentQuickTerminal agentName={agent.name} agentId={agent.id} circleId={circleId} />
+      )}
+
+      <View style={styles.sectionDivider} />
+
       {/* Agent Spirit & Soul — unified section */}
       <Pressable
         onPress={() => setShowSpirits(!showSpirits)}
         style={[styles.spiritRow, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
       >
         <Text style={styles.spiritLabel}>
-          {showSpirits ? '▼' : '▶'} SPIRIT & SOUL
+          {showSpirits ? '▼' : '▶'} SOUL
         </Text>
         {currentSpirit ? (
           <View style={styles.spiritBadge}>
@@ -460,27 +497,48 @@ export default function AgentPanel({
                 Optional: fine-tune communication style. Prepended to every LLM call alongside the spirit.
               </Text>
 
-              {/* Personality template quick-picks */}
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
-                {getTemplatesByCategory('personality').map(tmpl => {
-                  const isActive = detectTemplate(soulText)?.id === tmpl.id;
-                  return (
-                    <Pressable
-                      key={tmpl.id}
-                      onPress={() => setSoulText(tmpl.soulText)}
-                      style={[
-                        styles.personalityChip,
-                        isActive && { borderColor: '#6366f1', backgroundColor: '#6366f115' },
-                        Platform.OS === 'web' && { cursor: 'pointer' } as any,
-                      ]}
-                    >
-                      <Text style={styles.personalityChipText}>
-                        {tmpl.emoji} {tmpl.name}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </ScrollView>
+              {/* Personality template quick-picks with scroll arrows */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8, gap: 4 }}>
+                <Pressable
+                  onPress={() => personalityScrollRef.current?.scrollTo({ x: Math.max(0, (personalityScrollX.current || 0) - 200), animated: true })}
+                  style={[styles.scrollArrow, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <Text style={styles.scrollArrowText}>‹</Text>
+                </Pressable>
+                <ScrollView
+                  ref={personalityScrollRef}
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={{ flex: 1 }}
+                  onScroll={(e) => { personalityScrollX.current = e.nativeEvent.contentOffset.x; }}
+                  scrollEventThrottle={16}
+                >
+                  {getTemplatesByCategory('personality').map(tmpl => {
+                    const isActive = detectTemplate(soulText)?.id === tmpl.id;
+                    return (
+                      <Pressable
+                        key={tmpl.id}
+                        onPress={() => setSoulText(tmpl.soulText)}
+                        style={[
+                          styles.personalityChip,
+                          isActive && { borderColor: '#6366f1', backgroundColor: '#6366f115' },
+                          Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                        ]}
+                      >
+                        <Text style={styles.personalityChipText}>
+                          {tmpl.emoji} {tmpl.name}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+                <Pressable
+                  onPress={() => personalityScrollRef.current?.scrollTo({ x: (personalityScrollX.current || 0) + 200, animated: true })}
+                  style={[styles.scrollArrow, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <Text style={styles.scrollArrowText}>›</Text>
+                </Pressable>
+              </View>
 
               {/* Editable soul text */}
               <TextInput
@@ -631,9 +689,9 @@ export default function AgentPanel({
           </Pressable>
 
           {showCustomize && (() => {
-            const a = appearances?.[agent.name] || { ...DEFAULT_APPEARANCE, shirtColor: agent.color, hairColor: agent.color };
+            const a = appearances?.[agent.id] || appearances?.[agent.name] || { ...DEFAULT_APPEARANCE, shirtColor: agent.color, hairColor: agent.color };
             const update = (patch: Partial<AgentAppearance>) => {
-              onAppearanceChange(agent.name, { ...a, ...patch });
+              onAppearanceChange(agent.id, { ...a, ...patch });
             };
 
             const NEON_SKIN_TONES = ['#ff00ff', '#00ff88', '#00ffff', '#ff4444', '#ffff00', '#aa55ff'];
@@ -747,27 +805,6 @@ export default function AgentPanel({
 
       {/* Agent Soul section removed — merged into SPIRIT & SOUL above */}
 
-      {/* ── SECTION: agent-controls — Bridge status + power + remote shell ── */}
-      {circleId && sessionKey && (
-        <View style={{ marginTop: 8 }} nativeID="section-agent-controls">
-          <AgentControlCard
-            agent={agent}
-            circleId={circleId}
-            control={control}
-            onClose={() => {}}
-            onOpenPanel={() => {}}
-            onDisconnect={onClose}
-            onRunCommand={onRunCommand}
-            embedded
-          />
-        </View>
-      )}
-
-      {/* ── SECTION: agent-quick-terminal — Inline command to this agent ── */}
-      {circleId && (
-        <AgentQuickTerminal agentName={agent.name} agentId={agent.id} circleId={circleId} />
-      )}
-
       </ScrollView>
     </Animated.View>
   );
@@ -781,21 +818,62 @@ const styles = StyleSheet.create({
     right: 0,
     backgroundColor: '#0a0a0a',
     borderTopWidth: 1,
-    borderTopColor: '#2a2a2a',
+    borderTopColor: '#1e1e3a',
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
     paddingHorizontal: 20,
     paddingBottom: 24,
-    maxHeight: 560,
+    maxHeight: '70%' as any,
   },
   panelDesktop: {
-    maxWidth: 560,
+    top: 0,
+    bottom: 0,
     left: 'auto' as any,
-    right: 16,
-    bottom: 16,
-    borderRadius: 16,
+    right: 0,
+    width: 540,
+    maxHeight: '100%' as any,
+    borderRadius: 0,
+    borderTopLeftRadius: 12,
+    borderBottomLeftRadius: 12,
+    borderTopRightRadius: 0,
+    borderTopWidth: 0,
+    borderLeftWidth: 1,
+    borderLeftColor: '#1e1e3a',
+    ...(Platform.OS === 'web' ? {
+      boxShadow: '-8px 0 30px rgba(0,0,0,0.5)',
+    } as any : {}),
+  },
+  desktopHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e1e3a',
+    marginBottom: 8,
+  },
+  desktopHeaderTitle: {
+    color: '#555',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 2,
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+  },
+  desktopCloseBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 6,
+    backgroundColor: '#ffffff08',
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: '#ffffff10',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  desktopCloseBtnText: {
+    color: '#666',
+    fontSize: 14,
+    fontWeight: '600',
   },
   handleArea: {
     alignItems: 'center',
@@ -809,6 +887,12 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     flex: 1,
+  },
+  sectionDivider: {
+    height: 1,
+    backgroundColor: '#1e1e3a',
+    marginVertical: 12,
+    marginHorizontal: -4,
   },
   // Header
   header: {
@@ -824,22 +908,22 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   avatar: {
-    width: 42,
-    height: 42,
-    borderRadius: 10,
-    borderWidth: 1.5,
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    borderWidth: 2,
     alignItems: 'center',
     justifyContent: 'center',
   },
   avatarText: {
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: '900',
     fontFamily: 'monospace',
   },
   name: {
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: '800',
-    color: '#eee',
+    color: '#fff',
     fontFamily: 'monospace',
   },
   nameRow: {
@@ -906,21 +990,21 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   role: {
-    fontSize: 11,
-    color: '#666',
+    fontSize: 13,
+    color: '#888',
     fontFamily: 'monospace',
   },
   modelBadge: {
     backgroundColor: '#ffffff08',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
     borderWidth: 1,
     borderColor: '#ffffff10',
   },
   modelText: {
-    fontSize: 8,
-    color: '#555',
+    fontSize: 10,
+    color: '#777',
     fontFamily: 'monospace',
     fontWeight: '700',
     letterSpacing: 0.3,
@@ -928,50 +1012,51 @@ const styles = StyleSheet.create({
   statusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
     borderRadius: 12,
     borderWidth: 1,
   },
   statusDotSmall: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
   },
   statusText: {
-    fontSize: 10,
-    fontWeight: '700',
+    fontSize: 12,
+    fontWeight: '800',
     fontFamily: 'monospace',
+    letterSpacing: 0.5,
   },
   // Connection source
   connectionRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
+    flexDirection: 'row', alignItems: 'center', gap: 8,
     marginBottom: 10, paddingHorizontal: 4,
   },
-  connectionIcon: { fontSize: 12 },
-  connectionName: { fontSize: 10, fontWeight: '700', fontFamily: 'monospace' },
-  connectionType: { fontSize: 9, color: '#555', fontFamily: 'monospace' },
+  connectionIcon: { fontSize: 16 },
+  connectionName: { fontSize: 13, fontWeight: '700', fontFamily: 'monospace' },
+  connectionType: { fontSize: 11, color: '#666', fontFamily: 'monospace' },
   // Activity bar
   activityBar: {
     flexDirection: 'row',
-    gap: 8,
-    backgroundColor: '#161616',
-    padding: 10,
-    borderRadius: 8,
+    gap: 10,
+    backgroundColor: '#111',
+    padding: 14,
+    borderRadius: 10,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: '#1e1e3a',
   },
   activityLabel: {
-    fontSize: 10,
-    color: '#555',
+    fontSize: 12,
+    color: '#666',
     fontFamily: 'monospace',
-    fontWeight: '700',
+    fontWeight: '800',
   },
   activityValue: {
-    fontSize: 10,
-    color: '#aaa',
+    fontSize: 13,
+    color: '#ccc',
     fontFamily: 'monospace',
     flex: 1,
   },
@@ -985,25 +1070,25 @@ const styles = StyleSheet.create({
   gridCard: {
     backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#2a2a2a',
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
+    borderColor: '#1e1e3a',
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
     alignItems: 'center',
     minWidth: '30%' as any,
     flex: 1,
   },
   gridValue: {
-    fontSize: 15,
+    fontSize: 17,
     fontWeight: '900',
-    color: '#ddd',
+    color: '#fff',
     fontFamily: 'monospace',
   },
   gridLabel: {
-    fontSize: 8,
-    color: '#555',
+    fontSize: 10,
+    color: '#666',
     fontFamily: 'monospace',
-    marginTop: 2,
+    marginTop: 3,
     letterSpacing: 0.3,
   },
   // Session key
@@ -1033,12 +1118,12 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   actionsTitle: {
-    fontSize: 9,
+    fontSize: 12,
     fontWeight: '800',
-    color: '#444',
+    color: '#888',
     fontFamily: 'monospace',
-    letterSpacing: 1.5,
-    marginBottom: 4,
+    letterSpacing: 2,
+    marginBottom: 6,
   },
   actionRow: {
     flexDirection: 'row',
@@ -1047,10 +1132,10 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   actionTime: {
-    fontSize: 8,
-    color: '#333',
+    fontSize: 10,
+    color: '#444',
     fontFamily: 'monospace',
-    width: 52,
+    width: 56,
     textAlign: 'right',
     paddingTop: 2,
   },
@@ -1068,11 +1153,11 @@ const styles = StyleSheet.create({
     marginBottom: 1,
   },
   actionText: {
-    fontSize: 10,
-    color: '#555',
+    fontSize: 12,
+    color: '#888',
     fontFamily: 'monospace',
     flex: 1,
-    lineHeight: 14,
+    lineHeight: 18,
   },
   noActivity: {
     fontSize: 10,
@@ -1083,38 +1168,33 @@ const styles = StyleSheet.create({
   },
   // Tags section
   tagsSection: {
-    gap: 6,
-    marginVertical: 12,
-    paddingVertical: 12,
-    borderTopWidth: 1,
-    borderBottomWidth: 1,
-    borderColor: '#2a2a2a',
+    gap: 8,
+    marginVertical: 16,
+    paddingVertical: 14,
   },
   tagsSectionTitle: {
-    fontSize: 9,
+    fontSize: 12,
     fontWeight: '800',
-    color: '#444',
+    color: '#888',
     fontFamily: 'monospace',
-    letterSpacing: 1.5,
+    letterSpacing: 2,
   },
   // Customize section
   customizeSection: {
-    marginTop: 12,
-    borderTopWidth: 1,
-    borderColor: '#2a2a2a',
-    paddingTop: 10,
+    marginTop: 16,
+    paddingTop: 12,
   },
   customizeToggle: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 6,
+    paddingVertical: 8,
   },
   customizeToggleText: {
-    fontSize: 10,
+    fontSize: 13,
     fontWeight: '800',
-    color: '#888',
+    color: '#aaa',
     fontFamily: 'monospace',
-    letterSpacing: 1,
+    letterSpacing: 1.5,
   },
   custBody: {
     gap: 4,
@@ -1196,57 +1276,72 @@ const styles = StyleSheet.create({
   // Spirit styles
   spiritRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 12, paddingVertical: 8,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
+    paddingHorizontal: 4, paddingVertical: 10,
   },
   spiritLabel: {
-    color: '#555', fontSize: 9, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 1,
+    color: '#aaa', fontSize: 13, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1.5,
   },
   spiritBadge: {
-    paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8,
+    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8,
     borderWidth: 1, borderColor: '#6366f140', backgroundColor: '#6366f115',
   },
   spiritBadgeText: {
-    color: '#6366f1', fontSize: 9, fontWeight: '600', fontFamily: 'monospace',
+    color: '#6366f1', fontSize: 11, fontWeight: '700', fontFamily: 'monospace',
   },
   spiritNone: {
-    color: '#333', fontSize: 9, fontFamily: 'monospace',
+    color: '#555', fontSize: 11, fontFamily: 'monospace',
   },
   spiritPicker: {
-    padding: 10, gap: 8, borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
+    padding: 12, gap: 10,
   },
   spiritHint: {
-    color: '#555', fontSize: 9, fontFamily: 'monospace', lineHeight: 13,
+    color: '#666', fontSize: 12, fontFamily: 'monospace', lineHeight: 18,
   },
   spiritClearBtn: {
-    paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6,
+    paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8,
     backgroundColor: '#2a2a2a', alignSelf: 'flex-start',
   },
   spiritClearText: {
-    color: '#ef4444', fontSize: 9, fontWeight: '600', fontFamily: 'monospace',
+    color: '#ef4444', fontSize: 11, fontWeight: '700', fontFamily: 'monospace',
   },
   spiritCatLabel: {
-    fontSize: 9, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 1,
-    marginBottom: 4, marginTop: 4,
+    fontSize: 12, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1.5,
+    marginBottom: 6, marginTop: 8,
   },
   spiritGrid: {
-    flexDirection: 'row', flexWrap: 'wrap', gap: 4,
+    flexDirection: 'row', flexWrap: 'wrap', gap: 6,
   },
   spiritCard: {
-    width: '48%', padding: 8, borderRadius: 8,
-    borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#0a0a0a',
+    width: '48%', padding: 10, borderRadius: 10,
+    borderWidth: 1, borderColor: '#1e1e3a', backgroundColor: '#0a0a0a',
   },
-  spiritEmoji: { fontSize: 14, marginBottom: 2 },
+  spiritEmoji: { fontSize: 18, marginBottom: 4 },
   spiritName: {
-    color: '#6366f1', fontSize: 10, fontWeight: '700', fontFamily: 'monospace',
+    color: '#6366f1', fontSize: 12, fontWeight: '800', fontFamily: 'monospace',
   },
   spiritTagline: {
-    color: '#555', fontSize: 8, fontFamily: 'monospace', lineHeight: 11, marginTop: 1,
+    color: '#666', fontSize: 10, fontFamily: 'monospace', lineHeight: 15, marginTop: 2,
   },
 
   // Inline soul section (inside spirit picker)
   soulInlineSection: {
     marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: '#2a2a2a',
+  },
+  scrollArrow: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#ffffff08',
+    borderWidth: 1,
+    borderColor: '#ffffff12',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  scrollArrowText: {
+    color: '#888',
+    fontSize: 18,
+    fontWeight: '600',
+    marginTop: -1,
   },
   personalityChip: {
     paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12,

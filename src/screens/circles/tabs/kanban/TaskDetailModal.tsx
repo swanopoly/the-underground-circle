@@ -16,6 +16,7 @@ import type { GoalWithCount } from '../../../../hooks/useGoals';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
 import { supabase } from '../../../../lib/supabase';
 import SpawnAgentPanel from '../../../../components/SpawnAgentPanel';
+import FocusChainPanel from './FocusChainPanel';
 
 // ─── Automation Report Section Parser ────────────────────────────────────────
 
@@ -717,6 +718,14 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                 {task.description || 'No description'}
               </Text>
             )}
+
+            {/* Focus Chain (Checklist) */}
+            <FocusChainPanel
+              taskId={task.id}
+              items={task.focus_chain || []}
+              onUpdate={(chain) => kanban.updateFocusChain(task.id, chain)}
+              circleId={circleId}
+            />
 
             {/* Image */}
             <Text style={s.sectionLabel}>Image</Text>

@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { useKanbanData, type KanbanMember } from '../../../hooks/useKanbanData';
 import { useGoals } from '../../../hooks/useGoals';
+import { usePlans } from '../../../hooks/usePlans';
 import {
   KanbanTask, TaskStatus, TaskPriority, TasksByColumn,
   COLUMNS, PRIORITY_COLORS, PRIORITY_LABELS,
@@ -40,6 +41,7 @@ import ActivityFeedPanel from './kanban/ActivityFeedPanel';
 import KanbanBoard from './kanban/KanbanBoard';
 import TaskDetailModal from './kanban/TaskDetailModal';
 import GoalDetailModal from './kanban/GoalDetailModal';
+import PlanningPanel from './kanban/PlanningPanel';
 
 // ─── Water Flow Loading Animation ─────────────────────────────────────────
 
@@ -612,11 +614,12 @@ function timeAgo(dateStr: string): string {
 const MOBILE_BREAKPOINT = 768;
 
 type MobileTab = 'goals' | 'activity' | 'agents' | 'board' | 'ai-tools';
-type CenterTab = 'activity' | 'agents' | 'ai-tools';
+type CenterTab = 'activity' | 'agents' | 'ai-tools' | 'plans';
 
 export default function FeedTab({ circleId }: { circleId: string }) {
   const kanban = useKanbanData(circleId);
   const goalsHook = useGoals(circleId);
+  const plansHook = usePlans(circleId);
   const { automations } = useCircleAutomations(circleId);
   const { stats: dashStats } = useDashboardStats(circleId);
   const [filteredGoalId, setFilteredGoalId] = useState<string | null>(null);
@@ -907,6 +910,18 @@ export default function FeedTab({ circleId }: { circleId: string }) {
               <HuggingSwanPanel circleId={circleId} />
             </View>
           )}
+          {mobileTab === 'plans' && (
+            <View style={s.mobilePanel}>
+              <PlanningPanel
+                circleId={circleId}
+                plans={plansHook.plans}
+                onCreatePlan={plansHook.createPlan}
+                onUpdatePlan={plansHook.updatePlan}
+                onDeletePlan={plansHook.deletePlan}
+                onGenerateTasks={plansHook.generateTasksFromPlan}
+              />
+            </View>
+          )}
           {mobileTab === 'board' && (
             <KanbanBoard
               columns={COLUMNS}
@@ -1037,11 +1052,26 @@ export default function FeedTab({ circleId }: { circleId: string }) {
             >
               <Text style={[ct.tabText, centerTab === 'ai-tools' && ct.tabTextActive]}>{'\uD83E\uDD17'} AI Tools</Text>
             </Pressable>
+            <Pressable
+              onPress={() => setCenterTab('plans')}
+              style={[ct.tab, centerTab === 'plans' && ct.tabActive]}
+            >
+              <Text style={[ct.tabText, centerTab === 'plans' && ct.tabTextActive]}>{'\uD83D\uDCCB'} Plans</Text>
+            </Pressable>
           </View>
           {centerTab === 'activity' ? (
             <ActivityFeedPanel circleId={circleId} agents={agents} />
           ) : centerTab === 'ai-tools' ? (
             <HuggingSwanPanel circleId={circleId} />
+          ) : centerTab === 'plans' ? (
+            <PlanningPanel
+              circleId={circleId}
+              plans={plansHook.plans}
+              onCreatePlan={plansHook.createPlan}
+              onUpdatePlan={plansHook.updatePlan}
+              onDeletePlan={plansHook.deletePlan}
+              onGenerateTasks={plansHook.generateTasksFromPlan}
+            />
           ) : (
             <AgentTasksPanel
               tasksByColumn={filteredTasksByColumn}

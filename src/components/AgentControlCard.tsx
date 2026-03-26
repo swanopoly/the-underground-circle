@@ -76,8 +76,15 @@ export default function AgentControlCard({
   const provider = agent.providerType || 'claude-code';
 
   // Check bridge health on mount + every 15s
+  const hasBridge = !!BRIDGE_PORTS[provider];
+
   const checkBridge = useCallback(() => {
-    const port = BRIDGE_PORTS[provider] || 7778;
+    if (!hasBridge) {
+      setBridgeOk(null);
+      setStatusMsg('No local bridge for this agent type');
+      return;
+    }
+    const port = BRIDGE_PORTS[provider];
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     fetch(`http://localhost:${port}/health`, { signal: controller.signal })
@@ -94,13 +101,14 @@ export default function AgentControlCard({
         setBridgeOk(false);
         setStatusMsg('Bridge offline — cannot reach local agent');
       });
-  }, [provider]);
+  }, [provider, hasBridge]);
 
   useEffect(() => {
     checkBridge();
+    if (!hasBridge) return; // Don't poll for non-bridge providers
     const interval = setInterval(checkBridge, 15000);
     return () => clearInterval(interval);
-  }, [checkBridge]);
+  }, [checkBridge, hasBridge]);
 
   // ── Status ─────────────────────────────────────────────────────────────────
 
@@ -120,9 +128,10 @@ export default function AgentControlCard({
     setCmdOutput('');
     let processKilled = false;
     try {
-      // Try to kill via bridge — may fail if bridge is offline
-      if (onRunCommand) {
-        const result = await onRunCommand(KILL_COMMANDS[provider] || `echo "Unknown provider: ${provider}"`);
+      // Try to kill via bridge — only for providers with a bridge
+      const hasBridge = !!BRIDGE_PORTS[provider];
+      if (onRunCommand && hasBridge && KILL_COMMANDS[provider]) {
+        const result = await onRunCommand(KILL_COMMANDS[provider]);
         processKilled = result.ok;
         setCmdOutput(result.stdout || result.stderr || 'Kill signal sent');
       }
@@ -167,11 +176,12 @@ export default function AgentControlCard({
   const handleDisconnect = useCallback(async () => {
     setSaving(true);
     try {
-      // Try to kill agent process + bridge — best-effort, don't block on failure
-      if (onRunCommand) {
+      // Try to kill agent process + bridge — only for providers that have a bridge
+      const hasBridge = !!BRIDGE_PORTS[provider];
+      if (onRunCommand && hasBridge) {
         const killResult = await onRunCommand(KILL_COMMANDS[provider] || 'true').catch(() => ({ ok: false }));
         if (killResult.ok) {
-          const port = BRIDGE_PORTS[provider] || 7778;
+          const port = BRIDGE_PORTS[provider];
           await onRunCommand(`lsof -ti:${port} | xargs kill -9 2>/dev/null; echo "✓ Bridge on :${port} killed"`).catch(() => {});
         }
       }
@@ -300,13 +310,52 @@ export default function AgentControlCard({
         </View>
       )}
 
-      {/* ── SECTION: agent-no-bridge — Bridge offline warning ──────────── */}
-      {bridgeOk === false && (
+      {/* ── SECTION: agent-no-bridge — Bridge offline + restart ──────────── */}
+      {bridgeOk === false && hasBridge && (
         <View style={c.noBridge} nativeID="section-agent-no-bridge">
           <Text style={c.noBridgeText}>
-            Bridge not reachable on :{BRIDGE_PORTS[provider] || 7778}.{'\n'}
-            Start the bridge: node scripts/{provider === 'codex' ? 'codex' : provider === 'gemini' ? 'gemini' : 'claude'}-bridge.js
+            Bridge not reachable on :{BRIDGE_PORTS[provider]}.
           </Text>
+          <Pressable
+            onPress={async () => {
+              setCmdOutput('Starting bridge...');
+              setCmdRunning(true);
+              try {
+                const script = provider === 'codex' ? 'codex-bridge.js'
+                  : provider === 'gemini' ? 'gemini-bridge.js'
+                  : provider === 'cursor' ? 'cursor-bridge.js'
+                  : 'claude-bridge.js';
+                // Try to start via the proxy/exec endpoint on any available bridge
+                const ports = [7778, 7779, 7780, 7781];
+                let started = false;
+                for (const p of ports) {
+                  try {
+                    const r = await fetch(`http://localhost:${p}/exec`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ command: `cd /home/swan/the-underground-circle && nohup node scripts/${script} > /tmp/${script}.log 2>&1 & echo STARTED` }),
+                      signal: AbortSignal.timeout(3000),
+                    });
+                    const d = await r.json();
+                    if (d.ok && d.stdout?.includes('STARTED')) { started = true; break; }
+                  } catch {}
+                }
+                if (started) {
+                  setCmdOutput('Bridge starting...');
+                  setTimeout(() => { checkBridge(); setCmdRunning(false); }, 3000);
+                } else {
+                  setCmdOutput(`Run manually: node scripts/${script}`);
+                  setCmdRunning(false);
+                }
+              } catch {
+                setCmdOutput('Could not auto-start. Run manually.');
+                setCmdRunning(false);
+              }
+            }}
+            style={[c.startBridgeBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={c.startBridgeBtnText}>{cmdRunning ? '...' : '▶ START BRIDGE'}</Text>
+          </Pressable>
         </View>
       )}
     </>
@@ -426,5 +475,12 @@ const c = StyleSheet.create({
     backgroundColor: '#ef444410', borderRadius: 8, borderWidth: 1, borderColor: '#ef444430',
     padding: 10, marginTop: 8,
   },
-  noBridgeText: { color: '#fca5a5', fontSize: 10, fontFamily: MONO, lineHeight: 16, textAlign: 'center' },
+  noBridgeText: { color: '#fca5a5', fontSize: 10, fontFamily: MONO, lineHeight: 16, textAlign: 'center', marginBottom: 8 },
+  startBridgeBtn: {
+    backgroundColor: '#22c55e15', borderWidth: 1, borderColor: '#22c55e40',
+    borderRadius: 6, paddingVertical: 7, alignItems: 'center',
+  },
+  startBridgeBtnText: {
+    color: '#22c55e', fontSize: 9, fontWeight: '800', fontFamily: MONO, letterSpacing: 0.8,
+  },
 });

@@ -94,8 +94,8 @@ const _listeners = new Set<Listener>();
 
 const RETRY_BASE_MS = 5000;      // Initial retry interval
 const RETRY_MAX_MS = 30000;      // Max retry interval
-const CC_DETECT_INTERVAL = 10000; // Claude Code bridge detection interval
-const OC_RECONNECT_INTERVAL = 10000; // OpenClaw reconnect check interval
+const CC_DETECT_INTERVAL = 20000; // Claude Code bridge detection interval (20s)
+const OC_RECONNECT_INTERVAL = 20000; // OpenClaw reconnect check interval (20s)
 
 // Alternate OpenClaw endpoints to try (CORS proxy first, then direct gateway)
 const OPENCLAW_FALLBACK_ENDPOINTS = [
@@ -676,7 +676,7 @@ async function _connectWithFallback(conn: AgentConnection) {
     );
     _notify();
   });
-  poller.start(10000);
+  poller.start(20000); // 20s polling — balances responsiveness vs CPU
   _ocPollers.set(conn.id, poller);
 
   _retryAttempt = 0; // Reset backoff on success

@@ -309,9 +309,8 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     return () => { if (automateTimerRef.current) clearTimeout(automateTimerRef.current); };
   }, [agent.status, onAutomate, showAutomateInput, selected]);
 
-  // Aura animations — disabled in reduced motion (4 loops per agent!)
+  // Aura animations — always on (visual identity)
   useEffect(() => {
-    if (reducedMotion) return;
     const flickerLoop = animLoop(() => Animated.sequence([
         Animated.timing(auraFlicker, { toValue: 1, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(auraFlicker, { toValue: 0.4, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),

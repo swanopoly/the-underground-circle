@@ -5,6 +5,48 @@
 export type TaskStatus = 'backlog' | 'todo' | 'in_progress' | 'peer_review' | 'review' | 'approved' | 'done';
 export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent';
 
+export interface FocusChainItem {
+  id: string;
+  text: string;
+  done: boolean;
+  auto_generated: boolean;
+  order: number;
+}
+
+export type PlanStatus = 'draft' | 'investigating' | 'qa' | 'ready' | 'active' | 'completed' | 'archived';
+
+export interface PlanStep {
+  id: string;
+  title: string;
+  description: string;
+  status: 'pending' | 'in_progress' | 'done';
+  order: number;
+  task_id?: string;
+}
+
+export interface CirclePlan {
+  id: string;
+  circle_id: string;
+  title: string;
+  description: string | null;
+  status: PlanStatus;
+  steps: PlanStep[];
+  context: {
+    investigation?: string;
+    qa_pairs?: Array<{ q: string; a: string }>;
+    references?: string[];
+    findings?: string[];
+  };
+  created_by: string;
+  assigned_agent_ids: string[];
+  goal_id: string | null;
+  tags: string[];
+  estimated_cost: number;
+  actual_cost: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface KanbanTask {
   id: string;
   circle_id: string;
@@ -21,6 +63,15 @@ export interface KanbanTask {
   position: number;
   created_at: string;
   goal_id?: string | null;
+  // Plan integration
+  plan_id?: string | null;
+  plan_step_id?: string | null;
+  focus_chain?: FocusChainItem[];
+  mode?: 'plan' | 'execute';
+  total_cost?: number;
+  total_tokens?: number;
+  total_duration_ms?: number;
+  agent_runs?: number;
   // Peer review tracking
   peer_approvals?: string[];  // array of agent_ids that approved
   review_comments_count?: number;
@@ -58,13 +109,13 @@ export interface KanbanColumnDef {
 }
 
 export const COLUMNS: KanbanColumnDef[] = [
-  { key: 'backlog',     label: 'BACKLOG',      icon: '○', color: '#666680' },
-  { key: 'todo',        label: 'TO DO',        icon: '●', color: '#6366f1' },
-  { key: 'in_progress', label: 'IN PROGRESS',  icon: '◐', color: '#f59e0b' },
-  { key: 'peer_review', label: 'PEER REVIEW',  icon: '◈', color: '#a855f7' },
-  { key: 'review',      label: 'REVIEW',       icon: '◎', color: '#f97316' },
-  { key: 'approved',    label: 'APPROVED',     icon: '◉', color: '#22c55e' },
-  { key: 'done',        label: 'DONE',         icon: '✓', color: '#10b981' },
+  { key: 'backlog',     label: 'BACKLOG',      icon: '\u25CB', color: '#666680' },
+  { key: 'todo',        label: 'TO DO',        icon: '\u25CF', color: '#6366f1' },
+  { key: 'in_progress', label: 'IN PROGRESS',  icon: '\u25D0', color: '#f59e0b' },
+  { key: 'peer_review', label: 'PEER REVIEW',  icon: '\u25C8', color: '#a855f7' },
+  { key: 'review',      label: 'REVIEW',       icon: '\u25CE', color: '#f97316' },
+  { key: 'approved',    label: 'APPROVED',     icon: '\u25C9', color: '#22c55e' },
+  { key: 'done',        label: 'DONE',         icon: '\u2713', color: '#10b981' },
 ];
 
 export const PRIORITY_COLORS: Record<TaskPriority, string> = {
@@ -121,8 +172,6 @@ export interface Goal {
   auto_task_frequency?: 'day' | 'week';
   last_auto_task_at?: string;
 }
-
-// ─── Agent Roles & Profiles ──────────────────────────────────────────────────
 
 export type AgentRole = 'boss' | 'writer' | 'researcher' | 'strategist' | 'executor' | 'designer' | 'reviewer' | 'analyst' | 'custom';
 

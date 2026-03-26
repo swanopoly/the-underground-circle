@@ -9,7 +9,7 @@ import { supabase } from '../lib/supabase';
 import { awardXP, getXPForAction } from '../lib/gamification';
 import { loadCircleOfficeAgents, CircleOfficeAgent } from '../lib/circleOffice';
 import {
-  KanbanTask, TaskComment, TaskAttachment, TaskStatus, TaskPriority,
+  KanbanTask, TaskComment, TaskAttachment, TaskStatus, TaskPriority, FocusChainItem,
   TasksByColumn, groupByColumn, normalizeStatus,
 } from '../types/kanban';
 
@@ -40,6 +40,10 @@ export interface KanbanData {
   uploadTaskFile: (taskId: string, file: File) => Promise<TaskAttachment | null>;
   // Agent
   runAgentOnTask: (taskId: string, agentId?: string, options?: AgentRunOptions) => Promise<string | null>;
+  // Focus chain & planning
+  updateFocusChain: (taskId: string, chain: FocusChainItem[]) => Promise<void>;
+  toggleTaskMode: (taskId: string, mode: 'plan' | 'execute') => Promise<void>;
+  recordTaskCost: (taskId: string, cost: number, tokens: number, durationMs: number) => Promise<void>;
   // Refresh
   refresh: () => void;
 }
@@ -64,6 +68,10 @@ export interface CreateTaskFields {
   assigned_agent_id?: string | null;
   due_date?: string | null;
   goal_id?: string | null;
+  plan_id?: string | null;
+  plan_step_id?: string | null;
+  focus_chain?: FocusChainItem[];
+  mode?: 'plan' | 'execute';
 }
 
 export function useKanbanData(circleId: string): KanbanData {
@@ -163,6 +171,10 @@ export function useKanbanData(circleId: string): KanbanData {
       assigned_agent_id: fields.assigned_agent_id || null,
       due_date: fields.due_date || null,
       goal_id: fields.goal_id || null,
+      plan_id: fields.plan_id || null,
+      plan_step_id: fields.plan_step_id || null,
+      focus_chain: fields.focus_chain || null,
+      mode: fields.mode || null,
       position: maxPos + 1,
     });
   }, [circleId, currentUserId, tasks]);
@@ -415,6 +427,33 @@ export function useKanbanData(circleId: string): KanbanData {
     }
   }, [tasks, agents, currentUserId, circleId, fetchComments]);
 
+  // Update focus chain
+  const updateFocusChain = useCallback(async (taskId: string, chain: FocusChainItem[]) => {
+    const { error } = await supabase.from('tasks').update({ focus_chain: chain }).eq('id', taskId);
+    if (error) console.error('updateFocusChain error:', error);
+    else fetchTasks();
+  }, [fetchTasks]);
+
+  // Toggle task mode
+  const toggleTaskMode = useCallback(async (taskId: string, mode: 'plan' | 'execute') => {
+    const { error } = await supabase.from('tasks').update({ mode }).eq('id', taskId);
+    if (error) console.error('toggleTaskMode error:', error);
+    else fetchTasks();
+  }, [fetchTasks]);
+
+  // Record task cost (increments)
+  const recordTaskCost = useCallback(async (taskId: string, cost: number, tokens: number, durationMs: number) => {
+    const task = tasks.find(t => t.id === taskId);
+    const { error } = await supabase.from('tasks').update({
+      total_cost: (task?.total_cost || 0) + cost,
+      total_tokens: (task?.total_tokens || 0) + tokens,
+      total_duration_ms: (task?.total_duration_ms || 0) + durationMs,
+      agent_runs: (task?.agent_runs || 0) + 1,
+    }).eq('id', taskId);
+    if (error) console.error('recordTaskCost error:', error);
+    else fetchTasks();
+  }, [tasks, fetchTasks]);
+
   const refresh = useCallback(() => {
     fetchTasks();
     fetchMembers();
@@ -425,6 +464,7 @@ export function useKanbanData(circleId: string): KanbanData {
     tasks, tasksByColumn, members, agents, currentUserId, loading,
     createTask, moveTask, updateTask, deleteTask,
     approveTask, requestChanges,
+    updateFocusChain, toggleTaskMode, recordTaskCost,
     fetchComments, addComment, uploadTaskFile, runAgentOnTask, refresh,
   };
 }

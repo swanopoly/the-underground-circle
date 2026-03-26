@@ -186,15 +186,20 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     const bridgePorts: Record<string, number> = {
       'claude-code': 7778, 'codex': 7779, 'gemini': 7780, 'cursor': 7781,
     };
-    const port = bridgePorts[selectedAgent.providerType || ''] || 7778;
+    const port = bridgePorts[selectedAgent.providerType || ''];
+    if (!port) return { ok: false, stdout: '', stderr: 'No bridge for this provider' };
     const bridgeUrl = `http://localhost:${port}`;
 
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
       const res = await fetch(`${bridgeUrl}/exec`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command: cmd }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
       const data = await res.json();
       return { ok: data.ok, stdout: data.stdout || '', stderr: data.stderr || '' };
     } catch (e: any) {
@@ -1249,12 +1254,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   // Merge DB-backed agents that have no corresponding live session
   // Only show if active within the last 2 hours — stale agents are hidden
+  // Skip if a live agent already exists for this provider (prevents ghost duplicates)
   const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
   const now = Date.now();
   const liveAgentNames = new Set(rawAgents.map(a => a.name));
+  const liveProviders = new Set(rawAgents.map(a => a.providerType));
   const myDbAgents = mergedCircleAgents.filter(a => {
     if (a.ownerId !== currentUserId) return false;
     if (liveAgentNames.has(a.name)) return false;
+    // Skip if there's already a live agent for this provider type
+    if (a.provider && liveProviders.has(a.provider as any)) return false;
     // Filter out stale agents — if no lastActiveAt or too old, hide them
     if (!a.lastActiveAt) return false;
     const age = now - new Date(a.lastActiveAt).getTime();
@@ -1397,6 +1406,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // Filter agents for current floor — but if none are assigned yet, show all on current floor
   const agents = useMemo(() => {
     const filtered = displayAgents.filter(a => currentFloor?.agentIds?.includes(a.id));
+    // Use displayAgents order (BlackSwan first, then most recent) regardless of floor agentIds order
     return filtered.length > 0 ? filtered : displayAgents;
   }, [displayAgents, currentFloor?.agentIds]);
 
@@ -1481,49 +1491,29 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     });
   }, [sessionsTick]); // Only re-run when sessions actually update
 
-  // Periodic snapshot save (every 30 seconds)
-  useEffect(() => {
-    if (enrichedAgents.length === 0) return;
-    
-    const interval = setInterval(async () => {
-      try {
-        await takeSnapshot(enrichedAgentsRef.current, sessionTagsRef.current);
-      } catch (error) {
-        console.error('Failed to save snapshot:', error);
-      }
-    }, 30000); // 30 seconds
-
-    return () => clearInterval(interval);
-  }, [enrichedAgents.length > 0]);
-
-  // Sync live agent token data to DB (every 30s) with granular breakdown
-  // Uses snapshot-to-delta RPC to correctly accumulate _total columns
+  // Combined 30-second sync: snapshot + DB token sync (single interval instead of two)
   useEffect(() => {
     if (enrichedAgents.length === 0 || !circleId) return;
 
-    const syncToDB = async () => {
+    const syncAll = async () => {
       try {
+        // 1. Save local snapshot
+        await takeSnapshot(enrichedAgentsRef.current, sessionTagsRef.current).catch(() => {});
+        // 2. Sync tokens to DB
         const agents = enrichedAgentsRef.current;
         for (const agent of agents) {
           if (agent.tokensUsed <= 0 && agent.messagesProcessed <= 0) continue;
-          // Only sync agents we own (skip db:: agents, they already have DB data)
           if (agent.connectionId === 'db-agent') continue;
           await syncAgentTokenSnapshot(
-            circleId,
-            agent.name,
-            agent.inputTokens,
-            agent.outputTokens,
-            agent.cachedTokens,
-            agent.turns || agent.messagesProcessed,
-            agent.costToday,
-            agent.model,
+            circleId, agent.name, agent.inputTokens, agent.outputTokens,
+            agent.cachedTokens, agent.turns || agent.messagesProcessed,
+            agent.costToday, agent.model,
           );
         }
       } catch {}
     };
-    // Initial sync after enrichment
-    syncToDB();
-    const interval = setInterval(syncToDB, 30000);
+    syncAll();
+    const interval = setInterval(syncAll, 30000);
     return () => clearInterval(interval);
   }, [enrichedAgents.length > 0, circleId]);
 
@@ -1587,7 +1577,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       setCronJobs(allJobs);
     };
     fetchCron();
-    const interval = setInterval(fetchCron, 60_000);
+    const interval = setInterval(fetchCron, 300_000); // 5 min — cron data changes rarely
     return () => clearInterval(interval);
   }, [connectedCount]);
 
