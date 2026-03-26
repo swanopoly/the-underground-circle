@@ -791,8 +791,473 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ── POST /mcp — MCP (Model Context Protocol) JSON-RPC endpoint ───────────
+  if (url === '/mcp' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 65536) {
+        res.writeHead(413, CORS);
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Request too large' } }));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      let rpcReq;
+      try {
+        rpcReq = JSON.parse(body);
+      } catch {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }));
+        return;
+      }
+
+      const { jsonrpc, id, method, params } = rpcReq;
+      if (jsonrpc !== '2.0' || id === undefined) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: id || null, error: { code: -32600, message: 'Invalid JSON-RPC request' } }));
+        return;
+      }
+
+      // MCP tool definitions
+      const MCP_TOOLS = [
+        {
+          name: 'list_sessions',
+          description: 'List all active Claude Code sessions detected by the bridge',
+          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+          annotations: { title: 'List Sessions', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+        },
+        {
+          name: 'exec_command',
+          description: 'Execute a shell command on the bridge host (restricted, dangerous commands are blocked)',
+          inputSchema: {
+            type: 'object',
+            properties: { command: { type: 'string', description: 'The shell command to execute' } },
+            required: ['command'],
+            additionalProperties: false
+          },
+          annotations: { title: 'Execute Command', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+        },
+        {
+          name: 'list_devices',
+          description: 'Discover all connected devices (printers, serial ports, USB, network printers)',
+          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+          annotations: { title: 'List Devices', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+        },
+        {
+          name: 'list_printers',
+          description: 'List available printers with their status',
+          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+          annotations: { title: 'List Printers', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+        },
+        {
+          name: 'print_text',
+          description: 'Print text content to a printer',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              text: { type: 'string', description: 'The text content to print' },
+              printer: { type: 'string', description: 'Printer name (optional, uses default if omitted)' }
+            },
+            required: ['text'],
+            additionalProperties: false
+          },
+          annotations: { title: 'Print Text', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+        },
+        {
+          name: 'list_serial_ports',
+          description: 'List available serial ports (Linux and Windows via WSL)',
+          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+          annotations: { title: 'List Serial Ports', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+        },
+        {
+          name: 'send_serial',
+          description: 'Send data to a serial port',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              port: { type: 'string', description: 'Serial port path (e.g. /dev/ttyUSB0 or COM3)' },
+              data: { type: 'string', description: 'Data string to send' },
+              baudRate: { type: 'number', description: 'Baud rate (optional)' }
+            },
+            required: ['port', 'data'],
+            additionalProperties: false
+          },
+          annotations: { title: 'Send Serial Data', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+        },
+        {
+          name: 'detect_3d_printer',
+          description: 'Detect 3D printer services (OctoPrint, Klipper, serial-connected printers)',
+          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+          annotations: { title: 'Detect 3D Printer', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+        },
+        {
+          name: 'send_gcode',
+          description: 'Send G-code command to a 3D printer via OctoPrint, Klipper, or serial',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              command: { type: 'string', description: 'G-code command to send' },
+              printer: { type: 'string', description: 'Target printer type: "octoprint", "klipper", or "serial"' }
+            },
+            required: ['command'],
+            additionalProperties: false
+          },
+          annotations: { title: 'Send G-code', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+        },
+        {
+          name: 'scan_network',
+          description: 'Scan the local network for devices using ARP and mDNS',
+          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+          annotations: { title: 'Scan Network', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+        }
+      ];
+
+      // MCP resource definitions
+      const MCP_RESOURCES = [
+        { uri: 'bridge://sessions', name: 'Active Sessions', description: 'Currently active Claude Code sessions', mimeType: 'application/json' },
+        { uri: 'bridge://devices', name: 'Connected Devices', description: 'All discovered devices (printers, serial, USB, network)', mimeType: 'application/json' },
+        { uri: 'bridge://health', name: 'Bridge Health', description: 'Bridge server health and status', mimeType: 'application/json' }
+      ];
+
+      function mcpResult(result) {
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ jsonrpc: '2.0', id, result }));
+      }
+
+      function mcpError(code, message, data) {
+        res.writeHead(200, CORS);
+        const errObj = { code, message };
+        if (data !== undefined) errObj.data = data;
+        res.end(JSON.stringify({ jsonrpc: '2.0', id, error: errObj }));
+      }
+
+      if (method === 'initialize') {
+        mcpResult({
+          protocolVersion: '2024-11-05',
+          capabilities: {
+            tools: { listChanged: false },
+            resources: { subscribe: false, listChanged: false }
+          },
+          serverInfo: { name: 'claude-bridge', version: '1.0.0' }
+        });
+        return;
+      }
+
+      if (method === 'tools/list') {
+        mcpResult({ tools: MCP_TOOLS });
+        return;
+      }
+
+      if (method === 'tools/call') {
+        const toolName = params && params.name;
+        const toolArgs = (params && params.arguments) || {};
+
+        if (!toolName) {
+          mcpError(-32602, 'Missing tool name in params.name');
+          return;
+        }
+
+        if (toolName === 'list_sessions') {
+          mcpResult({ content: [{ type: 'text', text: JSON.stringify({ sessions: cachedSessions, timestamp: lastScanTime }, null, 2) }] });
+          return;
+        }
+
+        if (toolName === 'exec_command') {
+          const command = toolArgs.command;
+          if (!command || typeof command !== 'string') {
+            mcpError(-32602, 'Missing or invalid "command" argument');
+            return;
+          }
+          const BLOCKED = [
+            /\brm\s+(-[a-zA-Z]*\s+)*\//,
+            /\brm\s+(-[a-zA-Z]*\s+)*~/,
+            /\brmdir\s+(-[a-zA-Z]*\s+)*\//,
+            /\bmkfs\b/,
+            /\bdd\s+.*of=/,
+            />\s*\/dev\/sd/,
+            /\bcurl\b.*\|\s*(ba)?sh/,
+            /\bwget\b.*\|\s*(ba)?sh/,
+            /\bchmod\s+777\b/,
+            /\bpasswd\b/,
+            /\buseradd\b/,
+            /\buserdel\b/,
+            /\bsudo\b/,
+            /\bsu\s+-?\s/,
+            /\/etc\/shadow/,
+            /\/etc\/passwd/,
+            /\benv\b.*SECRET|KEY|TOKEN|PASS/i,
+            /\bcrontab\s+-[er]/,
+            /\bshutdown\b/,
+            /\breboot\b/,
+          ];
+          if (BLOCKED.some(p => p.test(command))) {
+            mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: 'Command blocked: contains restricted pattern' }) }], isError: true });
+            return;
+          }
+          exec(command, { timeout: 30000, maxBuffer: 1024 * 1024, shell: true }, (err, stdout, stderr) => {
+            if (err && err.killed) {
+              mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: 'Command timed out (30s)' }) }], isError: true });
+            } else {
+              mcpResult({ content: [{ type: 'text', text: JSON.stringify({
+                ok: !err || err.code === 0,
+                stdout: (stdout || '').slice(0, 65536),
+                stderr: (stderr || '').slice(0, 16384),
+                code: err ? err.code || 1 : 0,
+              }, null, 2) }] });
+            }
+          });
+          return;
+        }
+
+        if (toolName === 'list_devices') {
+          mcpResult({ content: [{ type: 'text', text: JSON.stringify(discoverDevices(), null, 2) }] });
+          return;
+        }
+
+        if (toolName === 'list_printers') {
+          const lpOut = safeExec('lpstat -p -d 2>/dev/null');
+          const printers = [];
+          if (lpOut) {
+            const defaultMatch = lpOut.match(/system default destination:\s*(\S+)/);
+            const defaultPrinter = defaultMatch ? defaultMatch[1] : '';
+            const printerLines = lpOut.match(/^printer\s+(\S+)\s+(.*)$/gm) || [];
+            for (const line of printerLines) {
+              const m = line.match(/^printer\s+(\S+)\s+(.*)/);
+              if (m) printers.push({ name: m[1], status: m[2].trim(), isDefault: m[1] === defaultPrinter });
+            }
+          }
+          mcpResult({ content: [{ type: 'text', text: JSON.stringify({ printers }, null, 2) }] });
+          return;
+        }
+
+        if (toolName === 'print_text') {
+          const { text, printer } = toolArgs;
+          if (!text || typeof text !== 'string') {
+            mcpError(-32602, 'Missing or invalid "text" argument');
+            return;
+          }
+          const tmpFile = path.join(os.tmpdir(), 'claude-mcp-print-' + Date.now() + '.txt');
+          fs.writeFileSync(tmpFile, text, 'utf-8');
+          const parts = ['lp'];
+          if (printer) parts.push('-d', printer);
+          parts.push('--', tmpFile);
+          exec(parts.join(' '), { timeout: 15000 }, (err, stdout, stderr) => {
+            try { fs.unlinkSync(tmpFile); } catch {}
+            if (err) {
+              mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: stderr || err.message }) }], isError: true });
+            } else {
+              const jobMatch = (stdout || '').match(/request id is (\S+)/);
+              mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: true, jobId: jobMatch ? jobMatch[1] : 'unknown' }) }] });
+            }
+          });
+          return;
+        }
+
+        if (toolName === 'list_serial_ports') {
+          const ports = [];
+          const wsl = isWSL();
+          for (const pattern of ['/dev/ttyUSB*', '/dev/ttyACM*', '/dev/ttyS*']) {
+            const found = safeExec('ls ' + pattern + ' 2>/dev/null');
+            if (found) {
+              for (const p of found.split('\n').filter(Boolean)) {
+                ports.push({ path: p, description: path.basename(p) });
+              }
+            }
+          }
+          const byId = safeExec('ls -la /dev/serial/by-id/ 2>/dev/null');
+          if (byId) {
+            for (const line of byId.split('\n').filter(l => l.includes('->'))) {
+              const pts = line.split(/\s+/);
+              const name = pts[pts.length - 3] || '';
+              const target = pts[pts.length - 1] || '';
+              if (name && target) {
+                const resolved = path.resolve('/dev/serial/by-id', target);
+                if (!ports.find(s => s.path === resolved)) {
+                  ports.push({ path: resolved, description: name });
+                }
+              }
+            }
+          }
+          if (wsl) {
+            const comPorts = safeExec('powershell.exe -c "[System.IO.Ports.SerialPort]::GetPortNames()" 2>/dev/null');
+            if (comPorts) {
+              for (const p of comPorts.split('\n').map(s => s.trim()).filter(Boolean)) {
+                ports.push({ path: p, description: 'Windows ' + p, source: 'windows' });
+              }
+            }
+          }
+          mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ports }, null, 2) }] });
+          return;
+        }
+
+        if (toolName === 'send_serial') {
+          const { port, data, baudRate } = toolArgs;
+          if (!port || !data) {
+            mcpError(-32602, 'Missing "port" or "data" argument');
+            return;
+          }
+          if (!/^(\/dev\/tty[A-Za-z0-9\/]+|COM\d+)$/.test(port)) {
+            mcpError(-32602, 'Invalid port path');
+            return;
+          }
+          let cmd;
+          if (baudRate) {
+            cmd = 'stty -F ' + port + ' ' + baudRate + ' raw -echo 2>/dev/null; echo -ne ' + JSON.stringify(data) + ' > ' + port;
+          } else {
+            cmd = 'echo -ne ' + JSON.stringify(data) + ' > ' + port;
+          }
+          exec(cmd, { timeout: 10000 }, (err, stdout, stderr) => {
+            if (err) {
+              mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: stderr || err.message }) }], isError: true });
+            } else {
+              mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] });
+            }
+          });
+          return;
+        }
+
+        if (toolName === 'detect_3d_printer') {
+          const services = [];
+          const octoPrint = safeExec('curl -s http://localhost:5000/api/version 2>/dev/null');
+          if (octoPrint) {
+            try {
+              const info = JSON.parse(octoPrint);
+              services.push({ type: 'octoprint', url: 'http://localhost:5000', status: 'online', version: info.server || info.text || 'unknown' });
+            } catch {
+              if (octoPrint.length > 0) services.push({ type: 'octoprint', url: 'http://localhost:5000', status: 'responding' });
+            }
+          }
+          const moonraker = safeExec('curl -s http://localhost:7125/server/info 2>/dev/null');
+          if (moonraker) {
+            try {
+              const info = JSON.parse(moonraker);
+              services.push({ type: 'klipper', url: 'http://localhost:7125', status: 'online', version: info.result?.software_version || 'unknown' });
+            } catch {
+              if (moonraker.length > 0) services.push({ type: 'klipper', url: 'http://localhost:7125', status: 'responding' });
+            }
+          }
+          const usbOut = safeExec('lsusb 2>/dev/null');
+          if (usbOut) {
+            const printerIds = [
+              { pattern: /2c99/i, brand: 'Prusa' },
+              { pattern: /1a86:7523/i, brand: 'CH340 (common 3D printer)' },
+              { pattern: /0403:6001/i, brand: 'FTDI (common 3D printer)' },
+              { pattern: /2341/i, brand: 'Arduino/3D printer' },
+              { pattern: /1d50:6029/i, brand: 'Marlin USB' },
+            ];
+            for (const line of usbOut.split('\n')) {
+              for (const { pattern, brand } of printerIds) {
+                if (pattern.test(line)) {
+                  services.push({ type: 'serial', status: 'detected', description: brand + ': ' + line.trim() });
+                }
+              }
+            }
+          }
+          mcpResult({ content: [{ type: 'text', text: JSON.stringify({ services }, null, 2) }] });
+          return;
+        }
+
+        if (toolName === 'send_gcode') {
+          const gcodeCmd = toolArgs.command;
+          const target = toolArgs.printer || 'octoprint';
+          if (!gcodeCmd || typeof gcodeCmd !== 'string') {
+            mcpError(-32602, 'Missing or invalid "command" argument');
+            return;
+          }
+          if (target === 'octoprint') {
+            const payload = JSON.stringify({ command: gcodeCmd });
+            const cmd = 'curl -s -X POST http://localhost:5000/api/printer/command -H "Content-Type: application/json" -d \'' + payload + '\'';
+            exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
+              if (err) {
+                mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: stderr || err.message }) }], isError: true });
+              } else {
+                mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: true, response: stdout || undefined }) }] });
+              }
+            });
+          } else if (target === 'klipper') {
+            const payload = JSON.stringify({ script: gcodeCmd });
+            const cmd = 'curl -s -X POST http://localhost:7125/printer/gcode/script -H "Content-Type: application/json" -d \'' + payload + '\'';
+            exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
+              if (err) {
+                mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: stderr || err.message }) }], isError: true });
+              } else {
+                mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: true, response: stdout || undefined }) }] });
+              }
+            });
+          } else {
+            mcpError(-32602, 'Invalid printer target. Use "octoprint" or "klipper"');
+          }
+          return;
+        }
+
+        if (toolName === 'scan_network') {
+          const devices = [];
+          const arpOut = safeExec('arp -a 2>/dev/null');
+          if (arpOut) {
+            for (const line of arpOut.split('\n').filter(Boolean)) {
+              const m = line.match(/^(\S+)\s+\(([^)]+)\)\s+at\s+(\S+)/);
+              if (m) {
+                devices.push({ hostname: m[1] !== '?' ? m[1] : undefined, ip: m[2], mac: m[3] !== '<incomplete>' ? m[3] : undefined });
+              }
+            }
+          }
+          const mdnsOut = safeExec('avahi-browse -tpr _http._tcp 2>/dev/null');
+          if (mdnsOut) {
+            for (const line of mdnsOut.split('\n').filter(l => l.startsWith('='))) {
+              const parts = line.split(';');
+              if (parts.length >= 8) {
+                const existing = devices.find(d => d.ip === parts[7]);
+                if (existing) {
+                  existing.services = existing.services || [];
+                  existing.services.push(parts[3]);
+                } else {
+                  devices.push({ hostname: parts[6] || undefined, ip: parts[7], services: [parts[3]] });
+                }
+              }
+            }
+          }
+          mcpResult({ content: [{ type: 'text', text: JSON.stringify({ devices }, null, 2) }] });
+          return;
+        }
+
+        mcpError(-32602, 'Unknown tool: ' + toolName);
+        return;
+      }
+
+      if (method === 'resources/list') {
+        mcpResult({ resources: MCP_RESOURCES });
+        return;
+      }
+
+      if (method === 'resources/read') {
+        const uri = params && params.uri;
+        if (!uri) {
+          mcpError(-32602, 'Missing resource URI in params.uri');
+          return;
+        }
+        if (uri === 'bridge://sessions') {
+          mcpResult({ contents: [{ uri, mimeType: 'application/json', text: JSON.stringify({ sessions: cachedSessions, timestamp: lastScanTime }, null, 2) }] });
+          return;
+        }
+        if (uri === 'bridge://devices') {
+          mcpResult({ contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(discoverDevices(), null, 2) }] });
+          return;
+        }
+        if (uri === 'bridge://health') {
+          mcpResult({ contents: [{ uri, mimeType: 'application/json', text: JSON.stringify({ ok: true, version: '1.0.0', sessions: cachedSessions.length }, null, 2) }] });
+          return;
+        }
+        mcpError(-32602, 'Unknown resource URI: ' + uri);
+        return;
+      }
+
+      mcpError(-32601, 'Method not found: ' + method);
+    });
+    return;
+  }
   res.writeHead(404, CORS);
-  res.end(JSON.stringify({ error: 'Not found. Use /health, /sessions, /exec, or /devices/*' }));
+  res.end(JSON.stringify({ error: 'Not found. Use /health, /sessions, /exec, /devices/*, or /mcp' }));
 });
 
 server.on('error', (err) => {

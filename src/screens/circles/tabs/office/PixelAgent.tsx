@@ -25,6 +25,11 @@ interface Props {
 }
 
 function PixelAgentInner({ agent, appearance, environmentType, onPress, selected, scale = 1, showThoughts = false, totalAgents = 1, dancing = false, xp = 0, xpNext = 100, turns = 0, tokens = 0, onAutomate }: Props) {
+  // Performance mode: disable expensive animations when many agents are on the floor
+  // 1-3 agents: full animations | 4-6: reduced | 7+: minimal (static sprites with blinking only)
+  const reducedMotion = totalAgents >= 4;
+  const minimalMotion = totalAgents >= 7;
+
   const a = appearance || { ...DEFAULT_APPEARANCE, shirtColor: agent.color, hairColor: agent.color };
 
   // Only apply theme outfits to agents using default appearance (not user-customized)
@@ -171,8 +176,9 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
   }, [dancing]);
 
 
-  // Glow animation
+  // Glow animation — disabled in reduced motion
   useEffect(() => {
+    if (reducedMotion) return;
     if (agent.status === 'active') {
       const glowLoop = animLoop(() => Animated.sequence([
           Animated.timing(glowAnim, { toValue: 0.9, duration: 1500, useNativeDriver: false }),
@@ -181,7 +187,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
       glowLoop.start();
       return () => glowLoop.stop();
     }
-  }, [agent.status]);
+  }, [agent.status, reducedMotion]);
 
   // Eye blinking — periodic blink every 3-6s for alive agents
   useEffect(() => {
@@ -213,8 +219,9 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     return () => clearTimeout(timerId);
   }, [agent.status === 'offline']);
 
-  // Typing animation — arm wiggle when building/active
+  // Typing animation — arm wiggle when building/active (disabled in minimal motion)
   useEffect(() => {
+    if (minimalMotion) { typingAnim.setValue(0); return; }
     if (agent.status === 'active' || agent.status === 'building') {
       const typingLoop = animLoop(() => Animated.sequence([
           Animated.timing(typingAnim, { toValue: 1, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
@@ -229,7 +236,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     } else {
       typingAnim.setValue(0);
     }
-  }, [agent.status]);
+  }, [agent.status, minimalMotion]);
 
 
   // Crowd factor: more agents → smaller movements, longer gaps
@@ -240,8 +247,9 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
   const gapMin = Math.round(6000 / crowd); // 6s at 1 agent, ~13s at 5, ~24s at 10
   const gapRange = Math.round(8000 / crowd);
 
-  // Limb fidget — subtle, scales down with more agents
+  // Limb fidget — disabled in reduced motion mode
   useEffect(() => {
+    if (reducedMotion) return;
     let stopped = false;
     const doFidget = () => {
       if (stopped) return;
@@ -301,8 +309,9 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     return () => { if (automateTimerRef.current) clearTimeout(automateTimerRef.current); };
   }, [agent.status, onAutomate, showAutomateInput, selected]);
 
-  // Aura animations — flicker, pulse, rotation, drift
+  // Aura animations — disabled in reduced motion (4 loops per agent!)
   useEffect(() => {
+    if (reducedMotion) return;
     const flickerLoop = animLoop(() => Animated.sequence([
         Animated.timing(auraFlicker, { toValue: 1, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(auraFlicker, { toValue: 0.4, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
@@ -328,8 +337,9 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     return () => { flickerLoop.stop(); pulseLoop.stop(); rotateLoop.stop(); driftLoop.stop(); };
   }, []);
 
-  // Pet animations — scales down with crowd, random per agent
+  // Pet animations — disabled in reduced motion (heavy recursive timers)
   useEffect(() => {
+    if (reducedMotion) return;
     let stopped = false;
     const timers: ReturnType<typeof setTimeout>[] = [];
     const pBounce = Math.round(2 * crowd * 10) / 10; // 2px at 1, ~0.9 at 5, ~0.5 at 10
@@ -444,9 +454,9 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     return () => { if (moodTimerRef.current) clearTimeout(moodTimerRef.current); };
   }, [agent.status, agent.costToday]);
 
-  // Thought bubble generation
+  // Thought bubble generation — disabled in minimal motion
   useEffect(() => {
-    if (!showThoughts || currentThought) return;
+    if (!showThoughts || currentThought || minimalMotion) return;
 
     // Check for events
     const costSpike = agent.costToday > lastCost.current + 0.10;
@@ -1992,6 +2002,7 @@ const PixelAgent = memo(PixelAgentInner, (prev, next) => {
     prev.appearance === next.appearance &&
     prev.environmentType === next.environmentType &&
     prev.showThoughts === next.showThoughts &&
+    prev.totalAgents === next.totalAgents &&
     prev.xp === next.xp &&
     prev.turns === next.turns &&
     prev.tokens === next.tokens

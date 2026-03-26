@@ -19,6 +19,35 @@ interface McpServer {
   status: string;
 }
 
+interface McpTool {
+  name: string;
+  description?: string;
+  inputSchema?: any;
+}
+
+type RiskTier = 'low' | 'medium' | 'high' | 'unknown';
+
+const RISK_KEYWORDS: Record<string, RiskTier> = {
+  read: 'low', get: 'low', list: 'low', search: 'low', fetch: 'low', query: 'low', describe: 'low',
+  write: 'medium', create: 'medium', update: 'medium', set: 'medium', add: 'medium', put: 'medium', post: 'medium',
+  delete: 'high', remove: 'high', drop: 'high', destroy: 'high', execute: 'high', run: 'high', exec: 'high', eval: 'high',
+};
+
+function inferRiskTier(toolName: string): RiskTier {
+  const lower = toolName.toLowerCase();
+  for (const [keyword, tier] of Object.entries(RISK_KEYWORDS)) {
+    if (lower.includes(keyword)) return tier;
+  }
+  return 'unknown';
+}
+
+const RISK_COLORS: Record<RiskTier, { bg: string; text: string; label: string }> = {
+  low: { bg: '#22c55e18', text: '#22c55e', label: 'LOW' },
+  medium: { bg: '#eab30818', text: '#eab308', label: 'MED' },
+  high: { bg: '#ef444418', text: '#ef4444', label: 'HIGH' },
+  unknown: { bg: '#6366f118', text: '#6366f1', label: '?' },
+};
+
 interface Props {
   circleId: string;
   onClose: () => void;
@@ -31,6 +60,8 @@ export default function McpPanel({ circleId, onClose }: Props) {
   const [newUrl, setNewUrl] = useState('');
   const [adding, setAdding] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
+  const [serverTools, setServerTools] = useState<Record<string, McpTool[]>>({});
+  const [loadingTools, setLoadingTools] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     loadServers();
@@ -47,6 +78,33 @@ export default function McpPanel({ circleId, onClose }: Props) {
     if (error) console.error('Error loading MCP servers:', error);
     else setServers(data || []);
     setLoading(false);
+  };
+
+  const fetchTools = async (server: McpServer) => {
+    setLoadingTools(prev => ({ ...prev, [server.id]: true }));
+    try {
+      const response = await fetch(server.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'list-tools',
+          method: 'tools/list',
+          params: {}
+        }),
+      });
+
+      const data = await response.json();
+      if (data.result && data.result.tools) {
+        setServerTools(prev => ({ ...prev, [server.id]: data.result.tools }));
+      } else {
+        setServerTools(prev => ({ ...prev, [server.id]: [] }));
+      }
+    } catch (e) {
+      console.error('Failed to fetch tools:', e);
+      setServerTools(prev => ({ ...prev, [server.id]: [] }));
+    }
+    setLoadingTools(prev => ({ ...prev, [server.id]: false }));
   };
 
   const handleAddServer = async () => {
@@ -88,8 +146,16 @@ export default function McpPanel({ circleId, onClose }: Props) {
       .delete()
       .eq('id', id);
 
-    if (error) Alert.alert('Error', error.message);
-    else loadServers();
+    if (error) {
+      Alert.alert('Error', error.message);
+    } else {
+      setServerTools(prev => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      loadServers();
+    }
   };
 
   const testConnection = async (server: McpServer) => {
@@ -112,7 +178,11 @@ export default function McpPanel({ circleId, onClose }: Props) {
 
       const data = await response.json();
       if (data.result) {
-        Alert.alert('Success', `Connected to ${data.result.serverInfo?.name || 'MCP Server'} (v${data.result.serverInfo?.version})`);
+        const sn = data.result.serverInfo?.name || 'MCP Server';
+        const sv = data.result.serverInfo?.version;
+        Alert.alert('Success', `Connected to ${sn} (v${sv})`);
+        // Auto-fetch tools after successful connection test
+        fetchTools(server);
       } else {
         throw new Error(data.error?.message || 'Invalid MCP response');
       }
@@ -120,6 +190,24 @@ export default function McpPanel({ circleId, onClose }: Props) {
       Alert.alert('Connection Failed', e.message);
     }
     setTesting(null);
+  };
+
+  const renderToolRow = (tool: McpTool) => {
+    const risk = inferRiskTier(tool.name);
+    const riskStyle = RISK_COLORS[risk];
+    return (
+      <View key={tool.name} style={styles.toolRow}>
+        <View style={styles.toolInfo}>
+          <Text style={styles.toolName}>{tool.name}</Text>
+          {tool.description ? (
+            <Text style={styles.toolDesc} numberOfLines={2}>{tool.description}</Text>
+          ) : null}
+        </View>
+        <View style={[styles.riskBadge, { backgroundColor: riskStyle.bg }]}>
+          <Text style={[styles.riskBadgeText, { color: riskStyle.text }]}>{riskStyle.label}</Text>
+        </View>
+      </View>
+    );
   };
 
   return (
@@ -152,8 +240,8 @@ export default function McpPanel({ circleId, onClose }: Props) {
             onChangeText={setNewUrl}
             autoCapitalize="none"
           />
-          <Pressable 
-            style={[styles.addBtn, (!newName || !newUrl || adding) && styles.btnDisabled]} 
+          <Pressable
+            style={[styles.addBtn, (!newName || !newUrl || adding) && styles.btnDisabled]}
             onPress={handleAddServer}
             disabled={!newName || !newUrl || adding}
           >
@@ -170,33 +258,69 @@ export default function McpPanel({ circleId, onClose }: Props) {
               <Text style={styles.emptyText}>No MCP servers registered.</Text>
             </View>
           ) : (
-            servers.map((server) => (
-              <View key={server.id} style={styles.serverCard}>
-                <View style={styles.serverInfo}>
-                  <Text style={styles.serverName}>{server.name}</Text>
-                  <Text style={styles.serverUrl} numberOfLines={1}>{server.url}</Text>
-                  <View style={styles.badge}>
-                    <Text style={styles.badgeText}>{server.type.toUpperCase()}</Text>
+            servers.map((server) => {
+              const tools = serverTools[server.id];
+              const isLoadingTools = loadingTools[server.id];
+              return (
+                <View key={server.id} style={styles.serverCardWrapper}>
+                  <View style={styles.serverCard}>
+                    <View style={styles.serverInfo}>
+                      <View style={styles.serverNameRow}>
+                        <Text style={styles.serverName}>{server.name}</Text>
+                        {tools && tools.length > 0 && (
+                          <View style={styles.toolCountBadge}>
+                            <Text style={styles.toolCountText}>{tools.length} tool{tools.length !== 1 ? 's' : ''}</Text>
+                          </View>
+                        )}
+                      </View>
+                      <Text style={styles.serverUrl} numberOfLines={1}>{server.url}</Text>
+                      <View style={styles.badge}>
+                        <Text style={styles.badgeText}>{server.type.toUpperCase()}</Text>
+                      </View>
+                    </View>
+                    <View style={styles.serverActions}>
+                      <Pressable
+                        onPress={() => testConnection(server)}
+                        style={styles.actionBtn}
+                        disabled={testing === server.id}
+                      >
+                        {testing === server.id ? (
+                          <ActivityIndicator size="small" color="#e8e8e8" />
+                        ) : (
+                          <Text style={styles.actionBtnText}>TEST</Text>
+                        )}
+                      </Pressable>
+                      <Pressable onPress={() => handleDeleteServer(server.id)} style={styles.deleteBtn}>
+                        <Text style={styles.deleteBtnText}>✕</Text>
+                      </Pressable>
+                    </View>
                   </View>
+                  {/* Tools section */}
+                  {isLoadingTools && (
+                    <View style={styles.toolsLoading}>
+                      <ActivityIndicator size="small" color="#6366f1" />
+                      <Text style={styles.toolsLoadingText}>Fetching tools...</Text>
+                    </View>
+                  )}
+                  {tools && tools.length > 0 && (
+                    <View style={styles.toolsSection}>
+                      <View style={styles.toolsHeader}>
+                        <Text style={styles.toolsSectionLabel}>AVAILABLE TOOLS</Text>
+                        <Pressable onPress={() => fetchTools(server)} style={styles.refreshBtn}>
+                          <Text style={styles.refreshBtnText}>↻ Refresh Tools</Text>
+                        </Pressable>
+                      </View>
+                      {tools.map(renderToolRow)}
+                    </View>
+                  )}
+                  {tools && tools.length === 0 && !isLoadingTools && (
+                    <View style={styles.toolsSection}>
+                      <Text style={styles.noToolsText}>No tools reported by this server.</Text>
+                    </View>
+                  )}
                 </View>
-                <View style={styles.serverActions}>
-                  <Pressable 
-                    onPress={() => testConnection(server)} 
-                    style={styles.actionBtn}
-                    disabled={testing === server.id}
-                  >
-                    {testing === server.id ? (
-                      <ActivityIndicator size="small" color="#e8e8e8" />
-                    ) : (
-                      <Text style={styles.actionBtnText}>TEST</Text>
-                    )}
-                  </Pressable>
-                  <Pressable onPress={() => handleDeleteServer(server.id)} style={styles.deleteBtn}>
-                    <Text style={styles.deleteBtnText}>✕</Text>
-                  </Pressable>
-                </View>
-              </View>
-            ))
+              );
+            })
           )}
         </View>
 
@@ -300,11 +424,13 @@ const styles = StyleSheet.create({
     color: '#6f6f6f',
     fontSize: 14,
   },
+  serverCardWrapper: {
+    marginBottom: 12,
+  },
   serverCard: {
     backgroundColor: '#161616',
     borderRadius: 12,
     padding: 16,
-    marginBottom: 12,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -315,9 +441,25 @@ const styles = StyleSheet.create({
     flex: 1,
     marginRight: 12,
   },
+  serverNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   serverName: {
     color: '#e8e8e8',
     fontSize: 15,
+    fontWeight: '600',
+  },
+  toolCountBadge: {
+    backgroundColor: '#6366f125',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  toolCountText: {
+    color: '#a5b4fc',
+    fontSize: 10,
     fontWeight: '600',
   },
   serverUrl: {
@@ -361,6 +503,94 @@ const styles = StyleSheet.create({
   deleteBtnText: {
     color: '#ef4444',
     fontSize: 16,
+  },
+  toolsSection: {
+    backgroundColor: '#0d0d0d',
+    borderWidth: 1,
+    borderTopWidth: 0,
+    borderColor: '#252525',
+    borderBottomLeftRadius: 12,
+    borderBottomRightRadius: 12,
+    padding: 12,
+  },
+  toolsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  toolsSectionLabel: {
+    color: '#6f6f6f',
+    fontSize: 10,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
+  },
+  refreshBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#6366f140',
+  },
+  refreshBtnText: {
+    color: '#6366f1',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  toolRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a1a',
+  },
+  toolInfo: {
+    flex: 1,
+    marginRight: 8,
+  },
+  toolName: {
+    color: '#d4d4d4',
+    fontSize: 12,
+    fontWeight: '600',
+    fontFamily: 'monospace',
+  },
+  toolDesc: {
+    color: '#6f6f6f',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  riskBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  riskBadgeText: {
+    fontSize: 9,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
+  },
+  toolsLoading: {
+    backgroundColor: '#0d0d0d',
+    borderWidth: 1,
+    borderTopWidth: 0,
+    borderColor: '#252525',
+    borderBottomLeftRadius: 12,
+    borderBottomRightRadius: 12,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  toolsLoadingText: {
+    color: '#6f6f6f',
+    fontSize: 11,
+  },
+  noToolsText: {
+    color: '#6f6f6f',
+    fontSize: 11,
+    fontStyle: 'italic',
   },
   infoBox: {
     backgroundColor: '#3b82f610',

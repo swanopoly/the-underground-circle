@@ -9,6 +9,7 @@ import ServerRack from './office/ServerRack';
 import Whiteboard from './office/Whiteboard';
 import AgentPanel from './office/AgentPanel';
 import CustomizePanel, { TelegramConfig } from './office/CustomizePanel';
+import McpPanel from './office/McpPanel';
 import type { OfficeCommand } from './office/OfficeChat';
 import { OfficeAgent, DEFAULT_AGENT, sessionsToAgents } from '../../../lib/officeAgents';
 import {
@@ -164,6 +165,7 @@ interface Props {
 export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props) {
   const [selectedAgent, setSelectedAgent] = useState<OfficeAgent | null>(null);
   const [showCustomize, setShowCustomize] = useState(false);
+  const [showMcpHub, setShowMcpHub] = useState(false);
   const [showRewards, setShowRewards] = useState(false);
   const [celebrationBadge, setCelebrationBadge] = useState<Badge | null>(null);
   const [dancingAgentId, setDancingAgentId] = useState<string | null>(null);
@@ -1217,40 +1219,47 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const anyConnected = connectedConns.length > 0;
 
   const rawAgents: OfficeAgent[] = [];
+  const seenSessionIds = new Set<string>();
   let indexOffset = 0;
   for (const conn of connectedConns) {
     const sessions = sessionsRef.current.get(conn.id) || [];
     const connAgents = sessionsToAgents(sessions, conn.id, conn.name, conn.provider);
-    rawAgents.push(...connAgents);
+    for (const a of connAgents) {
+      if (!seenSessionIds.has(a.sessionKey)) {
+        seenSessionIds.add(a.sessionKey);
+        rawAgents.push(a);
+      }
+    }
     indexOffset += connAgents.length;
   }
-  // Merge auto-detected Claude Code sessions (bridge on localhost:7778)
-  const ccAutoAgents = sessionsRef.current.get('claude-code-auto') as unknown as OfficeAgent[] | undefined;
-  if (ccAutoAgents && ccAutoAgents.length > 0) {
-    rawAgents.push(...ccAutoAgents);
-  }
-  // Merge auto-detected Codex sessions (bridge on localhost:7779)
-  const codexAutoAgents = sessionsRef.current.get('codex-auto') as unknown as OfficeAgent[] | undefined;
-  if (codexAutoAgents && codexAutoAgents.length > 0) {
-    rawAgents.push(...codexAutoAgents);
-  }
-  // Merge auto-detected Gemini CLI sessions (bridge on localhost:7780)
-  const geminiAutoAgents = sessionsRef.current.get('gemini-cli-auto') as unknown as OfficeAgent[] | undefined;
-  if (geminiAutoAgents && geminiAutoAgents.length > 0) {
-    rawAgents.push(...geminiAutoAgents);
-  }
-  // Merge auto-detected Cursor sessions (bridge on localhost:7781)
-  const cursorAutoAgents = sessionsRef.current.get('cursor-auto') as unknown as OfficeAgent[] | undefined;
-  if (cursorAutoAgents && cursorAutoAgents.length > 0) {
-    rawAgents.push(...cursorAutoAgents);
+  // Merge auto-detected sessions — deduplicate by sessionKey to prevent duplicates
+  // when the same bridge is connected both manually and via auto-detect
+  const autoKeys = ['claude-code-auto', 'codex-auto', 'gemini-cli-auto', 'cursor-auto'] as const;
+  for (const key of autoKeys) {
+    const autoAgents = sessionsRef.current.get(key) as unknown as OfficeAgent[] | undefined;
+    if (autoAgents && autoAgents.length > 0) {
+      for (const a of autoAgents) {
+        if (!seenSessionIds.has(a.sessionKey)) {
+          seenSessionIds.add(a.sessionKey);
+          rawAgents.push(a);
+        }
+      }
+    }
   }
 
   // Merge DB-backed agents that have no corresponding live session
-  // Keep ALL user's agents visible as pixel agents — even idle/offline ones stay on the floor
+  // Only show if active within the last 2 hours — stale agents are hidden
+  const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
+  const now = Date.now();
   const liveAgentNames = new Set(rawAgents.map(a => a.name));
-  const myDbAgents = mergedCircleAgents.filter(a =>
-    a.ownerId === currentUserId && !liveAgentNames.has(a.name)
-  );
+  const myDbAgents = mergedCircleAgents.filter(a => {
+    if (a.ownerId !== currentUserId) return false;
+    if (liveAgentNames.has(a.name)) return false;
+    // Filter out stale agents — if no lastActiveAt or too old, hide them
+    if (!a.lastActiveAt) return false;
+    const age = now - new Date(a.lastActiveAt).getTime();
+    return age < STALE_THRESHOLD_MS;
+  });
   for (const dbAgent of myDbAgents) {
     rawAgents.push({
       id: `db::${dbAgent.id}`,
@@ -1304,9 +1313,19 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   // Use enriched agents if available (has cached costs/tokens), fallback to fresh agents
   const userAgents = enrichedAgents.length > 0 ? enrichedAgents : allAgents;
-  // BlackSwan first, then other agents sorted by most recently active
+  // BlackSwan first, then other agents sorted by most recently active (deduped by name)
   const displayAgents = useMemo(() => {
-    const sorted = [...userAgents].sort((a, b) => {
+    // Final dedup by name — keep the most recently active version
+    const byName = new Map<string, typeof userAgents[0]>();
+    for (const a of userAgents) {
+      const existing = byName.get(a.name);
+      if (!existing) { byName.set(a.name, a); continue; }
+      const existingTime = existing.lastActive ? new Date(existing.lastActive).getTime() : 0;
+      const newTime = a.lastActive ? new Date(a.lastActive).getTime() : 0;
+      if (newTime > existingTime) byName.set(a.name, a);
+    }
+    const deduped = Array.from(byName.values());
+    const sorted = [...deduped].sort((a, b) => {
       const ta = a.lastActive ? new Date(a.lastActive).getTime() : 0;
       const tb = b.lastActive ? new Date(b.lastActive).getTime() : 0;
       return tb - ta;
@@ -2969,6 +2988,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               <Text style={styles.toolbarBtnIcon}>🔧</Text>
               <Text style={styles.toolbarBtnText}>Customize</Text>
             </Pressable>
+            <Pressable onPress={() => setShowMcpHub(true)} style={[styles.toolbarBtn,
+              Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+              <Text style={styles.toolbarBtnIcon}>🔌</Text>
+              <Text style={styles.toolbarBtnText}>MCP</Text>
+            </Pressable>
           </View>
         </View>
       )}
@@ -3713,6 +3737,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         circleId={circleId}
         userEmail={userEmail}
       />
+
+      {/* MCP Hub Panel */}
+      {showMcpHub && (
+        <Modal visible={showMcpHub} animationType="fade" transparent onRequestClose={() => setShowMcpHub(false)}>
+          <McpPanel circleId={circleId} onClose={() => setShowMcpHub(false)} />
+        </Modal>
+      )}
 
       {/* Image / NFT Picker Modal */}
       <Modal visible={nftPickerVisible} animationType="fade" transparent>
