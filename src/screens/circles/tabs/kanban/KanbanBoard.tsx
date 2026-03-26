@@ -107,8 +107,8 @@ export default function KanbanBoard({
                 onPress={() => setActiveColumn(c.key)}
                 style={[s.tab, isActive && s.tabActive]}
               >
-                <Text style={[s.tabIcon, { color: isActive ? c.color : '#333348' }]}>{c.icon}</Text>
-                <Text style={[s.tabText, isActive && { color: '#e4e4ed' }]}>{c.label}</Text>
+                <Text style={[s.tabIcon, { color: isActive ? c.color : '#3e3e3e' }]}>{c.icon}</Text>
+                <Text style={[s.tabText, isActive && { color: '#6366f1' }]}>{c.label}</Text>
                 <View style={[s.tabBadge, isActive && { backgroundColor: c.color + '20' }]}>
                   <Text style={[s.tabBadgeText, isActive && { color: c.color }]}>{count}</Text>
                 </View>
@@ -189,9 +189,9 @@ const s = StyleSheet.create({
     flex: 1,
   },
   tabBar: {
-    backgroundColor: '#0a0a12',
+    backgroundColor: '#0a0a0a',
     borderBottomWidth: 1,
-    borderBottomColor: '#15151e',
+    borderBottomColor: '#1a1a1a',
     flexGrow: 0,
   },
   tabBarContent: {
@@ -209,14 +209,14 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background 0.15s' } as any : {}),
   },
   tabActive: {
-    backgroundColor: '#15151e',
+    backgroundColor: '#1a1a1a',
   },
   tabIcon: {
     fontSize: 11,
     fontWeight: '700',
   },
   tabText: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 10,
     fontWeight: '600',
     letterSpacing: 0.5,
@@ -226,11 +226,11 @@ const s = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 5,
     paddingVertical: 1,
-    backgroundColor: '#111119',
+    backgroundColor: '#0a0a0a',
   },
   tabBadgeText: {
     fontSize: 9,
     fontWeight: '700',
-    color: '#555566',
+    color: '#6f6f6f',
   },
 });

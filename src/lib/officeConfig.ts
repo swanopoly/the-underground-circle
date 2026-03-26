@@ -481,7 +481,9 @@ export type FurnitureType =
   | 'retro_console'
   | 'scrabble_board'
   // Farm & Pet
-  | 'farm_plot' | 'office_pet';
+  | 'farm_plot' | 'office_pet'
+  // AI / ML
+  | 'hf_explorer' | 'hf_runner';
 
 export interface FurnitureItem {
   id: string;
@@ -700,6 +702,8 @@ export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
   { type: 'music_visualizer', name: 'Music Visualizer', icon: '🎶', width: 90,  height: 60,  category: 'connected', description: 'Audio spectrum visualizer' },
   { type: 'figma_board',      name: 'Figma Board',      icon: '🎨', width: 100, height: 80,  category: 'connected', description: 'Preview your Figma designs' },
   { type: 'email_hub',        name: 'Email Hub',        icon: '📧', width: 85,  height: 70,  category: 'connected', description: 'Outlook / Gmail inbox at a glance' },
+  { type: 'hf_explorer',      name: 'HF Explorer',      icon: 'HF', width: 90,  height: 70,  category: 'connected', description: 'Browse & add Hugging Face models and tools' },
+  { type: 'hf_runner',        name: 'HF Runner',        icon: 'AI', width: 90,  height: 70,  category: 'connected', description: 'Run AI inference — images, text, translation & more' },
   { type: 'smart_tv',        name: 'Smart TV',        icon: '📺', width: 120, height: 80,  category: 'connected', description: 'Stream YouTube, Netflix, Hulu & more' },
   { type: 'spotify_jukebox', name: 'Spotify Jukebox', icon: '🎧', width: 70,  height: 90,  category: 'connected', description: 'Connect Spotify — control playback' },
   { type: 'discord_hub',     name: 'Discord Hub',     icon: '💬', width: 80,  height: 70,  category: 'connected', description: 'Connect Discord server widget' },
@@ -794,6 +798,7 @@ export function isInteractiveFurniture(type: FurnitureType): boolean {
     'poker_table', 'chess_board', 'coin_flip', 'connect_four', 'trivia_screen', 'roulette_wheel',
     'retro_console', 'scrabble_board',
     'farm_plot', 'office_pet',
+    'hf_explorer', 'hf_runner',
   ].includes(type);
 }
 

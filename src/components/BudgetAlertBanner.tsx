@@ -66,7 +66,7 @@ export default function BudgetAlertBanner({ alerts, onDismiss, onConfigure }: Pr
 const styles = StyleSheet.create({
   banner: {
     borderWidth: 1,
-    borderRadius: 8,
+    borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 10,
     marginHorizontal: 12,
@@ -106,7 +106,7 @@ const styles = StyleSheet.create({
   },
   detail: {
     fontSize: 10,
-    color: '#888',
+    color: '#9e9e9e',
     fontFamily: 'monospace',
   },
   actions: {
@@ -116,7 +116,7 @@ const styles = StyleSheet.create({
   actionBtn: {
     width: 28,
     height: 28,
-    borderRadius: 6,
+    borderRadius: 12,
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
@@ -128,7 +128,7 @@ const styles = StyleSheet.create({
   },
   moreCount: {
     fontSize: 9,
-    color: '#666',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
     marginTop: 6,
     fontStyle: 'italic',

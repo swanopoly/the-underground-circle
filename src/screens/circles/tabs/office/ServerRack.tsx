@@ -65,7 +65,7 @@ function MiniBar({ value, max, color, width = 30 }: { value: number; max: number
 
 /* ─── Grade badge ─── */
 const GRADE_COLORS: Record<string, string> = {
-  S: '#f59e0b', A: '#22c55e', B: '#3b82f6', C: '#eab308', D: '#f97316', F: '#ef4444',
+  S: '#ffd700', A: '#22c55e', B: '#3b82f6', C: '#f59e0b', D: '#ef4444', F: '#ef4444',
 };
 function GradeBadge({ grade }: { grade: string }) {
   return (
@@ -93,7 +93,7 @@ function AgentBlade({
   score: AgentPerformanceScore | null;
   workload: AgentWorkload | null;
 }) {
-  const statusColor = STATUS_COLORS[agent.status] || '#6b7280';
+  const statusColor = STATUS_COLORS[agent.status] || '#6f6f6f';
   const cacheRate = agent.inputTokens > 0
     ? Math.round((agent.cachedTokens / agent.inputTokens) * 100)
     : 0;
@@ -113,7 +113,7 @@ function AgentBlade({
   // Model pricing tier
   const rate = resolveModelRate(agent.model);
   const priceTier = rate.inPer1M >= 15 ? 'PREMIUM' : rate.inPer1M >= 3 ? 'STANDARD' : 'ECONOMY';
-  const priceColor = priceTier === 'PREMIUM' ? '#f59e0b' : priceTier === 'STANDARD' ? '#3b82f6' : '#22c55e';
+  const priceColor = priceTier === 'PREMIUM' ? '#a855f7' : priceTier === 'STANDARD' ? '#3b82f6' : '#22c55e';
 
   // Derived server metrics
   const cpuLoad = workload?.currentLoad ?? (agent.status === 'active' ? 65 : agent.status === 'idle' ? 12 : 0);
@@ -149,23 +149,23 @@ function AgentBlade({
       {/* LED bank — activity indicators */}
       <View style={s.bladeLedBank}>
         <BlinkingLED color="#22c55e" delay={index * 150} size={2} />
-        <BlinkingLED color="#eab308" delay={index * 150 + 80} size={2} />
+        <BlinkingLED color="#f59e0b" delay={index * 150 + 80} size={2} />
         <BlinkingLED color="#3b82f6" delay={index * 150 + 160} size={2} />
         <BlinkingLED color={agent.status === 'active' ? '#22c55e' : '#333'} delay={index * 150 + 240} size={2} />
         <BlinkingLED color={agent.turns > 0 ? '#6366f1' : '#222'} delay={index * 150 + 320} size={2} />
-        <BlinkingLED color={cacheRate > 50 ? '#22c55e' : '#222'} delay={index * 150 + 400} size={2} />
+        <BlinkingLED color={cacheRate > 50 ? '#22d3ee' : '#222'} delay={index * 150 + 400} size={2} />
       </View>
 
       {/* CPU / MEM load bars */}
       <View style={s.bladeLoadSection}>
         <View style={s.bladeLoadRow}>
           <Text style={s.bladeLoadLabel}>CPU</Text>
-          <MiniBar value={cpuLoad} max={100} color={cpuLoad > 80 ? '#ef4444' : cpuLoad > 50 ? '#eab308' : '#22c55e'} width={32} />
+          <MiniBar value={cpuLoad} max={100} color={cpuLoad > 80 ? '#ef4444' : cpuLoad > 50 ? '#f59e0b' : '#22c55e'} width={32} />
           <Text style={s.bladeLoadPct}>{cpuLoad}%</Text>
         </View>
         <View style={s.bladeLoadRow}>
           <Text style={s.bladeLoadLabel}>MEM</Text>
-          <MiniBar value={memUsage} max={100} color={memUsage > 80 ? '#ef4444' : memUsage > 50 ? '#eab308' : '#3b82f6'} width={32} />
+          <MiniBar value={memUsage} max={100} color={memUsage > 80 ? '#ef4444' : memUsage > 50 ? '#f59e0b' : '#3b82f6'} width={32} />
           <Text style={s.bladeLoadPct}>{memUsage}%</Text>
         </View>
       </View>
@@ -229,11 +229,11 @@ function AgentBlade({
           </View>
           <View style={s.bladeScoreRow}>
             <Text style={s.bladeScoreLabel}>PRD</Text>
-            <MiniBar value={score.breakdown.productivity} max={100} color="#eab308" width={24} />
+            <MiniBar value={score.breakdown.productivity} max={100} color="#a855f7" width={24} />
           </View>
           <View style={s.bladeScoreRow}>
             <Text style={s.bladeScoreLabel}>QUA</Text>
-            <MiniBar value={score.breakdown.quality} max={100} color="#a855f7" width={24} />
+            <MiniBar value={score.breakdown.quality} max={100} color="#f59e0b" width={24} />
           </View>
           <Text style={s.bladeScoreTotal}>SCORE {score.overall}/100</Text>
         </View>
@@ -265,7 +265,7 @@ function AgentBlade({
 
 /* ─── Health status color ─── */
 const HEALTH_COLORS: Record<string, string> = {
-  excellent: '#22c55e', good: '#22c55e', fair: '#eab308', poor: '#f97316', critical: '#ef4444',
+  excellent: '#22c55e', good: '#22c55e', fair: '#f59e0b', poor: '#ef4444', critical: '#ef4444',
 };
 
 /* ─── Main horizontal server rack ─── */
@@ -374,7 +374,7 @@ export default function ServerRack({ agents = [] }: { agents?: OfficeAgent[] }) 
               </View>
               <View style={s.collapsedStatCell}>
                 <Text style={s.collapsedStatLabel}>IDLE</Text>
-                <Text style={[s.collapsedStatVal, { color: '#eab308' }]}>{idleCount}</Text>
+                <Text style={[s.collapsedStatVal, { color: '#f59e0b' }]}>{idleCount}</Text>
               </View>
               <View style={s.collapsedStatCell}>
                 <Text style={s.collapsedStatLabel}>ERR</Text>
@@ -386,7 +386,7 @@ export default function ServerRack({ agents = [] }: { agents?: OfficeAgent[] }) 
               </View>
               <View style={s.collapsedStatCell}>
                 <Text style={s.collapsedStatLabel}>COST</Text>
-                <Text style={[s.collapsedStatVal, { color: '#f59e0b' }]}>${totalCost.toFixed(3)}</Text>
+                <Text style={[s.collapsedStatVal, { color: '#22d3ee' }]}>${totalCost.toFixed(3)}</Text>
               </View>
               <View style={s.collapsedStatCell}>
                 <Text style={s.collapsedStatLabel}>SCORE</Text>
@@ -394,7 +394,7 @@ export default function ServerRack({ agents = [] }: { agents?: OfficeAgent[] }) 
               </View>
               <View style={s.collapsedStatCell}>
                 <Text style={s.collapsedStatLabel}>CPU</Text>
-                <MiniBar value={clusterCpu} max={100} color={clusterCpu > 80 ? '#ef4444' : clusterCpu > 50 ? '#eab308' : '#22c55e'} width={24} />
+                <MiniBar value={clusterCpu} max={100} color={clusterCpu > 80 ? '#ef4444' : clusterCpu > 50 ? '#f59e0b' : '#22c55e'} width={24} />
               </View>
               <View style={s.collapsedStatCell}>
                 <Text style={s.collapsedStatLabel}>MEM</Text>
@@ -508,7 +508,7 @@ export default function ServerRack({ agents = [] }: { agents?: OfficeAgent[] }) 
             </View>
             <View style={s.sysRow}>
               <Text style={s.sysLabel}>IDLE</Text>
-              <Text style={[s.sysVal, { color: '#eab308' }]}>{idleCount}</Text>
+              <Text style={[s.sysVal, { color: '#f59e0b' }]}>{idleCount}</Text>
             </View>
             {errorCount > 0 && (
               <View style={s.sysRow}>
@@ -519,7 +519,7 @@ export default function ServerRack({ agents = [] }: { agents?: OfficeAgent[] }) 
             {offlineCount > 0 && (
               <View style={s.sysRow}>
                 <Text style={s.sysLabel}>OFF</Text>
-                <Text style={[s.sysVal, { color: '#6b7280' }]}>{offlineCount}</Text>
+                <Text style={[s.sysVal, { color: '#6f6f6f' }]}>{offlineCount}</Text>
               </View>
             )}
 
@@ -529,7 +529,7 @@ export default function ServerRack({ agents = [] }: { agents?: OfficeAgent[] }) 
             <Text style={s.sysTermHeader}>◆ VITALS</Text>
             <View style={s.sysRow}>
               <Text style={s.sysLabel}>CPU</Text>
-              <MiniBar value={clusterCpu} max={100} color={clusterCpu > 80 ? '#ef4444' : clusterCpu > 50 ? '#eab308' : '#22c55e'} width={28} />
+              <MiniBar value={clusterCpu} max={100} color={clusterCpu > 80 ? '#ef4444' : clusterCpu > 50 ? '#f59e0b' : '#22c55e'} width={28} />
               <Text style={s.sysVal}>{clusterCpu}%</Text>
             </View>
             <View style={s.sysRow}>
@@ -539,17 +539,17 @@ export default function ServerRack({ agents = [] }: { agents?: OfficeAgent[] }) 
             </View>
             <View style={s.sysRow}>
               <Text style={s.sysLabel}>DISK</Text>
-              <MiniBar value={clusterDisk} max={100} color={clusterDisk > 80 ? '#f97316' : '#3b82f6'} width={28} />
+              <MiniBar value={clusterDisk} max={100} color={clusterDisk > 80 ? '#ef4444' : '#a855f7'} width={28} />
               <Text style={s.sysVal}>{clusterDisk}%</Text>
             </View>
             <View style={s.sysRow}>
               <Text style={s.sysLabel}>NET</Text>
-              <MiniBar value={clusterNet} max={100} color={clusterNet > 80 ? '#eab308' : '#22c55e'} width={28} />
+              <MiniBar value={clusterNet} max={100} color={clusterNet > 80 ? '#ef4444' : '#22c55e'} width={28} />
               <Text style={s.sysVal}>{clusterNet}%</Text>
             </View>
             <View style={s.sysRow}>
               <Text style={s.sysLabel}>TEMP</Text>
-              <Text style={[s.sysVal, clusterTemp > 65 ? { color: '#ef4444' } : clusterTemp > 50 ? { color: '#eab308' } : null]}>{clusterTemp}°C</Text>
+              <Text style={[s.sysVal, clusterTemp > 65 ? { color: '#ef4444' } : clusterTemp > 50 ? { color: '#f59e0b' } : null]}>{clusterTemp}°C</Text>
             </View>
 
             <View style={s.sysDivider} />
@@ -578,7 +578,7 @@ export default function ServerRack({ agents = [] }: { agents?: OfficeAgent[] }) 
             </View>
             <View style={s.sysRow}>
               <Text style={s.sysLabel}>CACHE</Text>
-              <Text style={[s.sysVal, cacheRate > 50 ? { color: '#22c55e' } : cacheRate > 0 ? { color: '#eab308' } : null]}>{cacheRate}%</Text>
+              <Text style={[s.sysVal, cacheRate > 50 ? { color: '#22c55e' } : cacheRate > 0 ? { color: '#f59e0b' } : null]}>{cacheRate}%</Text>
             </View>
 
             <View style={s.sysDivider} />
@@ -637,7 +637,7 @@ export default function ServerRack({ agents = [] }: { agents?: OfficeAgent[] }) 
             </View>
             <View style={s.sysRow}>
               <Text style={s.sysLabel}>AVAIL</Text>
-              <Text style={[s.sysVal, { color: '#3b82f6' }]}>{idleWorkloadCount}</Text>
+              <Text style={[s.sysVal, { color: '#f59e0b' }]}>{idleWorkloadCount}</Text>
             </View>
 
             <View style={s.sysDivider} />
@@ -706,7 +706,7 @@ export default function ServerRack({ agents = [] }: { agents?: OfficeAgent[] }) 
         <View style={s.netPanel}>
           <View style={s.netPanelHeader}>
             <Text style={s.netPanelTitle}>NET / OPS</Text>
-            <BlinkingLED color="#3b82f6" delay={100} size={3} />
+            <BlinkingLED color="#22d3ee" delay={100} size={3} />
           </View>
 
           {/* Network activity LEDs */}
@@ -714,7 +714,7 @@ export default function ServerRack({ agents = [] }: { agents?: OfficeAgent[] }) 
             {agents.slice(0, 8).map((a, i) => (
               <View key={i} style={s.netLedItem}>
                 <BlinkingLED
-                  color={a.status === 'active' ? '#22c55e' : a.status === 'idle' ? '#eab308' : '#ef4444'}
+                  color={a.status === 'active' ? '#22c55e' : a.status === 'idle' ? '#f59e0b' : '#ef4444'}
                   delay={i * 120}
                   size={3}
                 />
@@ -840,7 +840,7 @@ const s = StyleSheet.create({
   collapsedChassis: {
     flexDirection: 'row',
     width: '100%',
-    backgroundColor: '#08080f',
+    backgroundColor: '#000000',
     borderLeftWidth: 2,
     borderRightWidth: 2,
     borderColor: '#2a2a2a',
@@ -848,7 +848,7 @@ const s = StyleSheet.create({
   },
   collapsedLeftCol: {
     width: 70,
-    backgroundColor: '#0a0a14',
+    backgroundColor: '#0a0a0a',
     borderRightWidth: 1,
     borderRightColor: '#2a2a2a',
     padding: 4,
@@ -858,7 +858,7 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 3,
-    backgroundColor: '#0c0c18',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
     borderColor: '#2a2a2a',
     borderRadius: 2,
@@ -939,7 +939,7 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 3,
-    backgroundColor: '#0c0c18',
+    backgroundColor: '#0a0a0a',
     borderWidth: 0.5,
     borderColor: '#2a2a2a',
     borderRadius: 1,
@@ -967,7 +967,7 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 2,
-    backgroundColor: '#0c0c18',
+    backgroundColor: '#0a0a0a',
     borderWidth: 0.5,
     borderRadius: 1,
     paddingHorizontal: 3,
@@ -991,7 +991,7 @@ const s = StyleSheet.create({
   },
   collapsedRightCol: {
     width: 50,
-    backgroundColor: '#0a0a14',
+    backgroundColor: '#0a0a0a',
     borderLeftWidth: 1,
     borderLeftColor: '#2a2a2a',
     padding: 4,
@@ -1000,9 +1000,9 @@ const s = StyleSheet.create({
   },
   collapsedExpandBtn: {
     alignItems: 'center',
-    backgroundColor: '#3b82f615',
+    backgroundColor: '#ffffff10',
     borderWidth: 1,
-    borderColor: '#3b82f640',
+    borderColor: '#ffffff20',
     borderRadius: 2,
     paddingVertical: 3,
     paddingHorizontal: 6,
@@ -1010,11 +1010,11 @@ const s = StyleSheet.create({
   },
   collapsedExpandIcon: {
     fontSize: 6,
-    color: '#3b82f6',
+    color: '#6366f1',
   },
   collapsedExpandText: {
     fontSize: 3.5,
-    color: '#3b82f6',
+    color: '#6366f1',
     fontFamily: 'monospace',
     fontWeight: '800',
     letterSpacing: 0.5,
@@ -1037,7 +1037,7 @@ const s = StyleSheet.create({
   },
   collapsedFloorLabel: {
     fontSize: 4,
-    color: '#333333',
+    color: '#252525',
     fontFamily: 'monospace',
     marginTop: 2,
     letterSpacing: 0.5,
@@ -1054,9 +1054,9 @@ const s = StyleSheet.create({
   },
   expandedMinBtn: {
     alignSelf: 'flex-end',
-    backgroundColor: '#3b82f610',
+    backgroundColor: '#ffffff10',
     borderWidth: 1,
-    borderColor: '#3b82f630',
+    borderColor: '#ffffff20',
     borderRadius: 2,
     paddingHorizontal: 6,
     paddingVertical: 2,
@@ -1064,7 +1064,7 @@ const s = StyleSheet.create({
   },
   expandedMinBtnText: {
     fontSize: 5,
-    color: '#3b82f6',
+    color: '#9e9e9e',
     fontFamily: 'monospace',
     fontWeight: '700',
   },
@@ -1083,9 +1083,9 @@ const s = StyleSheet.create({
     width: 4,
     height: 4,
     borderRadius: 2,
-    backgroundColor: '#333333',
+    backgroundColor: '#252525',
     borderWidth: 0.5,
-    borderColor: '#3d3d3d',
+    borderColor: '#3e3e3e',
   },
   railGroove: {
     flex: 1,
@@ -1097,7 +1097,7 @@ const s = StyleSheet.create({
   chassis: {
     flexDirection: 'row',
     width: '100%',
-    backgroundColor: '#08080f',
+    backgroundColor: '#000000',
     borderLeftWidth: 2,
     borderRightWidth: 2,
     borderColor: '#2a2a2a',
@@ -1106,7 +1106,7 @@ const s = StyleSheet.create({
   // ── System panel (left) ──
   sysPanel: {
     width: 110,
-    backgroundColor: '#0a0a14',
+    backgroundColor: '#0a0a0a',
     borderRightWidth: 1,
     borderRightColor: '#2a2a2a',
     padding: 4,
@@ -1122,7 +1122,7 @@ const s = StyleSheet.create({
   },
   sysPanelTitle: {
     fontSize: 5,
-    color: '#22c55e',
+    color: '#22d3ee',
     fontFamily: 'monospace',
     fontWeight: '800',
     letterSpacing: 0.5,
@@ -1131,7 +1131,7 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: '#0c0c18',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
     borderColor: '#2a2a2a',
     borderRadius: 2,
@@ -1157,7 +1157,7 @@ const s = StyleSheet.create({
   },
   sysTermHeader: {
     fontSize: 4,
-    color: '#6366f1',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
     fontWeight: '800',
     marginTop: 2,
@@ -1183,7 +1183,7 @@ const s = StyleSheet.create({
   },
   sysCost: {
     fontSize: 4,
-    color: '#f59e0b',
+    color: '#22d3ee',
     fontFamily: 'monospace',
     fontWeight: '800',
   },
@@ -1194,18 +1194,18 @@ const s = StyleSheet.create({
   },
   sysModelLine: {
     fontSize: 3.5,
-    color: '#6366f180',
+    color: '#a855f7',
     fontFamily: 'monospace',
   },
   sysModelPrice: {
     fontSize: 3.5,
-    color: '#f59e0b80',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
     marginLeft: 'auto',
   },
   sysConnLine: {
     fontSize: 3.5,
-    color: '#22c55e60',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
     paddingLeft: 4,
   },
@@ -1299,7 +1299,7 @@ const s = StyleSheet.create({
   scanLine: {
     width: 2,
     height: 4,
-    backgroundColor: '#22c55e40',
+    backgroundColor: '#ffffff20',
     borderRadius: 1,
   },
   bladeRow: {
@@ -1310,7 +1310,7 @@ const s = StyleSheet.create({
   // Individual blade
   blade: {
     width: 80,
-    backgroundColor: '#0c0c18',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
     borderColor: '#2a2a2a',
     borderRadius: 2,
@@ -1341,7 +1341,7 @@ const s = StyleSheet.create({
   },
   bladeModel: {
     fontSize: 3.5,
-    color: '#6366f1',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
     fontWeight: '700',
   },
@@ -1416,18 +1416,18 @@ const s = StyleSheet.create({
     fontWeight: '700',
   },
   bladeTermCost: {
-    color: '#f59e0b',
+    color: '#22d3ee',
     fontWeight: '800',
   },
   cacheHigh: {
     color: '#22c55e',
   },
   cacheMid: {
-    color: '#eab308',
+    color: '#f59e0b',
   },
   // Performance score section
   bladeScoreSection: {
-    backgroundColor: '#0a0a16',
+    backgroundColor: '#0a0a0a',
     borderWidth: 0.5,
     borderColor: '#2a2a2a',
     borderRadius: 1,
@@ -1461,12 +1461,12 @@ const s = StyleSheet.create({
   },
   bladeConnText: {
     fontSize: 3,
-    color: '#22c55e50',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
   },
   bladeProviderText: {
     fontSize: 3,
-    color: '#6366f150',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
   },
   bladeVents: {
@@ -1477,7 +1477,7 @@ const s = StyleSheet.create({
   bladeVent: {
     width: 2,
     height: 4,
-    backgroundColor: '#0f0f1a',
+    backgroundColor: '#0a0a0a',
     borderWidth: 0.5,
     borderColor: '#2a2a2a',
   },
@@ -1502,9 +1502,9 @@ const s = StyleSheet.create({
   // Empty blade slots
   bladeEmpty: {
     width: 80,
-    backgroundColor: '#080810',
+    backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#12121e',
+    borderColor: '#1a1a1a',
     borderRadius: 2,
     borderStyle: 'dashed',
     padding: 3,
@@ -1529,7 +1529,7 @@ const s = StyleSheet.create({
   // ── Network / Ops panel (right) ──
   netPanel: {
     width: 80,
-    backgroundColor: '#0a0a14',
+    backgroundColor: '#0a0a0a',
     borderLeftWidth: 1,
     borderLeftColor: '#2a2a2a',
     padding: 4,
@@ -1545,7 +1545,7 @@ const s = StyleSheet.create({
   },
   netPanelTitle: {
     fontSize: 5,
-    color: '#3b82f6',
+    color: '#22d3ee',
     fontFamily: 'monospace',
     fontWeight: '800',
     letterSpacing: 0.5,
@@ -1603,7 +1603,7 @@ const s = StyleSheet.create({
   },
   providerText: {
     fontSize: 3.5,
-    color: '#6366f180',
+    color: '#6366f1',
     fontFamily: 'monospace',
     fontWeight: '700',
   },

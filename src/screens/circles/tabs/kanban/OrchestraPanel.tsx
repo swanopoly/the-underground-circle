@@ -83,7 +83,7 @@ export default function OrchestraPanel({ agents, automationStats, taskStats }: P
         )}
         {statusSummary.idle > 0 && (
           <Text style={s.statusText}>
-            <Text style={{ color: '#444455' }}>{statusSummary.idle}</Text> offline
+            <Text style={{ color: '#ef4444' }}>{statusSummary.idle}</Text> offline
           </Text>
         )}
       </View>
@@ -94,15 +94,15 @@ export default function OrchestraPanel({ agents, automationStats, taskStats }: P
           <View style={s.divider} />
           <View style={s.section}>
             {automationStats!.activeCount > 0 && (
-              <View style={[s.modelChip, { backgroundColor: '#06b6d410' }]}>
+              <View style={[s.modelChip, { backgroundColor: '#22c55e10' }]}>
                 <Text style={{ fontSize: 10 }}>⚡</Text>
-                <Text style={[s.modelLabel, { color: '#06b6d4' }]}>active</Text>
-                <Text style={[s.modelCount, { color: '#06b6d4cc' }]}>{automationStats!.activeCount}</Text>
+                <Text style={[s.modelLabel, { color: '#22c55e' }]}>active</Text>
+                <Text style={[s.modelCount, { color: '#22c55e' }]}>{automationStats!.activeCount}</Text>
               </View>
             )}
             {automationStats!.runsThisWeek > 0 && (
               <Text style={s.statusText}>
-                <Text style={{ color: '#06b6d4' }}>{automationStats!.runsThisWeek}</Text> runs/wk
+                <Text style={{ color: '#3b82f6' }}>{automationStats!.runsThisWeek}</Text> runs/wk
               </Text>
             )}
           </View>
@@ -121,12 +121,12 @@ export default function OrchestraPanel({ agents, automationStats, taskStats }: P
             )}
             {taskStats!.dueToday > 0 && (
               <Text style={s.statusText}>
-                <Text style={{ color: '#f97316' }}>{taskStats!.dueToday}</Text> due today
+                <Text style={{ color: '#f59e0b' }}>{taskStats!.dueToday}</Text> due today
               </Text>
             )}
             {taskStats!.inProgress > 0 && (
               <Text style={s.statusText}>
-                <Text style={{ color: '#6366f1' }}>{taskStats!.inProgress}</Text> in progress
+                <Text style={{ color: '#f59e0b' }}>{taskStats!.inProgress}</Text> in progress
               </Text>
             )}
             {taskStats!.completedThisWeek > 0 && (
@@ -145,9 +145,9 @@ const s = StyleSheet.create({
   container: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#08080e',
+    backgroundColor: '#000000',
     borderBottomWidth: 1,
-    borderBottomColor: '#12121a',
+    borderBottomColor: '#1a1a1a',
     paddingVertical: 5,
     paddingHorizontal: 14,
     gap: 10,
@@ -179,10 +179,10 @@ const s = StyleSheet.create({
   divider: {
     width: 1,
     height: 12,
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
   },
   statusText: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 10,
     fontWeight: '500',
     ...(Platform.OS === 'web' ? { whiteSpace: 'nowrap' } as any : {}),

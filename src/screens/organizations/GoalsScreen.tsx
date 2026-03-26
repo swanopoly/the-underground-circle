@@ -6,10 +6,10 @@ import {
   Pressable,
   ScrollView,
   TextInput,
-  ActivityIndicator,
   Alert,
   Platform,
 } from 'react-native';
+import { LoadingScreen } from '../../components/LoadingWave';
 import { useOrg } from '../../hooks/useOrg';
 import {
   getOrgGoals,
@@ -214,11 +214,7 @@ export default function GoalsScreen({ route, navigation }: any) {
   };
 
   if (loading) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator color="#6366f1" size="large" />
-      </View>
-    );
+    return <LoadingScreen />;
   }
 
   return (

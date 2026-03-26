@@ -8,6 +8,7 @@ import {
   Dimensions,
   Pressable,
 } from 'react-native';
+import { LoadingScreen } from '../../components/LoadingWave';
 import { supabase } from '../../lib/supabase';
 import PhotonProofCheck, { PhotonProof } from '../../components/PhotonProofCheck';
 import Button from '../../components/Button';
@@ -170,13 +171,7 @@ export default function MorningRoutineScreen({ navigation, route }: MorningRouti
   };
 
   if (loading) {
-    return (
-      <View style={styles.container}>
-        <View style={styles.loadingContainer}>
-          <Text style={styles.loadingText}>Loading morning routine...</Text>
-        </View>
-      </View>
-    );
+    return <LoadingScreen />;
   }
 
   if (showPhotonCheck) {

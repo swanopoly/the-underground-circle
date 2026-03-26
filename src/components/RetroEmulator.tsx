@@ -16,32 +16,32 @@ export interface EmulatorSystem {
 
 export const EMULATOR_SYSTEMS: EmulatorSystem[] = [
   // ── Nintendo handhelds ──
-  { id: 'gba',    name: 'Game Boy Advance',  core: 'gba',     icon: '🟣', color: '#7c3aed', extensions: ['.gba'] },
-  { id: 'gbc',    name: 'Game Boy Color',    core: 'gbc',     icon: '🟡', color: '#eab308', extensions: ['.gbc', '.gb'] },
-  { id: 'gb',     name: 'Game Boy',          core: 'gb',      icon: '⬜', color: '#94a3b8', extensions: ['.gb'] },
+  { id: 'gba',    name: 'Game Boy Advance',  core: 'gba',     icon: '🟣', color: '#a855f7', extensions: ['.gba'] },
+  { id: 'gbc',    name: 'Game Boy Color',    core: 'gbc',     icon: '🟡', color: '#fbbf24', extensions: ['.gbc', '.gb'] },
+  { id: 'gb',     name: 'Game Boy',          core: 'gb',      icon: '⬜', color: '#22c55e', extensions: ['.gb'] },
   { id: 'nds',    name: 'Nintendo DS',       core: 'nds',     icon: '🔵', color: '#3b82f6', extensions: ['.nds'] },
   // ── Nintendo consoles ──
   { id: 'nes',    name: 'NES',               core: 'nes',     icon: '🔴', color: '#ef4444', extensions: ['.nes'] },
-  { id: 'snes',   name: 'SNES',              core: 'snes',    icon: '🟣', color: '#8b5cf6', extensions: ['.smc', '.sfc'] },
+  { id: 'snes',   name: 'SNES',              core: 'snes',    icon: '🟣', color: '#6366f1', extensions: ['.smc', '.sfc'] },
   { id: 'n64',    name: 'Nintendo 64',       core: 'n64',     icon: '🟢', color: '#22c55e', extensions: ['.n64', '.z64', '.v64'] },
   // ── Sega ──
-  { id: 'segaMD', name: 'Sega Genesis',      core: 'segaMD',  icon: '⚫', color: '#1e293b', extensions: ['.md', '.gen', '.bin'] },
-  { id: 'segaMS', name: 'Sega Master System', core: 'segaMS', icon: '🔵', color: '#2563eb', extensions: ['.sms'] },
-  { id: 'segaGG', name: 'Sega Game Gear',    core: 'segaGG',  icon: '⬛', color: '#334155', extensions: ['.gg'] },
-  { id: 'segaCD', name: 'Sega CD',           core: 'segaCD',  icon: '🔵', color: '#1d4ed8', extensions: ['.iso', '.bin', '.cue'] },
-  { id: 'segaSaturn', name: 'Sega Saturn',   core: 'segaSaturn', icon: '⚪', color: '#64748b', extensions: ['.iso', '.bin', '.cue'] },
-  { id: 'segaDC', name: 'Dreamcast',         core: 'dreamcast', icon: '🌀', color: '#f97316', extensions: ['.cdi', '.gdi', '.chd'] },
+  { id: 'segaMD', name: 'Sega Genesis',      core: 'segaMD',  icon: '⚫', color: '#3b82f6', extensions: ['.md', '.gen', '.bin'] },
+  { id: 'segaMS', name: 'Sega Master System', core: 'segaMS', icon: '🔵', color: '#22d3ee', extensions: ['.sms'] },
+  { id: 'segaGG', name: 'Sega Game Gear',    core: 'segaGG',  icon: '⬛', color: '#f97316', extensions: ['.gg'] },
+  { id: 'segaCD', name: 'Sega CD',           core: 'segaCD',  icon: '🔵', color: '#6366f1', extensions: ['.iso', '.bin', '.cue'] },
+  { id: 'segaSaturn', name: 'Sega Saturn',   core: 'segaSaturn', icon: '⚪', color: '#a855f7', extensions: ['.iso', '.bin', '.cue'] },
+  { id: 'segaDC', name: 'Dreamcast',         core: 'dreamcast', icon: '🌀', color: '#ec4899', extensions: ['.cdi', '.gdi', '.chd'] },
   // ── Sony ──
-  { id: 'psx',    name: 'PlayStation',        core: 'psx',     icon: '⬜', color: '#6b7280', extensions: ['.bin', '.iso', '.cue', '.chd', '.pbp'] },
+  { id: 'psx',    name: 'PlayStation',        core: 'psx',     icon: '⬜', color: '#3b82f6', extensions: ['.bin', '.iso', '.cue', '.chd', '.pbp'] },
   // ── Atari ──
-  { id: 'atari2600', name: 'Atari 2600',     core: 'atari2600', icon: '🟤', color: '#92400e', extensions: ['.a26', '.bin'] },
-  { id: 'atari7800', name: 'Atari 7800',     core: 'atari7800', icon: '🟤', color: '#78350f', extensions: ['.a78', '.bin'] },
+  { id: 'atari2600', name: 'Atari 2600',     core: 'atari2600', icon: '🟤', color: '#f97316', extensions: ['.a26', '.bin'] },
+  { id: 'atari7800', name: 'Atari 7800',     core: 'atari7800', icon: '🟤', color: '#f59e0b', extensions: ['.a78', '.bin'] },
   // ── Other ──
-  { id: 'arcade', name: 'Arcade (MAME)',     core: 'mame2003', icon: '🕹️', color: '#f59e0b', extensions: ['.zip'] },
-  { id: 'pce',    name: 'TurboGrafx-16',     core: 'pce',     icon: '🟠', color: '#ea580c', extensions: ['.pce'] },
-  { id: 'ngp',    name: 'Neo Geo Pocket',    core: 'ngp',     icon: '🔶', color: '#d97706', extensions: ['.ngp', '.ngc'] },
-  { id: 'vb',     name: 'Virtual Boy',       core: 'vb',      icon: '🔴', color: '#dc2626', extensions: ['.vb', '.vboy'] },
-  { id: 'ws',     name: 'WonderSwan',        core: 'ws',      icon: '🔷', color: '#0284c7', extensions: ['.ws', '.wsc'] },
+  { id: 'arcade', name: 'Arcade (MAME)',     core: 'mame2003', icon: '🕹️', color: '#fbbf24', extensions: ['.zip'] },
+  { id: 'pce',    name: 'TurboGrafx-16',     core: 'pce',     icon: '🟠', color: '#f97316', extensions: ['.pce'] },
+  { id: 'ngp',    name: 'Neo Geo Pocket',    core: 'ngp',     icon: '🔶', color: '#ec4899', extensions: ['.ngp', '.ngc'] },
+  { id: 'vb',     name: 'Virtual Boy',       core: 'vb',      icon: '🔴', color: '#ef4444', extensions: ['.vb', '.vboy'] },
+  { id: 'ws',     name: 'WonderSwan',        core: 'ws',      icon: '🔷', color: '#22d3ee', extensions: ['.ws', '.wsc'] },
 ];
 
 // Group systems by category
@@ -139,7 +139,7 @@ function buildEmulatorHtml(romUrl: string, core: string): string {
   EJS_startOnLoaded = true;
   EJS_color = '#6366f1';
   EJS_backgroundBlur = true;
-  EJS_backgroundColor = '#0d0d14';
+  EJS_backgroundColor = '#0a0a0a';
   EJS_fullscreenOnLoaded = false;
 </script>
 <script src="${EMULATORJS_CDN}loader.js"><\/script>
@@ -149,14 +149,14 @@ function buildEmulatorHtml(romUrl: string, core: string): string {
 // ─── Genre colors ────────────────────────────────────────────────────────────
 
 const GENRE_COLORS: Record<string, string> = {
-  'Action RPG': '#f59e0b',
-  'Platformer': '#22c55e',
-  'Simulation': '#3b82f6',
+  'Action RPG': '#a855f7',
+  'Platformer': '#3b82f6',
+  'Simulation': '#22c55e',
   'Action':     '#ef4444',
-  'Puzzle':     '#8b5cf6',
-  'Arcade':     '#f97316',
-  'Fighting':   '#ec4899',
-  'Card Game':  '#14b8a6',
+  'Puzzle':     '#f59e0b',
+  'Arcade':     '#ec4899',
+  'Fighting':   '#f97316',
+  'Card Game':  '#22d3ee',
 };
 
 // ─── Main component ──────────────────────────────────────────────────────────
@@ -335,14 +335,14 @@ export default function RetroEmulator({ visible, onClose, initialSystem }: Retro
                   </Text>
                   <View style={styles.gameList}>
                     {systemGames.map((game, i) => {
-                      const genreColor = GENRE_COLORS[game.genre] || '#6366f1';
+                      const genreColor = GENRE_COLORS[game.genre] || '#e8e8e8';
                       return (
                         <Pressable
                           key={game.file}
                           onPress={() => handlePlayBuiltIn(game)}
                           style={({ pressed }: any) => [
                             styles.gameCard,
-                            pressed && { backgroundColor: '#1e293b' },
+                            pressed && { backgroundColor: '#1a1a1a' },
                           ]}
                         >
                           <View style={styles.gameCardLeft}>
@@ -355,7 +355,7 @@ export default function RetroEmulator({ visible, onClose, initialSystem }: Retro
                               <Text style={styles.gameAuthor}>by {game.author}</Text>
                             </View>
                           </View>
-                          <View style={[styles.playBtn, { backgroundColor: selectedSystem?.color || '#6366f1' }]}>
+                          <View style={[styles.playBtn, { backgroundColor: selectedSystem?.color || '#e8e8e8' }]}>
                             <Text style={styles.playBtnText}>PLAY</Text>
                           </View>
                         </Pressable>
@@ -421,7 +421,7 @@ const styles = StyleSheet.create({
     width: '90%' as any,
     maxWidth: 650,
     maxHeight: '85%' as any,
-    backgroundColor: '#0d0d14',
+    backgroundColor: '#0a0a0a',
     borderRadius: 12,
     borderWidth: 1,
     borderColor: '#6366f1',
@@ -439,18 +439,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#1a1a1a',
   },
   title: {
     flex: 1,
-    color: '#e2e8f0',
+    color: '#e8e8e8',
     fontSize: 16,
     fontFamily: 'monospace',
     fontWeight: '700',
     textAlign: 'center',
   },
   subtitle: {
-    color: '#64748b',
+    color: '#6f6f6f',
     fontSize: 13,
     fontFamily: 'monospace',
     textAlign: 'center',
@@ -460,54 +460,54 @@ const styles = StyleSheet.create({
     width: 32,
     height: 32,
     borderRadius: 6,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#1a1a1a',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  xBtnText: { color: '#94a3b8', fontSize: 16 },
+  xBtnText: { color: '#9e9e9e', fontSize: 16 },
   backBtn: {
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 4,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#1a1a1a',
   },
-  backBtnText: { color: '#94a3b8', fontSize: 13, fontFamily: 'monospace' },
+  backBtnText: { color: '#9e9e9e', fontSize: 13, fontFamily: 'monospace' },
   closeBtn: {
     marginTop: 16,
     paddingHorizontal: 24,
     paddingVertical: 10,
     borderRadius: 6,
-    backgroundColor: '#6366f1',
+    backgroundColor: '#e8e8e8',
     alignSelf: 'center',
   },
-  closeBtnText: { color: '#fff', fontSize: 14, fontFamily: 'monospace', fontWeight: '600' },
+  closeBtnText: { color: '#000000', fontSize: 14, fontFamily: 'monospace', fontWeight: '600' },
   scrollArea: {
     flex: 1,
     padding: 16,
   },
   controlsBox: {
-    backgroundColor: '#111827',
+    backgroundColor: '#161616',
     borderRadius: 8,
     padding: 12,
     marginBottom: 16,
     borderWidth: 1,
-    borderColor: '#1e293b',
+    borderColor: '#1a1a1a',
   },
   controlsTitle: {
-    color: '#6366f1',
+    color: '#e8e8e8',
     fontSize: 11,
     fontFamily: 'monospace',
     fontWeight: '700',
     marginBottom: 4,
   },
   controlsText: {
-    color: '#64748b',
+    color: '#6f6f6f',
     fontSize: 10,
     fontFamily: 'monospace',
     lineHeight: 16,
   },
   sectionLabel: {
-    color: '#6366f1',
+    color: '#e8e8e8',
     fontSize: 11,
     fontFamily: 'monospace',
     fontWeight: '700',
@@ -524,13 +524,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#2a2a3e',
-    backgroundColor: '#111827',
+    borderColor: '#2a2a2a',
+    backgroundColor: '#161616',
     gap: 6,
   },
   systemChipIcon: { fontSize: 16 },
   systemChipName: {
-    color: '#e2e8f0',
+    color: '#e8e8e8',
     fontSize: 11,
     fontFamily: 'monospace',
     fontWeight: '600',
@@ -554,10 +554,10 @@ const styles = StyleSheet.create({
   gameCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#111827',
+    backgroundColor: '#161616',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1e293b',
+    borderColor: '#1a1a1a',
     padding: 12,
     gap: 12,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background-color 0.15s ease' } as any : {}),
@@ -567,13 +567,13 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   gameName: {
-    color: '#e2e8f0',
+    color: '#e8e8e8',
     fontSize: 14,
     fontFamily: 'monospace',
     fontWeight: '700',
   },
   gameDesc: {
-    color: '#94a3b8',
+    color: '#9e9e9e',
     fontSize: 11,
     fontFamily: 'monospace',
     lineHeight: 16,
@@ -596,7 +596,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   gameAuthor: {
-    color: '#475569',
+    color: '#3e3e3e',
     fontSize: 10,
     fontFamily: 'monospace',
   },
@@ -606,7 +606,7 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   playBtnText: {
-    color: '#fff',
+    color: '#000000',
     fontSize: 11,
     fontFamily: 'monospace',
     fontWeight: '800',
@@ -621,13 +621,13 @@ const styles = StyleSheet.create({
   },
   noGamesIcon: { fontSize: 32 },
   noGamesText: {
-    color: '#64748b',
+    color: '#6f6f6f',
     fontSize: 13,
     fontFamily: 'monospace',
     fontWeight: '600',
   },
   noGamesSubtext: {
-    color: '#475569',
+    color: '#3e3e3e',
     fontSize: 11,
     fontFamily: 'monospace',
   },
@@ -642,10 +642,10 @@ const styles = StyleSheet.create({
   dividerLine: {
     flex: 1,
     height: 1,
-    backgroundColor: '#1e293b',
+    backgroundColor: '#1a1a1a',
   },
   dividerText: {
-    color: '#475569',
+    color: '#3e3e3e',
     fontSize: 10,
     fontFamily: 'monospace',
   },
@@ -656,8 +656,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#2a2a3e',
-    backgroundColor: '#0d0d14',
+    borderColor: '#2a2a2a',
+    backgroundColor: '#0a0a0a',
     alignItems: 'center',
   },
   loadBtnText: {
@@ -668,7 +668,7 @@ const styles = StyleSheet.create({
 
   // Footer
   footerText: {
-    color: '#334155',
+    color: '#252525',
     fontSize: 10,
     fontFamily: 'monospace',
     textAlign: 'center',
@@ -684,15 +684,15 @@ const styles = StyleSheet.create({
   // Legacy (kept for system picker category view)
   categorySection: { marginBottom: 16 },
   categoryLabel: {
-    color: '#6366f1', fontSize: 11, fontFamily: 'monospace', fontWeight: '700',
+    color: '#e8e8e8', fontSize: 11, fontFamily: 'monospace', fontWeight: '700',
     textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8,
   },
   systemGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   systemCard: {
     width: 120, paddingVertical: 10, paddingHorizontal: 10, borderRadius: 8,
-    borderWidth: 1, borderColor: '#2a2a3e', backgroundColor: '#111827', alignItems: 'center',
+    borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#161616', alignItems: 'center',
   },
   systemIcon: { fontSize: 22, marginBottom: 4 },
-  systemName: { color: '#e2e8f0', fontSize: 11, fontFamily: 'monospace', fontWeight: '600', textAlign: 'center' },
-  systemExt: { color: '#475569', fontSize: 9, fontFamily: 'monospace', marginTop: 2, textAlign: 'center' },
+  systemName: { color: '#e8e8e8', fontSize: 11, fontFamily: 'monospace', fontWeight: '600', textAlign: 'center' },
+  systemExt: { color: '#3e3e3e', fontSize: 9, fontFamily: 'monospace', marginTop: 2, textAlign: 'center' },
 });

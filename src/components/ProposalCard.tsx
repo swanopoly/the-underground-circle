@@ -28,8 +28,8 @@ export default function ProposalCard({ proposal, currentUserId, accentColor, onV
   }[proposal.proposal_type] || '📜';
 
   const statusColor = {
-    active: '#eab308', passed: '#22c55e', failed: '#ef4444', expired: '#6b7280',
-  }[isExpired ? 'expired' : proposal.status] || '#6b7280';
+    active: '#3b82f6', passed: '#22c55e', failed: '#ef4444', expired: '#6f6f6f',
+  }[isExpired ? 'expired' : proposal.status] || '#6f6f6f';
 
   const statusLabel = isExpired ? 'EXPIRED' : proposal.status.toUpperCase();
 
@@ -107,7 +107,7 @@ export default function ProposalCard({ proposal, currentUserId, accentColor, onV
             disabled={!isActive || voting}
             style={[
               styles.voteBtn, styles.yesBtn,
-              myVote?.vote === 'yes' && { backgroundColor: '#22c55e30', borderColor: '#22c55e' },
+              myVote?.vote === 'yes' && { backgroundColor: '#22c55e15', borderColor: '#22c55e' },
               Platform.OS === 'web' && { cursor: isActive ? 'pointer' : 'default' } as any,
             ]}
           >
@@ -120,7 +120,7 @@ export default function ProposalCard({ proposal, currentUserId, accentColor, onV
             disabled={!isActive || voting}
             style={[
               styles.voteBtn, styles.noBtn,
-              myVote?.vote === 'no' && { backgroundColor: '#ef444430', borderColor: '#ef4444' },
+              myVote?.vote === 'no' && { backgroundColor: '#ef444415', borderColor: '#ef4444' },
               Platform.OS === 'web' && { cursor: isActive ? 'pointer' : 'default' } as any,
             ]}
           >
@@ -133,11 +133,11 @@ export default function ProposalCard({ proposal, currentUserId, accentColor, onV
             disabled={!isActive || voting}
             style={[
               styles.voteBtn,
-              myVote?.vote === 'abstain' && { backgroundColor: '#eab30830', borderColor: '#eab308' },
+              myVote?.vote === 'abstain' && { backgroundColor: '#ffffff10', borderColor: '#6f6f6f' },
               Platform.OS === 'web' && { cursor: isActive ? 'pointer' : 'default' } as any,
             ]}
           >
-            <Text style={[styles.voteBtnText, myVote?.vote === 'abstain' && { color: '#eab308' }]}>
+            <Text style={[styles.voteBtnText, myVote?.vote === 'abstain' && { color: '#6f6f6f' }]}>
               🤷 ({summary?.abstain || 0})
             </Text>
           </Pressable>
@@ -151,7 +151,7 @@ export default function ProposalCard({ proposal, currentUserId, accentColor, onV
             <View style={styles.quorumBar}>
               <View style={[styles.quorumFill, {
                 width: `${Math.min(100, (summary.total / summary.member_count) * 100)}%` as any,
-                backgroundColor: summary.quorum_met ? '#22c55e' : '#eab308',
+                backgroundColor: summary.quorum_met ? '#6366f1' : '#6366f180',
               }]} />
             </View>
             <Text style={styles.quorumText}>
@@ -165,8 +165,8 @@ export default function ProposalCard({ proposal, currentUserId, accentColor, onV
             <View style={styles.voterRow}>
               {proposal.votes.slice(0, 8).map((v, i) => (
                 <View key={v.id} style={[styles.voterDot, {
-                  backgroundColor: v.vote === 'yes' ? '#22c55e30' : v.vote === 'no' ? '#ef444430' : '#eab30830',
-                  borderColor: v.vote === 'yes' ? '#22c55e' : v.vote === 'no' ? '#ef4444' : '#eab308',
+                  backgroundColor: v.vote === 'yes' ? '#22c55e15' : v.vote === 'no' ? '#ef444415' : '#ffffff10',
+                  borderColor: v.vote === 'yes' ? '#22c55e' : v.vote === 'no' ? '#ef4444' : '#6f6f6f',
                 }]}>
                   <Text style={styles.voterText}>
                     {((v.user as any)?.display_name || (v.user as any)?.username || '?').charAt(0)}
@@ -197,19 +197,19 @@ export default function ProposalCard({ proposal, currentUserId, accentColor, onV
 
 const styles = StyleSheet.create({
   card: {
-    backgroundColor: '#0d0d14', borderWidth: 1, borderRadius: 14,
+    backgroundColor: '#0a0a0a', borderWidth: 1, borderRadius: 14,
     padding: 16, gap: 12, marginVertical: 4,
   },
   header: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
   typeIcon: { fontSize: 24, marginTop: 2 },
   headerInfo: { flex: 1, gap: 2 },
-  title: { fontSize: 16, fontWeight: '800', color: '#eee', fontFamily: 'monospace' },
-  meta: { fontSize: 12, color: '#888', fontFamily: 'monospace' },
+  title: { fontSize: 16, fontWeight: '800', color: '#e8e8e8', fontFamily: 'monospace' },
+  meta: { fontSize: 12, color: '#9e9e9e', fontFamily: 'monospace' },
   statusBadge: {
     paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, borderWidth: 1,
   },
   statusText: { fontSize: 10, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 0.5 },
-  description: { fontSize: 14, color: '#aaa', lineHeight: 20 },
+  description: { fontSize: 14, color: '#9e9e9e', lineHeight: 20 },
 
   // Poll options
   options: { gap: 6 },
@@ -225,9 +225,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     paddingHorizontal: 14, paddingVertical: 12, zIndex: 1,
   },
-  optionLabel: { fontSize: 14, color: '#ccc', fontWeight: '600' },
-  optionCount: { fontSize: 13, color: '#888', fontFamily: 'monospace' },
-  checkmark: { position: 'absolute', right: 14, color: '#22c55e', fontSize: 16, fontWeight: '800' },
+  optionLabel: { fontSize: 14, color: '#b5b5b5', fontWeight: '600' },
+  optionCount: { fontSize: 13, color: '#9e9e9e', fontFamily: 'monospace' },
+  checkmark: { position: 'absolute', right: 14, color: '#b5b5b5', fontSize: 16, fontWeight: '800' },
 
   // Yes/No buttons
   yesNoRow: { flexDirection: 'row', gap: 8 },
@@ -238,7 +238,7 @@ const styles = StyleSheet.create({
   },
   yesBtn: { backgroundColor: '#22c55e08' },
   noBtn: { backgroundColor: '#ef444408' },
-  voteBtnText: { fontSize: 14, fontWeight: '700', color: '#888', fontFamily: 'monospace' },
+  voteBtnText: { fontSize: 14, fontWeight: '700', color: '#9e9e9e', fontFamily: 'monospace' },
 
   // Footer
   footer: { gap: 8 },
@@ -247,16 +247,16 @@ const styles = StyleSheet.create({
     height: 4, backgroundColor: '#2a2a2a', borderRadius: 2, overflow: 'hidden',
   },
   quorumFill: { height: '100%', borderRadius: 2 },
-  quorumText: { fontSize: 11, color: '#666', fontFamily: 'monospace' },
+  quorumText: { fontSize: 11, color: '#6f6f6f', fontFamily: 'monospace' },
   voterRow: { flexDirection: 'row', gap: 4, alignItems: 'center' },
   voterDot: {
     width: 24, height: 24, borderRadius: 12, borderWidth: 1,
     alignItems: 'center', justifyContent: 'center',
   },
-  voterText: { fontSize: 10, color: '#ccc', fontWeight: '800' },
-  moreVoters: { fontSize: 11, color: '#666', fontFamily: 'monospace', marginLeft: 4 },
+  voterText: { fontSize: 10, color: '#b5b5b5', fontWeight: '800' },
+  moreVoters: { fontSize: 11, color: '#6f6f6f', fontFamily: 'monospace', marginLeft: 4 },
   resolveBtn: {
     paddingVertical: 10, borderRadius: 8, alignItems: 'center', marginTop: 4,
   },
-  resolveBtnText: { fontSize: 12, color: '#fff', fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
+  resolveBtnText: { fontSize: 12, color: '#e8e8e8', fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
 });

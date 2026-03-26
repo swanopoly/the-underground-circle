@@ -51,7 +51,7 @@ const QUICK_PROMPTS = [
 const PROMPT_CATEGORIES = [
   {
     title: '🎮 GAMES & FUN',
-    color: '#ec4899',
+    color: '#a855f7',
     prompts: [
       { label: 'Trivia Battle', desc: 'Test your knowledge', text: 'trivia' },
       { label: 'Would You Rather', desc: 'Fun dilemmas for the crew', text: 'would you rather' },
@@ -64,7 +64,7 @@ const PROMPT_CATEGORIES = [
   },
   {
     title: '⚔️ CHALLENGES',
-    color: '#f43f5e',
+    color: '#ef4444',
     prompts: [
       { label: 'Challenge a Member', desc: '1v1 productivity duel', text: 'challenge a member' },
       { label: 'Speed Task', desc: 'Race to finish first', text: 'speed task' },
@@ -84,7 +84,7 @@ const PROMPT_CATEGORIES = [
   },
   {
     title: '📊 STATS & TRACKING',
-    color: '#10b981',
+    color: '#22d3ee',
     prompts: [
       { label: 'Circle Status', desc: 'Check-ins, tasks, members', text: 'status' },
       { label: 'Leaderboard', desc: 'Streak rankings', text: 'leaderboard' },
@@ -95,7 +95,7 @@ const PROMPT_CATEGORIES = [
   },
   {
     title: '💸 CRYPTO',
-    color: '#22d3ee',
+    color: '#f97316',
     prompts: [
       { label: 'Send Crypto', desc: 'Send ETH/SOL to a member', text: '__SEND_CRYPTO__' },
       { label: 'My Wallet', desc: 'Check your wallet status', text: 'my wallet' },
@@ -114,7 +114,7 @@ const PROMPT_CATEGORIES = [
   },
   {
     title: '🗳️ GOVERNANCE (DAO)',
-    color: '#8b5cf6',
+    color: '#22c55e',
     prompts: [
       { label: 'Create Proposal', desc: 'Put something to a vote', text: '/propose ' },
       { label: 'Quick Poll', desc: 'Ask the crew a question', text: '/poll ' },
@@ -125,7 +125,7 @@ const PROMPT_CATEGORIES = [
   },
   {
     title: '🔥 MOTIVATION',
-    color: '#f59e0b',
+    color: '#ec4899',
     prompts: [
       { label: 'Motivate Me', desc: 'Get fired up', text: 'motivate me' },
       { label: 'Roast Me', desc: 'If you dare 😈', text: 'roast me' },
@@ -243,7 +243,7 @@ function ParticleEffect({ x, y, color, onComplete }: { x: number; y: number; col
   );
 }
 
-const WAVE_COLORS_CHAT = ['#6366f1', '#a855f7', '#ec4899', '#f43f5e', '#f59e0b', '#22c55e', '#06b6d4'];
+const WAVE_COLORS_CHAT = ['#6366f1', '#a855f7', '#3b82f6', '#22c55e', '#f59e0b', '#ec4899', '#22d3ee'];
 let _chatWaveStyleInjected = false;
 
 function ChatLoadingWave() {
@@ -381,6 +381,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   }, [circleId]);
 
   const init = async () => {
+    try {
     // Get current user
     const { data: { user } } = await supabase.auth.getUser();
     if (user) {
@@ -507,7 +508,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       setPinnedMessages(pins);
     } catch (e) { /* tables may not exist yet */ }
 
-    setLoaded(true);
+    } catch (e) {
+      console.error('[ChatTab] init error:', e);
+    } finally {
+      setLoaded(true);
+    }
   };
 
   // ─── Realtime subscription — see other members' messages live ──────────
@@ -601,7 +606,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   };
 
   const triggerParticleEffect = (x: number, y: number, isAchievement = false) => {
-    const color = isAchievement ? '#ffd700' : accentColor;
+    const color = isAchievement ? '#f59e0b' : accentColor;
     const id = Math.random().toString();
     setParticles(prev => [...prev, { id, x, y, color }]);
   };
@@ -1260,10 +1265,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   if (!loaded) {
     return (
       <View style={styles.loadingContainer}>
-        <View style={styles.loadingPulse}>
-          <Text style={[styles.loadingText, { color: accentColor }]}>LOADING</Text>
-          <ChatLoadingWave />
-        </View>
+        <ChatLoadingWave />
       </View>
     );
   }
@@ -1744,7 +1746,7 @@ function MessageRow({
 
       {/* Special effects for check-ins and achievements */}
       {(item.isCheckIn || item.isAchievement) && (
-        <View style={[styles.specialMessageGlow, Platform.OS === 'web' ? { boxShadow: `0 0 8px ${item.isAchievement ? '#ffd700' : accentColor}4d` } as any : { shadowColor: item.isAchievement ? '#ffd700' : accentColor }]} />
+        <View style={[styles.specialMessageGlow, Platform.OS === 'web' ? { boxShadow: `0 0 8px ${item.isAchievement ? '#f59e0b' : accentColor}4d` } as any : { shadowColor: item.isAchievement ? '#f59e0b' : accentColor }]} />
       )}
     </View>
   );
@@ -2032,7 +2034,7 @@ function EnhancedQuickBar({ onPromptPress, onSendCrypto, onNuke, accentColor, ci
 
       {/* Nuke Confirmation */}
       {showNukeConfirm && (
-        <View style={[checkInStyles.panel, { borderColor: '#ef444460' }]}>
+        <View style={[checkInStyles.panel, { borderColor: '#ffffff20' }]}>
           <View style={checkInStyles.header}>
             <Text style={checkInStyles.title}>☢️ Nuke All Messages?</Text>
             <Pressable onPress={() => setShowNukeConfirm(false)}>
@@ -2316,7 +2318,7 @@ function EnhancedSendButton({ onPress, disabled, sending, wallet, accentColor }:
         onHoverOut={() => setHovered(false)}
         style={[
           styles.enhancedSendButton,
-          { backgroundColor: disabled ? '#1a2a2a' : accentColor },
+          { backgroundColor: disabled ? '#1a1a1a' : accentColor },
           buttonStyle,
           disabled && { opacity: 0.5 },
         ]}
@@ -2359,7 +2361,7 @@ function EnhancedMentionPopup({ members, onSelect, accentColor }: any) {
         <Pressable key={m.id} onPress={() => onSelect(m)} style={styles.enhancedMentionItem}>
           <View style={[
             styles.mentionAvatar,
-            m.id === BLACKSWAN_ID && { backgroundColor: '#a855f730' },
+            m.id === BLACKSWAN_ID && { backgroundColor: '#6366f115' },
           ]}>
             <Text style={styles.mentionAvatarText}>
               {m.id === BLACKSWAN_ID ? '🦢' : (m.display_name || '?').charAt(0).toUpperCase()}
@@ -2370,8 +2372,8 @@ function EnhancedMentionPopup({ members, onSelect, accentColor }: any) {
             <Text style={styles.mentionHandle}>@{m.username}</Text>
           </View>
           {m.id === BLACKSWAN_ID && (
-            <View style={[styles.mentionBotBadge, { backgroundColor: '#a855f730' }]}>
-              <Text style={[styles.mentionBotBadgeText, { color: '#a855f7' }]}>AI</Text>
+            <View style={[styles.mentionBotBadge, { backgroundColor: '#6366f120' }]}>
+              <Text style={[styles.mentionBotBadgeText, { color: '#6366f1' }]}>AI</Text>
             </View>
           )}
         </Pressable>
@@ -2504,8 +2506,8 @@ function EnhancedSendInputButton({ onPress, disabled, accentColor }: any) {
 // Ambient live indicator: shows who's in a step-away session right now
 
 const TOOL_COLORS: Record<string, string> = {
-  'claude-code': '#6366f1', 'cowork': '#22c55e', 'openclaw': '#f59e0b',
-  'codex': '#10a37f', 'gemini': '#4285f4', 'cursor': '#8b5cf6', 'other': '#06b6d4',
+  'claude-code': '#f97316', 'cowork': '#3b82f6', 'openclaw': '#a855f7',
+  'codex': '#22c55e', 'gemini': '#22d3ee', 'cursor': '#ec4899', 'other': '#6366f1',
 };
 const TOOL_ICONS: Record<string, string> = {
   'claude-code': '💻', 'cowork': '💼', 'openclaw': '🐾',
@@ -2612,13 +2614,13 @@ const checkInStyles = StyleSheet.create({
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   title: { color: '#fff', fontSize: 13, fontWeight: '700' },
   close: { color: '#666', fontSize: 16, padding: 4 },
-  input: { backgroundColor: '#000000', borderWidth: 1, borderRadius: 8, color: '#fff', fontSize: 13, padding: 10, minHeight: 60, textAlignVertical: 'top' },
+  input: { backgroundColor: '#000000', borderWidth: 1, borderRadius: 12, color: '#fff', fontSize: 13, padding: 10, minHeight: 60, textAlignVertical: 'top' },
   footer: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 },
   charCount: { color: '#555', fontSize: 11 },
-  submitBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8 },
+  submitBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 12 },
   submitText: { color: '#fff', fontSize: 12, fontWeight: '700' },
   checkbox: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  checkboxBox: { width: 18, height: 18, borderWidth: 1.5, borderColor: '#444', borderRadius: 4, alignItems: 'center', justifyContent: 'center' },
+  checkboxBox: { width: 18, height: 18, borderWidth: 1.5, borderColor: '#444', borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
   checkboxCheck: { color: '#fff', fontSize: 11, fontWeight: '700', marginTop: -1 },
   checkboxLabel: { color: '#888', fontSize: 11 },
 });
@@ -2724,7 +2726,7 @@ const styles = StyleSheet.create({
   densityButton: {
     paddingHorizontal: 12,
     paddingVertical: 6,
-    borderRadius: 8,
+    borderRadius: 12,
     borderWidth: 1,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -2755,7 +2757,7 @@ const styles = StyleSheet.create({
     padding: 14,
     paddingLeft: 20,
     borderBottomWidth: 1,
-    borderBottomColor: '#0e0e0e',
+    borderBottomColor: '#0d0d0d',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.2s ease' } as any : {}),
   },
   promptInfo: { flex: 1 },
@@ -2782,15 +2784,15 @@ const styles = StyleSheet.create({
   pinnedBanner: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1,
-    backgroundColor: '#0d0d14',
+    backgroundColor: '#0d0d0d',
   },
   pinnedBannerIcon: { fontSize: 14 },
   pinnedBannerText: { flex: 1, fontSize: 13, color: '#888', fontWeight: '600' },
   pinnedBannerChevron: { fontSize: 12, color: '#666' },
-  pinnedList: { paddingHorizontal: 16, paddingBottom: 8, backgroundColor: '#0d0d14', gap: 6 },
+  pinnedList: { paddingHorizontal: 16, paddingBottom: 8, backgroundColor: '#0d0d0d', gap: 6 },
   pinnedItem: {
-    backgroundColor: '#222222', borderRadius: 8, padding: 10,
-    borderLeftWidth: 3, borderLeftColor: '#eab308',
+    backgroundColor: '#222222', borderRadius: 12, padding: 10,
+    borderLeftWidth: 3, borderLeftColor: '#f59e0b',
   },
   pinnedItemText: { fontSize: 13, color: '#ccc', lineHeight: 18 },
   pinnedItemMeta: { fontSize: 11, color: '#666', marginTop: 4 },
@@ -2825,10 +2827,10 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#2a2a2a',
   },
-  msgAvatarMe: { backgroundColor: '#1a2e1a', borderColor: '#2a4a2a' },
+  msgAvatarMe: { backgroundColor: '#1a1a1a', borderColor: '#2a2a2a' },
   msgAvatarText: { color: '#fff', fontSize: 13, fontWeight: '800' },
   msgName: { color: '#fff', fontSize: 14, fontWeight: '700' },
-  aiBadge: { borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 },
+  aiBadge: { borderRadius: 12, paddingHorizontal: 6, paddingVertical: 2 },
   aiBadgeText: { fontSize: 9, fontWeight: '900', letterSpacing: 1 },
   msgTime: { color: '#444', fontSize: 11, marginLeft: 'auto' as any },
 
@@ -2844,7 +2846,7 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(8px)' } as any : {}),
   },
   msgContent: { fontSize: 15, lineHeight: 22 },
-  mention: { fontWeight: '700', backgroundColor: '#1a1a3e', paddingHorizontal: 4, borderRadius: 4 },
+  mention: { fontWeight: '700', backgroundColor: '#1a1a1a', paddingHorizontal: 4, borderRadius: 12 },
   bold: { fontWeight: '800', color: '#fff' },
 
   // Enhanced hover actions
@@ -2864,7 +2866,7 @@ const styles = StyleSheet.create({
   hoverBtn: {
     width: 32,
     height: 30,
-    borderRadius: 8,
+    borderRadius: 12,
     justifyContent: 'center',
     alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background-color 0.2s' } as any : {}),
@@ -2888,7 +2890,7 @@ const styles = StyleSheet.create({
   reactionPickerItem: {
     width: 36,
     height: 36,
-    borderRadius: 10,
+    borderRadius: 12,
     justifyContent: 'center',
     alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.2s' } as any : {}),
@@ -3027,7 +3029,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  walletDisconnectText: { color: '#cc4444', fontSize: 12, fontWeight: '600' },
+  walletDisconnectText: { color: '#ef4444', fontSize: 12, fontWeight: '600' },
 
   // Enhanced form inputs
   cryptoLabel: { color: '#666', fontSize: 11, fontWeight: '700', letterSpacing: 1.5, marginBottom: 8 },
@@ -3048,7 +3050,7 @@ const styles = StyleSheet.create({
   enhancedMemberPickChip: {
     paddingVertical: 6,
     paddingHorizontal: 12,
-    borderRadius: 10,
+    borderRadius: 12,
     backgroundColor: '#111111aa',
     borderWidth: 1,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.2s', backdropFilter: 'blur(6px)' } as any : {}),
@@ -3061,7 +3063,7 @@ const styles = StyleSheet.create({
   cryptoQuickBtn: {
     paddingVertical: 8,
     paddingHorizontal: 12,
-    borderRadius: 10,
+    borderRadius: 12,
     backgroundColor: '#111111aa',
     borderWidth: 1,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', backdropFilter: 'blur(6px)' } as any : {}),
@@ -3119,7 +3121,7 @@ const styles = StyleSheet.create({
   mentionAvatarText: { color: '#fff', fontSize: 12, fontWeight: '800' },
   mentionName: { color: '#fff', fontSize: 14, fontWeight: '700' },
   mentionHandle: { color: '#555', fontSize: 12 },
-  mentionBotBadge: { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3 },
+  mentionBotBadge: { borderRadius: 12, paddingHorizontal: 8, paddingVertical: 3 },
   mentionBotBadgeText: { fontSize: 10, fontWeight: '900', letterSpacing: 1 },
 
   // Enhanced reply bar

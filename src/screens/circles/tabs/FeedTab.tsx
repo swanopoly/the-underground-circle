@@ -258,7 +258,9 @@ function HuggingSwanPanel({ circleId }: { circleId: string }) {
           setActivities(prev => [row, ...prev].slice(0, 30));
         }
       })
-      .subscribe();
+      .subscribe((status, err) => {
+        if (err) console.error('[FeedTab] Realtime subscription error:', err);
+      });
     return () => { supabase.removeChannel(channel); };
   }, [circleId]);
 
@@ -801,16 +803,12 @@ export default function FeedTab({ circleId }: { circleId: string }) {
 
   // Batch move handler
   const handleBatchMove = useCallback(async (taskIds: string[], newStatus: TaskStatus) => {
-    for (const id of taskIds) {
-      await kanban.moveTask(id, newStatus);
-    }
+    await Promise.all(taskIds.map(id => kanban.moveTask(id, newStatus)));
   }, [kanban.moveTask]);
 
   // Archive done handler (deletes old completed tasks)
   const handleArchiveDone = useCallback(async (taskIds: string[]) => {
-    for (const id of taskIds) {
-      await kanban.deleteTask(id);
-    }
+    await Promise.all(taskIds.map(id => kanban.deleteTask(id)));
   }, [kanban.deleteTask]);
 
   // Keyboard shortcuts (web only)

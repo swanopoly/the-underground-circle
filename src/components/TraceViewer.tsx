@@ -198,7 +198,7 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
               </View>
               {trace.latencyMs != null && (
                 <View style={[styles.pill, {
-                  backgroundColor: trace.latencyMs > 5000 ? '#ef444425' : trace.latencyMs > 2000 ? '#f59e0b25' : '#22c55e25',
+                  backgroundColor: trace.latencyMs > 5000 ? '#ef444420' : trace.latencyMs > 2000 ? '#f59e0b20' : '#22c55e20',
                 }]}>
                   <Text style={[styles.pillText, {
                     color: trace.latencyMs > 5000 ? '#ef4444' : trace.latencyMs > 2000 ? '#f59e0b' : '#22c55e',
@@ -211,7 +211,7 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
                 <Text style={styles.pillText}>${cost.toFixed(4)}</Text>
               </View>
               {isError && (
-                <View style={[styles.pill, { backgroundColor: '#ef444425' }]}>
+                <View style={[styles.pill, { backgroundColor: '#ef444420' }]}>
                   <Text style={[styles.pillText, { color: '#ef4444' }]}>ERROR</Text>
                 </View>
               )}
@@ -228,7 +228,7 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
                       {trace.inputTokens} in
                     </Text>
                     <Text style={styles.detailSep}>/</Text>
-                    <Text style={[styles.detailValue, { color: '#8b5cf6' }]}>
+                    <Text style={[styles.detailValue, { color: '#a855f7' }]}>
                       {trace.outputTokens} out
                     </Text>
                     {trace.cacheReadTokens > 0 && (
@@ -291,8 +291,8 @@ const styles = StyleSheet.create({
     padding: 32,
   },
   emptyIcon: { fontSize: 48, marginBottom: 12 },
-  emptyTitle: { fontSize: 18, fontWeight: '700', color: '#fff', marginBottom: 8 },
-  emptyText: { fontSize: 13, color: '#888', textAlign: 'center' },
+  emptyTitle: { fontSize: 18, fontWeight: '700', color: '#e8e8e8', marginBottom: 8 },
+  emptyText: { fontSize: 13, color: '#9e9e9e', textAlign: 'center' },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -302,18 +302,18 @@ const styles = StyleSheet.create({
   headerTitle: {
     fontSize: 14,
     fontWeight: '800',
-    color: '#fff',
+    color: '#e8e8e8',
     letterSpacing: 2,
   },
   headerSub: {
     fontSize: 11,
-    color: '#666',
+    color: '#6f6f6f',
   },
   traceCard: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderWidth: 1,
-    borderColor: '#1f1f1f',
-    borderRadius: 8,
+    borderColor: '#1a1a1a',
+    borderRadius: 12,
     padding: 12,
     marginBottom: 8,
   },
@@ -334,11 +334,11 @@ const styles = StyleSheet.create({
   traceSender: {
     fontSize: 12,
     fontWeight: '600',
-    color: '#888',
+    color: '#9e9e9e',
   },
   traceArrow: {
     fontSize: 10,
-    color: '#555',
+    color: '#6f6f6f',
   },
   traceAgent: {
     fontSize: 12,
@@ -347,11 +347,11 @@ const styles = StyleSheet.create({
   },
   traceTime: {
     fontSize: 10,
-    color: '#555',
+    color: '#6f6f6f',
   },
   traceCommand: {
     fontSize: 12,
-    color: '#ccc',
+    color: '#b5b5b5',
     fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
     marginBottom: 8,
   },
@@ -369,12 +369,12 @@ const styles = StyleSheet.create({
   pillText: {
     fontSize: 10,
     fontWeight: '600',
-    color: '#888',
+    color: '#9e9e9e',
   },
   expandedSection: {
     marginTop: 12,
     borderTopWidth: 1,
-    borderTopColor: '#1f1f1f',
+    borderTopColor: '#1a1a1a',
     paddingTop: 10,
     gap: 8,
   },
@@ -385,7 +385,7 @@ const styles = StyleSheet.create({
   },
   detailLabel: {
     fontSize: 11,
-    color: '#666',
+    color: '#6f6f6f',
     fontWeight: '600',
   },
   detailValue: {
@@ -394,25 +394,25 @@ const styles = StyleSheet.create({
   },
   detailSep: {
     fontSize: 10,
-    color: '#444',
+    color: '#3e3e3e',
   },
   responseBox: {
-    backgroundColor: '#0d0d14',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
     borderColor: '#2a2a2a',
-    borderRadius: 6,
+    borderRadius: 12,
     padding: 10,
   },
   responseLabel: {
     fontSize: 10,
     fontWeight: '700',
-    color: '#666',
+    color: '#6f6f6f',
     letterSpacing: 1,
     marginBottom: 6,
   },
   responseText: {
     fontSize: 12,
-    color: '#aaa',
+    color: '#9e9e9e',
     lineHeight: 18,
     fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
   },

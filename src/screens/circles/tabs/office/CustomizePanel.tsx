@@ -241,10 +241,13 @@ export default function CustomizePanel({
     const agentName = selectedAgent?.name;
     if (!agentName) return;
     (async () => {
+      const { data: auth } = await supabase.auth.getUser();
+      if (!auth.user) return;
       const { data } = await supabase
         .from('circle_office_agents')
         .select('id, spirit, spirit_emoji')
         .eq('circle_id', circleId)
+        .eq('owner_id', auth.user.id)
         .ilike('name', agentName)
         .maybeSingle();
       if (data) {

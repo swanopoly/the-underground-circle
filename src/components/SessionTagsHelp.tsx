@@ -134,11 +134,11 @@ export default function SessionTagsHelp({ visible, onClose }: Props) {
                 <View style={[styles.exampleTag, { borderColor: '#3b82f6' }]}>
                   <Text style={[styles.exampleTagText, { color: '#3b82f6' }]}>project:client-website</Text>
                 </View>
-                <View style={[styles.exampleTag, { borderColor: '#8b5cf6' }]}>
-                  <Text style={[styles.exampleTagText, { color: '#8b5cf6' }]}>client:acme-corp</Text>
+                <View style={[styles.exampleTag, { borderColor: '#a855f7' }]}>
+                  <Text style={[styles.exampleTagText, { color: '#a855f7' }]}>client:acme-corp</Text>
                 </View>
-                <View style={[styles.exampleTag, { borderColor: '#ec4899' }]}>
-                  <Text style={[styles.exampleTagText, { color: '#ec4899' }]}>team:design</Text>
+                <View style={[styles.exampleTag, { borderColor: '#22c55e' }]}>
+                  <Text style={[styles.exampleTagText, { color: '#22c55e' }]}>team:design</Text>
                 </View>
               </View>
               <Text style={styles.exampleDesc}>
@@ -152,11 +152,11 @@ export default function SessionTagsHelp({ visible, onClose }: Props) {
                 <View style={[styles.exampleTag, { borderColor: '#3b82f6' }]}>
                   <Text style={[styles.exampleTagText, { color: '#3b82f6' }]}>project:mvp</Text>
                 </View>
-                <View style={[styles.exampleTag, { borderColor: '#f59e0b' }]}>
-                  <Text style={[styles.exampleTagText, { color: '#f59e0b' }]}>priority:urgent</Text>
+                <View style={[styles.exampleTag, { borderColor: '#ef4444' }]}>
+                  <Text style={[styles.exampleTagText, { color: '#ef4444' }]}>priority:urgent</Text>
                 </View>
-                <View style={[styles.exampleTag, { borderColor: '#10b981' }]}>
-                  <Text style={[styles.exampleTagText, { color: '#10b981' }]}>status:testing</Text>
+                <View style={[styles.exampleTag, { borderColor: '#f59e0b' }]}>
+                  <Text style={[styles.exampleTagText, { color: '#f59e0b' }]}>status:testing</Text>
                 </View>
               </View>
               <Text style={styles.exampleDesc}>
@@ -167,14 +167,14 @@ export default function SessionTagsHelp({ visible, onClose }: Props) {
             <View style={styles.example}>
               <Text style={styles.exampleTitle}>🏢 Enterprise IT</Text>
               <View style={styles.exampleTags}>
-                <View style={[styles.exampleTag, { borderColor: '#8b5cf6' }]}>
-                  <Text style={[styles.exampleTagText, { color: '#8b5cf6' }]}>client:dept-engineering</Text>
+                <View style={[styles.exampleTag, { borderColor: '#a855f7' }]}>
+                  <Text style={[styles.exampleTagText, { color: '#a855f7' }]}>client:dept-engineering</Text>
                 </View>
                 <View style={[styles.exampleTag, { borderColor: '#3b82f6' }]}>
                   <Text style={[styles.exampleTagText, { color: '#3b82f6' }]}>project:infrastructure</Text>
                 </View>
-                <View style={[styles.exampleTag, { borderColor: '#6b7280' }]}>
-                  <Text style={[styles.exampleTagText, { color: '#6b7280' }]}>custom:budget-2024</Text>
+                <View style={[styles.exampleTag, { borderColor: '#f97316' }]}>
+                  <Text style={[styles.exampleTagText, { color: '#f97316' }]}>custom:budget-2024</Text>
                 </View>
               </View>
               <Text style={styles.exampleDesc}>
@@ -238,7 +238,7 @@ const styles = StyleSheet.create({
     zIndex: 10000,
   },
   modal: {
-    backgroundColor: '#0d0d14',
+    backgroundColor: '#0a0a0a',
     borderWidth: 2,
     borderColor: '#6366f1',
     borderRadius: 12,
@@ -267,20 +267,20 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 20,
     fontWeight: '800',
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
   },
   closeBtn: {
     width: 32,
     height: 32,
     borderRadius: 16,
-    backgroundColor: '#ffffff10',
+    backgroundColor: '#6366f115',
     alignItems: 'center',
     justifyContent: 'center',
   },
   closeBtnText: {
     fontSize: 18,
-    color: '#999',
+    color: '#9e9e9e',
     fontWeight: '700',
   },
 
@@ -291,21 +291,21 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: 16,
     fontWeight: '800',
-    color: '#6366f1',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
     marginBottom: 12,
   },
   text: {
     fontSize: 13,
-    color: '#ccc',
+    color: '#b5b5b5',
     lineHeight: 20,
     marginBottom: 8,
     fontFamily: 'monospace',
   },
   code: {
     fontFamily: 'monospace',
-    color: '#22c55e',
-    backgroundColor: '#22c55e20',
+    color: '#22d3ee',
+    backgroundColor: '#22d3ee15',
     paddingHorizontal: 4,
     paddingVertical: 2,
     borderRadius: 4,
@@ -318,7 +318,7 @@ const styles = StyleSheet.create({
   },
   bullet: {
     fontSize: 12,
-    color: '#999',
+    color: '#22c55e',
     lineHeight: 18,
     fontFamily: 'monospace',
     paddingLeft: 8,
@@ -354,7 +354,7 @@ const styles = StyleSheet.create({
   },
   categoryExample: {
     fontSize: 10,
-    color: '#666',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
     lineHeight: 14,
   },
@@ -370,7 +370,7 @@ const styles = StyleSheet.create({
     height: 28,
     borderRadius: 14,
     backgroundColor: '#6366f1',
-    color: '#fff',
+    color: '#ffffff',
     fontSize: 14,
     fontWeight: '800',
     textAlign: 'center',
@@ -383,13 +383,13 @@ const styles = StyleSheet.create({
   stepTitle: {
     fontSize: 13,
     fontWeight: '700',
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
     marginBottom: 4,
   },
   stepText: {
     fontSize: 11,
-    color: '#999',
+    color: '#9e9e9e',
     lineHeight: 16,
     fontFamily: 'monospace',
   },
@@ -406,7 +406,7 @@ const styles = StyleSheet.create({
   exampleTitle: {
     fontSize: 13,
     fontWeight: '700',
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
     marginBottom: 8,
   },
@@ -429,7 +429,7 @@ const styles = StyleSheet.create({
   },
   exampleDesc: {
     fontSize: 11,
-    color: '#666',
+    color: '#6f6f6f',
     fontStyle: 'italic',
     lineHeight: 16,
     fontFamily: 'monospace',
@@ -439,11 +439,11 @@ const styles = StyleSheet.create({
   tipBox: {
     flexDirection: 'row',
     gap: 10,
-    backgroundColor: '#6366f115',
+    backgroundColor: '#6366f108',
     padding: 10,
-    borderRadius: 8,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#6366f130',
+    borderColor: '#2a2a2a',
     marginBottom: 8,
   },
   tipIcon: {
@@ -452,27 +452,27 @@ const styles = StyleSheet.create({
   tipText: {
     flex: 1,
     fontSize: 11,
-    color: '#ccc',
+    color: '#b5b5b5',
     lineHeight: 16,
     fontFamily: 'monospace',
   },
   tipBold: {
     fontWeight: '700',
-    color: '#6366f1',
+    color: '#e8e8e8',
   },
 
   // Footer
   footer: {
-    backgroundColor: '#22c55e15',
+    backgroundColor: '#22c55e08',
     padding: 12,
-    borderRadius: 8,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#22c55e30',
+    borderColor: '#22c55e20',
     marginTop: 8,
   },
   footerText: {
     fontSize: 11,
-    color: '#22c55e',
+    color: '#e8e8e8',
     textAlign: 'center',
     fontFamily: 'monospace',
     lineHeight: 16,

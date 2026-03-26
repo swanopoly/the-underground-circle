@@ -31,9 +31,9 @@ const SOURCE_LABELS: Record<ActivitySource, string> = {
 };
 
 const STATUS_COLORS: Record<string, string> = {
-  running: '#F59E0B',
-  completed: '#10B981',
-  failed: '#EF4444',
+  running: '#f59e0b',
+  completed: '#22c55e',
+  failed: '#ef4444',
 };
 
 function timeAgo(dateStr: string): string {
@@ -48,7 +48,7 @@ function timeAgo(dateStr: string): string {
 }
 
 function ActivityCard({ item }: { item: AgentActivity }) {
-  const statusColor = STATUS_COLORS[item.status] ?? '#6B7280';
+  const statusColor = STATUS_COLORS[item.status] ?? '#6f6f6f';
   const sourceIcon = SOURCE_ICONS[item.source] ?? '📡';
 
   return (
@@ -80,7 +80,7 @@ export default function AgentActivityFeed({ circleId, maxHeight = 400 }: Props) 
   if (isLoading) {
     return (
       <View style={styles.centered}>
-        <ActivityIndicator color="#00FF9C" size="small" />
+        <ActivityIndicator color="#e8e8e8" size="small" />
       </View>
     );
   }
@@ -120,11 +120,11 @@ const styles = StyleSheet.create({
     paddingBottom: 8,
   },
   card: {
-    backgroundColor: '#111827',
-    borderRadius: 8,
+    backgroundColor: '#161616',
+    borderRadius: 12,
     padding: 10,
     borderWidth: 1,
-    borderColor: '#1F2937',
+    borderColor: '#1a1a1a',
     gap: 4,
   },
   cardHeader: {
@@ -142,7 +142,7 @@ const styles = StyleSheet.create({
   },
   sourceLabel: {
     fontSize: 11,
-    color: '#6B7280',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
   },
   rightMeta: {
@@ -157,17 +157,17 @@ const styles = StyleSheet.create({
   },
   timestamp: {
     fontSize: 10,
-    color: '#4B5563',
+    color: '#3e3e3e',
     fontFamily: 'monospace',
   },
   title: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#E5E7EB',
+    color: '#e8e8e8',
   },
   body: {
     fontSize: 12,
-    color: '#9CA3AF',
+    color: '#9e9e9e',
     lineHeight: 17,
   },
   centered: {
@@ -181,18 +181,18 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 13,
-    color: '#6B7280',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
   },
   refreshBtn: {
     marginTop: 8,
     paddingHorizontal: 12,
     paddingVertical: 5,
-    backgroundColor: '#1F2937',
+    backgroundColor: '#252525',
     borderRadius: 6,
   },
   refreshText: {
     fontSize: 12,
-    color: '#00FF9C',
+    color: '#e8e8e8',
   },
 });

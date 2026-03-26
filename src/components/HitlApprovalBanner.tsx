@@ -11,8 +11,8 @@ interface Props {
 function actionColor(type: string): string {
   if (type === 'spending') return '#f59e0b';
   if (type === 'tool_call') return '#6366f1';
-  if (type === 'external_message') return '#ef4444';
-  return '#06b6d4';
+  if (type === 'external_message') return '#3b82f6';
+  return '#9e9e9e';
 }
 
 function CountdownTimer({
@@ -154,9 +154,9 @@ const styles = StyleSheet.create({
   banner: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#150e00',
+    backgroundColor: '#0a0a0a',
     borderBottomWidth: 1,
-    borderColor: '#f59e0b50',
+    borderColor: '#2a2a2a',
     paddingHorizontal: 16,
     paddingVertical: 11,
     gap: 10,
@@ -177,15 +177,15 @@ const styles = StyleSheet.create({
   },
   chevron: { color: '#f59e0b', fontSize: 10 },
   list: {
-    backgroundColor: '#0d0d09',
+    backgroundColor: '#0a0a0a',
     borderBottomWidth: 1,
-    borderColor: '#1a1a0a',
+    borderColor: '#1a1a1a',
     maxHeight: 340,
   },
   card: {
     padding: 14,
     borderBottomWidth: 1,
-    borderColor: '#1a1a14',
+    borderColor: '#1a1a1a',
   },
   cardHeader: {
     flexDirection: 'row',
@@ -195,7 +195,7 @@ const styles = StyleSheet.create({
   },
   agentName: {
     flex: 1,
-    color: '#eee',
+    color: '#e8e8e8',
     fontSize: 12,
     fontWeight: '800',
     fontFamily: 'monospace',
@@ -213,20 +213,20 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   countdown: {
-    color: '#888',
+    color: '#9e9e9e',
     fontSize: 9,
     fontFamily: 'monospace',
   },
   countdownUrgent: { color: '#ef4444' },
   description: {
-    color: '#aaa',
+    color: '#9e9e9e',
     fontSize: 12,
     fontFamily: 'monospace',
     marginBottom: 6,
     lineHeight: 16,
   },
   payload: {
-    color: '#555',
+    color: '#6f6f6f',
     fontSize: 9,
     fontFamily: 'monospace',
     backgroundColor: '#000000',
@@ -237,20 +237,20 @@ const styles = StyleSheet.create({
   actions: { flexDirection: 'row', gap: 8 },
   rejectBtn: {
     flex: 1,
-    backgroundColor: '#ef444418',
+    backgroundColor: '#ef444415',
     borderWidth: 1,
     borderColor: '#ef444440',
-    borderRadius: 6,
+    borderRadius: 12,
     paddingVertical: 9,
     alignItems: 'center',
   },
   rejectText: { color: '#ef4444', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' },
   approveBtn: {
     flex: 1,
-    backgroundColor: '#22c55e18',
+    backgroundColor: '#22c55e15',
     borderWidth: 1,
     borderColor: '#22c55e40',
-    borderRadius: 6,
+    borderRadius: 12,
     paddingVertical: 9,
     alignItems: 'center',
   },

@@ -48,6 +48,7 @@ import {
 } from '../../../lib/agentAutoConnect';
 import { storage } from '../../../lib/storage';
 import { loadTrendingContent } from '../../../lib/trendingContent';
+import AgentQuickConnect from "../../../components/AgentQuickConnect";
 import {
   SessionTag, loadSessionTags, addSessionTag, removeSessionTag,
 } from '../../../lib/sessionTags';
@@ -93,6 +94,7 @@ import {
   cleanupTerminalChannels,
   updateAgentAnalytics,
   sendTerminalCommand,
+  syncAgentTokenSnapshot,
   BroadcastCommandPayload,
 } from '../../../lib/officeTerminal';
 import {
@@ -253,13 +255,19 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [terminalTargetIds, setTerminalTargetIds] = useState<string[] | null>(['blackswan-default']);
   const [statusHistory, setStatusHistory] = useState<Array<OfficeAgent[]>>([]);
   const [enrichedAgents, setEnrichedAgents] = useState<OfficeAgent[]>([]);
+  const enrichedAgentsRef = useRef<OfficeAgent[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
   const viewMode = 'office'; // Simplified — analytics dashboards moved to Backpack tab
   const [sessionTags, setSessionTags] = useState<Map<string, SessionTag[]>>(new Map());
+  const sessionTagsRef = useRef<Map<string, SessionTag[]>>(new Map());
   const [budgetConfig, setBudgetConfig] = useState<BudgetConfig>({ enabled: false });
   const [idleConfig, setIdleConfig] = useState<IdleBehaviorConfig>(getDefaultIdleConfig());
   const idleConfigRef = useRef<IdleBehaviorConfig>(getDefaultIdleConfig());
+
+  // Keep refs in sync with state for use in intervals/callbacks
+  useEffect(() => { enrichedAgentsRef.current = enrichedAgents; }, [enrichedAgents]);
+  useEffect(() => { sessionTagsRef.current = sessionTags; }, [sessionTags]);
   const { keys: providerKeys, refresh: refreshProviderKeys } = useUserApiKeys();
   const [budgetAlertsDismissed, setBudgetAlertsDismissed] = useState(false);
   const [actionResult, setActionResult] = useState<string>('');
@@ -268,6 +276,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   // ─── Multi-floor state ──────────────────────────────
   const [floors, setFloors] = useState<OfficeFloor[]>(DEFAULT_FLOORS);
+  const floorsRef = useRef<OfficeFloor[]>(DEFAULT_FLOORS);
+  useEffect(() => { floorsRef.current = floors; }, [floors]);
   const [currentFloorId, setCurrentFloorId] = useState<string>('floor_1');
 
   // ─── Image / NFT picker state ───────────────────────────────────────────
@@ -923,7 +933,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         const preSessions = getAutoConnectSessions();
         if (preConns.length > 0) {
           setConnections(preConns);
-          console.log('[OfficeTab] Loaded', preConns.length, 'pre-connected agents from auto-connect');
+          if (__DEV__) console.log('[OfficeTab] Loaded', preConns.length, 'pre-connected agents from auto-connect');
         }
         // Copy sessions into our local ref
         for (const [key, sessions] of preSessions) {
@@ -1140,7 +1150,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     })();
 
     return () => {
-      if ((initRef as any)._unsub) (initRef as any)._unsub();
+      (initRef as any)._unsub?.();
     };
   }, [connectOne, circleId]);
 
@@ -1273,15 +1283,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     });
   }
 
-  // Enrich live agents with spirit from their CircleOfficeAgent record (matched by name)
-  const spiritByName = new Map(
+  // Enrich live agents with spirit from their CircleOfficeAgent record (matched by owner+name)
+  const spiritByKey = new Map(
     mergedCircleAgents
       .filter(a => a.spirit)
-      .map(a => [a.name, a.spirit!])
+      .map(a => [`${a.ownerId}::${a.name}`, a.spirit!])
   );
   for (const agent of rawAgents) {
-    if (!agent.spirit && spiritByName.has(agent.name)) {
-      agent.spirit = spiritByName.get(agent.name);
+    const key = `${currentUserId}::${agent.name}`;
+    if (!agent.spirit && spiritByKey.has(key)) {
+      agent.spirit = spiritByKey.get(key);
     }
   }
 
@@ -1293,8 +1304,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   // Use enriched agents if available (has cached costs/tokens), fallback to fresh agents
   const userAgents = enrichedAgents.length > 0 ? enrichedAgents : allAgents;
-  // Always include the default UC Agent alongside user agents
-  const displayAgents = useMemo(() => [DEFAULT_AGENT, ...userAgents], [userAgents]);
+  // BlackSwan first, then other agents sorted by most recently active
+  const displayAgents = useMemo(() => {
+    const sorted = [...userAgents].sort((a, b) => {
+      const ta = a.lastActive ? new Date(a.lastActive).getTime() : 0;
+      const tb = b.lastActive ? new Date(b.lastActive).getTime() : 0;
+      return tb - ta;
+    });
+    return [DEFAULT_AGENT, ...sorted];
+  }, [userAgents]);
 
   // Resolve appearance — lookup by id first, fall back to name for legacy data
   const getAppearance = useCallback((agent: OfficeAgent) => {
@@ -1450,37 +1468,37 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     
     const interval = setInterval(async () => {
       try {
-        await takeSnapshot(enrichedAgents, sessionTags);
+        await takeSnapshot(enrichedAgentsRef.current, sessionTagsRef.current);
       } catch (error) {
         console.error('Failed to save snapshot:', error);
       }
     }, 30000); // 30 seconds
 
     return () => clearInterval(interval);
-  }, [enrichedAgents]);
+  }, [enrichedAgents.length > 0]);
 
-  // Sync live agent token data to DB (every 30s) so the token ticker is accurate
+  // Sync live agent token data to DB (every 30s) with granular breakdown
+  // Uses snapshot-to-delta RPC to correctly accumulate _total columns
   useEffect(() => {
-    if (enrichedAgents.length === 0) return;
+    if (enrichedAgents.length === 0 || !circleId) return;
 
     const syncToDB = async () => {
       try {
-        const { data: auth } = await supabase.auth.getUser();
-        if (!auth.user) return;
-        for (const agent of enrichedAgents) {
+        const agents = enrichedAgentsRef.current;
+        for (const agent of agents) {
           if (agent.tokensUsed <= 0 && agent.messagesProcessed <= 0) continue;
           // Only sync agents we own (skip db:: agents, they already have DB data)
           if (agent.connectionId === 'db-agent') continue;
-          await supabase
-            .from('circle_office_agents')
-            .update({
-              token_usage_today: agent.tokensUsed,
-              message_count_today: agent.turns || agent.messagesProcessed,
-              updated_at: new Date().toISOString(),
-            })
-            .eq('circle_id', circleId)
-            .eq('owner_id', auth.user.id)
-            .ilike('name', agent.name);
+          await syncAgentTokenSnapshot(
+            circleId,
+            agent.name,
+            agent.inputTokens,
+            agent.outputTokens,
+            agent.cachedTokens,
+            agent.turns || agent.messagesProcessed,
+            agent.costToday,
+            agent.model,
+          );
         }
       } catch {}
     };
@@ -1488,7 +1506,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     syncToDB();
     const interval = setInterval(syncToDB, 30000);
     return () => clearInterval(interval);
-  }, [enrichedAgents, circleId]);
+  }, [enrichedAgents.length > 0, circleId]);
 
   // Push agent stats to parent (use enrichedAgents for accurate totals)
   useEffect(() => {
@@ -1537,12 +1555,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   useEffect(() => {
     if (connectedCount === 0) return;
     const fetchCron = async () => {
+      const openclawConns = connections.filter(c => c.status === 'connected' && c.provider === 'openclaw');
+      if (openclawConns.length === 0) return; // skip if no OpenClaw connections
       const allJobs: CronJob[] = [];
-      for (const conn of connections.filter(c => c.status === 'connected')) {
-        if (conn.provider !== 'openclaw') continue;
+      for (const conn of openclawConns) {
         const config: OpenClawConfig = { endpoint: conn.endpoint, token: conn.token };
-        const result = await listCronJobs(config);
-        if (result.ok) allJobs.push(...result.jobs);
+        try {
+          const result = await listCronJobs(config);
+          if (result.ok) allJobs.push(...result.jobs);
+        } catch {} // endpoint may not support cron
       }
       setCronJobs(allJobs);
     };
@@ -1932,7 +1953,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   // ─── Interactive furniture handler ────────────────────────────────────────
   const handleFurnitureInteract = useCallback((id: string, type: FurnitureType) => {
-    const currentFloor = floors.find(f => f.id === currentFloorId);
+    const currentFloor = floorsRef.current.find(f => f.id === currentFloorId);
     const item = currentFloor?.furniture.find(f => f.id === id);
     if (!item) return;
 
@@ -2698,7 +2719,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       default:
         break;
     }
-  }, [floors, currentFloorId, interactInputId, currentUserId, currentUserName, circleId, displayAgents]);
+  }, [currentFloorId, interactInputId, currentUserId, currentUserName, circleId, displayAgents]);
 
   // ─── Poker player action handler (legacy — game now runs in fullscreen modal) ──
   const handlePokerAction = useCallback((_id: string, _action: string, _amount?: number) => {
@@ -3164,23 +3185,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                     );
                   }
                   return (
-                    <>
-                      <Text style={{ fontSize: 48, marginBottom: 8 }}>🤖</Text>
-                      <Text style={styles.mobileEmptyTitle}>No agents connected</Text>
-                      <Text style={styles.mobileEmptyText}>
-                        Connect your AI agent to show up in the circle office
-                      </Text>
-                    </>
+                    <AgentQuickConnect circleId={circleId} onOpenWizard={() => setShowSetupWizard(true)} compact />
                   );
                 })()}
-                <Pressable
-                  onPress={() => setShowSetupWizard(true)}
-                  style={[styles.mobileEmptyBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                  accessibilityRole="button"
-                  accessibilityLabel="Connect agent"
-                >
-                  <Text style={styles.mobileEmptyBtnText}>CONNECT AGENT →</Text>
-                </Pressable>
               </View>
             ) : (
               displayAgents.map((agent) => {
@@ -3267,17 +3274,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                             </Pressable>
                           </>
                         ) : (
-                          <>
-                            <Text style={{ fontSize: 56, marginBottom: 8 }}>🤖</Text>
-                            <Text style={styles.emptyTitle}>No agents connected</Text>
-                            <Text style={styles.emptyText}>Connect your AI agent to show up in the circle office</Text>
-                            <Pressable
-                              onPress={() => setShowSetupWizard(true)}
-                              style={{ marginTop: 16, backgroundColor: '#252525', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 24, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
-                            >
-                              <Text style={{ color: '#e8e8e8', fontWeight: '700', fontSize: 14 }}>Connect Agent →</Text>
-                            </Pressable>
-                          </>
+                          <AgentQuickConnect circleId={circleId} onOpenWizard={() => setShowSetupWizard(true)} />
                         )}
                       </View>
                     )}

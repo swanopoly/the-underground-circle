@@ -17,7 +17,7 @@ interface Props {
 
 type TabType = 'overview' | 'performance' | 'workload' | 'optimization' | 'health';
 
-export default function FarmHealthDashboard({ agents, sessions, accentColor = '#6366f1' }: Props) {
+export default function FarmHealthDashboard({ agents, sessions, accentColor = '#e8e8e8' }: Props) {
   const [activeTab, setActiveTab] = useState<TabType>('overview');
   const [farmMetrics, setFarmMetrics] = useState<FarmMetrics | null>(null);
   const [agentScores, setAgentScores] = useState<AgentPerformanceScore[]>([]);
@@ -53,7 +53,7 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
       farmMetrics.healthStatus === 'good' ? '#3b82f6' :
       farmMetrics.healthStatus === 'fair' ? '#f59e0b' :
       farmMetrics.healthStatus === 'poor' ? '#ef4444' :
-      '#dc2626';
+      '#6f6f6f';
 
     return (
       <View style={styles.tabContent}>
@@ -89,7 +89,7 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
             <Text style={styles.statValue}>{farmMetrics.errorAgents}</Text>
             <Text style={styles.statLabel}>ERRORS</Text>
           </View>
-          <View style={[styles.statCard, { borderLeftColor: '#6b7280' }]}>
+          <View style={[styles.statCard, { borderLeftColor: '#6f6f6f' }]}>
             <Text style={styles.statValue}>{farmMetrics.offlineAgents}</Text>
             <Text style={styles.statLabel}>OFFLINE</Text>
           </View>
@@ -141,7 +141,7 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
         {farmMetrics.bottleneck && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>⚠️ BOTTLENECK DETECTED</Text>
-            <View style={[styles.bottleneckCard, { borderColor: '#ef444440' }]}>
+            <View style={[styles.bottleneckCard, { borderColor: '#ffffff20' }]}>
               <Text style={styles.bottleneckAgent}>{farmMetrics.bottleneck.agent.name}</Text>
               <Text style={styles.bottleneckReason}>{farmMetrics.bottleneck.reason}</Text>
             </View>
@@ -166,7 +166,7 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
               if (!agent) return null;
 
               const gradeColor =
-                score.grade === 'S' ? '#fbbf24' :
+                score.grade === 'S' ? '#f59e0b' :
                 score.grade === 'A' ? '#22c55e' :
                 score.grade === 'B' ? '#3b82f6' :
                 score.grade === 'C' ? '#f59e0b' :
@@ -216,7 +216,7 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
                     <View style={styles.breakdownRow}>
                       <Text style={styles.breakdownLabel}>Quality</Text>
                       <View style={styles.breakdownBar}>
-                        <View style={[styles.breakdownFill, { width: `${score.breakdown.quality}%`, backgroundColor: '#8b5cf6' }]} />
+                        <View style={[styles.breakdownFill, { width: `${score.breakdown.quality}%`, backgroundColor: '#a855f7' }]} />
                       </View>
                       <Text style={styles.breakdownValue}>{score.breakdown.quality}</Text>
                     </View>
@@ -224,7 +224,7 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
 
                   <View style={styles.scoreFooter}>
                     <Text style={styles.scoreRank}>Rank: #{score.rank}</Text>
-                    <Text style={[styles.scoreTrend, { color: score.trend === 'improving' ? '#22c55e' : score.trend === 'declining' ? '#ef4444' : '#888' }]}>
+                    <Text style={[styles.scoreTrend, { color: score.trend === 'improving' ? '#22c55e' : score.trend === 'declining' ? '#ef4444' : '#9e9e9e' }]}>
                       {score.trend === 'improving' ? '📈 Improving' : score.trend === 'declining' ? '📉 Declining' : '➡️ Stable'}
                     </Text>
                   </View>
@@ -247,7 +247,7 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
               const statusColor =
                 load.recommendedAction === 'overloaded' ? '#ef4444' :
                 load.recommendedAction === 'optimal' ? '#22c55e' :
-                '#3b82f6';
+                '#f59e0b';
 
               return (
                 <View key={load.agentId} style={[styles.workloadCard, { borderLeftColor: statusColor }]}>
@@ -338,7 +338,7 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
 
     return (
       <View style={styles.tabContent}>
-        <View style={[styles.healthStatusCard, { backgroundColor: healthCheck.passed ? '#22c55e15' : '#ef444415', borderColor: healthCheck.passed ? '#22c55e40' : '#ef444440' }]}>
+        <View style={[styles.healthStatusCard, { backgroundColor: healthCheck.passed ? '#22c55e08' : '#ef444408', borderColor: healthCheck.passed ? '#22c55e30' : '#ef444430' }]}>
           <Text style={[styles.healthStatusIcon, { color: healthCheck.passed ? '#22c55e' : '#ef4444' }]}>
             {healthCheck.passed ? '✅' : '⚠️'}
           </Text>
@@ -445,7 +445,7 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#050508',
+    backgroundColor: '#000000',
   },
   tabBar: {
     flexDirection: 'row',
@@ -462,7 +462,7 @@ const styles = StyleSheet.create({
     borderBottomColor: 'transparent',
   },
   tabActive: {
-    borderBottomColor: '#6366f1',
+    borderBottomColor: '#e8e8e8',
   },
   tabIcon: {
     fontSize: 16,
@@ -470,7 +470,7 @@ const styles = StyleSheet.create({
   tabLabel: {
     fontSize: 10,
     fontWeight: '700',
-    color: '#666',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
     letterSpacing: 0.5,
   },
@@ -502,7 +502,7 @@ const styles = StyleSheet.create({
   },
   healthSubtext: {
     fontSize: 11,
-    color: '#888',
+    color: '#9e9e9e',
     fontFamily: 'monospace',
     marginTop: 2,
   },
@@ -522,12 +522,12 @@ const styles = StyleSheet.create({
   statValue: {
     fontSize: 24,
     fontWeight: '800',
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
   },
   statLabel: {
     fontSize: 10,
-    color: '#666',
+    color: '#6f6f6f',
     fontWeight: '700',
     fontFamily: 'monospace',
     letterSpacing: 1,
@@ -539,7 +539,7 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: 11,
     fontWeight: '800',
-    color: '#888',
+    color: '#9e9e9e',
     fontFamily: 'monospace',
     letterSpacing: 1.5,
   },
@@ -552,13 +552,13 @@ const styles = StyleSheet.create({
   },
   costLabel: {
     fontSize: 12,
-    color: '#888',
+    color: '#9e9e9e',
     fontFamily: 'monospace',
   },
   costValue: {
     fontSize: 13,
     fontWeight: '700',
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
   },
   performerCard: {
@@ -584,12 +584,12 @@ const styles = StyleSheet.create({
   performerName: {
     fontSize: 13,
     fontWeight: '700',
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
   },
   performerRole: {
     fontSize: 10,
-    color: '#666',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
   },
   performerScore: {
@@ -607,13 +607,13 @@ const styles = StyleSheet.create({
   bottleneckAgent: {
     fontSize: 13,
     fontWeight: '700',
-    color: '#ef4444',
+    color: '#9e9e9e',
     fontFamily: 'monospace',
     marginBottom: 4,
   },
   bottleneckReason: {
     fontSize: 11,
-    color: '#888',
+    color: '#9e9e9e',
     fontFamily: 'monospace',
   },
 
@@ -625,7 +625,7 @@ const styles = StyleSheet.create({
   },
   legendText: {
     fontSize: 9,
-    color: '#666',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
     textAlign: 'center',
   },
@@ -666,12 +666,12 @@ const styles = StyleSheet.create({
   scoreName: {
     fontSize: 13,
     fontWeight: '700',
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
   },
   scoreRole: {
     fontSize: 10,
-    color: '#666',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
   },
   scoreOverall: {
@@ -684,7 +684,7 @@ const styles = StyleSheet.create({
   },
   scoreOverallLabel: {
     fontSize: 8,
-    color: '#666',
+    color: '#6f6f6f',
     fontWeight: '700',
     fontFamily: 'monospace',
     letterSpacing: 1,
@@ -700,7 +700,7 @@ const styles = StyleSheet.create({
   breakdownLabel: {
     width: 75,
     fontSize: 9,
-    color: '#888',
+    color: '#9e9e9e',
     fontFamily: 'monospace',
     fontWeight: '600',
   },
@@ -718,7 +718,7 @@ const styles = StyleSheet.create({
   breakdownValue: {
     width: 30,
     fontSize: 9,
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
     fontWeight: '700',
     textAlign: 'right',
@@ -732,7 +732,7 @@ const styles = StyleSheet.create({
   },
   scoreRank: {
     fontSize: 10,
-    color: '#888',
+    color: '#9e9e9e',
     fontFamily: 'monospace',
   },
   scoreTrend: {
@@ -761,7 +761,7 @@ const styles = StyleSheet.create({
   workloadName: {
     fontSize: 13,
     fontWeight: '700',
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
   },
   workloadBadge: {
@@ -805,7 +805,7 @@ const styles = StyleSheet.create({
   },
   workloadStat: {
     fontSize: 10,
-    color: '#666',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
   },
 
@@ -840,13 +840,13 @@ const styles = StyleSheet.create({
   },
   optimizationType: {
     fontSize: 11,
-    color: '#888',
+    color: '#9e9e9e',
     fontFamily: 'monospace',
     fontWeight: '600',
   },
   optimizationRecommendation: {
     fontSize: 12,
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
     lineHeight: 18,
   },
@@ -859,7 +859,7 @@ const styles = StyleSheet.create({
   },
   savingsLabel: {
     fontSize: 10,
-    color: '#888',
+    color: '#9e9e9e',
     fontFamily: 'monospace',
   },
   savingsValue: {
@@ -888,7 +888,7 @@ const styles = StyleSheet.create({
   },
   healthStatusSubtext: {
     fontSize: 10,
-    color: '#888',
+    color: '#9e9e9e',
     fontFamily: 'monospace',
     marginTop: 2,
   },
@@ -925,7 +925,7 @@ const styles = StyleSheet.create({
   },
   issueMessage: {
     fontSize: 12,
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
     lineHeight: 18,
   },
@@ -948,13 +948,13 @@ const styles = StyleSheet.create({
   emptyTitle: {
     fontSize: 16,
     fontWeight: '700',
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
     marginBottom: 6,
   },
   emptyText: {
     fontSize: 12,
-    color: '#666',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
     textAlign: 'center',
   },

@@ -118,11 +118,15 @@ export default function AgentControlCard({
   const handleKill = useCallback(async () => {
     setSaving(true);
     setCmdOutput('');
+    let processKilled = false;
     try {
+      // Try to kill via bridge — may fail if bridge is offline
       if (onRunCommand) {
         const result = await onRunCommand(KILL_COMMANDS[provider] || `echo "Unknown provider: ${provider}"`);
+        processKilled = result.ok;
         setCmdOutput(result.stdout || result.stderr || 'Kill signal sent');
       }
+      // Always update DB regardless of bridge status
       await upsertAgentControl(circleId, agent.sessionKey, agent.name, { is_paused: true });
       const { data: auth } = await supabase.auth.getUser();
       if (auth.user) {
@@ -130,7 +134,11 @@ export default function AgentControlCard({
           status: 'offline', current_task: 'Killed by user', updated_at: new Date().toISOString(),
         }).eq('circle_id', circleId).eq('owner_id', auth.user.id).eq('name', agent.name);
       }
-      setStatusMsg('Agent process terminated');
+      if (processKilled) {
+        setStatusMsg('Agent process terminated');
+      } else {
+        setStatusMsg('Agent marked offline — process may still be running (bridge unreachable)');
+      }
     } catch (e: any) {
       setCmdOutput(`Error: ${e.message}`);
     }
@@ -159,13 +167,15 @@ export default function AgentControlCard({
   const handleDisconnect = useCallback(async () => {
     setSaving(true);
     try {
-      // Kill agent process + bridge if running
+      // Try to kill agent process + bridge — best-effort, don't block on failure
       if (onRunCommand) {
-        await onRunCommand(KILL_COMMANDS[provider] || 'true').catch(() => {});
-        const port = BRIDGE_PORTS[provider] || 7778;
-        await onRunCommand(`lsof -ti:${port} | xargs kill -9 2>/dev/null; echo "✓ Bridge on :${port} killed"`).catch(() => {});
+        const killResult = await onRunCommand(KILL_COMMANDS[provider] || 'true').catch(() => ({ ok: false }));
+        if (killResult.ok) {
+          const port = BRIDGE_PORTS[provider] || 7778;
+          await onRunCommand(`lsof -ti:${port} | xargs kill -9 2>/dev/null; echo "✓ Bridge on :${port} killed"`).catch(() => {});
+        }
       }
-      // DELETE the agent from the circle (not just mark offline — removes the pixel agent)
+      // Always DELETE the agent from the circle (not just mark offline — removes the pixel agent)
       const { data: auth } = await supabase.auth.getUser();
       if (auth.user) {
         await supabase.from('circle_office_agents')

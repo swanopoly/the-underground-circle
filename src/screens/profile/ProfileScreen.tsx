@@ -35,7 +35,7 @@ function getLevelColor(level: number): string {
   if (level >= 30) return '#a855f7'; // purple
   if (level >= 15) return '#3b82f6'; // blue
   if (level >= 5) return '#22c55e'; // green
-  return '#666'; // gray
+  return '#6f6f6f'; // gray
 }
 
 function getTimeAgo(dateStr: string): string {
@@ -578,20 +578,20 @@ export default function ProfileScreen({ navigation }: any) {
             <View style={[styles.themeColorDot, { backgroundColor: themeColor }]} />
             <Text style={styles.themeColorName}>
               {themeColor === '#6366f1' ? 'Indigo' :
-               themeColor === '#8b5cf6' ? 'Purple' :
-               themeColor === '#06b6d4' ? 'Cyan' :
-               themeColor === '#10b981' ? 'Emerald' :
+               themeColor === '#a855f7' ? 'Purple' :
+               themeColor === '#22d3ee' ? 'Cyan' :
+               themeColor === '#22c55e' ? 'Green' :
+               themeColor === '#f43f5e' ? 'Rose' :
                themeColor === '#f59e0b' ? 'Amber' :
-               themeColor === '#ef4444' ? 'Red' :
-               themeColor === '#ec4899' ? 'Pink' :
-               themeColor === '#84cc16' ? 'Lime' : 'Custom'}
+               themeColor === '#3b82f6' ? 'Blue' :
+               themeColor === '#fbbf24' ? 'Gold' : 'Custom'}
             </Text>
           </View>
           
           {showThemeSelector && (
             <Card style={styles.themeSelector}>
               <View style={styles.themeColors}>
-                {['#6366f1', '#8b5cf6', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#84cc16'].map(color => (
+                {['#6366f1', '#a855f7', '#22d3ee', '#22c55e', '#f43f5e', '#f59e0b', '#3b82f6', '#fbbf24'].map(color => (
                   <Pressable
                     key={color}
                     style={[
@@ -847,8 +847,8 @@ const styles = StyleSheet.create({
   modalIcon: { fontSize: 48, marginBottom: 12 },
   modalBadgeName: { color: '#fff', fontSize: 18, fontWeight: '800', marginBottom: 6 },
   modalDesc: { color: '#888', fontSize: 13, textAlign: 'center', marginBottom: 10 },
-  modalXP: { color: '#a855f7', fontSize: 14, fontWeight: '700', marginBottom: 8 },
-  modalUnlocked: { color: '#4a9a4a', fontSize: 12 },
+  modalXP: { color: '#fbbf24', fontSize: 14, fontWeight: '700', marginBottom: 8 },
+  modalUnlocked: { color: '#22c55e', fontSize: 12 },
   modalLocked: { color: '#666', fontSize: 12 },
 
   // New customizable styles
@@ -958,10 +958,10 @@ const styles = StyleSheet.create({
   agentName: { color: '#fff', fontSize: 11, fontWeight: '700', marginBottom: 2, textAlign: 'center' },
   agentType: { color: '#666', fontSize: 8, letterSpacing: 1, marginBottom: 4 },
   agentStatus: { flexDirection: 'row', alignItems: 'center' },
-  agentStatusDot: { 
-    width: 6, 
-    height: 6, 
-    borderRadius: 3, 
+  agentStatusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
     backgroundColor: '#22c55e',
     marginRight: 4,
   },

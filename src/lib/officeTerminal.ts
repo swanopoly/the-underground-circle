@@ -444,6 +444,44 @@ export async function updateAgentAnalytics(
   }
 }
 
+// ─── Sync agent token snapshot to DB ──────────────────────────────────────────
+// Called every 30s from OfficeTab with cumulative session token counts.
+// The DB-side RPC computes deltas to safely increment _total columns.
+
+export async function syncAgentTokenSnapshot(
+  circleId: string,
+  agentName: string,
+  inputTokens: number,
+  outputTokens: number,
+  cachedTokens: number,
+  messageCount: number,
+  estimatedCost: number,
+  model?: string,
+): Promise<void> {
+  try {
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) return;
+
+    const { error } = await supabase.rpc('sync_agent_token_snapshot', {
+      p_circle_id:      circleId,
+      p_owner_id:       auth.user.id,
+      p_agent_name:     agentName,
+      p_input_tokens:   inputTokens,
+      p_output_tokens:  outputTokens,
+      p_cached_tokens:  cachedTokens,
+      p_message_count:  messageCount,
+      p_estimated_cost: estimatedCost,
+      p_model:          model || null,
+    });
+
+    if (error) {
+      console.warn('[syncAgentTokenSnapshot] RPC failed:', error.message);
+    }
+  } catch (err) {
+    console.warn('[syncAgentTokenSnapshot] Error:', err);
+  }
+}
+
 // ─── Update agent position ────────────────────────────────────────────────────
 
 export async function updateAgentPosition(

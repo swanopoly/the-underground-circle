@@ -1,11 +1,10 @@
-import React, { useState, useEffect, lazy, Suspense } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   Pressable,
   ScrollView,
-  ActivityIndicator,
   Platform as RNPlatform,
   useWindowDimensions,
 } from 'react-native';
@@ -13,13 +12,12 @@ import { supabase } from '../../../lib/supabase';
 import { getSlackConfig } from '../../../lib/slack';
 import { getTeamsConfig } from '../../../lib/teams';
 import { getCircleDiscordConfig } from '../../../lib/discord';
-
-// Lazy-load platform sub-tabs — only one is visible at a time
-const SlackTab = lazy(() => import('./SlackTab'));
-const TeamsTab = lazy(() => import('./TeamsTab'));
-const DiscordTab = lazy(() => import('./DiscordTab'));
-const GitHubTab = lazy(() => import('./GitHubTab'));
-const HeliusTab = lazy(() => import('./HeliusTab'));
+import LoadingWave from '../../../components/LoadingWave';
+import SlackTab from './SlackTab';
+import TeamsTab from './TeamsTab';
+import DiscordTab from './DiscordTab';
+import GitHubTab from './GitHubTab';
+import HeliusTab from './HeliusTab';
 
 type PlatformKey = 'none' | 'github' | 'slack' | 'teams' | 'discord' | 'helius';
 
@@ -210,13 +208,11 @@ export default function IntegrationsTab({ circleId }: { circleId: string }) {
             <Text style={styles.backText}>← All Integrations</Text>
           </Pressable>
           <View style={styles.platformContent}>
-            <Suspense fallback={<ActivityIndicator color="#6366f1" style={{ marginTop: 40 }} />}>
               {activePlatform === 'github' && <GitHubTab circleId={circleId} />}
               {activePlatform === 'slack' && <SlackTab circleId={circleId} />}
               {activePlatform === 'teams' && <TeamsTab circleId={circleId} />}
               {activePlatform === 'discord' && <DiscordTab circleId={circleId} />}
               {activePlatform === 'helius' && <HeliusTab circleId={circleId} />}
-            </Suspense>
           </View>
         </View>
       </View>
@@ -268,7 +264,7 @@ export default function IntegrationsTab({ circleId }: { circleId: string }) {
         {/* Platform Grid */}
         {loading ? (
           <View style={styles.loadingContainer}>
-            <ActivityIndicator color="#6366f1" size="large" />
+            <LoadingWave />
           </View>
         ) : (
           <View style={[styles.platformGrid, isWide && styles.platformGridWide]}>

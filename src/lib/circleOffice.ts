@@ -41,7 +41,7 @@ export type CircleOfficeAgent = {
   position_y?: number;
   pixel_character?: string;
 
-  // Analytics (from migration 20260226)
+  // Analytics (from migration 20260226 + 20260324)
   token_usage_today?: number;
   token_usage_total?: number;
   message_count_today?: number;
@@ -50,6 +50,17 @@ export type CircleOfficeAgent = {
   uptime_score?: number;
   last_command?: string;
   last_command_at?: string;
+
+  // Granular token breakdown (from migration 20260324)
+  input_tokens_today?: number;
+  output_tokens_today?: number;
+  cached_tokens_today?: number;
+  input_tokens_total?: number;
+  output_tokens_total?: number;
+  cached_tokens_total?: number;
+  estimated_cost_today?: number;
+  estimated_cost_total?: number;
+  model_name?: string;
 
   // Meta
   isPublished: boolean;
@@ -158,6 +169,16 @@ function fromRow(row: any, currentUserId?: string): CircleOfficeAgent {
     uptime_score:        row.uptime_score       ?? 1.0,
     last_command:        row.last_command       ?? undefined,
     last_command_at:     row.last_command_at    ?? undefined,
+    // Granular token breakdown (from migration 20260324)
+    input_tokens_today:   row.input_tokens_today   ?? 0,
+    output_tokens_today:  row.output_tokens_today  ?? 0,
+    cached_tokens_today:  row.cached_tokens_today  ?? 0,
+    input_tokens_total:   row.input_tokens_total   ?? 0,
+    output_tokens_total:  row.output_tokens_total  ?? 0,
+    cached_tokens_total:  row.cached_tokens_total  ?? 0,
+    estimated_cost_today: parseFloat(row.estimated_cost_today) || 0,
+    estimated_cost_total: parseFloat(row.estimated_cost_total) || 0,
+    model_name:           row.model_name           ?? undefined,
     spirit: row.spirit ?? undefined,
     spirit_emoji: row.spirit_emoji ?? undefined,
     isPublished: row.is_published,

@@ -329,7 +329,7 @@ export default function ScrabbleGame({ visible, onClose, vsComputer = true, onSt
         <View style={s.overlay}>
           <View style={s.container}>
             <Text style={s.headerTitle}>Scrabble</Text>
-            <Text style={{ color: '#64748b', fontFamily: 'monospace', textAlign: 'center', margin: 16 }}>
+            <Text style={{ color: '#6f6f6f', fontFamily: 'monospace', textAlign: 'center', margin: 16 }}>
               Only available on web
             </Text>
             <Pressable onPress={onClose} style={s.newGameBtn}>
@@ -420,8 +420,8 @@ export default function ScrabbleGame({ visible, onClose, vsComputer = true, onSt
                     const isPlaced = ch !== '.' && !isPending;
                     const mult = getMultiplier(r, c);
                     const multLabel = MULT_LABELS[mult];
-                    const bgColor = isPlaced ? '#c4a35a' : isPending ? '#e2b86b' : MULT_BG[mult];
-                    const borderColor = isPending ? '#f59e0b' : isPlaced ? '#a08940' : MULT_COLORS[mult];
+                    const bgColor = isPlaced ? '#d4a574' : isPending ? '#e8c89e' : MULT_BG[mult];
+                    const borderColor = isPending ? '#c4956a' : isPlaced ? '#a67c52' : MULT_COLORS[mult];
 
                     return (
                       <Pressable
@@ -434,7 +434,7 @@ export default function ScrabbleGame({ visible, onClose, vsComputer = true, onSt
                       >
                         {(isPlaced || isPending) ? (
                           <View style={s.tileInCell}>
-                            <Text style={[s.tileLetter, isPending && { color: '#7c2d12' }]}>
+                            <Text style={[s.tileLetter, isPending && { color: '#252525' }]}>
                               {ch.toUpperCase()}
                             </Text>
                             <Text style={s.tilePoints}>
@@ -443,7 +443,7 @@ export default function ScrabbleGame({ visible, onClose, vsComputer = true, onSt
                           </View>
                         ) : (
                           multLabel ? (
-                            <Text style={[s.multText, { color: mult >= 3 ? '#fca5a5' : '#93c5fd' }]}>
+                            <Text style={[s.multText, { color: mult >= 3 ? '#ef4444' : '#3b82f6' }]}>
                               {multLabel}
                             </Text>
                           ) : null
@@ -499,10 +499,10 @@ export default function ScrabbleGame({ visible, onClose, vsComputer = true, onSt
                   style={[s.ctrlBtn, s.playBtn, game.pending.length === 0 && { opacity: 0.4 }]}
                   disabled={game.pending.length === 0 || !isMyTurn}
                 >
-                  <Text style={[s.ctrlBtnText, { color: '#fff', fontWeight: '800' }]}>PLAY</Text>
+                  <Text style={[s.ctrlBtnText, { color: '#ffffff', fontWeight: '800' }]}>PLAY</Text>
                 </Pressable>
                 <Pressable onPress={passTurn} style={s.ctrlBtn} disabled={!isMyTurn}>
-                  <Text style={[s.ctrlBtnText, { color: '#f87171' }]}>Pass</Text>
+                  <Text style={[s.ctrlBtnText, { color: '#9e9e9e' }]}>Pass</Text>
                 </Pressable>
               </View>
 
@@ -534,10 +534,10 @@ const s = StyleSheet.create({
     width: '95%' as any,
     maxWidth: 520,
     maxHeight: '95%' as any,
-    backgroundColor: '#0d0d14',
+    backgroundColor: '#0a0a0a',
     borderRadius: 12,
     borderWidth: 1.5,
-    borderColor: '#c4a35a',
+    borderColor: '#a67c52',
     overflow: 'hidden',
   },
   header: {
@@ -547,28 +547,28 @@ const s = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
-    backgroundColor: '#111318',
+    borderBottomColor: '#1a1a1a',
+    backgroundColor: '#161616',
   },
   headerLeft: { gap: 2 },
   headerTitle: {
-    color: '#c4a35a',
+    color: '#e8e8e8',
     fontSize: 18,
     fontFamily: 'monospace',
     fontWeight: '800',
     letterSpacing: 3,
   },
   headerSub: {
-    color: '#64748b',
+    color: '#6f6f6f',
     fontSize: 10,
     fontFamily: 'monospace',
   },
   closeBtn: {
     width: 32, height: 32, borderRadius: 6,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#1a1a1a',
     justifyContent: 'center', alignItems: 'center',
   },
-  closeBtnText: { color: '#94a3b8', fontSize: 16 },
+  closeBtnText: { color: '#9e9e9e', fontSize: 16 },
 
   // Scores
   scoreBar: {
@@ -578,7 +578,7 @@ const s = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 12,
     gap: 8,
-    backgroundColor: '#0a0a12',
+    backgroundColor: '#000000',
   },
   scoreBox: {
     flex: 1,
@@ -586,40 +586,40 @@ const s = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#1e293b',
-    backgroundColor: '#111827',
+    borderColor: '#1a1a1a',
+    backgroundColor: '#161616',
   },
   scoreBoxActive: {
-    borderColor: '#c4a35a50',
-    backgroundColor: '#c4a35a10',
+    borderColor: '#fbbf2450',
+    backgroundColor: '#fbbf2410',
   },
   scoreLabel: {
-    color: '#64748b',
+    color: '#6f6f6f',
     fontSize: 9,
     fontFamily: 'monospace',
     fontWeight: '700',
     letterSpacing: 1,
   },
   scoreNum: {
-    color: '#e2e8f0',
+    color: '#e8e8e8',
     fontSize: 22,
     fontFamily: 'monospace',
     fontWeight: '800',
   },
   vsBox: { alignItems: 'center', width: 60 },
-  vsText: { color: '#334155', fontSize: 12, fontFamily: 'monospace', fontWeight: '700' },
-  lastWordText: { color: '#c4a35a', fontSize: 9, fontFamily: 'monospace', fontWeight: '600', marginTop: 2 },
+  vsText: { color: '#252525', fontSize: 12, fontFamily: 'monospace', fontWeight: '700' },
+  lastWordText: { color: '#fbbf24', fontSize: 9, fontFamily: 'monospace', fontWeight: '600', marginTop: 2 },
 
   // BlackSwan line
   bsLineBox: {
     paddingHorizontal: 16,
     paddingVertical: 6,
-    backgroundColor: '#0a0a12',
+    backgroundColor: '#000000',
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a2e',
+    borderBottomColor: '#1a1a1a',
   },
   bsLine: {
-    color: '#64748b',
+    color: '#6f6f6f',
     fontSize: 11,
     fontFamily: 'monospace',
     fontStyle: 'italic',
@@ -633,10 +633,10 @@ const s = StyleSheet.create({
     paddingVertical: 8,
   },
   boardContainer: {
-    backgroundColor: '#0f1419',
+    backgroundColor: '#1a120a',
     borderRadius: 4,
     borderWidth: 1,
-    borderColor: '#c4a35a40',
+    borderColor: '#a67c5260',
     padding: 2,
   },
   boardRow: { flexDirection: 'row' },
@@ -656,7 +656,7 @@ const s = StyleSheet.create({
     borderRadius: 2,
   },
   tileLetter: {
-    color: '#1a1207',
+    color: '#000000',
     fontSize: 13,
     fontFamily: 'monospace',
     fontWeight: '800',
@@ -665,7 +665,7 @@ const s = StyleSheet.create({
     position: 'absolute',
     bottom: 1,
     right: 2,
-    color: '#5c4a1e',
+    color: '#3e3e3e',
     fontSize: 6,
     fontFamily: 'monospace',
     fontWeight: '700',
@@ -679,10 +679,10 @@ const s = StyleSheet.create({
   // Message
   messageBar: {
     paddingVertical: 4,
-    backgroundColor: '#c4a35a20',
+    backgroundColor: '#fbbf2420',
   },
   messageText: {
-    color: '#c4a35a',
+    color: '#e8e8e8',
     fontSize: 12,
     fontFamily: 'monospace',
     fontWeight: '700',
@@ -692,8 +692,8 @@ const s = StyleSheet.create({
   // Rack
   rackSection: {
     borderTopWidth: 1,
-    borderTopColor: '#1a1a2e',
-    backgroundColor: '#111318',
+    borderTopColor: '#1a1a1a',
+    backgroundColor: '#161616',
     paddingVertical: 10,
     paddingHorizontal: 8,
   },
@@ -707,21 +707,21 @@ const s = StyleSheet.create({
     width: 40,
     height: 44,
     borderRadius: 4,
-    backgroundColor: '#c4a35a',
+    backgroundColor: '#e8c89e',
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1.5,
-    borderColor: '#a08940',
+    borderColor: '#a67c52',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'transform 0.1s ease' } as any : {}),
   },
   rackTileSelected: {
-    borderColor: '#22c55e',
-    backgroundColor: '#d4b86a',
+    borderColor: '#fbbf24',
+    backgroundColor: '#d4a574',
     transform: [{ translateY: -6 }],
-    ...(Platform.OS === 'web' ? { boxShadow: '0 4px 12px rgba(34,197,94,0.4)' } as any : {}),
+    ...(Platform.OS === 'web' ? { boxShadow: '0 4px 12px rgba(251,191,36,0.25)' } as any : {}),
   },
   rackLetter: {
-    color: '#1a1207',
+    color: '#000000',
     fontSize: 20,
     fontFamily: 'monospace',
     fontWeight: '800',
@@ -730,7 +730,7 @@ const s = StyleSheet.create({
     position: 'absolute',
     bottom: 2,
     right: 4,
-    color: '#5c4a1e',
+    color: '#3e3e3e',
     fontSize: 8,
     fontFamily: 'monospace',
     fontWeight: '700',
@@ -747,19 +747,19 @@ const s = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 6,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#1a1a1a',
     borderWidth: 1,
-    borderColor: '#2a2a3e',
+    borderColor: '#2a2a2a',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   ctrlBtnText: {
-    color: '#94a3b8',
+    color: '#9e9e9e',
     fontSize: 11,
     fontFamily: 'monospace',
     fontWeight: '600',
   },
   dirBtn: {
-    borderColor: '#c4a35a40',
+    borderColor: '#6366f140',
     minWidth: 44,
     alignItems: 'center',
   },
@@ -774,7 +774,7 @@ const s = StyleSheet.create({
     paddingVertical: 4,
   },
   waitingText: {
-    color: '#64748b',
+    color: '#6f6f6f',
     fontSize: 11,
     fontFamily: 'monospace',
     textAlign: 'center',
@@ -791,14 +791,14 @@ const s = StyleSheet.create({
     gap: 12,
   },
   gameOverTitle: {
-    color: '#c4a35a',
+    color: '#e8e8e8',
     fontSize: 28,
     fontFamily: 'monospace',
     fontWeight: '800',
     letterSpacing: 2,
   },
   gameOverScore: {
-    color: '#e2e8f0',
+    color: '#e8e8e8',
     fontSize: 24,
     fontFamily: 'monospace',
     fontWeight: '700',
@@ -808,10 +808,10 @@ const s = StyleSheet.create({
     paddingHorizontal: 28,
     paddingVertical: 12,
     borderRadius: 8,
-    backgroundColor: '#c4a35a',
+    backgroundColor: '#22c55e',
   },
   newGameBtnText: {
-    color: '#1a1207',
+    color: '#000000',
     fontSize: 14,
     fontFamily: 'monospace',
     fontWeight: '800',

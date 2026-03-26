@@ -12,6 +12,7 @@ import {
   Animated,
   Image,
 } from 'react-native';
+import { LoadingScreen } from '../../components/LoadingWave';
 import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../../lib/supabase';
@@ -20,8 +21,8 @@ import { Circle, CheckInFormat } from '../../types';
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const ACCENT_COLORS = [
-  '#6366f1', '#ec4899', '#10b981', '#f59e0b', '#ef4444', '#22d3ee',
-  '#8b5cf6', '#f97316', '#14b8a6', '#e11d48', '#3b82f6', '#84cc16',
+  '#6366f1', '#a855f7', '#22d3ee', '#22c55e', '#f43f5e', '#f59e0b',
+  '#3b82f6', '#fbbf24', '#ec4899', '#14b8a6', '#8b5cf6', '#ef4444',
 ];
 
 const EMOJI_CATEGORIES: Record<string, string[]> = {
@@ -251,11 +252,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   const removeRule = (i: number) => { setRules(rules.filter((_, idx) => idx !== i)); markChanged(); };
 
   if (loading) {
-    return (
-      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
-        <ActivityIndicator color="#333" />
-      </View>
-    );
+    return <LoadingScreen />;
   }
 
   const readOnly = !isCreator;
@@ -583,7 +580,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
             <Text style={styles.dangerBtnText}>LEAVE CIRCLE</Text>
           </Pressable>
           {isCreator && (
-            <Pressable onPress={handleDeleteCircle} style={[styles.dangerBtn, { backgroundColor: '#ef444420', borderColor: '#ef4444' }]}>
+            <Pressable onPress={handleDeleteCircle} style={[styles.dangerBtn, { backgroundColor: '#ef444415', borderColor: '#ef4444' }]}>
               <Text style={[styles.dangerBtnText, { color: '#ef4444' }]}>
                 {deleteConfirm ? 'TAP AGAIN TO CONFIRM DELETE' : 'DELETE CIRCLE'}
               </Text>
@@ -602,7 +599,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
         ]}>
           <Pressable
             onPress={showSaved ? undefined : saveAll}
-            style={[styles.saveButton, { backgroundColor: showSaved ? '#10b981' : accentColor }]}
+            style={[styles.saveButton, { backgroundColor: showSaved ? '#22c55e' : accentColor }]}
             disabled={saving || showSaved}
           >
             {saving ? (

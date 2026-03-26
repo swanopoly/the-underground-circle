@@ -14,6 +14,19 @@ const { exec, execSync } = require('child_process');
 
 const PORT = 7778;
 const CLAUDE_DIR = path.join(os.homedir(), '.claude', 'projects');
+// Also scan Windows-side Claude sessions when running in WSL
+const CLAUDE_DIRS = [CLAUDE_DIR];
+if (fs.existsSync('/mnt/c/Users')) {
+  try {
+    const winUsers = fs.readdirSync('/mnt/c/Users').filter(u => !['Public','Default','Default User','All Users'].includes(u));
+    for (const u of winUsers) {
+      const winClaudeDir = '/mnt/c/Users/' + u + '/.claude/projects';
+      if (fs.existsSync(winClaudeDir) && winClaudeDir !== CLAUDE_DIR) {
+        CLAUDE_DIRS.push(winClaudeDir);
+      }
+    }
+  } catch {}
+}
 const ACTIVE_THRESHOLD = 30_000;   // 30s → active
 const IDLE_THRESHOLD = 300_000;    // 5min → idle
 const TAIL_BYTES = 16384;          // Read last 16KB of each JSONL
@@ -168,14 +181,24 @@ function tailRead(filePath) {
 // ── Scan ~/.claude/projects/ for active sessions ────────────────────────────
 
 function scanSessions() {
-  if (!fs.existsSync(CLAUDE_DIR)) return [];
+  const sessions = [];
+  for (const claudeDir of CLAUDE_DIRS) {
+    if (!fs.existsSync(claudeDir)) continue;
+    const scanned = scanDirectory(claudeDir);
+    sessions.push(...scanned);
+  }
+  return sessions;
+}
+
+function scanDirectory(claudeDir) {
+  if (!fs.existsSync(claudeDir)) return [];
   const sessions = [];
 
   let projectDirs;
-  try { projectDirs = fs.readdirSync(CLAUDE_DIR); } catch { return []; }
+  try { projectDirs = fs.readdirSync(claudeDir); } catch { return []; }
 
   for (const projHash of projectDirs) {
-    const projPath = path.join(CLAUDE_DIR, projHash);
+    const projPath = path.join(claudeDir, projHash);
     let projStat;
     try { projStat = fs.statSync(projPath); } catch { continue; }
     if (!projStat.isDirectory()) continue;
@@ -785,7 +808,7 @@ process.on('uncaughtException', (err) => console.error('[bridge] Uncaught:', err
 server.listen(PORT, () => {
   console.log(`\n  Claude Code Bridge`);
   console.log(`  Serving on http://localhost:${PORT}`);
-  console.log(`  Scanning ${CLAUDE_DIR}`);
+  console.log(`  Scanning ${CLAUDE_DIRS.join(", ")}`);
   console.log(`  Found ${cachedSessions.length} active session(s)\n`);
   console.log(`  Endpoints:`);
   console.log(`    GET  /health              — Bridge status`);

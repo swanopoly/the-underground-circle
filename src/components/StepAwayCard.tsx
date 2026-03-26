@@ -62,13 +62,13 @@ type Props = {
 // ─── Tool config ──────────────────────────────────────────────────────────────
 
 const TOOLS = [
-  { id: 'claude-code', label: 'Claude Code', icon: '💻', color: '#6366f1' },
-  { id: 'cowork',      label: 'Cowork',      icon: '💼', color: '#22c55e' },
-  { id: 'openclaw',    label: 'OpenClaw',    icon: '🐾', color: '#f59e0b' },
-  { id: 'other',       label: 'Other AI',    icon: '🤖', color: '#06b6d4' },
-  { id: 'codex',       label: 'Codex',       icon: '🧠', color: '#10a37f' },
-  { id: 'gemini',      label: 'Gemini',      icon: '♊', color: '#4285f4' },
-  { id: 'cursor',      label: 'Cursor',      icon: '🎯', color: '#8b5cf6' },
+  { id: 'claude-code', label: 'Claude Code', icon: '💻', color: '#f97316' },
+  { id: 'cowork',      label: 'Cowork',      icon: '💼', color: '#6366f1' },
+  { id: 'openclaw',    label: 'OpenClaw',    icon: '🐾', color: '#a855f7' },
+  { id: 'other',       label: 'Other AI',    icon: '🤖', color: '#9e9e9e' },
+  { id: 'codex',       label: 'Codex',       icon: '🧠', color: '#22c55e' },
+  { id: 'gemini',      label: 'Gemini',      icon: '♊', color: '#3b82f6' },
+  { id: 'cursor',      label: 'Cursor',      icon: '🎯', color: '#22d3ee' },
 ] as const;
 
 const RETURN_TIMES = ['30 min', '1 hour', '2 hours', '4 hours', 'Back tonight', 'Tomorrow'];
@@ -77,7 +77,7 @@ const VERDICTS = [
   { id: 'shipped',      label: '✅ Shipped it',      color: '#22c55e', desc: 'Built and deployed' },
   { id: 'pivoted',      label: '🔄 Pivoted',         color: '#f59e0b', desc: 'Changed direction' },
   { id: 'rolled-back',  label: '↩️ Rolled back',     color: '#ef4444', desc: 'Had to revert' },
-  { id: 'still-running',label: '⏳ Still running',   color: '#6366f1', desc: 'Agent still going' },
+  { id: 'still-running',label: '⏳ Still running',   color: '#3b82f6', desc: 'Agent still going' },
 ] as const;
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -238,7 +238,7 @@ export default function StepAwayCard({ circleId, userId, userName, onPost, activ
                 <TextInput
                   style={styles.input}
                   placeholder="e.g. Building the checkout flow, writing the Q1 report..."
-                  placeholderTextColor="#555"
+                  placeholderTextColor="#3e3e3e"
                   value={task}
                   onChangeText={setTask}
                   multiline
@@ -249,7 +249,7 @@ export default function StepAwayCard({ circleId, userId, userName, onPost, activ
                 <TextInput
                   style={styles.input}
                   placeholder="e.g. Ship to 3 real users by Friday"
-                  placeholderTextColor="#555"
+                  placeholderTextColor="#3e3e3e"
                   value={goal}
                   onChangeText={setGoal}
                 />
@@ -273,7 +273,7 @@ export default function StepAwayCard({ circleId, userId, userName, onPost, activ
                 <TextInput
                   style={styles.input}
                   placeholder="https://claude.ai/code/..."
-                  placeholderTextColor="#555"
+                  placeholderTextColor="#3e3e3e"
                   value={sessionUrl}
                   onChangeText={setSessionUrl}
                   autoCapitalize="none"
@@ -294,7 +294,7 @@ export default function StepAwayCard({ circleId, userId, userName, onPost, activ
                 <TextInput
                   style={styles.input}
                   placeholder="e.g. $30 this session"
-                  placeholderTextColor="#555"
+                  placeholderTextColor="#3e3e3e"
                   value={estimatedCost}
                   onChangeText={setEstimatedCost}
                 />
@@ -304,7 +304,7 @@ export default function StepAwayCard({ circleId, userId, userName, onPost, activ
                   onPress={handleStepAway}
                   disabled={!task.trim() || !goal.trim() || !returnTime || loading}
                 >
-                  {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitBtnText}>🖥️  Post to Circle</Text>}
+                  {loading ? <ActivityIndicator color="#000000" /> : <Text style={styles.submitBtnText}>🖥️  Post to Circle</Text>}
                 </Pressable>
               </View>
             )}
@@ -338,7 +338,7 @@ export default function StepAwayCard({ circleId, userId, userName, onPost, activ
                 <TextInput
                   style={[styles.input, { minHeight: 100 }]}
                   placeholder="e.g. Claude built the auth flow, looks solid — shipping to staging. Or: went in the wrong direction, rolled back, pivoting to..."
-                  placeholderTextColor="#555"
+                  placeholderTextColor="#3e3e3e"
                   value={note}
                   onChangeText={setNote}
                   multiline
@@ -349,7 +349,7 @@ export default function StepAwayCard({ circleId, userId, userName, onPost, activ
                   onPress={handleBackAtKeyboard}
                   disabled={!note.trim() || loading}
                 >
-                  {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitBtnText}>⌨️  Post Verdict</Text>}
+                  {loading ? <ActivityIndicator color="#000000" /> : <Text style={styles.submitBtnText}>⌨️  Post Verdict</Text>}
                 </Pressable>
               </View>
             )}
@@ -368,94 +368,94 @@ const styles = StyleSheet.create({
   stepAwayTrigger: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#2a2a2a',
+    backgroundColor: '#252525',
     borderWidth: 1,
-    borderColor: '#6366f133',
-    borderRadius: 10,
+    borderColor: '#2a2a2a',
+    borderRadius: 12,
     paddingHorizontal: 14,
     paddingVertical: 10,
     gap: 8,
   },
   stepAwayTriggerIcon: { fontSize: 18 },
-  stepAwayTriggerText: { color: '#a5b4fc', fontSize: 14, fontWeight: '600' },
+  stepAwayTriggerText: { color: '#e8e8e8', fontSize: 14, fontWeight: '600' },
 
   bakTrigger: {
-    backgroundColor: '#22c55e22',
+    backgroundColor: '#22c55e10',
     borderWidth: 1,
-    borderColor: '#22c55e55',
-    borderRadius: 8,
+    borderColor: '#22c55e30',
+    borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
-  bakTriggerText: { color: '#22c55e', fontSize: 13, fontWeight: '600' },
+  bakTriggerText: { color: '#e8e8e8', fontSize: 13, fontWeight: '600' },
 
   // Modal
-  modal: { flex: 1, backgroundColor: '#0d0d1a' },
+  modal: { flex: 1, backgroundColor: '#000000' },
   modalHeader: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    padding: 20, paddingTop: 24, borderBottomWidth: 1, borderBottomColor: '#1e1e3a',
+    padding: 20, paddingTop: 24, borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
   },
-  modalTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
-  closeBtn: { color: '#666', fontSize: 20, padding: 4 },
-  modalSubtitle: { color: '#888', fontSize: 13, lineHeight: 20, paddingHorizontal: 20, paddingTop: 14, paddingBottom: 4 },
+  modalTitle: { color: '#e8e8e8', fontSize: 18, fontWeight: '700' },
+  closeBtn: { color: '#6f6f6f', fontSize: 20, padding: 4 },
+  modalSubtitle: { color: '#9e9e9e', fontSize: 13, lineHeight: 20, paddingHorizontal: 20, paddingTop: 14, paddingBottom: 4 },
 
   // Form
   form: { padding: 20 },
-  label: { color: '#ccc', fontSize: 13, fontWeight: '600', marginBottom: 8, marginTop: 16, textTransform: 'uppercase', letterSpacing: 0.5 },
-  optional: { color: '#555', fontWeight: '400', textTransform: 'none' },
+  label: { color: '#b5b5b5', fontSize: 13, fontWeight: '600', marginBottom: 8, marginTop: 16, textTransform: 'uppercase', letterSpacing: 0.5 },
+  optional: { color: '#6f6f6f', fontWeight: '400', textTransform: 'none' },
 
   input: {
-    backgroundColor: '#2a2a2a',
+    backgroundColor: '#161616',
     borderWidth: 1,
-    borderColor: '#2a2a4a',
-    borderRadius: 10,
-    color: '#fff',
+    borderColor: '#2a2a2a',
+    borderRadius: 12,
+    color: '#e8e8e8',
     fontSize: 15,
     padding: 14,
     minHeight: 50,
   },
 
-  hint: { color: '#555', fontSize: 12, marginTop: 6, lineHeight: 18 },
-  code: { color: '#6366f1', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  hint: { color: '#6f6f6f', fontSize: 12, marginTop: 6, lineHeight: 18 },
+  code: { color: '#22d3ee', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
 
   sessionLink: { marginTop: 6 },
-  sessionLinkText: { color: '#6366f1', fontSize: 13 },
+  sessionLinkText: { color: '#3b82f6', fontSize: 13 },
 
   // Tool picker
   toolRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   toolChip: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
     paddingHorizontal: 12, paddingVertical: 8,
-    borderRadius: 8, borderWidth: 1, borderColor: '#2a2a4a',
-    backgroundColor: '#2a2a2a',
+    borderRadius: 12, borderWidth: 1, borderColor: '#2a2a2a',
+    backgroundColor: '#161616',
   },
   toolChipIcon: { fontSize: 16 },
-  toolChipLabel: { color: '#888', fontSize: 13, fontWeight: '500' },
+  toolChipLabel: { color: '#9e9e9e', fontSize: 13, fontWeight: '500' },
 
   // Return time chips
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#2a2a4a', backgroundColor: '#2a2a2a' },
-  chipActive: { borderColor: '#6366f1', backgroundColor: '#6366f122' },
-  chipText: { color: '#666', fontSize: 13 },
-  chipTextActive: { color: '#a5b4fc', fontWeight: '600' },
+  chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12, borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#161616' },
+  chipActive: { borderColor: '#6366f1', backgroundColor: '#6366f115' },
+  chipText: { color: '#6f6f6f', fontSize: 13 },
+  chipTextActive: { color: '#6366f1', fontWeight: '600' },
 
   // Verdict
   verdictGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   verdictChip: {
     flex: 1, minWidth: '45%',
-    padding: 12, borderRadius: 10, borderWidth: 1, borderColor: '#2a2a4a',
-    backgroundColor: '#2a2a2a',
+    padding: 12, borderRadius: 12, borderWidth: 1, borderColor: '#2a2a2a',
+    backgroundColor: '#161616',
   },
-  verdictChipLabel: { color: '#ddd', fontSize: 14, fontWeight: '600', marginBottom: 2 },
-  verdictChipDesc: { color: '#666', fontSize: 12 },
+  verdictChipLabel: { color: '#e8e8e8', fontSize: 14, fontWeight: '600', marginBottom: 2 },
+  verdictChipDesc: { color: '#6f6f6f', fontSize: 12 },
 
   // Handoff ref
   handoffRef: {
-    backgroundColor: '#2a2a2a', borderRadius: 10, padding: 14,
+    backgroundColor: '#161616', borderRadius: 12, padding: 14,
     borderLeftWidth: 3, borderLeftColor: '#6366f1', marginBottom: 4,
   },
-  handoffRefLabel: { color: '#666', fontSize: 12, marginBottom: 4 },
-  handoffRefTask: { color: '#a5b4fc', fontSize: 14 },
+  handoffRefLabel: { color: '#6f6f6f', fontSize: 12, marginBottom: 4 },
+  handoffRefTask: { color: '#e8e8e8', fontSize: 14 },
 
   // Submit
   submitBtn: {
@@ -464,5 +464,5 @@ const styles = StyleSheet.create({
   },
   submitBtnBAK: { backgroundColor: '#22c55e' },
   submitBtnDisabled: { opacity: 0.4 },
-  submitBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  submitBtnText: { color: '#ffffff', fontSize: 16, fontWeight: '700' },
 });

@@ -5,6 +5,7 @@ import { AgentAppearance, DEFAULT_APPEARANCE, EnvironmentType, THEME_OUTFITS, NE
 import ThoughtBubble from '../../../../components/ThoughtBubble';
 import { ThoughtBubble as ThoughtData, generateThoughtBubble } from '../../../../lib/agentMessaging';
 import { animLoop } from '../../../../lib/animationHelpers';
+import { getSpiritById } from '../../../../lib/agentSpirits';
 
 interface Props {
   agent: OfficeAgent;
@@ -789,6 +790,27 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
         {mood && !isOffline && (
           <MoodBubble emoji={mood} />
         )}
+
+        {/* Spirit badge — shows assigned spirit emoji on left side */}
+        {agent.spirit && (() => {
+          const spiritData = getSpiritById(agent.spirit!);
+          return spiritData ? (
+            <View style={{
+              position: 'absolute',
+              top: -14,
+              left: -2,
+              zIndex: 24,
+              backgroundColor: '#0d0d14',
+              borderRadius: 8,
+              paddingHorizontal: 3,
+              paddingVertical: 1,
+              borderWidth: 1,
+              borderColor: spiritData.color + '40',
+            }}>
+              <Text style={{ fontSize: 8 }}>{spiritData.emoji}</Text>
+            </View>
+          ) : null;
+        })()}
 
         {/* Action Particles when building/active */}
         {(agent.status === 'active' || agent.status === 'building') && !isOffline && (

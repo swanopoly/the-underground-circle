@@ -5,10 +5,10 @@ import {
   StyleSheet,
   Pressable,
   ScrollView,
-  ActivityIndicator,
   Alert,
   Platform,
 } from 'react-native';
+import { LoadingScreen } from '../../../components/LoadingWave';
 import {
   getTeamsConfig,
   initiateTeamsOAuth,
@@ -85,11 +85,7 @@ export default function TeamsTab({ circleId }: { circleId: string }) {
   };
 
   if (loading) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator color="#6366f1" size="large" />
-      </View>
-    );
+    return <LoadingScreen />;
   }
 
   if (mode === 'setup') {

@@ -1,69 +1,29 @@
-import React, { lazy, Suspense } from 'react';
-import { View, ActivityIndicator } from 'react-native';
+import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
-// Core screens — always needed on the primary navigation path
 import CirclesScreen from '../screens/circles/CirclesScreen';
 import CircleDetailScreen from '../screens/circles/CircleDetailScreen';
-
-// Lazy-load all secondary screens — only loaded when navigated to
-const CreateCircleScreen = lazy(() => import('../screens/circles/CreateCircleScreen'));
-const JoinCircleScreen = lazy(() => import('../screens/circles/JoinCircleScreen'));
-const CircleSettingsScreen = lazy(() => import('../screens/circles/CircleSettingsScreen'));
-const EditProfileScreen = lazy(() => import('../screens/profile/EditProfileScreen'));
-const FriendsScreen = lazy(() => import('../screens/friends/FriendsScreen'));
-const DMScreen = lazy(() => import('../screens/friends/DMScreen'));
-const AgentsScreen = lazy(() => import('../screens/agents/AgentsScreen'));
-const IntegrationsScreen = lazy(() => import('../screens/integrations/IntegrationsScreen'));
-const InviteManageScreen = lazy(() => import('../screens/circles/InviteManageScreen'));
-const OrgListScreen = lazy(() => import('../screens/organizations/OrgListScreen'));
-const OrgDetailScreen = lazy(() => import('../screens/organizations/OrgDetailScreen'));
-const CreateOrgScreen = lazy(() => import('../screens/organizations/CreateOrgScreen'));
-const OrgSettingsScreen = lazy(() => import('../screens/organizations/OrgSettingsScreen'));
-const BillingScreen = lazy(() => import('../screens/organizations/BillingScreen'));
-const SSOConfigScreen = lazy(() => import('../screens/organizations/SSOConfigScreen'));
-const GoalsScreen = lazy(() => import('../screens/organizations/GoalsScreen'));
-const ReportsScreen = lazy(() => import('../screens/organizations/ReportsScreen'));
-const WhiteLabelScreen = lazy(() => import('../screens/organizations/WhiteLabelScreen'));
-const SchoolsScreen = lazy(() => import('../screens/schools/SchoolsScreen'));
+import CreateCircleScreen from '../screens/circles/CreateCircleScreen';
+import JoinCircleScreen from '../screens/circles/JoinCircleScreen';
+import CircleSettingsScreen from '../screens/circles/CircleSettingsScreen';
+import EditProfileScreen from '../screens/profile/EditProfileScreen';
+import FriendsScreen from '../screens/friends/FriendsScreen';
+import DMScreen from '../screens/friends/DMScreen';
+import AgentsScreen from '../screens/agents/AgentsScreen';
+import IntegrationsScreen from '../screens/integrations/IntegrationsScreen';
+import InviteManageScreen from '../screens/circles/InviteManageScreen';
+import OrgListScreen from '../screens/organizations/OrgListScreen';
+import OrgDetailScreen from '../screens/organizations/OrgDetailScreen';
+import CreateOrgScreen from '../screens/organizations/CreateOrgScreen';
+import OrgSettingsScreen from '../screens/organizations/OrgSettingsScreen';
+import BillingScreen from '../screens/organizations/BillingScreen';
+import SSOConfigScreen from '../screens/organizations/SSOConfigScreen';
+import GoalsScreen from '../screens/organizations/GoalsScreen';
+import ReportsScreen from '../screens/organizations/ReportsScreen';
+import WhiteLabelScreen from '../screens/organizations/WhiteLabelScreen';
+import SchoolsScreen from '../screens/schools/SchoolsScreen';
 
 const Stack = createNativeStackNavigator();
-
-/** Wraps a lazy component so it works with React Navigation's component prop */
-function lazyScreen(LazyComponent: React.LazyExoticComponent<React.ComponentType<any>>) {
-  return function LazyScreenWrapper(props: any) {
-    return (
-      <Suspense fallback={
-        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#000' }}>
-          <ActivityIndicator color="#6366f1" size="small" />
-        </View>
-      }>
-        <LazyComponent {...props} />
-      </Suspense>
-    );
-  };
-}
-
-// Hoist wrapped components to module scope so React Navigation gets stable references
-const LazyCreateCircle = lazyScreen(CreateCircleScreen);
-const LazyJoinCircle = lazyScreen(JoinCircleScreen);
-const LazyCircleSettings = lazyScreen(CircleSettingsScreen);
-const LazyEditProfile = lazyScreen(EditProfileScreen);
-const LazyFriends = lazyScreen(FriendsScreen);
-const LazyDM = lazyScreen(DMScreen);
-const LazyAgents = lazyScreen(AgentsScreen);
-const LazyIntegrations = lazyScreen(IntegrationsScreen);
-const LazyInviteManage = lazyScreen(InviteManageScreen);
-const LazyOrgList = lazyScreen(OrgListScreen);
-const LazyOrgDetail = lazyScreen(OrgDetailScreen);
-const LazyCreateOrg = lazyScreen(CreateOrgScreen);
-const LazyOrgSettings = lazyScreen(OrgSettingsScreen);
-const LazyBilling = lazyScreen(BillingScreen);
-const LazySSOConfig = lazyScreen(SSOConfigScreen);
-const LazyGoals = lazyScreen(GoalsScreen);
-const LazyReports = lazyScreen(ReportsScreen);
-const LazyWhiteLabel = lazyScreen(WhiteLabelScreen);
-const LazySchools = lazyScreen(SchoolsScreen);
 
 export default function MainNavigator() {
   return (
@@ -74,29 +34,29 @@ export default function MainNavigator() {
       }}
     >
       <Stack.Screen name="CirclesList" component={CirclesScreen} />
-      <Stack.Screen name="CreateCircle" component={LazyCreateCircle} />
-      <Stack.Screen name="JoinCircle" component={LazyJoinCircle} />
+      <Stack.Screen name="CreateCircle" component={CreateCircleScreen} />
+      <Stack.Screen name="JoinCircle" component={JoinCircleScreen} />
       <Stack.Screen name="CircleDetail" component={CircleDetailScreen} />
-      <Stack.Screen name="CircleSettings" component={LazyCircleSettings} />
+      <Stack.Screen name="CircleSettings" component={CircleSettingsScreen} />
       {/* Profile sub-screens */}
-      <Stack.Screen name="EditProfile" component={LazyEditProfile} />
-      <Stack.Screen name="Friends" component={LazyFriends} />
-      <Stack.Screen name="DMScreen" component={LazyDM} />
-      <Stack.Screen name="Agents" component={LazyAgents} />
-      <Stack.Screen name="Integrations" component={LazyIntegrations} />
-      <Stack.Screen name="InviteManage" component={LazyInviteManage} />
+      <Stack.Screen name="EditProfile" component={EditProfileScreen} />
+      <Stack.Screen name="Friends" component={FriendsScreen} />
+      <Stack.Screen name="DMScreen" component={DMScreen} />
+      <Stack.Screen name="Agents" component={AgentsScreen} />
+      <Stack.Screen name="Integrations" component={IntegrationsScreen} />
+      <Stack.Screen name="InviteManage" component={InviteManageScreen} />
       {/* Organization screens */}
-      <Stack.Screen name="OrgList" component={LazyOrgList} />
-      <Stack.Screen name="OrgDetail" component={LazyOrgDetail} />
-      <Stack.Screen name="CreateOrg" component={LazyCreateOrg} />
-      <Stack.Screen name="OrgSettings" component={LazyOrgSettings} />
-      <Stack.Screen name="Billing" component={LazyBilling} />
-      <Stack.Screen name="SSOConfig" component={LazySSOConfig} />
-      <Stack.Screen name="Goals" component={LazyGoals} />
-      <Stack.Screen name="Reports" component={LazyReports} />
-      <Stack.Screen name="WhiteLabel" component={LazyWhiteLabel} />
+      <Stack.Screen name="OrgList" component={OrgListScreen} />
+      <Stack.Screen name="OrgDetail" component={OrgDetailScreen} />
+      <Stack.Screen name="CreateOrg" component={CreateOrgScreen} />
+      <Stack.Screen name="OrgSettings" component={OrgSettingsScreen} />
+      <Stack.Screen name="Billing" component={BillingScreen} />
+      <Stack.Screen name="SSOConfig" component={SSOConfigScreen} />
+      <Stack.Screen name="Goals" component={GoalsScreen} />
+      <Stack.Screen name="Reports" component={ReportsScreen} />
+      <Stack.Screen name="WhiteLabel" component={WhiteLabelScreen} />
       {/* Schools */}
-      <Stack.Screen name="Schools" component={LazySchools} />
+      <Stack.Screen name="Schools" component={SchoolsScreen} />
     </Stack.Navigator>
   );
 }

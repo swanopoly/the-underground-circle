@@ -104,6 +104,19 @@ Deno.serve(async (req: Request) => {
         .gte("created_at", todayStart)
         .lte("created_at", todayEnd);
 
+      // Aggregate agent token data for this circle
+      const { data: circleAgents } = await supabase
+        .from("circle_office_agents")
+        .select("token_usage_today, estimated_cost_today")
+        .eq("circle_id", cid);
+
+      const agentTokensTotal = (circleAgents || []).reduce(
+        (sum: number, a: any) => sum + (a.token_usage_today || 0), 0
+      );
+      const agentCostTotal = (circleAgents || []).reduce(
+        (sum: number, a: any) => sum + parseFloat(a.estimated_cost_today || "0"), 0
+      );
+
       // Upsert daily analytics
       await supabase.from("circle_analytics_daily").upsert({
         circle_id: cid,
@@ -114,6 +127,8 @@ Deno.serve(async (req: Request) => {
         avg_streak: Math.round(avgStreak * 100) / 100,
         tasks_completed: tasksCompleted || 0,
         tasks_created: tasksCreated || 0,
+        agent_tokens_total: agentTokensTotal,
+        agent_cost_total: Math.round(agentCostTotal * 10000) / 10000,
       }, { onConflict: "circle_id,date" });
 
       processed++;

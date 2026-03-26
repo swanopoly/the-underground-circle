@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { View, Text, TextInput, StyleSheet, Animated, Pressable, Platform, ScrollView } from 'react-native';
 import { OfficeAgent, STATUS_COLORS } from '../../../../lib/officeAgents';
 import { PROVIDER_META } from '../../../../lib/connectionManager';
@@ -187,22 +187,48 @@ export default function AgentPanel({
 
   const control = useAgentControl(circleId, sessionKey);
 
-  // Load spirit from DB agent when panel opens
+  // Load or create DB agent row when panel opens
+  const ensureDbAgent = useCallback(async (): Promise<string | null> => {
+    if (dbAgentId) return dbAgentId;
+    if (!agent || !circleId) return null;
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) return null;
+    // Try to find existing row
+    const { data } = await supabase
+      .from('circle_office_agents')
+      .select('id, spirit, spirit_emoji')
+      .eq('circle_id', circleId)
+      .eq('owner_id', auth.user.id)
+      .ilike('name', agent.name)
+      .maybeSingle();
+    if (data) {
+      setDbAgentId(data.id);
+      setCurrentSpirit(data.spirit || null);
+      return data.id;
+    }
+    // Auto-create if missing
+    const { data: created, error } = await supabase
+      .from('circle_office_agents')
+      .upsert({
+        circle_id: circleId,
+        owner_id: auth.user.id,
+        name: agent.name,
+        provider: agent.providerType || 'claude-code',
+        status: agent.status || 'idle',
+        color: agent.color || '#6366f1',
+      }, { onConflict: 'circle_id,owner_id,name' })
+      .select('id')
+      .single();
+    if (created && !error) {
+      setDbAgentId(created.id);
+      return created.id;
+    }
+    return null;
+  }, [dbAgentId, agent, circleId]);
+
   useEffect(() => {
-    if (!agent || !circleId) return;
-    (async () => {
-      const { data } = await supabase
-        .from('circle_office_agents')
-        .select('id, spirit, spirit_emoji')
-        .eq('circle_id', circleId)
-        .ilike('name', agent.name)
-        .maybeSingle();
-      if (data) {
-        setDbAgentId(data.id);
-        setCurrentSpirit(data.spirit || null);
-      }
-    })();
-  }, [agent?.name, circleId]);
+    ensureDbAgent();
+  }, [ensureDbAgent]);
 
   // Load personality when agent panel opens for a specific agent
   useEffect(() => {
@@ -381,8 +407,9 @@ export default function AgentPanel({
           {currentSpirit && (
             <Pressable
               onPress={async () => {
-                if (dbAgentId) {
-                  await updateAgentSpirit(dbAgentId, null, null);
+                const id = await ensureDbAgent();
+                if (id) {
+                  await updateAgentSpirit(id, null, null);
                   setCurrentSpirit(null);
                 }
               }}
@@ -401,8 +428,9 @@ export default function AgentPanel({
                     <Pressable
                       key={spirit.id}
                       onPress={async () => {
-                        if (dbAgentId) {
-                          await updateAgentSpirit(dbAgentId, spirit.id, spirit.emoji);
+                        const id = await ensureDbAgent();
+                        if (id) {
+                          await updateAgentSpirit(id, spirit.id, spirit.emoji);
                           setCurrentSpirit(spirit.id);
                         }
                       }}

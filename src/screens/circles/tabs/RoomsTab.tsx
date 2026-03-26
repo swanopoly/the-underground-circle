@@ -16,6 +16,7 @@ import {
   Modal, Platform, useWindowDimensions, ActivityIndicator,
   Image, Alert,
 } from 'react-native';
+import { LoadingScreen } from '../../../components/LoadingWave';
 import { supabase } from '../../../lib/supabase';
 import { getSwanBotResponse as getAIResponse } from '../../../lib/swanbot';
 import {
@@ -203,7 +204,7 @@ function ArrowScrollView({ children, style, scrollStyle, contentContainerStyle, 
 const arrowSt = StyleSheet.create({
   arrow: {
     width: 22, height: 28, justifyContent: 'center', alignItems: 'center',
-    backgroundColor: '#000000', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 6,
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 12,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   arrowText: { color: '#aaa', fontSize: 18, lineHeight: 20, fontWeight: '700' },
@@ -220,10 +221,10 @@ const FILE_TYPES = [
 type FileType = typeof FILE_TYPES[number];
 
 const LANG_COLORS: Record<string, string> = {
-  typescript:'#3178c6', javascript:'#f7df1e', python:'#3776ab', sql:'#e38c00',
-  json:'#6d6d6d', bash:'#4eaa25', rust:'#dea584', go:'#00add8',
-  markdown:'#519aba', plaintext:'#9ca3af', csv:'#21b76a', image:'#ec4899',
-  html:'#e34c26', css:'#1572b6', yaml:'#cb171e', canvas:'#8b5cf6', other:'#888',
+  typescript:'#3b82f6', javascript:'#f59e0b', python:'#22c55e', sql:'#22d3ee',
+  json:'#6f6f6f', bash:'#22c55e', rust:'#f97316', go:'#22d3ee',
+  markdown:'#a855f7', plaintext:'#9e9e9e', csv:'#22c55e', image:'#ec4899',
+  html:'#f97316', css:'#6366f1', yaml:'#ef4444', canvas:'#a855f7', other:'#888',
 };
 const FILE_ICONS: Record<string, string> = {
   typescript:'📘', javascript:'📒', python:'🐍', sql:'🗃', json:'{ }',
@@ -261,20 +262,20 @@ function detectFileType(name: string, current: FileType = 'typescript'): FileTyp
 type TokenType = 'keyword' | 'string' | 'comment' | 'number' | 'type' | 'function' | 'operator' | 'punctuation' | 'property' | 'builtin' | 'tag' | 'attribute' | 'variable' | 'plain';
 
 const TOKEN_COLORS: Record<TokenType, string> = {
-  keyword:     '#ff7b72',   // red-ish (if, else, const, return…)
-  string:      '#a5d6ff',   // light blue (strings)
-  comment:     '#8b949e',   // gray (comments)
-  number:      '#79c0ff',   // blue (numeric literals)
-  type:        '#ffa657',   // orange (type names, classes)
-  function:    '#d2a8ff',   // purple (function names)
-  operator:    '#ff7b72',   // red-ish (=, +, =>)
-  punctuation: '#8b949e',   // gray ({, }, [, ], ;)
-  property:    '#79c0ff',   // blue (object keys)
-  builtin:     '#ffa657',   // orange (console, Math, etc.)
-  tag:         '#7ee787',   // green (HTML tags)
-  attribute:   '#79c0ff',   // blue (HTML attributes)
-  variable:    '#ffa657',   // orange (special vars)
-  plain:       '#e6edf3',   // default text
+  keyword:     '#a855f7',   // purple (if, else, const, return…)
+  string:      '#22c55e',   // green (strings)
+  comment:     '#6f6f6f',   // muted (comments)
+  number:      '#f59e0b',   // amber (numeric literals)
+  type:        '#22d3ee',   // cyan (type names, classes)
+  function:    '#3b82f6',   // blue (function names)
+  operator:    '#9e9e9e',   // medium (=, +, =>)
+  punctuation: '#6f6f6f',   // muted ({, }, [, ], ;)
+  property:    '#ec4899',   // pink (object keys)
+  builtin:     '#f97316',   // orange (console, Math, etc.)
+  tag:         '#ef4444',   // red (HTML tags)
+  attribute:   '#f59e0b',   // amber (HTML attributes)
+  variable:    '#22d3ee',   // cyan (special vars)
+  plain:       '#e8e8e8',   // default text
 };
 
 interface Token { text: string; type: TokenType; }
@@ -461,13 +462,13 @@ function timeAgo(dateStr: string): string {
 // ─── Room APIs Config ─────────────────────────────────────────────────────────
 
 const ROOM_APIS = [
-  { id: 'storage',    label: 'Storage',    icon: '🗄',  color: '#6366f1',
+  { id: 'storage',    label: 'Storage',    icon: '🗄',  color: '#3b82f6',
     desc: 'File & blob storage. Put, get, list, delete objects.',
     help: 'Upload and manage files scoped to this room. Each room gets its own storage bucket. Files are accessible to all room members and any agents assigned to this room. Use this for assets, documents, datasets, or any binary data your project needs.' },
-  { id: 'database',  label: 'Database',   icon: '🏛',  color: '#3b82f6',
+  { id: 'database',  label: 'Database',   icon: '🏛',  color: '#22c55e',
     desc: 'Supabase Postgres. Query tables, run SQL, subscribe.',
     help: 'Query the room\'s data tables using the Supabase client. All queries are automatically scoped to this room via Row Level Security. You can read room files, messages, usage logs, and any custom data. Use the Supabase JS client or REST API with your auth token.' },
-  { id: 'messaging', label: 'Messaging',  icon: '📨',  color: '#22c55e',
+  { id: 'messaging', label: 'Messaging',  icon: '📨',  color: '#a855f7',
     desc: 'Realtime channels. Publish events, broadcast messages.',
     help: 'Subscribe to real-time events in this room using Supabase Realtime. Events include new messages, file changes, agent activity, and custom broadcasts. Useful for building live dashboards, collaborative editing, or notifying agents of changes.' },
   { id: 'queues',    label: 'Queues',     icon: '📋',  color: '#f59e0b',
@@ -476,24 +477,24 @@ const ROOM_APIS = [
   { id: 'secrets',   label: 'Secrets',   icon: '🔒',  color: '#ef4444',
     desc: 'Encrypted KV store. Store API keys, tokens, credentials.',
     help: 'Securely store sensitive values like API keys, tokens, and credentials. Secrets are encrypted at rest and only accessible by room members. Agents can read secrets at runtime to authenticate with external services without exposing keys in code.' },
-  { id: 'containers',label: 'Containers', icon: '🐳',  color: '#00add8',
+  { id: 'containers',label: 'Containers', icon: '🐳',  color: '#22d3ee',
     desc: 'Run sandboxed code. Execute tasks, deploy agents.',
     help: 'Execute code in isolated sandboxed environments. Specify a Docker image, mount files, and run commands. Output is captured and returned. Use this for running untrusted code, CI tasks, data pipelines, or spinning up temporary agent environments.' },
 ] as const;
 
 const INTEGRATIONS = [
-  { name: 'AWS',       icon: '🟠', color: '#ff9900' },
-  { name: 'Azure',     icon: '🔵', color: '#0078d4' },
-  { name: 'GCP',       icon: '🔴', color: '#4285f4' },
-  { name: 'Python',    icon: '🐍', color: '#3776ab' },
-  { name: 'JS',        icon: '🟡', color: '#f7df1e' },
-  { name: 'TypeScript',icon: '📘', color: '#3178c6' },
-  { name: 'React',     icon: '⚛', color: '#61dafb' },
-  { name: 'Flutter',   icon: '🐦', color: '#54c5f8' },
-  { name: 'OpenAI',    icon: '🤖', color: '#412991' },
-  { name: 'Anthropic', icon: '🅐', color: '#d4a76a' },
-  { name: 'GitHub',    icon: '🐙', color: '#24292f' },
-  { name: 'Docker',    icon: '🐳', color: '#2496ed' },
+  { name: 'AWS',       icon: '🟠', color: '#f97316' },
+  { name: 'Azure',     icon: '🔵', color: '#3b82f6' },
+  { name: 'GCP',       icon: '🔴', color: '#ef4444' },
+  { name: 'Python',    icon: '🐍', color: '#22c55e' },
+  { name: 'JS',        icon: '🟡', color: '#f59e0b' },
+  { name: 'TypeScript',icon: '📘', color: '#3b82f6' },
+  { name: 'React',     icon: '⚛', color: '#22d3ee' },
+  { name: 'Flutter',   icon: '🐦', color: '#3b82f6' },
+  { name: 'OpenAI',    icon: '🤖', color: '#22c55e' },
+  { name: 'Anthropic', icon: '🅐', color: '#f97316' },
+  { name: 'GitHub',    icon: '🐙', color: '#a855f7' },
+  { name: 'Docker',    icon: '🐳', color: '#22d3ee' },
 ];
 
 // ─── JS Syntax Highlighter ───────────────────────────────────────────────────
@@ -509,28 +510,28 @@ const JS_KEYWORDS = new Set([
 
 function highlightLine(line: string, lang: string): React.ReactNode[] {
   if (!['typescript','javascript','html','css'].includes(lang)) {
-    const color = lang === 'python' ? '#e6e6e6' : '#e6e6e6';
+    const color = lang === 'python' ? '#22c55e' : '#e8e8e8';
     return [<Text key="plain" style={{ color }}>{line || ' '}</Text>];
   }
   const trimmed = line.trimStart();
   if (trimmed.startsWith('//') || trimmed.startsWith('#')) {
-    return [<Text key="c" style={{ color:'#6a9955', fontStyle:'italic' }}>{line}</Text>];
+    return [<Text key="c" style={{ color:'#6f6f6f', fontStyle:'italic' }}>{line}</Text>];
   }
   const parts: React.ReactNode[] = [];
   const regex = /(\s+)|('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`)|([a-zA-Z_$][\w$]*)|([^\s\w])/g;
   let match, idx = 0;
   while ((match = regex.exec(line)) !== null) {
     const [, space, str, word, op] = match;
-    if (space) parts.push(<Text key={idx++} style={{ color:'#e6e6e6' }}>{space}</Text>);
-    else if (str) parts.push(<Text key={idx++} style={{ color:'#ce9178' }}>{str}</Text>);
+    if (space) parts.push(<Text key={idx++} style={{ color:'#e8e8e8' }}>{space}</Text>);
+    else if (str) parts.push(<Text key={idx++} style={{ color:'#22c55e' }}>{str}</Text>);
     else if (word) {
-      if (JS_KEYWORDS.has(word)) parts.push(<Text key={idx++} style={{ color:'#569cd6', fontWeight:'700' }}>{word}</Text>);
+      if (JS_KEYWORDS.has(word)) parts.push(<Text key={idx++} style={{ color:'#a855f7', fontWeight:'700' }}>{word}</Text>);
       else if (word[0] === word[0].toUpperCase() && word[0] !== word[0].toLowerCase())
-        parts.push(<Text key={idx++} style={{ color:'#4ec9b0' }}>{word}</Text>);
-      else parts.push(<Text key={idx++} style={{ color:'#e6e6e6' }}>{word}</Text>);
-    } else if (op) parts.push(<Text key={idx++} style={{ color:'#d4d4d4' }}>{op}</Text>);
+        parts.push(<Text key={idx++} style={{ color:'#22d3ee' }}>{word}</Text>);
+      else parts.push(<Text key={idx++} style={{ color:'#e8e8e8' }}>{word}</Text>);
+    } else if (op) parts.push(<Text key={idx++} style={{ color:'#9e9e9e' }}>{op}</Text>);
   }
-  return parts.length ? parts : [<Text key="e" style={{ color:'#e6e6e6' }}>{line || ' '}</Text>];
+  return parts.length ? parts : [<Text key="e" style={{ color:'#e8e8e8' }}>{line || ' '}</Text>];
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -575,12 +576,7 @@ export default function RoomsTab({ circleId, accentColor }: Props) {
     if (selectedRoom?.id === roomId) setSelectedRoom(null);
   }, [selectedRoom]);
 
-  if (loading) return (
-    <View style={s.center}>
-      <ActivityIndicator color={accentColor} />
-      <Text style={s.loadingText}>Loading rooms...</Text>
-    </View>
-  );
+  if (loading) return <LoadingScreen />;
 
   if (selectedRoom) return (
     <RoomDetail
@@ -1171,7 +1167,7 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
           {/* Save */}
           {isDirty && (
             <Pressable onPress={saveFile} disabled={saving}
-              style={[s.barBtn,{backgroundColor:'#22c55e20',borderColor:'#22c55e50'}]}>
+              style={[s.barBtn,{backgroundColor:'#ffffff10',borderColor:'#ffffff25'}]}>
               <Text style={{color:'#22c55e',fontSize:12,fontWeight:'700'}}>{saving?'Saving...':'💾 Save'}</Text>
             </Pressable>
           )}
@@ -1193,8 +1189,8 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
               created_by: user?.id || null,
             }).select().single();
             if (!error && data) { setFiles(p=>[...p,data]); openFile(data); }
-          }} style={[s.barBtn,{backgroundColor:'#8b5cf615',borderColor:'#8b5cf640'}]}>
-            <Text style={{color:'#a78bfa',fontSize:12,fontWeight:'700'}}>+ Canvas</Text>
+          }} style={[s.barBtn,{backgroundColor:'#ffffff08',borderColor:'#ffffff20'}]}>
+            <Text style={{color:'#9e9e9e',fontSize:12,fontWeight:'700'}}>+ Canvas</Text>
           </Pressable>
           {/* Summarize */}
           <Pressable onPress={async () => {
@@ -1211,15 +1207,15 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
               metadata: { summary_request: true },
             });
             setRightPanel('chat');
-          }} style={[s.barBtn,{backgroundColor:'#22c55e15',borderColor:'#22c55e40'}]}>
-            <Text style={{color:'#22c55e',fontSize:12,fontWeight:'700'}}>Summarize</Text>
+          }} style={[s.barBtn,{backgroundColor:'#ffffff08',borderColor:'#ffffff20'}]}>
+            <Text style={{color:'#a855f7',fontSize:12,fontWeight:'700'}}>Summarize</Text>
           </Pressable>
           {/* Sidebar toggle */}
           <Pressable onPress={()=>setSidebarOpen(p=>!p)} style={s.barBtn}>
             <Text style={{color:'#888',fontSize:12}}>☰</Text>
           </Pressable>
           {/* Delete room */}
-          <Pressable onPress={onDelete} style={[s.barBtn,{backgroundColor:'#ef444415',borderColor:'#ef444430'}]}>
+          <Pressable onPress={onDelete} style={[s.barBtn,{backgroundColor:'#ffffff08',borderColor:'#ffffff15'}]}>
             <Text style={{color:'#ef4444',fontSize:12}}>🗑</Text>
           </Pressable>
         </View>
@@ -1336,12 +1332,12 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
               <View style={s.fileToolbarRight}>
                 {isGitHubFile(activeTab) && (
                   <>
-                    <View style={{backgroundColor:'#24292f30',paddingHorizontal:6,paddingVertical:2,borderRadius:4}}>
+                    <View style={{backgroundColor:'#ffffff10',paddingHorizontal:6,paddingVertical:2,borderRadius:12}}>
                       <Text style={{color:'#888',fontSize:10,fontWeight:'700',fontFamily:MONO}}>GITHUB · READ-ONLY</Text>
                     </View>
                     <Pressable onPress={()=>importGitHubFile(activeTab)}
-                      style={[s.fileAction,{backgroundColor:'#22c55e15',borderColor:'#22c55e30',borderWidth:1,borderRadius:6}]}>
-                      <Text style={{color:'#22c55e',fontSize:11,fontWeight:'700'}}>↓ Import to Room</Text>
+                      style={[s.fileAction,{backgroundColor:'#ffffff08',borderColor:'#ffffff15',borderWidth:1,borderRadius:12}]}>
+                      <Text style={{color:'#3b82f6',fontSize:11,fontWeight:'700'}}>↓ Import to Room</Text>
                     </Pressable>
                   </>
                 )}
@@ -1630,7 +1626,7 @@ function FileViewer({ file, editValue, onEdit }: {
             {/* Line numbers */}
             <View style={{position:'absolute',top:0,left:0,bottom:0,paddingTop:8}} pointerEvents="none">
               {ptLines.map((_,idx) => (
-                <Text key={idx} style={{width:ptGw,textAlign:'right',paddingRight:12,color:'#484f58',fontSize:13,fontFamily:MONO,lineHeight:22,userSelect:'none'} as any} selectable={false}>
+                <Text key={idx} style={{width:ptGw,textAlign:'right',paddingRight:12,color:'#4a4a4a',fontSize:13,fontFamily:MONO,lineHeight:22,userSelect:'none'} as any} selectable={false}>
                   {idx+1}
                 </Text>
               ))}
@@ -1638,7 +1634,7 @@ function FileViewer({ file, editValue, onEdit }: {
             <TextInput
               style={{
                 paddingTop:8,paddingBottom:16,paddingLeft:ptGw+4,paddingRight:16,
-                color:'#e6edf3',fontSize:14,lineHeight:22,
+                color:'#e8e8e8',fontSize:14,lineHeight:22,
                 textAlignVertical:'top',minHeight:ptLines.length*22+32,
                 ...(Platform.OS==='web'?{outlineStyle:'none'} as any:{}),
               }}
@@ -1664,7 +1660,7 @@ function FileViewer({ file, editValue, onEdit }: {
     <View style={{flex:1,backgroundColor:'#000000'}}>
       {/* Language pill */}
       <View style={{flexDirection:'row',alignItems:'center',paddingHorizontal:14,paddingTop:6,paddingBottom:4,gap:8}}>
-        <View style={{backgroundColor:langColor+'20',paddingHorizontal:8,paddingVertical:2,borderRadius:4,borderWidth:1,borderColor:langColor+'40'}}>
+        <View style={{backgroundColor:langColor+'20',paddingHorizontal:8,paddingVertical:2,borderRadius:12,borderWidth:1,borderColor:langColor+'40'}}>
           <Text style={{color:langColor,fontSize:10,fontWeight:'700',fontFamily:MONO}}>{FILE_ICONS[lang]||'📄'} {lang.toUpperCase()}</Text>
         </View>
         <Text style={{color:'#555',fontSize:10,fontFamily:MONO}}>{lines.length} lines</Text>
@@ -1679,7 +1675,7 @@ function FileViewer({ file, editValue, onEdit }: {
               return (
                 <View key={idx} style={{flexDirection:'row',minHeight:22,alignItems:'flex-start'}}>
                   {/* Line number */}
-                  <Text style={{width:gw,textAlign:'right',paddingRight:12,color:'#484f58',fontSize:13,fontFamily:MONO,lineHeight:22,userSelect:'none'} as any} selectable={false}>
+                  <Text style={{width:gw,textAlign:'right',paddingRight:12,color:'#4a4a4a',fontSize:13,fontFamily:MONO,lineHeight:22,userSelect:'none'} as any} selectable={false}>
                     {idx+1}
                   </Text>
                   {/* Tokens */}
@@ -2002,7 +1998,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     return () => { supabase.removeChannel(ch); };
   }, [roomId]);
 
-  const STATUS_COLOR: Record<string, string> = { active: '#22c55e', idle: '#f59e0b', error: '#ef4444', offline: '#6b7280' };
+  const STATUS_COLOR: Record<string, string> = { active: '#22c55e', idle: '#f59e0b', error: '#ef4444', offline: '#6f6f6f' };
 
   return (
     <View style={s.panel}>
@@ -2068,8 +2064,8 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             </Pressable>
             {roomFiles.filter(f => f.name !== activeFile?.name).map(f => (
               <Pressable key={f.id} onPress={() => setSelectedFile(selectedFile === f.name ? '' : f.name)}
-                style={[chatSt.fileChip, selectedFile === f.name && { backgroundColor: '#6366f120', borderColor: '#6366f160' }]}>
-                <Text style={[chatSt.fileChipText, selectedFile === f.name && { color: '#a5b4fc' }]}>{f.name}</Text>
+                style={[chatSt.fileChip, selectedFile === f.name && { backgroundColor: '#ffffff10', borderColor: '#ffffff30' }]}>
+                <Text style={[chatSt.fileChipText, selectedFile === f.name && { color: '#e8e8e8' }]}>{f.name}</Text>
               </Pressable>
             ))}
           </ScrollView>
@@ -2088,7 +2084,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
               <View style={[chatSt.assignSummaryDot, { backgroundColor: STATUS_COLOR[selectedAgent.status] || '#888' }]} />
               <Text style={{ color: '#aaa', fontSize: 11 }}>
                 <Text style={{ color: '#fff', fontWeight: '700' }}>{selectedAgent.name}</Text>
-                {selectedFile ? <Text> → <Text style={{ color: '#a5b4fc' }}>{selectedFile}</Text></Text> : null}
+                {selectedFile ? <Text> → <Text style={{ color: '#e8e8e8' }}>{selectedFile}</Text></Text> : null}
               </Text>
             </View>
           )}
@@ -2123,11 +2119,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
 }
 
 const chatSt = StyleSheet.create({
-  assignBox: { backgroundColor: '#0a0f0a', borderBottomWidth: 1, borderBottomColor: '#1a2a1a', padding: 14, gap: 4 },
+  assignBox: { backgroundColor: '#0a0a0a', borderBottomWidth: 1, borderBottomColor: '#1a1a1a', padding: 14, gap: 4 },
   assignLabel: { color: '#555', fontSize: 9, fontWeight: '800', letterSpacing: 1, marginBottom: 6 },
   agentChip: {
     flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 8,
-    borderRadius: 10, borderWidth: 1, borderColor: '#222', backgroundColor: '#0d0d0d',
+    borderRadius: 12, borderWidth: 1, borderColor: '#222', backgroundColor: '#0d0d0d',
     marginRight: 8, minWidth: 100,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -2135,20 +2131,20 @@ const chatSt = StyleSheet.create({
   agentChipName: { color: '#ccc', fontSize: 12, fontWeight: '700' },
   agentChipModel: { color: '#555', fontSize: 9, fontFamily: MONO, marginTop: 1 },
   fileChip: {
-    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, borderWidth: 1,
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12, borderWidth: 1,
     borderColor: '#222', backgroundColor: '#0d0d0d', marginRight: 6,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   fileChipText: { color: '#888', fontSize: 11, fontFamily: MONO },
-  assignSummary: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6, borderTopWidth: 1, borderTopColor: '#1a2a1a', marginTop: 4 },
+  assignSummary: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6, borderTopWidth: 1, borderTopColor: '#1a1a1a', marginTop: 4 },
   assignSummaryDot: { width: 7, height: 7, borderRadius: 4 },
   activeFileBanner: {
     flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8,
-    paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8,
-    backgroundColor: '#6366f110', borderWidth: 1, borderColor: '#6366f130',
+    paddingHorizontal: 10, paddingVertical: 7, borderRadius: 12,
+    backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff15',
   },
   activeFileBannerIcon: { fontSize: 14 },
-  activeFileBannerName: { color: '#a5b4fc', fontSize: 12, fontWeight: '700', fontFamily: MONO },
+  activeFileBannerName: { color: '#e8e8e8', fontSize: 12, fontWeight: '700', fontFamily: MONO },
   activeFileBannerHint: { color: '#555', fontSize: 10, fontStyle: 'italic' },
   agentChipOwner: { color: '#555', fontSize: 9, marginTop: 1 },
   agentChipTask: { color: '#888', fontSize: 9, marginTop: 1, fontStyle: 'italic' },
@@ -2190,7 +2186,7 @@ function AgentThinkingLoader() {
     const offset = (frame * 3 + i * 40) % 360;
     const y = Math.sin((offset * Math.PI) / 180) * 6;
     const scale = 0.6 + Math.cos((offset * Math.PI) / 180) * 0.4;
-    const colors = ['#6366f1', '#8b5cf6', '#a855f7', '#c084fc', '#e879f9'];
+    const colors = ['#6366f1', '#a855f7', '#3b82f6', '#22c55e', '#f59e0b'];
     return { y, scale, color: colors[i] };
   });
 
@@ -2218,7 +2214,7 @@ function AgentThinkingLoader() {
           background: linear-gradient(135deg, #6366f1, #a855f7);
           border-radius: 4px;
           animation: agentCubeSpin 2s linear infinite;
-          box-shadow: 0 0 12px rgba(99,102,241,0.5);
+          box-shadow: 0 0 12px rgba(255,255,255,0.15);
         }
         .agent-dot {
           width: 6px; height: 6px; border-radius: 50%;
@@ -2229,7 +2225,7 @@ function AgentThinkingLoader() {
     }, []);
 
     return (
-      <View style={{ marginTop: 8, padding: 12, backgroundColor: '#6366f108', borderRadius: 8, borderWidth: 1, borderColor: '#6366f120' }}>
+      <View style={{ marginTop: 8, padding: 12, backgroundColor: '#ffffff05', borderRadius: 12, borderWidth: 1, borderColor: '#ffffff10' }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
           <Text style={{ fontSize: 20 }}>🧠</Text>
 
@@ -2249,13 +2245,13 @@ function AgentThinkingLoader() {
           </View>
 
           {/* Status text */}
-          <Text style={{ color: '#a5b4fc', fontSize: 11, fontWeight: '600', fontStyle: 'italic' }}>
+          <Text style={{ color: '#e8e8e8', fontSize: 11, fontWeight: '600', fontStyle: 'italic' }}>
             {phrase}
           </Text>
         </View>
 
         {/* Progress bar */}
-        <View style={{ marginTop: 8, height: 3, backgroundColor: '#6366f115', borderRadius: 2, overflow: 'hidden' }}>
+        <View style={{ marginTop: 8, height: 3, backgroundColor: '#ffffff08', borderRadius: 2, overflow: 'hidden' }}>
           <View style={{
             height: 3, borderRadius: 2,
             backgroundColor: '#6366f1',
@@ -2268,11 +2264,11 @@ function AgentThinkingLoader() {
 
   // Native fallback — ASCII art cube + dots
   return (
-    <View style={{ marginTop: 8, padding: 10, backgroundColor: '#6366f108', borderRadius: 8, borderWidth: 1, borderColor: '#6366f120' }}>
-      <Text style={{ color: '#6366f1', fontSize: 10, fontFamily: MONO, lineHeight: 12 }}>
+    <View style={{ marginTop: 8, padding: 10, backgroundColor: '#ffffff05', borderRadius: 12, borderWidth: 1, borderColor: '#ffffff10' }}>
+      <Text style={{ color: '#e8e8e8', fontSize: 10, fontFamily: MONO, lineHeight: 12 }}>
         {cubeFrame.join('\n')}
       </Text>
-      <Text style={{ color: '#a5b4fc', fontSize: 11, fontWeight: '600', marginTop: 4 }}>{phrase}</Text>
+      <Text style={{ color: '#e8e8e8', fontSize: 11, fontWeight: '600', marginTop: 4 }}>{phrase}</Text>
     </View>
   );
 }
@@ -2288,13 +2284,13 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor }: { msg: Roo
     const targetFile = msg.metadata?.target_file;
     const status = msg.metadata?.status;
     return (
-      <View style={{borderLeftWidth:3,borderLeftColor:isTask?'#6366f1':'#22c55e',paddingLeft:10,paddingVertical:7,backgroundColor:isTask?'#6366f108':'#0d1a0d10',borderRadius:4}}>
+      <View style={{borderLeftWidth:3,borderLeftColor:isTask?'#6366f1':'#3b82f6',paddingLeft:10,paddingVertical:7,backgroundColor:isTask?'#6366f108':'#3b82f608',borderRadius:12}}>
         <View style={{flexDirection:'row',gap:8,marginBottom:3,flexWrap:'wrap',alignItems:'center'}}>
-          <Text style={{color:isTask?'#a5b4fc':'#22c55e',fontSize:11,fontWeight:'700'}}>{msg.agent_name||'Agent'}</Text>
-          {isTask && <View style={{backgroundColor:'#6366f120',paddingHorizontal:5,paddingVertical:2,borderRadius:4,borderWidth:1,borderColor:'#6366f140'}}>
-            <Text style={{color:'#a5b4fc',fontSize:9,fontWeight:'800',letterSpacing:0.5}}>TASK</Text>
+          <Text style={{color:isTask?'#6366f1':'#3b82f6',fontSize:11,fontWeight:'700'}}>{msg.agent_name||'Agent'}</Text>
+          {isTask && <View style={{backgroundColor:'#6366f115',paddingHorizontal:5,paddingVertical:2,borderRadius:12,borderWidth:1,borderColor:'#6366f130'}}>
+            <Text style={{color:'#6366f1',fontSize:9,fontWeight:'800',letterSpacing:0.5}}>TASK</Text>
           </View>}
-          {targetFile && <Text style={{color:'#a5b4fc',fontSize:10,fontFamily:MONO}}>→ {targetFile}</Text>}
+          {targetFile && <Text style={{color:'#e8e8e8',fontSize:10,fontFamily:MONO}}>→ {targetFile}</Text>}
           {status && (
             <Text style={{
               color: status==='pending' ? '#f59e0b' : status==='done' ? '#22c55e' : '#ef4444',
@@ -2351,8 +2347,8 @@ function HelpTip({ text, color }: { text: string; color: string }) {
       {show && (
         <View style={{
           position: 'absolute', top: 22, right: 0, zIndex: 100, width: 260,
-          backgroundColor: '#1a1a2e', borderWidth: 1, borderColor: color + '40',
-          borderRadius: 10, padding: 12,
+          backgroundColor: '#161616', borderWidth: 1, borderColor: color + '40',
+          borderRadius: 12, padding: 12,
           ...(Platform.OS === 'web' ? { boxShadow: `0 4px 20px ${color}30` } as any : {}),
         }}>
           <Text style={{ color: '#ccc', fontSize: 11, lineHeight: 17, fontFamily: 'monospace' }}>{text}</Text>
@@ -2506,7 +2502,7 @@ function SecretsPanel({ roomId, accentColor }: { roomId: string; accentColor: st
     <View style={s.panel}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingRight: 14 }}>
         <Text style={s.panelTitle}>Secrets</Text>
-        <HelpTip color="#ef4444" text="Secrets are stored server-side with Row Level Security. Only room members can add, view key names, or delete secrets. Secret values are never sent to the browser after saving — they can only be read server-side by Edge Functions or agents." />
+        <HelpTip color="#9e9e9e" text="Secrets are stored server-side with Row Level Security. Only room members can add, view key names, or delete secrets. Secret values are never sent to the browser after saving — they can only be read server-side by Edge Functions or agents." />
       </View>
       <Text style={{color:'#666',fontSize:11,padding:14,paddingTop:0,lineHeight:16}}>
         Encrypted KV store for this room. Store API keys, tokens, credentials.
@@ -2563,16 +2559,16 @@ function UsagePanel({ roomId, accentColor }: { roomId: string; accentColor: stri
     <View style={s.panel}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingRight: 14 }}>
         <Text style={s.panelTitle}>Usage</Text>
-        <HelpTip color="#f59e0b" text="Track resource consumption for this room. File count, messages sent, AI tokens used, and estimated cost. The activity log shows a chronological record of all operations performed by users and agents." />
+        <HelpTip color="#9e9e9e" text="Track resource consumption for this room. File count, messages sent, AI tokens used, and estimated cost. The activity log shows a chronological record of all operations performed by users and agents." />
       </View>
       <ScrollView contentContainerStyle={{padding:14,gap:12}}>
         {/* Stats grid */}
         <View style={{flexDirection:'row',flexWrap:'wrap',gap:10}}>
           {[
-            {label:'FILES',   value:fileCount,    color:'#6366f1'},
-            {label:'MESSAGES',value:msgCount,     color:'#22c55e'},
+            {label:'FILES',   value:fileCount,    color:'#3b82f6'},
+            {label:'MESSAGES',value:msgCount,     color:'#a855f7'},
             {label:'TOKENS',  value:totalTokens>0?`${(totalTokens/1000).toFixed(1)}K`:0, color:'#f59e0b'},
-            {label:'COST',    value:`$${totalCost.toFixed(4)}`, color:'#ef4444'},
+            {label:'COST',    value:`$${totalCost.toFixed(4)}`, color:'#22c55e'},
           ].map(stat => (
             <View key={stat.label} style={s.statBox}>
               <Text style={[s.statVal,{color:stat.color}]}>{stat.value}</Text>
@@ -2601,7 +2597,7 @@ function UsagePanel({ roomId, accentColor }: { roomId: string; accentColor: stri
 
 // ─── Canvas Viewer (Miro-style sticky note whiteboard) ───────────────────────
 
-const STICKY_COLORS = ['#fbbf24','#34d399','#60a5fa','#f472b6','#a78bfa','#fb923c','#f87171','#fff'];
+const STICKY_COLORS = ['#fde68a','#bbf7d0','#bfdbfe','#e9d5ff','#fecaca','#fed7aa','#99f6e4','#fff'];
 
 function CanvasViewer({ file, onEdit }: { file: RoomFile; onEdit: (v: string) => void }) {
   const parseNotes = (content: string): StickyNote[] => {
@@ -2610,7 +2606,7 @@ function CanvasViewer({ file, onEdit }: { file: RoomFile; onEdit: (v: string) =>
   };
 
   const [notes, setNotes] = useState<StickyNote[]>(() => parseNotes(file.content));
-  const [nextColor, setNextColor] = useState('#fbbf24');
+  const [nextColor, setNextColor] = useState('#d0d0d0');
   const [brainstorm, setBrainstorm] = useState('');
   const [showBrainstorm, setShowBrainstorm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -2688,7 +2684,7 @@ function CanvasViewer({ file, onEdit }: { file: RoomFile; onEdit: (v: string) =>
       'Simplest possible version',
       'Riskiest assumption to test first',
     ];
-    const colors = ['#fbbf24','#34d399','#60a5fa','#f472b6','#a78bfa','#fb923c'];
+    const colors = ['#fde68a','#bbf7d0','#bfdbfe','#e9d5ff','#fecaca','#fed7aa'];
     setNotes(prev => {
       const newNotes: StickyNote[] = IDEAS.map((idea, i) => ({
         id: Date.now().toString() + i,
@@ -2706,7 +2702,7 @@ function CanvasViewer({ file, onEdit }: { file: RoomFile; onEdit: (v: string) =>
   }, [brainstorm, save]);
 
   return (
-    <View style={{ flex: 1, backgroundColor: '#0a0f1a' }}>
+    <View style={{ flex: 1, backgroundColor: '#0a0a0a' }}>
       {/* Canvas toolbar */}
       <View style={cvSt.toolbar}>
         <Text style={cvSt.toolbarTitle}>Canvas</Text>
@@ -2720,8 +2716,8 @@ function CanvasViewer({ file, onEdit }: { file: RoomFile; onEdit: (v: string) =>
           <Text style={{ color: nextColor, fontSize: 11, fontWeight: '800' }}>+ Note</Text>
         </Pressable>
         <Pressable onPress={() => setShowBrainstorm(p => !p)}
-          style={[cvSt.toolbarBtn, { backgroundColor: '#8b5cf620', borderColor: '#8b5cf650' }]}>
-          <Text style={{ color: '#a78bfa', fontSize: 11, fontWeight: '800' }}>Brainstorm</Text>
+          style={[cvSt.toolbarBtn, { backgroundColor: '#ffffff10', borderColor: '#ffffff25' }]}>
+          <Text style={{ color: '#9e9e9e', fontSize: 11, fontWeight: '800' }}>Brainstorm</Text>
         </Pressable>
         <Text style={cvSt.noteCount}>{notes.length} notes</Text>
       </View>
@@ -2737,7 +2733,7 @@ function CanvasViewer({ file, onEdit }: { file: RoomFile; onEdit: (v: string) =>
           />
           <Pressable onPress={generateBrainstorm} disabled={!brainstorm.trim()}
             style={[cvSt.brainstormBtn, { opacity: brainstorm.trim() ? 1 : 0.4 }]}>
-            <Text style={{ color: '#a78bfa', fontSize: 12, fontWeight: '800' }}>Generate</Text>
+            <Text style={{ color: '#9e9e9e', fontSize: 12, fontWeight: '800' }}>Generate</Text>
           </Pressable>
         </View>
       )}
@@ -2851,9 +2847,9 @@ const cvSt = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 8,
     paddingHorizontal: 12, paddingVertical: 8,
     borderBottomWidth: 1, borderBottomColor: '#2a2a2a',
-    backgroundColor: '#080d1a', flexWrap: 'wrap',
+    backgroundColor: '#0a0a0a', flexWrap: 'wrap',
   },
-  toolbarTitle: { color: '#a78bfa', fontSize: 12, fontWeight: '800', letterSpacing: 0.5 },
+  toolbarTitle: { color: '#9e9e9e', fontSize: 12, fontWeight: '800', letterSpacing: 0.5 },
   colorRow: { flexDirection: 'row', gap: 5, alignItems: 'center' },
   colorDot: {
     width: 16, height: 16, borderRadius: 8, borderWidth: 2, borderColor: 'transparent',
@@ -2861,21 +2857,21 @@ const cvSt = StyleSheet.create({
   },
   colorDotActive: { borderColor: '#fff', transform: [{ scale: 1.2 }] },
   toolbarBtn: {
-    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, borderWidth: 1,
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12, borderWidth: 1,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   noteCount: { color: '#555', fontSize: 10, marginLeft: 'auto' as any },
   brainstormRow: {
     flexDirection: 'row', gap: 8, padding: 10,
-    borderBottomWidth: 1, borderBottomColor: '#2a2a2a', backgroundColor: '#080d1a',
+    borderBottomWidth: 1, borderBottomColor: '#2a2a2a', backgroundColor: '#0a0a0a',
   },
   brainstormInput: {
-    flex: 1, backgroundColor: '#000000', borderWidth: 1, borderColor: '#8b5cf640',
-    borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, color: '#fff', fontSize: 13,
+    flex: 1, backgroundColor: '#000000', borderWidth: 1, borderColor: '#ffffff20',
+    borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, color: '#fff', fontSize: 13,
   },
   brainstormBtn: {
-    paddingHorizontal: 14, paddingVertical: 8, backgroundColor: '#8b5cf620',
-    borderRadius: 8, borderWidth: 1, borderColor: '#8b5cf650',
+    paddingHorizontal: 14, paddingVertical: 8, backgroundColor: '#ffffff10',
+    borderRadius: 12, borderWidth: 1, borderColor: '#ffffff25',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   emptyCanvas: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 120 },
@@ -2884,7 +2880,7 @@ const cvSt = StyleSheet.create({
   stickyNote: {
     position: 'absolute',
     width: 180, minHeight: 130,
-    borderRadius: 4, padding: 10,
+    borderRadius: 12, padding: 10,
     shadowColor: '#000', shadowOffset: { width: 2, height: 4 }, shadowOpacity: 0.4, shadowRadius: 6,
     elevation: 4,
     ...(Platform.OS === 'web' ? { cursor: 'grab', userSelect: 'none', boxShadow: '2px 4px 12px rgba(0,0,0,0.4)' } as any : {}),
@@ -2912,7 +2908,7 @@ const cvSt = StyleSheet.create({
 
 // ─── Playground Panel (Langfuse-style prompt tester) ─────────────────────────
 
-const VARIANT_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444'];
+const VARIANT_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ec4899'];
 
 const PLAYGROUND_MODELS = [
   { id: 'claude-opus-4-6',     label: 'Claude Opus 4.6',    provider: 'Anthropic' },
@@ -3273,41 +3269,41 @@ function PlaygroundPanel({ roomId, accentColor, activeFile, circleId }: {
 
 const pgSt = StyleSheet.create({
   headerBtn: {
-    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8,
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12,
     backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#333',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   headerBtnText: { color: '#888', fontSize: 11, fontWeight: '700' },
-  runBtn: { paddingHorizontal: 16, paddingVertical: 7, borderRadius: 8,
+  runBtn: { paddingHorizontal: 16, paddingVertical: 7, borderRadius: 12,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
   runBtnText: { color: '#fff', fontSize: 12, fontWeight: '800', letterSpacing: 0.3 },
   sectionLabel: { color: '#555', fontSize: 9, fontWeight: '800', letterSpacing: 1, marginBottom: 8 },
-  varSection: { backgroundColor: '#0d0d0d', borderRadius: 8, padding: 10, borderWidth: 1, borderColor: '#000000', gap: 6 },
+  varSection: { backgroundColor: '#0d0d0d', borderRadius: 12, padding: 10, borderWidth: 1, borderColor: '#000000', gap: 6 },
   varRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  varName: { color: '#a78bfa', fontSize: 11, fontFamily: MONO, fontWeight: '700', width: 90 },
-  varInput: { flex: 1, backgroundColor: '#111', borderWidth: 1, borderColor: '#222', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5, color: '#fff', fontSize: 12 },
+  varName: { color: '#9e9e9e', fontSize: 11, fontFamily: MONO, fontWeight: '700', width: 90 },
+  varInput: { flex: 1, backgroundColor: '#111', borderWidth: 1, borderColor: '#222', borderRadius: 12, paddingHorizontal: 8, paddingVertical: 5, color: '#fff', fontSize: 12 },
   variantsRow: { flexDirection: 'column', gap: 10 },
-  variantCard: { backgroundColor: '#0d0d0d', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#2a2a2a', gap: 8 },
+  variantCard: { backgroundColor: '#0d0d0d', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#2a2a2a', gap: 8 },
   variantHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
   variantLabel: { color: '#fff', fontSize: 12, fontWeight: '800', flex: 1 },
-  modelBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#111', borderWidth: 1, borderColor: '#333', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4,
+  modelBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#111', borderWidth: 1, borderColor: '#333', borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
   modelBtnText: { color: '#aaa', fontSize: 10, fontFamily: MONO },
-  modelDropdown: { backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 8, overflow: 'hidden', marginBottom: 4 },
+  modelDropdown: { backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 12, overflow: 'hidden', marginBottom: 4 },
   modelGroupHeader: { paddingHorizontal: 12, paddingTop: 10, paddingBottom: 4, backgroundColor: '#0f0f0f', borderBottomWidth: 1, borderBottomColor: '#000000' },
   modelGroupLabel: { color: '#444', fontSize: 8, fontWeight: '900', letterSpacing: 1.5 },
   modelOption: { paddingHorizontal: 12, paddingVertical: 7, paddingLeft: 20, borderBottomWidth: 1, borderBottomColor: '#111',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
   modelOptionProvider: { color: '#555', fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
   modelOptionLabel: { color: '#ccc', fontSize: 12, fontWeight: '600' },
-  paramsSection: { backgroundColor: '#0a0a0a', borderRadius: 8, padding: 10, borderWidth: 1, borderColor: '#000000' },
+  paramsSection: { backgroundColor: '#0a0a0a', borderRadius: 12, padding: 10, borderWidth: 1, borderColor: '#000000' },
   paramsRow: { flexDirection: 'row', gap: 12 },
   paramBox: { flex: 1 },
   paramLabel: { color: '#555', fontSize: 9, fontWeight: '800', letterSpacing: 0.5, marginBottom: 6 },
-  paramInput: { backgroundColor: '#111', borderWidth: 1, borderColor: '#333', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5, color: '#fff', fontSize: 12, fontFamily: MONO },
+  paramInput: { backgroundColor: '#111', borderWidth: 1, borderColor: '#333', borderRadius: 12, paddingHorizontal: 8, paddingVertical: 5, color: '#fff', fontSize: 12, fontFamily: MONO },
   paramInputRow: { gap: 6 },
   paramPresets: { flexDirection: 'row', gap: 4, marginTop: 4 },
-  paramPresetBtn: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 4, borderWidth: 1, borderColor: '#222', backgroundColor: '#111',
+  paramPresetBtn: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12, borderWidth: 1, borderColor: '#222', backgroundColor: '#111',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
   paramPresetText: { color: '#666', fontSize: 9, fontWeight: '700', fontFamily: MONO },
   promptSection: { gap: 4 },
@@ -3315,7 +3311,7 @@ const pgSt = StyleSheet.create({
   promptDivider: { height: 1, backgroundColor: '#000000', marginVertical: 2 },
   fieldLabel: { color: '#555', fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
   promptInput: {
-    backgroundColor: '#080d1a', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 8,
+    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 12,
     paddingHorizontal: 10, paddingVertical: 8, color: '#e6e6e6', fontSize: 13,
     lineHeight: 20, minHeight: 70, textAlignVertical: 'top',
   },
@@ -3367,7 +3363,7 @@ function SessionsPanel({ roomId, roomName, accentColor }: { roomId: string; room
   sessions.forEach(s => { if (s.agent_name) byAgent[s.agent_name] = (byAgent[s.agent_name] || 0) + 1; });
 
   const STATUS_COLORS_MAP: Record<string, string> = {
-    file_write: '#22c55e', file_read: '#6366f1', message: '#3b82f6',
+    file_write: '#22c55e', file_read: '#3b82f6', message: '#a855f7',
     agent_task: '#f59e0b', error: '#ef4444',
   };
 
@@ -3411,7 +3407,7 @@ function SessionsPanel({ roomId, roomName, accentColor }: { roomId: string; room
                 <Text style={[panelTabSt.logEvent, { color: STATUS_COLORS_MAP[e.event_type] || '#aaa' }]}>{e.event_type}</Text>
                 <Text style={panelTabSt.logTime}>{new Date(e.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</Text>
               </View>
-              {e.agent_name && <Text style={{ color: '#6366f1', fontSize: 11, fontFamily: MONO, marginBottom: 2 }}>{e.agent_name}</Text>}
+              {e.agent_name && <Text style={{ color: '#e8e8e8', fontSize: 11, fontFamily: MONO, marginBottom: 2 }}>{e.agent_name}</Text>}
               {e.metadata && Object.keys(e.metadata).length > 0 && (
                 <Text style={{ color: '#555', fontSize: 10, fontFamily: MONO }} numberOfLines={2}>
                   {JSON.stringify(e.metadata)}
@@ -3420,7 +3416,7 @@ function SessionsPanel({ roomId, roomName, accentColor }: { roomId: string; room
               {e.tokens > 0 && (
                 <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
                   <Text style={{ color: '#f59e0b', fontSize: 10 }}>{e.tokens} tokens</Text>
-                  <Text style={{ color: '#ef4444', fontSize: 10 }}>${parseFloat(String(e.cost_usd)).toFixed(6)}</Text>
+                  <Text style={{ color: '#22c55e', fontSize: 10 }}>${parseFloat(String(e.cost_usd)).toFixed(6)}</Text>
                 </View>
               )}
             </View>
@@ -3431,9 +3427,9 @@ function SessionsPanel({ roomId, roomName, accentColor }: { roomId: string; room
       {view === 'metrics' && (
         <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 14, gap: 12 }}>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-            <View style={s.statBox}><Text style={[s.statVal, { color: '#6366f1' }]}>{sessions.length}</Text><Text style={s.statLabel}>EVENTS</Text></View>
-            <View style={s.statBox}><Text style={[s.statVal, { color: '#f59e0b' }]}>{totalTokens > 0 ? `${(totalTokens/1000).toFixed(1)}K` : '0'}</Text><Text style={s.statLabel}>TOKENS</Text></View>
-            <View style={s.statBox}><Text style={[s.statVal, { color: '#ef4444' }]}>${totalCost.toFixed(4)}</Text><Text style={s.statLabel}>COST</Text></View>
+            <View style={s.statBox}><Text style={[s.statVal, { color: '#e8e8e8' }]}>{sessions.length}</Text><Text style={s.statLabel}>EVENTS</Text></View>
+            <View style={s.statBox}><Text style={[s.statVal, { color: '#9e9e9e' }]}>{totalTokens > 0 ? `${(totalTokens/1000).toFixed(1)}K` : '0'}</Text><Text style={s.statLabel}>TOKENS</Text></View>
+            <View style={s.statBox}><Text style={[s.statVal, { color: '#9e9e9e' }]}>${totalCost.toFixed(4)}</Text><Text style={s.statLabel}>COST</Text></View>
           </View>
 
           <Text style={s.apiLabel}>BY AGENT</Text>
@@ -3443,7 +3439,7 @@ function SessionsPanel({ roomId, roomName, accentColor }: { roomId: string; room
               <View key={name} style={{ marginBottom: 6 }}>
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 3 }}>
                   <Text style={{ color: '#aaa', fontSize: 12 }}>{name}</Text>
-                  <Text style={{ color: '#6366f1', fontSize: 12, fontWeight: '700' }}>{count}</Text>
+                  <Text style={{ color: '#e8e8e8', fontSize: 12, fontWeight: '700' }}>{count}</Text>
                 </View>
                 <View style={{ height: 4, backgroundColor: '#000000', borderRadius: 2 }}>
                   <View style={{ height: 4, borderRadius: 2, backgroundColor: accentColor,
@@ -3481,7 +3477,7 @@ function ServicesPanel({ roomId, accentColor }: { roomId: string; accentColor: s
 
   const SERVICE_TYPES: RoomService['type'][] = ['agent', 'tool', 'webhook', 'scheduled'];
   const STATUS_COLOR: Record<RoomService['status'], string> = {
-    running: '#22c55e', stopped: '#6b7280', error: '#ef4444', deploying: '#f59e0b',
+    running: '#22c55e', stopped: '#6f6f6f', error: '#ef4444', deploying: '#f59e0b',
   };
 
   useEffect(() => {
@@ -3565,8 +3561,8 @@ function ServicesPanel({ roomId, accentColor }: { roomId: string; accentColor: s
             {svc.description && <Text style={{ color: '#666', fontSize: 11, marginBottom: 6 }}>{svc.description}</Text>}
             <View style={{ flexDirection: 'row', gap: 8 }}>
               <Pressable onPress={() => toggleService(svc.id)}
-                style={[panelTabSt.svcBtn, { backgroundColor: svc.status === 'running' ? '#ef444420' : '#22c55e20',
-                  borderColor: svc.status === 'running' ? '#ef444450' : '#22c55e50' }]}>
+                style={[panelTabSt.svcBtn, { backgroundColor: svc.status === 'running' ? '#ffffff10' : '#ffffff10',
+                  borderColor: svc.status === 'running' ? '#ffffff25' : '#ffffff25' }]}>
                 <Text style={{ color: svc.status === 'running' ? '#ef4444' : '#22c55e', fontSize: 11, fontWeight: '700' }}>
                   {svc.status === 'running' ? 'Stop' : 'Start'}
                 </Text>
@@ -3617,7 +3613,7 @@ function PermissionsPanel({ roomId, accentColor }: { roomId: string; accentColor
   }, [roomId]);
 
   const ROLE_COLOR: Record<string, string> = {
-    owner: '#f59e0b', admin: '#6366f1', member: '#22c55e', viewer: '#6b7280',
+    owner: '#f59e0b', admin: '#6366f1', member: '#22c55e', viewer: '#6f6f6f',
   };
 
   const togglePermission = (userId: string, perm: Permission) => {
@@ -3866,7 +3862,7 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
           const tt = TASK_TYPE_MAP[task.taskType] || TASK_TYPE_MAP.general;
           const isRunning = runningTaskId === task.id || task.status === 'running';
           const statusDotColor = isRunning ? '#f59e0b' : task.status === 'done' ? '#22c55e'
-            : task.status === 'error' ? '#ef4444' : task.enabled ? '#6366f1' : '#6b7280';
+            : task.status === 'error' ? '#ef4444' : task.enabled ? '#3b82f6' : '#6f6f6f';
           const resultPreview = task.lastResult?.preview
             || task.lastResult?.error
             || (task.lastResult ? JSON.stringify(task.lastResult).slice(0, 120) : null);
@@ -3883,13 +3879,13 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
                 </View>
               </View>
               <Text style={{ color: '#666', fontSize: 11, marginBottom: 4 }} numberOfLines={2}>{task.prompt}</Text>
-              <Text style={{ color: '#6366f1', fontSize: 10, marginBottom: 4, fontFamily: MONO }}>
+              <Text style={{ color: '#e8e8e8', fontSize: 10, marginBottom: 4, fontFamily: MONO }}>
                 {'\u2192'} {task.agent}
                 {task.status !== 'idle' && <Text style={{ color: statusDotColor }}> {'\u00B7'} {task.status.toUpperCase()}</Text>}
               </Text>
               {resultPreview && (
-                <View style={{ backgroundColor: '#0a0a12', borderRadius: 4, padding: 8, marginBottom: 6,
-                  borderWidth: 1, borderColor: task.lastResult?.error ? '#ef444430' : '#1a1a2e' }}>
+                <View style={{ backgroundColor: '#0a0a0a', borderRadius: 12, padding: 8, marginBottom: 6,
+                  borderWidth: 1, borderColor: task.lastResult?.error ? '#ffffff15' : '#161616' }}>
                   <Text style={{ color: task.lastResult?.error ? '#ef4444' : '#888', fontSize: 10, fontFamily: MONO }} numberOfLines={2}>
                     {resultPreview}
                   </Text>
@@ -3902,15 +3898,15 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
               )}
               <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
                 <Pressable onPress={() => runTask(task)} disabled={isRunning}
-                  style={[panelTabSt.svcBtn, { backgroundColor: isRunning ? '#f59e0b18' : accentColor + '20',
-                    borderColor: isRunning ? '#f59e0b40' : accentColor + '50', opacity: isRunning ? 0.6 : 1 }]}>
+                  style={[panelTabSt.svcBtn, { backgroundColor: isRunning ? '#ffffff08' : accentColor + '20',
+                    borderColor: isRunning ? '#ffffff20' : accentColor + '50', opacity: isRunning ? 0.6 : 1 }]}>
                   <Text style={{ color: isRunning ? '#f59e0b' : accentColor, fontSize: 11, fontWeight: '700', fontFamily: MONO }}>
                     {isRunning ? '... RUNNING' : '\u25B6 RUN'}
                   </Text>
                 </Pressable>
                 <Pressable onPress={() => toggleTask(task.id)}
-                  style={[panelTabSt.svcBtn, { backgroundColor: task.enabled ? '#ef444420' : '#22c55e20',
-                    borderColor: task.enabled ? '#ef444450' : '#22c55e50' }]}>
+                  style={[panelTabSt.svcBtn, { backgroundColor: task.enabled ? '#ffffff10' : '#ffffff10',
+                    borderColor: task.enabled ? '#ffffff25' : '#ffffff25' }]}>
                   <Text style={{ color: task.enabled ? '#ef4444' : '#22c55e', fontSize: 11, fontWeight: '700' }}>
                     {task.enabled ? 'Disable' : 'Enable'}
                   </Text>
@@ -3929,27 +3925,27 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
 
 // ─── Shared panel sub-styles ──────────────────────────────────────────────────
 const panelTabSt = StyleSheet.create({
-  tab: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: '#222', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
+  tab: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, borderWidth: 1, borderColor: '#222', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
   tabText: { color: '#666', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
-  filterInput: { flex: 1, backgroundColor: '#111', borderWidth: 1, borderColor: '#222', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, color: '#fff', fontSize: 11 },
+  filterInput: { flex: 1, backgroundColor: '#111', borderWidth: 1, borderColor: '#222', borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4, color: '#fff', fontSize: 11 },
   empty: { color: '#444', fontSize: 12, textAlign: 'center', fontStyle: 'italic', marginTop: 24, marginBottom: 8 },
   logRow: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 5, borderBottomWidth: 1, borderBottomColor: '#111' },
   logDot: { width: 6, height: 6, borderRadius: 3 },
   logEvent: { color: '#888', fontSize: 11, fontFamily: MONO, flex: 1 },
-  logAgent: { color: '#6366f1', fontSize: 10, fontWeight: '700' },
-  logTokens: { color: '#f59e0b', fontSize: 10 },
+  logAgent: { color: '#e8e8e8', fontSize: 10, fontWeight: '700' },
+  logTokens: { color: '#9e9e9e', fontSize: 10 },
   logTime: { color: '#444', fontSize: 10 },
-  traceRow: { backgroundColor: '#0d0d0d', borderRadius: 8, padding: 10, borderWidth: 1, borderColor: '#000000' },
+  traceRow: { backgroundColor: '#0d0d0d', borderRadius: 12, padding: 10, borderWidth: 1, borderColor: '#000000' },
   addBox: { backgroundColor: '#0d0d0d', borderBottomWidth: 1, borderBottomColor: '#000000', padding: 14 },
-  serviceRow: { backgroundColor: '#0d0d0d', borderRadius: 8, padding: 12, borderWidth: 1, borderColor: '#000000' },
+  serviceRow: { backgroundColor: '#0d0d0d', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#000000' },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
-  typeBadge: { backgroundColor: '#000000', paddingHorizontal: 6, paddingVertical: 3, borderRadius: 4, borderWidth: 1, borderColor: '#2a2a2a' },
-  svcBtn: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, borderWidth: 1, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
-  miniTab: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: '#222', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
+  typeBadge: { backgroundColor: '#000000', paddingHorizontal: 6, paddingVertical: 3, borderRadius: 12, borderWidth: 1, borderColor: '#2a2a2a' },
+  svcBtn: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12, borderWidth: 1, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
+  miniTab: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12, borderWidth: 1, borderColor: '#222', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
   memberRow: { borderBottomWidth: 1, borderBottomColor: '#111' },
   memberAvatar: { width: 28, height: 28, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
-  roleBadge: { paddingHorizontal: 6, paddingVertical: 3, borderRadius: 4, borderWidth: 1 },
-  permBadge: { paddingHorizontal: 6, paddingVertical: 3, borderRadius: 4, borderWidth: 1, borderColor: '#222', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
+  roleBadge: { paddingHorizontal: 6, paddingVertical: 3, borderRadius: 12, borderWidth: 1 },
+  permBadge: { paddingHorizontal: 6, paddingVertical: 3, borderRadius: 12, borderWidth: 1, borderColor: '#222', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
 });
 
 // ─── GitHub Panel ─────────────────────────────────────────────────────────────
@@ -4133,7 +4129,7 @@ function GitHubPanel({ circleId, accentColor, ghConnected, ghUser, ghRepo,
         <Text style={{fontSize:14}}>🐙</Text>
         <Text style={{color:'#fff',fontSize:12,fontWeight:'700',flex:1}}>{ghUser?.login}</Text>
         <Pressable onPress={handleDisconnect} style={ghSt.disconnectBtn}>
-          <Text style={{color:'#ef4444',fontSize:10,fontWeight:'700'}}>Disconnect</Text>
+          <Text style={{color:'#9e9e9e',fontSize:10,fontWeight:'700'}}>Disconnect</Text>
         </Pressable>
       </View>
 
@@ -4221,11 +4217,11 @@ function GitHubPanel({ circleId, accentColor, ghConnected, ghUser, ghRepo,
 const ghSt = StyleSheet.create({
   label: { color:'#888', fontSize:11, fontWeight:'700', marginBottom:6 },
   input: {
-    backgroundColor:'#111', borderWidth:1, borderColor:'#222', borderRadius:8,
+    backgroundColor:'#111', borderWidth:1, borderColor:'#222', borderRadius:12,
     padding:12, color:'#fff', fontSize:13, fontFamily:MONO,
   },
   connectBtn: {
-    marginTop:16, paddingVertical:12, borderRadius:10, alignItems:'center',
+    marginTop:16, paddingVertical:12, borderRadius:12, alignItems:'center',
     ...(Platform.OS === 'web' ? { cursor:'pointer' } as any : {}),
   },
   connectText: { color:'#fff', fontSize:13, fontWeight:'700' },
@@ -4234,7 +4230,7 @@ const ghSt = StyleSheet.create({
     borderBottomWidth:1, borderBottomColor:'#000000',
   },
   disconnectBtn: {
-    paddingHorizontal:8, paddingVertical:4, borderRadius:6, backgroundColor:'#ef444420',
+    paddingHorizontal:8, paddingVertical:4, borderRadius:12, backgroundColor:'#ffffff10',
     ...(Platform.OS === 'web' ? { cursor:'pointer' } as any : {}),
   },
   activeRepo: {
@@ -4242,18 +4238,18 @@ const ghSt = StyleSheet.create({
     borderBottomWidth:1, borderBottomColor:'#000000',
   },
   closeRepoBtn: {
-    paddingHorizontal:6, paddingVertical:3, borderRadius:4, backgroundColor:'#ffffff10',
+    paddingHorizontal:6, paddingVertical:3, borderRadius:12, backgroundColor:'#ffffff10',
     ...(Platform.OS === 'web' ? { cursor:'pointer' } as any : {}),
   },
   filterInput: {
-    backgroundColor:'#111', borderWidth:1, borderColor:'#222', borderRadius:6,
+    backgroundColor:'#111', borderWidth:1, borderColor:'#222', borderRadius:12,
     paddingHorizontal:10, paddingVertical:6, color:'#fff', fontSize:11, fontFamily:MONO,
   },
   repoRow: {
     padding:10, borderBottomWidth:1, borderBottomColor:'#111', gap:2,
   },
   langChip: {
-    paddingHorizontal:5, paddingVertical:1, borderRadius:4,
+    paddingHorizontal:5, paddingVertical:1, borderRadius:12,
   },
 });
 
@@ -4307,18 +4303,18 @@ function GitHubFolderSection({ folder, entries, activeTabId, loadingPath, onOpen
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
-  container: { flex:1, backgroundColor:'#050508' },
+  container: { flex:1, backgroundColor:'#000000' },
   dragging: { opacity:0.85 },
-  center: { flex:1, justifyContent:'center', alignItems:'center', backgroundColor:'#050508' },
-  loadingText: { color:'#666680', marginTop:8, fontSize:12, fontFamily:MONO },
+  center: { flex:1, justifyContent:'center', alignItems:'center', backgroundColor:'#000000' },
+  loadingText: { color:'#6f6f6f', marginTop:8, fontSize:12, fontFamily:MONO },
 
   // List header
   listHeader: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', paddingHorizontal:20, paddingVertical:14, borderBottomWidth:1, borderBottomColor:'#2a2a2a' },
   listTitle: { color:'#fff', fontSize:16, fontWeight:'900', fontFamily:MONO, letterSpacing:3, textTransform:'uppercase' as any },
-  listSub: { color:'#666680', fontSize:11, fontFamily:MONO, marginTop:2 },
+  listSub: { color:'#6f6f6f', fontSize:11, fontFamily:MONO, marginTop:2 },
   list: { flex:1 },
   listContent: { padding:16 },
-  createBtn: { paddingHorizontal:14, paddingVertical:8, borderRadius:6, borderWidth:1, ...(Platform.OS==='web'?{cursor:'pointer',transition:'all 0.15s ease'} as any:{}) },
+  createBtn: { paddingHorizontal:14, paddingVertical:8, borderRadius:12, borderWidth:1, ...(Platform.OS==='web'?{cursor:'pointer',transition:'all 0.15s ease'} as any:{}) },
   createBtnText: { fontSize:12, fontWeight:'700', fontFamily:MONO },
 
   // Grid
@@ -4326,69 +4322,69 @@ const s = StyleSheet.create({
   gridMobile: { flexDirection:'column' },
 
   // Room Card
-  card: { backgroundColor:'#161618', borderWidth:1, borderColor:'#2a2a2a', borderRadius:10, padding:16, minWidth:260, maxWidth:420, flex:1, ...(Platform.OS==='web'?{cursor:'pointer',transition:'all 0.2s ease'} as any:{}) },
+  card: { backgroundColor:'#161616', borderWidth:1, borderColor:'#2a2a2a', borderRadius:12, padding:16, minWidth:260, maxWidth:420, flex:1, ...(Platform.OS==='web'?{cursor:'pointer',transition:'all 0.2s ease'} as any:{}) },
   cardMobile: { maxWidth:'100%' as any },
   cardHeader: { flexDirection:'row', alignItems:'center', marginBottom:10, gap:8 },
   cardIcon: { fontSize:16, fontFamily:MONO },
   cardName: { color:'#fff', fontSize:14, fontWeight:'700', fontFamily:MONO, flex:1 },
-  cardPath: { color:'#666680', fontSize:11, fontFamily:MONO, marginBottom:6, backgroundColor:'#ffffff06', paddingHorizontal:6, paddingVertical:2, borderRadius:4, alignSelf:'flex-start' as any },
-  cardDesc: { color:'#555568', fontSize:11, fontFamily:MONO, marginBottom:10, lineHeight:16 },
+  cardPath: { color:'#6f6f6f', fontSize:11, fontFamily:MONO, marginBottom:6, backgroundColor:'#ffffff06', paddingHorizontal:6, paddingVertical:2, borderRadius:12, alignSelf:'flex-start' as any },
+  cardDesc: { color:'#555555', fontSize:11, fontFamily:MONO, marginBottom:10, lineHeight:16 },
   cardFooter: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginBottom:8, paddingTop:8, borderTopWidth:1, borderTopColor:'#000000' },
-  cardTime: { color:'#444460', fontSize:10, fontFamily:MONO },
-  cardFiles: { backgroundColor:'#ffffff08', paddingHorizontal:8, paddingVertical:3, borderRadius:6, borderWidth:1, borderColor:'#2a2a2a' },
-  cardFilesText: { color:'#666680', fontSize:10, fontFamily:MONO },
+  cardTime: { color:'#444444', fontSize:10, fontFamily:MONO },
+  cardFiles: { backgroundColor:'#ffffff08', paddingHorizontal:8, paddingVertical:3, borderRadius:12, borderWidth:1, borderColor:'#2a2a2a' },
+  cardFilesText: { color:'#6f6f6f', fontSize:10, fontFamily:MONO },
   cardDelete: { paddingHorizontal:6, paddingVertical:2, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
   cardDeleteText: { fontSize:12, fontFamily:MONO, fontWeight:'700', color:'#ef444460' },
   cardApiBadges: { flexDirection:'row', gap:6 },
-  cardApiBadge: { fontSize:10, fontFamily:MONO, color:'#555568' },
+  cardApiBadge: { fontSize:10, fontFamily:MONO, color:'#555555' },
 
   // Lang badge — pixel
-  langBadge: { paddingHorizontal:6, paddingVertical:3, borderRadius:2, borderWidth:2 },
+  langBadge: { paddingHorizontal:6, paddingVertical:3, borderRadius:12, borderWidth:2 },
   langBadgeText: { fontSize:9, fontWeight:'900', fontFamily:MONO, letterSpacing:1 },
 
   // Empty state — pixel
   empty: { alignItems:'center', paddingVertical:48 },
-  emptyIcon: { fontSize:32, fontFamily:MONO, fontWeight:'900', color:'#333348', marginBottom:12 },
-  emptyTitle: { color:'#c0c0d0', fontSize:16, fontWeight:'900', fontFamily:MONO, marginBottom:8, letterSpacing:1 },
-  emptySub: { color:'#666680', fontSize:12, fontFamily:MONO, textAlign:'center', maxWidth:280, marginBottom:20, lineHeight:18 },
-  emptyBtn: { paddingHorizontal:16, paddingVertical:10, borderRadius:2, borderWidth:2, borderColor:'#ffffff20' },
+  emptyIcon: { fontSize:32, fontFamily:MONO, fontWeight:'900', color:'#333333', marginBottom:12 },
+  emptyTitle: { color:'#c0c0c0', fontSize:16, fontWeight:'900', fontFamily:MONO, marginBottom:8, letterSpacing:1 },
+  emptySub: { color:'#6f6f6f', fontSize:12, fontFamily:MONO, textAlign:'center', maxWidth:280, marginBottom:20, lineHeight:18 },
+  emptyBtn: { paddingHorizontal:16, paddingVertical:10, borderRadius:12, borderWidth:2, borderColor:'#ffffff20' },
   emptyBtnText: { color:'#fff', fontSize:13, fontWeight:'700', fontFamily:MONO },
-  emptyText: { color:'#333348', fontSize:12, fontFamily:MONO },
+  emptyText: { color:'#333333', fontSize:12, fontFamily:MONO },
 
   // Modal — pixel borders
   overlay: { flex:1, backgroundColor:'rgba(0,0,0,0.85)', justifyContent:'center', alignItems:'center' },
-  modalBox: { backgroundColor:'#222222', borderWidth:2, borderColor:'#333333', borderRadius:2, padding:20, width:'90%', maxWidth:540, maxHeight:'90%', ...(Platform.OS==='web'?{boxShadow:'6px 6px 0px #050508'} as any:{}) },
+  modalBox: { backgroundColor:'#222222', borderWidth:2, borderColor:'#333333', borderRadius:16, padding:20, width:'90%', maxWidth:540, maxHeight:'90%', ...(Platform.OS==='web'?{boxShadow:'6px 6px 0px #000000'} as any:{}) },
   modalTitle: { color:'#fff', fontSize:16, fontWeight:'900', fontFamily:MONO, letterSpacing:1, marginBottom:4 },
-  modalSub: { color:'#666680', fontSize:11, fontFamily:MONO, marginBottom:16, lineHeight:16 },
-  label: { color:'#666680', fontSize:10, fontWeight:'700', fontFamily:MONO, marginBottom:6, marginTop:12, letterSpacing:1, textTransform:'uppercase' as any },
-  input: { backgroundColor:'#050508', borderWidth:2, borderColor:'#333333', borderRadius:2, paddingHorizontal:12, paddingVertical:10, color:'#fff', fontSize:13, fontFamily:MONO },
+  modalSub: { color:'#6f6f6f', fontSize:11, fontFamily:MONO, marginBottom:16, lineHeight:16 },
+  label: { color:'#6f6f6f', fontSize:10, fontWeight:'700', fontFamily:MONO, marginBottom:6, marginTop:12, letterSpacing:1, textTransform:'uppercase' as any },
+  input: { backgroundColor:'#000000', borderWidth:2, borderColor:'#333333', borderRadius:12, paddingHorizontal:12, paddingVertical:10, color:'#fff', fontSize:13, fontFamily:MONO },
   langPicker: { marginBottom:4 },
-  langOpt: { paddingHorizontal:10, paddingVertical:6, borderRadius:2, borderWidth:2, borderColor:'#2a2a2a', marginRight:6, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
-  langOptText: { color:'#666680', fontSize:11, fontWeight:'700', fontFamily:MONO },
+  langOpt: { paddingHorizontal:10, paddingVertical:6, borderRadius:12, borderWidth:2, borderColor:'#2a2a2a', marginRight:6, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
+  langOptText: { color:'#6f6f6f', fontSize:11, fontWeight:'700', fontFamily:MONO },
   modalActions: { flexDirection:'row', justifyContent:'flex-end', gap:8, marginTop:16 },
-  cancelBtn: { paddingHorizontal:14, paddingVertical:8, borderRadius:2 },
-  cancelText: { color:'#666680', fontSize:13, fontWeight:'600', fontFamily:MONO },
-  submitBtn: { paddingHorizontal:16, paddingVertical:8, borderRadius:2, borderWidth:2, borderColor:'#ffffff20' },
+  cancelBtn: { paddingHorizontal:14, paddingVertical:8, borderRadius:12 },
+  cancelText: { color:'#6f6f6f', fontSize:13, fontWeight:'600', fontFamily:MONO },
+  submitBtn: { paddingHorizontal:16, paddingVertical:8, borderRadius:12, borderWidth:2, borderColor:'#ffffff20' },
   submitText: { color:'#fff', fontSize:13, fontWeight:'700', fontFamily:MONO },
 
   // Detail Top Bar
   detailBar: { flexDirection:'row', alignItems:'center', paddingHorizontal:14, paddingVertical:8, borderBottomWidth:1, borderBottomColor:'#2a2a2a', gap:10, backgroundColor:'#0d0d0d' },
-  backBtn: { paddingHorizontal:10, paddingVertical:6, borderRadius:8, backgroundColor:'#ffffff08', ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
+  backBtn: { paddingHorizontal:10, paddingVertical:6, borderRadius:12, backgroundColor:'#ffffff08', ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
   backText: { color:'#888', fontSize:13, fontWeight:'600' },
   detailName: { color:'#fff', fontSize:15, fontWeight:'700', flex:1 },
   detailActions: { flexDirection:'row', gap:6 },
-  barBtn: { paddingHorizontal:10, paddingVertical:5, borderRadius:6, borderWidth:1, borderColor:'#333', ...(Platform.OS==='web'?{cursor:'pointer',transition:'all 0.15s ease'} as any:{}) },
+  barBtn: { paddingHorizontal:10, paddingVertical:5, borderRadius:12, borderWidth:1, borderColor:'#333', ...(Platform.OS==='web'?{cursor:'pointer',transition:'all 0.15s ease'} as any:{}) },
 
   // Right Panel Tabs
   rightPanelTabs: { flexDirection:'row', paddingHorizontal:8, paddingVertical:6, gap:4, borderBottomWidth:1, borderBottomColor:'#2a2a2a', backgroundColor:'#111' },
-  rpTab: { paddingHorizontal:10, paddingVertical:5, borderRadius:6, borderWidth:1, borderColor:'#222', ...(Platform.OS==='web'?{cursor:'pointer',transition:'all 0.15s ease'} as any:{}) },
+  rpTab: { paddingHorizontal:10, paddingVertical:5, borderRadius:12, borderWidth:1, borderColor:'#222', ...(Platform.OS==='web'?{cursor:'pointer',transition:'all 0.15s ease'} as any:{}) },
   rpTabText: { color:'#888', fontSize:11, fontWeight:'600' },
 
   // Body
   body: { flex:1, flexDirection:'row' },
 
   // Sidebar
-  sidebar: { width:210, borderRightWidth:1, borderRightColor:'#2a2a2a', backgroundColor:'#0a0a0c' },
+  sidebar: { width:210, borderRightWidth:1, borderRightColor:'#2a2a2a', backgroundColor:'#0a0a0a' },
   sidebarMobile: { width:160 },
   sidebarHeader: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', paddingHorizontal:12, paddingVertical:10, borderBottomWidth:1, borderBottomColor:'#2a2a2a' },
   sidebarTitle: { color:'#555', fontSize:10, fontWeight:'800', letterSpacing:1 },
@@ -4410,7 +4406,7 @@ const s = StyleSheet.create({
   fileRowAction: { fontSize:12, color:'#888' },
 
   // Drop hint
-  dropHint: { padding:12, margin:10, borderRadius:8, borderWidth:1, borderColor:'#000000', borderStyle:'dashed', alignItems:'center' },
+  dropHint: { padding:12, margin:10, borderRadius:12, borderWidth:1, borderColor:'#000000', borderStyle:'dashed', alignItems:'center' },
   dropHintText: { color:'#555', fontSize:10, textAlign:'center' },
 
   // Editor Pane
@@ -4427,10 +4423,10 @@ const s = StyleSheet.create({
   fileToolbarPath: { color:'#888', fontSize:12, fontFamily:MONO, flex:1 },
   fileToolbarRight: { flexDirection:'row', alignItems:'center', gap:8 },
   fileToolbarMeta: { color:'#555', fontSize:11 },
-  fileAction: { paddingHorizontal:8, paddingVertical:3, borderRadius:6, backgroundColor:'#ffffff08', borderWidth:1, borderColor:'#222', ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
+  fileAction: { paddingHorizontal:8, paddingVertical:3, borderRadius:12, backgroundColor:'#ffffff08', borderWidth:1, borderColor:'#222', ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
   fileActionText: { color:'#888', fontSize:11, fontWeight:'600' },
-  tag: { backgroundColor:'#6366f120', paddingHorizontal:6, paddingVertical:2, borderRadius:4, borderWidth:1, borderColor:'#6366f140' },
-  tagText: { color:'#a5b4fc', fontSize:10, fontWeight:'600' },
+  tag: { backgroundColor:'#ffffff10', paddingHorizontal:6, paddingVertical:2, borderRadius:12, borderWidth:1, borderColor:'#ffffff20' },
+  tagText: { color:'#e8e8e8', fontSize:10, fontWeight:'600' },
 
   // No file
   noFile: { flex:1, justifyContent:'center', alignItems:'center', gap:8 },
@@ -4449,18 +4445,18 @@ const s = StyleSheet.create({
   mdH3: { color:'#ccc', fontSize:15, fontWeight:'700', marginBottom:3 },
   mdP: { color:'#bbb', fontSize:13, lineHeight:21 },
   mdLi: { color:'#bbb', fontSize:13, lineHeight:21, paddingLeft:8 },
-  mdQuote: { borderLeftWidth:3, borderLeftColor:'#6366f1', paddingLeft:12, backgroundColor:'#6366f108', paddingVertical:6, borderRadius:4, marginVertical:4 },
+  mdQuote: { borderLeftWidth:3, borderLeftColor:'#e8e8e8', paddingLeft:12, backgroundColor:'#ffffff05', paddingVertical:6, borderRadius:12, marginVertical:4 },
   mdQuoteText: { color:'#888', fontSize:13, fontStyle:'italic' },
 
   // CSV
   csvRow: { flexDirection:'row' },
   csvCell: { minWidth:100, paddingHorizontal:10, paddingVertical:6, borderBottomWidth:1, borderBottomColor:'#000000', borderRightWidth:1, borderRightColor:'#000000' },
-  csvHead: { backgroundColor:'#111827' },
-  csvHeadText: { color:'#a5b4fc', fontSize:12, fontWeight:'700', fontFamily:MONO },
+  csvHead: { backgroundColor:'#161616' },
+  csvHeadText: { color:'#e8e8e8', fontSize:12, fontWeight:'700', fontFamily:MONO },
   csvCellText: { color:'#ccc', fontSize:12, fontFamily:MONO },
 
   // Image
-  fileImage: { width:'100%' as any, maxWidth:700, height:380, borderRadius:8, backgroundColor:'#111' },
+  fileImage: { width:'100%' as any, maxWidth:700, height:380, borderRadius:12, backgroundColor:'#111' },
 
   // Resize handle
   resizeHandle: {
@@ -4489,26 +4485,26 @@ const s = StyleSheet.create({
   panel: { flex:1, backgroundColor:'#000000', flexDirection:'column' },
   panelHeader: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', paddingHorizontal:14, paddingVertical:10, borderBottomWidth:1, borderBottomColor:'#000000' },
   panelTitle: { color:'#fff', fontSize:13, fontWeight:'700', paddingHorizontal:14, paddingTop:12, paddingBottom:4 },
-  panelBtn: { paddingHorizontal:10, paddingVertical:5, borderRadius:8, borderWidth:1, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
+  panelBtn: { paddingHorizontal:10, paddingVertical:5, borderRadius:12, borderWidth:1, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
 
   // Chat
-  taskBox: { padding:12, backgroundColor:'#0d1a0d', borderBottomWidth:1, borderBottomColor:'#1a2a1a' },
-  taskInput: { backgroundColor:'#000000', borderWidth:1, borderColor:'#1a3a1a', borderRadius:8, paddingHorizontal:12, paddingVertical:8, color:'#fff', fontSize:13, minHeight:50 },
-  taskSubmit: { marginTop:8, alignSelf:'flex-end', backgroundColor:'#22c55e20', borderWidth:1, borderColor:'#22c55e60', paddingHorizontal:14, paddingVertical:6, borderRadius:8 },
+  taskBox: { padding:12, backgroundColor:'#0a0a0a', borderBottomWidth:1, borderBottomColor:'#1a1a1a' },
+  taskInput: { backgroundColor:'#000000', borderWidth:1, borderColor:'#1a1a1a', borderRadius:12, paddingHorizontal:12, paddingVertical:8, color:'#fff', fontSize:13, minHeight:50 },
+  taskSubmit: { marginTop:8, alignSelf:'flex-end', backgroundColor:'#ffffff10', borderWidth:1, borderColor:'#ffffff30', paddingHorizontal:14, paddingVertical:6, borderRadius:12 },
   msgList: { flex:1 },
   msgInputRow: { flexDirection:'row', alignItems:'center', padding:12, gap:8, borderTopWidth:1, borderTopColor:'#000000' },
-  msgInput: { flex:1, backgroundColor:'#111', borderWidth:1, borderColor:'#222', borderRadius:10, paddingHorizontal:12, paddingVertical:8, color:'#fff', fontSize:13 },
+  msgInput: { flex:1, backgroundColor:'#111', borderWidth:1, borderColor:'#222', borderRadius:12, paddingHorizontal:12, paddingVertical:8, color:'#fff', fontSize:13 },
   sendBtn: { width:36, height:36, borderRadius:18, justifyContent:'center', alignItems:'center', ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
 
   // APIs
-  apiTab: { paddingHorizontal:10, paddingVertical:5, borderRadius:8, borderWidth:1, borderColor:'#222', marginRight:6, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
+  apiTab: { paddingHorizontal:10, paddingVertical:5, borderRadius:12, borderWidth:1, borderColor:'#222', marginRight:6, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
   apiTabText: { color:'#888', fontSize:11, fontWeight:'700' },
-  apiCard: { borderWidth:1, borderRadius:10, padding:12, backgroundColor:'#0d0d0d' },
+  apiCard: { borderWidth:1, borderRadius:12, padding:12, backgroundColor:'#0d0d0d' },
   apiCardTitle: { fontSize:14, fontWeight:'800', marginBottom:4 },
   apiCardDesc: { color:'#888', fontSize:12, lineHeight:18 },
   apiLabel: { color:'#555', fontSize:10, fontWeight:'800', letterSpacing:1 },
-  codeBlock: { backgroundColor:'#000000', borderRadius:8, padding:12, borderWidth:1, borderColor:'#2a2a2a' },
-  codeBlockText: { color:'#ce9178', fontSize:12, fontFamily:MONO, lineHeight:18 },
+  codeBlock: { backgroundColor:'#000000', borderRadius:12, padding:12, borderWidth:1, borderColor:'#2a2a2a' },
+  codeBlockText: { color:'#b5b5b5', fontSize:12, fontFamily:MONO, lineHeight:18 },
   integrationsSection: { padding:14, borderTopWidth:1, borderTopColor:'#000000', gap:8 },
   integrationBadge: { alignItems:'center', marginRight:10, gap:2 },
   integrationIcon: { fontSize:20 },
@@ -4516,21 +4512,21 @@ const s = StyleSheet.create({
 
   // Secrets
   secretRow: { flexDirection:'row', alignItems:'center', gap:8, paddingVertical:8, borderBottomWidth:1, borderBottomColor:'#000000' },
-  secretKey: { color:'#a5b4fc', fontSize:12, fontWeight:'700', fontFamily:MONO, flex:1 },
+  secretKey: { color:'#e8e8e8', fontSize:12, fontWeight:'700', fontFamily:MONO, flex:1 },
   secretVal: { color:'#555', fontSize:12, fontFamily:MONO, flex:1 },
 
   // Usage
-  statBox: { alignItems:'center', backgroundColor:'#111', borderRadius:10, padding:12, flex:1, minWidth:70, borderWidth:1, borderColor:'#000000' },
+  statBox: { alignItems:'center', backgroundColor:'#111', borderRadius:12, padding:12, flex:1, minWidth:70, borderWidth:1, borderColor:'#000000' },
   statVal: { fontSize:18, fontWeight:'900', fontFamily:MONO },
   statLabel: { color:'#555', fontSize:9, fontWeight:'800', letterSpacing:0.5, marginTop:2 },
   usageRow: { flexDirection:'row', alignItems:'center', gap:8, paddingVertical:6, borderBottomWidth:1, borderBottomColor:'#111' },
   usageEvent: { color:'#888', fontSize:11, fontFamily:MONO, flex:1 },
-  usageAgent: { color:'#6366f1', fontSize:11, fontWeight:'700' },
-  usageTokens: { color:'#f59e0b', fontSize:10 },
+  usageAgent: { color:'#e8e8e8', fontSize:11, fontWeight:'700' },
+  usageTokens: { color:'#9e9e9e', fontSize:10 },
   usageTime: { color:'#555', fontSize:10 },
 
   // Drop overlay
-  dropOverlay: { position:'absolute', top:0, left:0, right:0, bottom:0, backgroundColor:'rgba(99,102,241,0.15)', borderWidth:2, borderColor:'#6366f1', borderStyle:'dashed', justifyContent:'center', alignItems:'center', zIndex:100 },
+  dropOverlay: { position:'absolute', top:0, left:0, right:0, bottom:0, backgroundColor:'rgba(255,255,255,0.08)', borderWidth:2, borderColor:'#e8e8e8', borderStyle:'dashed', justifyContent:'center', alignItems:'center', zIndex:100 },
   dropOverlayText: { fontSize:64, marginBottom:8 },
-  dropOverlayLabel: { color:'#a5b4fc', fontSize:20, fontWeight:'800' },
+  dropOverlayLabel: { color:'#e8e8e8', fontSize:20, fontWeight:'800' },
 });

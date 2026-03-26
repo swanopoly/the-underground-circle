@@ -38,9 +38,9 @@ interface ProviderCard {
 
 const PROVIDERS: ProviderCard[] = [
   { type: 'openclaw',      icon: '🐾', label: 'OpenClaw',    tagline: 'Recommended — full control',   color: '#6366f1', defaultEndpoint: 'http://localhost:18790' },
-  { type: 'claude-code',   icon: '🤖', label: 'Claude Code', tagline: 'Anthropic\'s coding agent',     color: '#f59e0b', defaultEndpoint: 'http://localhost:8080'  },
-  { type: 'codex',         icon: '🧠', label: 'Codex',       tagline: 'OpenAI\'s agent',               color: '#10a37f', defaultEndpoint: 'https://api.openai.com/v1' },
-  { type: 'generic-agent', icon: '⚡', label: 'Other',       tagline: 'Any OpenAI-compatible API',    color: '#06b6d4', defaultEndpoint: 'https://' },
+  { type: 'claude-code',   icon: '🤖', label: 'Claude Code', tagline: 'Anthropic\'s coding agent',     color: '#f97316', defaultEndpoint: 'http://localhost:8080'  },
+  { type: 'codex',         icon: '🧠', label: 'Codex',       tagline: 'OpenAI\'s agent',               color: '#22c55e', defaultEndpoint: 'https://api.openai.com/v1' },
+  { type: 'generic-agent', icon: '⚡', label: 'Other',       tagline: 'Any OpenAI-compatible API',    color: '#a855f7', defaultEndpoint: 'https://' },
 ];
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -160,7 +160,7 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
                 value={endpoint}
                 onChangeText={t => { setEndpoint(t); setTestResult(null); }}
                 placeholder="http://localhost:18790"
-                placeholderTextColor="#52525b"
+                placeholderTextColor="#3e3e3e"
                 autoCapitalize="none"
                 autoCorrect={false}
               />
@@ -171,7 +171,7 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
                 value={token}
                 onChangeText={t => { setToken(t); setTestResult(null); }}
                 placeholder="your-gateway-token"
-                placeholderTextColor="#52525b"
+                placeholderTextColor="#3e3e3e"
                 secureTextEntry
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -195,7 +195,7 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
                 disabled={testing || !endpoint}
               >
                 {testing
-                  ? <><ActivityIndicator size="small" color="#fff" /><Text style={s.primaryBtnTxt}> Testing...</Text></>
+                  ? <><ActivityIndicator size="small" color="#ffffff" /><Text style={s.primaryBtnTxt}> Testing...</Text></>
                   : <Text style={s.primaryBtnTxt}>Test Connection</Text>
                 }
               </Pressable>
@@ -260,7 +260,7 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
                 value={agentName}
                 onChangeText={setAgentName}
                 placeholder={provider.label}
-                placeholderTextColor="#52525b"
+                placeholderTextColor="#3e3e3e"
                 autoCorrect={false}
               />
 
@@ -290,7 +290,7 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
                     value={publicUrl}
                     onChangeText={setPublicUrl}
                     placeholder="https://your-tunnel.trycloudflare.com"
-                    placeholderTextColor="#52525b"
+                    placeholderTextColor="#3e3e3e"
                     autoCapitalize="none"
                     autoCorrect={false}
                   />
@@ -326,70 +326,70 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
-  root:          { flex: 1, backgroundColor: '#0d0d0d' },
+  root:          { flex: 1, backgroundColor: '#000000' },
   header:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingTop: 20, paddingHorizontal: 20, paddingBottom: 8 },
   stepDots:      { flexDirection: 'row', gap: 8, flex: 1, justifyContent: 'center' },
-  dot:           { width: 8, height: 8, borderRadius: 4, backgroundColor: '#27272a' },
+  dot:           { width: 8, height: 8, borderRadius: 4, backgroundColor: '#2a2a2a' },
   dotActive:     { backgroundColor: '#6366f1' },
   closeBtn:      { position: 'absolute', right: 20, top: 20, padding: 4 },
-  closeTxt:      { color: '#71717a', fontSize: 18 },
+  closeTxt:      { color: '#6f6f6f', fontSize: 18 },
   scroll:        { flex: 1 },
   scrollContent: { padding: 24, paddingBottom: 60 },
-  title:         { color: '#f4f4f5', fontSize: 24, fontWeight: '700', marginBottom: 6 },
-  subtitle:      { color: '#71717a', fontSize: 14, marginBottom: 28 },
-  label:         { color: '#a1a1aa', fontSize: 12, fontWeight: '600', marginBottom: 8, marginTop: 16, textTransform: 'uppercase', letterSpacing: 0.5 },
-  input:         { backgroundColor: '#111', borderWidth: 1, borderColor: '#27272a', borderRadius: 10, padding: 14, color: '#f4f4f5', fontSize: 14 },
+  title:         { color: '#e8e8e8', fontSize: 24, fontWeight: '700', marginBottom: 6 },
+  subtitle:      { color: '#6f6f6f', fontSize: 14, marginBottom: 28 },
+  label:         { color: '#9e9e9e', fontSize: 12, fontWeight: '600', marginBottom: 8, marginTop: 16, textTransform: 'uppercase', letterSpacing: 0.5 },
+  input:         { backgroundColor: '#161616', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 10, padding: 14, color: '#e8e8e8', fontSize: 14 },
 
   // Provider grid
   providerGrid:   { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  providerCard:   { width: '47%', backgroundColor: '#111', borderWidth: 1, borderColor: '#27272a', borderRadius: 14, padding: 16, gap: 4, overflow: 'hidden' },
+  providerCard:   { width: '47%', backgroundColor: '#161616', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 14, padding: 16, gap: 4, overflow: 'hidden' },
   providerIcon:   { fontSize: 28, marginBottom: 4 },
-  providerLabel:  { color: '#f4f4f5', fontSize: 15, fontWeight: '700' },
-  providerTagline:{ color: '#71717a', fontSize: 12, lineHeight: 16 },
+  providerLabel:  { color: '#e8e8e8', fontSize: 15, fontWeight: '700' },
+  providerTagline:{ color: '#6f6f6f', fontSize: 12, lineHeight: 16 },
   providerBar:    { position: 'absolute', bottom: 0, left: 0, right: 0, height: 3, opacity: 0.6 },
 
   // Hint box
-  hintBox:     { backgroundColor: '#111', borderWidth: 1, borderColor: '#27272a', borderRadius: 10, padding: 12, marginTop: 12 },
-  hintTitle:   { color: '#a1a1aa', fontSize: 12, marginBottom: 8 },
+  hintBox:     { backgroundColor: '#161616', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 10, padding: 12, marginTop: 12 },
+  hintTitle:   { color: '#9e9e9e', fontSize: 12, marginBottom: 8 },
   hintCmd:     { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#000000', borderRadius: 6, padding: 8 },
-  hintCmdText: { color: '#6366f1', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', flex: 1 },
-  copyBtn:     { backgroundColor: '#1e1e2e', borderRadius: 5, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderColor: '#6366f133' },
-  copyBtnTxt:  { color: '#a5b4fc', fontSize: 11, fontWeight: '600' },
+  hintCmdText: { color: '#e8e8e8', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', flex: 1 },
+  copyBtn:     { backgroundColor: '#252525', borderRadius: 5, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderColor: '#6366f130' },
+  copyBtnTxt:  { color: '#b5b5b5', fontSize: 11, fontWeight: '600' },
 
   // Buttons
   primaryBtn:        { backgroundColor: '#6366f1', borderRadius: 10, padding: 14, alignItems: 'center', marginTop: 16, flexDirection: 'row', justifyContent: 'center', gap: 6 },
   primaryBtnDisabled:{ opacity: 0.4 },
-  primaryBtnTxt:     { color: '#fff', fontSize: 15, fontWeight: '700' },
+  primaryBtnTxt:     { color: '#ffffff', fontSize: 15, fontWeight: '700' },
   backBtn:           { paddingVertical: 14, paddingHorizontal: 4 },
-  backBtnTxt:        { color: '#71717a', fontSize: 14 },
+  backBtnTxt:        { color: '#6f6f6f', fontSize: 14 },
   navRow:            { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
   navNext:           { flex: 0, paddingHorizontal: 24, marginTop: 0 },
 
   // Test result
   resultBox:    { borderRadius: 10, padding: 12, marginTop: 12, borderWidth: 1 },
-  resultOk:     { backgroundColor: '#14532d22', borderColor: '#22c55e44' },
-  resultErr:    { backgroundColor: '#7f1d1d22', borderColor: '#ef444444' },
+  resultOk:     { backgroundColor: '#22c55e10', borderColor: '#22c55e40' },
+  resultErr:    { backgroundColor: '#ef444410', borderColor: '#ef444440' },
   resultTxt:    { fontSize: 13, fontWeight: '600', marginBottom: 4 },
-  resultTxtOk:  { color: '#4ade80' },
-  resultTxtErr: { color: '#f87171' },
+  resultTxtOk:  { color: '#22c55e' },
+  resultTxtErr: { color: '#ef4444' },
   diagFix:      { marginTop: 8 },
-  diagFixLabel: { color: '#a1a1aa', fontSize: 12, marginBottom: 6 },
+  diagFixLabel: { color: '#9e9e9e', fontSize: 12, marginBottom: 6 },
 
   // Summary card
-  summaryCard:     { backgroundColor: '#111', borderWidth: 1, borderColor: '#27272a', borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8 },
+  summaryCard:     { backgroundColor: '#161616', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8 },
   summaryIcon:     { fontSize: 28 },
   summaryInfo:     { flex: 1 },
-  summaryProvider: { color: '#f4f4f5', fontSize: 15, fontWeight: '700' },
-  summaryEndpoint: { color: '#71717a', fontSize: 11, marginTop: 2 },
+  summaryProvider: { color: '#e8e8e8', fontSize: 15, fontWeight: '700' },
+  summaryEndpoint: { color: '#6f6f6f', fontSize: 11, marginTop: 2 },
   summaryDot:      { width: 10, height: 10, borderRadius: 5 },
 
   // Mode cards
-  modeCard:      { backgroundColor: '#111', borderWidth: 1, borderColor: '#27272a', borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 8 },
+  modeCard:      { backgroundColor: '#161616', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 8 },
   modeCardActive:{ borderColor: '#6366f1', backgroundColor: '#6366f108' },
   modeIcon:      { fontSize: 22 },
   modeInfo:      { flex: 1 },
-  modeTitle:     { color: '#f4f4f5', fontSize: 14, fontWeight: '600' },
-  modeSub:       { color: '#71717a', fontSize: 12, marginTop: 2, lineHeight: 16 },
-  radio:         { width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: '#3f3f46' },
+  modeTitle:     { color: '#e8e8e8', fontSize: 14, fontWeight: '600' },
+  modeSub:       { color: '#6f6f6f', fontSize: 12, marginTop: 2, lineHeight: 16 },
+  radio:         { width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: '#3e3e3e' },
   radioActive:   { borderColor: '#6366f1', backgroundColor: '#6366f1' },
 });

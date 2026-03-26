@@ -362,7 +362,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult, compact
               value={inputValue}
               onChangeText={setInputValue}
               placeholder="e.g., Homepage Redesign"
-              placeholderTextColor="#666"
+              placeholderTextColor="#6f6f6f"
               autoFocus
             />
           </View>
@@ -378,7 +378,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult, compact
               value={inputValue}
               onChangeText={setInputValue}
               placeholder="Your message..."
-              placeholderTextColor="#666"
+              placeholderTextColor="#6f6f6f"
               multiline
               autoFocus
             />
@@ -404,12 +404,12 @@ export default function OfficeActionPanel({ agents, getConfig, onResult, compact
             icon="🌅"
             label="Standup"
             onPress={() => handleAction('standup')}
-            color="#8b5cf6"
+            color="#f59e0b"
             disabled={!hasAgents}
             size={buttonSize}
             tooltip="Start daily standup: ask all agents what they're working on and any blockers"
           />
-          
+
           <PixelButton
             icon="📊"
             label="Sync"
@@ -419,7 +419,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult, compact
             size={buttonSize}
             tooltip="Sync project status with team: task progress, blockers, and cost breakdown"
           />
-          
+
           <PixelButton
             icon="🎯"
             label="Assign"
@@ -429,27 +429,27 @@ export default function OfficeActionPanel({ agents, getConfig, onResult, compact
             size={buttonSize}
             tooltip="Auto-assign unassigned tasks to best-fit agents based on workload and expertise"
           />
-          
+
           <PixelButton
             icon="💬"
             label="Chat"
             onPress={() => handleAction('chat')}
-            color="#ec4899"
+            color="#6366f1"
             disabled={!hasAgents}
             size={buttonSize}
             tooltip="Start a new multi-agent conversation on a specific topic"
           />
-          
+
           <PixelButton
             icon="📢"
             label="Broadcast"
             onPress={() => handleAction('broadcast')}
-            color="#f59e0b"
+            color="#a855f7"
             disabled={!hasAgents}
             size={buttonSize}
             tooltip="Send an announcement or message to all active agents at once"
           />
-          
+
           <PixelButton
             icon="🆘"
             label="Help"
@@ -460,12 +460,12 @@ export default function OfficeActionPanel({ agents, getConfig, onResult, compact
             size={buttonSize}
             tooltip="Coordinate help for blocked tasks: notify team of tasks that need support"
           />
-          
+
           <PixelButton
             icon="📈"
             label="Status"
             onPress={() => handleAction('status')}
-            color="#10b981"
+            color="#22d3ee"
             disabled={!hasAgents}
             size={buttonSize}
             tooltip="Quick status check: see all active agents, their status, and daily costs"
@@ -500,7 +500,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult, compact
                 disabled={loading}
                 style={[styles.modalButton, styles.modalButtonSecondary]}
               >
-                <Text style={[styles.modalButtonText, { color: '#999' }]}>✕ CANCEL</Text>
+                <Text style={[styles.modalButtonText, { color: '#9e9e9e' }]}>✕ CANCEL</Text>
               </Pressable>
             </View>
           </Pressable>
@@ -565,7 +565,7 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 9,
     fontWeight: '800',
-    color: '#888',
+    color: '#9e9e9e',
     fontFamily: 'monospace',
     letterSpacing: 1.5,
     marginBottom: 8,
@@ -585,9 +585,9 @@ const styles = StyleSheet.create({
     padding: 20,
   },
   modalContent: {
-    backgroundColor: '#0d0d14',
+    backgroundColor: '#0a0a0a',
     borderWidth: 2,
-    borderColor: '#6366f1',
+    borderColor: '#2a2a2a',
     borderRadius: 12,
     padding: 20,
     minWidth: 300,
@@ -597,23 +597,23 @@ const styles = StyleSheet.create({
   modalTitle: {
     fontSize: 16,
     fontWeight: '800',
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
     letterSpacing: 1,
   },
   modalDesc: {
     fontSize: 12,
-    color: '#888',
+    color: '#9e9e9e',
     fontFamily: 'monospace',
     marginBottom: 8,
   },
   input: {
     backgroundColor: '#2a2a2a',
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     padding: 12,
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
     fontSize: 13,
   },
@@ -631,16 +631,16 @@ const styles = StyleSheet.create({
   },
   modalButtonPrimary: {
     backgroundColor: '#6366f1',
-    borderColor: '#8b5cf6',
+    borderColor: '#4f46e5',
   },
   modalButtonSecondary: {
     backgroundColor: '#2a2a2a',
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
   },
   modalButtonText: {
     fontSize: 12,
     fontWeight: '800',
-    color: '#fff',
+    color: '#ffffff',
     fontFamily: 'monospace',
     letterSpacing: 1,
   },
@@ -658,11 +658,11 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     marginBottom: 6,
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
   },
   projectItemSelected: {
     borderColor: '#6366f1',
-    backgroundColor: '#6366f120',
+    backgroundColor: '#6366f115',
   },
   projectDot: {
     width: 10,
@@ -672,12 +672,12 @@ const styles = StyleSheet.create({
   projectName: {
     fontSize: 13,
     fontWeight: '700',
-    color: '#fff',
+    color: '#e8e8e8',
     fontFamily: 'monospace',
   },
   projectDesc: {
     fontSize: 10,
-    color: '#666',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
   },
   projectCheck: {
@@ -686,7 +686,7 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 11,
-    color: '#666',
+    color: '#6f6f6f',
     fontFamily: 'monospace',
     textAlign: 'center',
     padding: 20,

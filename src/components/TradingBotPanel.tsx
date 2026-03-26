@@ -21,6 +21,7 @@ import {
   ActivityIndicator,
   Platform as RNPlatform,
 } from 'react-native';
+import { LoadingScreen } from './LoadingWave';
 import { supabase } from '../lib/supabase';
 import { PIXEL_COLORS, GRID, PX } from '../lib/pixelDesign';
 import {
@@ -64,20 +65,20 @@ import {
   SOLANA_TOKEN_REGISTRY,
 } from '../lib/heliusTrading';
 
-const ACCENT = '#9945FF';
+const ACCENT = '#6366f1';
 type Tab = 'featured' | 'pending' | 'positions' | 'signals' | 'portfolio' | 'trade' | 'dca' | 'alerts' | 'wallets' | 'history';
 
 const ALL_TABS: { key: Tab; label: string; icon: string; color: string }[] = [
   { key: 'portfolio', label: 'Portfolio',  icon: '$',  color: '#22c55e' },
-  { key: 'trade',     label: 'Trade',      icon: '<>', color: '#9945FF' },
-  { key: 'positions', label: 'Positions',  icon: '[]', color: '#3b82f6' },
-  { key: 'signals',   label: 'Signals',    icon: '//', color: '#06b6d4' },
+  { key: 'trade',     label: 'Trade',      icon: '<>', color: '#3b82f6' },
+  { key: 'positions', label: 'Positions',  icon: '[]', color: '#a855f7' },
+  { key: 'signals',   label: 'Signals',    icon: '//', color: '#22d3ee' },
   { key: 'featured',  label: 'Ideas',      icon: '*',  color: '#f59e0b' },
-  { key: 'dca',       label: 'DCA',        icon: '~',  color: '#8b5cf6' },
+  { key: 'dca',       label: 'DCA',        icon: '~',  color: '#6366f1' },
   { key: 'alerts',    label: 'Alerts',     icon: '!',  color: '#ef4444' },
   { key: 'pending',   label: 'Queue',      icon: '..',  color: '#f97316' },
   { key: 'wallets',   label: 'Watch',      icon: '@',  color: '#ec4899' },
-  { key: 'history',   label: 'Log',        icon: '#',  color: '#14b8a6' },
+  { key: 'history',   label: 'Log',        icon: '#',  color: '#9e9e9e' },
 ];
 
 interface Props {
@@ -129,7 +130,7 @@ export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT
   };
 
   if (loading) {
-    return <View style={s.center}><ActivityIndicator color={ACCENT} /></View>;
+    return <LoadingScreen />;
   }
 
   if (noKey) {
@@ -268,10 +269,10 @@ function FeaturedTab({ client, walletAddress, userId }: { client: HeliusClient; 
     setExecuting(null);
   };
 
-  if (loading) return <View style={s.center}><ActivityIndicator color={ACCENT} /></View>;
+  if (loading) return <LoadingScreen />;
 
   const confidenceColors: Record<string, string> = { high: '#22c55e', medium: '#f59e0b', low: '#ef4444' };
-  const riskColors: Record<string, string> = { low: '#22c55e', moderate: '#f59e0b', high: '#ef4444', extreme: '#dc2626' };
+  const riskColors: Record<string, string> = { low: '#22c55e', moderate: '#f59e0b', high: '#ef4444', extreme: '#6f6f6f' };
   const timeframeLabels: Record<string, string> = { scalp: '< 1h', day: '1-24h', swing: '2-7d', position: '1w+' };
 
   return (
@@ -329,8 +330,8 @@ function FeaturedTab({ client, walletAddress, userId }: { client: HeliusClient; 
 
       {/* Trade Cards */}
       {trades.map(trade => {
-        const confColor = confidenceColors[trade.confidence] || '#888';
-        const riskColor = riskColors[trade.riskLevel] || '#888';
+        const confColor = confidenceColors[trade.confidence] || '#9e9e9e';
+        const riskColor = riskColors[trade.riskLevel] || '#9e9e9e';
         const isExecuting = executing === trade.id;
         const hoursLeft = Math.max(0, Math.floor((new Date(trade.expiresAt).getTime() - Date.now()) / 3600000));
 
@@ -350,7 +351,7 @@ function FeaturedTab({ client, walletAddress, userId }: { client: HeliusClient; 
 
             {/* Tags row */}
             <View style={s.featuredTagRow}>
-              <View style={[s.featuredTag, { borderColor: trade.direction === 'buy' ? '#22c55e40' : '#ef444440' }]}>
+              <View style={[s.featuredTag, { borderColor: trade.direction === 'buy' ? '#22c55e30' : '#ef444430' }]}>
                 <Text style={[s.featuredTagText, { color: trade.direction === 'buy' ? '#22c55e' : '#ef4444' }]}>
                   {trade.direction === 'buy' ? 'BUY' : 'SELL'}
                 </Text>
@@ -396,14 +397,14 @@ function FeaturedTab({ client, walletAddress, userId }: { client: HeliusClient; 
             {/* Entry reasoning */}
             {trade.entryReasoning && (
               <View style={s.reasonBox}>
-                <Text style={[s.reasonText, { color: '#94a3b8' }]}>{trade.entryReasoning}</Text>
+                <Text style={[s.reasonText, { color: '#9e9e9e' }]}>{trade.entryReasoning}</Text>
               </View>
             )}
 
             {/* Exit strategy */}
             {trade.exitStrategy && (
-              <View style={[s.reasonBox, { borderColor: '#22c55e15', backgroundColor: '#22c55e05' }]}>
-                <Text style={[s.reasonText, { color: '#86efac' }]}>Exit: {trade.exitStrategy}</Text>
+              <View style={[s.reasonBox, { borderColor: '#ffffff08', backgroundColor: '#ffffff03' }]}>
+                <Text style={[s.reasonText, { color: '#9e9e9e' }]}>Exit: {trade.exitStrategy}</Text>
               </View>
             )}
 
@@ -416,7 +417,7 @@ function FeaturedTab({ client, walletAddress, userId }: { client: HeliusClient; 
               {isExecuting ? (
                 <ActivityIndicator size="small" color="#fff" />
               ) : (
-                <Text style={[s.actionText, { color: '#fff' }]}>
+                <Text style={[s.actionText, { color: '#e8e8e8' }]}>
                   {walletAddress ? `Execute ${trade.direction === 'buy' ? 'Buy' : 'Sell'} — ${trade.suggestedAmountSol} SOL` : 'Link Wallet First'}
                 </Text>
               )}
@@ -506,7 +507,7 @@ function PendingTab({ client, walletAddress, userId }: { client: HeliusClient; w
     setExecuting(null);
   };
 
-  if (loading) return <View style={s.center}><ActivityIndicator color={ACCENT} /></View>;
+  if (loading) return <LoadingScreen />;
 
   const pendingActions = actions.filter(a => a.status === 'pending');
 
@@ -531,7 +532,7 @@ function PendingTab({ client, walletAddress, userId }: { client: HeliusClient; w
         const amountSol = (action.amountLamports / 1e9).toFixed(4);
 
         return (
-          <View key={action.id} style={[s.listCard, { borderColor: isExpired ? '#555' : ACCENT + '30' }]}>
+          <View key={action.id} style={[s.listCard, { borderColor: isExpired ? '#6f6f6f' : ACCENT + '30' }]}>
             {/* Header */}
             <View style={s.listTop}>
               <View style={{ flex: 1 }}>
@@ -543,8 +544,8 @@ function PendingTab({ client, walletAddress, userId }: { client: HeliusClient; w
                 </Text>
               </View>
               {isExpired && (
-                <View style={[s.statusPill, { borderColor: '#f59e0b30', backgroundColor: '#f59e0b08' }]}>
-                  <Text style={[s.statusPillText, { color: '#f59e0b' }]}>Expired</Text>
+                <View style={[s.statusPill, { borderColor: '#ffffff15', backgroundColor: '#ffffff05' }]}>
+                  <Text style={[s.statusPillText, { color: '#9e9e9e' }]}>Expired</Text>
                 </View>
               )}
             </View>
@@ -580,8 +581,8 @@ function PendingTab({ client, walletAddress, userId }: { client: HeliusClient; w
 
             {/* Error */}
             {action.error && (
-              <View style={[s.reasonBox, { borderColor: '#ef444430' }]}>
-                <Text style={[s.reasonText, { color: '#ef4444' }]}>{action.error}</Text>
+              <View style={[s.reasonBox, { borderColor: '#ffffff15' }]}>
+                <Text style={[s.reasonText, { color: '#9e9e9e' }]}>{action.error}</Text>
               </View>
             )}
 
@@ -599,7 +600,7 @@ function PendingTab({ client, walletAddress, userId }: { client: HeliusClient; w
                   {executing === action.id ? (
                     <ActivityIndicator size="small" color="#fff" />
                   ) : (
-                    <Text style={[s.pendingBtnText, { color: '#fff' }]}>
+                    <Text style={[s.pendingBtnText, { color: '#e8e8e8' }]}>
                       {walletAddress ? 'Approve & Execute' : 'Link Wallet First'}
                     </Text>
                   )}
@@ -648,7 +649,7 @@ function PortfolioTab({ client, walletAddress, userId }: { client: HeliusClient;
     );
   }
 
-  if (loading) return <View style={s.center}><ActivityIndicator color={ACCENT} /></View>;
+  if (loading) return <LoadingScreen />;
   if (!portfolio) return <View style={s.center}><Text style={s.emptyDesc}>Failed to load portfolio</Text></View>;
 
   return (
@@ -849,7 +850,7 @@ function TradeTab({ client, walletAddress, userId }: { client: HeliusClient; wal
 
           <Pressable onPress={handleSwap} disabled={swapping} style={[s.actionBtn, { backgroundColor: '#22c55e', marginTop: 12 }]}>
             {swapping ? <ActivityIndicator size="small" color="#fff" /> :
-              <Text style={[s.actionText, { color: '#fff' }]}>Execute Swap</Text>}
+              <Text style={[s.actionText, { color: '#e8e8e8' }]}>Execute Swap</Text>}
           </Pressable>
         </View>
       )}
@@ -904,7 +905,7 @@ function DCATab({ client, userId }: { client: HeliusClient; userId: string }) {
     setSaving(false);
   };
 
-  if (loading) return <View style={s.center}><ActivityIndicator color={ACCENT} /></View>;
+  if (loading) return <LoadingScreen />;
 
   return (
     <ScrollView contentContainerStyle={s.scrollPad}>
@@ -935,7 +936,7 @@ function DCATab({ client, userId }: { client: HeliusClient; userId: string }) {
           </View>
           <Pressable onPress={handleCreate} disabled={saving} style={[s.actionBtn, { backgroundColor: ACCENT }]}>
             {saving ? <ActivityIndicator size="small" color="#fff" /> :
-              <Text style={[s.actionText, { color: '#fff' }]}>Create DCA</Text>}
+              <Text style={[s.actionText, { color: '#e8e8e8' }]}>Create DCA</Text>}
           </Pressable>
         </View>
       )}
@@ -1008,7 +1009,7 @@ function AlertsTab({ client, userId }: { client: HeliusClient; userId: string })
     setSaving(false);
   };
 
-  if (loading) return <View style={s.center}><ActivityIndicator color={ACCENT} /></View>;
+  if (loading) return <LoadingScreen />;
 
   return (
     <ScrollView contentContainerStyle={s.scrollPad}>
@@ -1034,13 +1035,13 @@ function AlertsTab({ client, userId }: { client: HeliusClient; userId: string })
             <View style={s.toggleRow}>
               <Pressable
                 onPress={() => setAlertType('price_above')}
-                style={[s.toggleBtn, alertType === 'price_above' && { backgroundColor: '#22c55e18', borderColor: '#22c55e40' }]}
+                style={[s.toggleBtn, alertType === 'price_above' && { backgroundColor: '#22c55e10', borderColor: '#22c55e40' }]}
               >
                 <Text style={[s.toggleText, alertType === 'price_above' && { color: '#22c55e' }]}>Above</Text>
               </Pressable>
               <Pressable
                 onPress={() => setAlertType('price_below')}
-                style={[s.toggleBtn, alertType === 'price_below' && { backgroundColor: '#ef444418', borderColor: '#ef444440' }]}
+                style={[s.toggleBtn, alertType === 'price_below' && { backgroundColor: '#ef444410', borderColor: '#ef444440' }]}
               >
                 <Text style={[s.toggleText, alertType === 'price_below' && { color: '#ef4444' }]}>Below</Text>
               </Pressable>
@@ -1052,7 +1053,7 @@ function AlertsTab({ client, userId }: { client: HeliusClient; userId: string })
           </View>
           <Pressable onPress={handleCreate} disabled={saving} style={[s.actionBtn, { backgroundColor: ACCENT }]}>
             {saving ? <ActivityIndicator size="small" color="#fff" /> :
-              <Text style={[s.actionText, { color: '#fff' }]}>Create Alert</Text>}
+              <Text style={[s.actionText, { color: '#e8e8e8' }]}>Create Alert</Text>}
           </Pressable>
         </View>
       )}
@@ -1124,11 +1125,11 @@ const NOTABLE_WALLETS: NotableWallet[] = [
 
 const CATEGORY_COLORS: Record<string, string> = {
   exchange: '#3b82f6',
-  market_maker: '#06b6d4',
-  whale: '#f59e0b',
+  market_maker: '#22d3ee',
+  whale: '#a855f7',
   trader: '#22c55e',
   political: '#ef4444',
-  fund: '#8b5cf6',
+  fund: '#f59e0b',
   btc_whale: '#f97316',
 };
 
@@ -1217,7 +1218,7 @@ function WalletsTab({ client, userId }: { client: HeliusClient; userId: string }
   const categories = [...new Set(NOTABLE_WALLETS.map(w => w.category))];
   const filteredNotable = filterCat ? NOTABLE_WALLETS.filter(w => w.category === filterCat) : NOTABLE_WALLETS;
 
-  if (loading) return <View style={s.center}><ActivityIndicator color={ACCENT} /></View>;
+  if (loading) return <LoadingScreen />;
 
   const formatSol = (n: number) => n >= 1000000 ? (n / 1000000).toFixed(2) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'K' : n.toFixed(2);
   const formatUsd = (n: number) => n >= 1000000000 ? '$' + (n / 1000000000).toFixed(2) + 'B' : n >= 1000000 ? '$' + (n / 1000000).toFixed(1) + 'M' : n >= 1000 ? '$' + (n / 1000).toFixed(1) + 'K' : '$' + n.toFixed(2);
@@ -1244,7 +1245,7 @@ function WalletsTab({ client, userId }: { client: HeliusClient; userId: string }
           </View>
           <Pressable onPress={handleAdd} disabled={saving} style={[s.actionBtn, { backgroundColor: ACCENT }]}>
             {saving ? <ActivityIndicator size="small" color="#fff" /> :
-              <Text style={[s.actionText, { color: '#fff' }]}>Track Wallet</Text>}
+              <Text style={[s.actionText, { color: '#e8e8e8' }]}>Track Wallet</Text>}
           </Pressable>
         </View>
       )}
@@ -1293,7 +1294,7 @@ function WalletsTab({ client, userId }: { client: HeliusClient; userId: string }
             <Text style={[s.quickText, !filterCat && { color: ACCENT }]}>ALL</Text>
           </Pressable>
           {categories.map(cat => {
-            const c = CATEGORY_COLORS[cat] || '#666';
+            const c = CATEGORY_COLORS[cat] || '#6f6f6f';
             const active = filterCat === cat;
             return (
               <Pressable key={cat} onPress={() => setFilterCat(active ? null : cat)} style={[s.quickBtn, active && { borderColor: c, backgroundColor: c + '15' }]}>
@@ -1307,7 +1308,7 @@ function WalletsTab({ client, userId }: { client: HeliusClient; userId: string }
       {filteredNotable.map(nw => {
         const isTracked = trackedAddrs.has(nw.address);
         const isTrackLoading = trackingAddr === nw.address;
-        const catColor = CATEGORY_COLORS[nw.category] || '#666';
+        const catColor = CATEGORY_COLORS[nw.category] || '#6f6f6f';
         const isSol = nw.chain === 'sol';
         const live = liveData[nw.address];
         const isLiveLoading = loadingLive.has(nw.address);
@@ -1322,10 +1323,10 @@ function WalletsTab({ client, userId }: { client: HeliusClient; userId: string }
                     <Text style={[s.statusPillText, { color: catColor }]}>{CATEGORY_LABELS[nw.category]}</Text>
                   </View>
                   <View style={[s.statusPill, { borderColor: '#ffffff15', backgroundColor: '#ffffff05' }]}>
-                    <Text style={[s.statusPillText, { color: '#888' }]}>{nw.chain.toUpperCase()}</Text>
+                    <Text style={[s.statusPillText, { color: '#9e9e9e' }]}>{nw.chain.toUpperCase()}</Text>
                   </View>
                 </View>
-                {nw.description && <Text style={[s.listMeta, { color: '#888' }]}>{nw.description}</Text>}
+                {nw.description && <Text style={[s.listMeta, { color: '#9e9e9e' }]}>{nw.description}</Text>}
                 <Text style={s.listMeta}>{nw.address.slice(0, 16)}...{nw.address.slice(-6)}</Text>
               </View>
             </View>
@@ -1348,8 +1349,8 @@ function WalletsTab({ client, userId }: { client: HeliusClient; userId: string }
                 </Pressable>
               )}
               {!isSol && (
-                <View style={[s.quickBtn, { flex: 1, alignItems: 'center', borderColor: '#333' }]}>
-                  <Text style={[s.quickText, { color: '#555' }]}>VIEW ONLY</Text>
+                <View style={[s.quickBtn, { flex: 1, alignItems: 'center', borderColor: '#2a2a2a' }]}>
+                  <Text style={[s.quickText, { color: '#6f6f6f' }]}>VIEW ONLY</Text>
                 </View>
               )}
               {isSol && !isTracked && (
@@ -1359,7 +1360,7 @@ function WalletsTab({ client, userId }: { client: HeliusClient; userId: string }
                 </Pressable>
               )}
               {isSol && isTracked && (
-                <View style={[s.quickBtn, { flex: 1, alignItems: 'center', borderColor: '#22c55e40', backgroundColor: '#22c55e08' }]}>
+                <View style={[s.quickBtn, { flex: 1, alignItems: 'center', borderColor: '#ffffff20', backgroundColor: '#ffffff05' }]}>
                   <Text style={[s.quickText, { color: '#22c55e' }]}>TRACKED</Text>
                 </View>
               )}
@@ -1393,7 +1394,7 @@ function HistoryTab({ userId }: { userId: string }) {
     setLoading(false);
   };
 
-  if (loading) return <View style={s.center}><ActivityIndicator color={ACCENT} /></View>;
+  if (loading) return <LoadingScreen />;
 
   return (
     <ScrollView contentContainerStyle={s.scrollPad}>
@@ -1483,7 +1484,7 @@ function PositionsTab({ client, userId }: { client: HeliusClient; userId: string
     }
   };
 
-  if (loading) return <View style={s.center}><ActivityIndicator color={ACCENT} /></View>;
+  if (loading) return <LoadingScreen />;
 
   const totalPnl = positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
   const totalValue = positions.reduce((sum, p) => sum + p.currentValueUsd, 0);
@@ -1494,11 +1495,11 @@ function PositionsTab({ client, userId }: { client: HeliusClient; userId: string
       {positions.length > 0 && (
         <View style={s.statsRow}>
           <View style={s.statCard}>
-            <Text style={[s.statValue, { color: '#fff' }]}>{positions.length}</Text>
+            <Text style={[s.statValue, { color: '#e8e8e8' }]}>{positions.length}</Text>
             <Text style={s.statLabel}>Open</Text>
           </View>
           <View style={s.statCard}>
-            <Text style={[s.statValue, { color: '#fff' }]}>${totalValue.toFixed(2)}</Text>
+            <Text style={[s.statValue, { color: '#e8e8e8' }]}>${totalValue.toFixed(2)}</Text>
             <Text style={s.statLabel}>Value</Text>
           </View>
           <View style={s.statCard}>
@@ -1559,7 +1560,7 @@ function PositionsTab({ client, userId }: { client: HeliusClient; userId: string
                 </View>
               </View>
               <Pressable
-                style={[s.refreshBtn, { marginTop: 8, backgroundColor: '#ef444418', borderColor: '#ef444430' }]}
+                style={[s.refreshBtn, { marginTop: 8, backgroundColor: '#ffffff08', borderColor: '#ffffff15' }]}
                 onPress={() => handleClosePosition(pos)}
               >
                 <Text style={[s.refreshText, { color: '#ef4444' }]}>CLOSE POSITION</Text>
@@ -1625,18 +1626,18 @@ function SignalsTab({ client, userId }: { client: HeliusClient; userId: string }
   const gradeColor = (grade: string) => {
     switch (grade) {
       case 'A': return '#22c55e';
-      case 'B': return '#86efac';
+      case 'B': return '#3b82f6';
       case 'C': return '#f59e0b';
       case 'D': return '#f97316';
       case 'F': return '#ef4444';
-      default: return '#888';
+      default: return '#9e9e9e';
     }
   };
 
   const signalColor = (signal: string) => {
     if (signal.includes('buy')) return '#22c55e';
     if (signal.includes('sell')) return '#ef4444';
-    return '#888';
+    return '#f59e0b';
   };
 
   return (
@@ -1684,7 +1685,7 @@ function SignalsTab({ client, userId }: { client: HeliusClient; userId: string }
                 <Text style={s.listMeta}>{key.replace(/([A-Z])/g, ' $1').trim()}</Text>
                 <Text style={s.listMeta}>{val}/20</Text>
               </View>
-              <View style={{ height: 4, backgroundColor: '#222', borderRadius: 2, marginTop: 2 }}>
+              <View style={{ height: 4, backgroundColor: '#1a1a1a', borderRadius: 2, marginTop: 2 }}>
                 <View style={{
                   height: 4,
                   width: `${(val / 20) * 100}%`,
@@ -1697,9 +1698,9 @@ function SignalsTab({ client, userId }: { client: HeliusClient; userId: string }
 
           {/* Warnings */}
           {riskScore.warnings.length > 0 && (
-            <View style={{ marginTop: 10, padding: 8, backgroundColor: '#ef444408', borderRadius: 6, borderWidth: 1, borderColor: '#ef444420' }}>
+            <View style={{ marginTop: 10, padding: 8, backgroundColor: '#ffffff05', borderRadius: 6, borderWidth: 1, borderColor: '#ffffff10' }}>
               {riskScore.warnings.map((w, i) => (
-                <Text key={i} style={[s.listMeta, { color: '#f97316', marginBottom: 2 }]}>{w}</Text>
+                <Text key={i} style={[s.listMeta, { color: '#f59e0b', marginBottom: 2 }]}>{w}</Text>
               ))}
             </View>
           )}
@@ -1817,30 +1818,30 @@ const s = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 3,
   },
-  tabBadgeText: { color: '#fff', fontSize: 8, fontWeight: '900', fontFamily: 'monospace' },
+  tabBadgeText: { color: '#e8e8e8', fontSize: 8, fontWeight: '900', fontFamily: 'monospace' },
 
   // Empty state
   emptyIcon: { fontSize: 32, color: ACCENT, marginBottom: 12 },
-  emptyTitle: { color: '#fff', fontSize: 16, fontWeight: '700', fontFamily: 'monospace', marginBottom: 8 },
-  emptyDesc: { color: '#666', fontSize: 13, fontFamily: 'monospace', textAlign: 'center', lineHeight: 20 },
+  emptyTitle: { color: '#e8e8e8', fontSize: 16, fontWeight: '700', fontFamily: 'monospace', marginBottom: 8 },
+  emptyDesc: { color: '#6f6f6f', fontSize: 13, fontFamily: 'monospace', textAlign: 'center', lineHeight: 20 },
 
   // Stats
   statsRow: { flexDirection: 'row', gap: 10, marginBottom: 16 },
   statCard: {
     flex: 1,
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#1a1a1a',
     padding: 12,
     alignItems: 'center',
   },
-  statValue: { color: '#fff', fontSize: 18, fontWeight: '800', fontFamily: 'monospace' },
-  statLabel: { color: '#666', fontSize: 10, fontFamily: 'monospace', marginTop: 4 },
+  statValue: { color: '#e8e8e8', fontSize: 18, fontWeight: '800', fontFamily: 'monospace' },
+  statLabel: { color: '#6f6f6f', fontSize: 10, fontFamily: 'monospace', marginTop: 4 },
 
   // Labels
   label: {
-    color: '#666',
+    color: '#6f6f6f',
     fontSize: 10,
     fontWeight: '700',
     fontFamily: 'monospace',
@@ -1851,14 +1852,14 @@ const s = StyleSheet.create({
 
   // Info row
   infoRow: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#1a1a1a',
     paddingHorizontal: 12,
     paddingVertical: 10,
   },
-  mono: { color: '#ccc', fontSize: 13, fontFamily: 'monospace' },
+  mono: { color: '#b5b5b5', fontSize: 13, fontFamily: 'monospace' },
 
   // Token rows
   tokenRow: {
@@ -1867,33 +1868,33 @@ const s = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 10,
     paddingHorizontal: 12,
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#1a1a1a',
     marginBottom: 4,
   },
-  tokenSymbol: { color: '#fff', fontSize: 13, fontWeight: '700', fontFamily: 'monospace' },
-  tokenName: { color: '#555', fontSize: 11, fontFamily: 'monospace' },
-  tokenAmount: { color: '#ccc', fontSize: 12, fontFamily: 'monospace' },
-  tokenUsd: { color: '#888', fontSize: 11, fontFamily: 'monospace' },
+  tokenSymbol: { color: '#e8e8e8', fontSize: 13, fontWeight: '700', fontFamily: 'monospace' },
+  tokenName: { color: '#6f6f6f', fontSize: 11, fontFamily: 'monospace' },
+  tokenAmount: { color: '#b5b5b5', fontSize: 12, fontFamily: 'monospace' },
+  tokenUsd: { color: '#9e9e9e', fontSize: 11, fontFamily: 'monospace' },
 
   // Form
   fieldGroup: { marginBottom: 12 },
-  fieldLabel: { color: '#888', fontSize: 11, fontWeight: '600', fontFamily: 'monospace', marginBottom: 4 },
+  fieldLabel: { color: '#9e9e9e', fontSize: 11, fontWeight: '600', fontFamily: 'monospace', marginBottom: 4 },
   input: {
     backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
-    color: '#fff',
+    color: '#e8e8e8',
     fontSize: 13,
     fontFamily: 'monospace',
   },
   formCard: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 10,
     borderWidth: 1,
     borderColor: ACCENT + '30',
@@ -1908,10 +1909,10 @@ const s = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#333',
-    backgroundColor: '#111',
+    borderColor: '#2a2a2a',
+    backgroundColor: '#161616',
   },
-  quickText: { color: '#aaa', fontSize: 11, fontFamily: 'monospace', fontWeight: '600' },
+  quickText: { color: '#9e9e9e', fontSize: 11, fontFamily: 'monospace', fontWeight: '600' },
 
   // Action button
   actionBtn: {
@@ -1936,17 +1937,17 @@ const s = StyleSheet.create({
 
   // Quote card
   quoteCard: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#1a1a1a',
     padding: 14,
     marginTop: 14,
   },
-  quoteTitle: { color: '#fff', fontSize: 13, fontWeight: '700', fontFamily: 'monospace', marginBottom: 10 },
+  quoteTitle: { color: '#e8e8e8', fontSize: 13, fontWeight: '700', fontFamily: 'monospace', marginBottom: 10 },
   quoteRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
-  quoteLabel: { color: '#888', fontSize: 12, fontFamily: 'monospace' },
-  quoteValue: { color: '#fff', fontSize: 12, fontFamily: 'monospace', fontWeight: '600' },
+  quoteLabel: { color: '#9e9e9e', fontSize: 12, fontFamily: 'monospace' },
+  quoteValue: { color: '#e8e8e8', fontSize: 12, fontFamily: 'monospace', fontWeight: '600' },
 
   // Result
   resultBanner: {
@@ -1972,17 +1973,17 @@ const s = StyleSheet.create({
 
   // List card
   listCard: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#1a1a1a',
     padding: 12,
     marginBottom: 8,
   },
   listTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
-  listTitle: { color: '#fff', fontSize: 13, fontWeight: '700', fontFamily: 'monospace' },
-  listMeta: { color: '#777', fontSize: 11, fontFamily: 'monospace', marginTop: 2 },
-  listTime: { color: '#555', fontSize: 10, fontFamily: 'monospace', marginTop: 4 },
+  listTitle: { color: '#e8e8e8', fontSize: 13, fontWeight: '700', fontFamily: 'monospace' },
+  listMeta: { color: '#6f6f6f', fontSize: 11, fontFamily: 'monospace', marginTop: 2 },
+  listTime: { color: '#6f6f6f', fontSize: 10, fontFamily: 'monospace', marginTop: 4 },
 
   // Status pills
   statusPill: {
@@ -1990,12 +1991,12 @@ const s = StyleSheet.create({
     paddingHorizontal: 8,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     backgroundColor: '#0a0a0a',
   },
-  statusPillActive: { borderColor: '#22c55e30', backgroundColor: '#22c55e08' },
-  statusPillFailed: { borderColor: '#ef444430', backgroundColor: '#ef444408' },
-  statusPillText: { color: '#777', fontSize: 10, fontWeight: '600', fontFamily: 'monospace' },
+  statusPillActive: { borderColor: '#22c55e30', backgroundColor: '#22c55e10' },
+  statusPillFailed: { borderColor: '#ef444430', backgroundColor: '#ef444410' },
+  statusPillText: { color: '#6f6f6f', fontSize: 10, fontWeight: '600', fontFamily: 'monospace' },
 
   // Toggle
   toggleRow: { flexDirection: 'row', gap: 8 },
@@ -2004,10 +2005,10 @@ const s = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     alignItems: 'center',
   },
-  toggleText: { color: '#777', fontSize: 12, fontWeight: '600', fontFamily: 'monospace' },
+  toggleText: { color: '#6f6f6f', fontSize: 12, fontWeight: '600', fontFamily: 'monospace' },
 
   // Alert badge
   alertBadge: { fontSize: 11, fontWeight: '700', fontFamily: 'monospace' },
@@ -2022,17 +2023,17 @@ const s = StyleSheet.create({
     paddingHorizontal: 6,
     borderRadius: 4,
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
   },
-  featuredTagText: { color: '#aaa', fontSize: 9, fontWeight: '700', fontFamily: 'monospace', textTransform: 'uppercase' },
-  featuredDesc: { color: '#94a3b8', fontSize: 11.5, fontFamily: 'monospace', lineHeight: 17, marginBottom: 8 },
+  featuredTagText: { color: '#9e9e9e', fontSize: 9, fontWeight: '700', fontFamily: 'monospace', textTransform: 'uppercase' },
+  featuredDesc: { color: '#9e9e9e', fontSize: 11.5, fontFamily: 'monospace', lineHeight: 17, marginBottom: 8 },
 
   // Pending actions
   emptyCard: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#1a1a1a',
     padding: 20,
     alignItems: 'center',
   },
@@ -2047,8 +2048,8 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
   },
-  pendingLabel: { color: '#888', fontSize: 11, fontFamily: 'monospace' },
-  pendingValue: { color: '#fff', fontSize: 11, fontFamily: 'monospace', fontWeight: '600' },
+  pendingLabel: { color: '#9e9e9e', fontSize: 11, fontFamily: 'monospace' },
+  pendingValue: { color: '#e8e8e8', fontSize: 11, fontFamily: 'monospace', fontWeight: '600' },
   reasonBox: {
     borderWidth: 1,
     borderColor: ACCENT + '20',
@@ -2057,7 +2058,7 @@ const s = StyleSheet.create({
     padding: 8,
     marginBottom: 8,
   },
-  reasonText: { color: '#aaa', fontSize: 11, fontFamily: 'monospace', lineHeight: 16 },
+  reasonText: { color: '#9e9e9e', fontSize: 11, fontFamily: 'monospace', lineHeight: 16 },
   pendingBtnRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
   pendingBtn: {
     flex: 1,
@@ -2069,7 +2070,7 @@ const s = StyleSheet.create({
   pendingBtnReject: {
     borderWidth: 1,
     borderColor: '#ef444430',
-    backgroundColor: '#ef444408',
+    backgroundColor: '#ef444410',
   },
   pendingBtnApprove: {
     backgroundColor: '#22c55e',

@@ -242,7 +242,7 @@ export default function KanbanColumn({
         <TextInput
           style={s.quickInput}
           placeholder="+ Add a task..."
-          placeholderTextColor="#444455"
+          placeholderTextColor="#3e3e3e"
           value={quickAddText}
           onChangeText={setQuickAddText}
           onSubmitEditing={handleQuickAdd}
@@ -269,10 +269,10 @@ const s = StyleSheet.create({
   column: {
     width: 240,
     minWidth: 240,
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     borderRadius: 12,
     borderWidth: 2,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     marginRight: 10,
     flexShrink: 0,
     maxHeight: '100%',
@@ -309,7 +309,7 @@ const s = StyleSheet.create({
     fontWeight: '700',
   },
   headerLabel: {
-    color: '#9090a8',
+    color: '#9e9e9e',
     fontSize: 11,
     fontWeight: '700',
     letterSpacing: 0.8,
@@ -340,10 +340,10 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   batchBtnActive: {
-    backgroundColor: '#1e1e2e',
+    backgroundColor: '#1a1a1a',
   },
   batchBtnText: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 12,
     fontWeight: '900',
     letterSpacing: 1,
@@ -352,10 +352,10 @@ const s = StyleSheet.create({
   batchMenu: {
     marginHorizontal: 8,
     marginBottom: 6,
-    backgroundColor: '#0e0e16',
+    backgroundColor: '#0a0a0a',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1e1e2e',
+    borderColor: '#1a1a1a',
     padding: 8,
     gap: 8,
   },
@@ -363,7 +363,7 @@ const s = StyleSheet.create({
     gap: 4,
   },
   batchSectionLabel: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 9,
     fontWeight: '700',
     letterSpacing: 0.5,
@@ -380,7 +380,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
-    backgroundColor: '#15151e',
+    backgroundColor: '#1a1a1a',
   },
   batchPriorityDot: {
     width: 4,
@@ -388,7 +388,7 @@ const s = StyleSheet.create({
     borderRadius: 2,
   },
   batchPriorityText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 9,
     fontWeight: '600',
   },
@@ -404,7 +404,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 6,
     paddingVertical: 3,
     borderRadius: 5,
-    backgroundColor: '#15151e',
+    backgroundColor: '#1a1a1a',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background 0.15s' } as any : {}),
   },
   batchMoveDot: {
@@ -417,7 +417,7 @@ const s = StyleSheet.create({
     fontWeight: '600',
   },
   batchArchiveBtn: {
-    backgroundColor: '#ef444412',
+    backgroundColor: '#ef444415',
     borderRadius: 6,
     paddingVertical: 6,
     alignItems: 'center',
@@ -433,7 +433,7 @@ const s = StyleSheet.create({
     gap: 6,
   },
   batchArchiveWarning: {
-    color: '#f87171',
+    color: '#ef4444',
     fontSize: 10,
     fontWeight: '500',
   },
@@ -449,7 +449,7 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   batchArchiveConfirmText: {
-    color: '#f87171',
+    color: '#ef4444',
     fontSize: 10,
     fontWeight: '600',
   },
@@ -460,7 +460,7 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   batchArchiveCancelText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 10,
     fontWeight: '600',
   },
@@ -468,13 +468,13 @@ const s = StyleSheet.create({
     width: 22,
     height: 22,
     borderRadius: 6,
-    backgroundColor: '#15151e',
+    backgroundColor: '#1a1a1a',
     justifyContent: 'center',
     alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   addBtnText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 14,
     fontWeight: '500',
     lineHeight: 16,
@@ -510,12 +510,12 @@ const s = StyleSheet.create({
     gap: 6,
   },
   emptyIcon: {
-    color: '#333333',
+    color: '#3e3e3e',
     fontSize: 20,
     fontWeight: '900',
   },
   emptyText: {
-    color: '#333348',
+    color: '#3e3e3e',
     fontSize: 12,
     fontWeight: '500',
   },
@@ -526,22 +526,22 @@ const s = StyleSheet.create({
     paddingVertical: 8,
     gap: 6,
     borderTopWidth: 1,
-    borderTopColor: '#15151e',
+    borderTopColor: '#1a1a1a',
     ...(Platform.OS === 'web' ? { transition: 'border-color 0.15s' } as any : {}),
   },
   quickAddFocused: {
-    borderTopColor: '#2a2a40',
+    borderTopColor: '#2a2a2a',
   },
   quickInput: {
     flex: 1,
-    color: '#c0c0d0',
+    color: '#b5b5b5',
     fontSize: 12,
     paddingVertical: 6,
     paddingHorizontal: 10,
-    backgroundColor: '#111119',
+    backgroundColor: '#161616',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     ...(Platform.OS === 'web' ? { outlineStyle: 'none', transition: 'border-color 0.15s' } as any : {}),
   },
   submitBtn: {
@@ -560,13 +560,13 @@ const s = StyleSheet.create({
     width: 28,
     height: 28,
     borderRadius: 7,
-    backgroundColor: '#15151e',
+    backgroundColor: '#1a1a1a',
     justifyContent: 'center',
     alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   expandBtnText: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 16,
     fontWeight: '500',
     lineHeight: 18,

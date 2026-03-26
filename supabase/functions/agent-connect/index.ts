@@ -150,6 +150,25 @@ Deno.serve(async (req: Request) => {
       bodyCircleId = body.circle_id;
     }
 
+    // ── Token validation (no-op, just returns token info) ────────────────────
+    if (event === "token_validate") {
+      const { data: valProfile } = await sb
+        .from("profiles")
+        .select("display_name, username")
+        .eq("id", userId)
+        .single();
+
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          circle_id: defaultCircleId || null,
+          user_id: userId,
+          display_name: valProfile?.display_name || valProfile?.username || null,
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
     // ── Resolve circle: body > token default > user's first circle ───────────
     let circleId = bodyCircleId || defaultCircleId;
 

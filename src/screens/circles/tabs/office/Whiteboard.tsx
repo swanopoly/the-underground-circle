@@ -33,22 +33,22 @@ interface Props {
 
 // ── COLORS ─────────────────────────────────────────────────────────────────
 const C = {
-  bg: '#05050d',
-  surface: '#0c0c18',
-  surfaceLight: '#111124',
-  border: '#14142a',
-  borderActive: '#1e1e3a',
-  text: '#e2e2e8',
-  textSec: '#8b8b9e',
-  textTert: '#555566',
+  bg: '#000000',
+  surface: '#0a0a0a',
+  surfaceLight: '#161616',
+  border: '#1a1a1a',
+  borderActive: '#2a2a2a',
+  text: '#e8e8e8',
+  textSec: '#9e9e9e',
+  textTert: '#6f6f6f',
   active: '#22c55e',
-  idle: '#eab308',
+  idle: '#f59e0b',
   error: '#ef4444',
-  offline: '#6b7280',
+  offline: '#6f6f6f',
   accent: '#6366f1',
-  pink: '#ec4899',
-  live: '#f59e0b',
-  amber: '#b45309',
+  pink: '#a855f7',
+  live: '#22c55e',
+  amber: '#f59e0b',
 };
 
 const SOURCE_ICONS: Record<string, string> = {
@@ -276,7 +276,7 @@ export default function Whiteboard({
   const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 
   // Badge color
-  const BADGE_REMAP: Record<string, string> = { '#ffd700': '#b45309', '#e5e4e2': '#6366f1', '#c0c0c0': '#475569' };
+  const BADGE_REMAP: Record<string, string> = { '#ffd700': '#ffd700', '#e5e4e2': '#e5e4e2', '#c0c0c0': '#c0c0c0' };
   const rawBadgeColor = reward.currentBadge?.color ?? C.accent;
   const badgeColor = BADGE_REMAP[rawBadgeColor] ?? rawBadgeColor;
 
@@ -326,7 +326,7 @@ export default function Whiteboard({
             </View>
 
             {/* Live count cell */}
-            <View style={[s.statCell, { backgroundColor: liveCount > 0 ? '#22c55e08' : '#ffffff04', borderColor: liveCount > 0 ? '#22c55e25' : '#ffffff10' }]}>
+            <View style={[s.statCell, { backgroundColor: liveCount > 0 ? '#22c55e10' : '#ffffff04', borderColor: liveCount > 0 ? '#22c55e30' : '#ffffff10' }]}>
               <View style={s.statValRow}>
                 <View style={[s.cmdDot, { backgroundColor: liveCount > 0 ? '#22c55e' : '#333' }]} />
                 <Text style={[s.statValue, { color: liveCount > 0 ? '#22c55e' : '#555' }]}>{liveCount}</Text>
@@ -335,21 +335,21 @@ export default function Whiteboard({
             </View>
 
             {/* Agents cell */}
-            <View style={[s.statCell, { backgroundColor: '#8b5cf608', borderColor: '#8b5cf620' }]}>
-              <Text style={[s.statValue, { color: '#a78bfa' }]}>{agents.length}</Text>
+            <View style={[s.statCell, { backgroundColor: '#6366f110', borderColor: '#6366f120' }]}>
+              <Text style={[s.statValue, { color: '#6366f1' }]}>{agents.length}</Text>
               <Text style={s.statLabel}>AGENTS</Text>
             </View>
 
             {/* Tokens cell */}
-            <View style={[s.statCell, { backgroundColor: totalTokens > 0 ? '#f59e0b08' : '#ffffff04', borderColor: totalTokens > 0 ? '#f59e0b20' : '#ffffff10' }]}>
-              <Text style={[s.statValue, { color: totalTokens > 0 ? '#f59e0b' : '#444' }]}>
+            <View style={[s.statCell, { backgroundColor: totalTokens > 0 ? '#a855f710' : '#ffffff04', borderColor: totalTokens > 0 ? '#a855f720' : '#ffffff10' }]}>
+              <Text style={[s.statValue, { color: totalTokens > 0 ? '#a855f7' : '#444' }]}>
                 {totalTokens > 0 ? fmtTok(totalTokens) : '—'}
               </Text>
               <Text style={s.statLabel}>TOKENS</Text>
             </View>
 
             {/* Cost cell */}
-            <View style={[s.statCell, { backgroundColor: farmMetrics.totalCostToday > 0 ? '#22c55e08' : '#ffffff04', borderColor: farmMetrics.totalCostToday > 0 ? '#22c55e20' : '#ffffff10' }]}>
+            <View style={[s.statCell, { backgroundColor: farmMetrics.totalCostToday > 0 ? '#22c55e10' : '#ffffff04', borderColor: farmMetrics.totalCostToday > 0 ? '#22c55e20' : '#ffffff10' }]}>
               <Text style={[s.statValue, { color: farmMetrics.totalCostToday > 0 ? '#22c55e' : '#444' }]}>
                 ${farmMetrics.totalCostToday.toFixed(2)}
               </Text>
@@ -357,16 +357,16 @@ export default function Whiteboard({
             </View>
 
             {/* Output cell */}
-            <View style={[s.statCell, { backgroundColor: totalMsgs > 0 ? '#06b6d408' : '#ffffff04', borderColor: totalMsgs > 0 ? '#06b6d420' : '#ffffff10' }]}>
-              <Text style={[s.statValue, { color: totalMsgs > 0 ? '#06b6d4' : '#444' }]}>
+            <View style={[s.statCell, { backgroundColor: totalMsgs > 0 ? '#3b82f610' : '#ffffff04', borderColor: totalMsgs > 0 ? '#3b82f620' : '#ffffff10' }]}>
+              <Text style={[s.statValue, { color: totalMsgs > 0 ? '#3b82f6' : '#444' }]}>
                 {totalMsgs > 0 ? fmtTok(totalMsgs) : '—'}
               </Text>
               <Text style={s.statLabel}>OUTPUT</Text>
             </View>
 
             {/* Connections cell */}
-            <View style={[s.statCell, { backgroundColor: '#6366f108', borderColor: '#6366f120' }]}>
-              <Text style={[s.statValue, { color: connectedCount > 0 ? '#818cf8' : '#555' }]}>{connectedCount}/{totalConnections || 0}</Text>
+            <View style={[s.statCell, { backgroundColor: '#22d3ee10', borderColor: '#22d3ee20' }]}>
+              <Text style={[s.statValue, { color: connectedCount > 0 ? '#22d3ee' : '#555' }]}>{connectedCount}/{totalConnections || 0}</Text>
               <Text style={s.statLabel}>LINKS</Text>
             </View>
           </View>
@@ -384,7 +384,7 @@ export default function Whiteboard({
                 s.bsPillText,
                 bsStatus === 'local'   && { color: '#22c55e' },
                 bsStatus === 'offline' && { color: '#555' },
-                bsStatus === 'checking' && { color: '#6366f1' },
+                bsStatus === 'checking' && { color: '#f59e0b' },
               ]}>
                 {bsStatus === 'local' ? '🦢' : bsStatus === 'checking' ? '…' : '🦢'}
               </Text>
@@ -1119,7 +1119,7 @@ const s = StyleSheet.create({
     fontSize: 4,
     fontWeight: '700',
     fontFamily: 'monospace',
-    color: '#555566',
+    color: '#6f6f6f',
     letterSpacing: 0.8,
     marginTop: 1,
   } as any,
@@ -1155,9 +1155,9 @@ const s = StyleSheet.create({
 
   // ── BlackSwan pill ──
   bsPill: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 3, paddingVertical: 0, borderRadius: 3, borderWidth: 1, borderColor: '#2a2a2a', marginLeft: 2 },
-  bsPillLocal:    { backgroundColor: '#22c55e12', borderColor: '#22c55e40' },
-  bsPillOffline:  { backgroundColor: '#11111a',   borderColor: '#2a2a3a' },
-  bsPillChecking: { backgroundColor: '#6366f112', borderColor: '#6366f140' },
+  bsPillLocal:    { backgroundColor: '#22c55e15', borderColor: '#22c55e30' },
+  bsPillOffline:  { backgroundColor: '#111111',   borderColor: '#2a2a2a' },
+  bsPillChecking: { backgroundColor: '#f59e0b15', borderColor: '#f59e0b30' },
   bsPillText: { fontSize: 5, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 0.3 },
 
   // ── Notes header ──

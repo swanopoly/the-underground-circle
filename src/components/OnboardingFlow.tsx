@@ -10,6 +10,8 @@ import {
 } from 'react-native';
 import { connectViaOAuth } from '../lib/github';
 import { createLinkInvite, generateInviteUrl } from '../lib/invites';
+import { ensureConnectToken } from '../lib/agentConnect';
+import * as Clipboard from 'expo-clipboard';
 
 const ONBOARDING_KEY = 'uc_onboarding_complete';
 
@@ -40,6 +42,8 @@ export default function OnboardingFlow({ userId, circleId, onComplete }: Props) 
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [connectToken, setConnectToken] = useState<string | null>(null);
+  const [cmdCopied, setCmdCopied] = useState(false);
 
   const handleGitHubConnect = useCallback(async () => {
     if (!circleId) {
@@ -92,7 +96,7 @@ export default function OnboardingFlow({ userId, circleId, onComplete }: Props) 
     onComplete();
   }, [onComplete]);
 
-  const totalSteps = 3;
+  const totalSteps = 4;
 
   return (
     <Modal transparent animationType="fade" visible>
@@ -186,6 +190,55 @@ export default function OnboardingFlow({ userId, circleId, onComplete }: Props) 
               </Pressable>
             </View>
           )}
+
+          {/* Step 4: Connect your agent */}
+          {step === 3 && (
+            <View style={styles.stepContent}>
+              <Text style={styles.heading}>Connect your AI agent</Text>
+              <Text style={styles.sub}>
+                Run this command so your agent auto-connects to the circle whenever you work.
+              </Text>
+
+              {connectToken ? (
+                <View style={{
+                  backgroundColor: '#111', borderWidth: 1, borderColor: '#27272a',
+                  borderRadius: 2, padding: 12, width: '100%', gap: 8,
+                }}>
+                  <Text style={{ color: '#a78bfa', fontSize: 12, fontFamily: 'monospace' }} selectable>
+                    {'npx @underground-circle/connect --token=' + connectToken}
+                  </Text>
+                  <Pressable
+                    onPress={async () => {
+                      await Clipboard.setStringAsync(
+                        'npx @underground-circle/connect --token=' + connectToken
+                      );
+                      setCmdCopied(true);
+                      setTimeout(() => setCmdCopied(false), 2000);
+                    }}
+                    style={styles.copyBtn}
+                  >
+                    <Text style={styles.copyBtnText}>{cmdCopied ? 'Copied!' : 'Copy command'}</Text>
+                  </Pressable>
+                </View>
+              ) : (
+                <Text style={styles.sub}>
+                  You can set this up later from the Office tab.
+                </Text>
+              )}
+
+              <Text style={{ color: '#52525b', fontSize: 11, fontFamily: 'monospace', textAlign: 'center', marginTop: 8, lineHeight: 16 }}>
+                {'Supports Claude Code, Codex, Gemini CLI, and Cursor.\nOne command. Works forever.'}
+              </Text>
+
+              <Pressable onPress={handleFinish} style={[styles.ctaBtn, { marginTop: 16 }]}>
+                <Text style={styles.ctaBtnText}>Open the app</Text>
+              </Pressable>
+              <Pressable onPress={handleFinish} style={styles.skipBtn}>
+                <Text style={styles.skipText}>{"I'll do this later"}</Text>
+              </Pressable>
+            </View>
+          )}
+
         </View>
       </View>
     </Modal>

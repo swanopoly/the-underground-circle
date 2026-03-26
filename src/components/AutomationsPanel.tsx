@@ -207,9 +207,9 @@ function detectTrigger(text: string): TriggerOption | null {
 
 const TRIGGER_LABELS: Record<TriggerType, { label: string; color: string }> = {
   schedule: { label: 'SCHEDULE', color: '#6366f1' },
-  event:    { label: 'EVENT',    color: '#f59e0b' },
-  manual:   { label: 'MANUAL',   color: '#22c55e' },
-  webhook:  { label: 'WEBHOOK',  color: '#06b6d4' },
+  event:    { label: 'EVENT',    color: '#22d3ee' },
+  manual:   { label: 'MANUAL',   color: '#f59e0b' },
+  webhook:  { label: 'WEBHOOK',  color: '#a855f7' },
 };
 
 const OUTPUT_LABELS: Record<OutputTarget, string> = {
@@ -221,7 +221,7 @@ const OUTPUT_LABELS: Record<OutputTarget, string> = {
 
 const MODEL_OPTIONS = [
   { value: 'claude-haiku',  label: 'Haiku 4.5',  sub: 'fast · cheap',   color: '#22c55e' },
-  { value: 'claude-sonnet', label: 'Sonnet 4.6', sub: 'balanced',        color: '#6366f1' },
+  { value: 'claude-sonnet', label: 'Sonnet 4.6', sub: 'balanced',        color: '#3b82f6' },
   { value: 'claude-opus',   label: 'Opus 4.6',   sub: 'most powerful',   color: '#f59e0b' },
 ];
 
@@ -262,7 +262,7 @@ function StatsDashboard({
       </View>
       <View style={sd.card}>
         <Text style={sd.cardLabel}>Failed · 7d</Text>
-        <Text style={[sd.cardValue, { color: stats.failedLast7d > 0 ? '#ef4444' : '#888' }]}>
+        <Text style={[sd.cardValue, { color: stats.failedLast7d > 0 ? '#ef4444' : '#9e9e9e' }]}>
           {stats.failedLast7d}
         </Text>
       </View>
@@ -284,10 +284,10 @@ const sd = StyleSheet.create({
   },
   card: {
     flex: 1,
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1e1e1e',
+    borderColor: '#161616',
     padding: 12,
     minHeight: 60,
     justifyContent: 'space-between',
@@ -297,13 +297,13 @@ const sd = StyleSheet.create({
     alignItems: 'flex-start',
   },
   cardLabel: {
-    color: '#666',
+    color: '#6f6f6f',
     fontSize: 10,
     fontFamily: 'monospace',
     letterSpacing: 0.5,
   },
   cardValue: {
-    color: '#fff',
+    color: '#e8e8e8',
     fontSize: 22,
     fontWeight: '700',
     marginTop: 4,
@@ -352,11 +352,11 @@ function QuickCreateBar({
         disabled={!text.trim()}
         style={[
           qc.submitBtn,
-          { backgroundColor: text.trim() ? accentColor : '#222' },
+          { backgroundColor: text.trim() ? accentColor : '#161616' },
           Platform.OS === 'web' && { cursor: text.trim() ? 'pointer' : 'default' } as any,
         ]}
       >
-        <Text style={[qc.submitIcon, { color: text.trim() ? '#fff' : '#555' }]}>↑</Text>
+        <Text style={[qc.submitIcon, { color: text.trim() ? '#e8e8e8' : '#6f6f6f' }]}>↑</Text>
       </Pressable>
     </View>
   );
@@ -364,10 +364,10 @@ function QuickCreateBar({
 
 const qc = StyleSheet.create({
   container: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1e1e1e',
+    borderColor: '#161616',
     padding: 12,
     marginBottom: 12,
     flexDirection: 'row',
@@ -376,7 +376,7 @@ const qc = StyleSheet.create({
   },
   input: {
     flex: 1,
-    color: '#ccc',
+    color: '#b5b5b5',
     fontSize: 13,
     minHeight: 44,
     maxHeight: 80,
@@ -460,7 +460,7 @@ const sg = StyleSheet.create({
     marginTop: 16,
   },
   sectionLabel: {
-    color: '#888',
+    color: '#9e9e9e',
     fontSize: 13,
     fontWeight: '700',
     marginBottom: 14,
@@ -481,20 +481,20 @@ const sg = StyleSheet.create({
     width: 24,
     height: 24,
     borderRadius: 4,
-    backgroundColor: '#15151e',
+    backgroundColor: '#161616',
     borderWidth: 1,
-    borderColor: '#1e1e2e',
+    borderColor: '#161616',
     justifyContent: 'center',
     alignItems: 'center',
   },
   groupIconText: {
-    color: '#6366f1',
+    color: '#e8e8e8',
     fontSize: 9,
     fontWeight: '800',
     fontFamily: 'monospace',
   },
   groupLabel: {
-    color: '#9090a8',
+    color: '#9e9e9e',
     fontSize: 12,
     fontWeight: '700',
     fontFamily: 'monospace',
@@ -502,11 +502,11 @@ const sg = StyleSheet.create({
     flex: 1,
   },
   groupCount: {
-    color: '#444455',
+    color: '#3e3e3e',
     fontSize: 10,
     fontWeight: '600',
     fontFamily: 'monospace',
-    backgroundColor: '#222222',
+    backgroundColor: '#161616',
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
@@ -518,7 +518,7 @@ const sg = StyleSheet.create({
   },
   card: {
     width: '48.5%',
-    backgroundColor: '#0d0d0d',
+    backgroundColor: '#0a0a0a',
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#000000',
@@ -536,13 +536,13 @@ const sg = StyleSheet.create({
     fontSize: 18,
   },
   cardTitle: {
-    color: '#e5e5e5',
+    color: '#e8e8e8',
     fontSize: 13,
     fontWeight: '700',
     lineHeight: 18,
   },
   cardDesc: {
-    color: '#555',
+    color: '#6f6f6f',
     fontSize: 11,
     lineHeight: 16,
   },
@@ -551,7 +551,7 @@ const sg = StyleSheet.create({
     paddingVertical: 4,
   },
   moreText: {
-    color: '#666',
+    color: '#6f6f6f',
     fontSize: 12,
     fontWeight: '600',
   },
@@ -633,10 +633,10 @@ const rh = StyleSheet.create({
     padding: 16,
   },
   sheet: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#161616',
     width: '100%',
     maxWidth: 480,
     maxHeight: '80%',
@@ -648,27 +648,27 @@ const rh = StyleSheet.create({
     alignItems: 'center',
     padding: 16,
   },
-  title: { color: '#fff', fontSize: 16, fontWeight: '800' },
+  title: { color: '#e8e8e8', fontSize: 16, fontWeight: '800' },
   closeBtn: { padding: 4 },
-  closeText: { color: '#555', fontSize: 16 },
+  closeText: { color: '#6f6f6f', fontSize: 16 },
   divider: { height: 1, backgroundColor: '#000000' },
-  empty: { color: '#555', fontSize: 12, textAlign: 'center', padding: 24, fontFamily: 'monospace' },
+  empty: { color: '#6f6f6f', fontSize: 12, textAlign: 'center', padding: 24, fontFamily: 'monospace' },
   row: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     padding: 10,
     paddingHorizontal: 14,
     borderBottomWidth: 1,
-    borderBottomColor: '#0f0f0f',
+    borderBottomColor: '#0a0a0a',
     gap: 10,
   },
   rowIcon: { fontSize: 13, marginTop: 1 },
   rowInfo: { flex: 1 },
-  rowTime: { color: '#888', fontSize: 10, fontFamily: 'monospace' },
-  rowOutput: { color: '#ccc', fontSize: 11, marginTop: 2 },
+  rowTime: { color: '#9e9e9e', fontSize: 10, fontFamily: 'monospace' },
+  rowOutput: { color: '#b5b5b5', fontSize: 11, marginTop: 2 },
   rowError: { color: '#ef4444', fontSize: 11, marginTop: 2 },
   rowMeta: { alignItems: 'flex-end', gap: 2 },
-  rowMetaText: { color: '#555', fontSize: 10, fontFamily: 'monospace' },
+  rowMetaText: { color: '#6f6f6f', fontSize: 10, fontFamily: 'monospace' },
   rowMetaCost: { color: '#f59e0b', fontSize: 10, fontFamily: 'monospace' },
 });
 
@@ -756,10 +756,10 @@ const tp = StyleSheet.create({
     padding: 16,
   },
   sheet: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#161616',
     width: '100%',
     maxWidth: 420,
     maxHeight: '80%',
@@ -774,10 +774,10 @@ const tp = StyleSheet.create({
     paddingVertical: 10,
     gap: 8,
   },
-  searchIcon: { fontSize: 14, color: '#555' },
-  searchInput: { flex: 1, color: '#fff', fontSize: 14, fontFamily: 'monospace' },
+  searchIcon: { fontSize: 14, color: '#6f6f6f' },
+  searchInput: { flex: 1, color: '#e8e8e8', fontSize: 14, fontFamily: 'monospace' },
   closeBtn: { padding: 4 },
-  closeText: { color: '#555', fontSize: 14 },
+  closeText: { color: '#6f6f6f', fontSize: 14 },
   scroll: { flex: 1 },
   groupHeader: {
     flexDirection: 'row',
@@ -789,7 +789,7 @@ const tp = StyleSheet.create({
   },
   groupIcon: { fontSize: 13 },
   groupLabel: {
-    color: '#666',
+    color: '#6f6f6f',
     fontSize: 10,
     fontWeight: '700',
     fontFamily: 'monospace',
@@ -805,10 +805,10 @@ const tp = StyleSheet.create({
   },
   itemIcon: { fontSize: 18, width: 26, textAlign: 'center' },
   itemInfo: { flex: 1 },
-  itemLabel: { color: '#e5e5e5', fontSize: 13, fontWeight: '600' },
-  itemDesc: { color: '#555', fontSize: 11, marginTop: 1 },
-  itemArrow: { color: '#444', fontSize: 16 },
-  empty: { color: '#555', fontSize: 12, fontFamily: 'monospace', textAlign: 'center', padding: 24 },
+  itemLabel: { color: '#e8e8e8', fontSize: 13, fontWeight: '600' },
+  itemDesc: { color: '#6f6f6f', fontSize: 11, marginTop: 1 },
+  itemArrow: { color: '#3e3e3e', fontSize: 16 },
+  empty: { color: '#6f6f6f', fontSize: 12, fontFamily: 'monospace', textAlign: 'center', padding: 24 },
 });
 
 // ─── Model Picker Modal ───────────────────────────────────────────────────────
@@ -859,16 +859,16 @@ const mp = StyleSheet.create({
     padding: 16,
   },
   sheet: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#161616',
     width: '100%',
     maxWidth: 320,
     padding: 16,
   },
   title: {
-    color: '#888',
+    color: '#9e9e9e',
     fontSize: 10,
     fontWeight: '700',
     fontFamily: 'monospace',
@@ -880,7 +880,7 @@ const mp = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#161616',
     borderRadius: 8,
     padding: 12,
     marginBottom: 6,
@@ -888,8 +888,8 @@ const mp = StyleSheet.create({
   },
   dot: { width: 8, height: 8, borderRadius: 4 },
   itemInfo: { flex: 1 },
-  itemLabel: { color: '#e5e5e5', fontSize: 13, fontWeight: '700' },
-  itemSub: { color: '#555', fontSize: 11, marginTop: 2 },
+  itemLabel: { color: '#e8e8e8', fontSize: 13, fontWeight: '700' },
+  itemSub: { color: '#6f6f6f', fontSize: 11, marginTop: 2 },
   check: { fontSize: 16 },
 });
 
@@ -1103,10 +1103,10 @@ const mn = StyleSheet.create({
     padding: 16,
   },
   sheet: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#161616',
     width: '100%',
     maxWidth: 480,
     maxHeight: '85%',
@@ -1119,19 +1119,19 @@ const mn = StyleSheet.create({
     padding: 20,
     paddingBottom: 14,
   },
-  title: { color: '#fff', fontSize: 16, fontWeight: '800' },
-  subtitle: { color: '#555', fontSize: 11, marginTop: 3 },
+  title: { color: '#e8e8e8', fontSize: 16, fontWeight: '800' },
+  subtitle: { color: '#6f6f6f', fontSize: 11, marginTop: 3 },
   closeBtn: { padding: 4 },
-  closeText: { color: '#555', fontSize: 16 },
+  closeText: { color: '#6f6f6f', fontSize: 16 },
   divider: { height: 1, backgroundColor: '#000000' },
   scroll: { maxHeight: 480 },
   unsaved: { alignItems: 'center', padding: 32, gap: 10 },
   unsavedIcon: { fontSize: 32 },
-  unsavedText: { color: '#666', fontSize: 13, textAlign: 'center' },
+  unsavedText: { color: '#6f6f6f', fontSize: 13, textAlign: 'center' },
   empty: { alignItems: 'center', padding: 24, gap: 8 },
   emptyIcon: { fontSize: 28 },
-  emptyText: { color: '#888', fontSize: 14, fontWeight: '700' },
-  emptySubtext: { color: '#555', fontSize: 12, textAlign: 'center', lineHeight: 18 },
+  emptyText: { color: '#9e9e9e', fontSize: 14, fontWeight: '700' },
+  emptySubtext: { color: '#6f6f6f', fontSize: 12, textAlign: 'center', lineHeight: 18 },
   addNoteBtn: {
     margin: 16,
     borderWidth: 1,
@@ -1146,8 +1146,8 @@ const mn = StyleSheet.create({
     marginTop: 12,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1e1e1e',
-    backgroundColor: '#0d0d0d',
+    borderColor: '#161616',
+    backgroundColor: '#0a0a0a',
     overflow: 'hidden',
   },
   noteHeader: {
@@ -1157,10 +1157,10 @@ const mn = StyleSheet.create({
     gap: 8,
   },
   noteIcon: { fontSize: 14 },
-  noteTitle: { flex: 1, color: '#e5e5e5', fontSize: 13, fontWeight: '600' },
-  noteChevron: { color: '#444', fontSize: 10 },
+  noteTitle: { flex: 1, color: '#e8e8e8', fontSize: 13, fontWeight: '600' },
+  noteChevron: { color: '#3e3e3e', fontSize: 10 },
   noteBody: { paddingHorizontal: 12, paddingBottom: 12 },
-  noteContent: { color: '#888', fontSize: 12, lineHeight: 18, fontFamily: 'monospace' },
+  noteContent: { color: '#9e9e9e', fontSize: 12, lineHeight: 18, fontFamily: 'monospace' },
   noteActions: { flexDirection: 'row', gap: 12, marginTop: 10 },
   noteActionBtn: {},
   noteActionText: { fontSize: 12, fontWeight: '600' },
@@ -1169,36 +1169,36 @@ const mn = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#2a2a2a',
-    backgroundColor: '#0d0d0d',
+    backgroundColor: '#0a0a0a',
     overflow: 'hidden',
     padding: 12,
     gap: 8,
   },
   editorTitle: {
-    color: '#fff',
+    color: '#e8e8e8',
     fontSize: 13,
     fontWeight: '700',
     borderBottomWidth: 1,
-    borderBottomColor: '#1e1e1e',
+    borderBottomColor: '#161616',
     paddingBottom: 8,
   },
-  editorContent: { color: '#ccc', fontSize: 12, fontFamily: 'monospace', minHeight: 80, lineHeight: 18 },
+  editorContent: { color: '#b5b5b5', fontSize: 12, fontFamily: 'monospace', minHeight: 80, lineHeight: 18 },
   editorActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8, marginTop: 4 },
   editorCancelBtn: {
     paddingHorizontal: 14,
     paddingVertical: 6,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
   },
-  editorCancelText: { color: '#777', fontSize: 12 },
+  editorCancelText: { color: '#6f6f6f', fontSize: 12 },
   editorSaveBtn: { paddingHorizontal: 16, paddingVertical: 6, borderRadius: 6 },
-  editorSaveText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  editorSaveText: { color: '#e8e8e8', fontSize: 12, fontWeight: '700' },
 });
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: Props) {
+export default function AutomationsPanel({ circleId, accentColor = '#e8e8e8' }: Props) {
   const { automations, isLoading, refresh } = useCircleAutomations(circleId);
   const { stats, refreshStats } = useAutomationStats(circleId);
   const liveRuns = useCircleRunStream(circleId);
@@ -1376,13 +1376,13 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
       {failedCount > 0 && activeTab !== 'failed' && (
         <Pressable
           onPress={() => setActiveTab('failed')}
-          style={[{ backgroundColor: '#200a0a', borderWidth: 1, borderColor: '#ef444440', borderRadius: 8, padding: 10, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 8 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          style={[{ backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#ffffff20', borderRadius: 8, padding: 10, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 8 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
         >
           <Text style={{ fontSize: 14 }}>⚠️</Text>
-          <Text style={{ color: '#ef4444', fontSize: 12, fontWeight: '700', flex: 1 }}>
+          <Text style={{ color: '#f59e0b', fontSize: 12, fontWeight: '700', flex: 1 }}>
             {failedCount} automation{failedCount > 1 ? 's' : ''} with errors
           </Text>
-          <Text style={{ color: '#ef444480', fontSize: 11 }}>View →</Text>
+          <Text style={{ color: '#ffffff40', fontSize: 11 }}>View →</Text>
         </Pressable>
       )}
 
@@ -1402,11 +1402,11 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
                 onPress={() => setActiveTab(key)}
                 style={[
                   s.tab,
-                  activeTab === key && { backgroundColor: key === 'failed' ? '#ef4444' : '#fff' },
+                  activeTab === key && { backgroundColor: key === 'failed' ? '#ef4444' : '#6366f1' },
                   Platform.OS === 'web' && { cursor: 'pointer' } as any,
                 ]}
               >
-                <Text style={[s.tabText, activeTab === key && { color: key === 'failed' ? '#fff' : '#000' }]}>
+                <Text style={[s.tabText, activeTab === key && { color: key === 'failed' ? '#e8e8e8' : '#000' }]}>
                   {label}{count != null && count > 0 ? ` ${count}` : ''}
                 </Text>
               </Pressable>
@@ -1436,12 +1436,13 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
           )}
           <Pressable
             onPress={() => setShowCreate(true)}
-            style={[s.newBtn, { backgroundColor: '#fff' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            style={[s.newBtn, { backgroundColor: '#e8e8e8' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
           >
             <Text style={s.newBtnText}>+ New</Text>
           </Pressable>
         </View>
       </View>
+
 
       {/* Automation list OR empty state */}
       {filteredAutomations.length === 0 ? (
@@ -1467,20 +1468,20 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
               ? run.errorMessage.split('\n').filter(Boolean)
               : logLines;
             return (
-              <View key={`live-${run.id}`} style={{ backgroundColor: '#2a2a2a', borderWidth: 1, borderColor: '#6366f180', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+              <View key={`live-${run.id}`} style={{ backgroundColor: '#2a2a2a', borderWidth: 1, borderColor: '#ffffff40', borderRadius: 8, padding: 10, marginBottom: 8 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                   <ActivityIndicator size="small" color="#6366f1" />
-                  <Text style={{ color: '#ddd', fontSize: 13, fontWeight: '700' }}>
+                  <Text style={{ color: '#b5b5b5', fontSize: 13, fontWeight: '700' }}>
                     Running: {auto?.name || 'Automation'}
                   </Text>
-                  <Text style={{ color: '#888', fontSize: 11 }}>
+                  <Text style={{ color: '#9e9e9e', fontSize: 11 }}>
                     {run.durationMs != null ? `${(run.durationMs / 1000).toFixed(1)}s` : '...'}
                   </Text>
                 </View>
                 {lastLog.length > 0 && (
-                  <View style={{ backgroundColor: '#111', borderRadius: 4, padding: 6, marginTop: 2 }}>
+                  <View style={{ backgroundColor: '#161616', borderRadius: 4, padding: 6, marginTop: 2 }}>
                     {(Array.isArray(lastLog) ? lastLog : [lastLog]).slice(-5).map((line: string, i: number) => (
-                      <Text key={i} style={{ color: '#aaa', fontSize: 10, fontFamily: 'monospace', lineHeight: 14 }}>{line}</Text>
+                      <Text key={i} style={{ color: '#9e9e9e', fontSize: 10, fontFamily: 'monospace', lineHeight: 14 }}>{line}</Text>
                     ))}
                   </View>
                 )}
@@ -1492,23 +1493,23 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
             const auto = automations.find(a => a.id === run.automationId);
             const isOk = run.status === 'completed';
             return (
-              <View key={`done-${run.id}`} style={{ backgroundColor: isOk ? '#0a2010' : '#200a0a', borderWidth: 1, borderColor: isOk ? '#22c55e40' : '#ef444440', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+              <View key={`done-${run.id}`} style={{ backgroundColor: isOk ? '#0a0a0a' : '#0a0a0a', borderWidth: 1, borderColor: isOk ? '#ffffff20' : '#ffffff20', borderRadius: 8, padding: 10, marginBottom: 8 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                   <Text style={{ fontSize: 14 }}>{isOk ? '✅' : '❌'}</Text>
                   <Text style={{ color: isOk ? '#22c55e' : '#ef4444', fontSize: 13, fontWeight: '700', flex: 1 }}>
                     {auto?.name || 'Automation'} — {isOk ? 'Completed' : 'Failed'}
                   </Text>
-                  <Text style={{ color: '#888', fontSize: 11 }}>
+                  <Text style={{ color: '#9e9e9e', fontSize: 11 }}>
                     {run.durationMs != null ? `${(run.durationMs / 1000).toFixed(1)}s` : ''} · {run.tokenCount} tok
                   </Text>
                 </View>
                 {run.outputText && isOk && (
-                  <Text style={{ color: '#ccc', fontSize: 11, fontFamily: 'monospace', marginTop: 4 }} numberOfLines={3}>
+                  <Text style={{ color: '#b5b5b5', fontSize: 11, fontFamily: 'monospace', marginTop: 4 }} numberOfLines={3}>
                     {run.outputText.slice(0, 300)}
                   </Text>
                 )}
                 {run.errorMessage && !isOk && (
-                  <Text style={{ color: '#ef4444', fontSize: 11, fontFamily: 'monospace', marginTop: 4 }} numberOfLines={2}>
+                  <Text style={{ color: '#9e9e9e', fontSize: 11, fontFamily: 'monospace', marginTop: 4 }} numberOfLines={2}>
                     {run.errorMessage}
                   </Text>
                 )}
@@ -1543,10 +1544,10 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
             onPress={() => setShowSuggested(!showSuggested)}
             style={[{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
           >
-            <Text style={{ color: '#888', fontSize: 13, fontWeight: '700', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: 0.5, flex: 1 }}>
+            <Text style={{ color: '#9e9e9e', fontSize: 13, fontWeight: '700', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: 0.5, flex: 1 }}>
               Suggested Automations
             </Text>
-            <Text style={{ color: '#555', fontSize: 12 }}>{showSuggested ? '∧' : `${SUGGESTED_GROUPS.reduce((sum, g) => sum + g.templates.length, 0)} templates ∨`}</Text>
+            <Text style={{ color: '#6f6f6f', fontSize: 12 }}>{showSuggested ? '∧' : `${SUGGESTED_GROUPS.reduce((sum, g) => sum + g.templates.length, 0)} templates ∨`}</Text>
           </Pressable>
           {showSuggested && <SuggestedSection onApply={handleApplySuggested} accentColor={accentColor} />}
         </View>
@@ -1558,23 +1559,23 @@ export default function AutomationsPanel({ circleId, accentColor = '#6366f1' }: 
       {deleteConfirmId && (
         <Modal transparent animationType="fade" onRequestClose={() => setDeleteConfirmId(null)}>
           <Pressable style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center' }} onPress={() => setDeleteConfirmId(null)}>
-            <Pressable onPress={(e) => e.stopPropagation()} style={{ backgroundColor: '#1a1a1a', borderRadius: 12, padding: 20, maxWidth: 340, width: '90%', borderWidth: 1, borderColor: '#333' }}>
-              <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700', marginBottom: 8 }}>Delete Automation?</Text>
-              <Text style={{ color: '#999', fontSize: 13, marginBottom: 20, lineHeight: 18 }}>
+            <Pressable onPress={(e) => e.stopPropagation()} style={{ backgroundColor: '#161616', borderRadius: 12, padding: 20, maxWidth: 340, width: '90%', borderWidth: 1, borderColor: '#2a2a2a' }}>
+              <Text style={{ color: '#e8e8e8', fontSize: 16, fontWeight: '700', marginBottom: 8 }}>Delete Automation?</Text>
+              <Text style={{ color: '#9e9e9e', fontSize: 13, marginBottom: 20, lineHeight: 18 }}>
                 This will permanently delete this automation and all its run history. This cannot be undone.
               </Text>
               <View style={{ flexDirection: 'row', gap: 10, justifyContent: 'flex-end' }}>
                 <Pressable
                   onPress={() => setDeleteConfirmId(null)}
-                  style={[{ paddingHorizontal: 16, paddingVertical: 8, borderRadius: 6, backgroundColor: '#333' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  style={[{ paddingHorizontal: 16, paddingVertical: 8, borderRadius: 6, backgroundColor: '#2a2a2a' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                 >
-                  <Text style={{ color: '#ccc', fontSize: 13, fontWeight: '600' }}>Cancel</Text>
+                  <Text style={{ color: '#b5b5b5', fontSize: 13, fontWeight: '600' }}>Cancel</Text>
                 </Pressable>
                 <Pressable
                   onPress={confirmDelete}
                   style={[{ paddingHorizontal: 16, paddingVertical: 8, borderRadius: 6, backgroundColor: '#ef4444' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                 >
-                  <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>Delete</Text>
+                  <Text style={{ color: '#e8e8e8', fontSize: 13, fontWeight: '700' }}>Delete</Text>
                 </Pressable>
               </View>
             </Pressable>
@@ -1671,8 +1672,8 @@ function AutomationCard({
               <Text style={s.cardMetaText}>{auto.eventConfig.provider}</Text>
             )}
             {auto.eventConfig?.linked_goal_id && (
-              <View style={[s.triggerBadge, { backgroundColor: '#22c55e25' }]}>
-                <Text style={[s.triggerText, { color: '#22c55e' }]}>🎯 Goal linked</Text>
+              <View style={[s.triggerBadge, { backgroundColor: '#ffffff10' }]}>
+                <Text style={[s.triggerText, { color: '#b5b5b5' }]}>🎯 Goal linked</Text>
               </View>
             )}
             <Text style={s.cardMetaText}>·</Text>
@@ -1715,8 +1716,8 @@ function AutomationCard({
         <Switch
           value={auto.enabled}
           onValueChange={(val) => onToggle(auto.id, val)}
-          trackColor={{ false: '#333', true: accentColor + '60' }}
-          thumbColor={auto.enabled ? accentColor : '#666'}
+          trackColor={{ false: '#2a2a2a', true: accentColor + '60' }}
+          thumbColor={auto.enabled ? accentColor : '#6f6f6f'}
           style={{ transform: [{ scale: 0.8 }] }}
         />
       </Pressable>
@@ -1736,12 +1737,12 @@ function AutomationCard({
         <Pressable
           onPress={() => onTrigger(auto.id)}
           disabled={triggering}
-          style={[s.runBtn, triggering && { backgroundColor: '#22c55e15', borderColor: '#22c55e40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          style={[s.runBtn, triggering && { backgroundColor: '#ffffff08', borderColor: '#ffffff20' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
         >
           {triggering ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
               <ActivityIndicator size="small" color="#22c55e" />
-              <Text style={[s.runBtnText, { color: '#22c55e' }]}>Running...</Text>
+              <Text style={[s.runBtnText, { color: '#b5b5b5' }]}>Running...</Text>
             </View>
           ) : (
             <Text style={s.runBtnText}>▶ Run</Text>
@@ -1752,7 +1753,7 @@ function AutomationCard({
           disabled={triggering}
           style={[s.actionBtn, { borderColor: '#6366f140' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
         >
-          <Text style={[s.actionBtnText, { fontSize: 9, color: '#6366f1' }]}>🧪 Test</Text>
+          <Text style={[s.actionBtnText, { fontSize: 9, color: '#e8e8e8' }]}>🧪 Test</Text>
         </Pressable>
         <Pressable onPress={onEdit} style={[s.actionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
           <Text style={s.actionBtnText}>✏️</Text>
@@ -1818,10 +1819,10 @@ function RunRow({ run }: { run: AutomationRun }) {
   const recentTrades = ctx?.recentTrades || [];
   const eventPayload = ctx?.eventPayload;
 
-  const sectionHead = { color: '#666', fontSize: 9, fontWeight: '800' as const, fontFamily: 'monospace' as const, marginBottom: 3, letterSpacing: 1 };
-  const sectionBox = { backgroundColor: '#0a0a14', borderRadius: 4, padding: 6, marginBottom: 6, borderWidth: 1, borderColor: '#2a2a2a' };
-  const toggleStyle = [{ paddingVertical: 4, paddingHorizontal: 6, backgroundColor: '#111', borderRadius: 4, borderWidth: 1, borderColor: '#222', alignSelf: 'flex-start' as const, marginTop: 4 }, Platform.OS === 'web' && { cursor: 'pointer' } as any];
-  const toggleText = { color: '#6366f1', fontSize: 8, fontWeight: '700' as const, fontFamily: 'monospace' as const, letterSpacing: 0.5 };
+  const sectionHead = { color: '#6f6f6f', fontSize: 9, fontWeight: '800' as const, fontFamily: 'monospace' as const, marginBottom: 3, letterSpacing: 1 };
+  const sectionBox = { backgroundColor: '#0a0a0a', borderRadius: 4, padding: 6, marginBottom: 6, borderWidth: 1, borderColor: '#2a2a2a' };
+  const toggleStyle = [{ paddingVertical: 4, paddingHorizontal: 6, backgroundColor: '#161616', borderRadius: 4, borderWidth: 1, borderColor: '#161616', alignSelf: 'flex-start' as const, marginTop: 4 }, Platform.OS === 'web' && { cursor: 'pointer' } as any];
+  const toggleText = { color: '#e8e8e8', fontSize: 8, fontWeight: '700' as const, fontFamily: 'monospace' as const, letterSpacing: 0.5 };
 
   return (
     <View style={s.runRow}>
@@ -1832,7 +1833,7 @@ function RunRow({ run }: { run: AutomationRun }) {
         <Text style={s.runIcon}>
           {run.status === 'running' ? '🔄' : runStatusIcon(run.status)}
         </Text>
-        {isDryRun && <Text style={{ color: '#6366f1', fontSize: 8, fontWeight: '800', fontFamily: 'monospace', backgroundColor: '#6366f120', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 3 }}>TEST</Text>}
+        {isDryRun && <Text style={{ color: '#e8e8e8', fontSize: 8, fontWeight: '800', fontFamily: 'monospace', backgroundColor: '#ffffff10', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 3 }}>TEST</Text>}
         <Text style={s.runTime}>{timeAgo(run.startedAt)}</Text>
         {run.durationMs != null && (
           <Text style={s.runDuration}>{(run.durationMs / 1000).toFixed(1)}s</Text>
@@ -1856,7 +1857,7 @@ function RunRow({ run }: { run: AutomationRun }) {
             <View style={sectionBox}>
               <Text style={sectionHead}>EXECUTION LOG</Text>
               {logSteps.map((step: string, i: number) => (
-                <Text key={i} style={{ color: step.includes('❌') ? '#ef4444' : step.includes('✓') || step.includes('✅') ? '#22c55e' : '#aaa', fontSize: 10, fontFamily: 'monospace', lineHeight: 14 }}>{step}</Text>
+                <Text key={i} style={{ color: step.includes('❌') ? '#9e9e9e' : step.includes('✓') || step.includes('✅') ? '#b5b5b5' : '#9e9e9e', fontSize: 10, fontFamily: 'monospace', lineHeight: 14 }}>{step}</Text>
               ))}
             </View>
           )}
@@ -1879,16 +1880,16 @@ function RunRow({ run }: { run: AutomationRun }) {
             <View style={sectionBox}>
               <Text style={sectionHead}>TOKEN BREAKDOWN</Text>
               <View style={{ flexDirection: 'row', gap: 12 }}>
-                <View style={{ flex: 1, backgroundColor: '#111', borderRadius: 4, padding: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
-                  <Text style={{ color: '#888', fontSize: 7, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 0.5 }}>INPUT</Text>
-                  <Text style={{ color: '#6366f1', fontSize: 14, fontWeight: '900', fontFamily: 'monospace' }}>{inputTokens.toLocaleString()}</Text>
+                <View style={{ flex: 1, backgroundColor: '#161616', borderRadius: 4, padding: 6, borderWidth: 1, borderColor: '#1a1a1a' }}>
+                  <Text style={{ color: '#9e9e9e', fontSize: 7, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 0.5 }}>INPUT</Text>
+                  <Text style={{ color: '#e8e8e8', fontSize: 14, fontWeight: '900', fontFamily: 'monospace' }}>{inputTokens.toLocaleString()}</Text>
                 </View>
-                <View style={{ flex: 1, backgroundColor: '#111', borderRadius: 4, padding: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
-                  <Text style={{ color: '#888', fontSize: 7, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 0.5 }}>OUTPUT</Text>
-                  <Text style={{ color: '#22c55e', fontSize: 14, fontWeight: '900', fontFamily: 'monospace' }}>{outputTokens.toLocaleString()}</Text>
+                <View style={{ flex: 1, backgroundColor: '#161616', borderRadius: 4, padding: 6, borderWidth: 1, borderColor: '#1a1a1a' }}>
+                  <Text style={{ color: '#9e9e9e', fontSize: 7, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 0.5 }}>OUTPUT</Text>
+                  <Text style={{ color: '#a855f7', fontSize: 14, fontWeight: '900', fontFamily: 'monospace' }}>{outputTokens.toLocaleString()}</Text>
                 </View>
-                <View style={{ flex: 1, backgroundColor: '#111', borderRadius: 4, padding: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
-                  <Text style={{ color: '#888', fontSize: 7, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 0.5 }}>COST</Text>
+                <View style={{ flex: 1, backgroundColor: '#161616', borderRadius: 4, padding: 6, borderWidth: 1, borderColor: '#1a1a1a' }}>
+                  <Text style={{ color: '#9e9e9e', fontSize: 7, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 0.5 }}>COST</Text>
                   <Text style={{ color: '#f59e0b', fontSize: 14, fontWeight: '900', fontFamily: 'monospace' }}>${run.estimatedCost.toFixed(4)}</Text>
                 </View>
               </View>
@@ -1902,8 +1903,8 @@ function RunRow({ run }: { run: AutomationRun }) {
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 <Text style={{ fontSize: 14 }}>🧠</Text>
                 <View>
-                  <Text style={{ color: '#c084fc', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' }}>{spirit}</Text>
-                  {ctx?.spiritPrompt && <Text style={{ color: '#555', fontSize: 8, fontFamily: 'monospace', marginTop: 2 }} numberOfLines={2}>{ctx.spiritPrompt}</Text>}
+                  <Text style={{ color: '#9e9e9e', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' }}>{spirit}</Text>
+                  {ctx?.spiritPrompt && <Text style={{ color: '#6f6f6f', fontSize: 8, fontFamily: 'monospace', marginTop: 2 }} numberOfLines={2}>{ctx.spiritPrompt}</Text>}
                 </View>
               </View>
             </View>
@@ -1914,10 +1915,10 @@ function RunRow({ run }: { run: AutomationRun }) {
             <View style={sectionBox}>
               <Pressable onPress={() => setShowPrompt(!showPrompt)} style={[{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                 <Text style={sectionHead}>USER PROMPT</Text>
-                <Text style={{ color: '#6366f1', fontSize: 8, fontFamily: 'monospace' }}>{showPrompt ? '▲ HIDE' : '▼ SHOW'}</Text>
+                <Text style={{ color: '#e8e8e8', fontSize: 8, fontFamily: 'monospace' }}>{showPrompt ? '▲ HIDE' : '▼ SHOW'}</Text>
               </Pressable>
               {showPrompt && (
-                <Text style={{ color: '#ccc', fontSize: 10, fontFamily: 'monospace', lineHeight: 14, marginTop: 4 }} selectable>
+                <Text style={{ color: '#b5b5b5', fontSize: 10, fontFamily: 'monospace', lineHeight: 14, marginTop: 4 }} selectable>
                   {run.promptUsed || ctx?.userPrompt || ''}
                 </Text>
               )}
@@ -1929,10 +1930,10 @@ function RunRow({ run }: { run: AutomationRun }) {
             <View style={sectionBox}>
               <Pressable onPress={() => setShowSystemPrompt(!showSystemPrompt)} style={[{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                 <Text style={sectionHead}>SYSTEM PROMPT</Text>
-                <Text style={{ color: '#6366f1', fontSize: 8, fontFamily: 'monospace' }}>{showSystemPrompt ? '▲ HIDE' : `▼ SHOW (${ctx.systemPrompt.length} chars)`}</Text>
+                <Text style={{ color: '#e8e8e8', fontSize: 8, fontFamily: 'monospace' }}>{showSystemPrompt ? '▲ HIDE' : `▼ SHOW (${ctx.systemPrompt.length} chars)`}</Text>
               </Pressable>
               {showSystemPrompt && (
-                <Text style={{ color: '#999', fontSize: 9, fontFamily: 'monospace', lineHeight: 13, marginTop: 4 }} selectable>
+                <Text style={{ color: '#9e9e9e', fontSize: 9, fontFamily: 'monospace', lineHeight: 13, marginTop: 4 }} selectable>
                   {ctx.systemPrompt}
                 </Text>
               )}
@@ -1944,10 +1945,10 @@ function RunRow({ run }: { run: AutomationRun }) {
             <View style={sectionBox}>
               <Pressable onPress={() => setShowContext(!showContext)} style={[{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                 <Text style={sectionHead}>CONTEXT DATA SENT TO AI</Text>
-                <Text style={{ color: '#6366f1', fontSize: 8, fontFamily: 'monospace' }}>{showContext ? '▲ HIDE' : '▼ SHOW'}</Text>
+                <Text style={{ color: '#e8e8e8', fontSize: 8, fontFamily: 'monospace' }}>{showContext ? '▲ HIDE' : '▼ SHOW'}</Text>
               </Pressable>
               {showContext && (
-                <Text style={{ color: '#888', fontSize: 9, fontFamily: 'monospace', lineHeight: 13, marginTop: 4 }} selectable>
+                <Text style={{ color: '#9e9e9e', fontSize: 9, fontFamily: 'monospace', lineHeight: 13, marginTop: 4 }} selectable>
                   {ctx.contextString}
                 </Text>
               )}
@@ -1960,11 +1961,11 @@ function RunRow({ run }: { run: AutomationRun }) {
               <Text style={sectionHead}>CIRCLE SNAPSHOT</Text>
               {members.length > 0 && (
                 <View style={{ marginBottom: 4 }}>
-                  <Text style={{ color: '#555', fontSize: 8, fontWeight: '700', fontFamily: 'monospace', marginBottom: 2 }}>
+                  <Text style={{ color: '#6f6f6f', fontSize: 8, fontWeight: '700', fontFamily: 'monospace', marginBottom: 2 }}>
                     MEMBERS ({members.length}) — {ctx?.checkedInCount || 0} checked in
                   </Text>
                   {members.map((m: any, i: number) => (
-                    <Text key={i} style={{ color: m.checkedIn ? '#22c55e' : '#555', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                    <Text key={i} style={{ color: m.checkedIn ? '#22c55e' : '#6f6f6f', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
                       {m.checkedIn ? '● ' : '○ '}{m.name}{m.streak > 0 ? ` 🔥${m.streak}` : ''}{m.role !== 'member' ? ` (${m.role})` : ''}
                     </Text>
                   ))}
@@ -1972,8 +1973,8 @@ function RunRow({ run }: { run: AutomationRun }) {
               )}
               {notCheckedIn.length > 0 && (
                 <View style={{ marginBottom: 4 }}>
-                  <Text style={{ color: '#ef4444', fontSize: 8, fontWeight: '700', fontFamily: 'monospace', marginBottom: 2 }}>NOT CHECKED IN ({notCheckedIn.length})</Text>
-                  <Text style={{ color: '#ef4444', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>{notCheckedIn.join(', ')}</Text>
+                  <Text style={{ color: '#f59e0b', fontSize: 8, fontWeight: '700', fontFamily: 'monospace', marginBottom: 2 }}>NOT CHECKED IN ({notCheckedIn.length})</Text>
+                  <Text style={{ color: '#9e9e9e', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>{notCheckedIn.join(', ')}</Text>
                 </View>
               )}
               {todayCheckIns.length > 0 && (
@@ -1981,8 +1982,8 @@ function RunRow({ run }: { run: AutomationRun }) {
                   <Text style={{ color: '#22c55e', fontSize: 8, fontWeight: '700', fontFamily: 'monospace', marginBottom: 2 }}>TODAY'S CHECK-INS ({todayCheckIns.length})</Text>
                   {todayCheckIns.map((c: any, i: number) => (
                     <View key={i} style={{ marginBottom: 3 }}>
-                      <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '700', fontFamily: 'monospace' }}>{c.user}</Text>
-                      <Text style={{ color: '#666', fontSize: 8, fontFamily: 'monospace', lineHeight: 12 }} numberOfLines={3}>{c.content}</Text>
+                      <Text style={{ color: '#9e9e9e', fontSize: 9, fontWeight: '700', fontFamily: 'monospace' }}>{c.user}</Text>
+                      <Text style={{ color: '#6f6f6f', fontSize: 8, fontFamily: 'monospace', lineHeight: 12 }} numberOfLines={3}>{c.content}</Text>
                     </View>
                   ))}
                 </View>
@@ -1995,7 +1996,7 @@ function RunRow({ run }: { run: AutomationRun }) {
             <View style={sectionBox}>
               <Text style={sectionHead}>OPEN TASKS ({openTasks.length})</Text>
               {openTasks.map((t: any, i: number) => (
-                <Text key={i} style={{ color: '#aaa', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                <Text key={i} style={{ color: '#9e9e9e', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
                   • {t.title}{t.assignee ? ` → ${t.assignee}` : ''}{t.priority ? ` [${t.priority}]` : ''}
                 </Text>
               ))}
@@ -2007,9 +2008,10 @@ function RunRow({ run }: { run: AutomationRun }) {
             <View style={sectionBox}>
               <Text style={[sectionHead, { color: '#f59e0b' }]}>STUCK TASKS ({stuckTasks.length})</Text>
               {stuckTasks.map((t: any, i: number) => (
-                <Text key={i} style={{ color: '#f59e0b', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                <Text key={i} style={{ color: '#9e9e9e', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
                   {'\u26A0\uFE0F'} {t.title}{t.assignee ? ` → ${t.assignee}` : ''} [{t.status}]{t.daysSinceUpdate ? ` ${t.daysSinceUpdate}d stuck` : ''}
                 </Text>
+
               ))}
             </View>
           )}
@@ -2017,9 +2019,9 @@ function RunRow({ run }: { run: AutomationRun }) {
           {/* ── Peer Review Tasks ── */}
           {peerReviewTasks.length > 0 && (
             <View style={sectionBox}>
-              <Text style={[sectionHead, { color: '#8b5cf6' }]}>TASKS IN REVIEW ({peerReviewTasks.length})</Text>
+              <Text style={[sectionHead, { color: '#3b82f6' }]}>TASKS IN REVIEW ({peerReviewTasks.length})</Text>
               {peerReviewTasks.map((t: any, i: number) => (
-                <Text key={i} style={{ color: '#c084fc', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                <Text key={i} style={{ color: '#9e9e9e', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
                   {'\uD83D\uDD0D'} {t.title}{t.assignee ? ` → ${t.assignee}` : ''} [{t.status}]
                 </Text>
               ))}
@@ -2031,7 +2033,7 @@ function RunRow({ run }: { run: AutomationRun }) {
             <View style={sectionBox}>
               <Text style={sectionHead}>GOALS ({goals.length})</Text>
               {goals.map((g: any, i: number) => (
-                <Text key={i} style={{ color: g.status === 'active' ? '#22c55e' : '#888', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                <Text key={i} style={{ color: g.status === 'active' ? '#22c55e' : '#9e9e9e', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
                   {'\uD83C\uDFAF'} {g.title || g.name} [{g.status}]{g.target_count ? ` ${g.current_count || 0}/${g.target_count}` : ''}
                 </Text>
               ))}
@@ -2043,7 +2045,7 @@ function RunRow({ run }: { run: AutomationRun }) {
             <View style={sectionBox}>
               <Text style={sectionHead}>PROJECT ROOMS ({rooms.length})</Text>
               {rooms.map((r: any, i: number) => (
-                <Text key={i} style={{ color: '#38bdf8', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                <Text key={i} style={{ color: '#9e9e9e', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
                   {'\uD83D\uDCBB'} {r.name}{r.fileCount ? ` (${r.fileCount} files)` : ''}{r.recentMessages ? ` ${r.recentMessages} msgs` : ''}
                 </Text>
               ))}
@@ -2053,9 +2055,9 @@ function RunRow({ run }: { run: AutomationRun }) {
           {/* ── Wallets ── */}
           {wallets.length > 0 && (
             <View style={sectionBox}>
-              <Text style={[sectionHead, { color: '#9945FF' }]}>CONNECTED WALLETS ({wallets.length})</Text>
+              <Text style={[sectionHead, { color: '#22d3ee' }]}>CONNECTED WALLETS ({wallets.length})</Text>
               {wallets.map((w: any, i: number) => (
-                <Text key={i} style={{ color: '#c084fc', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                <Text key={i} style={{ color: '#9e9e9e', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
                   {'\u25CE'} {w.name} — {w.address?.slice(0, 8)}...{w.address?.slice(-4)}{w.portfolioUsd ? ` ($${w.portfolioUsd.toFixed(2)})` : ''}
                 </Text>
               ))}
@@ -2067,7 +2069,7 @@ function RunRow({ run }: { run: AutomationRun }) {
             <View style={sectionBox}>
               <Text style={[sectionHead, { color: '#22c55e' }]}>RECENT TRADES ({recentTrades.length})</Text>
               {recentTrades.map((t: any, i: number) => (
-                <Text key={i} style={{ color: t.status === 'success' ? '#22c55e' : t.status === 'failed' ? '#ef4444' : '#888', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
+                <Text key={i} style={{ color: t.status === 'success' ? '#22c55e' : t.status === 'failed' ? '#ef4444' : '#9e9e9e', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
                   [{t.status}] {t.action}: {t.inputAmount} {'\u2192'} {t.outputAmount}
                 </Text>
               ))}
@@ -2078,13 +2080,13 @@ function RunRow({ run }: { run: AutomationRun }) {
           {eventPayload && (
             <View style={sectionBox}>
               <Text style={sectionHead}>EVENT TRIGGER DATA</Text>
-              <Text style={{ color: '#888', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }} selectable>{eventPayload}</Text>
+              <Text style={{ color: '#9e9e9e', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }} selectable>{eventPayload}</Text>
             </View>
           )}
 
           {/* ── Error ── */}
           {run.errorMessage && run.status !== 'running' && (
-            <View style={[sectionBox, { borderColor: '#ef444440' }]}>
+            <View style={[sectionBox, { borderColor: '#ef444430' }]}>
               <Text style={[sectionHead, { color: '#ef4444' }]}>ERROR</Text>
               <Text style={s.runError}>{run.errorMessage}</Text>
             </View>
@@ -2095,71 +2097,71 @@ function RunRow({ run }: { run: AutomationRun }) {
             <View style={sectionBox}>
               <Text style={sectionHead}>LIVE PROGRESS</Text>
               {run.errorMessage.split('\n').filter(Boolean).map((line: string, i: number) => (
-                <Text key={i} style={{ color: line.includes('✓') ? '#22c55e' : line.includes('❌') ? '#ef4444' : '#aaa', fontSize: 10, fontFamily: 'monospace', lineHeight: 14 }}>{line}</Text>
+                <Text key={i} style={{ color: line.includes('✓') ? '#22c55e' : line.includes('❌') ? '#ef4444' : '#9e9e9e', fontSize: 10, fontFamily: 'monospace', lineHeight: 14 }}>{line}</Text>
               ))}
             </View>
           )}
 
           {/* ── Meta Info ── */}
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 2 }}>
-            <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
-              <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>MODEL</Text>
-              <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{run.modelUsed || '?'}</Text>
+            <View style={{ backgroundColor: '#161616', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a1a' }}>
+              <Text style={{ color: '#6f6f6f', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>MODEL</Text>
+              <Text style={{ color: '#9e9e9e', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{run.modelUsed || '?'}</Text>
             </View>
-            <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
-              <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>OUTPUT TO</Text>
-              <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{run.outputTarget || ctx?.outputTarget || '?'}</Text>
+            <View style={{ backgroundColor: '#161616', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a1a' }}>
+              <Text style={{ color: '#6f6f6f', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>OUTPUT TO</Text>
+              <Text style={{ color: '#9e9e9e', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{run.outputTarget || ctx?.outputTarget || '?'}</Text>
             </View>
-            <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
-              <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>TRIGGER</Text>
-              <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{run.triggerSource}</Text>
+            <View style={{ backgroundColor: '#161616', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a1a' }}>
+              <Text style={{ color: '#6f6f6f', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>TRIGGER</Text>
+              <Text style={{ color: '#9e9e9e', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{run.triggerSource}</Text>
             </View>
             {ctx?.agent && (
-              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
-                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>AGENT</Text>
-                <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{ctx.agent}</Text>
+              <View style={{ backgroundColor: '#161616', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a1a' }}>
+                <Text style={{ color: '#6f6f6f', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>AGENT</Text>
+                <Text style={{ color: '#9e9e9e', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{ctx.agent}</Text>
               </View>
             )}
             {ctx?.memberCount != null && (
-              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
-                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>MEMBERS</Text>
-                <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{ctx.checkedInCount || 0}/{ctx.memberCount} checked in</Text>
+              <View style={{ backgroundColor: '#161616', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a1a' }}>
+                <Text style={{ color: '#6f6f6f', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>MEMBERS</Text>
+                <Text style={{ color: '#9e9e9e', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{ctx.checkedInCount || 0}/{ctx.memberCount} checked in</Text>
               </View>
             )}
             {ctx?.openTaskCount != null && ctx.openTaskCount > 0 && (
-              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
-                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>TASKS</Text>
-                <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{ctx.openTaskCount} open</Text>
+              <View style={{ backgroundColor: '#161616', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a1a' }}>
+                <Text style={{ color: '#6f6f6f', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>TASKS</Text>
+                <Text style={{ color: '#9e9e9e', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{ctx.openTaskCount} open</Text>
               </View>
             )}
             {stuckTasks.length > 0 && (
-              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
-                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>STUCK</Text>
-                <Text style={{ color: '#f59e0b', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{stuckTasks.length} tasks</Text>
+              <View style={{ backgroundColor: '#161616', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a1a' }}>
+                <Text style={{ color: '#6f6f6f', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>STUCK</Text>
+                <Text style={{ color: '#9e9e9e', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{stuckTasks.length} tasks</Text>
               </View>
             )}
             {goals.length > 0 && (
-              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
-                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>GOALS</Text>
+              <View style={{ backgroundColor: '#161616', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a1a' }}>
+                <Text style={{ color: '#6f6f6f', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>GOALS</Text>
                 <Text style={{ color: '#22c55e', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{goals.length} active</Text>
               </View>
             )}
             {rooms.length > 0 && (
-              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
-                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>ROOMS</Text>
-                <Text style={{ color: '#38bdf8', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{rooms.length} active</Text>
+              <View style={{ backgroundColor: '#161616', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a1a' }}>
+                <Text style={{ color: '#6f6f6f', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>ROOMS</Text>
+                <Text style={{ color: '#9e9e9e', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{rooms.length} active</Text>
               </View>
             )}
             {wallets.length > 0 && (
-              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
-                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>WALLETS</Text>
-                <Text style={{ color: '#9945FF', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{wallets.length} connected</Text>
+              <View style={{ backgroundColor: '#161616', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a1a' }}>
+                <Text style={{ color: '#6f6f6f', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>WALLETS</Text>
+                <Text style={{ color: '#9e9e9e', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{wallets.length} connected</Text>
               </View>
             )}
             {run.startedAt && (
-              <View style={{ backgroundColor: '#111', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a2a' }}>
-                <Text style={{ color: '#555', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>STARTED</Text>
-                <Text style={{ color: '#aaa', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{new Date(run.startedAt).toLocaleTimeString()}</Text>
+              <View style={{ backgroundColor: '#161616', borderRadius: 4, paddingVertical: 3, paddingHorizontal: 6, borderWidth: 1, borderColor: '#1a1a1a' }}>
+                <Text style={{ color: '#6f6f6f', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' }}>STARTED</Text>
+                <Text style={{ color: '#9e9e9e', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{new Date(run.startedAt).toLocaleTimeString()}</Text>
               </View>
             )}
           </View>
@@ -2489,10 +2491,10 @@ function AutomationFormModal({
             <Text style={f.label}>TRIGGER</Text>
             {selectedTrigger ? (
               <View style={f.selectedTriggerRow}>
-                <View style={[f.selectedTriggerPill, { borderColor: (TRIGGER_LABELS[selectedTrigger.triggerType]?.color ?? '#6366f1') + '60' }]}>
+                <View style={[f.selectedTriggerPill, { borderColor: (TRIGGER_LABELS[selectedTrigger.triggerType]?.color ?? '#e8e8e8') + '60' }]}>
                   <Text style={f.selectedTriggerIcon}>{selectedTrigger.icon}</Text>
                   <View>
-                    <Text style={[f.selectedTriggerLabel, { color: TRIGGER_LABELS[selectedTrigger.triggerType]?.color ?? '#6366f1' }]}>
+                    <Text style={[f.selectedTriggerLabel, { color: TRIGGER_LABELS[selectedTrigger.triggerType]?.color ?? '#e8e8e8' }]}>
                       {selectedTrigger.label}
                     </Text>
                     <Text style={f.selectedTriggerCat}>{selectedTrigger.category}</Text>
@@ -2555,11 +2557,11 @@ function AutomationFormModal({
                   onPress={() => setSelectedSpirit(null)}
                   style={[
                     f.chip,
-                    !selectedSpirit && { borderColor: '#555', backgroundColor: '#ffffff08' },
+                    !selectedSpirit && { borderColor: '#6f6f6f', backgroundColor: '#ffffff08' },
                     Platform.OS === 'web' && { cursor: 'pointer' } as any,
                   ]}
                 >
-                  <Text style={[f.chipText, !selectedSpirit && { color: '#aaa' }]}>None</Text>
+                  <Text style={[f.chipText, !selectedSpirit && { color: '#9e9e9e' }]}>None</Text>
                 </Pressable>
                 {AGENT_SPIRITS.map((sp) => (
                   <Pressable
@@ -2581,7 +2583,7 @@ function AutomationFormModal({
             {selectedSpirit && (() => {
               const sp = getSpiritById(selectedSpirit);
               return sp ? (
-                <Text style={{ color: '#555', fontSize: 10, marginBottom: 8, fontStyle: 'italic' }}>
+                <Text style={{ color: '#6f6f6f', fontSize: 10, marginBottom: 8, fontStyle: 'italic' }}>
                   {sp.tagline}
                 </Text>
               ) : null;
@@ -2616,7 +2618,7 @@ function AutomationFormModal({
                   onPress={() => setIncludeContext((prev) => ({ ...prev, [key]: !prev[key] }))}
                   style={[f.contextToggle, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                 >
-                  <Text style={[f.contextText, includeContext[key] && { color: '#22c55e' }]}>
+                  <Text style={[f.contextText, includeContext[key] && { color: '#b5b5b5' }]}>
                     {includeContext[key] ? '☑' : '☐'} {key.replace('_', ' ')}
                   </Text>
                 </Pressable>
@@ -2638,11 +2640,11 @@ function AutomationFormModal({
                   onPress={() => { setLinkMode(mode); if (mode === 'none') { setLinkedGoalId(null); setNewGoalName(''); setNewTaskTitle(''); } }}
                   style={[
                     f.chip,
-                    linkMode === mode && { borderColor: '#22c55e', backgroundColor: '#22c55e20' },
+                    linkMode === mode && { borderColor: '#b5b5b5', backgroundColor: '#22c55e20' },
                     Platform.OS === 'web' && { cursor: 'pointer' } as any,
                   ]}
                 >
-                  <Text style={[f.chipText, linkMode === mode && { color: '#22c55e' }]}>{label}</Text>
+                  <Text style={[f.chipText, linkMode === mode && { color: '#b5b5b5' }]}>{label}</Text>
                 </Pressable>
               ))}
             </View>
@@ -2658,17 +2660,17 @@ function AutomationFormModal({
                         onPress={() => setLinkedGoalId(g.id)}
                         style={[
                           f.chip,
-                          linkedGoalId === g.id && { borderColor: '#22c55e', backgroundColor: '#22c55e20' },
+                          linkedGoalId === g.id && { borderColor: '#b5b5b5', backgroundColor: '#22c55e20' },
                           Platform.OS === 'web' && { cursor: 'pointer' } as any,
                         ]}
                       >
-                        <Text style={[f.chipText, linkedGoalId === g.id && { color: '#22c55e' }]}>
+                        <Text style={[f.chipText, linkedGoalId === g.id && { color: '#b5b5b5' }]}>
                           🎯 {g.name}
                         </Text>
                       </Pressable>
                     ))}
                     {availableGoals.length === 0 && (
-                      <Text style={{ color: '#555', fontSize: 11 }}>No goals yet — create one below</Text>
+                      <Text style={{ color: '#6f6f6f', fontSize: 11 }}>No goals yet — create one below</Text>
                     )}
                   </View>
                 </ScrollView>
@@ -2705,17 +2707,17 @@ function AutomationFormModal({
                       <View style={f.chipRow}>
                         <Pressable
                           onPress={() => setLinkedGoalId(null)}
-                          style={[f.chip, !linkedGoalId && { borderColor: '#555', backgroundColor: '#ffffff08' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                          style={[f.chip, !linkedGoalId && { borderColor: '#6f6f6f', backgroundColor: '#ffffff08' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                         >
-                          <Text style={[f.chipText, !linkedGoalId && { color: '#aaa' }]}>None</Text>
+                          <Text style={[f.chipText, !linkedGoalId && { color: '#9e9e9e' }]}>None</Text>
                         </Pressable>
                         {availableGoals.map((g) => (
                           <Pressable
                             key={g.id}
                             onPress={() => setLinkedGoalId(g.id)}
-                            style={[f.chip, linkedGoalId === g.id && { borderColor: '#22c55e', backgroundColor: '#22c55e20' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                            style={[f.chip, linkedGoalId === g.id && { borderColor: '#b5b5b5', backgroundColor: '#22c55e20' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                           >
-                            <Text style={[f.chipText, linkedGoalId === g.id && { color: '#22c55e' }]}>🎯 {g.name}</Text>
+                            <Text style={[f.chipText, linkedGoalId === g.id && { color: '#b5b5b5' }]}>🎯 {g.name}</Text>
                           </Pressable>
                         ))}
                       </View>
@@ -2806,7 +2808,7 @@ const s = StyleSheet.create({
     paddingBottom: 24,
   },
   pageTitle: {
-    color: '#fff',
+    color: '#e8e8e8',
     fontSize: 22,
     fontWeight: '800',
     marginBottom: 14,
@@ -2832,7 +2834,7 @@ const s = StyleSheet.create({
     borderRadius: 6,
   },
   tabText: {
-    color: '#888',
+    color: '#9e9e9e',
     fontSize: 12,
     fontWeight: '600',
   },
@@ -2849,10 +2851,10 @@ const s = StyleSheet.create({
   },
   iconBtnText: { fontSize: 16 },
   searchInput: {
-    color: '#fff',
+    color: '#e8e8e8',
     fontSize: 13,
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 5,
@@ -2875,7 +2877,7 @@ const s = StyleSheet.create({
 
   // Empty state
   emptyState: {
-    backgroundColor: '#0d0d0d',
+    backgroundColor: '#0a0a0a',
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#000000',
@@ -2884,13 +2886,13 @@ const s = StyleSheet.create({
     marginBottom: 8,
   },
   emptyTitle: {
-    color: '#e5e5e5',
+    color: '#e8e8e8',
     fontSize: 15,
     fontWeight: '700',
     marginBottom: 8,
   },
   emptySubtitle: {
-    color: '#666',
+    color: '#6f6f6f',
     fontSize: 12,
     textAlign: 'center',
     lineHeight: 18,
@@ -2900,16 +2902,16 @@ const s = StyleSheet.create({
     marginTop: 16,
     backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     paddingHorizontal: 20,
     paddingVertical: 8,
   },
-  emptyBtnText: { color: '#e5e5e5', fontSize: 13, fontWeight: '600' },
+  emptyBtnText: { color: '#e8e8e8', fontSize: 13, fontWeight: '600' },
 
   // Card
   card: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#000000',
@@ -2923,16 +2925,16 @@ const s = StyleSheet.create({
   },
   cardIcon: { fontSize: 18 },
   cardInfo: { flex: 1 },
-  cardName: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  cardName: { color: '#e8e8e8', fontSize: 13, fontWeight: '700' },
   cardMeta: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3, flexWrap: 'wrap' },
-  cardMetaText: { color: '#666', fontSize: 10, fontFamily: 'monospace' },
+  cardMetaText: { color: '#6f6f6f', fontSize: 10, fontFamily: 'monospace' },
   triggerBadge: { borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 },
   triggerText: { fontSize: 9, fontWeight: '800', fontFamily: 'monospace' },
   statsRow: { flexDirection: 'row', gap: 10, marginTop: 3 },
-  statText: { color: '#555', fontSize: 9, fontFamily: 'monospace' },
+  statText: { color: '#6f6f6f', fontSize: 9, fontFamily: 'monospace' },
   errorRow: { paddingHorizontal: 10, paddingBottom: 4 },
-  errorText: { color: '#ef4444', fontSize: 10, fontFamily: 'monospace' },
-  nextRun: { color: '#555', fontSize: 10, fontFamily: 'monospace', paddingHorizontal: 10, paddingBottom: 4 },
+  errorText: { color: '#9e9e9e', fontSize: 10, fontFamily: 'monospace' },
+  nextRun: { color: '#6f6f6f', fontSize: 10, fontFamily: 'monospace', paddingHorizontal: 10, paddingBottom: 4 },
 
   // Card actions
   cardActions: {
@@ -2943,32 +2945,32 @@ const s = StyleSheet.create({
     gap: 6,
     flexWrap: 'wrap',
   },
-  runBtn: { backgroundColor: '#22c55e15', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 4 },
-  runBtnText: { color: '#22c55e', fontSize: 11, fontWeight: '700', fontFamily: 'monospace' },
-  actionBtn: { backgroundColor: '#1e1e1e', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 },
+  runBtn: { backgroundColor: '#ffffff08', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 4 },
+  runBtnText: { color: '#b5b5b5', fontSize: 11, fontWeight: '700', fontFamily: 'monospace' },
+  actionBtn: { backgroundColor: '#161616', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 },
   actionBtnText: { fontSize: 12 },
   memoryBtn: { backgroundColor: '#8b5cf615', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 },
-  memoryBtnText: { color: '#8b5cf6', fontSize: 11, fontWeight: '700', fontFamily: 'monospace' },
+  memoryBtnText: { color: '#9e9e9e', fontSize: 11, fontWeight: '700', fontFamily: 'monospace' },
   historyBtn: { backgroundColor: '#6366f115', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 },
-  historyBtnText: { color: '#6366f1', fontSize: 11, fontWeight: '700', fontFamily: 'monospace' },
+  historyBtnText: { color: '#e8e8e8', fontSize: 11, fontWeight: '700', fontFamily: 'monospace' },
   deleteBtn: { padding: 4 },
-  deleteBtnText: { color: '#444', fontSize: 12 },
+  deleteBtnText: { color: '#3e3e3e', fontSize: 12 },
 
   // Run history
-  noRuns: { color: '#555', fontSize: 11, fontFamily: 'monospace', padding: 10, textAlign: 'center' },
+  noRuns: { color: '#6f6f6f', fontSize: 11, fontFamily: 'monospace', padding: 10, textAlign: 'center' },
   runsList: { borderTopWidth: 1, borderTopColor: '#000000' },
-  runRow: { borderBottomWidth: 1, borderBottomColor: '#0f0f0f' },
+  runRow: { borderBottomWidth: 1, borderBottomColor: '#0a0a0a' },
   runRowHeader: { flexDirection: 'row', alignItems: 'center', padding: 8, paddingHorizontal: 10, gap: 8 },
   runIcon: { fontSize: 12 },
-  runTime: { color: '#888', fontSize: 10, fontFamily: 'monospace' },
-  runDuration: { color: '#555', fontSize: 10, fontFamily: 'monospace' },
-  runTokens: { color: '#555', fontSize: 10, fontFamily: 'monospace' },
-  runCost: { color: '#f59e0b', fontSize: 10, fontFamily: 'monospace' },
-  runChevron: { color: '#444', fontSize: 9, marginLeft: 'auto' },
+  runTime: { color: '#9e9e9e', fontSize: 10, fontFamily: 'monospace' },
+  runDuration: { color: '#6f6f6f', fontSize: 10, fontFamily: 'monospace' },
+  runTokens: { color: '#6f6f6f', fontSize: 10, fontFamily: 'monospace' },
+  runCost: { color: '#9e9e9e', fontSize: 10, fontFamily: 'monospace' },
+  runChevron: { color: '#3e3e3e', fontSize: 9, marginLeft: 'auto' },
   runDetail: { paddingHorizontal: 10, paddingBottom: 10, backgroundColor: '#000000' },
-  runOutput: { color: '#ccc', fontSize: 11, fontFamily: 'monospace', lineHeight: 16 },
-  runError: { color: '#ef4444', fontSize: 11, fontFamily: 'monospace', marginTop: 4 },
-  runMeta: { color: '#444', fontSize: 9, fontFamily: 'monospace', marginTop: 6 },
+  runOutput: { color: '#b5b5b5', fontSize: 11, fontFamily: 'monospace', lineHeight: 16 },
+  runError: { color: '#9e9e9e', fontSize: 11, fontFamily: 'monospace', marginTop: 4 },
+  runMeta: { color: '#3e3e3e', fontSize: 9, fontFamily: 'monospace', marginTop: 6 },
 });
 
 // ─── Form styles ──────────────────────────────────────────────────────────────
@@ -2982,10 +2984,10 @@ const f = StyleSheet.create({
     padding: 16,
   },
   sheet: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#161616',
     padding: 20,
     width: '100%',
     maxWidth: 500,
@@ -2997,7 +2999,7 @@ const f = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: 16,
   },
-  title: { color: '#fff', fontSize: 18, fontWeight: '800' },
+  title: { color: '#e8e8e8', fontSize: 18, fontWeight: '800' },
   memoryHeaderBtn: {
     backgroundColor: '#8b5cf615',
     borderRadius: 8,
@@ -3006,7 +3008,7 @@ const f = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#8b5cf630',
   },
-  memoryHeaderText: { color: '#8b5cf6', fontSize: 11, fontWeight: '700' },
+  memoryHeaderText: { color: '#9e9e9e', fontSize: 11, fontWeight: '700' },
   label: {
     color: '#6B7280',
     fontSize: 10,
@@ -3019,9 +3021,9 @@ const f = StyleSheet.create({
   input: {
     backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#161616',
     borderRadius: 8,
-    color: '#fff',
+    color: '#e8e8e8',
     fontSize: 13,
     padding: 10,
     fontFamily: 'monospace',
@@ -3051,15 +3053,15 @@ const f = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 8,
-    backgroundColor: '#0d0d0d',
+    backgroundColor: '#0a0a0a',
   },
   selectedTriggerIcon: { fontSize: 16 },
   selectedTriggerLabel: { fontSize: 13, fontWeight: '700' },
-  selectedTriggerCat: { color: '#555', fontSize: 10 },
+  selectedTriggerCat: { color: '#6f6f6f', fontSize: 10 },
   clearTriggerBtn: { marginLeft: 'auto', padding: 4 },
-  clearTriggerText: { color: '#555', fontSize: 12 },
-  changeTriggerBtn: { paddingHorizontal: 10, paddingVertical: 8, borderWidth: 1, borderColor: '#333', borderRadius: 8 },
-  changeTriggerText: { color: '#888', fontSize: 11 },
+  clearTriggerText: { color: '#6f6f6f', fontSize: 12 },
+  changeTriggerBtn: { paddingHorizontal: 10, paddingVertical: 8, borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 8 },
+  changeTriggerText: { color: '#9e9e9e', fontSize: 11 },
 
   // Model dropdown
   modelDropdown: {
@@ -3068,20 +3070,20 @@ const f = StyleSheet.create({
     gap: 8,
     backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#161616',
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
   },
   modelDot: { width: 8, height: 8, borderRadius: 4 },
   modelLabel: { fontSize: 13, fontWeight: '700' },
-  modelSub: { color: '#555', fontSize: 11 },
-  modelChevron: { color: '#555', fontSize: 14 },
+  modelSub: { color: '#6f6f6f', fontSize: 11 },
+  modelChevron: { color: '#6f6f6f', fontSize: 14 },
 
   // Chips
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  chip: { borderWidth: 1, borderColor: '#333', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 5 },
-  chipText: { color: '#888', fontSize: 11, fontWeight: '600', fontFamily: 'monospace' },
+  chip: { borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 5 },
+  chipText: { color: '#9e9e9e', fontSize: 11, fontWeight: '600', fontFamily: 'monospace' },
 
   // Templates
   // Accordion template categories
@@ -3093,15 +3095,15 @@ const f = StyleSheet.create({
     paddingHorizontal: 4,
   },
   accordionIcon: { fontSize: 12 },
-  accordionLabel: { color: '#9090a8', fontSize: 11, fontWeight: '700', fontFamily: 'monospace', flex: 1 },
-  accordionCount: { color: '#555', fontSize: 10, fontWeight: '600', fontFamily: 'monospace', backgroundColor: '#1a1a1a', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4 },
-  accordionChevron: { color: '#555', fontSize: 10, marginLeft: 2 },
+  accordionLabel: { color: '#9e9e9e', fontSize: 11, fontWeight: '700', fontFamily: 'monospace', flex: 1 },
+  accordionCount: { color: '#6f6f6f', fontSize: 10, fontWeight: '600', fontFamily: 'monospace', backgroundColor: '#161616', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4 },
+  accordionChevron: { color: '#6f6f6f', fontSize: 10, marginLeft: 2 },
   templateScroll: { marginBottom: 4 },
   templateChip: {
     flexDirection: 'row',
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#161616',
     borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 6,
@@ -3109,12 +3111,12 @@ const f = StyleSheet.create({
     gap: 4,
   },
   templateIcon: { fontSize: 14 },
-  templateName: { color: '#888', fontSize: 11, fontWeight: '600' },
+  templateName: { color: '#9e9e9e', fontSize: 11, fontWeight: '600' },
 
   // Context
   contextRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   contextToggle: {},
-  contextText: { color: '#666', fontSize: 11, fontFamily: 'monospace' },
+  contextText: { color: '#6f6f6f', fontSize: 11, fontFamily: 'monospace' },
 
   // Memory notes section
   memorySection: {
@@ -3127,14 +3129,14 @@ const f = StyleSheet.create({
   },
   memorySectionRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   memoryManageText: { fontSize: 11, fontWeight: '700' },
-  memorySub: { color: '#555', fontSize: 11, marginTop: 4 },
+  memorySub: { color: '#6f6f6f', fontSize: 11, marginTop: 4 },
 
-  errorMsg: { color: '#ef4444', fontSize: 11, marginTop: 8 },
+  errorMsg: { color: '#9e9e9e', fontSize: 11, marginTop: 8 },
 
   // Buttons
   btnRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 16, paddingBottom: 4 },
-  cancelBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#333' },
-  cancelText: { color: '#888', fontSize: 13, fontWeight: '600' },
+  cancelBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#2a2a2a' },
+  cancelText: { color: '#9e9e9e', fontSize: 13, fontWeight: '600' },
   saveBtn: { paddingHorizontal: 20, paddingVertical: 8, borderRadius: 8 },
-  saveText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  saveText: { color: '#e8e8e8', fontSize: 13, fontWeight: '700' },
 });

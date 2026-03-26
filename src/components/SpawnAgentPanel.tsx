@@ -19,17 +19,17 @@ const MONO = Platform.OS === 'ios' ? 'Courier' : 'monospace';
 // ─── Theme ───────────────────────────────────────────────────────────────────
 
 const T = {
-  bg: '#0a0a0f',
-  panel: '#0f0f17',
-  card: '#12121c',
-  border: '#1a1a2e',
-  borderLit: '#2a2a4e',
-  text: '#e2e2f0',
-  textSec: '#8888a8',
-  textMuted: '#44445a',
-  accent: '#00d4aa',
-  accentDim: '#00a888',
-  info: '#6366f1',
+  bg: '#000000',
+  panel: '#0a0a0a',
+  card: '#161616',
+  border: '#1a1a1a',
+  borderLit: '#2a2a2a',
+  text: '#e8e8e8',
+  textSec: '#9e9e9e',
+  textMuted: '#3e3e3e',
+  accent: '#6366f1',
+  accentDim: '#818cf8',
+  info: '#3b82f6',
   success: '#22c55e',
   warning: '#f59e0b',
   error: '#ef4444',
@@ -38,16 +38,16 @@ const T = {
 // ─── Config options ──────────────────────────────────────────────────────────
 
 const AGENT_COLORS = [
-  { color: '#00d4aa', label: 'Cyan' },
   { color: '#6366f1', label: 'Indigo' },
-  { color: '#22c55e', label: 'Green' },
-  { color: '#f59e0b', label: 'Amber' },
-  { color: '#ef4444', label: 'Red' },
-  { color: '#8b5cf6', label: 'Purple' },
+  { color: '#a855f7', label: 'Purple' },
   { color: '#ec4899', label: 'Pink' },
-  { color: '#06b6d4', label: 'Teal' },
+  { color: '#ef4444', label: 'Red' },
   { color: '#f97316', label: 'Orange' },
+  { color: '#f59e0b', label: 'Amber' },
+  { color: '#22c55e', label: 'Green' },
+  { color: '#22d3ee', label: 'Cyan' },
   { color: '#3b82f6', label: 'Blue' },
+  { color: '#e8e8e8', label: 'White' },
 ];
 
 const MODEL_PREFERENCES = [
@@ -142,7 +142,7 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
   const [config, setConfig] = useState<AgentConfig>({
     name: '',
     provider: 'blackswan',
-    color: '#00d4aa',
+    color: '#6366f1',
     spirit: null,
     modelPreference: 'auto',
     autonomy: 'balanced',
@@ -597,7 +597,7 @@ const s = StyleSheet.create({
     width: 24, height: 24, borderRadius: 2,
     backgroundColor: T.accent, alignItems: 'center', justifyContent: 'center',
   },
-  brandLetter: { color: '#000', fontFamily: MONO, fontSize: 14, fontWeight: '900' },
+  brandLetter: { color: '#fff', fontFamily: MONO, fontSize: 14, fontWeight: '900' },
   headerTitle: { color: T.text, fontFamily: MONO, fontSize: 11, fontWeight: '800', letterSpacing: 2 },
   cancelBtn: {
     paddingHorizontal: 10, paddingVertical: 4, borderRadius: 2,
@@ -660,7 +660,7 @@ const s = StyleSheet.create({
     width: 24, height: 24, borderRadius: 12, borderWidth: 2, borderColor: 'transparent',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  colorDotActive: { borderColor: '#fff', borderWidth: 2 },
+  colorDotActive: { borderColor: '#ffffff', borderWidth: 2 },
 
   // Spirit cards
   catLabel: {
@@ -682,7 +682,7 @@ const s = StyleSheet.create({
     width: 18, height: 18, borderRadius: 2,
     alignItems: 'center', justifyContent: 'center',
   },
-  checkText: { color: '#000', fontFamily: MONO, fontSize: 10, fontWeight: '900' },
+  checkText: { color: '#fff', fontFamily: MONO, fontSize: 10, fontWeight: '900' },
 
   // Radio rows (model, autonomy)
   radioRow: {
@@ -755,11 +755,11 @@ const s = StyleSheet.create({
     backgroundColor: T.accent,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  nextBtnText: { color: '#000', fontFamily: MONO, fontSize: 10, fontWeight: '800' },
+  nextBtnText: { color: '#fff', fontFamily: MONO, fontSize: 10, fontWeight: '800' },
   deployBtn: {
     paddingHorizontal: 20, paddingVertical: 8, borderRadius: 2,
     backgroundColor: T.accent,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  deployBtnText: { color: '#000', fontFamily: MONO, fontSize: 11, fontWeight: '800', letterSpacing: 1 },
+  deployBtnText: { color: '#fff', fontFamily: MONO, fontSize: 11, fontWeight: '800', letterSpacing: 1 },
 });

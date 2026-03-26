@@ -968,7 +968,7 @@ export default function OfficeChat({
         <Text style={styles.headerIcon}>{'💬'}</Text>
         <Text style={styles.headerTitle}>OFFICE TERMINAL</Text>
         {bridgeOnline && (
-          <View style={{ backgroundColor: '#22c55e20', borderRadius: 8, paddingHorizontal: 6, paddingVertical: 1, borderWidth: 1, borderColor: '#22c55e30', flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+          <View style={{ backgroundColor: '#22c55e15', borderRadius: 8, paddingHorizontal: 6, paddingVertical: 1, borderWidth: 1, borderColor: '#22c55e30', flexDirection: 'row', alignItems: 'center', gap: 3 }}>
             <View style={{ width: 5, height: 5, borderRadius: 2.5, backgroundColor: '#22c55e' }} />
             <Text style={{ fontSize: 8, color: '#22c55e', fontFamily: 'monospace', fontWeight: '800' }}>SH</Text>
           </View>
@@ -1076,7 +1076,7 @@ export default function OfficeChat({
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: '#0a0a12', borderWidth: 1, borderColor: '#2a2a2a',
+    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#2a2a2a',
     borderRadius: 12, overflow: 'hidden', flex: 1, minHeight: 200,
   },
   containerFullscreen: {
@@ -1091,14 +1091,14 @@ const styles = StyleSheet.create({
     zIndex: 3000,
   },
   headerFullscreen: {
-    backgroundColor: '#0d0d14',
+    backgroundColor: '#0a0a0a',
     borderBottomWidth: 2,
     borderBottomColor: '#6366f1',
     paddingVertical: 12,
   },
   minimized: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
-    backgroundColor: '#0a0a12', borderWidth: 1, borderColor: '#2a2a2a',
+    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#2a2a2a',
     borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10,
   },
   minimizedIcon: { fontSize: 14 },
@@ -1114,7 +1114,7 @@ const styles = StyleSheet.create({
   headerIcon: { fontSize: 12 },
   headerTitle: { fontSize: 10, color: '#888', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1, flex: 1 },
   connCountBadge: {
-    backgroundColor: '#22c55e20', borderRadius: 8, paddingHorizontal: 6, paddingVertical: 1,
+    backgroundColor: '#22c55e15', borderRadius: 8, paddingHorizontal: 6, paddingVertical: 1,
     borderWidth: 1, borderColor: '#22c55e30',
   },
   connCountText: { fontSize: 9, color: '#22c55e', fontFamily: 'monospace', fontWeight: '800' },
@@ -1135,7 +1135,7 @@ const styles = StyleSheet.create({
     borderBottomColor: '#2a2a2a',
     paddingVertical: 4,
     paddingHorizontal: 8,
-    backgroundColor: '#08080e',
+    backgroundColor: '#000000',
   },
   messageList: { flex: 1 },
   messageContent: { padding: 10, gap: 8 },
@@ -1143,11 +1143,11 @@ const styles = StyleSheet.create({
   msgRowUser: { alignItems: 'flex-end' },
   msgAgent: { fontSize: 11, color: '#888', fontFamily: 'monospace', fontWeight: '700', marginLeft: 4, marginBottom: 2 },
   msgBubble: { maxWidth: '85%' as any, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 10 },
-  msgBubbleBot: { backgroundColor: '#222222', borderWidth: 1, borderColor: '#2a2a2a', alignSelf: 'flex-start' },
-  msgBubbleUser: { backgroundColor: '#6366f1', alignSelf: 'flex-end' },
+  msgBubbleBot: { backgroundColor: '#161616', borderWidth: 1, borderColor: '#2a2a2a', alignSelf: 'flex-start' },
+  msgBubbleUser: { backgroundColor: '#252525', alignSelf: 'flex-end' },
   msgBubbleOC: { borderColor: '#6366f140' },
-  msgBubbleTG: { borderColor: '#0088cc40' },
-  msgBubbleShell: { borderColor: '#22c55e40', backgroundColor: '#0a1210' },
+  msgBubbleTG: { borderColor: '#a855f740' },
+  msgBubbleShell: { borderColor: '#ffffff20', backgroundColor: '#0a0a0a' },
   msgText: { fontSize: 14, color: '#ccc', fontFamily: 'monospace', lineHeight: 20 },
   msgTextUser: { color: '#fff' },
   inputRow: {
@@ -1171,7 +1171,7 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: '#6366f1',
+    backgroundColor: '#252525',
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
@@ -1180,10 +1180,10 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 5,
     borderWidth: 2,
-    borderColor: '#8b5cf6',
+    borderColor: '#3e3e3e',
   },
   scrollBtnText: {
-    color: '#fff',
+    color: '#e8e8e8',
     fontSize: 18,
     fontWeight: '800',
   },

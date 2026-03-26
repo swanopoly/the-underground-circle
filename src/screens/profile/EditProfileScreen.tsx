@@ -15,14 +15,14 @@ import Button from '../../components/Button';
 import { getAllAchievements, getUserAchievements } from '../../lib/gamification';
 
 const THEME_COLORS = [
-  '#6366f1', // Default indigo
-  '#8b5cf6', // Purple
-  '#06b6d4', // Cyan
-  '#10b981', // Emerald
+  '#6366f1', // Indigo
+  '#a855f7', // Purple
+  '#22d3ee', // Cyan
+  '#22c55e', // Green
+  '#f43f5e', // Rose
   '#f59e0b', // Amber
-  '#ef4444', // Red
-  '#ec4899', // Pink
-  '#84cc16', // Lime
+  '#3b82f6', // Blue
+  '#fbbf24', // Gold
 ];
 
 export default function EditProfileScreen({ navigation }: any) {
@@ -413,7 +413,7 @@ const styles = StyleSheet.create({
   },
   achievementSelected: {
     borderColor: '#6366f1',
-    backgroundColor: '#2a2a2a',
+    backgroundColor: '#6366f115',
   },
   achievementIcon: { fontSize: 24, marginRight: 12 },
   achievementName: { color: '#fff', fontSize: 14, flex: 1 },

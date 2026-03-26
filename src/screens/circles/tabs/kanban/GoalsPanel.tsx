@@ -64,9 +64,9 @@ export default function GoalsPanel({
       <ScrollView style={s.list} contentContainerStyle={s.listContent} showsVerticalScrollIndicator={false}>
         {goals.map(goal => {
           const isSelected = filteredGoalId === goal.id;
-          const statusColor = GOAL_STATUS_COLORS[goal.status] || '#666680';
+          const statusColor = GOAL_STATUS_COLORS[goal.status] || '#6f6f6f';
           const pct = goal.task_count > 0 ? Math.round((goal.completed_count / goal.task_count) * 100) : 0;
-          const barColor = pct >= 100 ? '#22c55e' : pct > 0 ? '#6366f1' : '#333348';
+          const barColor = pct >= 100 ? '#22c55e' : pct > 0 ? '#6366f1' : '#3e3e3e';
 
           return (
             <Pressable
@@ -126,7 +126,7 @@ export default function GoalsPanel({
                   {goal.assigned_agent_ids.slice(0, 4).map((aid, i) => {
                     const agent = agents.find(a => a.id === aid);
                     return (
-                      <View key={i} style={[s.agentAvatar, { backgroundColor: agent?.color || '#6366f1' }]}>
+                      <View key={i} style={[s.agentAvatar, { backgroundColor: agent?.color || '#e8e8e8' }]}>
                         <Text style={s.agentAvatarText}>
                           {(agent?.name || '?')[0].toUpperCase()}
                         </Text>
@@ -193,7 +193,7 @@ function AddGoalModal({ onClose, onCreate }: { onClose: () => void; onCreate: (f
         <TextInput
           style={modal.input}
           placeholder="Goal name"
-          placeholderTextColor="#444455"
+          placeholderTextColor="#3e3e3e"
           value={name}
           onChangeText={setName}
           autoFocus
@@ -202,7 +202,7 @@ function AddGoalModal({ onClose, onCreate }: { onClose: () => void; onCreate: (f
         <TextInput
           style={[modal.input, modal.textArea]}
           placeholder="Description (optional)"
-          placeholderTextColor="#333348"
+          placeholderTextColor="#3e3e3e"
           value={description}
           onChangeText={setDescription}
           multiline
@@ -283,7 +283,7 @@ function EditGoalModal({
             multiline
             maxLength={300}
             placeholder="Description"
-            placeholderTextColor="#333348"
+            placeholderTextColor="#3e3e3e"
           />
 
           {/* Status toggle */}
@@ -314,9 +314,9 @@ function EditGoalModal({
                 <Pressable
                   key={a.id}
                   onPress={() => toggleAgent(a.id)}
-                  style={[modal.chip, sel && { backgroundColor: (a.color || '#6366f1') + '15', borderColor: (a.color || '#6366f1') + '30' }]}
+                  style={[modal.chip, sel && { backgroundColor: (a.color || '#e8e8e8') + '15', borderColor: (a.color || '#e8e8e8') + '30' }]}
                 >
-                  <Text style={[modal.chipText, sel && { color: a.color || '#6366f1' }]}>
+                  <Text style={[modal.chipText, sel && { color: a.color || '#e8e8e8' }]}>
                     {a.toolIcon || '>>'} {a.name}
                   </Text>
                 </Pressable>
@@ -421,7 +421,7 @@ function GoalProgressSummary({ goals, agents }: { goals: GoalWithCount[]; agents
           <Text style={summary.statLabel}>active</Text>
         </View>
         <View style={summary.stat}>
-          <Text style={[summary.statValue, { color: '#a5b4fc' }]}>{totalTasks}</Text>
+          <Text style={[summary.statValue, { color: '#3b82f6' }]}>{totalTasks}</Text>
           <Text style={summary.statLabel}>tasks</Text>
         </View>
       </View>
@@ -436,7 +436,7 @@ function GoalProgressSummary({ goals, agents }: { goals: GoalWithCount[]; agents
           )}
           {completedGoals.length > 0 && (
             <View style={summary.stat}>
-              <Text style={[summary.statValue, { color: '#666680', fontSize: 13 }]}>{completedGoals.length}</Text>
+              <Text style={[summary.statValue, { color: '#6f6f6f', fontSize: 13 }]}>{completedGoals.length}</Text>
               <Text style={summary.statLabel}>done</Text>
             </View>
           )}
@@ -447,7 +447,7 @@ function GoalProgressSummary({ goals, agents }: { goals: GoalWithCount[]; agents
       </View>
       {topAgent && (
         <View style={summary.mvpRow}>
-          <View style={[summary.mvpDot, { backgroundColor: topAgent.color || '#6366f1' }]} />
+          <View style={[summary.mvpDot, { backgroundColor: topAgent.color || '#e8e8e8' }]} />
           <Text style={summary.mvpText} numberOfLines={1}>{topAgent.name}</Text>
           <Text style={summary.mvpLabel}>top agent</Text>
         </View>
@@ -461,7 +461,7 @@ const summary = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 8,
     borderBottomWidth: 1,
-    borderBottomColor: '#15151e',
+    borderBottomColor: '#1a1a1a',
     gap: 6,
   },
   row: {
@@ -474,19 +474,19 @@ const summary = StyleSheet.create({
     gap: 3,
   },
   statValue: {
-    color: '#6366f1',
+    color: '#e8e8e8',
     fontSize: 16,
     fontWeight: '700',
     fontFamily: 'monospace',
   },
   statLabel: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 10,
     fontWeight: '500',
   },
   progressBar: {
     height: 3,
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
     borderRadius: 2,
     overflow: 'hidden',
   },
@@ -506,13 +506,13 @@ const summary = StyleSheet.create({
     borderRadius: 3,
   },
   mvpText: {
-    color: '#9090a8',
+    color: '#9e9e9e',
     fontSize: 10,
     fontWeight: '600',
     flex: 1,
   },
   mvpLabel: {
-    color: '#444455',
+    color: '#3e3e3e',
     fontSize: 9,
     fontWeight: '500',
   },
@@ -523,15 +523,15 @@ const summary = StyleSheet.create({
 const GOAL_STATUS_COLORS: Record<string, string> = {
   active: '#22c55e',
   paused: '#f59e0b',
-  completed: '#666680',
+  completed: '#6366f1',
 };
 
 const s = StyleSheet.create({
   container: {
     width: 220,
-    backgroundColor: '#0d0d16',
+    backgroundColor: '#000000',
     borderRightWidth: 1,
-    borderRightColor: '#15151e',
+    borderRightColor: '#1a1a1a',
   },
   header: {
     flexDirection: 'row',
@@ -540,7 +540,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#15151e',
+    borderBottomColor: '#1a1a1a',
   },
   headerLeft: {
     flexDirection: 'row',
@@ -548,25 +548,25 @@ const s = StyleSheet.create({
     gap: 6,
   },
   headerIcon: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 14,
     fontFamily: 'monospace',
   },
   headerTitle: {
-    color: '#9090a8',
+    color: '#9e9e9e',
     fontSize: 11,
     fontWeight: '700',
     letterSpacing: 1,
     fontFamily: 'monospace',
   },
   countBadge: {
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
     borderRadius: 8,
     paddingHorizontal: 6,
     paddingVertical: 1,
   },
   countText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 10,
     fontWeight: '700',
   },
@@ -574,13 +574,13 @@ const s = StyleSheet.create({
     width: 24,
     height: 24,
     borderRadius: 6,
-    backgroundColor: '#15151e',
+    backgroundColor: '#1a1a1a',
     justifyContent: 'center',
     alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   addBtnText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 16,
     fontWeight: '500',
     lineHeight: 18,
@@ -588,7 +588,7 @@ const s = StyleSheet.create({
   clearFilter: {
     paddingHorizontal: 12,
     paddingVertical: 6,
-    backgroundColor: '#6366f108',
+    backgroundColor: '#6366f110',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   clearFilterText: {
@@ -604,9 +604,9 @@ const s = StyleSheet.create({
     gap: 6,
   },
   card: {
-    backgroundColor: '#111119',
+    backgroundColor: '#161616',
     borderWidth: 1,
-    borderColor: '#1e1e2e',
+    borderColor: '#1a1a1a',
     borderRadius: 8,
     padding: 10,
     gap: 6,
@@ -622,7 +622,7 @@ const s = StyleSheet.create({
     alignItems: 'flex-start',
   },
   cardName: {
-    color: '#e4e4ed',
+    color: '#e8e8e8',
     fontSize: 13,
     fontWeight: '700',
     flex: 1,
@@ -633,12 +633,12 @@ const s = StyleSheet.create({
     marginLeft: 4,
   },
   cardActionIcon: {
-    color: '#444455',
+    color: '#3e3e3e',
     fontSize: 11,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   cardDescription: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 10,
     lineHeight: 14,
   },
@@ -666,19 +666,19 @@ const s = StyleSheet.create({
     alignItems: 'center',
   },
   progressText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 11,
     fontWeight: '500',
   },
   progressTextMuted: {
-    color: '#444455',
+    color: '#3e3e3e',
     fontSize: 11,
     fontWeight: '500',
     fontStyle: 'italic',
   },
   progressBar: {
     height: 4,
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
     borderRadius: 2,
     overflow: 'hidden',
   },
@@ -707,12 +707,12 @@ const s = StyleSheet.create({
     width: 20,
     height: 20,
     borderRadius: 10,
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
     justifyContent: 'center',
     alignItems: 'center',
   },
   agentMoreText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 8,
     fontWeight: '700',
   },
@@ -722,18 +722,18 @@ const s = StyleSheet.create({
     gap: 8,
   },
   emptyText: {
-    color: '#333348',
+    color: '#3e3e3e',
     fontSize: 12,
   },
   emptyBtn: {
     paddingHorizontal: 12,
     paddingVertical: 6,
-    backgroundColor: '#15151e',
+    backgroundColor: '#1a1a1a',
     borderRadius: 6,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   emptyBtnText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 11,
     fontWeight: '600',
   },
@@ -744,7 +744,7 @@ const s = StyleSheet.create({
     paddingVertical: 4,
   },
   deleteConfirmText: {
-    color: '#f87171',
+    color: '#ef4444',
     fontSize: 10,
     fontWeight: '500',
     flex: 1,
@@ -757,7 +757,7 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   deleteConfirmBtnText: {
-    color: '#f87171',
+    color: '#ef4444',
     fontSize: 10,
     fontWeight: '600',
   },
@@ -768,7 +768,7 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   deleteCancelBtnText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 10,
     fontWeight: '600',
   },
@@ -791,10 +791,10 @@ const modal = StyleSheet.create({
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(4px)' } as any : {}),
   },
   box: {
-    backgroundColor: '#111119',
+    backgroundColor: '#161616',
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: '#1e1e2e',
+    borderColor: '#1a1a1a',
     width: '90%',
     maxWidth: 420,
     padding: 20,
@@ -808,23 +808,23 @@ const modal = StyleSheet.create({
     marginBottom: 16,
   },
   headerTitle: {
-    color: '#e4e4ed',
+    color: '#e8e8e8',
     fontSize: 16,
     fontWeight: '600',
   },
   closeX: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 16,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   input: {
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     borderRadius: 8,
     paddingVertical: 10,
     paddingHorizontal: 12,
-    color: '#e4e4ed',
+    color: '#e8e8e8',
     fontSize: 14,
     marginBottom: 10,
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
@@ -834,7 +834,7 @@ const modal = StyleSheet.create({
     textAlignVertical: 'top',
   },
   label: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 11,
     fontWeight: '600',
     marginBottom: 6,
@@ -855,9 +855,9 @@ const modal = StyleSheet.create({
     paddingVertical: 5,
     paddingHorizontal: 10,
     borderWidth: 1,
-    borderColor: '#1e1e2e',
+    borderColor: '#1a1a1a',
     borderRadius: 16,
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
   },
   chipDot: {
@@ -868,10 +868,10 @@ const modal = StyleSheet.create({
   chipText: {
     fontSize: 11,
     fontWeight: '600',
-    color: '#555566',
+    color: '#6f6f6f',
   },
   mutedText: {
-    color: '#444455',
+    color: '#3e3e3e',
     fontSize: 12,
   },
   autoRow: {
@@ -886,13 +886,13 @@ const modal = StyleSheet.create({
     gap: 2,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1e1e2e',
+    borderColor: '#1a1a1a',
     overflow: 'hidden',
   },
   freqChip: {
     paddingHorizontal: 10,
     paddingVertical: 5,
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
   },
   freqChipActive: {
@@ -901,13 +901,13 @@ const modal = StyleSheet.create({
   freqText: {
     fontSize: 11,
     fontWeight: '600',
-    color: '#555566',
+    color: '#6f6f6f',
   },
   freqTextActive: {
-    color: '#a5b4fc',
+    color: '#6366f1',
   },
   runBtn: {
-    backgroundColor: '#6366f115',
+    backgroundColor: '#6366f120',
     borderRadius: 6,
     paddingHorizontal: 10,
     paddingVertical: 6,
@@ -938,7 +938,7 @@ const modal = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   cancelBtnText: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 13,
     fontWeight: '500',
   },

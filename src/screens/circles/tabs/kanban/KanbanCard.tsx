@@ -43,9 +43,9 @@ function isStale(task: KanbanTask): boolean {
 
 function priorityBadge(priority: string): { label: string; color: string } {
   if (priority === 'urgent') return { label: 'H', color: '#ef4444' };
-  if (priority === 'high') return { label: 'H', color: '#e89b3e' };
-  if (priority === 'normal') return { label: 'M', color: '#888' };
-  return { label: 'L', color: '#555' };
+  if (priority === 'high') return { label: 'H', color: '#f97316' };
+  if (priority === 'normal') return { label: 'M', color: '#f59e0b' };
+  return { label: 'L', color: '#3b82f6' };
 }
 
 function getDueDateInfo(dueDate: string | null): { label: string; color: string } | null {
@@ -59,9 +59,9 @@ function getDueDateInfo(dueDate: string | null): { label: string; color: string 
     const overdue = Math.abs(diffDays);
     return { label: `${overdue}d overdue`, color: '#ef4444' };
   }
-  if (diffDays === 0) return { label: 'Due today', color: '#f97316' };
+  if (diffDays === 0) return { label: 'Due today', color: '#f59e0b' };
   if (diffDays <= 3) return { label: `Due in ${diffDays}d`, color: '#f59e0b' };
-  return { label: `Due ${diffDays}d`, color: '#555566' };
+  return { label: `Due ${diffDays}d`, color: '#6f6f6f' };
 }
 
 export default function KanbanCard({ task, agents, goals, onPress, onMove, onDragStart, onDragEnd }: Props) {
@@ -164,7 +164,7 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
           {/* Goal tag */}
           {goalData && (
             <View style={s.goalTag}>
-              <View style={[s.goalDot, { backgroundColor: goalData.status === 'active' ? '#22c55e' : goalData.status === 'paused' ? '#f59e0b' : '#666680' }]} />
+              <View style={[s.goalDot, { backgroundColor: goalData.status === 'active' ? '#22c55e' : goalData.status === 'paused' ? '#f59e0b' : '#6f6f6f' }]} />
               <Text style={s.goalName} numberOfLines={1}>{goalData.name}</Text>
             </View>
           )}
@@ -182,7 +182,7 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
                       key={i}
                       style={[
                         s.reviewAvatar,
-                        { backgroundColor: approved ? '#22c55e30' : '#1a1a28', borderColor: approved ? '#22c55e50' : '#333333' },
+                        { backgroundColor: approved ? '#22c55e15' : '#1a1a1a', borderColor: approved ? '#22c55e30' : '#3e3e3e' },
                       ]}
                     >
                       {roster ? (
@@ -212,7 +212,7 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
               {/* Agent avatar + model indicator */}
               {assignedAgent ? (
                 <>
-                  <View style={[s.avatar, { backgroundColor: assignedAgent.color || '#6366f1' }]}>
+                  <View style={[s.avatar, { backgroundColor: assignedAgent.color || '#9e9e9e' }]}>
                     <Text style={s.avatarText}>{assignedAgent.name[0].toUpperCase()}</Text>
                   </View>
                   {(() => {
@@ -228,7 +228,7 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
                   })()}
                 </>
               ) : task.assignee ? (
-                <View style={[s.avatar, { backgroundColor: '#6366f1' }]}>
+                <View style={[s.avatar, { backgroundColor: '#9e9e9e' }]}>
                   <Text style={s.avatarText}>
                     {(task.assignee.display_name || task.assignee.username || '?')[0].toUpperCase()}
                   </Text>
@@ -303,10 +303,10 @@ const s = StyleSheet.create({
     marginBottom: 8,
   },
   card: {
-    backgroundColor: '#111119',
+    backgroundColor: '#161616',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1e1e2e',
+    borderColor: '#1a1a1a',
     ...(Platform.OS === 'web' ? {
       transition: 'all 0.2s cubic-bezier(.4,0,.2,1)',
       boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
@@ -317,8 +317,8 @@ const s = StyleSheet.create({
     gap: 8,
   },
   cardHovered: {
-    borderColor: '#2a2a40',
-    backgroundColor: '#151520',
+    borderColor: '#2a2a2a',
+    backgroundColor: '#1a1a1a',
     ...(Platform.OS === 'web' ? {
       transform: [{ translateY: -1 }],
       boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
@@ -328,14 +328,14 @@ const s = StyleSheet.create({
     opacity: 0.4,
     ...(Platform.OS === 'web' ? {
       transform: [{ scale: 0.97 }],
-      boxShadow: '0 0 0 2px #6366f150',
+      boxShadow: '0 0 0 2px #ffffff30',
     } as any : {}),
   },
   cardDone: {
     opacity: 0.45,
   },
   cardPeerReview: {
-    borderColor: '#a855f730',
+    borderColor: '#a855f715',
     backgroundColor: '#a855f706',
   },
   dragHandle: {
@@ -350,22 +350,22 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'grab' } as any : {}),
   },
   dragHandleText: {
-    color: '#888',
+    color: '#9e9e9e',
     fontSize: 10,
     lineHeight: 12,
   },
   title: {
-    color: '#e4e4ed',
+    color: '#e8e8e8',
     fontSize: 14,
     fontWeight: '500',
     lineHeight: 19,
   },
   titleDone: {
     textDecorationLine: 'line-through',
-    color: '#555566',
+    color: '#6f6f6f',
   },
   descriptionPreview: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 9,
     lineHeight: 13,
     marginTop: -4,
@@ -375,14 +375,14 @@ const s = StyleSheet.create({
     height: 80,
     borderRadius: 4,
     marginTop: 4,
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
   },
   goalTag: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
     alignSelf: 'flex-start',
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
     paddingHorizontal: 7,
     paddingVertical: 3,
     borderRadius: 6,
@@ -393,7 +393,7 @@ const s = StyleSheet.create({
     borderRadius: 3,
   },
   goalName: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 10,
     fontWeight: '600',
     maxWidth: 140,
@@ -420,12 +420,12 @@ const s = StyleSheet.create({
     fontSize: 9,
   },
   reviewAvatarText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 8,
     fontWeight: '700',
   },
   reviewCount: {
-    color: '#a855f7',
+    color: '#9e9e9e',
     fontSize: 10,
     fontWeight: '700',
   },
@@ -440,7 +440,7 @@ const s = StyleSheet.create({
     alignItems: 'center',
   },
   toolIcon: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 13,
   },
   footerRight: {
@@ -487,7 +487,7 @@ const s = StyleSheet.create({
     fontWeight: '700',
   },
   timeText: {
-    color: '#444455',
+    color: '#3e3e3e',
     fontSize: 10,
     fontWeight: '500',
   },
@@ -495,10 +495,10 @@ const s = StyleSheet.create({
     paddingHorizontal: 5,
     paddingVertical: 1,
     borderRadius: 4,
-    backgroundColor: '#55556618',
+    backgroundColor: '#3b82f620',
   },
   commentText: {
-    color: '#555566',
+    color: '#3b82f6',
     fontSize: 9,
     fontWeight: '700',
   },
@@ -520,10 +520,10 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   moveBtnActive: {
-    backgroundColor: '#1e1e2e',
+    backgroundColor: '#1a1a1a',
   },
   moveBtnText: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 13,
     fontWeight: '900',
     lineHeight: 13,
@@ -535,7 +535,7 @@ const s = StyleSheet.create({
     gap: 4,
     paddingVertical: 6,
     paddingHorizontal: 4,
-    backgroundColor: '#0e0e16',
+    backgroundColor: '#0a0a0a',
     borderRadius: 8,
     marginTop: 4,
   },
@@ -546,7 +546,7 @@ const s = StyleSheet.create({
     paddingVertical: 4,
     paddingHorizontal: 8,
     borderRadius: 6,
-    backgroundColor: '#15151e',
+    backgroundColor: '#1a1a1a',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background 0.15s' } as any : {}),
   },
   moveChipDot: {

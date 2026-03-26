@@ -1,27 +1,66 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  View,
-  Text,
-  Image,
-  Pressable,
-  StyleSheet,
-  Platform,
-  useWindowDimensions,
+  View, Text, Image, Pressable, StyleSheet, Platform,
+  useWindowDimensions, Animated, Easing,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { createLinkInvite } from '../lib/invites';
+import FlatIcon from './FlatIcon';
 
 interface AppHeaderProps {
   navigation: any;
   title?: string;
 }
 
+// ── Menu data ──────────────────────────────────────────────────────────────────
+
+type MenuEntry = { label: string; icon: string; flatIcon?: string; screen: string } | 'divider';
+
+const MENU_ENTRIES: MenuEntry[] = [
+  { label: 'Your Circles', icon: '◎', flatIcon: 'circles',       screen: 'CirclesList' },
+  { label: 'Create Circle', icon: '+', flatIcon: 'create',        screen: 'CreateCircle' },
+  { label: 'Join Circle',   icon: '→', flatIcon: 'join',          screen: 'JoinCircle' },
+  'divider',
+  { label: 'Friends',       icon: '⁘', flatIcon: 'friends',       screen: 'Friends' },
+  { label: 'Organizations', icon: '▣', flatIcon: 'organizations', screen: 'OrgList' },
+  { label: 'Schools',       icon: '△', flatIcon: 'schools',       screen: 'Schools' },
+  'divider',
+  { label: 'Agents',        icon: '⬡', flatIcon: 'agents',        screen: 'Agents' },
+  { label: 'Integrations',  icon: '⚙', flatIcon: 'integrations',  screen: 'Integrations' },
+  'divider',
+  { label: 'Profile',       icon: '●', flatIcon: 'profile',       screen: 'EditProfile' },
+];
+
+const MENU_ITEM_COUNT = MENU_ENTRIES.filter(e => e !== 'divider').length;
+
+// (animation constants removed — using spring physics now)
+
+// ── Main component ─────────────────────────────────────────────────────────────
+
 export default function AppHeader({ navigation, title }: AppHeaderProps) {
   const { width } = useWindowDimensions();
   const isDesktop = width > 768;
+
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuVisible, setMenuVisible] = useState(false);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [username, setUsername] = useState<string>('');
+  const [circleName, setCircleName] = useState('');
+  const [circleId, setCircleId] = useState('');
+  const [inviteCopied, setInviteCopied] = useState(false);
+
+  // ── Animated values ────────────────────────────────────────────────────────
+
+  const hamburgerAnim = useRef(new Animated.Value(0)).current;
+  const backdropOpacity = useRef(new Animated.Value(0)).current;
+  const panelOpacity = useRef(new Animated.Value(0)).current;
+  const panelScale = useRef(new Animated.Value(0.85)).current;
+  const panelTranslateY = useRef(new Animated.Value(-12)).current;
+  const itemAnims = useRef(
+    Array.from({ length: MENU_ITEM_COUNT }, () => new Animated.Value(0)),
+  ).current;
+
+  // ── Data effects ───────────────────────────────────────────────────────────
 
   useEffect(() => {
     (async () => {
@@ -40,10 +79,6 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
     })();
   }, []);
 
-  // Detect if we're inside a circle to show its name + id
-  const [circleName, setCircleName] = useState('');
-  const [circleId, setCircleId] = useState('');
-  const [inviteCopied, setInviteCopied] = useState(false);
   useEffect(() => {
     const unsubscribe = navigation.addListener('state', () => {
       try {
@@ -63,20 +98,154 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
     return unsubscribe;
   }, [navigation]);
 
+  // ── Animation helpers ──────────────────────────────────────────────────────
+
+  const resetAnims = useCallback(() => {
+    hamburgerAnim.setValue(0);
+    backdropOpacity.setValue(0);
+    panelOpacity.setValue(0);
+    panelScale.setValue(0.85);
+    panelTranslateY.setValue(-12);
+    itemAnims.forEach(a => a.setValue(0));
+  }, [hamburgerAnim, backdropOpacity, panelOpacity, panelScale, panelTranslateY, itemAnims]);
+
+  // ── BUBBLE OPEN ────────────────────────────────────────────────────────────
+
+  const openMenu = useCallback(() => {
+    setMenuOpen(true);
+    setMenuVisible(true);
+    resetAnims();
+
+    // Hamburger → X morph
+    Animated.timing(hamburgerAnim, {
+      toValue: 1, duration: 300,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+
+    // Backdrop — soft fade
+    Animated.timing(backdropOpacity, {
+      toValue: 1, duration: 250,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+
+    // Panel pops in — bouncy spring with overshoot
+    Animated.parallel([
+      Animated.spring(panelScale, {
+        toValue: 1, tension: 180, friction: 12,
+        useNativeDriver: false,
+      }),
+      Animated.spring(panelTranslateY, {
+        toValue: 0, tension: 180, friction: 14,
+        useNativeDriver: false,
+      }),
+      Animated.timing(panelOpacity, {
+        toValue: 1, duration: 200,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: false,
+      }),
+    ]).start();
+
+    // Items bounce in with stagger — each one pops like a bubble
+    itemAnims.forEach((anim, i) => {
+      Animated.sequence([
+        Animated.delay(80 + i * 35),
+        Animated.spring(anim, {
+          toValue: 1, tension: 220, friction: 10,
+          useNativeDriver: false,
+        }),
+      ]).start();
+    });
+  }, [hamburgerAnim, backdropOpacity, panelOpacity, panelScale, panelTranslateY, itemAnims, resetAnims]);
+
+  // ── BUBBLE CLOSE ──────────────────────────────────────────────────────────
+
+  const closeMenu = useCallback(() => {
+    setMenuOpen(false);
+
+    // X → Hamburger morph
+    Animated.timing(hamburgerAnim, {
+      toValue: 0, duration: 250,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+
+    // Everything shrinks away playfully
+    Animated.parallel([
+      Animated.timing(backdropOpacity, {
+        toValue: 0, duration: 200,
+        useNativeDriver: false,
+      }),
+      Animated.timing(panelOpacity, {
+        toValue: 0, duration: 180,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: false,
+      }),
+      Animated.spring(panelScale, {
+        toValue: 0.85, tension: 200, friction: 18,
+        useNativeDriver: false,
+      }),
+      Animated.timing(panelTranslateY, {
+        toValue: -12, duration: 200,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: false,
+      }),
+    ]).start(() => {
+      setMenuVisible(false);
+      resetAnims();
+    });
+  }, [hamburgerAnim, backdropOpacity, panelOpacity, panelScale, panelTranslateY, resetAnims]);
+
+  const toggleMenu = useCallback(() => {
+    if (menuOpen) closeMenu();
+    else openMenu();
+  }, [menuOpen, openMenu, closeMenu]);
+
+  const handleMenuNavigate = useCallback((screen: string) => {
+    setMenuOpen(false);
+    setMenuVisible(false);
+    resetAnims();
+    navigation.navigate(screen);
+  }, [navigation, resetAnims]);
+
+  // ── Hamburger morph interpolations ─────────────────────────────────────────
+
+  const topLineStyle = {
+    transform: [
+      { translateY: hamburgerAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 5] }) },
+      { rotate: hamburgerAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '45deg'] }) },
+    ],
+  };
+  const midLineStyle = {
+    opacity: hamburgerAnim.interpolate({ inputRange: [0, 0.3], outputRange: [1, 0], extrapolate: 'clamp' }),
+    transform: [
+      { scaleX: hamburgerAnim.interpolate({ inputRange: [0, 0.4], outputRange: [1, 0.3], extrapolate: 'clamp' }) },
+    ],
+  };
+  const botLineStyle = {
+    transform: [
+      { translateY: hamburgerAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -5] }) },
+      { rotate: hamburgerAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '-45deg'] }) },
+    ],
+  };
+
   const initials = username ? username.charAt(0).toUpperCase() : '?';
+  let staggerIdx = 0;
+
+  // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <>
       <View style={styles.header}>
-        {/* Left section: hamburger + logo */}
         <View style={styles.leftSection}>
           <Pressable
-            onPress={() => setMenuOpen(!menuOpen)}
+            onPress={toggleMenu}
             style={({ pressed }) => [styles.hamburger, pressed && styles.pressed]}
           >
-            <View style={styles.hamburgerLine} />
-            <View style={styles.hamburgerLine} />
-            <View style={styles.hamburgerLine} />
+            <Animated.View style={[styles.hamburgerLine, topLineStyle]} />
+            <Animated.View style={[styles.hamburgerLine, midLineStyle]} />
+            <Animated.View style={[styles.hamburgerLine, botLineStyle]} />
           </Pressable>
 
           <Pressable
@@ -89,17 +258,14 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
               resizeMode="contain"
             />
           </Pressable>
-
         </View>
 
-        {/* Center: circle name or dashboard title */}
         <View style={styles.centerTitle} pointerEvents="none">
           <Text style={styles.centerTitleText} numberOfLines={1}>
             {circleName ? circleName.toUpperCase() : (title || 'Dashboard')}
           </Text>
         </View>
 
-        {/* Right section: nav items + profile */}
         <View style={styles.rightSection}>
           {circleId ? (
             <>
@@ -139,22 +305,12 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
             </>
           ) : isDesktop ? (
             <>
-              <HeaderIconButton
-                label="+"
-                onPress={() => navigation.navigate('CreateCircle')}
-              />
-              <HeaderIconButton
-                label="◎"
-                onPress={() => navigation.navigate('CirclesList')}
-              />
-              <HeaderIconButton
-                label="⁘"
-                onPress={() => navigation.navigate('Friends')}
-              />
+              <HeaderIconButton label="+" onPress={() => navigation.navigate('CreateCircle')} />
+              <HeaderIconButton label="◎" onPress={() => navigation.navigate('CirclesList')} />
+              <HeaderIconButton label="⁘" onPress={() => navigation.navigate('Friends')} />
             </>
           ) : null}
 
-          {/* Profile avatar */}
           <Pressable
             onPress={() => navigation.navigate('EditProfile')}
             style={({ pressed }) => [styles.avatarButton, pressed && styles.pressed]}
@@ -171,64 +327,54 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
         </View>
       </View>
 
-      {/* Dropdown menu */}
-      {menuOpen && (
-        <Pressable style={styles.menuOverlay} onPress={() => setMenuOpen(false)}>
-          <View style={styles.menuDropdown}>
-            <MenuItem
-              label="Your Circles"
-              icon="◎"
-              onPress={() => { setMenuOpen(false); navigation.navigate('CirclesList'); }}
-            />
-            <MenuItem
-              label="Create Circle"
-              icon="+"
-              onPress={() => { setMenuOpen(false); navigation.navigate('CreateCircle'); }}
-            />
-            <MenuItem
-              label="Join Circle"
-              icon="→"
-              onPress={() => { setMenuOpen(false); navigation.navigate('JoinCircle'); }}
-            />
-            <View style={styles.menuDivider} />
-            <MenuItem
-              label="Friends"
-              icon="⁘"
-              onPress={() => { setMenuOpen(false); navigation.navigate('Friends'); }}
-            />
-            <MenuItem
-              label="Organizations"
-              icon="▣"
-              onPress={() => { setMenuOpen(false); navigation.navigate('OrgList'); }}
-            />
-            <MenuItem
-              label="Schools"
-              icon="△"
-              onPress={() => { setMenuOpen(false); navigation.navigate('Schools'); }}
-            />
-            <View style={styles.menuDivider} />
-            <MenuItem
-              label="Agents"
-              icon="⬡"
-              onPress={() => { setMenuOpen(false); navigation.navigate('Agents'); }}
-            />
-            <MenuItem
-              label="Integrations"
-              icon="⚙"
-              onPress={() => { setMenuOpen(false); navigation.navigate('Integrations'); }}
-            />
-            <View style={styles.menuDivider} />
-            <MenuItem
-              label="Profile"
-              icon="●"
-              onPress={() => { setMenuOpen(false); navigation.navigate('EditProfile'); }}
-            />
-          </View>
-        </Pressable>
+      {/* ── Animated dropdown menu ──────────────────────────────────────────── */}
+      {menuVisible && (
+        <Animated.View
+          style={[styles.menuOverlay, { opacity: backdropOpacity }]}
+          pointerEvents={menuOpen ? 'auto' : 'none'}
+        >
+          <Pressable style={styles.menuOverlayPress} onPress={closeMenu}>
+            <Animated.View
+              style={[
+                styles.menuDropdown,
+                {
+                  opacity: panelOpacity,
+                  transform: [
+                    { translateY: panelTranslateY },
+                    { scale: panelScale },
+                  ],
+                },
+              ]}
+            >
+              {/* Accent line */}
+              <View style={styles.accentLine} />
+
+              {/* Menu entries — bouncy stagger */}
+              {MENU_ENTRIES.map((entry, i) => {
+                if (entry === 'divider') {
+                  return <View key={`div-${i}`} style={styles.menuDivider} />;
+                }
+                const idx = staggerIdx++;
+                return (
+                  <AnimatedMenuItem
+                    key={entry.screen}
+                    label={entry.label}
+                    icon={entry.icon}
+                    flatIcon={entry.flatIcon}
+                    anim={itemAnims[idx]}
+                    onPress={() => handleMenuNavigate(entry.screen)}
+                  />
+                );
+              })}
+            </Animated.View>
+          </Pressable>
+        </Animated.View>
       )}
     </>
   );
 }
+
+// ── Sub-components ─────────────────────────────────────────────────────────────
 
 function HeaderIconButton({ label, onPress }: { label: string; onPress: () => void }) {
   return (
@@ -241,20 +387,44 @@ function HeaderIconButton({ label, onPress }: { label: string; onPress: () => vo
   );
 }
 
-function MenuItem({ label, icon, onPress }: { label: string; icon: string; onPress: () => void }) {
+function AnimatedMenuItem({
+  label, icon, flatIcon, anim, onPress,
+}: {
+  label: string; icon: string; flatIcon?: string; anim: Animated.Value; onPress: () => void;
+}) {
   const [hovered, setHovered] = useState(false);
+
   return (
-    <Pressable
-      onPress={onPress}
-      onHoverIn={() => setHovered(true)}
-      onHoverOut={() => setHovered(false)}
-      style={[styles.menuItem, hovered && styles.menuItemHovered]}
+    <Animated.View
+      style={{
+        opacity: anim,
+        transform: [{
+          scale: anim.interpolate({
+            inputRange: [0, 0.6, 1],
+            outputRange: [0.5, 1.08, 1],
+          }),
+        }],
+      }}
     >
-      <Text style={styles.menuItemIcon}>{icon}</Text>
-      <Text style={styles.menuItemLabel}>{label}</Text>
-    </Pressable>
+      <Pressable
+        onPress={onPress}
+        onHoverIn={() => setHovered(true)}
+        onHoverOut={() => setHovered(false)}
+        style={[styles.menuItem, hovered && styles.menuItemHovered]}
+      >
+        <View style={[styles.hoverBar, hovered && styles.hoverBarActive]} />
+        {flatIcon ? (
+          <FlatIcon name={flatIcon} size={16} glow={hovered} style={styles.menuItemIcon} />
+        ) : (
+          <Text style={[styles.menuItemIcon, hovered && styles.menuItemIconHovered]}>{icon}</Text>
+        )}
+        <Text style={[styles.menuItemLabel, hovered && styles.menuItemLabelHovered]}>{label}</Text>
+      </Pressable>
+    </Animated.View>
   );
 }
+
+// ── Styles ─────────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   header: {
@@ -268,176 +438,119 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     ...(Platform.OS === 'web' ? { position: 'sticky' as any, top: 0, zIndex: 1000 } : {}),
   },
-  leftSection: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
+  leftSection: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   hamburger: {
-    width: 32,
-    height: 32,
-    justifyContent: 'center',
-    alignItems: 'center',
+    width: 32, height: 32,
+    justifyContent: 'center', alignItems: 'center',
     borderRadius: 6,
   },
   hamburgerLine: {
-    width: 16,
-    height: 2,
+    width: 16, height: 2,
     backgroundColor: '#f0f6fc',
     marginVertical: 1.5,
     borderRadius: 1,
   },
-  pressed: {
-    opacity: 0.7,
-  },
+  pressed: { opacity: 0.7 },
   logoButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    overflow: 'hidden',
-    justifyContent: 'center',
-    alignItems: 'center',
+    width: 32, height: 32, borderRadius: 16,
+    overflow: 'hidden', justifyContent: 'center', alignItems: 'center',
   },
-  logo: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-  },
-  titleText: {
-    color: '#f0f6fc',
-    fontSize: 14,
-    fontWeight: '600',
-    marginLeft: 4,
-  },
-  titleTextMobile: {
-    color: '#f0f6fc',
-    fontSize: 14,
-    fontWeight: '600',
-    flex: 1,
-    textAlign: 'center',
-    marginHorizontal: 8,
-  },
+  logo: { width: 32, height: 32, borderRadius: 16 },
   centerTitle: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    top: 0,
-    bottom: 0,
-    justifyContent: 'center',
-    alignItems: 'center',
+    position: 'absolute', left: 0, right: 0, top: 0, bottom: 0,
+    justifyContent: 'center', alignItems: 'center',
   },
-  centerTitleText: {
-    color: '#f0f6fc',
-    fontSize: 15,
-    fontWeight: '700',
-    letterSpacing: 1,
-  },
-  rightSection: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
+  centerTitleText: { color: '#f0f6fc', fontSize: 15, fontWeight: '700', letterSpacing: 1 },
+  rightSection: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   headerIcon: {
-    width: 32,
-    height: 32,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#30363d',
-    justifyContent: 'center',
-    alignItems: 'center',
+    width: 32, height: 32, borderRadius: 6,
+    borderWidth: 1, borderColor: '#30363d',
+    justifyContent: 'center', alignItems: 'center',
     backgroundColor: 'transparent',
   },
-  headerIconPressed: {
-    backgroundColor: '#21262d',
-  },
-  headerIconText: {
-    color: '#f0f6fc',
-    fontSize: 14,
-  },
-  avatarButton: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    marginLeft: 4,
-    position: 'relative',
-  },
-  avatar: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-  },
+  headerIconPressed: { backgroundColor: '#21262d' },
+  headerIconText: { color: '#f0f6fc', fontSize: 14 },
+  avatarButton: { width: 28, height: 28, borderRadius: 14, marginLeft: 4, position: 'relative' },
+  avatar: { width: 28, height: 28, borderRadius: 14 },
   avatarFallback: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#30363d',
-    justifyContent: 'center',
-    alignItems: 'center',
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: '#30363d', justifyContent: 'center', alignItems: 'center',
   },
-  avatarInitials: {
-    color: '#f0f6fc',
-    fontSize: 12,
-    fontWeight: '700',
-  },
+  avatarInitials: { color: '#f0f6fc', fontSize: 12, fontWeight: '700' },
   statusDot: {
-    position: 'absolute',
-    bottom: -1,
-    right: -1,
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#3fb950',
-    borderWidth: 1.5,
-    borderColor: '#000000',
+    position: 'absolute', bottom: -1, right: -1,
+    width: 8, height: 8, borderRadius: 4,
+    backgroundColor: '#3fb950', borderWidth: 1.5, borderColor: '#000000',
   },
-  // Dropdown menu
+
+  // ── Menu overlay + dropdown ────────────────────────────────────────────────
   menuOverlay: {
     ...(Platform.OS === 'web'
       ? { position: 'fixed' as any, top: 0, left: 0, right: 0, bottom: 0, zIndex: 999 }
       : { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 999 }),
-    backgroundColor: 'rgba(0,0,0,0.3)',
+    backgroundColor: 'rgba(0,0,0,0.35)',
   },
+  menuOverlayPress: { flex: 1 },
   menuDropdown: {
     position: 'absolute',
-    top: 48,
-    left: 16,
-    width: 240,
+    top: 48, left: 16, width: 240,
     backgroundColor: '#161b22',
-    borderWidth: 1,
-    borderColor: '#30363d',
+    borderWidth: 1, borderColor: '#30363d',
     borderRadius: 12,
-    paddingVertical: 4,
+    paddingVertical: 6,
+    overflow: 'hidden',
     ...(Platform.OS === 'web'
-      ? { boxShadow: '0 8px 24px rgba(0,0,0,0.4)' } as any
+      ? { boxShadow: '0 12px 40px rgba(0,0,0,0.5)', transformOrigin: 'top left' } as any
       : { elevation: 8 }),
     zIndex: 1001,
   },
-  menuDivider: {
+  // Accent line
+  accentLine: {
     height: 1,
-    backgroundColor: '#21262d',
-    marginVertical: 4,
-    marginHorizontal: 8,
+    marginHorizontal: 16, marginTop: 2, marginBottom: 4,
+    borderRadius: 1,
+    backgroundColor: '#1f6feb',
+    opacity: 0.5,
+    ...(Platform.OS === 'web' ? { boxShadow: '0 0 8px rgba(31,111,235,0.35)' } as any : {}),
   },
+
+  menuDivider: {
+    height: 1, backgroundColor: '#21262d',
+    marginVertical: 4, marginHorizontal: 12,
+  },
+
+  // ── Menu items ─────────────────────────────────────────────────────────────
   menuItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    gap: 10,
-    borderRadius: 6,
-    marginHorizontal: 4,
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 8, paddingHorizontal: 16,
+    gap: 10, borderRadius: 6, marginHorizontal: 4,
+    position: 'relative', overflow: 'hidden',
+    ...(Platform.OS === 'web' ? {
+      transition: 'background-color 0.2s ease, transform 0.15s ease',
+      cursor: 'pointer',
+    } as any : {}),
   },
   menuItemHovered: {
-    backgroundColor: '#1f6feb22',
+    backgroundColor: '#1f6feb10',
+    transform: [{ translateX: 2 }],
   },
+  hoverBar: {
+    position: 'absolute', left: 0, top: 6, bottom: 6,
+    width: 2, borderRadius: 1,
+    backgroundColor: '#1f6feb', opacity: 0,
+    ...(Platform.OS === 'web' ? { transition: 'opacity 0.2s ease' } as any : {}),
+  },
+  hoverBarActive: { opacity: 1 },
   menuItemIcon: {
-    fontSize: 14,
-    width: 20,
-    textAlign: 'center',
+    fontSize: 14, width: 20, textAlign: 'center',
+    ...(Platform.OS === 'web' ? { transition: 'text-shadow 0.2s ease' } as any : {}),
+  },
+  menuItemIconHovered: {
+    ...(Platform.OS === 'web' ? { textShadow: '0 0 10px rgba(88,166,255,0.5)' } as any : {}),
   },
   menuItemLabel: {
-    color: '#c9d1d9',
-    fontSize: 13,
-    fontWeight: '500',
+    color: '#c9d1d9', fontSize: 13, fontWeight: '500',
+    ...(Platform.OS === 'web' ? { transition: 'color 0.2s ease' } as any : {}),
   },
+  menuItemLabelHovered: { color: '#f0f6fc' },
 });

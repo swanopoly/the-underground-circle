@@ -204,14 +204,12 @@ export async function updateCursorAgentStatus(
         ? `${sessions.length} session${sessions.length > 1 ? 's' : ''} — ${sessions[0].task || 'idle'}`
         : 'Bridge connected — no active sessions';
 
-    const totalMessages = sessions.reduce((sum, s) => sum + (s.messageCount || 0), 0);
-
+    // Token syncing is centralized in OfficeTab's 30s sync loop via syncAgentTokenSnapshot()
     await supabase
       .from('circle_office_agents')
       .update({
         status,
         current_task: currentTask,
-        message_count_today: totalMessages,
         last_active_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })

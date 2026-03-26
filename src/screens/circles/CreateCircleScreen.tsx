@@ -25,7 +25,7 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     emoji: '💪',
     category: 'Health',
     description: 'Track workouts, runs, and healthy habits',
-    accent_color: '#ef4444',
+    accent_color: '#22c55e',
     suggested_names: ['Iron Temple', 'Sweat Squad', 'Fitness Freaks', 'Grind Gang'],
     check_in_format: { type: 'photo', label: 'Workout Proof' },
     tags: ['fitness', 'health', 'exercise']
@@ -36,7 +36,7 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     emoji: '💰',
     category: 'Finance',
     description: 'Save money, track expenses, build wealth',
-    accent_color: '#22c55e',
+    accent_color: '#fbbf24',
     suggested_names: ['Money Makers', 'Wealth Builders', 'Cash Crew', 'Profit Pack'],
     check_in_format: { type: 'number', label: 'Amount Saved', unit: 'dollars' },
     tags: ['money', 'finance', 'savings']
@@ -58,7 +58,7 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     emoji: '🧠',
     category: 'Wellness',
     description: 'Meditation, therapy, mindfulness practice',
-    accent_color: '#8b5cf6',
+    accent_color: '#a855f7',
     suggested_names: ['Mind Matters', 'Zen Circle', 'Peace Squad', 'Mental Warriors'],
     check_in_format: { type: 'rating', label: 'Mood Rating', min: 1, max: 10 },
     tags: ['mental-health', 'wellness', 'mindfulness']
@@ -69,7 +69,7 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     emoji: '❤️',
     category: 'Social',
     description: 'Build deeper connections with family & friends',
-    accent_color: '#ec4899',
+    accent_color: '#f43f5e',
     suggested_names: ['Love Circle', 'Connection Crew', 'Heart Squad', 'Bond Builders'],
     check_in_format: { type: 'text', label: 'Connection Made' },
     tags: ['relationships', 'social', 'family']
@@ -80,7 +80,7 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     emoji: '🎯',
     category: 'Professional',
     description: 'Level up your career and professional skills',
-    accent_color: '#f59e0b',
+    accent_color: '#6366f1',
     suggested_names: ['Career Climbers', 'Success Squad', 'Ambition Circle', 'Goal Getters'],
     check_in_format: { type: 'text', label: 'Progress Made' },
     tags: ['career', 'professional', 'goals']
@@ -91,7 +91,7 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     emoji: '⏰',
     category: 'Efficiency',
     description: 'Get things done, manage time, build systems',
-    accent_color: '#06b6d4',
+    accent_color: '#f59e0b',
     suggested_names: ['Productivity Pack', 'Efficiency Experts', 'Time Masters', 'Done Squad'],
     check_in_format: { type: 'number', label: 'Tasks Completed', unit: 'tasks' },
     tags: ['productivity', 'time-management', 'efficiency']
@@ -102,7 +102,7 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     emoji: '🍳',
     category: 'Health',
     description: 'Eat better, cook more, build healthy eating habits',
-    accent_color: '#84cc16',
+    accent_color: '#14b8a6',
     suggested_names: ['Nutrition Squad', 'Healthy Eaters', 'Kitchen Crew', 'Fuel Team'],
     check_in_format: { type: 'photo', label: 'Healthy Meal' },
     tags: ['nutrition', 'cooking', 'health']
@@ -113,7 +113,7 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     emoji: '🙏',
     category: 'Spiritual',
     description: 'Find meaning, spiritual growth, volunteering',
-    accent_color: '#a855f7',
+    accent_color: '#8b5cf6',
     suggested_names: ['Purpose Squad', 'Meaning Makers', 'Spirit Circle', 'Mission Crew'],
     check_in_format: { type: 'text', label: 'Meaningful Action' },
     tags: ['purpose', 'spiritual', 'meaning']
@@ -124,7 +124,7 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     emoji: '🎮',
     category: 'Entertainment',
     description: 'Game together, esports training, streaming',
-    accent_color: '#7c3aed',
+    accent_color: '#22d3ee',
     suggested_names: ['Gaming Squad', 'Esports Elite', 'Game Night', 'Console Crew'],
     check_in_format: { type: 'text', label: 'Games Played' },
     tags: ['gaming', 'esports', 'entertainment']
@@ -135,7 +135,7 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     emoji: '🎨',
     category: 'Art',
     description: 'Art, music, writing, creative projects',
-    accent_color: '#f97316',
+    accent_color: '#ec4899',
     suggested_names: ['Creative Collective', 'Art Squad', 'Makers Circle', 'Creative Minds'],
     check_in_format: { type: 'photo', label: 'Creative Work' },
     tags: ['creative', 'art', 'music']
@@ -158,7 +158,7 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     emoji: '✍️',
     category: 'AI Creator',
     description: 'Content creators, marketers, and writers using AI tools to create and publish',
-    accent_color: '#f97316',
+    accent_color: '#f43f5e',
     suggested_names: ['Create & Ship', 'Content Circle', 'The Creators', 'Publish Squad'],
     check_in_format: { type: 'text', label: "What did you create or publish today?" },
     tags: ['creator', 'content', 'marketing', 'writing', 'cowork']
@@ -169,7 +169,7 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     emoji: '💼',
     category: 'AI Business',
     description: 'Business owners and operators using AI (Claude Cowork, ChatGPT, etc.) to run and grow their business',
-    accent_color: '#22c55e',
+    accent_color: '#fbbf24',
     suggested_names: ['Operators Circle', 'Business Builders', 'The Operators', 'Revenue Circle'],
     check_in_format: { type: 'text', label: "What did your AI handle for your business today?" },
     tags: ['business', 'operator', 'cowork', 'revenue', 'ai-tools']
@@ -180,7 +180,7 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     emoji: '🔬',
     category: 'AI Research',
     description: 'Analysts, researchers, and knowledge workers using AI to research, synthesize, and decide',
-    accent_color: '#06b6d4',
+    accent_color: '#22d3ee',
     suggested_names: ['Research Circle', 'The Analysts', 'Deep Dive Crew', 'Signal Squad'],
     check_in_format: { type: 'text', label: "What did you learn or ship from your research today?" },
     tags: ['research', 'analysis', 'knowledge-work', 'cowork']
@@ -191,7 +191,7 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     emoji: '✨',
     category: 'Custom',
     description: 'Create your own unique circle type',
-    accent_color: '#6366f1',
+    accent_color: '#a855f7',
     suggested_names: ['Custom Circle', 'Unique Squad', 'Special Crew', 'Your Circle'],
     check_in_format: { type: 'text', label: 'Daily Check-in' },
     tags: ['custom']
@@ -199,9 +199,9 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
 ];
 
 const ACCENT_COLORS = [
-  '#6366f1', '#3b82f6', '#06b6d4', '#10b981', '#22c55e', '#84cc16',
-  '#eab308', '#f59e0b', '#f97316', '#ef4444', '#ec4899', '#d946ef',
-  '#a855f7', '#8b5cf6', '#7c3aed', '#6d28d9'
+  '#6366f1', '#a855f7', '#22d3ee', '#22c55e', '#f43f5e', '#f59e0b',
+  '#3b82f6', '#fbbf24', '#ec4899', '#14b8a6', '#8b5cf6', '#ef4444',
+  '#0ea5e9', '#10b981', '#d946ef', '#f97316',
 ];
 
 const CIRCLE_ICONS = [
@@ -710,15 +710,15 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   errorBox: {
-    backgroundColor: '#2a1515',
+    backgroundColor: '#ef444415',
     borderWidth: 1,
-    borderColor: '#4a2020',
-    borderRadius: 10,
+    borderColor: '#ef444440',
+    borderRadius: 12,
     padding: 12,
     marginBottom: 16,
   },
   errorText: {
-    color: '#ff6666',
+    color: '#ef4444',
     fontSize: 13,
     textAlign: 'center',
   },

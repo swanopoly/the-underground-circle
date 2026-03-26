@@ -5,8 +5,8 @@ import {
   StyleSheet,
   ScrollView,
   Pressable,
-  ActivityIndicator,
 } from 'react-native';
+import { LoadingScreen } from '../../../components/LoadingWave';
 import {
   getCircleAnalytics,
   getRealtimeStats,
@@ -64,12 +64,7 @@ export default function AnalyticsTab({ circleId }: { circleId: string }) {
   const maxCheckIns = Math.max(...analytics.map(d => d.total_check_ins), 1);
 
   if (loading) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator color="#6366f1" size="large" />
-        <Text style={styles.loadingText}>Loading analytics...</Text>
-      </View>
-    );
+    return <LoadingScreen />;
   }
 
   return (

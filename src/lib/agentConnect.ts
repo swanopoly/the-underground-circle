@@ -450,6 +450,28 @@ function buildCurlCmd(token: string, agentType: string): string {
   return `curl -sX POST '${AGENT_CONNECT_URL}' -H 'Authorization: Bearer ${token}' -H 'Content-Type: application/json' -d '{"event":"heartbeat","agent_type":"${agentType}"}' &>/dev/null &`;
 }
 
+// ── Auto-token generation ─────────────────────────────────────────────────────
+
+/**
+ * Ensure a connect token exists for the given circle.
+ * Returns existing token or creates a new one automatically.
+ */
+export async function ensureConnectToken(circleId?: string): Promise<ConnectToken | null> {
+  try {
+    const tokens = await listConnectTokens();
+    // Find a token for this circle, or any default token
+    const match = tokens.find(t => t.circleId === circleId)
+      || tokens.find(t => !t.circleId)
+      || tokens[0];
+    if (match) return match;
+
+    // No tokens at all — create one
+    return await createConnectToken(circleId, 'auto-generated');
+  } catch {
+    return null;
+  }
+}
+
 // ── Cloud agent polling ──────────────────────────────────────────────────────
 
 export async function pollCloudAgents(circleId: string): Promise<{

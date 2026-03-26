@@ -39,7 +39,7 @@ interface Props {
 
 const STORAGE_KEY_DATE_RANGE = '@cost_dashboard_date_range';
 
-export default function CostDashboard({ sessions, agents, sessionTags, accentColor = '#6366f1' }: Props) {
+export default function CostDashboard({ sessions, agents, sessionTags, accentColor = '#e8e8e8' }: Props) {
   const [dateRange, setDateRange] = useState<7 | 30 | 90>(30);
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportStatus, setExportStatus] = useState<string>('');
@@ -245,7 +245,7 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
             </View>
             <View style={styles.trendItem}>
               <Text style={styles.trendLabel}>PEAK</Text>
-              <Text style={[styles.trendValue, { color: '#ef4444' }]}>
+              <Text style={[styles.trendValue, { color: '#9e9e9e' }]}>
                 ${Math.max(...costData.dailyHistory.map(d => d.cost)).toFixed(3)}
               </Text>
             </View>
@@ -309,7 +309,7 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
           </View>
           <View style={styles.tokenCard}>
             <Text style={styles.tokenLabel}>OUTPUT</Text>
-            <Text style={[styles.tokenValue, { color: '#8b5cf6' }]}>
+            <Text style={[styles.tokenValue, { color: '#a855f7' }]}>
               {formatTokenCount(costData.tokenBreakdown.output)}
             </Text>
           </View>
@@ -331,12 +331,12 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
           {costData.tokenBreakdown.total > 0 && (
             <View style={styles.tokenBarRow}>
               <View style={[styles.tokenBarSegment, { flex: costData.tokenBreakdown.input || 1, backgroundColor: '#3b82f6' }]} />
-              <View style={[styles.tokenBarSegment, { flex: costData.tokenBreakdown.output || 1, backgroundColor: '#8b5cf6' }]} />
+              <View style={[styles.tokenBarSegment, { flex: costData.tokenBreakdown.output || 1, backgroundColor: '#a855f7' }]} />
             </View>
           )}
           <View style={styles.tokenBarLegend}>
             <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#3b82f6' }]} /><Text style={styles.legendText}>Input</Text></View>
-            <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#8b5cf6' }]} /><Text style={styles.legendText}>Output</Text></View>
+            <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#a855f7' }]} /><Text style={styles.legendText}>Output</Text></View>
             <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#22c55e' }]} /><Text style={styles.legendText}>Cached</Text></View>
           </View>
         </View>
@@ -557,9 +557,9 @@ function InsightCard({ type, text }: {
   text: string;
 }) {
   const config = {
-    warning: { bg: '#ef444420', border: '#ef4444', emoji: '⚠️' },
-    tip: { bg: '#3b82f620', border: '#3b82f6', emoji: '💡' },
-    success: { bg: '#22c55e20', border: '#22c55e', emoji: '✓' },
+    warning: { bg: '#f59e0b10', border: '#f59e0b', emoji: '⚠️' },
+    tip: { bg: '#3b82f610', border: '#3b82f6', emoji: '💡' },
+    success: { bg: '#22c55e10', border: '#22c55e', emoji: '✓' },
   };
   
   const style = config[type];
@@ -695,12 +695,12 @@ function calculateCostData(sessions: OpenClawSession[], dateRange: 7 | 30 | 90 =
 
   // Model breakdown
   const MODEL_COLORS: Record<string, string> = {
-    'blackswan': '#ef4444',
+    'blackswan': '#a855f7',
     'claude-haiku-4-5-20251001': '#22c55e',
     'claude-sonnet-4-6': '#3b82f6',
-    'claude-opus-4-6': '#8b5cf6',
-    'mixed': '#f59e0b',
-    'unknown': '#666',
+    'claude-opus-4-6': '#f59e0b',
+    'mixed': '#6366f1',
+    'unknown': '#6f6f6f',
   };
   const totalModelCost = Object.values(modelCosts).reduce((s, m) => s + m.cost, 0) || 1;
   const modelBreakdown = Object.entries(modelCosts)
@@ -714,7 +714,7 @@ function calculateCostData(sessions: OpenClawSession[], dateRange: 7 | 30 | 90 =
       cost: data.cost,
       tokens: data.tokens,
       percentage: (data.cost / totalModelCost) * 100,
-      color: MODEL_COLORS[model] || '#666',
+      color: MODEL_COLORS[model] || '#6f6f6f',
     }))
     .sort((a, b) => b.cost - a.cost);
 
@@ -772,12 +772,12 @@ const styles = StyleSheet.create({
   emptyTitle: {
     fontSize: 20,
     fontWeight: '700',
-    color: '#fff',
+    color: '#e8e8e8',
     marginBottom: 8,
   },
   emptyText: {
     fontSize: 14,
-    color: '#888',
+    color: '#9e9e9e',
     textAlign: 'center',
     lineHeight: 20,
   },
@@ -789,7 +789,7 @@ const styles = StyleSheet.create({
   headerTitle: {
     fontSize: 16,
     fontWeight: '800',
-    color: '#fff',
+    color: '#e8e8e8',
     letterSpacing: 2,
     marginBottom: 12,
   },
@@ -809,7 +809,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     backgroundColor: '#000000',
   },
   dateRangeBtnActive: {
@@ -819,7 +819,7 @@ const styles = StyleSheet.create({
   dateRangeBtnText: {
     fontSize: 12,
     fontWeight: '700',
-    color: '#666',
+    color: '#6f6f6f',
   },
   dateRangeBtnTextActive: {
     fontWeight: '800',
@@ -832,12 +832,12 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
   },
   exportBtnText: {
     fontSize: 11,
     fontWeight: '700',
-    color: '#888',
+    color: '#9e9e9e',
     letterSpacing: 1,
   },
 
@@ -845,7 +845,7 @@ const styles = StyleSheet.create({
   summaryBanner: {
     backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     borderLeftWidth: 3,
     borderRadius: 8,
     padding: 16,
@@ -863,7 +863,7 @@ const styles = StyleSheet.create({
   summaryLabel: {
     fontSize: 10,
     fontWeight: '600',
-    color: '#666',
+    color: '#6f6f6f',
     letterSpacing: 1,
     marginBottom: 6,
     textTransform: 'uppercase',
@@ -875,7 +875,7 @@ const styles = StyleSheet.create({
   summaryDivider: {
     width: 1,
     height: 40,
-    backgroundColor: '#333',
+    backgroundColor: '#2a2a2a',
   },
 
   // Overview Grid
@@ -888,14 +888,14 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     padding: 16,
   },
   costLabel: {
     fontSize: 11,
     fontWeight: '700',
-    color: '#888',
+    color: '#9e9e9e',
     letterSpacing: 1,
     marginBottom: 8,
   },
@@ -920,7 +920,7 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: 12,
     fontWeight: '700',
-    color: '#888',
+    color: '#9e9e9e',
     letterSpacing: 1.5,
     marginBottom: 12,
   },
@@ -929,7 +929,7 @@ const styles = StyleSheet.create({
   chartContainer: {
     backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     padding: 16,
   },
@@ -960,7 +960,7 @@ const styles = StyleSheet.create({
   },
   chartLabel: {
     fontSize: 10,
-    color: '#666',
+    color: '#6f6f6f',
     fontWeight: '600',
   },
 
@@ -971,7 +971,7 @@ const styles = StyleSheet.create({
   spenderRow: {
     backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     padding: 12,
   },
@@ -990,12 +990,12 @@ const styles = StyleSheet.create({
   spenderName: {
     fontSize: 14,
     fontWeight: '700',
-    color: '#fff',
+    color: '#e8e8e8',
     marginBottom: 2,
   },
   spenderSessions: {
     fontSize: 11,
-    color: '#666',
+    color: '#6f6f6f',
   },
   spenderRight: {
     position: 'absolute',
@@ -1010,12 +1010,12 @@ const styles = StyleSheet.create({
   },
   spenderPercent: {
     fontSize: 11,
-    color: '#888',
+    color: '#9e9e9e',
     fontWeight: '600',
   },
   spenderBar: {
     height: 4,
-    backgroundColor: '#333',
+    backgroundColor: '#2a2a2a',
     borderRadius: 2,
     overflow: 'hidden',
     marginTop: 8,
@@ -1042,7 +1042,7 @@ const styles = StyleSheet.create({
   insightText: {
     flex: 1,
     fontSize: 13,
-    color: '#fff',
+    color: '#e8e8e8',
     fontWeight: '500',
     lineHeight: 18,
   },
@@ -1053,7 +1053,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-around',
     backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     padding: 12,
     marginTop: 8,
@@ -1064,7 +1064,7 @@ const styles = StyleSheet.create({
   trendLabel: {
     fontSize: 9,
     fontWeight: '700',
-    color: '#666',
+    color: '#6f6f6f',
     letterSpacing: 1,
     marginBottom: 4,
   },
@@ -1077,7 +1077,7 @@ const styles = StyleSheet.create({
   modelRow: {
     backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     padding: 12,
   },
@@ -1095,7 +1095,7 @@ const styles = StyleSheet.create({
   modelName: {
     fontSize: 13,
     fontWeight: '700',
-    color: '#fff',
+    color: '#e8e8e8',
   },
   modelRight: {
     flexDirection: 'row',
@@ -1108,12 +1108,12 @@ const styles = StyleSheet.create({
   },
   modelTokens: {
     fontSize: 12,
-    color: '#888',
+    color: '#9e9e9e',
     fontWeight: '600',
   },
   noDataText: {
     fontSize: 12,
-    color: '#666',
+    color: '#6f6f6f',
     textAlign: 'center',
     padding: 16,
   },
@@ -1130,7 +1130,7 @@ const styles = StyleSheet.create({
     minWidth: '45%' as any,
     backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     padding: 12,
     alignItems: 'center',
@@ -1138,7 +1138,7 @@ const styles = StyleSheet.create({
   tokenLabel: {
     fontSize: 10,
     fontWeight: '700',
-    color: '#888',
+    color: '#9e9e9e',
     letterSpacing: 1,
     marginBottom: 4,
   },
@@ -1149,7 +1149,7 @@ const styles = StyleSheet.create({
   tokenBarContainer: {
     backgroundColor: '#000000',
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     padding: 12,
   },
@@ -1180,7 +1180,7 @@ const styles = StyleSheet.create({
   },
   legendText: {
     fontSize: 10,
-    color: '#888',
+    color: '#9e9e9e',
     fontWeight: '600',
   },
 
@@ -1193,9 +1193,9 @@ const styles = StyleSheet.create({
     padding: 20,
   },
   modalContent: {
-    backgroundColor: '#0d0d14',
+    backgroundColor: '#0a0a0a',
     borderWidth: 2,
-    borderColor: '#6366f1',
+    borderColor: '#e8e8e8',
     borderRadius: 12,
     padding: 20,
     minWidth: 300,
@@ -1205,19 +1205,19 @@ const styles = StyleSheet.create({
   modalTitle: {
     fontSize: 18,
     fontWeight: '800',
-    color: '#fff',
+    color: '#e8e8e8',
     letterSpacing: 1,
   },
   modalDesc: {
     fontSize: 13,
-    color: '#888',
+    color: '#9e9e9e',
   },
   exportStatus: {
     fontSize: 13,
     color: '#22c55e',
     textAlign: 'center',
     padding: 8,
-    backgroundColor: '#22c55e15',
+    backgroundColor: '#22c55e08',
     borderRadius: 6,
   },
   exportButtons: {
@@ -1229,7 +1229,7 @@ const styles = StyleSheet.create({
     padding: 14,
     backgroundColor: '#2a2a2a',
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#2a2a2a',
     borderRadius: 8,
     gap: 12,
   },
@@ -1240,21 +1240,21 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 14,
     fontWeight: '700',
-    color: '#fff',
+    color: '#e8e8e8',
   },
   exportOptionDesc: {
     fontSize: 11,
-    color: '#888',
+    color: '#9e9e9e',
   },
   modalCloseBtn: {
     padding: 12,
-    backgroundColor: '#333',
+    backgroundColor: '#2a2a2a',
     borderRadius: 8,
     alignItems: 'center',
   },
   modalCloseBtnText: {
     fontSize: 13,
     fontWeight: '700',
-    color: '#fff',
+    color: '#e8e8e8',
   },
 });

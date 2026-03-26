@@ -68,7 +68,7 @@ interface StatCardProps {
   sub?: string;
 }
 
-function StatCard({ icon, value, label, valueColor = '#e5e5e5', sub }: StatCardProps) {
+function StatCard({ icon, value, label, valueColor = '#e8e8e8', sub }: StatCardProps) {
   return (
     <View style={cardStyles.card}>
       <Text style={cardStyles.icon}>{icon}</Text>
@@ -85,12 +85,12 @@ const cardStyles = StyleSheet.create({
   card: {
     flex: 1,
     minWidth: '46%',
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 10,
     padding: 14,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: '#1a1a1a',
   },
   icon: { fontSize: 20, marginBottom: 6 },
   value: {
@@ -99,17 +99,17 @@ const cardStyles = StyleSheet.create({
     marginBottom: 2,
     letterSpacing: -0.5,
   },
-  label: { color: '#52525b', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5 },
-  sub: { color: '#6366f1', fontSize: 10, marginTop: 2 },
+  label: { color: '#6f6f6f', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5 },
+  sub: { color: '#e8e8e8', fontSize: 10, marginTop: 2 },
 });
 
 // ─── Agent Row (mini list) ────────────────────────────────────────────────────
 
 function AgentRow({ agent }: { agent: CircleOfficeAgent }) {
   const statusColors: Record<string, string> = {
-    idle: '#22c55e', building: '#f59e0b', offline: '#52525b', error: '#ef4444',
+    idle: '#22c55e', building: '#3b82f6', offline: '#6f6f6f', error: '#ef4444',
   };
-  const color = statusColors[agent.status] || '#52525b';
+  const color = statusColors[agent.status] || '#6f6f6f';
   return (
     <View style={rowStyles.row}>
       <View style={[rowStyles.dot, { backgroundColor: color }]} />
@@ -137,10 +137,10 @@ const rowStyles = StyleSheet.create({
   },
   dot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0 },
   info: { flex: 1 },
-  name: { color: '#e5e5e5', fontSize: 12, fontWeight: '600' },
-  owner: { color: '#52525b', fontSize: 10 },
+  name: { color: '#e8e8e8', fontSize: 12, fontWeight: '600' },
+  owner: { color: '#6f6f6f', fontSize: 10 },
   tokens: { fontSize: 12, fontWeight: '700', minWidth: 50, textAlign: 'right' },
-  msgs: { color: '#52525b', fontSize: 10, minWidth: 45, textAlign: 'right' },
+  msgs: { color: '#6f6f6f', fontSize: 10, minWidth: 45, textAlign: 'right' },
 });
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -193,6 +193,15 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
                 last_response_ms:    (r.last_response_ms   as number) ?? a.last_response_ms,
                 uptime_score:        (r.uptime_score        as number) ?? a.uptime_score,
                 status:              (r.status              as CircleOfficeAgent['status']) ?? a.status,
+                input_tokens_today:  (r.input_tokens_today  as number) ?? a.input_tokens_today,
+                output_tokens_today: (r.output_tokens_today as number) ?? a.output_tokens_today,
+                cached_tokens_today: (r.cached_tokens_today as number) ?? a.cached_tokens_today,
+                input_tokens_total:  (r.input_tokens_total  as number) ?? a.input_tokens_total,
+                output_tokens_total: (r.output_tokens_total as number) ?? a.output_tokens_total,
+                cached_tokens_total: (r.cached_tokens_total as number) ?? a.cached_tokens_total,
+                estimated_cost_today: parseFloat(r.estimated_cost_today as string) || a.estimated_cost_today,
+                estimated_cost_total: parseFloat(r.estimated_cost_total as string) || a.estimated_cost_total,
+                model_name:           (r.model_name as string) ?? a.model_name,
               }
             : a
         ));
@@ -316,7 +325,13 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
   const totalTokensAllTime  = filtered.reduce((s, a) => s + (a.token_usage_total   ?? 0), 0);
   const totalMessagesToday  = filtered.reduce((s, a) => s + (a.message_count_today ?? 0), 0);
   const totalMessagesAllTime = filtered.reduce((s, a) => s + (a.message_count_total ?? 0), 0);
-  const totalCostAllTime    = totalTokensAllTime * 0.0000005;
+  // Use DB-stored estimated cost (model-aware) instead of flat-rate guess
+  const totalCostToday      = filtered.reduce((s, a) => s + (a.estimated_cost_today ?? 0), 0);
+  const totalCostAllTime    = filtered.reduce((s, a) => s + (a.estimated_cost_total ?? 0), 0);
+  // Granular token breakdown
+  const inputTokensToday    = filtered.reduce((s, a) => s + (a.input_tokens_today  ?? 0), 0);
+  const outputTokensToday   = filtered.reduce((s, a) => s + (a.output_tokens_today ?? 0), 0);
+  const cachedTokensToday   = filtered.reduce((s, a) => s + (a.cached_tokens_today ?? 0), 0);
   const onlineCount         = filtered.filter(a => a.status !== 'offline').length;
   const latencies           = filtered.map(a => a.last_response_ms).filter((v): v is number => v != null);
   const avgLatency          = latencies.length ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : null;
@@ -360,7 +375,7 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
             value={fmtTokens(totalTokensAllTime)}
             label="Total Tokens (All Time)"
             valueColor="#f59e0b"
-            sub={`$${totalCostAllTime.toFixed(3)} total cost`}
+            sub={`$${totalCostAllTime.toFixed(2)} est. cost`}
           />
           <StatCard
             icon="📨"
@@ -377,6 +392,7 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
             value={fmtTokens(totalTokensToday)}
             label="Tokens Today"
             valueColor={tokenColor(totalTokensToday)}
+            sub={`$${totalCostToday.toFixed(2)} today`}
           />
           <StatCard
             icon="💬"
@@ -395,21 +411,56 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
             icon="⏱️"
             value={fmtLatency(avgLatency)}
             label="Avg Latency"
-            valueColor={avgLatency ? latencyColor(avgLatency) : '#52525b'}
+            valueColor={avgLatency ? latencyColor(avgLatency) : '#6f6f6f'}
           />
           <StatCard
             icon="🟢"
             value={`${onlineCount}/${filtered.length}`}
             label="Agents Online"
-            valueColor={onlineCount > 0 ? '#22c55e' : '#52525b'}
+            valueColor={onlineCount > 0 ? '#22c55e' : '#6f6f6f'}
           />
           <StatCard
             icon="📈"
             value={fmtUptime(avgUptime)}
             label="Avg Uptime"
-            valueColor={avgUptime != null ? uptimeColor(avgUptime) : '#52525b'}
+            valueColor={avgUptime != null ? uptimeColor(avgUptime) : '#6f6f6f'}
           />
         </View>
+
+        {/* Token Breakdown — Today */}
+        {totalTokensToday > 0 && (
+          <View style={styles.metricsCard}>
+            <Text style={styles.metricsTitle}>TOKEN BREAKDOWN (TODAY)</Text>
+            <View style={styles.percentilesRow}>
+              <View style={styles.percentileItem}>
+                <Text style={styles.percentileLabel}>INPUT</Text>
+                <Text style={[styles.percentileValue, { color: '#3b82f6' }]}>{fmtTokens(inputTokensToday)}</Text>
+              </View>
+              <View style={styles.percentileItem}>
+                <Text style={styles.percentileLabel}>OUTPUT</Text>
+                <Text style={[styles.percentileValue, { color: '#a855f7' }]}>{fmtTokens(outputTokensToday)}</Text>
+              </View>
+              <View style={styles.percentileItem}>
+                <Text style={styles.percentileLabel}>CACHED</Text>
+                <Text style={[styles.percentileValue, { color: '#22c55e' }]}>{fmtTokens(cachedTokensToday)}</Text>
+              </View>
+              <View style={styles.percentileItem}>
+                <Text style={styles.percentileLabel}>CACHE HIT</Text>
+                <Text style={[styles.percentileValue, { color: '#22c55e' }]}>
+                  {inputTokensToday > 0 ? `${Math.round((cachedTokensToday / inputTokensToday) * 100)}%` : '—'}
+                </Text>
+              </View>
+            </View>
+            {/* Proportional bar */}
+            {(inputTokensToday + outputTokensToday) > 0 && (
+              <View style={{ flexDirection: 'row', height: 6, borderRadius: 3, overflow: 'hidden', marginTop: 8 }}>
+                <View style={{ flex: inputTokensToday - cachedTokensToday, backgroundColor: '#3b82f6' }} />
+                <View style={{ flex: cachedTokensToday, backgroundColor: '#22c55e' }} />
+                <View style={{ flex: outputTokensToday, backgroundColor: '#a855f7' }} />
+              </View>
+            )}
+          </View>
+        )}
 
         {/* Latency Percentiles */}
         {latencyPercentiles.count > 0 && (
@@ -488,7 +539,7 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
             </View>
             {userUsage.map((u, i) => (
               <View key={i} style={rowStyles.row}>
-                <View style={[rowStyles.dot, { backgroundColor: '#6366f1' }]} />
+                <View style={[rowStyles.dot, { backgroundColor: '#e8e8e8' }]} />
                 <View style={rowStyles.info}>
                   <Text style={rowStyles.name}>{u.name}</Text>
                   <Text style={rowStyles.owner}>{u.commands} cmds / {u.model}</Text>
@@ -538,7 +589,7 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0d0d0d',
+    backgroundColor: '#000000',
   },
   toggleRow: {
     flexDirection: 'row',
@@ -562,12 +613,12 @@ const styles = StyleSheet.create({
     borderColor: '#6366f1',
   },
   toggleText: {
-    color: '#71717a',
+    color: '#6f6f6f',
     fontSize: 13,
     fontWeight: '600',
   },
   toggleTextActive: {
-    color: '#6366f1',
+    color: '#e8e8e8',
   },
   scroll: {
     padding: 12,
@@ -580,11 +631,11 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   agentList: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 12,
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: '#1a1a1a',
   },
   listHeader: {
     flexDirection: 'row',
@@ -596,26 +647,26 @@ const styles = StyleSheet.create({
     borderBottomColor: '#000000',
   },
   listTitle: {
-    color: '#e5e5e5',
+    color: '#e8e8e8',
     fontSize: 13,
     fontWeight: '700',
   },
   listSub: {
-    color: '#52525b',
+    color: '#6f6f6f',
     fontSize: 10,
   },
   // Latency Percentiles & Error Rate
   metricsCard: {
-    backgroundColor: '#111',
+    backgroundColor: '#161616',
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: '#1a1a1a',
     padding: 14,
   },
   metricsTitle: {
     fontSize: 11,
     fontWeight: '700',
-    color: '#888',
+    color: '#9e9e9e',
     letterSpacing: 1.5,
     marginBottom: 12,
   },
@@ -631,7 +682,7 @@ const styles = StyleSheet.create({
   percentileLabel: {
     fontSize: 10,
     fontWeight: '600',
-    color: '#666',
+    color: '#6f6f6f',
     letterSpacing: 1,
     marginBottom: 4,
   },
@@ -642,11 +693,11 @@ const styles = StyleSheet.create({
   percentileDivider: {
     width: 1,
     height: 32,
-    backgroundColor: '#333',
+    backgroundColor: '#2a2a2a',
   },
   percentileSub: {
     fontSize: 10,
-    color: '#555',
+    color: '#6f6f6f',
     textAlign: 'center',
     marginTop: 8,
   },
@@ -665,11 +716,11 @@ const styles = StyleSheet.create({
   },
   errorRateSub: {
     fontSize: 11,
-    color: '#888',
+    color: '#9e9e9e',
   },
   successBar: {
     height: 6,
-    backgroundColor: '#333',
+    backgroundColor: '#2a2a2a',
     borderRadius: 3,
     overflow: 'hidden',
   },
@@ -680,13 +731,13 @@ const styles = StyleSheet.create({
   recentErrors: {
     marginTop: 12,
     borderTopWidth: 1,
-    borderTopColor: '#1f1f1f',
+    borderTopColor: '#1a1a1a',
     paddingTop: 8,
   },
   recentErrorsTitle: {
     fontSize: 10,
     fontWeight: '700',
-    color: '#ef4444',
+    color: '#9e9e9e',
     letterSpacing: 1,
     marginBottom: 6,
   },
@@ -698,7 +749,7 @@ const styles = StyleSheet.create({
   errorAgent: {
     fontSize: 11,
     fontWeight: '600',
-    color: '#888',
+    color: '#ef4444',
     minWidth: 70,
   },
   errorMsg: {
@@ -714,14 +765,14 @@ const styles = StyleSheet.create({
   },
   emptyIcon: { fontSize: 36, marginBottom: 12 },
   emptyTitle: {
-    color: '#e5e5e5',
+    color: '#e8e8e8',
     fontSize: 16,
     fontWeight: '700',
     marginBottom: 6,
     textAlign: 'center',
   },
   emptyText: {
-    color: '#52525b',
+    color: '#6f6f6f',
     fontSize: 12,
     textAlign: 'center',
     lineHeight: 18,

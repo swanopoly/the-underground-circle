@@ -3,6 +3,7 @@ import {
   View, Text, TextInput, FlatList, StyleSheet, Platform,
   Pressable, RefreshControl, ActivityIndicator, ScrollView,
 } from 'react-native';
+import { LoadingScreen } from '../../../components/LoadingWave';
 import {
   getCircleDiscordConfig, connectDiscordWithGuildId, disconnectDiscord,
   getCachedChannels, syncChannels, getChannelMessages, sendToChannel,
@@ -146,12 +147,7 @@ export default function DiscordTab({ circleId }: { circleId: string }) {
   // ─── Render: Loading ─────────────────────────────────────────────
 
   if (loading) {
-    return (
-      <View style={st.centered}>
-        <ActivityIndicator color="#fff" />
-        <Text style={st.loadingText}>Loading Discord...</Text>
-      </View>
-    );
+    return <LoadingScreen />;
   }
 
   // ─── Render: Setup ───────────────────────────────────────────────

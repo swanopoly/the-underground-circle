@@ -57,24 +57,26 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
   const fetchActivity = useCallback(async () => {
     try {
       // Fetch both activity and recent automation runs in parallel
-      const [actRes, runRes] = await Promise.all([
-        supabase
-          .from('agent_activity')
-          .select('id, agent_name, activity_type, source, source_detail, title, body, created_at')
-          .eq('circle_id', circleId)
-          .order('created_at', { ascending: false })
-          .limit(60),
-        supabase
+      const actRes = await supabase
+        .from('agent_activity')
+        .select('id, agent_name, activity_type, source, source_detail, title, body, created_at')
+        .eq('circle_id', circleId)
+        .order('created_at', { ascending: false })
+        .limit(60);
+
+      if (!actRes.error && actRes.data) setItems(actRes.data);
+
+      // automation_runs — skip if table doesn't exist (avoids 400 spam)
+      try {
+        const runRes = await supabase
           .from('automation_runs')
           .select('id, status, error_message, output_text, model_used, estimated_cost, duration_ms, trigger_source, created_at')
           .eq('circle_id', circleId)
           .in('status', ['failed', 'completed'])
           .order('created_at', { ascending: false })
-          .limit(10),
-      ]);
-
-      if (!actRes.error && actRes.data) setItems(actRes.data);
-      if (!runRes.error && runRes.data) setRuns(runRes.data);
+          .limit(10);
+        if (!runRes.error && runRes.data) setRuns(runRes.data);
+      } catch {}  // table may not exist
     } catch (err) {
       console.error('ActivityFeed fetch error:', err);
     }

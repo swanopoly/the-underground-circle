@@ -24,6 +24,7 @@ import {
   CHAIN_CONFIGS,
 } from '../../lib/crypto';
 import type { Chain, Token, NFT, Transaction, StakeAccount, Portfolio } from '../../types';
+import { LoadingScreen } from '../../components/LoadingWave';
 import PageContainer from '../../components/PageContainer';
 import Card from '../../components/Card';
 
@@ -111,7 +112,7 @@ function ChainSelector({
 
 function TokenRow({ token, onPress }: { token: Token; onPress: () => void }) {
   const config = CHAIN_CONFIGS[token.chain];
-  const changeColor = (token.change24h || 0) >= 0 ? '#10b981' : '#ef4444';
+  const changeColor = (token.change24h || 0) >= 0 ? '#22c55e' : '#ef4444';
   
   return (
     <Pressable onPress={onPress} style={s.tokenRow}>
@@ -195,7 +196,7 @@ function TransactionRow({ tx, onPress }: { tx: Transaction; onPress: () => void 
 function SectionLoader({ label }: { label?: string }) {
   return (
     <View style={{ padding: 32, alignItems: 'center' }}>
-      <ActivityIndicator size="small" color="#22d3ee" />
+      <ActivityIndicator size="small" color="#e8e8e8" />
       {label && <Text style={{ color: '#444', fontSize: 11, marginTop: 8, letterSpacing: 1, textTransform: 'uppercase' }}>{label}</Text>}
     </View>
   );
@@ -505,12 +506,12 @@ export default function WalletDashboard({
         <View style={s.portfolioChange}>
           <Text style={[
             s.portfolioChangeText,
-            { color: (portfolio?.change24h || 0) >= 0 ? '#10b981' : '#ef4444' }
+            { color: (portfolio?.change24h || 0) >= 0 ? '#22c55e' : '#ef4444' }
           ]}>
             {formatPercent(portfolio?.change24h || 0)} (24h)
           </Text>
         </View>
-        
+
         {/* Mini chart placeholder */}
         <View style={s.chartPlaceholder}>
           <Text style={s.chartPlaceholderText}>Chart coming soon</Text>
@@ -537,38 +538,38 @@ export default function WalletDashboard({
           style={s.actionBtn}
           onPress={() => setActivePanel(activePanel === 'send' ? null : 'send')}
         >
-          <View style={[s.actionBtnIcon, { backgroundColor: '#22d3ee20' }]}>
-            <Text style={[s.actionBtnEmoji, { color: '#22d3ee' }]}>↗</Text>
+          <View style={[s.actionBtnIcon, { backgroundColor: '#6366f120' }]}>
+            <Text style={[s.actionBtnEmoji, { color: '#6366f1' }]}>↗</Text>
           </View>
           <Text style={s.actionBtnLabel}>SEND</Text>
         </Pressable>
-        
-        <Pressable 
+
+        <Pressable
           style={s.actionBtn}
           onPress={() => setActivePanel(activePanel === 'receive' ? null : 'receive')}
         >
-          <View style={[s.actionBtnIcon, { backgroundColor: '#10b98120' }]}>
-            <Text style={[s.actionBtnEmoji, { color: '#10b981' }]}>↙</Text>
+          <View style={[s.actionBtnIcon, { backgroundColor: '#22c55e20' }]}>
+            <Text style={[s.actionBtnEmoji, { color: '#22c55e' }]}>↙</Text>
           </View>
           <Text style={s.actionBtnLabel}>RECEIVE</Text>
         </Pressable>
-        
-        <Pressable 
+
+        <Pressable
           style={s.actionBtn}
           onPress={() => setActiveTab('swap')}
         >
-          <View style={[s.actionBtnIcon, { backgroundColor: '#f59e0b20' }]}>
-            <Text style={[s.actionBtnEmoji, { color: '#f59e0b' }]}>⇄</Text>
+          <View style={[s.actionBtnIcon, { backgroundColor: '#22d3ee20' }]}>
+            <Text style={[s.actionBtnEmoji, { color: '#22d3ee' }]}>⇄</Text>
           </View>
           <Text style={s.actionBtnLabel}>SWAP</Text>
         </Pressable>
-        
-        <Pressable 
+
+        <Pressable
           style={s.actionBtn}
           onPress={() => setActiveTab('stake')}
         >
-          <View style={[s.actionBtnIcon, { backgroundColor: '#8b5cf620' }]}>
-            <Text style={[s.actionBtnEmoji, { color: '#8b5cf6' }]}>⬡</Text>
+          <View style={[s.actionBtnIcon, { backgroundColor: '#a855f720' }]}>
+            <Text style={[s.actionBtnEmoji, { color: '#a855f7' }]}>⬡</Text>
           </View>
           <Text style={s.actionBtnLabel}>STAKE</Text>
         </Pressable>
@@ -818,14 +819,14 @@ export default function WalletDashboard({
   );
 
   const renderMarketRow = (item: MarketItem, index: number) => {
-    const changeColor = item.change24h >= 0 ? '#10b981' : '#ef4444';
+    const changeColor = item.change24h >= 0 ? '#22c55e' : '#ef4444';
     const changePrefix = item.change24h >= 0 ? '+' : '';
     
 
     return (
       <View key={`${item.type}-${item.symbol}-${index}`} style={s.marketRow}>
         <View style={s.marketRowLeft}>
-          <View style={[s.marketIcon, { backgroundColor: item.change24h >= 0 ? '#10b98115' : '#ef444415' }]}>
+          <View style={[s.marketIcon, { backgroundColor: item.change24h >= 0 ? '#22c55e15' : '#ef444415' }]}>
             <Text style={s.marketIconText}>{item.symbol[0]}</Text>
           </View>
           <View>
@@ -1010,12 +1011,7 @@ export default function WalletDashboard({
   const isDesktop = screenWidth > 768;
 
   if (loading) {
-    return (
-      <View style={s.loadingContainer}>
-        <ActivityIndicator size="large" color="#fff" />
-        <Text style={s.loadingText}>Loading wallet...</Text>
-      </View>
-    );
+    return <LoadingScreen />;
   }
 
   return (
@@ -1034,7 +1030,7 @@ export default function WalletDashboard({
           <Text style={s.headerValue}>{formatUSD(portfolio?.totalValue || 0)}</Text>
           <Text style={[
             s.headerChange,
-            { color: (portfolio?.change24h || 0) >= 0 ? '#10b981' : '#ef4444' }
+            { color: (portfolio?.change24h || 0) >= 0 ? '#22c55e' : '#ef4444' }
           ]}>
             {formatPercent(portfolio?.change24h || 0)}
           </Text>
@@ -1134,11 +1130,11 @@ const s = StyleSheet.create({
     paddingHorizontal: 16, paddingVertical: 12, alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
   },
-  tabActive: { borderBottomWidth: 2, borderBottomColor: '#22d3ee' },
+  tabActive: { borderBottomWidth: 2, borderBottomColor: '#6366f1' },
   tabIcon: { fontSize: 16, marginBottom: 4, color: '#555' },
-  tabIconActive: { color: '#22d3ee' },
+  tabIconActive: { color: '#6366f1' },
   tabLabel: { color: '#666', fontSize: 10, fontWeight: '700', letterSpacing: 1 },
-  tabLabelActive: { color: '#22d3ee' },
+  tabLabelActive: { color: '#6366f1' },
 
   // Chain selector
   chainSelector: { marginBottom: 16 },
@@ -1148,11 +1144,11 @@ const s = StyleSheet.create({
     backgroundColor: '#111', borderRadius: 20, borderWidth: 1, borderColor: '#222',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  chainChipActive: { borderColor: '#22d3ee', backgroundColor: '#0a1515' },
+  chainChipActive: { borderColor: '#6366f1', backgroundColor: '#6366f110' },
   chainChipDisabled: { opacity: 0.4 },
   chainChipIcon: { fontSize: 16 },
   chainChipText: { color: '#888', fontSize: 12, fontWeight: '600' },
-  chainChipTextActive: { color: '#22d3ee' },
+  chainChipTextActive: { color: '#6366f1' },
   chainDot: { width: 6, height: 6, borderRadius: 3 },
 
   // Portfolio
@@ -1196,7 +1192,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 6, backgroundColor: '#2a2a2a', borderRadius: 8,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  addTokenText: { color: '#7c8fff', fontSize: 10, fontWeight: '700', letterSpacing: 1 },
+  addTokenText: { color: '#6366f1', fontSize: 10, fontWeight: '700', letterSpacing: 1 },
 
   tokenRow: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
@@ -1246,7 +1242,7 @@ const s = StyleSheet.create({
   txTime: { color: '#444', fontSize: 10, marginTop: 2 },
   txRight: { alignItems: 'center', gap: 4 },
   txStatus: { width: 20, height: 20, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
-  txStatusConfirmed: { backgroundColor: '#10b98120' },
+  txStatusConfirmed: { backgroundColor: '#22c55e20' },
   txStatusText: { fontSize: 10 },
   txArrow: { color: '#444', fontSize: 16 },
 
@@ -1275,9 +1271,9 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   swapArrowText: { color: '#888', fontSize: 14 },
-  swapInfo: { alignItems: 'center', padding: 12, backgroundColor: '#0d1a0d', borderRadius: 8, marginBottom: 16 },
-  swapInfoText: { color: '#4a9a4a', fontSize: 12, fontWeight: '600' },
-  swapInfoSubtext: { color: '#2a6a2a', fontSize: 10, marginTop: 2 },
+  swapInfo: { alignItems: 'center', padding: 12, backgroundColor: '#22d3ee10', borderRadius: 8, marginBottom: 16 },
+  swapInfoText: { color: '#22d3ee', fontSize: 12, fontWeight: '600' },
+  swapInfoSubtext: { color: '#6f6f6f', fontSize: 10, marginTop: 2 },
   swapBtn: {
     backgroundColor: '#22d3ee', borderRadius: 12, paddingVertical: 16, alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
@@ -1298,7 +1294,7 @@ const s = StyleSheet.create({
   },
   stakeAmount: { color: '#fff', fontSize: 15, fontWeight: '700' },
   stakeValidator: { color: '#666', fontSize: 11, marginTop: 2 },
-  stakeRewards: { color: '#10b981', fontSize: 13, fontWeight: '600', textAlign: 'right' },
+  stakeRewards: { color: '#22c55e', fontSize: 13, fontWeight: '600', textAlign: 'right' },
   stakeStatus: { color: '#666', fontSize: 10, textAlign: 'right', marginTop: 2 },
   validatorRow: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
@@ -1307,13 +1303,13 @@ const s = StyleSheet.create({
   },
   validatorName: { color: '#fff', fontSize: 14, fontWeight: '600' },
   validatorAddress: { color: '#666', fontSize: 10, marginTop: 2, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
-  validatorAPY: { color: '#10b981', fontSize: 12, fontWeight: '700', textAlign: 'right' },
+  validatorAPY: { color: '#22c55e', fontSize: 12, fontWeight: '700', textAlign: 'right' },
   validatorCommission: { color: '#888', fontSize: 10, textAlign: 'right', marginTop: 2 },
   stakeSmallBtn: {
-    backgroundColor: '#1a2e1a', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6,
+    backgroundColor: '#252525', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  stakeSmallBtnText: { color: '#4a9a4a', fontSize: 10, fontWeight: '700', letterSpacing: 1 },
+  stakeSmallBtnText: { color: '#22c55e', fontSize: 10, fontWeight: '700', letterSpacing: 1 },
 
   // Coming Soon
   comingSoonBox: {
@@ -1343,19 +1339,19 @@ const s = StyleSheet.create({
     backgroundColor: '#000000', borderWidth: 1, borderColor: '#222',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  quickChipActive: { borderColor: '#22d3ee', backgroundColor: '#0a1515' },
+  quickChipActive: { borderColor: '#6366f1', backgroundColor: '#6366f110' },
   quickChipText: { color: '#666', fontSize: 12, fontWeight: '700' },
-  quickChipTextActive: { color: '#22d3ee' },
+  quickChipTextActive: { color: '#6366f1' },
   resultBox: { borderRadius: 10, padding: 12, marginBottom: 12 },
-  resultSuccess: { backgroundColor: '#0d1f0d', borderWidth: 1, borderColor: '#1a3a1a' },
-  resultError: { backgroundColor: '#1f0d0d', borderWidth: 1, borderColor: '#3a1a1a' },
+  resultSuccess: { backgroundColor: '#22c55e10', borderWidth: 1, borderColor: '#22c55e30' },
+  resultError: { backgroundColor: '#ef444410', borderWidth: 1, borderColor: '#ef444430' },
   resultText: { color: '#ccc', fontSize: 13 },
-  resultLink: { color: '#22d3ee', fontSize: 12, marginTop: 6, fontWeight: '600' },
+  resultLink: { color: '#3b82f6', fontSize: 12, marginTop: 6, fontWeight: '600' },
   primaryBtn: {
-    backgroundColor: '#22d3ee', borderRadius: 12, paddingVertical: 14, alignItems: 'center',
+    backgroundColor: '#6366f1', borderRadius: 12, paddingVertical: 14, alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  primaryBtnDisabled: { backgroundColor: '#1a2a2a', opacity: 0.5 },
+  primaryBtnDisabled: { backgroundColor: '#252525', opacity: 0.5 },
   primaryBtnText: { color: '#0a0a0a', fontSize: 14, fontWeight: '800', letterSpacing: 2 },
 
   // Receive
@@ -1375,15 +1371,15 @@ const s = StyleSheet.create({
     lineHeight: 20,
   },
   copyBtn: {
-    backgroundColor: '#1a2e1a', borderRadius: 12, paddingVertical: 14, alignItems: 'center',
-    borderWidth: 1, borderColor: '#2a3e2a', marginBottom: 12,
+    backgroundColor: '#252525', borderRadius: 12, paddingVertical: 14, alignItems: 'center',
+    borderWidth: 1, borderColor: '#3e3e3e', marginBottom: 12,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  copyBtnText: { color: '#4a9a4a', fontSize: 13, fontWeight: '700', letterSpacing: 1 },
+  copyBtnText: { color: '#6366f1', fontSize: 13, fontWeight: '700', letterSpacing: 1 },
   receiveWarning: {
-    backgroundColor: '#1f1a0d', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#3a2e1a',
+    backgroundColor: '#f59e0b10', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#f59e0b30',
   },
-  receiveWarningText: { color: '#b89a4a', fontSize: 12, lineHeight: 18 },
+  receiveWarningText: { color: '#f59e0b', fontSize: 12, lineHeight: 18 },
 
   // Common
   sectionTitle: { color: '#666', fontSize: 12, letterSpacing: 2, fontWeight: '700', marginBottom: 16 },
@@ -1394,10 +1390,10 @@ const s = StyleSheet.create({
   signOutSection: { marginTop: 32, marginBottom: 40, alignItems: 'center' },
   signOutBtn: {
     paddingVertical: 14, paddingHorizontal: 32, borderRadius: 12,
-    backgroundColor: '#1a1111', borderWidth: 1, borderColor: '#2e1a1a',
+    backgroundColor: '#161616', borderWidth: 1, borderColor: '#2a2a2a',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  signOutText: { color: '#cc4444', fontSize: 12, fontWeight: '700', letterSpacing: 1 },
+  signOutText: { color: '#6f6f6f', fontSize: 12, fontWeight: '700', letterSpacing: 1 },
   signOutHint: { color: '#444', fontSize: 11, textAlign: 'center', marginTop: 10 },
 
   // Market

@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import FlatIcon from '../../components/FlatIcon';
 import {
   View,
   Text,
@@ -10,42 +11,39 @@ import {
   ScrollView,
   NativeSyntheticEvent,
   NativeScrollEvent,
-  ActivityIndicator,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../../lib/supabase';
 import ChatTab from './tabs/ChatTab';
 import OfficeTab from './tabs/OfficeTab';
-
-// Lazy-load all non-chat/office tabs — only mount when user navigates to them
-const FeedTab = lazy(() => import('./tabs/FeedTab'));
-const MembersTab = lazy(() => import('./tabs/MembersTab'));
-const ChallengesTab = lazy(() => import('./tabs/ChallengesTab'));
-const WalletTab = lazy(() => import('./tabs/WalletTab'));
-const ProfileTab = lazy(() => import('./tabs/ProfileTab'));
-const RoomsTab = lazy(() => import('./tabs/RoomsTab'));
-const AnalyticsTab = lazy(() => import('./tabs/AnalyticsTab'));
-const IntegrationsTab = lazy(() => import('./tabs/IntegrationsTab'));
-const BackpackTab = lazy(() => import('./tabs/BackpackTab'));
+import FeedTab from './tabs/FeedTab';
+import MembersTab from './tabs/MembersTab';
+import ChallengesTab from './tabs/ChallengesTab';
+import WalletTab from './tabs/WalletTab';
+import ProfileTab from './tabs/ProfileTab';
+import RoomsTab from './tabs/RoomsTab';
+import AnalyticsTab from './tabs/AnalyticsTab';
+import IntegrationsTab from './tabs/IntegrationsTab';
+import BackpackTab from './tabs/BackpackTab';
 
 import { Circle } from '../../types';
 import ErrorBoundary from '../../components/ErrorBoundary';
+import { LoadingScreen } from '../../components/LoadingWave';
 
-// Chat + Office stay mounted permanently; other tabs mount on first visit
-const PERSISTENT_TABS = new Set(['CHAT', 'OFFICE']);
+// Core tabs (Chat, Office, Rooms) always mounted; secondary tabs lazy-mount on first visit
 
-const TAB_META: { key: string; label: string; icon: string }[] = [
-  { key: 'CHAT', label: 'Chat', icon: '💬' },
-  { key: 'OFFICE', label: 'Office', icon: '🏢' },
-  { key: 'ROOMS', label: 'Rooms', icon: '🏠' },
-  { key: 'BACKPACK', label: 'Backpack', icon: '🎒' },
-  { key: 'FEED', label: 'Feed', icon: '📋' },
-  { key: 'WALLET', label: 'Wallet', icon: '💰' },
-  { key: 'INTEGRATIONS', label: 'Integrations', icon: '🔗' },
-  { key: 'CHALLENGES', label: 'Challenges', icon: '🏆' },
-  { key: 'MEMBERS', label: 'Members', icon: '👥' },
-  { key: 'ANALYTICS', label: 'Analytics', icon: '📊' },
-  { key: 'PROFILE', label: 'Profile', icon: '👤' },
+const TAB_META: { key: string; label: string; icon: string; flatIcon?: string }[] = [
+  { key: 'CHAT', label: 'Chat', icon: '💬', flatIcon: 'chat' },
+  { key: 'OFFICE', label: 'Office', icon: '🏢', flatIcon: 'office' },
+  { key: 'ROOMS', label: 'Rooms', icon: '🏠', flatIcon: 'rooms' },
+  { key: 'BACKPACK', label: 'Backpack', icon: '🎒', flatIcon: 'backpack' },
+  { key: 'FEED', label: 'Feed', icon: '📋', flatIcon: 'feed' },
+  { key: 'WALLET', label: 'Wallet', icon: '💰', flatIcon: 'wallet' },
+  { key: 'INTEGRATIONS', label: 'Integrations', icon: '🔗', flatIcon: 'integrations' },
+  { key: 'CHALLENGES', label: 'Challenges', icon: '🏆', flatIcon: 'challenges' },
+  { key: 'MEMBERS', label: 'Members', icon: '👥', flatIcon: 'members' },
+  { key: 'ANALYTICS', label: 'Analytics', icon: '📊', flatIcon: 'analytics' },
+  { key: 'PROFILE', label: 'Profile', icon: '👤', flatIcon: 'profile' },
 ];
 
 const TABS = TAB_META.map(t => t.key) as readonly string[];
@@ -157,11 +155,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   };
 
   if (loading) {
-    return (
-      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
-        <Text style={styles.loadingText}>LOADING...</Text>
-      </View>
-    );
+    return <LoadingScreen />;
   }
 
   return (
@@ -180,21 +174,18 @@ export default function CircleDetailScreen({ route, navigation }: any) {
         </View>
       </View>
 
-      {/* Content — Chat & Office stay mounted; other tabs mount on first visit */}
+      {/* Core tabs — always mounted, instant switching */}
       <View style={[styles.tabContent, activeTab !== 'CHAT' && styles.hiddenTab]}>
-        <ErrorBoundary>
-          <ChatTab circleId={circleId} accentColor={accentColor} />
-        </ErrorBoundary>
+        <ErrorBoundary><ChatTab circleId={circleId} accentColor={accentColor} /></ErrorBoundary>
+      </View>
+      <View style={[styles.tabContent, activeTab !== 'OFFICE' && styles.hiddenTab]}>
+        <ErrorBoundary><OfficeTab circleId={circleId} accentColor={accentColor} /></ErrorBoundary>
+      </View>
+      <View style={[styles.tabContent, activeTab !== 'ROOMS' && styles.hiddenTab]}>
+        <ErrorBoundary><RoomsTab circleId={circleId} accentColor={accentColor} /></ErrorBoundary>
       </View>
 
-      <View style={[styles.tabContent, activeTab !== 'OFFICE' && styles.hiddenTab]}>
-        <ErrorBoundary>
-          <OfficeTab circleId={circleId} accentColor={accentColor} />
-        </ErrorBoundary>
-      </View>
-      <LazyTab tabKey="ROOMS" activeTab={activeTab}>
-        <RoomsTab circleId={circleId} accentColor={accentColor} />
-      </LazyTab>
+      {/* Secondary tabs — lazy mount on first visit, stay mounted after */}
       <LazyTab tabKey="BACKPACK" activeTab={activeTab}>
         <BackpackTab circleId={circleId} accentColor={accentColor} />
       </LazyTab>
@@ -223,16 +214,10 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   );
 }
 
-// ─── Lazy Tab — only mounts on first visit, stays mounted after ─────────────
-
-const tabFallback = (
-  <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#000' }}>
-    <ActivityIndicator color="#6366f1" size="small" />
-  </View>
-);
+// ─── Lazy Tab — mounts on first visit, stays mounted after ──────────────────
 
 function LazyTab({ tabKey, activeTab, children }: { tabKey: string; activeTab: string; children: React.ReactNode }) {
-  const [hasVisited, setHasVisited] = useState(PERSISTENT_TABS.has(tabKey));
+  const [hasVisited, setHasVisited] = useState(false);
   const isActive = activeTab === tabKey;
 
   useEffect(() => {
@@ -243,19 +228,15 @@ function LazyTab({ tabKey, activeTab, children }: { tabKey: string; activeTab: s
 
   return (
     <View style={[styles.tabContent, !isActive && styles.hiddenTab]}>
-      <ErrorBoundary>
-        <Suspense fallback={tabFallback}>
-          {children}
-        </Suspense>
-      </ErrorBoundary>
+      <ErrorBoundary>{children}</ErrorBoundary>
     </View>
   );
 }
 
 // ─── Tab Pill ───────────────────────────────────────────────────────
 
-function TabPill({ icon, label, active, accentColor, isMobile, onPress }: {
-  icon: string; label: string; active: boolean; accentColor: string; isMobile: boolean; onPress: () => void;
+function TabPill({ icon, flatIcon, label, active, accentColor, isMobile, onPress }: {
+  icon: string; flatIcon?: string; label: string; active: boolean; accentColor: string; isMobile: boolean; onPress: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
 
@@ -274,10 +255,20 @@ function TabPill({ icon, label, active, accentColor, isMobile, onPress }: {
       accessibilityLabel={label}
       accessibilityState={{ selected: active }}
     >
-      <Text style={styles.tabPillIcon}>{icon}</Text>
+      {flatIcon ? (
+        <FlatIcon
+          name={flatIcon}
+          size={isMobile ? 16 : 18}
+          mono={!hovered && !active}
+          glow={active}
+          style={!active && !hovered ? { opacity: 0.5 } : undefined}
+        />
+      ) : (
+        <Text style={styles.tabPillIcon}>{icon}</Text>
+      )}
       <Text style={[
         styles.tabPillText,
-        { color: active ? accentColor : '#888' },
+        { color: active ? accentColor : hovered ? '#ccc' : '#888' },
         active && { fontWeight: '800' },
       ]}>
         {label}
@@ -344,6 +335,7 @@ function TabBarScroller({ tabs, activeTab, accentColor, isMobile, onTabPress }: 
           <TabPill
             key={tab.key}
             icon={tab.icon}
+            flatIcon={tab.flatIcon}
             label={tab.label}
             active={activeTab === tab.key}
             accentColor={accentColor}

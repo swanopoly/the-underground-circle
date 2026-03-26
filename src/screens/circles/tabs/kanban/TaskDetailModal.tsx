@@ -104,14 +104,14 @@ function AutomationReportView({ description }: { description: string }) {
 
   const sectionColors: Record<ReportSection['type'], string> = {
     summary: '#6366f1',
-    context: '#8b5cf6',
-    members: '#06b6d4',
+    context: '#3b82f6',
+    members: '#a855f7',
     checkins: '#22c55e',
     tasks: '#f59e0b',
-    ai: '#ec4899',
-    log: '#64748b',
-    prompt: '#78716c',
-    other: '#6b6b80',
+    ai: '#22d3ee',
+    log: '#6f6f6f',
+    prompt: '#6f6f6f',
+    other: '#6f6f6f',
   };
 
   if (sections.length === 0) {
@@ -122,7 +122,7 @@ function AutomationReportView({ description }: { description: string }) {
     <View style={rs.container}>
       {sections.map((section, idx) => {
         const expanded = expandedSections.has(idx);
-        const color = sectionColors[section.type] || '#6b6b80';
+        const color = sectionColors[section.type] || '#6f6f6f';
         const icon = sectionIcons[section.type] || '\u{1F4C4}';
         const lineCount = section.content.split('\n').length;
 
@@ -152,7 +152,7 @@ function AutomationReportView({ description }: { description: string }) {
                       const isSuccess = line.includes('\u2713') || line.includes('\u2705');
                       const isError = line.includes('\u274C');
                       const isPending = line.includes('\u23F3') || line.includes('\u231B');
-                      const lineColor = isError ? '#ef4444' : isSuccess ? '#22c55e' : isPending ? '#f59e0b' : '#9090a8';
+                      const lineColor = isError ? '#ef4444' : isSuccess ? '#22c55e' : isPending ? '#f59e0b' : '#9e9e9e';
                       return (
                         <Text key={i} style={[rs.logLine, { color: lineColor }]} selectable>{line.trim()}</Text>
                       );
@@ -194,15 +194,15 @@ const rs = StyleSheet.create({
     gap: 4,
   },
   emptyText: {
-    color: '#444455',
+    color: '#3e3e3e',
     fontSize: 14,
     fontStyle: 'italic',
   },
   section: {
     borderLeftWidth: 3,
-    borderLeftColor: '#6366f1',
+    borderLeftColor: '#e8e8e8',
     borderRadius: 8,
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     overflow: 'hidden',
   },
   sectionHeader: {
@@ -245,27 +245,27 @@ const rs = StyleSheet.create({
     paddingBottom: 12,
   },
   sectionContent: {
-    color: '#9090a8',
+    color: '#9e9e9e',
     fontSize: 12,
     lineHeight: 18,
     fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
   },
   // AI output
   aiOutputBox: {
-    backgroundColor: '#0a0a12',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#ec489920',
+    borderColor: '#22d3ee20',
     borderRadius: 8,
     padding: 12,
   },
   aiOutputText: {
-    color: '#e4e4ed',
+    color: '#e8e8e8',
     fontSize: 13,
     lineHeight: 20,
   },
   // Log
   logBox: {
-    backgroundColor: '#0a0a12',
+    backgroundColor: '#0a0a0a',
     borderRadius: 8,
     padding: 10,
     gap: 3,
@@ -284,18 +284,18 @@ const rs = StyleSheet.create({
     gap: 6,
   },
   summaryLabel: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 12,
     fontWeight: '600',
     minWidth: 90,
   },
   summaryValue: {
-    color: '#c0c0d0',
+    color: '#b5b5b5',
     fontSize: 12,
     flex: 1,
   },
   summaryLine: {
-    color: '#9090a8',
+    color: '#9e9e9e',
     fontSize: 12,
   },
 });
@@ -511,7 +511,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
   }, [task.id, selectedAgentId, thinkingLevel, agentModel, agentMode, kanban]);
 
   const selectedAgent = kanban.agents.find(a => a.id === selectedAgentId)
-    || { id: 'blackswan-default', name: 'BlackSwan', color: '#22c55e' };
+    || { id: 'blackswan-default', name: 'BlackSwan', color: '#b5b5b5' };
 
   const assignedAgent = assignedAgentId
     ? kanban.agents.find(a => a.id === assignedAgentId)
@@ -554,15 +554,15 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
               </View>
             )}
             {isFinalReview && (
-              <View style={[s.reviewBanner, { backgroundColor: '#f9731608' }]}>
-                <View style={[s.reviewBannerDot, { backgroundColor: '#f97316' }]} />
-                <Text style={[s.reviewBannerText, { color: '#f97316' }]}>FINAL REVIEW</Text>
+              <View style={[s.reviewBanner, { backgroundColor: '#f59e0b08' }]}>
+                <View style={[s.reviewBannerDot, { backgroundColor: '#f59e0b' }]} />
+                <Text style={[s.reviewBannerText, { color: '#f59e0b' }]}>FINAL REVIEW</Text>
               </View>
             )}
             {isAutoReport && (
-              <View style={[s.reviewBanner, { backgroundColor: '#6366f108' }]}>
+              <View style={[s.reviewBanner, { backgroundColor: '#ffffff08' }]}>
                 <Text style={{ fontSize: 12 }}>{'\u{1F916}'}</Text>
-                <Text style={[s.reviewBannerText, { color: '#6366f1' }]}>AUTOMATION REPORT</Text>
+                <Text style={[s.reviewBannerText, { color: '#e8e8e8' }]}>AUTOMATION REPORT</Text>
                 {task.title.includes('FAILED') && (
                   <View style={{ backgroundColor: '#ef444420', borderRadius: 8, paddingHorizontal: 6, paddingVertical: 1, marginLeft: 4 }}>
                     <Text style={{ color: '#ef4444', fontSize: 9, fontWeight: '700' }}>FAILED</Text>
@@ -610,10 +610,10 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                       isActive && { backgroundColor: col.color + '20', borderColor: col.color + '40' },
                     ]}
                   >
-                    <View style={[s.statusDot, isPast ? { backgroundColor: col.color } : { backgroundColor: '#333333' }]} />
+                    <View style={[s.statusDot, isPast ? { backgroundColor: col.color } : { backgroundColor: '#3e3e3e' }]} />
                     <Text style={[
                       s.statusStepText,
-                      isActive ? { color: col.color } : isPast ? { color: '#9090a8' } : { color: '#444455' },
+                      isActive ? { color: col.color } : isPast ? { color: '#9e9e9e' } : { color: '#3e3e3e' },
                     ]}>
                       {col.label}
                     </Text>
@@ -632,7 +632,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                   const roster = DEFAULT_AGENT_ROSTER.find(r => agent?.name?.toLowerCase().includes(r.name.toLowerCase()));
                   return (
                     <View key={i} style={s.peerRow}>
-                      <View style={[s.peerIcon, approved ? { backgroundColor: '#22c55e20' } : { backgroundColor: '#1a1a28' }]}>
+                      <View style={[s.peerIcon, approved ? { backgroundColor: '#22c55e15' } : { backgroundColor: '#1a1a1a' }]}>
                         {roster ? (
                           <Text style={s.peerEmoji}>{roster.emoji}</Text>
                         ) : (
@@ -669,8 +669,8 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
 
             {/* Final Review Panel */}
             {isFinalReview && (
-              <View style={[s.peerPanel, { borderColor: '#f9731620' }]}>
-                <Text style={[s.peerPanelTitle, { color: '#f97316' }]}>Final Review</Text>
+              <View style={[s.peerPanel, { borderColor: '#f59e0b20' }]}>
+                <Text style={[s.peerPanelTitle, { color: '#f59e0b' }]}>Final Review</Text>
                 <Text style={s.peerPanelSub}>
                   This task has passed peer review. Approve to mark as complete or send it back.
                 </Text>
@@ -708,7 +708,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                 multiline
                 maxLength={isAutoReport ? 50000 : 2000}
                 placeholder="Add details..."
-                placeholderTextColor="#333348"
+                placeholderTextColor="#3e3e3e"
               />
             ) : isAutoReport ? (
               <AutomationReportView description={task.description || ''} />
@@ -745,7 +745,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                       disabled={uploading}
                     >
                       {uploading ? (
-                        <ActivityIndicator size="small" color="#6366f1" />
+                        <ActivityIndicator size="small" color="#e8e8e8" />
                       ) : (
                         <Text style={s.addImageText}>+ Add Image</Text>
                       )}
@@ -813,7 +813,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                   {([
                     { key: 'fast' as ThinkingLevel, label: 'FAST', icon: '\u26A1', color: '#f59e0b' },
                     { key: 'balanced' as ThinkingLevel, label: 'BALANCED', icon: '\u{1F3AF}', color: '#6366f1' },
-                    { key: 'deep' as ThinkingLevel, label: 'DEEP', icon: '\u{1F9E0}', color: '#ec4899' },
+                    { key: 'deep' as ThinkingLevel, label: 'DEEP', icon: '\u{1F9E0}', color: '#a855f7' },
                   ] as const).map(t => {
                     const active = thinkingLevel === t.key;
                     return (
@@ -835,11 +835,11 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                 <Text style={s.controlLabel}>Model</Text>
                 <View style={s.thinkingRow}>
                   {([
-                    { key: 'auto' as AgentModel, label: 'AUTO', color: '#22c55e' },
-                    { key: 'blackswan' as AgentModel, label: 'BSwan', color: '#22c55e' },
-                    { key: 'claude-haiku' as AgentModel, label: 'Haiku', color: '#f59e0b' },
-                    { key: 'claude-sonnet' as AgentModel, label: 'Sonnet', color: '#8b5cf6' },
-                    { key: 'claude-opus' as AgentModel, label: 'Opus', color: '#ef4444' },
+                    { key: 'auto' as AgentModel, label: 'AUTO', color: '#6366f1' },
+                    { key: 'blackswan' as AgentModel, label: 'BSwan', color: '#22d3ee' },
+                    { key: 'claude-haiku' as AgentModel, label: 'Haiku', color: '#22c55e' },
+                    { key: 'claude-sonnet' as AgentModel, label: 'Sonnet', color: '#f59e0b' },
+                    { key: 'claude-opus' as AgentModel, label: 'Opus', color: '#a855f7' },
                   ] as const).map(m => {
                     const active = agentModel === m.key;
                     return (
@@ -858,7 +858,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
               {/* Agent picker + run */}
               <View style={s.agentPickerRow}>
                 <Pressable onPress={() => setShowAgentPicker(p => !p)} style={s.agentPickerToggle}>
-                  <View style={[s.agentPickerDot, { backgroundColor: (selectedAgent as any).color || '#22c55e' }]} />
+                  <View style={[s.agentPickerDot, { backgroundColor: (selectedAgent as any).color || '#b5b5b5' }]} />
                   <Text style={s.agentPickerName}>{(selectedAgent as any).name || 'BlackSwan'}</Text>
                   <Text style={s.agentPickerArrow}>{showAgentPicker ? '\u25B2' : '\u25BC'}</Text>
                 </Pressable>
@@ -867,19 +867,19 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                   style={[
                     s.runAgentBtn,
                     agentRunning && { opacity: 0.5 },
-                    agentMode === 'plan' && { backgroundColor: '#6366f115', borderColor: '#6366f130' },
+                    agentMode === 'plan' && { backgroundColor: '#f59e0b15', borderColor: '#f59e0b30' },
                   ]}
                   disabled={agentRunning}
                 >
                   {agentRunning ? (
                     <View style={s.runAgentLoadingRow}>
-                      <ActivityIndicator size="small" color={agentMode === 'plan' ? '#6366f1' : '#22c55e'} />
-                      <Text style={[s.runAgentBtnText, agentMode === 'plan' && { color: '#6366f1' }]}>
+                      <ActivityIndicator size="small" color={agentMode === 'plan' ? '#f59e0b' : '#6366f1'} />
+                      <Text style={[s.runAgentBtnText, agentMode === 'plan' && { color: '#f59e0b' }]}>
                         {agentMode === 'plan' ? 'Planning...' : 'Working...'}
                       </Text>
                     </View>
                   ) : (
-                    <Text style={[s.runAgentBtnText, agentMode === 'plan' && { color: '#6366f1' }]}>
+                    <Text style={[s.runAgentBtnText, agentMode === 'plan' && { color: '#f59e0b' }]}>
                       {agentMode === 'plan' ? 'GENERATE PLAN' : 'RUN AGENT'}
                     </Text>
                   )}
@@ -893,7 +893,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                     onPress={() => { setSelectedAgentId('blackswan-default'); setShowAgentPicker(false); }}
                     style={[s.agentPickerOption, selectedAgentId === 'blackswan-default' && s.agentPickerOptionActive]}
                   >
-                    <View style={[s.agentPickerDot, { backgroundColor: '#22c55e' }]} />
+                    <View style={[s.agentPickerDot, { backgroundColor: '#b5b5b5' }]} />
                     <Text style={s.agentPickerOptionText}>BlackSwan</Text>
                     <Text style={s.agentPickerDefault}>default</Text>
                   </Pressable>
@@ -903,15 +903,15 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                       onPress={() => { setSelectedAgentId(a.id); setShowAgentPicker(false); }}
                       style={[s.agentPickerOption, selectedAgentId === a.id && s.agentPickerOptionActive]}
                     >
-                      <View style={[s.agentPickerDot, { backgroundColor: a.color || '#6366f1' }]} />
+                      <View style={[s.agentPickerDot, { backgroundColor: a.color || '#e8e8e8' }]} />
                       <Text style={s.agentPickerOptionText}>{a.name}</Text>
                     </Pressable>
                   ))}
                   <Pressable
                     onPress={() => { setShowAgentPicker(false); setShowSpawnAgent(true); }}
-                    style={[s.agentPickerOption, { borderTopWidth: 1, borderTopColor: '#1a1a2e', marginTop: 4, paddingTop: 8 }]}
+                    style={[s.agentPickerOption, { borderTopWidth: 1, borderTopColor: '#1a1a1a', marginTop: 4, paddingTop: 8 }]}
                   >
-                    <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '700', fontFamily: 'monospace' }}>+ NEW AGENT</Text>
+                    <Text style={{ color: '#6366f1', fontSize: 12, fontWeight: '700', fontFamily: 'monospace' }}>+ NEW AGENT</Text>
                   </Pressable>
                 </View>
               )}
@@ -991,7 +991,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                 <Pressable onPress={() => setShowAssignees(p => !p)} style={s.assigneeToggle}>
                   <View style={s.assigneeToggleLeft}>
                     {(assignedAgent || assignedMember) && (
-                      <View style={[s.assigneeAvatar, { backgroundColor: assignedAgent?.color || '#6366f1' }]}>
+                      <View style={[s.assigneeAvatar, { backgroundColor: assignedAgent?.color || '#e8e8e8' }]}>
                         <Text style={s.assigneeAvatarText}>
                           {(assignedAgent ? assignedAgent.name : (assignedMember?.display_name || assignedMember?.username || '?'))[0].toUpperCase()}
                         </Text>
@@ -1023,7 +1023,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                         style={[s.assigneeOption, assignedTo === m.id && s.assigneeOptionActive]}
                       >
                         <View style={s.assigneeOptionRow}>
-                          <View style={[s.assigneeAvatar, { backgroundColor: '#6366f1' }]}>
+                          <View style={[s.assigneeAvatar, { backgroundColor: '#e8e8e8' }]}>
                             <Text style={s.assigneeAvatarText}>
                               {(m.display_name || m.username || '?')[0].toUpperCase()}
                             </Text>
@@ -1042,7 +1042,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                         style={[s.assigneeOption, assignedAgentId === a.id && s.assigneeOptionActive]}
                       >
                         <View style={s.assigneeOptionRow}>
-                          <View style={[s.assigneeAvatar, { backgroundColor: a.color || '#6366f1' }]}>
+                          <View style={[s.assigneeAvatar, { backgroundColor: a.color || '#e8e8e8' }]}>
                             <Text style={s.assigneeAvatarText}>{a.name[0].toUpperCase()}</Text>
                           </View>
                           <Text style={s.assigneeOptionText}>{a.name}</Text>
@@ -1056,7 +1056,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
               <View style={s.assigneeDisplay}>
                 {(task.assignee || assignedAgent) ? (
                   <View style={s.assigneeRow}>
-                    <View style={[s.assigneeAvatar, { backgroundColor: assignedAgent?.color || '#6366f1' }]}>
+                    <View style={[s.assigneeAvatar, { backgroundColor: assignedAgent?.color || '#e8e8e8' }]}>
                       <Text style={s.assigneeAvatarText}>
                         {(assignedAgent ? assignedAgent.name : (task.assignee?.display_name || task.assignee?.username || '?'))[0].toUpperCase()}
                       </Text>
@@ -1079,7 +1079,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                 value={dueDate}
                 onChangeText={setDueDate}
                 placeholder="YYYY-MM-DD"
-                placeholderTextColor="#333348"
+                placeholderTextColor="#3e3e3e"
                 maxLength={10}
               />
             ) : (
@@ -1127,7 +1127,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                 const actionColor = isApproval || isFinal ? '#22c55e' : isChanges || isSentBack ? '#f59e0b' : undefined;
 
                 return (
-                  <View key={c.id} style={[s.comment, isAction && { backgroundColor: (actionColor || '#6366f1') + '08' }]}>
+                  <View key={c.id} style={[s.comment, isAction && { backgroundColor: (actionColor || '#e8e8e8') + '08' }]}>
                     <View style={s.commentMeta}>
                       <View style={s.commentAuthorRow}>
                         <View style={[s.commentAvatar, isAction && { backgroundColor: actionColor + '20' }]}>
@@ -1239,7 +1239,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
                 disabled={commentUploading}
               >
                 {commentUploading ? (
-                  <ActivityIndicator size="small" color="#6366f1" />
+                  <ActivityIndicator size="small" color="#e8e8e8" />
                 ) : (
                   <Text style={s.attachBtnText}>{'\u{1F4CE}'}</Text>
                 )}
@@ -1250,7 +1250,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, onCl
               value={commentText}
               onChangeText={setCommentText}
               placeholder="Add a comment..."
-              placeholderTextColor="#444455"
+              placeholderTextColor="#3e3e3e"
               onSubmitEditing={handleAddComment}
               returnKeyType="send"
             />
@@ -1289,10 +1289,10 @@ const s = StyleSheet.create({
     zIndex: 101,
   },
   modal: {
-    backgroundColor: '#111119',
+    backgroundColor: '#161616',
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#1e1e2e',
+    borderColor: '#1a1a1a',
     maxHeight: '100%',
     overflow: 'hidden',
     ...(Platform.OS === 'web' ? { boxShadow: '0 20px 60px rgba(0,0,0,0.5)' } as any : {}),
@@ -1309,7 +1309,7 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    backgroundColor: '#a855f708',
+    backgroundColor: '#ffffff06',
     borderRadius: 8,
     paddingVertical: 8,
     paddingHorizontal: 12,
@@ -1332,7 +1332,7 @@ const s = StyleSheet.create({
   peerPanel: {
     backgroundColor: '#a855f706',
     borderWidth: 1,
-    borderColor: '#a855f720',
+    borderColor: '#a855f715',
     borderRadius: 10,
     padding: 14,
     gap: 8,
@@ -1346,7 +1346,7 @@ const s = StyleSheet.create({
     letterSpacing: 0.5,
   },
   peerPanelSub: {
-    color: '#9090a8',
+    color: '#9e9e9e',
     fontSize: 12,
     lineHeight: 17,
   },
@@ -1366,12 +1366,12 @@ const s = StyleSheet.create({
     fontSize: 12,
   },
   peerInitial: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 10,
     fontWeight: '700',
   },
   peerName: {
-    color: '#c0c0d0',
+    color: '#b5b5b5',
     fontSize: 13,
     flex: 1,
   },
@@ -1387,7 +1387,7 @@ const s = StyleSheet.create({
     fontWeight: '600',
   },
   peerPendingBadge: {
-    backgroundColor: '#f59e0b10',
+    backgroundColor: '#f59e0b15',
     borderRadius: 10,
     paddingHorizontal: 8,
     paddingVertical: 2,
@@ -1415,7 +1415,7 @@ const s = StyleSheet.create({
     fontWeight: '600',
   },
   changesBtn: {
-    backgroundColor: '#f59e0b10',
+    backgroundColor: '#f59e0b15',
     borderRadius: 8,
     paddingHorizontal: 14,
     paddingVertical: 8,
@@ -1464,11 +1464,11 @@ const s = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 6,
     borderRadius: 8,
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'opacity 0.15s' } as any : {}),
   },
   editBtnText: {
-    color: '#9090a8',
+    color: '#9e9e9e',
     fontSize: 12,
     fontWeight: '600',
   },
@@ -1484,13 +1484,13 @@ const s = StyleSheet.create({
     width: 30,
     height: 30,
     borderRadius: 8,
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
     justifyContent: 'center',
     alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   closeBtnText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 16,
     fontWeight: '400',
   },
@@ -1509,7 +1509,7 @@ const s = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 6,
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     borderRadius: 8,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
   },
@@ -1527,35 +1527,35 @@ const s = StyleSheet.create({
 
   // Fields
   sectionLabel: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 12,
     fontWeight: '600',
     marginBottom: 8,
     marginTop: 16,
   },
   titleText: {
-    color: '#e4e4ed',
+    color: '#e8e8e8',
     fontSize: 16,
     fontWeight: '600',
     lineHeight: 22,
   },
   fieldValue: {
-    color: '#c0c0d0',
+    color: '#b5b5b5',
     fontSize: 14,
     lineHeight: 20,
   },
   fieldEmpty: {
-    color: '#444455',
+    color: '#3e3e3e',
     fontStyle: 'italic',
   },
   input: {
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     borderRadius: 10,
     paddingVertical: 10,
     paddingHorizontal: 14,
-    color: '#e4e4ed',
+    color: '#e8e8e8',
     fontSize: 14,
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
@@ -1575,9 +1575,9 @@ const s = StyleSheet.create({
     paddingVertical: 6,
     paddingHorizontal: 12,
     borderWidth: 1,
-    borderColor: '#1e1e2e',
+    borderColor: '#1a1a1a',
     borderRadius: 20,
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
   },
   chipDot: {
@@ -1588,7 +1588,7 @@ const s = StyleSheet.create({
   chipText: {
     fontSize: 12,
     fontWeight: '600',
-    color: '#555566',
+    color: '#6f6f6f',
   },
   inlineBadge: {
     borderRadius: 20,
@@ -1602,9 +1602,9 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     borderRadius: 10,
     paddingVertical: 10,
     paddingHorizontal: 14,
@@ -1616,26 +1616,26 @@ const s = StyleSheet.create({
     gap: 8,
   },
   assigneeToggleText: {
-    color: '#c0c0d0',
+    color: '#b5b5b5',
     fontSize: 13,
   },
   assigneeToggleArrow: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 16,
     fontWeight: '300',
   },
   assigneeList: {
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
     borderTopWidth: 0,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     borderBottomLeftRadius: 10,
     borderBottomRightRadius: 10,
     maxHeight: 220,
     overflow: 'hidden',
   },
   assigneeSectionLabel: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 10,
     fontWeight: '600',
     paddingHorizontal: 14,
@@ -1648,11 +1648,11 @@ const s = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 14,
     borderTopWidth: 1,
-    borderTopColor: '#15151e',
+    borderTopColor: '#1a1a1a',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background 0.15s' } as any : {}),
   },
   assigneeOptionActive: {
-    backgroundColor: '#15151e',
+    backgroundColor: '#1a1a1a',
   },
   assigneeOptionRow: {
     flexDirection: 'row',
@@ -1660,7 +1660,7 @@ const s = StyleSheet.create({
     gap: 8,
   },
   assigneeOptionText: {
-    color: '#c0c0d0',
+    color: '#b5b5b5',
     fontSize: 13,
   },
   assigneeAvatar: {
@@ -1688,7 +1688,7 @@ const s = StyleSheet.create({
     gap: 4,
   },
   metaText: {
-    color: '#444455',
+    color: '#3e3e3e',
     fontSize: 12,
   },
 
@@ -1699,7 +1699,7 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   deleteToggleText: {
-    color: '#ef444460',
+    color: '#6f6f6f',
     fontSize: 12,
     fontWeight: '500',
   },
@@ -1710,18 +1710,18 @@ const s = StyleSheet.create({
     marginTop: 8,
   },
   deleteWarning: {
-    color: '#f87171',
+    color: '#ef4444',
     fontSize: 12,
   },
   deleteBtn: {
-    backgroundColor: '#ef444415',
+    backgroundColor: '#ef444420',
     borderRadius: 8,
     paddingHorizontal: 14,
     paddingVertical: 6,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   deleteBtnText: {
-    color: '#f87171',
+    color: '#ef4444',
     fontSize: 12,
     fontWeight: '600',
   },
@@ -1734,28 +1734,28 @@ const s = StyleSheet.create({
     width: '100%' as any,
     height: 160,
     borderRadius: 10,
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
   },
   imageExpanded: {
     width: '100%' as any,
     height: 360,
     borderRadius: 10,
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
   },
   addImageBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     borderStyle: 'dashed' as any,
     borderRadius: 10,
     paddingVertical: 16,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'border-color 0.15s' } as any : {}),
   },
   addImageText: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 13,
     fontWeight: '600',
   },
@@ -1764,7 +1764,7 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   removeImageText: {
-    color: '#ef444460',
+    color: '#6f6f6f',
     fontSize: 11,
     fontWeight: '500',
   },
@@ -1783,9 +1783,9 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     borderRadius: 10,
     paddingVertical: 10,
     paddingHorizontal: 14,
@@ -1797,18 +1797,18 @@ const s = StyleSheet.create({
     borderRadius: 4,
   },
   agentPickerName: {
-    color: '#c0c0d0',
+    color: '#b5b5b5',
     fontSize: 13,
     flex: 1,
   },
   agentPickerArrow: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 10,
   },
   agentPickerList: {
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     borderRadius: 10,
     maxHeight: 220,
     overflow: 'hidden',
@@ -1820,35 +1820,35 @@ const s = StyleSheet.create({
     paddingVertical: 9,
     paddingHorizontal: 14,
     borderTopWidth: 1,
-    borderTopColor: '#15151e',
+    borderTopColor: '#1a1a1a',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background 0.15s' } as any : {}),
   },
   agentPickerOptionActive: {
-    backgroundColor: '#15151e',
+    backgroundColor: '#1a1a1a',
   },
   agentPickerOptionText: {
-    color: '#c0c0d0',
+    color: '#b5b5b5',
     fontSize: 13,
     flex: 1,
   },
   agentPickerDefault: {
-    color: '#22c55e',
+    color: '#6366f1',
     fontSize: 9,
     fontWeight: '700',
     textTransform: 'uppercase' as any,
     letterSpacing: 0.5,
   },
   runAgentBtn: {
-    backgroundColor: '#22c55e15',
+    backgroundColor: '#6366f120',
     borderWidth: 1,
-    borderColor: '#22c55e30',
+    borderColor: '#6366f140',
     borderRadius: 10,
     paddingHorizontal: 18,
     paddingVertical: 10,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
   },
   runAgentBtnText: {
-    color: '#22c55e',
+    color: '#6366f1',
     fontSize: 12,
     fontWeight: '800',
     letterSpacing: 1,
@@ -1860,22 +1860,22 @@ const s = StyleSheet.create({
     gap: 8,
   },
   agentResultBox: {
-    backgroundColor: '#0a0a12',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#22c55e20',
+    borderColor: '#22d3ee20',
     borderRadius: 10,
     padding: 14,
     gap: 6,
   },
   agentResultLabel: {
-    color: '#22c55e',
+    color: '#22d3ee',
     fontSize: 10,
     fontWeight: '700',
     textTransform: 'uppercase' as any,
     letterSpacing: 0.5,
   },
   agentResultText: {
-    color: '#e4e4ed',
+    color: '#e8e8e8',
     fontSize: 13,
     lineHeight: 20,
   },
@@ -1894,7 +1894,7 @@ const s = StyleSheet.create({
   spawnAgentContainer: {
     marginTop: 8,
     borderWidth: 1,
-    borderColor: '#22c55e30',
+    borderColor: '#ffffff15',
     borderRadius: 10,
     overflow: 'hidden',
     maxHeight: 500,
@@ -1910,32 +1910,32 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     borderRadius: 10,
     paddingVertical: 10,
     paddingHorizontal: 14,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
   },
   modeBtnActive: {
-    backgroundColor: '#6366f108',
+    backgroundColor: '#6366f110',
     borderColor: '#6366f130',
   },
   modeBtnIcon: {
     fontSize: 16,
   },
   modeBtnLabel: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0.5,
   },
   modeBtnLabelActive: {
-    color: '#c0c0d0',
+    color: '#6366f1',
   },
   modeBtnDesc: {
-    color: '#444455',
+    color: '#3e3e3e',
     fontSize: 10,
   },
 
@@ -1946,7 +1946,7 @@ const s = StyleSheet.create({
     gap: 10,
   },
   controlLabel: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 10,
     fontWeight: '700',
     textTransform: 'uppercase' as any,
@@ -1966,15 +1966,15 @@ const s = StyleSheet.create({
     paddingVertical: 5,
     paddingHorizontal: 8,
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     borderRadius: 8,
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
   },
   thinkingBtnText: {
     fontSize: 9,
     fontWeight: '700',
-    color: '#555566',
+    color: '#6f6f6f',
     letterSpacing: 0.3,
   },
 
@@ -2001,11 +2001,11 @@ const s = StyleSheet.create({
   commentSection: {
     marginTop: 28,
     borderTopWidth: 1,
-    borderTopColor: '#1a1a28',
+    borderTopColor: '#1a1a1a',
     paddingTop: 16,
   },
   commentHeader: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 12,
     fontWeight: '600',
     marginBottom: 12,
@@ -2014,7 +2014,7 @@ const s = StyleSheet.create({
     borderRadius: 10,
     padding: 12,
     marginBottom: 8,
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
   },
   commentMeta: {
     flexDirection: 'row',
@@ -2031,32 +2031,32 @@ const s = StyleSheet.create({
     width: 20,
     height: 20,
     borderRadius: 10,
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
     justifyContent: 'center',
     alignItems: 'center',
   },
   commentAvatarText: {
-    color: '#6b6b80',
+    color: '#6f6f6f',
     fontSize: 9,
     fontWeight: '700',
   },
   commentAuthor: {
-    color: '#a5b4fc',
+    color: '#b5b5b5',
     fontSize: 12,
     fontWeight: '600',
   },
   commentTime: {
-    color: '#444455',
+    color: '#3e3e3e',
     fontSize: 11,
   },
   commentContent: {
-    color: '#c0c0d0',
+    color: '#b5b5b5',
     fontSize: 13,
     lineHeight: 18,
     paddingLeft: 26,
   },
   noComments: {
-    color: '#333348',
+    color: '#3e3e3e',
     fontSize: 13,
     textAlign: 'center',
     paddingVertical: 20,
@@ -2068,19 +2068,19 @@ const s = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     borderTopWidth: 1,
-    borderTopColor: '#1a1a28',
+    borderTopColor: '#1a1a1a',
     padding: 12,
-    backgroundColor: '#0e0e16',
+    backgroundColor: '#0a0a0a',
   },
   commentField: {
     flex: 1,
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#1a1a28',
+    borderColor: '#1a1a1a',
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 8,
-    color: '#e4e4ed',
+    color: '#e8e8e8',
     fontSize: 13,
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
@@ -2102,7 +2102,7 @@ const s = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 8,
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
     justifyContent: 'center',
     alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background 0.15s' } as any : {}),
@@ -2119,15 +2119,15 @@ const s = StyleSheet.create({
     paddingHorizontal: 12,
     paddingTop: 8,
     paddingBottom: 4,
-    backgroundColor: '#0e0e16',
+    backgroundColor: '#0a0a0a',
     borderTopWidth: 1,
-    borderTopColor: '#1a1a28',
+    borderTopColor: '#1a1a1a',
   },
   pendingAttItem: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
     borderRadius: 8,
     paddingVertical: 4,
     paddingHorizontal: 8,
@@ -2142,16 +2142,16 @@ const s = StyleSheet.create({
     width: 24,
     height: 24,
     borderRadius: 4,
-    backgroundColor: '#0c0c14',
+    backgroundColor: '#0a0a0a',
     justifyContent: 'center',
     alignItems: 'center',
   },
   pendingAttFileIcon: {
     fontSize: 10,
-    color: '#6b6b80',
+    color: '#6f6f6f',
   },
   pendingAttName: {
-    color: '#9090a8',
+    color: '#9e9e9e',
     fontSize: 11,
     flex: 1,
   },
@@ -2159,13 +2159,13 @@ const s = StyleSheet.create({
     width: 18,
     height: 18,
     borderRadius: 9,
-    backgroundColor: '#ef444420',
+    backgroundColor: '#ffffff10',
     justifyContent: 'center',
     alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   pendingAttRemoveText: {
-    color: '#ef4444',
+    color: '#9e9e9e',
     fontSize: 10,
     fontWeight: '700',
   },
@@ -2179,7 +2179,7 @@ const s = StyleSheet.create({
   commentAttImage: {
     borderRadius: 8,
     overflow: 'hidden',
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
   },
   commentAttImageImg: {
     width: '100%' as any,
@@ -2187,15 +2187,15 @@ const s = StyleSheet.create({
     borderRadius: 8,
   },
   commentAttImageName: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 10,
     paddingHorizontal: 8,
     paddingVertical: 4,
   },
   commentAttCode: {
-    backgroundColor: '#0a0a12',
+    backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#1e1e2e',
+    borderColor: '#1a1a1a',
     borderRadius: 8,
     overflow: 'hidden',
   },
@@ -2205,24 +2205,24 @@ const s = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 10,
     paddingVertical: 6,
-    backgroundColor: '#0c0c16',
+    backgroundColor: '#0a0a0a',
   },
   commentAttCodeLang: {
-    color: '#8b5cf6',
+    color: '#9e9e9e',
     fontSize: 10,
     fontWeight: '700',
     textTransform: 'uppercase' as any,
     letterSpacing: 0.5,
   },
   commentAttCodeName: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 10,
   },
   commentAttFile: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: '#1a1a28',
+    backgroundColor: '#1a1a1a',
     borderRadius: 8,
     paddingVertical: 6,
     paddingHorizontal: 10,
@@ -2233,12 +2233,12 @@ const s = StyleSheet.create({
     fontSize: 12,
   },
   commentAttFileName: {
-    color: '#a5b4fc',
+    color: '#b5b5b5',
     fontSize: 12,
     fontWeight: '500',
   },
   commentAttFileSize: {
-    color: '#555566',
+    color: '#6f6f6f',
     fontSize: 10,
   },
 });

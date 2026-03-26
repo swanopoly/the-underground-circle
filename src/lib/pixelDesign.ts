@@ -1,8 +1,8 @@
 /**
- * pixelDesign.ts — Clean Monochromatic Design System
+ * pixelDesign.ts — Clean Dark Design System
  *
- * Inspired by Ollama's documentation aesthetic:
- *   - Pure black/white/gray palette — no colored accents
+ * Inspired by GitHub Dark / Ollama aesthetic:
+ *   - Dark backgrounds with meaningful color accents
  *   - Soft rounded corners (12-16px)
  *   - System fonts for UI, monospace only for code/terminal
  *   - Minimal, spacious layout
@@ -25,7 +25,7 @@ export const GRID = {
   xxl:  PX * 8,   // 32
 } as const;
 
-// ─── Colors (Ollama monochromatic palette) ───────────────────────────────────
+// ─── Colors (GitHub Dark inspired palette) ───────────────────────────────────
 
 export const PIXEL_COLORS = {
   // Backgrounds — pure black scale
@@ -45,20 +45,20 @@ export const PIXEL_COLORS = {
   text2: '#6f6f6f',    // Muted (≈ gray-500)
   text3: '#3e3e3e',    // Ghost (≈ gray-700)
 
-  // Accent palette — muted grayscale (no neon)
-  indigo:  '#9e9e9e',
-  green:   '#b5b5b5',
-  amber:   '#9e9e9e',
-  red:     '#9e9e9e',
-  cyan:    '#b5b5b5',
-  pink:    '#9e9e9e',
-  purple:  '#9e9e9e',
-  orange:  '#9e9e9e',
-  blue:    '#9e9e9e',
-  teal:    '#b5b5b5',
+  // Accent palette — real colors
+  indigo:  '#6366f1',
+  green:   '#22c55e',
+  amber:   '#f59e0b',
+  red:     '#ef4444',
+  cyan:    '#22d3ee',
+  pink:    '#ec4899',
+  purple:  '#a855f7',
+  orange:  '#f97316',
+  blue:    '#3b82f6',
+  teal:    '#14b8a6',
 
   // Special
-  gold:    '#9e9e9e',
+  gold:    '#fbbf24',
   scanline: '#ffffff04',
 } as const;
 
@@ -71,20 +71,20 @@ export interface PixelIcon {
 }
 
 export const PIXEL_ICONS: Record<string, PixelIcon> = {
-  cost:        { label: '$',  color: '#b5b5b5', bgColor: '#161616' },
+  cost:        { label: '$',  color: '#22c55e', bgColor: '#161616' },
   terminal:    { label: '>_', color: '#e8e8e8', bgColor: '#161616' },
-  traces:      { label: '?',  color: '#9e9e9e', bgColor: '#161616' },
-  farm:        { label: '+',  color: '#9e9e9e', bgColor: '#161616' },
-  performance: { label: '#',  color: '#9e9e9e', bgColor: '#161616' },
-  projects:    { label: '[ ]',color: '#9e9e9e', bgColor: '#161616' },
-  analytics:   { label: '//', color: '#9e9e9e', bgColor: '#161616' },
-  canvas:      { label: '[]', color: '#9e9e9e', bgColor: '#161616' },
-  prompts:     { label: 'P',  color: '#9e9e9e', bgColor: '#161616' },
+  traces:      { label: '?',  color: '#f59e0b', bgColor: '#161616' },
+  farm:        { label: '+',  color: '#22c55e', bgColor: '#161616' },
+  performance: { label: '#',  color: '#3b82f6', bgColor: '#161616' },
+  projects:    { label: '[ ]',color: '#a855f7', bgColor: '#161616' },
+  analytics:   { label: '//', color: '#6366f1', bgColor: '#161616' },
+  canvas:      { label: '[]', color: '#ec4899', bgColor: '#161616' },
+  prompts:     { label: 'P',  color: '#f97316', bgColor: '#161616' },
   // Room types
-  code:        { label: '{}', color: '#b5b5b5', bgColor: '#161616' },
-  docs:        { label: 'D',  color: '#9e9e9e', bgColor: '#161616' },
-  chat:        { label: '..',  color: '#9e9e9e', bgColor: '#161616' },
-  config:      { label: '*',  color: '#9e9e9e', bgColor: '#161616' },
+  code:        { label: '{}', color: '#22d3ee', bgColor: '#161616' },
+  docs:        { label: 'D',  color: '#3b82f6', bgColor: '#161616' },
+  chat:        { label: '..',  color: '#22c55e', bgColor: '#161616' },
+  config:      { label: '*',  color: '#f59e0b', bgColor: '#161616' },
 } as const;
 
 // ─── Shared Styles ────────────────────────────────────────────────────────────
