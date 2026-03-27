@@ -1,6 +1,6 @@
 /**
- * GoalsPanel — left sidebar showing goals with filter, CRUD, and edit modal
- * with auto-generate tasks (count + frequency + round-robin agent assignment)
+ * GoalsPanel — left sidebar showing goals + plans with filter, CRUD, and edit modal
+ * Goals and Plans are unified in a single sidebar with a tab switcher.
  */
 
 import React, { useState } from 'react';
@@ -8,9 +8,12 @@ import {
   View, Text, TextInput, Pressable, ScrollView, StyleSheet, Platform,
 } from 'react-native';
 import type { GoalWithCount } from '../../../../hooks/useGoals';
-import type { Goal } from '../../../../types/kanban';
+import type { Goal, CirclePlan } from '../../../../types/kanban';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
 import type { CreateTaskFields } from '../../../../hooks/useKanbanData';
+import PlanningPanel from './PlanningPanel';
+
+type SidebarTab = 'goals' | 'plans';
 
 interface Props {
   goals: GoalWithCount[];
@@ -22,18 +25,66 @@ interface Props {
   onDeleteGoal: (goalId: string) => void;
   onCreateTask?: (fields: CreateTaskFields) => Promise<void>;
   onEditGoal?: (goal: GoalWithCount) => void;
+  // Plans integration
+  plans?: CirclePlan[];
+  circleId?: string;
+  onCreatePlan?: (fields: Partial<CirclePlan>) => Promise<any>;
+  onUpdatePlan?: (id: string, fields: Partial<CirclePlan>) => Promise<void>;
+  onDeletePlan?: (id: string) => Promise<void>;
+  onGenerateTasks?: (planId: string) => Promise<void>;
 }
 
 export default function GoalsPanel({
   goals, agents, filteredGoalId, onFilter,
   onCreateGoal, onUpdateGoal, onDeleteGoal, onCreateTask, onEditGoal,
+  plans, circleId, onCreatePlan, onUpdatePlan, onDeletePlan, onGenerateTasks,
 }: Props) {
   const [showAdd, setShowAdd] = useState(false);
   const [editGoal, setEditGoal] = useState<GoalWithCount | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('goals');
 
   return (
     <View style={s.container}>
+      {/* Tab switcher: Goals | Plans */}
+      <View style={s.tabSwitcher}>
+        <Pressable
+          onPress={() => setSidebarTab('goals')}
+          style={[s.switchTab, sidebarTab === 'goals' && s.switchTabActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        >
+          <Text style={[s.switchTabText, sidebarTab === 'goals' && s.switchTabTextActive]}>
+            Goals ({goals.length})
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={() => setSidebarTab('plans')}
+          style={[s.switchTab, sidebarTab === 'plans' && s.switchTabActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        >
+          <Text style={[s.switchTabText, sidebarTab === 'plans' && s.switchTabTextActive]}>
+            Plans ({plans?.length || 0})
+          </Text>
+        </Pressable>
+      </View>
+
+      {/* Plans tab content */}
+      {sidebarTab === 'plans' && circleId && onCreatePlan && onUpdatePlan && onDeletePlan && onGenerateTasks ? (
+        <PlanningPanel
+          circleId={circleId}
+          plans={plans || []}
+          onCreatePlan={onCreatePlan}
+          onUpdatePlan={onUpdatePlan}
+          onDeletePlan={onDeletePlan}
+          onGenerateTasks={onGenerateTasks}
+        />
+      ) : sidebarTab === 'plans' ? (
+        <View style={{ padding: 16, alignItems: 'center' }}>
+          <Text style={{ color: '#555', fontSize: 12, fontFamily: 'monospace' }}>Plans not available</Text>
+        </View>
+      ) : null}
+
+      {/* Goals tab content */}
+      {sidebarTab === 'goals' && (
+      <>
       {/* Header */}
       <View style={s.header}>
         <View style={s.headerLeft}>
@@ -171,6 +222,8 @@ export default function GoalsPanel({
           onUpdate={(fields) => { onUpdateGoal(editGoal.id, fields); setEditGoal(null); }}
           onCreateTask={onCreateTask}
         />
+      )}
+      </>
       )}
     </View>
   );
@@ -527,8 +580,34 @@ const GOAL_STATUS_COLORS: Record<string, string> = {
 };
 
 const s = StyleSheet.create({
+  tabSwitcher: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a1a',
+  },
+  switchTab: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: 'center',
+    ...(Platform.OS === 'web' ? { transition: 'background-color 0.2s' } as any : {}),
+  },
+  switchTabActive: {
+    borderBottomWidth: 2,
+    borderBottomColor: '#6366f1',
+    backgroundColor: '#6366f108',
+  },
+  switchTabText: {
+    color: '#555',
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+    letterSpacing: 0.5,
+  },
+  switchTabTextActive: {
+    color: '#ccc',
+  },
   container: {
-    width: 220,
+    width: 260,
     backgroundColor: '#000000',
     borderRightWidth: 1,
     borderRightColor: '#1a1a1a',
