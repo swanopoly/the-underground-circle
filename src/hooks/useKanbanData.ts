@@ -442,17 +442,31 @@ export function useKanbanData(circleId: string): KanbanData {
   }, [fetchTasks]);
 
   // Record task cost (increments)
+  // NOTE: This fetch-then-update pattern minimizes but does not fully eliminate
+  // race conditions. A proper fix would use a Supabase RPC/database function
+  // with atomic increment (e.g., SET total_cost = total_cost + $1).
   const recordTaskCost = useCallback(async (taskId: string, cost: number, tokens: number, durationMs: number) => {
-    const task = tasks.find(t => t.id === taskId);
+    // Fetch the current task values from the database to minimize stale-data races
+    const { data: freshTask, error: fetchError } = await supabase
+      .from('tasks')
+      .select('total_cost, total_tokens, total_duration_ms, agent_runs')
+      .eq('id', taskId)
+      .single();
+
+    if (fetchError || !freshTask) {
+      console.error('recordTaskCost fetch error:', fetchError);
+      return;
+    }
+
     const { error } = await supabase.from('tasks').update({
-      total_cost: (task?.total_cost || 0) + cost,
-      total_tokens: (task?.total_tokens || 0) + tokens,
-      total_duration_ms: (task?.total_duration_ms || 0) + durationMs,
-      agent_runs: (task?.agent_runs || 0) + 1,
+      total_cost: (freshTask.total_cost || 0) + cost,
+      total_tokens: (freshTask.total_tokens || 0) + tokens,
+      total_duration_ms: (freshTask.total_duration_ms || 0) + durationMs,
+      agent_runs: (freshTask.agent_runs || 0) + 1,
     }).eq('id', taskId);
     if (error) console.error('recordTaskCost error:', error);
     else fetchTasks();
-  }, [tasks, fetchTasks]);
+  }, [fetchTasks]);
 
   const refresh = useCallback(() => {
     fetchTasks();

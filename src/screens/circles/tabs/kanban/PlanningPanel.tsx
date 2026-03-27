@@ -72,6 +72,7 @@ export default function PlanningPanel({
   const [creating, setCreating] = useState(false);
   const [generatingId, setGeneratingId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
   const [showContextId, setShowContextId] = useState<string | null>(null);
 
   // Sort: active first, then by updated_at desc
@@ -87,6 +88,7 @@ export default function PlanningPanel({
     const title = newTitle.trim();
     if (!title) return;
     setCreating(true);
+    setCreateError(null);
     try {
       await onCreatePlan({ title, description: newDesc.trim() });
       setNewTitle('');
@@ -94,6 +96,7 @@ export default function PlanningPanel({
       setShowCreateForm(false);
     } catch (err) {
       console.warn('[PlanningPanel] create failed:', err);
+      setCreateError(err instanceof Error ? err.message : 'Failed to create plan. Please try again.');
     } finally {
       setCreating(false);
     }
@@ -182,6 +185,9 @@ export default function PlanningPanel({
               <Text style={s.cancelFormText}>Cancel</Text>
             </Pressable>
           </View>
+          {createError && (
+            <Text style={s.createErrorText}>{createError}</Text>
+          )}
         </View>
       )}
 
@@ -476,6 +482,11 @@ const s = StyleSheet.create({
     color: '#666',
     fontSize: 13,
     fontWeight: '600',
+  },
+  createErrorText: {
+    color: '#ef4444',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
   },
   // Empty state
   emptyState: {

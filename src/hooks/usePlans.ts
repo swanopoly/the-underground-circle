@@ -5,6 +5,7 @@ import { CirclePlan, PlanStep, PlanStatus } from '../types/kanban';
 export function usePlans(circleId: string) {
   const [plans, setPlans] = useState<CirclePlan[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchPlans = useCallback(async () => {
     try {
@@ -14,7 +15,7 @@ export function usePlans(circleId: string) {
         .eq('circle_id', circleId)
         .order('created_at', { ascending: false });
 
-      if (error || !data) { setLoading(false); return; }
+      if (error || !data) { setError(error?.message || 'Failed to fetch plans'); setLoading(false); return; }
 
       const parsed: CirclePlan[] = data.map((p: any) => ({
         ...p,
@@ -27,8 +28,10 @@ export function usePlans(circleId: string) {
       }));
 
       setPlans(parsed);
+      setError(null);
     } catch (err) {
       console.error('usePlans error:', err);
+      setError(err instanceof Error ? err.message : 'Failed to fetch plans');
     } finally {
       setLoading(false);
     }
@@ -40,7 +43,7 @@ export function usePlans(circleId: string) {
     const channel = supabase
       .channel(`circle_plans:${circleId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'circle_plans', filter: `circle_id=eq.${circleId}` }, fetchPlans)
-      .subscribe();
+      .subscribe((status, err) => { if (err) console.error('[usePlans] realtime error:', err); });
 
     return () => { supabase.removeChannel(channel); };
   }, [circleId, fetchPlans]);
@@ -163,5 +166,5 @@ export function usePlans(circleId: string) {
     fetchPlans();
   };
 
-  return { plans, loading, createPlan, updatePlan, deletePlan, updatePlanStep, generateTasksFromPlan, refresh: fetchPlans };
+  return { plans, loading, error, createPlan, updatePlan, deletePlan, updatePlanStep, generateTasksFromPlan, refresh: fetchPlans };
 }

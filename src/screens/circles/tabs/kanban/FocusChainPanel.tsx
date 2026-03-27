@@ -23,6 +23,7 @@ export default function FocusChainPanel({ taskId, items, onUpdate, circleId }: P
   const [showInput, setShowInput] = useState(false);
   const [newItemText, setNewItemText] = useState('');
   const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const doneCount = items.filter(i => i.done).length;
   const totalCount = items.length;
@@ -36,7 +37,9 @@ export default function FocusChainPanel({ taskId, items, onUpdate, circleId }: P
   }, [items, onUpdate]);
 
   const deleteItem = useCallback((id: string) => {
-    const updated = items.filter(item => item.id !== id);
+    const updated = items
+      .filter(item => item.id !== id)
+      .map((item, idx) => ({ ...item, order: idx }));
     onUpdate(updated);
   }, [items, onUpdate]);
 
@@ -51,15 +54,16 @@ export default function FocusChainPanel({ taskId, items, onUpdate, circleId }: P
 
   const autoGenerate = useCallback(async () => {
     setGenerating(true);
+    setError(null);
     try {
-      const { data, error } = await supabase.functions.invoke('swanbot-ai', {
+      const { data, error: invokeError } = await supabase.functions.invoke('swanbot-ai', {
         body: {
           message: 'Generate a checklist of actionable steps for this task. Return a JSON array of objects with "text" (string) fields. Only return the JSON array, no other text.',
           circleId,
         },
       });
 
-      if (error) throw error;
+      if (invokeError) throw invokeError;
 
       let parsed: { text: string }[] = [];
       const content = typeof data === 'string' ? data : data?.response || data?.content || data?.message || JSON.stringify(data);
@@ -67,24 +71,38 @@ export default function FocusChainPanel({ taskId, items, onUpdate, circleId }: P
       if (typeof content === 'string') {
         const jsonMatch = content.match(/\[[\s\S]*\]/);
         if (jsonMatch) {
-          parsed = JSON.parse(jsonMatch[0]);
+          try {
+            parsed = JSON.parse(jsonMatch[0]);
+          } catch (parseErr) {
+            setError('Failed to parse AI response. Please try again.');
+            return;
+          }
         }
       } else if (Array.isArray(content)) {
         parsed = content;
       }
 
-      if (parsed.length > 0) {
-        const newItems: FocusChainItem[] = parsed.map((p, idx) => ({
-          id: generateId(),
-          text: typeof p === 'string' ? p : p.text || String(p),
-          done: false,
-          auto_generated: true,
-          order: items.length + idx,
-        }));
-        onUpdate([...items, ...newItems]);
+      // Validate each item has a non-empty text field
+      const validItems = parsed.filter(
+        (p) => (typeof p === 'string' && p.trim().length > 0) || (p && typeof p.text === 'string' && p.text.trim().length > 0)
+      );
+
+      if (validItems.length === 0) {
+        setError('No items generated. The AI returned an empty or invalid response.');
+        return;
       }
+
+      const newItems: FocusChainItem[] = validItems.map((p, idx) => ({
+        id: generateId(),
+        text: typeof p === 'string' ? p : p.text || String(p),
+        done: false,
+        auto_generated: true,
+        order: items.length + idx,
+      }));
+      onUpdate([...items, ...newItems]);
     } catch (err) {
       console.warn('[FocusChainPanel] auto-generate failed:', err);
+      setError('Auto-generate failed. Please try again.');
     } finally {
       setGenerating(false);
     }
@@ -156,6 +174,11 @@ export default function FocusChainPanel({ taskId, items, onUpdate, circleId }: P
             <Text style={s.cancelText}>{'\u00D7'}</Text>
           </Pressable>
         </View>
+      )}
+
+      {/* Error message */}
+      {error && (
+        <Text style={s.errorText}>{error}</Text>
       )}
 
       {/* Action buttons */}
@@ -363,5 +386,11 @@ const s = StyleSheet.create({
   },
   generateBtnText: {
     color: '#8b5cf6',
+  },
+  errorText: {
+    color: '#ef4444',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+    paddingHorizontal: 4,
   },
 });
