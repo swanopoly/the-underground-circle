@@ -47,6 +47,34 @@ const ICON_CATALOG: Record<string, number> = {
   robot:         3398643,
   workspace:     1599808,
   connection:    13963737,
+
+  // Spirit/Soul icons (colorful, visible on dark backgrounds)
+  'sr-engineer':       6009939,   // software engineer
+  'architect':         2532827,   // blueprint (colorful outline)
+  'devops':            6419097,   // agile/devops (lineal color)
+  'security':          2592258,   // security shield (flat color)
+  'github-devops':     1322053,   // github (lineal color)
+  'code-reviewer':     16942656,  // code review (color lineal)
+  'ml-engineer':       13320544,  // neural network (color lineal)
+  'security-analyst':  4916214,   // flask/analysis (flat color)
+  'data-engineer':     2980479,   // data processing (lineal color)
+  'qa-engineer':       17729908,  // quality assurance (color lineal)
+  'hw-engineer':       17560440,  // circuit board (color lineal)
+  'coding-agent':      2881142,   // coding (flat color)
+  'designer':          865298,    // palette (lineal color)
+  'writer':            3343144,   // feather pen (flat circular)
+  'marketer':          18408042,  // conversion rate (color lineal)
+  'devrel':            4661318,   // developer
+  '3d-designer':       10781493,  // 3d modeling (color fill)
+  'pm':                1705317,   // briefing (lineal color)
+  'tech-lead':         18224786,  // leadership (color lineal)
+  'coach':             10828180,  // dumbbell (color lineal)
+  'philosopher':       11145727,  // atom (color fill)
+  'strategist':        16686109,  // strategy (gradient fill)
+  'researcher':        2793615,   // microscope (flat color)
+  'mentor':            11511038,  // owl/school (color lineal)
+  'trader':            2782414,   // profit chart (lineal color)
+  'analyst':           546861,    // pie chart (lineal color)
 };
 
 function getCdnUrl(iconId: number, size: 128 | 256 | 512 = 128): string {

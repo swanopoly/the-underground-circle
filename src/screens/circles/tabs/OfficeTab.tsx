@@ -1284,7 +1284,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       lastActive: dbAgent.lastActiveAt || '',
       recentActions: [],
       recentMessages: [],
-      costToday: 0,
+      costToday: dbAgent.estimated_cost_today || 0,
+      costTotal: dbAgent.estimated_cost_total || 0,
       costWeek: 0,
       tokensUsed: dbAgent.token_usage_total || 0,
       inputTokens: 0,
@@ -1301,16 +1302,25 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     });
   }
 
-  // Enrich live agents with spirit from their CircleOfficeAgent record (matched by owner+name)
-  const spiritByKey = new Map(
+  // Enrich live agents with spirit + accumulated cost from their CircleOfficeAgent DB record
+  const dbDataByKey = new Map(
     mergedCircleAgents
-      .filter(a => a.spirit)
-      .map(a => [`${a.ownerId}::${a.name}`, a.spirit!])
+      .filter(a => a.ownerId === currentUserId)
+      .map(a => [`${a.ownerId}::${a.name}`, a])
+  );
+  // Also index by provider for live agents with slug names (e.g. "Wandering Duckling" → claude-code)
+  const dbDataByProvider = new Map(
+    mergedCircleAgents
+      .filter(a => a.ownerId === currentUserId && a.provider)
+      .map(a => [a.provider!, a])
   );
   for (const agent of rawAgents) {
     const key = `${currentUserId}::${agent.name}`;
-    if (!agent.spirit && spiritByKey.has(key)) {
-      agent.spirit = spiritByKey.get(key);
+    const dbMatch = dbDataByKey.get(key) || dbDataByProvider.get(agent.providerType);
+    if (dbMatch) {
+      if (!agent.spirit && dbMatch.spirit) agent.spirit = dbMatch.spirit;
+      // Accumulate: costTotal = DB total + current session's cost
+      agent.costTotal = (dbMatch.estimated_cost_total || 0) + (agent.costToday || 0);
     }
   }
 
@@ -1405,9 +1415,23 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
 
   // Filter agents for current floor — but if none are assigned yet, show all on current floor
   const agents = useMemo(() => {
-    const filtered = displayAgents.filter(a => currentFloor?.agentIds?.includes(a.id));
-    // Use displayAgents order (BlackSwan first, then most recent) regardless of floor agentIds order
-    return filtered.length > 0 ? filtered : displayAgents;
+    const floorIds = currentFloor?.agentIds;
+    if (!floorIds || floorIds.length === 0) return displayAgents;
+    const onFloor = new Set(floorIds);
+    const filtered = displayAgents.filter(a => onFloor.has(a.id));
+    if (filtered.length === 0) return displayAgents;
+    // Ensure BlackSwan is always first, then sort remaining by most recently active
+    const blackSwan = filtered.find(a => a.id === DEFAULT_AGENT.id);
+    const rest = filtered.filter(a => a.id !== DEFAULT_AGENT.id).sort((a, b) => {
+      // Active/building agents always come before idle/offline
+      const aActive = a.status === 'active' || a.status === 'building' ? 1 : 0;
+      const bActive = b.status === 'active' || b.status === 'building' ? 1 : 0;
+      if (bActive !== aActive) return bActive - aActive;
+      const ta = a.lastActive ? new Date(a.lastActive).getTime() : 0;
+      const tb = b.lastActive ? new Date(b.lastActive).getTime() : 0;
+      return tb - ta;
+    });
+    return blackSwan ? [blackSwan, ...rest] : rest;
   }, [displayAgents, currentFloor?.agentIds]);
 
   // Auto-assign new agents to first floor (runs only when agent count changes)
@@ -1523,7 +1547,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       onAgentStats({
         agentCount: enrichedAgents.length,
         sessionCount: enrichedAgents.filter(a => a.status === 'active' || a.status === 'building').length,
-        costToday: enrichedAgents.reduce((s, a) => s + a.costToday, 0),
+        costToday: enrichedAgents.reduce((s, a) => s + (a.costTotal || a.costToday), 0),
         costWeek: enrichedAgents.reduce((s, a) => s + a.costWeek, 0),
         tokens: enrichedAgents.reduce((s, a) => s + a.tokensUsed, 0),
         tokensTotal: enrichedAgents.reduce((s, a) => s + a.tokensUsed, 0),
@@ -3230,7 +3254,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                         <Text style={styles.mobileCardModel}>{agent.model}</Text>
                       </View>
                       <View style={styles.mobileCardRight}>
-                        <Text style={styles.mobileCardCost}>${agent.costToday.toFixed(2)}</Text>
+                        <Text style={styles.mobileCardCost}>${(agent.costTotal || agent.costToday).toFixed(2)}</Text>
                         <Text style={styles.mobileCardCostLabel}>today</Text>
                       </View>
                     </View>
@@ -3447,7 +3471,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                         backgroundColor: agent.status === 'active' ? '#22c55e' : agent.status === 'idle' ? '#f59e0b' : agent.status === 'error' ? '#ef4444' : '#6f6f6f',
                       }]} />
                       <Text style={[styles.quickName, selectedAgent?.id === agent.id && { color: agent.color }]}>{agent.name}</Text>
-                      <Text style={styles.quickCost}>${agent.costToday.toFixed(2)}</Text>
+                      <Text style={styles.quickCost}>${(agent.costTotal || agent.costToday).toFixed(2)}</Text>
                     </Pressable>
                   ))}
                 </ScrollView>

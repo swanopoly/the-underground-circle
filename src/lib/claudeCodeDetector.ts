@@ -178,6 +178,7 @@ export function bridgeSessionsToAgents(sessions: ClaudeCodeSession[]): OfficeAge
       s.newTokens || 0,
       s.totalOutputTokens || 0,
     ),
+    costTotal: 0, // populated from DB via enrichment
     costWeek: 0,
     tokensUsed: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
     inputTokens: s.totalInputTokens || 0,

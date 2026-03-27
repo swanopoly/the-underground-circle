@@ -19,6 +19,7 @@ export interface OfficeAgent {
   recentActions: string[];
   recentMessages: Array<{ role: string; content: string; timestamp?: string }>;
   costToday: number;
+  costTotal: number;
   costWeek: number;
   tokensUsed: number;
   inputTokens: number;
@@ -68,6 +69,7 @@ export const DEFAULT_AGENT: OfficeAgent = {
   recentActions: [],
   recentMessages: [],
   costToday: 0,
+  costTotal: 0,
   costWeek: 0,
   tokensUsed: 0,
   inputTokens: 0,
@@ -112,6 +114,7 @@ export function sessionsToAgents(
       ?? (s.cachedTokens != null || s.newTokens != null
           ? estimateCostWithCache(s.model, s.cachedTokens ?? 0, s.newTokens ?? 0, s.totalOutputTokens ?? 0)
           : estimateCost(s.model, s.totalInputTokens ?? 0, s.totalOutputTokens ?? 0)),
+    costTotal: 0, // enriched from DB
     costWeek: 0,
     tokensUsed: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
     inputTokens: s.totalInputTokens || 0,

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { View, Text, TextInput, StyleSheet, Animated, Pressable, Platform, ScrollView } from 'react-native';
 import { OfficeAgent, STATUS_COLORS } from '../../../../lib/officeAgents';
+import FlatIcon, { ICON_CATALOG } from '../../../../components/FlatIcon';
 import { PROVIDER_META } from '../../../../lib/connectionManager';
 import { SessionTag } from '../../../../lib/sessionTags';
 import SessionTagInput from '../../../../components/SessionTagInput';
@@ -160,6 +161,21 @@ export default function AgentPanel({
   const [soulStatus, setSoulStatus] = useState('');
   const [soulLoaded, setSoulLoaded] = useState<string | null>(null); // tracks which agent was loaded
   const [showSpirits, setShowSpirits] = useState(true);
+  const [editingSpirit, setEditingSpirit] = useState(false);
+  const [customPrompt, setCustomPrompt] = useState('');
+  const [customKnobs, setCustomKnobs] = useState({
+    actionPosture: 'propose' as string,
+    evidencePosture: 'high' as string,
+    communicationDensity: 'normal' as string,
+    skepticism: 'medium' as string,
+    riskTier: 'medium' as string,
+    escalationTrigger: '',
+    skillBundle: '',
+  });
+  const [customProfiles, setCustomProfiles] = useState<any[]>([]);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [saveProfileName, setSaveProfileName] = useState('');
+  const [showSaveForm, setShowSaveForm] = useState(false);
   const personalityScrollRef = useRef<ScrollView>(null);
   const personalityScrollX = useRef(0);
   const [currentSpirit, setCurrentSpirit] = useState<string | null>(null);
@@ -231,6 +247,17 @@ export default function AgentPanel({
 
   useEffect(() => {
     ensureDbAgent();
+    // Load custom profiles
+    (async () => {
+      const { data: auth } = await supabase.auth.getUser();
+      if (!auth.user) return;
+      const { data } = await supabase
+        .from('custom_agent_profiles')
+        .select('*')
+        .eq('user_id', auth.user.id)
+        .order('name');
+      if (data) setCustomProfiles(data);
+    })();
   }, [ensureDbAgent]);
 
   // Load personality when agent panel opens for a specific agent
@@ -426,9 +453,14 @@ export default function AgentPanel({
           {showSpirits ? '▼' : '▶'} SOUL
         </Text>
         {currentSpirit ? (
-          <View style={styles.spiritBadge}>
+          <View style={[styles.spiritBadge, { flexDirection: 'row', alignItems: 'center', gap: 6 }]}>
+            {ICON_CATALOG[currentSpirit] ? (
+              <FlatIcon name={currentSpirit} size={18} />
+            ) : (
+              <Text style={{ fontSize: 12 }}>{getSpiritById(currentSpirit)?.emoji}</Text>
+            )}
             <Text style={styles.spiritBadgeText}>
-              {getSpiritById(currentSpirit)?.emoji} {getSpiritById(currentSpirit)?.name}
+              {getSpiritById(currentSpirit)?.name}
             </Text>
           </View>
         ) : (
@@ -441,20 +473,207 @@ export default function AgentPanel({
           <Text style={styles.spiritHint}>
             Assign a specialty that shapes how {agent.name} thinks, responds, and what it knows.
           </Text>
-          {currentSpirit && (
-            <Pressable
-              onPress={async () => {
-                const id = await ensureDbAgent();
-                if (id) {
-                  await updateAgentSpirit(id, null, null);
-                  setCurrentSpirit(null);
-                }
-              }}
-              style={[styles.spiritClearBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-            >
-              <Text style={styles.spiritClearText}>Clear spirit</Text>
-            </Pressable>
+          {/* Selected spirit detail view — editable */}
+          {currentSpirit && getSpiritById(currentSpirit) && (() => {
+            const s = getSpiritById(currentSpirit)!;
+            const postureColors: Record<string, string> = {
+              'act': '#22c55e', 'act-gated': '#3b82f6', 'observe-act-gated': '#f59e0b',
+              'observe-propose': '#a855f7', 'propose': '#6366f1', 'never-act': '#ef4444',
+            };
+            const riskColors: Record<string, string> = {
+              'low': '#22c55e', 'medium': '#f59e0b', 'high': '#ef4444', 'critical': '#dc2626',
+            };
+            const knobs = editingSpirit ? customKnobs : {
+              actionPosture: s.actionPosture, evidencePosture: s.evidencePosture,
+              communicationDensity: s.communicationDensity, skepticism: s.skepticism,
+              riskTier: s.riskTier, escalationTrigger: s.escalationTrigger, skillBundle: s.skillBundle,
+            };
+            const prompt = editingSpirit ? customPrompt : s.systemPromptPrefix;
+
+            const KnobPicker = ({ label, value, options, colors }: { label: string; value: string; options: string[]; colors?: Record<string, string> }) => (
+              <View style={styles.spiritKnob}>
+                <Text style={styles.spiritKnobLabel}>{label}</Text>
+                {editingSpirit ? (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 3, justifyContent: 'center' }}>
+                    {options.map(opt => (
+                      <Pressable key={opt} onPress={() => setCustomKnobs(prev => ({ ...prev, [label === 'ACTION' ? 'actionPosture' : label === 'EVIDENCE' ? 'evidencePosture' : label === 'COMMUNICATION' ? 'communicationDensity' : label === 'SKEPTICISM' ? 'skepticism' : 'riskTier']: opt }))}
+                        style={[{ paddingHorizontal: 4, paddingVertical: 2, borderRadius: 4, borderWidth: 1, borderColor: value === opt ? (colors?.[opt] || '#6366f1') + '60' : '#1e1e3a', backgroundColor: value === opt ? (colors?.[opt] || '#6366f1') + '15' : 'transparent' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                        <Text style={{ fontSize: 8, fontFamily: 'monospace', fontWeight: '700', color: value === opt ? (colors?.[opt] || '#6366f1') : '#555' }}>{opt.replace(/-/g, ' ').toUpperCase()}</Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                ) : (
+                  <Text style={[styles.spiritKnobValue, { color: (colors?.[value] || '#6366f1') }]}>{value.replace(/-/g, ' ').toUpperCase()}</Text>
+                )}
+              </View>
+            );
+
+            return (
+              <View style={styles.spiritDetail}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                  {ICON_CATALOG[s.id] ? <FlatIcon name={s.id} size={28} glow /> : <Text style={{ fontSize: 24 }}>{s.emoji}</Text>}
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.spiritDetailName}>{s.name}</Text>
+                    <Text style={styles.spiritDetailTagline}>{s.tagline}</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', gap: 6 }}>
+                    <Pressable
+                      onPress={() => {
+                        if (!editingSpirit) {
+                          setCustomPrompt(s.systemPromptPrefix);
+                          setCustomKnobs({ actionPosture: s.actionPosture, evidencePosture: s.evidencePosture, communicationDensity: s.communicationDensity, skepticism: s.skepticism, riskTier: s.riskTier, escalationTrigger: s.escalationTrigger, skillBundle: s.skillBundle });
+                        }
+                        setEditingSpirit(!editingSpirit);
+                      }}
+                      style={[{ paddingVertical: 5, paddingHorizontal: 10, borderRadius: 6, backgroundColor: editingSpirit ? '#6366f120' : '#ffffff08', borderWidth: 1, borderColor: editingSpirit ? '#6366f140' : '#ffffff15' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                    >
+                      <Text style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: '700', color: editingSpirit ? '#6366f1' : '#888' }}>{editingSpirit ? 'EDITING' : 'EDIT'}</Text>
+                    </Pressable>
+                    <Pressable onPress={async () => { const id = await ensureDbAgent(); if (id) { await updateAgentSpirit(id, null, null); setCurrentSpirit(null); setEditingSpirit(false); } }}
+                      style={[styles.spiritClearBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Text style={styles.spiritClearText}>Clear</Text>
+                    </Pressable>
+                  </View>
+                </View>
+
+                {/* Behavioral knobs */}
+                <View style={styles.spiritKnobsGrid}>
+                  <KnobPicker label="ACTION" value={knobs.actionPosture} options={['act', 'act-gated', 'observe-act-gated', 'observe-propose', 'propose', 'never-act']} colors={postureColors} />
+                  <KnobPicker label="EVIDENCE" value={knobs.evidencePosture} options={['medium', 'high', 'very-high']} />
+                  <KnobPicker label="COMMUNICATION" value={knobs.communicationDensity} options={['terse', 'normal', 'detailed', 'motivational']} />
+                  <KnobPicker label="SKEPTICISM" value={knobs.skepticism} options={['low', 'medium', 'high', 'very-high']} colors={{ 'low': '#22c55e', 'medium': '#f59e0b', 'high': '#ef4444', 'very-high': '#dc2626' }} />
+                  <KnobPicker label="RISK TIER" value={knobs.riskTier} options={['low', 'medium', 'high', 'critical']} colors={riskColors} />
+                  <View style={styles.spiritKnob}>
+                    <Text style={styles.spiritKnobLabel}>SKILL</Text>
+                    {editingSpirit ? (
+                      <TextInput value={customKnobs.skillBundle} onChangeText={v => setCustomKnobs(prev => ({ ...prev, skillBundle: v }))}
+                        style={{ fontSize: 9, color: '#6366f1', fontFamily: 'monospace', fontWeight: '700', textAlign: 'center', borderBottomWidth: 1, borderBottomColor: '#1e1e3a', paddingVertical: 2 }} placeholder="skill-name" placeholderTextColor="#333" />
+                    ) : (
+                      <Text style={[styles.spiritKnobValue, { color: '#6366f1' }]} numberOfLines={1}>{knobs.skillBundle}</Text>
+                    )}
+                  </View>
+                </View>
+
+                {/* Escalation trigger */}
+                <View style={styles.spiritEscalation}>
+                  <Text style={styles.spiritKnobLabel}>ESCALATES WHEN</Text>
+                  {editingSpirit ? (
+                    <TextInput value={customKnobs.escalationTrigger} onChangeText={v => setCustomKnobs(prev => ({ ...prev, escalationTrigger: v }))}
+                      style={[styles.spiritEscalationText, { borderBottomWidth: 1, borderBottomColor: '#1e1e3a', paddingVertical: 4 }]}
+                      placeholder="e.g. failing tests, unclear requirements" placeholderTextColor="#333" />
+                  ) : (
+                    <Text style={styles.spiritEscalationText}>{knobs.escalationTrigger}</Text>
+                  )}
+                </View>
+
+                {/* System prompt — collapsible, editable */}
+                <Pressable onPress={() => setShowSoul(!showSoul)} style={[{ marginTop: 10, paddingVertical: 6 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                  <Text style={{ color: '#888', fontSize: 11, fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1 }}>
+                    {showSoul ? '▼' : '▶'} SYSTEM PROMPT ({Math.round(prompt.length / 100) * 100}+ chars)
+                  </Text>
+                </Pressable>
+                {showSoul && (
+                  <View style={{ marginTop: 4 }}>
+                    {editingSpirit ? (
+                      <TextInput value={customPrompt} onChangeText={setCustomPrompt} multiline
+                        style={{ backgroundColor: '#000', borderWidth: 1, borderColor: '#1e1e3a', borderRadius: 8, padding: 12, color: '#ccc', fontFamily: 'monospace', fontSize: 11, minHeight: 200, maxHeight: 400, textAlignVertical: 'top' }}
+                        placeholder="System prompt instructions..." placeholderTextColor="#333" />
+                    ) : (
+                      <ScrollView style={{ maxHeight: 300, backgroundColor: '#000', borderWidth: 1, borderColor: '#1e1e3a', borderRadius: 8, padding: 12 }}>
+                        <Text style={{ color: '#aaa', fontFamily: 'monospace', fontSize: 11, lineHeight: 17 }} selectable>{prompt}</Text>
+                      </ScrollView>
+                    )}
+                  </View>
+                )}
+
+                {/* Save as custom profile */}
+                {editingSpirit && (
+                  <View style={{ marginTop: 12 }}>
+                    {showSaveForm ? (
+                      <View style={{ gap: 8 }}>
+                        <TextInput value={saveProfileName} onChangeText={setSaveProfileName} placeholder="Profile name..." placeholderTextColor="#555"
+                          style={{ backgroundColor: '#000', borderWidth: 1, borderColor: '#1e1e3a', borderRadius: 8, padding: 10, color: '#eee', fontFamily: 'monospace', fontSize: 13 }} />
+                        <View style={{ flexDirection: 'row', gap: 8 }}>
+                          <Pressable
+                            onPress={async () => {
+                              if (!saveProfileName.trim()) return;
+                              setSavingProfile(true);
+                              const { data: auth } = await supabase.auth.getUser();
+                              if (!auth.user) { setSavingProfile(false); return; }
+                              const { data, error } = await supabase.from('custom_agent_profiles').upsert({
+                                user_id: auth.user.id, name: saveProfileName.trim(),
+                                system_prompt: customPrompt, skill_bundle: customKnobs.skillBundle,
+                                risk_tier: customKnobs.riskTier, action_posture: customKnobs.actionPosture,
+                                evidence_posture: customKnobs.evidencePosture, communication_density: customKnobs.communicationDensity,
+                                skepticism: customKnobs.skepticism, escalation_trigger: customKnobs.escalationTrigger,
+                                emoji: getSpiritById(currentSpirit)?.emoji || '🤖', color: getSpiritById(currentSpirit)?.color || '#6366f1',
+                                tagline: `Custom ${s.name} profile`,
+                              }, { onConflict: 'user_id,name' }).select().single();
+                              if (!error && data) {
+                                setCustomProfiles(prev => [...prev.filter(p => p.id !== data.id), data]);
+                                setShowSaveForm(false); setSaveProfileName('');
+                              }
+                              setSavingProfile(false);
+                            }}
+                            style={[{ flex: 1, paddingVertical: 10, borderRadius: 8, backgroundColor: '#22c55e15', borderWidth: 1, borderColor: '#22c55e40', alignItems: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                            <Text style={{ color: '#22c55e', fontSize: 12, fontFamily: 'monospace', fontWeight: '800' }}>{savingProfile ? '...' : 'SAVE PROFILE'}</Text>
+                          </Pressable>
+                          <Pressable onPress={() => setShowSaveForm(false)}
+                            style={[{ paddingVertical: 10, paddingHorizontal: 16, borderRadius: 8, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff15' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                            <Text style={{ color: '#888', fontSize: 12, fontFamily: 'monospace', fontWeight: '700' }}>Cancel</Text>
+                          </Pressable>
+                        </View>
+                      </View>
+                    ) : (
+                      <Pressable onPress={() => { setSaveProfileName(s.name + ' (Custom)'); setShowSaveForm(true); }}
+                        style={[{ paddingVertical: 10, borderRadius: 8, backgroundColor: '#6366f115', borderWidth: 1, borderColor: '#6366f140', alignItems: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                        <Text style={{ color: '#6366f1', fontSize: 12, fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5 }}>💾 SAVE AS CUSTOM PROFILE</Text>
+                      </Pressable>
+                    )}
+                  </View>
+                )}
+              </View>
+            );
+          })()}
+
+          {/* Custom profiles section */}
+          {customProfiles.length > 0 && (
+            <View style={{ marginBottom: 10 }}>
+              <Text style={[styles.spiritCatLabel, { color: '#22c55e' }]}>Your Custom Profiles</Text>
+              <View style={styles.spiritGrid}>
+                {customProfiles.map(profile => {
+                  const active = currentSpirit === `custom::${profile.id}`;
+                  return (
+                    <Pressable key={profile.id}
+                      onPress={async () => {
+                        const id = await ensureDbAgent();
+                        if (id) {
+                          await updateAgentSpirit(id, `custom::${profile.id}`, profile.emoji);
+                          setCurrentSpirit(`custom::${profile.id}`);
+                        }
+                      }}
+                      onLongPress={async () => {
+                        // Delete on long press
+                        await supabase.from('custom_agent_profiles').delete().eq('id', profile.id);
+                        setCustomProfiles(prev => prev.filter(p => p.id !== profile.id));
+                        if (currentSpirit === `custom::${profile.id}`) {
+                          const dbId = await ensureDbAgent();
+                          if (dbId) { await updateAgentSpirit(dbId, null, null); setCurrentSpirit(null); }
+                        }
+                      }}
+                      style={[styles.spiritCard, active && { borderColor: (profile.color || '#22c55e') + '60', backgroundColor: (profile.color || '#22c55e') + '10' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <View style={{ alignItems: 'center', marginBottom: 6 }}>
+                        <Text style={{ fontSize: 28 }}>{profile.emoji || '🤖'}</Text>
+                      </View>
+                      <Text style={[styles.spiritName, active && { color: profile.color || '#22c55e' }]} numberOfLines={1}>{profile.name}</Text>
+                      <Text style={styles.spiritTagline} numberOfLines={1}>{profile.tagline || 'Custom profile'}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
           )}
+
           {SPIRIT_CATEGORIES.map(cat => (
             <View key={cat.key}>
               <Text style={[styles.spiritCatLabel, { color: cat.color }]}>{cat.label}</Text>
@@ -477,7 +696,13 @@ export default function AgentPanel({
                         Platform.OS === 'web' && { cursor: 'pointer' } as any,
                       ]}
                     >
-                      <Text style={styles.spiritEmoji}>{spirit.emoji}</Text>
+                      <View style={{ alignItems: 'center', marginBottom: 6 }}>
+                        {ICON_CATALOG[spirit.id] ? (
+                          <FlatIcon name={spirit.id} size={32} glow={active} />
+                        ) : (
+                          <Text style={styles.spiritEmoji}>{spirit.emoji}</Text>
+                        )}
+                      </View>
                       <Text style={[styles.spiritName, active && { color: spirit.color }]} numberOfLines={1}>
                         {spirit.name}
                       </Text>
@@ -604,8 +829,12 @@ export default function AgentPanel({
       {/* Cost + Performance grid */}
       <View style={styles.gridRow}>
         <View style={styles.gridCard}>
+          <Text style={[styles.gridValue, { color: '#22c55e' }]}>${((agent as any).costTotal || agent.costToday).toFixed(2)}</Text>
+          <Text style={styles.gridLabel}>Total Cost</Text>
+        </View>
+        <View style={styles.gridCard}>
           <Text style={[styles.gridValue, { color: '#22d3ee' }]}>${agent.costToday.toFixed(2)}</Text>
-          <Text style={styles.gridLabel}>Cost Today</Text>
+          <Text style={styles.gridLabel}>Session Cost</Text>
         </View>
         <View style={styles.gridCard}>
           <Text style={[styles.gridValue, { color: '#6366f1' }]}>{formatTokens(agent.tokensUsed)}</Text>
@@ -1210,24 +1439,24 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   custSectionTitle: {
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: '900',
-    color: '#777',
+    color: '#888',
     fontFamily: 'monospace',
-    letterSpacing: 1.5,
-    marginTop: 6,
-    marginBottom: 3,
+    letterSpacing: 2,
+    marginTop: 10,
+    marginBottom: 6,
   },
   custScroll: {
-    marginBottom: 2,
+    marginBottom: 4,
   },
   custItemSwatch: {
-    width: 36,
-    height: 36,
-    borderRadius: 8,
+    width: 40,
+    height: 40,
+    borderRadius: 10,
     borderWidth: 2.5,
     borderColor: 'transparent',
-    marginRight: 6,
+    marginRight: 8,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1244,16 +1473,16 @@ const styles = StyleSheet.create({
     textShadowRadius: 3,
   },
   custItemCard: {
-    width: 60,
-    height: 60,
-    borderRadius: 10,
+    width: 70,
+    height: 70,
+    borderRadius: 12,
     borderWidth: 1.5,
-    borderColor: '#2a2a2a',
+    borderColor: '#1e1e3a',
     backgroundColor: '#000000',
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 6,
-    gap: 1,
+    marginRight: 8,
+    gap: 2,
   },
   custItemCardActive: {
     borderColor: '#6366f1',
@@ -1261,11 +1490,11 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { boxShadow: '0 0 10px rgba(99,102,241,0.3)' } as any : {}),
   },
   custItemEmoji: {
-    fontSize: 20,
+    fontSize: 24,
   },
   custItemLabel: {
-    fontSize: 7,
-    color: '#555',
+    fontSize: 9,
+    color: '#666',
     fontFamily: 'monospace',
     fontWeight: '700',
     textAlign: 'center',
@@ -1297,9 +1526,44 @@ const styles = StyleSheet.create({
   spiritHint: {
     color: '#666', fontSize: 12, fontFamily: 'monospace', lineHeight: 18,
   },
+  spiritDetail: {
+    backgroundColor: '#08081a',
+    borderWidth: 1,
+    borderColor: '#1e1e3a',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 12,
+  },
+  spiritDetailName: {
+    color: '#fff', fontSize: 15, fontWeight: '800', fontFamily: 'monospace',
+  },
+  spiritDetailTagline: {
+    color: '#888', fontSize: 11, fontFamily: 'monospace', marginTop: 2,
+  },
+  spiritKnobsGrid: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 8,
+  },
+  spiritKnob: {
+    width: '30%' as any, backgroundColor: '#0a0a1a', borderRadius: 8,
+    borderWidth: 1, borderColor: '#1e1e3a', padding: 8, alignItems: 'center',
+  },
+  spiritKnobLabel: {
+    color: '#555', fontSize: 8, fontWeight: '800', fontFamily: 'monospace',
+    letterSpacing: 1, marginBottom: 4,
+  },
+  spiritKnobValue: {
+    fontSize: 11, fontWeight: '800', fontFamily: 'monospace', textAlign: 'center',
+  },
+  spiritEscalation: {
+    marginTop: 10, backgroundColor: '#0a0a1a', borderRadius: 8,
+    borderWidth: 1, borderColor: '#1e1e3a', padding: 10,
+  },
+  spiritEscalationText: {
+    color: '#ccc', fontSize: 12, fontFamily: 'monospace', marginTop: 4, lineHeight: 18,
+  },
   spiritClearBtn: {
     paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8,
-    backgroundColor: '#2a2a2a', alignSelf: 'flex-start',
+    backgroundColor: '#ef444415', borderWidth: 1, borderColor: '#ef444430',
   },
   spiritClearText: {
     color: '#ef4444', fontSize: 11, fontWeight: '700', fontFamily: 'monospace',
@@ -1312,105 +1576,106 @@ const styles = StyleSheet.create({
     flexDirection: 'row', flexWrap: 'wrap', gap: 6,
   },
   spiritCard: {
-    width: '48%', padding: 10, borderRadius: 10,
+    width: '48%', padding: 12, borderRadius: 10,
     borderWidth: 1, borderColor: '#1e1e3a', backgroundColor: '#0a0a0a',
+    alignItems: 'center',
   },
-  spiritEmoji: { fontSize: 18, marginBottom: 4 },
+  spiritEmoji: { fontSize: 28, marginBottom: 4 },
   spiritName: {
-    color: '#6366f1', fontSize: 12, fontWeight: '800', fontFamily: 'monospace',
+    color: '#6366f1', fontSize: 12, fontWeight: '800', fontFamily: 'monospace', textAlign: 'center',
   },
   spiritTagline: {
-    color: '#666', fontSize: 10, fontFamily: 'monospace', lineHeight: 15, marginTop: 2,
+    color: '#666', fontSize: 10, fontFamily: 'monospace', lineHeight: 15, marginTop: 2, textAlign: 'center',
   },
 
   // Inline soul section (inside spirit picker)
   soulInlineSection: {
-    marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: '#2a2a2a',
+    marginTop: 16, paddingTop: 14,
   },
   scrollArrow: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     backgroundColor: '#ffffff08',
     borderWidth: 1,
-    borderColor: '#ffffff12',
+    borderColor: '#ffffff15',
     alignItems: 'center',
     justifyContent: 'center',
   },
   scrollArrowText: {
-    color: '#888',
-    fontSize: 18,
+    color: '#aaa',
+    fontSize: 20,
     fontWeight: '600',
     marginTop: -1,
   },
   personalityChip: {
-    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12,
-    borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
-    marginRight: 6,
+    paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12,
+    borderWidth: 1, borderColor: '#1e1e3a', backgroundColor: '#000000',
+    marginRight: 8,
   },
   personalityChipText: {
-    fontSize: 9, color: '#aaa', fontFamily: 'monospace', fontWeight: '600',
+    fontSize: 13, color: '#ccc', fontFamily: 'monospace', fontWeight: '600',
   },
 
   // Soul / personality styles
   soulActiveBadge: {
-    paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8,
+    paddingHorizontal: 10, paddingVertical: 3, borderRadius: 8,
     borderWidth: 1, borderColor: '#6366f140', backgroundColor: '#6366f115',
     marginLeft: 8,
   },
   soulActiveBadgeText: {
-    fontSize: 7, color: '#aaa', fontFamily: 'monospace', fontWeight: '700',
+    fontSize: 10, color: '#aaa', fontFamily: 'monospace', fontWeight: '700',
   },
   soulBody: {
-    gap: 8, paddingTop: 8,
+    gap: 10, paddingTop: 10,
   },
   soulHint: {
-    fontSize: 9, color: '#666', fontFamily: 'monospace', fontStyle: 'italic', lineHeight: 13,
+    fontSize: 12, color: '#777', fontFamily: 'monospace', fontStyle: 'italic', lineHeight: 18,
   },
   soulCategoryRow: {
-    flexDirection: 'row', gap: 4,
+    flexDirection: 'row', gap: 6,
   },
   soulCategoryTab: {
-    flex: 1, paddingVertical: 6, paddingHorizontal: 4, borderRadius: 6,
-    borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
+    flex: 1, paddingVertical: 8, paddingHorizontal: 6, borderRadius: 8,
+    borderWidth: 1, borderColor: '#1e1e3a', backgroundColor: '#000000',
     alignItems: 'center',
   },
   soulCategoryText: {
-    fontSize: 8, color: '#555', fontFamily: 'monospace', fontWeight: '700',
+    fontSize: 11, color: '#666', fontFamily: 'monospace', fontWeight: '700',
   },
   soulCard: {
-    backgroundColor: '#000000', borderWidth: 1, borderColor: '#2a2a2a',
-    borderRadius: 6, padding: 8, gap: 3, marginBottom: 4,
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#1e1e3a',
+    borderRadius: 10, padding: 12, gap: 4, marginBottom: 6,
   },
   soulCardHeader: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
+    flexDirection: 'row', alignItems: 'center', gap: 8,
   },
   soulCardName: {
-    fontSize: 10, fontWeight: '800', color: '#999', fontFamily: 'monospace', flex: 1,
+    fontSize: 13, fontWeight: '800', color: '#bbb', fontFamily: 'monospace', flex: 1,
   },
   soulCardDesc: {
-    fontSize: 8, color: '#555', fontFamily: 'monospace', lineHeight: 12,
+    fontSize: 11, color: '#666', fontFamily: 'monospace', lineHeight: 16,
   },
   soulInput: {
-    backgroundColor: '#000000', borderWidth: 1, borderColor: '#2a2a2a',
-    borderRadius: 6, padding: 8, color: '#ccc', fontFamily: 'monospace',
-    fontSize: 9, minHeight: 80, textAlignVertical: 'top',
+    backgroundColor: '#000000', borderWidth: 1, borderColor: '#1e1e3a',
+    borderRadius: 10, padding: 12, color: '#ddd', fontFamily: 'monospace',
+    fontSize: 13, minHeight: 100, textAlignVertical: 'top',
   },
   soulActions: {
-    flexDirection: 'row', gap: 6, alignItems: 'center',
+    flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 4,
   },
   soulSaveBtn: {
-    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6,
+    paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8,
     backgroundColor: '#6366f120', borderWidth: 1, borderColor: '#6366f140',
   },
   soulSaveBtnText: {
-    fontSize: 8, color: '#6366f1', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5,
+    fontSize: 12, color: '#6366f1', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.8,
   },
   soulClearBtn: {
-    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6,
+    paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8,
     backgroundColor: '#ef444420', borderWidth: 1, borderColor: '#ef444440',
   },
   soulClearBtnText: {
-    fontSize: 8, color: '#ef4444', fontFamily: 'monospace', fontWeight: '800',
+    fontSize: 12, color: '#ef4444', fontFamily: 'monospace', fontWeight: '800',
   },
 });
