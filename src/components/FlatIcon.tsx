@@ -21,7 +21,7 @@ const ICON_CATALOG: Record<string, number> = {
   office:        1209313,
   rooms:         12602918,
   backpack:      2542524,
-  feed:          7854714,
+  feed:          10931508,
   challenges:    12281613,
   members:       3839469,
   analytics:     646249,

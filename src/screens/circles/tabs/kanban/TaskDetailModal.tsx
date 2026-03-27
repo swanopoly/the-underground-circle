@@ -307,10 +307,11 @@ interface Props {
   task: KanbanTask;
   kanban: KanbanData;
   goals?: GoalWithCount[];
+  circleId: string;
   onClose: () => void;
 }
 
-export default function TaskDetailModal({ task: initialTask, kanban, goals, onClose }: Props) {
+export default function TaskDetailModal({ task: initialTask, kanban, goals, circleId, onClose }: Props) {
   const task = kanban.tasks.find(t => t.id === initialTask.id) || initialTask;
 
   const [editing, setEditing] = useState(false);

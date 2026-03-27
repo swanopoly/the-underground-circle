@@ -7,7 +7,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { awardXP, getXPForAction } from '../lib/gamification';
-import { loadCircleOfficeAgents, CircleOfficeAgent } from '../lib/circleOffice';
+import { invokeDirect } from '../lib/agentInvocation';
+import { loadCircleOfficeAgents, CircleOfficeAgent, createBlackSwanAgent } from '../lib/circleOffice';
 import {
   KanbanTask, TaskComment, TaskAttachment, TaskStatus, TaskPriority, FocusChainItem,
   TasksByColumn, groupByColumn, normalizeStatus,
@@ -316,14 +317,18 @@ export function useKanbanData(circleId: string): KanbanData {
     if (!task || !currentUserId) return null;
 
     const targetAgentId = agentId || 'blackswan-default';
-    const targetAgent = agents.find(a => a.id === targetAgentId);
-    const targetAgentName = targetAgent?.name || 'BlackSwan';
+    const targetAgent = agents.find(a => a.id === targetAgentId)
+      || (targetAgentId === 'blackswan-default' ? createBlackSwanAgent(circleId) : null);
+    if (!targetAgent) return null;
 
+    const targetAgentName = targetAgent.name || 'BlackSwan';
     const thinkingLevel = options?.thinkingLevel || 'balanced';
     const model = options?.model && options.model !== 'auto' ? options.model : undefined;
     const mode = options?.mode || 'execute';
+    const modelWithThinking = model && thinkingLevel !== 'balanced'
+      ? `${model}::${thinkingLevel}`
+      : model;
 
-    // Fetch existing comments for full context
     let commentHistory = '';
     try {
       const existingComments = await fetchComments(taskId);
@@ -334,14 +339,13 @@ export function useKanbanData(circleId: string): KanbanData {
           return `${author}: ${c.content}`;
         }).join('\n');
       }
-    } catch {} // non-critical
+    } catch {}
 
-    // Build rich prompt with full task context
     const parts: string[] = [];
 
     if (mode === 'plan') {
       parts.push(`You are in PLANNING MODE. Analyze this task and return a structured implementation plan.`);
-      parts.push(`Do NOT execute — only plan. Your plan should include:`);
+      parts.push(`Do NOT execute - only plan. Your plan should include:`);
       parts.push(`1. A brief analysis of what needs to be done`);
       parts.push(`2. Step-by-step implementation plan with clear deliverables`);
       parts.push(`3. Dependencies or blockers`);
@@ -368,7 +372,7 @@ export function useKanbanData(circleId: string): KanbanData {
       parts.push(``);
       parts.push(`=== INSTRUCTIONS ===`);
       parts.push(`1. Analyze what this task is asking for`);
-      parts.push(`2. Do the work — write the code, draft the content, research the answer, build the plan, or whatever the task requires`);
+      parts.push(`2. Do the work - write the code, draft the content, research the answer, build the plan, or whatever the task requires`);
       parts.push(`3. Return your complete deliverable, not just a summary of what you would do`);
       parts.push(`4. If the task asks for code, write the full working code`);
       parts.push(`5. If the task asks for content, write the full content`);
@@ -379,18 +383,23 @@ export function useKanbanData(circleId: string): KanbanData {
     const message = parts.join('\n');
 
     try {
-      const { data, error } = await supabase.functions.invoke('swanbot-ai', {
-        body: { message, circleId, userId: currentUserId, targetAgentName, thinkingLevel, model },
-      });
+      const result = await invokeDirect({
+        messageId: crypto.randomUUID(),
+        circleId,
+        command: message,
+        senderId: currentUserId,
+        targetAgentId,
+        targetAgentName,
+        model: modelWithThinking || null,
+      }, targetAgent, targetAgent.gatewayUrl);
 
-      if (error) {
-        console.error('runAgentOnTask error:', error);
+      if (!result.success) {
+        console.error('runAgentOnTask error:', result.error);
         return null;
       }
 
-      const response = data?.reply || data?.response || data?.message || 'Agent completed task (no output)';
+      const response = result.responseText || 'Agent completed task (no output)';
 
-      // Extract code blocks as attachments
       const codeBlockRegex = /```(\w+)?\n([\s\S]*?)```/g;
       const attachments: TaskAttachment[] = [];
       let match;
@@ -399,7 +408,7 @@ export function useKanbanData(circleId: string): KanbanData {
         const code = match[2].trim();
         if (code.length > 10) {
           attachments.push({
-            url: '', // inline code, no URL needed
+            url: '',
             name: `code.${lang}`,
             type: 'code',
             language: lang,
@@ -407,7 +416,6 @@ export function useKanbanData(circleId: string): KanbanData {
         }
       }
 
-      // Post the response as a comment with agent attribution + attachments
       const modeTag = mode === 'plan' ? '[PLAN]' : '[EXEC]';
       const modelTag = model ? ` | ${model}` : '';
       const thinkTag = thinkingLevel !== 'balanced' ? ` | ${thinkingLevel}` : '';

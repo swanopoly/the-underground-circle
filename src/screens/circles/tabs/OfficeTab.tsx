@@ -280,6 +280,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [actionResult, setActionResult] = useState<string>('');
   const [showActionResult, setShowActionResult] = useState(false);
   const [enrichedSessions, setEnrichedSessions] = useState<OpenClawSession[]>([]);
+  const enrichedSessionSignatureRef = useRef('');
 
   // ─── Multi-floor state ──────────────────────────────
   const [floors, setFloors] = useState<OfficeFloor[]>(DEFAULT_FLOORS);
@@ -363,18 +364,30 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   const [currentUserName, setCurrentUserName] = useState<string>('');
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
-      if (data.user) {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { data } = await supabase.auth.getUser();
+        if (!data.user || cancelled) return;
         setCurrentUserId(data.user.id);
-        supabase.from('profiles')
-          .select('display_name, username')
-          .eq('id', data.user.id)
-          .single()
-          .then(({ data: profile }) => {
+
+        try {
+          const { data: profile } = await supabase.from('profiles')
+            .select('display_name, username')
+            .eq('id', data.user.id)
+            .single();
+
+          if (!cancelled) {
             setCurrentUserName(profile?.display_name || profile?.username || 'Agent');
-          });
-      }
-    });
+          }
+        } catch {}
+      } catch {}
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // ─── Circle Office (shared agents from all members) ──────────────────────
@@ -1331,7 +1344,46 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   );
 
   // Use enriched agents if available (has cached costs/tokens), fallback to fresh agents
-  const userAgents = enrichedAgents.length > 0 ? enrichedAgents : allAgents;
+  const userAgents = useMemo(() => {
+    if (enrichedAgents.length === 0) return allAgents;
+    const enrichedById = new Map(enrichedAgents.map(agent => [agent.id, agent]));
+    return allAgents.map(agent => {
+      const enriched = enrichedById.get(agent.id);
+      if (!enriched) return agent;
+      return {
+        ...enriched,
+        ...agent,
+        recentActions: enriched.recentActions,
+        recentMessages: enriched.recentMessages,
+        cachedTokens: enriched.cachedTokens,
+        newTokens: enriched.newTokens,
+      };
+    });
+  }, [allAgents, enrichedAgents]);
+
+  useEffect(() => {
+    enrichedAgentsRef.current = userAgents;
+  }, [userAgents]);
+
+  const userAgentsStatusKey = useMemo(() => JSON.stringify(userAgents.map(agent => [
+    agent.id,
+    agent.status,
+    agent.lastActive || '',
+    agent.messagesProcessed || 0,
+    agent.turns || 0,
+  ])), [userAgents]);
+  const userAgentsMetricsKey = useMemo(() => JSON.stringify(userAgents.map(agent => [
+    agent.id,
+    agent.status,
+    agent.lastActive || '',
+    agent.messagesProcessed || 0,
+    agent.turns || 0,
+    agent.costToday || 0,
+    agent.costWeek || 0,
+    agent.tokensUsed || 0,
+    agent.inputTokens || 0,
+    agent.outputTokens || 0,
+  ])), [userAgents]);
   // BlackSwan first, then other agents sorted by most recently active (deduped by name)
   const displayAgents = useMemo(() => {
     // Final dedup by name — keep the most recently active version
@@ -1456,12 +1508,23 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [displayAgents.length]);
 
-  // Update status history when agents change
+  // Update status history when agent state materially changes
   useEffect(() => {
-    if (enrichedAgents.length > 0) {
-      setStatusHistory(prev => [...prev, enrichedAgents].slice(-10));
-    }
-  }, [enrichedAgents]);
+    if (userAgents.length === 0) return;
+    setStatusHistory(prev => {
+      const last = prev[prev.length - 1];
+      if (last && JSON.stringify(last.map(agent => [
+        agent.id,
+        agent.status,
+        agent.lastActive || '',
+        agent.messagesProcessed || 0,
+        agent.turns || 0,
+      ])) === userAgentsStatusKey) {
+        return prev;
+      }
+      return [...prev, userAgents].slice(-10);
+    });
+  }, [userAgentsStatusKey]);
 
   // Enrich agents with cached data + restore identity
   useEffect(() => {
@@ -1497,27 +1560,52 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // Enrich sessions for Cost Dashboard
   useEffect(() => {
     const allSessions: OpenClawSession[] = [];
-    for (const conn of connectedConns) {
+    const sortedConnections = [...connectedConns].sort((a, b) => a.id.localeCompare(b.id));
+
+    for (const conn of sortedConnections) {
       const sessions = sessionsRef.current.get(conn.id) || [];
       allSessions.push(...sessions);
     }
 
-    if (allSessions.length === 0) {
+    const normalizedSessions = [...allSessions].sort((a, b) => {
+      const sessionCmp = (a.sessionKey || '').localeCompare(b.sessionKey || '');
+      if (sessionCmp !== 0) return sessionCmp;
+      const modelCmp = (a.model || '').localeCompare(b.model || '');
+      if (modelCmp !== 0) return modelCmp;
+      return (a.lastActivity || '').localeCompare(b.lastActivity || '');
+    });
+
+    const signature = JSON.stringify(normalizedSessions.map(session => [
+      session.sessionKey,
+      session.lastActivity || '',
+      session.messageCount || 0,
+      session.totalCost || 0,
+      session.totalInputTokens || 0,
+      session.totalOutputTokens || 0,
+      session.cachedTokens || 0,
+      session.newTokens || 0,
+      session.model || '',
+    ]));
+
+    if (signature === enrichedSessionSignatureRef.current) return;
+    enrichedSessionSignatureRef.current = signature;
+
+    if (normalizedSessions.length === 0) {
       setEnrichedSessions([]);
       return;
     }
 
-    enrichSessionsWithCache(allSessions).then(enriched => {
+    enrichSessionsWithCache(normalizedSessions).then(enriched => {
       setEnrichedSessions(enriched);
     }).catch(err => {
       console.error('Failed to enrich sessions:', err);
-      setEnrichedSessions(allSessions); // Fallback to raw sessions
+      setEnrichedSessions(normalizedSessions); // Fallback to raw sessions
     });
   }, [sessionsTick]); // Only re-run when sessions actually update
 
   // Combined 30-second sync: snapshot + DB token sync (single interval instead of two)
   useEffect(() => {
-    if (enrichedAgents.length === 0 || !circleId) return;
+    if (userAgents.length === 0 || !circleId) return;
 
     const syncAll = async () => {
       try {
@@ -1539,25 +1627,25 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     syncAll();
     const interval = setInterval(syncAll, 30000);
     return () => clearInterval(interval);
-  }, [enrichedAgents.length > 0, circleId]);
+  }, [userAgents.length > 0, circleId]);
 
-  // Push agent stats to parent (use enrichedAgents for accurate totals)
+  // Push agent stats to parent using the merged live + cached view
   useEffect(() => {
-    if (onAgentStats && enrichedAgents.length > 0) {
+    if (onAgentStats && userAgents.length > 0) {
       onAgentStats({
-        agentCount: enrichedAgents.length,
-        sessionCount: enrichedAgents.filter(a => a.status === 'active' || a.status === 'building').length,
-        costToday: enrichedAgents.reduce((s, a) => s + (a.costTotal || a.costToday), 0),
-        costWeek: enrichedAgents.reduce((s, a) => s + a.costWeek, 0),
-        tokens: enrichedAgents.reduce((s, a) => s + a.tokensUsed, 0),
-        tokensTotal: enrichedAgents.reduce((s, a) => s + a.tokensUsed, 0),
-        messagesTotal: enrichedAgents.reduce((s, a) => s + a.messagesProcessed, 0),
-        messagesToday: enrichedAgents.reduce((s, a) => s + a.turns, 0),
-        inputTokens: enrichedAgents.reduce((s, a) => s + a.inputTokens, 0),
-        outputTokens: enrichedAgents.reduce((s, a) => s + a.outputTokens, 0),
+        agentCount: userAgents.length,
+        sessionCount: userAgents.filter(a => a.status === 'active' || a.status === 'building').length,
+        costToday: userAgents.reduce((s, a) => s + a.costToday, 0),
+        costWeek: userAgents.reduce((s, a) => s + a.costWeek, 0),
+        tokens: userAgents.reduce((s, a) => s + a.tokensUsed, 0),
+        tokensTotal: userAgents.reduce((s, a) => s + a.tokensUsed, 0),
+        messagesTotal: userAgents.reduce((s, a) => s + a.messagesProcessed, 0),
+        messagesToday: userAgents.reduce((s, a) => s + a.turns, 0),
+        inputTokens: userAgents.reduce((s, a) => s + a.inputTokens, 0),
+        outputTokens: userAgents.reduce((s, a) => s + a.outputTokens, 0),
       });
     }
-  }, [enrichedAgents, onAgentStats]);
+  }, [userAgentsMetricsKey, onAgentStats]);
 
   // Save appearances when changed — localStorage + Supabase
   useEffect(() => {

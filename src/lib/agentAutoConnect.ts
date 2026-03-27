@@ -155,6 +155,11 @@ export async function startAgentAutoConnect() {
   _retryAttempt = 0;
   console.log('[agentAutoConnect] Starting app-level agent detection...');
 
+  if (Platform.OS === 'web') {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    if (!_running) return;
+  }
+
   // 1. Load saved connections
   let conns = await loadConnections();
 
@@ -184,29 +189,28 @@ export async function startAgentAutoConnect() {
     }
   }
 
-  // 4. Detect Claude Code bridge
-  const ccDetected = await detectClaudeCodeBridge();
+  const [ccDetected, codexDetected, geminiDetected, cursorDetected] = await Promise.all([
+    detectClaudeCodeBridge(),
+    detectCodexBridge(),
+    detectGeminiCliBridge(),
+    detectCursorBridge(),
+  ]);
+
   if (ccDetected) {
     _startCCPoller();
     console.log('[agentAutoConnect] Claude Code bridge detected');
   }
 
-  // 5. Detect Codex bridge
-  const codexDetected = await detectCodexBridge();
   if (codexDetected) {
     _startCodexPoller();
     console.log('[agentAutoConnect] Codex bridge detected');
   }
 
-  // 5b. Detect Gemini CLI bridge
-  const geminiDetected = await detectGeminiCliBridge();
   if (geminiDetected) {
     _startGeminiPoller();
     console.log('[agentAutoConnect] Gemini CLI bridge detected');
   }
 
-  // 5c. Detect Cursor bridge
-  const cursorDetected = await detectCursorBridge();
   if (cursorDetected) {
     _startCursorPoller();
     console.log('[agentAutoConnect] Cursor bridge detected');

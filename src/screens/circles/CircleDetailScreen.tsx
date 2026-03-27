@@ -174,16 +174,16 @@ export default function CircleDetailScreen({ route, navigation }: any) {
         </View>
       </View>
 
-      {/* Core tabs — always mounted, instant switching */}
-      <View style={[styles.tabContent, activeTab !== 'CHAT' && styles.hiddenTab]}>
-        <ErrorBoundary><ChatTab circleId={circleId} accentColor={accentColor} /></ErrorBoundary>
-      </View>
-      <View style={[styles.tabContent, activeTab !== 'OFFICE' && styles.hiddenTab]}>
-        <ErrorBoundary><OfficeTab circleId={circleId} accentColor={accentColor} /></ErrorBoundary>
-      </View>
-      <View style={[styles.tabContent, activeTab !== 'ROOMS' && styles.hiddenTab]}>
-        <ErrorBoundary><RoomsTab circleId={circleId} accentColor={accentColor} /></ErrorBoundary>
-      </View>
+      {/* Tabs — lazy mount on first visit, stay mounted after */}
+      <LazyTab tabKey="CHAT" activeTab={activeTab}>
+        <ChatTab circleId={circleId} accentColor={accentColor} />
+      </LazyTab>
+      <LazyTab tabKey="OFFICE" activeTab={activeTab}>
+        <OfficeTab circleId={circleId} accentColor={accentColor} />
+      </LazyTab>
+      <LazyTab tabKey="ROOMS" activeTab={activeTab}>
+        <RoomsTab circleId={circleId} accentColor={accentColor} />
+      </LazyTab>
 
       {/* Secondary tabs — lazy mount on first visit, stay mounted after */}
       <LazyTab tabKey="BACKPACK" activeTab={activeTab}>
@@ -310,10 +310,32 @@ function TabBarScroller({ tabs, activeTab, accentColor, isMobile, onTabPress }: 
     scrollRef.current?.scrollTo({ x: next, animated: true });
   }, []);
 
+  // Desktop: show all tabs in a wrapping row (no scroll)
+  if (!isMobile) {
+    return (
+      <View style={styles.tabBarWrapper}>
+        <View style={styles.tabBarDesktopWrap}>
+          {tabs.map((tab) => (
+            <TabPill
+              key={tab.key}
+              icon={tab.icon}
+              flatIcon={tab.flatIcon}
+              label={tab.label}
+              active={activeTab === tab.key}
+              accentColor={accentColor}
+              isMobile={false}
+              onPress={() => onTabPress(tab.key)}
+            />
+          ))}
+        </View>
+      </View>
+    );
+  }
+
+  // Mobile: horizontal scroll with arrows
   return (
     <View style={styles.tabBarWrapper}>
-      {/* Left arrow */}
-      {!isMobile && canScrollLeft && (
+      {canScrollLeft && (
         <Pressable
           onPress={() => scrollBy(-200)}
           style={[styles.tabArrow, styles.tabArrowLeft]}
@@ -328,7 +350,7 @@ function TabBarScroller({ tabs, activeTab, accentColor, isMobile, onTabPress }: 
         showsHorizontalScrollIndicator={false}
         onScroll={handleScroll}
         scrollEventThrottle={16}
-        contentContainerStyle={isMobile ? styles.tabBarMobile : styles.tabBar}
+        contentContainerStyle={styles.tabBarMobile}
         style={styles.tabBarScroll}
       >
         {tabs.map((tab) => (
@@ -345,8 +367,8 @@ function TabBarScroller({ tabs, activeTab, accentColor, isMobile, onTabPress }: 
         ))}
       </ScrollView>
 
-      {/* Right arrow */}
-      {!isMobile && canScrollRight && (
+      {/* Right arrow (mobile only) */}
+      {canScrollRight && (
         <Pressable
           onPress={() => scrollBy(200)}
           style={[styles.tabArrow, styles.tabArrowRight]}
@@ -354,10 +376,6 @@ function TabBarScroller({ tabs, activeTab, accentColor, isMobile, onTabPress }: 
           <Text style={styles.tabArrowText}>›</Text>
         </Pressable>
       )}
-
-      {/* Fade hints */}
-      {!isMobile && canScrollLeft && <View style={[styles.tabFade, styles.tabFadeLeft]} pointerEvents="none" />}
-      {!isMobile && canScrollRight && <View style={[styles.tabFade, styles.tabFadeRight]} pointerEvents="none" />}
     </View>
   );
 }
@@ -401,7 +419,16 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 
-  // Tab Bar — desktop
+  // Tab Bar — desktop: all tabs visible, wrapping if needed
+  tabBarDesktopWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    gap: 4,
+  },
   tabBar: {
     flexDirection: 'row',
     justifyContent: 'center',

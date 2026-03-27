@@ -40,8 +40,9 @@ export function usePlans(circleId: string) {
   useEffect(() => {
     fetchPlans();
 
+    const channelId = `circle_plans:${circleId}:${Math.random().toString(36).slice(2, 10)}`;
     const channel = supabase
-      .channel(`circle_plans:${circleId}`)
+      .channel(channelId)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'circle_plans', filter: `circle_id=eq.${circleId}` }, fetchPlans)
       .subscribe((status, err) => { if (err) console.error('[usePlans] realtime error:', err); });
 

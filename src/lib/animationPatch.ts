@@ -23,6 +23,8 @@ if (Platform.OS === 'web') {
     '"shadow*" style props are deprecated',
     '"textShadow*" style props are deprecated',
     'props.pointerEvents is deprecated',
+    'Cannot record touch end without a touch start.',
+    'Multiple instances of Three.js being imported.',
   ];
   const origWarn = console.warn;
   console.warn = function (...args: any[]) {

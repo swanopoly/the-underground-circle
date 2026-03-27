@@ -157,6 +157,7 @@ export function geminiSessionsToAgents(sessions: GeminiCliSession[]): OfficeAgen
     recentActions: s.recentActions || [],
     recentMessages: [],
     costToday: 0, // Gemini CLI is free-tier or API-key based
+    costTotal: 0,
     costWeek: 0,
     tokensUsed: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
     inputTokens: s.totalInputTokens || 0,

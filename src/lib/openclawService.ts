@@ -49,11 +49,21 @@ export interface OpenClawToolResult {
 
 // ─── Low-level API ────────────────────────────────────
 
+const unsupportedToolCache = new Set<string>();
+
 async function invokeToolRaw(
   config: OpenClawConfig,
   tool: string,
   args: Record<string, any> = {},
 ): Promise<OpenClawToolResult> {
+  const toolKey = `${config.endpoint.replace(/\/$/, '')}::${tool}`;
+  if (unsupportedToolCache.has(toolKey)) {
+    return {
+      ok: false,
+      error: { type: 'unsupported', message: `Tool not supported: ${tool}` },
+    };
+  }
+
   const res = await fetch(`${config.endpoint}/tools/invoke`, {
     method: 'POST',
     headers: {
@@ -62,10 +72,15 @@ async function invokeToolRaw(
     },
     body: JSON.stringify({ tool, args }),
   });
-  if (res.status === 404) return { content: [], isError: true } as any;
+  if (res.status === 404) {
+    unsupportedToolCache.add(toolKey);
+    return {
+      ok: false,
+      error: { type: 'unsupported', message: `Tool not supported: ${tool}` },
+    };
+  }
   return res.json();
 }
-
 async function chatCompletion(
   config: OpenClawConfig,
   message: string,
@@ -218,16 +233,11 @@ export interface CronJob {
 
 export async function listCronJobs(config: OpenClawConfig): Promise<{ ok: boolean; jobs: CronJob[] }> {
   try {
-    const res = await fetch(`${config.endpoint}/tools/invoke`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.token}`,
-      },
-      body: JSON.stringify({ tool: 'cron', parameters: { action: 'list', includeDisabled: true } }),
+    const data = await invokeToolRaw(config, 'cron', {
+      action: 'list',
+      includeDisabled: true,
     });
-    if (res.status === 404) return { ok: false, jobs: [] };
-    const data = await res.json();
+    if (!data.ok) return { ok: false, jobs: [] };
     // The response has content[0].text which is a text summary, and details with structured data
     if (data?.result?.details?.jobs) {
       return { ok: true, jobs: data.result.details.jobs };
@@ -252,7 +262,6 @@ export async function listCronJobs(config: OpenClawConfig): Promise<{ ok: boolea
     return { ok: false, jobs: [] };
   }
 }
-
 export async function sendAgentTask(
   config: OpenClawConfig,
   task: string,

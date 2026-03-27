@@ -21,7 +21,7 @@ import {
   Platform,
   useWindowDimensions,
 } from 'react-native';
-import { useBackpackData } from '../../../hooks/useBackpackData';
+import { useBackpackData, type BackpackData } from '../../../hooks/useBackpackData';
 import StatCube from '../../../components/StatCube';
 import {
   PIXEL_COLORS, PIXEL_ICONS, GRID, PX,
@@ -42,8 +42,6 @@ import PromptManagerPanel from './office/PromptManagerPanel';
 import TraceViewer from '../../../components/TraceViewer';
 import LLMBenchmarkPanel from '../../../components/LLMBenchmarkPanel';
 import TradingBotPanel from '../../../components/TradingBotPanel';
-import Backpack3DScene from '../../../components/backpack3d/Backpack3DScene';
-import SplineBackpackScene from '../../../components/backpack3d/SplineBackpackScene';
 import DevicePanel from '../../../components/DevicePanel';
 import ModelLabPanel from '../../../components/ModelLabPanel';
 
@@ -83,6 +81,12 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
   const [viewMode, setViewMode] = useState<'spline' | '3d' | 'list'>('list');
   const { width } = useWindowDimensions();
   const isDesktop = width > 768;
+  const Backpack3DSceneComponent = Platform.OS === 'web' && viewMode === '3d'
+    ? (require('../../../components/backpack3d/Backpack3DScene').default as React.ComponentType<{ data: BackpackData; onOpenCompartment: (key: string) => void }>)
+    : null;
+  const SplineBackpackSceneComponent = Platform.OS === 'web' && viewMode === 'spline'
+    ? (require('../../../components/backpack3d/SplineBackpackScene').default as React.ComponentType<{ data: BackpackData; onOpenCompartment: (key: string) => void }>)
+    : null;
 
   // Terminal shared state — must match OfficeTerminal's expected defaults
   const [terminalInput, setTerminalInput] = useState('');
@@ -359,16 +363,16 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
         </View>
 
         {/* Spline View — real 3D model */}
-        {viewMode === 'spline' && Platform.OS === 'web' ? (
-            <SplineBackpackScene
+        {SplineBackpackSceneComponent ? (
+            <SplineBackpackSceneComponent
               data={data}
               onOpenCompartment={(key: string) => setActiveCompartment(key as Compartment)}
             />
         ) : null}
 
         {/* Procedural 3D View */}
-        {viewMode === '3d' && Platform.OS === 'web' ? (
-            <Backpack3DScene
+        {Backpack3DSceneComponent ? (
+            <Backpack3DSceneComponent
               data={data}
               onOpenCompartment={(key: string) => setActiveCompartment(key as Compartment)}
             />

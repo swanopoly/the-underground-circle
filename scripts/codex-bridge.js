@@ -17,8 +17,8 @@ const { exec } = require('child_process');
 
 const PORT = 7779;
 const SCAN_INTERVAL = 5000;
-const ACTIVE_THRESHOLD = 60_000;   // 60s → active
-const IDLE_THRESHOLD = 300_000;    // 5min → idle
+const ACTIVE_THRESHOLD = 120_000;   // 2min → active
+const IDLE_THRESHOLD = 1800_000;    // 30min → idle (Codex writes less frequently than Claude)
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -80,32 +80,76 @@ function scanCodexProcesses() {
 function scanCodexFiles() {
   const sessions = [];
 
-  // Check common Codex working directories
+  // Check common Codex working directories (Linux + Windows via WSL)
   const codexDirs = [
     path.join(os.homedir(), '.codex'),
     path.join(os.homedir(), '.openai'),
     path.join(os.homedir(), '.config', 'codex'),
   ];
+  // Also scan Windows-side Codex directories when running in WSL
+  try {
+    const winUsers = fs.readdirSync('/mnt/c/Users').filter(u => !u.startsWith('.') && u !== 'Public' && u !== 'Default' && u !== 'Default User' && u !== 'All Users');
+    for (const u of winUsers) {
+      codexDirs.push(`/mnt/c/Users/${u}/.codex`);
+    }
+  } catch {}
+
+  // Find Codex session files — only look in sessions/ subdirectory for rollout-*.jsonl
+  function findSessionFiles(dir) {
+    const results = [];
+    const sessionsDir = path.join(dir, 'sessions');
+    if (!fs.existsSync(sessionsDir)) return results;
+
+    function recurse(d, depth) {
+      if (depth > 5) return;
+      try {
+        const entries = fs.readdirSync(d, { withFileTypes: true });
+        for (const entry of entries) {
+          const fullPath = path.join(d, entry.name);
+          if (entry.isDirectory()) {
+            recurse(fullPath, depth + 1);
+          } else if (entry.isFile() && entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')) {
+            results.push(fullPath);
+          }
+        }
+      } catch {}
+    }
+    recurse(sessionsDir, 0);
+    return results;
+  }
 
   for (const dir of codexDirs) {
     if (!fs.existsSync(dir)) continue;
     try {
-      const files = fs.readdirSync(dir);
-      for (const file of files) {
-        if (!file.endsWith('.json') && !file.endsWith('.jsonl')) continue;
-        const filePath = path.join(dir, file);
+      const sessionFiles = findSessionFiles(dir);
+      for (const filePath of sessionFiles) {
+        const file = path.relative(dir, filePath);
         const stat = fs.statSync(filePath);
         const age = Date.now() - stat.mtimeMs;
 
         // Only include recently active files
         if (age > IDLE_THRESHOLD) continue;
 
+        // Try to extract model from last line of jsonl
+        let detectedModel = 'codex';
+        try {
+          const content = fs.readFileSync(filePath, 'utf8');
+          const lastLines = content.trim().split('\n').slice(-5);
+          for (const line of lastLines.reverse()) {
+            try {
+              const parsed = JSON.parse(line);
+              if (parsed.model) { detectedModel = parsed.model; break; }
+              if (parsed.payload?.model) { detectedModel = parsed.payload.model; break; }
+            } catch {}
+          }
+        } catch {}
+        const baseName = path.basename(file).replace(/\.\w+$/, '');
         sessions.push({
-          sessionId: `codex-file-${file.replace(/\.\w+$/, '')}`,
+          sessionId: `codex-${baseName}`,
           projectDir: dir,
-          model: 'codex',
+          model: detectedModel,
           status: age < ACTIVE_THRESHOLD ? 'active' : 'idle',
-          task: `Session: ${file}`,
+          task: `Session: ${baseName}`,
           lastActivity: stat.mtime.toISOString(),
           totalInputTokens: 0,
           totalOutputTokens: 0,

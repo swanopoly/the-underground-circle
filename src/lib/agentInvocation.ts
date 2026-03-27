@@ -680,6 +680,104 @@ const pendingAgentTasks = new Map<string, string>();
  * 3. Stream updates in realtime
  * 4. Mark complete
  */
+// --- Direct Invoke: Shared routing without terminal rows -------------------
+
+export async function invokeDirect(
+  req: InvocationRequest,
+  agent: CircleOfficeAgent,
+  gatewayUrl?: string,
+  authToken?: string
+): Promise<AgentInvocationResult> {
+  try {
+    const budgetConfig = await loadBudgetConfig();
+    if (budgetConfig.enabled && budgetConfig.hardLimit) {
+      const now = new Date();
+      const todayStr = now.toISOString().split('T')[0];
+      const weekAgo = new Date(now.getTime() - 7 * 86400000).toISOString();
+      const monthAgo = new Date(now.getTime() - 30 * 86400000).toISOString();
+
+      const [todayRes, weekRes, monthRes] = await Promise.all([
+        supabase.from('office_terminal_responses').select('token_count').eq('circle_id', req.circleId).gte('created_at', todayStr).eq('status', 'done'),
+        supabase.from('office_terminal_responses').select('token_count').eq('circle_id', req.circleId).gte('created_at', weekAgo).eq('status', 'done'),
+        supabase.from('office_terminal_responses').select('token_count').eq('circle_id', req.circleId).gte('created_at', monthAgo).eq('status', 'done'),
+      ]);
+
+      const estimateCost = (rows: any[]) => (rows || []).reduce((s: number, r: any) => s + (r.token_count || 0), 0) * 0.0000005;
+      const blocked = checkHardLimit(budgetConfig, estimateCost(todayRes.data || []), estimateCost(weekRes.data || []), estimateCost(monthRes.data || []));
+      if (blocked) {
+        return { success: false, error: blocked };
+      }
+    }
+  } catch (e) {
+    console.warn('[agentInvocation] Direct budget check failed, proceeding:', e);
+  }
+
+  const blackSwan = isBlackSwanAgent(agent);
+  const claudeCode = isClaudeCodeAgent(agent);
+  const geminiCli = isGeminiCliAgent(agent);
+  const byoLLM = isBYOLLMAgent(agent);
+
+  const resolvedUrl = agent.gatewayUrl || gatewayUrl;
+  if (!resolvedUrl && !blackSwan && !claudeCode && !geminiCli && !byoLLM) {
+    return {
+      success: false,
+      error: `No gateway URL for ${agent.name} - configure one in Connections`,
+    };
+  }
+
+  if (!blackSwan && !claudeCode && !geminiCli && !byoLLM && !agent.isOwn && !agent.isPublic) {
+    return {
+      success: false,
+      error: `${agent.name} is local-only - they need a public URL for cross-machine commands`,
+    };
+  }
+
+  if (blackSwan) {
+    if (req.model === 'gemini-flash') {
+      const geminiStart = Date.now();
+      try {
+        const { getSwanBotResponse } = await import('./swanbot');
+        const geminiResult = await getSwanBotResponse(req.command, {
+          userId: req.senderId || req.messageId,
+          circleId: req.circleId,
+        });
+        return {
+          success: true,
+          responseText: geminiResult,
+          tokenCount: estimateTokens(req.command, geminiResult),
+          latencyMs: Date.now() - geminiStart,
+        };
+      } catch (err: any) {
+        return { success: false, error: `Gemini fallback failed: ${err.message}` };
+      }
+    }
+    return invokeBlackSwan(req.command, req.circleId, req.senderId || req.messageId, req.model, agent.name);
+  }
+
+  if (claudeCode) {
+    return invokeClaudeCode(req.command, resolvedUrl);
+  }
+
+  if (geminiCli) {
+    const geminiUrl = resolvedUrl || 'http://localhost:7780';
+    return invokeGeminiCli(req.command, geminiUrl);
+  }
+
+  if (byoLLM) {
+    return invokeBYOLLM(req.command, agent.provider, req.model, req.circleId, req.senderId);
+  }
+
+  return callOpenClawAgent(
+    req.command,
+    agent.id,
+    agent.name,
+    resolvedUrl!,
+    30000,
+    req.model,
+    authToken
+  );
+}
+
 export async function invokeAndStream(
   req: InvocationRequest,
   agent: CircleOfficeAgent,

@@ -45,7 +45,7 @@ interface AutomationRun {
   estimated_cost: number | null;
   duration_ms: number | null;
   trigger_source: string | null;
-  created_at: string;
+  started_at: string;
 }
 
 export default function ActivityFeedPanel({ circleId, agents }: Props) {
@@ -53,6 +53,7 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
   const [runs, setRuns] = useState<AutomationRun[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const automationRunsSupportedRef = useRef(true);
 
   const fetchActivity = useCallback(async () => {
     try {
@@ -66,17 +67,23 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
 
       if (!actRes.error && actRes.data) setItems(actRes.data);
 
-      // automation_runs — skip if table doesn't exist (avoids 400 spam)
-      try {
+      if (automationRunsSupportedRef.current) {
         const runRes = await supabase
           .from('automation_runs')
-          .select('id, status, error_message, output_text, model_used, estimated_cost, duration_ms, trigger_source, created_at')
+          .select('id, status, error_message, output_text, model_used, estimated_cost, duration_ms, trigger_source, started_at')
           .eq('circle_id', circleId)
           .in('status', ['failed', 'completed'])
-          .order('created_at', { ascending: false })
+          .order('started_at', { ascending: false })
           .limit(10);
-        if (!runRes.error && runRes.data) setRuns(runRes.data);
-      } catch {}  // table may not exist
+
+        if (runRes.error) {
+          automationRunsSupportedRef.current = false;
+          setRuns([]);
+          console.warn('[ActivityFeedPanel] automation_runs unavailable:', runRes.error.message);
+        } else if (runRes.data) {
+          setRuns(runRes.data);
+        }
+      }
     } catch (err) {
       console.error('ActivityFeed fetch error:', err);
     }
@@ -157,7 +164,7 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
                     see error details...
                   </Text>
                 )}
-                <Text style={s.timestamp}>{timeAgo(run.created_at)}</Text>
+                <Text style={s.timestamp}>{timeAgo(run.started_at)}</Text>
               </View>
             </View>
           </View>

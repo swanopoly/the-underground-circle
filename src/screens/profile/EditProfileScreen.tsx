@@ -285,7 +285,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     borderBottomWidth: 1,
     borderBottomColor: '#000000',
-    maxWidth: 480,
+    maxWidth: 720,
     alignSelf: 'center',
     width: '100%',
   },
@@ -294,7 +294,7 @@ const styles = StyleSheet.create({
   scrollContent: { flexGrow: 1 },
   inner: {
     width: '100%',
-    maxWidth: 480,
+    maxWidth: 720,
     alignSelf: 'center',
     paddingHorizontal: 20,
     paddingTop: 20,

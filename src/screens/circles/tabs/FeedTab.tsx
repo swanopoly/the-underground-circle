@@ -398,10 +398,16 @@ function AgentTasksPanel({
   tasksByColumn,
   agents,
   onCardPress,
+  searchText,
+  filterPriority,
+  filterAssignee,
 }: {
   tasksByColumn: TasksByColumn;
   agents: CircleOfficeAgent[];
   onCardPress: (task: KanbanTask) => void;
+  searchText: string;
+  filterPriority: TaskPriority | null;
+  filterAssignee: string | null;
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [filterAgent, setFilterAgent] = useState<string | null>(null);
@@ -419,9 +425,26 @@ function AgentTasksPanel({
     ).slice(0, 50);
   }, [tasksByColumn]);
 
-  const filteredTasks = filterAgent
-    ? agentTasks.filter(t => parseAgentTaskMeta(t).agentName === filterAgent)
-    : agentTasks;
+  const searchQuery = searchText.toLowerCase().trim();
+
+  const filteredTasks = agentTasks.filter(task => {
+    const meta = parseAgentTaskMeta(task);
+    if (filterAgent && meta.agentName !== filterAgent) return false;
+    if (filterPriority && task.priority !== filterPriority) return false;
+    if (filterAssignee) {
+      if (filterAssignee.startsWith('agent:')) {
+        if (task.assigned_agent_id !== filterAssignee.slice(6)) return false;
+      } else if (task.assigned_to !== filterAssignee) {
+        return false;
+      }
+    }
+    if (!searchQuery) return true;
+
+    const haystack = [task.title, task.description || '', meta.prompt, meta.response]
+      .join('\n')
+      .toLowerCase();
+    return haystack.includes(searchQuery);
+  });
 
   const processingCount = agentTasks.filter(t => parseAgentTaskMeta(t).status === 'processing').length;
 
@@ -907,6 +930,9 @@ export default function FeedTab({ circleId }: { circleId: string }) {
                 tasksByColumn={filteredTasksByColumn}
                 agents={agents}
                 onCardPress={setDetailTask}
+                searchText={searchText}
+                filterPriority={filterPriority}
+                filterAssignee={filterAssignee}
               />
             </View>
           )}
@@ -963,6 +989,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
             task={detailTask}
             kanban={kanban}
             goals={goalsHook.goals}
+            circleId={circleId}
             onClose={() => setDetailTask(null)}
           />
         )}
@@ -1062,6 +1089,9 @@ export default function FeedTab({ circleId }: { circleId: string }) {
               tasksByColumn={filteredTasksByColumn}
               agents={agents}
               onCardPress={setDetailTask}
+              searchText={searchText}
+              filterPriority={filterPriority}
+              filterAssignee={filterAssignee}
             />
           )}
         </View>
@@ -1088,6 +1118,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
           task={detailTask}
           kanban={kanban}
           goals={goalsHook.goals}
+          circleId={circleId}
           onClose={() => setDetailTask(null)}
         />
       )}
