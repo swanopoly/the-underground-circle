@@ -78,21 +78,24 @@ import {
   getTradingBotAutopilotConfig,
   saveTradingBotAutopilotConfig,
   runTradingBotAutopilot,
+  withdrawFromBotWallet,
+  scanBotWalletMomentum,
+  type MomentumHolding,
+  type MomentumScanResult,
   SOL_MINT,
   USDC_MINT,
   SOLANA_TOKEN_REGISTRY,
 } from '../lib/heliusTrading';
 import { TradingBotPaperTab } from './TradingBotPaperTab';
 import { TradingBotBacktestTab } from './TradingBotBacktestTab';
+import TradingTerminalLayout from './trading/TradingTerminalLayout';
 
 const ACCENT = '#6366f1';
 type Tab = 'featured' | 'pending' | 'positions' | 'signals' | 'portfolio' | 'paper' | 'trade' | 'backtest' | 'bot' | 'dca' | 'alerts' | 'wallets' | 'history';
 
 const ALL_TABS: { key: Tab; label: string; icon: string; color: string }[] = [
-  { key: 'portfolio', label: 'Portfolio',  icon: '$',  color: '#22c55e' },
+  { key: 'trade',     label: 'Terminal',   icon: 'TV', color: '#3b82f6' },
   { key: 'paper',     label: 'Paper',      icon: 'PP', color: '#14b8a6' },
-  { key: 'trade',     label: 'Trade',      icon: '<>', color: '#3b82f6' },
-  { key: 'positions', label: 'Positions',  icon: '[]', color: '#a855f7' },
   { key: 'signals',   label: 'Signals',    icon: '//', color: '#22d3ee' },
   { key: 'backtest',  label: 'Lab',        icon: 'BT', color: '#f97316' },
   { key: 'bot',       label: 'Bot',        icon: 'AI', color: '#84cc16' },
@@ -101,7 +104,6 @@ const ALL_TABS: { key: Tab; label: string; icon: string; color: string }[] = [
   { key: 'alerts',    label: 'Alerts',     icon: '!',  color: '#ef4444' },
   { key: 'pending',   label: 'Queue',      icon: '..', color: '#f97316' },
   { key: 'wallets',   label: 'Watch',      icon: '@',  color: '#ec4899' },
-  { key: 'history',   label: 'Log',        icon: '#',  color: '#9e9e9e' },
 ];
 
 interface Props {
@@ -392,7 +394,7 @@ function getExecutionModeLabel(mode: TradingExecutionMode): string {
 }
 
 export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT }: Props) {
-  const [tab, setTab] = useState<Tab>('portfolio');
+  const [tab, setTab] = useState<Tab>('trade');
   const [client, setClient] = useState<HeliusClient | null>(null);
   const [loading, setLoading] = useState(true);
   const [noKey, setNoKey] = useState(false);
@@ -579,10 +581,8 @@ export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT
 
       {/* Content */}
       <View style={s.content}>
-        {tab === 'portfolio' && <PortfolioTab client={client!} walletAddress={walletAddress} userId={userId} circleId={circleId} />}
+        {tab === 'trade' && <TradingTerminalLayout client={client!} walletAddress={walletAddress} userId={userId} circleId={circleId} botWallet={botWallet} onBotWalletRefresh={refreshBotWallet} />}
         {tab === 'paper' && <TradingBotPaperTab client={client!} userId={userId} circleId={circleId} />}
-        {tab === 'trade' && <TradeTab client={client!} walletAddress={walletAddress} userId={userId} circleId={circleId} botWallet={botWallet} onBotWalletRefresh={refreshBotWallet} />}
-        {tab === 'positions' && <PositionsTab client={client!} userId={userId} />}
         {tab === 'signals' && <SignalsTab client={client!} userId={userId} />}
         {tab === 'backtest' && <TradingBotBacktestTab client={client!} userId={userId} circleId={circleId} />}
         {tab === 'bot' && <BotWalletTab circleId={circleId} walletAddress={walletAddress} botWallet={botWallet} onBotWalletRefresh={refreshBotWallet} onTradingStateRefresh={init} />}
@@ -591,7 +591,6 @@ export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT
         {tab === 'alerts' && <AlertsTab client={client!} userId={userId} />}
         {tab === 'pending' && <PendingTab client={client!} walletAddress={walletAddress} userId={userId} circleId={circleId} botWallet={botWallet} onBotWalletRefresh={refreshBotWallet} />}
         {tab === 'wallets' && <WalletsTab client={client!} userId={userId} />}
-        {tab === 'history' && <HistoryTab userId={userId} />}
       </View>
     </View>
   );
@@ -622,6 +621,17 @@ function BotWalletTab({
   const [maxDailyTrades, setMaxDailyTrades] = useState('3');
   const [slippageCap, setSlippageCap] = useState('150');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // Withdraw state
+  const [withdrawDest, setWithdrawDest] = useState('');
+  const [withdrawAmount, setWithdrawAmount] = useState('');
+  const [withdrawAll, setWithdrawAll] = useState(false);
+  const [withdrawing, setWithdrawing] = useState(false);
+  const [withdrawMessage, setWithdrawMessage] = useState<string | null>(null);
+
+  // Momentum scan state
+  const [scanning, setScanning] = useState(false);
+  const [scanResult, setScanResult] = useState<MomentumScanResult | null>(null);
 
   const syncDrafts = useCallback((nextConfig: TradingBotAutopilotConfig | null) => {
     setConfig(nextConfig);
@@ -726,6 +736,41 @@ function BotWalletTab({
     setRunningAutopilot(false);
   };
 
+  const handleWithdraw = async () => {
+    if (!botWallet || withdrawing) return;
+    setWithdrawing(true);
+    setWithdrawMessage(null);
+    try {
+      const result = await withdrawFromBotWallet({
+        circleId,
+        destination: withdrawDest.trim(),
+        amountLamports: withdrawAll ? undefined : Math.floor(parseFloat(withdrawAmount || '0') * 1e9),
+        withdrawAll,
+      });
+      setWithdrawMessage(`Sent ${result.amountSol.toFixed(4)} SOL — TX: ${result.txHash.slice(0, 12)}...`);
+      setWithdrawDest('');
+      setWithdrawAmount('');
+      setWithdrawAll(false);
+      await onBotWalletRefresh();
+    } catch (err: any) {
+      setWithdrawMessage(`Withdraw failed: ${err.message || err}`);
+    }
+    setWithdrawing(false);
+  };
+
+  const handleScanMomentum = async () => {
+    setScanning(true);
+    setStatusMessage(null);
+    try {
+      const result = await scanBotWalletMomentum(circleId, { autoExecute: false });
+      setScanResult(result);
+      setStatusMessage(`Scanned ${result.holdings.length} holdings — ${result.exitCandidates.length} exit / ${result.entryCandidates.length} entry signals`);
+    } catch (err: any) {
+      setStatusMessage(`Momentum scan failed: ${err.message || err}`);
+    }
+    setScanning(false);
+  };
+
   if (!botWallet) {
     return (
       <ScrollView contentContainerStyle={s.scrollPad}>
@@ -789,12 +834,68 @@ function BotWalletTab({
       </View>
 
       {RNPlatform.OS === 'web' && (
-        <Pressable onPress={handleCopyAddress} style={[s.refreshBtn, { marginTop: 8 }]}> 
+        <Pressable onPress={handleCopyAddress} style={[s.refreshBtn, { marginTop: 8 }]}>
           <Text style={s.refreshText}>Copy Deposit Address</Text>
         </Pressable>
       )}
 
-      <View style={[s.listCard, { marginTop: 12 }]}> 
+      {/* ── Withdraw Section ── */}
+      <View style={[s.listCard, { marginTop: 12 }]} nativeID="section-bot-withdraw">
+        <Text style={s.listTitle}>Withdraw SOL</Text>
+        <Text style={[s.listMeta, { marginTop: 6, marginBottom: 10 }]}>Send SOL out of the bot wallet to any Solana address.</Text>
+
+        <Text style={s.fieldLabel}>Destination address</Text>
+        <View style={{ flexDirection: 'row', gap: 8, marginBottom: 10 }}>
+          <TextInput
+            value={withdrawDest}
+            onChangeText={setWithdrawDest}
+            placeholder="Solana address..."
+            placeholderTextColor="#6f6f6f"
+            style={[s.input, { flex: 1, marginBottom: 0 }]}
+          />
+          {walletAddress && (
+            <Pressable onPress={() => setWithdrawDest(walletAddress)} style={[s.toggleChip, { borderColor: '#6366f140', backgroundColor: '#6366f112' }]}>
+              <Text style={[s.toggleChipText, { color: '#818cf8' }]}>My Wallet</Text>
+            </Pressable>
+          )}
+        </View>
+
+        <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+          {!withdrawAll && (
+            <>
+              <Text style={[s.fieldLabel, { marginBottom: 0 }]}>Amount (SOL)</Text>
+              <TextInput
+                value={withdrawAmount}
+                onChangeText={setWithdrawAmount}
+                keyboardType="decimal-pad"
+                placeholder="0.1"
+                placeholderTextColor="#6f6f6f"
+                style={[s.input, { flex: 1, marginBottom: 0 }]}
+              />
+            </>
+          )}
+          <Pressable
+            onPress={() => setWithdrawAll(prev => !prev)}
+            style={[s.toggleChip, withdrawAll ? { borderColor: '#f59e0b50', backgroundColor: '#f59e0b18' } : { borderColor: '#ffffff12', backgroundColor: '#ffffff04' }]}
+          >
+            <Text style={[s.toggleChipText, { color: withdrawAll ? '#f59e0b' : '#6f6f6f' }]}>Withdraw All</Text>
+          </Pressable>
+        </View>
+
+        <Pressable
+          onPress={handleWithdraw}
+          disabled={withdrawing || !withdrawDest.trim() || (!withdrawAll && !withdrawAmount)}
+          style={[s.toggleChip, { borderColor: '#ef444450', backgroundColor: '#ef4444', opacity: (withdrawing || !withdrawDest.trim()) ? 0.5 : 1 }]}
+        >
+          {withdrawing ? <ActivityIndicator size="small" color="#e8e8e8" /> : <Text style={[s.toggleChipText, { color: '#e8e8e8' }]}>Withdraw SOL</Text>}
+        </Pressable>
+
+        {withdrawMessage && (
+          <Text style={[s.listMeta, { marginTop: 8, color: withdrawMessage.startsWith('Sent') ? '#22c55e' : '#ef4444' }]}>{withdrawMessage}</Text>
+        )}
+      </View>
+
+      <View style={[s.listCard, { marginTop: 12 }]}>
         <View style={s.listTop}>
           <View style={{ flex: 1 }}>
             <Text style={s.listTitle}>Autopilot</Text>
@@ -807,21 +908,21 @@ function BotWalletTab({
           <>
             <Text style={s.fieldLabel}>Autopilot status</Text>
             <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-              <Pressable onPress={() => setConfig(prev => prev ? { ...prev, isEnabled: !prev.isEnabled } : prev)} style={[s.pendingBtn, config.isEnabled ? s.pendingBtnApprove : s.pendingBtnReject, { flex: 0 }]}> 
-                <Text style={[s.pendingBtnText, { color: config.isEnabled ? '#e8e8e8' : '#ef4444' }]}>{config.isEnabled ? 'Enabled' : 'Disabled'}</Text>
+              <Pressable onPress={() => setConfig(prev => prev ? { ...prev, isEnabled: !prev.isEnabled } : prev)} style={[s.toggleChip, config.isEnabled ? { borderColor: '#22c55e50', backgroundColor: '#22c55e18' } : { borderColor: '#ef444440', backgroundColor: '#ef444412' }]}>
+                <Text style={[s.toggleChipText, { color: config.isEnabled ? '#22c55e' : '#ef4444' }]}>{config.isEnabled ? 'Enabled' : 'Disabled'}</Text>
               </Pressable>
-              <Pressable onPress={() => setConfig(prev => prev ? { ...prev, autoPauseOnError: !prev.autoPauseOnError } : prev)} style={[s.pendingBtn, { borderColor: '#ffffff18', backgroundColor: '#ffffff05', flex: 0 }]}> 
-                <Text style={s.pendingBtnText}>{config.autoPauseOnError ? 'Pause On Error' : 'Keep Running On Error'}</Text>
+              <Pressable onPress={() => setConfig(prev => prev ? { ...prev, autoPauseOnError: !prev.autoPauseOnError } : prev)} style={[s.toggleChip, { borderColor: config.autoPauseOnError ? '#f59e0b30' : '#ffffff12', backgroundColor: config.autoPauseOnError ? '#f59e0b08' : '#ffffff04' }]}>
+                <Text style={[s.toggleChipText, { color: config.autoPauseOnError ? '#f59e0b' : '#6f6f6f' }]}>{config.autoPauseOnError ? 'Pause On Error' : 'Keep Running On Error'}</Text>
               </Pressable>
             </View>
 
             <Text style={s.fieldLabel}>Trade sources</Text>
             <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-              <Pressable onPress={() => setConfig(prev => prev ? { ...prev, allowPendingActions: !prev.allowPendingActions } : prev)} style={[s.pendingBtn, { flex: 0, borderColor: config.allowPendingActions ? '#84cc1630' : '#ffffff12', backgroundColor: config.allowPendingActions ? '#84cc1610' : '#ffffff04' }]}> 
-                <Text style={[s.pendingBtnText, { color: config.allowPendingActions ? '#84cc16' : '#9e9e9e' }]}>Queue Actions</Text>
+              <Pressable onPress={() => setConfig(prev => prev ? { ...prev, allowPendingActions: !prev.allowPendingActions } : prev)} style={[s.toggleChip, { borderColor: config.allowPendingActions ? '#84cc1640' : '#ffffff12', backgroundColor: config.allowPendingActions ? '#84cc1612' : '#ffffff04' }]}>
+                <Text style={[s.toggleChipText, { color: config.allowPendingActions ? '#84cc16' : '#6f6f6f' }]}>Queue Actions</Text>
               </Pressable>
-              <Pressable onPress={() => setConfig(prev => prev ? { ...prev, allowFeaturedTrades: !prev.allowFeaturedTrades } : prev)} style={[s.pendingBtn, { flex: 0, borderColor: config.allowFeaturedTrades ? '#f59e0b30' : '#ffffff12', backgroundColor: config.allowFeaturedTrades ? '#f59e0b10' : '#ffffff04' }]}> 
-                <Text style={[s.pendingBtnText, { color: config.allowFeaturedTrades ? '#f59e0b' : '#9e9e9e' }]}>Featured Ideas</Text>
+              <Pressable onPress={() => setConfig(prev => prev ? { ...prev, allowFeaturedTrades: !prev.allowFeaturedTrades } : prev)} style={[s.toggleChip, { borderColor: config.allowFeaturedTrades ? '#f59e0b40' : '#ffffff12', backgroundColor: config.allowFeaturedTrades ? '#f59e0b12' : '#ffffff04' }]}>
+                <Text style={[s.toggleChipText, { color: config.allowFeaturedTrades ? '#f59e0b' : '#6f6f6f' }]}>Featured Ideas</Text>
               </Pressable>
             </View>
 
@@ -831,13 +932,14 @@ function BotWalletTab({
                 { key: 'hybrid', label: 'Hybrid' },
                 { key: 'queue_only', label: 'Queue First' },
                 { key: 'featured_only', label: 'Ideas Only' },
+                { key: 'momentum_rotation', label: 'Momentum' },
               ].map(option => (
                 <Pressable
                   key={option.key}
                   onPress={() => setConfig(prev => prev ? { ...prev, strategyMode: option.key as TradingBotAutopilotConfig['strategyMode'] } : prev)}
-                  style={[s.pendingBtn, { flex: 0, borderColor: config.strategyMode === option.key ? '#6366f130' : '#ffffff12', backgroundColor: config.strategyMode === option.key ? '#6366f110' : '#ffffff04' }]}
+                  style={[s.toggleChip, { borderColor: config.strategyMode === option.key ? '#6366f150' : '#ffffff12', backgroundColor: config.strategyMode === option.key ? '#6366f115' : '#ffffff04' }]}
                 >
-                  <Text style={[s.pendingBtnText, { color: config.strategyMode === option.key ? '#818cf8' : '#9e9e9e' }]}>{option.label}</Text>
+                  <Text style={[s.toggleChipText, { color: config.strategyMode === option.key ? '#818cf8' : '#6f6f6f' }]}>{option.label}</Text>
                 </Pressable>
               ))}
             </View>
@@ -848,38 +950,113 @@ function BotWalletTab({
                 <Pressable
                   key={level}
                   onPress={() => setConfig(prev => prev ? { ...prev, minConfidence: level as TradingBotAutopilotConfig['minConfidence'] } : prev)}
-                  style={[s.pendingBtn, { flex: 0, borderColor: config.minConfidence === level ? '#22c55e30' : '#ffffff12', backgroundColor: config.minConfidence === level ? '#22c55e10' : '#ffffff04' }]}
+                  style={[s.toggleChip, { borderColor: config.minConfidence === level ? '#22c55e50' : '#ffffff12', backgroundColor: config.minConfidence === level ? '#22c55e15' : '#ffffff04' }]}
                 >
-                  <Text style={[s.pendingBtnText, { color: config.minConfidence === level ? '#22c55e' : '#9e9e9e' }]}>{level.toUpperCase()}</Text>
+                  <Text style={[s.toggleChipText, { color: config.minConfidence === level ? '#22c55e' : '#6f6f6f' }]}>{level.toUpperCase()}</Text>
                 </Pressable>
               ))}
             </View>
 
-            <Text style={s.fieldLabel}>Max trade size (SOL)</Text>
-            <TextInput value={maxTradeSol} onChangeText={setMaxTradeSol} keyboardType="decimal-pad" placeholder="0.25" placeholderTextColor="#6f6f6f" style={s.input} />
+            <Text style={[s.fieldLabel, { marginTop: 4 }]}>Max trade size (SOL)</Text>
+            <TextInput value={maxTradeSol} onChangeText={setMaxTradeSol} keyboardType="decimal-pad" placeholder="0.25" placeholderTextColor="#6f6f6f" style={[s.input, { marginBottom: 10 }]} />
 
             <Text style={s.fieldLabel}>Max trades per day</Text>
-            <TextInput value={maxDailyTrades} onChangeText={setMaxDailyTrades} keyboardType="number-pad" placeholder="3" placeholderTextColor="#6f6f6f" style={s.input} />
+            <TextInput value={maxDailyTrades} onChangeText={setMaxDailyTrades} keyboardType="number-pad" placeholder="3" placeholderTextColor="#6f6f6f" style={[s.input, { marginBottom: 10 }]} />
 
             <Text style={s.fieldLabel}>Slippage cap (bps)</Text>
-            <TextInput value={slippageCap} onChangeText={setSlippageCap} keyboardType="number-pad" placeholder="150" placeholderTextColor="#6f6f6f" style={s.input} />
+            <TextInput value={slippageCap} onChangeText={setSlippageCap} keyboardType="number-pad" placeholder="150" placeholderTextColor="#6f6f6f" style={[s.input, { marginBottom: 14 }]} />
 
-            <View style={s.pendingBtnRow}>
-              <Pressable onPress={handleSaveConfig} disabled={savingConfig} style={[s.pendingBtn, s.pendingBtnApprove]}>
-                {savingConfig ? <ActivityIndicator size="small" color="#e8e8e8" /> : <Text style={[s.pendingBtnText, { color: '#e8e8e8' }]}>Save Rules</Text>}
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <Pressable onPress={handleSaveConfig} disabled={savingConfig} style={[s.toggleChip, { flex: 1, borderColor: '#22c55e50', backgroundColor: '#22c55e' }]}>
+                {savingConfig ? <ActivityIndicator size="small" color="#e8e8e8" /> : <Text style={[s.toggleChipText, { color: '#e8e8e8' }]}>Save Rules</Text>}
               </Pressable>
-              <Pressable onPress={handleRunAutopilot} disabled={runningAutopilot || botWallet.status !== 'active'} style={[s.pendingBtn, { borderColor: '#84cc1630', backgroundColor: '#84cc1610' }]}> 
-                {runningAutopilot ? <ActivityIndicator size="small" color="#84cc16" /> : <Text style={[s.pendingBtnText, { color: '#84cc16' }]}>Run Now</Text>}
+              <Pressable onPress={handleRunAutopilot} disabled={runningAutopilot || botWallet.status !== 'active'} style={[s.toggleChip, { flex: 1, borderColor: '#84cc1640', backgroundColor: '#84cc1612' }]}>
+                {runningAutopilot ? <ActivityIndicator size="small" color="#84cc16" /> : <Text style={[s.toggleChipText, { color: '#84cc16' }]}>Run Now</Text>}
               </Pressable>
             </View>
 
-            <View style={[s.reasonBox, { marginTop: 12 }]}> 
-              <Text style={s.reasonText}>Autopilot scans every ~2 minutes while the Trading Bot dashboard is open. The same backend action can later be triggered by cron or circle automations.</Text>
+            {/* ── Momentum Scan UI ── */}
+            {config.strategyMode === 'momentum_rotation' && (
+              <View nativeID="section-bot-momentum" style={{ marginTop: 14 }}>
+                <Pressable
+                  onPress={handleScanMomentum}
+                  disabled={scanning || botWallet.status !== 'active'}
+                  style={[s.toggleChip, { borderColor: '#06b6d450', backgroundColor: '#06b6d418', opacity: scanning ? 0.6 : 1 }]}
+                >
+                  {scanning ? <ActivityIndicator size="small" color="#06b6d4" /> : <Text style={[s.toggleChipText, { color: '#06b6d4' }]}>Scan Momentum</Text>}
+                </Pressable>
+
+                {scanResult && (
+                  <View style={{ marginTop: 12 }}>
+                    {/* Holdings */}
+                    {scanResult.holdings.length > 0 && (
+                      <>
+                        <Text style={[s.fieldLabel, { marginBottom: 6 }]}>Holdings</Text>
+                        {scanResult.holdings.map((h) => (
+                          <View key={h.mint} style={[s.reasonBox, { marginBottom: 6, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
+                            <View style={{ flex: 1 }}>
+                              <Text style={[s.toggleChipText, { color: '#e8e8e8', fontSize: 12 }]}>{h.symbol}</Text>
+                              <Text style={[s.listMeta, { fontSize: 10 }]}>${h.price.toFixed(4)} — ${h.valueUsd.toFixed(2)}</Text>
+                            </View>
+                            <View style={{ alignItems: 'flex-end' }}>
+                              <Text style={[s.toggleChipText, {
+                                fontSize: 11,
+                                color: h.signal.action === 'exit' ? '#ef4444' : h.signal.action === 'enter' ? '#22c55e' : '#6f6f6f',
+                              }]}>
+                                {h.signal.action.toUpperCase()} ({h.signal.score})
+                              </Text>
+                              <Text style={[s.listMeta, { fontSize: 9 }]}>{h.signal.reasons.slice(0, 2).join(' | ')}</Text>
+                            </View>
+                          </View>
+                        ))}
+                      </>
+                    )}
+
+                    {/* Exit signals */}
+                    {scanResult.exitCandidates.length > 0 && (
+                      <>
+                        <Text style={[s.fieldLabel, { color: '#ef4444', marginTop: 8, marginBottom: 4 }]}>Exit Signals</Text>
+                        {scanResult.exitCandidates.map((h) => (
+                          <View key={h.mint} style={[s.reasonBox, { marginBottom: 4, borderColor: '#ef444430' }]}>
+                            <Text style={[s.toggleChipText, { color: '#ef4444', fontSize: 11 }]}>{h.symbol} → USDC (score {h.signal.score})</Text>
+                            <Text style={[s.listMeta, { fontSize: 9 }]}>{h.signal.reasons.join(' | ')}</Text>
+                          </View>
+                        ))}
+                      </>
+                    )}
+
+                    {/* Entry signals */}
+                    {scanResult.entryCandidates.length > 0 && (
+                      <>
+                        <Text style={[s.fieldLabel, { color: '#22c55e', marginTop: 8, marginBottom: 4 }]}>Entry Signals</Text>
+                        {scanResult.entryCandidates.map((h) => (
+                          <View key={h.mint} style={[s.reasonBox, { marginBottom: 4, borderColor: '#22c55e30' }]}>
+                            <Text style={[s.toggleChipText, { color: '#22c55e', fontSize: 11 }]}>USDC → {h.symbol} (score {h.signal.score})</Text>
+                            <Text style={[s.listMeta, { fontSize: 9 }]}>{h.signal.reasons.join(' | ')}</Text>
+                          </View>
+                        ))}
+                      </>
+                    )}
+
+                    {scanResult.holdings.length === 0 && scanResult.exitCandidates.length === 0 && scanResult.entryCandidates.length === 0 && (
+                      <Text style={[s.listMeta, { marginTop: 8 }]}>No token positions or signals found. Fund the wallet with USDC or tokens to start momentum tracking.</Text>
+                    )}
+                  </View>
+                )}
+              </View>
+            )}
+
+            <View style={[s.reasonBox, { marginTop: 12 }]}>
+              <Text style={s.reasonText}>
+                {config.strategyMode === 'momentum_rotation'
+                  ? 'Momentum mode scans token positions, exits losers to USDC, and enters gainers from USDC. Autopilot runs this on each cycle.'
+                  : 'Autopilot scans every ~2 minutes while the Trading Bot dashboard is open. The same backend action can later be triggered by cron or circle automations.'}
+              </Text>
             </View>
 
-            <Text style={[s.listMeta, { marginTop: 12 }]}>Last scan: {config.lastRunAt ? new Date(config.lastRunAt).toLocaleString() : 'Never'}</Text>
+            <Text style={[s.listMeta, { marginTop: 8 }]}>Last scan: {config.lastRunAt ? new Date(config.lastRunAt).toLocaleString() : 'Never'}</Text>
             <Text style={s.listMeta}>Last auto trade: {config.lastTradeAt ? new Date(config.lastTradeAt).toLocaleString() : 'None yet'}</Text>
-            <Text style={s.listMeta}>Wallet mode: SOL-funded autopilot with reserve protection and daily trade caps.</Text>
+            <Text style={s.listMeta}>Wallet mode: {config.strategyMode === 'momentum_rotation' ? 'Momentum rotation with USDC reserve' : 'SOL-funded autopilot with reserve protection and daily trade caps'}.</Text>
             {config.lastError && <Text style={[s.listMeta, { color: '#ef4444', marginTop: 8 }]}>Last error: {config.lastError}</Text>}
           </>
         )}
@@ -3263,5 +3440,21 @@ const s = StyleSheet.create({
     backgroundColor: '#22c55e',
   },
   pendingBtnText: { fontSize: 12, fontWeight: '700', fontFamily: 'monospace' },
+
+  // Toggle chips (autopilot settings)
+  toggleChip: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 2,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  toggleChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    letterSpacing: 0.5,
+  },
 });
 

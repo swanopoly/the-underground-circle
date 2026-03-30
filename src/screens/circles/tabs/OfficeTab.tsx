@@ -400,6 +400,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   }, [circleId]);
 
   useEffect(() => {
+    setAutoConnectCircleId(circleId);
     loadCircleOffice();
     const unsub = subscribeToCircleOffice(circleId, loadCircleOffice);
     return unsub;

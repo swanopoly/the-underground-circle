@@ -194,7 +194,7 @@ export interface TradingBotAutopilotConfig {
   id?: string | null;
   circleId: string;
   isEnabled: boolean;
-  strategyMode: 'hybrid' | 'featured_only' | 'queue_only';
+  strategyMode: 'hybrid' | 'featured_only' | 'queue_only' | 'momentum_rotation';
   minConfidence: 'high' | 'medium' | 'low';
   maxTradeSol: number;
   maxDailyTrades: number;
@@ -210,7 +210,7 @@ export interface TradingBotAutopilotConfig {
 
 export interface TradingBotAutopilotResult {
   ok: boolean;
-  status: 'executed' | 'skipped' | 'disabled' | 'no_wallet' | 'paused' | 'error';
+  status: 'executed' | 'skipped' | 'disabled' | 'no_wallet' | 'paused' | 'error' | 'scanned';
   message: string;
   wallet?: TradingBotWalletInfo | null;
   config?: TradingBotAutopilotConfig | null;
@@ -977,86 +977,71 @@ export async function createUserHeliusClient(userId?: string): Promise<HeliusCli
 
 // ??? Bot Wallet Integration ??????????????????????????????????????????????????
 
-async function getTradingBotAuthHeaders(): Promise<Record<string, string>> {
-  const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
-  const invalidSessionMessage = 'Your login session is invalid. Sign out and sign back in, then try again.';
-  const buildHeaders = (accessToken: string) => ({
-    'Authorization': 'Bearer ' + accessToken,
-    'apikey': anonKey,
-    'Content-Type': 'application/json',
-  });
-
-  const { data } = await supabase.auth.getSession();
-  const accessToken = data.session?.access_token || null;
-
-  if (accessToken && tradingBotInvalidAccessToken && tradingBotInvalidAccessToken !== accessToken) {
-    tradingBotSessionInvalid = false;
-    tradingBotInvalidAccessToken = null;
-  }
-
-  if (tradingBotSessionInvalid && tradingBotInvalidAccessToken && tradingBotInvalidAccessToken === accessToken) {
-    throw new Error(invalidSessionMessage);
-  }
-
-  if (accessToken && accessToken.split('.').length === 3) {
-    tradingBotSessionInvalid = false;
-    tradingBotInvalidAccessToken = null;
-    return buildHeaders(accessToken);
-  }
-
-  tradingBotSessionInvalid = true;
-  tradingBotInvalidAccessToken = accessToken;
-  throw new Error(invalidSessionMessage);
-}
-
 async function invokeTradingBotWallet<T>(body: Record<string, any>): Promise<T> {
-  const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
-  let headers = await getTradingBotAuthHeaders();
+  const invalidSessionMessage = 'Your login session is invalid. Sign out and sign back in, then try again.';
 
-  const executeRequest = async (requestHeaders: Record<string, string>) => {
-    return fetch(`${supabaseUrl}/functions/v1/trading-bot-wallet`, {
-      method: 'POST',
-      headers: requestHeaders,
-      body: JSON.stringify(body),
-    });
-  };
+  const attempt = async (token?: string): Promise<T> => {
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    const { data, error } = await supabase.functions.invoke('trading-bot-wallet', { body, headers });
 
-  let response = await executeRequest(headers);
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    if (response.status === 401 && text.includes('Invalid JWT')) {
-      const badToken = headers.Authorization.replace('Bearer ', '');
+    if (error) {
+      let errorMessage = '';
       try {
-        const { data: refreshed } = await supabase.auth.refreshSession();
-        const refreshedToken = refreshed?.session?.access_token || null;
-        if (refreshedToken && refreshedToken !== badToken && refreshedToken.split('.').length === 3) {
-          headers = {
-            'Authorization': 'Bearer ' + refreshedToken,
-            'apikey': process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '',
-            'Content-Type': 'application/json',
-          };
-          response = await executeRequest(headers);
-          if (response.ok) {
-            tradingBotSessionInvalid = false;
-            tradingBotInvalidAccessToken = null;
-            return await response.json() as T;
-          }
+        if (error.context && typeof error.context.json === 'function') {
+          const errorBody = await error.context.json();
+          errorMessage = errorBody?.error || error.message || String(error);
+        } else {
+          errorMessage = error.message || String(error);
         }
       } catch {
-        // Keep the original invalid-session handling below.
+        errorMessage = error.message || String(error);
       }
+      throw new Error(errorMessage);
+    }
+
+    return data as T;
+  };
+
+  // Get a fresh token via getUser() which forces a server-side validation + refresh
+  const { data: userData } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+  if (!userData?.user) {
+    tradingBotSessionInvalid = true;
+    throw new Error(invalidSessionMessage);
+  }
+  const { data: sessionData } = await supabase.auth.getSession();
+  const token = sessionData.session?.access_token;
+
+  try {
+    const result = await attempt(token || undefined);
+    tradingBotSessionInvalid = false;
+    tradingBotInvalidAccessToken = null;
+    return result;
+  } catch (err: any) {
+    const msg = err?.message || String(err);
+    const isAuthError = msg.includes('Not authenticated') || msg.includes('Invalid JWT') || msg.includes('unauthorized');
+
+    if (isAuthError) {
+      // Refresh session and retry once
+      try {
+        const { data: refreshed } = await supabase.auth.refreshSession();
+        if (refreshed?.session?.access_token) {
+          const result = await attempt(refreshed.session.access_token);
+          tradingBotSessionInvalid = false;
+          tradingBotInvalidAccessToken = null;
+          return result;
+        }
+      } catch { /* fall through */ }
 
       tradingBotSessionInvalid = true;
-      tradingBotInvalidAccessToken = badToken;
-      throw new Error('Your login session is invalid. Sign out and sign back in, then try again.');
+      tradingBotInvalidAccessToken = null;
+      throw new Error(invalidSessionMessage);
     }
-    throw new Error(text ? `${response.status}: ${text}` : `Bot wallet request failed (${response.status})`);
-  }
 
-  tradingBotSessionInvalid = false;
-  tradingBotInvalidAccessToken = null;
-  return await response.json() as T;
+    throw err;
+  }
 }
 
 export async function getTradingBotWallet(circleId: string): Promise<TradingBotWalletInfo | null> {
@@ -1206,6 +1191,80 @@ export async function runTradingBotAutopilot(
     config: data?.config || null,
     executedTrade: data?.executedTrade || undefined,
   };
+}
+
+// ─── Bot Wallet Withdraw ─────────────────────────────────────────────────────
+
+export interface BotWalletWithdrawResult {
+  success: boolean;
+  txHash: string;
+  walletAddress: string;
+  destination: string;
+  amountLamports: number;
+  amountSol: number;
+}
+
+export async function withdrawFromBotWallet(params: {
+  circleId: string;
+  destination: string;
+  amountLamports?: number;
+  withdrawAll?: boolean;
+}): Promise<BotWalletWithdrawResult> {
+  const data = await invokeTradingBotWallet<BotWalletWithdrawResult & { error?: string }>({
+    action: 'execute_transfer',
+    circleId: params.circleId,
+    destination: params.destination,
+    amountLamports: params.amountLamports,
+    withdrawAll: params.withdrawAll || false,
+  });
+  if (data?.error) throw new Error(data.error);
+  return data;
+}
+
+// ─── Momentum Scan & Rotate ─────────────────────────────────────────────────
+
+export interface MomentumHolding {
+  mint: string;
+  symbol: string;
+  balance: number;
+  decimals: number;
+  price: number;
+  valueUsd: number;
+  signal: {
+    score: number;
+    action: 'exit' | 'enter' | 'hold';
+    reasons: string[];
+  };
+}
+
+export interface MomentumScanResult {
+  holdings: MomentumHolding[];
+  exitCandidates: MomentumHolding[];
+  entryCandidates: MomentumHolding[];
+  executedTrade: {
+    action: string;
+    symbol: string;
+    mint: string;
+    score: number;
+    reasons: string[];
+    txHash?: string;
+    inputAmount?: string;
+    outputAmount?: string;
+    error?: string;
+  } | null;
+}
+
+export async function scanBotWalletMomentum(
+  circleId: string,
+  options?: { autoExecute?: boolean },
+): Promise<MomentumScanResult> {
+  const data = await invokeTradingBotWallet<MomentumScanResult & { error?: string }>({
+    action: 'scan_and_rotate',
+    circleId,
+    autoExecute: options?.autoExecute || false,
+  });
+  if ((data as any)?.error) throw new Error((data as any).error);
+  return data;
 }
 
 // ─── DCA Config Storage ──────────────────────────────────────────────────────
