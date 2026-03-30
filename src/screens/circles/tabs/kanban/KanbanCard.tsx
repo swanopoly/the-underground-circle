@@ -73,9 +73,11 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
   const dueDateInfo = !isDone ? getDueDateInfo(task.due_date) : null;
   const dragRef = useRef<View>(null);
 
-  const assignedAgent = task.assigned_agent_id
-    ? agents.find(a => a.id === task.assigned_agent_id)
-    : null;
+  const assignedAgentIds = task.assigned_agent_ids || (task.assigned_agent_id ? [task.assigned_agent_id] : []);
+  const assignedAgents = assignedAgentIds
+    .map(agentId => agents.find(a => a.id === agentId))
+    .filter(Boolean) as CircleOfficeAgent[];
+  const assignedAgent = assignedAgents[0] || null;
 
   // Resolve goal from joined data or from goals list
   const goalData = task.goal
@@ -86,8 +88,17 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
   const goalAgentIds = goalData && 'assigned_agent_ids' in goalData
     ? (goalData as GoalWithCount).assigned_agent_ids || []
     : [];
-  const totalReviewers = Math.max(goalAgentIds.length, 1);
+  const reviewAgentIds = assignedAgentIds.length > 0 ? assignedAgentIds : goalAgentIds;
+  const totalReviewers = Math.max(reviewAgentIds.length, 1);
   const approvedCount = peerApprovals.length;
+  const latestRunStatus = task.last_agent_run_status;
+  const latestRunColor = latestRunStatus === 'completed'
+    ? '#22c55e'
+    : latestRunStatus === 'failed'
+      ? '#ef4444'
+      : latestRunStatus === 'running'
+        ? '#f59e0b'
+        : '#6f6f6f';
 
   const pb = priorityBadge(task.priority);
 
@@ -173,7 +184,7 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
           {isPeerReview && (
             <View style={s.reviewRow}>
               <View style={s.reviewAvatars}>
-                {goalAgentIds.slice(0, 5).map((aid, i) => {
+                {reviewAgentIds.slice(0, 5).map((aid, i) => {
                   const approved = peerApprovals.includes(aid);
                   const agent = agents.find(a => a.id === aid);
                   const roster = DEFAULT_AGENT_ROSTER.find(r => agent?.name?.toLowerCase().includes(r.name.toLowerCase()));
@@ -210,15 +221,22 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
 
             <View style={s.footerRight}>
               {/* Agent avatar + model indicator */}
-              {assignedAgent ? (
+              {assignedAgents.length > 0 ? (
                 <>
-                  <View style={[s.avatar, { backgroundColor: assignedAgent.color || '#9e9e9e' }]}>
-                    <Text style={s.avatarText}>{assignedAgent.name[0].toUpperCase()}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <View style={[s.avatar, { backgroundColor: assignedAgent?.color || '#9e9e9e' }]}>
+                      <Text style={s.avatarText}>{assignedAgent?.name?.[0]?.toUpperCase() || '?'}</Text>
+                    </View>
+                    {assignedAgents.length > 1 && (
+                      <View style={[s.avatar, { marginLeft: -6, backgroundColor: '#141414', borderWidth: 1, borderColor: '#2a2a2a' }]}>
+                        <Text style={s.avatarText}>+{assignedAgents.length - 1}</Text>
+                      </View>
+                    )}
                   </View>
                   {(() => {
-                    const roster = DEFAULT_AGENT_ROSTER.find(r =>
-                      assignedAgent.name?.toLowerCase().includes(r.name.toLowerCase())
-                    );
+                    const roster = assignedAgent
+                      ? DEFAULT_AGENT_ROSTER.find(r => assignedAgent.name?.toLowerCase().includes(r.name.toLowerCase()))
+                      : null;
                     const mi = roster ? MODEL_ICONS[roster.preferredModel] : null;
                     return mi ? (
                       <View style={[s.modelPill, { backgroundColor: mi.color + '15' }]}>
@@ -244,6 +262,12 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
               {task.review_comments_count != null && task.review_comments_count > 0 && (
                 <View style={s.commentBadge}>
                   <Text style={s.commentText}>{'\uD83D\uDCAC'} {task.review_comments_count}</Text>
+                </View>
+              )}
+
+              {latestRunStatus && (
+                <View style={[s.dueBadge, { backgroundColor: latestRunColor + '15' }]}>
+                  <Text style={[s.dueText, { color: latestRunColor }]}>Run {latestRunStatus}</Text>
                 </View>
               )}
 

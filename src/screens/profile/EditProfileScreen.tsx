@@ -7,6 +7,7 @@ import {
   TextInput,
   Pressable,
   Alert,
+  Platform,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { User, Achievement } from '../../types';
@@ -102,6 +103,20 @@ export default function EditProfileScreen({ navigation }: any) {
     setLoading(false);
   };
 
+  const handleSignOut = async () => {
+    if (Platform.OS === 'web') {
+      if (window.confirm('Sign out now?')) {
+        await supabase.auth.signOut({ scope: 'local' });
+      }
+      return;
+    }
+
+    Alert.alert('Sign Out', 'Sign out now?', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Sign Out', style: 'destructive', onPress: () => { void supabase.auth.signOut({ scope: 'local' }); } },
+    ]);
+  };
+
   const togglePinnedAchievement = (achievementId: string) => {
     setPinnedAchievements(prev => {
       if (prev.includes(achievementId)) {
@@ -122,10 +137,12 @@ export default function EditProfileScreen({ navigation }: any) {
     <View style={styles.container}>
       <View style={styles.header}>
         <Pressable onPress={() => navigation.goBack()}>
-          <Text style={styles.headerBack}>← BACK</Text>
+          <Text style={styles.headerBack}>BACK</Text>
         </Pressable>
         <Text style={styles.headerTitle}>EDIT PROFILE</Text>
-        <View style={{ width: 60 }} />
+        <Pressable onPress={handleSignOut}>
+          <Text style={styles.headerSignOut}>SIGN OUT</Text>
+        </Pressable>
       </View>
 
       <ScrollView contentContainerStyle={styles.scrollContent}>
@@ -291,6 +308,7 @@ const styles = StyleSheet.create({
   },
   headerBack: { color: '#6366f1', fontSize: 14, fontWeight: '700' },
   headerTitle: { color: '#fff', fontSize: 18, fontWeight: '900', letterSpacing: 2 },
+  headerSignOut: { color: '#ef4444', fontSize: 12, fontWeight: '800', letterSpacing: 1 },
   scrollContent: { flexGrow: 1 },
   inner: {
     width: '100%',
@@ -430,3 +448,6 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
 });
+
+
+

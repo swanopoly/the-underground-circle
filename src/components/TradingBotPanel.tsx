@@ -1,16 +1,18 @@
 /**
- * TradingBotPanel — Backpack compartment for Solana trading
+ * TradingBotPanel - Backpack compartment for Solana trading
  *
  * Tabs:
  *   - Portfolio: wallet overview, token balances, total value
+ *   - Paper: simulated trading with persistent paper equity
  *   - Trade: manual swap via Jupiter
+ *   - Backtest: snapshot strategy tests and run history
  *   - DCA: dollar-cost averaging configs
  *   - Alerts: price alerts management
  *   - Wallets: tracked whale wallets
- *   - History: trade log with P&L
+ *   - History: trade log with live, paper, and backtest activity
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -37,6 +39,11 @@ import {
   type Position,
   type TokenRiskScore,
   type TechnicalAnalysis,
+  type RebalancePlan,
+  type TradeLogEntry,
+  type TradingExecutionMode,
+  type TradingBotWalletInfo,
+  type TradingBotAutopilotConfig,
   getUserDCAConfigs,
   getUserAlerts,
   getTrackedWallets,
@@ -49,34 +56,50 @@ import {
   saveTradeAlert,
   trackWallet,
   logTrade,
+  getTradingLog,
   getFeaturedTrades,
   generateFeaturedTrades,
   executeFeaturedTrade,
   getFeaturedTradeStats,
   getOpenPositions,
   closePosition,
+  closePaperPosition,
   checkPositionStops,
   scoreTokenRisk,
   calculateTechnicalSignals,
+  generateRebalancePlan,
   getPortfolioAllocation,
+  savePosition,
   expirePendingActions,
+  getTradingBotWallet,
+  createTradingBotWallet,
+  setTradingBotWalletStatus,
+  executeBotWalletSwap,
+  getTradingBotAutopilotConfig,
+  saveTradingBotAutopilotConfig,
+  runTradingBotAutopilot,
   SOL_MINT,
   USDC_MINT,
   SOLANA_TOKEN_REGISTRY,
 } from '../lib/heliusTrading';
+import { TradingBotPaperTab } from './TradingBotPaperTab';
+import { TradingBotBacktestTab } from './TradingBotBacktestTab';
 
 const ACCENT = '#6366f1';
-type Tab = 'featured' | 'pending' | 'positions' | 'signals' | 'portfolio' | 'trade' | 'dca' | 'alerts' | 'wallets' | 'history';
+type Tab = 'featured' | 'pending' | 'positions' | 'signals' | 'portfolio' | 'paper' | 'trade' | 'backtest' | 'bot' | 'dca' | 'alerts' | 'wallets' | 'history';
 
 const ALL_TABS: { key: Tab; label: string; icon: string; color: string }[] = [
   { key: 'portfolio', label: 'Portfolio',  icon: '$',  color: '#22c55e' },
+  { key: 'paper',     label: 'Paper',      icon: 'PP', color: '#14b8a6' },
   { key: 'trade',     label: 'Trade',      icon: '<>', color: '#3b82f6' },
   { key: 'positions', label: 'Positions',  icon: '[]', color: '#a855f7' },
   { key: 'signals',   label: 'Signals',    icon: '//', color: '#22d3ee' },
+  { key: 'backtest',  label: 'Lab',        icon: 'BT', color: '#f97316' },
+  { key: 'bot',       label: 'Bot',        icon: 'AI', color: '#84cc16' },
   { key: 'featured',  label: 'Ideas',      icon: '*',  color: '#f59e0b' },
   { key: 'dca',       label: 'DCA',        icon: '~',  color: '#6366f1' },
   { key: 'alerts',    label: 'Alerts',     icon: '!',  color: '#ef4444' },
-  { key: 'pending',   label: 'Queue',      icon: '..',  color: '#f97316' },
+  { key: 'pending',   label: 'Queue',      icon: '..', color: '#f97316' },
   { key: 'wallets',   label: 'Watch',      icon: '@',  color: '#ec4899' },
   { key: 'history',   label: 'Log',        icon: '#',  color: '#9e9e9e' },
 ];
@@ -87,47 +110,425 @@ interface Props {
   accentColor?: string;
 }
 
+
+type RebalancePresetId = 'core' | 'balanced' | 'stable';
+type RebalanceTargetInput = { symbol: string; targetPct: string };
+
+interface TokenMarketSnapshot {
+  mint: string;
+  symbol: string;
+  priceUsd: number;
+  priceChange5m: number;
+  priceChange1h: number;
+  priceChange6h: number;
+  priceChange24h: number;
+  volume24h: number;
+  liquidityUsd: number;
+  marketCap: number;
+  fdv: number;
+  buys24h: number;
+  sells24h: number;
+  pairCreatedAt?: number;
+  dexId?: string;
+  pairUrl?: string;
+  activeBoosts: number;
+  websites: string[];
+  socials: string[];
+}
+
+const COMMON_TRADING_SYMBOLS = ['SOL', 'USDC', 'JUP', 'BONK', 'PYTH', 'JTO', 'WIF', 'RAY'] as const;
+
+const REBALANCE_PRESETS: Record<RebalancePresetId, { label: string; targets: Array<{ symbol: string; targetPct: number }> }> = {
+  core: {
+    label: 'Core',
+    targets: [
+      { symbol: 'SOL', targetPct: 45 },
+      { symbol: 'USDC', targetPct: 20 },
+      { symbol: 'JUP', targetPct: 15 },
+      { symbol: 'JTO', targetPct: 10 },
+      { symbol: 'PYTH', targetPct: 10 },
+    ],
+  },
+  balanced: {
+    label: 'Balanced',
+    targets: [
+      { symbol: 'SOL', targetPct: 35 },
+      { symbol: 'USDC', targetPct: 30 },
+      { symbol: 'JUP', targetPct: 15 },
+      { symbol: 'RAY', targetPct: 10 },
+      { symbol: 'PYTH', targetPct: 10 },
+    ],
+  },
+  stable: {
+    label: 'Stable',
+    targets: [
+      { symbol: 'USDC', targetPct: 45 },
+      { symbol: 'SOL', targetPct: 30 },
+      { symbol: 'JUP', targetPct: 10 },
+      { symbol: 'JTO', targetPct: 10 },
+      { symbol: 'PYTH', targetPct: 5 },
+    ],
+  },
+};
+
+function getTokenMetaByMint(mint: string): { symbol: string; name: string; decimals: number } {
+  const entry = Object.entries(SOLANA_TOKEN_REGISTRY).find(([, token]) => token.mint === mint);
+  if (entry) {
+    return { symbol: entry[0], name: entry[1].name, decimals: entry[1].decimals };
+  }
+  return {
+    symbol: mint === SOL_MINT ? 'SOL' : mint === USDC_MINT ? 'USDC' : mint.slice(0, 6),
+    name: mint === SOL_MINT ? 'Solana' : mint === USDC_MINT ? 'USD Coin' : 'Custom Token',
+    decimals: mint === SOL_MINT ? 9 : 6,
+  };
+}
+
+function getTokenMetaBySymbol(symbol: string): { mint: string; symbol: string; decimals: number; name: string } | null {
+  const token = SOLANA_TOKEN_REGISTRY[symbol.toUpperCase()];
+  return token
+    ? { mint: token.mint, symbol: symbol.toUpperCase(), decimals: token.decimals, name: token.name }
+    : null;
+}
+
+function parsePositiveNumber(value: string): number | undefined {
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function formatCompactUsd(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '$0';
+  if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(2)}B`;
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
+  return `$${value.toFixed(2)}`;
+}
+
+function formatPct(value: number): string {
+  return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
+}
+
+function formatAge(pairCreatedAt?: number): string {
+  if (!pairCreatedAt) return 'n/a';
+  const ageHours = (Date.now() - pairCreatedAt) / 3_600_000;
+  if (ageHours < 24) return `${Math.max(1, Math.round(ageHours))}h`;
+  return `${Math.max(1, Math.round(ageHours / 24))}d`;
+}
+
+function convertFromSmallestUnit(amount: string | number, mint: string): number {
+  const value = typeof amount === 'string' ? parseFloat(amount || '0') : amount;
+  if (!Number.isFinite(value)) return 0;
+  return value / Math.pow(10, getTokenMetaByMint(mint).decimals);
+}
+
+function getPairTokenPrice(pair: any, mint: string): number {
+  const baseAddress = pair?.baseToken?.address;
+  const priceUsd = parseFloat(pair?.priceUsd || '0') || 0;
+  if (baseAddress === mint) return priceUsd;
+  const priceNative = parseFloat(pair?.priceNative || '0') || 0;
+  return priceNative > 0 && priceUsd > 0 ? priceUsd / priceNative : priceUsd;
+}
+
+async function fetchTokenMarketSnapshot(mint: string): Promise<TokenMarketSnapshot | null> {
+  try {
+    const resp = await fetch(`https://api.dexscreener.com/token-pairs/v1/solana/${mint}`);
+    if (!resp.ok) return null;
+    const pairs = await resp.json();
+    if (!Array.isArray(pairs) || pairs.length === 0) return null;
+
+    const bestPair = [...pairs].sort((a, b) => {
+      const liquidityDiff = (b?.liquidity?.usd || 0) - (a?.liquidity?.usd || 0);
+      if (liquidityDiff !== 0) return liquidityDiff;
+      return (b?.volume?.h24 || 0) - (a?.volume?.h24 || 0);
+    })[0];
+
+    const meta = getTokenMetaByMint(mint);
+    return {
+      mint,
+      symbol: meta.symbol,
+      priceUsd: getPairTokenPrice(bestPair, mint),
+      priceChange5m: Number(bestPair?.priceChange?.m5 || 0),
+      priceChange1h: Number(bestPair?.priceChange?.h1 || 0),
+      priceChange6h: Number(bestPair?.priceChange?.h6 || 0),
+      priceChange24h: Number(bestPair?.priceChange?.h24 || 0),
+      volume24h: Number(bestPair?.volume?.h24 || 0),
+      liquidityUsd: Number(bestPair?.liquidity?.usd || 0),
+      marketCap: Number(bestPair?.marketCap || 0),
+      fdv: Number(bestPair?.fdv || 0),
+      buys24h: Number(bestPair?.txns?.h24?.buys || 0),
+      sells24h: Number(bestPair?.txns?.h24?.sells || 0),
+      pairCreatedAt: bestPair?.pairCreatedAt,
+      dexId: bestPair?.dexId,
+      pairUrl: bestPair?.url,
+      activeBoosts: Number(bestPair?.boosts?.active || 0),
+      websites: Array.isArray(bestPair?.info?.websites) ? bestPair.info.websites.map((site: any) => site?.url).filter(Boolean) : [],
+      socials: Array.isArray(bestPair?.info?.socials) ? bestPair.info.socials.map((social: any) => social?.handle || social?.platform).filter(Boolean) : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function anchorPriceFromChange(currentPrice: number, changePct: number): number {
+  const ratio = 1 + ((changePct || 0) / 100);
+  return ratio > 0.05 ? currentPrice / ratio : currentPrice;
+}
+
+function buildPriceSeriesFromSnapshot(snapshot: TokenMarketSnapshot): number[] {
+  const current = snapshot.priceUsd || 0;
+  if (current <= 0) return Array.from({ length: 31 }, () => 0);
+
+  const anchors = [
+    { index: 0, price: anchorPriceFromChange(current, snapshot.priceChange24h) },
+    { index: 18, price: anchorPriceFromChange(current, snapshot.priceChange6h) },
+    { index: 26, price: anchorPriceFromChange(current, snapshot.priceChange1h) },
+    { index: 29, price: anchorPriceFromChange(current, snapshot.priceChange5m) },
+    { index: 30, price: current },
+  ];
+
+  const series = Array.from({ length: 31 }, () => current);
+  for (let i = 0; i < anchors.length - 1; i += 1) {
+    const start = anchors[i];
+    const end = anchors[i + 1];
+    for (let idx = start.index; idx <= end.index; idx += 1) {
+      const progress = end.index === start.index ? 1 : (idx - start.index) / (end.index - start.index);
+      series[idx] = start.price + ((end.price - start.price) * progress);
+    }
+  }
+  return series.map(value => Math.max(value, 0.0000001));
+}
+
+function buildLiveAnalysisFromSnapshot(snapshot: TokenMarketSnapshot, symbol: string, mint: string): TechnicalAnalysis {
+  const base = calculateTechnicalSignals(buildPriceSeriesFromSnapshot(snapshot), symbol, mint);
+  const totalTxns = snapshot.buys24h + snapshot.sells24h;
+  const buyRatio = totalTxns > 0 ? snapshot.buys24h / totalTxns : 0.5;
+  const orderFlowSignal = {
+    indicator: 'Order Flow 24h',
+    value: Math.round(buyRatio * 100),
+    signal: buyRatio > 0.56 ? 'buy' as const : buyRatio < 0.44 ? 'sell' as const : 'neutral' as const,
+    strength: Math.min(1, Math.abs(buyRatio - 0.5) * 2.4),
+  };
+  const liquidityStrength = snapshot.liquidityUsd >= 250_000 ? 0.9 : snapshot.liquidityUsd >= 100_000 ? 0.65 : snapshot.liquidityUsd >= 50_000 ? 0.45 : 0.2;
+  const liquiditySignal = {
+    indicator: 'Liquidity Depth',
+    value: Math.round(snapshot.liquidityUsd),
+    signal: snapshot.liquidityUsd >= 250_000 ? 'buy' as const : snapshot.liquidityUsd < 50_000 ? 'sell' as const : 'neutral' as const,
+    strength: liquidityStrength,
+  };
+  const boostSignal = {
+    indicator: 'Momentum 24h',
+    value: Math.round(snapshot.priceChange24h * 10) / 10,
+    signal: snapshot.priceChange24h >= 8 ? 'buy' as const : snapshot.priceChange24h <= -8 ? 'sell' as const : 'neutral' as const,
+    strength: Math.min(1, Math.abs(snapshot.priceChange24h) / 25),
+  };
+
+  const signals = [...base.signals, orderFlowSignal, liquiditySignal, boostSignal];
+  const combinedScore = Math.max(
+    -100,
+    Math.min(
+      100,
+      Math.round(
+        (base.overallScore * 0.7)
+        + ((buyRatio - 0.5) * 80)
+        + (snapshot.priceChange1h * 1.5)
+        + (snapshot.priceChange24h * 0.5)
+        + (snapshot.liquidityUsd >= 250_000 ? 10 : snapshot.liquidityUsd < 50_000 ? -10 : 0)
+      ),
+    ),
+  );
+
+  const overallSignal: TechnicalAnalysis['overallSignal'] = combinedScore >= 60
+    ? 'strong_buy'
+    : combinedScore >= 20
+      ? 'buy'
+      : combinedScore <= -60
+        ? 'strong_sell'
+        : combinedScore <= -20
+          ? 'sell'
+          : 'neutral';
+
+  const volatility = Math.max(Math.abs(snapshot.priceChange5m), Math.abs(snapshot.priceChange1h), Math.abs(snapshot.priceChange6h), 2);
+  const support = snapshot.priceUsd * (1 - Math.min(0.12, volatility / 160));
+  const resistance = snapshot.priceUsd * (1 + Math.min(0.15, Math.max(0.03, Math.abs(snapshot.priceChange24h) / 100)));
+
+  return {
+    ...base,
+    currentPrice: snapshot.priceUsd,
+    overallScore: combinedScore,
+    overallSignal,
+    support,
+    resistance,
+    signals,
+  };
+}
+
+function buildTargetRows(preset: RebalancePresetId): RebalanceTargetInput[] {
+  return REBALANCE_PRESETS[preset].targets.map(target => ({
+    symbol: target.symbol,
+    targetPct: String(target.targetPct),
+  }));
+}
+
+
+function getExecutionModeColor(mode: TradingExecutionMode): string {
+  switch (mode) {
+    case 'paper':
+      return '#14b8a6';
+    case 'backtest':
+      return '#f97316';
+    default:
+      return '#22c55e';
+  }
+}
+
+function getExecutionModeLabel(mode: TradingExecutionMode): string {
+  switch (mode) {
+    case 'paper':
+      return 'PAPER';
+    case 'backtest':
+      return 'BACKTEST';
+    default:
+      return 'LIVE';
+  }
+}
+
 export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT }: Props) {
   const [tab, setTab] = useState<Tab>('portfolio');
   const [client, setClient] = useState<HeliusClient | null>(null);
   const [loading, setLoading] = useState(true);
   const [noKey, setNoKey] = useState(false);
+  const [noKeyMessage, setNoKeyMessage] = useState('Add your Helius API key in Integrations to enable the trading bot.');
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [botWallet, setBotWallet] = useState<TradingBotWalletInfo | null>(null);
   const [badges, setBadges] = useState<Partial<Record<Tab, number>>>({});
+  const autopilotBusyRef = useRef(false);
 
-  useEffect(() => {
-    init();
-  }, [userId]);
+  const refreshBotWallet = useCallback(async () => {
+    try {
+      setBotWallet(await getTradingBotWallet(circleId));
+    } catch {
+      setBotWallet(null);
+    }
+  }, [circleId]);
 
-  const init = async () => {
+  const init = useCallback(async () => {
     setLoading(true);
+    setNoKey(false);
+    setNoKeyMessage('Add your Helius API key in Integrations to enable the trading bot.');
     try {
       const c = await createUserHeliusClient(userId);
-      if (!c) { setNoKey(true); setLoading(false); return; }
+      if (!c) {
+        setClient(null);
+      setBotWallet(null);
+        try {
+          const { data: allKeys } = await supabase.rpc('list_user_api_keys');
+          const hasActiveHelius = (allKeys || []).some((key: any) => key?.provider === 'helius' && key?.is_active);
+          if (hasActiveHelius) {
+            setNoKeyMessage('Helius is saved in Integrations, but this Supabase project is missing the get_user_api_key RPC. Apply the latest DB migrations, or re-save the Helius key once after this update to refresh the local cache on this device.');
+          }
+        } catch {
+          // Ignore metadata lookup failures and keep the default message.
+        }
+        setNoKey(true);
+        return;
+      }
       setClient(c);
 
-      // Parallel: fetch wallet + badge counts
       const countSafe = async (q: any): Promise<number> => {
         try { const r = await q; return r.count || 0; } catch { return 0; }
       };
-      const [profileRes, pendingCount, positionCount, alertCount] = await Promise.all([
+      const [profileRes, pendingCount, positionCount, alertCount, nextBotWallet] = await Promise.all([
         supabase.from('profiles').select('wallet_address, wallet_address_sol').eq('id', userId).single(),
         countSafe(supabase.from('trading_pending_actions').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('status', 'pending')),
         countSafe(supabase.from('trading_positions').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('status', 'open')),
-        countSafe(supabase.from('trading_alerts').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('is_active', true)),
+        countSafe(supabase.from('trading_alerts').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('triggered', false)),
+        getTradingBotWallet(circleId).catch(() => null),
       ]);
 
       const addr = profileRes.data?.wallet_address_sol || profileRes.data?.wallet_address || null;
-      if (addr) setWalletAddress(addr);
+      setWalletAddress(addr);
+      setBotWallet(nextBotWallet);
 
-      const b: Partial<Record<Tab, number>> = {};
-      if (pendingCount > 0) b.pending = pendingCount as number;
-      if (positionCount > 0) b.positions = positionCount as number;
-      if (alertCount > 0) b.alerts = alertCount as number;
-      setBadges(b);
-    } catch {}
-    setLoading(false);
-  };
+      const nextBadges: Partial<Record<Tab, number>> = {};
+      if (pendingCount > 0) nextBadges.pending = pendingCount as number;
+      if (positionCount > 0) nextBadges.positions = positionCount as number;
+      if (alertCount > 0) nextBadges.alerts = alertCount as number;
+      setBadges(nextBadges);
+    } catch (err) {
+      console.warn('[TradingBotPanel] init failed', err);
+      setClient(null);
+      if (`${(err as any)?.message || err || ''}`.includes('get_user_api_key')) {
+        setNoKeyMessage('Helius key lookup failed because the backend get_user_api_key RPC is missing. Apply the latest DB migrations, or re-save the Helius key once after this update to refresh the local cache on this device.');
+      }
+      setNoKey(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [circleId, userId]);
+
+  useEffect(() => {
+    init();
+  }, [init]);
+
+  useEffect(() => {
+    if (RNPlatform.OS !== 'web' || typeof window === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+    const handleFocus = () => { init(); };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        init();
+      }
+    };
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [init]);
+
+  useEffect(() => {
+    if (!botWallet || botWallet.status !== 'active') {
+      return;
+    }
+
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled || autopilotBusyRef.current) {
+        return;
+      }
+      if (RNPlatform.OS === 'web' && typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
+
+      autopilotBusyRef.current = true;
+      try {
+        const result = await runTradingBotAutopilot(circleId, { triggerSource: 'dashboard_poll' });
+        if (cancelled) {
+          return;
+        }
+        if (result.wallet) {
+          setBotWallet(result.wallet);
+        }
+        if (result.status === 'executed') {
+          await init();
+        }
+      } catch {
+        // Ignore background autopilot failures here; the Bot tab surfaces the error state.
+      } finally {
+        autopilotBusyRef.current = false;
+      }
+    };
+
+    const warmup = setTimeout(() => { void tick(); }, 15000);
+    const interval = setInterval(() => { void tick(); }, 120000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(warmup);
+      clearInterval(interval);
+    };
+  }, [botWallet?.id, botWallet?.status, circleId, init]);
 
   if (loading) {
     return <LoadingScreen />;
@@ -136,10 +537,10 @@ export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT
   if (noKey) {
     return (
       <View style={s.center}>
-        <Text style={s.emptyIcon}>◎</Text>
+        <Text style={s.emptyIcon}>O</Text>
         <Text style={s.emptyTitle}>Helius Not Connected</Text>
         <Text style={s.emptyDesc}>
-          Add your Helius API key in Integrations to enable the trading bot.
+          {noKeyMessage}
         </Text>
       </View>
     );
@@ -178,14 +579,17 @@ export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT
 
       {/* Content */}
       <View style={s.content}>
-        {tab === 'portfolio' && <PortfolioTab client={client!} walletAddress={walletAddress} userId={userId} />}
-        {tab === 'trade' && <TradeTab client={client!} walletAddress={walletAddress} userId={userId} />}
+        {tab === 'portfolio' && <PortfolioTab client={client!} walletAddress={walletAddress} userId={userId} circleId={circleId} />}
+        {tab === 'paper' && <TradingBotPaperTab client={client!} userId={userId} circleId={circleId} />}
+        {tab === 'trade' && <TradeTab client={client!} walletAddress={walletAddress} userId={userId} circleId={circleId} botWallet={botWallet} onBotWalletRefresh={refreshBotWallet} />}
         {tab === 'positions' && <PositionsTab client={client!} userId={userId} />}
         {tab === 'signals' && <SignalsTab client={client!} userId={userId} />}
-        {tab === 'featured' && <FeaturedTab client={client!} walletAddress={walletAddress} userId={userId} />}
+        {tab === 'backtest' && <TradingBotBacktestTab client={client!} userId={userId} circleId={circleId} />}
+        {tab === 'bot' && <BotWalletTab circleId={circleId} walletAddress={walletAddress} botWallet={botWallet} onBotWalletRefresh={refreshBotWallet} onTradingStateRefresh={init} />}
+        {tab === 'featured' && <FeaturedTab client={client!} walletAddress={walletAddress} userId={userId} circleId={circleId} botWallet={botWallet} onBotWalletRefresh={refreshBotWallet} />}
         {tab === 'dca' && <DCATab client={client!} userId={userId} />}
         {tab === 'alerts' && <AlertsTab client={client!} userId={userId} />}
-        {tab === 'pending' && <PendingTab client={client!} walletAddress={walletAddress} userId={userId} />}
+        {tab === 'pending' && <PendingTab client={client!} walletAddress={walletAddress} userId={userId} circleId={circleId} botWallet={botWallet} onBotWalletRefresh={refreshBotWallet} />}
         {tab === 'wallets' && <WalletsTab client={client!} userId={userId} />}
         {tab === 'history' && <HistoryTab userId={userId} />}
       </View>
@@ -193,9 +597,306 @@ export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT
   );
 }
 
-// ─── Featured Trades Tab ──────────────────────────────────────────────────────
+// ??? Bot Wallet Tab ???????????????????????????????????????????????????????????
 
-function FeaturedTab({ client, walletAddress, userId }: { client: HeliusClient; walletAddress: string | null; userId: string }) {
+function BotWalletTab({
+  circleId,
+  walletAddress,
+  botWallet,
+  onBotWalletRefresh,
+  onTradingStateRefresh,
+}: {
+  circleId: string;
+  walletAddress: string | null;
+  botWallet: TradingBotWalletInfo | null;
+  onBotWalletRefresh: () => Promise<void>;
+  onTradingStateRefresh: () => Promise<void>;
+}) {
+  const [creating, setCreating] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [loadingConfig, setLoadingConfig] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [runningAutopilot, setRunningAutopilot] = useState(false);
+  const [config, setConfig] = useState<TradingBotAutopilotConfig | null>(null);
+  const [maxTradeSol, setMaxTradeSol] = useState('0.25');
+  const [maxDailyTrades, setMaxDailyTrades] = useState('3');
+  const [slippageCap, setSlippageCap] = useState('150');
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  const syncDrafts = useCallback((nextConfig: TradingBotAutopilotConfig | null) => {
+    setConfig(nextConfig);
+    if (!nextConfig) return;
+    setMaxTradeSol(String(nextConfig.maxTradeSol));
+    setMaxDailyTrades(String(nextConfig.maxDailyTrades));
+    setSlippageCap(String(nextConfig.slippageBpsCap));
+  }, []);
+
+  const loadConfig = useCallback(async () => {
+    if (!botWallet) {
+      syncDrafts(null);
+      return;
+    }
+    setLoadingConfig(true);
+    try {
+      const nextConfig = await getTradingBotAutopilotConfig(circleId);
+      syncDrafts(nextConfig);
+    } catch (err: any) {
+      setStatusMessage(`Failed to load autopilot config: ${err.message || err}`);
+    }
+    setLoadingConfig(false);
+  }, [botWallet, circleId, syncDrafts]);
+
+  useEffect(() => {
+    void loadConfig();
+  }, [loadConfig]);
+
+  const handleCreate = async () => {
+    setCreating(true);
+    try {
+      await createTradingBotWallet(circleId);
+      await onTradingStateRefresh();
+      setStatusMessage('Bot wallet created. Fund it with a small SOL balance, then configure autopilot.');
+    } catch (err: any) {
+      alert(`Failed to create bot wallet: ${err.message || err}`);
+    }
+    setCreating(false);
+  };
+
+  const handleToggleStatus = async () => {
+    if (!botWallet) return;
+    setUpdating(true);
+    try {
+      await setTradingBotWalletStatus(circleId, botWallet.status === 'active' ? 'paused' : 'active');
+      await onTradingStateRefresh();
+      setStatusMessage(botWallet.status === 'active' ? 'Bot wallet paused.' : 'Bot wallet resumed.');
+    } catch (err: any) {
+      alert(`Failed to update bot wallet: ${err.message || err}`);
+    }
+    setUpdating(false);
+  };
+
+  const handleCopyAddress = async () => {
+    if (!botWallet?.address || RNPlatform.OS !== 'web' || !navigator?.clipboard) return;
+    await navigator.clipboard.writeText(botWallet.address);
+    alert('Bot wallet address copied.');
+  };
+
+  const handleSaveConfig = async () => {
+    if (!config) return;
+    setSavingConfig(true);
+    setStatusMessage(null);
+    try {
+      const nextConfig = await saveTradingBotAutopilotConfig(circleId, {
+        isEnabled: config.isEnabled,
+        strategyMode: config.strategyMode,
+        minConfidence: config.minConfidence,
+        maxTradeSol: Math.max(0.01, parseFloat(maxTradeSol || '0.25') || 0.25),
+        maxDailyTrades: Math.max(1, parseInt(maxDailyTrades || '3', 10) || 3),
+        allowFeaturedTrades: config.allowFeaturedTrades,
+        allowPendingActions: config.allowPendingActions,
+        slippageBpsCap: Math.max(25, parseInt(slippageCap || '150', 10) || 150),
+        autoPauseOnError: config.autoPauseOnError,
+      });
+      syncDrafts(nextConfig);
+      setStatusMessage('Autopilot settings saved.');
+    } catch (err: any) {
+      alert(`Failed to save autopilot settings: ${err.message || err}`);
+    }
+    setSavingConfig(false);
+  };
+
+  const handleRunAutopilot = async () => {
+    setRunningAutopilot(true);
+    setStatusMessage(null);
+    try {
+      const result = await runTradingBotAutopilot(circleId, { force: true, triggerSource: 'bot_tab_manual' });
+      if (result.config) {
+        syncDrafts(result.config);
+      }
+      if (result.wallet) {
+        await onBotWalletRefresh();
+      }
+      if (result.status === 'executed') {
+        await onTradingStateRefresh();
+      }
+      setStatusMessage(result.message);
+    } catch (err: any) {
+      setStatusMessage(`Autopilot run failed: ${err.message || err}`);
+    }
+    setRunningAutopilot(false);
+  };
+
+  if (!botWallet) {
+    return (
+      <ScrollView contentContainerStyle={s.scrollPad}>
+        <Text style={s.label}>BOT WALLET</Text>
+        <View style={s.emptyCard}>
+          <Text style={s.emptyTitle}>Create an Autopilot Wallet</Text>
+          <Text style={s.emptyDesc}>
+            This wallet lives on the backend, not in Phantom. It can sign Solana swaps server-side so the trading bot can execute without asking you to approve every trade.
+          </Text>
+        </View>
+
+        <View style={s.listCard}>
+          <Text style={s.listTitle}>How it works</Text>
+          <Text style={[s.listMeta, { marginTop: 8 }]}>1. Create the wallet in-app.</Text>
+          <Text style={s.listMeta}>2. Fund it with a limited amount of SOL from Phantom or another wallet.</Text>
+          <Text style={s.listMeta}>3. Enable autopilot to let the bot execute queued actions and featured trade ideas without Phantom popups.</Text>
+          <Text style={[s.listMeta, { marginTop: 8, color: '#f59e0b' }]}>Use a capped balance. Treat it like a hot trading wallet, not your treasury.</Text>
+        </View>
+
+        <Pressable onPress={handleCreate} disabled={creating} style={[s.actionBtn, { backgroundColor: '#84cc16', marginTop: 8 }]}>
+          {creating ? <ActivityIndicator size="small" color="#0a0a0a" /> : <Text style={[s.actionText, { color: '#0a0a0a' }]}>Create Bot Wallet</Text>}
+        </Pressable>
+
+        <Text style={[s.emptyDesc, { textAlign: 'left', marginTop: 12 }]}> 
+          {walletAddress ? 'Once created, copy the bot wallet address and fund it from Phantom.' : 'You do not need Phantom for the bot wallet to trade, but you will typically use Phantom to fund it.'}
+        </Text>
+      </ScrollView>
+    );
+  }
+
+  return (
+    <ScrollView contentContainerStyle={s.scrollPad}>
+      <Text style={s.label}>BOT WALLET</Text>
+      <View style={s.statsRow}>
+        <View style={s.statCard}>
+          <Text style={s.statValue}>{botWallet.balanceSol.toFixed(4)}</Text>
+          <Text style={s.statLabel}>SOL Balance</Text>
+        </View>
+        <View style={s.statCard}>
+          <Text style={[s.statValue, { color: botWallet.status === 'active' ? '#84cc16' : '#f59e0b' }]}>{botWallet.status.toUpperCase()}</Text>
+          <Text style={s.statLabel}>Status</Text>
+        </View>
+      </View>
+
+      <View style={s.listCard}>
+        <Text style={s.listTitle}>{botWallet.label}</Text>
+        <Text style={[s.listMeta, { marginTop: 8 }]}>Address</Text>
+        <Text style={s.mono}>{botWallet.address}</Text>
+        <Text style={[s.listMeta, { marginTop: 8 }]}>Created {new Date(botWallet.createdAt).toLocaleString()}</Text>
+        {botWallet.lastFundedAt && <Text style={s.listMeta}>Funded {new Date(botWallet.lastFundedAt).toLocaleString()}</Text>}
+        {botWallet.lastUsedAt && <Text style={s.listMeta}>Last trade {new Date(botWallet.lastUsedAt).toLocaleString()}</Text>}
+      </View>
+
+      <View style={s.pendingBtnRow}>
+        <Pressable onPress={onTradingStateRefresh} style={[s.pendingBtn, s.pendingBtnApprove]}>
+          <Text style={[s.pendingBtnText, { color: '#e8e8e8' }]}>Refresh Balance</Text>
+        </Pressable>
+        <Pressable onPress={handleToggleStatus} disabled={updating} style={[s.pendingBtn, s.pendingBtnReject]}>
+          {updating ? <ActivityIndicator size="small" color="#ef4444" /> : <Text style={[s.pendingBtnText, { color: '#ef4444' }]}>{botWallet.status === 'active' ? 'Pause' : 'Resume'}</Text>}
+        </Pressable>
+      </View>
+
+      {RNPlatform.OS === 'web' && (
+        <Pressable onPress={handleCopyAddress} style={[s.refreshBtn, { marginTop: 8 }]}> 
+          <Text style={s.refreshText}>Copy Deposit Address</Text>
+        </Pressable>
+      )}
+
+      <View style={[s.listCard, { marginTop: 12 }]}> 
+        <View style={s.listTop}>
+          <View style={{ flex: 1 }}>
+            <Text style={s.listTitle}>Autopilot</Text>
+            <Text style={[s.listMeta, { marginTop: 6 }]}>Server-side trading through the bot wallet. First pass auto-executes SOL-funded queued actions and featured ideas that fit your limits.</Text>
+          </View>
+          {loadingConfig && <ActivityIndicator size="small" color={ACCENT} />}
+        </View>
+
+        {config && (
+          <>
+            <Text style={s.fieldLabel}>Autopilot status</Text>
+            <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+              <Pressable onPress={() => setConfig(prev => prev ? { ...prev, isEnabled: !prev.isEnabled } : prev)} style={[s.pendingBtn, config.isEnabled ? s.pendingBtnApprove : s.pendingBtnReject, { flex: 0 }]}> 
+                <Text style={[s.pendingBtnText, { color: config.isEnabled ? '#e8e8e8' : '#ef4444' }]}>{config.isEnabled ? 'Enabled' : 'Disabled'}</Text>
+              </Pressable>
+              <Pressable onPress={() => setConfig(prev => prev ? { ...prev, autoPauseOnError: !prev.autoPauseOnError } : prev)} style={[s.pendingBtn, { borderColor: '#ffffff18', backgroundColor: '#ffffff05', flex: 0 }]}> 
+                <Text style={s.pendingBtnText}>{config.autoPauseOnError ? 'Pause On Error' : 'Keep Running On Error'}</Text>
+              </Pressable>
+            </View>
+
+            <Text style={s.fieldLabel}>Trade sources</Text>
+            <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+              <Pressable onPress={() => setConfig(prev => prev ? { ...prev, allowPendingActions: !prev.allowPendingActions } : prev)} style={[s.pendingBtn, { flex: 0, borderColor: config.allowPendingActions ? '#84cc1630' : '#ffffff12', backgroundColor: config.allowPendingActions ? '#84cc1610' : '#ffffff04' }]}> 
+                <Text style={[s.pendingBtnText, { color: config.allowPendingActions ? '#84cc16' : '#9e9e9e' }]}>Queue Actions</Text>
+              </Pressable>
+              <Pressable onPress={() => setConfig(prev => prev ? { ...prev, allowFeaturedTrades: !prev.allowFeaturedTrades } : prev)} style={[s.pendingBtn, { flex: 0, borderColor: config.allowFeaturedTrades ? '#f59e0b30' : '#ffffff12', backgroundColor: config.allowFeaturedTrades ? '#f59e0b10' : '#ffffff04' }]}> 
+                <Text style={[s.pendingBtnText, { color: config.allowFeaturedTrades ? '#f59e0b' : '#9e9e9e' }]}>Featured Ideas</Text>
+              </Pressable>
+            </View>
+
+            <Text style={s.fieldLabel}>Strategy mode</Text>
+            <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+              {[
+                { key: 'hybrid', label: 'Hybrid' },
+                { key: 'queue_only', label: 'Queue First' },
+                { key: 'featured_only', label: 'Ideas Only' },
+              ].map(option => (
+                <Pressable
+                  key={option.key}
+                  onPress={() => setConfig(prev => prev ? { ...prev, strategyMode: option.key as TradingBotAutopilotConfig['strategyMode'] } : prev)}
+                  style={[s.pendingBtn, { flex: 0, borderColor: config.strategyMode === option.key ? '#6366f130' : '#ffffff12', backgroundColor: config.strategyMode === option.key ? '#6366f110' : '#ffffff04' }]}
+                >
+                  <Text style={[s.pendingBtnText, { color: config.strategyMode === option.key ? '#818cf8' : '#9e9e9e' }]}>{option.label}</Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <Text style={s.fieldLabel}>Minimum confidence</Text>
+            <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+              {['high', 'medium', 'low'].map(level => (
+                <Pressable
+                  key={level}
+                  onPress={() => setConfig(prev => prev ? { ...prev, minConfidence: level as TradingBotAutopilotConfig['minConfidence'] } : prev)}
+                  style={[s.pendingBtn, { flex: 0, borderColor: config.minConfidence === level ? '#22c55e30' : '#ffffff12', backgroundColor: config.minConfidence === level ? '#22c55e10' : '#ffffff04' }]}
+                >
+                  <Text style={[s.pendingBtnText, { color: config.minConfidence === level ? '#22c55e' : '#9e9e9e' }]}>{level.toUpperCase()}</Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <Text style={s.fieldLabel}>Max trade size (SOL)</Text>
+            <TextInput value={maxTradeSol} onChangeText={setMaxTradeSol} keyboardType="decimal-pad" placeholder="0.25" placeholderTextColor="#6f6f6f" style={s.input} />
+
+            <Text style={s.fieldLabel}>Max trades per day</Text>
+            <TextInput value={maxDailyTrades} onChangeText={setMaxDailyTrades} keyboardType="number-pad" placeholder="3" placeholderTextColor="#6f6f6f" style={s.input} />
+
+            <Text style={s.fieldLabel}>Slippage cap (bps)</Text>
+            <TextInput value={slippageCap} onChangeText={setSlippageCap} keyboardType="number-pad" placeholder="150" placeholderTextColor="#6f6f6f" style={s.input} />
+
+            <View style={s.pendingBtnRow}>
+              <Pressable onPress={handleSaveConfig} disabled={savingConfig} style={[s.pendingBtn, s.pendingBtnApprove]}>
+                {savingConfig ? <ActivityIndicator size="small" color="#e8e8e8" /> : <Text style={[s.pendingBtnText, { color: '#e8e8e8' }]}>Save Rules</Text>}
+              </Pressable>
+              <Pressable onPress={handleRunAutopilot} disabled={runningAutopilot || botWallet.status !== 'active'} style={[s.pendingBtn, { borderColor: '#84cc1630', backgroundColor: '#84cc1610' }]}> 
+                {runningAutopilot ? <ActivityIndicator size="small" color="#84cc16" /> : <Text style={[s.pendingBtnText, { color: '#84cc16' }]}>Run Now</Text>}
+              </Pressable>
+            </View>
+
+            <View style={[s.reasonBox, { marginTop: 12 }]}> 
+              <Text style={s.reasonText}>Autopilot scans every ~2 minutes while the Trading Bot dashboard is open. The same backend action can later be triggered by cron or circle automations.</Text>
+            </View>
+
+            <Text style={[s.listMeta, { marginTop: 12 }]}>Last scan: {config.lastRunAt ? new Date(config.lastRunAt).toLocaleString() : 'Never'}</Text>
+            <Text style={s.listMeta}>Last auto trade: {config.lastTradeAt ? new Date(config.lastTradeAt).toLocaleString() : 'None yet'}</Text>
+            <Text style={s.listMeta}>Wallet mode: SOL-funded autopilot with reserve protection and daily trade caps.</Text>
+            {config.lastError && <Text style={[s.listMeta, { color: '#ef4444', marginTop: 8 }]}>Last error: {config.lastError}</Text>}
+          </>
+        )}
+      </View>
+
+      {statusMessage && (
+        <View style={[s.reasonBox, { marginTop: 12 }]}> 
+          <Text style={s.reasonText}>{statusMessage}</Text>
+        </View>
+      )}
+    </ScrollView>
+  );
+}
+
+// ??? Featured Trades Tab ??????????????????????????????????????????????????????
+
+function FeaturedTab({ client, walletAddress, userId, circleId, botWallet, onBotWalletRefresh }: { client: HeliusClient; walletAddress: string | null; userId: string; circleId: string; botWallet: TradingBotWalletInfo | null; onBotWalletRefresh: () => Promise<void> }) {
   const [trades, setTrades] = useState<FeaturedTrade[]>([]);
   const [stats, setStats] = useState<{ totalGenerated: number; totalExecuted: number; wins: number; losses: number; avgReturnPct: number } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -232,23 +933,37 @@ function FeaturedTab({ client, walletAddress, userId }: { client: HeliusClient; 
   };
 
   const handleExecute = async (trade: FeaturedTrade) => {
-    if (!walletAddress) return;
+    const activeBotWallet = botWallet?.status === 'active' ? botWallet : null;
+    const executionAddress = activeBotWallet?.address || walletAddress;
+    if (!executionAddress) return;
     setExecuting(trade.id);
     try {
       const amountLamports = Math.floor(trade.suggestedAmountSol * 1e9);
-      const result = await client.executeSwap({
-        inputMint: trade.inputMint,
-        outputMint: trade.outputMint,
-        amount: amountLamports,
-        slippageBps: trade.suggestedSlippageBps,
-        userPublicKey: walletAddress,
-      });
+      const result = activeBotWallet
+        ? await executeBotWalletSwap({
+            circleId,
+            inputMint: trade.inputMint,
+            outputMint: trade.outputMint,
+            amount: amountLamports,
+            slippageBps: trade.suggestedSlippageBps,
+          })
+        : {
+            ...(await client.executeSwap({
+              inputMint: trade.inputMint,
+              outputMint: trade.outputMint,
+              amount: amountLamports,
+              slippageBps: trade.suggestedSlippageBps,
+              userPublicKey: executionAddress,
+            })),
+            walletAddress: undefined,
+          };
 
       if (result.success && result.txHash) {
         await executeFeaturedTrade(trade.id, result.txHash, result.inputAmount, result.outputAmount);
         await logTrade({
           userId,
-          walletAddress,
+          circleId,
+          walletAddress: result.walletAddress || executionAddress,
           action: 'swap',
           inputMint: trade.inputMint,
           outputMint: trade.outputMint,
@@ -257,7 +972,13 @@ function FeaturedTab({ client, walletAddress, userId }: { client: HeliusClient; 
           txHash: result.txHash,
           status: 'success',
           reason: `Featured: ${trade.title}`,
+          strategyName: activeBotWallet ? 'featured_bot_wallet' : 'featured_manual',
+          metadata: {
+            featuredTradeId: trade.id,
+            executionWallet: activeBotWallet ? 'bot_wallet' : 'phantom',
+          },
         });
+        await onBotWalletRefresh();
         alert(`Trade executed! TX: ${result.txHash.slice(0, 16)}...`);
         setTrades(prev => prev.filter(t => t.id !== trade.id));
       } else {
@@ -357,7 +1078,7 @@ function FeaturedTab({ client, walletAddress, userId }: { client: HeliusClient; 
                 </Text>
               </View>
               <View style={[s.featuredTag, { borderColor: '#ffffff15' }]}>
-                <Text style={s.featuredTagText}>{trade.inputSymbol} → {trade.outputSymbol}</Text>
+                <Text style={s.featuredTagText}>{trade.inputSymbol} {'->'} {trade.outputSymbol}</Text>
               </View>
               <View style={[s.featuredTag, { borderColor: '#ffffff15' }]}>
                 <Text style={s.featuredTagText}>{timeframeLabels[trade.timeframe] || trade.timeframe}</Text>
@@ -411,21 +1132,21 @@ function FeaturedTab({ client, walletAddress, userId }: { client: HeliusClient; 
             {/* Execute button */}
             <Pressable
               onPress={() => handleExecute(trade)}
-              disabled={!walletAddress || isExecuting}
+              disabled={!(botWallet?.status === 'active' ? botWallet.address : walletAddress) || isExecuting}
               style={[s.actionBtn, { backgroundColor: trade.direction === 'buy' ? '#22c55e' : '#ef4444', marginTop: 8 }]}
             >
               {isExecuting ? (
                 <ActivityIndicator size="small" color="#fff" />
               ) : (
                 <Text style={[s.actionText, { color: '#e8e8e8' }]}>
-                  {walletAddress ? `Execute ${trade.direction === 'buy' ? 'Buy' : 'Sell'} — ${trade.suggestedAmountSol} SOL` : 'Link Wallet First'}
+                  {botWallet?.status === 'active' ? `Execute with Bot Wallet - ${trade.suggestedAmountSol} SOL` : walletAddress ? `Execute ${trade.direction === 'buy' ? 'Buy' : 'Sell'} - ${trade.suggestedAmountSol} SOL` : 'Create Bot Wallet or Link Phantom'}
                 </Text>
               )}
             </Pressable>
 
             {/* Meta */}
             <Text style={s.listTime}>
-              Generated by {trade.generatedBy} • {new Date(trade.createdAt).toLocaleString()}
+              Generated by {trade.generatedBy} | {new Date(trade.createdAt).toLocaleString()}
             </Text>
           </View>
         );
@@ -438,9 +1159,9 @@ function FeaturedTab({ client, walletAddress, userId }: { client: HeliusClient; 
   );
 }
 
-// ─── Pending Actions Tab ──────────────────────────────────────────────────────
+// ??? Pending Actions Tab ??????????????????????????????????????????????????????
 
-function PendingTab({ client, walletAddress, userId }: { client: HeliusClient; walletAddress: string | null; userId: string }) {
+function PendingTab({ client, walletAddress, userId, circleId, botWallet, onBotWalletRefresh }: { client: HeliusClient; walletAddress: string | null; userId: string; circleId: string; botWallet: TradingBotWalletInfo | null; onBotWalletRefresh: () => Promise<void> }) {
   const [actions, setActions] = useState<PendingTradeAction[]>([]);
   const [loading, setLoading] = useState(true);
   const [executing, setExecuting] = useState<string | null>(null);
@@ -462,7 +1183,9 @@ function PendingTab({ client, walletAddress, userId }: { client: HeliusClient; w
   };
 
   const handleExecute = async (action: PendingTradeAction) => {
-    if (!walletAddress) return;
+    const activeBotWallet = botWallet?.status === 'active' ? botWallet : null;
+    const executionAddress = activeBotWallet?.address || walletAddress;
+    if (!executionAddress) return;
     setExecuting(action.id);
     try {
       // Approve first
@@ -470,20 +1193,32 @@ function PendingTab({ client, walletAddress, userId }: { client: HeliusClient; w
 
       // Execute swap via Jupiter + Phantom
       console.log('[handleExecute] Starting swap...', { inputMint: action.inputMint, outputMint: action.outputMint, amount: action.amountLamports });
-      const result = await client.executeSwap({
-        inputMint: action.inputMint,
-        outputMint: action.outputMint,
-        amount: action.amountLamports,
-        slippageBps: action.slippageBps,
-        userPublicKey: walletAddress,
-      });
+      const result = activeBotWallet
+        ? await executeBotWalletSwap({
+            circleId,
+            inputMint: action.inputMint,
+            outputMint: action.outputMint,
+            amount: action.amountLamports,
+            slippageBps: action.slippageBps,
+          })
+        : {
+            ...(await client.executeSwap({
+              inputMint: action.inputMint,
+              outputMint: action.outputMint,
+              amount: action.amountLamports,
+              slippageBps: action.slippageBps,
+              userPublicKey: executionAddress,
+            })),
+            walletAddress: undefined,
+          };
       console.log('[handleExecute] Swap result:', JSON.stringify(result));
 
       if (result.success && result.txHash) {
         await markActionExecuted(action.id, result.txHash, result.outputAmount);
         await logTrade({
           userId,
-          walletAddress,
+          circleId,
+          walletAddress: result.walletAddress || executionAddress,
           action: action.actionType as any,
           inputMint: action.inputMint,
           outputMint: action.outputMint,
@@ -492,7 +1227,15 @@ function PendingTab({ client, walletAddress, userId }: { client: HeliusClient; w
           txHash: result.txHash,
           status: 'success',
           reason: action.reason || undefined,
+          strategyName: activeBotWallet ? 'pending_action_bot_wallet' : 'pending_action_manual',
+          metadata: {
+            pendingActionId: action.id,
+            actionSource: action.source,
+            proposedBy: action.proposedBy,
+            executionWallet: activeBotWallet ? 'bot_wallet' : 'phantom',
+          },
         });
+        await onBotWalletRefresh();
         alert(`Trade successful! TX: ${result.txHash.slice(0, 16)}...`);
         setActions(prev => prev.filter(a => a.id !== action.id));
       } else {
@@ -515,14 +1258,14 @@ function PendingTab({ client, walletAddress, userId }: { client: HeliusClient; w
     <ScrollView contentContainerStyle={s.scrollPad}>
       <Text style={s.label}>PENDING TRADE ACTIONS</Text>
       <Text style={[s.emptyDesc, { textAlign: 'left', marginBottom: 16 }]}>
-        Automations propose trades here. Review and approve to execute via Phantom.
+        Automations propose trades here. Review and execute them with your bot wallet or Phantom.
       </Text>
 
       {pendingActions.length === 0 && (
         <View style={s.emptyCard}>
           <Text style={s.emptyTitle}>No Pending Actions</Text>
           <Text style={s.emptyDesc}>
-            When trading automations (DCA Bot, Price Alerts) detect opportunities, they'll queue trades here for your approval.
+            When trading automations (DCA Bot, Price Alerts) detect opportunities, they'll queue trades here for execution with your bot wallet or Phantom.
           </Text>
         </View>
       )}
@@ -594,14 +1337,14 @@ function PendingTab({ client, walletAddress, userId }: { client: HeliusClient; w
                 </Pressable>
                 <Pressable
                   onPress={() => handleExecute(action)}
-                  disabled={!walletAddress || executing === action.id}
+                  disabled={!(botWallet?.status === 'active' ? botWallet.address : walletAddress) || executing === action.id}
                   style={[s.pendingBtn, s.pendingBtnApprove]}
                 >
                   {executing === action.id ? (
                     <ActivityIndicator size="small" color="#fff" />
                   ) : (
                     <Text style={[s.pendingBtnText, { color: '#e8e8e8' }]}>
-                      {walletAddress ? 'Approve & Execute' : 'Link Wallet First'}
+                      {botWallet?.status === 'active' ? 'Approve & Execute via Bot Wallet' : walletAddress ? 'Approve & Execute' : 'Create Bot Wallet or Link Phantom'}
                     </Text>
                   )}
                 </Pressable>
@@ -620,24 +1363,154 @@ function PendingTab({ client, walletAddress, userId }: { client: HeliusClient; w
   );
 }
 
-// ─── Portfolio Tab ────────────────────────────────────────────────────────────
+// ??? Portfolio Tab ????????????????????????????????????????????????????????????
 
-function PortfolioTab({ client, walletAddress, userId }: { client: HeliusClient; walletAddress: string | null; userId: string }) {
+function PortfolioTab({ client, walletAddress, userId, circleId }: { client: HeliusClient; walletAddress: string | null; userId: string; circleId: string }) {
   const [portfolio, setPortfolio] = useState<PortfolioSnapshot | null>(null);
+  const [allocation, setAllocation] = useState<Array<{ mint: string; symbol: string; valuePct: number; valueUsd: number }>>([]);
   const [loading, setLoading] = useState(true);
+  const [selectedPreset, setSelectedPreset] = useState<RebalancePresetId>('core');
+  const [targetRows, setTargetRows] = useState<RebalanceTargetInput[]>(() => buildTargetRows('core'));
+  const [plan, setPlan] = useState<RebalancePlan | null>(null);
+  const [planning, setPlanning] = useState(false);
+  const [queueing, setQueueing] = useState(false);
+  const [plannerMessage, setPlannerMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    if (walletAddress) loadPortfolio();
-    else setLoading(false);
+    if (walletAddress) {
+      loadPortfolio();
+    } else {
+      setLoading(false);
+    }
   }, [walletAddress]);
+
+  useEffect(() => {
+    setTargetRows(buildTargetRows(selectedPreset));
+    setPlan(null);
+    setPlannerMessage(null);
+  }, [selectedPreset]);
 
   const loadPortfolio = async () => {
     setLoading(true);
     try {
-      const snap = await client.getPortfolio(walletAddress!);
+      const [snap, alloc] = await Promise.all([
+        client.getPortfolio(walletAddress!),
+        getPortfolioAllocation(client, walletAddress!),
+      ]);
       setPortfolio(snap);
-    } catch {}
+      setAllocation(alloc);
+    } catch {
+      setPortfolio(null);
+      setAllocation([]);
+    }
     setLoading(false);
+  };
+
+  const handleGeneratePlan = async () => {
+    if (!walletAddress) return;
+    const targets = targetRows
+      .map(row => {
+        const meta = getTokenMetaBySymbol(row.symbol);
+        const targetPct = parseFloat(row.targetPct);
+        return meta && Number.isFinite(targetPct) && targetPct > 0
+          ? { mint: meta.mint, symbol: meta.symbol, targetPct }
+          : null;
+      })
+      .filter(Boolean) as Array<{ mint: string; symbol: string; targetPct: number }>;
+
+    const totalTargetPct = targets.reduce((sum, target) => sum + target.targetPct, 0);
+    if (targets.length === 0) {
+      setPlannerMessage('Add at least one target allocation before generating a rebalance plan.');
+      return;
+    }
+    if (Math.abs(totalTargetPct - 100) > 0.1) {
+      setPlannerMessage(`Target allocation must total 100%. Current total: ${totalTargetPct.toFixed(1)}%.`);
+      return;
+    }
+
+    setPlanning(true);
+    setPlannerMessage(null);
+    try {
+      const nextPlan = await generateRebalancePlan(client, walletAddress, targets);
+      setPlan(nextPlan);
+      if (nextPlan.estimatedSwaps === 0) {
+        setPlannerMessage('Portfolio is already within the target drift band. No rebalance trades are needed right now.');
+      }
+    } catch (err: any) {
+      setPlannerMessage(`Failed to generate rebalance plan: ${err.message || err}`);
+    }
+    setPlanning(false);
+  };
+
+  const handleQueuePlan = async () => {
+    if (!portfolio || !plan) return;
+    setQueueing(true);
+    try {
+      const tokenLookup = new Map(portfolio.tokens.map(token => [token.mint, token]));
+      const solPrice = tokenLookup.get(SOL_MINT)?.priceUsd || (await fetchTokenMarketSnapshot(SOL_MINT))?.priceUsd || 0;
+      const actions = [] as any[];
+
+      for (const target of plan.targets.filter(item => item.action !== 'hold' && item.amountUsd > 1)) {
+        if (target.action === 'buy') {
+          if (solPrice <= 0) continue;
+          const amountLamports = Math.max(1, Math.round((target.amountUsd / solPrice) * 1e9));
+          actions.push({
+            user_id: userId,
+            circle_id: circleId,
+            action_type: 'swap',
+            input_mint: SOL_MINT,
+            output_mint: target.tokenMint,
+            amount_lamports: amountLamports,
+            slippage_bps: 150,
+            reason: `Rebalance buy ${target.tokenSymbol}: move from ${target.currentPct.toFixed(1)}% to ${target.targetPct.toFixed(1)}% target allocation.`,
+            proposed_by: 'Backpack Rebalance',
+            source: 'rebalance',
+            metadata: {
+              preset: selectedPreset,
+              target_pct: target.targetPct,
+              current_pct: target.currentPct,
+              amount_usd: target.amountUsd,
+            },
+          });
+        } else {
+          const token = tokenLookup.get(target.tokenMint);
+          const tokenPrice = token?.priceUsd || (await fetchTokenMarketSnapshot(target.tokenMint))?.priceUsd || 0;
+          if (tokenPrice <= 0) continue;
+          const decimals = token?.decimals || getTokenMetaByMint(target.tokenMint).decimals;
+          const tokenQty = target.amountUsd / tokenPrice;
+          const amountLamports = Math.max(1, Math.round(tokenQty * Math.pow(10, decimals)));
+          actions.push({
+            user_id: userId,
+            circle_id: circleId,
+            action_type: 'swap',
+            input_mint: target.tokenMint,
+            output_mint: SOL_MINT,
+            amount_lamports: amountLamports,
+            slippage_bps: 150,
+            reason: `Rebalance sell ${target.tokenSymbol}: move from ${target.currentPct.toFixed(1)}% to ${target.targetPct.toFixed(1)}% target allocation.`,
+            proposed_by: 'Backpack Rebalance',
+            source: 'rebalance',
+            metadata: {
+              preset: selectedPreset,
+              target_pct: target.targetPct,
+              current_pct: target.currentPct,
+              amount_usd: target.amountUsd,
+            },
+          });
+        }
+      }
+
+      if (actions.length === 0) {
+        setPlannerMessage('The rebalance plan did not produce any executable swaps. Refresh portfolio data and try again.');
+      } else {
+        const { error } = await supabase.from('trading_pending_actions').insert(actions);
+        if (error) throw error;
+        setPlannerMessage(`${actions.length} rebalance actions were added to Queue for review and approval.`);
+      }
+    } catch (err: any) {
+      setPlannerMessage(`Failed to queue rebalance actions: ${err.message || err}`);
+    }
+    setQueueing(false);
   };
 
   if (!walletAddress) {
@@ -654,7 +1527,6 @@ function PortfolioTab({ client, walletAddress, userId }: { client: HeliusClient;
 
   return (
     <ScrollView contentContainerStyle={s.scrollPad}>
-      {/* Summary Cards */}
       <View style={s.statsRow}>
         <View style={s.statCard}>
           <Text style={s.statValue}>${portfolio.totalValueUsd.toFixed(2)}</Text>
@@ -670,14 +1542,125 @@ function PortfolioTab({ client, walletAddress, userId }: { client: HeliusClient;
         </View>
       </View>
 
-      {/* Wallet */}
       <Text style={s.label}>WALLET</Text>
       <View style={s.infoRow}>
         <Text style={s.mono}>{walletAddress.slice(0, 8)}...{walletAddress.slice(-6)}</Text>
       </View>
 
-      {/* Token List */}
-      <Text style={[s.label, { marginTop: 16 }]}>HOLDINGS</Text>
+      <View style={[s.sectionHeader, { marginTop: 16 }]}> 
+        <Text style={s.label}>CURRENT ALLOCATION</Text>
+        <Pressable onPress={loadPortfolio} style={s.addBtn}>
+          <Text style={s.addText}>Refresh</Text>
+        </Pressable>
+      </View>
+
+      {allocation.length === 0 ? (
+        <View style={s.emptyCard}>
+          <Text style={s.emptyDesc}>No priced holdings available yet for allocation analysis.</Text>
+        </View>
+      ) : (
+        allocation.slice(0, 8).map(item => (
+          <View key={item.mint} style={[s.listCard, { marginBottom: 8 }]}> 
+            <View style={s.listTop}>
+              <Text style={s.listTitle}>{item.symbol}</Text>
+              <Text style={s.alertBadge}>{item.valuePct.toFixed(1)}%</Text>
+            </View>
+            <View style={{ height: 6, backgroundColor: '#111111', borderRadius: 999, overflow: 'hidden', marginTop: 8 }}>
+              <View style={{ width: `${Math.min(item.valuePct, 100)}%`, height: 6, backgroundColor: ACCENT }} />
+            </View>
+            <Text style={[s.listMeta, { marginTop: 8 }]}>{formatCompactUsd(item.valueUsd)} deployed</Text>
+          </View>
+        ))
+      )}
+
+      <Text style={[s.label, { marginTop: 20 }]}>REBALANCE PLANNER</Text>
+      <Text style={[s.emptyDesc, { textAlign: 'left', marginBottom: 10 }]}>Inspired by popular rebalancing bots: set a target allocation, preview drift, then queue the swaps for approval in Queue.</Text>
+
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          {(Object.keys(REBALANCE_PRESETS) as RebalancePresetId[]).map(preset => (
+            <Pressable
+              key={preset}
+              onPress={() => setSelectedPreset(preset)}
+              style={[s.tab, selectedPreset === preset && { backgroundColor: ACCENT + '18', borderColor: ACCENT + '40' }]}
+            >
+              <Text style={[s.tabText, selectedPreset === preset && { color: ACCENT }]}>{REBALANCE_PRESETS[preset].label}</Text>
+            </Pressable>
+          ))}
+        </View>
+      </ScrollView>
+
+      <View style={s.formCard}>
+        {targetRows.map((row, index) => (
+          <View key={`${row.symbol}-${index}`} style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+            <View style={{ flex: 1 }}>
+              <Text style={s.fieldLabel}>Token</Text>
+              <TextInput
+                style={s.input}
+                value={row.symbol}
+                onChangeText={(value) => setTargetRows(prev => prev.map((item, itemIndex) => itemIndex === index ? { ...item, symbol: value.toUpperCase().replace(/[^A-Z]/g, '') } : item))}
+                placeholder="SOL"
+                placeholderTextColor="#555"
+                maxLength={8}
+              />
+            </View>
+            <View style={{ width: 120 }}>
+              <Text style={s.fieldLabel}>Target %</Text>
+              <TextInput
+                style={s.input}
+                value={row.targetPct}
+                onChangeText={(value) => setTargetRows(prev => prev.map((item, itemIndex) => itemIndex === index ? { ...item, targetPct: value } : item))}
+                placeholder="0"
+                placeholderTextColor="#555"
+                keyboardType="decimal-pad"
+              />
+            </View>
+          </View>
+        ))}
+        <Text style={[s.listMeta, { marginBottom: 12 }]}>Total target: {targetRows.reduce((sum, row) => sum + (parseFloat(row.targetPct) || 0), 0).toFixed(1)}%</Text>
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <Pressable style={[s.actionBtn, { flex: 1, backgroundColor: ACCENT + '22' }]} onPress={handleGeneratePlan} disabled={planning}>
+            <Text style={[s.actionText, { color: ACCENT }]}>{planning ? 'BUILDING PLAN...' : 'Build Plan'}</Text>
+          </Pressable>
+          <Pressable
+            style={[s.actionBtn, { flex: 1, backgroundColor: '#22c55e15', borderColor: '#22c55e30', opacity: plan && plan.estimatedSwaps > 0 ? 1 : 0.5 }]}
+            onPress={handleQueuePlan}
+            disabled={!plan || plan.estimatedSwaps === 0 || queueing}
+          >
+            <Text style={[s.actionText, { color: '#22c55e' }]}>{queueing ? 'QUEUEING...' : 'Queue Actions'}</Text>
+          </Pressable>
+        </View>
+      </View>
+
+      {plannerMessage && (
+        <View style={[s.resultBanner, { borderColor: plannerMessage.includes('Failed') ? '#ef444430' : '#22c55e30' }]}>
+          <Text style={[s.resultText, { color: plannerMessage.includes('Failed') ? '#ef4444' : '#22c55e' }]}>{plannerMessage}</Text>
+        </View>
+      )}
+
+      {plan && (
+        <View style={[s.listCard, { marginTop: 8 }]}> 
+          <View style={s.listTop}>
+            <Text style={s.listTitle}>REBALANCE PREVIEW</Text>
+            <Text style={s.listMeta}>{formatCompactUsd(plan.totalPortfolioValue)} portfolio</Text>
+          </View>
+          <Text style={[s.listMeta, { marginTop: 8 }]}>Estimated swaps: {plan.estimatedSwaps} | Estimated fees: ${plan.estimatedFeesUsd.toFixed(2)}</Text>
+          {plan.targets.map(target => (
+            <View key={target.tokenMint} style={{ marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: '#ffffff08' }}>
+              <View style={s.listTop}>
+                <Text style={s.listTitle}>{target.tokenSymbol}</Text>
+                <Text style={[s.alertBadge, { color: target.action === 'buy' ? '#22c55e' : target.action === 'sell' ? '#ef4444' : '#9e9e9e' }]}>
+                  {target.action.toUpperCase()}
+                </Text>
+              </View>
+              <Text style={s.listMeta}>Current {target.currentPct.toFixed(1)}% {'>'} Target {target.targetPct.toFixed(1)}% ({target.diffPct >= 0 ? '+' : ''}{target.diffPct.toFixed(1)} pts)</Text>
+              <Text style={[s.listMeta, { marginTop: 4 }]}>Trade size: {formatCompactUsd(target.amountUsd)}</Text>
+            </View>
+          ))}
+        </View>
+      )}
+
+      <Text style={[s.label, { marginTop: 20 }]}>HOLDINGS</Text>
       {portfolio.tokens.filter(t => t.amount > 0).sort((a, b) => b.usdValue - a.usdValue).map(token => (
         <View key={token.mint} style={s.tokenRow}>
           <View style={{ flex: 1 }}>
@@ -690,27 +1673,43 @@ function PortfolioTab({ client, walletAddress, userId }: { client: HeliusClient;
           </View>
         </View>
       ))}
-
-      <Pressable onPress={loadPortfolio} style={s.refreshBtn}>
-        <Text style={s.refreshText}>Refresh Portfolio</Text>
-      </Pressable>
     </ScrollView>
   );
 }
 
-// ─── Trade Tab (Manual Swap) ──────────────────────────────────────────────────
-
-function TradeTab({ client, walletAddress, userId }: { client: HeliusClient; walletAddress: string | null; userId: string }) {
+function TradeTab({ client, walletAddress, userId, circleId, botWallet, onBotWalletRefresh }: { client: HeliusClient; walletAddress: string | null; userId: string; circleId: string; botWallet: TradingBotWalletInfo | null; onBotWalletRefresh: () => Promise<void> }) {
   const [inputMint, setInputMint] = useState(SOL_MINT);
   const [outputMint, setOutputMint] = useState(USDC_MINT);
   const [amount, setAmount] = useState('');
+  const [slippagePct, setSlippagePct] = useState('1.0');
+  const [stopLossPct, setStopLossPct] = useState('');
+  const [takeProfitPct, setTakeProfitPct] = useState('');
+  const [trailingStopPct, setTrailingStopPct] = useState('');
   const [quote, setQuote] = useState<SwapQuoteResult | null>(null);
   const [quoting, setQuoting] = useState(false);
   const [swapping, setSwapping] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
+  const inputMeta = getTokenMetaByMint(inputMint);
+  const activeBotWallet = botWallet?.status === 'active' ? botWallet : null;
+  const executionAddress = activeBotWallet?.address || walletAddress;
+  const outputMeta = getTokenMetaByMint(outputMint);
+  const inputDecimals = inputMeta.decimals;
+  const outputDecimals = outputMeta.decimals;
+
   const handleQuote = async () => {
-    if (!amount || !walletAddress) return;
+    if (!executionAddress) return;
+    const parsedAmount = parseFloat(amount);
+    const parsedSlippage = parseFloat(slippagePct);
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      setResult({ ok: false, msg: 'Enter a valid trade size before requesting a quote.' });
+      return;
+    }
+    if (inputMint === outputMint) {
+      setResult({ ok: false, msg: 'Choose two different tokens for the swap.' });
+      return;
+    }
+
     setQuoting(true);
     setQuote(null);
     setResult(null);
@@ -718,8 +1717,9 @@ function TradeTab({ client, walletAddress, userId }: { client: HeliusClient; wal
       const q = await client.getSwapQuote({
         inputMint,
         outputMint,
-        amount: Math.floor(parseFloat(amount) * 1e9), // SOL to lamports
-        userPublicKey: walletAddress,
+        amount: Math.floor(parsedAmount * Math.pow(10, inputDecimals)),
+        slippageBps: Math.round((Number.isFinite(parsedSlippage) ? parsedSlippage : 1) * 100),
+        userPublicKey: executionAddress,
       });
       setQuote(q);
     } catch (err: any) {
@@ -729,27 +1729,90 @@ function TradeTab({ client, walletAddress, userId }: { client: HeliusClient; wal
   };
 
   const handleSwap = async () => {
-    if (!quote || !walletAddress) return;
+    if (!quote || !executionAddress) return;
     setSwapping(true);
     try {
-      const res = await client.executeSwap({
-        inputMint,
-        outputMint,
-        amount: Math.floor(parseFloat(amount) * 1e9),
-        userPublicKey: walletAddress,
-      });
+      const parsedAmount = parseFloat(amount);
+      const parsedSlippage = parseFloat(slippagePct);
+      const res = activeBotWallet
+        ? await executeBotWalletSwap({
+            circleId,
+            inputMint,
+            outputMint,
+            amount: Math.floor(parsedAmount * Math.pow(10, inputDecimals)),
+            slippageBps: Math.round((Number.isFinite(parsedSlippage) ? parsedSlippage : 1) * 100),
+          })
+        : {
+            ...(await client.executeSwap({
+              inputMint,
+              outputMint,
+              amount: Math.floor(parsedAmount * Math.pow(10, inputDecimals)),
+              slippageBps: Math.round((Number.isFinite(parsedSlippage) ? parsedSlippage : 1) * 100),
+              userPublicKey: executionAddress,
+            })),
+            walletAddress: undefined,
+          };
 
       if (res.success) {
         await logTrade({
-          userId, walletAddress,
+          userId,
+          circleId,
+          walletAddress: res.walletAddress || executionAddress,
           action: 'swap',
-          inputMint, outputMint,
+          inputMint,
+          outputMint,
           inputAmount: res.inputAmount,
           outputAmount: res.outputAmount,
           txHash: res.txHash,
           status: 'success',
+          reason: (parsePositiveNumber(stopLossPct) || parsePositiveNumber(takeProfitPct) || parsePositiveNumber(trailingStopPct)) ? 'Protected manual trade' : undefined,
+          strategyName: activeBotWallet ? 'smart_trade_bot_wallet' : 'smart_trade_manual',
+          metadata: {
+            executionWallet: activeBotWallet ? 'bot_wallet' : 'phantom',
+            stopLossPct: parsePositiveNumber(stopLossPct) || null,
+            takeProfitPct: parsePositiveNumber(takeProfitPct) || null,
+            trailingStopPct: parsePositiveNumber(trailingStopPct) || null,
+          },
         });
-        setResult({ ok: true, msg: `Swap successful! TX: ${res.txHash?.slice(0, 12)}...` });
+
+        await onBotWalletRefresh();
+        let message = `Swap successful! TX: ${res.txHash?.slice(0, 12)}...`;
+        const stopLoss = parsePositiveNumber(stopLossPct);
+        const takeProfit = parsePositiveNumber(takeProfitPct);
+        const trailingStop = parsePositiveNumber(trailingStopPct);
+
+        if (stopLoss || takeProfit || trailingStop) {
+          const outputQty = convertFromSmallestUnit(res.outputAmount, outputMint);
+          const outputSnapshot = await fetchTokenMarketSnapshot(outputMint);
+          const inputSnapshot = await fetchTokenMarketSnapshot(inputMint);
+          const livePrice = outputSnapshot?.priceUsd || 0;
+          const derivedPrice = outputQty > 0 && inputSnapshot?.priceUsd
+            ? (parsedAmount * inputSnapshot.priceUsd) / outputQty
+            : 0;
+          const entryPrice = livePrice || derivedPrice;
+
+          if (entryPrice > 0 && outputQty > 0) {
+            await savePosition({
+              userId,
+              tokenMint: outputMint,
+              tokenSymbol: outputMeta.symbol,
+              side: 'long',
+              entryPrice,
+              quantity: outputQty,
+              stopLossPrice: stopLoss ? entryPrice * (1 - (stopLoss / 100)) : undefined,
+              takeProfitPrice: takeProfit ? entryPrice * (1 + (takeProfit / 100)) : undefined,
+              trailingStopPct: trailingStop,
+              entryTxHash: res.txHash,
+              circleId,
+              strategyName: activeBotWallet ? 'smart_trade_bot_wallet' : 'smart_trade_manual',
+            });
+            message += ' Protected position saved to Positions.';
+          } else {
+            message += ' Swap completed, but a protected position could not be created because live pricing was unavailable.';
+          }
+        }
+
+        setResult({ ok: true, msg: message });
       } else {
         setResult({ ok: false, msg: res.error || 'Swap failed' });
       }
@@ -759,69 +1822,101 @@ function TradeTab({ client, walletAddress, userId }: { client: HeliusClient; wal
     setSwapping(false);
   };
 
-  if (!walletAddress) {
+  if (!executionAddress) {
     return (
       <View style={s.center}>
-        <Text style={s.emptyTitle}>Connect Wallet to Trade</Text>
-        <Text style={s.emptyDesc}>Link your Phantom wallet in Integrations to execute swaps.</Text>
+        <Text style={s.emptyTitle}>Create a Trading Wallet</Text>
+        <Text style={s.emptyDesc}>Create a Bot Wallet in this dashboard or link Phantom to execute swaps.</Text>
       </View>
     );
   }
 
   return (
     <ScrollView contentContainerStyle={s.scrollPad}>
-      <Text style={s.label}>SWAP</Text>
+      <Text style={s.label}>SMART TRADE</Text>
+      <Text style={[s.emptyDesc, { textAlign: 'left', marginBottom: 12 }]}>Manual swaps now support SmartTrade-style slippage and optional stop-loss, take-profit, and trailing protection. If a Bot Wallet is active, trades execute server-side without Phantom prompts.</Text>
 
-      {/* From */}
+      <Text style={s.fieldLabel}>Quick input token</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 10 }}>
+        <View style={{ flexDirection: 'row', gap: 6 }}>
+          {COMMON_TRADING_SYMBOLS.map(symbol => {
+            const meta = getTokenMetaBySymbol(symbol);
+            if (!meta) return null;
+            return (
+              <Pressable key={`in-${symbol}`} onPress={() => setInputMint(meta.mint)} style={[s.quickBtn, inputMint === meta.mint && { borderColor: ACCENT + '60', backgroundColor: ACCENT + '15' }]}>
+                <Text style={s.quickText}>{symbol}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </ScrollView>
+
       <View style={s.fieldGroup}>
-        <Text style={s.fieldLabel}>From (mint)</Text>
-        <TextInput
-          style={s.input}
-          value={inputMint}
-          onChangeText={setInputMint}
-          placeholder="Input token mint..."
-          placeholderTextColor="#555"
-        />
+        <Text style={s.fieldLabel}>From mint</Text>
+        <TextInput style={s.input} value={inputMint} onChangeText={setInputMint} placeholder="Input token mint..." placeholderTextColor="#555" />
+        <Text style={[s.listMeta, { marginTop: 4 }]}>{inputMeta.name} ({inputMeta.symbol})</Text>
       </View>
 
-      {/* To */}
+      <Text style={s.fieldLabel}>Quick output token</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 10 }}>
+        <View style={{ flexDirection: 'row', gap: 6 }}>
+          {COMMON_TRADING_SYMBOLS.map(symbol => {
+            const meta = getTokenMetaBySymbol(symbol);
+            if (!meta) return null;
+            return (
+              <Pressable key={`out-${symbol}`} onPress={() => setOutputMint(meta.mint)} style={[s.quickBtn, outputMint === meta.mint && { borderColor: ACCENT + '60', backgroundColor: ACCENT + '15' }]}>
+                <Text style={s.quickText}>{symbol}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </ScrollView>
+
       <View style={s.fieldGroup}>
-        <Text style={s.fieldLabel}>To (mint)</Text>
-        <TextInput
-          style={s.input}
-          value={outputMint}
-          onChangeText={setOutputMint}
-          placeholder="Output token mint..."
-          placeholderTextColor="#555"
-        />
+        <Text style={s.fieldLabel}>To mint</Text>
+        <TextInput style={s.input} value={outputMint} onChangeText={setOutputMint} placeholder="Output token mint..." placeholderTextColor="#555" />
+        <Text style={[s.listMeta, { marginTop: 4 }]}>{outputMeta.name} ({outputMeta.symbol})</Text>
       </View>
 
-      {/* Amount */}
       <View style={s.fieldGroup}>
-        <Text style={s.fieldLabel}>Amount (SOL)</Text>
-        <TextInput
-          style={s.input}
-          value={amount}
-          onChangeText={setAmount}
-          placeholder="0.0"
-          placeholderTextColor="#555"
-          keyboardType="decimal-pad"
-        />
+        <Text style={s.fieldLabel}>Amount ({inputMeta.symbol})</Text>
+        <TextInput style={s.input} value={amount} onChangeText={setAmount} placeholder="0.0" placeholderTextColor="#555" keyboardType="decimal-pad" />
       </View>
 
-      {/* Quick amounts */}
       <View style={s.quickRow}>
         {['0.1', '0.5', '1.0', '5.0'].map(v => (
           <Pressable key={v} onPress={() => setAmount(v)} style={s.quickBtn}>
-            <Text style={s.quickText}>{v} SOL</Text>
+            <Text style={s.quickText}>{v} {inputMeta.symbol}</Text>
           </Pressable>
         ))}
       </View>
 
-      {/* Quote */}
+      <View style={s.fieldGroup}>
+        <Text style={s.fieldLabel}>Slippage tolerance (%)</Text>
+        <TextInput style={s.input} value={slippagePct} onChangeText={setSlippagePct} placeholder="1.0" placeholderTextColor="#555" keyboardType="decimal-pad" />
+      </View>
+
+      <View style={[s.formCard, { marginTop: 8 }]}> 
+        <Text style={[s.label, { marginBottom: 10 }]}>PROTECTED POSITION</Text>
+        <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+          <View style={{ flex: 1, minWidth: 120 }}>
+            <Text style={s.fieldLabel}>Stop loss %</Text>
+            <TextInput style={s.input} value={stopLossPct} onChangeText={setStopLossPct} placeholder="8" placeholderTextColor="#555" keyboardType="decimal-pad" />
+          </View>
+          <View style={{ flex: 1, minWidth: 120 }}>
+            <Text style={s.fieldLabel}>Take profit %</Text>
+            <TextInput style={s.input} value={takeProfitPct} onChangeText={setTakeProfitPct} placeholder="15" placeholderTextColor="#555" keyboardType="decimal-pad" />
+          </View>
+          <View style={{ flex: 1, minWidth: 120 }}>
+            <Text style={s.fieldLabel}>Trailing stop %</Text>
+            <TextInput style={s.input} value={trailingStopPct} onChangeText={setTrailingStopPct} placeholder="5" placeholderTextColor="#555" keyboardType="decimal-pad" />
+          </View>
+        </View>
+        <Text style={[s.listMeta, { marginTop: 8 }]}>If any field is filled, the executed swap will be saved as a tracked long position so stop checks in Positions can manage it later.</Text>
+      </View>
+
       <Pressable onPress={handleQuote} disabled={quoting || !amount} style={[s.actionBtn, { backgroundColor: ACCENT + '20' }]}>
-        {quoting ? <ActivityIndicator size="small" color={ACCENT} /> :
-          <Text style={[s.actionText, { color: ACCENT }]}>Get Quote</Text>}
+        {quoting ? <ActivityIndicator size="small" color={ACCENT} /> : <Text style={[s.actionText, { color: ACCENT }]}>Get Quote</Text>}
       </Pressable>
 
       {quote && (
@@ -829,28 +1924,27 @@ function TradeTab({ client, walletAddress, userId }: { client: HeliusClient; wal
           <Text style={s.quoteTitle}>Quote</Text>
           <View style={s.quoteRow}>
             <Text style={s.quoteLabel}>You send</Text>
-            <Text style={s.quoteValue}>{(parseInt(quote.inAmount) / 1e9).toFixed(6)} SOL</Text>
+            <Text style={s.quoteValue}>{convertFromSmallestUnit(quote.inAmount, inputMint).toFixed(inputDecimals > 6 ? 6 : 4)} {inputMeta.symbol}</Text>
           </View>
           <View style={s.quoteRow}>
             <Text style={s.quoteLabel}>You receive</Text>
-            <Text style={s.quoteValue}>{(parseInt(quote.outAmount) / 1e6).toFixed(4)}</Text>
+            <Text style={s.quoteValue}>{convertFromSmallestUnit(quote.outAmount, outputMint).toFixed(outputDecimals > 6 ? 6 : 4)} {outputMeta.symbol}</Text>
           </View>
           <View style={s.quoteRow}>
             <Text style={s.quoteLabel}>Price impact</Text>
-            <Text style={[s.quoteValue, quote.priceImpactPct > 1 && { color: '#ef4444' }]}>
-              {quote.priceImpactPct.toFixed(3)}%
-            </Text>
+            <Text style={[s.quoteValue, quote.priceImpactPct > 1 && { color: '#ef4444' }]}>{quote.priceImpactPct.toFixed(3)}%</Text>
+          </View>
+          <View style={s.quoteRow}>
+            <Text style={s.quoteLabel}>Slippage</Text>
+            <Text style={s.quoteValue}>{slippagePct}%</Text>
           </View>
           <View style={s.quoteRow}>
             <Text style={s.quoteLabel}>Route</Text>
-            <Text style={s.quoteValue}>
-              {quote.routePlan?.map(r => r.swapInfo.label).join(' > ') || 'Direct'}
-            </Text>
+            <Text style={s.quoteValue}>{quote.routePlan?.map(r => r.swapInfo.label).filter(Boolean).join(' > ') || 'Direct'}</Text>
           </View>
 
           <Pressable onPress={handleSwap} disabled={swapping} style={[s.actionBtn, { backgroundColor: '#22c55e', marginTop: 12 }]}>
-            {swapping ? <ActivityIndicator size="small" color="#fff" /> :
-              <Text style={[s.actionText, { color: '#e8e8e8' }]}>Execute Swap</Text>}
+            {swapping ? <ActivityIndicator size="small" color="#fff" /> : <Text style={[s.actionText, { color: '#e8e8e8' }]}>Execute Smart Trade</Text>}
           </Pressable>
         </View>
       )}
@@ -863,8 +1957,6 @@ function TradeTab({ client, walletAddress, userId }: { client: HeliusClient; wal
     </ScrollView>
   );
 }
-
-// ─── DCA Tab ──────────────────────────────────────────────────────────────────
 
 function DCATab({ client, userId }: { client: HeliusClient; userId: string }) {
   const [configs, setConfigs] = useState<DCAConfig[]>([]);
@@ -968,7 +2060,7 @@ function DCATab({ client, userId }: { client: HeliusClient; userId: string }) {
   );
 }
 
-// ─── Alerts Tab ───────────────────────────────────────────────────────────────
+// ??? Alerts Tab ???????????????????????????????????????????????????????????????
 
 function AlertsTab({ client, userId }: { client: HeliusClient; userId: string }) {
   const [alerts, setAlerts] = useState<TradeAlert[]>([]);
@@ -1080,9 +2172,9 @@ function AlertsTab({ client, userId }: { client: HeliusClient; userId: string })
   );
 }
 
-// ─── Tracked Wallets Tab ──────────────────────────────────────────────────────
+// ??? Tracked Wallets Tab ??????????????????????????????????????????????????????
 
-// Notable wallets — auto-displayed with live data
+// Notable wallets - auto-displayed with live data
 type WalletCategory = 'exchange' | 'market_maker' | 'whale' | 'trader' | 'political' | 'fund' | 'btc_whale';
 
 interface NotableWallet {
@@ -1094,29 +2186,29 @@ interface NotableWallet {
 }
 
 const NOTABLE_WALLETS: NotableWallet[] = [
-  // ── Solana Exchanges ──
+  // ?? Solana Exchanges ??
   { address: '5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9', label: 'Binance', category: 'exchange', chain: 'sol', description: 'Largest CEX hot wallet' },
   { address: 'GJRs4FwHtemZ5ZE9x3FNvJ8TMwitKTh21yxdRPqn7npE', label: 'Coinbase Hot 2', category: 'exchange', chain: 'sol' },
   { address: 'H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS', label: 'Coinbase', category: 'exchange', chain: 'sol' },
   { address: 'AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2', label: 'Bybit', category: 'exchange', chain: 'sol' },
   { address: 'AobVSwdW9BbpMdJvTqeCN4hPAmh4rHm7vwLnQ5ATSyrS', label: 'Crypto.com', category: 'exchange', chain: 'sol' },
-  // ── Solana Market Makers ──
+  // ?? Solana Market Makers ??
   { address: '5sTQ5ih7xtctBhMXHr3f1aWdaXazWrWfoehqWdqWnTFP', label: 'Wintermute', category: 'market_maker', chain: 'sol', description: 'Primary trading wallet' },
   { address: 'MfDuWeqSHEqTFVYZ7LoexgAK9dxk7cy4DFJWjWMGVWa', label: 'Wintermute Bot', category: 'market_maker', chain: 'sol', description: 'Automated liquidity bot' },
-  // ── Solana Whales ──
+  // ?? Solana Whales ??
   { address: '52C9T2T7JRojtxumYnYZhyUmrN7kqzvCLc4Ksvjk7TxD', label: 'SOL Whale #1', category: 'whale', chain: 'sol', description: '~4.3M SOL (0.85% supply)' },
   { address: '8BseXT9EtoEhBTKFFYkwTnjKSUZwhtmdKY2Jrj8j45Rt', label: 'SOL Whale #2', category: 'whale', chain: 'sol', description: '~3.9M SOL (0.77% supply)' },
-  // ── Solana Traders ──
+  // ?? Solana Traders ??
   { address: 'AVAZvHLR2PcWpDf8BXY4rVxNHYRBytycHkcB5z5QNXYm', label: 'Ansem (@blknoiz06)', category: 'trader', chain: 'sol', description: 'Famous memecoin trader' },
   { address: '4Be9CvxqHW6BYiRAxW9Q3xu1ycTMWaL5z8NX4HR3ha7t', label: 'Smart Money Alpha', category: 'trader', chain: 'sol', description: 'Consistent 50x+ flips' },
   { address: '8zFZHuSRuDpuAR7J6FzwyF3vKNx4CVW3DFHJerQhc7Zd', label: 'Insider Signal', category: 'trader', chain: 'sol', description: 'Early entry pattern' },
-  // ── Political ──
+  // ?? Political ??
   { address: '6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN', label: '$TRUMP Token Mint', category: 'political', chain: 'sol', description: 'Official Trump memecoin' },
-  // ── BTC Whales (view-only — no Helius data) ──
+  // ?? BTC Whales (view-only ? no Helius data) ??
   { address: '34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo', label: 'Satoshi Nakamoto', category: 'btc_whale', chain: 'btc', description: '~1.1M BTC, genesis blocks' },
   { address: 'bc1qazcm763858nkj2dz7g4cx4k9wy2ualpzyczjmc', label: 'Binance Cold', category: 'btc_whale', chain: 'btc', description: '~248K BTC' },
   { address: 'bc1qm34lsc65zpw79lxes69zkqmk6ee3ewf0j77s3h', label: 'Bitfinex Cold', category: 'btc_whale', chain: 'btc', description: '~180K BTC' },
-  { address: '3LYJfcfHPXYJreMsASht2PKsQGbBqbRLqM', label: 'US Gov (Silk Road)', category: 'btc_whale', chain: 'btc', description: 'Seized BTC — DOJ wallet' },
+  { address: '3LYJfcfHPXYJreMsASht2PKsQGbBqbRLqM', label: 'US Gov (Silk Road)', category: 'btc_whale', chain: 'btc', description: 'Seized BTC - DOJ wallet' },
   { address: 'bc1qjasf9z3h7w3jspkhtgatgpyvvzgpa2wwd2lr0p5', label: 'MicroStrategy', category: 'btc_whale', chain: 'btc', description: '~500K+ BTC treasury' },
   { address: '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', label: 'Genesis Block', category: 'btc_whale', chain: 'btc', description: 'First-ever BTC block reward' },
   { address: 'bc1q4c8n5t00jmj8temxdgcc3t32nkg2wjwz24lywv', label: 'Grayscale GBTC', category: 'btc_whale', chain: 'btc', description: 'Largest BTC fund' },
@@ -1197,7 +2289,7 @@ function WalletsTab({ client, userId }: { client: HeliusClient; userId: string }
         client.getTransactionHistory(address, 1).catch(() => []),
       ]);
       const solBal = balLamports / 1e9;
-      // Rough USD — use SOL price from token balances if available, else estimate
+      // Rough USD ? use SOL price from token balances if available, else estimate
       const solToken = tokenBalances.find((t: TokenBalance) => t.mint === SOL_MINT);
       const solPrice = solToken?.usdValue && solToken.amount ? solToken.usdValue / solToken.amount : null;
       const usdVal = solPrice ? solBal * solPrice : null;
@@ -1282,7 +2374,7 @@ function WalletsTab({ client, userId }: { client: HeliusClient; userId: string }
         );
       })}
 
-      {/* Notable wallets — always visible */}
+      {/* Notable wallets - always visible */}
       <View style={[s.sectionHeader, { marginTop: 20 }]}>
         <Text style={s.label}>WHALE DIRECTORY</Text>
       </View>
@@ -1372,25 +2464,22 @@ function WalletsTab({ client, userId }: { client: HeliusClient; userId: string }
   );
 }
 
-// ─── History Tab ──────────────────────────────────────────────────────────────
+// ??? History Tab ??????????????????????????????????????????????????????????????
 
 function HistoryTab({ userId }: { userId: string }) {
-  const [trades, setTrades] = useState<any[]>([]);
+  const [trades, setTrades] = useState<TradeLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [modeFilter, setModeFilter] = useState<'all' | TradingExecutionMode>('all');
 
-  useEffect(() => { loadHistory(); }, [userId]);
+  useEffect(() => { loadHistory(); }, [userId, modeFilter]);
 
   const loadHistory = async () => {
     setLoading(true);
     try {
-      const { data } = await supabase
-        .from('trading_log')
-        .select('*')
-        .eq('user_id', userId)
-        .order('created_at', { ascending: false })
-        .limit(50);
-      setTrades(data || []);
-    } catch { setTrades([]); }
+      setTrades(await getTradingLog(userId, modeFilter, 100));
+    } catch {
+      setTrades([]);
+    }
     setLoading(false);
   };
 
@@ -1399,60 +2488,106 @@ function HistoryTab({ userId }: { userId: string }) {
   return (
     <ScrollView contentContainerStyle={s.scrollPad}>
       <Text style={s.label}>TRADE HISTORY</Text>
+      <Text style={s.emptyDesc}>Shared execution log for live swaps, paper trades, and backtest-generated entries and exits.</Text>
+
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
+        <View style={s.quickRow}>
+          {(['all', 'live', 'paper', 'backtest'] as const).map(mode => {
+            const active = modeFilter === mode;
+            const color = mode === 'all' ? '#9e9e9e' : getExecutionModeColor(mode);
+            return (
+              <Pressable
+                key={mode}
+                onPress={() => setModeFilter(mode)}
+                style={[
+                  s.quickBtn,
+                  active && { borderColor: `${color}70`, backgroundColor: `${color}18` },
+                ]}
+              >
+                <Text style={[s.quickText, active && { color }]}>
+                  {mode === 'all' ? 'ALL MODES' : getExecutionModeLabel(mode)}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </ScrollView>
 
       {trades.length === 0 && (
-        <Text style={s.emptyDesc}>No trades recorded yet.</Text>
+        <Text style={s.emptyDesc}>No trades recorded for this mode yet.</Text>
       )}
 
-      {trades.map(t => (
-        <View key={t.id} style={s.listCard}>
-          <View style={s.listTop}>
-            <Text style={s.listTitle}>{t.action.toUpperCase()}</Text>
-            <View style={[s.statusPill, t.status === 'success' ? s.statusPillActive : t.status === 'failed' ? s.statusPillFailed : {}]}>
-              <Text style={[s.statusPillText, t.status === 'success' && { color: '#22c55e' }, t.status === 'failed' && { color: '#ef4444' }]}>
-                {t.status}
-              </Text>
+      {trades.map(trade => {
+        const modeColor = getExecutionModeColor(trade.executionMode);
+        const inputSymbol = trade.inputMint ? getTokenMetaByMint(trade.inputMint).symbol : null;
+        const outputSymbol = trade.outputMint ? getTokenMetaByMint(trade.outputMint).symbol : null;
+        const pnlUsd = typeof trade.metadata?.pnlUsd === 'number' ? trade.metadata.pnlUsd : undefined;
+        return (
+          <View key={trade.id} style={s.listCard}>
+            <View style={s.listTop}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap', flex: 1 }}>
+                <Text style={s.listTitle}>{trade.action.toUpperCase()}</Text>
+                <View style={[s.statusPill, { borderColor: `${modeColor}50`, backgroundColor: `${modeColor}15` }]}>
+                  <Text style={[s.statusPillText, { color: modeColor }]}>
+                    {getExecutionModeLabel(trade.executionMode)}
+                  </Text>
+                </View>
+                <View style={[s.statusPill, trade.status === 'success' ? s.statusPillActive : trade.status === 'failed' ? s.statusPillFailed : {}]}>
+                  <Text style={[s.statusPillText, trade.status === 'success' && { color: '#22c55e' }, trade.status === 'failed' && { color: '#ef4444' }]}>
+                    {trade.status}
+                  </Text>
+                </View>
+              </View>
             </View>
+            {(trade.inputAmount || trade.outputAmount) && (
+              <Text style={s.listMeta}>
+                {trade.inputAmount || '0'} {inputSymbol || ''} {'>'} {trade.outputAmount || '—'} {outputSymbol || ''}
+              </Text>
+            )}
+            {trade.priceUsd && (
+              <Text style={s.listMeta}>Price: ${trade.priceUsd.toFixed(4)}</Text>
+            )}
+            {trade.strategyName && (
+              <Text style={s.listMeta}>Strategy: {trade.strategyName}</Text>
+            )}
+            {typeof pnlUsd === 'number' && (
+              <Text style={[s.listMeta, { color: pnlUsd >= 0 ? '#22c55e' : '#ef4444' }]}>
+                P&L: {pnlUsd >= 0 ? '+' : ''}{formatCompactUsd(pnlUsd)}
+              </Text>
+            )}
+            {trade.txHash && (
+              <Pressable
+                onPress={() => {
+                  if (RNPlatform.OS === 'web') window.open(`https://solscan.io/tx/${trade.txHash}`, '_blank');
+                }}
+              >
+                <Text style={s.txLink}>TX: {trade.txHash.slice(0, 12)}...</Text>
+              </Pressable>
+            )}
+            {trade.reason && <Text style={s.listMeta}>{trade.reason}</Text>}
+            <Text style={s.listTime}>{new Date(trade.createdAt).toLocaleString()}</Text>
           </View>
-          {t.input_amount && (
-            <Text style={s.listMeta}>
-              {t.input_amount} {'>'} {t.output_amount || '—'}
-            </Text>
-          )}
-          {t.price_usd && (
-            <Text style={s.listMeta}>Price: ${parseFloat(t.price_usd).toFixed(4)}</Text>
-          )}
-          {t.tx_hash && (
-            <Pressable
-              onPress={() => {
-                if (RNPlatform.OS === 'web') window.open(`https://solscan.io/tx/${t.tx_hash}`, '_blank');
-              }}
-            >
-              <Text style={s.txLink}>TX: {t.tx_hash.slice(0, 12)}...</Text>
-            </Pressable>
-          )}
-          {t.reason && <Text style={s.listMeta}>{t.reason}</Text>}
-          <Text style={s.listTime}>{new Date(t.created_at).toLocaleString()}</Text>
-        </View>
-      ))}
+        );
+      })}
     </ScrollView>
   );
 }
 
-// ─── Positions Tab ────────────────────────────────────────────────────────────
+// ??? Positions Tab ????????????????????????????????????????????????????????????
 
 function PositionsTab({ client, userId }: { client: HeliusClient; userId: string }) {
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
+  const [modeFilter, setModeFilter] = useState<'all' | 'live' | 'paper'>('all');
 
-  useEffect(() => { loadPositions(); }, [userId]);
+  useEffect(() => { loadPositions(); }, [userId, modeFilter]);
 
   const loadPositions = async () => {
     setLoading(true);
     try {
-      const p = await getOpenPositions(userId);
-      setPositions(p);
+      const nextPositions = await getOpenPositions(userId, modeFilter);
+      setPositions(nextPositions);
     } catch {
       setPositions([]);
     }
@@ -1477,7 +2612,14 @@ function PositionsTab({ client, userId }: { client: HeliusClient; userId: string
   const handleClosePosition = async (pos: Position) => {
     try {
       const { price } = await client.getTokenPrice(pos.tokenMint);
-      await closePosition(pos.id, price, 'manual');
+      if (!price) {
+        throw new Error('Live pricing is unavailable for this position.');
+      }
+      if (pos.executionMode === 'paper') {
+        await closePaperPosition(pos.id, price, 'manual');
+      } else {
+        await closePosition(pos.id, price, 'manual');
+      }
       await loadPositions();
     } catch (err: any) {
       alert('Error closing position: ' + (err.message || err));
@@ -1491,7 +2633,29 @@ function PositionsTab({ client, userId }: { client: HeliusClient; userId: string
 
   return (
     <ScrollView showsVerticalScrollIndicator={false}>
-      {/* Summary */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.scrollPad}>
+        <View style={s.quickRow}>
+          {(['all', 'live', 'paper'] as const).map(mode => {
+            const active = modeFilter === mode;
+            const color = mode === 'all' ? '#9e9e9e' : getExecutionModeColor(mode);
+            return (
+              <Pressable
+                key={mode}
+                onPress={() => setModeFilter(mode)}
+                style={[
+                  s.quickBtn,
+                  active && { borderColor: `${color}70`, backgroundColor: `${color}18` },
+                ]}
+              >
+                <Text style={[s.quickText, active && { color }]}>
+                  {mode === 'all' ? 'ALL OPEN' : getExecutionModeLabel(mode)}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </ScrollView>
+
       {positions.length > 0 && (
         <View style={s.statsRow}>
           <View style={s.statCard}>
@@ -1511,18 +2675,18 @@ function PositionsTab({ client, userId }: { client: HeliusClient; userId: string
         </View>
       )}
 
-      {/* Check Stops Button */}
       <Pressable style={s.refreshBtn} onPress={handleCheckStops} disabled={checking}>
         <Text style={s.refreshText}>{checking ? 'CHECKING STOPS...' : 'CHECK STOP-LOSS / TAKE-PROFIT'}</Text>
       </Pressable>
 
       {positions.length === 0 ? (
         <View style={[s.emptyCard, { marginTop: 16 }]}>
-          <Text style={s.emptyDesc}>No open positions. Positions are created when you execute trades with stop-loss/take-profit levels.</Text>
+          <Text style={s.emptyDesc}>No open positions in this mode. Live trades and paper trades both feed this book.</Text>
         </View>
       ) : (
         positions.map(pos => {
           const pnlColor = pos.unrealizedPnl >= 0 ? '#22c55e' : '#ef4444';
+          const modeColor = getExecutionModeColor(pos.executionMode);
           const stopDist = pos.stopLossPrice && pos.currentPrice > 0
             ? ((pos.currentPrice - pos.stopLossPrice) / pos.currentPrice * 100).toFixed(1)
             : null;
@@ -1533,7 +2697,19 @@ function PositionsTab({ client, userId }: { client: HeliusClient; userId: string
           return (
             <View key={pos.id} style={[s.listCard, { marginTop: 8 }]}>
               <View style={s.listTop}>
-                <Text style={s.listTitle}>{pos.tokenSymbol} {pos.side.toUpperCase()}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap', flex: 1 }}>
+                  <Text style={s.listTitle}>{pos.tokenSymbol} {pos.side.toUpperCase()}</Text>
+                  <View style={[s.statusPill, { borderColor: `${modeColor}50`, backgroundColor: `${modeColor}15` }]}>
+                    <Text style={[s.statusPillText, { color: modeColor }]}>
+                      {getExecutionModeLabel(pos.executionMode)}
+                    </Text>
+                  </View>
+                  {pos.strategyName && (
+                    <View style={s.statusPill}>
+                      <Text style={s.statusPillText}>{pos.strategyName}</Text>
+                    </View>
+                  )}
+                </View>
                 <Text style={[s.alertBadge, { color: pnlColor }]}>
                   {pos.unrealizedPnlPct >= 0 ? '+' : ''}{pos.unrealizedPnlPct.toFixed(2)}%
                 </Text>
@@ -1573,14 +2749,15 @@ function PositionsTab({ client, userId }: { client: HeliusClient; userId: string
   );
 }
 
-// ─── Signals Tab ──────────────────────────────────────────────────────────────
+// ??? Signals Tab ??????????????????????????????????????????????????????????????
 
 function SignalsTab({ client, userId }: { client: HeliusClient; userId: string }) {
   const [selectedToken, setSelectedToken] = useState<string>('SOL');
   const [riskScore, setRiskScore] = useState<TokenRiskScore | null>(null);
   const [analysis, setAnalysis] = useState<TechnicalAnalysis | null>(null);
+  const [marketSnapshot, setMarketSnapshot] = useState<TokenMarketSnapshot | null>(null);
   const [loadingRisk, setLoadingRisk] = useState(false);
-  const [loadingTA, setLoadingTA] = useState(false);
+  const [loadingAnalysis, setLoadingAnalysis] = useState(false);
 
   const tokens = Object.entries(SOLANA_TOKEN_REGISTRY).slice(0, 10);
 
@@ -1598,29 +2775,22 @@ function SignalsTab({ client, userId }: { client: HeliusClient; userId: string }
     setLoadingRisk(false);
   };
 
-  const handleRunTA = async () => {
-    setLoadingTA(true);
+  const handleRunLiveAnalysis = async () => {
+    setLoadingAnalysis(true);
     try {
       const token = SOLANA_TOKEN_REGISTRY[selectedToken];
       if (token) {
-        // Get current price and generate synthetic price history for demo
-        const { price } = await client.getTokenPrice(token.mint);
-        if (price > 0) {
-          // Generate 30 data points with some variance for TA demo
-          const prices: number[] = [];
-          for (let i = 29; i >= 0; i--) {
-            const variance = (Math.random() - 0.5) * 0.1;
-            prices.push(price * (1 + variance - (i * 0.002)));
-          }
-          prices.push(price); // current price last
-          const ta = calculateTechnicalSignals(prices, selectedToken, token.mint);
-          setAnalysis(ta);
+        const snapshot = await fetchTokenMarketSnapshot(token.mint);
+        if (!snapshot) {
+          throw new Error('No live pair data available for this token');
         }
+        setMarketSnapshot(snapshot);
+        setAnalysis(buildLiveAnalysisFromSnapshot(snapshot, selectedToken, token.mint));
       }
     } catch (err: any) {
-      alert('TA failed: ' + (err.message || err));
+      alert('Live analysis failed: ' + (err.message || err));
     }
-    setLoadingTA(false);
+    setLoadingAnalysis(false);
   };
 
   const gradeColor = (grade: string) => {
@@ -1641,15 +2811,19 @@ function SignalsTab({ client, userId }: { client: HeliusClient; userId: string }
   };
 
   return (
-    <ScrollView showsVerticalScrollIndicator={false}>
-      {/* Token Selector */}
+    <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={s.scrollPad}>
       <Text style={s.label}>SELECT TOKEN</Text>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 16 }}>
         <View style={{ flexDirection: 'row', gap: 6 }}>
           {tokens.map(([sym]) => (
             <Pressable
               key={sym}
-              onPress={() => { setSelectedToken(sym); setRiskScore(null); setAnalysis(null); }}
+              onPress={() => {
+                setSelectedToken(sym);
+                setRiskScore(null);
+                setAnalysis(null);
+                setMarketSnapshot(null);
+              }}
               style={[s.tab, selectedToken === sym && { backgroundColor: ACCENT + '18', borderColor: ACCENT + '40' }]}
             >
               <Text style={[s.tabText, selectedToken === sym && { color: ACCENT }]}>{sym}</Text>
@@ -1658,27 +2832,60 @@ function SignalsTab({ client, userId }: { client: HeliusClient; userId: string }
         </View>
       </ScrollView>
 
-      {/* Action Buttons */}
       <View style={{ flexDirection: 'row', gap: 8, marginBottom: 16 }}>
         <Pressable style={[s.refreshBtn, { flex: 1 }]} onPress={handleScanRisk} disabled={loadingRisk}>
           <Text style={s.refreshText}>{loadingRisk ? 'SCANNING...' : 'RISK SCAN'}</Text>
         </Pressable>
-        <Pressable style={[s.refreshBtn, { flex: 1 }]} onPress={handleRunTA} disabled={loadingTA}>
-          <Text style={s.refreshText}>{loadingTA ? 'ANALYZING...' : 'TECHNICAL ANALYSIS'}</Text>
+        <Pressable style={[s.refreshBtn, { flex: 1 }]} onPress={handleRunLiveAnalysis} disabled={loadingAnalysis}>
+          <Text style={s.refreshText}>{loadingAnalysis ? 'ANALYZING...' : 'LIVE ANALYSIS'}</Text>
         </Pressable>
       </View>
 
-      {/* Risk Score */}
+      {marketSnapshot && (
+        <View style={[s.listCard, { marginBottom: 12 }]}> 
+          <View style={s.listTop}>
+            <Text style={s.listTitle}>LIVE MARKET SNAPSHOT: {marketSnapshot.symbol}</Text>
+            <View style={[s.statusPill, { borderColor: marketSnapshot.priceChange24h >= 0 ? '#22c55e40' : '#ef444440', backgroundColor: marketSnapshot.priceChange24h >= 0 ? '#22c55e10' : '#ef444410' }]}>
+              <Text style={[s.statusPillText, { color: marketSnapshot.priceChange24h >= 0 ? '#22c55e' : '#ef4444' }]}>{formatPct(marketSnapshot.priceChange24h)}</Text>
+            </View>
+          </View>
+          <Text style={[s.listMeta, { marginTop: 6 }]}>Price {formatCompactUsd(marketSnapshot.priceUsd)} | Liquidity {formatCompactUsd(marketSnapshot.liquidityUsd)} | Volume 24h {formatCompactUsd(marketSnapshot.volume24h)}</Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
+            {[
+              `5m ${formatPct(marketSnapshot.priceChange5m)}`,
+              `1h ${formatPct(marketSnapshot.priceChange1h)}`,
+              `6h ${formatPct(marketSnapshot.priceChange6h)}`,
+              `Buys ${marketSnapshot.buys24h}`,
+              `Sells ${marketSnapshot.sells24h}`,
+              `Age ${formatAge(marketSnapshot.pairCreatedAt)}`,
+              `DEX ${marketSnapshot.dexId || 'n/a'}`,
+              `Boosts ${marketSnapshot.activeBoosts}`,
+            ].map(label => (
+              <View key={label} style={[s.featuredTag, { borderColor: '#ffffff12' }]}>
+                <Text style={s.featuredTagText}>{label}</Text>
+              </View>
+            ))}
+          </View>
+          <Text style={[s.listMeta, { marginTop: 10 }]}>Market Cap {formatCompactUsd(marketSnapshot.marketCap)} | FDV {formatCompactUsd(marketSnapshot.fdv)}</Text>
+          {(marketSnapshot.websites.length > 0 || marketSnapshot.socials.length > 0) && (
+            <Text style={[s.listMeta, { marginTop: 6 }]}>Links: {[...marketSnapshot.websites, ...marketSnapshot.socials].slice(0, 4).join(' ? ')}</Text>
+          )}
+          {marketSnapshot.pairUrl && RNPlatform.OS === 'web' && (
+            <Pressable onPress={() => window.open(marketSnapshot.pairUrl, '_blank')} style={[s.refreshBtn, { marginTop: 12 }]}> 
+              <Text style={s.refreshText}>Open Pair on DEX Screener</Text>
+            </Pressable>
+          )}
+        </View>
+      )}
+
       {riskScore && (
-        <View style={[s.listCard, { marginBottom: 12 }]}>
+        <View style={[s.listCard, { marginBottom: 12 }]}> 
           <View style={s.listTop}>
             <Text style={s.listTitle}>RISK SCORE: {riskScore.symbol}</Text>
             <View style={[s.statusPill, { borderColor: gradeColor(riskScore.grade) + '40', backgroundColor: gradeColor(riskScore.grade) + '08' }]}>
               <Text style={[s.statusPillText, { color: gradeColor(riskScore.grade) }]}>{riskScore.grade} ({riskScore.overallScore}/100)</Text>
             </View>
           </View>
-
-          {/* Factor bars */}
           {Object.entries(riskScore.factors).map(([key, val]) => (
             <View key={key} style={{ marginTop: 8 }}>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
@@ -1686,65 +2893,47 @@ function SignalsTab({ client, userId }: { client: HeliusClient; userId: string }
                 <Text style={s.listMeta}>{val}/20</Text>
               </View>
               <View style={{ height: 4, backgroundColor: '#1a1a1a', borderRadius: 2, marginTop: 2 }}>
-                <View style={{
-                  height: 4,
-                  width: `${(val / 20) * 100}%`,
-                  backgroundColor: val >= 15 ? '#22c55e' : val >= 10 ? '#f59e0b' : '#ef4444',
-                  borderRadius: 2,
-                }} />
+                <View style={{ height: 4, width: `${(val / 20) * 100}%`, backgroundColor: val >= 15 ? '#22c55e' : val >= 10 ? '#f59e0b' : '#ef4444', borderRadius: 2 }} />
               </View>
             </View>
           ))}
-
-          {/* Warnings */}
           {riskScore.warnings.length > 0 && (
             <View style={{ marginTop: 10, padding: 8, backgroundColor: '#ffffff05', borderRadius: 6, borderWidth: 1, borderColor: '#ffffff10' }}>
-              {riskScore.warnings.map((w, i) => (
-                <Text key={i} style={[s.listMeta, { color: '#f59e0b', marginBottom: 2 }]}>{w}</Text>
+              {riskScore.warnings.map((warning, index) => (
+                <Text key={index} style={[s.listMeta, { color: '#f59e0b', marginBottom: 2 }]}>{warning}</Text>
               ))}
             </View>
           )}
         </View>
       )}
 
-      {/* Technical Analysis */}
       {analysis && (
-        <View style={[s.listCard, { marginBottom: 12 }]}>
+        <View style={[s.listCard, { marginBottom: 12 }]}> 
           <View style={s.listTop}>
-            <Text style={s.listTitle}>SIGNALS: {analysis.symbol}</Text>
+            <Text style={s.listTitle}>LIVE SIGNALS: {analysis.symbol}</Text>
             <View style={[s.statusPill, { borderColor: signalColor(analysis.overallSignal) + '40', backgroundColor: signalColor(analysis.overallSignal) + '08' }]}>
-              <Text style={[s.statusPillText, { color: signalColor(analysis.overallSignal) }]}>
-                {analysis.overallSignal.replace(/_/g, ' ').toUpperCase()} ({analysis.overallScore})
-              </Text>
+              <Text style={[s.statusPillText, { color: signalColor(analysis.overallSignal) }]}>{analysis.overallSignal.replace(/_/g, ' ').toUpperCase()} ({analysis.overallScore})</Text>
             </View>
           </View>
-
-          <Text style={[s.listMeta, { marginTop: 6 }]}>
-            Price: ${analysis.currentPrice.toFixed(4)} | S: ${analysis.support.toFixed(4)} | R: ${analysis.resistance.toFixed(4)}
-          </Text>
-
-          {/* Individual signals */}
-          {analysis.signals.map((sig, i) => (
-            <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
+          <Text style={[s.listMeta, { marginTop: 6 }]}>Price ${analysis.currentPrice.toFixed(4)} | Support ${analysis.support.toFixed(4)} | Resistance ${analysis.resistance.toFixed(4)}</Text>
+          {analysis.signals.map((sig, index) => (
+            <View key={index} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
               <Text style={[s.listMeta, { flex: 1 }]}>{sig.indicator}</Text>
-              <Text style={[s.listMeta, { flex: 1, textAlign: 'center' }]}>{sig.value}</Text>
+              <Text style={[s.listMeta, { flex: 1, textAlign: 'center' }]}>{Math.round(sig.value * 100) / 100}</Text>
               <View style={[s.statusPill, { borderColor: signalColor(sig.signal) + '40', backgroundColor: signalColor(sig.signal) + '08' }]}>
-                <Text style={[s.statusPillText, { color: signalColor(sig.signal) }]}>
-                  {sig.signal.toUpperCase()} {Math.round(sig.strength * 100)}%
-                </Text>
+                <Text style={[s.statusPillText, { color: signalColor(sig.signal) }]}>{sig.signal.toUpperCase()} {Math.round(sig.strength * 100)}%</Text>
               </View>
             </View>
           ))}
         </View>
       )}
 
-      {/* Info */}
-      {!riskScore && !analysis && (
+      {!riskScore && !analysis && !marketSnapshot && (
         <View style={s.emptyCard}>
           <Text style={s.emptyDesc}>
-            Select a token and run Risk Scan or Technical Analysis to see signals.
-            {'\n\n'}Risk Score rates tokens 0-100 across liquidity, holder distribution, contract security, volume, and price stability.
-            {'\n\n'}Technical Analysis runs RSI, EMA crossover, MACD, Bollinger Bands, and momentum indicators.
+            Select a token and run Risk Scan or Live Analysis to see current market structure.
+            {'\n\n'}Live Analysis uses DEX Screener pair data for price change, order flow, liquidity, market cap, and pair age, then derives a momentum/structure view from those real market anchors.
+            {'\n\n'}Risk Score still focuses on contract security, liquidity, holder distribution, and price stability.
           </Text>
         </View>
       )}
@@ -1752,15 +2941,13 @@ function SignalsTab({ client, userId }: { client: HeliusClient; userId: string }
   );
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
-
 const s = StyleSheet.create({
   container: { flex: 1 },
   content: { flex: 1 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
   scrollPad: { padding: 16, paddingBottom: 40 },
 
-  // Tab bar — pixel-art style matching Backpack
+  // Tab bar ? pixel-art style matching Backpack
   tabBar: {
     borderBottomWidth: 2,
     borderBottomColor: PIXEL_COLORS.border1,
@@ -2077,3 +3264,4 @@ const s = StyleSheet.create({
   },
   pendingBtnText: { fontSize: 12, fontWeight: '700', fontFamily: 'monospace' },
 });
+

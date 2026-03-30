@@ -48,12 +48,27 @@ interface AutomationRun {
   started_at: string;
 }
 
+interface TaskRunFeedItem {
+  id: string;
+  task_id: string;
+  agent_id: string;
+  run_kind: string;
+  status: string;
+  summary: string | null;
+  model_used: string | null;
+  token_count: number | null;
+  duration_ms: number | null;
+  started_at: string;
+}
+
 export default function ActivityFeedPanel({ circleId, agents }: Props) {
   const [items, setItems] = useState<ActivityItem[]>([]);
   const [runs, setRuns] = useState<AutomationRun[]>([]);
+  const [taskRuns, setTaskRuns] = useState<TaskRunFeedItem[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const automationRunsSupportedRef = useRef(true);
+  const taskRunsSupportedRef = useRef(true);
 
   const fetchActivity = useCallback(async () => {
     try {
@@ -82,6 +97,24 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
           console.warn('[ActivityFeedPanel] automation_runs unavailable:', runRes.error.message);
         } else if (runRes.data) {
           setRuns(runRes.data);
+        }
+      }
+
+      if (taskRunsSupportedRef.current) {
+        const taskRunRes = await supabase
+          .from('task_runs')
+          .select('id, task_id, agent_id, run_kind, status, summary, model_used, token_count, duration_ms, started_at')
+          .eq('circle_id', circleId)
+          .in('status', ['completed', 'failed'])
+          .order('started_at', { ascending: false })
+          .limit(12);
+
+        if (taskRunRes.error) {
+          taskRunsSupportedRef.current = false;
+          setTaskRuns([]);
+          console.warn('[ActivityFeedPanel] task_runs unavailable:', taskRunRes.error.message);
+        } else if (taskRunRes.data) {
+          setTaskRuns(taskRunRes.data);
         }
       }
     } catch (err) {
@@ -141,6 +174,34 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
 
       {/* Feed */}
       <ScrollView style={s.list} contentContainerStyle={s.listContent} showsVerticalScrollIndicator={false}>
+        {/* Recent task runs */}
+        {taskRuns.map(run => {
+          const agent = agents.find(a => a.id === run.agent_id);
+          const color = run.status === 'failed' ? '#ef4444' : (agent?.color || '#22c55e');
+          return (
+            <View key={`task-run-${run.id}`} style={[s.item, { borderLeftWidth: 3, borderLeftColor: color }]}> 
+              <View style={s.itemRow}>
+                <View style={[s.iconCircle, { backgroundColor: color + '20' }]}> 
+                  <Text style={[s.iconText, { color }]}>{run.status === 'failed' ? '!' : '>'}</Text>
+                </View>
+                <View style={s.itemContent}>
+                  <View style={s.itemNameRow}>
+                    <Text style={[s.itemAgent, { color }]}>{agent?.name || run.agent_id}</Text>
+                    <Text style={[s.sourceBadge, { color }]}>{run.run_kind}</Text>
+                  </View>
+                  <Text style={s.itemAction}>{run.summary || 'Completed task run'}</Text>
+                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
+                    {run.model_used ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{run.model_used}</Text> : null}
+                    {run.duration_ms ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{(run.duration_ms / 1000).toFixed(1)}s</Text> : null}
+                    {run.token_count ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{run.token_count} tok</Text> : null}
+                  </View>
+                  <Text style={s.timestamp}>{timeAgo(run.started_at)}</Text>
+                </View>
+              </View>
+            </View>
+          );
+        })}
+
         {/* Failed/recent automation runs */}
         {runs.filter(r => r.status === 'failed').map(run => (
           <View key={`run-${run.id}`} style={[s.item, { borderLeftWidth: 3, borderLeftColor: '#ef4444' }]}>

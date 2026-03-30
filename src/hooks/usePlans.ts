@@ -129,6 +129,8 @@ export function usePlans(circleId: string) {
       priority: 'normal' as const,
       status: 'todo' as const,
       position: nextPos + i,
+      assigned_agent_id: plan.assigned_agent_ids?.[0] || null,
+      completion_policy: (plan.assigned_agent_ids?.length || 0) > 1 ? 'all_assigned' : 'single_owner',
       plan_id: planId,
       plan_step_id: step.id,
       goal_id: plan.goal_id || null,
@@ -146,6 +148,30 @@ export function usePlans(circleId: string) {
     }
 
     if (inserted && inserted.length === pendingSteps.length) {
+      if (plan.assigned_agent_ids?.length) {
+        try {
+          const assignmentRows = inserted.flatMap((row: any) =>
+            plan.assigned_agent_ids.map((agentId, index) => ({
+              task_id: row.id,
+              circle_id: circleId,
+              agent_id: agentId,
+              role: index === 0 ? 'owner' : 'executor',
+              assignment_type: 'plan',
+              required_for_completion: true,
+              required_for_review: false,
+              status: 'assigned',
+              order_index: index,
+              assigned_by: user.id,
+            }))
+          );
+          if (assignmentRows.length > 0) {
+            await supabase.from('task_agent_assignments').upsert(assignmentRows, { onConflict: 'task_id,agent_id' });
+          }
+        } catch (assignmentErr) {
+          console.warn('generateTasksFromPlan assignment sync skipped:', assignmentErr);
+        }
+      }
+
       const updatedSteps = plan.steps.map(s => {
         const idx = pendingSteps.findIndex(ps => ps.id === s.id);
         if (idx >= 0 && inserted[idx]) {

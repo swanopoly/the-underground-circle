@@ -57,7 +57,8 @@ export default function KanbanBoard({
         if (filterPriority && t.priority !== filterPriority) return false;
         if (filterAssignee) {
           if (filterAssignee.startsWith('agent:')) {
-            if (t.assigned_agent_id !== filterAssignee.slice(6)) return false;
+            const assignedAgentIds = t.assigned_agent_ids || (t.assigned_agent_id ? [t.assigned_agent_id] : []);
+            if (!assignedAgentIds.includes(filterAssignee.slice(6))) return false;
           } else {
             if (t.assigned_to !== filterAssignee) return false;
           }

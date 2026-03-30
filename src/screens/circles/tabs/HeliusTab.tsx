@@ -23,6 +23,8 @@ import { supabase } from '../../../lib/supabase';
 import {
   HeliusClient,
   createUserHeliusClient,
+  cacheHeliusApiKeyLocally,
+  clearHeliusApiKeyLocalCache,
   type PortfolioSnapshot,
   type TokenBalance,
   SOL_MINT,
@@ -126,6 +128,7 @@ export default function HeliusTab({ circleId }: { circleId: string }) {
       if (error) {
         setTestResult({ ok: false, msg: error.message });
       } else {
+        await cacheHeliusApiKeyLocally(userId, apiKeyInput.trim());
         setStoredKeyId(data);
         setMode('connected');
         setTestResult(null);
@@ -141,6 +144,7 @@ export default function HeliusTab({ circleId }: { circleId: string }) {
     if (!storedKeyId) return;
     try {
       await supabase.rpc('delete_user_api_key', { p_key_id: storedKeyId });
+      if (userId) await clearHeliusApiKeyLocalCache(userId);
       setStoredKeyId(null);
       setPortfolio(null);
       setApiKeyInput('');

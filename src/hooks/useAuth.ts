@@ -8,21 +8,58 @@ export function useAuth() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      setLoading(false);
-    }).catch(() => {
+    let cancelled = false;
+
+    const bootstrap = async () => {
+      try {
+        const { data: { session: cachedSession } } = await supabase.auth.getSession();
+        if (!cachedSession) {
+          if (!cancelled) {
+            setSession(null);
+            setUser(null);
+          }
+          return;
+        }
+
+        const { data: authData, error: authError } = await supabase.auth.getUser();
+        if (authError || !authData.user) {
+          await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+          if (!cancelled) {
+            setSession(null);
+            setUser(null);
+          }
+          return;
+        }
+
+        const { data: { session: freshSession } } = await supabase.auth.getSession();
+        if (!cancelled) {
+          setSession(freshSession ?? cachedSession);
+          setUser(authData.user);
+        }
+      } catch {
+        if (!cancelled) {
+          setSession(null);
+          setUser(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void bootstrap();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setUser(nextSession?.user ?? null);
       setLoading(false);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      setLoading(false);
-    });
-
-    return () => subscription.unsubscribe();
+    return () => {
+      cancelled = true;
+      subscription.unsubscribe();
+    };
   }, []);
 
   const signUp = async (email: string, password: string, username: string) => {
@@ -45,9 +82,10 @@ export function useAuth() {
   };
 
   const signOut = async () => {
-    const { error } = await supabase.auth.signOut();
+    const { error } = await supabase.auth.signOut({ scope: 'local' });
     return { error };
   };
 
   return { session, user, loading, signUp, signIn, signOut };
 }
+

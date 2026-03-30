@@ -8,7 +8,7 @@ import {
   Platform, KeyboardAvoidingView, Image, ActivityIndicator,
 } from 'react-native';
 import {
-  KanbanTask, TaskComment, TaskAttachment, TaskStatus, TaskPriority,
+  KanbanTask, TaskComment, TaskAttachment, TaskStatus, TaskPriority, TaskRun,
   COLUMNS, PRIORITY_COLORS, PRIORITY_LABELS, DEFAULT_AGENT_ROSTER,
 } from '../../../../types/kanban';
 import type { KanbanData, KanbanMember, ThinkingLevel, AgentModel, AgentMode } from '../../../../hooks/useKanbanData';
@@ -319,10 +319,11 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
   const [description, setDescription] = useState(task.description || '');
   const [priority, setPriority] = useState<TaskPriority>(task.priority);
   const [assignedTo, setAssignedTo] = useState<string | null>(task.assigned_to);
-  const [assignedAgentId, setAssignedAgentId] = useState<string | null>(task.assigned_agent_id);
+  const [assignedAgentIds, setAssignedAgentIds] = useState<string[]>(task.assigned_agent_ids || (task.assigned_agent_id ? [task.assigned_agent_id] : []));
   const [dueDate, setDueDate] = useState(task.due_date || '');
 
   const [comments, setComments] = useState<TaskComment[]>([]);
+  const [taskRuns, setTaskRuns] = useState<TaskRun[]>(task.recent_runs || []);
   const [commentText, setCommentText] = useState('');
   const [showDelete, setShowDelete] = useState(false);
   const [showAssignees, setShowAssignees] = useState(false);
@@ -368,18 +369,26 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
       setDescription(task.description || '');
       setPriority(task.priority);
       setAssignedTo(task.assigned_to);
-      setAssignedAgentId(task.assigned_agent_id);
+      setAssignedAgentIds(task.assigned_agent_ids || (task.assigned_agent_id ? [task.assigned_agent_id] : []));
       setDueDate(task.due_date || '');
     }
+    setSelectedAgentId(task.assigned_agent_ids?.[0] || task.assigned_agent_id || 'blackswan-default');
+    setTaskRuns(task.recent_runs || []);
   }, [task, editing]);
 
-  // Load comments
   const loadComments = useCallback(async () => {
     const c = await kanban.fetchComments(task.id);
     setComments(c);
   }, [task.id, kanban.fetchComments]);
 
+  const loadTaskRuns = useCallback(async () => {
+    if (!kanban.fetchTaskRuns) return;
+    const runs = await kanban.fetchTaskRuns(task.id);
+    setTaskRuns(runs);
+  }, [task.id, kanban.fetchTaskRuns]);
+
   useEffect(() => { loadComments(); }, [loadComments]);
+  useEffect(() => { loadTaskRuns(); }, [loadTaskRuns]);
 
   // Realtime comments
   useEffect(() => {
@@ -399,7 +408,8 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
       description: description.trim() || null,
       priority,
       assigned_to: assignedTo,
-      assigned_agent_id: assignedAgentId,
+      assigned_agent_id: assignedAgentIds[0] || null,
+      assigned_agent_ids: assignedAgentIds,
       due_date: dueDate || null,
     } as any);
     setEditing(false);
@@ -501,6 +511,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
       });
       if (result) {
         setAgentResult(result);
+        await loadTaskRuns();
       } else {
         setAgentError('Agent returned no response');
       }
@@ -515,12 +526,16 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
   const selectedAgent = kanban.agents.find(a => a.id === selectedAgentId)
     || { id: 'blackswan-default', name: 'BlackSwan', color: '#b5b5b5' };
 
-  const assignedAgent = assignedAgentId
-    ? kanban.agents.find(a => a.id === assignedAgentId)
-    : null;
+  const assignedAgents = assignedAgentIds
+    .map(agentId => kanban.agents.find(a => a.id === agentId))
+    .filter(Boolean) as CircleOfficeAgent[];
+  const assignedAgent = assignedAgents[0] || null;
   const assignedMember = assignedTo
     ? kanban.members.find(m => m.id === assignedTo)
     : null;
+  const taskAssignedAgents = (task.assigned_agent_ids || (task.assigned_agent_id ? [task.assigned_agent_id] : []))
+    .map(agentId => kanban.agents.find(a => a.id === agentId))
+    .filter(Boolean) as CircleOfficeAgent[];
 
   const currentCol = COLUMNS.find(c => c.key === task.status) || COLUMNS[1];
 
@@ -530,6 +545,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
   const peerApprovals = task.peer_approvals || [];
   const goalData = goals?.find(g => g.id === task.goal_id);
   const goalAgentIds = goalData?.assigned_agent_ids || [];
+  const reviewAgentIds = taskAssignedAgents.length > 0 ? taskAssignedAgents.map(agent => agent.id) : goalAgentIds;
   const isAutoReport = task.title.startsWith('[Auto]');
 
   const timeSince = (iso: string) => {
@@ -540,6 +556,13 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
     const hrs = Math.floor(mins / 60);
     if (hrs < 24) return `${hrs}h ago`;
     return `${Math.floor(hrs / 24)}d ago`;
+  };
+
+  const toggleAssignedAgent = (agentId: string) => {
+    setAssignedTo(null);
+    setAssignedAgentIds(prev => prev.includes(agentId)
+      ? prev.filter(id => id !== agentId)
+      : [...prev, agentId]);
   };
 
   return (
@@ -625,10 +648,10 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
             </View>
 
             {/* Peer Review Panel */}
-            {isPeerReview && goalAgentIds.length > 0 && (
+            {isPeerReview && reviewAgentIds.length > 0 && (
               <View style={s.peerPanel}>
                 <Text style={s.peerPanelTitle}>Reviewers</Text>
-                {goalAgentIds.map((aid, i) => {
+                {reviewAgentIds.map((aid, i) => {
                   const approved = peerApprovals.includes(aid);
                   const agent = kanban.agents.find(a => a.id === aid);
                   const roster = DEFAULT_AGENT_ROSTER.find(r => agent?.name?.toLowerCase().includes(r.name.toLowerCase()));
@@ -1000,17 +1023,30 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
               <View>
                 <Pressable onPress={() => setShowAssignees(p => !p)} style={s.assigneeToggle}>
                   <View style={s.assigneeToggleLeft}>
-                    {(assignedAgent || assignedMember) && (
-                      <View style={[s.assigneeAvatar, { backgroundColor: assignedAgent?.color || '#e8e8e8' }]}>
+                    {assignedAgents.length > 0 ? (
+                      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <View style={[s.assigneeAvatar, { backgroundColor: assignedAgents[0]?.color || '#e8e8e8' }]}>
+                          <Text style={s.assigneeAvatarText}>{assignedAgents[0]?.name?.[0]?.toUpperCase() || '?'}</Text>
+                        </View>
+                        {assignedAgents.length > 1 && (
+                          <View style={[s.assigneeAvatar, { marginLeft: -8, backgroundColor: '#141414', borderWidth: 1, borderColor: '#2a2a2a' }]}>
+                            <Text style={s.assigneeAvatarText}>+{assignedAgents.length - 1}</Text>
+                          </View>
+                        )}
+                      </View>
+                    ) : assignedMember ? (
+                      <View style={[s.assigneeAvatar, { backgroundColor: '#e8e8e8' }]}>
                         <Text style={s.assigneeAvatarText}>
-                          {(assignedAgent ? assignedAgent.name : (assignedMember?.display_name || assignedMember?.username || '?'))[0].toUpperCase()}
+                          {(assignedMember.display_name || assignedMember.username || '?')[0].toUpperCase()}
                         </Text>
                       </View>
-                    )}
+                    ) : null}
                     <Text style={s.assigneeToggleText}>
-                      {assignedAgent ? assignedAgent.name
-                        : assignedMember ? (assignedMember.display_name || assignedMember.username)
-                        : 'Unassigned'}
+                      {assignedAgents.length > 0
+                        ? assignedAgents.map(agent => agent.name).join(', ')
+                        : assignedMember
+                          ? (assignedMember.display_name || assignedMember.username)
+                          : 'Unassigned'}
                     </Text>
                   </View>
                   <Text style={s.assigneeToggleArrow}>{showAssignees ? '-' : '+'}</Text>
@@ -1018,8 +1054,8 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
                 {showAssignees && (
                   <View style={s.assigneeList}>
                     <Pressable
-                      onPress={() => { setAssignedTo(null); setAssignedAgentId(null); setShowAssignees(false); }}
-                      style={[s.assigneeOption, !assignedTo && !assignedAgentId && s.assigneeOptionActive]}
+                      onPress={() => { setAssignedTo(null); setAssignedAgentIds([]); setShowAssignees(false); }}
+                      style={[s.assigneeOption, !assignedTo && assignedAgentIds.length === 0 && s.assigneeOptionActive]}
                     >
                       <Text style={s.assigneeOptionText}>Unassigned</Text>
                     </Pressable>
@@ -1029,7 +1065,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
                     {kanban.members.map(m => (
                       <Pressable
                         key={m.id}
-                        onPress={() => { setAssignedTo(m.id); setAssignedAgentId(null); setShowAssignees(false); }}
+                        onPress={() => { setAssignedTo(m.id); setAssignedAgentIds([]); setShowAssignees(false); }}
                         style={[s.assigneeOption, assignedTo === m.id && s.assigneeOptionActive]}
                       >
                         <View style={s.assigneeOptionRow}>
@@ -1045,34 +1081,53 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
                     {kanban.agents.length > 0 && (
                       <Text style={s.assigneeSectionLabel}>Agents</Text>
                     )}
-                    {kanban.agents.map(a => (
-                      <Pressable
-                        key={a.id}
-                        onPress={() => { setAssignedAgentId(a.id); setAssignedTo(null); setShowAssignees(false); }}
-                        style={[s.assigneeOption, assignedAgentId === a.id && s.assigneeOptionActive]}
-                      >
-                        <View style={s.assigneeOptionRow}>
-                          <View style={[s.assigneeAvatar, { backgroundColor: a.color || '#e8e8e8' }]}>
-                            <Text style={s.assigneeAvatarText}>{a.name[0].toUpperCase()}</Text>
+                    {kanban.agents.map(a => {
+                      const active = assignedAgentIds.includes(a.id);
+                      return (
+                        <Pressable
+                          key={a.id}
+                          onPress={() => toggleAssignedAgent(a.id)}
+                          style={[s.assigneeOption, active && s.assigneeOptionActive]}
+                        >
+                          <View style={[s.assigneeOptionRow, { justifyContent: 'space-between' }]}>
+                            <View style={[s.assigneeOptionRow, { flex: 1 }]}> 
+                              <View style={[s.assigneeAvatar, { backgroundColor: a.color || '#e8e8e8' }]}>
+                                <Text style={s.assigneeAvatarText}>{a.name[0].toUpperCase()}</Text>
+                              </View>
+                              <Text style={s.assigneeOptionText}>{a.name}</Text>
+                            </View>
+                            <Text style={[s.assigneeOptionText, { color: active ? '#22c55e' : '#6f6f6f', fontWeight: '700' }]}>
+                              {active ? 'Selected' : 'Add'}
+                            </Text>
                           </View>
-                          <Text style={s.assigneeOptionText}>{a.name}</Text>
-                        </View>
-                      </Pressable>
-                    ))}
+                        </Pressable>
+                      );
+                    })}
                   </View>
                 )}
               </View>
             ) : (
               <View style={s.assigneeDisplay}>
-                {(task.assignee || assignedAgent) ? (
+                {taskAssignedAgents.length > 0 ? (
+                  <View style={{ gap: 8 }}>
+                    {taskAssignedAgents.map(agent => (
+                      <View key={agent.id} style={s.assigneeRow}>
+                        <View style={[s.assigneeAvatar, { backgroundColor: agent.color || '#e8e8e8' }]}>
+                          <Text style={s.assigneeAvatarText}>{agent.name[0].toUpperCase()}</Text>
+                        </View>
+                        <Text style={s.fieldValue}>{agent.name}</Text>
+                      </View>
+                    ))}
+                  </View>
+                ) : task.assignee ? (
                   <View style={s.assigneeRow}>
-                    <View style={[s.assigneeAvatar, { backgroundColor: assignedAgent?.color || '#e8e8e8' }]}>
+                    <View style={[s.assigneeAvatar, { backgroundColor: '#e8e8e8' }]}>
                       <Text style={s.assigneeAvatarText}>
-                        {(assignedAgent ? assignedAgent.name : (task.assignee?.display_name || task.assignee?.username || '?'))[0].toUpperCase()}
+                        {(task.assignee.display_name || task.assignee.username || '?')[0].toUpperCase()}
                       </Text>
                     </View>
                     <Text style={s.fieldValue}>
-                      {assignedAgent ? assignedAgent.name : (task.assignee?.display_name || task.assignee?.username)}
+                      {task.assignee.display_name || task.assignee.username}
                     </Text>
                   </View>
                 ) : (
@@ -1122,6 +1177,36 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
                   <Text style={s.deleteBtnText}>Confirm delete</Text>
                 </Pressable>
               </View>
+            )}
+
+            {/* Task Runs */}
+            {taskRuns.length > 0 && (
+              <>
+                <Text style={s.sectionLabel}>Task Runs</Text>
+                <View style={{ gap: 8, marginBottom: 16 }}>
+                  {taskRuns.slice(0, 5).map(run => {
+                    const runAgent = kanban.agents.find(a => a.id === run.agent_id);
+                    const runColor = run.status === 'completed' ? '#22c55e' : run.status === 'failed' ? '#ef4444' : '#f59e0b';
+                    return (
+                      <View key={run.id} style={{ borderWidth: 1, borderColor: '#1f1f1f', borderRadius: 10, padding: 10, backgroundColor: '#0a0a0a' }}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                          <Text style={{ color: runColor, fontSize: 11, fontWeight: '700', textTransform: 'uppercase' }}>{run.run_kind} ? {run.status}</Text>
+                          <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{timeSince(run.started_at)}</Text>
+                        </View>
+                        <Text style={{ color: '#e8e8e8', fontSize: 13, marginBottom: 4 }}>{runAgent?.name || run.agent_id}</Text>
+                        {run.summary ? (
+                          <Text style={{ color: '#b5b5b5', fontSize: 12, lineHeight: 18 }}>{run.summary}</Text>
+                        ) : null}
+                        <View style={{ flexDirection: 'row', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                          {run.model_used ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{run.model_used}</Text> : null}
+                          {run.duration_ms ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{(run.duration_ms / 1000).toFixed(1)}s</Text> : null}
+                          {run.token_count ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{run.token_count} tok</Text> : null}
+                        </View>
+                      </View>
+                    );
+                  })}
+                </View>
+              </>
             )}
 
             {/* Comments section */}

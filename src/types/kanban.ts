@@ -13,6 +13,72 @@ export interface FocusChainItem {
   order: number;
 }
 
+
+export type TaskCompletionPolicy = 'single_owner' | 'all_assigned' | 'any_assigned';
+export type TaskAssignmentRole = 'owner' | 'executor' | 'reviewer' | 'planner' | 'observer';
+export type TaskAssignmentStatus = 'assigned' | 'in_progress' | 'completed' | 'blocked' | 'skipped';
+export type TaskRunKind = 'plan' | 'execute' | 'review' | 'automation' | 'orchestrator';
+export type TaskRunStatus = 'running' | 'completed' | 'failed' | 'blocked' | 'cancelled';
+
+export interface TaskAgentAssignment {
+  id: string;
+  task_id: string;
+  circle_id: string;
+  agent_id: string;
+  role: TaskAssignmentRole;
+  assignment_type: 'manual' | 'goal' | 'plan' | 'automation' | 'legacy' | 'suggested';
+  required_for_completion: boolean;
+  required_for_review: boolean;
+  status: TaskAssignmentStatus;
+  order_index: number;
+  assigned_by?: string | null;
+  assigned_at?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  updated_at?: string;
+}
+
+export interface TaskRunArtifact {
+  name: string;
+  type: 'image' | 'file' | 'code' | 'link' | 'other';
+  url?: string;
+  language?: string;
+}
+
+export interface TaskRunOutput {
+  summary?: string;
+  deliverable?: string;
+  blockers?: string[];
+  next_actions?: string[];
+  proposed_status?: TaskStatus | null;
+  mark_complete?: boolean;
+  needs_review?: boolean;
+  artifacts?: TaskRunArtifact[];
+}
+
+export interface TaskRun {
+  id: string;
+  task_id: string;
+  circle_id: string;
+  assignment_id?: string | null;
+  agent_id: string;
+  parent_run_id?: string | null;
+  run_kind: TaskRunKind;
+  status: TaskRunStatus;
+  trigger_source?: string | null;
+  input_payload?: Record<string, any> | null;
+  output_payload?: TaskRunOutput | Record<string, any> | null;
+  summary?: string | null;
+  artifact_refs?: TaskRunArtifact[] | null;
+  cost?: number | null;
+  token_count?: number | null;
+  duration_ms?: number | null;
+  error_message?: string | null;
+  model_used?: string | null;
+  started_at: string;
+  completed_at?: string | null;
+}
+
 export type PlanStatus = 'draft' | 'investigating' | 'qa' | 'ready' | 'active' | 'completed' | 'archived';
 
 export interface PlanStep {
@@ -57,6 +123,8 @@ export interface KanbanTask {
   status: TaskStatus;
   assigned_to: string | null;
   assigned_agent_id: string | null;
+  assigned_agent_ids?: string[];
+  completion_policy?: TaskCompletionPolicy;
   created_by: string;
   due_date: string | null;
   completed_at: string | null;
@@ -72,6 +140,10 @@ export interface KanbanTask {
   total_tokens?: number;
   total_duration_ms?: number;
   agent_runs?: number;
+  agent_assignments?: TaskAgentAssignment[];
+  recent_runs?: TaskRun[];
+  last_agent_run_at?: string | null;
+  last_agent_run_status?: TaskRunStatus | null;
   // Peer review tracking
   peer_approvals?: string[];  // array of agent_ids that approved
   review_comments_count?: number;
@@ -95,6 +167,7 @@ export interface TaskComment {
   task_id: string;
   user_id: string;
   agent_id: string | null;
+  task_run_id?: string | null;
   content: string;
   attachments?: TaskAttachment[] | null;
   created_at: string;

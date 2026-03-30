@@ -433,7 +433,9 @@ function AgentTasksPanel({
     if (filterPriority && task.priority !== filterPriority) return false;
     if (filterAssignee) {
       if (filterAssignee.startsWith('agent:')) {
-        if (task.assigned_agent_id !== filterAssignee.slice(6)) return false;
+        const agentId = filterAssignee.slice(6);
+        const assignedAgentIds = task.assigned_agent_ids || (task.assigned_agent_id ? [task.assigned_agent_id] : []);
+        if (!assignedAgentIds.includes(agentId)) return false;
       } else if (task.assigned_to !== filterAssignee) {
         return false;
       }
@@ -766,10 +768,12 @@ export default function FeedTab({ circleId }: { circleId: string }) {
     const seen = new Set<string>();
     const allTasks = Object.values(kanban.tasksByColumn).flat();
     for (const t of allTasks) {
-      if (t.assigned_agent_id && !seen.has('agent:' + t.assigned_agent_id)) {
-        seen.add('agent:' + t.assigned_agent_id);
-        const agent = agents.find(a => a.id === t.assigned_agent_id);
-        opts.push({ id: 'agent:' + t.assigned_agent_id, label: agent?.name || 'Agent', color: agent?.color || '#e8e8e8' });
+      const assignedAgentIds = t.assigned_agent_ids || (t.assigned_agent_id ? [t.assigned_agent_id] : []);
+      for (const agentId of assignedAgentIds) {
+        if (seen.has('agent:' + agentId)) continue;
+        seen.add('agent:' + agentId);
+        const agent = agents.find(a => a.id === agentId);
+        opts.push({ id: 'agent:' + agentId, label: agent?.name || 'Agent', color: agent?.color || '#e8e8e8' });
       }
       if (t.assigned_to && !seen.has(t.assigned_to)) {
         seen.add(t.assigned_to);
@@ -1166,6 +1170,7 @@ interface CreateModalProps {
     status?: TaskStatus;
     assigned_to?: string | null;
     assigned_agent_id?: string | null;
+    assigned_agent_ids?: string[];
     due_date?: string | null;
     goal_id?: string | null;
   }) => void;
@@ -1176,7 +1181,7 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('normal');
   const [assignedTo, setAssignedTo] = useState<string | null>(null);
-  const [assignedAgentId, setAssignedAgentId] = useState<string | null>(null);
+  const [assignedAgentIds, setAssignedAgentIds] = useState<string[]>([]);
   const [dueDate, setDueDate] = useState('');
   const [selectedGoalId, setSelectedGoalId] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -1191,7 +1196,8 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
       priority,
       status: column,
       assigned_to: assignedTo,
-      assigned_agent_id: assignedAgentId,
+      assigned_agent_id: assignedAgentIds[0] || null,
+      assigned_agent_ids: assignedAgentIds,
       due_date: dueDate || null,
       goal_id: selectedGoalId,
     });
@@ -1291,15 +1297,15 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
           <Text style={m.sectionLabel}>Assign to</Text>
           <View style={m.chipRow}>
             <Pressable
-              onPress={() => { setAssignedTo(null); setAssignedAgentId(null); }}
-              style={[m.chip, !assignedTo && !assignedAgentId && m.chipActive]}
+              onPress={() => { setAssignedTo(null); setAssignedAgentIds([]); }}
+              style={[m.chip, !assignedTo && assignedAgentIds.length === 0 && m.chipActive]}
             >
-              <Text style={[m.chipText, !assignedTo && !assignedAgentId && { color: '#e8e8e8' }]}>Nobody</Text>
+              <Text style={[m.chipText, !assignedTo && assignedAgentIds.length === 0 && { color: '#e8e8e8' }]}>Nobody</Text>
             </Pressable>
             {members.map(mem => (
               <Pressable
                 key={mem.id}
-                onPress={() => { setAssignedTo(mem.id); setAssignedAgentId(null); }}
+                onPress={() => { setAssignedTo(mem.id); setAssignedAgentIds([]); }}
                 style={[m.chip, assignedTo === mem.id && m.chipActive]}
               >
                 <Text style={[m.chipText, assignedTo === mem.id && { color: '#e8e8e8' }]}>
@@ -1307,16 +1313,22 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
                 </Text>
               </Pressable>
             ))}
-            {agents.map(a => (
-              <Pressable
-                key={a.id}
-                onPress={() => { setAssignedAgentId(a.id); setAssignedTo(null); }}
-                style={[m.chip, assignedAgentId === a.id && { backgroundColor: (a.color || '#e8e8e8') + '15', borderColor: (a.color || '#e8e8e8') + '30' }]}
-              >
-                <View style={[m.chipDot, { backgroundColor: a.color || '#e8e8e8' }]} />
-                <Text style={[m.chipText, assignedAgentId === a.id && { color: a.color || '#e8e8e8' }]}>{a.name}</Text>
-              </Pressable>
-            ))}
+            {agents.map(a => {
+              const active = assignedAgentIds.includes(a.id);
+              return (
+                <Pressable
+                  key={a.id}
+                  onPress={() => {
+                    setAssignedTo(null);
+                    setAssignedAgentIds(prev => prev.includes(a.id) ? prev.filter(id => id !== a.id) : [...prev, a.id]);
+                  }}
+                  style={[m.chip, active && { backgroundColor: (a.color || '#e8e8e8') + '15', borderColor: (a.color || '#e8e8e8') + '30' }]}
+                >
+                  <View style={[m.chipDot, { backgroundColor: a.color || '#e8e8e8' }]} />
+                  <Text style={[m.chipText, active && { color: a.color || '#e8e8e8' }]}>{active ? '? ' : ''}{a.name}</Text>
+                </Pressable>
+              );
+            })}
           </View>
 
           {/* Due date */}
