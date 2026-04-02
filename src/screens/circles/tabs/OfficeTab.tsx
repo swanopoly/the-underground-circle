@@ -11,7 +11,15 @@ import AgentPanel from './office/AgentPanel';
 import CustomizePanel, { TelegramConfig } from './office/CustomizePanel';
 import McpPanel from './office/McpPanel';
 import type { OfficeCommand } from './office/OfficeChat';
-import { OfficeAgent, DEFAULT_AGENT, sessionsToAgents } from '../../../lib/officeAgents';
+import {
+  OfficeAgent,
+  DEFAULT_AGENT,
+  sessionsToAgents,
+  getOfficeStatusColor,
+  getOfficeStatusLabel,
+  getOfficeStatusSortRank,
+  isConnectedOfficeStatus,
+} from '../../../lib/officeAgents';
 import {
   OFFICE_THEMES, AgentAppearance, FurnitureItem, FurnitureType, FURNITURE_CATALOG,
   OfficeFloor, DEFAULT_FLOORS, createDefaultFloor, OfficeTheme, UC_AGENT_APPEARANCE,
@@ -1385,7 +1393,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     agent.inputTokens || 0,
     agent.outputTokens || 0,
   ])), [userAgents]);
-  // BlackSwan first, then other agents sorted by most recently active (deduped by name)
+  const getDisplayAgentSortRank = useCallback((agent: OfficeAgent) => {
+    if (agent.status === 'building') return 0;
+    if (agent.status === 'active') return 1;
+    if (agent.status === 'idle') {
+      if (agent.providerType === 'cursor' || agent.providerType === 'gemini') return 5;
+      return 2;
+    }
+    if (agent.status === 'error') return 3;
+    return 4;
+  }, []);
+
+  // BlackSwan first, then active sessions, with idle Cursor/Gemini bridges pushed down
   const displayAgents = useMemo(() => {
     // Final dedup by name — keep the most recently active version
     const byName = new Map<string, typeof userAgents[0]>();
@@ -1398,12 +1417,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     }
     const deduped = Array.from(byName.values());
     const sorted = [...deduped].sort((a, b) => {
+      const rankDiff = getDisplayAgentSortRank(a) - getDisplayAgentSortRank(b);
+      if (rankDiff !== 0) return rankDiff;
       const ta = a.lastActive ? new Date(a.lastActive).getTime() : 0;
       const tb = b.lastActive ? new Date(b.lastActive).getTime() : 0;
       return tb - ta;
     });
     return [DEFAULT_AGENT, ...sorted];
-  }, [userAgents]);
+  }, [userAgents, getDisplayAgentSortRank]);
 
   // Resolve appearance — lookup by id first, fall back to name for legacy data
   const getAppearance = useCallback((agent: OfficeAgent) => {
@@ -1476,16 +1497,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     // Ensure BlackSwan is always first, then sort remaining by most recently active
     const blackSwan = filtered.find(a => a.id === DEFAULT_AGENT.id);
     const rest = filtered.filter(a => a.id !== DEFAULT_AGENT.id).sort((a, b) => {
-      // Active/building agents always come before idle/offline
-      const aActive = a.status === 'active' || a.status === 'building' ? 1 : 0;
-      const bActive = b.status === 'active' || b.status === 'building' ? 1 : 0;
-      if (bActive !== aActive) return bActive - aActive;
+      const rankDiff = getDisplayAgentSortRank(a) - getDisplayAgentSortRank(b);
+      if (rankDiff !== 0) return rankDiff;
       const ta = a.lastActive ? new Date(a.lastActive).getTime() : 0;
       const tb = b.lastActive ? new Date(b.lastActive).getTime() : 0;
       return tb - ta;
     });
     return blackSwan ? [blackSwan, ...rest] : rest;
-  }, [displayAgents, currentFloor?.agentIds]);
+  }, [displayAgents, currentFloor?.agentIds, getDisplayAgentSortRank]);
 
   // Auto-assign new agents to first floor (runs only when agent count changes)
   const prevAgentCountRef = useRef(0);
@@ -3318,7 +3337,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               </View>
             ) : (
               displayAgents.map((agent) => {
-                const statusColor = agent.status === 'active' ? '#22c55e' : agent.status === 'idle' ? '#f59e0b' : agent.status === 'error' ? '#ef4444' : '#6f6f6f';
+                const statusColor = getOfficeStatusColor(agent.status);
+                const statusLabel = getOfficeStatusLabel(agent.status);
                 const isSelected = selectedAgent?.id === agent.id;
                 return (
                   <Pressable
@@ -3327,7 +3347,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                     style={[styles.mobileAgentCard, isSelected && { borderColor: agent.color + '60', backgroundColor: agent.color + '08' },
                       Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                     accessibilityRole="button"
-                    accessibilityLabel={`${agent.name}, ${agent.status}, ${agent.role}`}
+                    accessibilityLabel={`${agent.name}, ${statusLabel.toLowerCase()}, ${agent.role}`}
                   >
                     <View style={styles.mobileCardRow}>
                       <View style={[styles.mobileCardAvatar, { backgroundColor: agent.color + '20', borderColor: agent.color + '50' }]}>
@@ -3337,7 +3357,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                         <View style={styles.mobileCardNameRow}>
                           <Text style={styles.mobileCardName}>{agent.name}</Text>
                           <View style={[styles.mobileCardStatus, { backgroundColor: statusColor }]} />
-                          <Text style={[styles.mobileCardStatusText, { color: statusColor }]}>{agent.status}</Text>
+                          <Text style={[styles.mobileCardStatusText, { color: statusColor }]}>{statusLabel}</Text>
                         </View>
                         <Text style={styles.mobileCardRole}>{agent.role} · {PROVIDER_META[agent.providerType]?.icon || '⚡'} {agent.connectionName}</Text>
                         <Text style={styles.mobileCardModel}>{agent.model}</Text>
@@ -3557,7 +3577,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
                     >
                       <View style={[styles.quickProviderDot, { backgroundColor: PROVIDER_META[agent.providerType]?.color || '#6f6f6f' }]} />
                       <View style={[styles.quickDot, {
-                        backgroundColor: agent.status === 'active' ? '#22c55e' : agent.status === 'idle' ? '#f59e0b' : agent.status === 'error' ? '#ef4444' : '#6f6f6f',
+                        backgroundColor: getOfficeStatusColor(agent.status),
                       }]} />
                       <Text style={[styles.quickName, selectedAgent?.id === agent.id && { color: agent.color }]}>{agent.name}</Text>
                       <Text style={styles.quickCost}>${(agent.costTotal || agent.costToday).toFixed(2)}</Text>
@@ -4640,8 +4660,8 @@ function CircleOfficePanel({
   connectionStatus?: 'connecting' | 'live' | 'reconnecting' | 'offline';
 }) {
   const building = agents.filter(a => a.status === 'building');
-  const idle = agents.filter(a => a.status === 'idle');
-  const offline = agents.filter(a => a.status === 'offline');
+  const connected = agents.filter(a => isConnectedOfficeStatus(a.status) && a.status !== 'building');
+  const offline = agents.filter(a => !isConnectedOfficeStatus(a.status));
 
   if (compact) {
     // Horizontal strip for desktop — scrollable row of agent chips
@@ -4652,7 +4672,7 @@ function CircleOfficePanel({
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={coStyles.compactScroll}>
           {agents.map(agent => {
             const display = PROVIDER_DISPLAY[agent.provider] || PROVIDER_DISPLAY['generic-agent'];
-            const statusColor = agent.status === 'building' ? '#22c55e' : agent.status === 'idle' ? '#f59e0b' : '#444';
+            const statusColor = agent.status === 'building' ? '#22c55e' : getOfficeStatusColor(agent.status);
             return (
               <View key={agent.id} style={[coStyles.compactChip, { borderColor: display.color + '44' }]}>
                 {/* Live pulse for building */}
@@ -4676,15 +4696,14 @@ function CircleOfficePanel({
     );
   }
 
-  // Sort: building first, then idle (online), then offline by last seen
+  // Sort: connected agents first, then unavailable, with most recent first within each group
   const sorted = [...agents].sort((a, b) => {
-    const rank = (s: string) => s === 'building' ? 0 : s === 'idle' ? 1 : 2;
-    if (rank(a.status) !== rank(b.status)) return rank(a.status) - rank(b.status);
-    // Within same status, most recently active first
+    const rankDiff = getOfficeStatusSortRank(a.status) - getOfficeStatusSortRank(b.status);
+    if (rankDiff !== 0) return rankDiff;
     return new Date(b.lastActiveAt || 0).getTime() - new Date(a.lastActiveAt || 0).getTime();
   });
 
-  const onlineCount = agents.filter(a => a.status !== 'offline').length;
+  const onlineCount = agents.filter(a => isConnectedOfficeStatus(a.status)).length;
 
   // Full card view for mobile
   return (
@@ -4701,7 +4720,7 @@ function CircleOfficePanel({
         </View>
         <View style={coStyles.panelStats}>
           {building.length > 0 && <Text style={coStyles.statBuilding}>⚡ {building.length} building</Text>}
-          {idle.length > 0 && <Text style={coStyles.statIdle}>🟢 {idle.length} online</Text>}
+          {connected.length > 0 && <Text style={coStyles.statIdle}>🟢 {connected.length} connected</Text>}
           {offline.length > 0 && <Text style={coStyles.statOffline}>⚫ {offline.length} away</Text>}
         </View>
       </View>
@@ -4709,8 +4728,8 @@ function CircleOfficePanel({
       {sorted.map(agent => {
         const display = PROVIDER_DISPLAY[agent.provider] || PROVIDER_DISPLAY['generic-agent'];
         const isBuilding = agent.status === 'building';
-        const isOnline = agent.status === 'idle';
-        const isOffline = agent.status === 'offline';
+        const isConnected = isConnectedOfficeStatus(agent.status) && !isBuilding;
+        const isOffline = !isConnectedOfficeStatus(agent.status) && !isBuilding;
         const lastSeen = getLastSeen(agent.lastActiveAt);
 
         return (
@@ -4718,7 +4737,7 @@ function CircleOfficePanel({
             key={agent.id}
             style={[
               coStyles.agentCard,
-              { borderColor: isBuilding ? display.color + '66' : isOnline ? display.color + '33' : '#000000' },
+              { borderColor: isBuilding ? display.color + '66' : isConnected ? display.color + '33' : '#000000' },
               agent.isOwn && coStyles.ownAgentCard,
               isOffline && coStyles.offlineCard,
             ]}
@@ -4731,10 +4750,10 @@ function CircleOfficePanel({
               </View>
               <View style={coStyles.statusChip}>
                 <View style={[coStyles.statusDot, {
-                  backgroundColor: isBuilding ? '#3b82f6' : isOnline ? '#22c55e' : '#333',
+                  backgroundColor: isBuilding ? '#3b82f6' : isConnected ? '#22c55e' : '#333',
                 }]} />
                 <Text style={[coStyles.statusText, isOffline && { color: '#444' }]}>
-                  {isBuilding ? 'building' : isOnline ? 'online' : lastSeen.text}
+                  {isBuilding ? 'building' : isConnected ? 'connected' : lastSeen.text}
                 </Text>
               </View>
             </View>

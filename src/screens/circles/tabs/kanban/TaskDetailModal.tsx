@@ -2,7 +2,7 @@
  * TaskDetailModal — task detail/edit modal with comments + peer review workflow
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   View, Text, TextInput, Pressable, ScrollView, StyleSheet,
   Platform, KeyboardAvoidingView, Image, ActivityIndicator,
@@ -15,6 +15,7 @@ import type { KanbanData, KanbanMember, ThinkingLevel, AgentModel, AgentMode } f
 import type { GoalWithCount } from '../../../../hooks/useGoals';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
 import { supabase } from '../../../../lib/supabase';
+import { dispatchBridgeTask } from '../../../../lib/bridgeTaskDispatcher';
 import SpawnAgentPanel from '../../../../components/SpawnAgentPanel';
 import FocusChainPanel from './FocusChainPanel';
 
@@ -306,12 +307,30 @@ const rs = StyleSheet.create({
 interface Props {
   task: KanbanTask;
   kanban: KanbanData;
+  agents: CircleOfficeAgent[];
   goals?: GoalWithCount[];
   circleId: string;
   onClose: () => void;
 }
 
-export default function TaskDetailModal({ task: initialTask, kanban, goals, circleId, onClose }: Props) {
+const AGENT_ASSIGNMENT_STATUS_ORDER: Record<CircleOfficeAgent['status'], number> = {
+  active: 0,
+  building: 1,
+  idle: 2,
+  offline: 3,
+  error: 4,
+};
+
+function sortAgentsForAssignment(agents: CircleOfficeAgent[]): CircleOfficeAgent[] {
+  return [...agents].sort((a, b) => {
+    const statusDiff =
+      (AGENT_ASSIGNMENT_STATUS_ORDER[a.status] ?? 9) - (AGENT_ASSIGNMENT_STATUS_ORDER[b.status] ?? 9);
+    if (statusDiff !== 0) return statusDiff;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+export default function TaskDetailModal({ task: initialTask, kanban, agents, goals, circleId, onClose }: Props) {
   const task = kanban.tasks.find(t => t.id === initialTask.id) || initialTask;
 
   const [editing, setEditing] = useState(false);
@@ -389,6 +408,11 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
 
   useEffect(() => { loadComments(); }, [loadComments]);
   useEffect(() => { loadTaskRuns(); }, [loadTaskRuns]);
+
+  const availableAgents = useMemo(
+    () => sortAgentsForAssignment(agents.length > 0 ? agents : kanban.agents),
+    [agents, kanban.agents],
+  );
 
   // Realtime comments
   useEffect(() => {
@@ -523,18 +547,18 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
     }
   }, [task.id, selectedAgentId, thinkingLevel, agentModel, agentMode, kanban]);
 
-  const selectedAgent = kanban.agents.find(a => a.id === selectedAgentId)
+  const selectedAgent = availableAgents.find(a => a.id === selectedAgentId)
     || { id: 'blackswan-default', name: 'BlackSwan', color: '#b5b5b5' };
 
   const assignedAgents = assignedAgentIds
-    .map(agentId => kanban.agents.find(a => a.id === agentId))
+    .map(agentId => availableAgents.find(a => a.id === agentId))
     .filter(Boolean) as CircleOfficeAgent[];
   const assignedAgent = assignedAgents[0] || null;
   const assignedMember = assignedTo
     ? kanban.members.find(m => m.id === assignedTo)
     : null;
   const taskAssignedAgents = (task.assigned_agent_ids || (task.assigned_agent_id ? [task.assigned_agent_id] : []))
-    .map(agentId => kanban.agents.find(a => a.id === agentId))
+    .map(agentId => availableAgents.find(a => a.id === agentId))
     .filter(Boolean) as CircleOfficeAgent[];
 
   const currentCol = COLUMNS.find(c => c.key === task.status) || COLUMNS[1];
@@ -930,7 +954,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
                     <Text style={s.agentPickerOptionText}>BlackSwan</Text>
                     <Text style={s.agentPickerDefault}>default</Text>
                   </Pressable>
-                  {kanban.agents.filter(a => a.id !== 'blackswan-default').map(a => (
+                  {availableAgents.filter(a => a.id !== 'blackswan-default').map(a => (
                     <Pressable
                       key={a.id}
                       onPress={() => { setSelectedAgentId(a.id); setShowAgentPicker(false); }}
@@ -1078,16 +1102,17 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
                         </View>
                       </Pressable>
                     ))}
-                    {kanban.agents.length > 0 && (
+                    {availableAgents.length > 0 && (
                       <Text style={s.assigneeSectionLabel}>Agents</Text>
                     )}
-                    {kanban.agents.map(a => {
+                    {availableAgents.map(a => {
                       const active = assignedAgentIds.includes(a.id);
+                      const isOnline = a.status === 'active' || a.status === 'building' || a.status === 'idle';
                       return (
                         <Pressable
                           key={a.id}
                           onPress={() => toggleAssignedAgent(a.id)}
-                          style={[s.assigneeOption, active && s.assigneeOptionActive]}
+                          style={[s.assigneeOption, active && s.assigneeOptionActive, !isOnline && { opacity: 0.35 }]}
                         >
                           <View style={[s.assigneeOptionRow, { justifyContent: 'space-between' }]}>
                             <View style={[s.assigneeOptionRow, { flex: 1 }]}> 
@@ -1097,7 +1122,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, goals, circ
                               <Text style={s.assigneeOptionText}>{a.name}</Text>
                             </View>
                             <Text style={[s.assigneeOptionText, { color: active ? '#22c55e' : '#6f6f6f', fontWeight: '700' }]}>
-                              {active ? 'Selected' : 'Add'}
+                              {active ? 'Selected' : isOnline ? 'Add' : 'Offline'}
                             </Text>
                           </View>
                         </Pressable>

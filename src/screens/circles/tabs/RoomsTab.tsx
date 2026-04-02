@@ -19,6 +19,8 @@ import {
 import { LoadingScreen } from '../../../components/LoadingWave';
 import { supabase } from '../../../lib/supabase';
 import { getSwanBotResponse as getAIResponse } from '../../../lib/swanbot';
+import { dispatchBridgeTask, spawnNewSession } from '../../../lib/bridgeTaskDispatcher';
+import SpawnAgentPanel from '../../../components/SpawnAgentPanel';
 import {
   getStoredToken, storeToken, removeToken, validateToken as ghValidateToken,
   listRepos, getRepoTree, getFileContent, groupTreeByFolder,
@@ -26,6 +28,23 @@ import {
   type GitHubUser, type GitHubRepo, type GitHubTreeEntry,
 } from '../../../lib/github';
 // ─── Types ───────────────────────────────────────────────────────────────────
+
+// ── Persistent state keys ────────────────────────────────────────────────────
+const ROOM_STORAGE = {
+  selectedRoom: (circleId: string) => `uc_room_selected_${circleId}`,
+  openTabs: (roomId: string) => `uc_room_tabs_${roomId}`,
+  activeTab: (roomId: string) => `uc_room_active_tab_${roomId}`,
+  rightPanel: (roomId: string) => `uc_room_panel_${roomId}`,
+  sidebar: (roomId: string) => `uc_room_sidebar_${roomId}`,
+  panelWidth: (roomId: string) => `uc_room_panel_w_${roomId}`,
+};
+
+function storageGet(key: string): string | null {
+  try { return typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null; } catch { return null; }
+}
+function storageSet(key: string, value: string) {
+  try { if (typeof localStorage !== 'undefined') localStorage.setItem(key, value); } catch {}
+}
 
 interface Room {
   id: string;
@@ -118,6 +137,7 @@ interface LiveAgent {
   tool_icon: string | null;
   current_task: string | null;
   circle_id: string | null;
+  provider: string | null;
 }
 
 interface PlaygroundVariant {
@@ -539,8 +559,24 @@ function highlightLine(line: string, lang: string): React.ReactNode[] {
 export default function RoomsTab({ circleId, accentColor }: Props) {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
+  const savedRoomIdRef = React.useRef(storageGet(ROOM_STORAGE.selectedRoom(circleId)));
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
+
+  // Restore selected room from localStorage after rooms load
+  React.useEffect(() => {
+    if (rooms.length > 0 && !selectedRoom && savedRoomIdRef.current) {
+      const saved = rooms.find(r => r.id === savedRoomIdRef.current);
+      if (saved) setSelectedRoom(saved);
+    }
+  }, [rooms]);
+
+  // Persist selected room to localStorage
+  React.useEffect(() => {
+    if (selectedRoom) {
+      storageSet(ROOM_STORAGE.selectedRoom(circleId), selectedRoom.id);
+    }
+  }, [selectedRoom?.id, circleId]);
   const { width: winW } = useWindowDimensions();
   const isMobile = winW < 768;
 
@@ -833,14 +869,56 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
 }) {
   const [files, setFiles] = useState<RoomFile[]>([]);
   const [openTabs, setOpenTabs] = useState<RoomFile[]>([]);
-  const [activeTabId, setActiveTabId] = useState<string | null>(null);
-  const [rightPanel, setRightPanel] = useState<RightPanel>('chat');
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const savedTabIdsRef = React.useRef<string[]>(JSON.parse(storageGet(ROOM_STORAGE.openTabs(room.id)) || '[]'));
+  const [activeTabId, setActiveTabId] = useState<string | null>(storageGet(ROOM_STORAGE.activeTab(room.id)));
+  const [rightPanel, setRightPanel] = useState<RightPanel>((storageGet(ROOM_STORAGE.rightPanel(room.id)) || 'chat') as RightPanel);
+  const [sidebarOpen, setSidebarOpen] = useState(storageGet(ROOM_STORAGE.sidebar(room.id)) !== 'false');
   const [editingContent, setEditingContent] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+
   const [showNewFile, setShowNewFile] = useState(false);
-  const [rightPanelWidth, setRightPanelWidth] = useState(320);
+  const [rightPanelWidth, setRightPanelWidth] = useState(parseInt(storageGet(ROOM_STORAGE.panelWidth(room.id)) || '320', 10));
+  // ── Persist room-level UI state ──────────────────────────────────────────
+  React.useEffect(() => {
+    if (openTabs.length > 0) {
+      storageSet(ROOM_STORAGE.openTabs(room.id), JSON.stringify(openTabs.map(t => t.id)));
+    }
+  }, [openTabs, room.id]);
+
+  React.useEffect(() => {
+    if (activeTabId) storageSet(ROOM_STORAGE.activeTab(room.id), activeTabId);
+  }, [activeTabId, room.id]);
+
+  React.useEffect(() => {
+    storageSet(ROOM_STORAGE.rightPanel(room.id), rightPanel || 'chat');
+  }, [rightPanel, room.id]);
+
+  React.useEffect(() => {
+    storageSet(ROOM_STORAGE.sidebar(room.id), String(sidebarOpen));
+  }, [sidebarOpen, room.id]);
+
+  React.useEffect(() => {
+    storageSet(ROOM_STORAGE.panelWidth(room.id), String(rightPanelWidth));
+  }, [rightPanelWidth, room.id]);
+
+  // Restore open tabs after files load
+  React.useEffect(() => {
+    if (files.length > 0 && openTabs.length === 0 && savedTabIdsRef.current.length > 0) {
+      const restored = savedTabIdsRef.current
+        .map(id => files.find(f => f.id === id))
+        .filter((f): f is RoomFile => f != null);
+      if (restored.length > 0) {
+        setOpenTabs(restored);
+        const savedActive = storageGet(ROOM_STORAGE.activeTab(room.id));
+        if (savedActive && restored.some(f => f.id === savedActive)) {
+          setActiveTabId(savedActive);
+        } else {
+          setActiveTabId(restored[0].id);
+        }
+      }
+    }
+  }, [files, room.id]);
 
   const handlePanelResize = useCallback((delta: number) => {
     setRightPanelWidth(w => Math.min(700, Math.max(240, w + delta)));
@@ -1798,6 +1876,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   const [messages, setMessages]   = useState<RoomMessage[]>([]);
   const [input, setInput]         = useState('');
   const [showAssign, setShowAssign] = useState(false);
+  const [showSpawnAgent, setShowSpawnAgent] = useState(false);
   const [liveAgents, setLiveAgents] = useState<LiveAgent[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<LiveAgent | null>(null);
   const [selectedFile, setSelectedFile]   = useState<string>('');   // file name
@@ -1845,7 +1924,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   useEffect(() => {
     const query = () =>
       supabase.from('circle_office_agents')
-        .select('id, name, status, owner_id, color, tool_icon, owner_display_name, current_task, circle_id')
+        .select('id, name, status, owner_id, color, tool_icon, owner_display_name, current_task, circle_id, provider')
         .neq('status', 'offline')
         .order('status')
         .limit(100)
@@ -1910,6 +1989,16 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     }
   };
 
+  const handleDeleteMessage = async (msgId: string) => {
+    setMessages(prev => prev.filter(m => m.id !== msgId));
+    const { error } = await supabase.from('room_messages').delete().eq('id', msgId);
+    if (error) {
+      console.error('Failed to delete message:', error);
+      const { data } = await supabase.from('room_messages').select('*').eq('room_id', roomId).order('created_at');
+      if (data) setMessages(data);
+    }
+  };
+
   const assignToAgent = async () => {
     if (!selectedAgent || !taskPrompt.trim()) return;
     setAssigning(true);
@@ -1935,6 +2024,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           target_file: targetName,
           prompt: taskPrompt.trim(),
           status: 'pending',
+          provider: selectedAgent.provider || 'unknown',
         },
       }).select('id').single();
 
@@ -1945,8 +2035,58 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         .update({ current_task: `[Room] ${taskPrompt.trim().slice(0, 120)}`, status: 'building' })
         .eq('id', selectedAgent.id);
 
-      // 3. Execute task via Supabase Edge Function (server-side, works locally + live)
-      if (taskId) {
+      // 3. Dispatch via local bridge based on provider type
+      const provider = selectedAgent.provider || '';
+      const bridgeProviders = ['claude-code', 'codex', 'gemini', 'gemini-cli', 'cursor'];
+
+      if (bridgeProviders.includes(provider) && taskId) {
+        // Route through local bridge
+        console.log(`[Rooms] Dispatching task to ${provider} via bridge...`);
+        dispatchBridgeTask(provider, taskPrompt.trim(), targetName)
+          .then(async (result) => {
+            // Post bridge result back to room messages
+            const statusEmoji = result.ok ? '\u2705' : '\u274c';
+            const viaLabel = result.dispatchedVia === 'bridge' ? `\ud83c\udf09 ${provider} bridge` : 'fallback';
+            const responseContent = result.ok
+              ? `${statusEmoji} **${selectedAgent.name}** (via ${viaLabel}):\n\n${result.response || 'Done'}`
+              : `${statusEmoji} **${selectedAgent.name}** failed (${viaLabel}): ${result.error || 'Unknown error'}`;
+
+            await supabase.from('room_messages').insert({
+              room_id: roomId,
+              user_id: null,
+              agent_name: selectedAgent.name,
+              content: responseContent,
+              message_type: 'agent_output',
+              metadata: {
+                task_reply: true,
+                task_id: taskId,
+                provider,
+                dispatched_via: result.dispatchedVia,
+                success: result.ok,
+              },
+            });
+
+            // Clear agent's current_task
+            await supabase.from('circle_office_agents')
+              .update({ current_task: null, status: result.ok ? 'active' : 'idle' })
+              .eq('id', selectedAgent.id);
+          })
+          .catch(async (err) => {
+            console.error('Bridge dispatch failed:', err);
+            await supabase.from('room_messages').insert({
+              room_id: roomId,
+              user_id: null,
+              agent_name: selectedAgent.name,
+              content: `\u274c **${selectedAgent.name}** bridge dispatch error: ${err?.message || 'Unknown'}`,
+              message_type: 'agent_output',
+              metadata: { task_reply: true, task_id: taskId, error: true },
+            });
+            await supabase.from('circle_office_agents')
+              .update({ current_task: null, status: 'idle' })
+              .eq('id', selectedAgent.id);
+          });
+      } else if (taskId) {
+        // Fall back to Supabase Edge Function for non-bridge providers
         const taskPayload = {
           taskId,
           roomId,
@@ -2004,6 +2144,10 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     <View style={s.panel}>
       <View style={s.panelHeader}>
         <Text style={[s.panelTitle, { paddingHorizontal: 0, paddingTop: 0, paddingBottom: 0 }]}>Chat</Text>
+        <Pressable onPress={() => setShowSpawnAgent(p => !p)}
+          style={[chatSt.assignToggle, showSpawnAgent && { backgroundColor: '#22c55e15', borderColor: '#22c55e50' }]}>
+          <Text style={[chatSt.assignToggleText, showSpawnAgent && { color: '#22c55e' }]}>+ Spawn</Text>
+        </Pressable>
         <Pressable onPress={() => setShowAssign(p => !p)}
           style={[s.panelBtn, { backgroundColor: accentColor + '15', borderColor: accentColor + '40' }]}>
           <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }}>Assign Agent</Text>
@@ -2033,6 +2177,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
                       <Text style={[chatSt.agentChipName, isSelected && { color: agentColor }]}>
                         {agent.tool_icon ? `${agent.tool_icon} ` : ''}{agent.name}
                       </Text>
+                      {agent.provider && <Text style={{ color: '#58a6ff', fontSize: 9, fontWeight: '600', textTransform: 'uppercase' as any, letterSpacing: 0.5, marginTop: 1 }}>{agent.provider}</Text>}
                       {agent.owner_display_name && <Text style={chatSt.agentChipOwner}>@{agent.owner_display_name}</Text>}
                       {agent.current_task && <Text style={chatSt.agentChipTask} numberOfLines={1}>{agent.current_task}</Text>}
                     </View>
@@ -2079,6 +2224,18 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             placeholderTextColor="#555" multiline />
 
           {/* Selected summary */}
+          {showSpawnAgent && (
+            <View style={{ marginBottom: 10, borderWidth: 1, borderColor: '#22c55e30', borderRadius: 12, overflow: 'hidden' }}>
+              <SpawnAgentPanel
+                circleId={circleId}
+                onCreated={(agentId, name) => {
+                  setShowSpawnAgent(false);
+                }}
+                onCancel={() => setShowSpawnAgent(false)}
+              />
+            </View>
+          )}
+
           {selectedAgent && (
             <View style={chatSt.assignSummary}>
               <View style={[chatSt.assignSummaryDot, { backgroundColor: STATUS_COLOR[selectedAgent.status] || '#888' }]} />
@@ -2101,7 +2258,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       {/* Messages */}
       <ScrollView ref={scrollRef} style={s.msgList} contentContainerStyle={{ padding: 10, gap: 6 }}>
         {messages.length === 0 && <Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginTop: 20, fontStyle: 'italic' }}>No messages yet</Text>}
-        {messages.map(m => <MsgBubble key={m.id} msg={m} accentColor={accentColor} />)}
+        {messages.map(m => <MsgBubble key={m.id} msg={m} accentColor={accentColor} onDelete={handleDeleteMessage} />)}
       </ScrollView>
 
       {/* Input */}
@@ -2273,12 +2430,12 @@ function AgentThinkingLoader() {
   );
 }
 
-const MsgBubble = React.memo(function MsgBubble({ msg, accentColor }: { msg: RoomMessage; accentColor: string }) {
+const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, onDelete }: { msg: RoomMessage; accentColor: string; onDelete?: (id: string) => void }) {
   const time = new Date(msg.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
   if (msg.message_type==='edit_event')
-    return <View style={{alignItems:'center'}}><Text style={{color:'#555',fontSize:11,fontStyle:'italic'}}>✏️ {msg.content} · {time}</Text></View>;
+    return <View style={{alignItems:'center',flexDirection:'row',justifyContent:'center',gap:6}}><Text style={{color:'#555',fontSize:11,fontStyle:'italic'}}>✏️ {msg.content} · {time}</Text>{onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{opacity:0.4}}><Text style={{color:'#f85149',fontSize:10}}>×</Text></Pressable>}</View>;
   if (msg.message_type==='system')
-    return <View style={{alignItems:'center'}}><Text style={{color:'#555',fontSize:11,fontStyle:'italic'}}>{msg.content}</Text></View>;
+    return <View style={{alignItems:'center',flexDirection:'row',justifyContent:'center',gap:6}}><Text style={{color:'#555',fontSize:11,fontStyle:'italic'}}>{msg.content}</Text>{onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{opacity:0.4}}><Text style={{color:'#f85149',fontSize:10}}>×</Text></Pressable>}</View>;
   if (msg.message_type==='agent_output') {
     const isTask = msg.metadata?.task === true;
     const targetFile = msg.metadata?.target_file;
@@ -2300,6 +2457,7 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor }: { msg: Roo
             </Text>
           )}
           <Text style={{color:'#444',fontSize:10}}>{time}</Text>
+          {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ marginLeft: 'auto' as any, opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
         </View>
         <Text style={{color:'#ccc',fontSize:12,lineHeight:18}}>{isTask ? msg.metadata?.prompt || msg.content : msg.content}</Text>
         {isTask && msg.metadata?.status === 'pending' && <AgentThinkingLoader />}
@@ -2319,6 +2477,7 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor }: { msg: Roo
         </View>
         <Text style={{color:'#ccc',fontSize:11,fontWeight:'700'}}>{msg.agent_name||'Member'}</Text>
         <Text style={{color:'#444',fontSize:10}}>{time}</Text>
+        {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ marginLeft: 'auto' as any, opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
       </View>
       <Text style={{color:'#e6e6e6',fontSize:13,marginLeft:28,lineHeight:19}}>{msg.content}</Text>
     </View>

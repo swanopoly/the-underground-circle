@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -9,21 +9,99 @@ import {
   Platform,
   ScrollView,
   useWindowDimensions,
+  Animated,
+  Easing,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { signInWithSSO } from '../../lib/sso';
+import LoginBackground3D from '../../components/LoginBackground3D';
 
 const ACCENT = '#b8ff61';
 const ACCENT_STRONG = '#9be234';
-const CARD_BG = 'rgba(11, 15, 12, 0.88)';
+const CARD_BG = 'rgba(11, 15, 12, 0.45)';
 const CARD_BORDER = 'rgba(184, 255, 97, 0.18)';
 
 type FocusField = 'email' | 'password' | 'sso' | null;
 type HoverAction = 'login' | 'showSso' | 'submitSso' | 'backToEmail' | 'signup' | null;
 
+// Inject global CSS for focus ring removal + button hover effects (web only, once)
+let _loginCssInjected = false;
+function injectLoginCSS() {
+  if (Platform.OS !== 'web' || _loginCssInjected) return;
+  _loginCssInjected = true;
+  const style = document.createElement('style');
+  style.textContent = `
+    /* Kill all browser focus outlines */
+    input:focus, textarea:focus, [role="button"]:focus, button:focus, a:focus, div:focus {
+      outline: none !important;
+      -webkit-tap-highlight-color: transparent !important;
+    }
+    *:focus { outline: none !important; }
+    *:focus-visible { outline: none !important; }
+
+    /* Glowing border sweep on buttons */
+    @keyframes uc-border-sweep {
+      0% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+    @keyframes uc-glow-pulse {
+      0%, 100% { box-shadow: 0 0 15px #b8ff6133, 0 4px 20px #b8ff6122; }
+      50% { box-shadow: 0 0 25px #b8ff6155, 0 8px 30px #b8ff6133, 0 0 60px #b8ff6111; }
+    }
+    @keyframes uc-shimmer {
+      0% { left: -100%; }
+      100% { left: 200%; }
+    }
+    @keyframes uc-portal-vignette {
+      0% { box-shadow: inset 0 0 0px transparent; }
+      50% { box-shadow: inset 0 0 150px rgba(184, 255, 97, 0.15); }
+      100% { box-shadow: inset 0 0 300px rgba(0, 0, 0, 0.95), inset 0 0 100px rgba(184, 255, 97, 0.3); }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+// Hook: cursor-following transparent reveal on a panel
+function useCursorReveal() {
+  const ref = useRef<View>(null);
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !ref.current) return;
+    const el = ref.current as unknown as HTMLElement;
+    const onMove = (e: MouseEvent) => {
+      const rect = el.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      // Radial gradient mask: transparent circle at cursor, solid elsewhere
+      el.style.setProperty(
+        '-webkit-mask-image',
+        `radial-gradient(circle 120px at ${x}px ${y}px, transparent 0%, transparent 40%, black 100%)`,
+      );
+      el.style.setProperty(
+        'mask-image',
+        `radial-gradient(circle 120px at ${x}px ${y}px, transparent 0%, transparent 40%, black 100%)`,
+      );
+    };
+    const onLeave = () => {
+      el.style.removeProperty('-webkit-mask-image');
+      el.style.removeProperty('mask-image');
+    };
+    el.addEventListener('mousemove', onMove as any);
+    el.addEventListener('mouseleave', onLeave);
+    return () => {
+      el.removeEventListener('mousemove', onMove as any);
+      el.removeEventListener('mouseleave', onLeave);
+    };
+  }, []);
+  return ref;
+}
+
 export default function LoginScreen({ navigation }: any) {
   const { width } = useWindowDimensions();
   const isDesktop = width >= 980;
+  // Inject CSS on mount
+  useEffect(() => { injectLoginCSS(); }, []);
+  const heroRevealRef = useCursorReveal();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -33,6 +111,20 @@ export default function LoginScreen({ navigation }: any) {
   const [focusedField, setFocusedField] = useState<FocusField>(null);
   const [hoveredAction, setHoveredAction] = useState<HoverAction>(null);
 
+  // Portal suck-in transition — zooms INTO the portal like being pulled in
+  const [portalTransition, setPortalTransition] = useState(false);
+  const portalAnim = useRef(new Animated.Value(0)).current;
+  // Scale UP massively — like rushing forward into the screen
+  const portalScale = portalAnim.interpolate({ inputRange: [0, 0.3, 0.7, 1], outputRange: [1, 1.15, 3, 12] });
+  // Slight rotation — like being caught in the vortex
+  const portalRotate = portalAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '35deg'] });
+  // Fade out as you zoom past
+  const portalOpacity = portalAnim.interpolate({ inputRange: [0, 0.3, 0.6, 0.85, 1], outputRange: [1, 1, 0.6, 0.1, 0] });
+  // Pull upward toward portal center
+  const portalTranslateY = portalAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0, -30, -120] });
+  // Pull slightly left toward portal center
+  const portalTranslateX = portalAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0, -20, -60] });
+
   const handleLogin = async () => {
     setError('');
     if (!email || !password) {
@@ -41,11 +133,42 @@ export default function LoginScreen({ navigation }: any) {
     }
 
     setLoading(true);
-    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
-    setLoading(false);
 
-    if (signInError) {
-      setError(signInError.message);
+    // First validate credentials without persisting session yet
+    // We'll sign in, but play the animation before navigation happens
+    try {
+      // Start the portal animation immediately on button press
+      setPortalTransition(true);
+      // Tell the 3D camera to dive into the portal
+      if (Platform.OS === 'web') {
+        window.dispatchEvent(new Event('uc-portal-dive'));
+      }
+      Animated.timing(portalAnim, {
+        toValue: 1,
+        duration: 2200,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: false,
+      }).start();
+
+      // Wait for animation to nearly finish before signing in
+      // Animation is 2.2s — sign in at 1.8s so transition completes
+      await new Promise(resolve => setTimeout(resolve, 1800));
+
+      const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+
+      if (signInError) {
+        // Auth failed — reverse the animation
+        setPortalTransition(false);
+        portalAnim.setValue(0);
+        setLoading(false);
+        setError(signInError.message);
+      }
+      // If success, Supabase session triggers navigation — animation is already playing
+    } catch (err) {
+      setPortalTransition(false);
+      portalAnim.setValue(0);
+      setLoading(false);
+      setError('Something went wrong.');
     }
   };
 
@@ -105,38 +228,60 @@ export default function LoginScreen({ navigation }: any) {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <View style={styles.container}>
-        <View style={[styles.ambientOrb, styles.orbA]} />
-        <View style={[styles.ambientOrb, styles.orbB]} />
-        <View style={[styles.gridGlow, styles.gridGlowLeft]} />
-        <View style={[styles.gridGlow, styles.gridGlowRight]} />
+        {/* Three.js background — web only, renders behind everything */}
+        <LoginBackground3D />
 
+        {/* Portal vignette overlay — closes like an iris during transition */}
+        {portalTransition && Platform.OS === 'web' && (
+          <div style={{
+            position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh',
+            zIndex: 100, pointerEvents: 'none',
+            animation: 'uc-portal-vignette 2.2s ease-in forwards',
+            borderRadius: '50%',
+          }} />
+        )}
+        <Animated.View style={[
+          { flex: 1 },
+          portalTransition && {
+            opacity: portalOpacity,
+            transform: [
+              { perspective: 800 },
+              { scale: portalScale },
+              { rotate: portalRotate },
+              { translateY: portalTranslateY },
+              { translateX: portalTranslateX },
+            ],
+          },
+        ]}>
         <ScrollView
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
+          scrollEnabled={!portalTransition}
         >
           <View style={[styles.shell, isDesktop && styles.shellDesktop]}>
-            <View style={[styles.heroPanel, isDesktop && styles.heroPanelDesktop]}>
+            <View ref={heroRevealRef} style={[styles.heroPanel, isDesktop && styles.heroPanelDesktop]}>
               <Text style={styles.heroEyebrow}>UNDERGROUND ACCESS</Text>
               <Text style={styles.heroTitleTop}>The</Text>
               <Text style={styles.heroTitle}>Underground</Text>
               <Text style={styles.heroTitle}>Circle</Text>
               <Text style={styles.heroSubtitle}>
-                Focused tools for people shipping real work, not floating in tabs all day.
+                Deploy autonomous agents. Collaborate in private circles.{'\n'}
+                Ship faster than teams ten times your size.
               </Text>
 
               <View style={[styles.statRow, isDesktop && styles.statRowDesktop]}>
                 <View style={styles.statChip}>
-                  <Text style={styles.statValue}>Tighter</Text>
+                  <Text style={styles.statValue}>Private</Text>
                   <Text style={styles.statLabel}>circles</Text>
                 </View>
                 <View style={styles.statChip}>
-                  <Text style={styles.statValue}>Live</Text>
+                  <Text style={styles.statValue}>24/7</Text>
                   <Text style={styles.statLabel}>agents</Text>
                 </View>
                 <View style={styles.statChip}>
-                  <Text style={styles.statValue}>Real</Text>
-                  <Text style={styles.statLabel}>execution</Text>
+                  <Text style={styles.statValue}>Zero</Text>
+                  <Text style={styles.statLabel}>busywork</Text>
                 </View>
               </View>
             </View>
@@ -146,7 +291,7 @@ export default function LoginScreen({ navigation }: any) {
                 <Text style={styles.cardEyebrow}>MEMBER LOGIN</Text>
                 <Text style={styles.cardTitle}>Get back inside.</Text>
                 <Text style={styles.cardSubtitle}>
-                  Clean session, tighter form, less wasted space.
+                  Your agents are waiting. Pick up where you left off.
                 </Text>
 
                 {error ? (
@@ -223,8 +368,17 @@ export default function LoginScreen({ navigation }: any) {
                       onPress={handleLogin}
                       disabled={loading}
                     >
+                      {/* Shimmer sweep on hover */}
+                      {Platform.OS === 'web' && hoveredAction === 'login' && (
+                        <div style={{
+                          position: 'absolute', top: 0, left: '-100%', width: '60%', height: '100%',
+                          background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent)',
+                          animation: 'uc-shimmer 1.2s ease-in-out infinite',
+                          pointerEvents: 'none',
+                        }} />
+                      )}
                       <Text style={styles.primaryButtonText}>
-                        {loading ? 'GETTING IN...' : 'GET IN'}
+                        {portalTransition ? 'ENTERING THE CIRCLE...' : loading ? 'GETTING IN...' : 'GET IN'}
                       </Text>
                     </Pressable>
 
@@ -234,6 +388,14 @@ export default function LoginScreen({ navigation }: any) {
                       onHoverOut={() => setHoveredAction((current) => (current === 'showSso' ? null : current))}
                       onPress={() => setShowSSO(true)}
                     >
+                      {Platform.OS === 'web' && hoveredAction === 'showSso' && (
+                        <div style={{
+                          position: 'absolute', top: 0, left: '-100%', width: '50%', height: '100%',
+                          background: 'linear-gradient(90deg, transparent, rgba(184,255,97,0.12), transparent)',
+                          animation: 'uc-shimmer 1.5s ease-in-out infinite',
+                          pointerEvents: 'none',
+                        }} />
+                      )}
                       <Text style={styles.secondaryButtonText}>Use company SSO</Text>
                     </Pressable>
                   </>
@@ -255,6 +417,7 @@ export default function LoginScreen({ navigation }: any) {
             </View>
           </View>
         </ScrollView>
+        </Animated.View>
       </View>
     </KeyboardAvoidingView>
   );
@@ -263,13 +426,17 @@ export default function LoginScreen({ navigation }: any) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#050806',
+    backgroundColor: 'transparent',
   },
   scrollContent: {
     flexGrow: 1,
     justifyContent: 'center',
     paddingHorizontal: 20,
     paddingVertical: 28,
+    position: 'relative',
+    zIndex: 1,
+    // @ts-ignore — web-only: let pointer events pass through to 3D canvas
+    pointerEvents: 'box-none',
   },
   shell: {
     width: '100%',
@@ -284,11 +451,13 @@ const styles = StyleSheet.create({
   heroPanel: {
     borderRadius: 28,
     borderWidth: 1,
-    borderColor: 'rgba(184, 255, 97, 0.12)',
-    backgroundColor: 'rgba(9, 13, 10, 0.68)',
+    borderColor: 'rgba(184, 255, 97, 0.1)',
+    backgroundColor: 'rgba(9, 13, 10, 0.35)',
     paddingHorizontal: 28,
     paddingVertical: 30,
     overflow: 'hidden',
+    // @ts-ignore — web-only backdrop filter
+    backdropFilter: 'blur(8px)',
   },
   heroPanelDesktop: {
     flex: 1.1,
@@ -319,7 +488,7 @@ const styles = StyleSheet.create({
   heroSubtitle: {
     color: '#9ca89c',
     fontSize: 16,
-    lineHeight: 24,
+    lineHeight: 26,
     marginTop: 18,
     maxWidth: 420,
   },
@@ -341,6 +510,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 14,
     justifyContent: 'space-between',
+    // @ts-ignore
+    backdropFilter: 'blur(10px)',
   },
   statValue: {
     color: '#f5f7f2',
@@ -370,6 +541,8 @@ const styles = StyleSheet.create({
     shadowRadius: 24,
     shadowOffset: { width: 0, height: 14 },
     elevation: 12,
+    // @ts-ignore
+    backdropFilter: 'blur(10px)',
   },
   cardEyebrow: {
     color: ACCENT,
@@ -414,14 +587,15 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 8,
     marginBottom: 14,
+    // @ts-ignore
+    outlineStyle: 'none',
+    transition: 'border-color 0.3s ease, background-color 0.3s ease, box-shadow 0.3s ease',
   },
   fieldShellFocused: {
-    borderColor: 'rgba(184, 255, 97, 0.44)',
-    backgroundColor: 'rgba(184, 255, 97, 0.06)',
-    shadowColor: ACCENT,
-    shadowOpacity: 0.12,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 8 },
+    borderColor: 'rgba(184, 255, 97, 0.35)',
+    backgroundColor: 'rgba(184, 255, 97, 0.04)',
+    // @ts-ignore
+    boxShadow: '0 0 20px rgba(184, 255, 97, 0.1), inset 0 0 15px rgba(184, 255, 97, 0.03)',
   },
   fieldLabel: {
     color: '#7c877c',
@@ -434,6 +608,9 @@ const styles = StyleSheet.create({
     color: '#f5f7f2',
     fontSize: 16,
     paddingVertical: 10,
+    // @ts-ignore
+    outlineStyle: 'none',
+    outlineWidth: 0,
   },
   primaryButton: {
     minHeight: 58,
@@ -444,20 +621,23 @@ const styles = StyleSheet.create({
     marginTop: 10,
     borderWidth: 1,
     borderColor: ACCENT_STRONG,
-    shadowColor: ACCENT,
-    shadowOpacity: 0.18,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 10 },
+    overflow: 'hidden',
+    // @ts-ignore — web transitions
+    transition: 'transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.3s ease, background-color 0.2s ease',
+    boxShadow: '0 4px 15px rgba(184, 255, 97, 0.2)',
+    outlineStyle: 'none',
   },
   primaryButtonHovered: {
-    transform: [{ translateY: -2 }],
-    backgroundColor: '#c5ff7d',
-    shadowOpacity: 0.28,
-    shadowRadius: 22,
+    transform: [{ translateY: -3 }, { scale: 1.02 }],
+    // @ts-ignore
+    boxShadow: '0 8px 30px rgba(184, 255, 97, 0.35), 0 0 40px rgba(184, 255, 97, 0.15)',
+    animation: 'uc-glow-pulse 1.5s ease-in-out infinite',
   },
   primaryButtonPressed: {
-    transform: [{ translateY: 0 }],
+    transform: [{ translateY: 0 }, { scale: 0.98 }],
     backgroundColor: ACCENT_STRONG,
+    // @ts-ignore
+    boxShadow: '0 2px 10px rgba(184, 255, 97, 0.15)',
   },
   primaryButtonText: {
     color: '#091007',
@@ -474,11 +654,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: 12,
+    overflow: 'hidden',
+    // @ts-ignore
+    transition: 'transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.3s ease, background-color 0.3s ease, box-shadow 0.3s ease',
+    outlineStyle: 'none',
   },
   secondaryButtonHovered: {
-    borderColor: 'rgba(184, 255, 97, 0.42)',
-    backgroundColor: 'rgba(184, 255, 97, 0.08)',
-    transform: [{ translateY: -1 }],
+    borderColor: 'rgba(184, 255, 97, 0.5)',
+    backgroundColor: 'rgba(184, 255, 97, 0.06)',
+    transform: [{ translateY: -2 }, { scale: 1.01 }],
+    // @ts-ignore
+    boxShadow: '0 4px 20px rgba(184, 255, 97, 0.1), inset 0 0 20px rgba(184, 255, 97, 0.04)',
   },
   secondaryButtonText: {
     color: '#d6e3d2',
@@ -505,43 +691,12 @@ const styles = StyleSheet.create({
     color: ACCENT,
     fontSize: 14,
     fontWeight: '800',
+    // @ts-ignore
+    transition: 'color 0.2s ease, text-shadow 0.3s ease',
   },
   footerLinkHovered: {
     color: '#d2ff9c',
-  },
-  ambientOrb: {
-    position: 'absolute',
-    borderRadius: 999,
-    opacity: 0.18,
-  },
-  orbA: {
-    width: 360,
-    height: 360,
-    backgroundColor: '#13351b',
-    top: -80,
-    left: -110,
-  },
-  orbB: {
-    width: 280,
-    height: 280,
-    backgroundColor: '#203a32',
-    bottom: -90,
-    right: -60,
-  },
-  gridGlow: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    width: '40%',
-    opacity: 0.18,
-    borderColor: 'rgba(255,255,255,0.03)',
-  },
-  gridGlowLeft: {
-    left: 0,
-    borderRightWidth: 1,
-  },
-  gridGlowRight: {
-    right: 0,
-    borderLeftWidth: 1,
+    // @ts-ignore
+    textShadow: '0 0 12px rgba(184, 255, 97, 0.4)',
   },
 });

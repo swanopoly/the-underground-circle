@@ -640,6 +640,28 @@ const MOBILE_BREAKPOINT = 768;
 type MobileTab = 'goals' | 'activity' | 'agents' | 'board' | 'ai-tools';
 type CenterTab = 'activity' | 'agents' | 'ai-tools';
 
+const AGENT_ASSIGNMENT_STATUS_ORDER: Record<AgentStatus, number> = {
+  active: 0,
+  building: 1,
+  idle: 2,
+  offline: 3,
+  error: 4,
+};
+
+function isConnectedAgent(agent: Pick<CircleOfficeAgent, 'status'>): boolean {
+  return agent.status === 'active' || agent.status === 'building' || agent.status === 'idle';
+}
+
+function compareAgentsForAssignment(
+  a: Pick<CircleOfficeAgent, 'status' | 'name'>,
+  b: Pick<CircleOfficeAgent, 'status' | 'name'>,
+): number {
+  const statusDiff =
+    (AGENT_ASSIGNMENT_STATUS_ORDER[a.status] ?? 9) - (AGENT_ASSIGNMENT_STATUS_ORDER[b.status] ?? 9);
+  if (statusDiff !== 0) return statusDiff;
+  return a.name.localeCompare(b.name);
+}
+
 export default function FeedTab({ circleId }: { circleId: string }) {
   const kanban = useKanbanData(circleId);
   const goalsHook = useGoals(circleId);
@@ -677,21 +699,18 @@ export default function FeedTab({ circleId }: { circleId: string }) {
     return () => { unsubAuto(); unsubDb(); };
   }, [circleId]);
 
-  // Merge DB agents with live connected agents from auto-connect service
-  const agents = useMemo(() => {
-    const dbAgents = kanban.agents;
+  // Build the live agent list from auto-connect sessions only
+  const liveAgents = useMemo(() => {
     const connections = getAutoConnectConnections();
     const sessionsMap = getAutoConnectSessions();
 
-    // Convert live sessions → OfficeAgent[] (same pattern as OfficeTab)
+    // Convert live sessions to OfficeAgent[] (same pattern as OfficeTab)
     const liveOfficeAgents: OfficeAgent[] = [];
     for (const [connId, sessions] of sessionsMap) {
       if (connId === 'claude-code-auto') {
-        // Claude Code sessions are already OfficeAgent[]
         const ccAgents = sessions as unknown as OfficeAgent[];
         if (ccAgents?.length) liveOfficeAgents.push(...ccAgents);
       } else {
-        // OpenClaw sessions need conversion via sessionsToAgents()
         const conn = connections.find(c => c.id === connId);
         if (conn && sessions?.length) {
           const converted = sessionsToAgents(
@@ -705,7 +724,6 @@ export default function FeedTab({ circleId }: { circleId: string }) {
       }
     }
 
-    // Apply persistent identity (custom names) — same as OfficeTab's restoreAllAgents
     const resolvedAgents = liveOfficeAgents.map(oa => {
       const sessionKey = oa.id.includes('::') ? oa.id.split('::')[1] : oa.id;
       const identity = agentIdentities.get(sessionKey);
@@ -717,8 +735,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
       };
     });
 
-    // Map OfficeAgent → CircleOfficeAgent shape for the UI
-    const liveAsCircle: CircleOfficeAgent[] = resolvedAgents.map(oa => {
+    return resolvedAgents.map(oa => {
       const providerInfo = PROVIDER_DISPLAY[oa.providerType] || PROVIDER_DISPLAY['generic-agent'];
       return {
         id: oa.id,
@@ -729,24 +746,28 @@ export default function FeedTab({ circleId }: { circleId: string }) {
         provider: oa.providerType || 'generic-agent',
         name: oa.name,
         color: oa.color || providerInfo?.color || '#e8e8e8',
-        toolIcon: providerInfo?.icon || '🤖',
+        toolIcon: providerInfo?.icon || 'AI',
         status: (oa.status || 'idle') as AgentStatus,
         currentTask: undefined,
         isPublished: true,
         createdAt: '',
         updatedAt: '',
-      };
+      } as CircleOfficeAgent;
     });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveAgentTick, circleId, agentIdentities, legacyNames]);
 
-    // Merge: update DB agents with live status, add new live agents
+  // Merge DB agents with the live session list so task assignment can still see the full roster
+  const agents = useMemo(() => {
+    const dbAgents = kanban.agents;
     const merged = dbAgents.map(a => {
-      const live = liveAsCircle.find(l =>
+      const live = liveAgents.find(l =>
         l.name.toLowerCase() === a.name.toLowerCase() || l.id === a.id,
       );
       return live ? { ...a, status: live.status } as CircleOfficeAgent : a;
     });
     const existingNames = new Set(merged.map(a => a.name.toLowerCase()));
-    for (const live of liveAsCircle) {
+    for (const live of liveAgents) {
       if (!existingNames.has(live.name.toLowerCase())) {
         existingNames.add(live.name.toLowerCase());
         merged.push(live);
@@ -754,8 +775,24 @@ export default function FeedTab({ circleId }: { circleId: string }) {
     }
 
     return merged;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kanban.agents, liveAgentTick, circleId, agentIdentities, legacyNames]);
+  }, [kanban.agents, liveAgents]);
+
+  // The ORCHESTRA strip above the board should reflect live connected sessions only
+  const orchestraAgents = useMemo(() =>
+    liveAgents.filter(isConnectedAgent).sort(compareAgentsForAssignment),
+  [liveAgents]);
+
+  // Sorted agents for task assignment: live connected agents first, then the rest
+  const sortedAgentsForAssign = useMemo(() => {
+    const liveIds = new Set(orchestraAgents.map(a => a.id));
+    const liveNames = new Set(orchestraAgents.map(a => a.name.toLowerCase()));
+    return [...agents].sort((a, b) => {
+      const aIsLive = liveIds.has(a.id) || liveNames.has(a.name.toLowerCase());
+      const bIsLive = liveIds.has(b.id) || liveNames.has(b.name.toLowerCase());
+      if (aIsLive !== bIsLive) return aIsLive ? -1 : 1;
+      return compareAgentsForAssignment(a, b);
+    });
+  }, [agents, orchestraAgents]);
 
   // ─── Search & filter state (lifted from KanbanBoard) ────
   const [searchText, setSearchText] = useState('');
@@ -887,8 +924,8 @@ export default function FeedTab({ circleId }: { circleId: string }) {
   if (isMobile) {
     return (
       <View style={s.container}>
-        <AgentTopBar agents={agents} />
-        <OrchestraPanel agents={agents} automationStats={automationStats} taskStats={taskStats} />
+        <AgentTopBar agents={orchestraAgents} />
+        <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} />
         <TaskSearchBar
           searchText={searchText}
           onSearchChange={setSearchText}
@@ -992,6 +1029,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
           <TaskDetailModal
             task={detailTask}
             kanban={kanban}
+            agents={sortedAgentsForAssign}
             goals={goalsHook.goals}
             circleId={circleId}
             onClose={() => setDetailTask(null)}
@@ -1013,7 +1051,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
           <CreateTaskModal
             column={createInColumn}
             members={kanban.members}
-            agents={agents}
+            agents={sortedAgentsForAssign}
             goals={goalsHook.goals}
             onClose={() => setShowCreate(false)}
             onCreate={async (fields) => {
@@ -1029,8 +1067,8 @@ export default function FeedTab({ circleId }: { circleId: string }) {
   // ─── Desktop Layout ────────────────────────────────────────────────────
   return (
     <View style={s.container}>
-      <AgentTopBar agents={agents} />
-      <OrchestraPanel agents={agents} automationStats={automationStats} taskStats={taskStats} />
+      <AgentTopBar agents={orchestraAgents} />
+      <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} />
       <TaskSearchBar
         searchText={searchText}
         onSearchChange={setSearchText}
@@ -1121,6 +1159,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
         <TaskDetailModal
           task={detailTask}
           kanban={kanban}
+          agents={sortedAgentsForAssign}
           goals={goalsHook.goals}
           circleId={circleId}
           onClose={() => setDetailTask(null)}
@@ -1187,6 +1226,7 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
   const [error, setError] = useState('');
 
   const columnDef = COLUMNS.find(c => c.key === column) || COLUMNS[1];
+  const sortedAgentsForAssign = useMemo(() => [...agents].sort(compareAgentsForAssignment), [agents]);
 
   const handleCreate = () => {
     if (!title.trim()) { setError('Give the task a title'); return; }
@@ -1313,8 +1353,9 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
                 </Text>
               </Pressable>
             ))}
-            {agents.map(a => {
+            {sortedAgentsForAssign.map(a => {
               const active = assignedAgentIds.includes(a.id);
+              const isOnline = a.status === 'active' || a.status === 'building' || a.status === 'idle';
               return (
                 <Pressable
                   key={a.id}
@@ -1322,10 +1363,10 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
                     setAssignedTo(null);
                     setAssignedAgentIds(prev => prev.includes(a.id) ? prev.filter(id => id !== a.id) : [...prev, a.id]);
                   }}
-                  style={[m.chip, active && { backgroundColor: (a.color || '#e8e8e8') + '15', borderColor: (a.color || '#e8e8e8') + '30' }]}
+                  style={[m.chip, active && { backgroundColor: (a.color || '#e8e8e8') + '15', borderColor: (a.color || '#e8e8e8') + '30' }, !isOnline && { opacity: 0.35 }]}
                 >
-                  <View style={[m.chipDot, { backgroundColor: a.color || '#e8e8e8' }]} />
-                  <Text style={[m.chipText, active && { color: a.color || '#e8e8e8' }]}>{active ? '? ' : ''}{a.name}</Text>
+                  <View style={[m.chipDot, { backgroundColor: isOnline ? (a.color || '#e8e8e8') : '#555' }]} />
+                  <Text style={[m.chipText, active && { color: a.color || '#e8e8e8' }]}>{active ? '✓ ' : ''}{a.name}</Text>
                 </Pressable>
               );
             })}

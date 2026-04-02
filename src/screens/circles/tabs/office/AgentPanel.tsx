@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { View, Text, TextInput, StyleSheet, Animated, Pressable, Platform, ScrollView } from 'react-native';
-import { OfficeAgent, STATUS_COLORS } from '../../../../lib/officeAgents';
+import { OfficeAgent, getOfficeStatusColor, getOfficeStatusLabel } from '../../../../lib/officeAgents';
 import FlatIcon, { ICON_CATALOG } from '../../../../components/FlatIcon';
 import { PROVIDER_META } from '../../../../lib/connectionManager';
 import { SessionTag } from '../../../../lib/sessionTags';
@@ -322,7 +322,8 @@ export default function AgentPanel({
 
   if (!agent) return null;
 
-  const statusColor = STATUS_COLORS[agent.status];
+  const statusColor = getOfficeStatusColor(agent.status);
+  const statusLabel = getOfficeStatusLabel(agent.status).toUpperCase();
   const currentTags = sessionTags?.get(sessionKey!) || [];
 
   return (
@@ -410,7 +411,7 @@ export default function AgentPanel({
         </View>
         <View style={[styles.statusBadge, { backgroundColor: statusColor + '20', borderColor: statusColor + '40' }]}>
           <View style={[styles.statusDotSmall, { backgroundColor: statusColor }]} />
-          <Text style={[styles.statusText, { color: statusColor }]}>{agent.status.toUpperCase()}</Text>
+          <Text style={[styles.statusText, { color: statusColor }]}>{statusLabel}</Text>
         </View>
       </View>
 

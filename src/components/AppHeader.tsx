@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { createLinkInvite } from '../lib/invites';
+import { reconnectAllBridges } from '../lib/agentAutoConnect';
 import FlatIcon from './FlatIcon';
 
 interface AppHeaderProps {
@@ -48,6 +49,8 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
   const [circleName, setCircleName] = useState('');
   const [circleId, setCircleId] = useState('');
   const [inviteCopied, setInviteCopied] = useState(false);
+  const [bridgeConnecting, setBridgeConnecting] = useState(false);
+  const [bridgeResult, setBridgeResult] = useState<'idle' | 'success' | 'partial' | 'error'>('idle');
 
   // ── Animated values ────────────────────────────────────────────────────────
 
@@ -276,27 +279,6 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
                 <Text style={styles.headerIconText}>←</Text>
               </Pressable>
               <Pressable
-                onPress={async () => {
-                  try {
-                    const { url, error } = await createLinkInvite(circleId, { maxUses: 0, expiresInDays: 7 });
-                    if (error || !url) {
-                      if (Platform.OS === 'web') alert('Could not create invite link: ' + (error || 'Unknown error'));
-                      return;
-                    }
-                    if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.clipboard) {
-                      await navigator.clipboard.writeText(url);
-                    }
-                    setInviteCopied(true);
-                    setTimeout(() => setInviteCopied(false), 3000);
-                  } catch (err: any) {
-                    if (Platform.OS === 'web') alert('Failed to create invite: ' + (err?.message || 'Check console'));
-                  }
-                }}
-                style={({ pressed }) => [styles.headerIcon, pressed && styles.headerIconPressed]}
-              >
-                <Text style={styles.headerIconText}>{inviteCopied ? '✅' : '🔗'}</Text>
-              </Pressable>
-              <Pressable
                 onPress={() => navigation.navigate('CircleSettings', { circleId })}
                 style={({ pressed }) => [styles.headerIcon, pressed && styles.headerIconPressed]}
               >
@@ -310,6 +292,34 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
               <HeaderIconButton label="⁘" onPress={() => navigation.navigate('Friends')} />
             </>
           ) : null}
+
+          <Pressable
+            onPress={async () => {
+              if (bridgeConnecting) return;
+              setBridgeConnecting(true);
+              setBridgeResult('idle');
+              try {
+                const status = await reconnectAllBridges();
+                const total = [status.claudeCode, status.codex, status.gemini, status.cursor].filter(Boolean).length;
+                setBridgeResult(total > 0 ? 'success' : 'partial');
+              } catch {
+                setBridgeResult('error');
+              }
+              setBridgeConnecting(false);
+              setTimeout(() => setBridgeResult('idle'), 3000);
+            }}
+            style={({ pressed }) => [
+              styles.headerIcon,
+              pressed && styles.headerIconPressed,
+              bridgeConnecting && styles.bridgeConnecting,
+              bridgeResult === 'success' && styles.bridgeSuccess,
+              bridgeResult === 'error' && styles.bridgeError,
+            ]}
+          >
+            <Text style={styles.headerIconText}>
+              {bridgeConnecting ? '↻' : bridgeResult === 'success' ? '✅' : bridgeResult === 'error' ? '❌' : '🔗'}
+            </Text>
+          </Pressable>
 
           <Pressable
             onPress={() => navigation.navigate('EditProfile')}
@@ -547,6 +557,17 @@ const styles = StyleSheet.create({
   },
   menuItemIconHovered: {
     ...(Platform.OS === 'web' ? { textShadow: '0 0 10px rgba(88,166,255,0.5)' } as any : {}),
+  },
+  bridgeConnecting: {
+    borderColor: '#1f6feb',
+  },
+  bridgeSuccess: {
+    borderColor: '#3fb950',
+    backgroundColor: 'rgba(63,185,80,0.1)',
+  },
+  bridgeError: {
+    borderColor: '#f85149',
+    backgroundColor: 'rgba(248,81,73,0.1)',
   },
   menuItemLabel: {
     color: '#c9d1d9', fontSize: 13, fontWeight: '500',

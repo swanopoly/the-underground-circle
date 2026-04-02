@@ -419,6 +419,42 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+
+  // ── POST /spawn — spawn a new Claude Code session with a task ──────────────
+  if (url === '/spawn' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 64000) req.destroy(); });
+    req.on('end', () => {
+      let parsed;
+      try { parsed = JSON.parse(body); } catch { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' })); return; }
+      const { task, model, workdir } = parsed;
+      if (!task) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'Missing task' })); return; }
+
+      const cwd = workdir || process.cwd();
+      const modelFlag = model ? `--model ${model}` : '';
+      // Spawn claude in background with the task as prompt, capture session output
+      const escaped = task.replace(/'/g, "'\\''");
+      const cmd = `cd "${cwd}" && nohup claude ${modelFlag} --dangerously-skip-permissions -p "${escaped}" > /tmp/claude-spawn-$$.log 2>&1 & echo $!`;
+
+      const { exec } = require('child_process');
+      exec(cmd, { timeout: 10000, shell: '/bin/bash' }, (err, stdout, stderr) => {
+        if (err) {
+          res.writeHead(500, CORS);
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+          return;
+        }
+        const pid = stdout.trim();
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({
+          ok: true,
+          pid,
+          message: `Spawned Claude Code session (PID ${pid}) with task: ${task.slice(0, 100)}`,
+        }));
+      });
+    });
+    return;
+  }
+
   // ── GET /devices — Discover all connected devices ──────────────────────────
   if (url === '/devices' && req.method === 'GET') {
     res.writeHead(200, CORS);
@@ -1278,7 +1314,8 @@ server.listen(PORT, () => {
   console.log(`  Endpoints:`);
   console.log(`    GET  /health              — Bridge status`);
   console.log(`    GET  /sessions            — Active Claude Code sessions`);
-  console.log(`    POST /exec                — Run a shell command`);
+  console.log(`    POST /exec                — Run a shell command
+    POST /spawn               — Spawn a new Claude Code session with a task`);
   console.log(`    GET  /devices             — Discover all connected devices`);
   console.log(`    GET  /devices/printers    — List printers with status`);
   console.log(`    POST /devices/print       — Print a file or text`);

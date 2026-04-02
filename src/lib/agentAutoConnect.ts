@@ -138,6 +138,77 @@ export function setAutoConnectCircleId(circleId: string) {
 export function updateAutoConnectConnections(conns: AgentConnection[]) {
   _connections = conns;
 }
+// ── Manual reconnect (triggered by UI) ───────────────────────────────────────
+
+export type BridgeStatus = {
+  claudeCode: boolean;
+  codex: boolean;
+  gemini: boolean;
+  cursor: boolean;
+  openclawReconnected: number;
+};
+
+/**
+ * Manually detect and connect all bridges. Returns status of each bridge.
+ * Called from the header link button.
+ */
+export async function reconnectAllBridges(): Promise<BridgeStatus> {
+  console.log("[agentAutoConnect] Manual bridge reconnect triggered");
+  _retryAttempt = 0;
+
+  // If auto-connect is not running yet, start it
+  if (!_running) {
+    await startAgentAutoConnect();
+    return {
+      claudeCode: !!_ccPoller,
+      codex: !!_codexPoller,
+      gemini: !!_geminiPoller,
+      cursor: !!_cursorPoller,
+      openclawReconnected: 0,
+    };
+  }
+
+  // Detect all bridges in parallel
+  const [ccDetected, codexDetected, geminiDetected, cursorDetected] = await Promise.all([
+    detectClaudeCodeBridge().catch(() => false),
+    detectCodexBridge().catch(() => false),
+    detectGeminiCliBridge().catch(() => false),
+    detectCursorBridge().catch(() => false),
+  ]);
+
+  // Start pollers for newly detected bridges
+  if (ccDetected && !_ccPoller) _startCCPoller();
+  if (codexDetected && !_codexPoller) _startCodexPoller();
+  if (geminiDetected && !_geminiPoller) _startGeminiPoller();
+  if (cursorDetected && !_cursorPoller) _startCursorPoller();
+
+  // Retry failed OpenClaw connections
+  let ocReconnected = 0;
+  const failedConns = _connections.filter(
+    c => c.enabled && (c.status === "error" || c.status === "disconnected"),
+  );
+  for (const conn of failedConns) {
+    try {
+      await _connectWithFallback(conn);
+      if (_connections.find(c => c.id === conn.id)?.status === "connected") {
+        ocReconnected++;
+      }
+    } catch {}
+  }
+
+  _notify();
+
+  const status: BridgeStatus = {
+    claudeCode: ccDetected,
+    codex: codexDetected,
+    gemini: geminiDetected,
+    cursor: cursorDetected,
+    openclawReconnected: ocReconnected,
+  };
+  console.log("[agentAutoConnect] Manual reconnect result:", status);
+  return status;
+}
+
 
 // ── Backoff helper ──────────────────────────────────────────────────────────
 

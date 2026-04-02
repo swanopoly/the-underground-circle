@@ -37,11 +37,37 @@ export interface OfficeAgent {
 
 export const STATUS_COLORS: Record<AgentStatus, string> = {
   active: '#22c55e',
-  idle: '#eab308',
+  idle: '#22c55e',
   building: '#3b82f6',
   error: '#ef4444',
   offline: '#6b7280',
 };
+
+export function isConnectedOfficeStatus(status: AgentStatus | string | undefined): boolean {
+  return status === 'active' || status === 'building' || status === 'idle';
+}
+
+export function getOfficeStatusColor(status: AgentStatus | string | undefined): string {
+  if (status === 'error') return STATUS_COLORS.error;
+  if (status === 'offline' || !status) return STATUS_COLORS.offline;
+  return STATUS_COLORS.active;
+}
+
+export function getOfficeStatusLabel(status: AgentStatus | string | undefined): string {
+  if (status === 'building') return 'Building';
+  if (status === 'active') return 'Active';
+  if (status === 'idle') return 'Connected';
+  if (status === 'error') return 'Error';
+  return 'Offline';
+}
+
+export function getOfficeStatusSortRank(status: AgentStatus | string | undefined): number {
+  if (status === 'building') return 0;
+  if (status === 'active') return 1;
+  if (status === 'idle') return 2;
+  if (status === 'error') return 3;
+  return 4;
+}
 
 // Agent colors for assignment
 export const AGENT_COLORS = [

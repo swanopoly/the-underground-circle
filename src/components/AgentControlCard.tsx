@@ -14,7 +14,7 @@ import {
   View, Text, Pressable, TextInput, ScrollView, StyleSheet, Platform,
   ActivityIndicator,
 } from 'react-native';
-import { OfficeAgent } from '../lib/officeAgents';
+import { OfficeAgent, getOfficeStatusColor, getOfficeStatusLabel } from '../lib/officeAgents';
 import { AgentControl, upsertAgentControl } from '../services/hitlService';
 import { supabase } from '../lib/supabase';
 
@@ -56,7 +56,7 @@ const BRIDGE_PORTS: Record<string, number> = {
   'codex': 7779,
   'gemini': 7780,
   'cursor': 7781,
-  'openclaw': 18789,
+  'openclaw': 18790,
 };
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -112,14 +112,9 @@ export default function AgentControlCard({
 
   // ── Status ─────────────────────────────────────────────────────────────────
 
-  const statusLabel = isPaused ? 'PAUSED' : agent.status === 'building' ? 'BUILDING' :
-    agent.status === 'active' ? 'ACTIVE' : agent.status === 'idle' ? 'IDLE' :
-    agent.status === 'error' ? 'ERROR' : 'OFFLINE';
+  const statusLabel = isPaused ? 'PAUSED' : getOfficeStatusLabel(agent.status).toUpperCase();
 
-  const statusColor = isPaused ? '#f59e0b' :
-    agent.status === 'active' || agent.status === 'building' ? '#22c55e' :
-    agent.status === 'idle' ? '#f59e0b' :
-    agent.status === 'error' ? '#ef4444' : '#4b5563';
+  const statusColor = isPaused ? '#f59e0b' : getOfficeStatusColor(agent.status);
 
   // ── Power controls ─────────────────────────────────────────────────────────
 
