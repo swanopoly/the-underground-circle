@@ -37,7 +37,7 @@ if (!_global.__supabaseClient) {
       autoRefreshToken: true,
       persistSession: true,
       detectSessionInUrl: false,
-      flowType: 'implicit',
+      flowType: 'pkce',
       // Disable navigator.locks on web — prevents AbortError from GoTrueClient
       lock: Platform.OS === 'web'
         ? async (_name: string, _acquireTimeout: number, fn: () => Promise<any>) => await fn()

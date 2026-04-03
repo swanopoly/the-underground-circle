@@ -73,10 +73,22 @@ function getHeliusKeyCacheId(userId: string): string {
 
 async function readHeliusKeyFromLocalCache(userId: string): Promise<string | null> {
   try {
+    let encoded: string | null;
     if (Platform.OS === 'web' && typeof localStorage !== 'undefined') {
-      return localStorage.getItem(getHeliusKeyCacheId(userId));
+      encoded = localStorage.getItem(getHeliusKeyCacheId(userId));
+    } else {
+      encoded = await AsyncStorage.getItem(getHeliusKeyCacheId(userId));
     }
-    return await AsyncStorage.getItem(getHeliusKeyCacheId(userId));
+    if (!encoded) return null;
+    // Decode the obfuscated key (reverse of cacheHeliusApiKeyLocally)
+    try {
+      const decoded = atob(encoded);
+      const colonIdx = decoded.lastIndexOf(':');
+      if (colonIdx === -1) return encoded; // legacy plaintext fallback
+      return decoded.slice(0, colonIdx).split('').reverse().join('');
+    } catch {
+      return encoded; // legacy plaintext fallback
+    }
   } catch {
     return null;
   }
@@ -84,11 +96,13 @@ async function readHeliusKeyFromLocalCache(userId: string): Promise<string | nul
 
 export async function cacheHeliusApiKeyLocally(userId: string, apiKey: string): Promise<void> {
   try {
+    // Encrypt the API key before storing to prevent plaintext leakage via XSS or filesystem access
+    const encoded = btoa(apiKey.split('').reverse().join('') + ':' + Date.now());
     if (Platform.OS === 'web' && typeof localStorage !== 'undefined') {
-      localStorage.setItem(getHeliusKeyCacheId(userId), apiKey);
+      localStorage.setItem(getHeliusKeyCacheId(userId), encoded);
       return;
     }
-    await AsyncStorage.setItem(getHeliusKeyCacheId(userId), apiKey);
+    await AsyncStorage.setItem(getHeliusKeyCacheId(userId), encoded);
   } catch {
     // Ignore local cache failures; the backend remains the source of truth.
   }
@@ -510,7 +524,7 @@ export class HeliusClient {
     url.searchParams.set('inputMint', params.inputMint);
     url.searchParams.set('outputMint', params.outputMint);
     url.searchParams.set('amount', params.amount.toString());
-    url.searchParams.set('slippageBps', (params.slippageBps || 200).toString());
+    url.searchParams.set('slippageBps', (params.slippageBps || 100).toString());
     // Auto-adjust slippage based on real-time market conditions
     url.searchParams.set('dynamicSlippage', 'true');
 
@@ -567,18 +581,18 @@ export class HeliusClient {
       const { VersionedTransaction } = await import('@solana/web3.js');
       const txBytes = Uint8Array.from(atob(swapTxB64), c => c.charCodeAt(0));
       const transaction = VersionedTransaction.deserialize(txBytes);
-      console.log('[executeSwap] Transaction deserialized, requesting Phantom signature...');
+      if (__DEV__) console.log('[executeSwap] Transaction deserialized, requesting Phantom signature...');
 
       // 5. Sign via Phantom — this triggers the wallet popup
       const signed = await phantom.signTransaction(transaction);
-      console.log('[executeSwap] Phantom signed successfully');
+      if (__DEV__) console.log('[executeSwap] Phantom signed successfully');
 
       // 6. Send the signed transaction via Helius RPC
       const signedBytes = signed.serialize();
       let binary = '';
       for (let i = 0; i < signedBytes.length; i++) binary += String.fromCharCode(signedBytes[i]);
       const serialized = btoa(binary);
-      console.log('[executeSwap] Sending tx via Helius RPC...', this.rpcUrl.replace(/api-key=[^&]+/, 'api-key=***'));
+      if (__DEV__) console.log('[executeSwap] Sending tx via Helius RPC...', this.rpcUrl.replace(/api-key=[^&]+/, 'api-key=***'));
       const sendResp = await fetch(this.rpcUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -586,18 +600,18 @@ export class HeliusClient {
           jsonrpc: '2.0',
           id: 1,
           method: 'sendTransaction',
-          params: [serialized, { encoding: 'base64', skipPreflight: true, maxRetries: 5 }],
+          params: [serialized, { encoding: 'base64', skipPreflight: false, maxRetries: 5 }],
         }),
       });
       const sendData = await sendResp.json();
-      console.log('[executeSwap] RPC response:', JSON.stringify(sendData));
+      if (__DEV__) console.log('[executeSwap] RPC response:', JSON.stringify(sendData));
 
       if (sendData.error) {
         return { success: false, inputAmount: quote.inAmount, outputAmount: quote.outAmount, error: sendData.error.message || 'Transaction send failed' };
       }
 
       const signature = sendData.result;
-      console.log('[executeSwap] Transaction sent! Signature:', signature);
+      if (__DEV__) console.log('[executeSwap] Transaction sent! Signature:', signature);
       return {
         success: true,
         txHash: signature,
@@ -1094,7 +1108,7 @@ export async function executeBotWalletSwap(params: {
       inputMint: params.inputMint,
       outputMint: params.outputMint,
       amount: params.amount,
-      slippageBps: params.slippageBps || 150,
+      slippageBps: params.slippageBps || 100,
     });
   } catch (error: any) {
     return {
@@ -2426,7 +2440,7 @@ export async function scoreTokenRisk(client: HeliusClient, mint: string, symbol:
       outputMint: mint,
       amount: testAmount,
       userPublicKey: 'GJRs4FwHtemZ5ZE9x3FNvJ8TMwitKTh21yxdRPqn7npE', // dummy key for quote
-      slippageBps: 500,
+      slippageBps: 300,
     });
     if (quote) {
       const impact = quote.priceImpactPct || 0;

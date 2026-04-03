@@ -8,7 +8,7 @@ const STORAGE_KEY_AGENT_IDENTITY = '@agent_identity_store';
 
 export interface AgentIdentity {
   sessionKey: string; // The stable identifier (e.g., "rapid-slug")
-  
+
   // Persistent identity
   customName?: string;
   customColor?: string;
@@ -17,25 +17,35 @@ export interface AgentIdentity {
     eyes?: string;
     outfit?: string;
   };
-  
+
   // Historical data
   totalCostAllTime: number;
   totalTokensAllTime: number;
   totalSessionsAllTime: number;
   firstSeen: number; // timestamp
   lastSeen: number; // timestamp
-  
+
   // Activity tracking
   totalMessages: number;
   totalTurns: number;
-  
+
   // Floor assignment
   assignedFloorId?: string;
   deskIndex?: number;
-  
+
   // Metadata
   mostUsedModel?: string;
   tags?: string[]; // Quick access to common tags
+
+  // Bonding (local cache of server-side bond state)
+  bondId?: string;             // UUID from agent_bonds table
+  bondLevel?: number;          // 1-10
+  bondXP?: number;             // XP toward next level
+  isPrimary?: boolean;         // Is this the user's primary agent?
+  isCustomized?: boolean;      // Has the user customized this agent?
+  boundAiProvider?: string;    // 'claude' | 'gemini' | 'blackswan'
+  boundModel?: string;         // Specific model this agent uses
+  soulTraits?: Record<string, number>; // Trait strengths (local cache)
 }
 
 // ─── Load/Save Identity Store ──────────────────────────────
@@ -157,16 +167,17 @@ export async function restoreAgentIdentity(agent: OfficeAgent): Promise<OfficeAg
 
 export async function restoreAllAgents(agents: OfficeAgent[]): Promise<OfficeAgent[]> {
   const identities = await loadAgentIdentities();
-  
-  return agents.map(agent => {
+
+  const restored = agents.map(agent => {
     const sessionKey = agent.id.includes('::') ? agent.id.split('::')[1] : agent.id;
     const identity = identities.get(sessionKey);
-    
+
     if (!identity) {
       return agent;
     }
-    
-    return {
+
+    // Restore bound AI session — if this agent was assigned a Claude session, keep it
+    const restoredAgent: OfficeAgent = {
       ...agent,
       name: identity.customName || agent.name,
       color: identity.customColor || agent.color,
@@ -174,6 +185,36 @@ export async function restoreAllAgents(agents: OfficeAgent[]): Promise<OfficeAge
       tokensUsed: Math.max(agent.tokensUsed, identity.totalTokensAllTime),
       messagesProcessed: Math.max(agent.messagesProcessed, identity.totalMessages),
     };
+
+    // If agent has a bound model and no active model, restore the binding
+    if (identity.boundModel && (!agent.model || agent.model === 'unknown')) {
+      restoredAgent.model = identity.boundModel;
+    }
+
+    return restoredAgent;
+  });
+
+  // Sort: primary/bonded/customized agents first, then by bond level
+  return restored.sort((a, b) => {
+    const keyA = a.id.includes('::') ? a.id.split('::')[1] : a.id;
+    const keyB = b.id.includes('::') ? b.id.split('::')[1] : b.id;
+    const idA = identities.get(keyA);
+    const idB = identities.get(keyB);
+
+    // Primary agent always first
+    if (idA?.isPrimary && !idB?.isPrimary) return -1;
+    if (!idA?.isPrimary && idB?.isPrimary) return 1;
+
+    // Customized agents before non-customized
+    if (idA?.isCustomized && !idB?.isCustomized) return -1;
+    if (!idA?.isCustomized && idB?.isCustomized) return 1;
+
+    // Higher bond level first
+    const levelA = idA?.bondLevel || 0;
+    const levelB = idB?.bondLevel || 0;
+    if (levelA !== levelB) return levelB - levelA;
+
+    return 0; // preserve existing order otherwise
   });
 }
 

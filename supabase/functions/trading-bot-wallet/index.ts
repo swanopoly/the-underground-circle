@@ -1328,6 +1328,20 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    // Verify circle membership — user must be a member of the circle
+    const { data: membership, error: memberError } = await serviceClient
+      .from("circle_members")
+      .select("id")
+      .eq("circle_id", circleId)
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (!membership) {
+      return new Response(JSON.stringify({ error: "Not a member of this circle" }), {
+        status: 403,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     if (action === "status") {
       const row = await getBotWalletRow(serviceClient, user.id, circleId);
       const wallet = row ? await hydrateWallet(serviceClient, row, user.id) : null;

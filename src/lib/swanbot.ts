@@ -19,10 +19,20 @@ export type SwanBotContext = {
 
 type ConversationMessage = { role: 'user' | 'model'; text: string };
 
-// ─── Conversation History (per circle, in-memory) ────────────────────────────
+// ─── Conversation History (per circle, in-memory + persistent bond history) ──
 
 const conversationHistory: Map<string, ConversationMessage[]> = new Map();
 const MAX_HISTORY = 20;
+
+// Bond-aware history: if a bond exists, also persist to Supabase
+let _activeBondId: string | null = null;
+let _activeBondCircleId: string | null = null;
+
+/** Set the active bond for conversation persistence */
+export function setActiveBond(bondId: string | null, circleId: string | null) {
+  _activeBondId = bondId;
+  _activeBondCircleId = circleId;
+}
 
 function getHistory(circleId: string): ConversationMessage[] {
   return conversationHistory.get(circleId) || [];
@@ -33,6 +43,37 @@ function addToHistory(circleId: string, role: 'user' | 'model', text: string) {
   history.push({ role, text });
   if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY);
   conversationHistory.set(circleId, history);
+
+  // Persist to bond conversation history (non-blocking)
+  if (_activeBondId && _activeBondCircleId === circleId) {
+    import('./agentBonding').then(({ saveConversationMessage }) => {
+      saveConversationMessage(
+        _activeBondId!,
+        circleId,
+        role === 'user' ? 'user' : 'assistant',
+        text,
+      ).catch(() => {}); // fire-and-forget
+    }).catch(() => {});
+  }
+}
+
+/** Load conversation history from bond (for session restoration) */
+export async function restoreHistoryFromBond(bondId: string, circleId: string): Promise<void> {
+  try {
+    const { loadConversationHistory } = await import('./agentBonding');
+    const history = await loadConversationHistory(bondId, MAX_HISTORY);
+    if (history.length > 0) {
+      const messages: ConversationMessage[] = history.map(h => ({
+        role: h.role === 'user' ? 'user' : 'model',
+        text: h.content,
+      }));
+      conversationHistory.set(circleId, messages);
+      _activeBondId = bondId;
+      _activeBondCircleId = circleId;
+    }
+  } catch {
+    // Bond history unavailable — use in-memory only
+  }
 }
 
 // ─── AI Edge Function Call ───────────────────────────────────────────────────
