@@ -21,6 +21,7 @@ Pages with concrete findings in this pass:
 - `claude-agent-stack-and-openclaw-panel-deep-audit-2026-04-08.md`
 - `ai-agent-use-cases-and-openclaw-deep-audit-2026-04-07.md`
 - `agent-session-memory-deep-research-and-implementation-plan-2026-04-08.md`
+- `agent-memory-ux-and-compaction-implementation-plan-2026-04-08.md`
 - `feed-task-agent-execution-deep-audit-2026-04-04.md`
 - `feed-task-agent-execution-implementation-spec-2026-04-04.md`
 - `feed-task-agent-execution-pr1-dossier-2026-04-04.md`

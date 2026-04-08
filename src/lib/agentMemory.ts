@@ -112,24 +112,36 @@ Return [] if nothing worth remembering. Return ONLY the JSON array, no other tex
 
 /**
  * Run memory extraction on a conversation and save results.
- * Deduplicates against existing memories by title similarity.
+ * Deduplicates against existing, quality-gates candidates, detects contradictions.
  */
 export async function autoExtractAndSave(
   circleId: string,
   userId: string,
   messages: Array<{ role: string; text: string }>,
-): Promise<{ saved: number; updated: number }> {
+): Promise<{ saved: number; updated: number; rejected: number }> {
   // Load existing memories for dedup (scoped to this user for user memories)
   const existing = await loadMemories({ circleId, userId, scopes: ['circle', 'user'], limit: 100 });
 
   // Extract new memories
   const extracted = await extractMemoriesFromConversation(messages, existing);
-  if (extracted.length === 0) return { saved: 0, updated: 0 };
+  if (extracted.length === 0) return { saved: 0, updated: 0, rejected: 0 };
 
   let saved = 0;
   let updated = 0;
+  let rejected = 0;
+
+  // Import quality gate
+  let isHighQuality: (c: { kind: string; title: string; content: string }) => boolean;
+  try {
+    const mod = await import('./memoryConsolidation');
+    isHighQuality = mod.isHighQualityMemory;
+  } catch {
+    isHighQuality = () => true; // fallback: accept all
+  }
 
   for (const mem of extracted) {
+    // Quality gate: reject noise
+    if (!isHighQuality(mem)) { rejected++; continue; }
     // Improved dedup: check title similarity + content overlap
     const titleLower = mem.title.toLowerCase();
     const contentLower = mem.content.toLowerCase();
@@ -200,7 +212,13 @@ export async function autoExtractAndSave(
     }
   }
 
-  return { saved, updated };
+  // Run consolidation after extraction to merge duplicates
+  try {
+    const { consolidateMemories } = await import('./memoryConsolidation');
+    await consolidateMemories(circleId);
+  } catch {}
+
+  return { saved, updated, rejected };
 }
 
 // ── Memory Management (User-Facing) ─────────────────────────────────────────

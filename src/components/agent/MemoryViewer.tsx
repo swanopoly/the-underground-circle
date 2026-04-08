@@ -33,6 +33,8 @@ export default function MemoryViewer({ circleId, userId, accentColor = '#6366f1'
   const [editContent, setEditContent] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<MemoryEntry[] | null>(null);
+  const [healthReport, setHealthReport] = useState<any>(null);
+  const [consolidating, setConsolidating] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -40,6 +42,11 @@ export default function MemoryViewer({ circleId, userId, accentColor = '#6366f1'
       const { getUserMemories } = await import('../../lib/agentMemory');
       const data = await getUserMemories(circleId, userId);
       setMemories(data);
+      // Load health report
+      try {
+        const { getMemoryHealthReport } = await import('../../lib/memoryConsolidation');
+        setHealthReport(await getMemoryHealthReport(circleId));
+      } catch {}
     } catch {}
     setLoading(false);
   }, [circleId, userId]);
@@ -147,6 +154,38 @@ export default function MemoryViewer({ circleId, userId, accentColor = '#6366f1'
           <Text style={s.closeBtnText}>X</Text>
         </Pressable>
       </View>
+
+      {/* Health Stats */}
+      {healthReport && (
+        <View style={{ flexDirection: 'row', gap: 4, paddingHorizontal: 10, paddingVertical: 4, borderBottomWidth: 1, borderBottomColor: '#1a1a28' }}>
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>TRUST</Text>
+            <Text style={{ color: healthReport.avgTrustScore > 0.5 ? '#22c55e' : '#f59e0b', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{(healthReport.avgTrustScore * 100).toFixed(0)}%</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>STALE</Text>
+            <Text style={{ color: healthReport.stale > 0 ? '#ef4444' : '#22c55e', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{healthReport.stale}</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>CONFLICT</Text>
+            <Text style={{ color: healthReport.contradictionRisk > 0.2 ? '#ef4444' : '#22c55e', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{(healthReport.contradictionRisk * 100).toFixed(0)}%</Text>
+          </View>
+          <Pressable
+            onPress={async () => {
+              setConsolidating(true);
+              try {
+                const { consolidateMemories } = await import('../../lib/memoryConsolidation');
+                await consolidateMemories(circleId);
+                load();
+              } catch {}
+              setConsolidating(false);
+            }}
+            style={[{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e', backgroundColor: '#1a1a28' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={{ color: '#a855f7', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>{consolidating ? '...' : 'CONSOLIDATE'}</Text>
+          </Pressable>
+        </View>
+      )}
 
       {/* Search */}
       <View style={s.searchRow}>

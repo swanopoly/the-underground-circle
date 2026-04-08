@@ -777,6 +777,89 @@ export const WIKI_ARTICLES: WikiArticle[] = [
     ],
   },
   {
+    id: 'managed-agent-memory-patterns',
+    title: 'Managed Agent Memory Patterns',
+    subtitle: 'How the best agent systems separate startup memory, session state, archival retrieval, and transcript history.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#14b8a6',
+    tags: ['memory', 'managed agents', 'session memory', 'retrieval', 'compaction'],
+    content: [
+      {
+        title: 'The Best Pattern',
+        content:
+          'The best current agent-memory pattern is not one giant memory blob. It is a layered system: always-visible instruction memory, session working memory, archival memory retrieved on demand, and transcript/log memory kept mainly for audit and recall.',
+        bulletPoints: [
+          'Instruction memory',
+          'Session working memory',
+          'Archival retrieval',
+          'Transcript and logs',
+        ],
+      },
+      {
+        title: 'Why Compaction Matters',
+        content:
+          'Long-running agents degrade when they keep too much raw history in context. Better systems preserve plans, decisions, open questions, and artifact links while summarizing or dropping noisy traces. Compaction is a core capability, not an optimization.',
+        bulletPoints: [
+          'Keep plans and decisions',
+          'Drop noisy traces',
+          'Preserve artifact links',
+        ],
+      },
+      {
+        title: 'What Good Product UX Looks Like',
+        content:
+          'Users should be able to see what memory was loaded, mark something as worth remembering, prevent bad auto-memory, and review project memory in workspace surfaces. Memory quality improves when the system is both managed and visible.',
+        bulletPoints: [
+          'Show loaded memory sources',
+          'Allow remember and forget actions',
+          'Review memory at the workspace level',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'agent-memory-ui-compaction',
+    title: 'Agent Memory UI & Compaction',
+    subtitle: 'How good agent products make memory visible, editable, and compact enough to stay useful over long runs.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#22d3ee',
+    tags: ['memory ui', 'compaction', 'chat ux', 'session state', 'workspace memory'],
+    content: [
+      {
+        title: 'Memory Needs A UI',
+        content:
+          'Memory quality is not only a backend problem. Users need to see when memory influenced an answer, what was remembered, and how to correct bad memory. Without that, agent memory becomes opaque and trust drops.',
+        bulletPoints: [
+          'Show memory sources',
+          'Expose remember and forget actions',
+          'Keep trust high through visibility',
+        ],
+      },
+      {
+        title: 'Why Compaction Matters',
+        content:
+          'Long-running agents get worse if they keep every tool trace and every reply in active context. Better systems preserve plans, decisions, open questions, and artifact links while summarizing noisy traces. Compaction is what keeps session memory useful over time.',
+        bulletPoints: [
+          'Preserve plans and decisions',
+          'Summarize noise',
+          'Update session state during the run',
+        ],
+      },
+      {
+        title: 'Workspace Review',
+        content:
+          'Project memory should not live only inside chat bubbles. Workspace surfaces should let teams review instructions, decisions, findings, and candidate memories so durable knowledge stays curated instead of accidental.',
+        bulletPoints: [
+          'Review memory in project spaces',
+          'Promote or retire memories deliberately',
+          'Keep long-term knowledge clean',
+        ],
+      },
+    ],
+  },
+  {
     id: 'open-model-deployment-economics',
     title: 'Open Model Deployment Economics',
     subtitle: 'Why open-model cost comparisons depend on serving, utilization, and operations rather than model price alone.',
