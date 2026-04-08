@@ -75,6 +75,235 @@ function cacheHitPct(cachedTokens: number, totalInputTokens: number): string {
   return Math.round((cachedTokens / totalInputTokens) * 100) + '%';
 }
 
+// ── SECTION: agent-memory-panel — Memory viewer/editor for this agent ────────
+
+function AgentMemoryPanel({ circleId, userId, agentName, accentColor }: { circleId: string; userId?: string; agentName: string; accentColor: string }) {
+  const [memories, setMemories] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editContent, setEditContent] = useState('');
+  const [newMemory, setNewMemory] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const { getUserMemories } = await import('../../../../lib/agentMemory');
+      const data = await getUserMemories(circleId, userId);
+      setMemories([...data.circle, ...data.user, ...data.session]);
+    } catch {}
+    setLoading(false);
+  }, [circleId, userId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleSave = async (id: string) => {
+    try {
+      const { editMemory } = await import('../../../../lib/agentMemory');
+      await editMemory(id, { content: editContent });
+      setEditingId(null);
+      load();
+    } catch {}
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      const { deleteMemory } = await import('../../../../lib/agentMemory');
+      await deleteMemory(id);
+      load();
+    } catch {}
+  };
+
+  const handleAdd = async () => {
+    if (!newMemory.trim()) return;
+    try {
+      const { rememberFromChat } = await import('../../../../lib/memoryService');
+      await rememberFromChat(circleId, userId || '', newMemory.trim());
+      setNewMemory('');
+      load();
+    } catch {}
+  };
+
+  const kindColors: Record<string, string> = { preference: '#a855f7', fact: '#6366f1', decision: '#f59e0b', finding: '#22c55e', instruction: '#ec4899', policy: '#3b82f6', context: '#606075' };
+
+  return (
+    <View style={{ gap: 8 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>AGENT MEMORY</Text>
+        <Text style={{ color: '#3a3a4e', fontSize: 9, fontFamily: MONO }}>({memories.length})</Text>
+      </View>
+
+      {/* Add new memory */}
+      <View style={{ flexDirection: 'row', gap: 4 }}>
+        <TextInput
+          value={newMemory}
+          onChangeText={setNewMemory}
+          placeholder="Add a memory..."
+          placeholderTextColor="#3a3a4e"
+          style={{ flex: 1, color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 4, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+          onSubmitEditing={handleAdd}
+          returnKeyType="done"
+        />
+        <Pressable onPress={handleAdd} style={[{ backgroundColor: accentColor + '20', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 2, borderWidth: 1, borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+          <Text style={{ color: accentColor, fontSize: 9, fontWeight: '700', fontFamily: MONO }}>+</Text>
+        </Pressable>
+      </View>
+
+      {/* Memory list */}
+      <ScrollView style={{ maxHeight: 350 }} nestedScrollEnabled showsVerticalScrollIndicator>
+        {loading ? (
+          <ActivityIndicator size="small" color={accentColor} style={{ padding: 20 }} />
+        ) : memories.length === 0 ? (
+          <Text style={{ color: '#3a3a4e', fontSize: 10, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No memories yet. Chat with the agent to build memory.</Text>
+        ) : (
+          memories.map((mem: any) => (
+            <View key={mem.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 8, marginBottom: 4 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 3 }}>
+                <View style={{ backgroundColor: (kindColors[mem.memory_kind] || '#606075') + '20', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 2 }}>
+                  <Text style={{ color: kindColors[mem.memory_kind] || '#606075', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>{(mem.memory_kind || 'fact').toUpperCase()}</Text>
+                </View>
+                <View style={{ backgroundColor: '#1a1a28', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 2 }}>
+                  <Text style={{ color: '#606075', fontSize: 7, fontFamily: MONO }}>{mem.scope}</Text>
+                </View>
+                <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO, marginLeft: 'auto' }}>{new Date(mem.created_at).toLocaleDateString()}</Text>
+              </View>
+              <Text style={{ color: '#a0a0b0', fontSize: 10, fontWeight: '600', fontFamily: MONO, marginBottom: 2 }}>{mem.title}</Text>
+              {editingId === mem.id ? (
+                <View style={{ gap: 4 }}>
+                  <TextInput value={editContent} onChangeText={setEditContent} multiline autoFocus
+                    style={{ color: '#f0f0f5', fontSize: 9, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#2a2a3e', borderRadius: 2, padding: 6, minHeight: 36, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any} />
+                  <View style={{ flexDirection: 'row', gap: 4 }}>
+                    <Pressable onPress={() => handleSave(mem.id)} style={{ backgroundColor: '#22c55e20', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e40' }}><Text style={{ color: '#22c55e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>Save</Text></Pressable>
+                    <Pressable onPress={() => setEditingId(null)} style={{ backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}><Text style={{ color: '#606075', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>Cancel</Text></Pressable>
+                  </View>
+                </View>
+              ) : (
+                <>
+                  <Text style={{ color: '#808090', fontSize: 9, fontFamily: MONO, lineHeight: 14 }}>{mem.content}</Text>
+                  <View style={{ flexDirection: 'row', gap: 4, marginTop: 4 }}>
+                    <Pressable onPress={() => { setEditingId(mem.id); setEditContent(mem.content); }} style={[{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Text style={{ color: '#a0a0b0', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>Edit</Text>
+                    </Pressable>
+                    <Pressable onPress={() => handleDelete(mem.id)} style={[{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Text style={{ color: '#ef4444', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>Delete</Text>
+                    </Pressable>
+                  </View>
+                </>
+              )}
+            </View>
+          ))
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+// ── SECTION: agent-runs-panel — Recent runs for this agent ───────────────────
+
+function AgentRunsPanel({ circleId, agentName, accentColor }: { circleId: string; agentName: string; accentColor: string }) {
+  const [runs, setRuns] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [expandedRun, setExpandedRun] = useState<string | null>(null);
+  const [steps, setSteps] = useState<any[]>([]);
+
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      try {
+        const { listRuns } = await import('../../../../lib/agentRunSystem');
+        const data = await listRuns(circleId, { limit: 20 });
+        setRuns(data);
+      } catch {}
+      setLoading(false);
+    })();
+  }, [circleId]);
+
+  const loadSteps = async (runId: string) => {
+    try {
+      const { getRunSteps } = await import('../../../../lib/agentRunSystem');
+      const data = await getRunSteps(runId);
+      setSteps(data);
+    } catch {}
+  };
+
+  const statusColors: Record<string, string> = { completed: '#22c55e', running: '#3b82f6', failed: '#ef4444', queued: '#606075', planning: '#f59e0b', paused: '#f59e0b', waiting_approval: '#f59e0b', cancelled: '#606075' };
+
+  return (
+    <View style={{ gap: 8 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>AGENT RUNS</Text>
+        <Text style={{ color: '#3a3a4e', fontSize: 9, fontFamily: MONO }}>({runs.length})</Text>
+      </View>
+
+      <ScrollView style={{ maxHeight: 400 }} nestedScrollEnabled showsVerticalScrollIndicator>
+        {loading ? (
+          <ActivityIndicator size="small" color={accentColor} style={{ padding: 20 }} />
+        ) : runs.length === 0 ? (
+          <Text style={{ color: '#3a3a4e', fontSize: 10, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No runs yet.</Text>
+        ) : (
+          runs.map((run: any) => {
+            const isExpanded = expandedRun === run.id;
+            const sc = statusColors[run.status] || '#606075';
+            return (
+              <View key={run.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isExpanded ? sc + '40' : '#1a1a28', borderRadius: 2, marginBottom: 4, overflow: 'hidden' }}>
+                <Pressable
+                  onPress={() => { if (isExpanded) { setExpandedRun(null); } else { setExpandedRun(run.id); loadSteps(run.id); } }}
+                  style={[{ padding: 8 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: sc }} />
+                    <Text style={{ color: '#f0f0f5', fontSize: 10, fontWeight: '600', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{run.title || 'Untitled run'}</Text>
+                    <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>{run.status.toUpperCase()}</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 3 }}>
+                    <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>{run.surface}</Text>
+                    {run.mode !== 'talk' && <Text style={{ color: '#606075', fontSize: 8, fontFamily: MONO }}>{run.mode}</Text>}
+                    {run.delegated_to && <Text style={{ color: '#a855f7', fontSize: 8, fontFamily: MONO }}>{run.delegated_to}</Text>}
+                    <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO, marginLeft: 'auto' }}>{new Date(run.created_at).toLocaleTimeString()}</Text>
+                  </View>
+                  {(run.input_tokens > 0 || run.output_tokens > 0) && (
+                    <View style={{ flexDirection: 'row', gap: 8, marginTop: 2 }}>
+                      <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>In: {formatTokens(run.input_tokens)}</Text>
+                      <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>Out: {formatTokens(run.output_tokens)}</Text>
+                      {run.estimated_cost > 0 && <Text style={{ color: '#22c55e', fontSize: 7, fontFamily: MONO }}>${run.estimated_cost.toFixed(4)}</Text>}
+                    </View>
+                  )}
+                </Pressable>
+
+                {/* Expanded: show steps */}
+                {isExpanded && (
+                  <View style={{ paddingHorizontal: 8, paddingBottom: 8, borderTopWidth: 1, borderTopColor: '#1a1a28', paddingTop: 6 }}>
+                    {steps.length === 0 ? (
+                      <Text style={{ color: '#3a3a4e', fontSize: 9, fontFamily: MONO, fontStyle: 'italic' }}>No steps recorded.</Text>
+                    ) : (
+                      steps.map((step: any, i: number) => {
+                        const stepColors: Record<string, string> = { plan: '#6366f1', message: '#22c55e', tool_call: '#f59e0b', delegation: '#a855f7', error: '#ef4444', finalize: '#22d3ee', thinking: '#606075' };
+                        return (
+                          <View key={step.id} style={{ flexDirection: 'row', gap: 6, marginBottom: 4 }}>
+                            <View style={{ width: 2, backgroundColor: stepColors[step.step_kind] || '#1a1a28', borderRadius: 1 }} />
+                            <View style={{ flex: 1 }}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                                <Text style={{ color: stepColors[step.step_kind] || '#606075', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{step.step_kind}</Text>
+                                {step.tool_name && <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>{step.tool_name}</Text>}
+                                {step.delegated_to && <Text style={{ color: '#a855f7', fontSize: 7, fontFamily: MONO }}>{step.delegated_to}</Text>}
+                              </View>
+                              <Text style={{ color: '#808090', fontSize: 9, fontFamily: MONO }} numberOfLines={2}>{step.title}</Text>
+                              {step.body && <Text style={{ color: '#606075', fontSize: 8, fontFamily: MONO, marginTop: 1 }} numberOfLines={3}>{step.body.slice(0, 200)}</Text>}
+                            </View>
+                          </View>
+                        );
+                      })
+                    )}
+                  </View>
+                )}
+              </View>
+            );
+          })
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
 // ── SECTION: agent-remote-shell — Run shell commands on the agent's machine ──
 
 const QUICK_COMMANDS = [
@@ -289,7 +518,7 @@ export default function AgentPanel({
   const slideAnim = useRef(new Animated.Value(400)).current;
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState('');
-  const [panelTab, setPanelTab] = useState<'overview' | 'terminal' | 'spirit' | 'evolution' | 'activity' | 'customize'>('overview');
+  const [panelTab, setPanelTab] = useState<'overview' | 'terminal' | 'spirit' | 'evolution' | 'activity' | 'memory' | 'runs' | 'customize'>('overview');
   const [userId, setUserId] = useState<string | null>(null);
   useEffect(() => { supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id || null)).catch(() => {}); }, []);
   const [showCustomize, setShowCustomize] = useState(false);
@@ -565,6 +794,8 @@ export default function AgentPanel({
         {([
           { key: 'overview', label: 'Overview' },
           { key: 'terminal', label: 'Terminal' },
+          { key: 'memory', label: 'Memory' },
+          { key: 'runs', label: 'Runs' },
           { key: 'evolution', label: 'Evolution' },
           { key: 'spirit', label: 'Spirit' },
           { key: 'activity', label: 'Activity' },
@@ -1222,6 +1453,20 @@ export default function AgentPanel({
 
       {/* Close spirit tab */}
         </>
+      )}
+
+      {/* ── MEMORY TAB — view and edit agent memories ── */}
+      {panelTab === 'memory' && circleId && (
+        <View nativeID="section-agent-memory" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
+          <AgentMemoryPanel circleId={circleId} userId={userId || undefined} agentName={agent.name} accentColor={agent.color || '#6366f1'} />
+        </View>
+      )}
+
+      {/* ── RUNS TAB — recent agent runs and their status ── */}
+      {panelTab === 'runs' && circleId && (
+        <View nativeID="section-agent-runs" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
+          <AgentRunsPanel circleId={circleId} agentName={agent.name} accentColor={agent.color || '#6366f1'} />
+        </View>
       )}
 
       {/* ── ACTIVITY TAB — comprehensive agent telemetry ── */}

@@ -1012,8 +1012,34 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       saveUserProfile(profileRef.current).catch(() => {});
     }
 
-    // ─── Governance commands ───────────────────────────────────────
+    // ─── Conversational intent routing (natural language → actions) ─────────
+    // Catches "post this to WordPress", "create a task", "remember that...", etc.
+    // Only fires for non-slash-command messages
     const lowerContent = content.toLowerCase().trim();
+    if (!lowerContent.startsWith('/')) {
+      try {
+        const { detectConversationalIntent, executeConversationalIntent } = await import('../../../lib/conversationalRouter');
+        const intent = detectConversationalIntent(content, attachments as any);
+        if (intent.type !== 'none') {
+          setBotTyping(true);
+          const result = await executeConversationalIntent(intent, {
+            circleId, userId: currentUserId || '', userName: currentUserName,
+            fullMessage: content, attachments: attachments as any,
+          });
+          setBotTyping(false);
+          if (result?.handled) {
+            if (result.message === '__SHOW_MEMORIES__') {
+              setShowMemoryViewer(true);
+            } else {
+              addBotMessage(result.message, result.artifacts as any);
+            }
+            return;
+          }
+        }
+      } catch {}
+    }
+
+    // ─── Governance commands ───────────────────────────────────────
 
     // /poll "Question" "Option A" "Option B" ...
     if (lowerContent.startsWith('/poll ') || lowerContent.startsWith('poll ')) {
@@ -1094,6 +1120,34 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       } else {
         addBotMessage(`🔍 No messages found for "${query}"`);
       }
+      return;
+    }
+
+    // ─── Memory commands — /remember and /forget ────────────────────────────
+    if (lowerContent.startsWith('/remember ')) {
+      const what = content.slice(10).trim();
+      if (!what) { addBotMessage('Usage: `/remember <something to remember>`'); return; }
+      try {
+        const { rememberFromChat } = await import('../../../lib/memoryService');
+        const mem = await rememberFromChat(circleId, currentUserId || '', what);
+        addBotMessage(mem ? `Remembered: "${what.slice(0, 80)}"` : 'Failed to save memory.');
+      } catch (e: any) { addBotMessage(`Memory error: ${e.message}`); }
+      return;
+    }
+
+    if (lowerContent.startsWith('/forget ')) {
+      const what = content.slice(8).trim();
+      if (!what) { addBotMessage('Usage: `/forget <keyword to forget>`'); return; }
+      try {
+        const { forgetFromChat } = await import('../../../lib/memoryService');
+        const { forgotten } = await forgetFromChat(circleId, what);
+        addBotMessage(forgotten > 0 ? `Forgot ${forgotten} memor${forgotten === 1 ? 'y' : 'ies'} matching "${what}".` : `No memories found matching "${what}".`);
+      } catch (e: any) { addBotMessage(`Memory error: ${e.message}`); }
+      return;
+    }
+
+    if (lowerContent === '/memories' || lowerContent === '/memory') {
+      setShowMemoryViewer(true);
       return;
     }
 

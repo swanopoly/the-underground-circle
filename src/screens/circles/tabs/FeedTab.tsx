@@ -344,6 +344,52 @@ const hs = StyleSheet.create({
 
 // ═══════════════════════════════════════════════════════════════════════════════
 
+function ActiveRunsWidget({ circleId }: { circleId: string }) {
+  const [runs, setRuns] = React.useState<any[]>([]);
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const { getActiveRuns } = await import('../../../lib/agentRunSystem');
+        setRuns(await getActiveRuns(circleId));
+      } catch {}
+    })();
+    const interval = setInterval(async () => {
+      try {
+        const { getActiveRuns } = await import('../../../lib/agentRunSystem');
+        setRuns(await getActiveRuns(circleId));
+      } catch {}
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [circleId]);
+
+  if (runs.length === 0) return null;
+
+  const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
+  const statusColors: Record<string, string> = { running: '#22c55e', planning: '#6366f1', queued: '#606075', waiting_approval: '#f59e0b', paused: '#f59e0b' };
+
+  return (
+    <View style={{ marginBottom: 12 }}>
+      <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO, marginBottom: 6 }}>ACTIVE RUNS ({runs.length})</Text>
+      {runs.map((run: any) => (
+        <View key={run.id} style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: (statusColors[run.status] || '#1a1a28') + '40', borderRadius: 2, padding: 8, marginBottom: 4 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: statusColors[run.status] || '#606075' }} />
+            <Text style={{ color: '#f0f0f5', fontSize: 10, fontWeight: '600', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{run.title || 'Untitled'}</Text>
+            <Text style={{ color: statusColors[run.status] || '#606075', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{run.status.toUpperCase()}</Text>
+          </View>
+          <View style={{ flexDirection: 'row', gap: 6, marginTop: 2 }}>
+            <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>{run.surface}</Text>
+            {run.delegated_to && <Text style={{ color: '#a855f7', fontSize: 8, fontFamily: MONO }}>{run.delegated_to}</Text>}
+            {run.mode !== 'talk' && <Text style={{ color: '#606075', fontSize: 8, fontFamily: MONO }}>{run.mode}</Text>}
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+
 function AgentTasksPanel({
   tasksByColumn,
   agents,
@@ -921,6 +967,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
           )}
           {mobileTab === 'agents' && (
             <View style={s.mobilePanel}>
+              <ActiveRunsWidget circleId={circleId} />
               <AgentTasksPanel
                 tasksByColumn={filteredTasksByColumn}
                 agents={agents}
