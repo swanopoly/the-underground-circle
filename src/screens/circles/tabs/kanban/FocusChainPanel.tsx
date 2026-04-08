@@ -7,9 +7,12 @@ import React, { useState, useCallback } from 'react';
 import { View, Text, Pressable, TextInput, StyleSheet, Platform, ActivityIndicator } from 'react-native';
 import { FocusChainItem } from '../../../../types/kanban';
 import { supabase } from '../../../../lib/supabase';
+import { getSwanBotResponse } from '../../../../lib/swanbot';
 
 interface Props {
   taskId: string;
+  taskTitle?: string;
+  taskDescription?: string;
   items: FocusChainItem[];
   onUpdate: (chain: FocusChainItem[]) => void;
   circleId: string;
@@ -19,7 +22,7 @@ function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-export default function FocusChainPanel({ taskId, items, onUpdate, circleId }: Props) {
+export default function FocusChainPanel({ taskId, taskTitle, taskDescription, items, onUpdate, circleId }: Props) {
   const [showInput, setShowInput] = useState(false);
   const [newItemText, setNewItemText] = useState('');
   const [generating, setGenerating] = useState(false);
@@ -56,39 +59,33 @@ export default function FocusChainPanel({ taskId, items, onUpdate, circleId }: P
     setGenerating(true);
     setError(null);
     try {
-      const { data, error: invokeError } = await supabase.functions.invoke('swanbot-ai', {
-        body: {
-          message: 'Generate a checklist of actionable steps for this task. Return a JSON array of objects with "text" (string) fields. Only return the JSON array, no other text.',
-          circleId,
-        },
+      const taskCtx = taskTitle ? `Task: "${taskTitle}"${taskDescription ? `\nDescription: ${taskDescription}` : ''}` : '';
+      const existingSteps = items.length > 0 ? `\nExisting steps: ${items.map(i => i.text).join(', ')}` : '';
+      const prompt = `Generate a checklist of 5-8 actionable steps to complete this task. Each step should be specific and concrete — not vague. ${taskCtx}${existingSteps}\n\nReturn ONLY a JSON array of objects with "text" fields. Example: [{"text":"Step 1"},{"text":"Step 2"}]. No other text.`;
+
+      const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+      const response = await getSwanBotResponse(prompt, {
+        userId: user?.id || 'anonymous',
+        circleId,
       });
 
-      if (invokeError) throw invokeError;
-
       let parsed: { text: string }[] = [];
-      const content = typeof data === 'string' ? data : data?.response || data?.content || data?.message || JSON.stringify(data);
-
-      if (typeof content === 'string') {
-        const jsonMatch = content.match(/\[[\s\S]*\]/);
-        if (jsonMatch) {
-          try {
-            parsed = JSON.parse(jsonMatch[0]);
-          } catch (parseErr) {
-            setError('Failed to parse AI response. Please try again.');
-            return;
-          }
+      const jsonMatch = response.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        try {
+          parsed = JSON.parse(jsonMatch[0]);
+        } catch {
+          setError('Failed to parse AI response. Please try again.');
+          return;
         }
-      } else if (Array.isArray(content)) {
-        parsed = content;
       }
 
-      // Validate each item has a non-empty text field
-      const validItems = parsed.filter(
-        (p) => (typeof p === 'string' && p.trim().length > 0) || (p && typeof p.text === 'string' && p.text.trim().length > 0)
+      const validItems = (parsed as Array<{ text: string } | string>).filter(
+        (p): p is { text: string } | string => (typeof p === 'string' && p.trim().length > 0) || (p != null && typeof (p as any).text === 'string' && (p as any).text.trim().length > 0)
       );
 
       if (validItems.length === 0) {
-        setError('No items generated. The AI returned an empty or invalid response.');
+        setError('No items generated. Try again or add steps manually.');
         return;
       }
 
@@ -106,7 +103,7 @@ export default function FocusChainPanel({ taskId, items, onUpdate, circleId }: P
     } finally {
       setGenerating(false);
     }
-  }, [circleId, items, onUpdate]);
+  }, [circleId, items, onUpdate, taskTitle, taskDescription]);
 
   return (
     <View style={s.container}>

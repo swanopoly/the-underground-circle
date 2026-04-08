@@ -8,6 +8,14 @@ import { createLinkInvite } from '../lib/invites';
 import { reconnectAllBridges } from '../lib/agentAutoConnect';
 import FlatIcon from './FlatIcon';
 
+// Conditionally import useKBar on web (kbar is a web-only library)
+let useKBar: (() => { query: { toggle: () => void } }) | null = null;
+if (Platform.OS === 'web') {
+  try {
+    useKBar = require('kbar').useKBar;
+  } catch {}
+}
+
 interface AppHeaderProps {
   navigation: any;
   title?: string;
@@ -25,6 +33,7 @@ const MENU_ENTRIES: MenuEntry[] = [
   { label: 'Friends',       icon: '⁘', flatIcon: 'friends',       screen: 'Friends' },
   { label: 'Organizations', icon: '▣', flatIcon: 'organizations', screen: 'OrgList' },
   { label: 'Schools',       icon: '△', flatIcon: 'schools',       screen: 'Schools' },
+  { label: 'AI Wiki',       icon: '◈', flatIcon: 'wiki',          screen: 'Wiki' },
   'divider',
   { label: 'Agents',        icon: '⬡', flatIcon: 'agents',        screen: 'Agents' },
   { label: 'Integrations',  icon: '⚙', flatIcon: 'integrations',  screen: 'Integrations' },
@@ -293,6 +302,8 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
             </>
           ) : null}
 
+          {Platform.OS === 'web' && <CommandSearchButton />}
+
           <Pressable
             onPress={async () => {
               if (bridgeConnecting) return;
@@ -385,6 +396,21 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
 }
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
+
+/** Web-only search button that opens the Cmd+K command palette */
+function CommandSearchButton() {
+  if (Platform.OS !== 'web' || !useKBar) return null;
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  const { query } = useKBar();
+  return (
+    <Pressable
+      onPress={() => query.toggle()}
+      style={({ pressed }) => [styles.headerIcon, styles.searchButton, pressed && styles.headerIconPressed]}
+    >
+      <Text style={styles.searchButtonSlash}>/</Text>
+    </Pressable>
+  );
+}
 
 function HeaderIconButton({ label, onPress }: { label: string; onPress: () => void }) {
   return (
@@ -557,6 +583,16 @@ const styles = StyleSheet.create({
   },
   menuItemIconHovered: {
     ...(Platform.OS === 'web' ? { textShadow: '0 0 10px rgba(88,166,255,0.5)' } as any : {}),
+  },
+  searchButton: {
+    borderColor: '#3a3a4e',
+    backgroundColor: '#0a0a12',
+  },
+  searchButtonSlash: {
+    color: '#808098',
+    fontSize: 15,
+    fontWeight: '700',
+    fontFamily: 'monospace',
   },
   bridgeConnecting: {
     borderColor: '#1f6feb',

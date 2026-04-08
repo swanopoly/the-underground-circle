@@ -144,8 +144,7 @@ export default function MorningRoutineScreen({ navigation, route }: MorningRouti
 
   const getMorningGreeting = () => {
     const hour = new Date().getHours();
-    const user = supabase.auth.getUser();
-    
+
     if (hour < 6) return "Early bird! 🌅";
     if (hour < 9) return "Good morning! ☀️";
     if (hour < 12) return "Morning warrior! ⚡";

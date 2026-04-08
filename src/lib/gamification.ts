@@ -81,6 +81,25 @@ export async function awardXP(
       console.error('awardXP error:', error);
       return null;
     }
+
+    // Fire RPG XP popup for every XP award
+    try {
+      const { emitXPEvent } = await import('./rpgEvents');
+      const result = data as { total_xp: number; level: number } | null;
+      const prevLevel = result ? Math.max(1, Math.floor(Math.sqrt((result.total_xp - amount) / 50)) + 1) : 0;
+      const newLevel = result ? result.level : 0;
+      const levelUp = newLevel > prevLevel && prevLevel > 0;
+
+      emitXPEvent({
+        xpAmount: amount,
+        xpType: 'bond',
+        source: eventType.replace(/_/g, ' '),
+        levelUp,
+        newLevel: levelUp ? newLevel : undefined,
+        newTitle: levelUp ? (TITLES.find(([l]) => newLevel >= l)?.[1] || undefined) : undefined,
+      });
+    } catch {}
+
     return data as { total_xp: number; level: number };
   } catch (error) {
     console.error('awardXP exception:', error);

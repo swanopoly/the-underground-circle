@@ -365,25 +365,25 @@ export default function CheckInScreen({ route, navigation }: any) {
 
   const handleValidateProof = async (checkInId: string, isValid: boolean) => {
     if (!currentUserId) return;
-    
+
     try {
-      // TODO: Replace with actual Supabase call when table exists
-      // For now, just show a success message and award XP
-      
+      // TODO: This is a placeholder — validation is NOT persisted to any table yet.
+      // The XP award below goes through but the validation result (isValid) is discarded.
+      // When a proof_validations table exists, persist the vote here and update the
+      // check-in's validation_score / validation_count so the UI reflects real data.
+
       // Award XP for participating in validation
-      await awardXP(currentUserId, 5, 'proof_validation', { 
-        check_in_id: checkInId, 
-        validation: isValid 
+      // NOTE: XP is awarded even though the validation itself is not stored.
+      await awardXP(currentUserId, 5, 'proof_validation', {
+        check_in_id: checkInId,
+        validation: isValid
       });
 
       showAlert(
-        'Validation Recorded', 
+        'Validation Recorded',
         `Thanks for helping maintain proof quality! You earned 5 XP.`
       );
-      
-      // In real implementation, this would update the check-in's validation score
-      // and refresh the UI to show updated validation status
-      
+
     } catch (err) {
       console.error('Error validating proof:', err);
       showAlert('Error', 'Failed to record validation. Please try again.');

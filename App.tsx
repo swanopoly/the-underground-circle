@@ -1,7 +1,7 @@
 import './src/lib/animationPatch'; // Must be first — patches Animated.loop for web
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { StatusBar, View, Text, StyleSheet, Animated, Platform } from 'react-native';
-import { NavigationContainer, useNavigation } from '@react-navigation/native';
+import { NavigationContainer, useNavigation, LinkingOptions } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Session } from '@supabase/supabase-js';
 import { supabase } from './src/lib/supabase';
@@ -12,6 +12,16 @@ import AppHeader from './src/components/AppHeader';
 import { startAgentAutoConnect, stopAgentAutoConnect } from './src/lib/agentAutoConnect';
 import { acceptInvite, lookupInvite } from './src/lib/invites';
 import OnboardingFlow, { isOnboardingComplete } from './src/components/OnboardingFlow';
+import { buildAppActions } from './src/components/command/commandActions';
+import XPOverlay from './src/components/rpg/XPOverlay';
+
+// Conditionally import the web-only command palette provider
+let CommandPaletteProvider: React.FC<{ children: React.ReactNode; actions: any[] }> | null = null;
+if (Platform.OS === 'web') {
+  try {
+    CommandPaletteProvider = require('./src/components/command/CommandPalette.web').CommandPaletteProvider;
+  } catch {}
+}
 
 const PENDING_INVITE_KEY = 'uc_pending_invite';
 
@@ -70,12 +80,43 @@ function getInviteFromPath(): string | undefined {
 
 function MainWithHeader() {
   const navigation = useNavigation();
-  return (
+
+  // Build command palette actions with current navigation context
+  const actions = useMemo(() => {
+    const nav = (screen: string, params?: any) => {
+      try { (navigation as any).navigate(screen, params); } catch {}
+    };
+    // Try to extract circleId from current nav state
+    let circleId: string | undefined;
+    try {
+      const state = (navigation as any).getState?.();
+      if (state?.routes) {
+        const current = state.routes[state.index];
+        if (current?.name === 'CircleDetail') {
+          circleId = (current.params as any)?.circleId;
+        }
+      }
+    } catch {}
+    return buildAppActions(nav, circleId);
+  }, [navigation]);
+
+  const content = (
     <View style={{ flex: 1 }}>
       <AppHeader navigation={navigation} />
       <MainNavigator />
     </View>
   );
+
+  // Wrap with command palette on web only
+  if (Platform.OS === 'web' && CommandPaletteProvider) {
+    return (
+      <CommandPaletteProvider actions={actions}>
+        {content}
+      </CommandPaletteProvider>
+    );
+  }
+
+  return content;
 }
 
 const NAV_STATE_KEY = 'uc_nav_state_v1';
@@ -105,6 +146,56 @@ async function saveNavState(state: object) {
     // ignore
   }
 }
+
+// ─── Deep Linking — maps URL paths to screens ──────────────────────────────
+const linking: LinkingOptions<any> = {
+  prefixes: [
+    'https://app.chrisswanson.xyz',
+    'http://localhost:8081',
+  ],
+  config: {
+    screens: {
+      // Auth
+      Login: 'login',
+      SignUp: 'signup',
+      // Main
+      CirclesList: 'circles',
+      CreateCircle: 'circles/create',
+      JoinCircle: 'circles/join',
+      CircleDetail: {
+        path: 'circle/:circleId/:tab?',
+        parse: { tab: (tab: string) => tab?.toUpperCase() },
+      },
+      CircleSettings: 'circle/:circleId/settings',
+      // Profile & Social
+      EditProfile: 'profile/edit',
+      Friends: 'friends',
+      DMScreen: 'dm/:friendId',
+      Agents: 'agents',
+      Integrations: 'integrations',
+      InviteManage: 'invites',
+      // Organizations
+      OrgList: 'orgs',
+      OrgDetail: 'org/:orgId',
+      CreateOrg: 'orgs/create',
+      OrgSettings: 'org/:orgId/settings',
+      Billing: 'org/:orgId/billing',
+      SSOConfig: 'org/:orgId/sso',
+      Goals: 'org/:orgId/goals',
+      Reports: 'org/:orgId/reports',
+      WhiteLabel: 'org/:orgId/white-label',
+      // Schools
+      Schools: 'schools',
+      SchoolsTrack: 'schools/:trackId',
+      SchoolsModule: 'schools/:trackId/:moduleId',
+      SchoolsLesson: 'schools/:trackId/:moduleId/:lessonId',
+      // Wiki
+      Wiki: 'wiki',
+      WikiCategory: 'wiki/:categoryId',
+      WikiArticle: 'wiki/article/:articleId',
+    },
+  },
+};
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -209,6 +300,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <NavigationContainer
+        linking={linking}
         initialState={session ? validNavState : undefined}
         onStateChange={(state) => {
           if (state && session) saveNavState(state);
@@ -223,6 +315,7 @@ export default function App() {
           onComplete={() => setShowOnboarding(false)}
         />
       )}
+      {session && <XPOverlay />}
     </ErrorBoundary>
   );
 }

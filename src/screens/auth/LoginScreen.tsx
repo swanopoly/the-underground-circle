@@ -29,37 +29,40 @@ let _loginCssInjected = false;
 function injectLoginCSS() {
   if (Platform.OS !== 'web' || _loginCssInjected) return;
   _loginCssInjected = true;
-  const style = document.createElement('style');
-  style.textContent = `
-    /* Kill all browser focus outlines */
-    input:focus, textarea:focus, [role="button"]:focus, button:focus, a:focus, div:focus {
-      outline: none !important;
-      -webkit-tap-highlight-color: transparent !important;
-    }
-    *:focus { outline: none !important; }
-    *:focus-visible { outline: none !important; }
+  try {
+    const style = document.createElement('style');
+    style.textContent = `
+      /* Kill all browser focus outlines */
+      input:focus, textarea:focus, [role="button"]:focus, button:focus, a:focus, div:focus {
+        outline: none !important;
+        -webkit-tap-highlight-color: transparent !important;
+      }
+      *:focus { outline: none !important; }
+      *:focus-visible { outline: none !important; }
 
-    /* Glowing border sweep on buttons */
-    @keyframes uc-border-sweep {
-      0% { background-position: 0% 50%; }
-      50% { background-position: 100% 50%; }
-      100% { background-position: 0% 50%; }
-    }
-    @keyframes uc-glow-pulse {
-      0%, 100% { box-shadow: 0 0 15px #b8ff6133, 0 4px 20px #b8ff6122; }
-      50% { box-shadow: 0 0 25px #b8ff6155, 0 8px 30px #b8ff6133, 0 0 60px #b8ff6111; }
-    }
-    @keyframes uc-shimmer {
-      0% { left: -100%; }
-      100% { left: 200%; }
-    }
-    @keyframes uc-portal-vignette {
-      0% { box-shadow: inset 0 0 0px transparent; }
-      50% { box-shadow: inset 0 0 150px rgba(184, 255, 97, 0.15); }
-      100% { box-shadow: inset 0 0 300px rgba(0, 0, 0, 0.95), inset 0 0 100px rgba(184, 255, 97, 0.3); }
-    }
-  `;
-  document.head.appendChild(style);
+      /* Glowing border sweep on buttons */
+      @keyframes uc-border-sweep {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+      }
+      @keyframes uc-glow-pulse {
+        0%, 100% { box-shadow: 0 0 15px #b8ff6133, 0 4px 20px #b8ff6122; }
+        50% { box-shadow: 0 0 25px #b8ff6155, 0 8px 30px #b8ff6133, 0 0 60px #b8ff6111; }
+      }
+      @keyframes uc-shimmer {
+        0% { left: -100%; }
+        100% { left: 200%; }
+      }
+      @keyframes uc-fade-black {
+        0% { opacity: 0; }
+        100% { opacity: 1; }
+      }
+    `;
+    document.head.appendChild(style);
+  } catch (_e) {
+    // DOM API unavailable — skip CSS injection gracefully
+  }
 }
 
 // Hook: cursor-following transparent reveal on a panel
@@ -67,31 +70,44 @@ function useCursorReveal() {
   const ref = useRef<View>(null);
   useEffect(() => {
     if (Platform.OS !== 'web' || !ref.current) return;
-    const el = ref.current as unknown as HTMLElement;
-    const onMove = (e: MouseEvent) => {
-      const rect = el.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      // Radial gradient mask: transparent circle at cursor, solid elsewhere
-      el.style.setProperty(
-        '-webkit-mask-image',
-        `radial-gradient(circle 120px at ${x}px ${y}px, transparent 0%, transparent 40%, black 100%)`,
-      );
-      el.style.setProperty(
-        'mask-image',
-        `radial-gradient(circle 120px at ${x}px ${y}px, transparent 0%, transparent 40%, black 100%)`,
-      );
-    };
-    const onLeave = () => {
-      el.style.removeProperty('-webkit-mask-image');
-      el.style.removeProperty('mask-image');
-    };
-    el.addEventListener('mousemove', onMove as any);
-    el.addEventListener('mouseleave', onLeave);
-    return () => {
-      el.removeEventListener('mousemove', onMove as any);
-      el.removeEventListener('mouseleave', onLeave);
-    };
+    try {
+      const el = ref.current as unknown as HTMLElement;
+      if (!el || typeof el.addEventListener !== 'function') return;
+      const onMove = (e: MouseEvent) => {
+        try {
+          const rect = el.getBoundingClientRect();
+          const x = e.clientX - rect.left;
+          const y = e.clientY - rect.top;
+          // Radial gradient mask: transparent circle at cursor, solid elsewhere
+          el.style.setProperty(
+            '-webkit-mask-image',
+            `radial-gradient(circle 120px at ${x}px ${y}px, transparent 0%, transparent 40%, black 100%)`,
+          );
+          el.style.setProperty(
+            'mask-image',
+            `radial-gradient(circle 120px at ${x}px ${y}px, transparent 0%, transparent 40%, black 100%)`,
+          );
+        } catch (_e) {
+          // DOM operation failed — ignore gracefully
+        }
+      };
+      const onLeave = () => {
+        try {
+          el.style.removeProperty('-webkit-mask-image');
+          el.style.removeProperty('mask-image');
+        } catch (_e) {
+          // DOM operation failed — ignore gracefully
+        }
+      };
+      el.addEventListener('mousemove', onMove as any);
+      el.addEventListener('mouseleave', onLeave);
+      return () => {
+        el.removeEventListener('mousemove', onMove as any);
+        el.removeEventListener('mouseleave', onLeave);
+      };
+    } catch (_e) {
+      // Element cast or addEventListener failed — skip cursor reveal
+    }
   }, []);
   return ref;
 }
@@ -114,16 +130,36 @@ export default function LoginScreen({ navigation }: any) {
   // Portal suck-in transition — zooms INTO the portal like being pulled in
   const [portalTransition, setPortalTransition] = useState(false);
   const portalAnim = useRef(new Animated.Value(0)).current;
-  // Scale UP massively — like rushing forward into the screen
-  const portalScale = portalAnim.interpolate({ inputRange: [0, 0.3, 0.7, 1], outputRange: [1, 1.15, 3, 12] });
-  // Slight rotation — like being caught in the vortex
-  const portalRotate = portalAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '35deg'] });
-  // Fade out as you zoom past
-  const portalOpacity = portalAnim.interpolate({ inputRange: [0, 0.3, 0.6, 0.85, 1], outputRange: [1, 1, 0.6, 0.1, 0] });
-  // Pull upward toward portal center
-  const portalTranslateY = portalAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0, -30, -120] });
-  // Pull slightly left toward portal center
-  const portalTranslateX = portalAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0, -20, -60] });
+  // Simple zoom: scale up slightly, fade to black fast
+  const portalScale = portalAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [1, 1.05, 1.15] });
+  // No rotation — clean straight zoom
+  const portalRotate = portalAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '0deg'] });
+  // Fade out quickly — UI gone by 40%
+  const portalOpacity = portalAnim.interpolate({ inputRange: [0, 0.15, 0.4, 1], outputRange: [1, 0.6, 0, 0] });
+  // No lateral pull — just straight in
+  const portalTranslateY = portalAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 0] });
+  const portalTranslateX = portalAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 0] });
+  // Blur — apply via CSS filter on web (RN Animated doesn't support filter)
+  const portalViewRef = useRef<View>(null);
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !portalTransition) return;
+    const listener = portalAnim.addListener(({ value }) => {
+      try {
+        const el = (portalViewRef.current as any)?._nativeTag
+          ? undefined
+          : (portalViewRef.current as any);
+        // Get the DOM node
+        const node = el && (el as any).style ? el : (el as any)?._nativeTag ? undefined : document.querySelector('[data-portal-view]');
+        if (node && node.style) {
+          const blur = value < 0.15 ? 0 : Math.min((value - 0.15) * 35, 30);
+          node.style.filter = blur > 0 ? `blur(${blur}px)` : '';
+        }
+      } catch (_e) {
+        // DOM mutation failed — skip blur effect gracefully
+      }
+    });
+    return () => portalAnim.removeListener(listener);
+  }, [portalTransition, portalAnim]);
 
   const handleLogin = async () => {
     setError('');
@@ -145,14 +181,13 @@ export default function LoginScreen({ navigation }: any) {
       }
       Animated.timing(portalAnim, {
         toValue: 1,
-        duration: 2200,
-        easing: Easing.in(Easing.cubic),
+        duration: 1500,
+        easing: Easing.in(Easing.quad),
         useNativeDriver: false,
       }).start();
 
-      // Wait for animation to nearly finish before signing in
-      // Animation is 2.2s — sign in at 1.8s so transition completes
-      await new Promise(resolve => setTimeout(resolve, 1800));
+      // Sign in once screen is black
+      await new Promise(resolve => setTimeout(resolve, 800));
 
       const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
 
@@ -188,6 +223,8 @@ export default function LoginScreen({ navigation }: any) {
     }
   };
 
+  const passwordRef = useRef<TextInput>(null);
+
   const renderInput = ({
     label,
     value,
@@ -196,6 +233,9 @@ export default function LoginScreen({ navigation }: any) {
     focusKey,
     secureTextEntry,
     keyboardType,
+    onSubmitEditing,
+    returnKeyType,
+    inputRef,
   }: {
     label: string;
     value: string;
@@ -204,10 +244,14 @@ export default function LoginScreen({ navigation }: any) {
     focusKey: Exclude<FocusField, null>;
     secureTextEntry?: boolean;
     keyboardType?: 'default' | 'email-address';
+    onSubmitEditing?: () => void;
+    returnKeyType?: 'next' | 'go' | 'done';
+    inputRef?: React.RefObject<TextInput>;
   }) => (
     <View style={[styles.fieldShell, focusedField === focusKey && styles.fieldShellFocused]}>
       <Text style={styles.fieldLabel}>{label}</Text>
       <TextInput
+        ref={inputRef}
         style={styles.input}
         placeholder={placeholder}
         placeholderTextColor="#5f695f"
@@ -218,6 +262,8 @@ export default function LoginScreen({ navigation }: any) {
         autoCapitalize="none"
         keyboardType={keyboardType}
         secureTextEntry={secureTextEntry}
+        onSubmitEditing={onSubmitEditing}
+        returnKeyType={returnKeyType}
       />
     </View>
   );
@@ -231,28 +277,33 @@ export default function LoginScreen({ navigation }: any) {
         {/* Three.js background — web only, renders behind everything */}
         <LoginBackground3D />
 
-        {/* Portal vignette overlay — closes like an iris during transition */}
+        {/* Portal overlay — fades to black */}
         {portalTransition && Platform.OS === 'web' && (
           <div style={{
             position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh',
             zIndex: 100, pointerEvents: 'none',
-            animation: 'uc-portal-vignette 2.2s ease-in forwards',
-            borderRadius: '50%',
+            background: '#000000',
+            animation: 'uc-fade-black 1.2s ease-in forwards',
+            opacity: 0,
           }} />
         )}
-        <Animated.View style={[
-          { flex: 1 },
-          portalTransition && {
-            opacity: portalOpacity,
-            transform: [
-              { perspective: 800 },
-              { scale: portalScale },
-              { rotate: portalRotate },
-              { translateY: portalTranslateY },
-              { translateX: portalTranslateX },
-            ],
-          },
-        ]}>
+        <Animated.View
+          ref={portalViewRef}
+          {...(Platform.OS === 'web' ? { 'data-portal-view': true } as any : {})}
+          style={[
+            { flex: 1 },
+            portalTransition && {
+              opacity: portalOpacity,
+              transform: [
+                { perspective: 800 },
+                { scale: portalScale },
+                { rotate: portalRotate },
+                { translateY: portalTranslateY },
+                { translateX: portalTranslateX },
+              ],
+            },
+          ]}
+        >
         <ScrollView
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
@@ -345,6 +396,8 @@ export default function LoginScreen({ navigation }: any) {
                       placeholder: 'you@company.com',
                       focusKey: 'email',
                       keyboardType: 'email-address',
+                      returnKeyType: 'next',
+                      onSubmitEditing: () => passwordRef.current?.focus(),
                     })}
 
                     {renderInput({
@@ -354,6 +407,9 @@ export default function LoginScreen({ navigation }: any) {
                       placeholder: 'Your password',
                       focusKey: 'password',
                       secureTextEntry: true,
+                      returnKeyType: 'go',
+                      onSubmitEditing: handleLogin,
+                      inputRef: passwordRef,
                     })}
 
                     <Pressable

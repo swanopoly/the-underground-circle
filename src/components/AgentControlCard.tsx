@@ -254,8 +254,8 @@ export default function AgentControlCard({
         )}
       </View>
 
-      {/* ── Remote shell ────────────────────────────────────────────────────── */}
-      {onRunCommand && bridgeOk && (
+      {/* ── Remote shell — only in standalone mode, Terminal tab handles it when embedded ── */}
+      {!embedded && onRunCommand && bridgeOk && (
         <View style={c.shell}>
           <Text style={c.shellTitle}>REMOTE SHELL</Text>
 

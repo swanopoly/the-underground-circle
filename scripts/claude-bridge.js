@@ -27,9 +27,9 @@ if (fs.existsSync('/mnt/c/Users')) {
     }
   } catch {}
 }
-const ACTIVE_THRESHOLD = 30_000;   // 30s → active
-const IDLE_THRESHOLD = 300_000;    // 5min → idle
-const TAIL_BYTES = 16384;          // Read last 16KB of each JSONL
+const ACTIVE_THRESHOLD = 120_000;    // 2min → active (was 30s — too aggressive)
+const IDLE_THRESHOLD = 3_600_000;    // 1h → still show session (was 5min — missed live sessions)
+const TAIL_BYTES = 2 * 1024 * 1024; // Read last 2MB of each JSONL (was 16KB — way too small for token counting)
 const SCAN_INTERVAL = 5000;        // Scan filesystem every 5s
 
 const CORS = {
@@ -156,6 +156,9 @@ function discoverDevices() {
 
 // ── Tail-read a file and parse JSONL lines ──────────────────────────────────
 
+// Token accumulation cache — stores totals per session so we don't re-read entire files every poll
+const _tokenCache = new Map(); // sessionId -> { size, totalInput, totalOutput, cached, new, msgCount }
+
 function tailRead(filePath) {
   try {
     const stat = fs.statSync(filePath);
@@ -166,7 +169,6 @@ function tailRead(filePath) {
     fs.readSync(fd, buf, 0, readSize, stat.size - readSize);
     fs.closeSync(fd);
     const lines = buf.toString('utf-8').split('\n');
-    // First line is likely partial — skip it unless we read from start
     const startIdx = readSize < stat.size ? 1 : 0;
     const entries = [];
     for (let i = startIdx; i < lines.length; i++) {
@@ -176,6 +178,58 @@ function tailRead(filePath) {
     }
     return entries;
   } catch { return []; }
+}
+
+// Full file scan for accurate token totals — runs once per session, caches result
+function fullTokenScan(filePath, sessionId) {
+  try {
+    const stat = fs.statSync(filePath);
+    const cached = _tokenCache.get(sessionId);
+    // If file hasn't grown, return cached totals
+    if (cached && cached.size === stat.size) {
+      return cached;
+    }
+
+    // Read the full file line by line using a stream-like approach
+    // For very large files (>50MB), read in chunks
+    let totalInput = 0, totalOutput = 0, cachedTokens = 0, newTokens = 0, msgCount = 0;
+    const CHUNK = 4 * 1024 * 1024; // 4MB chunks
+    const fd = fs.openSync(filePath, 'r');
+    let leftover = '';
+
+    for (let offset = 0; offset < stat.size; offset += CHUNK) {
+      const readSize = Math.min(CHUNK, stat.size - offset);
+      const buf = Buffer.alloc(readSize);
+      fs.readSync(fd, buf, 0, readSize, offset);
+      const text = leftover + buf.toString('utf-8');
+      const lines = text.split('\n');
+      leftover = lines.pop() || ''; // Last line may be partial
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line.trim());
+          if (entry.type === 'assistant' && entry.message) {
+            msgCount++;
+            const u = entry.message.usage;
+            if (u) {
+              totalInput += u.input_tokens || 0;
+              totalOutput += u.output_tokens || 0;
+              cachedTokens += u.cache_read_input_tokens || 0;
+              newTokens += (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+            }
+          }
+        } catch {}
+      }
+    }
+    fs.closeSync(fd);
+
+    const result = { size: stat.size, totalInput, totalOutput, cachedTokens, newTokens, msgCount };
+    _tokenCache.set(sessionId, result);
+    return result;
+  } catch (e) {
+    return null;
+  }
 }
 
 // ── Scan ~/.claude/projects/ for active sessions ────────────────────────────
@@ -213,8 +267,13 @@ function scanDirectory(claudeDir) {
       try { fstat = fs.statSync(filePath); } catch { continue; }
 
       const age = Date.now() - fstat.mtimeMs;
-      if (age > IDLE_THRESHOLD) continue; // too old, skip
 
+      // Skip sessions that are too old — unless they were active very recently
+      if (age > IDLE_THRESHOLD) continue;
+
+      // Determine status: trust file modification time
+      // Active = file modified in last 2 min (agent is working)
+      // Idle = file modified in last 1h (session exists but not actively working)
       const status = age < ACTIVE_THRESHOLD ? 'active' : 'idle';
       const sessionId = file.replace('.jsonl', '');
       const entries = tailRead(filePath);
@@ -226,8 +285,26 @@ function scanDirectory(claudeDir) {
       const recentActions = [];
       const seenTools = new Set();
 
+      // Rich live context — extracted from tail entries
+      let lastUserMessage = '';
+      let lastAssistantText = '';
+      const recentToolCalls = []; // { tool, file, timestamp } — last 10 with context
+      const activeFiles = new Set(); // files being read/edited/written
+      let currentToolName = '';      // the tool being used RIGHT NOW (last tool_use in tail)
+      let currentToolFile = '';      // the file the current tool is targeting
+
+      // Get accurate token totals from full file scan (cached between polls)
+      const fullScan = fullTokenScan(filePath, sessionId);
+      if (fullScan) {
+        totalInput = fullScan.totalInput;
+        totalOutput = fullScan.totalOutput;
+        cachedTokens = fullScan.cachedTokens;
+        newTokens = fullScan.newTokens;
+        messageCount = fullScan.msgCount;
+      }
+
+      // Use tail-read entries for metadata + live context
       for (const entry of entries) {
-        if (entry.sessionId) { /* already have sessionId from filename */ }
         if (entry.cwd && !projectDir) projectDir = entry.cwd;
         if (entry.version && !version) version = entry.version;
         if (entry.slug && !slug) slug = entry.slug;
@@ -237,25 +314,53 @@ function scanDirectory(claudeDir) {
           }
         }
 
-        // Extract from assistant messages
-        if (entry.type === 'assistant' && entry.message) {
-          messageCount++;
-          if (entry.message.model) model = entry.message.model;
-          const u = entry.message.usage;
-          if (u) {
-            totalInput += u.input_tokens || 0;
-            totalOutput += u.output_tokens || 0;
-            cachedTokens += u.cache_read_input_tokens || 0;
-            const created = u.cache_creation_input_tokens || 0;
-            newTokens += (u.input_tokens || 0) + created;
+        // Capture last user message
+        if (entry.type === 'human' && entry.message) {
+          const hContent = entry.message.content;
+          if (typeof hContent === 'string' && hContent.trim()) {
+            lastUserMessage = hContent.trim().slice(0, 500);
+          } else if (Array.isArray(hContent)) {
+            for (const hc of hContent) {
+              if (hc.type === 'text' && hc.text) {
+                lastUserMessage = hc.text.trim().slice(0, 500);
+              }
+            }
           }
-          // Extract tool calls
+        }
+
+        if (entry.type === 'assistant' && entry.message) {
+          if (entry.message.model) model = entry.message.model;
           const content = entry.message.content;
           if (Array.isArray(content)) {
             for (const c of content) {
-              if (c.type === 'tool_use' && c.name && !seenTools.has(c.name)) {
-                seenTools.add(c.name);
-                recentActions.push(c.name);
+              // Capture assistant text
+              if (c.type === 'text' && c.text) {
+                lastAssistantText = c.text.trim().slice(0, 500);
+              }
+              // Capture tool uses with file context
+              if (c.type === 'tool_use' && c.name) {
+                if (!seenTools.has(c.name)) {
+                  seenTools.add(c.name);
+                  recentActions.push(c.name);
+                }
+                // Extract file path from tool input
+                let toolFile = '';
+                if (c.input) {
+                  toolFile = c.input.file_path || c.input.path || c.input.command || '';
+                  if (typeof toolFile === 'string' && toolFile.length > 200) {
+                    toolFile = toolFile.slice(0, 200);
+                  }
+                  // Track active files
+                  const fp = c.input.file_path || c.input.path || '';
+                  if (fp && typeof fp === 'string') activeFiles.add(fp);
+                }
+                recentToolCalls.push({
+                  tool: c.name,
+                  file: toolFile,
+                  ts: entry.timestamp || '',
+                });
+                currentToolName = c.name;
+                currentToolFile = toolFile;
               }
             }
           }
@@ -290,6 +395,13 @@ function scanDirectory(claudeDir) {
         messageCount,
         recentActions: recentActions.slice(-5),
         subagentCount,
+        // Rich live context
+        lastUserMessage,
+        lastAssistantText,
+        recentToolCalls: recentToolCalls.slice(-10),
+        activeFiles: [...activeFiles].slice(-10),
+        currentToolName,
+        currentToolFile,
       });
     }
   }

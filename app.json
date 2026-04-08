@@ -18,7 +18,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#000000"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
@@ -27,7 +27,8 @@
       "favicon": "./assets/favicon.png",
       "name": "The Underground Circle",
       "shortName": "TUC",
-      "themeColor": "#0a0a0a",
+      "backgroundColor": "#000000",
+      "themeColor": "#000000",
       "meta": {
         "title": "The Underground Circle",
         "description": "Social accountability circles for people who actually work. Track goals, connect wallets, manage AI agents, and grow together."

@@ -199,16 +199,28 @@ export default function ProfileScreen({ navigation }: any) {
 
   const saveBio = async () => {
     if (!profile) return;
-    await supabase.from('profiles').update({ bio: bioText.trim() }).eq('id', profile.id);
-    setProfile({ ...profile, bio: bioText.trim() });
+    const prevBio = profile.bio;
+    const trimmed = bioText.trim();
+    setProfile({ ...profile, bio: trimmed });
     setEditingBio(false);
+    const { error } = await supabase.from('profiles').update({ bio: trimmed }).eq('id', profile.id);
+    if (error) {
+      console.error('Failed to save bio:', error);
+      setProfile({ ...profile, bio: prevBio });
+      setEditingBio(true);
+    }
   };
 
   const updateThemeColor = async (color: string) => {
     if (!profile) return;
-    await supabase.from('profiles').update({ theme_color: color }).eq('id', profile.id);
+    const prevColor = profile.theme_color;
     setProfile({ ...profile, theme_color: color });
     setShowThemeSelector(false);
+    const { error } = await supabase.from('profiles').update({ theme_color: color }).eq('id', profile.id);
+    if (error) {
+      console.error('Failed to update theme color:', error);
+      setProfile({ ...profile, theme_color: prevColor });
+    }
   };
 
   const getPinnedAchievements = () => {

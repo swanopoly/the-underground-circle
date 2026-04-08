@@ -71,7 +71,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   const [rules, setRules] = useState<string[]>([]);
   const [ruleInput, setRuleInput] = useState('');
   const [expandedEmoji, setExpandedEmoji] = useState<string | null>('POPULAR');
-  const [circleImageUrl, setCircleImageUrl] = useState<string | null>(null);
+  const [circleImageUrl, setCircleImageUrl] = useState<string | undefined>(undefined);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [copiedInvite, setCopiedInvite] = useState(false);
@@ -107,7 +107,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
       setCheckInFormat(data.check_in_format || { type: 'text' });
       setVibe(data.vibe || '');
       setRules(data.rules || []);
-      setCircleImageUrl(data.circle_image_url || null);
+      setCircleImageUrl(data.circle_image_url || undefined);
       setIsCreator(user?.id === data.created_by);
     }
     setLoading(false);
@@ -179,7 +179,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   };
 
   const removeImage = () => {
-    setCircleImageUrl(null);
+    setCircleImageUrl(undefined);
     markChanged();
     save({ circle_image_url: null });
   };
@@ -204,9 +204,25 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
 
   const handleDeleteCircle = async () => {
     if (!deleteConfirm) { setDeleteConfirm(true); return; }
-    await supabase.from('circle_members').delete().eq('circle_id', circleId);
-    await supabase.from('circles').delete().eq('id', circleId);
-    navigation.navigate('CirclesList');
+    try {
+      const { error: membersError } = await supabase.from('circle_members').delete().eq('circle_id', circleId);
+      if (membersError) {
+        console.error('Failed to delete circle members:', membersError);
+        Alert.alert('Delete Error', 'Could not remove circle members. Circle was not deleted.');
+        return;
+      }
+      const { error: circleError } = await supabase.from('circles').delete().eq('id', circleId);
+      if (circleError) {
+        // Members were already deleted but circle delete failed — log for manual cleanup
+        console.error('Circle members deleted but circle delete failed (orphaned state):', circleError);
+        Alert.alert('Delete Error', 'Circle members were removed but the circle itself could not be deleted. Please try again.');
+        return;
+      }
+      navigation.navigate('CirclesList');
+    } catch (e) {
+      console.error('Unexpected error deleting circle:', e);
+      Alert.alert('Error', 'Something went wrong while deleting the circle.');
+    }
   };
 
   const handleLeaveCircle = async () => {
@@ -316,7 +332,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
                   {emojis.map(e => (
                     <Pressable
                       key={e}
-                      onPress={() => { if (!readOnly) { setIcon(e); setCircleImageUrl(null); markChanged(); save({ icon: e, circle_image_url: null }); } }}
+                      onPress={() => { if (!readOnly) { setIcon(e); setCircleImageUrl(undefined); markChanged(); save({ icon: e, circle_image_url: null }); } }}
                       style={[
                         styles.emojiBtn,
                         icon === e && { backgroundColor: accentColor + '30', borderColor: accentColor },

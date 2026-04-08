@@ -13,6 +13,19 @@ import { Platform } from 'react-native';
 
 const ACCENT_HEX = 0xb8ff61;
 
+// ─── Global mouse position for swan head tracking ──────────────────────────
+// Module-level so it persists across renders and is readable from useFrame
+const _globalMouse = { x: 0, y: 0 };
+let _mouseListenerAttached = false;
+function attachMouseListener() {
+  if (_mouseListenerAttached || typeof window === 'undefined') return;
+  _mouseListenerAttached = true;
+  window.addEventListener('mousemove', (e: MouseEvent) => {
+    _globalMouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+    _globalMouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  });
+}
+
 // ─── Portal dive trigger (global event) ─────────────────────────────────────
 // LoginScreen dispatches 'uc-portal-dive' on window to trigger camera rush
 
@@ -26,6 +39,7 @@ function InteractiveCamera() {
   const rot = useRef({ x: 0.15, y: 0 });
   const diving = useRef(false);
   const diveStart = useRef(0);
+  const diveStartPos = useRef(new THREE.Vector3());
 
   // Crater direction — where the portal is
   const craterDir = useMemo(() => new THREE.Vector3(0.0, 0.35, 1.0).normalize(), []);
@@ -52,7 +66,7 @@ function InteractiveCamera() {
       prev.current = { x: e.clientX, y: e.clientY };
     };
     // Listen for portal dive event
-    const onDive = () => { diving.current = true; diveStart.current = 0; };
+    const onDive = () => { diving.current = true; diveStart.current = 0; diveStartPos.current.set(0, 0, 0); /* will be set on first frame */ };
     window.addEventListener('pointerdown', onDown);
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointermove', onMove);
@@ -69,39 +83,31 @@ function InteractiveCamera() {
     const t = clock.elapsedTime;
 
     if (diving.current) {
-      // Camera rushes into the portal tunnel
+      // Capture camera position on first dive frame
+      if (diveStartPos.current.lengthSq() === 0) {
+        diveStartPos.current.copy(camera.position);
+      }
+
       diveStart.current += delta;
-      const diveDuration = 2.2;
+      const diveDuration = 1.5;
       const progress = Math.min(diveStart.current / diveDuration, 1);
-      // Ease in — starts slow, accelerates hard
-      const eased = progress * progress * progress;
+      // Smooth ease that starts moving IMMEDIATELY — no stall at the beginning
+      // Using sine ease-in: gentle at first but visibly moving from frame 1
+      const eased = 1 - Math.cos(progress * Math.PI * 0.5);
 
-      // Start position (wherever camera currently is)
-      // Target: deep inside the portal tunnel
-      const startDist = 14;
-      const endDist = -4; // past the portal, into the tunnel
-      const dist = startDist + (endDist - startDist) * eased;
+      // Just zoom straight forward along the camera's look direction into the portal
+      const target = portalCenter.clone();
+      // Move straight toward portal center — only zoom, no lateral movement
+      const dir = target.clone().sub(diveStartPos.current).normalize();
+      const totalDist = diveStartPos.current.distanceTo(target) + 4; // overshoot into tunnel
 
-      // Lerp camera toward portal center
-      const lerpAmt = eased;
-      const targetX = portalCenter.x * lerpAmt;
-      const targetY = (portalCenter.y + 1) * lerpAmt + (1 - lerpAmt) * (camera.position.y);
-      const targetZ = dist * (1 - lerpAmt * 0.7);
+      camera.position.copy(diveStartPos.current).addScaledVector(dir, eased * totalDist);
 
-      camera.position.x += (targetX - camera.position.x) * 0.06;
-      camera.position.y += (targetY - camera.position.y) * 0.06;
-      camera.position.z += (targetZ - camera.position.z) * 0.08;
+      // Keep looking at the same point — no jarring lookAt change
+      camera.lookAt(target);
 
-      // Look deeper into the tunnel as we dive
-      const lookTarget = new THREE.Vector3(
-        portalCenter.x,
-        portalCenter.y,
-        portalCenter.z - eased * 8,
-      );
-      camera.lookAt(lookTarget);
-
-      // Increase FOV for speed effect (tunnel vision)
-      (camera as THREE.PerspectiveCamera).fov = 55 + eased * 60;
+      // Slight FOV widening for speed feel
+      (camera as THREE.PerspectiveCamera).fov = 55 + eased * 15;
       (camera as THREE.PerspectiveCamera).updateProjectionMatrix();
       return;
     }
@@ -116,9 +122,9 @@ function InteractiveCamera() {
     rot.current.x += (targetX - rot.current.x) * 0.04;
     rot.current.y += (targetY - rot.current.y) * 0.04;
 
-    const d = 14;
+    const d = 22;
     camera.position.x = Math.sin(rot.current.y) * Math.cos(rot.current.x) * d;
-    camera.position.y = Math.sin(rot.current.x) * d * 0.5 + 1;
+    camera.position.y = Math.sin(rot.current.x) * d * 0.5 + 2;
     camera.position.z = Math.cos(rot.current.y) * Math.cos(rot.current.x) * d;
     camera.lookAt(0, -1, 0);
   });
@@ -140,7 +146,7 @@ function VoxelPlanet() {
     const radius = 8;
     const step = 0.65;
     const craterDir = new THREE.Vector3(0.0, 0.35, 1.0).normalize();
-    const craterAngle = 0.58;
+    const craterAngle = 0.65; // wider entrance opening, but thicker shell keeps blocks dense around rim
 
     // Seed energy vein paths (3D noise-like paths along surface)
     const veinSeeds = Array.from({ length: 8 }, (_, i) => ({
@@ -153,13 +159,16 @@ function VoxelPlanet() {
       for (let y = -radius; y <= radius; y += step) {
         for (let z = -radius; z <= radius; z += step) {
           const dist = Math.sqrt(x * x + y * y + z * z);
-          if (dist > radius || dist < radius - step * 2.5) continue;
+          // Thicker shell near the crater rim for more block coverage
           const norm = new THREE.Vector3(x, y, z).normalize();
           const dotCrater = norm.dot(craterDir);
+          const nearRim = dotCrater > Math.cos(craterAngle + 0.35);
+          const shellThickness = nearRim ? step * 3.5 : step * 2.5;
+          if (dist > radius || dist < radius - shellThickness) continue;
           if (dotCrater > Math.cos(craterAngle)) continue;
 
           const isEdge = dotCrater > Math.cos(craterAngle + 0.12);
-          const isNearEdge = dotCrater > Math.cos(craterAngle + 0.25);
+          const isNearEdge = dotCrater > Math.cos(craterAngle + 0.3);
           const ny = y / radius;
           const noise = Math.random();
 
@@ -533,28 +542,32 @@ function PortalRings() {
       mat.emissiveIntensity = 0.8 + depth * 1.5 + Math.sin(t * 2 + i) * 0.3;
     }
 
-    // Animate complex core shape
+    // Animate uranium diamond — slow rotation, radioactive pulse
     if (coreRef.current) {
-      coreRef.current.rotation.x = t * 0.4;
-      coreRef.current.rotation.y = t * 0.6;
-      coreRef.current.rotation.z = t * 0.3;
-      const pulse = 0.7 + Math.sin(t * 1.8) * 0.3;
-      coreRef.current.scale.setScalar(pulse);
-      (coreRef.current.material as THREE.MeshStandardMaterial).emissiveIntensity = 3 + Math.sin(t * 2.5) * 1.5;
+      coreRef.current.rotation.y = t * 0.35;
+      coreRef.current.rotation.x = t * 0.12;
+      coreRef.current.rotation.z = Math.sin(t * 0.2) * 0.15;
+      // Hover bob
+      coreRef.current.position.y = Math.sin(t * 0.5) * 0.1;
+      // Radioactive pulse — bright surge then dim
+      const pulse = 5 + Math.sin(t * 1.0) * 2.5 + Math.sin(t * 2.3) * 1.0;
+      (coreRef.current.material as THREE.MeshStandardMaterial).emissiveIntensity = pulse;
     }
+    // Inner uranium core — counter-rotates, hot center
     if (core2Ref.current) {
-      core2Ref.current.rotation.x = -t * 0.7;
-      core2Ref.current.rotation.y = t * 0.5;
-      core2Ref.current.rotation.z = -t * 0.8;
-      const pulse2 = 0.6 + Math.sin(t * 1.2 + 1) * 0.25;
-      core2Ref.current.scale.setScalar(pulse2);
+      core2Ref.current.rotation.y = -t * 0.5;
+      core2Ref.current.rotation.x = t * 0.3;
+      const corePulse = 1.0 + Math.sin(t * 1.5) * 0.15;
+      core2Ref.current.scale.setScalar(corePulse);
+      (core2Ref.current.material as THREE.MeshStandardMaterial).emissiveIntensity = 8 + Math.sin(t * 2.0) * 3;
     }
+    // Radioactive aura — pulsing halo
     if (core3Ref.current) {
-      core3Ref.current.rotation.x = t * 0.9;
-      core3Ref.current.rotation.z = -t * 0.4;
-      const pulse3 = 0.5 + Math.sin(t * 2.2 + 2) * 0.2;
-      core3Ref.current.scale.setScalar(pulse3);
-      (core3Ref.current.material as THREE.MeshStandardMaterial).emissiveIntensity = 2 + Math.sin(t * 3) * 1;
+      core3Ref.current.rotation.y = t * 0.08;
+      const aura = 1.0 + Math.sin(t * 0.7) * 0.2;
+      core3Ref.current.scale.setScalar(aura);
+      (core3Ref.current.material as THREE.MeshStandardMaterial).opacity = 0.12 + Math.sin(t * 0.6) * 0.06;
+      (core3Ref.current.material as THREE.MeshStandardMaterial).emissiveIntensity = 2.0 + Math.sin(t * 0.8) * 1.0;
     }
 
     // Animate wind particles — streaking into the tunnel
@@ -608,25 +621,66 @@ function PortalRings() {
         </mesh>
       ))}
 
-      {/* ═══ COMPLEX CORE SHAPE — nested geometries ═══ */}
-      {/* Outer: icosahedron (20-sided, faceted, alien-looking) */}
+      {/* ═══ URANIUM DIAMOND — radioactive faceted gem ═══ */}
+      {/* Outer diamond shell — icosahedron for maximum facets, glass-like */}
       <mesh ref={coreRef} position={[0, 0, -5]}>
-        <icosahedronGeometry args={[0.6, 1]} />
-        <meshStandardMaterial color={0x00ff4c} emissive={0x00ff4c} emissiveIntensity={5.0} transparent opacity={0.7} wireframe toneMapped={false} />
+        <icosahedronGeometry args={[0.55, 1]} />
+        <meshStandardMaterial
+          color={0x44ffaa}
+          emissive={0x22ff77}
+          emissiveIntensity={5.0}
+          transparent
+          opacity={0.7}
+          metalness={1.0}
+          roughness={0.0}
+          toneMapped={false}
+        />
       </mesh>
-      {/* Middle: octahedron (diamond shape) inside the icosahedron */}
+      {/* Inner uranium core — smaller octahedron, blazing hot */}
       <mesh ref={core2Ref} position={[0, 0, -5]}>
-        <octahedronGeometry args={[0.4, 0]} />
-        <meshStandardMaterial color={0x00ff4c} emissive={0x00ff4c} emissiveIntensity={6.0} transparent opacity={0.8} toneMapped={false} />
+        <octahedronGeometry args={[0.28, 0]} />
+        <meshStandardMaterial
+          color={0xeeffcc}
+          emissive={0xbbff44}
+          emissiveIntensity={10.0}
+          transparent
+          opacity={0.95}
+          metalness={1.0}
+          roughness={0.0}
+          toneMapped={false}
+        />
       </mesh>
-      {/* Inner: dodecahedron (12-faced, complex) spinning opposite */}
+      {/* Wireframe facet overlay — shows diamond cut lines */}
+      <mesh position={[0, 0, -5]} rotation={[0, 0, 0]}>
+        <icosahedronGeometry args={[0.58, 1]} />
+        <meshStandardMaterial
+          color={0xb8ff61}
+          emissive={0xb8ff61}
+          emissiveIntensity={2.0}
+          wireframe
+          transparent
+          opacity={0.3}
+          toneMapped={false}
+        />
+      </mesh>
+      {/* Radioactive aura — toxic green halo */}
       <mesh ref={core3Ref} position={[0, 0, -5]}>
-        <dodecahedronGeometry args={[0.25, 0]} />
-        <meshStandardMaterial color={0xaaffcc} emissive={0xaaffcc} emissiveIntensity={7.0} transparent opacity={0.85} toneMapped={false} />
+        <sphereGeometry args={[1.5, 16, 16]} />
+        <meshStandardMaterial
+          color={0x113311}
+          emissive={0x44ff66}
+          emissiveIntensity={2.0}
+          transparent
+          opacity={0.1}
+          depthWrite={false}
+          toneMapped={false}
+        />
       </mesh>
-      {/* Core point light — deep inside tunnel */}
-      <pointLight position={[0, 0, -5]} color={0x55ff77} intensity={10} distance={12} decay={2} />
-      <pointLight position={[0, 0, -5]} color={0xffffff} intensity={4} distance={8} decay={2} />
+      {/* Diamond light — intense green uranium glow */}
+      <pointLight position={[0, 0, -5]} color={0x66ff88} intensity={12} distance={12} decay={2} />
+      <pointLight position={[0, 0, -5]} color={0xbbff44} intensity={5} distance={8} decay={2} />
+      {/* Secondary purple undertone from the tiger deeper in */}
+      <pointLight position={[0, 0, -4.5]} color={0x6622aa} intensity={2} distance={5} decay={2} />
 
       {/* ═══ WIND STREAKS — particles rushing into the tunnel ═══ */}
       <points geometry={windGeo}>
@@ -1016,6 +1070,37 @@ function DetailedFurniture() {
           { pos: [0.1, 0, 0.03], size: [0.04, 0.03, 0.04], color: new THREE.Color('#ee3311') },
           { pos: [0.14, 0.01, 0.03], size: [0.03, 0.04, 0.035], color: new THREE.Color('#ff4422') },
         ]},
+      // ═══ GENIE LAMP — golden, ornate, magical ═══
+      { scale: 2.8, orbitRadius: 4.5, orbitSpeed: 0.22, orbitPhase: 3.5, spiralSpeed: 0.04, heightOffset: 0.2, tumbleSpeed: new THREE.Vector3(0.08, 0.12, 0.06),
+        boxes: [
+          // Base — wide flat oval
+          { pos: [0, -0.08, 0], size: [0.16, 0.02, 0.1], color: new THREE.Color('#d4940a') },
+          { pos: [0, -0.06, 0], size: [0.14, 0.02, 0.09], color: new THREE.Color('#fbbf24') },
+          // Body — bulbous belly
+          { pos: [0, 0, 0], size: [0.12, 0.08, 0.08], color: new THREE.Color('#fbbf24') },
+          { pos: [0, 0.02, 0], size: [0.1, 0.06, 0.07], color: new THREE.Color('#e8a810') },
+          // Neck — thin
+          { pos: [0, 0.06, 0], size: [0.04, 0.04, 0.04], color: new THREE.Color('#d4940a') },
+          // Rim / lip — wider ring at top
+          { pos: [0, 0.09, 0], size: [0.07, 0.02, 0.05], color: new THREE.Color('#fbbf24') },
+          // Spout — curves out to one side
+          { pos: [0.08, 0.04, 0], size: [0.06, 0.02, 0.02], color: new THREE.Color('#d4940a') },
+          { pos: [0.12, 0.05, 0], size: [0.04, 0.015, 0.015], color: new THREE.Color('#fbbf24') },
+          { pos: [0.15, 0.06, 0], size: [0.02, 0.01, 0.01], color: new THREE.Color('#e8a810') },
+          // Handle — opposite side
+          { pos: [-0.08, 0.04, 0], size: [0.02, 0.06, 0.02], color: new THREE.Color('#d4940a') },
+          { pos: [-0.09, 0.07, 0], size: [0.02, 0.02, 0.02], color: new THREE.Color('#d4940a') },
+          // Lid — little dome on top
+          { pos: [0, 0.11, 0], size: [0.05, 0.02, 0.04], color: new THREE.Color('#e8a810') },
+          { pos: [0, 0.13, 0], size: [0.02, 0.02, 0.02], color: new THREE.Color('#fbbf24') },
+          // Gem on lid
+          { pos: [0, 0.14, -0.01], size: [0.015, 0.015, 0.01], color: new THREE.Color('#ef4444') },
+          // Purple smoke wisps coming out of spout
+          { pos: [0.17, 0.08, 0], size: [0.02, 0.03, 0.02], color: new THREE.Color('#8844cc') },
+          { pos: [0.19, 0.11, 0.01], size: [0.025, 0.025, 0.025], color: new THREE.Color('#9955dd') },
+          { pos: [0.17, 0.14, -0.01], size: [0.03, 0.03, 0.03], color: new THREE.Color('#7733bb') },
+          { pos: [0.2, 0.17, 0.02], size: [0.035, 0.035, 0.035], color: new THREE.Color('#6622aa') },
+        ]},
     ];
   }, []);
 
@@ -1029,28 +1114,73 @@ function DetailedFurniture() {
       const grp = children[i] as THREE.Group;
       if (!grp) continue;
 
-      const phase = (t * piece.spiralSpeed + piece.orbitPhase) % 1;
-      const angle = piece.orbitPhase + t * piece.orbitSpeed;
-      // Depth into the tunnel (0 at entrance, increasing inward)
-      const tunnelDepth = phase * 5.0;
-      // Tunnel radius tapers from ~3.8 at entrance to ~1.3 deep inside
-      const maxR = 3.8 - tunnelDepth * 0.5;
-      // Orbit within the tunnel, shrinking as it spirals deeper
-      const r = maxR * (0.3 + (1 - phase) * 0.6);
-      const localX = Math.cos(angle) * r;
-      const localY = Math.sin(angle) * r;
-      const depth = -tunnelDepth; // negative = into the tunnel
+      // Faster cycle — items approach from in front of portal, get sucked in, disappear, repeat
+      const phase = ((t * piece.spiralSpeed * 0.45) + piece.orbitPhase) % 1;
 
+      // Ease-in: drifts at start, accelerates into tunnel
+      const eased = Math.pow(phase, 2.8);
+
+      // Some items start further out in front of the portal (along its axis)
+      // ALL items stay on the portal axis so they never clip through planet walls
+      const startsOutside = i % 3 === 0;
+
+      // Radius: outside items start wider but capped to portal mouth size (~4)
+      // so they funnel naturally into the entrance without hitting planet walls
+      const entranceRadius = startsOutside
+        ? 4.5 + piece.orbitRadius * 0.2  // slightly wider than portal mouth
+        : 3.2 + piece.orbitRadius * 0.25; // near portal mouth
+      const coreRadius = 0.15;
+      const radius = entranceRadius * (1 - eased) + coreRadius * eased;
+
+      // Clamp radius to tunnel taper — as depth increases, max allowed radius shrinks
+      // This prevents items from going through the tunnel walls at any point
+      const tunnelMaxR = 4.0 - eased * 3.5; // matches tunnel shape: 4.0 at entrance → 0.5 deep
+      const clampedRadius = Math.min(radius, tunnelMaxR);
+
+      // Angle: moderate orbit outside, spins faster deeper in
+      const slowSpin = phase * 1.2 * Math.PI * 2;
+      const fastSpin = eased * 5.0 * Math.PI * 2;
+      const totalAngle = piece.orbitPhase * Math.PI * 2 + slowSpin + fastSpin;
+
+      // Depth along portal axis: outside items start well in front of portal
+      // then all items funnel through the entrance and down the tunnel
+      const startDepth = startsOutside ? -5.0 : -1.0; // negative = in front of portal
+      const endDepth = 6.0; // deep in tunnel
+      const depth = startDepth + (endDepth - startDepth) * eased;
+
+      // Position in portal-local space (along portal axis)
+      const localX = Math.cos(totalAngle) * clampedRadius;
+      const localY = Math.sin(totalAngle) * clampedRadius;
+
+      // Use craterDir for depth (portal axis direction) — items travel along this axis
       grp.position.set(
-        craterCenter.x + craterUp.x * localX + craterRight.x * localY + craterDir.x * depth,
-        craterCenter.y + craterUp.y * localX + craterRight.y * localY + craterDir.y * depth,
-        craterCenter.z + craterUp.z * localX + craterRight.z * localY + craterDir.z * depth,
+        craterCenter.x + craterUp.x * localX + craterRight.x * localY + craterDir.x * (-depth),
+        craterCenter.y + craterUp.y * localX + craterRight.y * localY + craterDir.y * (-depth),
+        craterCenter.z + craterUp.z * localX + craterRight.z * localY + craterDir.z * (-depth),
       );
-      grp.rotation.x = t * piece.tumbleSpeed.x;
-      grp.rotation.y = t * piece.tumbleSpeed.y;
-      grp.rotation.z = t * piece.tumbleSpeed.z;
-      const scale = piece.scale * (0.3 + (1 - phase) * 0.7);
-      grp.scale.setScalar(scale);
+
+      // Tumble: very gentle drift, only slightly faster deeper in
+      const tumbleMultiplier = 0.05 + eased * 0.3;
+      grp.rotation.x = t * piece.tumbleSpeed.x * tumbleMultiplier;
+      grp.rotation.y = t * piece.tumbleSpeed.y * tumbleMultiplier;
+      grp.rotation.z = t * piece.tumbleSpeed.z * tumbleMultiplier;
+
+      // Scale: shrinks as it goes deeper, disappears at the back
+      const shrink = 1.0 - eased;
+      const scale = piece.scale * shrink;
+
+      // Opacity: fade in at start of cycle, fade out at end
+      const fadeIn = Math.min(phase / 0.1, 1.0);
+      const fadeOut = Math.min((1.0 - phase) / 0.08, 1.0);
+      const opacity = fadeIn * fadeOut;
+
+      grp.scale.setScalar(Math.max(scale, 0.01));
+      grp.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh) {
+          const mat = (child as THREE.Mesh).material as THREE.MeshStandardMaterial;
+          mat.opacity = opacity * 0.85;
+        }
+      });
     }
   });
 
@@ -1567,6 +1697,7 @@ function StarDust({ count = 300 }: { count?: number }) {
  */
 function UndergroundAgent() {
   const groupRef = useRef<THREE.Group>(null);
+  const swanHeadRef = useRef<THREE.Group>(null);
   const craterDir = useMemo(() => new THREE.Vector3(0.0, 0.35, 1.0).normalize(), []);
   const basePos = useMemo(() => craterDir.clone().multiplyScalar(1.2).add(new THREE.Vector3(0, -2, 0)), [craterDir]);
 
@@ -1608,8 +1739,9 @@ function UndergroundAgent() {
     headphone: new THREE.Color('#1a1a1a'), headCush: new THREE.Color('#3a3a3a'),
   }), []);
 
-  const voxels = useMemo(() => {
+  const { voxels, swanHeadVoxels, swanNeckBase } = useMemo(() => {
     const v: { pos: [number, number, number]; color: THREE.Color }[] = [];
+    const swanHeadV: { pos: [number, number, number]; color: THREE.Color }[] = [];
     const add = (x: number, y: number, z: number, col: THREE.Color) => {
       v.push({ pos: [x * s, y * s, z * s], color: col });
     };
@@ -1783,26 +1915,34 @@ function UndergroundAgent() {
     add(sx,sy+6,1,swanBlkSh); add(sx+1,sy+6,1,swanBlkSh);
     add(sx,sy+7,2,swanBlkSh);
 
-    // Neck (long, curved upward, rows sy+6 to sy+9)
-    add(sx,sy+6,0,swanBlk); add(sx+1,sy+6,0,swanBlkHi);
-    add(sx,sy+7,0,swanBlk); add(sx+1,sy+7,0,swanBlkHi);
-    add(sx,sy+8,-1,swanBlk); add(sx+1,sy+8,-1,swanBlk);
-    add(sx,sy+9,-1,swanBlkHi);
-
+    // Neck + Head — pushed to swanHeadVoxels (separate group for cursor tracking)
+    // Pivot is at base of neck (sx, sy+6, 0) — offsets relative to that
+    const neckBaseX = sx * s;
+    const neckBaseY = (sy + 6) * s;
+    const neckBaseZ = 0;
+    const ha = (x: number, y: number, z: number, col: THREE.Color) => {
+      swanHeadV.push({ pos: [(x * s) - neckBaseX, (y * s) - neckBaseY, (z * s) - neckBaseZ], color: col });
+    };
+    // Neck (rows sy+6 to sy+9)
+    ha(sx,sy+6,0,swanBlk); ha(sx+1,sy+6,0,swanBlkHi);
+    ha(sx,sy+7,0,swanBlk); ha(sx+1,sy+7,0,swanBlkHi);
+    ha(sx,sy+8,-1,swanBlk); ha(sx+1,sy+8,-1,swanBlk);
+    ha(sx,sy+9,-1,swanBlkHi);
     // Head
-    add(sx-1,sy+10,-1,swanBlk); add(sx,sy+10,-1,swanBlkHi); add(sx+1,sy+10,-1,swanBlk);
-    add(sx,sy+10,-2,swanBlk); // back of head
+    ha(sx-1,sy+10,-1,swanBlk); ha(sx,sy+10,-1,swanBlkHi); ha(sx+1,sy+10,-1,swanBlk);
+    ha(sx,sy+10,-2,swanBlk); // back of head
     // Eye — glowing red AI eye
-    add(sx-1,sy+10,-2,swanEye);
-    add(sx+1,sy+10,-2,swanEye);
+    ha(sx-1,sy+10,-2,swanEye);
+    ha(sx+1,sy+10,-2,swanEye);
     // Beak
-    add(sx,sy+10,0,swanBeak);
-    add(sx,sy+9,0,swanBeak);
-    add(sx,sy+9,1,swanBeakTip);
+    ha(sx,sy+10,0,swanBeak);
+    ha(sx,sy+9,0,swanBeak);
+    ha(sx,sy+9,1,swanBeakTip);
+    // AI glow accent on eyes
+    ha(sx-1,sy+10,-2,swanEyeGlow); // left eye ring
 
-    // AI glow accent — subtle green glow on chest and eyes
+    // AI glow accent — subtle green glow on chest
     add(sx,sy+3,0,swanGlow); // heart glow
-    add(sx-1,sy+10,-2,swanEyeGlow); // left eye ring
 
     // ═══ L-SHAPED DESK ═══
     // Main surface
@@ -1854,7 +1994,10 @@ function UndergroundAgent() {
     // Mousepad
     add(2,5,-2,c.hoodDk); add(3,5,-2,c.hoodDk); add(4,5,-2,c.hoodDk);
 
-    return v;
+    // Swan neck base position in local voxel-scaled coords (sx=-7, sy=1 already declared above)
+    const nBase: [number, number, number] = [sx * s, (sy + 6) * s, 0];
+
+    return { voxels: v, swanHeadVoxels: swanHeadV, swanNeckBase: nBase };
   }, [s, c]);
 
   useFrame((state) => {
@@ -1901,6 +2044,31 @@ function UndergroundAgent() {
         }
       });
     }
+
+    // Swan neck+head follows cursor — VERY dramatic so it's visible at this scale
+    // Only when near the desk, not while spiraling through portal
+    if (swanHeadRef.current) {
+      const nearDesk = Math.max(0, 1 - eased * 3); // 1.0 at desk, fades to 0 as it spirals
+      const mx = _globalMouse.x;  // -1 (left) to 1 (right)
+      const my = _globalMouse.y;  // -1 (bottom) to 1 (top)
+
+      // Huge rotation — the neck really cranes toward the cursor
+      const targetRotX = -my * 1.5 * nearDesk;
+      const targetRotY = mx * 1.8 * nearDesk;
+      const targetRotZ = -mx * 0.3 * nearDesk;
+
+      // Large positional displacement — head physically reaches toward cursor
+      // s * 8 means the head moves ~1 full voxel body-width in each direction
+      const targetPosX = mx * s * 8 * nearDesk;
+      const targetPosY = my * s * 6 * nearDesk;
+
+      const lr = 0.12; // faster lerp so it's responsive
+      swanHeadRef.current.rotation.x += (targetRotX - swanHeadRef.current.rotation.x) * lr;
+      swanHeadRef.current.rotation.y += (targetRotY - swanHeadRef.current.rotation.y) * lr;
+      swanHeadRef.current.rotation.z += (targetRotZ - swanHeadRef.current.rotation.z) * lr;
+      swanHeadRef.current.position.x += ((swanNeckBase[0] + targetPosX) - swanHeadRef.current.position.x) * lr;
+      swanHeadRef.current.position.y += ((swanNeckBase[1] + targetPosY) - swanHeadRef.current.position.y) * lr;
+    }
   });
 
   return (
@@ -1920,6 +2088,21 @@ function UndergroundAgent() {
           />
         </mesh>
       ))}
+      {/* Swan neck+head — separate group that tracks cursor */}
+      <group ref={swanHeadRef} position={swanNeckBase}>
+        {swanHeadVoxels.map((v, i) => (
+          <mesh key={`sh${i}`} position={v.pos}>
+            <boxGeometry args={[s * 0.92, s * 0.92, s * 0.92]} />
+            <meshStandardMaterial
+              color={v.color}
+              emissive={v.color}
+              emissiveIntensity={0.35}
+              roughness={0.3}
+              metalness={0.05}
+            />
+          </mesh>
+        ))}
+      </group>
     </group>
   );
 }
@@ -1972,12 +2155,9 @@ function PortalVein() {
       // Re-project snapped point back to planet surface
       const snapped = new THREE.Vector3(snappedX, snappedY, snappedZ);
       const snappedDir = snapped.clone().sub(planetCenter).normalize();
-      // Snake through blocks: oscillate depth so it weaves in and out
-      // Deep = hidden inside blocks, shallow = peeking out between them
-      // Snake weaves uniformly deep through blocks on all sides
-      // Stays well below surface — only glow visible between cracks
-      const snakeDepth = Math.sin(t * 7.0) * 0.08 + Math.sin(t * 11.0) * 0.04;
-      const depth = -0.42 + snakeDepth;
+      // Vein sits at a uniform depth inside the blocks on ALL sides
+      // No wave variation — constant depth so glow is even around the entire rim
+      const depth = -0.55;
       const finalPoint = planetCenter.clone().add(snappedDir.multiplyScalar(planetR + depth));
 
       rawPoints.push(finalPoint);
@@ -1996,20 +2176,21 @@ function PortalVein() {
       ));
     }
 
-    // Pick light positions every ~30 points along the path
+    // More frequent lights along the vein — positioned at block surface level
+    // so the glow illuminates the seams between blocks from inside
     const lights: [number, number, number][] = [];
-    for (let i = 0; i < smoothed.length; i += 30) {
+    for (let i = 0; i < smoothed.length; i += 15) {
       const p = smoothed[i];
       const n = p.clone().sub(planetCenter).normalize();
-      // Lift light slightly above surface so it illuminates nearby blocks
-      const lp = p.clone().add(n.multiplyScalar(0.15));
+      // Place light at the surface — glow from the vein below reaches up through cracks
+      const lp = p.clone().add(n.multiplyScalar(0.5));
       lights.push([lp.x, lp.y, lp.z]);
     }
 
-    // Glow path: same but slightly above surface
+    // Glow path: at surface level so bloom catches between blocks
     const glowSmoothed = smoothed.map(p => {
       const n = p.clone().sub(planetCenter).normalize();
-      return p.clone().add(n.multiplyScalar(0.08));
+      return p.clone().add(n.multiplyScalar(0.3));
     });
 
     return {
@@ -2031,23 +2212,773 @@ function PortalVein() {
 
   return (
     <group>
-      {/* Main vein — thin bright line sitting in block seams */}
+      {/* Main vein — buried inside blocks, glow reaches through seams */}
       <mesh ref={tubeRef}>
-        <tubeGeometry args={[curve, 300, 0.03, 5, true]} />
+        <tubeGeometry args={[curve, 300, 0.06, 6, true]} />
         <meshStandardMaterial
           color={0x00ff4c}
           emissive={0x00ff4c}
-          emissiveIntensity={4.0}
+          emissiveIntensity={6.0}
           transparent
-          opacity={0.95}
+          opacity={0.9}
           toneMapped={false}
         />
       </mesh>
 
-      {/* Point lights along the vein to illuminate nearby blocks */}
+      {/* Point lights along the vein — strong glow bleeds between blocks */}
       {lightPositions.map((pos, i) => (
-        <pointLight key={i} position={pos} color={0x00ff4c} intensity={0.6} distance={1.2} decay={2} />
+        <pointLight key={i} position={pos} color={0x00ff4c} intensity={1.5} distance={1.8} decay={2} />
       ))}
+    </group>
+  );
+}
+
+// ─── Black Swan with Crown (perched on top of the planet) ──────────────────
+
+function BlackSwanKing() {
+  const groupRef = useRef<THREE.Group>(null);
+  const headGroupRef = useRef<THREE.Group>(null);
+  const craterDir = useMemo(() => new THREE.Vector3(0.0, 0.35, 1.0).normalize(), []);
+
+  // Position on top of the planet, slightly tilted to look toward the portal
+  const planetCenter = useMemo(() => new THREE.Vector3(0, -2, 0), []);
+  const topPos = useMemo(() => {
+    const up = new THREE.Vector3(0, 1, 0);
+    const tilt = craterDir.clone().multiplyScalar(0.2).add(up).normalize();
+    return planetCenter.clone().add(tilt.multiplyScalar(8.3));
+  }, [craterDir, planetCenter]);
+
+  const PX = 0.18; // pixel unit size for the swan
+
+  // Animate: gentle bobbing, sway, and head follows cursor
+  useFrame((state) => {
+    if (!groupRef.current) return;
+    const t = state.clock.elapsedTime;
+    // Gentle bob
+    groupRef.current.position.y = topPos.y + Math.sin(t * 0.8) * 0.08;
+    // Subtle sway
+    groupRef.current.rotation.z = Math.sin(t * 0.5) * 0.03;
+
+    // HEAD FOLLOWS CURSOR
+    if (headGroupRef.current) {
+      const mx = _globalMouse.x; // -1 to 1
+      const my = _globalMouse.y; // -1 to 1
+      // Rotation: head turns to face cursor direction
+      const targetRotY = mx * 0.6;     // yaw — look left/right
+      const targetRotX = -my * 0.35;   // pitch — look up/down
+      const targetRotZ = -mx * 0.12;   // tilt — slight head cock
+      // Smooth lerp
+      const lr = 0.07;
+      headGroupRef.current.rotation.x += (targetRotX - headGroupRef.current.rotation.x) * lr;
+      headGroupRef.current.rotation.y += (targetRotY - headGroupRef.current.rotation.y) * lr;
+      headGroupRef.current.rotation.z += (targetRotZ - headGroupRef.current.rotation.z) * lr;
+    }
+  });
+
+  // Colors
+  const black = '#0a0a0a';
+  const darkGrey = '#1a1a1a';
+  const bodyBlack = '#111115';
+  const bodyDark = '#0d0d10';
+  const wingDark = '#161618';
+  const wingEdge = '#222225';
+  const beak = '#f97316';
+  const beakTip = '#ea580c';
+  const gogglePurple = '#7722cc';
+  const goggleDark = '#4a1188';
+  const goggleFrame = '#2a0a55';
+  const goggleLens = '#aa44ff';
+  const goggleShine = '#cc88ff';
+  const veinPurple = '#6622aa';
+  const veinBright = '#8833dd';
+  const crownGold = '#fbbf24';
+  const crownDark = '#d4940a';
+  const crownJewel = '#ef4444';
+  const crownJewelGreen = '#22c55e';
+
+  // All boxes as [x, y, z, w, h, d, color]
+  type VoxelDef = [number, number, number, number, number, number, string];
+
+  // BODY voxels — stays fixed
+  const bodyVoxels: VoxelDef[] = [
+    // ═══ BODY — oval, chunky, sitting ═══
+    [0, 0, 0, PX*5, PX*4, PX*6, bodyBlack],
+    [0, PX*0.5, 0, PX*4.5, PX*3.5, PX*5.5, bodyDark],
+    [0, PX*0.8, -PX*2.5, PX*4, PX*3, PX*1.5, bodyBlack],
+    // Wings
+    [-PX*2.8, PX*0.5, PX*0.5, PX*1.2, PX*3, PX*5, wingDark],
+    [-PX*3.2, PX*0.8, PX*1, PX*0.5, PX*2, PX*3.5, wingEdge],
+    [PX*2.8, PX*0.5, PX*0.5, PX*1.2, PX*3, PX*5, wingDark],
+    [PX*3.2, PX*0.8, PX*1, PX*0.5, PX*2, PX*3.5, wingEdge],
+    // Tail
+    [0, PX*1.5, PX*3.5, PX*3, PX*3.5, PX*1.5, bodyBlack],
+    [0, PX*3, PX*4, PX*2.5, PX*2.5, PX*1, wingDark],
+    [0, PX*4, PX*4.3, PX*1.5, PX*1.5, PX*0.5, wingEdge],
+    // Feet
+    [-PX*1.2, -PX*2.2, -PX*0.5, PX*1.5, PX*0.5, PX*2.5, darkGrey],
+    [PX*1.2, -PX*2.2, -PX*0.5, PX*1.5, PX*0.5, PX*2.5, darkGrey],
+  ];
+
+  // HEAD + NECK voxels — these follow the cursor
+  // Positions are relative to neck pivot at (0, PX*3, -PX*2)
+  const neckPivotY = PX * 3;
+  const neckPivotZ = -PX * 2;
+  const headVoxels: VoxelDef[] = [
+    // Neck (offset from pivot)
+    [0, 0, 0, PX*2, PX*2.5, PX*2, bodyBlack],
+    [0, PX*2, -PX*0.5, PX*1.8, PX*2.5, PX*1.8, bodyBlack],
+    [0, PX*4, -PX*0.5, PX*1.6, PX*2.5, PX*1.6, bodyDark],
+    [0, PX*6, 0, PX*1.5, PX*2, PX*1.5, bodyBlack],
+    // Head
+    [0, PX*7.5, PX*0.2, PX*2.5, PX*2.5, PX*2.8, bodyBlack],
+    [0, PX*7.5, PX*0.2, PX*2.2, PX*2.2, PX*2.5, bodyDark],
+    // Goggles
+    [0, PX*8, -PX*0.8, PX*3.5, PX*1.4, PX*1.2, goggleFrame],
+    [-PX*1, PX*8, -PX*1.2, PX*1.2, PX*1.0, PX*0.4, gogglePurple],
+    [-PX*1, PX*8, -PX*1.35, PX*0.9, PX*0.7, PX*0.15, goggleLens],
+    [-PX*0.7, PX*8.2, -PX*1.4, PX*0.3, PX*0.3, PX*0.1, goggleShine],
+    [PX*1, PX*8, -PX*1.2, PX*1.2, PX*1.0, PX*0.4, gogglePurple],
+    [PX*1, PX*8, -PX*1.35, PX*0.9, PX*0.7, PX*0.15, goggleLens],
+    [PX*0.7, PX*8.2, -PX*1.4, PX*0.3, PX*0.3, PX*0.1, goggleShine],
+    [0, PX*7.8, -PX*1.1, PX*0.6, PX*0.5, PX*0.3, goggleFrame],
+    [-PX*1.8, PX*8, -PX*0.2, PX*0.4, PX*0.8, PX*1.5, goggleFrame],
+    [PX*1.8, PX*8, -PX*0.2, PX*0.4, PX*0.8, PX*1.5, goggleFrame],
+    [-PX*1.6, PX*8, PX*1.2, PX*0.3, PX*0.6, PX*1.5, goggleDark],
+    [PX*1.6, PX*8, PX*1.2, PX*0.3, PX*0.6, PX*1.5, goggleDark],
+    // Veins on neck/head
+    [-PX*1.3, PX*7.2, -PX*0.5, PX*0.15, PX*0.8, PX*0.15, veinPurple],
+    [-PX*1.5, PX*6.5, -PX*0.3, PX*0.12, PX*1.0, PX*0.12, veinBright],
+    [-PX*1.2, PX*5.5, 0, PX*0.12, PX*1.2, PX*0.12, veinPurple],
+    [-PX*0.8, PX*4.5, PX*0.2, PX*0.1, PX*1.0, PX*0.1, veinBright],
+    [PX*1.3, PX*7.2, -PX*0.5, PX*0.15, PX*0.8, PX*0.15, veinPurple],
+    [PX*1.5, PX*6.5, -PX*0.3, PX*0.12, PX*1.0, PX*0.12, veinBright],
+    [PX*1.2, PX*5.5, 0, PX*0.12, PX*1.2, PX*0.12, veinPurple],
+    [PX*0.8, PX*4.5, PX*0.2, PX*0.1, PX*1.0, PX*0.1, veinBright],
+    [0, PX*8.8, -PX*0.6, PX*0.15, PX*0.6, PX*0.15, veinBright],
+    [0, PX*9, -PX*0.2, PX*0.12, PX*0.5, PX*0.12, veinPurple],
+    [-PX*0.5, PX*3.5, PX*0.5, PX*0.1, PX*1.5, PX*0.1, veinPurple],
+    [PX*0.5, PX*3.5, PX*0.5, PX*0.1, PX*1.5, PX*0.1, veinPurple],
+    [-PX*0.3, PX*2, PX*0.8, PX*0.08, PX*1.2, PX*0.08, veinBright],
+    [PX*0.3, PX*2, PX*0.8, PX*0.08, PX*1.2, PX*0.08, veinBright],
+    // Beak
+    [0, PX*7.3, -PX*1.4, PX*1.2, PX*0.6, PX*1.2, beak],
+    [0, PX*7.1, -PX*1.8, PX*0.8, PX*0.4, PX*0.8, beakTip],
+    // Crown
+    [0, PX*9.2, PX*0.2, PX*3.2, PX*1, PX*3, crownGold],
+    [0, PX*9.2, PX*0.2, PX*3, PX*0.8, PX*2.8, crownDark],
+    [-PX*1, PX*10.5, PX*0.2, PX*0.8, PX*1.5, PX*0.8, crownGold],
+    [0, PX*11.2, PX*0.2, PX*0.8, PX*2, PX*0.8, crownGold],
+    [PX*1, PX*10.5, PX*0.2, PX*0.8, PX*1.5, PX*0.8, crownGold],
+    [-PX*1, PX*10.8, -PX*0.3, PX*0.4, PX*0.4, PX*0.2, crownJewel],
+    [0, PX*11.5, -PX*0.3, PX*0.5, PX*0.5, PX*0.2, crownJewelGreen],
+    [PX*1, PX*10.8, -PX*0.3, PX*0.4, PX*0.4, PX*0.2, crownJewel],
+    [-PX*1.5, PX*9.4, -PX*1.3, PX*0.35, PX*0.35, PX*0.15, crownJewel],
+    [0, PX*9.4, -PX*1.3, PX*0.35, PX*0.35, PX*0.15, crownJewelGreen],
+    [PX*1.5, PX*9.4, -PX*1.3, PX*0.35, PX*0.35, PX*0.15, crownJewel],
+  ];
+
+  // Shared material function for both body and head
+  const matProps = (color: string) => ({
+    color,
+    emissive: (color === crownGold || color === crownDark) ? color
+      : (color === crownJewel || color === crownJewelGreen) ? color
+      : (color === gogglePurple || color === goggleLens || color === goggleShine) ? color
+      : (color === veinPurple || color === veinBright) ? color
+      : '#000000',
+    emissiveIntensity: (color === crownGold || color === crownDark) ? 1.2
+      : (color === crownJewel || color === crownJewelGreen) ? 3.0
+      : (color === goggleLens || color === goggleShine) ? 0.3
+      : color === gogglePurple ? 0.2
+      : color === veinPurple ? 0.15
+      : color === veinBright ? 0.25
+      : 0,
+    roughness: (color === goggleLens || color === goggleShine) ? 0.1 : 0.5,
+    metalness: (color === crownGold || color === crownDark) ? 0.7
+      : (color === goggleLens || color === goggleShine || color === gogglePurple) ? 0.8
+      : 0.1,
+    toneMapped: !(color === crownJewel || color === crownJewelGreen),
+  });
+
+  return (
+    <group ref={groupRef} position={[topPos.x, topPos.y, topPos.z]}
+      rotation={[0.15, Math.PI + 0.3, 0]}
+    >
+      {/* Body — stays still */}
+      {bodyVoxels.map((v, idx) => (
+        <mesh key={`b${idx}`} position={[v[0], v[1], v[2]]}>
+          <boxGeometry args={[v[3], v[4], v[5]]} />
+          <meshStandardMaterial {...matProps(v[6])} />
+        </mesh>
+      ))}
+
+      {/* Head + neck — follows cursor, pivots from base of neck */}
+      <group ref={headGroupRef} position={[0, neckPivotY, neckPivotZ]}>
+        {headVoxels.map((v, idx) => (
+          <mesh key={`h${idx}`} position={[v[0], v[1], v[2]]}>
+            <boxGeometry args={[v[3], v[4], v[5]]} />
+            <meshStandardMaterial {...matProps(v[6])} />
+          </mesh>
+        ))}
+        {/* Crown glow */}
+        <pointLight position={[0, PX * 11, 0]} color={0xfbbf24} intensity={2.5} distance={4} decay={2} />
+        <pointLight position={[0, PX * 10, -PX * 1]} color={0xef4444} intensity={0.8} distance={2.5} decay={2} />
+        {/* Goggle glow */}
+        <pointLight position={[0, PX * 8, -PX * 2]} color={0x7722cc} intensity={0.2} distance={2} decay={2} />
+      </group>
+    </group>
+  );
+}
+
+// ─── Green Dripping Lava (fluorescent goo from bottom of planet) ────────────
+
+function DrippingLava({ count = 40 }: { count?: number }) {
+  const groupRef = useRef<THREE.Group>(null);
+  const planetCenter = useMemo(() => new THREE.Vector3(0, -2, 0), []);
+
+  // Drips of different types: tiny fast droplets, medium drips, long slow oozes
+  const drips = useMemo(() => {
+    return Array.from({ length: count }, (_, i) => {
+      // Only spawn from the very bottom of the planet
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.PI * 0.82 + Math.random() * Math.PI * 0.18; // bottom 18% of sphere
+      const r = 8.0;
+      const x = r * Math.sin(phi) * Math.cos(theta);
+      const y = -Math.abs(r * Math.cos(phi)); // force downward
+      const z = r * Math.sin(phi) * Math.sin(theta);
+
+      // 3 drip types: tiny (40%), medium (35%), long ooze (25%)
+      const roll = Math.random();
+      let size: number, fallSpeed: number, fallDist: number, stretchMax: number, wobbleAmt: number;
+      if (roll < 0.3) {
+        // Quick splashy droplets — fast and small
+        size = 0.03 + Math.random() * 0.05;
+        fallSpeed = 1.5 + Math.random() * 2.0;
+        fallDist = 3 + Math.random() * 5;
+        stretchMax = 1.5;
+        wobbleAmt = 0.1 + Math.random() * 0.15;
+      } else if (roll < 0.55) {
+        // Medium drips — moderate speed
+        size = 0.08 + Math.random() * 0.1;
+        fallSpeed = 0.7 + Math.random() * 0.8;
+        fallDist = 4 + Math.random() * 7;
+        stretchMax = 3.0;
+        wobbleAmt = 0.15 + Math.random() * 0.3;
+      } else if (roll < 0.8) {
+        // Big fat drips — heavier, faster than oozes
+        size = 0.12 + Math.random() * 0.12;
+        fallSpeed = 0.5 + Math.random() * 0.6;
+        fallDist = 5 + Math.random() * 8;
+        stretchMax = 4.0;
+        wobbleAmt = 0.2 + Math.random() * 0.4;
+      } else {
+        // Long slow oozing drips — thick, stretchy, slow
+        size = 0.15 + Math.random() * 0.18;
+        fallSpeed = 0.2 + Math.random() * 0.3;
+        fallDist = 7 + Math.random() * 12;
+        stretchMax = 7.0;
+        wobbleAmt = 0.3 + Math.random() * 0.5;
+      }
+
+      return {
+        startX: x, startY: y + planetCenter.y, startZ: z,
+        fallSpeed, fallDist, size, stretchMax,
+        phase: Math.random(),
+        wobble: wobbleAmt,
+        wobbleSpeed: 0.5 + Math.random() * 1.5,
+      };
+    });
+  }, [count, planetCenter]);
+
+  useFrame((state) => {
+    if (!groupRef.current) return;
+    const t = state.clock.elapsedTime;
+    const children = groupRef.current.children;
+
+    for (let i = 0; i < drips.length; i++) {
+      const drip = drips[i];
+      const mesh = children[i] as THREE.Mesh;
+      if (!mesh) continue;
+
+      const cycle = (t * drip.fallSpeed * 0.08 + drip.phase) % 1;
+
+      // Two-speed fall: slow sticky ooze near the planet, then accelerates once it detaches
+      // Planet bottom is at roughly y = -10 (center -2, radius 8)
+      // First 40% of cycle = slow creep along surface, last 60% = accelerating freefall
+      let fallY: number;
+      if (cycle < 0.4) {
+        // Slow sticky phase — clinging to the planet surface
+        const slowPhase = cycle / 0.4; // 0→1
+        fallY = -slowPhase * drip.fallDist * 0.15; // barely moves
+      } else {
+        // Detached — accelerates like it broke free from the goo
+        const fastPhase = (cycle - 0.4) / 0.6; // 0→1
+        const accel = fastPhase * fastPhase * fastPhase; // cubic acceleration
+        fallY = -drip.fallDist * 0.15 - accel * drip.fallDist * 0.85;
+      }
+      const fallPhase = cycle;
+
+      // Straight down — no wobble
+      mesh.position.set(
+        drip.startX,
+        drip.startY + fallY,
+        drip.startZ,
+      );
+
+      // Stretch into long gooey shape as it falls — bigger drips stretch more
+      const stretchY = 1 + fallPhase * drip.stretchMax;
+      const squishXZ = 1 - fallPhase * 0.5;
+      mesh.scale.set(drip.size * squishXZ, drip.size * stretchY, drip.size * squishXZ);
+
+      const fadeIn = Math.min(cycle / 0.08, 1.0);
+      const fadeOut = Math.min((1 - cycle) / 0.12, 1.0);
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      mat.opacity = fadeIn * fadeOut * 0.85;
+    }
+  });
+
+  return (
+    <group ref={groupRef}>
+      {drips.map((_, i) => (
+        <mesh key={i}>
+          <sphereGeometry args={[1, 6, 6]} />
+          <meshStandardMaterial
+            color={0x00ff4c}
+            emissive={0x00ff4c}
+            emissiveIntensity={3.0}
+            transparent
+            opacity={0.8}
+            toneMapped={false}
+          />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+// ─── Shooting Stars ─────────────────────────────────────────────────────────
+
+function ShootingStars({ count = 6 }: { count?: number }) {
+  const groupRef = useRef<THREE.Group>(null);
+
+  const stars = useMemo(() => {
+    return Array.from({ length: count }, () => ({
+      // Random start position in the sky
+      startX: (Math.random() - 0.5) * 80,
+      startY: 15 + Math.random() * 25,
+      startZ: -20 - Math.random() * 30,
+      // Direction (diagonal streak)
+      dirX: -0.5 + Math.random() * -0.5,
+      dirY: -0.3 - Math.random() * 0.4,
+      dirZ: 0.2 + Math.random() * 0.3,
+      speed: 15 + Math.random() * 25,
+      length: 1.5 + Math.random() * 3,
+      phase: Math.random() * 30, // stagger timing
+      interval: 8 + Math.random() * 15, // seconds between appearances
+    }));
+  }, [count]);
+
+  useFrame((state) => {
+    if (!groupRef.current) return;
+    const t = state.clock.elapsedTime;
+    const children = groupRef.current.children;
+
+    for (let i = 0; i < stars.length; i++) {
+      const star = stars[i];
+      const mesh = children[i] as THREE.Mesh;
+      if (!mesh) continue;
+
+      // Each star fires periodically
+      const cycleTime = (t + star.phase) % star.interval;
+      const streakDuration = 0.8; // how long the streak is visible
+
+      if (cycleTime < streakDuration) {
+        const progress = cycleTime / streakDuration;
+        const pos = progress * star.speed;
+
+        mesh.position.set(
+          star.startX + star.dirX * pos,
+          star.startY + star.dirY * pos,
+          star.startZ + star.dirZ * pos,
+        );
+
+        // Fade in then out
+        const fade = progress < 0.3 ? progress / 0.3 : (1 - progress) / 0.7;
+        (mesh.material as THREE.MeshStandardMaterial).opacity = fade * 0.9;
+
+        // Stretch along direction of travel
+        mesh.scale.set(0.03, 0.03, star.length);
+        mesh.lookAt(
+          mesh.position.x + star.dirX,
+          mesh.position.y + star.dirY,
+          mesh.position.z + star.dirZ,
+        );
+        mesh.visible = true;
+      } else {
+        mesh.visible = false;
+      }
+    }
+  });
+
+  return (
+    <group ref={groupRef}>
+      {stars.map((_, i) => (
+        <mesh key={i} visible={false}>
+          <boxGeometry args={[1, 1, 1]} />
+          <meshStandardMaterial
+            color={0xffffff}
+            emissive={0xffffff}
+            emissiveIntensity={5.0}
+            transparent
+            opacity={0}
+            toneMapped={false}
+          />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+// ─── Background Planets (small distant worlds) ─────────────────────────────
+
+function BackgroundPlanets() {
+  const planets = useMemo(() => [
+    // Spread wide across the sky — distant glowing worlds
+    { pos: [-80, 30, -120] as [number,number,number], r: 1.0, color: '#3a2a5e', emissive: '#9955ff', ei: 3.0 },
+    { pos: [90, 20, -130] as [number,number,number], r: 0.8, color: '#2a3a2e', emissive: '#44ff66', ei: 3.5 },
+    { pos: [-50, -30, -110] as [number,number,number], r: 1.2, color: '#3a2525', emissive: '#ff6644', ei: 2.5 },
+    { pos: [60, 45, -100] as [number,number,number], r: 0.7, color: '#252a4e', emissive: '#6688ff', ei: 4.0 },
+    { pos: [-95, -15, -140] as [number,number,number], r: 0.9, color: '#3e3a2a', emissive: '#ffcc44', ei: 3.0 },
+    { pos: [75, -35, -115] as [number,number,number], r: 0.7, color: '#2a3a3a', emissive: '#44dddd', ei: 3.5 },
+    { pos: [-30, 50, -130] as [number,number,number], r: 0.5, color: '#2a2a3e', emissive: '#ff88cc', ei: 4.0 },
+    { pos: [40, -45, -125] as [number,number,number], r: 0.8, color: '#1a3a2a', emissive: '#88ffaa', ei: 3.0 },
+  ], []);
+
+  return (
+    <group>
+      {planets.map((p, i) => (
+        <group key={i} position={p.pos}>
+          {/* Planet body */}
+          <mesh>
+            <icosahedronGeometry args={[p.r, 1]} />
+            <meshStandardMaterial
+              color={p.color}
+              emissive={p.emissive}
+              emissiveIntensity={p.ei}
+              roughness={0.8}
+              flatShading
+            />
+          </mesh>
+          {/* Bright atmosphere glow — large halo so they read at extreme distance */}
+          <mesh>
+            <sphereGeometry args={[p.r * 2.5, 16, 16]} />
+            <meshStandardMaterial
+              color={p.emissive}
+              emissive={p.emissive}
+              emissiveIntensity={2.0}
+              transparent
+              opacity={0.12}
+              depthWrite={false}
+              toneMapped={false}
+            />
+          </mesh>
+        </group>
+      ))}
+    </group>
+  );
+}
+
+// ─── Spaceship Traveling Between Planets ────────────────────────────────────
+
+function Spaceship() {
+  const groupRef = useRef<THREE.Group>(null);
+  const trailRef = useRef<THREE.Points>(null);
+
+  // Planet waypoints the ship visits (must match BackgroundPlanets positions)
+  const waypoints = useMemo(() => [
+    new THREE.Vector3(-80, 30, -120),
+    new THREE.Vector3(60, 45, -100),
+    new THREE.Vector3(90, 20, -130),
+    new THREE.Vector3(75, -35, -115),
+    new THREE.Vector3(40, -45, -125),
+    new THREE.Vector3(-50, -30, -110),
+    new THREE.Vector3(-95, -15, -140),
+    new THREE.Vector3(-30, 50, -130),
+  ], []);
+
+  // Build a smooth looping path through all planets
+  const path = useMemo(() => {
+    return new THREE.CatmullRomCurve3(waypoints, true, 'centripetal', 0.5);
+  }, [waypoints]);
+
+  // Engine trail particles
+  const trailCount = 40;
+  const trailPositions = useMemo(() => new Float32Array(trailCount * 3), []);
+  const trailGeo = useMemo(() => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
+    return geo;
+  }, [trailPositions]);
+  const trailHistory = useRef<THREE.Vector3[]>([]);
+
+  const PX = 0.15;
+
+  useFrame((state) => {
+    if (!groupRef.current) return;
+    const t = state.clock.elapsedTime;
+
+    // Travel along the path — full loop every ~60 seconds
+    const loopTime = 55;
+    const progress = (t % loopTime) / loopTime;
+    const pos = path.getPointAt(progress);
+    const lookAhead = path.getPointAt((progress + 0.005) % 1);
+
+    groupRef.current.position.copy(pos);
+    groupRef.current.lookAt(lookAhead);
+
+    // Gentle banking on turns
+    const tangent = lookAhead.clone().sub(pos).normalize();
+    const nextTangent = path.getPointAt((progress + 0.01) % 1).sub(lookAhead).normalize();
+    const cross = new THREE.Vector3().crossVectors(tangent, nextTangent);
+    groupRef.current.rotateZ(-cross.y * 8);
+
+    // Engine trail
+    trailHistory.current.unshift(pos.clone());
+    if (trailHistory.current.length > trailCount) trailHistory.current.length = trailCount;
+    const arr = trailPositions;
+    for (let i = 0; i < trailCount; i++) {
+      const tp = trailHistory.current[i] || pos;
+      arr[i * 3] = tp.x;
+      arr[i * 3 + 1] = tp.y;
+      arr[i * 3 + 2] = tp.z;
+    }
+    trailGeo.attributes.position.needsUpdate = true;
+  });
+
+  return (
+    <group>
+      <group ref={groupRef}>
+        {/* ═══ SHIP BODY — sleek angular fuselage ═══ */}
+        {/* Main hull */}
+        <mesh>
+          <boxGeometry args={[PX * 3, PX * 1.5, PX * 8]} />
+          <meshStandardMaterial color={'#2a2a3a'} emissive={'#2a2a3a'} emissiveIntensity={0.3} metalness={0.7} roughness={0.3} />
+        </mesh>
+        {/* Nose cone */}
+        <mesh position={[0, 0, -PX * 5]}>
+          <boxGeometry args={[PX * 2, PX * 1, PX * 3]} />
+          <meshStandardMaterial color={'#3a3a4e'} emissive={'#3a3a4e'} emissiveIntensity={0.3} metalness={0.8} roughness={0.2} />
+        </mesh>
+        <mesh position={[0, 0, -PX * 7]}>
+          <boxGeometry args={[PX * 1, PX * 0.6, PX * 2]} />
+          <meshStandardMaterial color={'#4a4a5e'} emissive={'#4a4a5e'} emissiveIntensity={0.4} metalness={0.8} roughness={0.2} />
+        </mesh>
+        {/* Cockpit window */}
+        <mesh position={[0, PX * 0.8, -PX * 3]}>
+          <boxGeometry args={[PX * 1.5, PX * 0.4, PX * 2]} />
+          <meshStandardMaterial color={'#00ccff'} emissive={'#00ccff'} emissiveIntensity={2.0} toneMapped={false} />
+        </mesh>
+        {/* Wings — swept back */}
+        <mesh position={[-PX * 3.5, 0, PX * 1]}>
+          <boxGeometry args={[PX * 5, PX * 0.4, PX * 4]} />
+          <meshStandardMaterial color={'#222233'} emissive={'#222233'} emissiveIntensity={0.2} metalness={0.6} roughness={0.3} />
+        </mesh>
+        <mesh position={[PX * 3.5, 0, PX * 1]}>
+          <boxGeometry args={[PX * 5, PX * 0.4, PX * 4]} />
+          <meshStandardMaterial color={'#222233'} emissive={'#222233'} emissiveIntensity={0.2} metalness={0.6} roughness={0.3} />
+        </mesh>
+        {/* Wing tips — green accent */}
+        <mesh position={[-PX * 6, 0, PX * 2]}>
+          <boxGeometry args={[PX * 0.6, PX * 0.5, PX * 1]} />
+          <meshStandardMaterial color={'#00ff4c'} emissive={'#00ff4c'} emissiveIntensity={3.0} toneMapped={false} />
+        </mesh>
+        <mesh position={[PX * 6, 0, PX * 2]}>
+          <boxGeometry args={[PX * 0.6, PX * 0.5, PX * 1]} />
+          <meshStandardMaterial color={'#00ff4c'} emissive={'#00ff4c'} emissiveIntensity={3.0} toneMapped={false} />
+        </mesh>
+        {/* Tail fin */}
+        <mesh position={[0, PX * 2, PX * 3]}>
+          <boxGeometry args={[PX * 0.4, PX * 3, PX * 3]} />
+          <meshStandardMaterial color={'#222233'} emissive={'#222233'} emissiveIntensity={0.2} metalness={0.6} roughness={0.3} />
+        </mesh>
+        {/* Engine glow — back of ship */}
+        <mesh position={[0, 0, PX * 4.5]}>
+          <boxGeometry args={[PX * 2, PX * 1.2, PX * 0.8]} />
+          <meshStandardMaterial color={'#ff8800'} emissive={'#ff6600'} emissiveIntensity={5.0} toneMapped={false} />
+        </mesh>
+        <pointLight position={[0, 0, PX * 5]} color={0xff6600} intensity={3} distance={8} decay={2} />
+        {/* Headlight */}
+        <pointLight position={[0, 0, -PX * 7]} color={0xccddff} intensity={2} distance={10} decay={2} />
+      </group>
+
+      {/* Engine exhaust trail */}
+      <points ref={trailRef} geometry={trailGeo}>
+        <pointsMaterial
+          color={0xff8800}
+          size={0.15}
+          sizeAttenuation
+          transparent
+          opacity={0.5}
+          depthWrite={false}
+          toneMapped={false}
+        />
+      </points>
+    </group>
+  );
+}
+
+// ─── Sand Tiger Guardian (deep inside the portal tunnel) ────────────────────
+
+function SandTigerGuardian() {
+  const groupRef = useRef<THREE.Group>(null);
+  const leftEyeRef = useRef<THREE.Mesh>(null);
+  const rightEyeRef = useRef<THREE.Mesh>(null);
+  const craterDir = useMemo(() => new THREE.Vector3(0.0, 0.35, 1.0).normalize(), []);
+  const craterCenter = useMemo(() => craterDir.clone().multiplyScalar(5.5).add(new THREE.Vector3(0, -2, 0)), [craterDir]);
+
+  // Position deep inside the tunnel, facing outward toward the entrance
+  const tigerPos = useMemo(() => {
+    return new THREE.Vector3(
+      craterCenter.x - craterDir.x * 5,
+      craterCenter.y - craterDir.y * 5 - 0.3,
+      craterCenter.z - craterDir.z * 5,
+    );
+  }, [craterCenter, craterDir]);
+
+  const PX = 0.12;
+
+  // Animate: slow breathing, eye glow pulses
+  useFrame((state) => {
+    if (!groupRef.current) return;
+    const t = state.clock.elapsedTime;
+    // Slow breathing
+    const breathe = 1 + Math.sin(t * 0.6) * 0.02;
+    groupRef.current.scale.set(breathe, breathe, 1);
+
+    // Eyes pulse with forbidden purple glow
+    if (leftEyeRef.current) {
+      const mat = leftEyeRef.current.material as THREE.MeshStandardMaterial;
+      mat.emissiveIntensity = 4 + Math.sin(t * 1.5) * 2 + Math.sin(t * 3.7) * 1;
+    }
+    if (rightEyeRef.current) {
+      const mat = rightEyeRef.current.material as THREE.MeshStandardMaterial;
+      mat.emissiveIntensity = 4 + Math.sin(t * 1.5 + 0.3) * 2 + Math.sin(t * 3.7 + 0.3) * 1;
+    }
+  });
+
+  const sand = '#c2a14d';
+  const sandDark = '#8a7333';
+  const sandLight = '#d4b85a';
+  const sandPale = '#e8d9a0';
+  const stripe = '#6b5220';
+  const stripeDark = '#4a3815';
+  const nose = '#3a2a1a';
+  const mouthDark = '#2a1a0a';
+  const whiskerColor = '#e0d0a0';
+  const innerEar = '#cc8899';
+  const eyePurple = '#7722cc';
+
+  type V = [number, number, number, number, number, number, string];
+  const voxels: V[] = [
+    // ═══ HEAD — broad, powerful, front-facing ═══
+    // Main head block
+    [0, 0, 0, PX*10, PX*8, PX*7, sand],
+    [0, 0, -PX*0.5, PX*9.5, PX*7.5, PX*6.5, sandDark],
+    // Forehead — flat, wide
+    [0, PX*3, -PX*0.5, PX*9, PX*2.5, PX*6, sand],
+    // Cheeks — wider than head
+    [-PX*5, -PX*0.5, PX*0.5, PX*2, PX*4, PX*4, sandLight],
+    [PX*5, -PX*0.5, PX*0.5, PX*2, PX*4, PX*4, sandLight],
+    // Jaw — powerful, wide
+    [0, -PX*4, PX*0.5, PX*8, PX*2.5, PX*5, sandDark],
+    [0, -PX*5, PX*1, PX*6, PX*1.5, PX*4, sandDark],
+
+    // ═══ MUZZLE — rounded, prominent ═══
+    [0, -PX*1.5, -PX*3.5, PX*5, PX*3.5, PX*3, sandLight],
+    [0, -PX*1, -PX*4.5, PX*4, PX*3, PX*1.5, sandPale],
+    // Nose — dark, blocky
+    [0, PX*0.3, -PX*5, PX*2.5, PX*1.5, PX*1, nose],
+    [0, PX*0.8, -PX*5.2, PX*2, PX*0.8, PX*0.5, '#2a1a0a'],
+    // Mouth line
+    [0, -PX*2.5, -PX*4, PX*3, PX*0.4, PX*1.5, mouthDark],
+
+    // ═══ EYES — deep set, glowing purple/dark ═══
+    // Eye sockets (dark recess)
+    [-PX*2.8, PX*1.5, -PX*3, PX*2, PX*1.8, PX*0.8, '#1a1020'],
+    [PX*2.8, PX*1.5, -PX*3, PX*2, PX*1.8, PX*0.8, '#1a1020'],
+    // Brow ridge
+    [-PX*3, PX*3, -PX*2.5, PX*2.5, PX*1, PX*1.5, sandDark],
+    [PX*3, PX*3, -PX*2.5, PX*2.5, PX*1, PX*1.5, sandDark],
+
+    // ═══ EARS — rounded, tiger-like ═══
+    [-PX*3.5, PX*5.5, PX*0.5, PX*2.5, PX*3, PX*2, sand],
+    [PX*3.5, PX*5.5, PX*0.5, PX*2.5, PX*3, PX*2, sand],
+    [-PX*3.5, PX*6, PX*0.3, PX*1.5, PX*2, PX*1.2, innerEar],
+    [PX*3.5, PX*6, PX*0.3, PX*1.5, PX*2, PX*1.2, innerEar],
+
+    // ═══ TIGER STRIPES — dark markings ═══
+    // Forehead stripes
+    [0, PX*3.5, -PX*3, PX*1, PX*1.5, PX*0.3, stripeDark],
+    [-PX*2, PX*3, -PX*2.8, PX*0.8, PX*2, PX*0.3, stripe],
+    [PX*2, PX*3, -PX*2.8, PX*0.8, PX*2, PX*0.3, stripe],
+    // Cheek stripes
+    [-PX*4.5, PX*0.5, -PX*1, PX*0.5, PX*2.5, PX*0.3, stripe],
+    [-PX*5, -PX*0.5, -PX*0.5, PX*0.5, PX*2, PX*0.3, stripeDark],
+    [PX*4.5, PX*0.5, -PX*1, PX*0.5, PX*2.5, PX*0.3, stripe],
+    [PX*5, -PX*0.5, -PX*0.5, PX*0.5, PX*2, PX*0.3, stripeDark],
+    // Side head stripes
+    [-PX*5.5, PX*1.5, PX*1, PX*0.3, PX*1.5, PX*2, stripe],
+    [PX*5.5, PX*1.5, PX*1, PX*0.3, PX*1.5, PX*2, stripe],
+
+    // ═══ WHISKERS — thin horizontal lines ═══
+    [-PX*4, -PX*1.5, -PX*4, PX*3, PX*0.2, PX*0.15, whiskerColor],
+    [-PX*4, -PX*2, -PX*3.8, PX*3.5, PX*0.2, PX*0.15, whiskerColor],
+    [-PX*3.5, -PX*2.5, -PX*3.5, PX*2.5, PX*0.2, PX*0.15, whiskerColor],
+    [PX*4, -PX*1.5, -PX*4, PX*3, PX*0.2, PX*0.15, whiskerColor],
+    [PX*4, -PX*2, -PX*3.8, PX*3.5, PX*0.2, PX*0.15, whiskerColor],
+    [PX*3.5, -PX*2.5, -PX*3.5, PX*2.5, PX*0.2, PX*0.15, whiskerColor],
+
+    // ═══ CHIN / RUFF — white fur under jaw ═══
+    [0, -PX*5.5, -PX*1, PX*5, PX*1.5, PX*3, sandPale],
+    [0, -PX*6.5, PX*0, PX*4, PX*1.5, PX*3.5, sandPale],
+  ];
+
+  return (
+    <group ref={groupRef} position={[tigerPos.x, tigerPos.y, tigerPos.z]}
+      rotation={[-0.35, 0, 0]} // face outward along tunnel axis
+      scale={[1.8, 1.8, 1.8]}
+    >
+      {/* Body voxels */}
+      {voxels.map((v, idx) => (
+        <mesh key={idx} position={[v[0], v[1], v[2]]}>
+          <boxGeometry args={[v[3], v[4], v[5]]} />
+          <meshStandardMaterial color={v[6]} roughness={0.7} metalness={0.05} />
+        </mesh>
+      ))}
+
+      {/* ═══ GLOWING EYES — purple/dark, forbidden magic ═══ */}
+      <mesh ref={leftEyeRef} position={[-PX * 2.8, PX * 1.5, -PX * 3.5]}>
+        <boxGeometry args={[PX * 1.6, PX * 1.2, PX * 0.5]} />
+        <meshStandardMaterial color={eyePurple} emissive={eyePurple} emissiveIntensity={5.0} toneMapped={false} />
+      </mesh>
+      <mesh ref={rightEyeRef} position={[PX * 2.8, PX * 1.5, -PX * 3.5]}>
+        <boxGeometry args={[PX * 1.6, PX * 1.2, PX * 0.5]} />
+        <meshStandardMaterial color={eyePurple} emissive={eyePurple} emissiveIntensity={5.0} toneMapped={false} />
+      </mesh>
+      {/* Eye pupils — darker slit */}
+      <mesh position={[-PX * 2.8, PX * 1.5, -PX * 3.7]}>
+        <boxGeometry args={[PX * 0.4, PX * 1, PX * 0.2]} />
+        <meshStandardMaterial color={'#110022'} emissive={'#220044'} emissiveIntensity={2.0} toneMapped={false} />
+      </mesh>
+      <mesh position={[PX * 2.8, PX * 1.5, -PX * 3.7]}>
+        <boxGeometry args={[PX * 0.4, PX * 1, PX * 0.2]} />
+        <meshStandardMaterial color={'#110022'} emissive={'#220044'} emissiveIntensity={2.0} toneMapped={false} />
+      </mesh>
+
+      {/* Eye glow lights — purple aura */}
+      <pointLight position={[-PX * 3, PX * 1.5, -PX * 5]} color={0x7722cc} intensity={3} distance={4} decay={2} />
+      <pointLight position={[PX * 3, PX * 1.5, -PX * 5]} color={0x7722cc} intensity={3} distance={4} decay={2} />
+      {/* Deep purple ambient within the guardian's space */}
+      <pointLight position={[0, 0, -PX * 2]} color={0x331155} intensity={2} distance={5} decay={2} />
     </group>
   );
 }
@@ -2056,17 +2987,19 @@ function PortalVein() {
 
 export default function LoginBackground3D() {
   if (Platform.OS !== 'web') return null;
+  // Attach mouse listener lazily — only when login screen renders
+  attachMouseListener();
 
   return (
     <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', zIndex: 0 }}>
       <Canvas
-        camera={{ position: [0, 2, 14], fov: 55, near: 0.1, far: 100 }}
+        camera={{ position: [0, 2, 14], fov: 55, near: 0.1, far: 250 }}
         gl={{ antialias: true, alpha: true }}
         style={{ background: 'transparent', cursor: 'grab' }}
         dpr={[1, 1.5]}
       >
         <color attach="background" args={['#030508']} />
-        <fog attach="fog" args={['#030508', 25, 60]} />
+        <fog attach="fog" args={['#030508', 80, 200]} />
 
         <InteractiveCamera />
 
@@ -2076,7 +3009,10 @@ export default function LoginBackground3D() {
         
         
 
-        <StarDust count={300} />
+        <StarDust count={600} />
+        <ShootingStars count={8} />
+        <BackgroundPlanets />
+        <Spaceship />
 
         {/* Living planet */}
         <VoxelPlanet />
@@ -2089,9 +3025,30 @@ export default function LoginBackground3D() {
         <PortalDNA count={300} />
         <PortalSpiral />
         <DetailedFurniture />
+        <DrippingLava count={120} />
 
         {/* Cute agent working at desk inside the planet */}
         <UndergroundAgent />
+
+        {/* Black Swan with crown perched on top of the planet */}
+        <BlackSwanKing />
+        <SandTigerGuardian />
+        {/* Spotlight on the Black Swan from above-front */}
+        <group>
+          <spotLight
+            position={[1, 14, 4]}
+            color={0xffeedd}
+            intensity={12}
+            angle={0.3}
+            penumbra={0.5}
+            distance={20}
+            decay={1.5}
+          />
+          {/* Warm fill from the side */}
+          <pointLight position={[3, 8, 1]} color={0xffd700} intensity={3} distance={8} decay={2} />
+          {/* Green rim light from behind for dramatic silhouette */}
+          <pointLight position={[-1, 8, -2]} color={0x44ff66} intensity={2} distance={6} decay={2} />
+        </group>
 
         {/* Bloom postprocessing — makes emissive materials glow and blend */}
         <EffectComposer>

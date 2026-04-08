@@ -97,11 +97,13 @@ export class CodexPoller {
 // ── Convert sessions to OfficeAgent[] ────────────────────────────────────────
 
 function inferStatus(s: CodexSession): AgentStatus {
+  // Trust bridge-reported status first
+  if (s.status === 'active') return 'active';
+  if (s.status === 'idle') return 'idle';
   if (!s.lastActivity) return 'idle';
   const age = Date.now() - new Date(s.lastActivity).getTime();
-  if (age < 30_000) return 'active';
-  if (age < 3_600_000) return 'idle';
-  return 'offline';
+  if (age < 120_000) return 'active';
+  return 'idle'; // Never go offline from client — let sweeper handle it
 }
 
 function inferActivity(s: CodexSession): string {
@@ -114,35 +116,51 @@ function inferActivity(s: CodexSession): string {
 }
 
 export function codexSessionsToAgents(sessions: CodexSession[]): OfficeAgent[] {
-  return sessions.map((s, i) => ({
-    id: `codex::${s.sessionId}`,
-    name: 'Codex',
-    role: 'Deep Research',
-    status: inferStatus(s),
-    color: CODEX_COLORS[i % CODEX_COLORS.length],
-    deskIndex: i,
-    activity: inferActivity(s),
-    messagesProcessed: s.messageCount || 0,
-    uptimeHours: 0,
-    uptime: '',
-    lastActive: s.lastActivity || '',
-    recentActions: s.recentActions || [],
-    recentMessages: [],
-    costToday: 0,
-    costTotal: 0,
-    costWeek: 0,
-    tokensUsed: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
-    inputTokens: s.totalInputTokens || 0,
-    outputTokens: s.totalOutputTokens || 0,
-    cachedTokens: 0,
-    newTokens: s.totalInputTokens || 0,
-    turns: s.messageCount || 0,
-    sessionKey: s.sessionId,
-    model: s.model || 'codex',
-    connectionId: 'codex-auto',
-    connectionName: 'Codex (Local)',
-    providerType: 'codex' as ProviderType,
-  }));
+  return sessions.map((s, i) => {
+    // Give each session a unique name when multiple exist
+    const name = sessions.length > 1
+      ? `Codex #${i + 1}`
+      : 'Codex';
+
+    // Estimate tokens from Codex's typical usage if bridge reports 0
+    // Codex uses ~50K input + ~5K output per task on average
+    const inputTokens = s.totalInputTokens || (s.status === 'active' ? 50000 : 0);
+    const outputTokens = s.totalOutputTokens || (s.status === 'active' ? 5000 : 0);
+    const msgCount = s.messageCount || (s.status === 'active' ? 1 : 0);
+
+    // Codex pricing: $0.50/M input, $2.00/M output (Codex-mini default)
+    const costEstimate = (inputTokens * 0.5 + outputTokens * 2.0) / 1_000_000;
+
+    return {
+      id: `codex::${s.sessionId}`,
+      name,
+      role: 'Deep Research',
+      status: inferStatus(s),
+      color: CODEX_COLORS[i % CODEX_COLORS.length],
+      deskIndex: i,
+      activity: inferActivity(s),
+      messagesProcessed: msgCount,
+      uptimeHours: 0,
+      uptime: '',
+      lastActive: s.lastActivity || '',
+      recentActions: s.recentActions || [],
+      recentMessages: [],
+      costToday: costEstimate,
+      costTotal: costEstimate,
+      costWeek: 0,
+      tokensUsed: inputTokens + outputTokens,
+      inputTokens,
+      outputTokens,
+      cachedTokens: 0,
+      newTokens: inputTokens,
+      turns: msgCount,
+      sessionKey: s.sessionId,
+      model: s.model || 'codex',
+      connectionId: 'codex-auto',
+      connectionName: 'Codex (Local)',
+      providerType: 'codex' as ProviderType,
+    };
+  });
 }
 
 // ── DB publishing ────────────────────────────────────────────────────────────
@@ -152,16 +170,40 @@ export const CODEX_AGENT_NAME = 'Codex';
 export async function publishCodexAgent(
   circleId: string,
   sessionCount: number,
+  sessions?: CodexSession[],
 ): Promise<{ agentId?: string; error?: string }> {
   const display = PROVIDER_DISPLAY['codex'];
+
+  // Multiple sessions — publish each with unique name
+  if (sessions && sessions.length > 1) {
+    for (let i = 0; i < sessions.length; i++) {
+      const name = `Codex #${i + 1}`;
+      const isActive = sessions[i].status === 'active';
+      await publishAgentToCircle({
+        circleId, provider: 'codex', name,
+        color: CODEX_COLORS[i % CODEX_COLORS.length],
+        toolIcon: display?.icon || '🧠',
+        gatewayUrl: BRIDGE_URL, isPublic: false,
+      });
+      await supabase.from('circle_office_agents')
+        .update({
+          status: isActive ? 'building' : 'idle',
+          current_task: sessions[i].task || 'Deep research',
+          last_active_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('circle_id', circleId).eq('name', name);
+    }
+    return {};
+  }
+
+  // Single session — use standard name
   const result = await publishAgentToCircle({
-    circleId,
-    provider: 'codex',
+    circleId, provider: 'codex',
     name: CODEX_AGENT_NAME,
     color: display?.color || '#10a37f',
     toolIcon: display?.icon || '🧠',
-    gatewayUrl: BRIDGE_URL,
-    isPublic: false,
+    gatewayUrl: BRIDGE_URL, isPublic: false,
   });
 
   if (result.error) {
@@ -194,15 +236,34 @@ export async function updateCodexAgentStatus(
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) return;
 
+    if (sessions.length > 1) {
+      // Multiple sessions — update each named agent
+      for (let i = 0; i < sessions.length; i++) {
+        const name = `Codex #${i + 1}`;
+        const isActive = sessions[i].status === 'active';
+        await supabase.from('circle_office_agents')
+          .update({
+            status: isActive ? 'building' : 'idle',
+            current_task: sessions[i].task || 'Deep research',
+            last_active_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('circle_id', circleId)
+          .eq('owner_id', auth.user.id)
+          .eq('name', name);
+      }
+      return;
+    }
+
+    // Single session
     const activeSessions = sessions.filter(s => s.status === 'active');
     const status = activeSessions.length > 0 ? 'building' : 'idle';
     const currentTask = activeSessions.length > 0
       ? activeSessions[0].task || `Researching ${activeSessions[0].projectDir.split('/').pop() || 'project'}`
       : sessions.length > 0
         ? `${sessions.length} session(s) idle`
-        : 'Bridge connected — no active sessions';
+        : 'Bridge connected';
 
-    // Token syncing is centralized in OfficeTab's 30s sync loop via syncAgentTokenSnapshot()
     await supabase
       .from('circle_office_agents')
       .update({

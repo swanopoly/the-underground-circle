@@ -186,7 +186,7 @@ function processBlackSwanCommand(
   if (lower === 'agents' || lower === 'roster') {
     if (agents.length === 0) return '👽 No agents detected in the office.';
     const lines = agents.map(a => {
-      const status = { active: '🟢', idle: '🟡', error: '🔴', offline: '⚪' }[a.status] || '⚪';
+      const status = { active: '🟢', building: '🔵', idle: '🟡', error: '🔴', offline: '⚪' }[a.status] || '⚪';
       const cost = a.costToday > 0 ? ` · $${a.costToday.toFixed(4)}` : '';
       const model = a.model !== 'unknown' ? ` · ${a.model}` : '';
       return `  ${status} ${a.name} [${a.role}]${model}${cost}\n    └─ ${a.activity}`;

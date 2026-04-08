@@ -15,6 +15,25 @@
  */
 import { Animated, Platform } from 'react-native';
 
+// ─── Instant dark background — eliminates white flash on page load ──────────
+// This runs before ANY React rendering happens (imported first in App.tsx).
+if (typeof document !== 'undefined') {
+  const s = document.documentElement.style;
+  s.backgroundColor = '#000000';
+  s.margin = '0';
+  s.padding = '0';
+  s.minHeight = '100vh';
+  document.body.style.backgroundColor = '#000000';
+  document.body.style.margin = '0';
+  document.body.style.padding = '0';
+  // Also set root div if it exists
+  const root = document.getElementById('root');
+  if (root) {
+    root.style.backgroundColor = '#000000';
+    root.style.minHeight = '100vh';
+  }
+}
+
 if (Platform.OS === 'web') {
   // Suppress known RN 0.81 deprecation warnings for shadow/textShadow/pointerEvents.
   // These are cosmetic-only — styles still render fine. Hundreds of shadow props exist

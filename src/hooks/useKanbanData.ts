@@ -1,5 +1,5 @@
 /**
- * useKanbanData � data hook for the Kanban board
+ * useKanbanData � data hook for the Kanban board
  *
  * Loads tasks grouped by column, members, agents. Provides CRUD + realtime.
  */
@@ -8,6 +8,12 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { awardXP, getXPForAction } from '../lib/gamification';
 import { invokeDirect } from '../lib/agentInvocation';
+import { wakeAndAssignTask } from '../lib/bridgeTaskDispatcher';
+import { inferTaskCapabilityProfile, getTaskCapabilityProfile } from '../lib/taskCapabilityProfiles';
+import {
+  createInitialTaskRunSteps, appendTaskRunStep, createTaskRunArtifact,
+  ensureTaskAcceptanceChecks, evaluateTaskRunChecks, canTaskRunMarkComplete,
+} from '../lib/taskExecutionRuntime';
 import { loadCircleOfficeAgents, CircleOfficeAgent, createBlackSwanAgent } from '../lib/circleOffice';
 import {
   KanbanTask,
@@ -895,6 +901,10 @@ export function useKanbanData(circleId: string): KanbanData {
       }
     } catch {}
 
+    // ── Task execution runtime: infer profile ─────────────────────────
+    const profileKey = (task as any).capability_profile_key || inferTaskCapabilityProfile({ title: task.title, description: task.description || undefined });
+    const profile = getTaskCapabilityProfile(profileKey);
+
     const parts: string[] = [];
     if (mode === 'plan') {
       parts.push('You are in PLANNING MODE. Analyze the task, identify the work, and produce a concrete implementation plan.');
@@ -919,6 +929,23 @@ export function useKanbanData(circleId: string): KanbanData {
       parts.push(`Focus chain: ${task.focus_chain.map(item => `${item.done ? '[x]' : '[ ]'} ${item.text}`).join(' | ')}`);
     }
     if (commentHistory) parts.push(commentHistory);
+
+    // Task runtime context
+    if (profile) {
+      parts.push('');
+      parts.push('=== TASK RUNTIME ===');
+      parts.push(`Capability profile: ${profile.label} (${profileKey})`);
+      parts.push(`Allowed capabilities: ${profile.capabilities.join(', ')}`);
+      if (profile.defaults.required_artifacts?.length) {
+        parts.push(`Required artifacts: ${profile.defaults.required_artifacts.join(', ')}`);
+      }
+      if (profile.defaults.checks?.length) {
+        parts.push(`Required checks: ${profile.defaults.checks.join(', ')}`);
+      }
+      if (profile.defaults.approval_required) {
+        parts.push('APPROVAL RULE: If you propose room writes, external publishes, or destructive operations, mark as approval-required. The system will not auto-apply without human approval.');
+      }
+    }
 
     parts.push('');
     parts.push('=== RESPONSE CONTRACT ===');
@@ -958,6 +985,23 @@ export function useKanbanData(circleId: string): KanbanData {
       },
       model_used: modelWithThinking || null,
     });
+
+    // ── Initialize runtime steps + acceptance checks ──────────────────
+    if (taskRunId) {
+      createInitialTaskRunSteps(taskRunId, task.id, task.circle_id).catch(() => {});
+      ensureTaskAcceptanceChecks(task.id, task.circle_id, profileKey).catch(() => {});
+    }
+
+    // ── Wake idle agent before invocation — spawns terminal session if needed ──
+    const agentProvider = (targetAgent as any).providerType || (targetAgent as any).provider || '';
+    if (agentProvider && agentProvider !== 'blackswan') {
+      // Check if agent is idle/offline and try to wake it
+      const agentStatus = (targetAgent as any).status;
+      if (agentStatus === 'idle' || agentStatus === 'offline') {
+        console.log(`[runAgentOnTask] Agent "${targetAgentName}" is ${agentStatus}, waking...`);
+        await wakeAndAssignTask(agentProvider, targetAgentName, task.title, circleId).catch(() => {});
+      }
+    }
 
     try {
       const result = await invokeDirect({
@@ -1024,8 +1068,40 @@ export function useKanbanData(circleId: string): KanbanData {
         content: `[AGENT: ${targetAgentName}] ${modeTag}${modelTag}${thinkTag}${completionTag}${summaryTag}\n${deliverable}`,
       });
 
+      // ── Task execution runtime: artifacts, checks, completion gate ────
+      if (taskRunId) {
+        // Record execution step
+        appendTaskRunStep(taskRunId, task.id, task.circle_id, 'execution', 'Agent execution complete', parsed.output.summary).catch(() => {});
+
+        // Convert extracted attachments to typed artifacts
+        for (const att of attachments) {
+          const kind = att.language ? 'code_patch' : att.url ? 'link' : 'file';
+          createTaskRunArtifact(taskRunId, task.id, task.circle_id, kind, att.name || 'output', undefined, att.url, att.name).catch(() => {});
+        }
+
+        // Evaluate acceptance checks
+        await evaluateTaskRunChecks(taskRunId, task.id, task.circle_id);
+
+        // Completion gate — only mark done if checks + approvals pass
+        if (parsed.output.mark_complete && nextStatus === 'done') {
+          const canComplete = await canTaskRunMarkComplete(taskRunId, task.id, task.circle_id);
+          if (!canComplete) {
+            // Agent says complete but checks/approvals block it — override to in_progress
+            await supabase.from('tasks').update({ status: 'in_progress' }).eq('id', taskId);
+            appendTaskRunStep(taskRunId, task.id, task.circle_id, 'check_eval', 'Completion blocked', 'Required checks or approvals not yet passed').catch(() => {});
+          }
+        }
+
+        // Finalize step
+        appendTaskRunStep(taskRunId, task.id, task.circle_id, 'finalize', 'Run finalized').catch(() => {});
+      }
+
       if (nextStatus === 'done' && currentUserId) {
-        awardXP(currentUserId, getXPForAction('task_complete'), 'task_complete', { task_id: taskId }).catch(console.error);
+        // Only award XP if completion gate actually passed
+        const canComplete = taskRunId ? await canTaskRunMarkComplete(taskRunId, task.id, task.circle_id) : true;
+        if (canComplete) {
+          awardXP(currentUserId, getXPForAction('task_complete'), 'task_complete', { task_id: taskId }).catch(console.error);
+        }
       }
 
       fetchTasks();

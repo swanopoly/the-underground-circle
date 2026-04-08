@@ -1,350 +1,332 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, Pressable, ScrollView, Platform, Alert } from 'react-native';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { View, Text, StyleSheet, Pressable, ScrollView, Platform, Animated, Easing } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
+import { TRACKS, getTotalLessons, getTotalXP, Track } from '../../lib/schoolsData';
+import { getProgress, getTrackProgress, SchoolsProgress } from '../../lib/schoolsProgress';
 
-const FEATURES = [
-  {
-    icon: '\uD83D\uDC69\u200D\uD83C\uDFEB',
-    title: 'Classroom Circles',
-    desc: 'Teachers create circles for their class. Students check in daily, track goals, and build accountability habits together.',
-  },
-  {
-    icon: '\uD83D\uDCCA',
-    title: 'Teacher Dashboard',
-    desc: 'Monitor student engagement, streak data, and participation. Identify students who need support early.',
-  },
-  {
-    icon: '\uD83E\uDD16',
-    title: 'AI Study Assistant',
-    desc: 'BlackSwan AI helps students with homework, study plans, and test prep \u2014 all within a safe, monitored environment.',
-  },
-  {
-    icon: '\uD83D\uDD12',
-    title: 'Safe & Private',
-    desc: 'COPPA-compliant. No ads, no data selling. Teachers control visibility, permissions, and AI access levels.',
-  },
-  {
-    icon: '\uD83C\uDFC6',
-    title: 'Gamified Learning',
-    desc: 'XP, streaks, leaderboards, and badges motivate students to stay on track and celebrate each other\u2019s wins.',
-  },
-  {
-    icon: '\uD83D\uDCDA',
-    title: 'Study Groups',
-    desc: 'Students form private study circles for specific subjects. Share notes, set group goals, and hold each other accountable before exams.',
-  },
-  {
-    icon: '\uD83D\uDD2C',
-    title: 'Research Teams',
-    desc: 'Graduate students and research labs can coordinate projects, share milestones, and track thesis progress together.',
-  },
-  {
-    icon: '\uD83C\uDFE2',
-    title: 'Campus Organizations',
-    desc: 'Clubs, Greek life, student government \u2014 any campus org can use circles to manage members, events, and initiatives.',
-  },
-];
+// ─── Design Tokens ────────────────────────────────────────────────────────
+const BG_PAGE = '#050508', BG_SURFACE = '#0a0a10', BG_RAISED = '#0f0f18', BG_INPUT = '#1a1a28';
+const AMBER = '#f59e0b', AMBER_DIM = '#b47a08', AMBER_GLOW = 'rgba(245,158,11,0.08)', AMBER_BORDER = 'rgba(245,158,11,0.25)';
+const GREEN = '#22c55e';
+const TEXT_PRI = '#f0f0f5', TEXT_SEC = '#a0a0b0', TEXT_TER = '#606075', TEXT_DIS = '#3a3a4e';
+const BORDER_DEF = '#1a1a28', BORDER_HOV = '#2a2a3e';
+const R_CARD = 14, R_BTN = 10, R_PILL = 100;
 
-export default function SchoolsScreen({ navigation }: any) {
-  const [requestSent, setRequestSent] = useState(false);
+// ─── Track Card ───────────────────────────────────────────────────────────
+function TrackCard({ track, index, progress, onPress }: {
+  track: Track;
+  index: number;
+  progress: SchoolsProgress;
+  onPress: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(12)).current;
 
-  const handleRequestAccess = () => {
-    if (Platform.OS === 'web') {
-      window.alert('Thanks! We will be in touch when the education beta opens.');
-    } else {
-      Alert.alert(
-        'Request Received',
-        'Thanks! We will be in touch when the education beta opens.',
-        [{ text: 'OK' }]
-      );
-    }
-    setRequestSent(true);
-  };
+  const totalLessons = getTotalLessons(track);
+  const totalXP = getTotalXP(track);
+  const trackProgress = getTrackProgress(progress, track.id, totalLessons);
+  const progressPercent = Math.round(trackProgress * 100);
+  const hasStarted = progressPercent > 0;
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      Animated.parallel([
+        Animated.timing(fadeAnim, { toValue: 1, duration: 350, easing: Easing.bezier(0.16, 1, 0.3, 1), useNativeDriver: false }),
+        Animated.timing(slideAnim, { toValue: 0, duration: 350, easing: Easing.bezier(0.16, 1, 0.3, 1), useNativeDriver: false }),
+      ]).start();
+    }, 400 + index * 80);
+    return () => clearTimeout(t);
+  }, [index, fadeAnim, slideAnim]);
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <Pressable onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Text style={styles.backText}>{'\u2190'} Back</Text>
-        </Pressable>
-        <Text style={styles.title}>For Schools</Text>
-        <View style={styles.comingSoonBadge}>
-          <Text style={styles.comingSoonText}>COMING SOON</Text>
+    <Animated.View style={{ opacity: fadeAnim, transform: [{ translateY: slideAnim }] }}>
+      <Pressable
+        onPress={onPress}
+        onHoverIn={() => setHovered(true)}
+        onHoverOut={() => setHovered(false)}
+        accessibilityRole="button"
+        accessibilityLabel={`${track.title} track, ${progressPercent}% complete`}
+        style={[s.trackCard, hovered && s.trackCardHover]}
+      >
+        <View style={[s.trackAccent, { backgroundColor: track.color }]} />
+        <View style={s.trackInner}>
+          {/* Icon + Title */}
+          <View style={s.trackHeader}>
+            <View style={[s.trackIconBox, { backgroundColor: track.color + '15' }]}>
+              <Text style={[s.trackIconText, { color: track.color }]}>{track.icon}</Text>
+            </View>
+            <View style={s.trackTitleWrap}>
+              <Text style={s.trackTitle}>{track.title}</Text>
+              <Text style={s.trackSubtitle}>{track.subtitle}</Text>
+            </View>
+          </View>
+
+          {/* Stats Row */}
+          <View style={s.trackStatsRow}>
+            <View style={s.trackStat}>
+              <Text style={s.trackStatValue}>{track.modules.length}</Text>
+              <Text style={s.trackStatLabel}>Modules</Text>
+            </View>
+            <View style={s.trackStatDivider} />
+            <View style={s.trackStat}>
+              <Text style={s.trackStatValue}>{totalLessons}</Text>
+              <Text style={s.trackStatLabel}>Lessons</Text>
+            </View>
+            <View style={s.trackStatDivider} />
+            <View style={s.trackStat}>
+              <Text style={s.trackStatValue}>{totalXP.toLocaleString()}</Text>
+              <Text style={s.trackStatLabel}>XP</Text>
+            </View>
+          </View>
+
+          {/* Progress Bar */}
+          <View style={s.trackProgressBarBg}>
+            <View style={[s.trackProgressBarFill, { width: `${progressPercent}%`, backgroundColor: track.color }]} />
+          </View>
+
+          {/* Action text */}
+          <Text style={[s.trackActionText, { color: track.color }]}>
+            {hasStarted ? 'Continue' : 'Start Learning'} {' ->'}
+          </Text>
         </View>
-      </View>
+      </Pressable>
+    </Animated.View>
+  );
+}
 
-      <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
-        <View style={styles.pageWrapper}>
-          {/* Hero */}
-          <View style={styles.hero}>
-            <Text style={styles.heroIcon}>{'\uD83C\uDF93'}</Text>
-            <Text style={styles.heroTitle}>The Underground Circle{'\n'}for Education</Text>
-            <Text style={styles.heroSub}>
-              Accountability circles designed for classrooms, study groups, and school organizations. Empower students to build habits that last.
-            </Text>
+// ─── Wiki Link Card ──────────────────────────────────────────────────────
+const CYAN = '#06b6d4';
+
+function WikiLinkCard({ onPress }: { onPress: () => void }) {
+  const [hovered, setHovered] = useState(false);
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      Animated.timing(fadeAnim, { toValue: 1, duration: 350, easing: Easing.bezier(0.16, 1, 0.3, 1), useNativeDriver: false }).start();
+    }, 700);
+    return () => clearTimeout(t);
+  }, [fadeAnim]);
+
+  return (
+    <Animated.View style={{ opacity: fadeAnim, maxWidth: 720, width: '100%', alignSelf: 'center', marginTop: 20 }} nativeID="section-schools-wiki-link">
+      <Pressable
+        onPress={onPress}
+        onHoverIn={() => setHovered(true)}
+        onHoverOut={() => setHovered(false)}
+        accessibilityRole="button"
+        accessibilityLabel="Browse AI Wiki"
+        style={[s.wikiCard, hovered && s.wikiCardHover]}
+      >
+        <View style={s.wikiAccent} />
+        <View style={s.wikiInner}>
+          <View style={s.wikiIconBox}>
+            <Text style={s.wikiIconText}>{'W'}</Text>
           </View>
+          <View style={s.wikiTitleWrap}>
+            <Text style={s.wikiTitle}>AI Wiki</Text>
+            <Text style={s.wikiSubtitle}>Deep dive into AI agents, models, and tools</Text>
+          </View>
+          <Text style={s.wikiArrow}>{'-->'}</Text>
+        </View>
+      </Pressable>
+    </Animated.View>
+  );
+}
 
-          {/* Stats row */}
-          <View style={styles.statsRow}>
-            <View style={styles.statBox}>
-              <Text style={styles.statNumber}>500+</Text>
-              <Text style={styles.statLabel}>Schools Interested</Text>
+// ─── Main Screen ───────────────────────────────────────────────────────────
+export default function SchoolsScreen({ navigation }: any) {
+  const [progress, setProgress] = useState<SchoolsProgress>({
+    lessons: {},
+    totalXpEarned: 0,
+    lessonsCompleted: 0,
+    currentStreak: 0,
+  });
+
+  const headerAnim = useRef(new Animated.Value(0)).current;
+  const overviewAnim = useRef(new Animated.Value(0)).current;
+
+  useFocusEffect(useCallback(() => {
+    getProgress().then(setProgress);
+  }, []));
+
+  useEffect(() => {
+    Animated.timing(headerAnim, { toValue: 1, duration: 500, delay: 150, useNativeDriver: false }).start();
+    Animated.timing(overviewAnim, { toValue: 1, duration: 500, delay: 280, useNativeDriver: false }).start();
+  }, [headerAnim, overviewAnim]);
+
+  const totalLessonsAll = TRACKS.reduce((sum, t) => sum + getTotalLessons(t), 0);
+  const totalProgressPercent = totalLessonsAll > 0
+    ? Math.round((progress.lessonsCompleted / totalLessonsAll) * 100)
+    : 0;
+
+  return (
+    <View style={s.page} nativeID="section-schools-hub">
+      <ScrollView contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
+
+        {/* ── SECTION: Header ── */}
+        <Animated.View style={[s.header, { opacity: headerAnim }]} nativeID="section-schools-header">
+          <Pressable onPress={() => navigation.goBack()} accessibilityRole="button" accessibilityLabel="Go back">
+            <Text style={s.backText}>{'<-'} Back</Text>
+          </Pressable>
+          <View style={{ flex: 1, marginLeft: 16 }}>
+            <Text style={s.headerSubtitle}>Learn</Text>
+            <Text style={s.headerTitle}>Schools</Text>
+          </View>
+          <View style={s.progressPill}>
+            <Text style={s.progressPillText}>{totalProgressPercent}% Complete</Text>
+          </View>
+        </Animated.View>
+
+        {/* ── SECTION: Progress Overview ── */}
+        <Animated.View style={[s.overviewCard, { opacity: overviewAnim }]} nativeID="section-schools-overview">
+          <View style={s.overviewStatRow}>
+            <View style={s.overviewStat}>
+              <Text style={[s.overviewStatValue, { color: GREEN }]}>{progress.lessonsCompleted}</Text>
+              <Text style={s.overviewStatLabel}>Lessons Completed</Text>
             </View>
-            <View style={styles.statBox}>
-              <Text style={styles.statNumber}>K-12</Text>
-              <Text style={styles.statLabel}>& Universities</Text>
+            <View style={s.overviewStatDivider} />
+            <View style={s.overviewStat}>
+              <Text style={[s.overviewStatValue, { color: AMBER }]}>{progress.totalXpEarned.toLocaleString()}</Text>
+              <Text style={s.overviewStatLabel}>XP Earned</Text>
             </View>
-            <View style={styles.statBox}>
-              <Text style={styles.statNumber}>100%</Text>
-              <Text style={styles.statLabel}>COPPA Compliant</Text>
+            <View style={s.overviewStatDivider} />
+            <View style={s.overviewStat}>
+              <Text style={[s.overviewStatValue, { color: '#a855f7' }]}>{progress.currentStreak}</Text>
+              <Text style={s.overviewStatLabel}>Day Streak</Text>
             </View>
           </View>
+        </Animated.View>
 
-          {/* Section title */}
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Platform Features</Text>
-            <Text style={styles.sectionSub}>Everything your school needs to build accountability culture</Text>
-          </View>
-
-          {/* Feature cards */}
-          {FEATURES.map((f, i) => (
-            <View key={i} style={styles.featureCard}>
-              <View style={styles.featureRow}>
-                <View style={styles.featureIconBox}>
-                  <Text style={styles.featureIcon}>{f.icon}</Text>
-                </View>
-                <View style={styles.featureContent}>
-                  <Text style={styles.featureTitle}>{f.title}</Text>
-                  <Text style={styles.featureDesc}>{f.desc}</Text>
-                </View>
-              </View>
-            </View>
+        {/* ── SECTION: Track Cards ── */}
+        <View nativeID="section-schools-tracks" style={s.tracksContainer}>
+          {TRACKS.map((track, index) => (
+            <TrackCard
+              key={track.id}
+              track={track}
+              index={index}
+              progress={progress}
+              onPress={() => navigation.navigate('SchoolsTrack', { trackId: track.id })}
+            />
           ))}
-
-          {/* CTA Box */}
-          <View style={styles.ctaBox}>
-            <View style={styles.ctaBadge}>
-              <Text style={styles.ctaBadgeText}>BETA PROGRAM</Text>
-            </View>
-            <Text style={styles.ctaTitle}>Bring TUC to Your School</Text>
-            <Text style={styles.ctaText}>
-              We are building the education experience and looking for pilot schools to shape the product. Get early access, dedicated support, and a free year of the platform.
-            </Text>
-            <Pressable
-              style={[styles.ctaBtn, requestSent && styles.ctaBtnSent]}
-              onPress={handleRequestAccess}
-              disabled={requestSent}
-            >
-              <Text style={[styles.ctaBtnText, requestSent && styles.ctaBtnTextSent]}>
-                {requestSent ? 'Request Sent!' : 'Request Early Access'}
-              </Text>
-            </Pressable>
-            <Text style={styles.ctaFootnote}>No commitment required. We will reach out to discuss your needs.</Text>
-          </View>
         </View>
+
+        {/* ── SECTION: Wiki Link ── */}
+        <WikiLinkCard onPress={() => navigation.navigate('Wiki')} />
+
+        {/* ── SECTION: Footer ── */}
+        <View style={s.footer} nativeID="section-schools-footer">
+          <Text style={s.footerText}>Powered by The Underground Circle</Text>
+        </View>
+
       </ScrollView>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000000' },
+// ─── Styles ────────────────────────────────────────────────────────────────
+const s = StyleSheet.create({
+  page: { flex: 1, backgroundColor: BG_PAGE },
+  scroll: { paddingTop: 32, paddingBottom: 48, paddingHorizontal: 24 },
+
+  // Header
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#2a2a2a',
+    flexDirection: 'row', alignItems: 'center', maxWidth: 720, width: '100%', alignSelf: 'center', marginBottom: 24,
   },
-  backBtn: { paddingRight: 12 },
-  backText: { color: '#6366f1', fontSize: 14, fontFamily: 'monospace' },
-  title: { color: '#fff', fontSize: 18, fontWeight: '700', fontFamily: 'monospace', flex: 1 },
-  comingSoonBadge: {
-    backgroundColor: '#22c55e20',
-    borderWidth: 1,
-    borderColor: '#22c55e60',
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+  backText: { fontSize: 13, fontWeight: '500', color: AMBER },
+  headerSubtitle: { fontSize: 13, fontWeight: '500', color: TEXT_TER, marginBottom: 2 },
+  headerTitle: { fontSize: 28, fontWeight: '700', color: TEXT_PRI, letterSpacing: -0.5 },
+  progressPill: {
+    backgroundColor: AMBER_GLOW, paddingHorizontal: 12, paddingVertical: 5,
+    borderRadius: R_PILL, borderWidth: 1, borderColor: AMBER_BORDER,
   },
-  comingSoonText: {
-    color: '#22c55e',
-    fontSize: 10,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    letterSpacing: 1,
+  progressPillText: { fontSize: 11, fontWeight: '600', color: AMBER, letterSpacing: 0.3 },
+
+  // Overview Card
+  overviewCard: {
+    backgroundColor: BG_SURFACE, borderWidth: 1, borderColor: BORDER_DEF, borderRadius: R_CARD,
+    padding: 20, maxWidth: 720, width: '100%', alignSelf: 'center', marginBottom: 28,
   },
-  scrollView: { flex: 1 },
-  scrollContent: { paddingBottom: 60 },
-  pageWrapper: {
-    maxWidth: 720,
-    width: '100%',
-    alignSelf: 'center',
-    padding: 20,
+  overviewStatRow: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center' },
+  overviewStat: { alignItems: 'center', flex: 1 },
+  overviewStatValue: { fontSize: 22, fontWeight: '700', marginBottom: 4 },
+  overviewStatLabel: { fontSize: 11, fontWeight: '500', color: TEXT_TER, textAlign: 'center' },
+  overviewStatDivider: { width: 1, height: 32, backgroundColor: BORDER_DEF },
+
+  // Tracks
+  tracksContainer: { maxWidth: 720, width: '100%', alignSelf: 'center', gap: 14 },
+
+  // Track Card
+  trackCard: {
+    backgroundColor: BG_SURFACE, borderWidth: 1, borderColor: BORDER_DEF, borderRadius: R_CARD,
+    overflow: 'hidden', position: 'relative',
+    ...(Platform.OS === 'web' ? { transition: 'all 220ms cubic-bezier(0.25,0.46,0.45,0.94)', cursor: 'pointer' } as any : {}),
   },
-  hero: {
-    alignItems: 'center',
-    paddingVertical: 32,
-    marginBottom: 8,
+  trackCardHover: {
+    borderColor: BORDER_HOV, backgroundColor: BG_RAISED,
+    ...(Platform.OS === 'web' ? { transform: [{ translateY: -1 }], boxShadow: '0 4px 20px -4px rgba(0,0,0,0.4)' } as any : {}),
   },
-  heroIcon: { fontSize: 56, marginBottom: 16 },
-  heroTitle: {
-    color: '#fff',
-    fontSize: 26,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    textAlign: 'center',
-    marginBottom: 12,
-    lineHeight: 36,
+  trackAccent: {
+    position: 'absolute', left: 0, top: 0, bottom: 0, width: 3,
+    borderTopLeftRadius: R_CARD, borderBottomLeftRadius: R_CARD,
   },
-  heroSub: {
-    color: '#999',
-    fontSize: 15,
-    fontFamily: 'monospace',
-    textAlign: 'center',
-    lineHeight: 24,
-    maxWidth: 520,
+  trackInner: { padding: 20, paddingLeft: 22 },
+  trackHeader: { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 16 },
+  trackIconBox: {
+    width: 40, height: 40, borderRadius: 10, justifyContent: 'center', alignItems: 'center',
   },
-  statsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginBottom: 32,
-    backgroundColor: '#0a0a1a',
-    borderWidth: 1,
-    borderColor: '#1a1a3a',
-    borderRadius: 14,
-    padding: 20,
+  trackIconText: { fontSize: 13, fontWeight: '700', letterSpacing: 0.5 },
+  trackTitleWrap: { flex: 1 },
+  trackTitle: { fontSize: 17, fontWeight: '600', color: TEXT_PRI, letterSpacing: -0.2, marginBottom: 3 },
+  trackSubtitle: { fontSize: 13, fontWeight: '400', color: TEXT_SEC, lineHeight: 18 },
+
+  // Track Stats
+  trackStatsRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around',
+    backgroundColor: BG_PAGE, borderRadius: 8, padding: 12, marginBottom: 14,
   },
-  statBox: { alignItems: 'center' },
-  statNumber: {
-    color: '#6366f1',
-    fontSize: 22,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    marginBottom: 4,
+  trackStat: { alignItems: 'center', flex: 1 },
+  trackStatValue: { fontSize: 15, fontWeight: '600', color: TEXT_PRI, marginBottom: 2 },
+  trackStatLabel: { fontSize: 10, fontWeight: '500', color: TEXT_TER },
+  trackStatDivider: { width: 1, height: 24, backgroundColor: BORDER_DEF },
+
+  // Progress Bar
+  trackProgressBarBg: {
+    height: 6, backgroundColor: BG_INPUT, borderRadius: 3, overflow: 'hidden', marginBottom: 12,
   },
-  statLabel: {
-    color: '#888',
-    fontSize: 11,
-    fontFamily: 'monospace',
+  trackProgressBarFill: { height: 6, borderRadius: 3, minWidth: 0 },
+
+  // Action Text
+  trackActionText: { fontSize: 13, fontWeight: '600', letterSpacing: -0.2 },
+
+  // Wiki Link Card
+  wikiCard: {
+    backgroundColor: BG_SURFACE, borderWidth: 1, borderColor: BORDER_DEF, borderRadius: R_CARD,
+    overflow: 'hidden', position: 'relative' as const,
+    ...(Platform.OS === 'web' ? { transition: 'all 220ms cubic-bezier(0.25,0.46,0.45,0.94)', cursor: 'pointer' } as any : {}),
   },
-  sectionHeader: {
-    marginBottom: 20,
+  wikiCardHover: {
+    borderColor: BORDER_HOV, backgroundColor: BG_RAISED,
+    ...(Platform.OS === 'web' ? { transform: [{ translateY: -1 }], boxShadow: '0 4px 20px -4px rgba(0,0,0,0.4)' } as any : {}),
   },
-  sectionTitle: {
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    marginBottom: 6,
+  wikiAccent: {
+    position: 'absolute' as const, left: 0, top: 0, bottom: 0, width: 3,
+    borderTopLeftRadius: R_CARD, borderBottomLeftRadius: R_CARD,
+    backgroundColor: CYAN,
   },
-  sectionSub: {
-    color: '#666',
-    fontSize: 13,
-    fontFamily: 'monospace',
+  wikiInner: { flexDirection: 'row' as const, alignItems: 'center' as const, gap: 12, padding: 18, paddingLeft: 20 },
+  wikiIconBox: {
+    width: 40, height: 40, borderRadius: 10, justifyContent: 'center' as const, alignItems: 'center' as const,
+    backgroundColor: CYAN + '15',
   },
-  featureCard: {
-    backgroundColor: '#111',
-    borderWidth: 1,
-    borderColor: '#2a2a2a',
-    borderRadius: 12,
-    padding: 18,
-    marginBottom: 12,
-  },
-  featureRow: {
-    flexDirection: 'row',
-    gap: 14,
-  },
-  featureIconBox: {
-    width: 44,
-    height: 44,
-    borderRadius: 10,
-    backgroundColor: '#1a1a2e',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  featureIcon: { fontSize: 22 },
-  featureContent: { flex: 1 },
-  featureTitle: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-    marginBottom: 6,
-  },
-  featureDesc: {
-    color: '#888',
-    fontSize: 13,
-    fontFamily: 'monospace',
-    lineHeight: 20,
-  },
-  ctaBox: {
-    backgroundColor: '#0d0d1a',
-    borderWidth: 1,
-    borderColor: '#22c55e40',
-    borderRadius: 16,
-    padding: 28,
-    marginTop: 20,
-    alignItems: 'center',
-  },
-  ctaBadge: {
-    backgroundColor: '#22c55e15',
-    borderWidth: 1,
-    borderColor: '#22c55e40',
-    borderRadius: 20,
-    paddingHorizontal: 14,
-    paddingVertical: 4,
-    marginBottom: 16,
-  },
-  ctaBadgeText: {
-    color: '#22c55e',
-    fontSize: 10,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    letterSpacing: 1.5,
-  },
-  ctaTitle: {
-    color: '#22c55e',
-    fontSize: 20,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    marginBottom: 10,
-    textAlign: 'center',
-  },
-  ctaText: {
-    color: '#999',
-    fontSize: 14,
-    fontFamily: 'monospace',
-    textAlign: 'center',
-    lineHeight: 22,
-    marginBottom: 20,
-    maxWidth: 480,
-  },
-  ctaBtn: {
-    backgroundColor: '#22c55e',
-    paddingVertical: 14,
-    paddingHorizontal: 36,
-    borderRadius: 10,
-    marginBottom: 12,
-  },
-  ctaBtnSent: {
-    backgroundColor: '#22c55e30',
-    borderWidth: 1,
-    borderColor: '#22c55e',
-  },
-  ctaBtnText: {
-    color: '#000',
-    fontSize: 15,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-  },
-  ctaBtnTextSent: {
-    color: '#22c55e',
-  },
-  ctaFootnote: {
-    color: '#555',
-    fontSize: 11,
-    fontFamily: 'monospace',
-  },
+  wikiIconText: { fontSize: 14, fontWeight: '700' as const, color: CYAN },
+  wikiTitleWrap: { flex: 1 },
+  wikiTitle: { fontSize: 16, fontWeight: '600' as const, color: TEXT_PRI, letterSpacing: -0.2, marginBottom: 2 },
+  wikiSubtitle: { fontSize: 13, fontWeight: '400' as const, color: TEXT_SEC },
+  wikiArrow: { fontSize: 14, fontWeight: '700' as const, color: CYAN },
+
+  // Footer
+  footer: { marginTop: 32, alignItems: 'center', maxWidth: 720, width: '100%', alignSelf: 'center' },
+  footerText: { fontSize: 12, fontWeight: '400', color: TEXT_DIS },
 });

@@ -22,6 +22,12 @@ import GoalsScreen from '../screens/organizations/GoalsScreen';
 import ReportsScreen from '../screens/organizations/ReportsScreen';
 import WhiteLabelScreen from '../screens/organizations/WhiteLabelScreen';
 import SchoolsScreen from '../screens/schools/SchoolsScreen';
+import SchoolsTrackScreen from '../screens/schools/SchoolsTrackScreen';
+import SchoolsModuleScreen from '../screens/schools/SchoolsModuleScreen';
+import SchoolsLessonScreen from '../screens/schools/SchoolsLessonScreen';
+import WikiScreen from '../screens/wiki/WikiScreen';
+import WikiCategoryScreen from '../screens/wiki/WikiCategoryScreen';
+import WikiArticleScreen from '../screens/wiki/WikiArticleScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -57,6 +63,13 @@ export default function MainNavigator() {
       <Stack.Screen name="WhiteLabel" component={WhiteLabelScreen} />
       {/* Schools */}
       <Stack.Screen name="Schools" component={SchoolsScreen} />
+      <Stack.Screen name="SchoolsTrack" component={SchoolsTrackScreen} />
+      <Stack.Screen name="SchoolsModule" component={SchoolsModuleScreen} />
+      <Stack.Screen name="SchoolsLesson" component={SchoolsLessonScreen} />
+      {/* AI Wiki */}
+      <Stack.Screen name="Wiki" component={WikiScreen} />
+      <Stack.Screen name="WikiCategory" component={WikiCategoryScreen} />
+      <Stack.Screen name="WikiArticle" component={WikiArticleScreen} />
     </Stack.Navigator>
   );
 }

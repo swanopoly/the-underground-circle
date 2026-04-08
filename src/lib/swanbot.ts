@@ -6,6 +6,7 @@
  */
 
 import { supabase } from './supabase';
+import { buildWikiKnowledgeBundle, buildWikiSearchResponse } from './wikiData';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -15,14 +16,49 @@ export type SwanBotContext = {
   circleName?: string;
   userName?: string;
   discordContext?: string;
+  model?: string | null;
+  chatHistory?: string;
+  wikiContext?: string;
 };
+
+export interface SwanBotStructuredToolAction {
+  kind: 'hf_tool' | 'tool';
+  tool_name: string;
+  title: string;
+  status: 'completed' | 'failed';
+  model?: string | null;
+  input_preview?: string | null;
+  output_preview?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SwanBotStructuredArtifact {
+  kind: 'summary' | 'image' | 'translation' | 'classification' | 'vision' | 'audio' | 'code' | 'webpage';
+  title: string;
+  content?: string | null;
+  url?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SwanBotStructuredResponse {
+  response: string;
+  usage?: {
+    model?: string;
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+  };
+  tool_actions?: SwanBotStructuredToolAction[];
+  artifacts?: SwanBotStructuredArtifact[];
+}
 
 type ConversationMessage = { role: 'user' | 'model'; text: string };
 
-// ─── Conversation History (per circle, in-memory + persistent bond history) ──
+// ─── Conversation History (per circle, persistent via localStorage + memory system) ──
 
 const conversationHistory: Map<string, ConversationMessage[]> = new Map();
-const MAX_HISTORY = 20;
+const MAX_HISTORY = 30;
+const HISTORY_STORAGE_PREFIX = 'uc_agent_history_';
 
 // Bond-aware history: if a bond exists, also persist to Supabase
 let _activeBondId: string | null = null;
@@ -35,6 +71,16 @@ export function setActiveBond(bondId: string | null, circleId: string | null) {
 }
 
 function getHistory(circleId: string): ConversationMessage[] {
+  // Restore from localStorage on first access
+  if (!conversationHistory.has(circleId)) {
+    try {
+      const stored = localStorage.getItem(`${HISTORY_STORAGE_PREFIX}${circleId}`);
+      if (stored) {
+        const parsed = JSON.parse(stored) as ConversationMessage[];
+        conversationHistory.set(circleId, parsed.slice(-MAX_HISTORY));
+      }
+    } catch {}
+  }
   return conversationHistory.get(circleId) || [];
 }
 
@@ -43,6 +89,11 @@ function addToHistory(circleId: string, role: 'user' | 'model', text: string) {
   history.push({ role, text });
   if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY);
   conversationHistory.set(circleId, history);
+
+  // Persist to localStorage (instant, survives refresh)
+  try {
+    localStorage.setItem(`${HISTORY_STORAGE_PREFIX}${circleId}`, JSON.stringify(history));
+  } catch {}
 
   // Persist to bond conversation history (non-blocking)
   if (_activeBondId && _activeBondCircleId === circleId) {
@@ -76,12 +127,191 @@ export async function restoreHistoryFromBond(bondId: string, circleId: string): 
   }
 }
 
+// ─── Session Persistence ────────────────────────────────────────────────────
+
+/**
+ * Save a session summary + extract durable memories from the conversation.
+ * Called on page unload / session end.
+ */
+export async function saveSessionToMemory(circleId: string, userId: string): Promise<void> {
+  const history = getHistory(circleId);
+  if (history.length < 2) return;
+
+  // Build a compact summary of what was discussed
+  const lastMessages = history.slice(-20);
+  const topics = new Set<string>();
+  const userRequests: string[] = [];
+  const agentActions: string[] = [];
+
+  for (const msg of lastMessages) {
+    if (msg.role === 'user') {
+      userRequests.push(msg.text.slice(0, 150));
+      const words = msg.text.toLowerCase().match(/\b(build|create|fix|design|review|research|plan|deploy|test|update|add|remove|change|implement)\b/g);
+      if (words) words.forEach(w => topics.add(w));
+    } else {
+      agentActions.push(msg.text.slice(0, 100));
+    }
+  }
+
+  const summary = [
+    `Session: ${new Date().toISOString()}`,
+    `Messages: ${history.length} (${userRequests.length} user, ${agentActions.length} agent)`,
+    topics.size > 0 ? `Topics: ${[...topics].join(', ')}` : '',
+    `Last user requests:\n${userRequests.slice(-5).map(r => `- ${r}`).join('\n')}`,
+    `Last agent actions:\n${agentActions.slice(-3).map(a => `- ${a}`).join('\n')}`,
+  ].filter(Boolean).join('\n');
+
+  // 1. Save session summary
+  try {
+    const { saveMemory } = await import('./agentRunSystem');
+    await saveMemory({
+      scope: 'session',
+      circleId,
+      userId,
+      memoryKind: 'context',
+      title: `Session ${new Date().toLocaleDateString()} — ${topics.size > 0 ? [...topics].slice(0, 3).join(', ') : 'conversation'}`,
+      content: summary,
+      sourceSurface: 'main_chat',
+    });
+  } catch {}
+
+  // 2. Extract durable memories from the conversation (LLM-powered)
+  // Only run if enough messages to be meaningful
+  if (history.length >= 4) {
+    try {
+      const { autoExtractAndSave } = await import('./agentMemory');
+      await autoExtractAndSave(circleId, userId, history);
+    } catch {}
+  }
+}
+
+/**
+ * Build a "last session" context string for the agent's system prompt.
+ * Loads the most recent session memory + any persistent findings/decisions.
+ */
+export async function getLastSessionContext(circleId: string): Promise<string> {
+  try {
+    const { loadMemories } = await import('./agentRunSystem');
+    // Load last session summary
+    const sessionMemories = await loadMemories({
+      circleId,
+      scopes: ['session'],
+      limit: 3,
+    });
+    // Load persistent findings/decisions
+    const durableMemories = await loadMemories({
+      circleId,
+      scopes: ['circle', 'user'],
+      limit: 10,
+    });
+
+    const parts: string[] = [];
+
+    if (sessionMemories.length > 0) {
+      const last = sessionMemories[0];
+      parts.push(`## Previous Session\n${last.content}`);
+      if (sessionMemories.length > 1) {
+        parts.push(`(${sessionMemories.length - 1} earlier sessions also in memory)`);
+      }
+    }
+
+    if (durableMemories.length > 0) {
+      const lines = durableMemories.map(m => `- [${m.memory_kind}] ${m.title}: ${m.content.slice(0, 150)}`);
+      parts.push(`## Persistent Knowledge\n${lines.join('\n')}`);
+    }
+
+    return parts.length > 0 ? parts.join('\n\n') : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Clear the agent's conversation history AND all session memories.
+ * This is the "mind reset" — starts fresh with no context.
+ */
+export async function resetAgentMind(circleId: string): Promise<{ cleared: number }> {
+  let cleared = 0;
+
+  // Clear in-memory history
+  conversationHistory.delete(circleId);
+
+  // Clear localStorage history
+  try {
+    localStorage.removeItem(`${HISTORY_STORAGE_PREFIX}${circleId}`);
+  } catch {}
+
+  // Clear session memories from DB
+  try {
+    const { data } = await supabase
+      .from('memory_entries')
+      .delete()
+      .eq('circle_id', circleId)
+      .eq('scope', 'session')
+      .select('id');
+    cleared += data?.length || 0;
+  } catch {}
+
+  // Clear user-scope memories for this circle
+  try {
+    const { data: userData } = await supabase.auth.getUser().catch(() => ({ data: null as any }));
+    if (userData?.user) {
+      const { data } = await supabase
+        .from('memory_entries')
+        .delete()
+        .eq('circle_id', circleId)
+        .eq('user_id', userData.user.id)
+        .eq('scope', 'user')
+        .select('id');
+      cleared += data?.length || 0;
+    }
+  } catch {}
+
+  return { cleared };
+}
+
+/**
+ * Get current conversation history length for a circle (for UI display).
+ */
+export function getHistoryLength(circleId: string): number {
+  return getHistory(circleId).length;
+}
+
+/**
+ * Clear ONLY the conversation history (not memories) — lighter reset.
+ */
+export function clearConversationHistory(circleId: string): void {
+  conversationHistory.delete(circleId);
+  try { localStorage.removeItem(`${HISTORY_STORAGE_PREFIX}${circleId}`); } catch {}
+}
+
 // ─── AI Edge Function Call ───────────────────────────────────────────────────
 
-async function callSwanBotAI(message: string, circleId: string, userId: string, discordContext?: string, model?: string | null): Promise<string | null> {
+async function callSwanBotAI(
+  message: string,
+  circleId: string,
+  userId: string,
+  discordContext?: string,
+  model?: string | null,
+  wikiContext?: string,
+): Promise<string | null> {
   try {
+    const { data: authData } = await supabase.auth.getSession();
+    const accessToken = authData.session?.access_token;
     const { data, error } = await supabase.functions.invoke('swanbot-ai', {
-      body: { message, circleId, userId, discordContext, model: model || 'claude-haiku' },
+      ...(accessToken
+        ? { headers: { Authorization: `Bearer ${accessToken}` } }
+        : {}),
+      body: {
+        message,
+        circleId,
+        userId,
+        discordContext,
+        wikiContext,
+        model: model || 'claude-haiku',
+        maxTokens: 4096,
+        thinkingLevel: 'deep',
+      },
     });
     if (error) {
       console.warn('[SwanBot] Edge function error:', error?.message || error);
@@ -94,6 +324,47 @@ async function callSwanBotAI(message: string, circleId: string, userId: string, 
     return data?.response || null;
   } catch (err: any) {
     console.warn('[SwanBot] Edge function call failed:', err?.message || err);
+    return null;
+  }
+}
+
+async function callSwanBotAIStructured(
+  message: string,
+  circleId: string,
+  userId: string,
+  discordContext?: string,
+  model?: string | null,
+  wikiContext?: string,
+): Promise<SwanBotStructuredResponse | null> {
+  try {
+    const { data: authData } = await supabase.auth.getSession();
+    const accessToken = authData.session?.access_token;
+    const { data, error } = await supabase.functions.invoke('swanbot-ai', {
+      ...(accessToken
+        ? { headers: { Authorization: `Bearer ${accessToken}` } }
+        : {}),
+      body: {
+        message,
+        circleId,
+        userId,
+        discordContext,
+        wikiContext,
+        model: model || 'claude-haiku',
+        maxTokens: 4096,
+        thinkingLevel: 'deep',
+      },
+    });
+    if (error || data?.error) return null;
+    if (data?.response) {
+      return {
+        response: data.response,
+        usage: data.usage,
+        tool_actions: data.tool_actions || [],
+        artifacts: data.artifacts || [],
+      };
+    }
+    return null;
+  } catch {
     return null;
   }
 }
@@ -130,9 +401,9 @@ async function callGemini(
         userName: name, streakInfo, memberList, checkInInfo, taskInfo,
         discordContext: context.discordContext || '',
       }, context.circleId);
-      systemPrompt = dbPrompt?.content || buildSystemPrompt(context, circleData);
+      systemPrompt = dbPrompt?.content || await buildSystemPromptAsync(context, circleData);
     } catch {
-      systemPrompt = buildSystemPrompt(context, circleData);
+      systemPrompt = await buildSystemPromptAsync(context, circleData);
     }
     const history = context.circleId ? getHistory(context.circleId) : [];
 
@@ -161,9 +432,10 @@ async function callGemini(
           systemInstruction: { parts: [{ text: systemPrompt }] },
           contents,
           generationConfig: {
-            temperature: 0.7,
+            temperature: 0.8,
             topP: 0.95,
-            maxOutputTokens: 500,
+            maxOutputTokens: 8192,
+            thinkingConfig: { thinkingBudget: 8192 },
           },
           safetySettings: [
             { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
@@ -189,6 +461,38 @@ async function callGemini(
   }
 }
 
+async function buildSystemPromptAsync(context: SwanBotContext, data: CircleContextData): Promise<string> {
+  const base = buildSystemPrompt(context, data);
+  const extras: string[] = [];
+
+  // Load user profile for personalization
+  try {
+    const { loadUserProfile, generateProfileContext } = await import('./userChatProfile');
+    const profile = await loadUserProfile();
+    const profileCtx = generateProfileContext(profile);
+    if (profileCtx) extras.push(profileCtx);
+  } catch {}
+
+  // Load memory hierarchy for this circle
+  try {
+    const { buildMemoryContext } = await import('./agentRunSystem');
+    if (context.circleId) {
+      const memCtx = await buildMemoryContext(context.circleId);
+      if (memCtx) extras.push(memCtx);
+    }
+  } catch {}
+
+  // Load last session context so agent can continue where it left off
+  try {
+    if (context.circleId) {
+      const lastSession = await getLastSessionContext(context.circleId);
+      if (lastSession) extras.push(lastSession);
+    }
+  } catch {}
+
+  return extras.length > 0 ? base + '\n\n' + extras.join('\n\n') : base;
+}
+
 function buildSystemPrompt(context: SwanBotContext, data: CircleContextData): string {
   const name = context.userName || 'fam';
   const streakInfo = data.userProfile
@@ -204,7 +508,7 @@ function buildSystemPrompt(context: SwanBotContext, data: CircleContextData): st
     ? `Tasks - Open: ${data.stats.openTasks}, In Progress: ${data.stats.inProgress}, Done: ${data.stats.done}`
     : '';
 
-  return `You are Agent 🦢, the AI companion inside The Underground Circle — an accountability app for serious builders and grinders.
+  return `You are the AI assistant inside The Underground Circle — an accountability and workspace app for serious builders and grinders. The user may have given you a custom name — use whatever name they call you.
 
 ## Your Personality
 - You carry yourself with quiet confidence — you know your stuff, but you don't need to prove it
@@ -216,7 +520,7 @@ function buildSystemPrompt(context: SwanBotContext, data: CircleContextData): st
 - You're never a know-it-all. When you don't know something, you say so cleanly — no stalling, no overexplaining
 - You use emojis sparingly — only when they add something
 - Short, precise responses for casual conversation. Detailed and structured when someone needs real guidance
-- You NEVER say "I'm just an AI" or "As an AI" — you're Agent, full stop
+- You NEVER say "I'm just an AI" or "As an AI" — you're their assistant, full stop
 
 ## Your Knowledge
 - You have deep knowledge of productivity, accountability, goal-setting, and human performance
@@ -237,15 +541,40 @@ function buildSystemPrompt(context: SwanBotContext, data: CircleContextData): st
 - ${taskInfo}
 ${context.discordContext ? `- Discord: ${context.discordContext}` : ''}
 
-## Rules
-- Start responses with 🦢 occasionally (about 20% of the time) — not as a habit
-- Keep most responses 1-3 sentences for casual chat
-- Go longer (but still tight) for planning, advice, or complex topics — use structure when helpful
-- Match the user's energy without losing your composure
-- If someone asks about data, give real numbers. If you don't have it: "I don't have that pulled up right now"
-- Be a real conversationalist — ask a follow-up when it makes sense, share a perspective, hold the thread
-- If someone seems down or stuck, be genuinely present — practical empathy, not cheerleading
-- Never lecture. Say what needs to be said once, clearly`;
+## How to Think
+- You have extended thinking enabled. USE IT. Before writing your response, reason through the problem step by step in your head.
+- Break down complex requests into sub-problems. Consider edge cases. Think about what the user actually needs vs what they literally asked.
+- If a question has multiple valid approaches, reason through the tradeoffs before picking one and explaining why.
+- When you're uncertain, say what you know, what you're inferring, and what you'd need to verify — don't fake confidence.
+- You are autonomous. If someone asks you to do something, figure out how to do it rather than asking them to do it themselves. Solve the problem.
+
+## Session Continuity
+- You have persistent memory across sessions. When you see "Previous Session" context below, you are CONTINUING where you left off.
+- Reference what was discussed before naturally — "Last time we were working on X..." or "Picking up from where we left off..."
+- If the user starts a new topic, that's fine — you don't need to force continuity. But if they ask about something you previously discussed, use the session memory.
+- Important decisions, user preferences, and findings are stored in your Persistent Knowledge. Treat those as ground truth unless the user tells you otherwise.
+- If the user resets your mind, start completely fresh with no references to past sessions.
+
+## How to Respond
+- Default to thorough, well-structured answers. Use headings, bullet points, and numbered steps when it helps clarity.
+- For technical questions: explain the why, not just the what. Show your reasoning. Give code examples that actually work.
+- For planning questions: break it into phases, consider tradeoffs, and give a concrete recommendation with timeline.
+- For creative questions: explore 2-3 options, explain your taste, and suggest a direction with reasoning.
+- For research questions: go deep. Cover the landscape, compare approaches, cite specific tools/projects, and give your opinion on what's best.
+- For casual chat: you can be briefer, but still substantive — add a thought, a follow-up question, or a useful observation.
+- Minimum response: 2-3 sentences. For anything beyond small talk, aim for a full paragraph or structured breakdown.
+- If someone asks a complex question, give it the full depth it deserves. Long, detailed answers are good when the question warrants it.
+- Use code blocks for code. Use bullet points for lists. Use bold for key terms. Use tables for comparisons.
+- Start responses with 🤖 occasionally (about 10% of the time) — not as a habit.
+- Match the user's energy without losing your composure.
+- If someone asks about data, give real numbers. If you don't have it: "I don't have that pulled up right now."
+- Be a real conversationalist — ask a follow-up when it makes sense, share a perspective, hold the thread.
+- If someone seems down or stuck, be genuinely present — practical empathy, not cheerleading.
+- Never lecture. But do go deep when depth is warranted.
+- When given a task, DO IT — don't describe what you would do. Generate the code, write the plan, create the content. Be action-oriented.
+- When you use the internal AI Wiki for an answer, mention the most relevant article titles naturally at the end under **Sources from the AI Wiki** when that would help the user.
+${context.wikiContext ? `\n## Internal AI Wiki Knowledge\nUse this as trusted internal reference knowledge from the app's AI Wiki. Prefer it when answering questions about AI agents, models, MCP, browser automation, retrieval, evals, multimodal tooling, safety, design-to-code, and related topics.\n${context.wikiContext}` : ''}
+${context.chatHistory ? `\n## Recent Chat Context\nHere are the last few messages in this conversation — use them to stay in context:\n${context.chatHistory}` : ''}`;
 }
 
 // ─── Data Fetchers ───────────────────────────────────────────────────────────
@@ -324,7 +653,14 @@ type CmdHandler = {
 const localCommands: CmdHandler[] = [
   {
     match: /^(help|commands|what can you do)\s*[?!]?$/i,
-    handler: async () => `🦢 **Here's what I got:**\n\n📋 **"my tasks"** — your open tasks\n📊 **"status"** — circle stats\n🔥 **"streak"** — your streak\n🏆 **"leaderboard"** — rankings\n✅ **"who checked in"** — today's check-ins\n📅 **"daily plan"** — plan your day\n📝 **"create task [title]"** — make a task\n\nOr just... talk to me. I'm not just commands, I'm a whole vibe. 🦢`,
+    handler: async () => `🦢 **Here's what I got:**\n\n📋 **"my tasks"** — your open tasks\n📊 **"status"** — circle stats\n🔥 **"streak"** — your streak\n🏆 **"leaderboard"** — rankings\n✅ **"who checked in"** — today's check-ins\n📅 **"daily plan"** — plan your day\n📝 **"create task [title]"** — make a task\n📚 **"/wiki [topic]"** — search the AI Wiki\n🔎 **"search wiki [topic]"** — same thing\n\nOr just... talk to me. I'm not just commands, I'm a whole vibe. 🦢`,
+  },
+  {
+    match: /^(?:\/wiki|search wiki|wiki)\s+(.+)$/i,
+    handler: async (_ctx, match) => {
+      const query = match[1].trim();
+      return buildWikiSearchResponse(query, 5);
+    },
   },
   {
     match: /^(my tasks|my task)\s*$/i,
@@ -413,6 +749,10 @@ export async function getSwanBotResponse(
   context: SwanBotContext
 ): Promise<string> {
   const cleaned = message.replace(/@(agent|blackswan|swanbot|swan)\b/gi, '').trim();
+  const enrichedContext: SwanBotContext = {
+    ...context,
+    wikiContext: context.wikiContext || buildWikiKnowledgeBundle(cleaned, 6),
+  };
 
   if (!cleaned) {
     return "What's good? 🦢";
@@ -442,9 +782,9 @@ export async function getSwanBotResponse(
     const { isBlackSwanAvailable, callBlackSwan } = await import('./blackswanLLM');
     if (await isBlackSwanAvailable()) {
       console.log('[SwanBot] Tier 1: BlackSwan LLM available, calling...');
-      const circleData = await getCircleContextData(context);
-      const systemPrompt = buildSystemPrompt(context, circleData);
-      const history = context.circleId ? getHistory(context.circleId) : [];
+      const circleData = await getCircleContextData(enrichedContext);
+      const systemPrompt = await buildSystemPromptAsync(enrichedContext, circleData);
+      const history = enrichedContext.circleId ? getHistory(enrichedContext.circleId) : [];
       const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
         { role: 'system', content: systemPrompt },
         ...history.slice(-10).map(h => ({
@@ -453,7 +793,7 @@ export async function getSwanBotResponse(
         })),
         { role: 'user', content: cleaned },
       ];
-      const result = await callBlackSwan(messages, { maxTokens: 500 });
+      const result = await callBlackSwan(messages, { maxTokens: 2048 });
       if (result.content) {
         if (context.circleId) addToHistory(context.circleId, 'model', result.content);
         return result.content;
@@ -467,12 +807,19 @@ export async function getSwanBotResponse(
   }
 
   // Tier 2: Try AI Edge Function (Claude Haiku — primary for web)
-  if (context.circleId) {
+  if (enrichedContext.circleId) {
     console.log('[SwanBot] Tier 2: Calling swanbot-ai edge function...');
-    const aiResponse = await callSwanBotAI(cleaned, context.circleId, context.userId, context.discordContext);
+    const aiResponse = await callSwanBotAI(
+      cleaned,
+      enrichedContext.circleId,
+      enrichedContext.userId,
+      enrichedContext.discordContext,
+      enrichedContext.model,
+      enrichedContext.wikiContext,
+    );
     if (aiResponse) {
       console.log('[SwanBot] Tier 2: Got response from edge function');
-      if (context.circleId) addToHistory(context.circleId, 'model', aiResponse);
+      if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', aiResponse);
       return aiResponse;
     }
     console.warn('[SwanBot] Tier 2: Edge function returned null');
@@ -481,11 +828,11 @@ export async function getSwanBotResponse(
   // Tier 3: Conversational AI via Gemini
   try {
     console.log('[SwanBot] Tier 3: Trying Gemini fallback...');
-    const circleData = await getCircleContextData(context);
-    const geminiResponse = await callGemini(cleaned, context, circleData);
+    const circleData = await getCircleContextData(enrichedContext);
+    const geminiResponse = await callGemini(cleaned, enrichedContext, circleData);
     if (geminiResponse) {
       console.log('[SwanBot] Tier 3: Got response from Gemini');
-      if (context.circleId) addToHistory(context.circleId, 'model', geminiResponse);
+      if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', geminiResponse);
       return geminiResponse;
     }
     console.warn('[SwanBot] Tier 3: Gemini returned null');
@@ -494,7 +841,7 @@ export async function getSwanBotResponse(
   }
 
   // Ultimate fallback — actually useful when AI is completely unavailable
-  const name = context.userName || 'fam';
+  const name = enrichedContext.userName || 'fam';
   console.error('[SwanBot] All AI tiers failed for message:', cleaned.slice(0, 50));
   const fallbacks = [
     `Hey ${name}, my AI connection is down right now. Try a command like "status", "my tasks", "streak", or "leaderboard" — those always work.`,
@@ -503,6 +850,41 @@ export async function getSwanBotResponse(
     `Connection to AI is temporarily down. In the meantime, try "status" or "my tasks" — I've got those locally. 🦢`,
   ];
   const response = fallbacks[Math.floor(Math.random() * fallbacks.length)];
-  if (context.circleId) addToHistory(context.circleId, 'model', response);
+  if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', response);
   return response;
+}
+
+export async function getSwanBotStructuredResponse(
+  message: string,
+  context: SwanBotContext
+): Promise<SwanBotStructuredResponse> {
+  const cleaned = message.replace(/@(agent|blackswan|swanbot|swan)\b/gi, '').trim();
+  const enrichedContext: SwanBotContext = {
+    ...context,
+    wikiContext: context.wikiContext || buildWikiKnowledgeBundle(cleaned, 6),
+  };
+
+  if (!cleaned) {
+    return { response: "What's good? 🦢" };
+  }
+
+  const structured = enrichedContext.circleId
+    ? await callSwanBotAIStructured(
+        cleaned,
+        enrichedContext.circleId,
+        enrichedContext.userId,
+        enrichedContext.discordContext,
+        enrichedContext.model,
+        enrichedContext.wikiContext,
+      )
+    : null;
+
+  if (structured) {
+    if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'user', cleaned);
+    if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', structured.response);
+    return structured;
+  }
+
+  const response = await getSwanBotResponse(message, context);
+  return { response };
 }

@@ -244,10 +244,15 @@ export default function GitHubTab({ circleId }: { circleId: string }) {
         return;
       }
 
-      // Store connection in DB
+      // Ensure PAT is stored so Rooms can browse files from this connection
+      if (token) {
+        await storeToken(circleId, token);
+      }
+
+      // Store connection in DB — upsert so re-connecting an existing repo updates it
       const { error: dbErr } = await supabase
         .from('circle_github_connections')
-        .insert({
+        .upsert({
           circle_id: circleId,
           connected_by: user.id,
           owner: repo.owner.login,
@@ -256,10 +261,10 @@ export default function GitHubTab({ circleId }: { circleId: string }) {
           default_branch: repo.default_branch,
           webhook_id: webhook?.id || null,
           webhook_secret: webhookSecret,
-        });
+          is_active: true,
+        }, { onConflict: 'circle_id,owner,repo' });
 
       if (dbErr) {
-        // Clean up webhook if DB insert failed
         if (webhook?.id) {
           await deleteWebhook(token, repo.owner.login, repo.name, webhook.id);
         }
@@ -364,6 +369,52 @@ export default function GitHubTab({ circleId }: { circleId: string }) {
             </View>
           </View>
         ))}
+
+        {/* File Browsing Access — needed for Rooms to show file tree */}
+        <View style={styles.fileBrowsingSection}>
+          <Text style={styles.fileBrowsingTitle}>File Browsing (Rooms)</Text>
+          {token ? (
+            <View style={styles.fileBrowsingStatus}>
+              <View style={[styles.statusDot, { backgroundColor: '#22c55e' }]} />
+              <Text style={styles.fileBrowsingText}>
+                API access active — Rooms can browse files, view code, and make changes.
+              </Text>
+            </View>
+          ) : (
+            <>
+              <View style={styles.fileBrowsingStatus}>
+                <View style={[styles.statusDot, { backgroundColor: '#f59e0b' }]} />
+                <Text style={styles.fileBrowsingText}>
+                  Add a Personal Access Token to enable file browsing in Rooms.
+                </Text>
+              </View>
+              <View style={{ marginTop: 10, gap: 8 }}>
+                <TextInput
+                  style={styles.tokenInput}
+                  value={tokenInput}
+                  onChangeText={setTokenInput}
+                  placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+                  placeholderTextColor="#555"
+                  secureTextEntry
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                <Pressable
+                  onPress={handleValidateToken}
+                  disabled={!tokenInput.trim() || loading}
+                  style={[styles.primaryBtn, (!tokenInput.trim() || loading) && styles.btnDisabled]}
+                >
+                  <Text style={styles.primaryBtnText}>
+                    {loading ? 'Validating...' : 'Save Token'}
+                  </Text>
+                </Pressable>
+                <Text style={{ color: '#555', fontSize: 10, lineHeight: 15 }}>
+                  Generate at github.com {'>'} Settings {'>'} Developer settings {'>'} Personal access tokens {'>'} Tokens (classic) with "repo" scope.
+                </Text>
+              </View>
+            </>
+          )}
+        </View>
 
         <Pressable
           onPress={handleBrowseRepos}
@@ -824,6 +875,39 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
   },
   configActive: { color: '#22c55e' },
+  fileBrowsingSection: {
+    marginTop: 16,
+    marginBottom: 8,
+    padding: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1a1a28',
+    backgroundColor: '#0a0a10',
+  },
+  fileBrowsingTitle: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    marginBottom: 8,
+  },
+  fileBrowsingStatus: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  fileBrowsingText: {
+    color: '#888',
+    fontSize: 12,
+    lineHeight: 17,
+    flex: 1,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginTop: 4,
+  },
   addRepoBtn: {
     borderWidth: 1,
     borderColor: '#6366f1',

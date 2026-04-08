@@ -10,6 +10,7 @@ import {
   View, Text, TextInput, Pressable, StyleSheet, Platform, ScrollView,
   useWindowDimensions,
 } from 'react-native';
+import { useDebouncedValue } from '@mantine/hooks';
 import { useKanbanData, type KanbanMember } from '../../../hooks/useKanbanData';
 import { useGoals } from '../../../hooks/useGoals';
 import { usePlans } from '../../../hooks/usePlans';
@@ -34,6 +35,7 @@ import { storage } from '../../../lib/storage';
 import { useCircleAutomations, useDashboardStats } from '../../../services/automationService';
 
 import { supabase } from '../../../lib/supabase';
+import CircleStoriesRail from '../../../components/stories/CircleStoriesRail.web';
 import AgentTopBar from './kanban/AgentTopBar';
 import OrchestraPanel from './kanban/OrchestraPanel';
 import GoalsPanel from './kanban/GoalsPanel';
@@ -42,61 +44,9 @@ import KanbanBoard from './kanban/KanbanBoard';
 import TaskDetailModal from './kanban/TaskDetailModal';
 import GoalDetailModal from './kanban/GoalDetailModal';
 
-// ─── Water Flow Loading Animation ─────────────────────────────────────────
+// ─── Loading Animation (uses shared circle loader) ──────────────────────
 
-const WAVE_COLORS = ['#6366f1', '#a855f7', '#3b82f6', '#22c55e', '#f59e0b', '#ec4899', '#22d3ee'];
-let _loadingStyleInjected = false;
-
-function FeedLoadingAnimation() {
-  useEffect(() => {
-    if (Platform.OS !== 'web' || _loadingStyleInjected) return;
-    _loadingStyleInjected = true;
-    const style = document.createElement('style');
-    style.textContent = `
-      @keyframes uc-wave {
-        0%, 100% { transform: translateY(0) scale(1); opacity: 0.4; }
-        30% { transform: translateY(-18px) scale(1.3); opacity: 1; }
-        60% { transform: translateY(4px) scale(0.9); opacity: 0.7; }
-      }
-      .uc-wave-dot {
-        width: 10px; height: 10px; border-radius: 50%;
-        animation: uc-wave 1.4s ease-in-out infinite;
-      }
-    `;
-    document.head.appendChild(style);
-  }, []);
-
-  if (Platform.OS === 'web') {
-    return (
-      <View style={s.loadingContainer}>
-        <View style={s.loadingDots}>
-          {WAVE_COLORS.map((color, i) => (
-            <div
-              key={i}
-              className="uc-wave-dot"
-              style={{
-                backgroundColor: color,
-                animationDelay: `${i * 0.12}s`,
-                boxShadow: `0 0 12px ${color}60`,
-              }}
-            />
-          ))}
-        </View>
-      </View>
-    );
-  }
-
-  // Native fallback — static dots
-  return (
-    <View style={s.loadingContainer}>
-      <View style={s.loadingDots}>
-        {WAVE_COLORS.map((color, i) => (
-          <View key={i} style={[s.loadingDot, { backgroundColor: color }]} />
-        ))}
-      </View>
-    </View>
-  );
-}
+import { LoadingScreen as FeedLoadingAnimation } from '../../../components/LoadingWave';
 
 // ─── Task Search Bar (rendered in FeedTab, right under OrchestraPanel) ────
 
@@ -693,6 +643,8 @@ export default function FeedTab({ circleId }: { circleId: string }) {
     });
     // Load persistent agent identities (custom names, etc.)
     loadAgentIdentities().then(setAgentIdentities).catch(() => {});
+    // Legacy: reads custom agent names from old Office storage key (@office_agent_names).
+    // TODO: migrate to agentIdentity system (loadAgentIdentities) which stores names under @agent_identity_store.
     storage.getItem('@office_agent_names').then(raw => {
       if (raw) setLegacyNames(JSON.parse(raw));
     }).catch(() => {});
@@ -796,6 +748,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
 
   // ─── Search & filter state (lifted from KanbanBoard) ────
   const [searchText, setSearchText] = useState('');
+  const [debouncedSearchText] = useDebouncedValue(searchText, 300);
   const [filterPriority, setFilterPriority] = useState<TaskPriority | null>(null);
   const [filterAssignee, setFilterAssignee] = useState<string | null>(null);
 
@@ -925,6 +878,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
     return (
       <View style={s.container}>
         <AgentTopBar agents={orchestraAgents} />
+        {Platform.OS === 'web' && <CircleStoriesRail circleId={circleId} accentColor="#6366f1" />}
         <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} />
         <TaskSearchBar
           searchText={searchText}
@@ -971,7 +925,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
                 tasksByColumn={filteredTasksByColumn}
                 agents={agents}
                 onCardPress={setDetailTask}
-                searchText={searchText}
+                searchText={debouncedSearchText}
                 filterPriority={filterPriority}
                 filterAssignee={filterAssignee}
               />
@@ -995,7 +949,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
               onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
               onBatchMove={handleBatchMove}
               onArchiveDone={handleArchiveDone}
-              externalSearchText={searchText}
+              externalSearchText={debouncedSearchText}
               externalFilterPriority={filterPriority}
               externalFilterAssignee={filterAssignee}
             />
@@ -1068,6 +1022,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
   return (
     <View style={s.container}>
       <AgentTopBar agents={orchestraAgents} />
+      {Platform.OS === 'web' && <CircleStoriesRail circleId={circleId} accentColor="#6366f1" />}
       <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} />
       <TaskSearchBar
         searchText={searchText}
@@ -1131,7 +1086,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
               tasksByColumn={filteredTasksByColumn}
               agents={agents}
               onCardPress={setDetailTask}
-              searchText={searchText}
+              searchText={debouncedSearchText}
               filterPriority={filterPriority}
               filterAssignee={filterAssignee}
             />
@@ -1149,7 +1104,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
           onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
           onBatchMove={handleBatchMove}
           onArchiveDone={handleArchiveDone}
-          externalSearchText={searchText}
+          externalSearchText={debouncedSearchText}
           externalFilterPriority={filterPriority}
           externalFilterAssignee={filterAssignee}
         />

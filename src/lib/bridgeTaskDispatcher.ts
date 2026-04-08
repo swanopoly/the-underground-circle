@@ -6,10 +6,10 @@
 
 const BRIDGE_PORTS: Record<string, number> = {
   'claude-code': 7778,
-  'codex': 7779,
-  'gemini': 7780,
-  'gemini-cli': 7780,
-  'cursor': 7781,
+  'codex': 7778,    // Routes through Claude Code bridge
+  'gemini': 7778,   // Routes through Claude Code bridge (no dedicated bridge yet)
+  'gemini-cli': 7778,
+  'cursor': 7778,   // Routes through Claude Code bridge
 };
 
 export interface BridgeTaskResult {
@@ -37,10 +37,16 @@ async function probeBridge(port: number): Promise<boolean> {
  */
 async function dispatchToClaudeCode(prompt: string, fileName?: string | null): Promise<BridgeTaskResult> {
   const port = BRIDGE_PORTS['claude-code'];
+  const online = await probeBridge(port);
+  if (!online) return { ok: false, error: 'Claude Code bridge not reachable', dispatchedVia: 'none', provider: 'claude-code' };
   try {
-    const escaped = prompt.replace(/'/g, "'\\''");
-    const fileCtx = fileName ? ` (file: ${fileName})` : '';
-    const command = `echo '${escaped}${fileCtx}' | claude --dangerously-skip-permissions -p 2>&1 | tail -200`;
+    // Use a safe temp file approach to avoid shell injection — write prompt to stdin via process substitution
+    const fileCtx = fileName ? `\n\nFile context: ${fileName}` : '';
+    const fullPrompt = prompt + fileCtx;
+    // Pass prompt as JSON body field — the bridge exec endpoint handles it as stdin pipe
+    // Escape for shell: use base64 encoding to avoid any injection
+    const b64 = typeof btoa === 'function' ? btoa(unescape(encodeURIComponent(fullPrompt))) : Buffer.from(fullPrompt).toString('base64');
+    const command = `echo '${b64}' | base64 -d | claude --dangerously-skip-permissions -p 2>&1 | tail -200`;
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 120000);
@@ -300,5 +306,67 @@ export async function spawnNewSession(
     default:
       return { ok: false, error: `Cannot spawn sessions for provider: ${provider}`, dispatchedVia: 'none', provider: normalized };
   }
+}
+
+/**
+ * Wake an idle agent and assign it a task.
+ * If the agent's bridge is online, spawns a new terminal session with the task.
+ * If the bridge is offline, falls back to dispatchBridgeTask (which may fall through to AI).
+ *
+ * Flow:
+ * 1. Probe the bridge for the agent's provider
+ * 2. If online → spawn a new session with the task (wakes up a real terminal)
+ * 3. If offline → try dispatch (exec on existing session) → fall back to AI
+ * 4. Update agent status in the DB to 'building'
+ */
+export async function wakeAndAssignTask(
+  provider: string,
+  agentName: string,
+  task: string,
+  circleId: string,
+  agentDbId?: string,
+  options?: { model?: string; workdir?: string; fileName?: string },
+): Promise<BridgeTaskResult> {
+  const normalized = provider.toLowerCase().replace(/\s+/g, '-');
+  const port = BRIDGE_PORTS[normalized] || BRIDGE_PORTS['claude-code'];
+  const bridgeOnline = await probeBridge(port);
+
+  console.log(`[wakeAndAssign] Agent "${agentName}" (${normalized}), bridge ${bridgeOnline ? 'ONLINE' : 'OFFLINE'}`);
+
+  // Update agent status to building immediately
+  if (agentDbId) {
+    try {
+      const { supabase } = await import('./supabase');
+      await supabase.from('circle_office_agents')
+        .update({
+          status: 'building',
+          current_task: task.slice(0, 120),
+          last_active_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', agentDbId);
+    } catch {}
+  }
+
+  if (bridgeOnline) {
+    // Try spawning a new terminal session first — this WAKES the agent
+    const spawnResult = await spawnNewSession(normalized, task, options);
+    if (spawnResult.ok) {
+      console.log(`[wakeAndAssign] Spawned new ${normalized} session for "${agentName}"`);
+      return spawnResult;
+    }
+
+    // Spawn failed — try dispatching to an existing session
+    console.log(`[wakeAndAssign] Spawn failed (${spawnResult.error}), trying dispatch...`);
+    const dispatchResult = await dispatchBridgeTask(normalized, task, options?.fileName);
+    if (dispatchResult.ok) return dispatchResult;
+
+    // Both failed
+    return { ok: false, error: `Wake failed: spawn (${spawnResult.error}), dispatch (${dispatchResult.error})`, dispatchedVia: 'none', provider: normalized };
+  }
+
+  // Bridge offline — try dispatch anyway (might work if bridge comes back)
+  const dispatchResult = await dispatchBridgeTask(normalized, task, options?.fileName);
+  return dispatchResult;
 }
 

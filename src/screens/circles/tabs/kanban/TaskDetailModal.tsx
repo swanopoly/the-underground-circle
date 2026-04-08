@@ -18,6 +18,10 @@ import { supabase } from '../../../../lib/supabase';
 import { dispatchBridgeTask } from '../../../../lib/bridgeTaskDispatcher';
 import SpawnAgentPanel from '../../../../components/SpawnAgentPanel';
 import FocusChainPanel from './FocusChainPanel';
+import TaskRunTimeline from './TaskRunTimeline';
+import TaskArtifactsPanel from './TaskArtifactsPanel';
+import TaskChecksPanel from './TaskChecksPanel';
+import TaskApprovalsPanel from './TaskApprovalsPanel';
 
 // ─── Automation Report Section Parser ────────────────────────────────────────
 
@@ -770,6 +774,8 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
             {/* Focus Chain (Checklist) */}
             <FocusChainPanel
               taskId={task.id}
+              taskTitle={task.title}
+              taskDescription={task.description || undefined}
               items={task.focus_chain || []}
               onUpdate={(chain) => kanban.updateFocusChain(task.id, chain)}
               circleId={circleId}
@@ -1233,6 +1239,22 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                 </View>
               </>
             )}
+
+            {/* ── Execution Runtime Panels — Steps, Artifacts, Checks, Approvals ── */}
+            {taskRuns.length > 0 && (() => {
+              const latestRun = taskRuns[0];
+              return (
+                <>
+                  <Text style={s.sectionLabel}>Run Details — {latestRun.summary?.slice(0, 60) || 'Latest Run'}</Text>
+                  <View style={{ gap: 12, marginBottom: 16 }}>
+                    <TaskRunTimeline runId={latestRun.id} circleId={task.circle_id} />
+                    <TaskArtifactsPanel runId={latestRun.id} circleId={task.circle_id} />
+                    <TaskChecksPanel taskId={task.id} runId={latestRun.id} circleId={task.circle_id} />
+                    <TaskApprovalsPanel runId={latestRun.id} circleId={task.circle_id} />
+                  </View>
+                </>
+              );
+            })()}
 
             {/* Comments section */}
             <View style={s.commentSection}>

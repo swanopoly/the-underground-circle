@@ -50,7 +50,7 @@ const AGENT_COLORS = [
   { color: '#e8e8e8', label: 'White' },
 ];
 
-const MODEL_PREFERENCES = [
+const MODEL_PREFERENCES_BASE = [
   { key: 'auto',          label: 'Auto (best available)',  desc: 'System picks optimal model per task' },
   { key: 'blackswan',     label: 'BlackSwan LLM',         desc: 'Custom fine-tuned model' },
   { key: 'claude-haiku',  label: 'Claude Haiku',          desc: 'Fast, cost-efficient' },
@@ -60,6 +60,8 @@ const MODEL_PREFERENCES = [
   { key: 'gpt-4.1',       label: 'GPT-4.1',               desc: 'OpenAI flagship' },
   { key: 'o4-mini',       label: 'O4 Mini',               desc: 'OpenAI reasoning' },
 ];
+// Custom HF models are loaded at runtime and appended
+let MODEL_PREFERENCES = [...MODEL_PREFERENCES_BASE];
 
 const AUTONOMY_LEVELS = [
   { key: 'supervised',  label: 'Supervised',   desc: 'Asks before acting, proposes plans', icon: '?' },
@@ -138,6 +140,18 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
   const [step, setStep] = useState<Step>('identity');
   const [deploying, setDeploying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [customHfModels, setCustomHfModels] = useState<typeof MODEL_PREFERENCES_BASE>([]);
+
+  // Load custom HF models
+  React.useEffect(() => {
+    import('../lib/customModels').then(({ loadCustomModels }) => {
+      loadCustomModels().then(models => {
+        const mapped = models.map(m => ({ key: `hf:${m.id}`, label: `${m.label} (HF)`, desc: m.desc }));
+        setCustomHfModels(mapped);
+        MODEL_PREFERENCES = [...MODEL_PREFERENCES_BASE, ...mapped];
+      });
+    }).catch(() => {});
+  }, []);
 
   const [config, setConfig] = useState<AgentConfig>({
     name: '',
@@ -279,7 +293,7 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
       </View>
 
       {/* Step content */}
-      <ScrollView style={s.body} showsVerticalScrollIndicator={false} contentContainerStyle={s.bodyContent}>
+      <ScrollView style={s.body} showsVerticalScrollIndicator={true} nestedScrollEnabled contentContainerStyle={s.bodyContent}>
         {step === 'identity' && (
           <>
             <Text style={s.stepTitle}>Name & Identity</Text>

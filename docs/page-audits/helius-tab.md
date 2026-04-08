@@ -1,0 +1,8 @@
+# HeliusTab Audit
+Source: `src/screens/circles/tabs/HeliusTab.tsx`
+Last audited: 2026-04-03
+Status: No major findings identified in this pass.
+
+## Findings
+- No concrete page-level defects were identified during this static pass.
+

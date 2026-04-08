@@ -1856,7 +1856,8 @@ export default function CustomizePanel({
                     (async () => {
                       const { data: auth } = await supabase.auth.getSession();
                       const token = auth.session?.access_token || '';
-                      const url = `${supabase.supabaseUrl}/functions/v1/figma-oauth/authorize?state=${encodeURIComponent(token)}`;
+                      const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
+                      const url = `${supabaseUrl}/functions/v1/figma-oauth/authorize?state=${encodeURIComponent(token)}`;
                       Linking.openURL(url);
                     })();
                   }}

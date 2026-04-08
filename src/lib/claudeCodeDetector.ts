@@ -32,6 +32,13 @@ export interface ClaudeCodeSession {
   messageCount: number;
   recentActions: string[];
   subagentCount: number;
+  // Rich live context
+  lastUserMessage?: string;
+  lastAssistantText?: string;
+  recentToolCalls?: Array<{ tool: string; file: string; ts: string }>;
+  activeFiles?: string[];
+  currentToolName?: string;
+  currentToolFile?: string;
 }
 
 // Colors for auto-detected agents (amber/gold tones to match Claude Code branding)
@@ -124,11 +131,15 @@ export async function execBridgeCommand(
 // ── Convert bridge sessions to OfficeAgent[] ─────────────────────────────────
 
 function inferBridgeStatus(s: ClaudeCodeSession): AgentStatus {
+  // Trust the bridge's reported status first — it knows if the session is alive
+  if (s.status === 'active') return 'active';
+  if (s.status === 'idle') return 'idle';
+  // Fallback to activity-based inference only if bridge doesn't report status
   if (!s.lastActivity) return 'idle';
   const age = Date.now() - new Date(s.lastActivity).getTime();
-  if (age < 30_000) return 'active';
-  if (age < 3_600_000) return 'idle';   // Stay idle for up to 1 hour
-  return 'offline';
+  if (age < 120_000) return 'active';    // 2 min window (was 30s — too aggressive)
+  if (age < 86_400_000) return 'idle';   // Stay idle for up to 24 hours (was 1h)
+  return 'idle';                          // Never go offline from here — let sweeper handle it
 }
 
 function inferBridgeActivity(s: ClaudeCodeSession): string {
@@ -191,6 +202,17 @@ export function bridgeSessionsToAgents(sessions: ClaudeCodeSession[]): OfficeAge
     connectionId: 'claude-code-auto',
     connectionName: 'Claude Code (Local)',
     providerType: 'claude-code' as ProviderType,
+    // Live work context
+    lastUserMessage: s.lastUserMessage || '',
+    lastAssistantText: s.lastAssistantText || '',
+    recentToolCalls: s.recentToolCalls || [],
+    activeFiles: s.activeFiles || [],
+    currentToolName: s.currentToolName || '',
+    currentToolFile: s.currentToolFile || '',
+    projectDir: s.projectDir || '',
+    subagentCount: s.subagentCount || 0,
+    version: s.version || '',
+    slug: s.slug || '',
   }));
 }
 
@@ -200,14 +222,58 @@ export const CLAUDE_CODE_AGENT_NAME = 'Claude Code';
 const CLAUDE_CODE_BRIDGE_URL = 'http://localhost:7778';
 
 /**
- * Publish a single "Claude Code" agent to circle_office_agents.
- * Upsert on (circle_id, owner_id, name) — safe to call multiple times.
+ * Publish pixel agents for all active Claude Code sessions.
+ * Each main session gets its own persistent pixel agent via upsert on (circle_id, owner_id, name).
+ * Subagents roll up into their parent session's agent.
+ * When only one session exists, uses the name "Claude Code".
+ * When multiple exist, uses the session's friendly name (e.g., "Whistling Taco").
  */
 export async function publishClaudeCodeAgent(
   circleId: string,
   sessionCount: number,
+  sessions?: ClaudeCodeSession[],
 ): Promise<{ agentId?: string; error?: string }> {
   const display = PROVIDER_DISPLAY['claude-code'];
+
+  // If we have session details and multiple main sessions, publish each separately
+  const mainSessions = sessions?.filter(s => s.kind === 'main' || !s.kind) || [];
+
+  if (mainSessions.length > 1) {
+    // Multiple sessions — each gets its own pixel agent
+    for (let i = 0; i < mainSessions.length; i++) {
+      const session = mainSessions[i];
+      const name = friendlyName(session);
+      const subagents = sessions?.filter(s => s.kind === 'subagent' && s.parentSessionId === session.sessionId) || [];
+      const isActive = session.status === 'active' || subagents.some(s => s.status === 'active');
+      const project = session.projectDir.split('/').pop() || 'project';
+
+      await publishAgentToCircle({
+        circleId,
+        provider: 'claude-code',
+        name,
+        color: CC_COLORS[i % CC_COLORS.length],
+        toolIcon: display?.icon || '💻',
+        gatewayUrl: CLAUDE_CODE_BRIDGE_URL,
+        isPublic: false,
+      });
+
+      await supabase
+        .from('circle_office_agents')
+        .update({
+          status: isActive ? 'building' : 'idle',
+          current_task: isActive
+            ? `Working on ${project}${subagents.length > 0 ? ` (+${subagents.length} sub)` : ''}`
+            : `Idle on ${project}`,
+          last_active_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('circle_id', circleId)
+        .eq('name', name);
+    }
+    return { agentId: undefined };
+  }
+
+  // Single session or no session details — use the standard "Claude Code" name
   const result = await publishAgentToCircle({
     circleId,
     provider: 'claude-code',
@@ -251,17 +317,56 @@ export async function updateClaudeCodeAgentStatus(
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) return;
 
-    const activeSessions = sessions.filter(s => s.status === 'active');
-    const status = activeSessions.length > 0
-      ? 'building'
-      : 'idle';    // Always idle, never immediately offline
-    const currentTask = activeSessions.length > 0
-      ? `Working on ${activeSessions[0].projectDir.split('/').pop() || 'project'}`
-      : sessions.length > 0
-        ? `${sessions.length} session(s) idle`
-        : 'Session ended — idling';
+    const mainSessions = sessions.filter(s => s.kind === 'main' || !s.kind);
 
-    // Token syncing is centralized in OfficeTab's 30s sync loop via syncAgentTokenSnapshot()
+    if (mainSessions.length > 1) {
+      // Multiple sessions — update each session's named agent individually
+      for (const session of mainSessions) {
+        const name = friendlyName(session);
+        const subagents = sessions.filter(s => s.kind === 'subagent' && s.parentSessionId === session.sessionId);
+        const isActive = session.status === 'active' || subagents.some(s => s.status === 'active');
+        const project = session.projectDir.split('/').pop() || 'project';
+
+        await supabase
+          .from('circle_office_agents')
+          .update({
+            status: isActive ? 'building' : 'idle',
+            current_task: isActive
+              ? `Working on ${project}${subagents.length > 0 ? ` (+${subagents.length} sub)` : ''}`
+              : `Idle on ${project}`,
+            last_active_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('circle_id', circleId)
+          .eq('owner_id', auth.user.id)
+          .eq('name', name);
+      }
+      return;
+    }
+
+    // Single session — update the standard "Claude Code" agent
+    const activeSessions = sessions.filter(s => s.status === 'active');
+    const subagentSessions = sessions.filter(s => s.kind === 'subagent');
+    const activeSubagents = subagentSessions.filter(s => s.status === 'active');
+
+    const status = activeSessions.length > 0 ? 'building' : 'idle';
+
+    let currentTask: string;
+    if (activeSubagents.length > 0) {
+      const project = activeSubagents[0].projectDir.split('/').pop() || 'project';
+      currentTask = `Subagent active on ${project}` + (activeSubagents.length > 1 ? ` (+${activeSubagents.length - 1} more)` : '');
+    } else if (activeSessions.length > 0) {
+      const project = activeSessions[0].projectDir.split('/').pop() || 'project';
+      currentTask = `Working on ${project}`;
+    } else if (sessions.length > 0) {
+      const parts: string[] = [];
+      if (mainSessions.length > 0) parts.push(`${mainSessions.length} main`);
+      if (subagentSessions.length > 0) parts.push(`${subagentSessions.length} sub`);
+      currentTask = `${parts.join(' + ')} session(s) idle`;
+    } else {
+      currentTask = 'Session ended — idling';
+    }
+
     await supabase
       .from('circle_office_agents')
       .update({

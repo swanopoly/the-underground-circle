@@ -17,6 +17,7 @@ interface RequestBody {
   model?: string | null; // 'blackswan' | 'claude-haiku' | 'claude-sonnet' | 'claude-opus' | null (auto)
   thinkingLevel?: "fast" | "balanced" | "deep"; // Controls extended thinking
   targetAgentName?: string; // Name of the targeted agent (e.g. "MyBot") — defaults to "BlackSwan"
+  wikiContext?: string;
 }
 
 // ─── Skills System (Progressive Disclosure) ─────────────────────────────────
@@ -564,6 +565,12 @@ Use these to personalize responses. Learned from past conversations.
 ${nonGotchas.map((m: any) => `- [${m.category}] ${m.value}`).join("\n")}`;
   }
 
+  if (ctx.wikiContext) {
+    prompt += `\n\n## Internal AI Wiki Knowledge
+Use this as trusted internal reference knowledge from the app's AI Wiki when the user asks about AI agents, MCP, models, design-to-code, retrieval, evals, browser automation, multimodal tooling, safety, or related topics.
+${ctx.wikiContext}`;
+  }
+
   return prompt;
 }
 
@@ -633,6 +640,223 @@ interface ToolAction {
   tool: string;
   input: any;
   result: any;
+}
+
+function mapToolActionToStructuredToolAction(action: ToolAction) {
+  const status = action.result?.error ? "failed" : "completed";
+  return {
+    kind: action.tool.startsWith("hf_") ? "hf_tool" : "tool",
+    tool_name: action.tool,
+    title: action.tool.replace(/^hf_/, "").replace(/_/g, " "),
+    status,
+    model: action.result?.model || null,
+    input_preview: typeof action.input === "string"
+      ? action.input.slice(0, 160)
+      : JSON.stringify(action.input).slice(0, 160),
+    output_preview: typeof action.result === "string"
+      ? action.result.slice(0, 220)
+      : JSON.stringify(action.result).slice(0, 220),
+    metadata: action.result?.error ? { error: action.result.error } : undefined,
+  };
+}
+
+function mapToolActionsToArtifacts(toolActions?: ToolAction[]) {
+  if (!toolActions || toolActions.length === 0) return [];
+
+  const artifacts: any[] = [];
+  for (const action of toolActions) {
+    const result = action.result || {};
+    switch (action.tool) {
+      case "hf_generate_image":
+        if (result.image_url) {
+          artifacts.push({
+            kind: "image",
+            title: "Generated image",
+            url: result.image_url,
+            metadata: { tool_name: action.tool, model: result.model || null },
+          });
+        }
+        break;
+      case "hf_text_to_speech":
+        if (result.audio_data) {
+          artifacts.push({
+            kind: "audio",
+            title: "Generated audio",
+            url: result.audio_data,
+            metadata: { tool_name: action.tool, model: result.model || null },
+          });
+        }
+        break;
+      case "hf_translate":
+        if (result.translated) {
+          artifacts.push({
+            kind: "translation",
+            title: "Translation",
+            content: result.translated,
+            metadata: { tool_name: action.tool, model: result.model || null, from: result.from, to: result.to },
+          });
+        }
+        break;
+      case "hf_summarize":
+      case "hf_qa":
+      case "hf_transcribe":
+        if (result.summary || result.answer || result.transcript) {
+          artifacts.push({
+            kind: "summary",
+            title: action.tool === "hf_transcribe" ? "Transcript" : "Summary",
+            content: result.summary || result.answer || result.transcript,
+            metadata: { tool_name: action.tool, model: result.model || null },
+          });
+        }
+        break;
+      case "hf_chat":
+        if (result.reply) {
+          artifacts.push({
+            kind: "summary",
+            title: "Open model response",
+            content: result.reply,
+            metadata: { tool_name: action.tool, model: result.model || null },
+          });
+        }
+        break;
+      case "hf_code": {
+        if (result.code) {
+          const prompt = String(action.input?.prompt || "").toLowerCase();
+          const language = String(action.input?.language || "").toLowerCase();
+          const isWebpage = language === "html"
+            || /build-page|landing page|web page|webpage|website|html|tailwind|react page|marketing page/.test(prompt);
+          artifacts.push({
+            kind: isWebpage ? "webpage" : "code",
+            title: isWebpage ? "Generated web page" : "Generated code",
+            content: result.code,
+            metadata: {
+              tool_name: action.tool,
+              model: result.model || null,
+              language: action.input?.language || null,
+            },
+          });
+        }
+        break;
+      }
+      case "hf_classify":
+      case "hf_zero_shot":
+        artifacts.push({
+          kind: "classification",
+          title: "Classification",
+          content: JSON.stringify(result.classification || result, null, 2),
+          metadata: { tool_name: action.tool, model: result.model || null },
+        });
+        break;
+      case "hf_vision":
+        if (result.answer) {
+          artifacts.push({
+            kind: "vision",
+            title: "Vision analysis",
+            content: result.answer,
+            metadata: { tool_name: action.tool, model: result.model || null },
+          });
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  return artifacts;
+}
+
+const DIRECT_IMAGE_MODEL_MAP: Record<string, string> = {
+  "flux-schnell": "black-forest-labs/FLUX.1-schnell",
+  "flux-dev": "black-forest-labs/FLUX.1-dev",
+  "stable-diffusion": "stabilityai/stable-diffusion-xl-base-1.0",
+  "stable-diffusion-xl": "stabilityai/stable-diffusion-xl-base-1.0",
+};
+
+function stripLeadingCommand(message: string): string {
+  return message
+    .trim()
+    .replace(/^\/[a-z-]+\s*/i, "")
+    .replace(/^(wiki|search wiki)\s+/i, "")
+    .trim();
+}
+
+function detectDirectToolIntent(message: string, model?: string | null) {
+  const trimmed = message.trim();
+  const lower = trimmed.toLowerCase();
+  const selectedImageModel = model ? DIRECT_IMAGE_MODEL_MAP[model] : null;
+  const explicitStable = /\bstable\s*dif+fusion\b|\bsdxl\b/.test(lower);
+  const explicitFlux = /\bflux\b/.test(lower);
+  const imageLikePrompt =
+    /^\/imagine\b/.test(lower) ||
+    /\b(generate|create|make|draw|design|render)\b.{0,30}\b(image|logo|icon|poster|illustration|art|banner|wallpaper|diagram|portrait|avatar)\b/.test(lower) ||
+    /\bimage of\b|\bpicture of\b|\bconcept art\b/.test(lower) ||
+    explicitStable ||
+    explicitFlux;
+
+  if (
+    imageLikePrompt ||
+    (selectedImageModel && imageLikePrompt)
+  ) {
+    const prompt = stripLeadingCommand(trimmed) || trimmed;
+    return {
+      toolName: "hf_generate_image",
+      toolInput: {
+        prompt,
+        ...(selectedImageModel
+          ? { model: selectedImageModel }
+          : explicitStable
+            ? { model: DIRECT_IMAGE_MODEL_MAP["stable-diffusion"] }
+            : explicitFlux
+              ? { model: DIRECT_IMAGE_MODEL_MAP["flux-dev"] }
+              : {}),
+      },
+      responseText: "🦢 I generated an image from your prompt. The result is attached below as an artifact.",
+    };
+  }
+
+  if (/^\/build-page\b/.test(lower) || /\b(build|make|create|draft)\b.{0,30}\b(page|landing page|website|web page|homepage)\b/.test(lower)) {
+    const brief = stripLeadingCommand(trimmed) || trimmed;
+    return {
+      toolName: "hf_code",
+      toolInput: {
+        language: "html",
+        prompt: `Create a modern, polished single-file web page based on this brief: ${brief}
+
+Requirements:
+- Return a single HTML file with embedded CSS and minimal inline JavaScript only when needed
+- Make it responsive on mobile and desktop
+- Use a distinctive visual direction, not a boilerplate layout
+- Include semantic sections and realistic placeholder copy
+- Keep the output implementation-ready`,
+      },
+      responseText: "🦢 I drafted a web page artifact you can preview, refine, or hand off for implementation.",
+    };
+  }
+
+  if (/^\/code\b/.test(lower)) {
+    const task = stripLeadingCommand(trimmed) || trimmed;
+    return {
+      toolName: "hf_code",
+      toolInput: {
+        prompt: task,
+      },
+      responseText: "🦢 I generated code for that request and attached it as a reusable artifact.",
+    };
+  }
+
+  return null;
+}
+
+function estimateDirectUsage(message: string, response: string, model?: string | null) {
+  const inputTokens = Math.ceil(message.length / 4);
+  const outputTokens = Math.ceil(response.length / 4);
+  return {
+    model: model || "direct-tool",
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    cache_creation_tokens: 0,
+    cache_read_tokens: 0,
+    total_tokens: inputTokens + outputTokens,
+  };
 }
 
 const BLACKSWAN_TOOLS = [
@@ -1490,9 +1714,10 @@ async function callClaude(systemPrompt: string, userMessage: string, options: Ca
   ];
 
   // Configure max tokens based on thinking level
-  let maxTokens = 1024;
-  if (thinkingLevel === "deep") maxTokens = 4096;
-  else if (thinkingLevel === "fast") maxTokens = 512;
+  let maxTokens = 2048;
+  if (thinkingLevel === "deep") maxTokens = 8192;
+  else if (thinkingLevel === "balanced") maxTokens = 4096;
+  else if (thinkingLevel === "fast") maxTokens = 1024;
 
   // Build request body
   const requestBody: any = {
@@ -1507,13 +1732,14 @@ async function callClaude(systemPrompt: string, userMessage: string, options: Ca
     requestBody.tools = BLACKSWAN_TOOLS;
   }
 
-  // Extended thinking for deep mode on Sonnet/Opus
-  if (thinkingLevel === "deep" && (modelId.includes("sonnet") || modelId.includes("opus"))) {
+  // Extended thinking for deep + balanced on Sonnet/Opus
+  if ((thinkingLevel === "deep" || thinkingLevel === "balanced") && (modelId.includes("sonnet") || modelId.includes("opus"))) {
+    const budget = thinkingLevel === "deep" ? 10000 : 4096;
     requestBody.thinking = {
       type: "enabled",
-      budget_tokens: 2048,
+      budget_tokens: budget,
     };
-    requestBody.max_tokens = 8192;
+    requestBody.max_tokens = thinkingLevel === "deep" ? 16000 : 8192;
   }
 
   // ─── Agentic tool-use loop with guardrails ──────────────────────────
@@ -1834,7 +2060,7 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { message, circleId, userId, model, thinkingLevel, targetAgentName }: RequestBody = await req.json();
+    const { message, circleId, userId, model, thinkingLevel, targetAgentName, wikiContext }: RequestBody = await req.json();
 
     if (!message || !circleId || !userId) {
       return new Response(
@@ -1850,7 +2076,8 @@ Deno.serve(async (req: Request) => {
 
     // Gather full circle context (includes relevant knowledge entries + memories)
     // Pass targetAgentName so we load the correct agent's spirit + spawn config
-    const context = await gatherCircleContext(supabase, circleId, userId, message, targetAgentName);
+    const context: any = await gatherCircleContext(supabase, circleId, userId, message, targetAgentName);
+    context.wikiContext = wikiContext || null;
 
     // Route skills — spirit-aware + context-gated
     const matchedSkills = routeSkills(message, context.spirit, context);
@@ -2237,9 +2464,11 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
     }
 
     // Route based on requested model:
+    // - direct tool intents: execute image/code/page tools immediately
     // - null/auto/blackswan: try local BlackSwan LLM first, fall back to Claude Haiku
     // - claude-haiku/sonnet/opus: skip local, go straight to that Claude model
     let aiResponse: string | null = null;
+    let structuredToolActions: ToolAction[] = [];
     let tokenBreakdown = {
       model: "blackswan",
       input_tokens: 0,
@@ -2248,11 +2477,12 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       cache_read_tokens: 0,
       total_tokens: 0,
     };
-    const isClaudeModel = model && model.startsWith("claude-");
+    const normalizedModel = model || null;
+    const isClaudeModel = !!normalizedModel && normalizedModel.startsWith("claude-");
 
     // Smart model routing: auto-upgrade for complex queries when no model specified
-    let effectiveModel = model;
-    if (!isClaudeModel && thinkingLevel === "deep") {
+    let effectiveModel = normalizedModel;
+    if (!normalizedModel && thinkingLevel === "deep") {
       // Deep thinking → use Sonnet for extended thinking capability
       effectiveModel = "claude-sonnet";
     }
@@ -2272,10 +2502,40 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       "mistral":      "mistralai/Mistral-Large-2411",
     };
 
-    const hfModelId = effectiveModel ? HF_MODEL_MAP[effectiveModel] : null;
+    const hfModelId = effectiveModel
+      ? (HF_MODEL_MAP[effectiveModel] || (effectiveModel.includes("/") ? effectiveModel : null))
+      : null;
+
+    const directToolIntent = detectDirectToolIntent(message, effectiveModel);
+    if (directToolIntent) {
+      const directResultRaw = await executeToolCall(
+        directToolIntent.toolName,
+        directToolIntent.toolInput,
+        supabase,
+        circleId,
+        userId,
+      );
+      const directResult = JSON.parse(directResultRaw);
+      structuredToolActions = [{
+        tool: directToolIntent.toolName,
+        input: directToolIntent.toolInput,
+        result: directResult,
+      }];
+
+      if (directResult?.error) {
+        throw new Error(directResult.error);
+      }
+
+      aiResponse = directToolIntent.responseText;
+      tokenBreakdown = estimateDirectUsage(
+        message,
+        aiResponse,
+        directResult?.model || ("model" in directToolIntent.toolInput ? directToolIntent.toolInput.model : undefined) || effectiveModel || directToolIntent.toolName,
+      );
+    }
 
     // Route to HuggingFace if user selected an open model
-    if (hfModelId && !isClaudeModel) {
+    if (!aiResponse && hfModelId && !isClaudeModel) {
       const hfResult = await callHfProxy("chat", {
         messages: [
           { role: "system", content: systemPrompt },
@@ -2315,7 +2575,13 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
 
     if (!aiResponse) {
       // Fall back to Claude (using requested model or default Haiku)
-      const claudeModelKey = effectiveModel?.startsWith("claude-") ? effectiveModel : null;
+      const claudeModelKey = effectiveModel?.startsWith("claude-opus")
+        ? "claude-opus"
+        : effectiveModel?.startsWith("claude-sonnet")
+          ? "claude-sonnet"
+          : effectiveModel?.startsWith("claude-haiku")
+            ? "claude-haiku"
+            : null;
       const result = await callClaude(systemPrompt, message, {
         modelKey: claudeModelKey,
         conversationMessages,
@@ -2326,6 +2592,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         enableTools: true,
       });
       aiResponse = result.text;
+      structuredToolActions = result.toolActions || [];
 
       // If tools were used, append a summary of actions taken
       if (result.toolActions && result.toolActions.length > 0) {
@@ -2371,6 +2638,8 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       JSON.stringify({
         response: aiResponse,
         usage: tokenBreakdown,
+        tool_actions: structuredToolActions.map(mapToolActionToStructuredToolAction),
+        artifacts: mapToolActionsToArtifacts(structuredToolActions),
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );

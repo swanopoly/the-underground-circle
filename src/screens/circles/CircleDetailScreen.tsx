@@ -25,6 +25,8 @@ import RoomsTab from './tabs/RoomsTab';
 import AnalyticsTab from './tabs/AnalyticsTab';
 import IntegrationsTab from './tabs/IntegrationsTab';
 import BackpackTab from './tabs/BackpackTab';
+import FloatingChat from '../../components/FloatingChat';
+import TutorialController from '../../components/onboarding/TutorialController';
 
 import { Circle } from '../../types';
 import ErrorBoundary from '../../components/ErrorBoundary';
@@ -54,12 +56,26 @@ const TAB_STORAGE_KEY = 'uc_active_tab';
 function loadSavedTab(circleId: string): Tab {
   try {
     if (Platform.OS === 'web') {
+      // 1. Check clean URL path: /circle/:id/:tab
+      try {
+        const parts = window.location.pathname.split('/');
+        // Expected: ['', 'circle', circleId, tabSlug]
+        if (parts.length >= 4 && parts[1] === 'circle') {
+          const urlTab = parts[3].toUpperCase();
+          if (TABS.includes(urlTab)) return urlTab;
+        }
+      } catch {}
+      // 2. Legacy: check ?tab= query param
+      try {
+        const urlTab = new URLSearchParams(window.location.search).get('tab')?.toUpperCase();
+        if (urlTab && TABS.includes(urlTab)) return urlTab;
+      } catch {}
+      // 3. Fall back to localStorage
       const raw = localStorage.getItem(`${TAB_STORAGE_KEY}_${circleId}`);
       if (raw && TABS.includes(raw)) return raw;
     }
-    // Native: AsyncStorage is async, so we load synchronously from a cache below
   } catch {}
-  return 'FEED';
+  return 'OFFICE';
 }
 function saveTab(circleId: string, tab: Tab) {
   try {
@@ -74,11 +90,18 @@ function saveTab(circleId: string, tab: Tab) {
 
 // Cache circle data so the screen renders instantly on refresh
 const CIRCLE_CACHE_KEY = 'uc_circle_cache';
+const CIRCLE_CACHE_VERSION = 1;
+const CIRCLE_CACHE_TTL_MS = 300_000; // 5 minutes
 function loadCachedCircle(circleId: string): { circle: Circle | null; memberCount: number } {
   try {
     if (Platform.OS === 'web') {
       const raw = localStorage.getItem(`${CIRCLE_CACHE_KEY}_${circleId}`);
-      if (raw) return JSON.parse(raw);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed.version !== CIRCLE_CACHE_VERSION) return { circle: null, memberCount: 0 };
+        if (!parsed.savedAt || Date.now() - parsed.savedAt > CIRCLE_CACHE_TTL_MS) return { circle: null, memberCount: 0 };
+        return { circle: parsed.circle, memberCount: parsed.memberCount };
+      }
     }
   } catch {}
   return { circle: null, memberCount: 0 };
@@ -86,18 +109,40 @@ function loadCachedCircle(circleId: string): { circle: Circle | null; memberCoun
 function cacheCircle(circleId: string, circle: Circle, memberCount: number) {
   try {
     if (Platform.OS === 'web') {
-      localStorage.setItem(`${CIRCLE_CACHE_KEY}_${circleId}`, JSON.stringify({ circle, memberCount }));
+      localStorage.setItem(`${CIRCLE_CACHE_KEY}_${circleId}`, JSON.stringify({ version: CIRCLE_CACHE_VERSION, savedAt: Date.now(), circle, memberCount }));
     }
   } catch {}
 }
 
 export default function CircleDetailScreen({ route, navigation }: any) {
-  const { circleId, circleName } = route.params;
-  const [activeTab, setActiveTabRaw] = useState<Tab>(() => loadSavedTab(circleId));
+  const { circleId, circleName, tab: routeTab } = route.params;
+  const [activeTab, setActiveTabRaw] = useState<Tab>(() => {
+    // Route param takes priority (from CMD+K, deep links, programmatic navigation)
+    if (routeTab && TABS.includes(routeTab.toUpperCase())) return routeTab.toUpperCase();
+    return loadSavedTab(circleId);
+  });
   const setActiveTab = useCallback((tab: Tab) => {
     setActiveTabRaw(tab);
     saveTab(circleId, tab);
-  }, [circleId]);
+    // Sync tab to URL — clean path: /circle/:id/:tab
+    if (Platform.OS === 'web') {
+      try {
+        const tabSlug = tab.toLowerCase();
+        const cleanPath = `/circle/${circleId}/${tabSlug}`;
+        document.title = `${tab.charAt(0) + tab.slice(1).toLowerCase()} - ${circleName || 'Circle'}`;
+        window.history.replaceState({}, '', cleanPath);
+      } catch {}
+    }
+  }, [circleId, circleName]);
+
+  // When route params change (CMD+K, deep link), switch to the requested tab
+  const tabTs = route.params?._tabTs;
+  useEffect(() => {
+    if (routeTab) {
+      const upper = routeTab.toUpperCase();
+      if (TABS.includes(upper)) setActiveTab(upper);
+    }
+  }, [routeTab, tabTs, setActiveTab]);
   const cached = loadCachedCircle(circleId);
   const [circle, setCircle] = useState<Circle | null>(cached.circle);
   const [memberCount, setMemberCount] = useState(cached.memberCount);
@@ -105,8 +150,14 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   const { width: winW } = useWindowDimensions();
   const isMobile = winW < 700;
   const [onlineMembers, setOnlineMembers] = useState(Math.max(1, Math.floor((cached.memberCount || 1) * 0.5)));
-  // Skip loading gate if we have cached data — render immediately
-  const [loading, setLoading] = useState(!cached.circle);
+  // Chat pop-out state — renders FloatingChat overlay that persists across tabs
+  const [chatPopout, setChatPopout] = useState(false);
+  const [chatMountKey, setChatMountKey] = useState(0);
+
+  // Loading gate: show loading screen until circle data + Office tab are both ready
+  const [circleLoaded, setCircleLoaded] = useState(!!cached.circle);
+  const [officeReady, setOfficeReady] = useState(false);
+  const loading = !circleLoaded || !officeReady;
 
   // Native: load saved tab asynchronously on mount
   useEffect(() => {
@@ -139,7 +190,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
     } catch (error) {
       console.error('Error loading circle data:', error);
     } finally {
-      setLoading(false);
+      setCircleLoaded(true);
     }
   };
 
@@ -154,16 +205,22 @@ export default function CircleDetailScreen({ route, navigation }: any) {
     gaming: 'GAMING', creative: 'CREATIVE', custom: 'CUSTOM',
   };
 
-  if (loading) {
-    return <LoadingScreen />;
-  }
+  // Office is always mounted eagerly so it can load behind the loading screen.
+  // The onReady callback fires once Office has fetched its core data.
+  const handleOfficeReady = useCallback(() => setOfficeReady(true), []);
 
   return (
     <View style={styles.container}>
+      {/* Loading overlay — covers everything until circle data + Office are ready */}
+      {loading && (
+        <View style={styles.loadingOverlay}>
+          <LoadingScreen />
+        </View>
+      )}
+
       {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerInner}>
-          {/* Tab Bar — horizontal scrollable pills with arrow indicators */}
           <TabBarScroller
             tabs={TAB_META}
             activeTab={activeTab}
@@ -174,18 +231,34 @@ export default function CircleDetailScreen({ route, navigation }: any) {
         </View>
       </View>
 
-      {/* Tabs — lazy mount on first visit, stay mounted after */}
-      <LazyTab tabKey="CHAT" activeTab={activeTab}>
-        <ChatTab circleId={circleId} accentColor={accentColor} />
-      </LazyTab>
-      <LazyTab tabKey="OFFICE" activeTab={activeTab}>
-        <OfficeTab circleId={circleId} accentColor={accentColor} />
-      </LazyTab>
+      {/* Pop-out button — visible when Chat tab is active and not already popped out */}
+      {activeTab === 'CHAT' && !chatPopout && (
+        <Pressable
+          onPress={() => setChatPopout(true)}
+          style={[styles.popoutBtn, { borderColor: accentColor + '40' }]}
+          accessibilityRole="button"
+          accessibilityLabel="Pop out chat to floating window"
+        >
+          <Text style={[styles.popoutBtnText, { color: accentColor }]}>{'\u29C9'}</Text>
+        </Pressable>
+      )}
+
+      {/* Office — always mounted (eager), loads behind loading screen */}
+      <View style={[styles.tabContent, activeTab !== 'OFFICE' && styles.hiddenTab]}>
+        <ErrorBoundary>
+          <OfficeTab circleId={circleId} accentColor={accentColor} onReady={handleOfficeReady} />
+        </ErrorBoundary>
+      </View>
+
+      {/* Other tabs — lazy mount on first visit, stay mounted after */}
+      {!chatPopout && (
+        <LazyTab key={`chat-${chatMountKey}`} tabKey="CHAT" activeTab={activeTab}>
+          <ChatTab circleId={circleId} accentColor={accentColor} />
+        </LazyTab>
+      )}
       <LazyTab tabKey="ROOMS" activeTab={activeTab}>
         <RoomsTab circleId={circleId} accentColor={accentColor} />
       </LazyTab>
-
-      {/* Secondary tabs — lazy mount on first visit, stay mounted after */}
       <LazyTab tabKey="BACKPACK" activeTab={activeTab}>
         <BackpackTab circleId={circleId} accentColor={accentColor} />
       </LazyTab>
@@ -210,6 +283,19 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       <LazyTab tabKey="PROFILE" activeTab={activeTab}>
         <ProfileTab circleId={circleId} navigation={navigation} />
       </LazyTab>
+
+      {/* Floating Chat — persists across all tabs when popped out */}
+      {chatPopout && (
+        <FloatingChat
+          circleId={circleId}
+          circleName={circleName || circle?.name || 'Circle'}
+          accentColor={accentColor}
+          onClose={() => { setChatPopout(false); setChatMountKey(k => k + 1); }}
+        />
+      )}
+
+      {/* Onboarding Tutorial — floating guide for new users */}
+      <TutorialController circleId={circleId} />
     </View>
   );
 }
@@ -387,6 +473,11 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000000',
   },
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 100,
+    backgroundColor: '#000000',
+  },
   loadingText: {
     color: '#888',
     fontSize: 14,
@@ -517,5 +608,28 @@ const styles = StyleSheet.create({
   },
   hiddenTab: {
     display: 'none' as any,
+  },
+
+  // Pop-out button
+  popoutBtn: {
+    position: 'absolute' as any,
+    top: Platform.OS === 'web' ? 8 : 48,
+    right: 12,
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1a1a28',
+    backgroundColor: '#0a0a10',
+    alignItems: 'center' as any,
+    justifyContent: 'center' as any,
+    zIndex: 50,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'opacity 0.15s' } as any : {}),
+  },
+  popoutBtnText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#a0a0b0',
+    fontFamily: 'monospace',
   },
 });

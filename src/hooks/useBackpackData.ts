@@ -74,6 +74,7 @@ function circleAgentToOfficeAgent(ca: CircleOfficeAgent, idx: number): OfficeAge
     recentActions: ca.last_command ? [ca.last_command] : [],
     recentMessages: [],
     costToday: estimateCostFromTokens(ca.token_usage_today ?? 0),
+    costTotal: estimateCostFromTokens((ca.token_usage_today ?? 0) + (ca.token_usage_total ?? 0)),
     costWeek: estimateCostFromTokens(ca.token_usage_total ?? 0),
     tokensUsed: (ca.token_usage_today ?? 0) + (ca.token_usage_total ?? 0),
     inputTokens: (ca as any).input_tokens_total ?? Math.round(((ca.token_usage_today ?? 0) + (ca.token_usage_total ?? 0)) * 0.6),

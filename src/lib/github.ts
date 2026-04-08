@@ -190,12 +190,7 @@ export async function createWebhook(
   webhookUrl: string,
   secret: string,
   events: string[] = [
-    'push', 'pull_request', 'pull_request_review', 'issues',
-    'release', 'workflow_run', 'check_run', 'check_suite',
-    'deployment', 'deployment_status',
-    'code_scanning_alert', 'secret_scanning_alert', 'dependabot_alert',
-    'projects_v2_item', 'discussion', 'discussion_comment',
-    'star', 'fork',
+    'push', 'pull_request', 'issues', 'release', 'workflow_run',
   ],
 ): Promise<{ webhook: GitHubWebhook | null; error: string | null }> {
   try {
@@ -221,13 +216,29 @@ export async function createWebhook(
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      return { webhook: null, error: (body as any).message || `HTTP ${res.status}` };
+      const msg = (body as any).message || `HTTP ${res.status}`;
+      // If webhook already exists for this URL, find and return it
+      if (res.status === 422 && msg.includes('already')) {
+        const existing = await findExistingWebhook(token, owner, repo, webhookUrl);
+        if (existing) return { webhook: existing, error: null };
+      }
+      return { webhook: null, error: msg };
     }
     const data = await res.json();
     return { webhook: data as GitHubWebhook, error: null };
   } catch (e: any) {
     return { webhook: null, error: e.message || 'Network error' };
   }
+}
+
+/** Find an existing webhook by URL (used when creation returns 422 duplicate) */
+async function findExistingWebhook(
+  token: string, owner: string, repo: string, url: string,
+): Promise<GitHubWebhook | null> {
+  try {
+    const { data } = await ghFetch<GitHubWebhook[]>(`/repos/${owner}/${repo}/hooks`, token);
+    return data?.find(h => h.config?.url === url) || null;
+  } catch { return null; }
 }
 
 /** Delete a webhook from a repo */
@@ -577,4 +588,277 @@ export async function getConnectedRepos(userId: string): Promise<{ repos: GitHub
   } catch (e: any) {
     return { repos: [], error: e.message || 'Failed to fetch repos' };
   }
+}
+
+// ─── Write Operations — Create/Update/Delete files, branches, PRs ───────────
+
+/** Create or update a file in a repo (single-file commit) */
+export async function createOrUpdateFile(
+  token: string,
+  owner: string,
+  repo: string,
+  path: string,
+  content: string,
+  message: string,
+  branch: string,
+  sha?: string, // required for updates, omit for new files
+): Promise<{ success: boolean; sha?: string; error?: string }> {
+  const body: Record<string, unknown> = {
+    message,
+    content: btoa(encodeURIComponent(content).replace(/%([0-9A-F]{2})/g, (_, p1) => String.fromCharCode(parseInt(p1, 16)))), // base64 encode (Unicode-safe)
+    branch,
+  };
+  if (sha) body.sha = sha;
+
+  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+  const res = await fetch(`${API}/repos/${owner}/${repo}/contents/${encodedPath}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github.v3+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    return { success: false, error: (err as any).message || `HTTP ${res.status}` };
+  }
+  const data = await res.json();
+  return { success: true, sha: data.content?.sha };
+}
+
+/** Delete a file from a repo */
+export async function deleteFileFromRepo(
+  token: string,
+  owner: string,
+  repo: string,
+  path: string,
+  message: string,
+  branch: string,
+  sha: string,
+): Promise<{ success: boolean; error?: string }> {
+  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+  const res = await fetch(`${API}/repos/${owner}/${repo}/contents/${encodedPath}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github.v3+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ message, sha, branch }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    return { success: false, error: (err as any).message || `HTTP ${res.status}` };
+  }
+  return { success: true };
+}
+
+/** Create a new branch from an existing ref */
+export async function createBranch(
+  token: string,
+  owner: string,
+  repo: string,
+  newBranch: string,
+  fromBranch: string,
+): Promise<{ success: boolean; error?: string }> {
+  // Get the SHA of the source branch
+  const { data: refData, error: refErr } = await ghFetch<{ object: { sha: string } }>(
+    `/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(fromBranch)}`, token,
+  );
+  if (refErr || !refData) return { success: false, error: refErr || 'Source branch not found' };
+
+  const res = await fetch(`${API}/repos/${owner}/${repo}/git/refs`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github.v3+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      ref: `refs/heads/${newBranch}`,
+      sha: refData.object.sha,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    return { success: false, error: (err as any).message || `HTTP ${res.status}` };
+  }
+  return { success: true };
+}
+
+/** List branches for a repo */
+export async function listBranches(
+  token: string, owner: string, repo: string,
+): Promise<{ branches: { name: string; protected: boolean }[]; error?: string }> {
+  const { data, error } = await ghFetch<{ name: string; protected: boolean }[]>(
+    `/repos/${owner}/${repo}/branches?per_page=100`, token,
+  );
+  return { branches: data || [], error: error || undefined };
+}
+
+/** Create a pull request */
+export async function createPullRequest(
+  token: string,
+  owner: string,
+  repo: string,
+  title: string,
+  body: string,
+  head: string,  // source branch
+  base: string,  // target branch
+  draft?: boolean,
+): Promise<{ pr: { number: number; html_url: string } | null; error?: string }> {
+  const res = await fetch(`${API}/repos/${owner}/${repo}/pulls`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github.v3+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ title, body, head, base, draft: draft ?? false }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    return { pr: null, error: (err as any).message || `HTTP ${res.status}` };
+  }
+  const data = await res.json();
+  return { pr: { number: data.number, html_url: data.html_url } };
+}
+
+/** List open pull requests */
+export async function listPullRequests(
+  token: string, owner: string, repo: string, state: 'open' | 'closed' | 'all' = 'open',
+): Promise<{ prs: { number: number; title: string; html_url: string; state: string; user: { login: string }; created_at: string; head: { ref: string }; base: { ref: string } }[]; error?: string }> {
+  const { data, error } = await ghFetch<any[]>(
+    `/repos/${owner}/${repo}/pulls?state=${state}&per_page=30&sort=updated&direction=desc`, token,
+  );
+  return { prs: data || [], error: error || undefined };
+}
+
+/** Get the SHA of a file (needed for updates/deletes) */
+export async function getFileSha(
+  token: string, owner: string, repo: string, path: string, branch: string,
+): Promise<string | null> {
+  const { data } = await ghFetch<{ sha: string }>(
+    `/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(branch)}`, token,
+  );
+  return data?.sha || null;
+}
+
+/** Multi-file commit via the Git Data API (create tree + commit) */
+export async function commitMultipleFiles(
+  token: string,
+  owner: string,
+  repo: string,
+  branch: string,
+  message: string,
+  files: { path: string; content: string }[],
+): Promise<{ success: boolean; sha?: string; error?: string }> {
+  try {
+    // 1. Get current branch HEAD
+    const { data: refData } = await ghFetch<{ object: { sha: string } }>(
+      `/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(branch)}`, token,
+    );
+    if (!refData) return { success: false, error: 'Branch not found' };
+    const baseSha = refData.object.sha;
+
+    // 2. Create blobs for each file
+    const treeItems: { path: string; mode: string; type: string; sha: string }[] = [];
+    for (const file of files) {
+      const blobRes = await fetch(`${API}/repos/${owner}/${repo}/git/blobs`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github.v3+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ content: file.content, encoding: 'utf-8' }),
+      });
+      if (!blobRes.ok) return { success: false, error: `Failed to create blob for ${file.path}` };
+      const blob = await blobRes.json();
+      treeItems.push({ path: file.path, mode: '100644', type: 'blob', sha: blob.sha });
+    }
+
+    // 3. Create tree
+    const treeRes = await fetch(`${API}/repos/${owner}/${repo}/git/trees`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ base_tree: baseSha, tree: treeItems }),
+    });
+    if (!treeRes.ok) return { success: false, error: 'Failed to create tree' };
+    const tree = await treeRes.json();
+
+    // 4. Create commit
+    const commitRes = await fetch(`${API}/repos/${owner}/${repo}/git/commits`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message, tree: tree.sha, parents: [baseSha] }),
+    });
+    if (!commitRes.ok) return { success: false, error: 'Failed to create commit' };
+    const commit = await commitRes.json();
+
+    // 5. Update branch ref
+    const updateRes = await fetch(`${API}/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branch)}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ sha: commit.sha }),
+    });
+    if (!updateRes.ok) return { success: false, error: 'Failed to update branch' };
+
+    return { success: true, sha: commit.sha };
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Commit failed' };
+  }
+}
+
+/** List recent commits on a branch */
+export async function listCommits(
+  token: string, owner: string, repo: string, branch: string, perPage = 20,
+): Promise<{ commits: { sha: string; message: string; author: { login: string }; date: string; html_url: string }[]; error?: string }> {
+  const { data, error } = await ghFetch<any[]>(
+    `/repos/${owner}/${repo}/commits?sha=${encodeURIComponent(branch)}&per_page=${perPage}`, token,
+  );
+  const commits = (data || []).map((c: any) => ({
+    sha: c.sha,
+    message: c.commit?.message || '',
+    author: { login: c.author?.login || c.commit?.author?.name || 'unknown' },
+    date: c.commit?.author?.date || '',
+    html_url: c.html_url || '',
+  }));
+  return { commits, error: error || undefined };
+}
+
+/** Get diff between two branches */
+export async function compareBranches(
+  token: string, owner: string, repo: string, base: string, head: string,
+): Promise<{ ahead: number; behind: number; files: { filename: string; status: string; additions: number; deletions: number }[]; error?: string }> {
+  const { data, error } = await ghFetch<any>(
+    `/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`, token,
+  );
+  if (error || !data) return { ahead: 0, behind: 0, files: [], error: error || undefined };
+  return {
+    ahead: data.ahead_by || 0,
+    behind: data.behind_by || 0,
+    files: (data.files || []).map((f: any) => ({
+      filename: f.filename, status: f.status,
+      additions: f.additions, deletions: f.deletions,
+    })),
+  };
 }

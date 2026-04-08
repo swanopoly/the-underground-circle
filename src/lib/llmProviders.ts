@@ -84,6 +84,8 @@ export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
   replicate: [
     { id: 'flux-schnell', label: 'Flux Schnell (fast)', provider: 'replicate', contextWindow: 0, costTier: 'cheap' },
     { id: 'flux-dev',     label: 'Flux Dev (quality)',   provider: 'replicate', contextWindow: 0, costTier: 'mid' },
+    { id: 'stable-diffusion-xl', label: 'Stable Diffusion XL', provider: 'replicate', contextWindow: 0, costTier: 'cheap' },
+    { id: 'stable-diffusion',    label: 'Stable Diffusion',    provider: 'replicate', contextWindow: 0, costTier: 'cheap' },
   ],
   'github-models': [
     { id: 'gpt-4.1',                      label: 'GPT-4.1',         provider: 'github-models', contextWindow: 1047576, costTier: 'free' },

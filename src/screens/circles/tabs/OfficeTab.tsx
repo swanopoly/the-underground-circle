@@ -25,6 +25,7 @@ import {
   OfficeFloor, DEFAULT_FLOORS, createDefaultFloor, OfficeTheme, UC_AGENT_APPEARANCE,
   generateRandomAppearance, OWNER_EMAIL, isInteractiveFurniture,
 } from '../../../lib/officeConfig';
+import { validateOfficeLayout } from '../../../lib/officeValidation';
 import { useCustomThemes, customThemeToOfficeTheme, CUSTOM_THEME_PREFIX, CustomThemeRecord } from '../../../services/customThemes';
 import { enrichAgentsWithCache, enrichSessionsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
 import { restoreAllAgents, recordAgentActivity, renameAgent as renameAgentIdentity } from '../../../lib/agentIdentity';
@@ -136,6 +137,13 @@ import PhoneMessenger from '../../../components/PhoneMessenger';
 import PokerGame from '../../../components/poker/PokerGame';
 import HuggingFaceExplorer from './office/HuggingFaceExplorer';
 import HfToolRunner from './office/HfToolRunner';
+import Marquee from '../../../components/web-effects/Marquee.web';
+import StatusPicker from '../../../components/office/StatusPicker';
+import XPEventFeed from '../../../components/rpg/XPEventFeed';
+import StreakFlame from '../../../components/rpg/StreakFlame';
+import GitHubWallFeed from '../../../components/office/GitHubWallFeed';
+import WorldClockBar from '../../../components/office/WorldClockBar';
+import SoundMixer from '../../../components/office/SoundMixer';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -168,9 +176,10 @@ interface Props {
   circleId: string;
   accentColor: string;
   onAgentStats?: (stats: AgentStats) => void;
+  onReady?: () => void;
 }
 
-export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props) {
+export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady }: Props) {
   const [selectedAgent, setSelectedAgent] = useState<OfficeAgent | null>(null);
   const [showCustomize, setShowCustomize] = useState(false);
   const [showMcpHub, setShowMcpHub] = useState(false);
@@ -359,6 +368,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // ─── Cloud agent connect modal ─────────────────────────────────────────────
   const [showConnectAgent, setShowConnectAgent] = useState(false);
 
+  // ─── Office enhancement panels ────────────────────────────────────────────
+  const [showGitHubFeed, setShowGitHubFeed] = useState(false);
+  const [showSoundMixer, setShowSoundMixer] = useState(false);
+
   // ─── Multi-connection state ──────────────────────────────
   const [connections, setConnections] = useState<AgentConnection[]>([]);
   const pollersRef = useRef<Map<string, OpenClawPoller>>(new Map());
@@ -401,11 +414,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   // ─── Circle Office (shared agents from all members) ──────────────────────
   const [circleOfficeAgents, setCircleOfficeAgents] = useState<CircleOfficeAgent[]>([]);
   const [publishingToCircle, setPublishingToCircle] = useState(false);
+  const readyFired = useRef(false);
 
   const loadCircleOffice = useCallback(async () => {
     const { agents } = await loadCircleOfficeAgents(circleId);
     setCircleOfficeAgents(agents);
-  }, [circleId]);
+    // Signal ready after first successful load
+    if (!readyFired.current && onReady) {
+      readyFired.current = true;
+      onReady();
+    }
+  }, [circleId, onReady]);
 
   useEffect(() => {
     setAutoConnectCircleId(circleId);
@@ -475,7 +494,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       leavePresenceChannel(circleId);
       stopIdleScheduler(circleId);
     };
-  }, [circleId, connections.filter(c => c.status === 'connected').length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps — identity signature, not count
+  }, [circleId, connections.filter(c => c.status === 'connected').map(c => c.id).join(',')]);
 
   // ─── Direct invocation handler (called by OfficeTerminal after send) ─────
   const handleCommandSent = useCallback((params: {
@@ -570,6 +590,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     if (listenIds.length === 0) return;
 
     const unsub = subscribeToTerminalCommands(circleId, listenIds, async (cmd: BroadcastCommandPayload) => {
+      // Skip commands we sent ourselves — already handled via direct invocation (onCommandSent)
+      if (cmd.senderId === currentUserId) return;
       const baseReq = {
         messageId: cmd.messageId,
         circleId,
@@ -646,7 +668,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
       unsub();
       cleanupTerminalChannels(circleId);
     };
-  }, [circleId, currentUserId, circleOfficeAgents.filter(a => a.ownerId === currentUserId).length, resolvedGatewayUrl]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps — identity signature, not count
+  }, [circleId, currentUserId, circleOfficeAgents.filter(a => a.ownerId === currentUserId).map(a => a.id).join(','), resolvedGatewayUrl]);
 
   // Merge live presence into circle office agents
   const mergedCircleAgents = circleOfficeAgents.map(agent => ({
@@ -711,7 +734,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         }).then(() => loadCircleOffice());
       }
     }
-  }, [circleId, connections.filter(c => c.status === 'connected').length, loadCircleOffice]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps — identity signature, not count
+  }, [circleId, connections.filter(c => c.status === 'connected').map(c => c.id).join(','), loadCircleOffice]);
 
   // ─── Telegram state ──────────────────────────────
   const [telegramConfig, setTelegramConfig] = useState<TelegramConfig>({ botToken: '', chatId: '' });
@@ -862,20 +886,32 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
   }, [connections]);
 
   // Helper: push partial office preferences to Supabase (merges into existing JSONB)
+  // Serialized via promise chain to prevent lost-update races between concurrent writes
+  const prefQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pushOfficePreferences = useCallback((partial: Record<string, unknown>) => {
     if (!_profileHasOfficePreferences) return;
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (!user) return;
-      supabase.from('profiles').select('office_preferences').eq('id', user.id).single().then(({ data, error }) => {
-        if (error) { _profileHasOfficePreferences = false; return; }
+    prefQueueRef.current = prefQueueRef.current.then(async () => {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) return;
+        const { data, error } = await supabase.from('profiles')
+          .select('office_preferences').eq('id', user.id).single();
+        // Only disable sync for schema-missing errors (column doesn't exist), not transient ones
+        if (error) {
+          if (error.code === 'PGRST204' || error.message?.includes('column')) {
+            _profileHasOfficePreferences = false;
+          }
+          return;
+        }
         const current = (data?.office_preferences || {}) as Record<string, unknown>;
         const merged = { ...current, ...partial, updatedAt: Date.now() };
-        supabase.from('profiles').update({ office_preferences: merged }).eq('id', user.id).then(
-          ({ error: e2 }) => { if (e2) _profileHasOfficePreferences = false; },
-          () => { _profileHasOfficePreferences = false; },
-        );
-      });
-    }).catch(() => {});
+        const { error: e2 } = await supabase.from('profiles')
+          .update({ office_preferences: merged }).eq('id', user.id);
+        if (e2 && (e2.code === 'PGRST204' || e2.message?.includes('column'))) {
+          _profileHasOfficePreferences = false;
+        }
+      } catch {}
+    });
   }, []);
 
   // ─── Telegram handlers ──────────────────────────────
@@ -922,7 +958,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     setTelegramChatTitle(null);
     setTelegramMessages([]);
     setTelegramError(null);
-  }, []);
+    // Clear persisted credentials — both local storage and remote profile
+    storage.removeItem(STORAGE_KEY_TELEGRAM).catch(() => {});
+    pushOfficePreferences({ telegramConfig: null });
+  }, [pushOfficePreferences]);
 
   // ─── Load saved connections on mount + auto-discover ──────────────
   // Agent detection (Claude Code bridge + OpenClaw) is handled by the app-level
@@ -1210,16 +1249,22 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
     storage.setItem(STORAGE_KEY_FLOORS_TS, now.toString()).catch(() => {});
     // Async push to Supabase (skip if column doesn't exist)
     if (_profileHasOfficeLayout) {
-      supabase.auth.getUser().then(({ data: { user } }) => {
-        if (user) {
-          supabase.from('profiles').update({
-            office_layout: { floors, currentFloorId, updatedAt: now }
-          }).eq('id', user.id).then(
-            ({ error }) => { if (error) _profileHasOfficeLayout = false; },
-            () => { _profileHasOfficeLayout = false; },
-          );
-        }
-      }).catch(() => {});
+      const layoutData = { floors, currentFloorId, updatedAt: now };
+      const validation = validateOfficeLayout(layoutData);
+      if (!validation.valid) {
+        console.warn('[OfficeTab] Layout validation failed, skipping save:', validation.errors);
+      } else {
+        supabase.auth.getUser().then(({ data: { user } }) => {
+          if (user) {
+            supabase.from('profiles').update({
+              office_layout: validation.sanitizedLayout
+            }).eq('id', user.id).then(
+              ({ error }) => { if (error) _profileHasOfficeLayout = false; },
+              () => { _profileHasOfficeLayout = false; },
+            );
+          }
+        }).catch(() => {});
+      }
     }
   }, [floors, currentFloorId]);
 
@@ -3026,6 +3071,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
         />
       )}
 
+      {/* Marquee ticker removed — too noisy for the Office view */}
+
       {/* Combined floor selector + action bar */}
       {viewMode === 'office' && (
         <View style={styles.floorBar}>
@@ -3115,9 +3162,25 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats }: Props
               <Text style={styles.toolbarBtnIcon}>🔌</Text>
               <Text style={styles.toolbarBtnText}>MCP</Text>
             </Pressable>
+            <Pressable onPress={() => setShowGitHubFeed(!showGitHubFeed)} style={[styles.toolbarBtn,
+              showGitHubFeed && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' },
+              Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+              <Text style={styles.toolbarBtnIcon}>{'{}'}</Text>
+              <Text style={styles.toolbarBtnText}>GitHub</Text>
+            </Pressable>
+            {Platform.OS === 'web' && (
+              <Pressable onPress={() => setShowSoundMixer(!showSoundMixer)} style={[styles.toolbarBtn,
+                showSoundMixer && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' },
+                Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                <Text style={styles.toolbarBtnIcon}>{'(('}</Text>
+                <Text style={styles.toolbarBtnText}>Sound</Text>
+              </Pressable>
+            )}
           </View>
         </View>
       )}
+
+      {/* Enhancement panels moved to Agent Panel — Office stays clean */}
 
       {/* Edit toolbar */}
       {viewMode === 'office' && editMode && (
@@ -5241,6 +5304,19 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff08', borderColor: '#ffffff15',
   },
   tgBadge: { fontSize: 7, marginRight: 1 },
+
+  // Office enhancement panels
+  enhancementRow: {
+    flexDirection: 'row' as const, alignItems: 'stretch' as const,
+    gap: 4, paddingHorizontal: 8, paddingVertical: 4,
+    backgroundColor: '#050508',
+    borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
+  },
+  feedPanel: {
+    paddingHorizontal: 8, paddingVertical: 4,
+    backgroundColor: '#050508',
+    borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
+  },
 
   // Combined floor + actions bar
   floorBar: {

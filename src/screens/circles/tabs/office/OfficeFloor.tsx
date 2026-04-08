@@ -1022,7 +1022,7 @@ function CabinWindow({ theme }: { theme: OfficeTheme }) {
 function CathedralWindow({ theme }: { theme: OfficeTheme }) {
   // Tall lancet stained glass windows with tracery
   return (
-    <View style={[s.windowArea, { top: 16, right: 50 }]}>
+    <View style={{ position: 'absolute', top: 16, right: 50 }}>
       {/* Three tall lancet windows */}
       {[0, 75, 150].map((offset, i) => {
         const glassColors = [

@@ -19,7 +19,7 @@ import {
 import { LoadingScreen } from '../../../components/LoadingWave';
 import { supabase } from '../../../lib/supabase';
 import { getSwanBotResponse as getAIResponse } from '../../../lib/swanbot';
-import { dispatchBridgeTask, spawnNewSession } from '../../../lib/bridgeTaskDispatcher';
+import { dispatchBridgeTask, spawnNewSession, wakeAndAssignTask } from '../../../lib/bridgeTaskDispatcher';
 import SpawnAgentPanel from '../../../components/SpawnAgentPanel';
 import {
   getStoredToken, storeToken, removeToken, validateToken as ghValidateToken,
@@ -27,6 +27,8 @@ import {
   connectViaOAuth, getOAuthStatus, getConnectedRepos,
   type GitHubUser, type GitHubRepo, type GitHubTreeEntry,
 } from '../../../lib/github';
+import RoomFileTree from '../../../components/rooms/RoomFileTree.web';
+import type { RoomFileEntry } from '../../../components/rooms/roomTreeAdapter';
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 // ── Persistent state keys ────────────────────────────────────────────────────
@@ -556,7 +558,100 @@ function highlightLine(line: string, lang: string): React.ReactNode[] {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
+// ─── New Rooms Module Shell (swap-in) ──────────────────────────────────────
+import RoomWorkspaceShell from './rooms/RoomWorkspaceShell';
+import NewRoomCard from './rooms/RoomCard';
+import { useRoomList } from './rooms/roomHooks';
+import { ROOM_CHAT_PRESETS } from './rooms/roomTypes';
+
 export default function RoomsTab({ circleId, accentColor }: Props) {
+  // Use new room module for list + workspace
+  const [useNewModule] = useState(false); // flip to true to use new module
+
+  if (useNewModule) {
+    return <NewRoomsTab circleId={circleId} accentColor={accentColor} />;
+  }
+
+  return <LegacyRoomsTab circleId={circleId} accentColor={accentColor} />;
+}
+
+function NewRoomsTab({ circleId, accentColor }: Props) {
+  const { rooms, loading } = useRoomList(circleId);
+  const [selectedRoomId, setSelectedRoomId] = useState<string | null>(() => {
+    if (Platform.OS === 'web') {
+      try { return localStorage.getItem(`uc_selected_room_${circleId}`) || null; } catch {}
+    }
+    return null;
+  });
+
+  // Persist selection
+  useEffect(() => {
+    if (Platform.OS === 'web' && selectedRoomId) {
+      try { localStorage.setItem(`uc_selected_room_${circleId}`, selectedRoomId); } catch {}
+    }
+  }, [selectedRoomId, circleId]);
+
+  // Auto-select saved room
+  useEffect(() => {
+    if (rooms.length > 0 && selectedRoomId && !rooms.find(r => r.id === selectedRoomId)) {
+      setSelectedRoomId(null);
+    }
+  }, [rooms, selectedRoomId]);
+
+  if (loading) return <LoadingScreen />;
+
+  if (selectedRoomId) {
+    return (
+      <RoomWorkspaceShell
+        roomId={selectedRoomId}
+        circleId={circleId}
+        accentColor={accentColor}
+        onBack={() => setSelectedRoomId(null)}
+      />
+    );
+  }
+
+  // Room list
+  return (
+    <View style={{ flex: 1, backgroundColor: '#050508' }}>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 16, borderBottomWidth: 1, borderBottomColor: '#1a1a28' }}>
+        <Text style={{ color: '#f0f0f5', fontSize: 20, fontWeight: '700' }}>Rooms</Text>
+        <Pressable
+          onPress={async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!user) return;
+            const { data } = await supabase.from('project_rooms').insert({
+              circle_id: circleId, name: 'New Room', created_by: user.id, status: 'active',
+            }).select('id').single();
+            if (data) setSelectedRoomId(data.id);
+          }}
+          accessibilityRole="button"
+          style={{ backgroundColor: accentColor, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 10 }}
+        >
+          <Text style={{ color: '#000', fontSize: 13, fontWeight: '700' }}>+ New Room</Text>
+        </Pressable>
+      </View>
+      <ScrollView contentContainerStyle={{ padding: 16, gap: 12 }}>
+        {rooms.length === 0 && (
+          <View style={{ alignItems: 'center', paddingTop: 60 }}>
+            <Text style={{ color: '#606075', fontSize: 14, marginBottom: 8 }}>No rooms yet</Text>
+            <Text style={{ color: '#3a3a4e', fontSize: 12 }}>Create a room to start collaborating</Text>
+          </View>
+        )}
+        {rooms.map(room => (
+          <NewRoomCard
+            key={room.id}
+            room={room}
+            onPress={() => setSelectedRoomId(room.id)}
+            accentColor={accentColor}
+          />
+        ))}
+      </ScrollView>
+    </View>
+  );
+}
+
+function LegacyRoomsTab({ circleId, accentColor }: Props) {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
   const savedRoomIdRef = React.useRef(storageGet(ROOM_STORAGE.selectedRoom(circleId)));
@@ -672,6 +767,8 @@ function RoomCard({ room, accentColor, isMobile, onPress, onDelete }: {
 }) {
   const [hovered, setHovered] = useState(false);
   const [fileCount, setFileCount] = useState<number|null>(null);
+  const [taskCount, setTaskCount] = useState<number|null>(null);
+  const [msgCount, setMsgCount] = useState<number|null>(null);
   const langColor = LANG_COLORS[room.language] || '#888';
   const icon = FILE_ICONS[room.language] || '📁';
 
@@ -679,37 +776,61 @@ function RoomCard({ room, accentColor, isMobile, onPress, onDelete }: {
     supabase.from('room_files').select('id', { count:'exact', head:true })
       .eq('room_id', room.id).eq('is_deleted', false)
       .then(({ count }) => setFileCount(count ?? 0));
+    supabase.from('room_tasks').select('id', { count:'exact', head:true })
+      .eq('room_id', room.id)
+      .then(({ count }) => setTaskCount(count ?? 0));
+    supabase.from('room_messages').select('id', { count:'exact', head:true })
+      .eq('room_id', room.id)
+      .then(({ count }) => setMsgCount(count ?? 0));
   }, [room.id]);
+
+  const roomStatus = (room as any).status || 'active';
+  const statusColor = roomStatus === 'active' ? '#22c55e' : roomStatus === 'paused' ? '#f59e0b' : '#606075';
 
   return (
     <Pressable onPress={onPress}
       onHoverIn={() => setHovered(true)} onHoverOut={() => setHovered(false)}
-      style={[s.card, hovered && { borderColor:accentColor+'60', backgroundColor:'#ffffff08' }, isMobile && s.cardMobile]}>
-      <View style={s.cardHeader}>
+      accessibilityRole="button" accessibilityLabel={`Open room ${room.name}`}
+      style={[s.card, hovered && { borderColor:accentColor+'60', backgroundColor:'#0f0f18' }, isMobile && s.cardMobile,
+        ...(Platform.OS === 'web' ? [{ transition: 'all 0.2s ease', cursor: 'pointer' } as any] : []),
+      ]}>
+      {/* Left accent stripe */}
+      <View style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, backgroundColor: statusColor, borderTopLeftRadius: 12, borderBottomLeftRadius: 12 }} />
+
+      <View style={[s.cardHeader, { paddingLeft: 8 }]}>
         <Text style={s.cardIcon}>{icon}</Text>
         <Text style={s.cardName} numberOfLines={1}>{room.name}</Text>
         <View style={[s.langBadge,{backgroundColor:langColor+'20',borderColor:langColor+'50'}]}>
           <Text style={[s.langBadgeText,{color:langColor}]}>{room.language.toUpperCase()}</Text>
         </View>
-        <Pressable onPress={e=>{e.stopPropagation?.();onDelete();}} style={s.cardDelete} hitSlop={8}>
+        <Pressable onPress={e=>{e.stopPropagation?.();onDelete();}} style={s.cardDelete} hitSlop={8}
+          accessibilityRole="button" accessibilityLabel="Delete room">
           <Text style={s.cardDeleteText}>x</Text>
         </Pressable>
       </View>
-      {room.file_path && <Text style={s.cardPath} numberOfLines={1}>{room.file_path}</Text>}
-      {room.description && <Text style={s.cardDesc} numberOfLines={2}>{room.description}</Text>}
-      <View style={s.cardFooter}>
-        <Text style={s.cardTime}>{timeAgo(room.updated_at)}</Text>
+      {room.description && <Text style={[s.cardDesc, { paddingLeft: 8 }]} numberOfLines={2}>{room.description}</Text>}
+
+      {/* Stats row */}
+      <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 8, paddingTop: 6, paddingBottom: 4, flexWrap: 'wrap' }}>
         {fileCount !== null && (
-          <View style={s.cardFiles}>
-            <Text style={s.cardFilesText}>{fileCount} file{fileCount!==1?'s':''}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+            <Text style={{ color: '#606075', fontSize: 9, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontWeight: '700' }}>F</Text>
+            <Text style={{ color: '#a0a0b0', fontSize: 10 }}>{fileCount}</Text>
           </View>
         )}
-      </View>
-      {/* API badges */}
-      <View style={s.cardApiBadges}>
-        {['🗄','🏛','📨','📋','🔒','🐳'].map((ic,i) => (
-          <Text key={i} style={s.cardApiBadge}>{ic}</Text>
-        ))}
+        {taskCount !== null && taskCount > 0 && (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+            <Text style={{ color: '#606075', fontSize: 9, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontWeight: '700' }}>T</Text>
+            <Text style={{ color: '#a0a0b0', fontSize: 10 }}>{taskCount}</Text>
+          </View>
+        )}
+        {msgCount !== null && msgCount > 0 && (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+            <Text style={{ color: '#606075', fontSize: 9, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontWeight: '700' }}>..</Text>
+            <Text style={{ color: '#a0a0b0', fontSize: 10 }}>{msgCount}</Text>
+          </View>
+        )}
+        <Text style={[s.cardTime, { marginLeft: 'auto' }]}>{timeAgo(room.updated_at)}</Text>
       </View>
     </Pressable>
   );
@@ -878,6 +999,9 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
   const [isDragging, setIsDragging] = useState(false);
 
   const [showNewFile, setShowNewFile] = useState(false);
+  const [fileTreeView, setFileTreeView] = useState<'list' | 'tree'>(
+    Platform.OS === 'web' ? ((storageGet(`uc_room_tree_view_${room.id}`) as 'list' | 'tree') || 'list') : 'list'
+  );
   const [rightPanelWidth, setRightPanelWidth] = useState(parseInt(storageGet(ROOM_STORAGE.panelWidth(room.id)) || '320', 10));
   // ── Persist room-level UI state ──────────────────────────────────────────
   React.useEffect(() => {
@@ -937,19 +1061,65 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
   const isDirty = activeTab ? (editingContent[activeTab.id] !== undefined && editingContent[activeTab.id] !== activeTab.content) : false;
   const hasOpenedRef = useRef(false);
 
-  // Check for stored GitHub token on mount
+  // Check for GitHub connection on mount — tries PAT (local) then OAuth (Supabase)
   useEffect(() => {
     (async () => {
+      // 1. Try stored PAT token first (fast, local)
       const token = await getStoredToken(room.circle_id);
       if (token) {
         const { user } = await ghValidateToken(token);
-        if (user) { setGhConnected(true); setGhUser(user); }
+        if (user) { setGhConnected(true); setGhUser(user); return; }
         else { await removeToken(room.circle_id); }
       }
+      // 2. Check if connected via OAuth (Integrations tab) — uses circle_github_connections table
+      try {
+        const { data: ghConns, error: ghErr } = await supabase
+          .from('circle_github_connections')
+          .select('full_name, owner')
+          .eq('circle_id', room.circle_id)
+          .eq('is_active', true);
+        if (!ghErr && ghConns && ghConns.length > 0) {
+          const username = ghConns[0]?.owner || 'connected';
+          setGhConnected(true);
+          setGhUser({ login: username, avatar_url: '', name: username, id: 0 } as GitHubUser);
+        }
+      } catch {}
     })();
   }, [room.circle_id]);
 
   const isGitHubFile = (file: RoomFile) => file.id.startsWith('gh_');
+
+  // Shared helper: get a working GitHub token (PAT or OAuth)
+  const getGitHubToken = async (): Promise<string | null> => {
+    // 1. Try PAT token (local storage)
+    const pat = await getStoredToken(room.circle_id);
+    if (pat) return pat;
+    // 2. Try OAuth token from user_github_tokens table
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return null;
+      // Use maybeSingle() — returns null if no row exists instead of erroring
+      const { data: tokenRow } = await supabase
+        .from('user_github_tokens')
+        .select('access_token')
+        .eq('user_id', user.id)
+        .maybeSingle();
+      if (tokenRow?.access_token) return tokenRow.access_token;
+    } catch {}
+    // 3. Try via edge function with auth header
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return null;
+      const res = await fetch(
+        `${process.env.EXPO_PUBLIC_SUPABASE_URL}/functions/v1/github-oauth?action=status&user_id=${session.user.id}`,
+        { headers: { Authorization: `Bearer ${session.access_token}` } },
+      );
+      if (!res.ok) return null;
+      const status = await res.json();
+      if (status.connected && status.access_token) return status.access_token;
+    } catch {}
+    return null;
+  };
 
   const openFile = useCallback((file: RoomFile) => {
     setOpenTabs(p => p.find(t => t.id === file.id) ? p : [...p, file]);
@@ -963,7 +1133,7 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
     if (existing) { setActiveTabId(virtualId); return; }
 
     setGhLoadingFile(entry.path);
-    const token = await getStoredToken(room.circle_id);
+    const token = await getGitHubToken();
     if (!token) { setGhLoadingFile(null); return; }
 
     const [owner, repoName] = ghRepo.full_name.split('/');
@@ -1316,7 +1486,18 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
               ) : (
                 <>
                   <Text style={s.sidebarTitle}>FILES</Text>
-                  <View style={{flexDirection:'row',gap:4}}>
+                  <View style={{flexDirection:'row',gap:4,alignItems:'center'}}>
+                    {Platform.OS === 'web' && (
+                      <Pressable onPress={() => {
+                        const next = fileTreeView === 'list' ? 'tree' : 'list';
+                        setFileTreeView(next);
+                        storageSet(`uc_room_tree_view_${room.id}`, next);
+                      }} style={[s.sidebarAdd,{paddingHorizontal:4}]}>
+                        <Text style={{color: fileTreeView === 'tree' ? accentColor : '#888', fontSize:10, fontFamily:'monospace', fontWeight:'700'}}>
+                          {fileTreeView === 'tree' ? '[T]' : '[L]'}
+                        </Text>
+                      </Pressable>
+                    )}
                     {ghConnected && ghRepo && (
                       <Pressable onPress={() => setGhBrowsing(true)} style={s.sidebarAdd}>
                         <Text style={{color:'#888',fontSize:11}}>🐙</Text>
@@ -1352,16 +1533,40 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
                 </>
               ) : (
                 <>
-                  {Object.entries(folderMap).map(([folder, folderFiles]) => (
-                    <FolderSection key={folder} folder={folder} files={folderFiles}
-                      activeTabId={activeTabId} onOpen={openFile}
-                      onDelete={deleteFile} onDownload={downloadFile}
-                      accentColor={accentColor} />
-                  ))}
-                  {files.length === 0 && (
-                    <View style={{padding:16,alignItems:'center'}}>
-                      <Text style={{color:'#555',fontSize:12,textAlign:'center'}}>No files yet.{'\n'}Upload or create one.</Text>
-                    </View>
+                  {Platform.OS === 'web' && fileTreeView === 'tree' ? (
+                    <>
+                      <RoomFileTree
+                        files={files.map(f => ({
+                          id: f.id, name: f.name, folder: f.folder,
+                          file_type: f.file_type, size_bytes: f.size_bytes, is_deleted: f.is_deleted,
+                        }) as RoomFileEntry)}
+                        selectedFileId={activeTabId ?? undefined}
+                        onSelectFile={(fileId) => {
+                          const file = files.find(f => f.id === fileId);
+                          if (file) openFile(file);
+                        }}
+                        accentColor={accentColor}
+                      />
+                      {files.length === 0 && (
+                        <View style={{padding:16,alignItems:'center'}}>
+                          <Text style={{color:'#555',fontSize:12,textAlign:'center'}}>No files yet.{'\n'}Upload or create one.</Text>
+                        </View>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {Object.entries(folderMap).map(([folder, folderFiles]) => (
+                        <FolderSection key={folder} folder={folder} files={folderFiles}
+                          activeTabId={activeTabId} onOpen={openFile}
+                          onDelete={deleteFile} onDownload={downloadFile}
+                          accentColor={accentColor} />
+                      ))}
+                      {files.length === 0 && (
+                        <View style={{padding:16,alignItems:'center'}}>
+                          <Text style={{color:'#555',fontSize:12,textAlign:'center'}}>No files yet.{'\n'}Upload or create one.</Text>
+                        </View>
+                      )}
+                    </>
                   )}
                   {Platform.OS === 'web' && (
                     <View style={s.dropHint}>
@@ -1490,8 +1695,25 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
               onRepoSelected={async (repo) => {
                 setGhRepo(repo);
                 setGhLoadingTree(true);
-                const token = await getStoredToken(room.circle_id);
-                if (!token) { setGhLoadingTree(false); return; }
+                const token = await getGitHubToken();
+                if (!token) {
+                  setGhLoadingTree(false);
+                  // No API token — prompt for PAT in the GitHubPanel
+                  if (Platform.OS === 'web') {
+                    const pat = window.prompt('Enter a GitHub Personal Access Token to browse files.\n\nGenerate one at: github.com → Settings → Developer settings → Personal access tokens\n\nNeeded scopes: repo');
+                    if (pat && pat.startsWith('ghp_')) {
+                      await storeToken(room.circle_id, pat);
+                      // Retry with the new token
+                      const [owner, repoName] = repo.full_name.split('/');
+                      setGhLoadingTree(true);
+                      const { tree } = await getRepoTree(pat, owner, repoName, repo.default_branch);
+                      setGhTree(tree);
+                      setGhLoadingTree(false);
+                      setGhBrowsing(true);
+                    }
+                  }
+                  return;
+                }
                 const [owner, repoName] = repo.full_name.split('/');
                 const { tree } = await getRepoTree(token, owner, repoName, repo.default_branch);
                 setGhTree(tree);
@@ -1537,8 +1759,25 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
               onRepoSelected={async (repo) => {
                 setGhRepo(repo);
                 setGhLoadingTree(true);
-                const token = await getStoredToken(room.circle_id);
-                if (!token) { setGhLoadingTree(false); return; }
+                const token = await getGitHubToken();
+                if (!token) {
+                  setGhLoadingTree(false);
+                  // No API token — prompt for PAT in the GitHubPanel
+                  if (Platform.OS === 'web') {
+                    const pat = window.prompt('Enter a GitHub Personal Access Token to browse files.\n\nGenerate one at: github.com → Settings → Developer settings → Personal access tokens\n\nNeeded scopes: repo');
+                    if (pat && pat.startsWith('ghp_')) {
+                      await storeToken(room.circle_id, pat);
+                      // Retry with the new token
+                      const [owner, repoName] = repo.full_name.split('/');
+                      setGhLoadingTree(true);
+                      const { tree } = await getRepoTree(pat, owner, repoName, repo.default_branch);
+                      setGhTree(tree);
+                      setGhLoadingTree(false);
+                      setGhBrowsing(true);
+                    }
+                  }
+                  return;
+                }
                 const [owner, repoName] = repo.full_name.split('/');
                 const { tree } = await getRepoTree(token, owner, repoName, repo.default_branch);
                 setGhTree(tree);
@@ -1920,24 +2159,18 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     return () => { supabase.removeChannel(ch); };
   }, [roomId]);
 
-  // Load live agents — all non-offline agents, prefer same circle first
+  // Load live agents — same circle only (no cross-circle leakage)
   useEffect(() => {
-    const query = () =>
+    const query = () => {
+      if (!circleId) return;
       supabase.from('circle_office_agents')
         .select('id, name, status, owner_id, color, tool_icon, owner_display_name, current_task, circle_id, provider')
+        .eq('circle_id', circleId)
         .neq('status', 'offline')
         .order('status')
-        .limit(100)
-        .then(({ data }) => {
-          if (!data) return;
-          // Sort: same circle first, then others
-          const sorted = [...data].sort((a, b) => {
-            const aMatch = a.circle_id === circleId ? 0 : 1;
-            const bMatch = b.circle_id === circleId ? 0 : 1;
-            return aMatch - bMatch;
-          });
-          setLiveAgents(sorted);
-        });
+        .limit(50)
+        .then(({ data }) => { if (data) setLiveAgents(data); });
+    };
     query();
     const ch = supabase.channel(`chat_agents_${roomId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'circle_office_agents' }, query)
@@ -1951,41 +2184,166 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       .then(({ data }) => setRoomFiles(data || []));
   }, [roomId]);
 
+  const [botTyping, setBotTyping] = useState(false);
+
   const send = async () => {
     if (!input.trim()) return;
     const { data: { user } } = await supabase.auth.getUser();
     const content = input.trim();
+    const lowerContent = content.toLowerCase();
     await supabase.from('room_messages').insert({
       room_id: roomId, user_id: user?.id || null, content, message_type: 'chat',
     });
     setInput('');
 
-    // BlackSwan responds to @blackswan or @swanbot mentions in room chat
-    if (/@(blackswan|swanbot|swan)\b/i.test(content)) {
-      const cleanContent = content.replace(/@(blackswan|swanbot|swan)\s*/gi, '').trim() || content;
+    // ─── /room commands ─────────────────────────────────────────────────
+    if (lowerContent.startsWith('/room ') || lowerContent === '/room') {
+      setBotTyping(true);
       try {
-        const response = await getAIResponse(cleanContent, {
-          userId: user?.id || 'anonymous',
-          circleId,
+        const { executeRoomCommand } = await import('../../../lib/roomChatCommands');
+        const result = await executeRoomCommand(content, {
+          circleId: circleId || '', userId: user?.id || '', roomId, surface: 'room_chat',
         });
         await supabase.from('room_messages').insert({
-          room_id: roomId,
-          user_id: null,
-          agent_name: 'BlackSwan',
-          content: response,
-          message_type: 'agent_output',
-          metadata: { bot: true, bot_name: 'BlackSwan' },
+          room_id: roomId, user_id: null, agent_name: 'Agent',
+          content: result.message || 'No response.',
+          message_type: 'agent_output', metadata: { bot: true, bot_name: 'Agent' },
+        });
+      } catch (e: any) {
+        await supabase.from('room_messages').insert({
+          room_id: roomId, user_id: null, agent_name: 'Agent',
+          content: `Room error: ${e.message}`, message_type: 'agent_output',
+          metadata: { bot: true, bot_name: 'Agent' },
+        });
+      } finally { setBotTyping(false); }
+      return;
+    }
+
+    // ─── /gh commands ───────────────────────────────────────────────────
+    if (lowerContent.startsWith('/gh ') || lowerContent === '/gh') {
+      setBotTyping(true);
+      try {
+        const { executeGitHubCommand } = await import('../../../lib/githubChatCommands');
+        const result = await executeGitHubCommand(content, {
+          circleId: circleId || '', userId: user?.id || '',
+        });
+        await supabase.from('room_messages').insert({
+          room_id: roomId, user_id: null, agent_name: 'Agent',
+          content: result.message || 'No response.',
+          message_type: 'agent_output', metadata: { bot: true, bot_name: 'Agent' },
+        });
+      } catch (e: any) {
+        await supabase.from('room_messages').insert({
+          room_id: roomId, user_id: null, agent_name: 'Agent',
+          content: `GitHub error: ${e.message}`, message_type: 'agent_output',
+          metadata: { bot: true, bot_name: 'Agent' },
+        });
+      } finally { setBotTyping(false); }
+      return;
+    }
+
+    // ─── Smart command detection — special prompts that load extra context ──
+    const isAtMentioningSomeoneElse = /^@(?!agent|blackswan|swanbot|swan\b)\w/i.test(content.trim());
+    if (!isAtMentioningSomeoneElse) {
+      const cleanContent = content.replace(/@(agent|blackswan|swanbot|swan)\s*/gi, '').trim() || content;
+      setBotTyping(true);
+      try {
+        // Build base context
+        const recentMsgs = messages.slice(-8).map(m =>
+          `${m.metadata?.bot ? 'Agent' : 'User'}: ${(m.content || '').slice(0, 200)}`
+        ).join('\n');
+
+        const fileContext = activeFile
+          ? `\n\nCurrently viewing file: ${activeFile.name} (${activeFile.file_type || 'text'})\nFile content (first 2000 chars):\n${(activeFile.content || '').slice(0, 2000)}`
+          : '';
+
+        // ── Detect intent and load appropriate context ──────────────────
+        let specialContext = '';
+        let specialPromptPrefix = '';
+
+        // REVIEW — loads all files for comprehensive code review
+        const isReviewRequest = /review|audit|check.*files|look.*files|scan|analyze.*code|all.*files|code.*quality/i.test(cleanContent);
+        // SECURITY — focused security audit
+        const isSecurityRequest = /security|vulnerab|xss|injection|owasp|exploit|auth.*issue|secret|leak|exposed/i.test(cleanContent);
+        // PERFORMANCE — performance analysis
+        const isPerfRequest = /performance|optimize|slow|fast|speed|memory|bundle.*size|lazy.*load|cache|render/i.test(cleanContent);
+        // REFACTOR — refactoring suggestions
+        const isRefactorRequest = /refactor|simplif|clean.*up|dry|extract|decompos|split.*file|too.*long|too.*big|complex/i.test(cleanContent);
+        // TESTS — test generation
+        const isTestRequest = /test|spec|unit.*test|integration.*test|coverage|jest|vitest|assert|expect/i.test(cleanContent);
+        // DOCS — documentation generation
+        const isDocsRequest = /document|readme|jsdoc|typedoc|comment|explain.*code|what.*does.*this/i.test(cleanContent);
+        // RESEARCH — deep research on a topic
+        const isResearchRequest = /research|deep.*dive|how.*does|how.*to|best.*practice|compare|alternatives|pros.*cons|tradeoff/i.test(cleanContent);
+        // DEBUG — help debugging
+        const isDebugRequest = /debug|error|bug|crash|broken|not.*working|fix.*this|why.*fail|exception|trace/i.test(cleanContent);
+        // ARCHITECTURE — architecture review
+        const isArchRequest = /architect|structure|pattern|design.*pattern|dependency|coupling|solid|separation|layers/i.test(cleanContent);
+        // TYPES — TypeScript type analysis
+        const isTypeRequest = /type.*error|typescript|interface|generic|type.*safe|strict|any.*type|infer/i.test(cleanContent);
+
+        // Load all files for review-type requests
+        const needsAllFiles = isReviewRequest || isSecurityRequest || isPerfRequest || isRefactorRequest || isArchRequest;
+        if (needsAllFiles) {
+          const { data: allFiles } = await supabase
+            .from('room_files')
+            .select('name, file_type, content, size_bytes')
+            .eq('room_id', roomId)
+            .eq('is_deleted', false)
+            .order('name');
+          if (allFiles && allFiles.length > 0) {
+            const fileSummaries = allFiles.map((f: any) => {
+              const truncated = (f.content || '').slice(0, 3000);
+              return `\n--- ${f.name} (${f.file_type || 'text'}, ${f.size_bytes || 0}B) ---\n${truncated}${(f.content || '').length > 3000 ? '\n... (truncated)' : ''}`;
+            });
+            specialContext = `\n\n## ALL ROOM FILES (${allFiles.length} files)\n${fileSummaries.join('\n')}`;
+          }
+        } else if (roomFiles.length > 0) {
+          specialContext = `\n\nRoom files available: ${roomFiles.map(f => f.name).join(', ')}`;
+        }
+
+        // Add specialized instructions based on intent
+        if (isSecurityRequest) {
+          specialPromptPrefix = `[SECURITY AUDIT MODE] Analyze the code for security vulnerabilities. Check for: XSS, SQL injection, command injection, insecure secrets handling, missing auth checks, CORS issues, prototype pollution, path traversal, insecure dependencies, exposed API keys. Rate severity (Critical/High/Medium/Low) for each finding. Provide specific line-level fixes.\n\nUser request: `;
+        } else if (isPerfRequest) {
+          specialPromptPrefix = `[PERFORMANCE REVIEW MODE] Analyze the code for performance issues. Check for: unnecessary re-renders, missing memoization, N+1 queries, large bundle imports, unoptimized images, missing lazy loading, expensive computations in render, memory leaks from subscriptions/timers, missing virtualization for long lists. Suggest specific optimizations with code examples.\n\nUser request: `;
+        } else if (isRefactorRequest) {
+          specialPromptPrefix = `[REFACTOR MODE] Analyze the code and suggest refactoring improvements. Check for: DRY violations, god objects/functions, unclear naming, excessive nesting, missing abstractions, files that do too much, tightly coupled modules, dead code. Prioritize suggestions by impact. Show before/after code examples.\n\nUser request: `;
+        } else if (isTestRequest) {
+          specialPromptPrefix = `[TEST GENERATION MODE] Generate comprehensive tests for the code. Include: unit tests for pure functions, integration tests for API calls, edge cases, error paths, boundary values, mocking strategies for external dependencies. Use the project's testing conventions. Output complete runnable test files.\n\nUser request: `;
+        } else if (isDocsRequest) {
+          specialPromptPrefix = `[DOCUMENTATION MODE] Generate clear, useful documentation. Include: function/component purpose, parameters with types, return values, usage examples, edge cases, related functions. Match the project's existing doc style. Be concise but complete.\n\nUser request: `;
+        } else if (isResearchRequest) {
+          specialPromptPrefix = `[DEEP RESEARCH MODE] Provide thorough, well-researched analysis. Include: current best practices, comparison of approaches with tradeoffs, real-world examples, links to authoritative sources when possible, concrete recommendations with reasoning. Structure with clear headings. Go deep — this is not a quick answer.\n\nUser request: `;
+        } else if (isDebugRequest) {
+          specialPromptPrefix = `[DEBUG MODE] Help diagnose and fix the issue. Approach systematically: 1) Understand the expected vs actual behavior, 2) Identify potential causes, 3) Check for common pitfalls in this stack (React Native, Supabase, TypeScript), 4) Suggest debugging steps, 5) Provide the fix with explanation. Ask clarifying questions if needed.\n\nUser request: `;
+        } else if (isArchRequest) {
+          specialPromptPrefix = `[ARCHITECTURE REVIEW MODE] Analyze the code architecture. Evaluate: separation of concerns, dependency direction, module boundaries, data flow patterns, error handling strategy, state management approach, API design, scalability considerations. Provide specific architectural recommendations with diagrams (ASCII) where helpful.\n\nUser request: `;
+        } else if (isTypeRequest) {
+          specialPromptPrefix = `[TYPE ANALYSIS MODE] Analyze TypeScript types and suggest improvements. Check for: any types that should be narrowed, missing generics, interfaces vs types, discriminated unions, utility types that could simplify, incorrect nullability, missing readonly, unsafe type assertions. Show corrected type definitions.\n\nUser request: `;
+        } else if (isReviewRequest) {
+          specialPromptPrefix = `[CODE REVIEW MODE] Do a thorough code review. Check: correctness, error handling, edge cases, naming clarity, code style consistency, potential bugs, security issues, performance concerns, accessibility, and maintainability. Organize findings by severity. Suggest fixes with code examples.\n\nUser request: `;
+        }
+
+        const fullPrompt = specialPromptPrefix + cleanContent;
+
+        const response = await getAIResponse(fullPrompt, {
+          userId: user?.id || 'anonymous',
+          circleId,
+          chatHistory: recentMsgs + fileContext + specialContext,
+        });
+        await supabase.from('room_messages').insert({
+          room_id: roomId, user_id: null, agent_name: 'Agent',
+          content: response, message_type: 'agent_output',
+          metadata: { bot: true, bot_name: 'Agent' },
         });
       } catch {
         await supabase.from('room_messages').insert({
-          room_id: roomId,
-          user_id: null,
-          agent_name: 'BlackSwan',
+          room_id: roomId, user_id: null, agent_name: 'Agent',
           content: 'Something went wrong. Try again.',
-          message_type: 'agent_output',
-          metadata: { bot: true, bot_name: 'BlackSwan' },
+          message_type: 'agent_output', metadata: { bot: true, bot_name: 'Agent' },
         });
-      }
+      } finally { setBotTyping(false); }
     }
   };
 
@@ -2006,8 +2364,20 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       const { data: { user } } = await supabase.auth.getUser();
       const targetName = selectedFile || activeFile?.name || null;
       const filePart = targetName ? ` on \`${targetName}\`` : '';
-      const contextFile = selectedFile ? null : activeFile ?? null;
-      const fileContent = contextFile?.content?.slice(0, 12000) || null;
+
+      // Load full file content for context (both selected and active file)
+      let fileContent: string | null = null;
+      if (targetName) {
+        const { data: fileData } = await supabase
+          .from('room_files')
+          .select('content')
+          .eq('room_id', roomId)
+          .ilike('name', targetName)
+          .maybeSingle();
+        fileContent = fileData?.content?.slice(0, 12000) || null;
+      } else if (activeFile?.content) {
+        fileContent = activeFile.content.slice(0, 12000);
+      }
 
       const msgContent = `@${selectedAgent.name}${filePart}: ${taskPrompt.trim()}`;
 
@@ -2035,73 +2405,67 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         .update({ current_task: `[Room] ${taskPrompt.trim().slice(0, 120)}`, status: 'building' })
         .eq('id', selectedAgent.id);
 
-      // 3. Dispatch via local bridge based on provider type
-      const provider = selectedAgent.provider || '';
+      // 3. Dispatch — try bridge first, fall back to BlackSwan AI
+      const provider = (selectedAgent.provider || '').toLowerCase().replace(/\s+/g, '-');
       const bridgeProviders = ['claude-code', 'codex', 'gemini', 'gemini-cli', 'cursor'];
 
+      const postResult = async (ok: boolean, content: string, via: string) => {
+        await supabase.from('room_messages').insert({
+          room_id: roomId, user_id: null, agent_name: selectedAgent.name,
+          content, message_type: 'agent_output',
+          metadata: { task_reply: true, task_id: taskId, provider, dispatched_via: via, success: ok },
+        });
+        await supabase.from('circle_office_agents')
+          .update({ current_task: null, status: ok ? 'active' : 'idle' })
+          .eq('id', selectedAgent.id);
+      };
+
       if (bridgeProviders.includes(provider) && taskId) {
-        // Route through local bridge
-        console.log(`[Rooms] Dispatching task to ${provider} via bridge...`);
-        dispatchBridgeTask(provider, taskPrompt.trim(), targetName)
-          .then(async (result) => {
-            // Post bridge result back to room messages
-            const statusEmoji = result.ok ? '\u2705' : '\u274c';
-            const viaLabel = result.dispatchedVia === 'bridge' ? `\ud83c\udf09 ${provider} bridge` : 'fallback';
-            const responseContent = result.ok
-              ? `${statusEmoji} **${selectedAgent.name}** (via ${viaLabel}):\n\n${result.response || 'Done'}`
-              : `${statusEmoji} **${selectedAgent.name}** failed (${viaLabel}): ${result.error || 'Unknown error'}`;
-
-            await supabase.from('room_messages').insert({
-              room_id: roomId,
-              user_id: null,
-              agent_name: selectedAgent.name,
-              content: responseContent,
-              message_type: 'agent_output',
-              metadata: {
-                task_reply: true,
-                task_id: taskId,
-                provider,
-                dispatched_via: result.dispatchedVia,
-                success: result.ok,
-              },
+        console.log(`[Rooms] Waking & assigning task to ${provider}...`);
+        try {
+          const result = await wakeAndAssignTask(
+            provider, selectedAgent.name, taskPrompt.trim(),
+            circleId || '', selectedAgent.id,
+            { fileName: targetName || undefined },
+          );
+          if (result.ok) {
+            await postResult(true, `**${selectedAgent.name}** [executed via ${provider} bridge]:\n\n${result.response || 'Done'}`, 'bridge');
+          } else {
+            // Wake + dispatch failed — fall back to BlackSwan AI with file context
+            console.log(`[Rooms] Wake failed (${result.error}), falling back to AI...`);
+            const fileCtx = fileContent ? `\n\nFile "${targetName}":\n\`\`\`\n${fileContent.slice(0, 4000)}\n\`\`\`` : '';
+            const aiPrompt = `[Task from Rooms, assigned to ${selectedAgent.name}]${filePart}\n${taskPrompt.trim()}${fileCtx}`;
+            const aiResponse = await getAIResponse(aiPrompt, {
+              userId: user?.id || 'anonymous', circleId,
             });
-
-            // Clear agent's current_task
-            await supabase.from('circle_office_agents')
-              .update({ current_task: null, status: result.ok ? 'active' : 'idle' })
-              .eq('id', selectedAgent.id);
-          })
-          .catch(async (err) => {
-            console.error('Bridge dispatch failed:', err);
-            await supabase.from('room_messages').insert({
-              room_id: roomId,
-              user_id: null,
-              agent_name: selectedAgent.name,
-              content: `\u274c **${selectedAgent.name}** bridge dispatch error: ${err?.message || 'Unknown'}`,
-              message_type: 'agent_output',
-              metadata: { task_reply: true, task_id: taskId, error: true },
+            await postResult(true, `**${selectedAgent.name}** [AI draft — not executed by agent]:\n\n${aiResponse}`, 'ai-fallback');
+          }
+        } catch (err: any) {
+          console.error('Dispatch failed:', err);
+          // Fall back to AI
+          try {
+            const fileCtx = fileContent ? `\n\nFile "${targetName}":\n\`\`\`\n${fileContent.slice(0, 4000)}\n\`\`\`` : '';
+            const aiPrompt = `[Task from Rooms, assigned to ${selectedAgent.name}]${filePart}\n${taskPrompt.trim()}${fileCtx}`;
+            const aiResponse = await getAIResponse(aiPrompt, {
+              userId: user?.id || 'anonymous', circleId,
             });
-            await supabase.from('circle_office_agents')
-              .update({ current_task: null, status: 'idle' })
-              .eq('id', selectedAgent.id);
-          });
+            await postResult(true, `**${selectedAgent.name}** [AI draft — not executed by agent]:\n\n${aiResponse}`, 'ai-fallback');
+          } catch {
+            await postResult(false, `**${selectedAgent.name}** failed: ${err?.message || 'Unknown error'}`, 'none');
+          }
+        }
       } else if (taskId) {
-        // Fall back to Supabase Edge Function for non-bridge providers
-        const taskPayload = {
-          taskId,
-          roomId,
-          prompt: taskPrompt.trim(),
-          fileName: targetName,
-          fileContent,
-          agentName: selectedAgent.name,
-          agentId: selectedAgent.id,
-        };
-        supabase.functions.invoke('room-task-executor', { body: taskPayload })
-          .then(({ data, error }) => {
-            if (error) console.error('Edge function error:', error);
-            else console.log('Task executed:', data);
-          })
-          .catch(err => console.error('Task dispatch failed:', err));
+        // Non-bridge provider — use BlackSwan AI directly with full file context
+        try {
+          const fileCtx = fileContent ? `\n\nFile "${targetName}":\n\`\`\`\n${fileContent.slice(0, 4000)}\n\`\`\`` : '';
+          const aiPrompt = `[Task from Rooms, assigned to ${selectedAgent.name}]${filePart}\n${taskPrompt.trim()}${fileCtx}`;
+          const aiResponse = await getAIResponse(aiPrompt, {
+            userId: user?.id || 'anonymous', circleId,
+          });
+          await postResult(true, `**${selectedAgent.name}** [AI draft — not executed by agent]:\n\n${aiResponse}`, 'ai');
+        } catch (err: any) {
+          await postResult(false, `**${selectedAgent.name}** failed: ${err?.message || 'Unknown error'}`, 'none');
+        }
       }
 
       setTaskPrompt(''); setSelectedFile(''); setSelectedAgent(null); setShowAssign(false);
@@ -2144,13 +2508,19 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     <View style={s.panel}>
       <View style={s.panelHeader}>
         <Text style={[s.panelTitle, { paddingHorizontal: 0, paddingTop: 0, paddingBottom: 0 }]}>Chat</Text>
-        <Pressable onPress={() => setShowSpawnAgent(p => !p)}
+        {botTyping && (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#f59e0b' }} />
+            <Text style={{ color: '#f59e0b', fontSize: 10, fontWeight: '600' }}>thinking...</Text>
+          </View>
+        )}
+        <Pressable onPress={() => { setShowSpawnAgent(p => !p); if (showAssign) setShowAssign(false); }}
           style={[chatSt.assignToggle, showSpawnAgent && { backgroundColor: '#22c55e15', borderColor: '#22c55e50' }]}>
           <Text style={[chatSt.assignToggleText, showSpawnAgent && { color: '#22c55e' }]}>+ Spawn</Text>
         </Pressable>
-        <Pressable onPress={() => setShowAssign(p => !p)}
+        <Pressable onPress={() => { setShowAssign(p => !p); if (showSpawnAgent) setShowSpawnAgent(false); }}
           style={[s.panelBtn, { backgroundColor: accentColor + '15', borderColor: accentColor + '40' }]}>
-          <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }}>Assign Agent</Text>
+          <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }}>Assign</Text>
         </Pressable>
       </View>
 
@@ -2224,18 +2594,6 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             placeholderTextColor="#555" multiline />
 
           {/* Selected summary */}
-          {showSpawnAgent && (
-            <View style={{ marginBottom: 10, borderWidth: 1, borderColor: '#22c55e30', borderRadius: 12, overflow: 'hidden' }}>
-              <SpawnAgentPanel
-                circleId={circleId}
-                onCreated={(agentId, name) => {
-                  setShowSpawnAgent(false);
-                }}
-                onCancel={() => setShowSpawnAgent(false)}
-              />
-            </View>
-          )}
-
           {selectedAgent && (
             <View style={chatSt.assignSummary}>
               <View style={[chatSt.assignSummaryDot, { backgroundColor: STATUS_COLOR[selectedAgent.status] || '#888' }]} />
@@ -2255,22 +2613,89 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         </View>
       )}
 
+      {/* ── AI Presets Strip — explicit action buttons ── */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{ paddingHorizontal: 10, paddingVertical: 6, gap: 6 }}
+        style={{ maxHeight: 38, borderBottomWidth: 1, borderBottomColor: '#1a1a28' }}
+      >
+        {ROOM_CHAT_PRESETS.map(preset => (
+          <Pressable
+            key={preset.id}
+            onPress={() => { setInput(preset.prompt); }}
+            accessibilityRole="button"
+            accessibilityLabel={preset.label}
+            style={[
+              {
+                flexDirection: 'row', alignItems: 'center', gap: 4,
+                paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8,
+                borderWidth: 1, borderColor: preset.color + '40',
+                backgroundColor: preset.color + '10',
+              },
+              ...(Platform.OS === 'web' ? [{ cursor: 'pointer', transition: 'all 0.15s ease' } as any] : []),
+            ]}
+          >
+            <View style={{ width: 18, height: 18, borderRadius: 4, backgroundColor: preset.color + '25', justifyContent: 'center', alignItems: 'center' }}>
+              <Text style={{ color: preset.color, fontSize: 9, fontWeight: '800', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>{preset.icon}</Text>
+            </View>
+            <Text style={{ color: preset.color, fontSize: 10, fontWeight: '600' }}>{preset.label}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+
       {/* Messages */}
       <ScrollView ref={scrollRef} style={s.msgList} contentContainerStyle={{ padding: 10, gap: 6 }}>
         {messages.length === 0 && <Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginTop: 20, fontStyle: 'italic' }}>No messages yet</Text>}
         {messages.map(m => <MsgBubble key={m.id} msg={m} accentColor={accentColor} onDelete={handleDeleteMessage} />)}
       </ScrollView>
 
+      {/* Active file chip */}
+      {activeFile && (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 4, backgroundColor: '#0a0a10', borderTopWidth: 1, borderTopColor: '#1a1a28' }}>
+          <View style={{ width: 16, height: 16, borderRadius: 4, backgroundColor: accentColor + '20', justifyContent: 'center', alignItems: 'center' }}>
+            <Text style={{ color: accentColor, fontSize: 8, fontWeight: '800' }}>F</Text>
+          </View>
+          <Text style={{ color: '#a0a0b0', fontSize: 10 }} numberOfLines={1}>Attached: {activeFile.name}</Text>
+        </View>
+      )}
+
       {/* Input */}
       <View style={s.msgInputRow}>
         <TextInput style={s.msgInput} value={input} onChangeText={setInput}
-          placeholder="Message..." placeholderTextColor="#555"
-          onSubmitEditing={send} returnKeyType="send" />
+          placeholder="Ask Agent anything..." placeholderTextColor="#555"
+          onSubmitEditing={send} returnKeyType="send" multiline maxLength={2000} />
         <Pressable onPress={send} disabled={!input.trim()}
           style={[s.sendBtn, { backgroundColor: accentColor, opacity: input.trim() ? 1 : 0.4 }]}>
           <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>→</Text>
         </Pressable>
       </View>
+
+      {/* ── Spawn Agent — full overlay within chat panel ── */}
+      {showSpawnAgent && (
+        <View style={{
+          position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: '#000000f5', zIndex: 50, borderRadius: 12,
+        }} nativeID="section-spawn-overlay">
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 12, borderBottomWidth: 1, borderBottomColor: '#1a1a1a' }}>
+            <Text style={{ color: '#22c55e', fontSize: 13, fontWeight: '700', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', letterSpacing: 1 }}>SPAWN AGENT</Text>
+            <Pressable onPress={() => setShowSpawnAgent(false)} accessibilityRole="button" accessibilityLabel="Close spawn panel"
+              style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: '#1a1a1a', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#2a2a2a' }}>
+              <Text style={{ color: '#9e9e9e', fontSize: 14, fontWeight: '700' }}>X</Text>
+            </Pressable>
+          </View>
+          <SpawnAgentPanel
+            circleId={circleId}
+            onCreated={(_agentId: string, _agentName: string) => {
+              setShowSpawnAgent(false);
+              supabase.from('circle_office_agents')
+                .select('id, name, status, owner_id, color, tool_icon, owner_display_name, current_task, circle_id, provider')
+                .eq('circle_id', circleId || '')
+                .neq('status', 'offline').order('status').limit(50)
+                .then(({ data }) => { if (data) setLiveAgents(data); });
+            }}
+            onCancel={() => setShowSpawnAgent(false)}
+          />
+        </View>
+      )}
     </View>
   );
 }
@@ -2305,6 +2730,8 @@ const chatSt = StyleSheet.create({
   activeFileBannerHint: { color: '#555', fontSize: 10, fontStyle: 'italic' },
   agentChipOwner: { color: '#555', fontSize: 9, marginTop: 1 },
   agentChipTask: { color: '#888', fontSize: 9, marginTop: 1, fontStyle: 'italic' },
+  assignToggle: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: '#2a2a3e', backgroundColor: '#1a1a28' },
+  assignToggleText: { fontSize: 12, color: '#a0a0b0', fontWeight: '500' },
 });
 
 // ─── 3D Agent Thinking Animation ───────────────────────────────────────────
@@ -4147,16 +4574,48 @@ function GitHubPanel({ circleId, accentColor, ghConnected, ghUser, ghRepo,
   }, []);
 
   const loadRepos = async () => {
+    // 1. Try PAT-based full repo list
     const token = await getStoredToken(circleId);
-    if (!token) {
-      // Try OAuth repos as fallback
-      await loadReposViaOAuth();
-      return;
+    if (token) {
+      setLoadingRepos(true);
+      const { repos: r, error: e } = await listRepos(token);
+      setRepos(r);
+      if (e) setError(e);
+      setLoadingRepos(false);
+      if (r.length > 0) return;
     }
-    setLoadingRepos(true);
-    const { repos: r, error: e } = await listRepos(token);
-    setRepos(r);
-    if (e) setError(e);
+    // 2. Load connected repos directly from circle_github_connections table
+    try {
+      setLoadingRepos(true);
+      const { data: ghConns } = await supabase
+        .from('circle_github_connections')
+        .select('full_name, owner, repo, default_branch')
+        .eq('circle_id', circleId)
+        .eq('is_active', true);
+      if (ghConns && ghConns.length > 0) {
+        const mapped = ghConns.map((c: any) => ({
+          id: 0,
+          name: String(c.repo || ''),
+          full_name: String(c.full_name || ''),
+          owner: { login: String(c.owner || ''), avatar_url: '' },
+          private: false,
+          default_branch: String(c.default_branch || 'main'),
+          description: null as string | null,
+          language: null as string | null,
+          stargazers_count: 0,
+          updated_at: '',
+          size: 0,
+          fork: false,
+          archived: false,
+          open_issues_count: 0,
+        })) as GitHubRepo[];
+        setRepos(mapped);
+        setLoadingRepos(false);
+        return;
+      }
+    } catch {}
+    // 3. Try OAuth edge function as last resort
+    await loadReposViaOAuth();
     setLoadingRepos(false);
   };
 
@@ -4221,62 +4680,18 @@ function GitHubPanel({ circleId, accentColor, ghConnected, ghUser, ghRepo,
 
   if (!ghConnected) {
     return (
-      <ScrollView style={{flex:1}} contentContainerStyle={{padding:16}}>
-        <Text style={{color:'#fff',fontSize:14,fontWeight:'700',marginBottom:8}}>Connect GitHub</Text>
-        <Text style={{color:'#666',fontSize:12,lineHeight:18,marginBottom:16}}>
-          Connect your GitHub account to browse repos, receive webhooks, and let BlackSwan track your team's shipping.
+      <ScrollView style={{flex:1}} contentContainerStyle={{padding:16, alignItems:'center', justifyContent:'center', minHeight:200}}>
+        <View style={{width:48,height:48,borderRadius:14,backgroundColor:accentColor+'15',justifyContent:'center',alignItems:'center',marginBottom:16}}>
+          <Text style={{fontSize:20}}>{'</>'}</Text>
+        </View>
+        <Text style={{color:'#fff',fontSize:16,fontWeight:'700',marginBottom:8,textAlign:'center'}}>GitHub Not Connected</Text>
+        <Text style={{color:'#666',fontSize:13,lineHeight:20,marginBottom:20,textAlign:'center',maxWidth:320}}>
+          Connect your GitHub account from the Integrations tab to browse repos, view files, and track shipping.
         </Text>
-
-        {error ? <Text style={{color:'#ef4444',fontSize:11,marginBottom:8}}>{error}</Text> : null}
-
-        {/* Primary: OAuth */}
-        <Pressable onPress={handleOAuthConnect} disabled={connecting}
-          style={[ghSt.connectBtn,{backgroundColor:accentColor,opacity:connecting?0.5:1}]}>
-          <Text style={ghSt.connectText}>{connecting ? 'Connecting...' : 'Connect with GitHub'}</Text>
-        </Pressable>
-
-        {/* Fallback: PAT */}
-        <Pressable onPress={() => setShowPatFallback(!showPatFallback)}
-          style={{marginTop:20, paddingVertical:6}}>
-          <Text style={{color:'#555',fontSize:10,fontWeight:'800',letterSpacing:1}}>
-            {showPatFallback ? '▼ HIDE PAT OPTION' : '▶ USE PERSONAL ACCESS TOKEN INSTEAD'}
-          </Text>
-        </Pressable>
-
-        {showPatFallback && (
-          <View style={{marginTop:8}}>
-            <Text style={ghSt.label}>Personal Access Token</Text>
-            <TextInput
-              style={ghSt.input}
-              value={tokenInput}
-              onChangeText={setTokenInput}
-              placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
-              placeholderTextColor="#555"
-              secureTextEntry
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <Pressable onPress={handleConnect} disabled={connecting}
-              style={[ghSt.connectBtn,{backgroundColor:'#333',opacity:connecting?0.5:1,marginTop:8}]}>
-              <Text style={ghSt.connectText}>{connecting ? 'Connecting...' : 'Connect with PAT'}</Text>
-            </Pressable>
-
-            <View style={{marginTop:16,gap:10}}>
-              <Text style={{color:'#555',fontSize:10,fontWeight:'800',letterSpacing:1}}>HOW TO GET A TOKEN</Text>
-              {[
-                'Go to github.com → Settings → Developer settings',
-                'Click "Personal access tokens" → "Tokens (classic)"',
-                'Generate new token with "repo" scope',
-                'Copy and paste the token above',
-              ].map((step, i) => (
-                <View key={i} style={{flexDirection:'row',gap:8}}>
-                  <Text style={{color:accentColor,fontSize:11,fontWeight:'700'}}>{i+1}.</Text>
-                  <Text style={{color:'#888',fontSize:11,flex:1}}>{step}</Text>
-                </View>
-              ))}
-            </View>
-          </View>
-        )}
+        <Text style={{color:'#444',fontSize:11,textAlign:'center'}}>
+          Go to Integrations {'→'} GitHub {'→'} Connect
+        </Text>
+        {/* Legacy connect UI removed — single connection point in Integrations */}
       </ScrollView>
     );
   }
@@ -4641,7 +5056,7 @@ const s = StyleSheet.create({
   bottomSheet: { borderTopWidth:1, borderTopColor:'#000000' },
   bottomSheetExpanded: { flex:1, maxHeight:'55%' as any },
   bottomSheetCollapsed: { height:45 },
-  panel: { flex:1, backgroundColor:'#000000', flexDirection:'column' },
+  panel: { flex:1, backgroundColor:'#000000', flexDirection:'column', position:'relative' as any },
   panelHeader: { flexDirection:'row', justifyContent:'space-between', alignItems:'center', paddingHorizontal:14, paddingVertical:10, borderBottomWidth:1, borderBottomColor:'#000000' },
   panelTitle: { color:'#fff', fontSize:13, fontWeight:'700', paddingHorizontal:14, paddingTop:12, paddingBottom:4 },
   panelBtn: { paddingHorizontal:10, paddingVertical:5, borderRadius:12, borderWidth:1, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },

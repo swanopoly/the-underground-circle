@@ -63,6 +63,8 @@ export const MODEL_PRICING: Record<string, ModelRate> = {
   // ── Replicate ────────────────────────────────────────────────────────────
   'flux-schnell':     { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'Flux Schnell'      },
   'flux-dev':         { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'Flux Dev'          },
+  'stable-diffusion-xl': { inPer1M: 0,  outPer1M: 0,     cachedInPer1M: 0,     label: 'Stable Diffusion XL' },
+  'stable-diffusion': { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'Stable Diffusion'  },
   // ── BlackSwan (self-hosted, zero cost) ────────────────────────────────────
   'blackswan-7b':     { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'BlackSwan 7B'     },
   'blackswan-4b':     { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'BlackSwan 4B'     },

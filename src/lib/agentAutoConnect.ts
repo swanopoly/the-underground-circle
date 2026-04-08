@@ -11,6 +11,7 @@
  *  - Singleton — safe to call start() multiple times.
  */
 
+import { supabase } from './supabase';
 import {
   ClaudeCodePoller,
   ClaudeCodeSession,
@@ -368,6 +369,33 @@ function _startRetryLoop() {
       console.log('[agentAutoConnect] Claude Code bridge went offline');
     }
 
+    // ── Agent keepalive — prevent pg_cron sweeper from marking ANY published agent offline ──
+    // Pings last_active_at for ALL published agents regardless of status
+    if (_circleId) {
+      const keepAliveProviders: { published: boolean; name: string }[] = [
+        { published: _ccPublished, name: 'Claude Code' },
+        { published: _codexPublished, name: 'Codex' },
+        { published: _geminiPublished, name: 'Gemini CLI' },
+        { published: _cursorPublished, name: 'Cursor' },
+      ];
+      for (const { published, name } of keepAliveProviders) {
+        if (published) {
+          supabase.auth.getUser().then(({ data: { user } }) => {
+            if (!user) return;
+            // Ping ALL statuses — not just idle. The sweeper marks agents offline
+            // after 3 min of no heartbeat regardless of status.
+            supabase.from('circle_office_agents')
+              .update({ last_active_at: new Date().toISOString() })
+              .eq('circle_id', _circleId!)
+              .eq('owner_id', user.id)
+              .eq('name', name)
+              .in('status', ['idle', 'building', 'active'])
+              .then(() => {});
+          }).catch(() => {});
+        }
+      }
+    }
+
     // Codex bridge
     if (codexDetected && !_codexPoller) {
       _startCodexPoller();
@@ -549,12 +577,15 @@ function _startCCPoller() {
     _sessionsMap.set('claude-code-auto', bridgeSessionsToAgents(sessions) as any);
     _notify();
 
-    // Publish to circle DB if we have a circleId
+    // Publish to circle DB if we have a circleId — pass sessions for multi-agent support
     if (!_ccPublished && _circleId) {
       _ccPublished = true;
-      publishClaudeCodeAgent(_circleId, sessions.length).catch(err =>
+      publishClaudeCodeAgent(_circleId, sessions.length, sessions).catch(err =>
         console.error('[agentAutoConnect] Failed to publish CC agent:', err),
       );
+    } else if (_ccPublished && _circleId) {
+      // Re-publish if session count changed (new session started) — creates new pixel agents
+      publishClaudeCodeAgent(_circleId, sessions.length, sessions).catch(() => {});
     }
     if (_ccPublished && _circleId) {
       updateClaudeCodeAgentStatus(_circleId, sessions).catch(() => {});
@@ -576,9 +607,11 @@ function _startCodexPoller() {
     // Publish to circle DB if we have a circleId
     if (!_codexPublished && _circleId) {
       _codexPublished = true;
-      publishCodexAgent(_circleId, sessions.length).catch(err =>
+      publishCodexAgent(_circleId, sessions.length, sessions).catch(err =>
         console.error('[agentAutoConnect] Failed to publish Codex agent:', err),
       );
+    } else if (_codexPublished && _circleId) {
+      publishCodexAgent(_circleId, sessions.length, sessions).catch(() => {});
     }
     if (_codexPublished && _circleId) {
       updateCodexAgentStatus(_circleId, sessions).catch(() => {});

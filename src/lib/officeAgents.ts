@@ -33,6 +33,17 @@ export interface OfficeAgent {
   connectionName: string;
   providerType: ProviderType;
   spirit?: string;  // Agent spirit ID from agentSpirits.ts (e.g. 'sr-engineer', 'trader')
+  // Live work context — updated every bridge poll
+  lastUserMessage?: string;
+  lastAssistantText?: string;
+  recentToolCalls?: Array<{ tool: string; file: string; ts: string }>;
+  activeFiles?: string[];
+  currentToolName?: string;
+  currentToolFile?: string;
+  projectDir?: string;
+  subagentCount?: number;
+  version?: string;
+  slug?: string;
 }
 
 export const STATUS_COLORS: Record<AgentStatus, string> = {

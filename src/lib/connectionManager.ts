@@ -64,7 +64,11 @@ async function loadLocal(): Promise<AgentConnection[]> {
 }
 
 async function saveLocal(connections: AgentConnection[]): Promise<void> {
-  const toSave = connections.map(({ status, error, sessionCount, agentIds, ...rest }) => rest);
+  // Strip secrets (tokens) from local storage — only save metadata needed for reconnection
+  const toSave = connections.map(({ status, error, sessionCount, agentIds, token, ...rest }) => ({
+    ...rest,
+    token: token ? '***' : undefined, // Redact — tokens are recovered from Supabase on load
+  }));
   await storage.setItem(STORAGE_KEY, JSON.stringify(toSave));
 }
 
@@ -76,7 +80,7 @@ function toSupabaseRow(conn: AgentConnection, userId: string) {
     owner_id: userId,
     name: conn.name,
     api_endpoint: conn.endpoint,
-    api_key_hash: conn.token, // stored as-is (RLS protects it per user)
+    api_key_hash: conn.token, // NOTE: stored as plaintext despite column name — RLS restricts to owner only
     type: conn.provider === 'openclaw' ? 'assistant'
         : conn.provider === 'claude-code' ? 'assistant'
         : conn.provider === 'codex' ? 'assistant'
