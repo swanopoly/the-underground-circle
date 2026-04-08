@@ -619,20 +619,43 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return () => clearTimeout(timer);
   }, [loaded, currentUserId, circleId]);
 
-  // ─── Save session to memory on page unload ─────────────────────────────
+  // ─── Save session to memory — periodic checkpoint + page unload ─────────
+  const lastCheckpointRef = useRef(0);
   useEffect(() => {
     if (!circleId || !currentUserId || Platform.OS !== 'web') return;
-    const handleUnload = () => {
-      try {
-        // Use import() cached module — saveSessionToMemory was already imported via swanbot
-        import('../../../lib/swanbot').then(({ saveSessionToMemory }) => {
-          saveSessionToMemory(circleId, currentUserId);
-        });
-      } catch {}
+
+    const doCheckpoint = () => {
+      import('../../../lib/swanbot').then(({ saveSessionToMemory }) => {
+        saveSessionToMemory(circleId, currentUserId);
+      }).catch(() => {});
     };
+
+    // Save on page unload
+    const handleUnload = () => { try { doCheckpoint(); } catch {} };
     window.addEventListener('beforeunload', handleUnload);
-    return () => window.removeEventListener('beforeunload', handleUnload);
-  }, [circleId, currentUserId]);
+
+    // Also save on visibility change (tab switch, minimize) — more reliable than beforeunload
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        try { doCheckpoint(); } catch {}
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    // Periodic checkpoint every 5 minutes of active chatting
+    const interval = setInterval(() => {
+      if (messages.length > lastCheckpointRef.current + 4) {
+        lastCheckpointRef.current = messages.length;
+        doCheckpoint();
+      }
+    }, 300_000); // 5 min
+
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(interval);
+    };
+  }, [circleId, currentUserId, messages.length]);
 
   // ─── Realtime subscription — see other members' messages live ──────────
 

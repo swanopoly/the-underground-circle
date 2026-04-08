@@ -384,20 +384,47 @@ export async function loadMemories(opts: {
   scopes?: MemoryScope[];
   limit?: number;
 }): Promise<MemoryEntry[]> {
-  let query = supabase
-    .from('memory_entries')
-    .select('*')
-    .eq('circle_id', opts.circleId)
-    .eq('is_active', true)
-    .order('created_at', { ascending: false })
-    .limit(opts.limit || 50);
+  // Load shared memories (circle, room, org, session) separately from user-private memories
+  // This prevents user-scope memories from leaking to other circle members
+  const results: MemoryEntry[] = [];
 
-  if (opts.scopes && opts.scopes.length > 0) query = query.in('scope', opts.scopes);
-  if (opts.roomId) query = query.or(`room_id.eq.${opts.roomId},room_id.is.null`);
+  // 1. Load shared-scope memories (visible to all circle members)
+  const sharedScopes = (opts.scopes || ['circle', 'room', 'session', 'org']).filter(s => s !== 'user');
+  if (sharedScopes.length > 0) {
+    let sharedQuery = supabase
+      .from('memory_entries')
+      .select('*')
+      .eq('circle_id', opts.circleId)
+      .eq('is_active', true)
+      .in('scope', sharedScopes)
+      .order('created_at', { ascending: false })
+      .limit(opts.limit || 30);
 
-  const { data, error } = await query;
-  if (error || !data) return [];
-  return data.map(mapMemory);
+    if (opts.roomId) sharedQuery = sharedQuery.or(`room_id.eq.${opts.roomId},room_id.is.null`);
+
+    const { data } = await sharedQuery;
+    if (data) results.push(...data.map(mapMemory));
+  }
+
+  // 2. Load user-private memories (only if userId is provided, only that user's memories)
+  const wantsUser = !opts.scopes || opts.scopes.includes('user');
+  if (wantsUser && opts.userId) {
+    const { data } = await supabase
+      .from('memory_entries')
+      .select('*')
+      .eq('circle_id', opts.circleId)
+      .eq('user_id', opts.userId)
+      .eq('scope', 'user')
+      .eq('is_active', true)
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    if (data) results.push(...data.map(mapMemory));
+  }
+
+  // Sort combined results by recency and cap
+  results.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  return results.slice(0, opts.limit || 50);
 }
 
 export async function promoteMemory(
@@ -421,24 +448,65 @@ export async function promoteMemory(
   return !error;
 }
 
+/**
+ * Build a bounded memory context string for prompt injection.
+ *
+ * Privacy: userId is required to load user-private memories safely.
+ * Budget: capped at ~3000 chars to prevent context bloat.
+ * Priority: instructions > preferences > decisions > facts > findings > context
+ */
 export async function buildMemoryContext(circleId: string, roomId?: string, userId?: string): Promise<string> {
-  const memories = await loadMemories({ circleId, roomId, userId, scopes: ['circle', 'room', 'user'], limit: 30 });
+  const memories = await loadMemories({
+    circleId,
+    roomId,
+    userId, // REQUIRED for safe user-scope loading
+    scopes: ['circle', 'room', 'user'],
+    limit: 25,
+  });
   if (memories.length === 0) return '';
 
+  // Priority sort: by importance (if available) then kind
+  const kindPriority: Record<string, number> = {
+    instruction: 0, preference: 1, policy: 2, decision: 3, fact: 4, finding: 5, context: 6,
+  };
+  memories.sort((a, b) => {
+    // Higher importance first (column may not exist yet — defaults to kind-based)
+    const aImp = (a as any).importance ?? (1.0 - (kindPriority[a.memory_kind] ?? 9) / 10);
+    const bImp = (b as any).importance ?? (1.0 - (kindPriority[b.memory_kind] ?? 9) / 10);
+    return bImp - aImp;
+  });
+
+  // Group by scope for readable output
   const grouped: Record<string, MemoryEntry[]> = {};
   for (const m of memories) {
-    const key = m.scope;
-    if (!grouped[key]) grouped[key] = [];
-    grouped[key].push(m);
+    if (!grouped[m.scope]) grouped[m.scope] = [];
+    grouped[m.scope].push(m);
   }
 
+  // Build output with token budget (~3000 chars ≈ ~750 tokens)
+  const MAX_CHARS = 3000;
+  let totalChars = 0;
   const sections: string[] = [];
-  for (const [scope, entries] of Object.entries(grouped)) {
-    const lines = entries.map(e => `- [${e.memory_kind}] ${e.title}: ${e.content.slice(0, 200)}`);
-    sections.push(`### ${scope.charAt(0).toUpperCase() + scope.slice(1)} Memory\n${lines.join('\n')}`);
+
+  // Render in priority order: room > user > circle
+  for (const scope of ['room', 'user', 'circle'] as const) {
+    const entries = grouped[scope];
+    if (!entries || entries.length === 0) continue;
+
+    const lines: string[] = [];
+    for (const e of entries) {
+      const line = `- [${e.memory_kind}] ${e.title}: ${e.content.slice(0, 150)}`;
+      if (totalChars + line.length > MAX_CHARS) break;
+      lines.push(line);
+      totalChars += line.length;
+    }
+    if (lines.length > 0) {
+      const label = scope === 'room' ? 'Project' : scope === 'user' ? 'Personal' : 'Circle';
+      sections.push(`### ${label} Memory\n${lines.join('\n')}`);
+    }
   }
 
-  return `## Agent Memory\n${sections.join('\n\n')}`;
+  return sections.length > 0 ? `## Agent Memory (${memories.length} entries)\n${sections.join('\n\n')}` : '';
 }
 
 // ── 8. Realtime Subscriptions ───────────────────────────────────────────────

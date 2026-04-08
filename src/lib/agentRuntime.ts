@@ -292,7 +292,7 @@ export async function executeAgentRun(
     // Inject memory context
     try {
       const { buildMemoryContext } = await import('./agentRunSystem');
-      const memCtx = await buildMemoryContext(circleId, context?.roomId);
+      const memCtx = await buildMemoryContext(circleId, context?.roomId, userId);
       if (memCtx) contextParts.push(memCtx);
     } catch {}
 

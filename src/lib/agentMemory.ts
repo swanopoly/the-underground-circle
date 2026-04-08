@@ -119,8 +119,8 @@ export async function autoExtractAndSave(
   userId: string,
   messages: Array<{ role: string; text: string }>,
 ): Promise<{ saved: number; updated: number }> {
-  // Load existing memories for dedup
-  const existing = await loadMemories({ circleId, scopes: ['circle', 'user'], limit: 100 });
+  // Load existing memories for dedup (scoped to this user for user memories)
+  const existing = await loadMemories({ circleId, userId, scopes: ['circle', 'user'], limit: 100 });
 
   // Extract new memories
   const extracted = await extractMemoriesFromConversation(messages, existing);
@@ -130,24 +130,43 @@ export async function autoExtractAndSave(
   let updated = 0;
 
   for (const mem of extracted) {
-    // Check for existing memory with similar title (case-insensitive)
-    const duplicate = existing.find(e =>
-      e.title.toLowerCase() === mem.title.toLowerCase() ||
-      e.content.toLowerCase().includes(mem.content.toLowerCase().slice(0, 50))
-    );
+    // Improved dedup: check title similarity + content overlap
+    const titleLower = mem.title.toLowerCase();
+    const contentLower = mem.content.toLowerCase();
+    const duplicate = existing.find(e => {
+      const eTitleLower = e.title.toLowerCase();
+      const eContentLower = e.content.toLowerCase();
+      // Exact title match
+      if (eTitleLower === titleLower) return true;
+      // Title contains the other
+      if (eTitleLower.includes(titleLower) || titleLower.includes(eTitleLower)) return true;
+      // Content substantially overlaps (>60% of shorter string)
+      const shorter = contentLower.length < eContentLower.length ? contentLower : eContentLower;
+      const longer = contentLower.length < eContentLower.length ? eContentLower : contentLower;
+      if (shorter.length > 20 && longer.includes(shorter.slice(0, Math.floor(shorter.length * 0.6)))) return true;
+      return false;
+    });
 
     if (duplicate) {
-      // Update existing memory with new content (handles contradictions)
+      // Update existing memory — supersedes the old version
       try {
         await supabase
           .from('memory_entries')
-          .update({ content: mem.content, memory_kind: mem.kind, updated_at: new Date().toISOString() })
+          .update({
+            content: mem.content,
+            memory_kind: mem.kind,
+            updated_at: new Date().toISOString(),
+            status: 'active',
+          })
           .eq('id', duplicate.id);
         updated++;
       } catch {}
     } else {
-      // Save new memory
+      // Save new memory with proper scope, importance, and retrieval mode
       const scope: MemoryScope = ['preference', 'instruction'].includes(mem.kind) ? 'user' : 'circle';
+      const importance = mem.kind === 'instruction' ? 0.9 : mem.kind === 'decision' ? 0.8 : mem.kind === 'preference' ? 0.7 : 0.5;
+      const retrievalMode = ['instruction', 'preference'].includes(mem.kind) ? 'startup' : 'on_demand';
+
       await saveMemory({
         scope,
         circleId,
@@ -157,6 +176,26 @@ export async function autoExtractAndSave(
         content: mem.content,
         sourceSurface: 'main_chat',
       });
+
+      // Set importance and retrieval mode (columns added in privacy fix migration)
+      // Non-blocking — these columns may not exist yet if migration hasn't run
+      try {
+        if (saved === 0) {
+          // Only attempt once to check if columns exist
+          const { data: latest } = await supabase
+            .from('memory_entries')
+            .select('id')
+            .eq('circle_id', circleId)
+            .eq('title', mem.title)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .single();
+          if (latest) {
+            await supabase.from('memory_entries').update({ importance, retrieval_mode: retrievalMode }).eq('id', latest.id);
+          }
+        }
+      } catch {}
+
       saved++;
     }
   }

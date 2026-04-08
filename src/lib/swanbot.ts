@@ -477,7 +477,7 @@ async function buildSystemPromptAsync(context: SwanBotContext, data: CircleConte
   try {
     const { buildMemoryContext } = await import('./agentRunSystem');
     if (context.circleId) {
-      const memCtx = await buildMemoryContext(context.circleId);
+      const memCtx = await buildMemoryContext(context.circleId, undefined, context.userId);
       if (memCtx) extras.push(memCtx);
     }
   } catch {}
