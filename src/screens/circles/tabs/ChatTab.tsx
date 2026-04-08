@@ -15,6 +15,8 @@ import {
 import { supabase } from '../../../lib/supabase';
 import FlatIcon from '../../../components/FlatIcon';
 import MemoryViewer from '../../../components/agent/MemoryViewer';
+import RunStatusBar from '../../../components/agent/RunStatusBar';
+import PluginPicker from '../../../components/agent/PluginPicker';
 import {
   getSwanBotResponse as getAIResponse,
   getSwanBotStructuredResponse,
@@ -394,6 +396,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [pendingComputerUseTask, setPendingComputerUseTask] = useState('');
   const [pendingComputerUseActions, setPendingComputerUseActions] = useState<BrowserAction[]>([]);
   const [showMemoryViewer, setShowMemoryViewer] = useState(false);
+  const [showPluginPicker, setShowPluginPicker] = useState(false);
+  const [activePlugins, setActivePlugins] = useState<string[]>([]);
+  const [runStatus, setRunStatus] = useState<'idle' | 'running' | 'delegated' | 'waiting_approval'>('idle');
+  const [activeSubagent, setActiveSubagent] = useState<{ name: string; icon: string; color: string } | null>(null);
+  const [currentRunStep, setCurrentRunStep] = useState<string>('');
   // User behavior profile
   const profileRef = useRef<UserChatProfile | null>(null);
 
@@ -1282,6 +1289,46 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             setPendingHandoff(result.handoffSuggestion);
           }
         } else {
+          // Try subagent delegation — route to specialist if message matches
+          let delegated = false;
+          try {
+            const { detectSubagent, delegateToSubagent } = await import('../../../lib/subagentRegistry');
+            const { buildPluginPrompt } = await import('../../../lib/pluginRegistry');
+            const subagent = detectSubagent(cleanContent);
+            if (subagent) {
+              setRunStatus('delegated');
+              setActiveSubagent({ name: subagent.displayName, icon: subagent.icon, color: subagent.color });
+              setCurrentRunStep(`${subagent.displayName} is working...`);
+
+              // Include active plugin prompts
+              const pluginPrompt = buildPluginPrompt(activePlugins);
+              const augmentedPrompt = pluginPrompt ? `${pluginPrompt}\n\n${fullPrompt}` : fullPrompt;
+
+              const result = await delegateToSubagent({
+                circleId,
+                userId: currentUserId || 'anonymous',
+                userName: currentUserName,
+                surface: 'main_chat',
+                message: augmentedPrompt,
+                subagent,
+                model: selectedModel !== 'auto' ? selectedModel : undefined,
+                chatHistory,
+              });
+
+              addBotMessage(`**${subagent.displayName}:**\n\n${result.response}`);
+              delegated = true;
+              setRunStatus('idle');
+              setActiveSubagent(null);
+              setCurrentRunStep('');
+
+              if (profileRef.current) {
+                profileRef.current = updateProfileFromMessage(profileRef.current, result.response, false);
+                saveUserProfile(profileRef.current).catch(() => {});
+              }
+            }
+          } catch { setRunStatus('idle'); setActiveSubagent(null); }
+
+          if (!delegated) {
           const structured = await getSwanBotStructuredResponse(fullPrompt, context);
           const botResponse = structured.response;
           addBotMessage(botResponse, structured.artifacts);
@@ -1308,9 +1355,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               await updateRunStatus(run.id, 'completed');
             }
           } catch {}
+          } // close if (!delegated)
         }
       } catch (err) {
         addBotMessage("Something went wrong. Try again.");
+        setRunStatus('idle');
+        setActiveSubagent(null);
       }
       setBotTyping(false);
     }
@@ -1756,6 +1806,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             )}
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginLeft: 'auto' }}>
               <Pressable
+                onPress={() => setShowPluginPicker(prev => !prev)}
+                style={[{ backgroundColor: activePlugins.length > 0 ? '#22c55e15' : '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: activePlugins.length > 0 ? '#22c55e40' : '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              >
+                <Text style={{ color: activePlugins.length > 0 ? '#22c55e' : '#606075', fontSize: 8, fontWeight: '700', fontFamily: 'monospace' }}>PLUGINS{activePlugins.length > 0 ? ` ${activePlugins.length}` : ''}</Text>
+              </Pressable>
+              <Pressable
                 onPress={() => setShowMemoryViewer(prev => !prev)}
                 style={[{ backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
               >
@@ -1774,6 +1830,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               </Pressable>
             </View>
           </View>
+
+          {/* Plugin Picker Panel */}
+          {showPluginPicker && (
+            <PluginPicker
+              activePluginIds={activePlugins}
+              onTogglePlugin={(id) => setActivePlugins(prev => prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id])}
+              onQuickStart={(prompt) => { setInput(prompt); inputRef.current?.focus(); }}
+              onClose={() => setShowPluginPicker(false)}
+              accentColor={accentColor}
+            />
+          )}
 
           {/* Memory Viewer Panel */}
           {showMemoryViewer && (
@@ -2140,6 +2207,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       )}
 
       {/* Enhanced input with model selector + quick actions + mode selector */}
+      {/* Run Status Bar — shows active delegation/processing */}
+      <RunStatusBar
+        status={runStatus}
+        subagentName={activeSubagent?.name}
+        subagentIcon={activeSubagent?.icon}
+        subagentColor={activeSubagent?.color}
+        currentStep={currentRunStep}
+        accentColor={accentColor}
+      />
+
       <EnhancedInput
         input={input}
         onInputChange={handleInputChange}
