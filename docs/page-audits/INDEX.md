@@ -18,6 +18,7 @@ Pages with concrete findings in this pass:
 - `chat-tab-agent-cli-external-patterns-addendum-2026-04-03.md`
 - `chat-and-rooms-tooling-deep-audit-2026-04-04.md`
 - `claude-cowork-openclaw-integration-master-plan-2026-04-08.md`
+- `claude-agent-stack-and-openclaw-panel-deep-audit-2026-04-08.md`
 - `ai-agent-use-cases-and-openclaw-deep-audit-2026-04-07.md`
 - `agent-session-memory-deep-research-and-implementation-plan-2026-04-08.md`
 - `feed-task-agent-execution-deep-audit-2026-04-04.md`

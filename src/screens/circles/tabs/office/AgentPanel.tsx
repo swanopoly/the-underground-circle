@@ -3,6 +3,7 @@ import { View, Text, TextInput, StyleSheet, Animated, Pressable, Platform, Scrol
 import { OfficeAgent, getOfficeStatusColor, getOfficeStatusLabel } from '../../../../lib/officeAgents';
 import FlatIcon, { ICON_CATALOG } from '../../../../components/FlatIcon';
 import { PROVIDER_META } from '../../../../lib/connectionManager';
+import { loadConnections, type AgentConnection } from '../../../../lib/connectionManager';
 import { SessionTag } from '../../../../lib/sessionTags';
 import SessionTagInput from '../../../../components/SessionTagInput';
 import AgentControlCard from '../../../../components/AgentControlCard';
@@ -20,6 +21,19 @@ import {
 } from '../../../../lib/soulTemplates';
 import { AGENT_SPIRITS, SPIRIT_CATEGORIES, getSpiritById, type AgentSpirit } from '../../../../lib/agentSpirits';
 import { updateAgentSpirit } from '../../../../lib/circleOffice';
+import {
+  type OpenClawConfig,
+  type OpenClawSession,
+  type OpenClawSubAgent,
+  type CronJob,
+  listSessions,
+  listSubAgentsDetailed,
+  listCronJobs,
+  searchMemory,
+  sendSessionMessage,
+  spawnSubAgent,
+  manageCronJob,
+} from '../../../../lib/openclawService';
 import { supabase } from '../../../../lib/supabase';
 
 const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
@@ -304,6 +318,301 @@ function AgentRunsPanel({ circleId, agentName, accentColor }: { circleId: string
   );
 }
 
+function OpenClawFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; accentColor: string }) {
+  const [connection, setConnection] = useState<AgentConnection | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [sessions, setSessions] = useState<OpenClawSession[]>([]);
+  const [subagents, setSubagents] = useState<OpenClawSubAgent[]>([]);
+  const [jobs, setJobs] = useState<CronJob[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [messageInput, setMessageInput] = useState('');
+  const [spawnInput, setSpawnInput] = useState('');
+  const [memoryQuery, setMemoryQuery] = useState('');
+  const [memoryResult, setMemoryResult] = useState('');
+  const [actionState, setActionState] = useState<string | null>(null);
+
+  const resolveConfig = useCallback(async (): Promise<OpenClawConfig | null> => {
+    const connections = await loadConnections();
+    const match = connections.find((conn) =>
+      conn.provider === 'openclaw' && (
+        conn.id === agent.connectionId ||
+        conn.name === agent.connectionName
+      )
+    ) || connections.find((conn) => conn.provider === 'openclaw' && conn.status === 'connected');
+
+    if (!match?.endpoint || !match?.token || match.token === '***') {
+      setConnection(match || null);
+      return null;
+    }
+
+    setConnection(match);
+    return { endpoint: match.endpoint, token: match.token };
+  }, [agent.connectionId, agent.connectionName]);
+
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    setError(null);
+    try {
+      const config = await resolveConfig();
+      if (!config) {
+        setError('KingClaw connection token is not available in this session.');
+        setSessions([]);
+        setSubagents([]);
+        setJobs([]);
+        return;
+      }
+
+      const [sessionsResult, subagentsResult, jobsResult] = await Promise.all([
+        listSessions(config),
+        listSubAgentsDetailed(config),
+        listCronJobs(config),
+      ]);
+
+      if (!sessionsResult.ok) {
+        setError(sessionsResult.error || 'Failed to load sessions');
+      }
+
+      setSessions(sessionsResult.sessions || []);
+      setSubagents(subagentsResult.subagents || []);
+      setJobs(jobsResult.jobs || []);
+    } catch (e: any) {
+      setError(e?.message || 'Failed to load KingClaw data');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [resolveConfig]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const runAction = useCallback(async (label: string, fn: (config: OpenClawConfig) => Promise<void>) => {
+    setActionState(label);
+    setError(null);
+    try {
+      const config = await resolveConfig();
+      if (!config) throw new Error('KingClaw connection is not available');
+      await fn(config);
+      await refresh();
+    } catch (e: any) {
+      setError(e?.message || `Failed to ${label.toLowerCase()}`);
+    } finally {
+      setActionState(null);
+    }
+  }, [refresh, resolveConfig]);
+
+  const activeSession = sessions.find((session) => session.sessionKey === agent.sessionKey) || sessions[0] || null;
+  const subagentCount = subagents.length || sessions.filter((session) => session.kind === 'subagent').length;
+  const enabledJobs = jobs.filter((job) => job.enabled).length;
+  const capabilityCards = [
+    { label: 'Channels', value: 'Gateway', note: 'shared routing + DMs/groups', color: '#6366f1' },
+    { label: 'Media', value: 'Rich IO', note: 'images, audio, video, docs', color: '#22c55e' },
+    { label: 'Browser', value: 'Automation', note: 'browser + exec + search', color: '#f59e0b' },
+    { label: 'Jobs', value: 'Cron', note: 'scheduled tasks + heartbeats', color: '#a855f7' },
+    { label: 'Control UI', value: 'Runtime', note: 'sessions, logs, config', color: '#22d3ee' },
+    { label: 'Nodes', value: 'Mobile/Desktop', note: 'paired device commands', color: '#ec4899' },
+  ];
+
+  return (
+    <View style={{ paddingHorizontal: 8, gap: 8, paddingBottom: 12 }} nativeID="section-openclaw-frontend">
+      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: accentColor + '35', borderRadius: 3, padding: 10 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <View style={{ width: 24, height: 24, borderRadius: 3, backgroundColor: accentColor + '18', borderWidth: 1, borderColor: accentColor + '35', alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ color: accentColor, fontSize: 11, fontWeight: '800', fontFamily: MONO }}>OC</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: '#f0f0f5', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>KINGCLAW RUNTIME PANEL</Text>
+            <Text style={{ color: '#606075', fontSize: 9, fontFamily: MONO }} numberOfLines={1}>
+              {connection?.endpoint || 'No active KingClaw endpoint resolved'}
+            </Text>
+          </View>
+          <Pressable
+            onPress={refresh}
+            style={[{ paddingHorizontal: 10, paddingVertical: 5, borderRadius: 3, borderWidth: 1, borderColor: accentColor + '40', backgroundColor: accentColor + '12' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={{ color: accentColor, fontSize: 9, fontWeight: '700', fontFamily: MONO }}>{refreshing ? 'SYNC..' : 'REFRESH'}</Text>
+          </Pressable>
+        </View>
+
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
+          {[
+            { label: 'Sessions', value: String(sessions.length), color: '#6366f1' },
+            { label: 'Subagents', value: String(subagentCount), color: '#a855f7' },
+            { label: 'Cron Jobs', value: String(jobs.length), color: '#f59e0b' },
+            { label: 'Enabled Jobs', value: String(enabledJobs), color: '#22c55e' },
+          ].map((item) => (
+            <View key={item.label} style={{ width: '23%', backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 8 }}>
+              <Text style={{ color: '#3a3a4e', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>{item.label.toUpperCase()}</Text>
+              <Text style={{ color: item.color, fontSize: 14, fontWeight: '800', fontFamily: MONO, marginTop: 2 }}>{item.value}</Text>
+            </View>
+          ))}
+        </View>
+
+        {error ? <Text style={{ color: '#ef4444', fontSize: 9, fontFamily: MONO, marginTop: 8 }}>{error}</Text> : null}
+      </View>
+
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+        {capabilityCards.map((card) => (
+          <View key={card.label} style={{ width: '48%', backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 9 }}>
+            <Text style={{ color: '#3a3a4e', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>{card.label.toUpperCase()}</Text>
+            <Text style={{ color: card.color, fontSize: 11, fontWeight: '700', fontFamily: MONO, marginTop: 3 }}>{card.value}</Text>
+            <Text style={{ color: '#606075', fontSize: 8, fontFamily: MONO, marginTop: 3, lineHeight: 12 }}>{card.note}</Text>
+          </View>
+        ))}
+      </View>
+
+      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10, gap: 8 }}>
+        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>SESSIONS</Text>
+        {loading ? (
+          <ActivityIndicator size="small" color={accentColor} />
+        ) : activeSession ? (
+          <>
+            <View style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: accentColor + '30', borderRadius: 3, padding: 8 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Text style={{ color: accentColor, fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{activeSession.kind || 'session'}</Text>
+                <Text style={{ color: '#a0a0b0', fontSize: 10, fontFamily: MONO, flex: 1 }} numberOfLines={1}>{activeSession.sessionKey}</Text>
+                <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>{formatRelativeTime(activeSession.lastActivity)}</Text>
+              </View>
+              {activeSession.model ? <Text style={{ color: '#6366f1', fontSize: 9, fontFamily: MONO, marginTop: 4 }}>{activeSession.model}</Text> : null}
+              {activeSession.lastMessages?.length ? (
+                <Text style={{ color: '#808090', fontSize: 8, fontFamily: MONO, marginTop: 5, lineHeight: 12 }} numberOfLines={3}>
+                  {activeSession.lastMessages[activeSession.lastMessages.length - 1]?.content}
+                </Text>
+              ) : null}
+            </View>
+
+            {sessions.length > 1 ? (
+              <View style={{ gap: 4 }}>
+                {sessions.slice(0, 5).map((session) => (
+                  <View key={session.sessionKey} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 2 }}>
+                    <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: session.sessionKey === activeSession.sessionKey ? accentColor : '#2a2a3e' }} />
+                    <Text style={{ color: '#a0a0b0', fontSize: 9, fontFamily: MONO, flex: 1 }} numberOfLines={1}>{session.sessionKey}</Text>
+                    <Text style={{ color: '#606075', fontSize: 8, fontFamily: MONO }}>{session.kind}</Text>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+          </>
+        ) : (
+          <Text style={{ color: '#3a3a4e', fontSize: 9, fontFamily: MONO, fontStyle: 'italic' }}>No sessions returned by the gateway.</Text>
+        )}
+      </View>
+
+      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10, gap: 8 }}>
+        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>SUBAGENTS + AUTOMATIONS</Text>
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <View style={{ flex: 1, gap: 4 }}>
+            <Text style={{ color: '#a855f7', fontSize: 9, fontWeight: '700', fontFamily: MONO }}>Subagents</Text>
+            {subagents.length === 0 ? (
+              <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO, fontStyle: 'italic' }}>No subagents reported.</Text>
+            ) : subagents.slice(0, 4).map((subagent) => (
+              <View key={subagent.id} style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 6 }}>
+                <Text style={{ color: '#f0f0f5', fontSize: 8, fontWeight: '700', fontFamily: MONO }} numberOfLines={1}>{subagent.name || subagent.id}</Text>
+                <Text style={{ color: '#606075', fontSize: 7, fontFamily: MONO }} numberOfLines={1}>{subagent.model || subagent.status || 'unknown'}</Text>
+                {subagent.task ? <Text style={{ color: '#808090', fontSize: 7, fontFamily: MONO, marginTop: 2 }} numberOfLines={2}>{subagent.task}</Text> : null}
+              </View>
+            ))}
+          </View>
+
+          <View style={{ flex: 1, gap: 4 }}>
+            <Text style={{ color: '#f59e0b', fontSize: 9, fontWeight: '700', fontFamily: MONO }}>Cron Jobs</Text>
+            {jobs.length === 0 ? (
+              <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO, fontStyle: 'italic' }}>No cron jobs configured.</Text>
+            ) : jobs.slice(0, 4).map((job) => (
+              <View key={job.id} style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 6 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: job.enabled ? '#22c55e' : '#3a3a4e' }} />
+                  <Text style={{ color: '#f0f0f5', fontSize: 8, fontWeight: '700', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{job.name || job.id}</Text>
+                  <Pressable
+                    onPress={() => runAction(`Run ${job.id}`, async (config) => { await manageCronJob(config, 'run', job.id); })}
+                    style={[{ paddingHorizontal: 5, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b40', backgroundColor: '#f59e0b12' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  >
+                    <Text style={{ color: '#f59e0b', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>{actionState === `Run ${job.id}` ? '..' : 'RUN'}</Text>
+                  </Pressable>
+                </View>
+                {job.nextRun ? <Text style={{ color: '#606075', fontSize: 7, fontFamily: MONO, marginTop: 2 }} numberOfLines={1}>next {job.nextRun}</Text> : null}
+              </View>
+            ))}
+          </View>
+        </View>
+      </View>
+
+      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10, gap: 8 }}>
+        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>OPENCLAW ACTIONS</Text>
+
+        <View style={{ gap: 4 }}>
+          <Text style={{ color: '#3a3a4e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>SEND TO SESSION</Text>
+          <View style={{ flexDirection: 'row', gap: 6 }}>
+            <TextInput
+              value={messageInput}
+              onChangeText={setMessageInput}
+              placeholder="send a session message..."
+              placeholderTextColor="#3a3a4e"
+              style={{ flex: 1, color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+            />
+            <Pressable
+              onPress={() => messageInput.trim() && runAction('Send message', async (config) => {
+                await sendSessionMessage(config, agent.sessionKey, messageInput.trim());
+                setMessageInput('');
+              })}
+              style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: accentColor + '40', backgroundColor: accentColor + '12' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={{ color: accentColor, fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{actionState === 'Send message' ? '..' : 'SEND'}</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        <View style={{ gap: 4 }}>
+          <Text style={{ color: '#3a3a4e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>SPAWN SUBAGENT</Text>
+          <View style={{ flexDirection: 'row', gap: 6 }}>
+            <TextInput
+              value={spawnInput}
+              onChangeText={setSpawnInput}
+              placeholder="delegate a background task..."
+              placeholderTextColor="#3a3a4e"
+              style={{ flex: 1, color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+            />
+            <Pressable
+              onPress={() => spawnInput.trim() && runAction('Spawn subagent', async (config) => {
+                await spawnSubAgent(config, spawnInput.trim());
+                setSpawnInput('');
+              })}
+              style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#a855f740', backgroundColor: '#a855f712' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={{ color: '#a855f7', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{actionState === 'Spawn subagent' ? '..' : 'SPAWN'}</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        <View style={{ gap: 4 }}>
+          <Text style={{ color: '#3a3a4e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>MEMORY SEARCH</Text>
+          <View style={{ flexDirection: 'row', gap: 6 }}>
+            <TextInput
+              value={memoryQuery}
+              onChangeText={setMemoryQuery}
+              placeholder="search agent memory..."
+              placeholderTextColor="#3a3a4e"
+              style={{ flex: 1, color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+            />
+            <Pressable
+              onPress={() => memoryQuery.trim() && runAction('Search memory', async (config) => {
+                const result = await searchMemory(config, memoryQuery.trim());
+                setMemoryResult(result.reply || result.error || 'No result');
+              })}
+              style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e40', backgroundColor: '#22c55e12' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={{ color: '#22c55e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{actionState === 'Search memory' ? '..' : 'SEARCH'}</Text>
+            </Pressable>
+          </View>
+          {memoryResult ? <Text style={{ color: '#808090', fontSize: 8, fontFamily: MONO, lineHeight: 12 }} selectable>{memoryResult}</Text> : null}
+        </View>
+      </View>
+    </View>
+  );
+}
+
 // ── SECTION: agent-remote-shell — Run shell commands on the agent's machine ──
 
 const QUICK_COMMANDS = [
@@ -518,7 +827,7 @@ export default function AgentPanel({
   const slideAnim = useRef(new Animated.Value(400)).current;
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState('');
-  const [panelTab, setPanelTab] = useState<'overview' | 'terminal' | 'spirit' | 'evolution' | 'activity' | 'memory' | 'runs' | 'customize'>('overview');
+  const [panelTab, setPanelTab] = useState<'overview' | 'openclaw' | 'terminal' | 'spirit' | 'evolution' | 'activity' | 'memory' | 'runs' | 'customize'>('overview');
   const [userId, setUserId] = useState<string | null>(null);
   useEffect(() => { supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id || null)).catch(() => {}); }, []);
   const [showCustomize, setShowCustomize] = useState(false);
@@ -793,6 +1102,7 @@ export default function AgentPanel({
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxHeight: 36, borderBottomWidth: 1, borderBottomColor: '#1a1a28', marginBottom: 8 }} contentContainerStyle={{ paddingHorizontal: 8, gap: 2 }}>
         {([
           { key: 'overview', label: 'Overview' },
+          ...(agent.providerType === 'openclaw' ? [{ key: 'openclaw', label: 'KingClaw' as const }] : []),
           { key: 'terminal', label: 'Terminal' },
           { key: 'memory', label: 'Memory' },
           { key: 'runs', label: 'Runs' },
@@ -803,7 +1113,7 @@ export default function AgentPanel({
         ] as const).map(tab => (
           <Pressable
             key={tab.key}
-            onPress={() => setPanelTab(tab.key)}
+            onPress={() => setPanelTab(tab.key as any)}
             accessibilityRole="tab"
             style={[
               { paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 2, borderBottomColor: panelTab === tab.key ? (agent.color || '#6366f1') : 'transparent' },
@@ -1030,6 +1340,10 @@ export default function AgentPanel({
         </View>
         );
       })()}
+
+      {panelTab === 'openclaw' && agent.providerType === 'openclaw' && (
+        <OpenClawFrontendPanel agent={agent} accentColor={agent.color || '#6366f1'} />
+      )}
 
       {/* ── TERMINAL TAB — Remote Shell + AI Terminal ── */}
       {panelTab === 'terminal' && (
