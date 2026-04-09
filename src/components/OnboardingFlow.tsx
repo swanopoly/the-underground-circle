@@ -6,12 +6,7 @@ import {
   Pressable,
   Modal,
   Platform,
-  ActivityIndicator,
 } from 'react-native';
-import { connectViaOAuth } from '../lib/github';
-import { createLinkInvite, generateInviteUrl } from '../lib/invites';
-import { ensureConnectToken } from '../lib/agentConnect';
-import * as Clipboard from 'expo-clipboard';
 
 const ONBOARDING_KEY = 'uc_onboarding_complete';
 
@@ -38,71 +33,18 @@ interface Props {
 
 export default function OnboardingFlow({ userId, circleId, onComplete }: Props) {
   const [step, setStep] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [inviteUrl, setInviteUrl] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [connectToken, setConnectToken] = useState<string | null>(null);
-  const [cmdCopied, setCmdCopied] = useState(false);
-
-  const handleGitHubConnect = useCallback(async () => {
-    if (!circleId) {
-      setStep(2);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const { url, error: oauthErr } = await connectViaOAuth(circleId, userId);
-      if (oauthErr || !url) {
-        setError(oauthErr || 'Failed to start OAuth');
-        return;
-      }
-      if (Platform.OS === 'web') {
-        window.open(url, '_blank');
-      }
-      setStep(2);
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [circleId, userId]);
-
-  const handleGenerateInvite = useCallback(async () => {
-    if (!circleId || inviteUrl) return;
-    setLoading(true);
-    try {
-      const { url } = await createLinkInvite(circleId, { expiresInDays: 7 });
-      if (url) setInviteUrl(url);
-    } catch {
-      // Non-critical
-    } finally {
-      setLoading(false);
-    }
-  }, [circleId, inviteUrl]);
-
-  const handleCopyInvite = useCallback(async () => {
-    if (!inviteUrl) return;
-    try {
-      await navigator.clipboard.writeText(inviteUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {}
-  }, [inviteUrl]);
 
   const handleFinish = useCallback(() => {
     markOnboardingComplete();
     onComplete();
   }, [onComplete]);
 
-  const totalSteps = 4;
+  const totalSteps = 2;
 
   return (
     <Modal transparent animationType="fade" visible>
       <View style={styles.overlay}>
         <View style={styles.modal}>
-          {/* Step indicator */}
           <View style={styles.stepRow}>
             {Array.from({ length: totalSteps }).map((_, i) => (
               <View
@@ -112,129 +54,28 @@ export default function OnboardingFlow({ userId, circleId, onComplete }: Props) 
             ))}
           </View>
 
-          {/* Step 1: Welcome */}
           {step === 0 && (
             <View style={styles.stepContent}>
-              <Text style={styles.heading}>Your team. Your AI.{'\n'}No more standups.</Text>
+              <Text style={styles.heading}>Meet BlackSwan{'\n'}Your AI Agent</Text>
               <Text style={styles.sub}>
-                BlackSwan watches your GitHub and keeps everyone honest about shipping.
+                BlackSwan is built into the app — no downloads, no setup.{'\n\n'}
+                It watches your GitHub, tracks who's shipping, and keeps your team honest. Connect your own coding agents (Claude Code, Codex, Gemini CLI) later from the Office tab.
               </Text>
               <Pressable onPress={() => setStep(1)} style={styles.ctaBtn}>
-                <Text style={styles.ctaBtnText}>Get started</Text>
+                <Text style={styles.ctaBtnText}>Let's go</Text>
               </Pressable>
             </View>
           )}
 
-          {/* Step 2: Connect GitHub */}
           {step === 1 && (
             <View style={styles.stepContent}>
-              <Text style={styles.heading}>Connect your GitHub repo</Text>
+              <Text style={styles.heading}>Create or Join a Circle</Text>
               <Text style={styles.sub}>
-                BlackSwan will start watching commits and PRs automatically.
+                A circle is your team workspace. BlackSwan lives there and watches your code.{'\n\n'}
+                You can create your own or join an existing one with an invite code.
               </Text>
-              <Pressable
-                onPress={handleGitHubConnect}
-                style={[styles.githubBtn, loading && styles.btnDisabled]}
-                disabled={loading}
-              >
-                {loading ? (
-                  <ActivityIndicator color="#fff" size="small" />
-                ) : (
-                  <Text style={styles.githubBtnText}>Connect with GitHub</Text>
-                )}
-              </Pressable>
-              {error && <Text style={styles.errorText}>{error}</Text>}
-              <Pressable onPress={() => setStep(2)} style={styles.skipBtn}>
-                <Text style={styles.skipText}>I'll do this later</Text>
-              </Pressable>
-            </View>
-          )}
-
-          {/* Step 3: Invite team */}
-          {step === 2 && (
-            <View style={styles.stepContent}>
-              <Text style={styles.heading}>Invite your team</Text>
-              <Text style={styles.sub}>
-                Share the link below. They'll join your circle instantly.
-              </Text>
-
-              {circleId && !inviteUrl && (
-                <Pressable
-                  onPress={handleGenerateInvite}
-                  style={[styles.ctaBtn, loading && styles.btnDisabled]}
-                  disabled={loading}
-                >
-                  {loading ? (
-                    <ActivityIndicator color="#fff" size="small" />
-                  ) : (
-                    <Text style={styles.ctaBtnText}>Generate invite link</Text>
-                  )}
-                </Pressable>
-              )}
-
-              {inviteUrl && (
-                <View style={styles.inviteBox}>
-                  <Text style={styles.inviteUrl} numberOfLines={1}>{inviteUrl}</Text>
-                  <Pressable onPress={handleCopyInvite} style={styles.copyBtn}>
-                    <Text style={styles.copyBtnText}>{copied ? 'Copied!' : 'Copy'}</Text>
-                  </Pressable>
-                </View>
-              )}
-
-              {!circleId && (
-                <Text style={styles.sub}>Create or join a circle first, then invite your team.</Text>
-              )}
-
-              <Pressable onPress={handleFinish} style={[styles.ctaBtn, { marginTop: 16 }]}>
+              <Pressable onPress={handleFinish} style={styles.ctaBtn}>
                 <Text style={styles.ctaBtnText}>Open the app</Text>
-              </Pressable>
-            </View>
-          )}
-
-          {/* Step 4: Connect your agent */}
-          {step === 3 && (
-            <View style={styles.stepContent}>
-              <Text style={styles.heading}>Connect your AI agent</Text>
-              <Text style={styles.sub}>
-                Run this command so your agent auto-connects to the circle whenever you work.
-              </Text>
-
-              {connectToken ? (
-                <View style={{
-                  backgroundColor: '#111', borderWidth: 1, borderColor: '#27272a',
-                  borderRadius: 2, padding: 12, width: '100%', gap: 8,
-                }}>
-                  <Text style={{ color: '#a78bfa', fontSize: 12, fontFamily: 'monospace' }} selectable>
-                    {'npx @underground-circle/connect --token=' + connectToken}
-                  </Text>
-                  <Pressable
-                    onPress={async () => {
-                      await Clipboard.setStringAsync(
-                        'npx @underground-circle/connect --token=' + connectToken
-                      );
-                      setCmdCopied(true);
-                      setTimeout(() => setCmdCopied(false), 2000);
-                    }}
-                    style={styles.copyBtn}
-                  >
-                    <Text style={styles.copyBtnText}>{cmdCopied ? 'Copied!' : 'Copy command'}</Text>
-                  </Pressable>
-                </View>
-              ) : (
-                <Text style={styles.sub}>
-                  You can set this up later from the Office tab.
-                </Text>
-              )}
-
-              <Text style={{ color: '#52525b', fontSize: 11, fontFamily: 'monospace', textAlign: 'center', marginTop: 8, lineHeight: 16 }}>
-                {'Supports Claude Code, Codex, Gemini CLI, and Cursor.\nOne command. Works forever.'}
-              </Text>
-
-              <Pressable onPress={handleFinish} style={[styles.ctaBtn, { marginTop: 16 }]}>
-                <Text style={styles.ctaBtnText}>Open the app</Text>
-              </Pressable>
-              <Pressable onPress={handleFinish} style={styles.skipBtn}>
-                <Text style={styles.skipText}>{"I'll do this later"}</Text>
               </Pressable>
             </View>
           )}
