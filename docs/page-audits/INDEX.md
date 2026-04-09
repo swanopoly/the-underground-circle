@@ -19,6 +19,7 @@ Pages with concrete findings in this pass:
 - `chat-and-rooms-tooling-deep-audit-2026-04-04.md`
 - `claude-cowork-openclaw-integration-master-plan-2026-04-08.md`
 - `claude-agent-stack-and-openclaw-panel-deep-audit-2026-04-08.md`
+- `claude-apr-8-change-review-and-improvements-2026-04-08.md`
 - `ai-agent-use-cases-and-openclaw-deep-audit-2026-04-07.md`
 - `agent-session-memory-deep-research-and-implementation-plan-2026-04-08.md`
 - `agent-memory-ux-and-compaction-implementation-plan-2026-04-08.md`

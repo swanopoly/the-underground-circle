@@ -1140,7 +1140,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       if (!what) { addBotMessage('Usage: `/forget <keyword to forget>`'); return; }
       try {
         const { forgetFromChat } = await import('../../../lib/memoryService');
-        const { forgotten } = await forgetFromChat(circleId, what);
+        const { forgotten } = await forgetFromChat(circleId, currentUserId || '', what);
         addBotMessage(forgotten > 0 ? `Forgot ${forgotten} memor${forgotten === 1 ? 'y' : 'ies'} matching "${what}".` : `No memories found matching "${what}".`);
       } catch (e: any) { addBotMessage(`Memory error: ${e.message}`); }
       return;

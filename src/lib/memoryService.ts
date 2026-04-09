@@ -10,7 +10,7 @@
 
 import { supabase } from './supabase';
 import {
-  loadMemories, saveMemory, buildMemoryContext,
+  loadMemories, saveMemory,
   type MemoryScope, type MemoryKind, type MemoryEntry,
 } from './agentRunSystem';
 
@@ -25,25 +25,40 @@ export async function loadStartupMemory(opts: {
   userId: string;
   roomId?: string;
 }): Promise<string> {
-  // 1. Get the structured memory context (already priority-sorted and capped)
-  const memoryCtx = await buildMemoryContext(opts.circleId, opts.roomId, opts.userId);
+  const allMemories = await loadMemories({
+    circleId: opts.circleId,
+    roomId: opts.roomId,
+    userId: opts.userId,
+    scopes: ['circle', 'room', 'user', 'session'],
+    limit: 40,
+  });
 
-  // 2. Get last session summary for continuity
-  let sessionCtx = '';
-  try {
-    const sessionMems = await loadMemories({
-      circleId: opts.circleId,
-      userId: opts.userId,
-      scopes: ['session'],
-      limit: 2,
+  const startupMemories = allMemories
+    .filter(m => m.retrieval_mode !== 'manual_only')
+    .sort((a, b) => {
+      const aStartup = a.retrieval_mode === 'startup' ? 1 : 0;
+      const bStartup = b.retrieval_mode === 'startup' ? 1 : 0;
+      if (bStartup !== aStartup) return bStartup - aStartup;
+      if ((b.importance || 0) !== (a.importance || 0)) return (b.importance || 0) - (a.importance || 0);
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
     });
-    if (sessionMems.length > 0) {
-      const last = sessionMems[0];
-      sessionCtx = `## Previous Session\n${last.content.slice(0, 800)}`;
-    }
-  } catch {}
 
-  const parts = [memoryCtx, sessionCtx].filter(Boolean);
+  const durable = startupMemories.filter(m => m.scope !== 'session').slice(0, 10);
+  const recentSession = startupMemories
+    .filter(m => m.scope === 'session')
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    .slice(0, 1);
+
+  const parts: string[] = [];
+  if (durable.length > 0) {
+    parts.push(
+      `## Startup Memory\n${durable.map(m => `- [${m.scope}/${m.memory_kind}] ${m.title}: ${m.content.slice(0, 160)}`).join('\n')}`
+    );
+  }
+  if (recentSession.length > 0) {
+    parts.push(`## Previous Session\n${recentSession[0].content.slice(0, 800)}`);
+  }
+
   return parts.join('\n\n');
 }
 
@@ -110,6 +125,7 @@ export async function retrieveRelevantMemories(opts: {
   // Score and rank results
   const scored = data.map((d: any) => {
     const mem = mapMemoryEntry(d);
+    if (mem.retrieval_mode === 'manual_only') return { mem, score: -1 };
     let score = 0;
     const titleLower = mem.title.toLowerCase();
     const contentLower = mem.content.toLowerCase();
@@ -117,9 +133,11 @@ export async function retrieveRelevantMemories(opts: {
       if (titleLower.includes(kw)) score += 3;
       if (contentLower.includes(kw)) score += 1;
     }
+    if (keywords.some(kw => titleLower === kw || titleLower.startsWith(`${kw} `))) score += 2;
     // Boost by importance
-    const imp = (d as any).importance || 0.5;
+    const imp = mem.importance || 0.5;
     score *= (0.5 + imp);
+    if (mem.memory_kind === 'decision' || mem.memory_kind === 'instruction') score *= 1.15;
     // Recency decay — newer memories slightly preferred
     const ageMs = Date.now() - new Date(mem.created_at).getTime();
     const ageDays = ageMs / 86_400_000;
@@ -207,6 +225,9 @@ export async function saveCompactedSession(
       title: `Session summary ${new Date().toLocaleDateString()}`,
       content: compact.summary,
       sourceSurface: 'main_chat',
+      visibility: 'private',
+      importance: 0.7,
+      retrievalMode: 'startup',
     });
   }
 
@@ -218,6 +239,9 @@ export async function saveCompactedSession(
       title: decision.slice(0, 60),
       content: decision,
       sourceSurface: 'main_chat',
+      visibility: 'circle_shared',
+      importance: 0.85,
+      retrievalMode: 'startup',
     });
   }
 
@@ -227,8 +251,11 @@ export async function saveCompactedSession(
       scope: 'session', circleId, userId,
       memoryKind: 'context',
       title: 'Open questions',
-      content: compact.openQuestions.join('\n- '),
+      content: compact.openQuestions.map(q => `- ${q}`).join('\n'),
       sourceSurface: 'main_chat',
+      visibility: 'private',
+      importance: 0.55,
+      retrievalMode: 'startup',
     });
   }
 }
@@ -276,14 +303,18 @@ export async function rememberFromChat(
   kind: MemoryKind = 'fact',
 ): Promise<MemoryEntry | null> {
   const title = content.slice(0, 60).replace(/\n/g, ' ');
+  const isPrivate = kind === 'preference' || kind === 'instruction' || kind === 'context';
   return saveMemory({
-    scope: kind === 'preference' || kind === 'instruction' ? 'user' : 'circle',
+    scope: isPrivate ? 'user' : 'circle',
     circleId,
-    userId: kind === 'preference' || kind === 'instruction' ? userId : undefined,
+    userId: isPrivate ? userId : undefined,
     memoryKind: kind,
     title,
     content,
     sourceSurface: 'main_chat',
+    visibility: isPrivate ? 'private' : 'circle_shared',
+    importance: kind === 'instruction' ? 0.9 : kind === 'preference' ? 0.8 : kind === 'decision' ? 0.85 : 0.65,
+    retrievalMode: ['instruction', 'preference', 'context'].includes(kind) ? 'startup' : 'on_demand',
   });
 }
 
@@ -292,20 +323,28 @@ export async function rememberFromChat(
  */
 export async function forgetFromChat(
   circleId: string,
+  userId: string,
   query: string,
 ): Promise<{ forgotten: number }> {
   const { data } = await supabase
     .from('memory_entries')
-    .select('id')
+    .select('id, scope, user_id')
     .eq('circle_id', circleId)
     .eq('is_active', true)
     .or(`title.ilike.%${query}%,content.ilike.%${query}%`)
-    .limit(5);
+    .limit(12);
 
   if (!data || data.length === 0) return { forgotten: 0 };
 
+  const owned = data.filter(row =>
+    row.scope === 'circle' ||
+    (!!userId && row.user_id === userId && (row.scope === 'user' || row.scope === 'session'))
+  ).slice(0, 5);
+
+  if (owned.length === 0) return { forgotten: 0 };
+
   let forgotten = 0;
-  for (const row of data) {
+  for (const row of owned) {
     const { error } = await supabase
       .from('memory_entries')
       .update({ is_active: false, updated_at: new Date().toISOString() })
@@ -321,8 +360,11 @@ export async function forgetFromChat(
 function mapMemoryEntry(d: any): MemoryEntry {
   return {
     id: d.id, scope: d.scope, circle_id: d.circle_id, room_id: d.room_id,
+    session_id: d.session_id,
     user_id: d.user_id, memory_kind: d.memory_kind, title: d.title,
-    content: d.content, source_run_id: d.source_run_id, is_active: d.is_active,
-    created_at: d.created_at,
+    content: d.content, source_run_id: d.source_run_id, source_surface: d.source_surface,
+    is_active: d.is_active, visibility: d.visibility, importance: d.importance,
+    retrieval_mode: d.retrieval_mode, status: d.status, access_count: d.access_count,
+    last_accessed_at: d.last_accessed_at, updated_at: d.updated_at, created_at: d.created_at,
   };
 }

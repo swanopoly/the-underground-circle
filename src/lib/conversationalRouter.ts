@@ -287,7 +287,7 @@ ${status === 'draft' ? `Say "publish it" or use \`/wp publish ${result.postId}\`
     case 'forget': {
       try {
         const { forgetFromChat } = await import('./memoryService');
-        const { forgotten } = await forgetFromChat(context.circleId, intent.query);
+        const { forgotten } = await forgetFromChat(context.circleId, context.userId, intent.query);
         return { handled: true, message: forgotten > 0 ? `Forgot ${forgotten} memor${forgotten === 1 ? 'y' : 'ies'} matching "${intent.query}".` : `No memories found matching "${intent.query}".` };
       } catch (e: any) {
         return { handled: true, message: `Memory error: ${e.message}` };

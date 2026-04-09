@@ -101,11 +101,20 @@ export interface MemoryEntry {
   circle_id?: string;
   room_id?: string;
   user_id?: string;
+  session_id?: string;
   memory_kind: MemoryKind;
   title: string;
   content: string;
   source_run_id?: string;
+  source_surface?: string;
   is_active: boolean;
+  visibility?: 'private' | 'room_shared' | 'circle_shared' | 'org_shared';
+  importance?: number;
+  retrieval_mode?: 'startup' | 'on_demand' | 'manual_only';
+  status?: string;
+  access_count?: number;
+  last_accessed_at?: string;
+  updated_at?: string;
   created_at: string;
 }
 
@@ -470,13 +479,14 @@ export async function promoteMemory(
  * Priority: instructions > preferences > decisions > facts > findings > context
  */
 export async function buildMemoryContext(circleId: string, roomId?: string, userId?: string): Promise<string> {
-  const memories = await loadMemories({
+  const memories = (await loadMemories({
     circleId,
     roomId,
     userId, // REQUIRED for safe user-scope loading
     scopes: ['circle', 'room', 'user'],
     limit: 25,
-  });
+  }))
+    .filter(m => m.retrieval_mode !== 'manual_only');
   if (memories.length === 0) return '';
 
   // Priority sort: by importance (if available) then kind
@@ -484,15 +494,26 @@ export async function buildMemoryContext(circleId: string, roomId?: string, user
     instruction: 0, preference: 1, policy: 2, decision: 3, fact: 4, finding: 5, context: 6,
   };
   memories.sort((a, b) => {
-    // Higher importance first (column may not exist yet — defaults to kind-based)
-    const aImp = (a as any).importance ?? (1.0 - (kindPriority[a.memory_kind] ?? 9) / 10);
-    const bImp = (b as any).importance ?? (1.0 - (kindPriority[b.memory_kind] ?? 9) / 10);
-    return bImp - aImp;
+    const aStartupBoost = a.retrieval_mode === 'startup' ? 0.25 : 0;
+    const bStartupBoost = b.retrieval_mode === 'startup' ? 0.25 : 0;
+    const aImp = (a.importance ?? (1.0 - (kindPriority[a.memory_kind] ?? 9) / 10)) + aStartupBoost;
+    const bImp = (b.importance ?? (1.0 - (kindPriority[b.memory_kind] ?? 9) / 10)) + bStartupBoost;
+    if (bImp !== aImp) return bImp - aImp;
+    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+  });
+
+  // Keep the highest-value version when multiple active memories have the same title.
+  const seenTitles = new Set<string>();
+  const deduped = memories.filter(m => {
+    const key = `${m.scope}:${m.title.trim().toLowerCase()}`;
+    if (seenTitles.has(key)) return false;
+    seenTitles.add(key);
+    return true;
   });
 
   // Group by scope for readable output
   const grouped: Record<string, MemoryEntry[]> = {};
-  for (const m of memories) {
+  for (const m of deduped) {
     if (!grouped[m.scope]) grouped[m.scope] = [];
     grouped[m.scope].push(m);
   }
@@ -521,9 +542,9 @@ export async function buildMemoryContext(circleId: string, roomId?: string, user
   }
 
   // Log memory access (non-blocking) — tracks which memories were loaded into each run
-  if (memories.length > 0) {
+  if (deduped.length > 0) {
     try {
-      const accessLogs = memories.slice(0, 15).map(m => ({
+      const accessLogs = deduped.slice(0, 15).map(m => ({
         memory_id: m.id,
         user_id: userId,
         surface: 'system_prompt',
@@ -531,13 +552,13 @@ export async function buildMemoryContext(circleId: string, roomId?: string, user
       }));
       supabase.from('memory_access_log').insert(accessLogs).then(() => {});
       // Increment access counts
-      for (const m of memories.slice(0, 15)) {
-        supabase.from('memory_entries').update({ access_count: ((m as any).access_count || 0) + 1, last_accessed_at: new Date().toISOString() }).eq('id', m.id).then(() => {});
+      for (const m of deduped.slice(0, 15)) {
+        supabase.from('memory_entries').update({ access_count: (m.access_count || 0) + 1, last_accessed_at: new Date().toISOString() }).eq('id', m.id).then(() => {});
       }
     } catch {}
   }
 
-  return sections.length > 0 ? `## Agent Memory (${memories.length} entries)\n${sections.join('\n\n')}` : '';
+  return sections.length > 0 ? `## Agent Memory (${deduped.length} entries)\n${sections.join('\n\n')}` : '';
 }
 
 // ── 8. Realtime Subscriptions ───────────────────────────────────────────────
@@ -684,8 +705,11 @@ function mapApproval(d: any): RunApproval {
 function mapMemory(d: any): MemoryEntry {
   return {
     id: d.id, scope: d.scope, circle_id: d.circle_id, room_id: d.room_id,
+    session_id: d.session_id,
     user_id: d.user_id, memory_kind: d.memory_kind, title: d.title,
-    content: d.content, source_run_id: d.source_run_id, is_active: d.is_active,
-    created_at: d.created_at,
+    content: d.content, source_run_id: d.source_run_id, source_surface: d.source_surface,
+    is_active: d.is_active, visibility: d.visibility, importance: d.importance,
+    retrieval_mode: d.retrieval_mode, status: d.status, access_count: d.access_count,
+    last_accessed_at: d.last_accessed_at, updated_at: d.updated_at, created_at: d.created_at,
   };
 }
