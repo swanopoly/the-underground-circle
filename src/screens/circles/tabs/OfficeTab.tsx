@@ -47,6 +47,7 @@ import {
 import {
   ClaudeCodePoller, bridgeSessionsToAgents, detectClaudeCodeBridge,
   publishClaudeCodeAgent, updateClaudeCodeAgentStatus, markClaudeCodeAgentOffline,
+  saveSessionsToMemory,
 } from '../../../lib/claudeCodeDetector';
 import {
   isAutoConnectRunning,
@@ -112,6 +113,7 @@ import {
   invokeAllAgents,
   invokeSelectedAgents,
 } from '../../../lib/agentInvocation';
+import { getCircleSessionMemoryMode } from '../../../lib/agentRunSystem';
 import { useUserApiKeys } from '../../../lib/llmProviders';
 import {
   IdleBehaviorConfig, loadIdleConfig, saveIdleConfig,
@@ -188,6 +190,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [dancingAgentId, setDancingAgentId] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | undefined>();
   const [userEmail, setUserEmail] = useState<string | undefined>();
+  const [sessionMemoryMode, setSessionMemoryMode] = useState<'private' | 'shared'>('private');
+  const [savingSessionMemoryMode, setSavingSessionMemoryMode] = useState(false);
   const pendingApprovals = useAgentApprovals(circleId);
   // showControlCard removed — controls now embedded in AgentPanel
 
@@ -379,6 +383,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [sessionsTick, setSessionsTick] = useState(0); // force re-render on session updates
   const ccPollerRef = useRef<ClaudeCodePoller | null>(null);
   const ccPublishedRef = useRef(false);
+  const lastMemorySaveRef = useRef(0); // throttle memory saves to every 30s
 
   // ─── Current user ─────────────────────────────────────────────────────────
   const [currentUserId, setCurrentUserId] = useState<string>('');
@@ -410,6 +415,41 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    getCircleSessionMemoryMode(circleId).then(setSessionMemoryMode).catch(() => {});
+  }, [circleId]);
+
+  const toggleSessionMemoryMode = useCallback(async () => {
+    if (savingSessionMemoryMode) return;
+    const nextMode: 'private' | 'shared' = sessionMemoryMode === 'shared' ? 'private' : 'shared';
+    setSavingSessionMemoryMode(true);
+    try {
+      const { data, error } = await supabase
+        .from('circles')
+        .select('settings')
+        .eq('id', circleId)
+        .single();
+      if (error) throw error;
+
+      const { error: updateError } = await supabase
+        .from('circles')
+        .update({
+          settings: {
+            ...(data?.settings || {}),
+            sessionMemoryMode: nextMode,
+          },
+        })
+        .eq('id', circleId);
+      if (updateError) throw updateError;
+
+      setSessionMemoryMode(nextMode);
+    } catch (err) {
+      console.error('[OfficeTab] Failed to update session memory mode:', err);
+    } finally {
+      setSavingSessionMemoryMode(false);
+    }
+  }, [circleId, savingSessionMemoryMode, sessionMemoryMode]);
 
   // ─── Circle Office (shared agents from all members) ──────────────────────
   const [circleOfficeAgents, setCircleOfficeAgents] = useState<CircleOfficeAgent[]>([]);
@@ -1046,6 +1086,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               if (ccPublishedRef.current && circleId) {
                 updateClaudeCodeAgentStatus(circleId, sessions).catch(() => {});
               }
+              // Auto-save session context to memory (throttled to every 30s)
+              if (circleId && userId && Date.now() - lastMemorySaveRef.current > 30_000) {
+                lastMemorySaveRef.current = Date.now();
+                saveSessionsToMemory(circleId, userId, sessions).catch(() => {});
+              }
             });
             ccPollerRef.current.start(5000);
           }
@@ -1449,7 +1494,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     return 4;
   }, []);
 
-  // BlackSwan first, then Cursor (C3PO) always second, then active sessions
+  // BlackSwan first, then Claude Code, then active sessions
   const displayAgents = useMemo(() => {
     // Final dedup by name — keep the most recently active version
     const byName = new Map<string, typeof userAgents[0]>();
@@ -1462,7 +1507,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     }
     const deduped = Array.from(byName.values());
 
-    // Pull out Claude Code agent(s) to pin them second (C3PO)
+    // Pull out Claude Code agent(s) to pin them FIRST (C3PO)
     const claudeCodeAgents = deduped.filter(a => a.providerType === 'claude-code');
     const rest = deduped.filter(a => a.providerType !== 'claude-code');
 
@@ -1544,7 +1589,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     const onFloor = new Set(floorIds);
     const filtered = displayAgents.filter(a => onFloor.has(a.id));
     if (filtered.length === 0) return displayAgents;
-    // Ensure BlackSwan first, Claude Code (C3PO) second, then sort remaining
+    // Ensure BlackSwan first, then Claude Code, then sort remaining
     const blackSwan = filtered.find(a => a.id === DEFAULT_AGENT.id);
     const claudeCode = filtered.filter(a => a.id !== DEFAULT_AGENT.id && a.providerType === 'claude-code');
     const rest = filtered.filter(a => a.id !== DEFAULT_AGENT.id && a.providerType !== 'claude-code').sort((a, b) => {
@@ -3162,6 +3207,22 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
               <Text style={styles.toolbarBtnIcon}>🔧</Text>
               <Text style={styles.toolbarBtnText}>Customize</Text>
+            </Pressable>
+            <Pressable
+              onPress={toggleSessionMemoryMode}
+              style={[
+                styles.toolbarBtn,
+                sessionMemoryMode === 'shared' && styles.toolbarBtnActiveMemory,
+                Platform.OS === 'web' && { cursor: 'pointer' } as any,
+              ]}
+            >
+              <Text style={styles.toolbarBtnIcon}>{savingSessionMemoryMode ? '…' : '🧠'}</Text>
+              <Text style={[
+                styles.toolbarBtnText,
+                sessionMemoryMode === 'shared' && styles.toolbarBtnTextActiveMemory,
+              ]}>
+                {sessionMemoryMode === 'shared' ? 'Memory Shared' : 'Memory Private'}
+              </Text>
             </Pressable>
             <Pressable onPress={() => setShowMcpHub(true)} style={[styles.toolbarBtn,
               Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
@@ -5304,8 +5365,13 @@ const styles = StyleSheet.create({
   toolbarBtnActiveGreen: {
     borderColor: '#ffffff20', backgroundColor: '#ffffff10',
   },
+  toolbarBtnActiveMemory: {
+    backgroundColor: '#22c55e18',
+    borderColor: '#22c55e40',
+  },
   toolbarBtnIcon: { fontSize: 13 },
   toolbarBtnText: { fontSize: 11, fontWeight: '700', color: '#888', fontFamily: 'monospace' },
+  toolbarBtnTextActiveMemory: { color: '#22c55e' },
   reconnectBtnStyle: {
     backgroundColor: '#ffffff08', borderColor: '#ffffff15',
   },
