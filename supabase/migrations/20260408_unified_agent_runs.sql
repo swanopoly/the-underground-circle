@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
   goal text,  -- Cowork-style: what the user wants to accomplish
   mode text DEFAULT 'talk',  -- talk, plan, execute, review, research, support, design
   model text,
-  provider text,  -- claude, openai, gemini, openclaw, bridge, huggingface
+  provider text,  -- claude, openai, gemini, openswan, bridge, huggingface
 
   -- State machine
   status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','planning','running','waiting_approval','paused','completed','failed','cancelled')),

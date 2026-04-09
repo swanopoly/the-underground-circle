@@ -1,6 +1,6 @@
 # CLAUDE.md — The Underground Circle
 
-> Comprehensive project context for AI agents (Claude Code, OpenClaw, Codex, etc.)
+> Comprehensive project context for AI agents (Claude Code, OpenSwan, Codex, etc.)
 > Last updated: 2026-03-11 (Strategic pivot: GitHub integration + AI agent loop as core product)
 
 ---
@@ -80,11 +80,11 @@ It's the **AI-powered project manager nobody asked to be**. Small crews (2-8 peo
 | Language | TypeScript |
 | React | React 19 + React Native 0.81.5 |
 | Backend | Supabase (Auth, Postgres, Realtime, Edge Functions) |
-| AI/Agents | OpenClaw multi-agent + Claude Code + Codex |
+| AI/Agents | OpenSwan multi-agent + Claude Code + Codex |
 | Crypto | ethers.js (Ethereum) + @solana/web3.js (Solana) |
 | Web Deploy | Netlify |
 | Mobile Deploy | Expo EAS |
-| Dev Proxy | openclaw-proxy.js (port 18790, WebSocket + auto-auth) |
+| Dev Proxy | openswan-proxy.js (port 18790, WebSocket + auto-auth) |
 | BlackSwan Mini | Qwen2.5-7B fine-tune via Unsloth QLoRA → Ollama (v4) |
 | BlackSwan LLM | Qwen3.5-27B fine-tune via Unsloth QLoRA → Ollama (v5, planned) |
 | Claude Code Bridge | scripts/claude-bridge.js (port 7778) |
@@ -114,7 +114,7 @@ npm run web              # Web dev server (localhost:8081)
 npm run start            # Expo dev server (all platforms)
 npm run build            # Production web build (expo export --platform web)
 npm run dev              # start-dev.js — starts Expo + Bridge + Proxy together
-npm run proxy            # OpenClaw CORS/WS proxy on port 18790
+npm run proxy            # OpenSwan CORS/WS proxy on port 18790
 npm run generate-sprites # Generate pixel art PNGs for office themes
 
 # BlackSwan Mini (v4) — 7B model, runs on any machine with GPU
@@ -173,11 +173,11 @@ src/
     animationPatch.ts        # MUST be first import in App.tsx — disables Animated.loop on web, forces useNativeDriver:false
     supabase.ts              # Platform-aware client (globalThis singleton, no-op lock on web)
     agents.ts                # Agent management
-    agentAutoConnect.ts      # Singleton: detects Claude Code bridge + OpenClaw, publishes agents
+    agentAutoConnect.ts      # Singleton: detects Claude Code bridge + OpenSwan, publishes agents
     agentIdentity.ts         # Persistent custom names/colors by sessionKey
-    agentInvocation.ts       # Routes invocations: BlackSwan/CC/BYO/OpenClaw
+    agentInvocation.ts       # Routes invocations: BlackSwan/CC/BYO/OpenSwan
     connectionManager.ts     # Connection CRUD, auto-discover, provider types
-    openclawService.ts       # OpenClaw API: sessions_list, sessions_send, sessions_history
+    openswanService.ts       # OpenSwan API: sessions_list, sessions_send, sessions_history
     soulTemplates.ts         # Agent personality editor (SOUL.md-style)
     circleGames.ts           # Circle games and social features
     gamification.ts          # XP, levels, badges, challenges
@@ -206,8 +206,8 @@ src/
   types/                     # TypeScript type definitions
 scripts/
   claude-bridge.js           # Claude Code bridge server (port 7778) — scans ~/.claude/projects/
-  openclaw-activity-hook.js  # Node.js hook — posts to agent_activity table
-  openclaw-proxy.js          # HTTP + WebSocket CORS proxy (port 18790, auto-injects auth token)
+  openswan-activity-hook.js  # Node.js hook — posts to agent_activity table
+  openswan-proxy.js          # HTTP + WebSocket CORS proxy (port 18790, auto-injects auth token)
   generate-theme-sprites.js  # Generates pixel art PNGs for office themes (uses @napi-rs/canvas)
   blackswan-llm/             # BlackSwan LLM training pipeline (see "BlackSwan LLM" section below)
     download_datasets_v4.py  # Downloads 8 datasets from HuggingFace (~43K examples)
@@ -387,7 +387,7 @@ grant execute on function sweep_offline_agents() to postgres;
 ```
 
 ### CORS Proxy
-`scripts/openclaw-proxy.js` runs on port 18790. Supports HTTP + WebSocket upgrades.
+`scripts/openswan-proxy.js` runs on port 18790. Supports HTTP + WebSocket upgrades.
 All Realtime connections in dev route through here to avoid CORS issues.
 
 ### Solana Wallet
@@ -488,13 +488,13 @@ Positions stored as 0.0–1.0 floats (% of canvas size — universal across scre
 
 ### Agent Connectivity & Feed Dashboard (2026-03-10)
 - Claude Code Bridge auto-detection (port 7778, scans ~/.claude/projects/)
-- OpenClaw Gateway auto-detection (port 18789) + CORS proxy with auto-auth injection
+- OpenSwan Gateway auto-detection (port 18789) + CORS proxy with auto-auth injection
 - Agent auto-connect singleton service (agentAutoConnect.ts)
-- Feed dashboard: live agent merge (DB + Claude Code + OpenClaw sessions)
+- Feed dashboard: live agent merge (DB + Claude Code + OpenSwan sessions)
 - Feed dashboard: custom agent names from identity system
 - Feed dashboard: real-time online status dots (green for active/building/idle)
 - AgentTopBar: provider badges and popover cards for all agent types
-- OpenClaw invocation: sessions_send + sessions_history polling pattern
+- OpenSwan invocation: sessions_send + sessions_history polling pattern
 - Dev server supervisor (start-dev.js): manages Expo + Bridge + Proxy with auto-restart
 
 ### BlackSwan LLM — Two-Tier Model Strategy (2026-03-10)
@@ -550,7 +550,7 @@ Full-screen confetti celebration on rank-up (60 particles + shockwave + badge bo
 Agents dance (side-to-side + rotation, 5s) on badge earn.
 
 ### Step Away & Hand Off
-Declare task, goal, return time, tool (Claude Code/Cowork/OpenClaw/Other).
+Declare task, goal, return time, tool (Claude Code/Cowork/OpenSwan/Other).
 "Back at Keyboard" verdict: shipped / pivoted / rolled-back / still-running.
 Posts formatted message to circle chat.
 
@@ -564,7 +564,7 @@ ServicesPanel + TasksPanel (persist to Supabase).
 
 ### Agent Activity Feed
 Live scrolling feed in Office mobile view.
-`scripts/openclaw-activity-hook.js` auto-posts on SwanBot task completion.
+`scripts/openswan-activity-hook.js` auto-posts on SwanBot task completion.
 Circle "THE END" ID: `fcccaa73-2d48-4a90-8c19-c556b19f89dc`
 
 ### Circle Types
@@ -726,14 +726,14 @@ ba8a778  agent XP bar under name
 
 ---
 
-## OpenClaw Integration
+## OpenSwan Integration
 
 - SwanBot (main agent) runs in WSL2 on Swan's machine
-- CORS proxy at `localhost:18790` — HTTP + WebSocket support, auto-injects auth token from `~/.openclaw/openclaw.json`
+- CORS proxy at `localhost:18790` — HTTP + WebSocket support, auto-injects auth token from `~/.openswan/openswan.json`
 - `SUPABASE_SERVICE_KEY` + `ACTIVITY_CIRCLE_ID` env vars in `~/.bashrc` and systemd service
 - Hook script posts to `agent_activity` after every significant task
 - Activity visible in Office tab → Activity mode / AgentActivityFeed
-- **OpenClaw tools API:** `sessions_list`, `sessions_send`, `sessions_history` via `/tools/invoke` endpoint
+- **OpenSwan tools API:** `sessions_list`, `sessions_send`, `sessions_history` via `/tools/invoke` endpoint
 - **Invocation is async:** `sessions_send` fires immediately; poll `sessions_history` for assistant response
 - **`execute_command` does NOT exist** — never use it
 
@@ -743,12 +743,12 @@ ba8a778  agent XP bar under name
 
 ### Three Agent Sources
 1. **Claude Code Bridge** (`scripts/claude-bridge.js`, port 7778) — scans `~/.claude/projects/` JSONL files, serves sessions
-2. **OpenClaw Gateway** (port 18789) + **CORS Proxy** (port 18790) — multi-agent orchestration
+2. **OpenSwan Gateway** (port 18789) + **CORS Proxy** (port 18790) — multi-agent orchestration
 3. **Supabase DB** (`circle_office_agents` table) — persisted agent records
 
 ### Auto-Connect (`src/lib/agentAutoConnect.ts`)
 - Singleton service that detects bridge + gateway, publishes agents to DB
-- CC sessions stored as `OfficeAgent[]`, OpenClaw sessions as `OpenClawSession[]` — different shapes
+- CC sessions stored as `OfficeAgent[]`, OpenSwan sessions as `OpenSwanSession[]` — different shapes
 - `subscribeAutoConnect()` for reactive UI updates when agents connect/disconnect
 - `setAutoConnectCircleId(id)` to target a specific circle
 
@@ -764,8 +764,8 @@ ba8a778  agent XP bar under name
 - AgentTopBar shows scrollable pills with popover cards
 
 ### Agent Invocation (`src/lib/agentInvocation.ts`)
-- Routes: BlackSwan → edge fn, Claude Code → bridge, BYO → llm-proxy, OpenClaw → gateway
-- OpenClaw: `sessions_send` + `sessions_history` polling (2s interval, 60s timeout)
+- Routes: BlackSwan → edge fn, Claude Code → bridge, BYO → llm-proxy, OpenSwan → gateway
+- OpenSwan: `sessions_send` + `sessions_history` polling (2s interval, 60s timeout)
 
 ### Dev Server (`start-dev.js`)
 - Manages 3 services: Claude Code Bridge, CORS Proxy, Expo Dev Server

@@ -1,4 +1,4 @@
-# OpenClaw Activity Hook Setup
+# OpenSwan Activity Hook Setup
 
 Pipes SwanBot's activity (Discord, webchat, cron) into the Underground Circle app's Office dashboard in real time.
 
@@ -19,7 +19,7 @@ Or find it in the app URL when viewing your circle.
 
 ## 3. Set environment variables
 
-Add to `~/.bashrc` or `~/.profile` on the machine running OpenClaw (LegionOfSwan):
+Add to `~/.bashrc` or `~/.profile` on the machine running OpenSwan (LegionOfSwan):
 
 ```bash
 export SUPABASE_URL="https://rjkniqiqdtroeholxacg.supabase.co"
@@ -39,12 +39,12 @@ Paste the contents of `supabase/migrations/20260226_agent_activity.sql` into the
 cd /home/swan/the-underground-circle
 
 echo '{"source":"system","activity_type":"task_completed","title":"Hook test","body":"If you see this in the app, it works!"}' \
-  | node scripts/openclaw-activity-hook.js
+  | node scripts/openswan-activity-hook.js
 ```
 
 Check the Office tab in the app — you should see the activity card appear.
 
-## 6. Wire up OpenClaw (automatic logging)
+## 6. Wire up OpenSwan (automatic logging)
 
 Ask SwanBot: "Log your Discord and webchat activity to the Circle app automatically"
 
@@ -52,14 +52,14 @@ SwanBot will call the hook after completing tasks. It can also be triggered manu
 
 ```bash
 # Log a Discord interaction
-node scripts/openclaw-activity-hook.js \
+node scripts/openswan-activity-hook.js \
   --source discord \
   --type task_completed \
   --title "Updated UI button colors" \
   --body "Changed accent color in OfficeTab to match brand"
 
 # Log a cron completion  
-node scripts/openclaw-activity-hook.js \
+node scripts/openswan-activity-hook.js \
   --source cron \
   --detail "research-daily-synthesis" \
   --type task_completed \
@@ -70,6 +70,6 @@ node scripts/openclaw-activity-hook.js \
 ## 7. Have SwanBot auto-log (recommended)
 
 Tell SwanBot in any chat:
-> "After you complete any task from Discord or webchat, log it to the activity feed using the hook script at /home/swan/the-underground-circle/scripts/openclaw-activity-hook.js"
+> "After you complete any task from Discord or webchat, log it to the activity feed using the hook script at /home/swan/the-underground-circle/scripts/openswan-activity-hook.js"
 
 SwanBot will append a hook call at the end of each task automatically.

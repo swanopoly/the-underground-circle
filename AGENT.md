@@ -41,7 +41,7 @@ Important implication:
 
 - Stack: Expo 54, React Native 0.81.5, React 19, TypeScript
 - Backend: Supabase Auth + Postgres + Realtime + Edge Functions
-- Agent inputs: OpenClaw, Claude Code bridge, custom/published circle agents
+- Agent inputs: OpenSwan, Claude Code bridge, custom/published circle agents
 - Web deploy: Netlify
 - Local source of truth: WSL path `/home/swan/the-underground-circle`
 
@@ -80,7 +80,7 @@ npm run generate-sprites
 Expected local endpoints:
 
 - App dev server: `http://localhost:8081`
-- OpenClaw proxy: `http://localhost:18790`
+- OpenSwan proxy: `http://localhost:18790`
 - Claude Code bridge: `http://localhost:7778`
 
 When changing TypeScript-heavy code, run:

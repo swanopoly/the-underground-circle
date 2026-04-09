@@ -30,7 +30,7 @@
 ## Environment Facts
 
 - Supabase project: `rjkniqiqdtroeholxacg.supabase.co`
-- CORS proxy runs on port 18790 (`scripts/openclaw-proxy.js`) — HTTP + WebSocket support
+- CORS proxy runs on port 18790 (`scripts/openswan-proxy.js`) — HTTP + WebSocket support
 - Dev server: localhost:8081
 - Nav state persisted to localStorage key `uc_nav_state_v1`
 - SwanBot activity circle "THE END": `fcccaa73-2d48-4a90-8c19-c556b19f89dc`
@@ -89,7 +89,7 @@ grant execute on function sweep_offline_agents() to postgres;
 - Three layers total: client heartbeat + Realtime presence + pg_cron server sweeper
 
 ### CORS Proxy
-- `openclaw-proxy.js` on port 18790 — supports HTTP + WebSocket upgrades
+- `openswan-proxy.js` on port 18790 — supports HTTP + WebSocket upgrades
 - Old proxy was HTTP-only; rewrote with `ws.Server` to fix Realtime failures
 - All Realtime connections in dev route through here
 

@@ -1,5 +1,5 @@
-// Office Agent Types — real data comes from OpenClaw sessions
-import { OpenClawSession } from './openclawService';
+// Office Agent Types — real data comes from OpenSwan sessions
+import { OpenSwanSession } from './openswanService';
 import { ProviderType } from './connectionManager';
 
 export type AgentStatus = 'active' | 'idle' | 'building' | 'error' | 'offline';
@@ -125,9 +125,9 @@ export const DEFAULT_AGENT: OfficeAgent = {
 import { MODEL_PRICING, estimateCost, estimateCostWithCache } from './modelPricing';
 export { MODEL_PRICING } from './modelPricing';
 
-// Convert OpenClaw sessions to OfficeAgents
+// Convert OpenSwan sessions to OfficeAgents
 export function sessionsToAgents(
-  sessions: OpenClawSession[],
+  sessions: OpenSwanSession[],
   connectionId: string,
   connectionName: string,
   providerType: ProviderType,
@@ -167,14 +167,14 @@ export function sessionsToAgents(
   }));
 }
 
-function inferStatus(s: OpenClawSession): AgentStatus {
+function inferStatus(s: OpenSwanSession): AgentStatus {
   if (!s.lastActivity) return 'offline';
   // If it has recent messages, likely active
   if (s.lastMessages && s.lastMessages.length > 0) return 'active';
   return 'idle';
 }
 
-function inferActivity(s: OpenClawSession): string {
+function inferActivity(s: OpenSwanSession): string {
   if (s.lastMessages && s.lastMessages.length > 0) {
     const last = s.lastMessages[s.lastMessages.length - 1];
     if (last.content) return last.content.slice(0, 50) + (last.content.length > 50 ? '...' : '');
@@ -184,7 +184,7 @@ function inferActivity(s: OpenClawSession): string {
   return 'Idle';
 }
 
-function extractRecentActions(s: OpenClawSession): string[] {
+function extractRecentActions(s: OpenSwanSession): string[] {
   if (!s.lastMessages) return [];
   return s.lastMessages
     .filter(m => m.role === 'assistant' && m.content)

@@ -274,7 +274,7 @@ Watch your agents develop their personalities over time!
 ## 🔧 Technical Details
 
 **Message System:**
-- Messages sent via OpenClaw `sessions_send` tool
+- Messages sent via OpenSwan `sessions_send` tool
 - Broadcast messages sent to all active sessions
 - Project messages filtered by agent assignments
 - Message history kept in memory (last 100 messages)
@@ -297,7 +297,7 @@ Watch your agents develop their personalities over time!
 ## 🚀 Getting Started
 
 1. **Connect Your Agents**  
-   Go to ⚙️ → Connections and add your OpenClaw endpoints
+   Go to ⚙️ → Connections and add your OpenSwan endpoints
 
 2. **Create Your First Project**  
    ```bash

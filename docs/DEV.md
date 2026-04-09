@@ -28,7 +28,7 @@ npm start
 
 **Option 2: Start individually**
 ```bash
-node openclaw-proxy.js  # CORS proxy
+node openswan-proxy.js  # CORS proxy
 npm start               # Expo dev server
 ```
 
@@ -40,7 +40,7 @@ npm start               # Expo dev server
 1. **Unhandled exceptions** - Fixed: Added error handlers
 2. **Memory pressure** - Fixed: Auto-restart with rate limiting
 3. **Port conflicts** - Fixed: Better error messages
-4. **OpenClaw gateway disconnects** - Fixed: Graceful error handling
+4. **OpenSwan gateway disconnects** - Fixed: Graceful error handling
 
 **The supervisor (`start-dev.js`) solves this by:**
 - Auto-restarting crashed services (2s delay)
@@ -60,7 +60,7 @@ taskkill /PID <PID> /F
 ```
 
 **Services keep crashing:**
-- Check if OpenClaw gateway is running (`openclaw status`)
+- Check if OpenSwan gateway is running (`openswan status`)
 - Check available memory (Task Manager)
 - Review error logs above the restart message
 
@@ -73,16 +73,16 @@ taskkill /PID <PID> /F
 ## Architecture
 
 ```
-Browser → CORS Proxy (18790) → OpenClaw Gateway (18789)
+Browser → CORS Proxy (18790) → OpenSwan Gateway (18789)
                 ↓
         Expo Dev Server (8081)
 ```
 
 **Why the CORS proxy?**
-Browsers block cross-origin requests. The proxy adds CORS headers so the web app can talk to OpenClaw.
+Browsers block cross-origin requests. The proxy adds CORS headers so the web app can talk to OpenSwan.
 
 **Services:**
-- `openclaw-proxy.js` - Simple HTTP proxy with CORS headers
+- `openswan-proxy.js` - Simple HTTP proxy with CORS headers
 - `start-dev.js` - Supervisor that keeps both services running
 - Expo Metro - Bundles the React Native app for web/mobile
 
@@ -101,4 +101,4 @@ For production deployment, you don't need the CORS proxy. Options:
 
 3. **Reverse proxy** (nginx, caddy) with CORS headers
 
-The app is designed to work with any OpenClaw-compatible endpoint.
+The app is designed to work with any OpenSwan-compatible endpoint.

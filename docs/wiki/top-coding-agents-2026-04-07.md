@@ -64,7 +64,7 @@ What stands out:
 - strong context-size story
 - open-source distribution
 
-### OpenClaw
+### OpenSwan
 
 Why it matters:
 
@@ -80,7 +80,7 @@ What stands out:
 
 Official source:
 
-- https://docs.openclaw.ai/
+- https://docs.openswan.ai/
 
 ## What the best coding agents all have in common
 
@@ -111,4 +111,4 @@ Official source:
 - Claude Code overview: https://docs.anthropic.com/en/docs/claude-code/overview
 - Codex use cases: https://developers.openai.com/codex/use-cases
 - Introducing Codex: https://openai.com/index/introducing-codex/
-- OpenClaw docs: https://docs.openclaw.ai/
+- OpenSwan docs: https://docs.openswan.ai/

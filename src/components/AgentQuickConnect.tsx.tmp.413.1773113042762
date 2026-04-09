@@ -177,7 +177,7 @@ export default function AgentQuickConnect({ onOpenWizard, compact }: Props) {
             style={[s.wizardLink, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
           >
             <Text style={s.wizardLinkText}>
-              Using OpenClaw, Codex, or another agent? Advanced setup &#x2192;
+              Using OpenSwan, Codex, or another agent? Advanced setup &#x2192;
             </Text>
           </Pressable>
         </>

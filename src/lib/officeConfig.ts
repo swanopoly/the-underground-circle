@@ -802,17 +802,17 @@ export function isInteractiveFurniture(type: FurnitureType): boolean {
   ].includes(type);
 }
 
-// ─── OpenClaw Connection ─────────────────────────────────────────────────────
+// ─── OpenSwan Connection ─────────────────────────────────────────────────────
 
-export interface OpenClawConnection {
+export interface OpenSwanConnection {
   connected: boolean;
   endpoint: string;
   apiKey: string;
   lastPing: number | null;
-  sessions: OpenClawSession[];
+  sessions: OpenSwanSession[];
 }
 
-export interface OpenClawSession {
+export interface OpenSwanSession {
   id: string;
   kind: string;
   label: string;
@@ -824,7 +824,7 @@ export interface OpenClawSession {
   costEstimate: number;
 }
 
-export const DEFAULT_CONNECTION: OpenClawConnection = {
+export const DEFAULT_CONNECTION: OpenSwanConnection = {
   connected: false,
   endpoint: 'http://localhost:3000',
   apiKey: '',

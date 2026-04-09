@@ -2,11 +2,11 @@
 import React, { useMemo, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, Platform } from 'react-native';
 import { OfficeAgent } from '../lib/officeAgents';
-import { OpenClawSession } from '../lib/openclawService';
+import { OpenSwanSession } from '../lib/openswanService';
 
 interface Props {
   agents: OfficeAgent[];
-  sessions: OpenClawSession[];
+  sessions: OpenSwanSession[];
   accentColor?: string;
 }
 
@@ -333,7 +333,7 @@ function SortButton({ label, active, onPress, accentColor }: {
 
 // ─── Calculate Metrics ─────────────────────────────────────
 
-function calculateAgentMetrics(agents: OfficeAgent[], sessions: OpenClawSession[]): AgentMetrics[] {
+function calculateAgentMetrics(agents: OfficeAgent[], sessions: OpenSwanSession[]): AgentMetrics[] {
   return agents.map(agent => {
     // Find all sessions for this agent (sessions are per-response, keyed by agentId)
     const agentSessions = sessions.filter(s => s.agentId === agent.id || s.agentId === agent.name);

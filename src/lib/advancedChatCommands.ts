@@ -1,7 +1,7 @@
 // Advanced Chat Commands - Full collaboration features
 import { OfficeAgent } from './officeAgents';
 import { AgentConnection, PROVIDER_META } from './connectionManager';
-import { OpenClawConfig } from './openclawService';
+import { OpenSwanConfig } from './openswanService';
 import { Project, loadProjects } from './projectManagement';
 import {
   createTask, updateTask, assignTaskToAgent, completeTask, blockTask,
@@ -30,7 +30,7 @@ export async function processAdvancedCommands(
   command: string,
   agents: OfficeAgent[],
   connections: AgentConnection[],
-  getConfig: (id: string) => OpenClawConfig | null,
+  getConfig: (id: string) => OpenSwanConfig | null,
 ): Promise<AdvancedCommandResult | null> {
   const cmd = command.toLowerCase().trim();
   const parts = command.trim().split(' ');

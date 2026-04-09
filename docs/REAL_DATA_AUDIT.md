@@ -8,15 +8,15 @@
 
 ## Data Sources
 
-### Primary Data Source: OpenClaw Sessions
-All office data comes from **real OpenClawSession objects** fetched via:
-- `OpenClawPoller` - polls OpenClaw gateway every 10 seconds
+### Primary Data Source: OpenSwan Sessions
+All office data comes from **real OpenSwanSession objects** fetched via:
+- `OpenSwanPoller` - polls OpenSwan gateway every 10 seconds
 - `testConnection()` - initial connection test and session fetch
 - `listSessions()` - manual session refresh
 
 **Session Data Structure:**
 ```typescript
-interface OpenClawSession {
+interface OpenSwanSession {
   sessionKey: string;
   kind: string;
   agentId?: string;
@@ -24,7 +24,7 @@ interface OpenClawSession {
   lastActivity?: string;
   messageCount?: number;
   lastMessages?: Array<{ role: string; content: string }>;
-  totalCost?: number;           // Real cost from OpenClaw
+  totalCost?: number;           // Real cost from OpenSwan
   totalInputTokens?: number;    // Real token counts
   totalOutputTokens?: number;   // Real token counts
   turns?: number;
@@ -44,7 +44,7 @@ export const OFFICE_AGENTS: OfficeAgent[] = []; // Empty - no mock data
 ```
 
 **Data Flow:**
-1. Sessions fetched from OpenClaw via `sessionsRef.current.get(connectionId)`
+1. Sessions fetched from OpenSwan via `sessionsRef.current.get(connectionId)`
 2. Converted to agents via `sessionsToAgents(sessions, connectionId, connectionName, providerType)`
 3. All agent properties derived from real session data:
    - `name` → `session.agentId` or `sessionKey.slice(0, 12)`
@@ -71,7 +71,7 @@ When `session.totalCost` is unavailable, costs are estimated using real token co
 **Data Flow:**
 ```typescript
 <CostDashboard
-  sessions={allSessions}  // Real OpenClawSession[] from all connections
+  sessions={allSessions}  // Real OpenSwanSession[] from all connections
   accentColor={accentColor}
 />
 ```
@@ -116,7 +116,7 @@ const budgetAlerts = calculateBudgetAlerts(
 
 **Shared Logic (costCalculations.ts):**
 ```typescript
-export function calculatePeriodCosts(sessions: OpenClawSession[]): PeriodCosts {
+export function calculatePeriodCosts(sessions: OpenSwanSession[]): PeriodCosts {
   sessions.forEach(s => {
     const cost = s.totalCost || 0;  // Real cost
     const sessionDate = s.lastActivity ? new Date(s.lastActivity) : new Date();
@@ -150,7 +150,7 @@ export function calculatePeriodCosts(sessions: OpenClawSession[]): PeriodCosts {
 **Storage:**
 ```typescript
 interface SessionTags {
-  sessionKey: string;  // Real session key from OpenClaw
+  sessionKey: string;  // Real session key from OpenSwan
   tags: SessionTag[];  // User-added tags
   timestamp: string;
 }
@@ -177,14 +177,14 @@ export function calculateTagCostBreakdown(
 **Connections:**
 - Stored persistently: `@office_connections`
 - Each connection has:
-  - `endpoint`: Real OpenClaw gateway URL
+  - `endpoint`: Real OpenSwan gateway URL
   - `token`: Real auth token
   - `status`: Real-time connection status (connected/connecting/disconnected/error)
   - `sessionCount`: Real session count from connection
   - `agentIds`: Real agent IDs from connection
 
 **Polling:**
-- `OpenClawPoller` runs for each active connection
+- `OpenSwanPoller` runs for each active connection
 - Polls every 10 seconds for real session updates
 - Updates stored in `sessionsRef.current.set(connectionId, realSessions)`
 
@@ -236,9 +236,9 @@ All user data persists using `storage.ts` (cross-platform wrapper):
 
 **To verify real data integration:**
 
-- [ ] Connect to OpenClaw gateway (real endpoint + token)
+- [ ] Connect to OpenSwan gateway (real endpoint + token)
 - [ ] Verify agents appear (from real sessions)
-- [ ] Check agent costs (should match OpenClaw session_status)
+- [ ] Check agent costs (should match OpenSwan session_status)
 - [ ] View cost dashboard (should show real spending)
 - [ ] Set budget alert (should trigger based on real costs)
 - [ ] Add session tag (should persist and show in analytics)
@@ -257,7 +257,7 @@ All user data persists using `storage.ts` (cross-platform wrapper):
 - This can cause inaccurate period breakdowns (today vs week vs month)
 
 **Ideal Solution:**
-- OpenClaw would need to provide cost breakdowns by date
+- OpenSwan would need to provide cost breakdowns by date
 - Or we'd need to track session activity over time
 
 **Current Workaround:**
@@ -279,14 +279,14 @@ Agent-level `costWeek` is currently 0 in `sessionsToAgents()` because sessions d
 
 ✅ **100% REAL DATA** - No mock, demo, or fake data in the Office dashboard or cost analytics.
 
-All features calculate from actual OpenClaw sessions:
+All features calculate from actual OpenSwan sessions:
 - Agent status, activity, costs → from sessions
 - Cost dashboard → from sessions
 - Budget alerts → from sessions
 - Session tags → applied to real sessions
 - Multi-floor system → assigns real agents
 
-**Data Quality:** High - all costs and token counts come directly from OpenClaw gateway or are accurately estimated from real token usage.
+**Data Quality:** High - all costs and token counts come directly from OpenSwan gateway or are accurately estimated from real token usage.
 
 **Next Steps:**
 - Improve cost attribution logic (track session activity over time)

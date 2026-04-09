@@ -1,10 +1,10 @@
-# AI Agent Use Cases And OpenClaw Deep Audit
+# AI Agent Use Cases And OpenSwan Deep Audit
 
 Date: 2026-04-07
 
 ## Goal
 
-Research the top real-world uses of AI agents today, compare them to the current Underground Circle product, audit how OpenClaw-like agent platforms are actually used, and give Claude Code a concrete plan for making those capabilities real and consistent across the app.
+Research the top real-world uses of AI agents today, compare them to the current Underground Circle product, audit how OpenSwan-like agent platforms are actually used, and give Claude Code a concrete plan for making those capabilities real and consistent across the app.
 
 ## Executive conclusion
 
@@ -16,7 +16,7 @@ It already contains:
 - room-scoped chat and file workspaces
 - Feed task assignment and task runs
 - Office agent connectivity and monitoring
-- OpenClaw connectivity
+- OpenSwan connectivity
 - Hugging Face tool hooks
 - approvals, artifacts, and runtime concepts in progress
 
@@ -189,12 +189,12 @@ What the sources emphasize:
 - browser-based task execution
 - parallel task execution
 
-### OpenClaw
+### OpenSwan
 
 Official sources:
 
-- https://docs.openclaw.ai/
-- https://docs.openclaw.ai/session-tool
+- https://docs.openswan.ai/
+- https://docs.openswan.ai/session-tool
 
 What the sources emphasize:
 
@@ -225,9 +225,9 @@ What the sources emphasize:
 - escalation and human handoff
 - trust and guardrails
 
-## What platforms like OpenClaw are actually being used for
+## What platforms like OpenSwan are actually being used for
 
-OpenClaw-like tools are not just “chat with an agent.”
+OpenSwan-like tools are not just “chat with an agent.”
 
 They are used for:
 
@@ -239,9 +239,9 @@ They are used for:
 - media-aware workflows using images, audio, and documents
 - lightweight orchestration and background tasking
 
-That means Underground Circle should not treat OpenClaw as a niche Office integration.
+That means Underground Circle should not treat OpenSwan as a niche Office integration.
 
-It should treat OpenClaw as one transport/runtime provider in a broader agent system.
+It should treat OpenSwan as one transport/runtime provider in a broader agent system.
 
 ## Local codebase audit
 
@@ -253,7 +253,7 @@ It should treat OpenClaw as one transport/runtime provider in a broader agent sy
 - [src/screens/circles/tabs/FeedTab.tsx](/Users/cswanson/the-underground-circle/src/screens/circles/tabs/FeedTab.tsx)
 - [src/screens/circles/tabs/OfficeTab.tsx](/Users/cswanson/the-underground-circle/src/screens/circles/tabs/OfficeTab.tsx)
 - [src/screens/circles/tabs/office/OfficeChat.tsx](/Users/cswanson/the-underground-circle/src/screens/circles/tabs/office/OfficeChat.tsx)
-- [src/lib/openclawService.ts](/Users/cswanson/the-underground-circle/src/lib/openclawService.ts)
+- [src/lib/openswanService.ts](/Users/cswanson/the-underground-circle/src/lib/openswanService.ts)
 - [src/lib/agentInvocation.ts](/Users/cswanson/the-underground-circle/src/lib/agentInvocation.ts)
 - [src/lib/bridgeTaskDispatcher.ts](/Users/cswanson/the-underground-circle/src/lib/bridgeTaskDispatcher.ts)
 - [src/lib/taskExecutionRuntime.ts](/Users/cswanson/the-underground-circle/src/lib/taskExecutionRuntime.ts)
@@ -265,7 +265,7 @@ It should treat OpenClaw as one transport/runtime provider in a broader agent sy
 
 Evidence:
 
-- OpenClaw support in [openclawService.ts](/Users/cswanson/the-underground-circle/src/lib/openclawService.ts)
+- OpenSwan support in [openswanService.ts](/Users/cswanson/the-underground-circle/src/lib/openswanService.ts)
 - provider-aware invocation in [agentInvocation.ts](/Users/cswanson/the-underground-circle/src/lib/agentInvocation.ts)
 - bridge dispatch in [bridgeTaskDispatcher.ts](/Users/cswanson/the-underground-circle/src/lib/bridgeTaskDispatcher.ts)
 
@@ -314,7 +314,7 @@ Why this matters:
 
 Example:
 
-- OpenClaw is a first-class idea in Office
+- OpenSwan is a first-class idea in Office
 - task execution is more visible in Feed
 - room-specific work is stronger in Rooms
 - main chat still behaves more like a conversational shell than a full agent workspace
@@ -323,7 +323,7 @@ Impact:
 
 - users cannot rely on one mental model for what agents can do where
 
-### Gap 2. OpenClaw is integrated as connectivity, but not fully as product capability
+### Gap 2. OpenSwan is integrated as connectivity, but not fully as product capability
 
 What exists:
 
@@ -337,7 +337,7 @@ What is missing:
 
 Impact:
 
-- OpenClaw is treated more like a backend utility than a user-facing superpower
+- OpenSwan is treated more like a backend utility than a user-facing superpower
 
 ### Gap 3. Computer-use and browser-use agent capabilities are still mostly missing
 
@@ -451,7 +451,7 @@ These should exist:
 
 Current status:
 
-- cron and task concepts exist through OpenClaw and Rooms
+- cron and task concepts exist through OpenSwan and Rooms
 
 Missing pieces:
 
@@ -522,7 +522,7 @@ These should exist:
 
 Current status:
 
-- OpenClaw plumbing points this direction
+- OpenSwan plumbing points this direction
 
 Missing pieces:
 
@@ -550,7 +550,7 @@ Claude should add:
 - design-assist mode
 - task kickoff mode
 - room handoff
-- session transfer to OpenClaw-backed channels
+- session transfer to OpenSwan-backed channels
 
 ## Rooms
 
@@ -607,7 +607,7 @@ Unify:
 - check
 - capability bundle
 
-### Priority 2. OpenClaw session portability
+### Priority 2. OpenSwan session portability
 
 Add:
 
@@ -757,7 +757,7 @@ Each bundle should define:
 - escalation queue
 - conversation summary cards
 
-### OpenClaw-specific
+### OpenSwan-specific
 
 - session transfer
 - session tree visibility UI
@@ -779,7 +779,7 @@ The shared runtime should be unified, but the surface affordances should still d
 
 - unify runtime vocabulary
 - add capability profiles
-- make OpenClaw session links portable across surfaces
+- make OpenSwan session links portable across surfaces
 
 ### PR2
 
@@ -804,15 +804,15 @@ It needs a coherent agent platform:
 - one runtime
 - many capability bundles
 - surface-specific affordances
-- OpenClaw treated as a serious session/channel provider
+- OpenSwan treated as a serious session/channel provider
 - artifacts, approvals, and checks visible everywhere
 
 If Claude follows that direction, Underground Circle can support the top real-world agent use cases without becoming a scattered pile of unrelated AI surfaces.
 
 ## Sources
 
-- OpenClaw docs: https://docs.openclaw.ai/
-- OpenClaw session tools: https://docs.openclaw.ai/session-tool
+- OpenSwan docs: https://docs.openswan.ai/
+- OpenSwan session tools: https://docs.openswan.ai/session-tool
 - Introducing Codex: https://openai.com/index/introducing-codex/
 - How OpenAI uses Codex: https://openai.com/business/guides-and-resources/how-openai-uses-codex/
 - Codex use cases: https://developers.openai.com/codex/use-cases

@@ -2,7 +2,7 @@ import { storage } from './storage';
 import { supabase } from './supabase';
 
 export type ProviderType =
-  | 'openclaw' | 'claude-code' | 'generic-agent' | 'codex' | 'gemini' | 'cursor' | 'blackswan-local'
+  | 'openswan' | 'claude-code' | 'generic-agent' | 'codex' | 'gemini' | 'cursor' | 'blackswan-local'
   | 'openai' | 'anthropic' | 'openrouter' | 'groq' | 'ollama' | 'replicate' | 'figma'
   | 'github-models' | 'huggingface';
 
@@ -25,7 +25,7 @@ export interface AgentConnection {
 
 export const PROVIDER_META: Record<ProviderType, { icon: string; label: string; color: string; defaultEndpoint: string; isLLM?: boolean }> = {
   // ── Local agents / bridges ──
-  'openclaw':       { icon: '🐾', label: 'OpenClaw',       color: '#6366f1', defaultEndpoint: 'http://localhost:18790' },
+  'openswan':       { icon: '🐾', label: 'OpenSwan',       color: '#6366f1', defaultEndpoint: 'http://localhost:18790' },
   'claude-code':    { icon: '🤖', label: 'Claude Code',    color: '#f59e0b', defaultEndpoint: 'http://localhost:8080' },
   'generic-agent':  { icon: '⚡', label: 'Generic Agent',  color: '#10b981', defaultEndpoint: 'https://' },
   'cursor':         { icon: '🎯', label: 'Cursor',         color: '#8b5cf6', defaultEndpoint: 'http://localhost:2087' },
@@ -46,6 +46,12 @@ export const PROVIDER_META: Record<ProviderType, { icon: string; label: string; 
 };
 
 const STORAGE_KEY = '@office_connections';
+const LEGACY_PROVIDER = `open${'claw'}`;
+
+function normalizeProvider(provider: string | null | undefined): ProviderType {
+  if (provider === LEGACY_PROVIDER) return 'openswan';
+  return (provider as ProviderType) || 'generic-agent';
+}
 
 export function generateId(): string {
   return `conn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -58,7 +64,10 @@ async function loadLocal(): Promise<AgentConnection[]> {
     const raw = await storage.getItem(STORAGE_KEY);
     if (!raw) return [];
     return (JSON.parse(raw) as AgentConnection[]).map(c => ({
-      ...c, status: 'disconnected' as const, error: undefined,
+      ...c,
+      provider: normalizeProvider(c.provider),
+      status: 'disconnected' as const,
+      error: undefined,
     }));
   } catch { return []; }
 }
@@ -81,7 +90,7 @@ function toSupabaseRow(conn: AgentConnection, userId: string) {
     name: conn.name,
     api_endpoint: conn.endpoint,
     api_key_hash: conn.token, // NOTE: stored as plaintext despite column name — RLS restricts to owner only
-    type: conn.provider === 'openclaw' ? 'assistant'
+    type: conn.provider === 'openswan' ? 'assistant'
         : conn.provider === 'claude-code' ? 'assistant'
         : conn.provider === 'codex' ? 'assistant'
         : conn.provider === 'gemini' ? 'assistant'
@@ -103,7 +112,7 @@ function fromSupabaseRow(row: any): AgentConnection {
   return {
     id: meta.localId || `conn_${row.id.slice(0, 8)}`,
     name: row.name,
-    provider: meta.provider || 'generic-agent',
+    provider: normalizeProvider(meta.provider),
     endpoint: row.api_endpoint,
     token: row.api_key_hash,
     enabled: row.is_active,
@@ -266,7 +275,7 @@ const LOCAL_OPENCLAW_ENDPOINTS = [
 ];
 
 /**
- * Probe localhost for a running OpenClaw gateway.
+ * Probe localhost for a running OpenSwan gateway.
  * If found, auto-creates a connection entry (or returns existing).
  * Works on both localhost dev and the live site — browser fetch to
  * localhost reaches the user's own machine.
@@ -274,13 +283,13 @@ const LOCAL_OPENCLAW_ENDPOINTS = [
 export async function autoDiscoverLocalAgents(
   existing: AgentConnection[],
 ): Promise<{ discovered: AgentConnection | null; endpoint?: string }> {
-  // Skip if user already has an OpenClaw connection (enabled or not)
+  // Skip if user already has an OpenSwan connection (enabled or not)
   const hasOpenclaw = existing.some(
-    c => c.provider === 'openclaw' && c.endpoint.includes('localhost'),
+    c => c.provider === 'openswan' && c.endpoint.includes('localhost'),
   );
   if (hasOpenclaw) {
     // Return the existing one for auto-reconnect
-    const conn = existing.find(c => c.provider === 'openclaw' && c.endpoint.includes('localhost'));
+    const conn = existing.find(c => c.provider === 'openswan' && c.endpoint.includes('localhost'));
     return { discovered: null, endpoint: conn?.endpoint };
   }
 
@@ -294,13 +303,13 @@ export async function autoDiscoverLocalAgents(
         if (data?.ok || data?.status === 'live') {
           const conn: AgentConnection = {
             id: generateId(),
-            name: 'OpenClaw',
-            provider: 'openclaw',
+            name: 'OpenSwan',
+            provider: 'openswan',
             endpoint,
             token: '', // Will be filled from saved data or user input
             enabled: true,
             status: 'disconnected',
-            color: PROVIDER_META.openclaw.color,
+            color: PROVIDER_META.openswan.color,
           };
           return { discovered: conn, endpoint };
         }
@@ -343,16 +352,16 @@ export async function probeEndpointHealth(endpoint: string): Promise<boolean> {
 }
 
 /**
- * Get the first connected OpenClaw connection's endpoint,
+ * Get the first connected OpenSwan connection's endpoint,
  * or fall back to the first enabled one.
  */
-export function getOpenClawEndpoint(connections: AgentConnection[]): string | null {
+export function getOpenSwanEndpoint(connections: AgentConnection[]): string | null {
   const connected = connections.find(
-    c => c.provider === 'openclaw' && c.status === 'connected',
+    c => c.provider === 'openswan' && c.status === 'connected',
   );
   if (connected) return connected.endpoint;
   const enabled = connections.find(
-    c => c.provider === 'openclaw' && c.enabled,
+    c => c.provider === 'openswan' && c.enabled,
   );
   return enabled?.endpoint || null;
 }

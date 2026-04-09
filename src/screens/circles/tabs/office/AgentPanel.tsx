@@ -22,9 +22,9 @@ import {
 import { AGENT_SPIRITS, SPIRIT_CATEGORIES, getSpiritById, type AgentSpirit } from '../../../../lib/agentSpirits';
 import { updateAgentSpirit } from '../../../../lib/circleOffice';
 import {
-  type OpenClawConfig,
-  type OpenClawSession,
-  type OpenClawSubAgent,
+  type OpenSwanConfig,
+  type OpenSwanSession,
+  type OpenSwanSubAgent,
   type CronJob,
   listSessions,
   listSubAgentsDetailed,
@@ -36,7 +36,7 @@ import {
   createCronJob,
   formatCronSchedule,
   isLikelyCronExpression,
-} from '../../../../lib/openclawService';
+} from '../../../../lib/openswanService';
 import { supabase } from '../../../../lib/supabase';
 
 const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
@@ -321,12 +321,12 @@ function AgentRunsPanel({ circleId, agentName, accentColor }: { circleId: string
   );
 }
 
-function OpenClawFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; accentColor: string }) {
+function OpenSwanFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; accentColor: string }) {
   const [connection, setConnection] = useState<AgentConnection | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [sessions, setSessions] = useState<OpenClawSession[]>([]);
-  const [subagents, setSubagents] = useState<OpenClawSubAgent[]>([]);
+  const [sessions, setSessions] = useState<OpenSwanSession[]>([]);
+  const [subagents, setSubagents] = useState<OpenSwanSubAgent[]>([]);
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [messageInput, setMessageInput] = useState('');
@@ -335,14 +335,14 @@ function OpenClawFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
   const [memoryResult, setMemoryResult] = useState('');
   const [actionState, setActionState] = useState<string | null>(null);
 
-  const resolveConfig = useCallback(async (): Promise<OpenClawConfig | null> => {
+  const resolveConfig = useCallback(async (): Promise<OpenSwanConfig | null> => {
     const connections = await loadConnections();
     const match = connections.find((conn) =>
-      conn.provider === 'openclaw' && (
+      conn.provider === 'openswan' && (
         conn.id === agent.connectionId ||
         conn.name === agent.connectionName
       )
-    ) || connections.find((conn) => conn.provider === 'openclaw' && conn.status === 'connected');
+    ) || connections.find((conn) => conn.provider === 'openswan' && conn.status === 'connected');
 
     if (!match?.endpoint || !match?.token || match.token === '***') {
       setConnection(match || null);
@@ -359,7 +359,7 @@ function OpenClawFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
     try {
       const config = await resolveConfig();
       if (!config) {
-        setError('KingClaw connection token is not available in this session.');
+        setError('OpenSwan connection token is not available in this session.');
         setSessions([]);
         setSubagents([]);
         setJobs([]);
@@ -380,7 +380,7 @@ function OpenClawFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
       setSubagents(subagentsResult.subagents || []);
       setJobs(jobsResult.jobs || []);
     } catch (e: any) {
-      setError(e?.message || 'Failed to load KingClaw data');
+      setError(e?.message || 'Failed to load OpenSwan data');
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -391,12 +391,12 @@ function OpenClawFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
     refresh();
   }, [refresh]);
 
-  const runAction = useCallback(async (label: string, fn: (config: OpenClawConfig) => Promise<void>) => {
+  const runAction = useCallback(async (label: string, fn: (config: OpenSwanConfig) => Promise<void>) => {
     setActionState(label);
     setError(null);
     try {
       const config = await resolveConfig();
-      if (!config) throw new Error('KingClaw connection is not available');
+      if (!config) throw new Error('OpenSwan connection is not available');
       await fn(config);
       await refresh();
     } catch (e: any) {
@@ -419,7 +419,7 @@ function OpenClawFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
   ];
 
   return (
-    <View style={{ paddingHorizontal: 8, gap: 8, paddingBottom: 12 }} nativeID="section-openclaw-frontend">
+    <View style={{ paddingHorizontal: 8, gap: 8, paddingBottom: 12 }} nativeID="section-openswan-frontend">
       <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: accentColor + '35', borderRadius: 3, padding: 10 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
           <View style={{ width: 24, height: 24, borderRadius: 3, backgroundColor: accentColor + '18', borderWidth: 1, borderColor: accentColor + '35', alignItems: 'center', justifyContent: 'center' }}>
@@ -428,7 +428,7 @@ function OpenClawFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
           <View style={{ flex: 1 }}>
             <Text style={{ color: '#f0f0f5', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>KINGCLAW RUNTIME PANEL</Text>
             <Text style={{ color: '#606075', fontSize: 9, fontFamily: MONO }} numberOfLines={1}>
-              {connection?.endpoint || 'No active KingClaw endpoint resolved'}
+              {connection?.endpoint || 'No active OpenSwan endpoint resolved'}
             </Text>
           </View>
           <Pressable
@@ -628,10 +628,10 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
   const [connection, setConnection] = useState<AgentConnection | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
 
-  const resolveConfig = useCallback(async (): Promise<OpenClawConfig | null> => {
+  const resolveConfig = useCallback(async (): Promise<OpenSwanConfig | null> => {
     const connections = await loadConnections();
-    const match = connections.find(c => c.provider === 'openclaw' && c.status === 'connected')
-      || connections.find(c => c.provider === 'openclaw');
+    const match = connections.find(c => c.provider === 'openswan' && c.status === 'connected')
+      || connections.find(c => c.provider === 'openswan');
     if (!match?.endpoint || !match?.token || match.token === '***') { setConnection(match || null); return null; }
     setConnection(match);
     return { endpoint: match.endpoint, token: match.token };
@@ -658,7 +658,7 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
     try {
       const config = await resolveConfig();
       if (!config) {
-        setError('Connect KingClaw to manage gateway jobs.');
+        setError('Connect OpenSwan to manage gateway jobs.');
         return;
       }
       const result = await manageCronJob(config, action, jobId, patch);
@@ -684,7 +684,7 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
     try {
       const config = await resolveConfig();
       if (!config) {
-        setError('Connect KingClaw to create gateway jobs.');
+        setError('Connect OpenSwan to create gateway jobs.');
         return;
       }
       const result = await createCronJob(config, {
@@ -752,7 +752,7 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
           )}
         </View>
         <Text style={{ color: '#808090', fontSize: 9, fontFamily: MONO, lineHeight: 14 }}>
-          KingClaw jobs run on the connected KingClaw runtime. Circle Automations run inside Underground Circle and are managed separately in the Automations dashboard.
+          OpenSwan jobs run on the connected OpenSwan runtime. Circle Automations run inside Underground Circle and are managed separately in the Automations dashboard.
         </Text>
       </View>
 
@@ -1130,7 +1130,7 @@ export default function AgentPanel({
   const dragStartW = useRef(540);
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState('');
-  const [panelTab, setPanelTab] = useState<'overview' | 'openclaw' | 'terminal' | 'memory' | 'runs' | 'cron' | 'evolution' | 'spirit' | 'activity' | 'customize'>('overview');
+  const [panelTab, setPanelTab] = useState<'overview' | 'openswan' | 'terminal' | 'memory' | 'runs' | 'cron' | 'evolution' | 'spirit' | 'activity' | 'customize'>('overview');
   const [userId, setUserId] = useState<string | null>(null);
   useEffect(() => { supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id || null)).catch(() => {}); }, []);
   const [showCustomize, setShowCustomize] = useState(false);
@@ -1424,7 +1424,7 @@ export default function AgentPanel({
       {(() => {
         const allTabs = [
           { key: 'overview', label: 'Overview' },
-          ...(agent.providerType === 'openclaw' ? [{ key: 'openclaw', label: 'KingClaw' }] : []),
+          ...(agent.providerType === 'openswan' ? [{ key: 'openswan', label: 'OpenSwan' }] : []),
           { key: 'terminal', label: 'Terminal' },
           { key: 'memory', label: 'Memory' },
           { key: 'runs', label: 'Runs' },
@@ -1727,8 +1727,8 @@ export default function AgentPanel({
         );
       })()}
 
-      {panelTab === 'openclaw' && agent.providerType === 'openclaw' && (
-        <OpenClawFrontendPanel agent={agent} accentColor={agent.color || '#6366f1'} />
+      {panelTab === 'openswan' && agent.providerType === 'openswan' && (
+        <OpenSwanFrontendPanel agent={agent} accentColor={agent.color || '#6366f1'} />
       )}
 
       {/* ── TERMINAL TAB — Remote Shell + AI Terminal ── */}

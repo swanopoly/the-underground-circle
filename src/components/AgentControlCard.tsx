@@ -48,7 +48,7 @@ const KILL_COMMANDS: Record<string, string> = {
   'claude-code': 'pkill -f "claude" 2>/dev/null; echo "✓ Claude Code processes terminated"',
   'codex':       'pkill -f "codex" 2>/dev/null; echo "✓ Codex processes terminated"',
   'gemini':      'pkill -f "gemini" 2>/dev/null; echo "✓ Gemini CLI processes terminated"',
-  'openclaw':    'pkill -f "openclaw" 2>/dev/null; echo "✓ OpenClaw processes terminated"',
+  'openswan':    'pkill -f "openswan" 2>/dev/null; echo "✓ OpenSwan processes terminated"',
 };
 
 const BRIDGE_PORTS: Record<string, number> = {
@@ -56,7 +56,7 @@ const BRIDGE_PORTS: Record<string, number> = {
   'codex': 7779,
   'gemini': 7780,
   'cursor': 7781,
-  'openclaw': 18790,
+  'openswan': 18790,
 };
 
 // ── Component ────────────────────────────────────────────────────────────────

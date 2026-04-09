@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 //  Heartbeat Agent — Autonomous AI daemon that proactively manages circles
-//  Inspired by OpenClaw's heartbeat system: runs on a schedule, reads circle
+//  Inspired by OpenSwan's heartbeat system: runs on a schedule, reads circle
 //  state, and takes action without being prompted.
 //
 //  Trigger: pg_cron every 30 minutes, or manual invocation

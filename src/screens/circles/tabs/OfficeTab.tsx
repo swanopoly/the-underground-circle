@@ -33,16 +33,16 @@ import {
   verifyBot, getChat, TelegramPoller, TelegramMessage,
 } from '../../../lib/telegramService';
 import {
-  OpenClawConfig, OpenClawPoller, OpenClawSession, OpenClawUpdate,
+  OpenSwanConfig, OpenSwanPoller, OpenSwanSession, OpenSwanUpdate,
   testConnection, listAgents, listCronJobs, CronJob,
-} from '../../../lib/openclawService';
+} from '../../../lib/openswanService';
 import {
   openOAuthPopup, checkOAuthStatus, disconnectOAuth, fetchCalendarEvents, fetchEmails,
   OAuthProvider,
 } from '../../../lib/oauthConnect';
 import {
   AgentConnection, ProviderType, loadConnections, saveConnections, PROVIDER_META,
-  autoDiscoverLocalAgents, probeEndpointHealth, getOpenClawEndpoint,
+  autoDiscoverLocalAgents, probeEndpointHealth, getOpenSwanEndpoint,
 } from '../../../lib/connectionManager';
 import {
   ClaudeCodePoller, bridgeSessionsToAgents, detectClaudeCodeBridge,
@@ -296,7 +296,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [budgetAlertsDismissed, setBudgetAlertsDismissed] = useState(false);
   const [actionResult, setActionResult] = useState<string>('');
   const [showActionResult, setShowActionResult] = useState(false);
-  const [enrichedSessions, setEnrichedSessions] = useState<OpenClawSession[]>([]);
+  const [enrichedSessions, setEnrichedSessions] = useState<OpenSwanSession[]>([]);
   const enrichedSessionSignatureRef = useRef('');
 
   // ─── Multi-floor state ──────────────────────────────
@@ -374,8 +374,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   // ─── Multi-connection state ──────────────────────────────
   const [connections, setConnections] = useState<AgentConnection[]>([]);
-  const pollersRef = useRef<Map<string, OpenClawPoller>>(new Map());
-  const sessionsRef = useRef<Map<string, OpenClawSession[]>>(new Map());
+  const pollersRef = useRef<Map<string, OpenSwanPoller>>(new Map());
+  const sessionsRef = useRef<Map<string, OpenSwanSession[]>>(new Map());
   const [sessionsTick, setSessionsTick] = useState(0); // force re-render on session updates
   const ccPollerRef = useRef<ClaudeCodePoller | null>(null);
   const ccPublishedRef = useRef(false);
@@ -510,7 +510,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     const blackSwanAgent = createBlackSwanAgent(circleId);
     const myAgents = circleOfficeAgents.filter(a => a.ownerId === currentUserId);
     // Use the actual connected endpoint, not hardcoded localhost
-    const gwUrl = getOpenClawEndpoint(connections) || undefined;
+    const gwUrl = getOpenSwanEndpoint(connections) || undefined;
 
     const baseReq = {
       messageId: params.messageId,
@@ -574,7 +574,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // ─── Terminal command subscription ────────────────────────────────────────
   // Listen for commands targeting my agents + BlackSwan; invoke accordingly
   // Resolve the gateway URL from active connections (not hardcoded)
-  const resolvedGatewayUrl = getOpenClawEndpoint(connections);
+  const resolvedGatewayUrl = getOpenSwanEndpoint(connections);
 
   useEffect(() => {
     if (!currentUserId || !circleId) return;
@@ -684,7 +684,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // ─── Manual agent publish modal ──────────────────────────────────────────
   const [showPublishModal, setShowPublishModal] = useState(false);
   const [publishName, setPublishName] = useState('');
-  const [publishProvider, setPublishProvider] = useState('openclaw');
+  const [publishProvider, setPublishProvider] = useState('openswan');
 
   const handlePublishToCircle = useCallback(async (
     overrideName?: string,
@@ -694,11 +694,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
     // Prefer passed values → connected conn → modal values → defaults
     const conn = connections.find(c => c.enabled);
-    const display = PROVIDER_DISPLAY[overrideProvider || publishProvider || conn?.provider || 'openclaw']
+    const display = PROVIDER_DISPLAY[overrideProvider || publishProvider || conn?.provider || 'openswan']
       || PROVIDER_DISPLAY['generic-agent'];
 
     const agentName    = overrideName     || conn?.name     || publishName || 'My Agent';
-    const agentProvider= overrideProvider || conn?.provider || publishProvider || 'openclaw';
+    const agentProvider= overrideProvider || conn?.provider || publishProvider || 'openswan';
     const agentColor   = conn?.color      || display.color;
 
     setPublishingToCircle(true);
@@ -757,7 +757,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       return updated;
     });
 
-    const config: OpenClawConfig = { endpoint: conn.endpoint, token: conn.token };
+    const config: OpenSwanConfig = { endpoint: conn.endpoint, token: conn.token };
     const result = await testConnection(config);
 
     if (!result.ok) {
@@ -795,7 +795,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     const oldPoller = pollersRef.current.get(conn.id);
     if (oldPoller) oldPoller.stop();
 
-    const poller = new OpenClawPoller(config, (update: OpenClawUpdate) => {
+    const poller = new OpenSwanPoller(config, (update: OpenSwanUpdate) => {
       sessionsRef.current.set(conn.id, update.sessions);
       setConnections(prev => {
         const updated = prev.map(c => c.id === conn.id && c.status === 'connected' ? {
@@ -879,7 +879,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     }
   }, [connections, connectOne]);
 
-  const getConnectionConfig = useCallback((id: string): OpenClawConfig | null => {
+  const getConnectionConfig = useCallback((id: string): OpenSwanConfig | null => {
     const conn = connections.find(c => c.id === id && c.status === 'connected');
     if (!conn) return null;
     return { endpoint: conn.endpoint, token: conn.token };
@@ -964,7 +964,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   }, [pushOfficePreferences]);
 
   // ─── Load saved connections on mount + auto-discover ──────────────
-  // Agent detection (Claude Code bridge + OpenClaw) is handled by the app-level
+  // Agent detection (Claude Code bridge + OpenSwan) is handled by the app-level
   // agentAutoConnect singleton (started in App.tsx on auth). OfficeTab just
   // picks up the already-connected state and subscribes for updates.
 
@@ -1019,9 +1019,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         let conns = await loadConnections();
         const { discovered } = await autoDiscoverLocalAgents(conns);
         if (discovered) {
-          const existingOpenClaw = conns.find(c => c.provider === 'openclaw');
-          if (existingOpenClaw?.token) {
-            discovered.token = existingOpenClaw.token;
+          const existingOpenSwan = conns.find(c => c.provider === 'openswan');
+          if (existingOpenSwan?.token) {
+            discovered.token = existingOpenSwan.token;
           }
           conns = [...conns, discovered];
           saveConnections(conns);
@@ -1449,7 +1449,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     return 4;
   }, []);
 
-  // BlackSwan first, then active sessions, with idle Cursor/Gemini bridges pushed down
+  // BlackSwan first, then Cursor (C3PO) always second, then active sessions
   const displayAgents = useMemo(() => {
     // Final dedup by name — keep the most recently active version
     const byName = new Map<string, typeof userAgents[0]>();
@@ -1461,14 +1461,19 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       if (newTime > existingTime) byName.set(a.name, a);
     }
     const deduped = Array.from(byName.values());
-    const sorted = [...deduped].sort((a, b) => {
+
+    // Pull out Cursor agent(s) to pin them second
+    const cursorAgents = deduped.filter(a => a.providerType === 'cursor');
+    const rest = deduped.filter(a => a.providerType !== 'cursor');
+
+    const sorted = [...rest].sort((a, b) => {
       const rankDiff = getDisplayAgentSortRank(a) - getDisplayAgentSortRank(b);
       if (rankDiff !== 0) return rankDiff;
       const ta = a.lastActive ? new Date(a.lastActive).getTime() : 0;
       const tb = b.lastActive ? new Date(b.lastActive).getTime() : 0;
       return tb - ta;
     });
-    return [DEFAULT_AGENT, ...sorted];
+    return [DEFAULT_AGENT, ...cursorAgents, ...sorted];
   }, [userAgents, getDisplayAgentSortRank]);
 
   // Resolve appearance — lookup by id first, fall back to name for legacy data
@@ -1624,7 +1629,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   // Enrich sessions for Cost Dashboard
   useEffect(() => {
-    const allSessions: OpenClawSession[] = [];
+    const allSessions: OpenSwanSession[] = [];
     const sortedConnections = [...connectedConns].sort((a, b) => a.id.localeCompare(b.id));
 
     for (const conn of sortedConnections) {
@@ -1736,16 +1741,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     pushOfficePreferences({ whiteboardNotes });
   }, [whiteboardNotes]);
 
-  // Fetch cron jobs from all connected OpenClaw instances
+  // Fetch cron jobs from all connected OpenSwan instances
   const connectedCount = connections.filter(c => c.status === 'connected').length;
   useEffect(() => {
     if (connectedCount === 0) return;
     const fetchCron = async () => {
-      const openclawConns = connections.filter(c => c.status === 'connected' && c.provider === 'openclaw');
-      if (openclawConns.length === 0) return; // skip if no OpenClaw connections
+      const openswanConns = connections.filter(c => c.status === 'connected' && c.provider === 'openswan');
+      if (openswanConns.length === 0) return; // skip if no OpenSwan connections
       const allJobs: CronJob[] = [];
-      for (const conn of openclawConns) {
-        const config: OpenClawConfig = { endpoint: conn.endpoint, token: conn.token };
+      for (const conn of openswanConns) {
+        const config: OpenSwanConfig = { endpoint: conn.endpoint, token: conn.token };
         try {
           const result = await listCronJobs(config);
           if (result.ok) allJobs.push(...result.jobs);
@@ -3382,7 +3387,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                           </View>
                         ))}
                         <Text style={{ color: '#555', fontSize: 11, fontFamily: 'monospace', textAlign: 'center', marginBottom: 8 }}>
-                          Make sure OpenClaw is running and the CORS proxy is active
+                          Make sure OpenSwan is running and the CORS proxy is active
                         </Text>
                         <Pressable
                           onPress={() => savedConns.forEach(c => connectOne(c))}
@@ -3821,7 +3826,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             <Text style={pmStyles.label}>Agent Type</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={pmStyles.providerRow}>
               {[
-                { key: 'openclaw',      icon: '🦞', label: 'OpenClaw' },
+                { key: 'openswan',      icon: '🦞', label: 'OpenSwan' },
                 { key: 'claude-code',   icon: '🤖', label: 'Claude Code' },
                 { key: 'codex',         icon: '🧠', label: 'Codex' },
                 { key: 'cursor',        icon: '🖱️', label: 'Cursor' },

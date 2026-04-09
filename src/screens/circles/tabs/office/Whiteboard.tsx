@@ -9,7 +9,7 @@ import {
   calculateDailyScore,
 } from '../../../../lib/officeAgents';
 import { isBlackSwanAvailable } from '../../../../lib/blackswanLLM';
-import { CronJob } from '../../../../lib/openclawService';
+import { CronJob } from '../../../../lib/openswanService';
 import { useAgentActivity, AgentActivity } from '../../../../services/agentActivityLogger';
 import { supabase } from '../../../../lib/supabase';
 import { BADGES, getEarnedBadges, getNextBadge, formatPoints, Badge } from '../../../../lib/badges';

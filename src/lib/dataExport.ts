@@ -1,6 +1,6 @@
 // Data Export System - CSV & JSON exports for cost analytics
 import { OfficeAgent } from './officeAgents';
-import { OpenClawSession } from './openclawService';
+import { OpenSwanSession } from './openswanService';
 import { SessionTag } from './sessionTags';
 
 export interface ExportRow {
@@ -24,7 +24,7 @@ export interface ExportRow {
 
 export function generateExportData(
   agents: OfficeAgent[],
-  sessions: OpenClawSession[],
+  sessions: OpenSwanSession[],
   sessionTags: Map<string, SessionTag[]>,
   startDate?: Date,
   endDate?: Date

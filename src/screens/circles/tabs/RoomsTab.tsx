@@ -2125,7 +2125,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   const [agentConnections, setAgentConnections] = useState<any[]>([]);
   const scrollRef = useRef<ScrollView>(null);
 
-  // Load agent connections from local storage (user's own OpenClaw instances)
+  // Load agent connections from local storage (user's own OpenSwan instances)
   useEffect(() => {
     (async () => {
       try {

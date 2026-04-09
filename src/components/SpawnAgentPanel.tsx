@@ -97,7 +97,7 @@ const TOOL_CAPABILITIES = [
 const PROVIDERS = [
   { key: 'blackswan',     label: 'BlackSwan',    icon: 'S' },
   { key: 'claude-code',   label: 'Claude Code',  icon: 'C' },
-  { key: 'openclaw',      label: 'OpenClaw',     icon: 'O' },
+  { key: 'openswan',      label: 'OpenSwan',     icon: 'O' },
   { key: 'gemini',        label: 'Gemini',       icon: 'G' },
   { key: 'codex',         label: 'Codex',        icon: 'X' },
   { key: 'generic-agent', label: 'Custom',       icon: '+' },

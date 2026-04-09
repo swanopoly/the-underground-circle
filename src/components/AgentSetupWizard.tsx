@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { AgentConnection, PROVIDER_META, ProviderType, generateId } from '../lib/connectionManager';
-import { testConnection } from '../lib/openclawService';
+import { testConnection } from '../lib/openswanService';
 import { DiagnosticResult, getTokenHint } from '../lib/connectionDiagnostics';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -37,7 +37,7 @@ interface ProviderCard {
 }
 
 const PROVIDERS: ProviderCard[] = [
-  { type: 'openclaw',      icon: '🐾', label: 'OpenClaw',    tagline: 'Recommended — full control',   color: '#6366f1', defaultEndpoint: 'http://localhost:18790' },
+  { type: 'openswan',      icon: '🐾', label: 'OpenSwan',    tagline: 'Recommended — full control',   color: '#6366f1', defaultEndpoint: 'http://localhost:18790' },
   { type: 'claude-code',   icon: '🤖', label: 'Claude Code', tagline: 'Anthropic\'s coding agent',     color: '#f97316', defaultEndpoint: 'http://localhost:8080'  },
   { type: 'codex',         icon: '🧠', label: 'Codex',       tagline: 'OpenAI\'s agent',               color: '#22c55e', defaultEndpoint: 'https://api.openai.com/v1' },
   { type: 'generic-agent', icon: '⚡', label: 'Other',       tagline: 'Any OpenAI-compatible API',    color: '#a855f7', defaultEndpoint: 'https://' },

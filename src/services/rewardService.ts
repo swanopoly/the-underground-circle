@@ -181,7 +181,7 @@ export function useAgentPointsTracker(
 
 // ─── Multi-agent XP tracker ──────────────────────────────────────────────
 // Tracks ALL connected agents' turns and awards XP to the USER.
-// Every bot earns XP for its owner — Claude Code, OpenClaw, Codex, all of them.
+// Every bot earns XP for its owner — Claude Code, OpenSwan, Codex, all of them.
 
 export function useAllAgentPointsTracker(
   userId: string | undefined,

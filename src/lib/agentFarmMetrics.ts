@@ -1,6 +1,6 @@
 // Agent Farm Metrics & Analytics System
 import { OfficeAgent } from './officeAgents';
-import { OpenClawSession } from './openclawService';
+import { OpenSwanSession } from './openswanService';
 
 // ─── Performance Scoring ────────────────────────────────────────────
 
@@ -20,7 +20,7 @@ export interface AgentPerformanceScore {
 
 export function calculateAgentScore(
   agent: OfficeAgent,
-  sessions: OpenClawSession[],
+  sessions: OpenSwanSession[],
   allAgents: OfficeAgent[],
 ): AgentPerformanceScore {
   // Find sessions for this agent (sessions are per-response, match by agentId)
@@ -78,7 +78,7 @@ export function calculateAgentScore(
   };
 }
 
-function calculateOverallScore(agent: OfficeAgent, session?: OpenClawSession): number {
+function calculateOverallScore(agent: OfficeAgent, session?: OpenSwanSession): number {
   const reliability = calculateReliability(agent);
   const efficiency = calculateEfficiency(agent, session);
   const productivity = calculateProductivity(agent, session);
@@ -106,7 +106,7 @@ function calculateReliability(agent: OfficeAgent): number {
   return Math.min(100, Math.max(0, score));
 }
 
-function calculateEfficiency(agent: OfficeAgent, session?: OpenClawSession): number {
+function calculateEfficiency(agent: OfficeAgent, session?: OpenSwanSession): number {
   if (!session) return 50; // Default neutral score
 
   // Calculate tokens per message
@@ -137,7 +137,7 @@ function calculateEfficiency(agent: OfficeAgent, session?: OpenClawSession): num
   return Math.round(efficiencyScore);
 }
 
-function calculateProductivity(agent: OfficeAgent, session?: OpenClawSession): number {
+function calculateProductivity(agent: OfficeAgent, session?: OpenSwanSession): number {
   // Base on messages processed
   let score = Math.min(100, agent.messagesProcessed * 2); // Cap at 50 messages = 100
 
@@ -150,7 +150,7 @@ function calculateProductivity(agent: OfficeAgent, session?: OpenClawSession): n
   return Math.round(score);
 }
 
-function calculateQuality(agent: OfficeAgent, session?: OpenClawSession): number {
+function calculateQuality(agent: OfficeAgent, session?: OpenSwanSession): number {
   // Default to good quality (70) unless we have error signals
   let score = 70;
 
@@ -193,7 +193,7 @@ export interface FarmMetrics {
 
 export function calculateFarmMetrics(
   agents: OfficeAgent[],
-  sessions: OpenClawSession[],
+  sessions: OpenSwanSession[],
 ): FarmMetrics {
   const scores = agents.map(a => calculateAgentScore(a, sessions, agents));
 
@@ -320,7 +320,7 @@ export interface CostOptimization {
 
 export function generateCostOptimizations(
   agents: OfficeAgent[],
-  sessions: OpenClawSession[],
+  sessions: OpenSwanSession[],
 ): CostOptimization[] {
   const optimizations: CostOptimization[] = [];
 
@@ -440,7 +440,7 @@ export interface HealthCheck {
   }[];
 }
 
-export function performHealthCheck(agents: OfficeAgent[], sessions: OpenClawSession[]): HealthCheck {
+export function performHealthCheck(agents: OfficeAgent[], sessions: OpenSwanSession[]): HealthCheck {
   const issues: HealthCheck['issues'] = [];
 
   // Check for error agents

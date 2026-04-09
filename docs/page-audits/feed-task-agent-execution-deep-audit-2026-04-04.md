@@ -130,7 +130,7 @@ Current invocation routes across:
 - BlackSwan
 - Claude Code bridge
 - Gemini CLI bridge
-- BYO LLM/OpenClaw-style agents
+- BYO LLM/OpenSwan-style agents
 
 Relevant reference:
 

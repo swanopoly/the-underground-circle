@@ -10,7 +10,7 @@ create table if not exists circle_office_agents (
   owner_id            uuid not null references auth.users(id) on delete cascade,
 
   -- Public agent profile (no tokens or endpoints)
-  provider            text not null default 'openclaw',
+  provider            text not null default 'openswan',
   name                text not null,
   color               text not null default '#6366f1',
   tool_icon           text not null default '🤖',

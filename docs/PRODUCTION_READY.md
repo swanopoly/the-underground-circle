@@ -58,7 +58,7 @@ These features work on the live site without any local services:
 
 The Office tab is an **optional advanced feature** for users who want to manage AI agents locally:
 
-**What it does**: Connects to local or remote OpenClaw/AI agent endpoints to display and manage agents in a pixel-art office dashboard.
+**What it does**: Connects to local or remote OpenSwan/AI agent endpoints to display and manage agents in a pixel-art office dashboard.
 
 **On the live site**:
 - Shows helpful empty state
@@ -66,7 +66,7 @@ The Office tab is an **optional advanced feature** for users who want to manage 
 - Users can add their own remote endpoints if they have them
 
 **For local development**:
-1. Run OpenClaw gateway: `openclaw gateway start`
+1. Run OpenSwan gateway: `openswan gateway start`
 2. Run CORS proxy: `node docs/cors-proxy.js`
 3. Add connection in Office → Connections
 4. Use endpoint: `http://localhost:18790`
@@ -120,7 +120,7 @@ The app is fully responsive and works on:
 
 ## 🐛 Known Limitations
 
-- **Office Tab**: Requires local OpenClaw setup or remote agent endpoint (not needed for core features)
+- **Office Tab**: Requires local OpenSwan setup or remote agent endpoint (not needed for core features)
 - **AI Summaries**: Digest tab requires Gemini API key (configured via env var)
 - **Telegram Bot**: Telegram integration requires bot setup (optional)
 

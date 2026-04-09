@@ -18,7 +18,7 @@ Built for creators, builders, and grinders who want real accountability — not 
 
 - **Frontend:** React Native + Expo (Web, iOS, Android)
 - **Backend:** Supabase (Auth, Database, Realtime)
-- **AI:** OpenClaw integration for multi-agent management
+- **AI:** OpenSwan integration for multi-agent management
 - **Crypto:** ethers.js + @solana/web3.js
 - **Deploy:** Netlify (web), Expo EAS (mobile)
 

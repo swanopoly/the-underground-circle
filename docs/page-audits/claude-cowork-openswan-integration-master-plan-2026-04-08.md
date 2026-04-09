@@ -1,4 +1,4 @@
-# Claude Managed Agents + Cowork + OpenClaw Integration Master Plan
+# Claude Managed Agents + Cowork + OpenSwan Integration Master Plan
 
 Date: 2026-04-08
 Type: Deep research, product audit, and Claude-ready implementation plan
@@ -10,13 +10,13 @@ The Underground Circle already has meaningful agent infrastructure:
 
 - provider-aware chat dispatch in [ChatTab.tsx](/Users/cswanson/the-underground-circle/src/screens/circles/tabs/ChatTab.tsx)
 - bridge dispatch in [bridgeTaskDispatcher.ts](/Users/cswanson/the-underground-circle/src/lib/bridgeTaskDispatcher.ts)
-- OpenClaw gateway client and polling in [openclawService.ts](/Users/cswanson/the-underground-circle/src/lib/openclawService.ts)
+- OpenSwan gateway client and polling in [openswanService.ts](/Users/cswanson/the-underground-circle/src/lib/openswanService.ts)
 - multi-provider invocation in [agentInvocation.ts](/Users/cswanson/the-underground-circle/src/lib/agentInvocation.ts)
 - Office live-agent surface in [OfficeTab.tsx](/Users/cswanson/the-underground-circle/src/screens/circles/tabs/OfficeTab.tsx)
 - Room task dispatch in [RoomsTab.tsx](/Users/cswanson/the-underground-circle/src/screens/circles/tabs/RoomsTab.tsx)
 - Feed task execution scaffolding in [bridgeTaskDispatcher.ts](/Users/cswanson/the-underground-circle/src/lib/bridgeTaskDispatcher.ts) and prior Feed audit docs
 
-The gap is not "add AI." The gap is that the app does not yet expose the full product patterns that make Claude Cowork and OpenClaw useful:
+The gap is not "add AI." The gap is that the app does not yet expose the full product patterns that make Claude Cowork and OpenSwan useful:
 
 - goal-first delegation
 - durable task workspaces
@@ -70,9 +70,9 @@ Important implication for Underground Circle:
 
 The app should not stop at "provider orchestration." It should evolve into a managed-agent platform where sessions, permissions, memory, subagents, and evaluations are treated as first-class product primitives.
 
-### OpenClaw
+### OpenSwan
 
-Based on the official OpenClaw docs, OpenClaw is currently strongest as a self-hosted agent gateway and session runtime with:
+Based on the official OpenSwan docs, OpenSwan is currently strongest as a self-hosted agent gateway and session runtime with:
 
 - multi-channel messaging surfaces
 - session management and session tools
@@ -86,13 +86,13 @@ Based on the official OpenClaw docs, OpenClaw is currently strongest as a self-h
 
 Important implication for Underground Circle:
 
-OpenClaw is not just another provider. It is the best candidate in the current stack for a portable runtime layer across Chat, Rooms, Feed, Office, and future external channels.
+OpenSwan is not just another provider. It is the best candidate in the current stack for a portable runtime layer across Chat, Rooms, Feed, Office, and future external channels.
 
-## What Claude Managed Agents add beyond Cowork and OpenClaw
+## What Claude Managed Agents add beyond Cowork and OpenSwan
 
 Cowork contributes the end-user delegation UX.
 
-OpenClaw contributes a strong runtime/session/control-plane backbone.
+OpenSwan contributes a strong runtime/session/control-plane backbone.
 
 Claude Managed Agents contribute the missing management layer:
 
@@ -200,7 +200,7 @@ The repo should centralize:
 3. There is already a bridge/runtime split:
    - local bridge execution
    - BlackSwan edge execution
-   - OpenClaw session execution
+   - OpenSwan session execution
 4. The app already has the beginnings of:
    - agent assignment
    - task dispatch
@@ -272,7 +272,7 @@ The repo should centralize:
    - finance ops
    - community management
 
-### OpenClaw patterns Underground Circle should adopt
+### OpenSwan patterns Underground Circle should adopt
 
 1. Session portability
    - One session should be referenceable from Chat, Rooms, Office, and Feed.
@@ -354,7 +354,7 @@ The repo should centralize:
 
 ## Recommended target product model
 
-Underground Circle should not clone Cowork, managed-agent docs, or OpenClaw literally.
+Underground Circle should not clone Cowork, managed-agent docs, or OpenSwan literally.
 
 It should combine them into a four-layer architecture:
 
@@ -403,7 +403,7 @@ Execution backends:
 - Claude Code bridge
 - Codex bridge
 - Gemini bridge
-- OpenClaw gateway
+- OpenSwan gateway
 - browser / computer-use layer
 - future MCP servers and external connectors
 
@@ -518,7 +518,7 @@ It should own:
 - memory health / context compression visibility
 - evaluator failure queue
 
-Office should be where OpenClaw’s control-plane concepts land most directly.
+Office should be where OpenSwan’s control-plane concepts land most directly.
 
 ## Functionalities to add
 
@@ -539,7 +539,7 @@ Best place:
 - Rooms first
 - Main Chat second
 
-### B. OpenClaw-style session runtime
+### B. OpenSwan-style session runtime
 
 Add:
 
@@ -652,7 +652,7 @@ Add:
 
 Best implementation path:
 
-- use OpenClaw-style cron semantics as the product model even when execution backend differs
+- use OpenSwan-style cron semantics as the product model even when execution backend differs
 
 ### I. Deliverable/artifact system
 
@@ -698,7 +698,7 @@ Artifacts need:
 4. Feed to Rooms
    - Feed tasks should be able to open in the originating Room workspace.
 
-5. Office to OpenClaw runtime
+5. Office to OpenSwan runtime
    - Office should stay the deepest operational surface.
 
 ### Do not connect directly by default
@@ -838,7 +838,7 @@ Ship first:
 4. Steer / pause / resume / queue next
 5. Deliverable-first output cards
 
-### From OpenClaw
+### From OpenSwan
 
 Ship first:
 
@@ -863,7 +863,7 @@ Ship first:
 
 ### Keep and expand
 
-- [openclawService.ts](/Users/cswanson/the-underground-circle/src/lib/openclawService.ts)
+- [openswanService.ts](/Users/cswanson/the-underground-circle/src/lib/openswanService.ts)
   - good base for session, status, cron, and sub-agent integration
 - [agentInvocation.ts](/Users/cswanson/the-underground-circle/src/lib/agentInvocation.ts)
   - good base for backend-agnostic invocation
@@ -891,7 +891,7 @@ Ship first:
 ## Risks if implemented poorly
 
 1. Recreating Cowork only as a prettier chat
-2. Recreating OpenClaw only as another provider selector
+2. Recreating OpenSwan only as another provider selector
 3. Letting every surface execute privileged actions independently
 4. Fragmenting artifacts and sessions by tab
 5. Hiding delegation/planning from users
@@ -942,7 +942,7 @@ an agent workspace operating system that combines:
 
 - Claude Managed Agents’ memory, subagents, permissions, and eval discipline
 - Cowork’s knowledge-work delegation UX
-- OpenClaw’s session/runtime/automation backbone
+- OpenSwan’s session/runtime/automation backbone
 - Rooms as project memory and deliverable spaces
 - Feed as execution history and proof of work
 - Office as live control plane
@@ -967,7 +967,7 @@ That direction is stronger than trying to turn every screen into a standalone mi
 - Anthropic docs, Claude Code MCP: https://docs.anthropic.com/en/docs/claude-code/mcp
 - Anthropic engineering, writing tools for agents: https://www.anthropic.com/engineering/writing-tools-for-agents
 - Anthropic engineering, demystifying evals for AI agents: https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents
-- OpenClaw docs overview: https://docs.openclaw.ai/
-- OpenClaw docs, messages: https://docs.openclaw.ai/concepts/messages
-- OpenClaw docs, node host: https://docs.openclaw.ai/cli/node
-- OpenClaw docs, scheduled tasks: https://docs.openclaw.ai/automation/cron-jobs
+- OpenSwan docs overview: https://docs.openswan.ai/
+- OpenSwan docs, messages: https://docs.openswan.ai/concepts/messages
+- OpenSwan docs, node host: https://docs.openswan.ai/cli/node
+- OpenSwan docs, scheduled tasks: https://docs.openswan.ai/automation/cron-jobs

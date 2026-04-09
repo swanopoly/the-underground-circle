@@ -79,7 +79,7 @@ This should influence:
 - chat approvals
 - room tool access
 - task capability bundles
-- OpenClaw and MCP integration governance
+- OpenSwan and MCP integration governance
 
 ## Sources
 

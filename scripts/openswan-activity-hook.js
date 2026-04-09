@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * OpenClaw Activity Hook
+ * OpenSwan Activity Hook
  * 
  * Logs agent activity to Supabase agent_activity table.
  * Can be called directly or piped JSON via stdin.
  * 
  * Usage:
- *   echo '{"source":"discord","activity_type":"message_in","title":"Swan asked me to update the UI"}' | node openclaw-activity-hook.js
+ *   echo '{"source":"discord","activity_type":"message_in","title":"Swan asked me to update the UI"}' | node openswan-activity-hook.js
  * 
  * Or with args:
- *   node openclaw-activity-hook.js --source discord --type task_completed --title "Updated Office UI" --body "Added 3 files"
+ *   node openswan-activity-hook.js --source discord --type task_completed --title "Updated Office UI" --body "Added 3 files"
  * 
  * Required env vars:
  *   SUPABASE_URL          - e.g. https://rjkniqiqdtroeholxacg.supabase.co
@@ -22,11 +22,11 @@ const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_AN
 const CIRCLE_ID = process.env.ACTIVITY_CIRCLE_ID || '';
 
 if (!SUPABASE_KEY) {
-  process.stderr.write('[openclaw-activity-hook] ERROR: SUPABASE_SERVICE_KEY not set\n');
+  process.stderr.write('[openswan-activity-hook] ERROR: SUPABASE_SERVICE_KEY not set\n');
   process.exit(1);
 }
 if (!CIRCLE_ID) {
-  process.stderr.write('[openclaw-activity-hook] ERROR: ACTIVITY_CIRCLE_ID not set\n');
+  process.stderr.write('[openswan-activity-hook] ERROR: ACTIVITY_CIRCLE_ID not set\n');
   process.exit(1);
 }
 
@@ -56,11 +56,11 @@ async function insertActivity(payload) {
 
   if (!res.ok) {
     const text = await res.text();
-    process.stderr.write(`[openclaw-activity-hook] Insert failed ${res.status}: ${text}\n`);
+    process.stderr.write(`[openswan-activity-hook] Insert failed ${res.status}: ${text}\n`);
     process.exit(1);
   }
 
-  process.stderr.write(`[openclaw-activity-hook] Logged: ${payload.title}\n`);
+  process.stderr.write(`[openswan-activity-hook] Logged: ${payload.title}\n`);
 }
 
 // Parse stdin JSON or CLI args
@@ -93,13 +93,13 @@ async function main() {
         const fromStdin = JSON.parse(raw);
         payload = { ...payload, ...fromStdin };
       } catch {
-        process.stderr.write('[openclaw-activity-hook] Could not parse stdin JSON\n');
+        process.stderr.write('[openswan-activity-hook] Could not parse stdin JSON\n');
       }
     }
   }
 
   if (!payload.title) {
-    process.stderr.write('[openclaw-activity-hook] ERROR: title is required\n');
+    process.stderr.write('[openswan-activity-hook] ERROR: title is required\n');
     process.exit(1);
   }
 
@@ -107,7 +107,7 @@ async function main() {
 }
 
 main().catch(err => {
-  process.stderr.write(`[openclaw-activity-hook] FATAL: ${err.message}\n`);
+  process.stderr.write(`[openswan-activity-hook] FATAL: ${err.message}\n`);
   process.exit(1);
 });
 
@@ -141,6 +141,6 @@ async function logToRoom(payload) {
   });
   if (!res.ok) {
     const text = await res.text();
-    process.stderr.write(`[openclaw-activity-hook] Room log failed ${res.status}: ${text}\n`);
+    process.stderr.write(`[openswan-activity-hook] Room log failed ${res.status}: ${text}\n`);
   }
 }

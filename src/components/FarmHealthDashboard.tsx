@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, Platform } from 'react-native';
 import { OfficeAgent } from '../lib/officeAgents';
-import { OpenClawSession } from '../lib/openclawService';
+import { OpenSwanSession } from '../lib/openswanService';
 import {
   calculateFarmMetrics, calculateAgentScore, analyzeWorkloadDistribution,
   generateCostOptimizations, performHealthCheck, AgentPerformanceScore,
@@ -11,7 +11,7 @@ import {
 
 interface Props {
   agents: OfficeAgent[];
-  sessions: OpenClawSession[];
+  sessions: OpenSwanSession[];
   accentColor?: string;
 }
 

@@ -1,4 +1,4 @@
-# Claude Agent Stack and OpenClaw Panel Deep Audit
+# Claude Agent Stack and OpenSwan Panel Deep Audit
 
 Date: 2026-04-08
 Type: Deep research, implementation audit, and Claude-ready improvement plan
@@ -13,8 +13,8 @@ This audit covers:
 - what is still incomplete or incorrectly implemented
 - what is still needed for agents to handle tasks well
 - how to make session memory much stronger
-- what OpenClaw frontend/runtime features should exist in the app
-- how those OpenClaw frontend ideas should map into the Pixel Agent Panel
+- what OpenSwan frontend/runtime features should exist in the app
+- how those OpenSwan frontend ideas should map into the Pixel Agent Panel
 
 ## What is already meaningfully improved
 
@@ -45,7 +45,7 @@ That is directionally correct and much better than a single giant history blob.
 
 That is an important step away from pure text-in/text-out behavior.
 
-### 4. OpenClaw is already treated as a real runtime
+### 4. OpenSwan is already treated as a real runtime
 
 The repo has:
 
@@ -57,7 +57,7 @@ The repo has:
 - subagent enumeration
 - messaging to sessions
 
-in [openclawService.ts](/Users/cswanson/the-underground-circle/src/lib/openclawService.ts).
+in [openswanService.ts](/Users/cswanson/the-underground-circle/src/lib/openswanService.ts).
 
 ### 5. The Office Agent Panel is already a good extensibility point
 
@@ -70,27 +70,27 @@ The Agent Panel already has:
 - spirit/evolution
 - customization
 
-That makes it the right place to absorb OpenClaw-style control UI ideas.
+That makes it the right place to absorb OpenSwan-style control UI ideas.
 
 ## What I added in this pass
 
-I added a dedicated OpenClaw tab to the Agent Panel in:
+I added a dedicated OpenSwan tab to the Agent Panel in:
 
 [AgentPanel.tsx](/Users/cswanson/the-underground-circle/src/screens/circles/tabs/office/AgentPanel.tsx)
 
-The new OpenClaw tab now includes:
+The new OpenSwan tab now includes:
 
 - runtime endpoint header
 - session/subagent/cron summary tiles
-- OpenClaw capability cards
+- OpenSwan capability cards
 - live sessions section
 - subagents section
 - cron jobs section
 - session message action
 - spawn subagent action
-- OpenClaw memory search action
+- OpenSwan memory search action
 
-This is a meaningful UI improvement, but it is not yet parity with the OpenClaw Control UI.
+This is a meaningful UI improvement, but it is not yet parity with the OpenSwan Control UI.
 
 ## High-priority findings
 
@@ -120,11 +120,11 @@ The current unified memory model is still too loose around `user` scope.
 
 If Claude is going to improve agent memory properly, this must be fixed before expanding memory usage further.
 
-### 3. The OpenClaw panel is useful but still only a first slice
+### 3. The OpenSwan panel is useful but still only a first slice
 
 Severity: High
 
-The new Agent Panel tab now shows some OpenClaw control concepts, but it still does not cover several important Control UI features:
+The new Agent Panel tab now shows some OpenSwan control concepts, but it still does not cover several important Control UI features:
 
 - per-session overrides
 - stop/abort controls
@@ -166,7 +166,7 @@ The research direction is broader than coding:
 
 But the runtime and many UIs still feel optimized mainly for developer workflows.
 
-### 6. OpenClaw-style session management is still not portable enough across surfaces
+### 6. OpenSwan-style session management is still not portable enough across surfaces
 
 Severity: High
 
@@ -195,20 +195,20 @@ The app now has better run primitives, but users still do not consistently see:
 
 across all surfaces.
 
-### 8. OpenClaw frontend ideas should influence the Pixel Agent Panel more deeply
+### 8. OpenSwan frontend ideas should influence the Pixel Agent Panel more deeply
 
 Severity: Medium
 
-The right design direction is not “copy the whole OpenClaw dashboard.”
+The right design direction is not “copy the whole OpenSwan dashboard.”
 
 The right move is:
 
 - use the Agent Panel as the compact per-agent control UI
 - use Office as the broader runtime operations console
 
-## Best OpenClaw frontend features to bring into Underground Circle
+## Best OpenSwan frontend features to bring into Underground Circle
 
-Based on current OpenClaw docs, the most valuable frontend/runtime patterns are:
+Based on current OpenSwan docs, the most valuable frontend/runtime patterns are:
 
 ### 1. Session-centric control
 
@@ -348,7 +348,7 @@ Still needed:
 - stronger artifact typing
 - evaluator loops before completion/publish
 
-### OpenClaw parity
+### OpenSwan parity
 
 Still needed:
 
@@ -480,7 +480,7 @@ Before marking work done:
 
 ### PR4
 
-- add richer OpenClaw parity features:
+- add richer OpenSwan parity features:
   - session patching
   - channels status
   - instance presence
@@ -499,16 +499,16 @@ The next leap is not more scattered features. It is tightening:
 - memory correctness
 - approval correctness
 - runtime portability
-- OpenClaw-style operations visibility
+- OpenSwan-style operations visibility
 - non-coding agent usefulness
 
-The OpenClaw panel addition in the Agent Panel is a good first frontend step, but the app still needs another full pass before it reaches true managed-agent quality.
+The OpenSwan panel addition in the Agent Panel is a good first frontend step, but the app still needs another full pass before it reaches true managed-agent quality.
 
 ## Sources
 
-- OpenClaw features: https://docs.openclaw.ai/concepts/features
-- OpenClaw Control UI: https://docs.openclaw.ai/web/control-ui
-- OpenClaw docs overview: https://docs.openclaw.ai/
+- OpenSwan features: https://docs.openswan.ai/concepts/features
+- OpenSwan Control UI: https://docs.openswan.ai/web/control-ui
+- OpenSwan docs overview: https://docs.openswan.ai/
 - Anthropic Claude Code memory: https://docs.anthropic.com/en/docs/claude-code/memory
 - Anthropic Claude Code subagents: https://docs.anthropic.com/en/docs/claude-code/sub-agents
 - Anthropic building effective agents: https://www.anthropic.com/engineering/building-effective-agents

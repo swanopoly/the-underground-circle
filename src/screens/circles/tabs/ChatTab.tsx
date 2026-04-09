@@ -512,7 +512,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             const loaded: ChatMessage[] = fallback.map((m: any) => ({
               id: m.id, dbId: m.id,
               content: m.content || '',
-              isBot: /^(🦢|🤖) \*\*\w+.*?:\*\*/.test(m.content || '') || (m.content || '').startsWith('👑 **KingClaw:**'),
+              isBot: /^(🦢|🤖) \*\*\w+.*?:\*\*/.test(m.content || '') || (m.content || '').startsWith('👑 **OpenSwan:**'),
               isUser: m.user_id === user?.id,
               userName: m.user?.display_name || m.user?.username || 'Unknown',
               timestamp: new Date(m.created_at),
@@ -527,12 +527,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const loaded: ChatMessage[] = data.map((m: any) => {
           const isBot = m.is_bot === true
             || /^(🦢|🤖) \*\*\w+.*?:\*\*/.test(m.content || '')
-            || (m.content || '').startsWith('👑 **KingClaw:**');
+            || (m.content || '').startsWith('👑 **OpenSwan:**');
           return {
             id: m.id,
             dbId: m.id,
             content: isBot
-              ? (m.content || '').replace(/^(🦢|🤖) \*\*\w+.*?:\*\* /, '').replace(/^👑 \*\*KingClaw:\*\* /, '')
+              ? (m.content || '').replace(/^(🦢|🤖) \*\*\w+.*?:\*\* /, '').replace(/^👑 \*\*OpenSwan:\*\* /, '')
               : (m.content || ''),
             isBot,
             isUser: m.user_id === user?.id && !isBot,
@@ -691,13 +691,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         // Detect bot messages even if is_bot column not yet migrated
         const isBotMsg = newMsg.is_bot === true
           || /^(🦢|🤖) \*\*\w+.*?:\*\*/.test(newMsg.content || '')
-          || (newMsg.content || '').startsWith('👑 **KingClaw:**');
+          || (newMsg.content || '').startsWith('👑 **OpenSwan:**');
 
         const msg: ChatMessage = {
           id: newMsg.id,
           dbId: newMsg.id,
           content: isBotMsg
-            ? (newMsg.content || '').replace(/^(🦢|🤖) \*\*\w+.*?:\*\* /, '').replace(/^👑 \*\*KingClaw:\*\* /, '')
+            ? (newMsg.content || '').replace(/^(🦢|🤖) \*\*\w+.*?:\*\* /, '').replace(/^👑 \*\*OpenSwan:\*\* /, '')
             : (newMsg.content || ''),
           isBot: isBotMsg,
           isUser: false,
@@ -3890,11 +3890,11 @@ function EnhancedSendInputButton({ onPress, disabled, accentColor }: any) {
 // Ambient live indicator: shows who's in a step-away session right now
 
 const TOOL_COLORS: Record<string, string> = {
-  'claude-code': '#f97316', 'cowork': '#3b82f6', 'openclaw': '#a855f7',
+  'claude-code': '#f97316', 'cowork': '#3b82f6', 'openswan': '#a855f7',
   'codex': '#22c55e', 'gemini': '#22d3ee', 'cursor': '#ec4899', 'other': '#6366f1',
 };
 const TOOL_ICONS: Record<string, string> = {
-  'claude-code': '💻', 'cowork': '💼', 'openclaw': '🐾',
+  'claude-code': '💻', 'cowork': '💼', 'openswan': '🐾',
   'codex': '🧠', 'gemini': '♊', 'cursor': '🎯', 'other': '🤖',
 };
 
@@ -3933,7 +3933,7 @@ function WhosBuildingBanner({ circleId, accentColor }: { circleId: string; accen
         let tool = 'other';
         if (toolLine.includes('Claude Code')) tool = 'claude-code';
         else if (toolLine.includes('Cowork')) tool = 'cowork';
-        else if (toolLine.includes('OpenClaw')) tool = 'openclaw';
+        else if (toolLine.includes('OpenSwan')) tool = 'openswan';
         else if (toolLine.includes('Codex')) tool = 'codex';
         else if (toolLine.includes('Gemini')) tool = 'gemini';
         else if (toolLine.includes('Cursor')) tool = 'cursor';

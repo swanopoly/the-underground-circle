@@ -2,14 +2,14 @@
 
 ## Direct Answer
 
-Yes: the `Cron Jobs` tab in the Pixel Agent Panel currently needs a KingClaw connection.
+Yes: the `Cron Jobs` tab in the Pixel Agent Panel currently needs a OpenSwan connection.
 
 Reason:
-- that tab reads scheduler state from the KingClaw/OpenClaw gateway through `src/lib/openclawService.ts`
+- that tab reads scheduler state from the OpenSwan/OpenSwan gateway through `src/lib/openswanService.ts`
 - it does not read from the app-native `circle_automations` tables
 
 So today:
-- `Cron Jobs` tab = KingClaw-backed scheduler UI
+- `Cron Jobs` tab = OpenSwan-backed scheduler UI
 - `Automations` = app-native Supabase-backed automation system
 
 They are related, but they are not the same system.
@@ -20,7 +20,7 @@ They are related, but they are not the same system.
 
 There are two independent automation stacks:
 
-1. `KingClaw` gateway cron
+1. `OpenSwan` gateway cron
    - external runtime
    - external session model
    - external scheduler
@@ -35,14 +35,14 @@ There are two independent automation stacks:
 This is the single biggest architecture issue.
 
 Relevant files:
-- `src/lib/openclawService.ts`
+- `src/lib/openswanService.ts`
 - `src/services/automationService.ts`
 - `supabase/migrations/20260313_circle_automations.sql`
 - `supabase/functions/automation-executor/index.ts`
 
-### 2. KingClaw cron is richer than the app-native scheduler
+### 2. OpenSwan cron is richer than the app-native scheduler
 
-OpenClaw/KingClaw cron supports:
+OpenSwan/OpenSwan cron supports:
 - `at`
 - `every`
 - full cron expressions
@@ -58,11 +58,11 @@ The app-native scheduler mostly supports:
 - manual triggers
 - a polling due-run mechanism
 
-That means the app-native system is not yet “better than OpenClaw.” It is simpler and narrower.
+That means the app-native system is not yet “better than OpenSwan.” It is simpler and narrower.
 
 Sources:
-- https://docs.openclaw.ai/automation/index
-- https://docs.openclaw.ai/automation/cron-jobs
+- https://docs.openswan.ai/automation/index
+- https://docs.openswan.ai/automation/cron-jobs
 
 ### 3. The app-native scheduler had real lifecycle gaps
 
@@ -79,12 +79,12 @@ Changes made:
 - `toggleAutomation()` now clears `next_run_at` when disabled and recomputes it when re-enabled
 - `computeNextRun()` now returns `null` instead of fabricating timestamps for real cron expressions the app cannot actually calculate
 
-### 4. KingClaw cron support was under-rendering gateway data
+### 4. OpenSwan cron support was under-rendering gateway data
 
 The app was throwing away useful cron metadata that the gateway may already provide.
 
 Relevant files:
-- `src/lib/openclawService.ts`
+- `src/lib/openswanService.ts`
 - `src/screens/circles/tabs/office/AgentPanel.tsx`
 - `src/screens/circles/tabs/office/OfficeChat.tsx`
 
@@ -110,7 +110,7 @@ are two faces of the same thing.
 They are not.
 
 Best product wording:
-- `KingClaw Jobs` or `Gateway Jobs` for external scheduler jobs
+- `OpenSwan Jobs` or `Gateway Jobs` for external scheduler jobs
 - `Circle Automations` for app-native automations
 
 ### 6. App-native trigger modeling is still not fully clean
@@ -122,9 +122,9 @@ The frontend trigger types include `webhook`, but persisted SQL trigger types ar
 
 The current UI partially maps webhook-style choices into event-style persistence, which works, but it is not a clean mental model.
 
-## What Would Make It Better Than OpenClaw
+## What Would Make It Better Than OpenSwan
 
-To beat OpenClaw, Underground Circle should not try to clone one scheduler. It should combine:
+To beat OpenSwan, Underground Circle should not try to clone one scheduler. It should combine:
 
 ### A. Better product structure
 
@@ -150,7 +150,7 @@ For every job, show:
 
 ### C. Better orchestration
 
-OpenClaw is strong on runtime scheduling.
+OpenSwan is strong on runtime scheduling.
 Underground Circle can be better by adding:
 - circle-aware app context
 - task linkage
@@ -162,11 +162,11 @@ Underground Circle can be better by adding:
 ### D. Better cross-surface execution
 
 Best target model:
-- `KingClaw` owns portable runtime scheduling
+- `OpenSwan` owns portable runtime scheduling
 - `Circle Automations` own app-native business/workflow automations
 - both write into one shared run ledger and one shared automation dashboard
 
-That would be better than OpenClaw because OpenClaw is primarily runtime-first, while Underground Circle can be runtime + collaboration + task + artifact + social context together.
+That would be better than OpenSwan because OpenSwan is primarily runtime-first, while Underground Circle can be runtime + collaboration + task + artifact + social context together.
 
 ## Recommended Implementation Plan
 
@@ -175,13 +175,13 @@ That would be better than OpenClaw because OpenClaw is primarily runtime-first, 
 - rename labels to make the split explicit
 - add `source` badges wherever jobs/automations are shown
 - add shared automation overview card:
-  - `KingClaw Jobs`
+  - `OpenSwan Jobs`
   - `Circle Automations`
   - recent runs from both
 
 ### PR2
 
-- add KingClaw run history support in the panel
+- add OpenSwan run history support in the panel
 - add schedule-type support for:
   - `at`
   - `every`
@@ -207,12 +207,12 @@ That would be better than OpenClaw because OpenClaw is primarily runtime-first, 
 
 Code:
 - `src/services/automationService.ts`
-- `src/lib/openclawService.ts`
+- `src/lib/openswanService.ts`
 - `src/screens/circles/tabs/office/AgentPanel.tsx`
 - `src/screens/circles/tabs/office/OfficeChat.tsx`
 
 Docs:
-- `docs/page-audits/cron-jobs-and-kingclaw-deep-audit-2026-04-08.md`
+- `docs/page-audits/cron-jobs-and-openswan-deep-audit-2026-04-08.md`
 - this file
 
 ## Bottom Line
@@ -220,9 +220,9 @@ Docs:
 The current implementation is useful, but it is not yet the best it can be.
 
 Right now:
-- KingClaw cron is more capable
+- OpenSwan cron is more capable
 - app-native automations are more circle-aware
 - the app is strongest where those two ideas meet
 
-The path to being better than OpenClaw is not replacing KingClaw.
+The path to being better than OpenSwan is not replacing OpenSwan.
 It is making scheduler work first-class across the whole product, with better context, better run visibility, and one clear orchestration story.

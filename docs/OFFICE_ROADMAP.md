@@ -5,7 +5,7 @@
 **"Monitor, orchestrate, and optimize your AI agents from one beautiful, collaborative dashboard"**
 
 The Office transforms multi-agent chaos into a visual, intuitive control center where teams can:
-- See all agents in real-time (OpenClaw, Claude Code, custom agents)
+- See all agents in real-time (OpenSwan, Claude Code, custom agents)
 - Track costs per agent/session/project
 - Build workflows that chain agents together
 - Collaborate on agent tasks with your team
@@ -19,7 +19,7 @@ The Office transforms multi-agent chaos into a visual, intuitive control center 
 **Why:** VCs love platforms that solve "agent sprawl" — teams using 10+ different AI agents
 
 **Features:**
-- ✅ Connect multiple OpenClaw instances (DONE)
+- ✅ Connect multiple OpenSwan instances (DONE)
 - ✅ Visual agent grid/office (DONE)
 - 🔨 **Agent Workflows** - Chain agents together (e.g., "Research Agent → Writing Agent → Review Agent")
 - 🔨 **Agent Templates** - Pre-built agent configs for common use cases
@@ -163,7 +163,7 @@ The Office transforms multi-agent chaos into a visual, intuitive control center 
 ## 💼 GO-TO-MARKET STRATEGY
 
 ### Phase 1: Dev Tools (Now - Q2 2026)
-**Target:** Solo devs & small teams using OpenClaw/Claude/Cursor
+**Target:** Solo devs & small teams using OpenSwan/Claude/Cursor
 **Focus:** Core monitoring + cost tracking
 **Revenue:** Free tier + $20/mo Pro
 
@@ -262,7 +262,7 @@ The Office transforms multi-agent chaos into a visual, intuitive control center 
 
 We turn multi-agent chaos into a visual, collaborative office where teams monitor costs, build workflows, and share agent configs. Think Datadog meets Zapier, but for AI agents — with a pixel art aesthetic that makes it actually fun to use.
 
-Dev teams are already using 10+ different AI agents (Claude, Cursor, OpenClaw, custom LLMs). We give them one place to see everything, optimize spend, and build automation. 
+Dev teams are already using 10+ different AI agents (Claude, Cursor, OpenSwan, custom LLMs). We give them one place to see everything, optimize spend, and build automation. 
 
 Early traction: 100+ devs testing, $500 MRR, waiting list of 50 teams. Raising $750k seed to build out team features and marketplace."
 

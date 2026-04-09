@@ -1,4 +1,4 @@
-# Cron Jobs And KingClaw Deep Audit
+# Cron Jobs And OpenSwan Deep Audit
 
 ## Findings
 
@@ -7,7 +7,7 @@
 There are two cron/automation systems in the codebase:
 
 - app-native circle automations using `circle_automations`, `automation_runs`, `pg_cron`, and the `automation-executor` edge function
-- KingClaw/OpenClaw cron jobs exposed through the Office dashboard
+- OpenSwan/OpenSwan cron jobs exposed through the Office dashboard
 
 These are not equivalent systems and they do not share a runtime, run ledger, delivery model, or scheduling vocabulary.
 
@@ -15,17 +15,17 @@ Relevant files:
 - `src/services/automationService.ts`
 - `supabase/migrations/20260313_circle_automations.sql`
 - `supabase/functions/automation-executor/index.ts`
-- `src/lib/openclawService.ts`
+- `src/lib/openswanService.ts`
 - `src/screens/circles/tabs/office/AgentPanel.tsx`
 
 Why this matters:
 - users can believe “Cron Jobs” and “Automations” are the same thing when they are not
-- app-native schedule behavior does not match KingClaw/OpenClaw semantics
-- observability is split across `automation_runs` vs KingClaw gateway state
+- app-native schedule behavior does not match OpenSwan/OpenSwan semantics
+- observability is split across `automation_runs` vs OpenSwan gateway state
 
-### 2. App-native scheduled automations are not OpenClaw-like
+### 2. App-native scheduled automations are not OpenSwan-like
 
-The app-native scheduler is much simpler than OpenClaw:
+The app-native scheduler is much simpler than OpenSwan:
 
 - it stores `cron_expression`, but runtime scheduling is really built around a few shorthand values like `hourly`, `daily`, `weekly`, and `monthly`
 - it uses a database job to poll due rows by `next_run_at`
@@ -56,17 +56,17 @@ Change made:
 
 This is a correctness fix, not full cron support.
 
-### 4. KingClaw cron support in the app was too lossy
+### 4. OpenSwan cron support in the app was too lossy
 
-The KingClaw/OpenClaw adapter mostly treated cron jobs as `id + name + enabled`, even though OpenClaw supports richer fields like schedule kind/expression, session style, timezone, run history, and delivery behavior.
+The OpenSwan/OpenSwan adapter mostly treated cron jobs as `id + name + enabled`, even though OpenSwan supports richer fields like schedule kind/expression, session style, timezone, run history, and delivery behavior.
 
 Relevant files:
-- `src/lib/openclawService.ts`
+- `src/lib/openswanService.ts`
 - `src/screens/circles/tabs/office/AgentPanel.tsx`
 - `src/screens/circles/tabs/office/OfficeChat.tsx`
 
 Changes made:
-- normalized KingClaw cron payloads across common field aliases
+- normalized OpenSwan cron payloads across common field aliases
 - preserved additional metadata where present:
   - `status`
   - `timezone`
@@ -92,9 +92,9 @@ Relevant files:
 Impact:
 - the frontend type system advertises a mode that the persisted schema does not support cleanly
 
-### 6. The app-native scheduler has weaker reliability semantics than OpenClaw
+### 6. The app-native scheduler has weaker reliability semantics than OpenSwan
 
-OpenClaw cron is scheduler-owned and documented as:
+OpenSwan cron is scheduler-owned and documented as:
 
 - persistent across restarts
 - creating background task records for all executions
@@ -116,7 +116,7 @@ Relevant files:
 Main gap:
 - app-native scheduling is closer to a lightweight polling automation table than a true scheduler/runtime product
 
-### 7. KingClaw UI coverage is still partial compared with OpenClaw
+### 7. OpenSwan UI coverage is still partial compared with OpenSwan
 
 Current app support covers:
 
@@ -126,7 +126,7 @@ Current app support covers:
 - enable/disable
 - delete
 
-Missing versus OpenClaw docs:
+Missing versus OpenSwan docs:
 
 - one-shot `at` jobs
 - `every` interval jobs
@@ -142,13 +142,13 @@ Missing versus OpenClaw docs:
 - scheduler config visibility
 
 Relevant files:
-- `src/lib/openclawService.ts`
+- `src/lib/openswanService.ts`
 - `src/screens/circles/tabs/office/AgentPanel.tsx`
 - `src/screens/circles/tabs/office/OfficeChat.tsx`
 
-## What OpenClaw Does Better
+## What OpenSwan Does Better
 
-From the current OpenClaw docs, cron is not just “run something later.” It is a scheduler product with:
+From the current OpenSwan docs, cron is not just “run something later.” It is a scheduler product with:
 
 - precise schedule types: `at`, `every`, and full `cron`
 - explicit session execution styles: `main`, `isolated`, `current`, `session:<id>`
@@ -159,17 +159,17 @@ From the current OpenClaw docs, cron is not just “run something later.” It i
 - dedicated troubleshooting commands and status surfaces
 
 Sources:
-- https://docs.openclaw.ai/automation/index
-- https://docs.openclaw.ai/automation/cron-jobs
+- https://docs.openswan.ai/automation/index
+- https://docs.openswan.ai/automation/cron-jobs
 
 ## Best Plan For Underground Circle
 
 ### A. Keep the two systems distinct unless you unify them properly
 
-Do not keep pretending app-native automations and KingClaw cron are interchangeable.
+Do not keep pretending app-native automations and OpenSwan cron are interchangeable.
 
 Recommended product split:
-- `KingClaw Cron`: external gateway scheduler for portable agent runtime jobs
+- `OpenSwan Cron`: external gateway scheduler for portable agent runtime jobs
 - `Circle Automations`: app-native product automations tied to circle data and app workflows
 
 If you want them to converge later, unify them deliberately around:
@@ -178,7 +178,7 @@ If you want them to converge later, unify them deliberately around:
 - one delivery model
 - one troubleshooting surface
 
-### B. Make KingClaw cron feel like OpenClaw
+### B. Make OpenSwan cron feel like OpenSwan
 
 Highest-value next features:
 
@@ -212,19 +212,19 @@ If the app-native scheduler remains separate:
 2. Treat current schedule values as app presets, not full cron parity.
 3. Add a real cron parser only if you actually want full cron support there.
 4. Align `TriggerType` with the SQL schema.
-5. Stop mixing OpenClaw scheduling expectations into app-native automation messaging.
+5. Stop mixing OpenSwan scheduling expectations into app-native automation messaging.
 
 ## Changes Made In This Pass
 
 Code improvements landed:
 
-- normalized KingClaw cron job payloads in `src/lib/openclawService.ts`
-- surfaced more KingClaw cron metadata in `src/screens/circles/tabs/office/AgentPanel.tsx`
+- normalized OpenSwan cron job payloads in `src/lib/openswanService.ts`
+- surfaced more OpenSwan cron metadata in `src/screens/circles/tabs/office/AgentPanel.tsx`
 - improved cron listing output in `src/screens/circles/tabs/office/OfficeChat.tsx`
 - fixed fake next-run computation for real cron strings in `src/services/automationService.ts`
 
 ## Open Questions
 
-1. Is the long-term source of truth for scheduled agent work supposed to be KingClaw/OpenClaw or Supabase-native `circle_automations`?
+1. Is the long-term source of truth for scheduled agent work supposed to be OpenSwan/OpenSwan or Supabase-native `circle_automations`?
 2. Should app-native scheduled work create `agent_runs` records, `automation_runs` records, or both?
-3. Do you want Circle users configuring scheduler semantics directly, or should KingClaw remain an advanced Office/runtime layer?
+3. Do you want Circle users configuring scheduler semantics directly, or should OpenSwan remain an advanced Office/runtime layer?

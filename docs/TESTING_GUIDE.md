@@ -43,7 +43,7 @@ npm start
 - Health check passes/fails based on status
 
 **How to Test:**
-1. Add one OpenClaw connection
+1. Add one OpenSwan connection
 2. Wait for agent to appear
 3. Click 🏥 button
 4. Check each tab:

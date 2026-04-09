@@ -104,7 +104,7 @@ It is:
 This topic matters for:
 
 - whether to rely more on hosted providers
-- whether to expand local/OpenClaw/self-hosted runtime paths
+- whether to expand local/OpenSwan/self-hosted runtime paths
 - when to use open models for specialized tasks
 - how to keep multimodal and task workloads affordable
 

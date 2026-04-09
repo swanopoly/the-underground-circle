@@ -32,7 +32,7 @@ CREATE POLICY "Members can read activity" ON agent_activity
     )
   );
 
--- Service role (used by the OpenClaw hook) can insert
+-- Service role (used by the OpenSwan hook) can insert
 CREATE POLICY "Service role can insert" ON agent_activity
   FOR INSERT WITH CHECK (true);
 

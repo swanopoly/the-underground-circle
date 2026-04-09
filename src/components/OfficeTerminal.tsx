@@ -275,7 +275,7 @@ const respContentStyles = StyleSheet.create({
   },
 });
 
-// ─── Response Card (OpenClaw-style collapsible) ──────────────────────────────
+// ─── Response Card (OpenSwan-style collapsible) ──────────────────────────────
 
 function ResponseCard({ resp }: { resp: TerminalResponse }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -399,7 +399,7 @@ const cardStyles = StyleSheet.create({
   },
 });
 
-// ─── Terminal Message Row (OpenClaw card layout) ─────────────────────────────
+// ─── Terminal Message Row (OpenSwan card layout) ─────────────────────────────
 
 function TerminalRow({ msg, responses, onDelete }: {
   msg: TerminalMessage;
@@ -532,7 +532,7 @@ const rowStyles = StyleSheet.create({
   },
 });
 
-// ─── Agent Target Chip (OpenClaw-style pill) ─────────────────────────────────
+// ─── Agent Target Chip (OpenSwan-style pill) ─────────────────────────────────
 
 interface ChipProps {
   label: string;
@@ -568,7 +568,7 @@ const chipStyles = StyleSheet.create({
   textActive: { color: BS.accent },
 });
 
-// ─── Model Chip (OpenClaw-style toggle) ──────────────────────────────────────
+// ─── Model Chip (OpenSwan-style toggle) ──────────────────────────────────────
 
 function ModelChip({ label, icon, active, color, onPress }: {
   label: string; icon: string; active: boolean; color: string; onPress: () => void;
@@ -1764,7 +1764,7 @@ export default function OfficeTerminal({
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
     >
-      {/* ── Top bar: BlackSwan branding + metrics (OpenClaw-style) ── */}
+      {/* ── Top bar: BlackSwan branding + metrics (OpenSwan-style) ── */}
       {!compact && (
         <View style={styles.topBar}>
           <View style={styles.topBarLeft}>
@@ -2009,7 +2009,7 @@ export default function OfficeTerminal({
         </ScrollView>
       </View>
 
-      {/* ── Input bar (OpenClaw command palette style) ── */}
+      {/* ── Input bar (OpenSwan command palette style) ── */}
       <View style={styles.inputRow}>
         <View style={styles.inputPrefix}>
           <Text style={styles.prefixTarget}>
@@ -2049,7 +2049,7 @@ export default function OfficeTerminal({
         )}
       </View>
 
-      {/* ── Footer status line (OpenClaw-style) ── */}
+      {/* ── Footer status line (OpenSwan-style) ── */}
       <View style={styles.footer}>
         <View style={[styles.footerDot, onlineCount > 0 && { backgroundColor: BS.accent }]} />
         <Text style={styles.footerText}>

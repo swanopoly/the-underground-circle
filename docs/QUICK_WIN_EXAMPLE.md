@@ -57,7 +57,7 @@ Replace the existing whiteboard content with enhanced version:
 import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
 import { OfficeAgent, calculateDailyScore } from '../../../../lib/officeAgents';
-import { CronJob } from '../../../../lib/openclawService';
+import { CronJob } from '../../../../lib/openswanService';
 
 interface Props {
   agents: OfficeAgent[];

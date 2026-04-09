@@ -126,7 +126,7 @@ Auto-mark agents as idle after 10 minutes of no activity.
 
 ```typescript
 // In officeAgents.ts, enhance inferStatus:
-function inferStatus(s: OpenClawSession): AgentStatus {
+function inferStatus(s: OpenSwanSession): AgentStatus {
   if (!s.lastActivity) return 'offline';
   
   const lastActiveTime = new Date(s.lastActivity).getTime();

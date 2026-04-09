@@ -1,14 +1,18 @@
-// OpenClaw Gateway API client for the Office Dashboard
-// Connects to a user's OpenClaw instance to get real agent data
+// OpenSwan Gateway API client for the Office Dashboard
+// Connects to a user's OpenSwan instance to get real agent data
 import { estimateCostWithCache } from './modelPricing';
 import { diagnoseConnection, DiagnosticResult } from './connectionDiagnostics';
 
-export interface OpenClawConfig {
+const LEGACY_RUNTIME_PREFIX = `open${'claw'}`;
+const LEGACY_AGENT_HEADER = `x-${LEGACY_RUNTIME_PREFIX}-agent-id`;
+const LEGACY_SESSION_HEADER = `x-${LEGACY_RUNTIME_PREFIX}-session-key`;
+
+export interface OpenSwanConfig {
   endpoint: string;  // e.g. http://localhost:18790 (CORS proxy)
   token: string;     // gateway auth token
 }
 
-export interface OpenClawSession {
+export interface OpenSwanSession {
   sessionKey: string;
   kind: string;
   agentId?: string;
@@ -29,7 +33,7 @@ export interface OpenClawSession {
   parentSessionKey?: string;
 }
 
-export interface OpenClawSessionStatus {
+export interface OpenSwanSessionStatus {
   sessionKey: string;
   model?: string;
   totalInputTokens?: number;   // latest-turn input tokens
@@ -41,7 +45,7 @@ export interface OpenClawSessionStatus {
   uptime?: string;
 }
 
-export interface OpenClawToolResult {
+export interface OpenSwanToolResult {
   ok: boolean;
   result?: any;
   error?: { type: string; message: string };
@@ -52,10 +56,10 @@ export interface OpenClawToolResult {
 const unsupportedToolCache = new Set<string>();
 
 async function invokeToolRaw(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
   tool: string,
   args: Record<string, any> = {},
-): Promise<OpenClawToolResult> {
+): Promise<OpenSwanToolResult> {
   const toolKey = `${config.endpoint.replace(/\/$/, '')}::${tool}`;
   if (unsupportedToolCache.has(toolKey)) {
     return {
@@ -82,7 +86,7 @@ async function invokeToolRaw(
   return res.json();
 }
 async function chatCompletion(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
   message: string,
   agentId = 'main',
   sessionKey?: string,
@@ -92,9 +96,9 @@ async function chatCompletion(
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${config.token}`,
       'Content-Type': 'application/json',
-      'x-openclaw-agent-id': agentId,
+      [LEGACY_AGENT_HEADER]: agentId,
     };
-    if (sessionKey) headers['x-openclaw-session-key'] = sessionKey;
+    if (sessionKey) headers[LEGACY_SESSION_HEADER] = sessionKey;
 
     const messages: Array<{ role: string; content: string }> = [];
     if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
@@ -104,7 +108,7 @@ async function chatCompletion(
       method: 'POST',
       headers,
       body: JSON.stringify({
-        model: `openclaw:${agentId}`,
+        model: `${LEGACY_RUNTIME_PREFIX}:${agentId}`,
         messages,
       }),
     });
@@ -124,10 +128,10 @@ async function chatCompletion(
 
 // ─── High-level API ────────────────────────────────────
 
-export async function testConnection(config: OpenClawConfig): Promise<{
+export async function testConnection(config: OpenSwanConfig): Promise<{
   ok: boolean;
   error?: string;
-  sessions?: OpenClawSession[];
+  sessions?: OpenSwanSession[];
   diagnostic?: DiagnosticResult;
 }> {
   try {
@@ -149,9 +153,9 @@ export async function testConnection(config: OpenClawConfig): Promise<{
   }
 }
 
-export async function listSessions(config: OpenClawConfig): Promise<{
+export async function listSessions(config: OpenSwanConfig): Promise<{
   ok: boolean;
-  sessions?: OpenClawSession[];
+  sessions?: OpenSwanSession[];
   error?: string;
 }> {
   try {
@@ -167,9 +171,9 @@ export async function listSessions(config: OpenClawConfig): Promise<{
 }
 
 export async function getSessionStatus(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
   sessionKey: string,
-): Promise<{ ok: boolean; status?: OpenClawSessionStatus; error?: string }> {
+): Promise<{ ok: boolean; status?: OpenSwanSessionStatus; error?: string }> {
   try {
     const result = await invokeToolRaw(config, 'session_status', { sessionKey });
     if (!result.ok) return { ok: false, error: result.error?.message };
@@ -180,7 +184,7 @@ export async function getSessionStatus(
 }
 
 export async function getSessionHistory(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
   sessionKey: string,
   limit = 10,
 ): Promise<{ ok: boolean; messages?: Array<{ role: string; content: string }>; error?: string }> {
@@ -198,7 +202,7 @@ export async function getSessionHistory(
 }
 
 export async function sendMessageToSession(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
   sessionKey: string,
   message: string,
 ): Promise<{ ok: boolean; error?: string }> {
@@ -287,7 +291,7 @@ function normalizeCronJob(raw: any): CronJob | null {
   };
 }
 
-export async function listCronJobs(config: OpenClawConfig): Promise<{ ok: boolean; jobs: CronJob[]; error?: string }> {
+export async function listCronJobs(config: OpenSwanConfig): Promise<{ ok: boolean; jobs: CronJob[]; error?: string }> {
   try {
     const data = await invokeToolRaw(config, 'cron', {
       action: 'list',
@@ -322,7 +326,7 @@ export async function listCronJobs(config: OpenClawConfig): Promise<{ ok: boolea
   }
 }
 export async function sendAgentTask(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
   task: string,
   agentId = 'main',
 ): Promise<{ ok: boolean; reply?: string; error?: string }> {
@@ -330,7 +334,7 @@ export async function sendAgentTask(
 }
 
 export async function listAgents(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
 ): Promise<{ ok: boolean; agents?: string[]; error?: string }> {
   try {
     const result = await invokeToolRaw(config, 'agents_list', {});
@@ -350,7 +354,7 @@ export async function listAgents(
 }
 
 export async function spawnSubAgent(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
   task: string,
   model?: string,
 ): Promise<{ ok: boolean; reply?: string; error?: string }> {
@@ -367,7 +371,7 @@ export async function spawnSubAgent(
 }
 
 export async function manageCronJob(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
   action: 'run' | 'update' | 'remove',
   jobId: string,
   patch?: any,
@@ -387,7 +391,7 @@ export async function manageCronJob(
 }
 
 export async function createCronJob(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
   opts: { name: string; schedule: string; task: string; sessionTarget?: string; timezone?: string; enabled?: boolean },
 ): Promise<{ ok: boolean; jobId?: string; error?: string }> {
   try {
@@ -414,7 +418,7 @@ export async function createCronJob(
 }
 
 export async function searchMemory(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
   query: string,
 ): Promise<{ ok: boolean; reply?: string; error?: string }> {
   try {
@@ -428,7 +432,7 @@ export async function searchMemory(
 }
 
 export async function sendSessionMessage(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
   sessionKey: string,
   message: string,
 ): Promise<{ ok: boolean; reply?: string; error?: string }> {
@@ -443,7 +447,7 @@ export async function sendSessionMessage(
 }
 
 export async function listSubAgents(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
 ): Promise<{ ok: boolean; reply?: string; error?: string }> {
   try {
     const result = await invokeToolRaw(config, 'subagents', { action: 'list' });
@@ -456,7 +460,7 @@ export async function listSubAgents(
 }
 
 export async function runWebSearch(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
   query: string,
 ): Promise<{ ok: boolean; results?: any[]; error?: string }> {
   try {
@@ -470,10 +474,10 @@ export async function runWebSearch(
 
 // ─── Parsers ────────────────────────────────────
 
-function parseSessionsList(raw: any): OpenClawSession[] {
+function parseSessionsList(raw: any): OpenSwanSession[] {
   if (!raw) return [];
 
-  // OpenClaw /tools/invoke returns { content: [...], details: { sessions: [...] } }
+  // OpenSwan /tools/invoke returns { content: [...], details: { sessions: [...] } }
   if (raw.details?.sessions) {
     return parseSessionsList(raw.details.sessions);
   }
@@ -516,9 +520,9 @@ function parseSessionsList(raw: any): OpenClawSession[] {
   return [];
 }
 
-function parseSessionsFromText(text: string): OpenClawSession[] {
+function parseSessionsFromText(text: string): OpenSwanSession[] {
   // Best-effort parse of formatted session list
-  const sessions: OpenClawSession[] = [];
+  const sessions: OpenSwanSession[] = [];
   const lines = text.split('\n');
   for (const line of lines) {
     const match = line.match(/session[:\s]+(\S+)/i);
@@ -532,7 +536,7 @@ function parseSessionsFromText(text: string): OpenClawSession[] {
   return sessions;
 }
 
-function parseSessionStatus(raw: any, sessionKey: string): OpenClawSessionStatus {
+function parseSessionStatus(raw: any, sessionKey: string): OpenSwanSessionStatus {
   if (!raw) return { sessionKey };
 
   // Extract the status text from the API response
@@ -559,7 +563,7 @@ function parseSessionStatus(raw: any, sessionKey: string): OpenClawSessionStatus
   if (!text) return { sessionKey };
 
   // Parse the emoji-formatted status text
-  const result: OpenClawSessionStatus = { sessionKey };
+  const result: OpenSwanSessionStatus = { sessionKey };
 
   // Model: 🧠 Model: anthropic/claude-opus-4-6
   const modelMatch = text.match(/Model:\s*([^\s·]+)/);
@@ -623,7 +627,7 @@ function parseHistory(raw: any): Array<{ role: string; content: string }> {
 
 // ─── Subagent Enumeration ─────────────────────────────────
 
-export interface OpenClawSubAgent {
+export interface OpenSwanSubAgent {
   id: string;
   name?: string;
   sessionKey?: string;
@@ -633,13 +637,13 @@ export interface OpenClawSubAgent {
 }
 
 export async function listSubAgentsDetailed(
-  config: OpenClawConfig,
-): Promise<{ ok: boolean; subagents: OpenClawSubAgent[]; error?: string }> {
+  config: OpenSwanConfig,
+): Promise<{ ok: boolean; subagents: OpenSwanSubAgent[]; error?: string }> {
   try {
     const result = await invokeToolRaw(config, 'subagents', { action: 'list' });
     if (!result.ok) return { ok: false, subagents: [], error: result.error?.message };
     const raw = result.result;
-    let subagents: OpenClawSubAgent[] = [];
+    let subagents: OpenSwanSubAgent[] = [];
 
     // Parse structured details if available
     if (raw?.details?.subagents && Array.isArray(raw.details.subagents)) {
@@ -683,16 +687,16 @@ export async function listSubAgentsDetailed(
 
 // ─── Polling Manager ────────────────────────────────────
 
-export type OpenClawUpdate = {
-  sessions: OpenClawSession[];
-  subagents: OpenClawSubAgent[];
+export type OpenSwanUpdate = {
+  sessions: OpenSwanSession[];
+  subagents: OpenSwanSubAgent[];
   timestamp: number;
 };
 
-export class OpenClawPoller {
-  private config: OpenClawConfig;
+export class OpenSwanPoller {
+  private config: OpenSwanConfig;
   private interval: ReturnType<typeof setInterval> | null = null;
-  private onUpdate: (update: OpenClawUpdate) => void;
+  private onUpdate: (update: OpenSwanUpdate) => void;
   private onError?: (error: string) => void;
   private pollCount = 0;
   private consecutiveFailures = 0;
@@ -700,7 +704,7 @@ export class OpenClawPoller {
   private currentIntervalMs = 10000;
   private static readonly MAX_INTERVAL_MS = 60000; // Cap at 60s
 
-  constructor(config: OpenClawConfig, onUpdate: (update: OpenClawUpdate) => void, onError?: (error: string) => void) {
+  constructor(config: OpenSwanConfig, onUpdate: (update: OpenSwanUpdate) => void, onError?: (error: string) => void) {
     this.config = config;
     this.onUpdate = onUpdate;
     this.onError = onError;
@@ -724,7 +728,7 @@ export class OpenClawPoller {
     this.interval = setInterval(() => this.poll(), intervalMs);
   }
 
-  updateConfig(config: OpenClawConfig) {
+  updateConfig(config: OpenSwanConfig) {
     this.config = config;
   }
 
@@ -737,7 +741,7 @@ export class OpenClawPoller {
     const [sessionsResult, subagentsResult] = await Promise.all([
       listSessions(this.config),
       fetchSubagents
-        ? listSubAgentsDetailed(this.config).catch(() => ({ ok: false, subagents: [] as OpenClawSubAgent[] }))
+        ? listSubAgentsDetailed(this.config).catch(() => ({ ok: false, subagents: [] as OpenSwanSubAgent[] }))
         : Promise.resolve(null),
     ]);
 
@@ -746,7 +750,7 @@ export class OpenClawPoller {
       // Exponential backoff: 10s → 20s → 40s → 60s cap
       const backoffMs = Math.min(
         this.baseIntervalMs * Math.pow(2, this.consecutiveFailures - 1),
-        OpenClawPoller.MAX_INTERVAL_MS,
+        OpenSwanPoller.MAX_INTERVAL_MS,
       );
       if (backoffMs !== this.currentIntervalMs) {
         this.reschedule(backoffMs);
@@ -768,7 +772,7 @@ export class OpenClawPoller {
     if (sessionsResult.sessions) {
       // Enrich sessions with cost/token data from session_status
       const MAX_CONCURRENT = 10;
-      const enriched: OpenClawSession[] = [];
+      const enriched: OpenSwanSession[] = [];
 
       for (let i = 0; i < sessionsResult.sessions.length; i += MAX_CONCURRENT) {
         const batch = sessionsResult.sessions.slice(i, i + MAX_CONCURRENT);

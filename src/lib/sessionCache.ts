@@ -267,10 +267,10 @@ export async function takeSnapshot(
   }
 }
 
-// ─── Enrich OpenClaw Sessions ──────────────────────────────
+// ─── Enrich OpenSwan Sessions ──────────────────────────────
 
 export async function enrichSessionsWithCache(
-  sessions: any[] // OpenClawSession[] but avoiding circular import
+  sessions: any[] // OpenSwanSession[] but avoiding circular import
 ): Promise<any[]> {
   const cache = await loadSessionCache();
   

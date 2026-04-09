@@ -1,6 +1,6 @@
 /**
  * Agent Invocation — Phase 3
- * Real agent execution via OpenClaw gateway
+ * Real agent execution via OpenSwan gateway
  */
 
 import { supabase } from './supabase';
@@ -406,10 +406,10 @@ async function invokeBYOLLM(
   }
 }
 
-// ─── OpenClaw Gateway: Invoke Agent ─────────────────────────────────────────
+// ─── OpenSwan Gateway: Invoke Agent ─────────────────────────────────────────
 
 /**
- * Call the OpenClaw agent via gateway using sessions_send + response polling.
+ * Call the OpenSwan agent via gateway using sessions_send + response polling.
  *
  * Flow:
  * 1. Snapshot the last message timestamp from sessions_history
@@ -417,7 +417,7 @@ async function invokeBYOLLM(
  * 3. Poll sessions_history for a new assistant response
  * 4. Return the response text
  */
-export async function callOpenClawAgent(
+export async function callOpenSwanAgent(
   command: string,
   agentId: string,
   agentName: string,
@@ -489,7 +489,7 @@ export async function callOpenClawAgent(
     if (!sendResult?.ok) {
       return {
         success: false,
-        error: `Failed to send message to OpenClaw: ${sendResult?.error?.message || 'unknown error'}`,
+        error: `Failed to send message to OpenSwan: ${sendResult?.error?.message || 'unknown error'}`,
       };
     }
 
@@ -544,12 +544,12 @@ export async function callOpenClawAgent(
 
     return {
       success: false,
-      error: `OpenClaw agent did not respond within ${Math.round(timeoutMs / 1000)}s`,
+      error: `OpenSwan agent did not respond within ${Math.round(timeoutMs / 1000)}s`,
     };
   } catch (err: any) {
     return {
       success: false,
-      error: err.message || 'OpenClaw invocation failed',
+      error: err.message || 'OpenSwan invocation failed',
     };
   }
 }
@@ -767,7 +767,7 @@ export async function invokeDirect(
     return invokeBYOLLM(req.command, agent.provider, req.model, req.circleId, req.senderId);
   }
 
-  return callOpenClawAgent(
+  return callOpenSwanAgent(
     req.command,
     agent.id,
     agent.name,
@@ -918,7 +918,7 @@ export async function invokeAndStream(
       result = await invokeBYOLLM(req.command, agent.provider, req.model, req.circleId, req.senderId);
     } else {
       console.log(`[agentInvocation] Invoking gateway: ${resolvedUrl}/tools/invoke`);
-      result = await callOpenClawAgent(
+      result = await callOpenSwanAgent(
         req.command,
         agent.id,
         agent.name,

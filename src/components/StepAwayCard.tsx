@@ -34,7 +34,7 @@ export type StepAwayData = {
   goal: string;
   returnTime: string;
   sessionUrl?: string;    // claude.ai/code URL
-  toolUsed: 'claude-code' | 'cowork' | 'openclaw' | 'other' | 'codex' | 'gemini' | 'cursor';
+  toolUsed: 'claude-code' | 'cowork' | 'openswan' | 'other' | 'codex' | 'gemini' | 'cursor';
   estimatedCost?: string; // e.g. "$30" weekly budget
 };
 
@@ -64,7 +64,7 @@ type Props = {
 const TOOLS = [
   { id: 'claude-code', label: 'Claude Code', icon: '💻', color: '#f97316' },
   { id: 'cowork',      label: 'Cowork',      icon: '💼', color: '#6366f1' },
-  { id: 'openclaw',    label: 'OpenClaw',    icon: '🐾', color: '#a855f7' },
+  { id: 'openswan',    label: 'OpenSwan',    icon: '🐾', color: '#a855f7' },
   { id: 'other',       label: 'Other AI',    icon: '🤖', color: '#9e9e9e' },
   { id: 'codex',       label: 'Codex',       icon: '🧠', color: '#22c55e' },
   { id: 'gemini',      label: 'Gemini',      icon: '♊', color: '#3b82f6' },

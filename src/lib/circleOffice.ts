@@ -94,7 +94,7 @@ export type PublishAgentInput = {
 
 export const PROVIDER_DISPLAY: Record<string, { icon: string; color: string; label: string }> = {
   'blackswan':     { icon: '🦢', color: '#22c55e', label: 'BlackSwan' },
-  'openclaw':      { icon: '🐾', color: '#f59e0b', label: 'OpenClaw' },
+  'openswan':      { icon: '🐾', color: '#f59e0b', label: 'OpenSwan' },
   'claude-code':   { icon: '💻', color: '#6366f1', label: 'Claude Code' },
   'cowork':        { icon: '💼', color: '#22c55e', label: 'Cowork' },
   'codex':         { icon: '🧠', color: '#10a37f', label: 'OpenAI Codex' },

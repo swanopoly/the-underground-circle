@@ -121,7 +121,7 @@ This topic directly matters for:
 - room run continuity
 - Feed task history
 - agent evolution and XP systems
-- OpenClaw session portability
+- OpenSwan session portability
 
 The most valuable next step for this app is not “more memory.”
 

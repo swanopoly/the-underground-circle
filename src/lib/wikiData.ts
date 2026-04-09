@@ -202,7 +202,7 @@ export const WIKI_ARTICLES: WikiArticle[] = [
           'OpenAI Codex',
           'Anthropic Claude Code',
           'Google Gemini CLI',
-          'OpenClaw and self-hosted control-plane patterns',
+          'OpenSwan and self-hosted control-plane patterns',
         ],
       },
       {
@@ -234,7 +234,7 @@ export const WIKI_ARTICLES: WikiArticle[] = [
     category: 'agents',
     icon: '>_',
     color: '#22c55e',
-    tags: ['coding agents', 'claude code', 'codex', 'openclaw', 'gemini'],
+    tags: ['coding agents', 'claude code', 'codex', 'openswan', 'gemini'],
     content: [
       {
         title: 'Why Coding Agents Matter',
@@ -249,12 +249,12 @@ export const WIKI_ARTICLES: WikiArticle[] = [
       {
         title: 'The Highest-Signal Products',
         content:
-          'The most important coding-agent products right now include Claude Code, OpenAI Codex, Gemini CLI, and OpenClaw-style session and control-plane systems. They differ in product philosophy, ecosystem ties, and runtime design, but they all point toward the same broader shift: software work is moving from static assistance toward agentic execution.',
+          'The most important coding-agent products right now include Claude Code, OpenAI Codex, Gemini CLI, and OpenSwan-style session and control-plane systems. They differ in product philosophy, ecosystem ties, and runtime design, but they all point toward the same broader shift: software work is moving from static assistance toward agentic execution.',
         bulletPoints: [
           'Claude Code emphasizes terminal-native flow and tooling depth',
           'Codex emphasizes software execution and cloud/local task handling',
           'Gemini CLI emphasizes Gemini access and large-context workflows',
-          'OpenClaw emphasizes remote sessions and self-hosted control patterns',
+          'OpenSwan emphasizes remote sessions and self-hosted control patterns',
         ],
       },
       {

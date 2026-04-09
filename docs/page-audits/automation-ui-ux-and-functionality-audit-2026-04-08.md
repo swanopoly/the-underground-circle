@@ -108,12 +108,12 @@ What changed:
 
 5. Add automation source badges once scheduler systems are unified
    - `Circle Automation`
-   - `KingClaw Job`
+   - `OpenSwan Job`
 
 ### Structural gap still present
 
 The biggest remaining issue is still architectural:
-- `Circle Automations` and `KingClaw Jobs` are separate systems
+- `Circle Automations` and `OpenSwan Jobs` are separate systems
 
 That is not a card-design problem. It is a product-structure problem.
 
@@ -124,4 +124,4 @@ The next best bounded UI/UX step is:
 1. Add a `Needs Attention` section above the list.
 2. Add `last outcome` and `output target` chips to every card.
 3. Add lightweight schedule editing for schedule-based automations.
-4. Separate `Circle Automations` from `KingClaw Jobs` visually at the dashboard level.
+4. Separate `Circle Automations` from `OpenSwan Jobs` visually at the dashboard level.

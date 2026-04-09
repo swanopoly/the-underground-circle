@@ -205,7 +205,7 @@ export default function CustomizePanel({
 
   // Add connection state
   const [addStep, setAddStep] = useState<AddStep>('list');
-  const [newProvider, setNewProvider] = useState<ProviderType>('openclaw');
+  const [newProvider, setNewProvider] = useState<ProviderType>('openswan');
   const [newName, setNewName] = useState('');
   const [newEndpoint, setNewEndpoint] = useState('');
   const [newToken, setNewToken] = useState('');
@@ -514,7 +514,7 @@ export default function CustomizePanel({
 
   const resetAddForm = () => {
     setAddStep('list');
-    setNewProvider('openclaw');
+    setNewProvider('openswan');
     setNewName('');
     setNewEndpoint('');
     setNewToken('');
@@ -1543,7 +1543,7 @@ export default function CustomizePanel({
                     <View style={styles.connectInfo}>
                       <Text style={styles.connectInfoTitle}>No connections yet</Text>
                       <Text style={styles.connectInfoText}>Add your first connection to see live agents in the office.</Text>
-                      <Text style={styles.connectInfoText}>Supports OpenClaw, Claude Code, and generic APIs.</Text>
+                      <Text style={styles.connectInfoText}>Supports OpenSwan, Claude Code, and generic APIs.</Text>
                     </View>
                   )}
 
@@ -1610,15 +1610,15 @@ export default function CustomizePanel({
                               <Text style={styles.connCardError}>{conn.error}</Text>
                               {conn.error.includes('localhost') || conn.error.includes('CORS') ? (
                                 <Text style={{ color: '#f59e0b', fontSize: 10, marginTop: 3 }}>
-                                  💡 Try: node openclaw-proxy.js
+                                  💡 Try: node openswan-proxy.js
                                 </Text>
                               ) : conn.error.includes('refused') || conn.error.includes('reach') ? (
                                 <Text style={{ color: '#f59e0b', fontSize: 10, marginTop: 3 }}>
-                                  💡 Try: openclaw gateway start
+                                  💡 Try: openswan gateway start
                                 </Text>
                               ) : conn.error.includes('auth') || conn.error.includes('token') ? (
                                 <Text style={{ color: '#f59e0b', fontSize: 10, marginTop: 3 }}>
-                                  💡 Check token in ~/.openclaw/openclaw.json
+                                  💡 Check token in ~/.openswan/openswan.json
                                 </Text>
                               ) : null}
                             </View>
@@ -1780,18 +1780,18 @@ export default function CustomizePanel({
                     </View>
                   )}
 
-                  {newProvider === 'openclaw' && !editingConnectionId && (
+                  {newProvider === 'openswan' && !editingConnectionId && (
                     <View style={styles.connectInfo}>
-                      <Text style={styles.connectInfoTitle}>OpenClaw Setup</Text>
+                      <Text style={styles.connectInfoTitle}>OpenSwan Setup</Text>
                       <Text style={styles.connectInfoText}>1. Your gateway is on port 18789 (use proxy port 18790)</Text>
                       <Text style={styles.connectInfoText}>2. No proxy needed - direct connection works</Text>
-                      <Text style={styles.connectInfoText}>3. Find token in ~/.openclaw/openclaw.json</Text>
+                      <Text style={styles.connectInfoText}>3. Find token in ~/.openswan/openswan.json</Text>
                       <Text style={styles.connectInfoText}>4. Use http://localhost:18790 as endpoint (CORS proxy)</Text>
                     </View>
                   )}
 
                   {/* ─── Claude Code Remote Control ─── */}
-                  {(newProvider === 'openclaw' || newProvider === 'claude-code') && !editingConnectionId && (
+                  {(newProvider === 'openswan' || newProvider === 'claude-code') && !editingConnectionId && (
                     <>
                       <Pressable
                         onPress={() => setShowRemoteControl(v => !v)}
@@ -1834,7 +1834,7 @@ export default function CustomizePanel({
                     <View style={styles.connectInfo}>
                       <Text style={styles.connectInfoTitle}>Generic Agent</Text>
                       <Text style={styles.connectInfoText}>Any OpenAI-compatible API endpoint.</Text>
-                      <Text style={styles.connectInfoText}>Uses the same protocol as OpenClaw's /tools/invoke.</Text>
+                      <Text style={styles.connectInfoText}>Uses the same protocol as OpenSwan's /tools/invoke.</Text>
                     </View>
                   )}
                 </>

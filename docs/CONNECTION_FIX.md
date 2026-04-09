@@ -20,20 +20,20 @@ And updated all calls to use `storage.getItem()` and `storage.setItem()`.
 
 ---
 
-### 2. 🔌 OpenClaw Connection Error (NEEDS ACTION)
+### 2. 🔌 OpenSwan Connection Error (NEEDS ACTION)
 **Error:** `Failed to load resource: net::ERR_CONNECTION_REFUSED` on port 18790
 
-**Root Cause:** The Office tab is trying to connect to an OpenClaw gateway that isn't running.
+**Root Cause:** The Office tab is trying to connect to an OpenSwan gateway that isn't running.
 
 **Solutions:**
 
-#### Option A: Start Your OpenClaw Gateway
+#### Option A: Start Your OpenSwan Gateway
 ```bash
-# If you have OpenClaw installed
-openclaw gateway start
+# If you have OpenSwan installed
+openswan gateway start
 
 # Or if it's already running, check status
-openclaw gateway status
+openswan gateway status
 ```
 
 #### Option B: Add a Connection Manually
@@ -43,14 +43,14 @@ openclaw gateway status
 4. Click **"Connections"** tab
 5. Click **"+ ADD CONNECTION"**
 6. Enter:
-   - **Name:** Your OpenClaw instance name (e.g., "KingClaw")
-   - **Provider:** OpenClaw
+   - **Name:** Your OpenSwan instance name (e.g., "OpenSwan")
+   - **Provider:** OpenSwan
    - **Endpoint:** `http://localhost:18790` (or your gateway URL)
    - **Token:** Your gateway token
 7. Click **"Add Connection"**
 8. The app will attempt to connect
 
-#### Option C: Test Without OpenClaw (Demo Mode)
+#### Option C: Test Without OpenSwan (Demo Mode)
 The app will work without connections - it just won't show any agents. You can still:
 - See the UI/layout
 - Test the Farm Health Dashboard (will show empty state)
@@ -91,10 +91,10 @@ Open the browser console (F12) and look for:
 1. Go to Office tab
 2. Click 🏥 button
 3. Should show "No Agent Data" (if no connections)
-4. Or show agent metrics (if OpenClaw connected)
+4. Or show agent metrics (if OpenSwan connected)
 
-### 3. Connect to OpenClaw
-If you have OpenClaw running:
+### 3. Connect to OpenSwan
+If you have OpenSwan running:
 1. Click ⚙️ → Connections
 2. Add your gateway endpoint
 3. Click "Connect"
@@ -110,12 +110,12 @@ If you have OpenClaw running:
 3. **Test Office tab** - Make sure it loads
 
 ### If You Want to See Agent Data
-1. **Start OpenClaw gateway** (if you have it)
+1. **Start OpenSwan gateway** (if you have it)
 2. **Add connection** in Office settings
 3. **Watch agents appear** in the office view
 4. **Test Farm Dashboard** with real agent data
 
-### If Testing Without OpenClaw
+### If Testing Without OpenSwan
 That's fine! The app is fully functional without connections:
 - Browse the Office layout
 - See the empty states
@@ -139,8 +139,8 @@ That's fine! The app is fully functional without connections:
 
 **The app should now work correctly!** 🎉
 
-The storage error is fixed, and the connection errors are expected if you don't have OpenClaw running. You can either:
-- **Connect to OpenClaw** to see live agent data
+The storage error is fixed, and the connection errors are expected if you don't have OpenSwan running. You can either:
+- **Connect to OpenSwan** to see live agent data
 - **Use the app without connections** to explore the UI
 
 Either way, the core functionality is intact and ready to use!

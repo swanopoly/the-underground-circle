@@ -1,6 +1,6 @@
 // Advanced Agent Collaboration System - Full agent-to-agent communication
 import { OfficeAgent } from './officeAgents';
-import { OpenClawConfig, OpenClawSession } from './openclawService';
+import { OpenSwanConfig, OpenSwanSession } from './openswanService';
 import { Project, getProjectAgentIds } from './projectManagement';
 import { storage } from './storage';
 
@@ -328,7 +328,7 @@ export interface MessageContext {
 }
 
 export async function sendContextualMessage(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
   sessionKey: string,
   message: string,
   context: MessageContext,
@@ -394,7 +394,7 @@ export async function sendContextualMessage(
 
 export async function broadcastMessage(
   agents: OfficeAgent[],
-  getConfig: (connectionId: string) => OpenClawConfig | null,
+  getConfig: (connectionId: string) => OpenSwanConfig | null,
   message: string
 ): Promise<{ ok: boolean; deliveredTo?: string[]; error?: string }> {
   const delivered: string[] = [];
@@ -437,7 +437,7 @@ export async function relayMessageBetweenAgents(
   fromAgent: OfficeAgent,
   toAgent: OfficeAgent,
   message: string,
-  getConfig: (connectionId: string) => OpenClawConfig | null,
+  getConfig: (connectionId: string) => OpenSwanConfig | null,
   context?: MessageContext
 ): Promise<{ ok: boolean; error?: string }> {
   const config = getConfig(toAgent.connectionId);

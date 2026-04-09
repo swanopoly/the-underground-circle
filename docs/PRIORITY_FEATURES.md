@@ -231,7 +231,7 @@ interface OfficeFloor {
 
 **Build:**
 - Welcome screen explaining Office concept
-- Connect first agent (OpenClaw)
+- Connect first agent (OpenSwan)
 - Tour of main features
 - Set budget alert
 - Invite to Discord community

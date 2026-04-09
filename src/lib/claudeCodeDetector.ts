@@ -77,7 +77,7 @@ export async function fetchClaudeCodeSessions(): Promise<ClaudeCodeSession[]> {
   }
 }
 
-// ── Poller (mirrors OpenClawPoller pattern) ──────────────────────────────────
+// ── Poller (mirrors OpenSwanPoller pattern) ──────────────────────────────────
 
 export class ClaudeCodePoller {
   private interval: ReturnType<typeof setInterval> | null = null;

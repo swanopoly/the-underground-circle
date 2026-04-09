@@ -42,20 +42,20 @@ for (const conn of conns) {
 }
 ```
 
-**Issue:** The flagship feature (Office tab) **silently fails on production** because it skips localhost endpoints. Users get "No agents connected" with no explanation. The OpenClaw integration requires localhost (port 18790), which won't work on a deployed site.
+**Issue:** The flagship feature (Office tab) **silently fails on production** because it skips localhost endpoints. Users get "No agents connected" with no explanation. The OpenSwan integration requires localhost (port 18790), which won't work on a deployed site.
 
 **Impact:** THE CORE FEATURE DOESN'T WORK IN PRODUCTION. This is your main differentiator.
 
 **Fix Options:**
-- **Best:** Deploy a CORS proxy on a public server (e.g., Railway, Fly.io, or Vercel Edge Function) that forwards requests to user's local OpenClaw
-- **Quick:** Add clear messaging: "The Office dashboard connects to local AI agents. Run OpenClaw locally or use a remote endpoint."
+- **Best:** Deploy a CORS proxy on a public server (e.g., Railway, Fly.io, or Vercel Edge Function) that forwards requests to user's local OpenSwan
+- **Quick:** Add clear messaging: "The Office dashboard connects to local AI agents. Run OpenSwan locally or use a remote endpoint."
 - **Workaround:** Allow users to add ngrok/tunneling URLs in connection settings
 - **Remove check:** Let users try localhost connections and see real error messages instead of silent skip
 
 **Related Files:**
 - `src/screens/circles/tabs/OfficeTab.tsx:151-161` (production check)
 - `src/screens/circles/tabs/OfficeTab.tsx:702-711` (empty state that shows on production)
-- `src/lib/openclawService.ts` (entire service won't work with localhost on production)
+- `src/lib/openswanService.ts` (entire service won't work with localhost on production)
 
 ---
 
@@ -159,7 +159,7 @@ const handleSignUp = async () => {
 
 **Issue:** Tokens are stored in localStorage in plain text via `connectionManager.ts:35-40`. Anyone with access to DevTools can read all API tokens.
 
-**Impact:** Security vulnerability. OpenClaw gateway tokens, Discord bot tokens, Telegram bot tokens all exposed.
+**Impact:** Security vulnerability. OpenSwan gateway tokens, Discord bot tokens, Telegram bot tokens all exposed.
 
 **Fix:**
 - Use platform-specific secure storage (e.g., `expo-secure-store` for mobile)
@@ -175,12 +175,12 @@ const handleSignUp = async () => {
 ---
 
 ### 6. **CORS Proxy Port Hardcoded** 🔴
-**File:** `src/lib/openclawService.ts` and connection configs
+**File:** `src/lib/openswanService.ts` and connection configs
 
-The OpenClaw connection defaults to `http://localhost:18790` (CORS proxy port). This won't work in production without user explanation.
+The OpenSwan connection defaults to `http://localhost:18790` (CORS proxy port). This won't work in production without user explanation.
 
 **Issue:** Users won't know they need to:
-1. Run OpenClaw locally
+1. Run OpenSwan locally
 2. Enable CORS proxy on port 18790
 3. Or use tunneling service like ngrok
 
@@ -273,7 +273,7 @@ Good, but missing onboarding:
     <Text style={styles.emptyIcon}>🔗</Text>
     <Text style={styles.emptyTitle}>No agents connected</Text>
     <Text style={styles.emptyText}>Tap ⚙️ → Connections to add your agent endpoints</Text>
-    <Text style={styles.emptySub}>Supports OpenClaw, Claude Code, and generic APIs</Text>
+    <Text style={styles.emptySub}>Supports OpenSwan, Claude Code, and generic APIs</Text>
   </View>
 )}
 ```
@@ -644,7 +644,7 @@ Agents work in isolation. No:
 ### 35. **No Agent Logs/History**
 Can't view full conversation history or debug agent behavior.
 
-*(Note: `getSessionHistory` exists in openclawService, but no UI)*
+*(Note: `getSessionHistory` exists in openswanService, but no UI)*
 
 ---
 
@@ -717,10 +717,10 @@ Supabase realtime channel is created but cleanup might fail.
 
 ---
 
-### 45. **OpenClaw Polling Too Aggressive**
-**File:** `src/lib/openclawService.ts:449-474`
+### 45. **OpenSwan Polling Too Aggressive**
+**File:** `src/lib/openswanService.ts:449-474`
 
-OpenClaw sessions are polled every 10 seconds with status enrichment. This can hammer the API.
+OpenSwan sessions are polled every 10 seconds with status enrichment. This can hammer the API.
 
 **Fix:**
 - Increase interval to 30 seconds
@@ -761,7 +761,7 @@ Avatar and banner images are loaded full-size.
 Users can spam:
 - Message creation
 - Task creation
-- API calls to OpenClaw
+- API calls to OpenSwan
 
 **Fix:** Implement rate limiting at Supabase level (RLS policies) or app level.
 
@@ -907,7 +907,7 @@ Despite the issues, there ARE strong foundations:
 Users will try the Office tab (your main pitch), see "No agents connected", give up, and leave. You need to either:
 1. Fix the localhost/production issue with a proxy solution
 2. Make it CRYSTAL CLEAR this is a "localhost-only" feature during beta
-3. Provide hosted agent options (e.g., OpenClaw cloud)
+3. Provide hosted agent options (e.g., OpenSwan cloud)
 
 **Recommended Launch Strategy:**
 1. **Soft launch** to friends/beta testers with localhost warning prominent
@@ -928,7 +928,7 @@ Users will try the Office tab (your main pitch), see "No agents connected", give
 - Fix #1 (Office on production) — this is your whole pitch
 - Add error boundaries (#3) — prevent white screen of death
 - Document that wallet, photon, DMs are "coming soon" — remove from UI or disable gracefully
-- Add big warning banner on Office: "The Office connects to local AI agents. Run OpenClaw on your machine."
+- Add big warning banner on Office: "The Office connects to local AI agents. Run OpenSwan on your machine."
 
 **What to cut:**
 - Wallet tab (until you build the dashboard)

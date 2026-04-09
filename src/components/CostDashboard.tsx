@@ -1,7 +1,7 @@
 // Cost Analytics Dashboard - The #1 fundable feature
 import React, { useMemo, useEffect, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, Platform, Modal } from 'react-native';
-import { OpenClawSession } from '../lib/openclawService';
+import { OpenSwanSession } from '../lib/openswanService';
 import { storage } from '../lib/storage';
 import { OfficeAgent } from '../lib/officeAgents';
 import { SessionTag } from '../lib/sessionTags';
@@ -31,7 +31,7 @@ interface CostData {
 }
 
 interface Props {
-  sessions: OpenClawSession[];
+  sessions: OpenSwanSession[];
   agents: OfficeAgent[];
   sessionTags: Map<string, SessionTag[]>;
   accentColor?: string;
@@ -582,7 +582,7 @@ function formatTokenCount(tokens: number): string {
 
 // ─── Data Calculation ────────────────────────────────────
 
-function calculateCostData(sessions: OpenClawSession[], dateRange: 7 | 30 | 90 = 30): CostData {
+function calculateCostData(sessions: OpenSwanSession[], dateRange: 7 | 30 | 90 = 30): CostData {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);

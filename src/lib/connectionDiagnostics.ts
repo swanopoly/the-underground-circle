@@ -70,9 +70,9 @@ export async function diagnoseConnection(
         ok: false,
         errorCode: 'timeout',
         message: 'No response after 8 seconds',
-        fix: 'Make sure OpenClaw gateway is running:',
+        fix: 'Make sure OpenSwan gateway is running:',
         fixAction: 'copy_command',
-        fixValue: 'openclaw gateway start',
+        fixValue: 'openswan gateway start',
       };
     }
 
@@ -94,7 +94,7 @@ export async function diagnoseConnection(
           message: 'Server is running but CORS is blocking the request',
           fix: 'Start the CORS proxy in your project folder:',
           fixAction: 'copy_command',
-          fixValue: 'node openclaw-proxy.js',
+          fixValue: 'node openswan-proxy.js',
         };
       }
 
@@ -103,9 +103,9 @@ export async function diagnoseConnection(
         ok: false,
         errorCode: 'refused',
         message: `Cannot reach ${url}`,
-        fix: 'OpenClaw isn\'t running. Start it:',
+        fix: 'OpenSwan isn\'t running. Start it:',
         fixAction: 'copy_command',
-        fixValue: 'openclaw gateway start',
+        fixValue: 'openswan gateway start',
       };
     }
 
@@ -113,7 +113,7 @@ export async function diagnoseConnection(
       ok: false,
       errorCode: 'unknown',
       message: err?.message || 'Unknown error',
-      fix: 'Check that OpenClaw is running and the endpoint is correct',
+      fix: 'Check that OpenSwan is running and the endpoint is correct',
       fixAction: 'none',
     };
   }
@@ -148,7 +148,7 @@ async function tryParseSessionCount(res: Response): Promise<number | undefined> 
 }
 
 export function getTokenHint(): string {
-  return "cat ~/.openclaw/openclaw.json | grep gatewayToken";
+  return "cat ~/.openswan/openswan.json | grep gatewayToken";
 }
 
 // ─── Friendly label for error codes ──────────────────────────────────────────

@@ -1,9 +1,9 @@
 /**
- * OpenClaw CORS + WebSocket Proxy
- * Bridges the web app (localhost:8081) → OpenClaw Gateway (localhost:18789)
+ * OpenSwan CORS + WebSocket Proxy
+ * Bridges the web app (localhost:8081) → OpenSwan Gateway (localhost:18789)
  * Handles both HTTP REST and WebSocket upgrade connections.
  *
- * Run: node openclaw-proxy.js
+ * Run: node openswan-proxy.js
  */
 
 const http = require('http');
@@ -18,23 +18,23 @@ const GATEWAY_HOST = 'localhost';
 const GATEWAY_PORT = 18789;
 const PROXY_PORT   = 18790;
 
-// ─── Auto-load gateway auth token from OpenClaw config ───────────────────────
+// ─── Auto-load gateway auth token from OpenSwan config ───────────────────────
 let GATEWAY_TOKEN = '';
 try {
-  const configPath = path.join(os.homedir(), '.openclaw', 'openclaw.json');
+  const configPath = path.join(os.homedir(), '.openswan', 'openswan.json');
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   GATEWAY_TOKEN = config?.gateway?.auth?.token || '';
   if (GATEWAY_TOKEN) {
-    console.log('[proxy] Auth token loaded from ~/.openclaw/openclaw.json');
+    console.log('[proxy] Auth token loaded from ~/.openswan/openswan.json');
   }
 } catch (e) {
-  console.warn('[proxy] Could not load OpenClaw config — auth token not available');
+  console.warn('[proxy] Could not load OpenSwan config — auth token not available');
 }
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin':  '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-openclaw-agent-id, x-openclaw-session-key',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-openswan-agent-id, x-openswan-session-key',
 };
 
 // ─── HTTP server ───────────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ process.on('uncaughtException', (err) => console.error('[proxy] Uncaught:', err.
 process.on('unhandledRejection', (r) => console.error('[proxy] Unhandled rejection:', r));
 
 server.listen(PROXY_PORT, () => {
-  console.log(`🦢 OpenClaw CORS+WS Proxy → http://localhost:${PROXY_PORT}`);
+  console.log(`🦢 OpenSwan CORS+WS Proxy → http://localhost:${PROXY_PORT}`);
   console.log(`   Forwarding to ws://${GATEWAY_HOST}:${GATEWAY_PORT}`);
   console.log(`   Use http://localhost:${PROXY_PORT} as your endpoint in the app`);
 });

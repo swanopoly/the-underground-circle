@@ -18,7 +18,7 @@ Track:
 - Claude Code
 - Codex
 - Gemini CLI
-- OpenClaw
+- OpenSwan
 - OpenCode
 - Aider
 - Cursor
@@ -157,7 +157,7 @@ Avoid building the wiki from low-signal commentary when a primary source exists.
 ### Highest priority
 
 - top coding agents monthly tracker
-- OpenClaw ecosystem tracker
+- OpenSwan ecosystem tracker
 - open-weight model tracker
 - multimodal tools tracker
 - browser/computer-use tracker

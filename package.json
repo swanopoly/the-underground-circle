@@ -23,7 +23,7 @@
   "scripts": {
     "start": "node start-dev.js",
     "expo": "expo start",
-    "proxy": "node openclaw-proxy.js",
+    "proxy": "node openswan-proxy.js",
     "build": "expo export --platform web",
     "android": "expo start --android",
     "ios": "expo start --ios",

@@ -1,11 +1,11 @@
 /**
  * App-level agent auto-connect service.
- * Runs detection for Claude Code bridge + OpenClaw gateway immediately on auth,
+ * Runs detection for Claude Code bridge + OpenSwan gateway immediately on auth,
  * so agents are already connected when the user opens the Office tab.
  *
  * Resilience features:
  *  - Exponential backoff retry (5s → 10s → 20s → 30s cap)
- *  - Tries both CORS proxy (:18790) and direct gateway (:18789) for OpenClaw
+ *  - Tries both CORS proxy (:18790) and direct gateway (:18789) for OpenSwan
  *  - Visibility-change listener: instantly retries when user switches back to tab
  *  - Poller error detection: marks connection as error after 3 consecutive failures
  *  - Singleton — safe to call start() multiple times.
@@ -53,12 +53,12 @@ import {
   probeEndpointHealth,
 } from './connectionManager';
 import {
-  OpenClawConfig,
-  OpenClawPoller,
-  OpenClawUpdate,
+  OpenSwanConfig,
+  OpenSwanPoller,
+  OpenSwanUpdate,
   testConnection,
   listAgents,
-} from './openclawService';
+} from './openswanService';
 import { OfficeAgent } from './officeAgents';
 import { Platform } from 'react-native';
 
@@ -79,7 +79,7 @@ let _geminiStarting = false;
 let _cursorPoller: CursorPoller | null = null;
 let _cursorPublished = false;
 let _cursorStarting = false;
-let _ocPollers = new Map<string, OpenClawPoller>();
+let _ocPollers = new Map<string, OpenSwanPoller>();
 let _retryTimer: ReturnType<typeof setInterval> | null = null;
 let _ocReconnectTimer: ReturnType<typeof setInterval> | null = null;
 let _circleId: string | null = null;
@@ -96,9 +96,9 @@ const _listeners = new Set<Listener>();
 const RETRY_BASE_MS = 5000;      // Initial retry interval
 const RETRY_MAX_MS = 30000;      // Max retry interval
 const CC_DETECT_INTERVAL = 20000; // Claude Code bridge detection interval (20s)
-const OC_RECONNECT_INTERVAL = 20000; // OpenClaw reconnect check interval (20s)
+const OC_RECONNECT_INTERVAL = 20000; // OpenSwan reconnect check interval (20s)
 
-// Alternate OpenClaw endpoints to try (CORS proxy first, then direct gateway)
+// Alternate OpenSwan endpoints to try (CORS proxy first, then direct gateway)
 const OPENCLAW_FALLBACK_ENDPOINTS = [
   'http://localhost:18790', // CORS proxy (preferred)
   'http://localhost:18789', // Direct gateway (may work if CORS is configured)
@@ -146,7 +146,7 @@ export type BridgeStatus = {
   codex: boolean;
   gemini: boolean;
   cursor: boolean;
-  openclawReconnected: number;
+  openswanReconnected: number;
 };
 
 /**
@@ -165,7 +165,7 @@ export async function reconnectAllBridges(): Promise<BridgeStatus> {
       codex: !!_codexPoller,
       gemini: !!_geminiPoller,
       cursor: !!_cursorPoller,
-      openclawReconnected: 0,
+      openswanReconnected: 0,
     };
   }
 
@@ -183,7 +183,7 @@ export async function reconnectAllBridges(): Promise<BridgeStatus> {
   if (geminiDetected && !_geminiPoller) _startGeminiPoller();
   if (cursorDetected && !_cursorPoller) _startCursorPoller();
 
-  // Retry failed OpenClaw connections
+  // Retry failed OpenSwan connections
   let ocReconnected = 0;
   const failedConns = _connections.filter(
     c => c.enabled && (c.status === "error" || c.status === "disconnected"),
@@ -204,7 +204,7 @@ export async function reconnectAllBridges(): Promise<BridgeStatus> {
     codex: codexDetected,
     gemini: geminiDetected,
     cursor: cursorDetected,
-    openclawReconnected: ocReconnected,
+    openswanReconnected: ocReconnected,
   };
   console.log("[agentAutoConnect] Manual reconnect result:", status);
   return status;
@@ -235,26 +235,26 @@ export async function startAgentAutoConnect() {
   // 1. Load saved connections
   let conns = await loadConnections();
 
-  // 2. Auto-discover OpenClaw gateway (silently — skip if not running)
+  // 2. Auto-discover OpenSwan gateway (silently — skip if not running)
   try {
     const { discovered } = await autoDiscoverLocalAgents(conns);
     if (discovered) {
-      const existingOpenClaw = conns.find(c => c.provider === 'openclaw');
-      if (existingOpenClaw?.token) {
-        discovered.token = existingOpenClaw.token;
+      const existingOpenSwan = conns.find(c => c.provider === 'openswan');
+      if (existingOpenSwan?.token) {
+        discovered.token = existingOpenSwan.token;
       }
       conns = [...conns, discovered];
       saveConnections(conns);
-      console.log('[agentAutoConnect] Auto-discovered OpenClaw at', discovered.endpoint);
+      console.log('[agentAutoConnect] Auto-discovered OpenSwan at', discovered.endpoint);
     }
   } catch {
-    // OpenClaw not running — that's fine, skip silently
+    // OpenSwan not running — that's fine, skip silently
   }
 
   _connections = conns;
   _notify();
 
-  // 3. Auto-connect enabled connections (skip OpenClaw if no gateway found)
+  // 3. Auto-connect enabled connections (skip OpenSwan if no gateway found)
   for (const conn of conns) {
     if (conn.enabled && conn.status !== 'error') {
       _connectWithFallback(conn);
@@ -457,7 +457,7 @@ function _startRetryLoop() {
     }
   }, CC_DETECT_INTERVAL);
 
-  // OpenClaw reconnect — with backoff
+  // OpenSwan reconnect — with backoff
   const scheduleOcReconnect = () => {
     if (_ocReconnectTimer) clearInterval(_ocReconnectTimer);
     const interval = _getRetryInterval();
@@ -548,7 +548,7 @@ function _startVisibilityListener() {
       }
     });
 
-    // Retry failed OpenClaw connections
+    // Retry failed OpenSwan connections
     const failedConns = _connections.filter(
       c => c.enabled && (c.status === 'error' || c.status === 'disconnected'),
     );
@@ -675,8 +675,8 @@ async function _probeWithFallbacks(conn: AgentConnection): Promise<boolean> {
   const primary = await probeEndpointHealth(conn.endpoint);
   if (primary) return true;
 
-  // For OpenClaw connections, try alternate endpoints
-  if (conn.provider === 'openclaw') {
+  // For OpenSwan connections, try alternate endpoints
+  if (conn.provider === 'openswan') {
     for (const fallback of OPENCLAW_FALLBACK_ENDPOINTS) {
       if (fallback === conn.endpoint) continue; // Already tried
       const ok = await probeEndpointHealth(fallback);
@@ -707,14 +707,14 @@ async function _connectWithFallback(conn: AgentConnection) {
   _notify();
 
   // Try the saved endpoint
-  let config: OpenClawConfig = { endpoint: conn.endpoint, token: conn.token };
+  let config: OpenSwanConfig = { endpoint: conn.endpoint, token: conn.token };
   let result = await testConnection(config);
 
-  // If failed and this is an OpenClaw connection, try fallback endpoints
-  if (!result.ok && conn.provider === 'openclaw') {
+  // If failed and this is an OpenSwan connection, try fallback endpoints
+  if (!result.ok && conn.provider === 'openswan') {
     for (const fallback of OPENCLAW_FALLBACK_ENDPOINTS) {
       if (fallback === conn.endpoint) continue; // Already tried
-      const fallbackConfig: OpenClawConfig = { endpoint: fallback, token: conn.token };
+      const fallbackConfig: OpenSwanConfig = { endpoint: fallback, token: conn.token };
       const fallbackResult = await testConnection(fallbackConfig);
       if (fallbackResult.ok) {
         console.log('[agentAutoConnect] Connected via fallback endpoint:', fallback);
@@ -765,7 +765,7 @@ async function _connectWithFallback(conn: AgentConnection) {
   const oldPoller = _ocPollers.get(conn.id);
   if (oldPoller) oldPoller.stop();
 
-  const poller = new OpenClawPoller(config, (update: OpenClawUpdate) => {
+  const poller = new OpenSwanPoller(config, (update: OpenSwanUpdate) => {
     _sessionsMap.set(conn.id, update.sessions);
     _connections = _connections.map(c =>
       c.id === conn.id && c.status === 'connected'

@@ -1,4 +1,4 @@
-// Simple CORS proxy for OpenClaw Gateway
+// Simple CORS proxy for OpenSwan Gateway
 // Run: node cors-proxy.js
 // Proxies http://localhost:18790 → http://localhost:18789 with CORS headers
 

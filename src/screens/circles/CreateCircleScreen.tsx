@@ -146,11 +146,11 @@ const CIRCLE_TEMPLATES: CircleTemplate[] = [
     name: 'Builder',
     emoji: '🚀',
     category: 'AI Builder',
-    description: 'Developers using Claude Code, OpenClaw, or any AI coding agent to ship software',
+    description: 'Developers using Claude Code, OpenSwan, or any AI coding agent to ship software',
     accent_color: '#6366f1',
     suggested_names: ['Ship It Circle', 'Builder Squad', 'The Code Crew', 'Agent Army'],
     check_in_format: { type: 'text', label: "What did your AI build today?" },
-    tags: ['builder', 'developer', 'claude-code', 'openclaw', 'ai-coding']
+    tags: ['builder', 'developer', 'claude-code', 'openswan', 'ai-coding']
   },
   {
     id: 'creator',

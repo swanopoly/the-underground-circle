@@ -1415,7 +1415,7 @@ export default function AutomationsPanel({ circleId, accentColor = '#e8e8e8' }: 
           </View>
         </View>
         <Text style={{ color: '#9e9e9e', fontSize: 12, lineHeight: 17 }}>
-          These automations run inside Underground Circle. KingClaw gateway jobs are managed separately in the Pixel Agent Panel under `Cron Jobs`.
+          These automations run inside Underground Circle. OpenSwan gateway jobs are managed separately in the Pixel Agent Panel under `Cron Jobs`.
         </Text>
       </View>
 

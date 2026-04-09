@@ -7,7 +7,7 @@
  *   - office_terminal_responses → per-response sessions for cost tracking
  *   - profiles → member/streak data
  *
- * Converts DB data into the OfficeAgent / OpenClawSession shapes
+ * Converts DB data into the OfficeAgent / OpenSwanSession shapes
  * that downstream components (CostDashboard, FarmHealth, etc.) expect.
  */
 
@@ -18,12 +18,12 @@ import { SessionTag, loadSessionTags } from '../lib/sessionTags';
 import { AgentConnection, loadConnections } from '../lib/connectionManager';
 import { BudgetConfig, loadBudgetConfig, calculateBudgetAlerts } from '../lib/budgetAlerts';
 import { CircleOfficeAgent, loadCircleOfficeAgents } from '../lib/circleOffice';
-import type { OpenClawSession } from '../lib/openclawService';
+import type { OpenSwanSession } from '../lib/openswanService';
 
 export interface BackpackData {
   // Core data
   enrichedAgents: OfficeAgent[];
-  enrichedSessions: OpenClawSession[];
+  enrichedSessions: OpenSwanSession[];
   displayAgents: OfficeAgent[];
   sessionTags: Map<string, SessionTag[]>;
   connections: AgentConnection[];
@@ -93,10 +93,10 @@ function circleAgentToOfficeAgent(ca: CircleOfficeAgent, idx: number): OfficeAge
 }
 
 /**
- * Convert terminal response rows into per-response OpenClawSession objects.
+ * Convert terminal response rows into per-response OpenSwanSession objects.
  * Each response becomes its own session so CostDashboard can bucket costs by day.
  */
-function responsesToSessions(responses: any[]): OpenClawSession[] {
+function responsesToSessions(responses: any[]): OpenSwanSession[] {
   return responses.map((r: any) => {
     const tokens = r.token_count || 0;
     const inputTokens = r.input_tokens || 0;
@@ -139,7 +139,7 @@ function timeSince(iso: string): string {
 
 export function useBackpackData(circleId: string): BackpackData {
   const [enrichedAgents, setEnrichedAgents] = useState<OfficeAgent[]>([]);
-  const [enrichedSessions, setEnrichedSessions] = useState<OpenClawSession[]>([]);
+  const [enrichedSessions, setEnrichedSessions] = useState<OpenSwanSession[]>([]);
   const [sessionTags, setSessionTags] = useState<Map<string, SessionTag[]>>(new Map());
   const [connections, setConnections] = useState<AgentConnection[]>([]);
   const [mergedCircleAgents, setMergedCircleAgents] = useState<CircleOfficeAgent[]>([]);

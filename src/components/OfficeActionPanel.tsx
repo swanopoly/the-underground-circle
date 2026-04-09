@@ -4,7 +4,7 @@ import { View, Text, StyleSheet, ScrollView, Modal, TextInput, Pressable, Platfo
 import PixelButton from './PixelButton';
 import { OfficeAgent } from '../lib/officeAgents';
 import { Project, loadProjects } from '../lib/projectManagement';
-import { OpenClawConfig } from '../lib/openclawService';
+import { OpenSwanConfig } from '../lib/openswanService';
 import {
   createConversation, addMessageToConversation, getActiveConversations,
   sendContextualMessage, broadcastMessage, loadTasks, getProjectTasks,
@@ -15,7 +15,7 @@ import { addConversationMessage } from '../lib/conversationLog';
 
 interface Props {
   agents: OfficeAgent[];
-  getConfig: (connectionId: string) => OpenClawConfig | null;
+  getConfig: (connectionId: string) => OpenSwanConfig | null;
   onResult: (message: string) => void;
   compact?: boolean; // Use smaller button sizes
 }

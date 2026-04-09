@@ -48,7 +48,7 @@ High-signal examples:
 - OpenAI Codex
 - Anthropic Claude Code
 - Google Gemini CLI
-- OpenClaw as a self-hosted control plane / gateway layer
+- OpenSwan as a self-hosted control plane / gateway layer
 
 What to watch:
 
@@ -241,7 +241,7 @@ The AI themes most relevant to this product are:
 That means the AI wiki should prioritize:
 
 - agent products and workflows
-- OpenClaw and related control-plane patterns
+- OpenSwan and related control-plane patterns
 - coding-agent ecosystem reports
 - multimodal and browser-use capability research
 - open-source AI tooling
@@ -254,9 +254,9 @@ That means the AI wiki should prioritize:
 - Codex product page: https://openai.com/codex/
 - Claude Code hooks: https://docs.anthropic.com/en/docs/claude-code/hooks
 - Claude Code subagents: https://docs.anthropic.com/en/docs/claude-code/sub-agents
-- OpenClaw docs: https://docs.openclaw.ai/
-- OpenClaw getting started: https://docs.openclaw.ai/start/getting-started
-- OpenClaw FAQ: https://docs.openclaw.ai/help/faq
+- OpenSwan docs: https://docs.openswan.ai/
+- OpenSwan getting started: https://docs.openswan.ai/start/getting-started
+- OpenSwan FAQ: https://docs.openswan.ai/help/faq
 - Llama models: https://www.llama.com/models/
 - Gemma: https://ai.google.dev/gemma
 - EVMbench: https://openai.com/index/introducing-evmbench/

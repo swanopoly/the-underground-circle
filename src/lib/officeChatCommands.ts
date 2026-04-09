@@ -1,7 +1,7 @@
 // Enhanced Office Chat Commands - Multi-Agent Collaboration
 import { OfficeAgent } from './officeAgents';
 import { AgentConnection, PROVIDER_META } from './connectionManager';
-import { OpenClawConfig } from './openclawService';
+import { OpenSwanConfig } from './openswanService';
 import {
   Project, loadProjects, saveProjects, createProject,
   assignAgentToProject, unassignAgentFromProject, deleteProject, getAgentProjects,
@@ -24,7 +24,7 @@ export async function processCollaborationCommand(
   command: string,
   agents: OfficeAgent[],
   connections: AgentConnection[],
-  getConfig: (id: string) => OpenClawConfig | null,
+  getConfig: (id: string) => OpenSwanConfig | null,
 ): Promise<CommandResult | null> {
   const cmd = command.toLowerCase().trim();
   const parts = command.trim().split(' ');

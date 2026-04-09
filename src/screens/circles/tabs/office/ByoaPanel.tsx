@@ -24,7 +24,7 @@ const EVENTS = [
 ];
 
 const CONNECT_OPTIONS = [
-  { icon: '🦞', name: 'OpenClaw', desc: 'Connect your OpenClaw gateway', btn: 'Configure' },
+  { icon: '🦞', name: 'OpenSwan', desc: 'Connect your OpenSwan gateway', btn: 'Configure' },
   { icon: '🔗', name: 'Webhook', desc: 'Any HTTP endpoint', btn: 'Setup' },
   { icon: '⚡', name: 'n8n / Make / Zapier', desc: 'Automation platforms', btn: 'View Guide' },
   { icon: '📦', name: 'Python / Node SDK', desc: 'npm i uc-agent-sdk', btn: 'Copy Install' },

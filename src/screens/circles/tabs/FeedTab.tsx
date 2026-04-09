@@ -29,7 +29,7 @@ import {
 } from '../../../lib/agentAutoConnect';
 import type { OfficeAgent } from '../../../lib/officeAgents';
 import { sessionsToAgents } from '../../../lib/officeAgents';
-import type { OpenClawSession } from '../../../lib/openclawService';
+import type { OpenSwanSession } from '../../../lib/openswanService';
 import { loadAgentIdentities, type AgentIdentity } from '../../../lib/agentIdentity';
 import { storage } from '../../../lib/storage';
 import { useCircleAutomations, useDashboardStats } from '../../../services/automationService';
@@ -712,7 +712,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
         const conn = connections.find(c => c.id === connId);
         if (conn && sessions?.length) {
           const converted = sessionsToAgents(
-            sessions as OpenClawSession[],
+            sessions as OpenSwanSession[],
             connId,
             conn.name,
             conn.provider as any,

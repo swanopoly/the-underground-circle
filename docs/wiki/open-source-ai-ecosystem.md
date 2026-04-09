@@ -700,7 +700,7 @@ The 2026 roadmap focuses on enterprise deployments, transport scalability, gover
 
 | Project | Stars | Category | Why It Matters |
 |---------|-------|----------|----------------|
-| **OpenClaw** | 210K+ | Agentic automation | Fastest-growing OSS project in GitHub history (9K to 60K stars in days) |
+| **OpenSwan** | 210K+ | Agentic automation | Fastest-growing OSS project in GitHub history (9K to 60K stars in days) |
 | **Open WebUI** | 124K+ | Local AI interface | Self-hosted ChatGPT alternative, 282M+ downloads |
 | **Dify** | 131K+ | AI agent builder | Visual LLMOps platform, 280+ enterprise users |
 | **LangChain** | 100K+ | AI orchestration | Connective tissue of the AI agent ecosystem |

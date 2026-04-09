@@ -1,6 +1,6 @@
 # Master Plan Addendum: Implementation Progress (2026-04-08)
 
-> This addendum belongs at the end of `docs/page-audits/claude-cowork-openclaw-integration-master-plan-2026-04-08.md`
+> This addendum belongs at the end of `docs/page-audits/claude-cowork-openswan-integration-master-plan-2026-04-08.md`
 > That file is owned by root — run `sudo chown cswanson docs/page-audits/` to fix, then merge this in.
 
 ---

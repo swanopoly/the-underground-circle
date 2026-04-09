@@ -128,7 +128,7 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
             id: m.id,
             dbId: m.id,
             content: isBot
-              ? (m.content || '').replace(/^\u{1F9A2} \*\*(SwanBot|BlackSwan|Agent):\*\* /u, '').replace(/^\u{1F451} \*\*KingClaw:\*\* /u, '')
+              ? (m.content || '').replace(/^\u{1F9A2} \*\*(SwanBot|BlackSwan|Agent):\*\* /u, '').replace(/^\u{1F451} \*\*OpenSwan:\*\* /u, '')
               : (m.content || ''),
             isBot,
             isUser: m.user_id === user?.id && !isBot,
@@ -168,7 +168,7 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
           id: newMsg.id,
           dbId: newMsg.id,
           content: isBotMsg
-            ? (newMsg.content || '').replace(/^\u{1F9A2} \*\*(SwanBot|BlackSwan|Agent):\*\* /u, '').replace(/^\u{1F451} \*\*KingClaw:\*\* /u, '')
+            ? (newMsg.content || '').replace(/^\u{1F9A2} \*\*(SwanBot|BlackSwan|Agent):\*\* /u, '').replace(/^\u{1F451} \*\*OpenSwan:\*\* /u, '')
             : (newMsg.content || ''),
           isBot: isBotMsg,
           isUser: false,

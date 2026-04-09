@@ -1,6 +1,6 @@
 // Agent-to-Agent Messaging System
 import { OfficeAgent } from './officeAgents';
-import { OpenClawConfig } from './openclawService';
+import { OpenSwanConfig } from './openswanService';
 import { getCachedTrending, type TrendingItem } from './trendingContent';
 
 export type MessageRecipient = 'all' | 'project' | string; // 'all', project ID, or specific agent ID
@@ -1142,7 +1142,7 @@ export interface SendMessageResult {
 }
 
 export async function sendMessageToAgent(
-  config: OpenClawConfig,
+  config: OpenSwanConfig,
   sessionKey: string,
   message: string
 ): Promise<SendMessageResult> {
@@ -1171,7 +1171,7 @@ export async function sendMessageToAgent(
 
 export async function broadcastMessage(
   agents: OfficeAgent[],
-  getConfig: (connectionId: string) => OpenClawConfig | null,
+  getConfig: (connectionId: string) => OpenSwanConfig | null,
   message: string
 ): Promise<SendMessageResult> {
   const deliveredTo: string[] = [];
@@ -1207,7 +1207,7 @@ export async function broadcastMessage(
 
 export async function sendMessageToProject(
   projectAgents: OfficeAgent[],
-  getConfig: (connectionId: string) => OpenClawConfig | null,
+  getConfig: (connectionId: string) => OpenSwanConfig | null,
   message: string
 ): Promise<SendMessageResult> {
   return broadcastMessage(projectAgents, getConfig, message);

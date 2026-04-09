@@ -57,7 +57,7 @@ Evidence:
 
 Impact:
 
-- OpenClaw/API credentials are recoverable from browser storage and from the `agents_bots` table as plaintext.
+- OpenSwan/API credentials are recoverable from browser storage and from the `agents_bots` table as plaintext.
 - Any XSS, compromised browser profile, or accidental database exposure leaks working credentials immediately.
 
 Fix direction:

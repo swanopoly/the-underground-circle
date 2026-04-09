@@ -5,10 +5,10 @@ import {
 import type { NativeSyntheticEvent, TextInputKeyPressEventData } from 'react-native';
 import { OfficeAgent } from '../../../../lib/officeAgents';
 import {
-  OpenClawConfig, listSessions, getSessionStatus, getSessionHistory,
+  OpenSwanConfig, listSessions, getSessionStatus, getSessionHistory,
   sendAgentTask, listAgents, listCronJobs, runWebSearch,
   spawnSubAgent, manageCronJob, searchMemory, sendSessionMessage, listSubAgents, formatCronSchedule,
-} from '../../../../lib/openclawService';
+} from '../../../../lib/openswanService';
 import { AgentConnection, PROVIDER_META } from '../../../../lib/connectionManager';
 import { sendMessage as sendTgMessage, TelegramMessage } from '../../../../lib/telegramService';
 import { detectClaudeCodeBridge, execBridgeCommand } from '../../../../lib/claudeCodeDetector';
@@ -59,7 +59,7 @@ interface Props {
   agents?: OfficeAgent[];
   // Multi-connection support
   connections?: AgentConnection[];
-  getConnectionConfig?: (id: string) => OpenClawConfig | null;
+  getConnectionConfig?: (id: string) => OpenSwanConfig | null;
   // Telegram
   telegramConfig?: { botToken: string; chatId: string } | null;
   telegramConnected?: boolean;
@@ -68,11 +68,11 @@ interface Props {
   onActionResult?: (message: string) => void;
 }
 
-// Get the first connected OpenClaw config
+// Get the first connected OpenSwan config
 function getDefaultConfig(
   connections: AgentConnection[] | undefined,
-  getConfig: ((id: string) => OpenClawConfig | null) | undefined,
-): { config: OpenClawConfig; conn: AgentConnection } | null {
+  getConfig: ((id: string) => OpenSwanConfig | null) | undefined,
+): { config: OpenSwanConfig; conn: AgentConnection } | null {
   if (!connections || !getConfig) return null;
   for (const c of connections) {
     if (c.status === 'connected') {
@@ -583,7 +583,7 @@ export default function OfficeChat({
 
       // Find matching connection or agent
       const matchedConn = findConnectionByName(connections, target);
-      let targetCfg: OpenClawConfig | null = null;
+      let targetCfg: OpenSwanConfig | null = null;
       let targetName = target;
       let agentId = 'main';
 
@@ -806,7 +806,7 @@ export default function OfficeChat({
         setProcessing(true);
         try {
           const allJobs: string[] = [];
-          for (const conn of (connections || []).filter(c => c.status === 'connected' && c.provider === 'openclaw')) {
+          for (const conn of (connections || []).filter(c => c.status === 'connected' && c.provider === 'openswan')) {
             const cfg = getConnectionConfig(conn.id);
             if (!cfg) continue;
             const result = await withTimeout(listCronJobs(cfg), 15000, 'Cron');

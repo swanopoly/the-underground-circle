@@ -2,7 +2,7 @@
 
 ## Goal
 
-Fix the split-brain automation story so `Circle Automations` and `KingClaw Jobs` feel like one coherent product without forcing them into one runtime prematurely.
+Fix the split-brain automation story so `Circle Automations` and `OpenSwan Jobs` feel like one coherent product without forcing them into one runtime prematurely.
 
 The correct target is:
 
@@ -35,7 +35,7 @@ Each automation has:
 
 Execution backend can be:
 - `circle_native`
-- `kingclaw`
+- `openswan`
 
 The user should not have to understand the entire implementation difference before creating the automation.
 
@@ -61,18 +61,18 @@ Add a shared top-level automation descriptor that can represent either backend:
 - `run_count`
 - `last_error`
 - `linked_native_automation_id`
-- `linked_kingclaw_job_id`
+- `linked_openswan_job_id`
 
 Important:
 - this is a product-facing registry
-- it is not required to replace `circle_automations` or KingClaw storage immediately
+- it is not required to replace `circle_automations` or OpenSwan storage immediately
 
 ### One run model
 
 Add a unified run adapter/view that normalizes:
 
 - native `automation_runs`
-- KingClaw cron run history
+- OpenSwan cron run history
 
 Every rendered run in the app should expose:
 - `automation_ref_id`
@@ -100,7 +100,7 @@ Inside it:
 - `Scheduled`
 - `Event-driven`
 - `Manual`
-- `KingClaw`
+- `OpenSwan`
 - `Circle Native`
 
 Do not make the first split be by backend.
@@ -111,7 +111,7 @@ Make the first split be by user intent and job state.
 On each automation card:
 - show source badge
   - `Circle Native`
-  - `KingClaw`
+  - `OpenSwan`
 
 But do not force backend choice as the first interaction unless needed.
 
@@ -137,7 +137,7 @@ Step 3: Where should it run?
 
 Backend recommendation rules:
 - choose `circle_native` for app-context workflows
-- choose `kingclaw` for portable runtime/session-heavy jobs
+- choose `openswan` for portable runtime/session-heavy jobs
 
 ### 4. Add a “Needs Attention” surface
 
@@ -160,7 +160,7 @@ This becomes the operator’s default view.
 - goal-linked automations
 - notifications tightly tied to app data
 
-### KingClaw should own
+### OpenSwan should own
 
 - portable scheduled agent work
 - session-aware recurring jobs
@@ -179,22 +179,22 @@ When a native automation is created:
 - create native row
 - create registry row pointing to it
 
-When a KingClaw job is discovered or created from the app:
-- create/update registry row pointing to the KingClaw job id
+When a OpenSwan job is discovered or created from the app:
+- create/update registry row pointing to the OpenSwan job id
 
 ### Phase 2: Add unified run adapter
 
 Create either:
-- `automation_runs_unified` database view for native + synced KingClaw records
+- `automation_runs_unified` database view for native + synced OpenSwan records
 
 or:
 - app-layer adapter function that maps both into one UI shape
 
 The UI should stop caring which backend produced the run.
 
-### Phase 3: Add KingClaw sync
+### Phase 3: Add OpenSwan sync
 
-Persist lightweight synced metadata for KingClaw jobs:
+Persist lightweight synced metadata for OpenSwan jobs:
 - schedule
 - status
 - next run
@@ -219,7 +219,7 @@ This lets the app:
   - scheduled
   - event-driven
   - native
-  - kingclaw
+  - openswan
 - add backend explanation copy in create/edit flows
 
 ### PR2
@@ -227,19 +227,19 @@ This lets the app:
 - add `automation_registry`
 - add mapping layer for unified cards
 - add unified list rendering
-- keep existing native panel and KingClaw panel as subviews behind the unified layer
+- keep existing native panel and OpenSwan panel as subviews behind the unified layer
 
 ### PR3
 
 - add unified run history
-- show native + KingClaw runs in one timeline
+- show native + OpenSwan runs in one timeline
 - attach run outputs and failures to one shared card model
 
 ### PR4
 
 - make create flow backend-aware with recommendations
-- create KingClaw jobs from the same creation wizard
-- add richer KingClaw editing:
+- create OpenSwan jobs from the same creation wizard
+- add richer OpenSwan editing:
   - `at`
   - `every`
   - `cron`
@@ -259,7 +259,7 @@ Standardize these terms everywhere:
 
 - `Automation`: user-facing umbrella concept
 - `Circle Native`: app-native execution backend
-- `KingClaw`: gateway execution backend
+- `OpenSwan`: gateway execution backend
 - `Run`: any execution instance
 - `Trigger`: why it fired
 - `Destination`: where output goes
@@ -280,7 +280,7 @@ If you try to force both systems into one runtime immediately, you will create r
 
 ### Risk 3: Backend-first UX
 
-If users have to choose `KingClaw vs Circle Native` first, the product will still feel fragmented.
+If users have to choose `OpenSwan vs Circle Native` first, the product will still feel fragmented.
 
 ## Best Sequence
 

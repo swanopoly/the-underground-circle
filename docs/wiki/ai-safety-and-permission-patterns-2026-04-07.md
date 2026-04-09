@@ -129,7 +129,7 @@ This topic should directly shape:
 - task capability profiles
 - room mutation controls
 - chat approvals
-- OpenClaw session trust boundaries
+- OpenSwan session trust boundaries
 - future browser/computer-use features
 
 ## Sources

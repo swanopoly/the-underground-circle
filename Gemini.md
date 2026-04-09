@@ -9,9 +9,9 @@
 ## Tech Stack
 - **Frontend:** React Native + Expo 54 (Web/iOS/Android), TypeScript, React 19.
 - **Backend:** Supabase (Auth, Postgres, Realtime, Edge Functions).
-- **AI:** OpenClaw, Claude (via Anthropic API), Gemini (API key supported).
+- **AI:** OpenSwan, Claude (via Anthropic API), Gemini (API key supported).
 - **Crypto:** ethers.js, @solana/web3.js.
-- **Proxy:** `openclaw-proxy.js` (port 18790).
+- **Proxy:** `openswan-proxy.js` (port 18790).
 
 ## Core Dev Commands
 - `npm run web`: Start web development server (localhost:8081).

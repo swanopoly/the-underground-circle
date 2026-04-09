@@ -24,7 +24,7 @@ import { supabase } from '../../../lib/supabase';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
-type ToolId = 'claude-code' | 'cowork' | 'openclaw' | 'codex' | 'gemini' | 'cursor' | 'other';
+type ToolId = 'claude-code' | 'cowork' | 'openswan' | 'codex' | 'gemini' | 'cursor' | 'other';
 
 type LiveSession = {
   id: string;          // message id of the step-away post
@@ -58,7 +58,7 @@ type CompletedSession = {
 const TOOL_META: Record<ToolId, { icon: string; label: string; color: string }> = {
   'claude-code': { icon: '💻', label: 'Claude Code', color: '#6366f1' },
   'cowork':      { icon: '💼', label: 'Cowork',      color: '#22c55e' },
-  'openclaw':    { icon: '🐾', label: 'OpenClaw',    color: '#f59e0b' },
+  'openswan':    { icon: '🐾', label: 'OpenSwan',    color: '#f59e0b' },
   'codex':       { icon: '🧠', label: 'Codex',       color: '#10a37f' },
   'gemini':      { icon: '♊', label: 'Gemini',       color: '#4285f4' },
   'cursor':      { icon: '🎯', label: 'Cursor',       color: '#8b5cf6' },
@@ -106,7 +106,7 @@ function parseStepAway(content: string): Partial<LiveSession> | null {
     const toolLabel = toolMatch[1].toLowerCase();
     if (toolLabel.includes('claude code')) result.tool = 'claude-code';
     else if (toolLabel.includes('cowork')) result.tool = 'cowork';
-    else if (toolLabel.includes('openclaw')) result.tool = 'openclaw';
+    else if (toolLabel.includes('openswan')) result.tool = 'openswan';
     else if (toolLabel.includes('codex')) result.tool = 'codex';
     else if (toolLabel.includes('gemini')) result.tool = 'gemini';
     else if (toolLabel.includes('cursor')) result.tool = 'cursor';
