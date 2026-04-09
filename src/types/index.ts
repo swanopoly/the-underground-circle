@@ -39,6 +39,10 @@ export interface Circle {
   circle_image_url?: string;
   verification_badges?: string[];
   org_id?: string;
+  settings?: {
+    sessionMemoryMode?: 'private' | 'shared';
+    [key: string]: any;
+  };
 }
 
 export interface CheckInFormat {

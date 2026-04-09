@@ -44,10 +44,15 @@ export async function loadStartupMemory(opts: {
     });
 
   const durable = startupMemories.filter(m => m.scope !== 'session').slice(0, 10);
-  const recentSession = startupMemories
+  const sessionMemories = startupMemories
     .filter(m => m.scope === 'session')
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .slice(0, 1);
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+  // Separate agent session memories (CC/Cursor/Codex/Gemini) from regular chat sessions
+  const AGENT_SESSION_PREFIXES = ['CC Project:', 'CC Session:', 'Cursor Project:', 'Codex Project:', 'Gemini Project:'];
+  const isAgentSession = (m: MemoryEntry) => AGENT_SESSION_PREFIXES.some(p => m.title.startsWith(p));
+  const agentSessions = sessionMemories.filter(isAgentSession);
+  const chatSessions = sessionMemories.filter(m => !isAgentSession(m));
 
   const parts: string[] = [];
   if (durable.length > 0) {
@@ -55,8 +60,13 @@ export async function loadStartupMemory(opts: {
       `## Startup Memory\n${durable.map(m => `- [${m.scope}/${m.memory_kind}] ${m.title}: ${m.content.slice(0, 160)}`).join('\n')}`
     );
   }
-  if (recentSession.length > 0) {
-    parts.push(`## Previous Session\n${recentSession[0].content.slice(0, 800)}`);
+  // Show agent session context — what all agent sessions have been working on
+  if (agentSessions.length > 0) {
+    const agentLines = agentSessions.slice(0, 3).map(m => m.content.slice(0, 500)).join('\n---\n');
+    parts.push(`## Agent Sessions (${agentSessions.length} recent)\n${agentLines}`);
+  }
+  if (chatSessions.length > 0) {
+    parts.push(`## Previous Session\n${chatSessions[0].content.slice(0, 800)}`);
   }
 
   return parts.join('\n\n');

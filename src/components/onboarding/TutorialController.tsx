@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   loadOnboardingProgress,
   completeOnboardingStep,
+  completeAllOnboardingSteps,
   getNextStep,
   isOnboardingComplete,
   ONBOARDING_STEPS,
@@ -71,10 +72,7 @@ export default function TutorialController({ circleId }: TutorialControllerProps
     setCurrentStep(null);
     setDismissed(true);
 
-    // Persist — mark all as complete
-    for (const step of ONBOARDING_STEPS) {
-      await completeOnboardingStep(step.id);
-    }
+    await completeAllOnboardingSteps();
   }, []);
 
   // Listen for external completion signals

@@ -222,7 +222,7 @@ export async function getLastSessionContext(circleId: string, userId?: string): 
       circleId,
       userId,
       scopes: ['session'],
-      limit: 3,
+      limit: 5, // bumped from 3 to include CC session memories
     });
     // Load persistent findings/decisions — user-private + circle-shared
     const durableMemories = await loadMemories({
@@ -234,12 +234,36 @@ export async function getLastSessionContext(circleId: string, userId?: string): 
 
     const parts: string[] = [];
 
-    if (sessionMemories.length > 0) {
-      const last = sessionMemories[0];
+    // Separate agent session memories (CC/Cursor/Codex/Gemini) from regular chat sessions
+    const AGENT_SESSION_PREFIXES = ['CC Project:', 'CC Session:', 'Cursor Project:', 'Codex Project:', 'Gemini Project:'];
+    const isAgentSession = (m: any) => AGENT_SESSION_PREFIXES.some((p: string) => m.title.startsWith(p));
+    const agentSessions = sessionMemories.filter(isAgentSession);
+    const chatSessions = sessionMemories.filter((m: any) => !isAgentSession(m));
+
+    // Show active agent sessions first — so agent knows what's happening across all sessions
+    if (agentSessions.length > 0) {
+      const agentLines = agentSessions.map((m: any) => m.content).join('\n---\n');
+      parts.push(`## Active Agent Sessions (${agentSessions.length})\n${agentLines}`);
+    }
+
+    // Show previous chat session context
+    if (chatSessions.length > 0) {
+      const last = chatSessions[0];
       parts.push(`## Previous Session\n${last.content}`);
-      if (sessionMemories.length > 1) {
-        parts.push(`(${sessionMemories.length - 1} earlier sessions also in memory)`);
+      if (chatSessions.length > 1) {
+        parts.push(`(${chatSessions.length - 1} earlier sessions also in memory)`);
       }
+    }
+
+    // Fallback to live bridge context only if we do not have persisted agent session memory yet.
+    if (agentSessions.length === 0) {
+      try {
+        const { buildCrossSessionPrompt } = await import('./claudeCodeDetector');
+        const liveCtx = await buildCrossSessionPrompt();
+        if (liveCtx) {
+          parts.push(liveCtx);
+        }
+      } catch {} // bridge may not be running
     }
 
     if (durableMemories.length > 0) {

@@ -8,6 +8,7 @@ import { OfficeAgent, AgentStatus } from './officeAgents';
 import { ProviderType } from './connectionManager';
 import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
 import { supabase } from './supabase';
+import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
 
 const BRIDGE_URL = 'http://localhost:7779';
 
@@ -276,6 +277,28 @@ export async function updateCodexAgentStatus(
       .eq('owner_id', auth.user.id)
       .eq('name', CODEX_AGENT_NAME);
   } catch {}
+}
+
+// ── Session Memory Persistence ──────────────────────────────────────────────
+
+export async function saveCodexSessionsToMemory(
+  circleId: string,
+  userId: string,
+  sessions: CodexSession[],
+): Promise<{ saved: number; skipped: number }> {
+  const mapped: AgentSessionForMemory[] = sessions.map(s => ({
+    sessionId: s.sessionId,
+    projectDir: s.projectDir,
+    model: s.model,
+    status: s.status,
+    task: s.task,
+    lastActivity: s.lastActivity,
+    messageCount: s.messageCount,
+    totalInputTokens: s.totalInputTokens,
+    totalOutputTokens: s.totalOutputTokens,
+    recentActions: s.recentActions,
+  }));
+  return saveAgentSessionsToMemory('codex', circleId, userId, mapped);
 }
 
 export async function markCodexAgentOffline(circleId: string): Promise<void> {

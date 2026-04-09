@@ -11,6 +11,7 @@ import {
   ActivityIndicator,
   Animated,
   Image,
+  Switch,
 } from 'react-native';
 import { LoadingScreen } from '../../components/LoadingWave';
 import * as Clipboard from 'expo-clipboard';
@@ -77,6 +78,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   const [copiedInvite, setCopiedInvite] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
   const [showSaved, setShowSaved] = useState(false);
+  const [sessionMemoryMode, setSessionMemoryMode] = useState<'private' | 'shared'>('private');
   const saveButtonAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -108,6 +110,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
       setVibe(data.vibe || '');
       setRules(data.rules || []);
       setCircleImageUrl(data.circle_image_url || undefined);
+      setSessionMemoryMode(data.settings?.sessionMemoryMode === 'shared' ? 'shared' : 'private');
       setIsCreator(user?.id === data.created_by);
     }
     setLoading(false);
@@ -123,6 +126,10 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
         icon, accent_color: accentColor, name: name.trim(), description,
         circle_type: circleType, tags, check_in_format: checkInFormat,
         vibe, rules, circle_image_url: circleImageUrl,
+        settings: {
+          ...(circle?.settings || {}),
+          sessionMemoryMode,
+        },
       };
       const { error } = await supabase.from('circles').update(fields).eq('id', circleId);
       if (error) {
@@ -536,6 +543,37 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
           )}
         </Section>
 
+        <Section title="AI MEMORY" accentColor={accentColor}>
+          <View style={styles.memoryModeHeader}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.memoryModeTitle}>Share session memory across the circle</Text>
+              <Text style={styles.memoryModeDesc}>
+                {sessionMemoryMode === 'shared'
+                  ? 'All agents in this circle can read and build on the same session memory.'
+                  : 'Each user keeps their own session memory. Claude sessions still merge together per project for that user.'}
+              </Text>
+            </View>
+            <Switch
+              value={sessionMemoryMode === 'shared'}
+              onValueChange={(value) => {
+                if (readOnly) return;
+                const nextMode: 'private' | 'shared' = value ? 'shared' : 'private';
+                setSessionMemoryMode(nextMode);
+                markChanged();
+                save({
+                  settings: {
+                    ...(circle?.settings || {}),
+                    sessionMemoryMode: nextMode,
+                  },
+                });
+              }}
+              disabled={readOnly}
+              trackColor={{ false: '#27272a', true: accentColor + '44' }}
+              thumbColor={sessionMemoryMode === 'shared' ? accentColor : '#52525b'}
+            />
+          </View>
+        </Section>
+
         {/* ─── Fun Extras ─── */}
         <Section title="FUN EXTRAS" accentColor={accentColor}>
           <Text style={styles.fieldLabel}>CIRCLE VIBE</Text>
@@ -747,6 +785,9 @@ const styles = StyleSheet.create({
 
   // Fields
   fieldLabel: { color: '#555', fontSize: 9, fontWeight: '800', letterSpacing: 2, marginBottom: 6 },
+  memoryModeHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  memoryModeTitle: { color: '#fff', fontSize: 13, fontWeight: '700', marginBottom: 4 },
+  memoryModeDesc: { color: '#888', fontSize: 12, lineHeight: 18 },
 
   // Rules
   ruleRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },

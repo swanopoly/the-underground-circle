@@ -446,6 +446,47 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ── GET /context — aggregated context from ALL sessions for cross-session memory ──
+  if (url === '/context') {
+    const mainSessions = cachedSessions.filter(s => s.kind === 'main' || !s.kind);
+    const sessionContexts = mainSessions.map(s => ({
+      sessionId: s.sessionId,
+      slug: s.slug || s.sessionId.slice(0, 8),
+      projectDir: s.projectDir,
+      model: s.model,
+      status: s.status,
+      lastUserMessage: s.lastUserMessage || '',
+      lastAssistantText: s.lastAssistantText || '',
+      activeFiles: s.activeFiles || [],
+      recentToolCalls: (s.recentToolCalls || []).slice(-5),
+      currentToolName: s.currentToolName || '',
+      currentToolFile: s.currentToolFile || '',
+      messageCount: s.messageCount || 0,
+      lastActivity: s.lastActivity || '',
+    }));
+
+    // Build a unified summary string for easy injection into agent prompts
+    const summaryLines = sessionContexts.map(s => {
+      const project = s.projectDir.split('/').pop() || 'unknown';
+      const files = s.activeFiles.slice(-3).map(f => f.split('/').pop()).join(', ');
+      const parts = [`[${s.slug}] ${project} (${s.status})`];
+      if (s.lastUserMessage) parts.push(`  User: ${s.lastUserMessage.slice(0, 200)}`);
+      if (s.lastAssistantText) parts.push(`  Agent: ${s.lastAssistantText.slice(0, 200)}`);
+      if (files) parts.push(`  Files: ${files}`);
+      if (s.currentToolName) parts.push(`  Now: ${s.currentToolName}${s.currentToolFile ? ' → ' + s.currentToolFile.split('/').pop() : ''}`);
+      return parts.join('\n');
+    });
+
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({
+      sessionCount: sessionContexts.length,
+      sessions: sessionContexts,
+      summary: summaryLines.join('\n\n'),
+      timestamp: lastScanTime,
+    }));
+    return;
+  }
+
   // ── POST /exec — run a shell command (restricted) ──────────────────────────
   if (url === '/exec' && req.method === 'POST') {
     // Only allow requests from localhost origins

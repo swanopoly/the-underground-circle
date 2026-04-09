@@ -12,6 +12,7 @@ import { OfficeAgent, AgentStatus } from './officeAgents';
 import { ProviderType } from './connectionManager';
 import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
 import { supabase } from './supabase';
+import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
 
 const BRIDGE_URL = 'http://localhost:7781';
 
@@ -218,6 +219,28 @@ export async function updateCursorAgentStatus(
       .eq('owner_id', auth.user.id)
       .eq('name', CURSOR_AGENT_NAME);
   } catch {}
+}
+
+// ── Session Memory Persistence ──────────────────────────────────────────────
+
+export async function saveCursorSessionsToMemory(
+  circleId: string,
+  userId: string,
+  sessions: CursorSession[],
+): Promise<{ saved: number; skipped: number }> {
+  const mapped: AgentSessionForMemory[] = sessions.map(s => ({
+    sessionId: s.sessionId,
+    projectDir: s.projectDir,
+    model: s.model,
+    status: s.status,
+    task: s.task,
+    lastActivity: s.lastActivity,
+    messageCount: s.messageCount,
+    totalInputTokens: s.totalInputTokens,
+    totalOutputTokens: s.totalOutputTokens,
+    recentActions: s.recentActions,
+  }));
+  return saveAgentSessionsToMemory('cursor', circleId, userId, mapped);
 }
 
 export async function markCursorAgentOffline(circleId: string): Promise<void> {

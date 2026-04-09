@@ -18,6 +18,7 @@ export type ArtifactKind = 'text' | 'code_patch' | 'image' | 'screenshot' | 'rep
 export type ApprovalKind = 'tool_use' | 'publish' | 'external_send' | 'file_write' | 'browser_action' | 'cost_threshold' | 'privileged_action' | 'plan_approval' | 'deliverable_review';
 export type MemoryScope = 'org' | 'circle' | 'room' | 'user' | 'session';
 export type MemoryKind = 'fact' | 'instruction' | 'preference' | 'decision' | 'finding' | 'policy' | 'context';
+export type SessionMemoryMode = 'private' | 'shared';
 
 export interface AgentRun {
   id: string;
@@ -116,6 +117,17 @@ export interface MemoryEntry {
   last_accessed_at?: string;
   updated_at?: string;
   created_at: string;
+  metadata?: Record<string, unknown>;
+}
+
+export async function getCircleSessionMemoryMode(circleId: string): Promise<SessionMemoryMode> {
+  const { data } = await supabase
+    .from('circles')
+    .select('settings')
+    .eq('id', circleId)
+    .single();
+
+  return data?.settings?.sessionMemoryMode === 'shared' ? 'shared' : 'private';
 }
 
 // ── 1. Create Run ───────────────────────────────────────────────────────────
@@ -367,6 +379,7 @@ export async function saveMemory(opts: {
   visibility?: 'private' | 'room_shared' | 'circle_shared' | 'org_shared';
   importance?: number;
   retrievalMode?: 'startup' | 'on_demand' | 'manual_only';
+  metadata?: Record<string, unknown>;
 }): Promise<MemoryEntry | null> {
   // Auto-set visibility based on scope
   const visibility = opts.visibility || (
@@ -392,6 +405,7 @@ export async function saveMemory(opts: {
       visibility,
       importance: opts.importance,
       retrieval_mode: opts.retrievalMode,
+      metadata: opts.metadata || {},
     })
     .select()
     .single();
@@ -407,12 +421,13 @@ export async function loadMemories(opts: {
   scopes?: MemoryScope[];
   limit?: number;
 }): Promise<MemoryEntry[]> {
-  // Load shared memories (circle, room, org, session) separately from user-private memories
-  // This prevents user-scope memories from leaking to other circle members
+  // Load shared memories separately from user-private memories.
+  // Session memories are visibility-aware and may be either private or circle-shared.
   const results: MemoryEntry[] = [];
 
-  // 1. Load shared-scope memories (visible to all circle members)
-  const sharedScopes = (opts.scopes || ['circle', 'room', 'session', 'org']).filter(s => s !== 'user');
+  // 1. Load shared non-session memories (visible to all circle members)
+  const sharedScopes = (opts.scopes || ['circle', 'room', 'session', 'org'])
+    .filter(s => s !== 'user' && s !== 'session');
   if (sharedScopes.length > 0) {
     let sharedQuery = supabase
       .from('memory_entries')
@@ -429,7 +444,40 @@ export async function loadMemories(opts: {
     if (data) results.push(...data.map(mapMemory));
   }
 
-  // 2. Load user-private memories (only if userId is provided, only that user's memories)
+  // 2. Load session memories:
+  // - circle_shared session memories are visible to the whole circle
+  // - private session memories are only visible to the owner
+  const wantsSession = !opts.scopes || opts.scopes.includes('session');
+  if (wantsSession) {
+    const { data: sharedSessionData } = await supabase
+      .from('memory_entries')
+      .select('*')
+      .eq('circle_id', opts.circleId)
+      .eq('scope', 'session')
+      .eq('visibility', 'circle_shared')
+      .eq('is_active', true)
+      .order('updated_at', { ascending: false })
+      .limit(opts.limit || 30);
+
+    if (sharedSessionData) results.push(...sharedSessionData.map(mapMemory));
+  }
+
+  if (wantsSession && opts.userId) {
+    const { data: privateSessionData } = await supabase
+      .from('memory_entries')
+      .select('*')
+      .eq('circle_id', opts.circleId)
+      .eq('scope', 'session')
+      .eq('visibility', 'private')
+      .eq('user_id', opts.userId)
+      .eq('is_active', true)
+      .order('updated_at', { ascending: false })
+      .limit(opts.limit || 30);
+
+    if (privateSessionData) results.push(...privateSessionData.map(mapMemory));
+  }
+
+  // 3. Load user-private memories (only if userId is provided, only that user's memories)
   const wantsUser = !opts.scopes || opts.scopes.includes('user');
   if (wantsUser && opts.userId) {
     const { data } = await supabase
@@ -711,5 +759,6 @@ function mapMemory(d: any): MemoryEntry {
     is_active: d.is_active, visibility: d.visibility, importance: d.importance,
     retrieval_mode: d.retrieval_mode, status: d.status, access_count: d.access_count,
     last_accessed_at: d.last_accessed_at, updated_at: d.updated_at, created_at: d.created_at,
+    metadata: d.metadata || {},
   };
 }

@@ -9,6 +9,7 @@ import { ProviderType } from './connectionManager';
 import { estimateCostWithCache } from './modelPricing';
 import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
 import { supabase } from './supabase';
+import { getCircleSessionMemoryMode } from './agentRunSystem';
 
 const BRIDGE_URL = 'http://localhost:7778';
 
@@ -410,3 +411,212 @@ export async function markClaudeCodeAgentIdle(circleId: string): Promise<void> {
 
 // Keep the old name as an alias for backward compat
 export const markClaudeCodeAgentOffline = markClaudeCodeAgentIdle;
+
+// ── Cross-Session Context & Memory Persistence ─────────────────────────────
+
+export interface CrossSessionContext {
+  sessionCount: number;
+  sessions: Array<{
+    sessionId: string;
+    slug: string;
+    projectDir: string;
+    model: string;
+    status: string;
+    lastUserMessage: string;
+    lastAssistantText: string;
+    activeFiles: string[];
+    recentToolCalls: Array<{ tool: string; file: string; ts: string }>;
+    currentToolName: string;
+    currentToolFile: string;
+    messageCount: number;
+    lastActivity: string;
+  }>;
+  summary: string;
+  timestamp: string;
+}
+
+/**
+ * Fetch aggregated context from ALL Claude Code sessions via the bridge /context endpoint.
+ */
+export async function fetchCrossSessionContext(): Promise<CrossSessionContext | null> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(`${BRIDGE_URL}/context`, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+// Track what we've already saved to avoid duplicate memory writes
+const _savedContextHashes = new Map<string, string>(); // bucketId -> hash of last saved context
+
+function contextHash(s: { lastUserMessage: string; lastAssistantText: string; messageCount: number }): string {
+  return `${s.messageCount}:${s.lastUserMessage.slice(0, 50)}:${s.lastAssistantText.slice(0, 50)}`;
+}
+
+function normalizeProjectKey(projectDir: string): string {
+  const project = projectDir.split('/').filter(Boolean).pop() || 'project';
+  return project.toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
+}
+
+/**
+ * Save Claude Code session context to the app's memory system.
+ * Called periodically by the poller — only writes when context has meaningfully changed.
+ * All main Claude sessions for the same project are merged into one project-scoped memory entry.
+ */
+export async function saveSessionsToMemory(
+  circleId: string,
+  userId: string,
+  sessions: ClaudeCodeSession[],
+): Promise<{ saved: number; skipped: number }> {
+  let saved = 0;
+  let skipped = 0;
+
+  const mainSessions = sessions.filter(s => s.kind === 'main' || !s.kind);
+  const sessionMode = await getCircleSessionMemoryMode(circleId);
+  const visibility = sessionMode === 'shared' ? 'circle_shared' : 'private';
+  const grouped = new Map<string, ClaudeCodeSession[]>();
+
+  for (const session of mainSessions) {
+    if (!session.lastUserMessage && !session.lastAssistantText) {
+      skipped++;
+      continue;
+    }
+
+    const projectKey = normalizeProjectKey(session.projectDir);
+    const bucket = grouped.get(projectKey) || [];
+    bucket.push(session);
+    grouped.set(projectKey, bucket);
+  }
+
+  for (const [projectKey, projectSessions] of grouped) {
+    const sortedSessions = [...projectSessions].sort((a, b) => {
+      const aTime = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
+      const bTime = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
+      return bTime - aTime;
+    });
+    const latest = sortedSessions[0];
+    const project = latest.projectDir.split('/').filter(Boolean).pop() || 'project';
+    const bucketId = sessionMode === 'shared'
+      ? `claude-project:shared:${projectKey}`
+      : `claude-project:private:${userId}:${projectKey}`;
+
+    const combinedUser = sortedSessions
+      .map(s => s.lastUserMessage || '')
+      .filter(Boolean)
+      .slice(0, 4)
+      .join(' | ');
+    const combinedAssistant = sortedSessions
+      .map(s => s.lastAssistantText || '')
+      .filter(Boolean)
+      .slice(0, 4)
+      .join(' | ');
+    const messageCount = sortedSessions.reduce((sum, s) => sum + (s.messageCount || 0), 0);
+    const activeFiles = Array.from(new Set(
+      sortedSessions.flatMap(s => (s.activeFiles || []).slice(-5).map(f => f.split('/').pop() || f))
+    )).slice(0, 8);
+    const tools = Array.from(new Set(
+      sortedSessions.map(s => s.currentToolName || '').filter(Boolean)
+    )).slice(0, 5);
+
+    const hash = contextHash({
+      lastUserMessage: combinedUser,
+      lastAssistantText: combinedAssistant,
+      messageCount,
+    });
+    if (_savedContextHashes.get(bucketId) === hash) {
+      skipped++;
+      continue;
+    }
+
+    const content = [
+      `Claude Code project memory for ${project}`,
+      `Sessions merged: ${sortedSessions.length} | Total messages: ${messageCount}`,
+      combinedUser ? `Recent requests: ${combinedUser.slice(0, 600)}` : '',
+      combinedAssistant ? `Recent responses: ${combinedAssistant.slice(0, 600)}` : '',
+      activeFiles.length > 0 ? `Active files: ${activeFiles.join(', ')}` : '',
+      tools.length > 0 ? `Current tools: ${tools.join(', ')}` : '',
+    ].filter(Boolean).join('\n');
+
+    try {
+      let existingQuery = supabase
+        .from('memory_entries')
+        .select('id')
+        .eq('circle_id', circleId)
+        .eq('scope', 'session')
+        .eq('memory_kind', 'context')
+        .eq('source_surface', 'claude_code_bridge')
+        .eq('session_id', bucketId)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      existingQuery = sessionMode === 'shared'
+        ? existingQuery.is('user_id', null)
+        : existingQuery.eq('user_id', userId);
+      const { data: existing, error: existingError } = await existingQuery.maybeSingle();
+      if (existingError) throw existingError;
+
+      if (existing) {
+        const { error: updateError } = await supabase.from('memory_entries').update({
+          content,
+          title: `CC Project: ${project}`,
+          visibility,
+          updated_at: new Date().toISOString(),
+          metadata: {
+            projectKey,
+            projectDir: latest.projectDir,
+            mergedSessionIds: sortedSessions.map(s => s.sessionId),
+            sessionMemoryMode: sessionMode,
+          },
+        }).eq('id', existing.id);
+        if (updateError) throw updateError;
+      } else {
+        const { saveMemory } = await import('./agentRunSystem');
+        const savedMemory = await saveMemory({
+          scope: 'session',
+          circleId,
+          userId: sessionMode === 'shared' ? undefined : userId,
+          sessionId: bucketId,
+          memoryKind: 'context',
+          title: `CC Project: ${project}`,
+          content,
+          sourceSurface: 'claude_code_bridge',
+          visibility,
+          retrievalMode: 'startup',
+          importance: 0.72,
+          metadata: {
+            projectKey,
+            projectDir: latest.projectDir,
+            mergedSessionIds: sortedSessions.map(s => s.sessionId),
+            sessionMemoryMode: sessionMode,
+          },
+        });
+        if (!savedMemory) throw new Error('saveMemory returned null');
+      }
+
+      _savedContextHashes.set(bucketId, hash);
+      saved++;
+    } catch (err) {
+      console.warn('[claudeCodeDetector] Failed to save session context:', err);
+      skipped++;
+    }
+  }
+
+  return { saved, skipped };
+}
+
+/**
+ * Build a cross-session context string suitable for injection into agent system prompts.
+ * Shows what ALL active Claude Code sessions are working on so any new session
+ * can pick up where others left off.
+ */
+export async function buildCrossSessionPrompt(): Promise<string> {
+  const ctx = await fetchCrossSessionContext();
+  if (!ctx || ctx.sessionCount === 0) return '';
+
+  return `## Active Claude Code Sessions (${ctx.sessionCount})\n${ctx.summary}`;
+}

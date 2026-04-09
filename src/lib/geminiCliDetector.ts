@@ -13,6 +13,7 @@ import { OfficeAgent, AgentStatus } from './officeAgents';
 import { ProviderType } from './connectionManager';
 import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
 import { supabase } from './supabase';
+import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
 
 const BRIDGE_URL = 'http://localhost:7780';
 
@@ -243,6 +244,28 @@ export async function updateGeminiCliAgentStatus(
       .eq('owner_id', auth.user.id)
       .eq('name', GEMINI_CLI_AGENT_NAME);
   } catch {}
+}
+
+// ── Session Memory Persistence ──────────────────────────────────────────────
+
+export async function saveGeminiSessionsToMemory(
+  circleId: string,
+  userId: string,
+  sessions: GeminiCliSession[],
+): Promise<{ saved: number; skipped: number }> {
+  const mapped: AgentSessionForMemory[] = sessions.map(s => ({
+    sessionId: s.sessionId,
+    projectDir: s.projectDir,
+    model: s.model,
+    status: s.status,
+    task: s.task,
+    lastActivity: s.lastActivity,
+    messageCount: s.messageCount,
+    totalInputTokens: s.totalInputTokens,
+    totalOutputTokens: s.totalOutputTokens,
+    recentActions: s.recentActions,
+  }));
+  return saveAgentSessionsToMemory('gemini', circleId, userId, mapped);
 }
 
 export async function markGeminiCliAgentOffline(circleId: string): Promise<void> {

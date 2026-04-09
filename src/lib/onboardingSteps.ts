@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { supabase } from './supabase';
 
 // ─── Onboarding Step Types ──────────────────────────────────────────────────
 
@@ -84,10 +85,65 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
 
 const ONBOARDING_STORAGE_KEY = 'uc_onboarding_progress';
 
+function buildCompleteProgress(): Record<string, boolean> {
+  const allDone: Record<string, boolean> = {};
+  for (const step of ONBOARDING_STEPS) {
+    allDone[step.id] = true;
+  }
+  return allDone;
+}
+
+async function loadRemoteTutorialSeen(): Promise<boolean> {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return false;
+    const { data } = await supabase
+      .from('profiles')
+      .select('office_preferences')
+      .eq('id', user.id)
+      .single();
+    return data?.office_preferences?.firstCircleTutorialSeen === true;
+  } catch {
+    return false;
+  }
+}
+
+async function saveRemoteTutorialSeen(): Promise<void> {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const { data } = await supabase
+      .from('profiles')
+      .select('office_preferences')
+      .eq('id', user.id)
+      .single();
+
+    await supabase
+      .from('profiles')
+      .update({
+        office_preferences: {
+          ...(data?.office_preferences || {}),
+          firstCircleTutorialSeen: true,
+        },
+      })
+      .eq('id', user.id);
+  } catch (err) {
+    console.warn('[Onboarding] Failed to persist remote tutorial state:', err);
+  }
+}
+
 // ─── Load Progress ──────────────────────────────────────────────────────────
 
 export async function loadOnboardingProgress(): Promise<Record<string, boolean>> {
   try {
+    const remoteSeen = await loadRemoteTutorialSeen();
+    if (remoteSeen) {
+      const allDone = buildCompleteProgress();
+      await AsyncStorage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(allDone));
+      return allDone;
+    }
+
     const raw = await AsyncStorage.getItem(ONBOARDING_STORAGE_KEY);
     if (raw) {
       return JSON.parse(raw) as Record<string, boolean>;
@@ -105,8 +161,21 @@ export async function completeOnboardingStep(stepId: string): Promise<void> {
     const progress = await loadOnboardingProgress();
     progress[stepId] = true;
     await AsyncStorage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(progress));
+    if (isOnboardingComplete(progress)) {
+      await saveRemoteTutorialSeen();
+    }
   } catch (err) {
     console.warn('[Onboarding] Failed to save step:', err);
+  }
+}
+
+export async function completeAllOnboardingSteps(): Promise<void> {
+  try {
+    const allDone = buildCompleteProgress();
+    await AsyncStorage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(allDone));
+    await saveRemoteTutorialSeen();
+  } catch (err) {
+    console.warn('[Onboarding] Failed to complete tutorial:', err);
   }
 }
 
