@@ -1322,6 +1322,30 @@ export default function AgentPanel({
             ))}
           </View>
 
+          {/* ── RUNTIME HEALTH ── */}
+          <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10, marginBottom: 8 }}>
+            <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>RUNTIME</Text>
+            <View style={{ flexDirection: 'row', gap: 6 }}>
+              <View style={{ flex: 1, alignItems: 'center', paddingVertical: 4 }}>
+                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: isActive ? '#22c55e' : agent.status === 'idle' ? '#f59e0b' : '#ef4444', marginBottom: 3 }} />
+                <Text style={{ color: '#a0a0b0', fontSize: 9, fontWeight: '700', fontFamily: MONO }}>{isActive ? 'HEALTHY' : agent.status === 'idle' ? 'IDLE' : 'DOWN'}</Text>
+                <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>Gateway</Text>
+              </View>
+              <View style={{ flex: 1, alignItems: 'center', paddingVertical: 4 }}>
+                <Text style={{ color: '#6366f1', fontSize: 14, fontWeight: '800', fontFamily: MONO }}>{agent.turns || 0}</Text>
+                <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>Turns</Text>
+              </View>
+              <View style={{ flex: 1, alignItems: 'center', paddingVertical: 4 }}>
+                <Text style={{ color: '#22c55e', fontSize: 14, fontWeight: '800', fontFamily: MONO }}>${agent.costToday.toFixed(2)}</Text>
+                <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>Cost</Text>
+              </View>
+              <View style={{ flex: 1, alignItems: 'center', paddingVertical: 4 }}>
+                <Text style={{ color: '#a0a0b0', fontSize: 14, fontWeight: '800', fontFamily: MONO }}>{agent.subagentCount || 0}</Text>
+                <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>Sub-Agents</Text>
+              </View>
+            </View>
+          </View>
+
           {/* ── BRIDGE CONTROLS ── */}
           {circleId && sessionKey && (
             <View nativeID="section-agent-controls">

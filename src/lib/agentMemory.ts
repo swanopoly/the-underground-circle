@@ -187,26 +187,10 @@ export async function autoExtractAndSave(
         title: mem.title,
         content: mem.content,
         sourceSurface: 'main_chat',
+        importance,
+        retrievalMode: retrievalMode as any,
+        visibility: scope === 'user' ? 'private' : 'circle_shared',
       });
-
-      // Set importance and retrieval mode (columns added in privacy fix migration)
-      // Non-blocking — these columns may not exist yet if migration hasn't run
-      try {
-        if (saved === 0) {
-          // Only attempt once to check if columns exist
-          const { data: latest } = await supabase
-            .from('memory_entries')
-            .select('id')
-            .eq('circle_id', circleId)
-            .eq('title', mem.title)
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .single();
-          if (latest) {
-            await supabase.from('memory_entries').update({ importance, retrieval_mode: retrievalMode }).eq('id', latest.id);
-          }
-        }
-      } catch {}
 
       saved++;
     }
@@ -235,10 +219,10 @@ export async function getUserMemories(
   session: MemoryEntry[];
   total: number;
 }> {
-  const all = await loadMemories({ circleId, limit: 200 });
+  const all = await loadMemories({ circleId, userId, scopes: ['circle', 'user', 'session'], limit: 200 });
 
   const circle = all.filter(m => m.scope === 'circle');
-  const user = userId ? all.filter(m => m.scope === 'user' && m.user_id === userId) : [];
+  const user = all.filter(m => m.scope === 'user');
   const session = all.filter(m => m.scope === 'session');
 
   return { circle, user, session, total: all.length };

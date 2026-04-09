@@ -161,18 +161,43 @@ export async function saveSessionToMemory(circleId: string, userId: string): Pro
     `Last agent actions:\n${agentActions.slice(-3).map(a => `- ${a}`).join('\n')}`,
   ].filter(Boolean).join('\n');
 
-  // 1. Save session summary
+  // 1. Upsert session summary — replace the previous one instead of stacking duplicates
   try {
-    const { saveMemory } = await import('./agentRunSystem');
-    await saveMemory({
-      scope: 'session',
-      circleId,
-      userId,
-      memoryKind: 'context',
-      title: `Session ${new Date().toLocaleDateString()} — ${topics.size > 0 ? [...topics].slice(0, 3).join(', ') : 'conversation'}`,
-      content: summary,
-      sourceSurface: 'main_chat',
-    });
+    const sessionTitle = `Session ${new Date().toLocaleDateString()}`;
+    // Try to update the most recent session summary for today
+    const { data: existing } = await supabase
+      .from('memory_entries')
+      .select('id')
+      .eq('circle_id', circleId)
+      .eq('user_id', userId)
+      .eq('scope', 'session')
+      .eq('memory_kind', 'context')
+      .ilike('title', `Session ${new Date().toLocaleDateString()}%`)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (existing) {
+      // Update existing session summary for today
+      await supabase.from('memory_entries').update({
+        content: summary,
+        title: `${sessionTitle} — ${topics.size > 0 ? [...topics].slice(0, 3).join(', ') : 'conversation'}`,
+        updated_at: new Date().toISOString(),
+      }).eq('id', existing.id);
+    } else {
+      // Create new session summary (first session of the day)
+      const { saveMemory } = await import('./agentRunSystem');
+      await saveMemory({
+        scope: 'session',
+        circleId,
+        userId,
+        memoryKind: 'context',
+        title: `${sessionTitle} — ${topics.size > 0 ? [...topics].slice(0, 3).join(', ') : 'conversation'}`,
+        content: summary,
+        sourceSurface: 'main_chat',
+        visibility: 'private',
+      });
+    }
   } catch {}
 
   // 2. Extract durable memories from the conversation (LLM-powered)
@@ -189,18 +214,20 @@ export async function saveSessionToMemory(circleId: string, userId: string): Pro
  * Build a "last session" context string for the agent's system prompt.
  * Loads the most recent session memory + any persistent findings/decisions.
  */
-export async function getLastSessionContext(circleId: string): Promise<string> {
+export async function getLastSessionContext(circleId: string, userId?: string): Promise<string> {
   try {
     const { loadMemories } = await import('./agentRunSystem');
-    // Load last session summary
+    // Load last session summary — bound to this user
     const sessionMemories = await loadMemories({
       circleId,
+      userId,
       scopes: ['session'],
       limit: 3,
     });
-    // Load persistent findings/decisions
+    // Load persistent findings/decisions — user-private + circle-shared
     const durableMemories = await loadMemories({
       circleId,
+      userId,
       scopes: ['circle', 'user'],
       limit: 10,
     });
@@ -485,7 +512,7 @@ async function buildSystemPromptAsync(context: SwanBotContext, data: CircleConte
   // Load last session context so agent can continue where it left off
   try {
     if (context.circleId) {
-      const lastSession = await getLastSessionContext(context.circleId);
+      const lastSession = await getLastSessionContext(context.circleId, context.userId);
       if (lastSession) extras.push(lastSession);
     }
   } catch {}
