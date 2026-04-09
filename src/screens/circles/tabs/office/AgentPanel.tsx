@@ -94,12 +94,16 @@ function cacheHitPct(cachedTokens: number, totalInputTokens: number): string {
 
 // ── SECTION: agent-memory-panel — Memory viewer/editor for this agent ────────
 
-function AgentMemoryPanel({ circleId, userId, agentName, accentColor }: { circleId: string; userId?: string; agentName: string; accentColor: string }) {
+function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerType }: {
+  circleId: string; userId?: string; agentName: string; accentColor: string; providerType?: string;
+}) {
   const [memories, setMemories] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState('');
   const [newMemory, setNewMemory] = useState('');
+  const [newSkill, setNewSkill] = useState('');
+  const [viewMode, setViewMode] = useState<'all' | 'shared' | 'private' | 'skills'>('all');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -112,6 +116,14 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor }: { circle
   }, [circleId, userId]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Filter memories by view mode
+  const filtered = memories.filter(mem => {
+    if (viewMode === 'shared') return mem.scope === 'circle';
+    if (viewMode === 'private') return mem.scope === 'user' || mem.scope === 'session';
+    if (viewMode === 'skills') return mem.memory_kind === 'instruction';
+    return true; // 'all'
+  });
 
   const handleSave = async (id: string) => {
     try {
@@ -140,13 +152,42 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor }: { circle
     } catch {}
   };
 
+  const handleAddSkill = async () => {
+    if (!newSkill.trim()) return;
+    try {
+      const { rememberFromChat } = await import('../../../../lib/memoryService');
+      await rememberFromChat(circleId, userId || '', newSkill.trim(), 'instruction');
+      setNewSkill('');
+      load();
+    } catch {}
+  };
+
   const kindColors: Record<string, string> = { preference: '#a855f7', fact: '#6366f1', decision: '#f59e0b', finding: '#22c55e', instruction: '#ec4899', policy: '#3b82f6', context: '#606075' };
 
   return (
     <View style={{ gap: 8 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
         <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>AGENT MEMORY</Text>
-        <Text style={{ color: '#3a3a4e', fontSize: 9, fontFamily: MONO }}>({memories.length})</Text>
+        <Text style={{ color: '#3a3a4e', fontSize: 9, fontFamily: MONO }}>({filtered.length}/{memories.length})</Text>
+      </View>
+
+      {/* View mode toggle */}
+      <View style={{ flexDirection: 'row', gap: 2, marginBottom: 4 }}>
+        {(['all', 'shared', 'private', 'skills'] as const).map(mode => (
+          <Pressable
+            key={mode}
+            onPress={() => setViewMode(mode)}
+            style={[{
+              paddingHorizontal: 8, paddingVertical: 3, borderRadius: 2,
+              backgroundColor: viewMode === mode ? accentColor + '20' : 'transparent',
+              borderWidth: 1, borderColor: viewMode === mode ? accentColor + '40' : '#1a1a28',
+            }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={{ color: viewMode === mode ? accentColor : '#3a3a4e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>
+              {mode.toUpperCase()}
+            </Text>
+          </Pressable>
+        ))}
       </View>
 
       {/* Add new memory */}
@@ -165,14 +206,32 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor }: { circle
         </Pressable>
       </View>
 
+      {/* Add new skill (instruction) */}
+      {(viewMode === 'skills' || viewMode === 'all') && (
+        <View style={{ flexDirection: 'row', gap: 4 }}>
+          <TextInput
+            value={newSkill}
+            onChangeText={setNewSkill}
+            placeholder="Add a skill/instruction..."
+            placeholderTextColor="#3a3a4e"
+            style={{ flex: 1, color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 4, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+            onSubmitEditing={handleAddSkill}
+            returnKeyType="done"
+          />
+          <Pressable onPress={handleAddSkill} style={[{ backgroundColor: '#a855f720', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 2, borderWidth: 1, borderColor: '#a855f740' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+            <Text style={{ color: '#a855f7', fontSize: 9, fontWeight: '700', fontFamily: MONO }}>+Skill</Text>
+          </Pressable>
+        </View>
+      )}
+
       {/* Memory list */}
       <ScrollView style={{ maxHeight: 350 }} nestedScrollEnabled showsVerticalScrollIndicator>
         {loading ? (
           <ActivityIndicator size="small" color={accentColor} style={{ padding: 20 }} />
-        ) : memories.length === 0 ? (
+        ) : filtered.length === 0 ? (
           <Text style={{ color: '#3a3a4e', fontSize: 10, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No memories yet. Chat with the agent to build memory.</Text>
         ) : (
-          memories.map((mem: any) => (
+          filtered.map((mem: any) => (
             <View key={mem.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 8, marginBottom: 4 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 3 }}>
                 <View style={{ backgroundColor: (kindColors[mem.memory_kind] || '#606075') + '20', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 2 }}>
@@ -2241,7 +2300,7 @@ export default function AgentPanel({
       {/* ── MEMORY TAB — view and edit agent memories ── */}
       {panelTab === 'memory' && circleId && (
         <View nativeID="section-agent-memory" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
-          <AgentMemoryPanel circleId={circleId} userId={userId || undefined} agentName={agent.name} accentColor={agent.color || '#6366f1'} />
+          <AgentMemoryPanel circleId={circleId} userId={userId || undefined} agentName={agent.name} accentColor={agent.color || '#6366f1'} providerType={agent.providerType} />
         </View>
       )}
 
