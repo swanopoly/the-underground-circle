@@ -825,6 +825,9 @@ export default function AgentPanel({
   appearances, onAppearanceChange, environmentType, onRunCommand,
 }: Props) {
   const slideAnim = useRef(new Animated.Value(400)).current;
+  const [panelWidth, setPanelWidth] = useState(540);
+  const dragStartX = useRef(0);
+  const dragStartW = useRef(540);
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState('');
   const [panelTab, setPanelTab] = useState<'overview' | 'openclaw' | 'terminal' | 'spirit' | 'evolution' | 'activity' | 'memory' | 'runs' | 'customize'>('overview');
@@ -1008,8 +1011,27 @@ export default function AgentPanel({
       isDesktop
         ? { transform: [{ translateX: slideAnim }] }
         : { transform: [{ translateY: slideAnim }] },
-      isDesktop && styles.panelDesktop,
+      isDesktop && [styles.panelDesktop, { width: panelWidth }],
     ]}>
+      {/* Resize drag handle — left edge (desktop only, web only) */}
+      {isDesktop && Platform.OS === 'web' && (
+        <View
+          onPointerDown={(e: any) => {
+            dragStartX.current = e.nativeEvent?.pageX || e.pageX || 0;
+            dragStartW.current = panelWidth;
+            const onMove = (ev: MouseEvent) => {
+              const delta = dragStartX.current - ev.pageX;
+              setPanelWidth(Math.max(360, Math.min(900, dragStartW.current + delta)));
+            };
+            const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onUp);
+          }}
+          style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, zIndex: 10, cursor: 'col-resize', justifyContent: 'center', alignItems: 'center' } as any}
+        >
+          <View style={{ width: 2, height: 40, borderRadius: 1, backgroundColor: '#2a2a3e' }} />
+        </View>
+      )}
       {/* Close button (desktop: top-right X, mobile: drag handle) */}
       {isDesktop ? (
         <View style={styles.desktopHeader}>
@@ -2183,7 +2205,6 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 'auto' as any,
     right: 0,
-    width: 540,
     maxHeight: '100%' as any,
     borderRadius: 0,
     borderTopLeftRadius: 12,
