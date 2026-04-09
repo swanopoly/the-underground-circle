@@ -17,6 +17,7 @@ import FlatIcon from '../../../components/FlatIcon';
 import MemoryViewer from '../../../components/agent/MemoryViewer';
 import RunStatusBar from '../../../components/agent/RunStatusBar';
 import PluginPicker from '../../../components/agent/PluginPicker';
+import MemoryToast from '../../../components/agent/MemoryToast';
 import {
   getSwanBotResponse as getAIResponse,
   getSwanBotStructuredResponse,
@@ -209,6 +210,10 @@ type ChatMessage = {
   isCheckIn?: boolean;
   isAchievement?: boolean;
   artifacts?: SwanBotStructuredArtifact[];
+  // Memory indicators
+  memoriesSaved?: string[];   // titles of memories extracted from this exchange
+  memoriesUsed?: string[];    // titles of memories that informed this response
+  delegatedTo?: string;       // subagent that handled this message
 };
 
 // ─── Animation Components ────────────────────────────────────────────────────
@@ -401,6 +406,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [runStatus, setRunStatus] = useState<'idle' | 'running' | 'delegated' | 'waiting_approval'>('idle');
   const [activeSubagent, setActiveSubagent] = useState<{ name: string; icon: string; color: string } | null>(null);
   const [currentRunStep, setCurrentRunStep] = useState<string>('');
+  const [memoryToast, setMemoryToast] = useState<{ message: string; type: 'saved' | 'updated' | 'conflict' | 'forgotten' } | null>(null);
   // User behavior profile
   const profileRef = useRef<UserChatProfile | null>(null);
 
@@ -854,9 +860,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return msg;
   };
 
-  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[]) => {
+  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; memoriesUsed?: string[] }) => {
+    const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const msg: ChatMessage = {
-      id: `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      id: msgId,
       content,
       isBot: true,
       isUser: false,
@@ -864,10 +871,31 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       timestamp: new Date(),
       reactions: {},
       artifacts,
+      delegatedTo: extra?.delegatedTo,
+      memoriesUsed: extra?.memoriesUsed,
     };
 
     setMessages(prev => [...prev, msg]);
     animateNewMessage(msg.id);
+
+    // Background memory extraction — non-blocking, updates the message with saved indicators
+    if (currentUserId && circleId) {
+      (async () => {
+        try {
+          const { autoExtractAndSave } = await import('../../../lib/agentMemory');
+          const history = messages.slice(-6).map(m => ({ role: m.isBot ? 'model' : 'user', text: m.content }));
+          history.push({ role: 'model', text: content });
+          const { saved } = await autoExtractAndSave(circleId, currentUserId, history);
+          if (saved > 0) {
+            // Update the message with memory saved indicator
+            setMessages(prev => prev.map(m =>
+              m.id === msgId ? { ...m, memoriesSaved: [`${saved} new`] } : m
+            ));
+            setMemoryToast({ message: `${saved} memor${saved === 1 ? 'y' : 'ies'} saved from this conversation`, type: 'saved' });
+          }
+        } catch {}
+      })();
+    }
 
     // Persist bot message with retry
     if (currentUserId) {
@@ -1131,6 +1159,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const { rememberFromChat } = await import('../../../lib/memoryService');
         const mem = await rememberFromChat(circleId, currentUserId || '', what);
         addBotMessage(mem ? `Remembered: "${what.slice(0, 80)}"` : 'Failed to save memory.');
+        if (mem) setMemoryToast({ message: `Saved: "${what.slice(0, 50)}"`, type: 'saved' });
       } catch (e: any) { addBotMessage(`Memory error: ${e.message}`); }
       return;
     }
@@ -1142,6 +1171,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const { forgetFromChat } = await import('../../../lib/memoryService');
         const { forgotten } = await forgetFromChat(circleId, currentUserId || '', what);
         addBotMessage(forgotten > 0 ? `Forgot ${forgotten} memor${forgotten === 1 ? 'y' : 'ies'} matching "${what}".` : `No memories found matching "${what}".`);
+        if (forgotten > 0) setMemoryToast({ message: `Forgot ${forgotten} memor${forgotten === 1 ? 'y' : 'ies'}`, type: 'forgotten' });
       } catch (e: any) { addBotMessage(`Memory error: ${e.message}`); }
       return;
     }
@@ -1369,7 +1399,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 chatHistory,
               });
 
-              addBotMessage(`**${subagent.displayName}:**\n\n${result.response}`);
+              addBotMessage(result.response, undefined, { delegatedTo: subagent.displayName });
               delegated = true;
               setRunStatus('idle');
               setActiveSubagent(null);
@@ -1652,10 +1682,43 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const renderContent = (item: ChatMessage) => {
     return (
       <View>
+        {/* Subagent delegation badge */}
+        {item.delegatedTo && (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 4 }}>
+            <View style={{ backgroundColor: '#a855f715', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#a855f730', flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+              <Text style={{ color: '#a855f7', fontSize: 8, fontWeight: '700', fontFamily: 'monospace' }}>{item.delegatedTo.toUpperCase()}</Text>
+            </View>
+          </View>
+        )}
         <Text style={[styles.msgContent, { color: messageDensity === 'compact' ? '#bbb' : '#ccc' }]}>
           {renderInlineText(item.content)}
         </Text>
         {renderArtifacts(item.artifacts)}
+        {/* Memory source citations — which memories informed this response */}
+        {item.memoriesUsed && item.memoriesUsed.length > 0 && (
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 3, marginTop: 6 }}>
+            <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: 'monospace' }}>Used:</Text>
+            {item.memoriesUsed.map((m, i) => (
+              <View key={i} style={{ backgroundColor: '#6366f110', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#6366f125' }}>
+                <Text style={{ color: '#6366f1', fontSize: 7, fontFamily: 'monospace' }}>{m}</Text>
+              </View>
+            ))}
+          </View>
+        )}
+        {/* Memory saved indicator — inline chip like ChatGPT */}
+        {item.memoriesSaved && item.memoriesSaved.length > 0 && (
+          <Pressable
+            onPress={() => setShowMemoryViewer(true)}
+            style={[{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 6, backgroundColor: '#22c55e08', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e20', alignSelf: 'flex-start' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <View style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: '#22c55e20', justifyContent: 'center', alignItems: 'center' }}>
+              <Text style={{ color: '#22c55e', fontSize: 7, fontWeight: '800' }}>M</Text>
+            </View>
+            <Text style={{ color: '#22c55e', fontSize: 8, fontFamily: 'monospace' }}>
+              {item.memoriesSaved.length === 1 ? `Memory saved: ${item.memoriesSaved[0]}` : `${item.memoriesSaved.length} memories saved`}
+            </Text>
+          </Pressable>
+        )}
       </View>
     );
   };
@@ -2261,6 +2324,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       )}
 
       {/* Enhanced input with model selector + quick actions + mode selector */}
+      {/* Memory Toast — non-blocking notification */}
+      {memoryToast && (
+        <MemoryToast
+          message={memoryToast.message}
+          type={memoryToast.type}
+          onDismiss={() => setMemoryToast(null)}
+          onPress={() => { setMemoryToast(null); setShowMemoryViewer(true); }}
+        />
+      )}
+
       {/* Run Status Bar — shows active delegation/processing */}
       <RunStatusBar
         status={runStatus}
