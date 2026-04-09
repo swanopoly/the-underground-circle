@@ -1544,16 +1544,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     const onFloor = new Set(floorIds);
     const filtered = displayAgents.filter(a => onFloor.has(a.id));
     if (filtered.length === 0) return displayAgents;
-    // Ensure BlackSwan is always first, then sort remaining by most recently active
+    // Ensure BlackSwan first, Claude Code (C3PO) second, then sort remaining
     const blackSwan = filtered.find(a => a.id === DEFAULT_AGENT.id);
-    const rest = filtered.filter(a => a.id !== DEFAULT_AGENT.id).sort((a, b) => {
+    const claudeCode = filtered.filter(a => a.id !== DEFAULT_AGENT.id && a.providerType === 'claude-code');
+    const rest = filtered.filter(a => a.id !== DEFAULT_AGENT.id && a.providerType !== 'claude-code').sort((a, b) => {
       const rankDiff = getDisplayAgentSortRank(a) - getDisplayAgentSortRank(b);
       if (rankDiff !== 0) return rankDiff;
       const ta = a.lastActive ? new Date(a.lastActive).getTime() : 0;
       const tb = b.lastActive ? new Date(b.lastActive).getTime() : 0;
       return tb - ta;
     });
-    return blackSwan ? [blackSwan, ...rest] : rest;
+    return [...(blackSwan ? [blackSwan] : []), ...claudeCode, ...rest];
   }, [displayAgents, currentFloor?.agentIds, getDisplayAgentSortRank]);
 
   // Auto-assign new agents to first floor (runs only when agent count changes)
