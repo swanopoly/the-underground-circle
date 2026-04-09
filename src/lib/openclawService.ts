@@ -326,6 +326,29 @@ export async function manageCronJob(
   }
 }
 
+export async function createCronJob(
+  config: OpenClawConfig,
+  opts: { name: string; schedule: string; task: string; sessionTarget?: string; timezone?: string; enabled?: boolean },
+): Promise<{ ok: boolean; jobId?: string; error?: string }> {
+  try {
+    const result = await invokeToolRaw(config, 'cron', {
+      action: 'add',
+      name: opts.name,
+      cron: opts.schedule,
+      task: opts.task,
+      sessionTarget: opts.sessionTarget || 'isolated',
+      tz: opts.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+      enabled: opts.enabled !== false,
+    });
+    if (!result.ok) return { ok: false, error: result.error?.message };
+    const text = result.result?.content?.[0]?.text || '';
+    const idMatch = text.match(/`([a-f0-9-]+)`/);
+    return { ok: true, jobId: idMatch?.[1] || 'created' };
+  } catch (e: any) {
+    return { ok: false, error: e.message };
+  }
+}
+
 export async function searchMemory(
   config: OpenClawConfig,
   query: string,

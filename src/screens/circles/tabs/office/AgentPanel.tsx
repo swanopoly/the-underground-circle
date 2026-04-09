@@ -33,6 +33,7 @@ import {
   sendSessionMessage,
   spawnSubAgent,
   manageCronJob,
+  createCronJob,
 } from '../../../../lib/openclawService';
 import { supabase } from '../../../../lib/supabase';
 
@@ -613,6 +614,238 @@ function OpenClawFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
   );
 }
 
+// ── SECTION: cron-jobs-panel — Scheduled tasks and automation ────────────────
+
+function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; circleId: string; accentColor: string }) {
+  const [jobs, setJobs] = useState<CronJob[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [newJob, setNewJob] = useState({ name: '', schedule: '', task: '', sessionTarget: 'isolated' });
+  const [connection, setConnection] = useState<AgentConnection | null>(null);
+
+  const resolveConfig = useCallback(async (): Promise<OpenClawConfig | null> => {
+    const connections = await loadConnections();
+    const match = connections.find(c => c.provider === 'openclaw' && c.status === 'connected')
+      || connections.find(c => c.provider === 'openclaw');
+    if (!match?.endpoint || !match?.token || match.token === '***') { setConnection(match || null); return null; }
+    setConnection(match);
+    return { endpoint: match.endpoint, token: match.token };
+  }, []);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const config = await resolveConfig();
+      if (!config) { setError('No OpenClaw connection available.'); setJobs([]); setLoading(false); return; }
+      const result = await listCronJobs(config);
+      setJobs(result.jobs || []);
+      if (!result.ok) setError('Failed to load cron jobs.');
+    } catch (e: any) { setError(e.message); }
+    setLoading(false);
+  }, [resolveConfig]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const handleAction = async (action: 'run' | 'update' | 'remove', jobId: string, patch?: any) => {
+    setActionLoading(`${action}-${jobId}`);
+    try {
+      const config = await resolveConfig();
+      if (!config) return;
+      await manageCronJob(config, action, jobId, patch);
+      await refresh();
+    } catch {}
+    setActionLoading(null);
+  };
+
+  const handleCreate = async () => {
+    if (!newJob.name || !newJob.schedule || !newJob.task) return;
+    setActionLoading('create');
+    try {
+      const config = await resolveConfig();
+      if (!config) return;
+      await createCronJob(config, {
+        name: newJob.name,
+        schedule: newJob.schedule,
+        task: newJob.task,
+        sessionTarget: newJob.sessionTarget,
+      });
+      setNewJob({ name: '', schedule: '', task: '', sessionTarget: 'isolated' });
+      setShowCreate(false);
+      await refresh();
+    } catch {}
+    setActionLoading(null);
+  };
+
+  const SCHEDULE_PRESETS = [
+    { label: 'Every hour', cron: '0 * * * *' },
+    { label: 'Every 6 hours', cron: '0 */6 * * *' },
+    { label: 'Daily 9am', cron: '0 9 * * *' },
+    { label: 'Daily 6pm', cron: '0 18 * * *' },
+    { label: 'Mon-Fri 9am', cron: '0 9 * * 1-5' },
+    { label: 'Weekly Monday', cron: '0 9 * * 1' },
+    { label: 'Every 30 min', cron: '*/30 * * * *' },
+  ];
+
+  return (
+    <View style={{ gap: 8 }}>
+      {/* Header */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <View style={{ width: 20, height: 20, borderRadius: 2, backgroundColor: '#f59e0b15', borderWidth: 1, borderColor: '#f59e0b30', justifyContent: 'center', alignItems: 'center' }}>
+          <Text style={{ color: '#f59e0b', fontSize: 9, fontWeight: '800', fontFamily: MONO }}>C</Text>
+        </View>
+        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>CRON JOBS</Text>
+        <Text style={{ color: '#3a3a4e', fontSize: 9, fontFamily: MONO }}>({jobs.length})</Text>
+        <Pressable onPress={refresh} style={[{ marginLeft: 'auto', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e', backgroundColor: '#1a1a28' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+          <Text style={{ color: '#606075', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{loading ? '..' : 'REFRESH'}</Text>
+        </Pressable>
+        <Pressable onPress={() => setShowCreate(!showCreate)} style={[{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e30', backgroundColor: '#22c55e10' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+          <Text style={{ color: '#22c55e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{showCreate ? 'CANCEL' : '+ NEW'}</Text>
+        </Pressable>
+      </View>
+
+      {error && <Text style={{ color: '#ef4444', fontSize: 9, fontFamily: MONO }}>{error}</Text>}
+
+      {/* Create new job form */}
+      {showCreate && (
+        <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#22c55e25', borderRadius: 2, padding: 10, gap: 6 }}>
+          <Text style={{ color: '#22c55e', fontSize: 9, fontWeight: '700', fontFamily: MONO, letterSpacing: 0.5 }}>NEW CRON JOB</Text>
+
+          <TextInput
+            value={newJob.name} onChangeText={v => setNewJob(p => ({ ...p, name: v }))}
+            placeholder="Job name (e.g. daily-digest)" placeholderTextColor="#3a3a4e"
+            style={{ color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 5, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+          />
+
+          <View style={{ gap: 4 }}>
+            <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>SCHEDULE</Text>
+            <TextInput
+              value={newJob.schedule} onChangeText={v => setNewJob(p => ({ ...p, schedule: v }))}
+              placeholder="Cron expression (e.g. 0 9 * * *)" placeholderTextColor="#3a3a4e"
+              style={{ color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 5, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+            />
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 4 }}>
+              {SCHEDULE_PRESETS.map(p => (
+                <Pressable key={p.cron} onPress={() => setNewJob(prev => ({ ...prev, schedule: p.cron }))}
+                  style={[{ backgroundColor: newJob.schedule === p.cron ? '#f59e0b15' : '#1a1a28', paddingHorizontal: 6, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: newJob.schedule === p.cron ? '#f59e0b30' : '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                  <Text style={{ color: newJob.schedule === p.cron ? '#f59e0b' : '#606075', fontSize: 8, fontFamily: MONO }}>{p.label}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </View>
+
+          <TextInput
+            value={newJob.task} onChangeText={v => setNewJob(p => ({ ...p, task: v }))}
+            placeholder="Task prompt (what should the agent do?)" placeholderTextColor="#3a3a4e"
+            multiline numberOfLines={3}
+            style={{ color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 5, minHeight: 60, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+          />
+
+          <View style={{ flexDirection: 'row', gap: 4 }}>
+            <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO, paddingTop: 4 }}>SESSION:</Text>
+            {['isolated', 'main', 'current'].map(t => (
+              <Pressable key={t} onPress={() => setNewJob(p => ({ ...p, sessionTarget: t }))}
+                style={[{ backgroundColor: newJob.sessionTarget === t ? '#6366f115' : '#1a1a28', paddingHorizontal: 6, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: newJob.sessionTarget === t ? '#6366f130' : '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                <Text style={{ color: newJob.sessionTarget === t ? '#6366f1' : '#606075', fontSize: 8, fontFamily: MONO }}>{t.toUpperCase()}</Text>
+              </Pressable>
+            ))}
+          </View>
+
+          <Pressable onPress={handleCreate} disabled={!newJob.name || !newJob.schedule || !newJob.task || actionLoading === 'create'}
+            style={[{ backgroundColor: '#22c55e15', borderWidth: 1, borderColor: '#22c55e40', borderRadius: 2, paddingVertical: 6, alignItems: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+            <Text style={{ color: '#22c55e', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{actionLoading === 'create' ? 'CREATING...' : 'CREATE JOB'}</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* Job list */}
+      <ScrollView style={{ maxHeight: 400 }} nestedScrollEnabled showsVerticalScrollIndicator>
+        {loading && jobs.length === 0 ? (
+          <ActivityIndicator size="small" color={accentColor} style={{ padding: 20 }} />
+        ) : jobs.length === 0 ? (
+          <Text style={{ color: '#3a3a4e', fontSize: 10, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No cron jobs configured. Click + NEW to create one.</Text>
+        ) : (
+          jobs.map(job => {
+            const isEnabled = job.enabled;
+            return (
+              <View key={job.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isEnabled ? '#f59e0b20' : '#1a1a28', borderRadius: 2, padding: 10, marginBottom: 4 }}>
+                {/* Job header */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: isEnabled ? '#22c55e' : '#606075' }} />
+                  <Text style={{ color: '#f0f0f5', fontSize: 11, fontWeight: '700', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{job.name || job.id.slice(0, 8)}</Text>
+                  <Text style={{ color: isEnabled ? '#22c55e' : '#606075', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{isEnabled ? 'ENABLED' : 'DISABLED'}</Text>
+                </View>
+
+                {/* Schedule info */}
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}>
+                  {job.schedule && (
+                    <View style={{ backgroundColor: '#f59e0b10', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b25' }}>
+                      <Text style={{ color: '#f59e0b', fontSize: 8, fontFamily: MONO }}>{typeof job.schedule === 'string' ? job.schedule : JSON.stringify(job.schedule)}</Text>
+                    </View>
+                  )}
+                  {job.sessionTarget && (
+                    <View style={{ backgroundColor: '#6366f110', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#6366f125' }}>
+                      <Text style={{ color: '#6366f1', fontSize: 8, fontFamily: MONO }}>{job.sessionTarget}</Text>
+                    </View>
+                  )}
+                  <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>ID: {job.id.slice(0, 8)}</Text>
+                </View>
+
+                {/* Timing */}
+                <View style={{ flexDirection: 'row', gap: 12, marginBottom: 6 }}>
+                  {job.lastRun && (
+                    <View>
+                      <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>LAST RUN</Text>
+                      <Text style={{ color: '#808090', fontSize: 9, fontFamily: MONO }}>{formatRelativeTime(job.lastRun)}</Text>
+                    </View>
+                  )}
+                  {job.nextRun && (
+                    <View>
+                      <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>NEXT RUN</Text>
+                      <Text style={{ color: '#f59e0b', fontSize: 9, fontFamily: MONO }}>{formatRelativeTime(job.nextRun)}</Text>
+                    </View>
+                  )}
+                </View>
+
+                {/* Payload preview */}
+                {job.payload && (
+                  <Text style={{ color: '#606075', fontSize: 8, fontFamily: MONO, marginBottom: 6 }} numberOfLines={2}>
+                    {typeof job.payload === 'string' ? job.payload : JSON.stringify(job.payload).slice(0, 120)}
+                  </Text>
+                )}
+
+                {/* Actions */}
+                <View style={{ flexDirection: 'row', gap: 4 }}>
+                  <Pressable onPress={() => handleAction('run', job.id)}
+                    style={[{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e30', backgroundColor: '#22c55e08' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                    <Text style={{ color: '#22c55e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>
+                      {actionLoading === `run-${job.id}` ? '..' : 'RUN NOW'}
+                    </Text>
+                  </Pressable>
+                  <Pressable onPress={() => handleAction('update', job.id, { enabled: !isEnabled })}
+                    style={[{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b30', backgroundColor: '#f59e0b08' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                    <Text style={{ color: '#f59e0b', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>
+                      {actionLoading === `update-${job.id}` ? '..' : isEnabled ? 'DISABLE' : 'ENABLE'}
+                    </Text>
+                  </Pressable>
+                  <Pressable onPress={() => handleAction('remove', job.id)}
+                    style={[{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: '#ef444430', backgroundColor: '#ef444408' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                    <Text style={{ color: '#ef4444', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>
+                      {actionLoading === `remove-${job.id}` ? '..' : 'DELETE'}
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+            );
+          })
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
 // ── SECTION: agent-remote-shell — Run shell commands on the agent's machine ──
 
 const QUICK_COMMANDS = [
@@ -830,7 +1063,7 @@ export default function AgentPanel({
   const dragStartW = useRef(540);
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState('');
-  const [panelTab, setPanelTab] = useState<'overview' | 'openclaw' | 'terminal' | 'spirit' | 'evolution' | 'activity' | 'memory' | 'runs' | 'customize'>('overview');
+  const [panelTab, setPanelTab] = useState<'overview' | 'openclaw' | 'terminal' | 'memory' | 'runs' | 'cron' | 'evolution' | 'spirit' | 'activity' | 'customize'>('overview');
   const [userId, setUserId] = useState<string | null>(null);
   useEffect(() => { supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id || null)).catch(() => {}); }, []);
   const [showCustomize, setShowCustomize] = useState(false);
@@ -1128,6 +1361,7 @@ export default function AgentPanel({
           { key: 'terminal', label: 'Terminal' },
           { key: 'memory', label: 'Memory' },
           { key: 'runs', label: 'Runs' },
+          { key: 'cron', label: 'Cron Jobs' },
           { key: 'evolution', label: 'Evolution' },
           { key: 'spirit', label: 'Spirit' },
           { key: 'activity', label: 'Activity' },
@@ -1865,6 +2099,13 @@ export default function AgentPanel({
       {panelTab === 'runs' && circleId && (
         <View nativeID="section-agent-runs" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
           <AgentRunsPanel circleId={circleId} agentName={agent.name} accentColor={agent.color || '#6366f1'} />
+        </View>
+      )}
+
+      {/* ── CRON JOBS TAB ── */}
+      {panelTab === 'cron' && circleId && (
+        <View nativeID="section-agent-cron" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
+          <CronJobsPanel agent={agent} circleId={circleId} accentColor={agent.color || '#6366f1'} />
         </View>
       )}
 
