@@ -20,6 +20,7 @@ import {
   publishClaudeCodeAgent,
   updateClaudeCodeAgentStatus,
   markClaudeCodeAgentOffline,
+  saveSessionsToMemory as saveCCSessionsToMemory,
 } from './claudeCodeDetector';
 import {
   CodexPoller,
@@ -28,6 +29,7 @@ import {
   publishCodexAgent,
   updateCodexAgentStatus,
   markCodexAgentOffline,
+  saveCodexSessionsToMemory,
 } from './codexDetector';
 import {
   GeminiCliPoller,
@@ -36,6 +38,7 @@ import {
   publishGeminiCliAgent,
   updateGeminiCliAgentStatus,
   markGeminiCliAgentOffline,
+  saveGeminiSessionsToMemory,
 } from './geminiCliDetector';
 import {
   CursorPoller,
@@ -44,6 +47,7 @@ import {
   publishCursorAgent,
   updateCursorAgentStatus,
   markCursorAgentOffline,
+  saveCursorSessionsToMemory,
 } from './cursorDetector';
 import {
   AgentConnection,
@@ -80,6 +84,21 @@ let _cursorPoller: CursorPoller | null = null;
 let _cursorPublished = false;
 let _cursorStarting = false;
 let _ocPollers = new Map<string, OpenSwanPoller>();
+// Memory save throttle — 30s per provider
+let _lastMemorySave: Record<string, number> = {};
+const MEMORY_SAVE_THROTTLE_MS = 30_000;
+
+async function _getUserId(): Promise<string | null> {
+  try {
+    const { data } = await supabase.auth.getUser();
+    const uid = data.user?.id || null;
+    if (!uid) console.warn('[agentAutoConnect] _getUserId: no user authenticated');
+    return uid;
+  } catch (err) {
+    console.warn('[agentAutoConnect] _getUserId failed:', err);
+    return null;
+  }
+}
 let _retryTimer: ReturnType<typeof setInterval> | null = null;
 let _ocReconnectTimer: ReturnType<typeof setInterval> | null = null;
 let _circleId: string | null = null;
@@ -590,6 +609,17 @@ function _startCCPoller() {
     if (_ccPublished && _circleId) {
       updateClaudeCodeAgentStatus(_circleId, sessions).catch(() => {});
     }
+    // Auto-save session context to memory (throttled)
+    if (_circleId && Date.now() - (_lastMemorySave['cc'] || 0) > MEMORY_SAVE_THROTTLE_MS) {
+      _lastMemorySave['cc'] = Date.now();
+      _getUserId().then(uid => {
+        if (uid && _circleId) {
+          saveCCSessionsToMemory(_circleId, uid, sessions).catch(err => {
+            console.warn('[agentAutoConnect] Memory save failed for CC:', err);
+          });
+        }
+      });
+    }
   });
   _ccPoller.start(5000);
   _ccStarting = false;
@@ -616,6 +646,17 @@ function _startCodexPoller() {
     if (_codexPublished && _circleId) {
       updateCodexAgentStatus(_circleId, sessions).catch(() => {});
     }
+    // Auto-save session context to memory (throttled)
+    if (_circleId && Date.now() - (_lastMemorySave['codex'] || 0) > MEMORY_SAVE_THROTTLE_MS) {
+      _lastMemorySave['codex'] = Date.now();
+      _getUserId().then(uid => {
+        if (uid && _circleId) {
+          saveCodexSessionsToMemory(_circleId, uid, sessions).catch(err => {
+            console.warn('[agentAutoConnect] Memory save failed for Codex:', err);
+          });
+        }
+      });
+    }
   });
   _codexPoller.start(5000);
   _codexStarting = false;
@@ -640,6 +681,17 @@ function _startGeminiPoller() {
     if (_geminiPublished && _circleId) {
       updateGeminiCliAgentStatus(_circleId, sessions).catch(() => {});
     }
+    // Auto-save session context to memory (throttled)
+    if (_circleId && Date.now() - (_lastMemorySave['gemini'] || 0) > MEMORY_SAVE_THROTTLE_MS) {
+      _lastMemorySave['gemini'] = Date.now();
+      _getUserId().then(uid => {
+        if (uid && _circleId) {
+          saveGeminiSessionsToMemory(_circleId, uid, sessions).catch(err => {
+            console.warn('[agentAutoConnect] Memory save failed for Gemini:', err);
+          });
+        }
+      });
+    }
   });
   _geminiPoller.start(5000);
   _geminiStarting = false;
@@ -662,6 +714,17 @@ function _startCursorPoller() {
     }
     if (_cursorPublished && _circleId) {
       updateCursorAgentStatus(_circleId, sessions).catch(() => {});
+    }
+    // Auto-save session context to memory (throttled)
+    if (_circleId && Date.now() - (_lastMemorySave['cursor'] || 0) > MEMORY_SAVE_THROTTLE_MS) {
+      _lastMemorySave['cursor'] = Date.now();
+      _getUserId().then(uid => {
+        if (uid && _circleId) {
+          saveCursorSessionsToMemory(_circleId, uid, sessions).catch(err => {
+            console.warn('[agentAutoConnect] Memory save failed for Cursor:', err);
+          });
+        }
+      });
     }
   });
   _cursorPoller.start(5000);
