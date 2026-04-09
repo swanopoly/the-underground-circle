@@ -1462,9 +1462,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     }
     const deduped = Array.from(byName.values());
 
-    // Pull out Cursor agent(s) to pin them second
-    const cursorAgents = deduped.filter(a => a.providerType === 'cursor');
-    const rest = deduped.filter(a => a.providerType !== 'cursor');
+    // Pull out Claude Code agent(s) to pin them second (C3PO)
+    const claudeCodeAgents = deduped.filter(a => a.providerType === 'claude-code');
+    const rest = deduped.filter(a => a.providerType !== 'claude-code');
 
     const sorted = [...rest].sort((a, b) => {
       const rankDiff = getDisplayAgentSortRank(a) - getDisplayAgentSortRank(b);
@@ -1473,7 +1473,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       const tb = b.lastActive ? new Date(b.lastActive).getTime() : 0;
       return tb - ta;
     });
-    return [DEFAULT_AGENT, ...cursorAgents, ...sorted];
+    return [DEFAULT_AGENT, ...claudeCodeAgents, ...sorted];
   }, [userAgents, getDisplayAgentSortRank]);
 
   // Resolve appearance — lookup by id first, fall back to name for legacy data
