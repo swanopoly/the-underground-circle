@@ -136,15 +136,24 @@ function runFromRow(row: any): AutomationRun {
 
 function computeNextRun(cronExpression: string | undefined): string | null {
   if (!cronExpression) return null;
+  const normalized = cronExpression.trim();
+  if (/^(@(hourly|daily|weekly|monthly|yearly|annually|reboot))$/.test(normalized)) {
+    return null;
+  }
+  if (/^(\S+\s+){4,5}\S+$/.test(normalized)) {
+    // Real cron expressions need a cron parser + timezone context.
+    // Returning a fake date is worse than showing "unknown next run".
+    return null;
+  }
   const now = new Date();
-  switch (cronExpression) {
+  switch (normalized) {
     case 'hourly':      now.setHours(now.getHours() + 1); break;
     case 'every_6h':    now.setHours(now.getHours() + 6); break;
     case 'twice_daily': now.setHours(now.getHours() + 12); break;
     case 'daily':       now.setDate(now.getDate() + 1); break;
     case 'weekly':      now.setDate(now.getDate() + 7); break;
     case 'monthly':     now.setMonth(now.getMonth() + 1); break;
-    default:            now.setDate(now.getDate() + 1); break;
+    default:            return null;
   }
   return now.toISOString();
 }
@@ -215,13 +224,28 @@ export async function updateAutomation(id: string, updates: Partial<{
   spirit: string | null;
   spiritPrompt: string | null;
 }>): Promise<{ error?: string }> {
+  let existing: { trigger_type?: TriggerType; enabled?: boolean } | null = null;
+  if (updates.cronExpression !== undefined) {
+    const { data } = await supabase
+      .from('circle_automations')
+      .select('trigger_type, enabled')
+      .eq('id', id)
+      .single();
+    existing = data || null;
+  }
+
   const payload: any = {};
   if (updates.name !== undefined) payload.name = updates.name;
   if (updates.description !== undefined) payload.description = updates.description;
   if (updates.icon !== undefined) payload.icon = updates.icon;
   if (updates.prompt !== undefined) payload.prompt = updates.prompt;
   if (updates.model !== undefined) payload.model = updates.model;
-  if (updates.cronExpression !== undefined) payload.cron_expression = updates.cronExpression;
+  if (updates.cronExpression !== undefined) {
+    payload.cron_expression = updates.cronExpression;
+    if ((existing?.trigger_type || 'schedule') === 'schedule') {
+      payload.next_run_at = existing?.enabled === false ? null : computeNextRun(updates.cronExpression);
+    }
+  }
   if (updates.eventConfig !== undefined) payload.event_config = updates.eventConfig;
   if (updates.includeContext !== undefined) payload.include_context = updates.includeContext;
   if (updates.outputTarget !== undefined) payload.output_target = updates.outputTarget;
@@ -246,9 +270,20 @@ export async function deleteAutomation(id: string): Promise<{ error?: string }> 
 }
 
 export async function toggleAutomation(id: string, enabled: boolean): Promise<{ error?: string }> {
+  const { data: existing } = await supabase
+    .from('circle_automations')
+    .select('trigger_type, cron_expression')
+    .eq('id', id)
+    .single();
+
+  const payload: any = { enabled };
+  if ((existing?.trigger_type || 'schedule') === 'schedule') {
+    payload.next_run_at = enabled ? computeNextRun(existing?.cron_expression || undefined) : null;
+  }
+
   const { error } = await supabase
     .from('circle_automations')
-    .update({ enabled })
+    .update(payload)
     .eq('id', id);
   return error ? { error: error.message } : {};
 }

@@ -1241,7 +1241,7 @@ export default function AutomationsPanel({ circleId, accentColor = '#e8e8e8' }: 
 
   // Filtered automations
   const filteredAutomations = useMemo(() => {
-    let list = automations;
+    let list = [...automations];
     switch (activeTab) {
       case 'mine':
         if (currentUserId) list = list.filter((a) => a.createdBy === currentUserId);
@@ -1262,19 +1262,60 @@ export default function AutomationsPanel({ circleId, accentColor = '#e8e8e8' }: 
       list = list.filter(
         (a) =>
           a.name.toLowerCase().includes(q) ||
-          (a.description ?? '').toLowerCase().includes(q),
+          (a.description ?? '').toLowerCase().includes(q) ||
+          (a.prompt ?? '').toLowerCase().includes(q) ||
+          (a.cronExpression ?? '').toLowerCase().includes(q) ||
+          (a.model ?? '').toLowerCase().includes(q) ||
+          (a.agent ?? '').toLowerCase().includes(q) ||
+          (a.outputTarget ?? '').toLowerCase().includes(q) ||
+          JSON.stringify(a.eventConfig || {}).toLowerCase().includes(q),
       );
     }
+    list.sort((a, b) => {
+      const aScore =
+        (a.lastError ? 1000 : 0) +
+        (a.enabled ? 100 : 0) +
+        (a.nextRunAt ? Math.max(0, 50 - Math.floor((new Date(a.nextRunAt).getTime() - Date.now()) / 3_600_000)) : 0) +
+        (a.runCount > 0 ? 10 : 0);
+      const bScore =
+        (b.lastError ? 1000 : 0) +
+        (b.enabled ? 100 : 0) +
+        (b.nextRunAt ? Math.max(0, 50 - Math.floor((new Date(b.nextRunAt).getTime() - Date.now()) / 3_600_000)) : 0) +
+        (b.runCount > 0 ? 10 : 0);
+      if (bScore !== aScore) return bScore - aScore;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
     return list;
   }, [automations, activeTab, currentUserId, searchQuery]);
 
   // Count failed automations for alert badge
   const failedCount = useMemo(() => automations.filter(a => a.lastError).length, [automations]);
   const disabledCount = useMemo(() => automations.filter(a => !a.enabled).length, [automations]);
+  const emptyStateCopy = useMemo(() => {
+    if (searchQuery.trim()) {
+      return {
+        title: 'No Matching Automations',
+        subtitle: `Nothing matched "${searchQuery.trim()}". Try a broader search or clear the filters.`,
+      };
+    }
+    switch (activeTab) {
+      case 'active':
+        return { title: 'No Active Automations', subtitle: 'Everything is currently off, or you have not created an automation yet.' };
+      case 'failed':
+        return { title: 'No Automation Errors', subtitle: 'No automations are currently reporting errors.' };
+      case 'disabled':
+        return { title: 'No Disabled Automations', subtitle: 'You do not have any paused automations right now.' };
+      case 'mine':
+        return { title: 'No Personal Automations', subtitle: 'You have not created any automations in this circle yet.' };
+      default:
+        return { title: 'No Automations Yet', subtitle: 'Run agents on a schedule or automatically in response to events.' };
+    }
+  }, [activeTab, searchQuery]);
 
   const handleToggle = useCallback(async (id: string, enabled: boolean) => {
     await toggleAutomation(id, enabled);
-  }, []);
+    await Promise.all([refresh(), refreshStats()]);
+  }, [refresh, refreshStats]);
 
   const handleTrigger = useCallback(async (id: string) => {
     // Rate limit: 10s cooldown per automation
@@ -1292,8 +1333,8 @@ export default function AutomationsPanel({ circleId, accentColor = '#e8e8e8' }: 
     if (result.error) {
       console.warn('[Automation] Trigger error:', result.error);
     }
-    refreshStats();
-  }, [circleId, refreshStats]);
+    await Promise.all([refresh(), refreshStats()]);
+  }, [circleId, refresh, refreshStats]);
 
   const handleTest = useCallback(async (id: string) => {
     const now = Date.now();
@@ -1308,8 +1349,8 @@ export default function AutomationsPanel({ circleId, accentColor = '#e8e8e8' }: 
     if (result.error) {
       console.warn('[Automation] Test error:', result.error);
     }
-    refreshStats();
-  }, [circleId, refreshStats]);
+    await Promise.all([refresh(), refreshStats()]);
+  }, [circleId, refresh, refreshStats]);
 
   const handleDelete = useCallback(async (id: string) => {
     setDeleteConfirmId(id);
@@ -1319,8 +1360,9 @@ export default function AutomationsPanel({ circleId, accentColor = '#e8e8e8' }: 
     if (deleteConfirmId) {
       await deleteAutomation(deleteConfirmId);
       setDeleteConfirmId(null);
+      await Promise.all([refresh(), refreshStats()]);
     }
-  }, [deleteConfirmId]);
+  }, [deleteConfirmId, refresh, refreshStats]);
 
   const handleQuickCreate = (prompt: string, trigger: TriggerOption | null) => {
     setQuickPrompt(prompt);
@@ -1344,8 +1386,7 @@ export default function AutomationsPanel({ circleId, accentColor = '#e8e8e8' }: 
 
   const onSaved = () => {
     closeForm();
-    refresh();
-    refreshStats();
+    Promise.all([refresh(), refreshStats()]);
   };
 
   if (isLoading) {
@@ -1360,6 +1401,23 @@ export default function AutomationsPanel({ circleId, accentColor = '#e8e8e8' }: 
     <View style={s.container}>
       {/* Page title */}
       <Text style={s.pageTitle}>Automations</Text>
+
+      <View style={{ backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#ffffff14', borderRadius: 8, padding: 10, marginBottom: 12, gap: 6 }}>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+          <View style={{ backgroundColor: '#6366f115', borderWidth: 1, borderColor: '#6366f130', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 }}>
+            <Text style={{ color: '#8b92ff', fontSize: 10, fontWeight: '700' }}>Circle Automations</Text>
+          </View>
+          <View style={{ backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff14', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 }}>
+            <Text style={{ color: '#9e9e9e', fontSize: 10, fontWeight: '700' }}>{automations.length} configured</Text>
+          </View>
+          <View style={{ backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff14', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 }}>
+            <Text style={{ color: '#9e9e9e', fontSize: 10, fontWeight: '700' }}>Runs in-app</Text>
+          </View>
+        </View>
+        <Text style={{ color: '#9e9e9e', fontSize: 12, lineHeight: 17 }}>
+          These automations run inside Underground Circle. KingClaw gateway jobs are managed separately in the Pixel Agent Panel under `Cron Jobs`.
+        </Text>
+      </View>
 
       {/* Stats bar */}
       <StatsDashboard
@@ -1447,10 +1505,8 @@ export default function AutomationsPanel({ circleId, accentColor = '#e8e8e8' }: 
       {/* Automation list OR empty state */}
       {filteredAutomations.length === 0 ? (
         <View style={s.emptyState}>
-          <Text style={s.emptyTitle}>No Automations Yet</Text>
-          <Text style={s.emptySubtitle}>
-            Run agents on a schedule or automatically in response to events.
-          </Text>
+          <Text style={s.emptyTitle}>{emptyStateCopy.title}</Text>
+          <Text style={s.emptySubtitle}>{emptyStateCopy.subtitle}</Text>
           <Pressable
             onPress={() => setShowCreate(true)}
             style={[s.emptyBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
@@ -1671,6 +1727,9 @@ function AutomationCard({
             {auto.eventConfig?.provider && (
               <Text style={s.cardMetaText}>{auto.eventConfig.provider}</Text>
             )}
+            <View style={[s.triggerBadge, { backgroundColor: '#ffffff10' }]}>
+              <Text style={[s.triggerText, { color: '#b5b5b5' }]}>{OUTPUT_LABELS[auto.outputTarget] || auto.outputTarget}</Text>
+            </View>
             {auto.eventConfig?.linked_goal_id && (
               <View style={[s.triggerBadge, { backgroundColor: '#ffffff10' }]}>
                 <Text style={[s.triggerText, { color: '#b5b5b5' }]}>🎯 Goal linked</Text>
@@ -1729,7 +1788,7 @@ function AutomationCard({
       )}
 
       {auto.nextRunAt && auto.enabled && (
-        <Text style={s.nextRun}>Next: {timeUntil(auto.nextRunAt)}</Text>
+        <Text style={s.nextRun}>Next: {timeUntil(auto.nextRunAt)} · {new Date(auto.nextRunAt).toLocaleString()}</Text>
       )}
 
       {/* Actions */}

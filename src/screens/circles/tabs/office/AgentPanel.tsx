@@ -34,6 +34,8 @@ import {
   spawnSubAgent,
   manageCronJob,
   createCronJob,
+  formatCronSchedule,
+  isLikelyCronExpression,
 } from '../../../../lib/openclawService';
 import { supabase } from '../../../../lib/supabase';
 
@@ -624,6 +626,7 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
   const [showCreate, setShowCreate] = useState(false);
   const [newJob, setNewJob] = useState({ name: '', schedule: '', task: '', sessionTarget: 'isolated' });
   const [connection, setConnection] = useState<AgentConnection | null>(null);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
 
   const resolveConfig = useCallback(async (): Promise<OpenClawConfig | null> => {
     const connections = await loadConnections();
@@ -639,10 +642,11 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
     setError(null);
     try {
       const config = await resolveConfig();
-      if (!config) { setError('No OpenClaw connection available.'); setJobs([]); setLoading(false); return; }
+      if (!config) { setJobs([]); setLoading(false); return; }
       const result = await listCronJobs(config);
       setJobs(result.jobs || []);
-      if (!result.ok) setError('Failed to load cron jobs.');
+      if (!result.ok) setError(result.error || 'Failed to load cron jobs.');
+      else setLastRefreshedAt(new Date().toISOString());
     } catch (e: any) { setError(e.message); }
     setLoading(false);
   }, [resolveConfig]);
@@ -653,29 +657,53 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
     setActionLoading(`${action}-${jobId}`);
     try {
       const config = await resolveConfig();
-      if (!config) return;
-      await manageCronJob(config, action, jobId, patch);
+      if (!config) {
+        setError('Connect KingClaw to manage gateway jobs.');
+        return;
+      }
+      const result = await manageCronJob(config, action, jobId, patch);
+      if (!result.ok) {
+        setError(result.error || 'Cron action failed.');
+        return;
+      }
+      setError(null);
       await refresh();
-    } catch {}
+    } catch (e: any) {
+      setError(e.message || 'Cron action failed.');
+    }
     setActionLoading(null);
   };
 
   const handleCreate = async () => {
     if (!newJob.name || !newJob.schedule || !newJob.task) return;
+    if (!isLikelyCronExpression(newJob.schedule)) {
+      setError('Enter a valid cron expression like 0 9 * * *.');
+      return;
+    }
     setActionLoading('create');
     try {
       const config = await resolveConfig();
-      if (!config) return;
-      await createCronJob(config, {
+      if (!config) {
+        setError('Connect KingClaw to create gateway jobs.');
+        return;
+      }
+      const result = await createCronJob(config, {
         name: newJob.name,
         schedule: newJob.schedule,
         task: newJob.task,
         sessionTarget: newJob.sessionTarget,
       });
+      if (!result.ok) {
+        setError(result.error || 'Failed to create cron job.');
+        return;
+      }
+      setError(null);
       setNewJob({ name: '', schedule: '', task: '', sessionTarget: 'isolated' });
       setShowCreate(false);
       await refresh();
-    } catch {}
+    } catch (e: any) {
+      setError(e.message || 'Failed to create cron job.');
+    }
     setActionLoading(null);
   };
 
@@ -704,6 +732,28 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
         <Pressable onPress={() => setShowCreate(!showCreate)} style={[{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e30', backgroundColor: '#22c55e10' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
           <Text style={{ color: '#22c55e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{showCreate ? 'CANCEL' : '+ NEW'}</Text>
         </Pressable>
+      </View>
+
+      <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10, gap: 6 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <View style={{ backgroundColor: connection?.status === 'connected' ? '#22c55e15' : '#1a1a28', borderWidth: 1, borderColor: connection?.status === 'connected' ? '#22c55e35' : '#2a2a3e', borderRadius: 2, paddingHorizontal: 6, paddingVertical: 2 }}>
+            <Text style={{ color: connection?.status === 'connected' ? '#22c55e' : '#606075', fontSize: 8, fontFamily: MONO }}>
+              {connection?.status === 'connected' ? 'KINGCLAW CONNECTED' : 'KINGCLAW NOT CONNECTED'}
+            </Text>
+          </View>
+          <View style={{ backgroundColor: '#6366f110', borderWidth: 1, borderColor: '#6366f125', borderRadius: 2, paddingHorizontal: 6, paddingVertical: 2 }}>
+            <Text style={{ color: '#6366f1', fontSize: 8, fontFamily: MONO }}>GATEWAY JOBS</Text>
+          </View>
+          <View style={{ backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff14', borderRadius: 2, paddingHorizontal: 6, paddingVertical: 2 }}>
+            <Text style={{ color: '#808090', fontSize: 8, fontFamily: MONO }}>{jobs.length} JOBS</Text>
+          </View>
+          {lastRefreshedAt && (
+            <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>REFRESHED {formatRelativeTime(lastRefreshedAt)}</Text>
+          )}
+        </View>
+        <Text style={{ color: '#808090', fontSize: 9, fontFamily: MONO, lineHeight: 14 }}>
+          KingClaw jobs run on the connected KingClaw runtime. Circle Automations run inside Underground Circle and are managed separately in the Automations dashboard.
+        </Text>
       </View>
 
       {error && <Text style={{ color: '#ef4444', fontSize: 9, fontFamily: MONO }}>{error}</Text>}
@@ -782,12 +832,22 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}>
                   {job.schedule && (
                     <View style={{ backgroundColor: '#f59e0b10', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b25' }}>
-                      <Text style={{ color: '#f59e0b', fontSize: 8, fontFamily: MONO }}>{typeof job.schedule === 'string' ? job.schedule : JSON.stringify(job.schedule)}</Text>
+                      <Text style={{ color: '#f59e0b', fontSize: 8, fontFamily: MONO }}>{formatCronSchedule(job.schedule) || JSON.stringify(job.schedule)}</Text>
                     </View>
                   )}
                   {job.sessionTarget && (
                     <View style={{ backgroundColor: '#6366f110', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#6366f125' }}>
                       <Text style={{ color: '#6366f1', fontSize: 8, fontFamily: MONO }}>{job.sessionTarget}</Text>
+                    </View>
+                  )}
+                  {job.timezone && (
+                    <View style={{ backgroundColor: '#14b8a610', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#14b8a625' }}>
+                      <Text style={{ color: '#14b8a6', fontSize: 8, fontFamily: MONO }}>{job.timezone}</Text>
+                    </View>
+                  )}
+                  {job.status && (
+                    <View style={{ backgroundColor: '#a855f710', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#a855f725' }}>
+                      <Text style={{ color: '#a855f7', fontSize: 8, fontFamily: MONO }}>{job.status}</Text>
                     </View>
                   )}
                   <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>ID: {job.id.slice(0, 8)}</Text>
@@ -805,6 +865,13 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
                     <View>
                       <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>NEXT RUN</Text>
                       <Text style={{ color: '#f59e0b', fontSize: 9, fontFamily: MONO }}>{formatRelativeTime(job.nextRun)}</Text>
+                      <Text style={{ color: '#606075', fontSize: 7, fontFamily: MONO }}>{new Date(job.nextRun).toLocaleString()}</Text>
+                    </View>
+                  )}
+                  {typeof job.runCount === 'number' && (
+                    <View>
+                      <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>RUNS</Text>
+                      <Text style={{ color: '#808090', fontSize: 9, fontFamily: MONO }}>{job.runCount}</Text>
                     </View>
                   )}
                 </View>

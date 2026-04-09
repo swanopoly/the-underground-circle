@@ -7,7 +7,7 @@ import { OfficeAgent } from '../../../../lib/officeAgents';
 import {
   OpenClawConfig, listSessions, getSessionStatus, getSessionHistory,
   sendAgentTask, listAgents, listCronJobs, runWebSearch,
-  spawnSubAgent, manageCronJob, searchMemory, sendSessionMessage, listSubAgents,
+  spawnSubAgent, manageCronJob, searchMemory, sendSessionMessage, listSubAgents, formatCronSchedule,
 } from '../../../../lib/openclawService';
 import { AgentConnection, PROVIDER_META } from '../../../../lib/connectionManager';
 import { sendMessage as sendTgMessage, TelegramMessage } from '../../../../lib/telegramService';
@@ -812,7 +812,11 @@ export default function OfficeChat({
             const result = await withTimeout(listCronJobs(cfg), 15000, 'Cron');
             if (result.ok && result.jobs) {
               allJobs.push(`\n${PROVIDER_META[conn.provider].icon} ${conn.name}:`);
-              result.jobs.forEach((j: any) => { allJobs.push(`  • ${j.name || j.jobId || 'unnamed'} [${j.enabled !== false ? '✅' : '⏸'}]`); });
+              result.jobs.forEach((j: any) => {
+                const sched = formatCronSchedule(j.schedule);
+                const next = j.nextRun ? ` → next ${new Date(j.nextRun).toLocaleString()}` : '';
+                allJobs.push(`  • ${j.name || j.jobId || 'unnamed'} [${j.enabled !== false ? '✅' : '⏸'}]${sched ? ` ${sched}` : ''}${next}`);
+              });
             }
           }
           addMsg(`⏰ Cron Jobs${allJobs.join('\n') || '\nNo jobs'}`, false, 'System');

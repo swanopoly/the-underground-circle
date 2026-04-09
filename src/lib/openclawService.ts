@@ -229,18 +229,77 @@ export interface CronJob {
   sessionTarget?: string;
   lastRun?: string;
   nextRun?: string;
+  status?: string;
+  timezone?: string;
+  runCount?: number;
 }
 
-export async function listCronJobs(config: OpenClawConfig): Promise<{ ok: boolean; jobs: CronJob[] }> {
+export function isLikelyCronExpression(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim();
+  if (!normalized) return false;
+  if (/^@(hourly|daily|weekly|monthly|yearly|annually|reboot)$/.test(normalized)) return true;
+  return /^(\S+\s+){4,5}\S+$/.test(normalized);
+}
+
+export function formatCronSchedule(schedule: any): string {
+  if (!schedule) return '';
+  if (typeof schedule === 'string') return schedule;
+  if (typeof schedule === 'object') {
+    return schedule.expr || schedule.cron || schedule.kind || schedule.label || schedule.when || '';
+  }
+  return '';
+}
+
+function normalizeCronJob(raw: any): CronJob | null {
+  if (!raw) return null;
+
+  const id = raw.id || raw.jobId || raw.job_id;
+  if (!id) return null;
+
+  const schedule = raw.schedule || raw.cron || raw.when || raw.trigger || raw.expression;
+  const payload = raw.payload || raw.job || raw.args || raw.input;
+  const sessionTarget =
+    raw.sessionTarget ||
+    raw.session_target ||
+    raw.session ||
+    raw.payload?.sessionTarget ||
+    raw.delivery?.sessionTarget;
+
+  return {
+    id,
+    name: raw.name || raw.title || raw.label,
+    enabled: raw.enabled !== false && raw.disabled !== true,
+    schedule,
+    payload,
+    delivery: raw.delivery || raw.output || raw.target,
+    sessionTarget,
+    lastRun: raw.lastRun || raw.last_run || raw.lastRunAt || raw.last_run_at,
+    nextRun: raw.nextRun || raw.next_run || raw.nextRunAt || raw.next_run_at,
+    status: raw.status,
+    timezone: raw.timezone || raw.tz,
+    runCount:
+      raw.runCount == null && raw.run_count == null
+        ? undefined
+        : typeof (raw.runCount ?? raw.run_count) === 'number'
+          ? (raw.runCount ?? raw.run_count)
+          : Number(raw.runCount ?? raw.run_count),
+  };
+}
+
+export async function listCronJobs(config: OpenClawConfig): Promise<{ ok: boolean; jobs: CronJob[]; error?: string }> {
   try {
     const data = await invokeToolRaw(config, 'cron', {
       action: 'list',
       includeDisabled: true,
     });
-    if (!data.ok) return { ok: false, jobs: [] };
+    if (!data.ok) return { ok: false, jobs: [], error: data.error?.message || 'Failed to load cron jobs' };
     // The response has content[0].text which is a text summary, and details with structured data
     if (data?.result?.details?.jobs) {
-      return { ok: true, jobs: data.result.details.jobs };
+      return {
+        ok: true,
+        jobs: data.result.details.jobs.map(normalizeCronJob).filter(Boolean) as CronJob[],
+      };
     }
     // Try parsing from text content
     if (data?.result?.content?.[0]?.text) {
@@ -252,14 +311,14 @@ export async function listCronJobs(config: OpenClawConfig): Promise<{ ok: boolea
         const match = line.match(/\*\*(.+?)\*\*.*?`([a-f0-9-]+)`/);
         if (match) {
           const enabled = !line.toLowerCase().includes('disabled');
-          jobs.push({ id: match[2], name: match[1], enabled });
+          jobs.push({ id: match[2], name: match[1], enabled, schedule: line.includes(' - ') ? line.split(' - ').slice(-1)[0] : undefined });
         }
       }
       return { ok: true, jobs };
     }
-    return { ok: false, jobs: [] };
-  } catch {
-    return { ok: false, jobs: [] };
+    return { ok: false, jobs: [], error: 'Cron tool returned no structured jobs' };
+  } catch (e: any) {
+    return { ok: false, jobs: [], error: e.message };
   }
 }
 export async function sendAgentTask(
@@ -312,7 +371,7 @@ export async function manageCronJob(
   action: 'run' | 'update' | 'remove',
   jobId: string,
   patch?: any,
-): Promise<{ ok: boolean; reply?: string; error?: string }> {
+): Promise<{ ok: boolean; reply?: string; error?: string; runId?: string }> {
   try {
     const params: any = { action, jobId };
     if (action === 'update' && patch) params.patch = patch;
@@ -320,7 +379,8 @@ export async function manageCronJob(
     const result = await invokeToolRaw(config, 'cron', params);
     if (!result.ok) return { ok: false, error: result.error?.message };
     const text = result.result?.content?.[0]?.text || 'Done';
-    return { ok: true, reply: text };
+    const runIdMatch = text.match(/run(?:\s+id)?[:\s`]+([a-f0-9-]{8,})/i);
+    return { ok: true, reply: text, runId: runIdMatch?.[1] };
   } catch (e: any) {
     return { ok: false, error: e.message };
   }
@@ -331,6 +391,9 @@ export async function createCronJob(
   opts: { name: string; schedule: string; task: string; sessionTarget?: string; timezone?: string; enabled?: boolean },
 ): Promise<{ ok: boolean; jobId?: string; error?: string }> {
   try {
+    if (!isLikelyCronExpression(opts.schedule)) {
+      return { ok: false, error: 'Invalid cron expression' };
+    }
     const result = await invokeToolRaw(config, 'cron', {
       action: 'add',
       name: opts.name,
@@ -342,8 +405,9 @@ export async function createCronJob(
     });
     if (!result.ok) return { ok: false, error: result.error?.message };
     const text = result.result?.content?.[0]?.text || '';
-    const idMatch = text.match(/`([a-f0-9-]+)`/);
-    return { ok: true, jobId: idMatch?.[1] || 'created' };
+    const idMatch = text.match(/`([a-f0-9-]+)`/) || text.match(/job(?:\s+id)?[:\s`]+([a-f0-9-]{8,})/i);
+    const detailId = result.result?.details?.jobId || result.result?.details?.job_id;
+    return { ok: true, jobId: detailId || idMatch?.[1] || 'created' };
   } catch (e: any) {
     return { ok: false, error: e.message };
   }

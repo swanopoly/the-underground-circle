@@ -17,10 +17,14 @@ Pages with concrete findings in this pass:
 - `chat-tab-agent-cli-first-pr-dossier-2026-04-03.md`
 - `chat-tab-agent-cli-external-patterns-addendum-2026-04-03.md`
 - `chat-and-rooms-tooling-deep-audit-2026-04-04.md`
-- `claude-cowork-openclaw-integration-master-plan-2026-04-08.md`
-- `claude-agent-stack-and-openclaw-panel-deep-audit-2026-04-08.md`
+- `claude-cowork-kingclaw-integration-master-plan-2026-04-08.md`
+- `claude-agent-stack-and-kingclaw-panel-deep-audit-2026-04-08.md`
 - `claude-apr-8-change-review-and-improvements-2026-04-08.md`
-- `ai-agent-use-cases-and-openclaw-deep-audit-2026-04-07.md`
+- `cron-jobs-and-kingclaw-deep-audit-2026-04-08.md`
+- `automation-and-cron-master-audit-2026-04-08.md`
+- `automation-ui-ux-and-functionality-audit-2026-04-08.md`
+- `automation-unification-plan-2026-04-08.md`
+- `ai-agent-use-cases-and-kingclaw-deep-audit-2026-04-07.md`
 - `agent-session-memory-deep-research-and-implementation-plan-2026-04-08.md`
 - `agent-memory-ux-and-compaction-implementation-plan-2026-04-08.md`
 - `agent-memory-retrieval-privacy-and-sql-dossier-2026-04-08.md`
