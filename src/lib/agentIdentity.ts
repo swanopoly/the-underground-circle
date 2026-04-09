@@ -236,6 +236,41 @@ export async function renameAgent(sessionKey: string, newName: string): Promise<
   await updateAgentIdentity(sessionKey, { customName: newName });
 }
 
+// ─── Set Main Agent for Provider ──────────────────────────
+
+/**
+ * Set one agent as the main pixel agent for its provider type.
+ * Clears isPrimary from all other agents of the same provider.
+ */
+export async function setMainAgentForProvider(
+  sessionKey: string,
+  providerType: string,
+): Promise<void> {
+  const identities = await loadAgentIdentities();
+
+  // Clear isPrimary from all agents of same provider
+  for (const [key, identity] of identities) {
+    if (identity.boundAiProvider === providerType && identity.isPrimary) {
+      identities.set(key, { ...identity, isPrimary: false });
+    }
+  }
+
+  // Set this agent as primary
+  const existing = identities.get(sessionKey);
+  if (existing) {
+    identities.set(sessionKey, { ...existing, isPrimary: true, boundAiProvider: providerType });
+  } else {
+    identities.set(sessionKey, {
+      sessionKey,
+      totalCostAllTime: 0, totalTokensAllTime: 0, totalSessionsAllTime: 0,
+      firstSeen: Date.now(), lastSeen: Date.now(), totalMessages: 0, totalTurns: 0,
+      isPrimary: true, boundAiProvider: providerType,
+    });
+  }
+
+  await saveAgentIdentities(identities);
+}
+
 // ─── Customize Agent Appearance ────────────────────────────
 
 export async function customizeAgent(

@@ -1159,6 +1159,9 @@ export default function AgentPanel({
   const personalityScrollX = useRef(0);
   const [currentSpirit, setCurrentSpirit] = useState<string | null>(null);
   const [dbAgentId, setDbAgentId] = useState<string | null>(null);
+  const [renamingAgent, setRenamingAgent] = useState(false);
+  const [agentNameDraft, setAgentNameDraft] = useState('');
+  const [isMainAgent, setIsMainAgent] = useState(false);
 
   useEffect(() => {
     if (agent) {
@@ -1177,6 +1180,16 @@ export default function AgentPanel({
       }).start();
     }
   }, [agent, isDesktop]);
+
+  useEffect(() => {
+    if (!agent) return;
+    import('../../../../lib/agentIdentity').then(({ loadAgentIdentities }) => {
+      loadAgentIdentities().then(ids => {
+        const identity = ids.get(agent.sessionKey || agent.id);
+        setIsMainAgent(identity?.isPrimary === true);
+      });
+    });
+  }, [agent?.id]);
 
   // Extract sessionKey early so hooks always run in same order
   const sessionKey = agent
@@ -1550,6 +1563,76 @@ export default function AgentPanel({
               </View>
             ) : null}
           </View>
+
+          {/* ── MEMORY SYNC STATUS — shows for all bridge-connected agents ── */}
+          {['claude-code', 'cursor', 'codex', 'gemini'].includes(agent.providerType) && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 6 }}>
+              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: agent.status === 'active' || agent.status === 'building' ? '#22c55e' : '#3a3a4e' }} />
+              <Text style={{ color: '#606075', fontSize: 8, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>
+                MEMORY SYNC {agent.status === 'active' || agent.status === 'building' ? 'ACTIVE' : 'IDLE'}
+              </Text>
+              <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO, marginLeft: 'auto' }}>
+                Session context auto-saved every 30s
+              </Text>
+            </View>
+          )}
+
+          {/* ── AGENT IDENTITY — rename + set as main ── */}
+          {['claude-code', 'cursor', 'codex', 'gemini'].includes(agent.providerType) && (
+            <View style={{ gap: 6 }}>
+              {/* Rename agent */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                <Text style={{ color: '#606075', fontSize: 8, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>AGENT NAME</Text>
+                {renamingAgent ? (
+                  <View style={{ flexDirection: 'row', flex: 1, gap: 4 }}>
+                    <TextInput
+                      value={agentNameDraft}
+                      onChangeText={setAgentNameDraft}
+                      placeholder={agent.name}
+                      placeholderTextColor="#3a3a4e"
+                      autoFocus
+                      style={{ flex: 1, color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 6, paddingVertical: 3, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+                      onSubmitEditing={async () => {
+                        if (agentNameDraft.trim()) {
+                          const { renameAgent } = await import('../../../../lib/agentIdentity');
+                          await renameAgent(agent.sessionKey || agent.id, agentNameDraft.trim());
+                          if (onRenameAgent) onRenameAgent(agent.id, agentNameDraft.trim());
+                        }
+                        setRenamingAgent(false);
+                      }}
+                    />
+                    <Pressable onPress={() => setRenamingAgent(false)} style={{ paddingHorizontal: 6, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}>
+                      <Text style={{ color: '#606075', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>Cancel</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <Pressable onPress={() => { setAgentNameDraft(agent.name); setRenamingAgent(true); }} style={[{ paddingHorizontal: 6, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                    <Text style={{ color: '#a0a0b0', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>Rename</Text>
+                  </Pressable>
+                )}
+              </View>
+
+              {/* Set as main pixel agent for this provider */}
+              <Pressable
+                onPress={async () => {
+                  const { setMainAgentForProvider } = await import('../../../../lib/agentIdentity');
+                  await setMainAgentForProvider(agent.sessionKey || agent.id, agent.providerType);
+                  setIsMainAgent(true);
+                }}
+                style={[{
+                  flexDirection: 'row', alignItems: 'center', gap: 6,
+                  backgroundColor: isMainAgent ? agent.color + '20' : '#0a0a10',
+                  borderWidth: 1, borderColor: isMainAgent ? agent.color + '60' : '#1a1a28',
+                  borderRadius: 2, padding: 6,
+                }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              >
+                <Text style={{ fontSize: 10 }}>{isMainAgent ? '\u2605' : '\u2606'}</Text>
+                <Text style={{ color: isMainAgent ? agent.color : '#606075', fontSize: 8, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>
+                  {isMainAgent ? 'MAIN PIXEL AGENT' : 'SET AS MAIN PIXEL AGENT'}
+                </Text>
+              </Pressable>
+            </View>
+          )}
 
           {/* ── MODEL + PROVIDER BAR ── */}
           <View style={{ flexDirection: 'row', gap: 6 }}>
