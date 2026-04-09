@@ -69,17 +69,41 @@ export async function retrieveRelevantMemories(opts: {
 
   if (keywords.length === 0) return [];
 
-  // Build OR filter for keyword search
-  const orFilter = keywords.map(k => `title.ilike.%${k}%,content.ilike.%${k}%`).join(',');
+  // Try full-text search first (uses GIN index), fall back to ILIKE
+  const tsQuery = keywords.join(' & '); // PostgreSQL tsquery format
+  let data: any[] | null = null;
 
-  const { data, error } = await supabase
-    .from('memory_entries')
-    .select('*')
-    .eq('circle_id', opts.circleId)
-    .eq('is_active', true)
-    .or(orFilter)
-    .order('created_at', { ascending: false })
-    .limit(opts.limit || 10);
+  // Attempt tsvector full-text search
+  try {
+    const ftsResult = await supabase
+      .from('memory_entries')
+      .select('*')
+      .eq('circle_id', opts.circleId)
+      .eq('is_active', true)
+      .textSearch('title', tsQuery, { type: 'websearch' })
+      .order('created_at', { ascending: false })
+      .limit(opts.limit || 10);
+
+    if (ftsResult.data && ftsResult.data.length > 0) {
+      data = ftsResult.data;
+    }
+  } catch {}
+
+  // Fallback to ILIKE keyword search
+  if (!data || data.length === 0) {
+    const orFilter = keywords.map(k => `title.ilike.%${k}%,content.ilike.%${k}%`).join(',');
+    const iResult = await supabase
+      .from('memory_entries')
+      .select('*')
+      .eq('circle_id', opts.circleId)
+      .eq('is_active', true)
+      .or(orFilter)
+      .order('created_at', { ascending: false })
+      .limit(opts.limit || 10);
+    data = iResult.data;
+  }
+
+  const error = null; // handled above
 
   if (error || !data) return [];
 

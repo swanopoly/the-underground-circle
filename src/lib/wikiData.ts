@@ -860,6 +860,88 @@ export const WIKI_ARTICLES: WikiArticle[] = [
     ],
   },
   {
+    id: 'semantic-memory-retrieval-privacy',
+    title: 'Semantic Memory Retrieval & Privacy',
+    subtitle: 'Why good agent memory depends on meaning-based retrieval, strong metadata filters, and private-by-default boundaries.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#84cc16',
+    tags: ['semantic retrieval', 'memory privacy', 'pgvector', 'rls', 'ranking'],
+    content: [
+      {
+        title: 'Retrieval Needs Ranking',
+        content:
+          'Good agent memory retrieval should not rely only on recency or only on keywords. The strongest pattern is to filter by scope and visibility first, then retrieve semantically, then rerank by importance, confidence, freshness, and scope priority.',
+        bulletPoints: [
+          'Filter first',
+          'Retrieve by meaning',
+          'Rerank with metadata',
+        ],
+      },
+      {
+        title: 'Privacy Comes First',
+        content:
+          'Private user memory should not leak through broad shared policies. Strong agent systems enforce privacy both in database row-level security and in application query filters. One without the other is not enough.',
+        bulletPoints: [
+          'Use RLS correctly',
+          'Use explicit app-side filters',
+          'Default private memory to owner-only',
+        ],
+      },
+      {
+        title: 'The Product Lesson',
+        content:
+          'A managed-agent product should know not only what to remember, but what to retrieve for this user, in this workspace, for this task, without overloading context or crossing privacy boundaries.',
+        bulletPoints: [
+          'Task-aware retrieval',
+          'Workspace-aware retrieval',
+          'Private-by-default memory',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'agent-memory-review-notes',
+    title: 'Agent Memory Review Notes',
+    subtitle: 'Practical lessons from reviewing a real agent-memory implementation: metadata consistency, private queries, and checkpoint snapshots.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#f59e0b',
+    tags: ['memory review', 'implementation notes', 'session snapshots', 'private memory'],
+    content: [
+      {
+        title: 'Save Metadata On Insert',
+        content:
+          'Memory quality drops quickly if importance and retrieval metadata are applied in a fragile second update step. A stronger implementation writes ranking metadata directly when the memory is created.',
+        bulletPoints: [
+          'Write ranking metadata at insert time',
+          'Avoid title-based follow-up updates',
+          'Keep retrieval behavior consistent',
+        ],
+      },
+      {
+        title: 'Keep User Queries User-Bound',
+        content:
+          'A private memory system only works if the active user binding survives through review and retrieval paths. Query helpers should not silently drop the user id and fall back to broad shared reads.',
+        bulletPoints: [
+          'Pass user binding through every query path',
+          'Separate shared and private review views',
+          'Do not rely on UI filtering alone',
+        ],
+      },
+      {
+        title: 'Checkpoint, Don’t Accumulate',
+        content:
+          'Session summaries should behave like compact snapshots, not an ever-growing list of near-duplicate memory rows. Better systems checkpoint session state and only promote the durable parts into long-term memory.',
+        bulletPoints: [
+          'Use snapshot checkpoints',
+          'Promote only durable information',
+          'Keep long-term memory cleaner',
+        ],
+      },
+    ],
+  },
+  {
     id: 'open-model-deployment-economics',
     title: 'Open Model Deployment Economics',
     subtitle: 'Why open-model cost comparisons depend on serving, utilization, and operations rather than model price alone.',

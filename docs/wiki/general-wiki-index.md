@@ -48,6 +48,8 @@ These are time-bound reports that capture what is current:
 - [agent-memory-systems-2026-04-07.md](/Users/cswanson/the-underground-circle/docs/wiki/agent-memory-systems-2026-04-07.md)
 - [managed-agent-memory-patterns-2026-04-08.md](/Users/cswanson/the-underground-circle/docs/wiki/managed-agent-memory-patterns-2026-04-08.md)
 - [agent-memory-ui-and-compaction-2026-04-08.md](/Users/cswanson/the-underground-circle/docs/wiki/agent-memory-ui-and-compaction-2026-04-08.md)
+- [semantic-memory-retrieval-and-privacy-2026-04-08.md](/Users/cswanson/the-underground-circle/docs/wiki/semantic-memory-retrieval-and-privacy-2026-04-08.md)
+- [agent-memory-review-notes-2026-04-08.md](/Users/cswanson/the-underground-circle/docs/wiki/agent-memory-review-notes-2026-04-08.md)
 - [open-model-deployment-economics-2026-04-07.md](/Users/cswanson/the-underground-circle/docs/wiki/open-model-deployment-economics-2026-04-07.md)
 - [ai-regulation-and-policy-tracker-2026-04-07.md](/Users/cswanson/the-underground-circle/docs/wiki/ai-regulation-and-policy-tracker-2026-04-07.md)
 

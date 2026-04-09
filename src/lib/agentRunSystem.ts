@@ -355,7 +355,18 @@ export async function saveMemory(opts: {
   content: string;
   sourceRunId?: string;
   sourceSurface?: string;
+  visibility?: 'private' | 'room_shared' | 'circle_shared' | 'org_shared';
+  importance?: number;
+  retrievalMode?: 'startup' | 'on_demand' | 'manual_only';
 }): Promise<MemoryEntry | null> {
+  // Auto-set visibility based on scope
+  const visibility = opts.visibility || (
+    opts.scope === 'user' ? 'private' :
+    opts.scope === 'room' ? 'room_shared' :
+    opts.scope === 'session' ? 'private' :
+    'circle_shared'
+  );
+
   const { data, error } = await supabase
     .from('memory_entries')
     .insert({
@@ -369,6 +380,9 @@ export async function saveMemory(opts: {
       content: opts.content,
       source_run_id: opts.sourceRunId,
       source_surface: opts.sourceSurface,
+      visibility,
+      importance: opts.importance,
+      retrieval_mode: opts.retrievalMode,
     })
     .select()
     .single();
@@ -504,6 +518,23 @@ export async function buildMemoryContext(circleId: string, roomId?: string, user
       const label = scope === 'room' ? 'Project' : scope === 'user' ? 'Personal' : 'Circle';
       sections.push(`### ${label} Memory\n${lines.join('\n')}`);
     }
+  }
+
+  // Log memory access (non-blocking) — tracks which memories were loaded into each run
+  if (memories.length > 0) {
+    try {
+      const accessLogs = memories.slice(0, 15).map(m => ({
+        memory_id: m.id,
+        user_id: userId,
+        surface: 'system_prompt',
+        reason: 'startup' as const,
+      }));
+      supabase.from('memory_access_log').insert(accessLogs).then(() => {});
+      // Increment access counts
+      for (const m of memories.slice(0, 15)) {
+        supabase.from('memory_entries').update({ access_count: ((m as any).access_count || 0) + 1, last_accessed_at: new Date().toISOString() }).eq('id', m.id).then(() => {});
+      }
+    } catch {}
   }
 
   return sections.length > 0 ? `## Agent Memory (${memories.length} entries)\n${sections.join('\n\n')}` : '';
