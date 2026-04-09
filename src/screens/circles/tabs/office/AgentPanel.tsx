@@ -2157,46 +2157,6 @@ export default function AgentPanel({
         </View>
       )}
 
-      {/* ── Next Tab Footer ── */}
-      {(() => {
-        const allTabs = [
-          { key: 'overview', label: 'Overview' },
-          ...(agent.providerType === 'openclaw' ? [{ key: 'openclaw', label: 'KingClaw' }] : []),
-          { key: 'terminal', label: 'Terminal' },
-          { key: 'memory', label: 'Memory' },
-          { key: 'runs', label: 'Runs' },
-          { key: 'evolution', label: 'Evolution' },
-          { key: 'spirit', label: 'Spirit' },
-          { key: 'activity', label: 'Activity' },
-          { key: 'customize', label: 'Customize' },
-        ];
-        const currentIdx = allTabs.findIndex(t => t.key === panelTab);
-        const prevTab = currentIdx > 0 ? allTabs[currentIdx - 1] : null;
-        const nextTab = currentIdx < allTabs.length - 1 ? allTabs[currentIdx + 1] : null;
-
-        return (
-          <View style={{ flexDirection: 'row', gap: 6, paddingHorizontal: 8, paddingVertical: 10, borderTopWidth: 1, borderTopColor: '#1a1a28' }}>
-            {prevTab && (
-              <Pressable
-                onPress={() => setPanelTab(prevTab.key as any)}
-                style={[{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              >
-                <Text style={{ color: '#606075', fontSize: 10, fontFamily: MONO }}>{'<'}</Text>
-                <Text style={{ color: '#a0a0b0', fontSize: 10, fontWeight: '600', fontFamily: MONO }}>{prevTab.label}</Text>
-              </Pressable>
-            )}
-            {nextTab && (
-              <Pressable
-                onPress={() => setPanelTab(nextTab.key as any)}
-                style={[{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, backgroundColor: (agent.color || '#6366f1') + '12', borderWidth: 1, borderColor: (agent.color || '#6366f1') + '30', borderRadius: 2 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              >
-                <Text style={{ color: agent.color || '#6366f1', fontSize: 10, fontWeight: '600', fontFamily: MONO }}>{nextTab.label}</Text>
-                <Text style={{ color: agent.color || '#6366f1', fontSize: 10, fontFamily: MONO }}>{'>'}</Text>
-              </Pressable>
-            )}
-          </View>
-        );
-      })()}
 
       </ScrollView>
     </Animated.View>
