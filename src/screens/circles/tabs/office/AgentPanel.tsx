@@ -1098,11 +1098,11 @@ export default function AgentPanel({
         <Text style={styles.connectionType}>{PROVIDER_META[agent.providerType]?.label || agent.providerType}</Text>
       </View>
 
-      {/* ── Panel Tab Navigation ── */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxHeight: 36, borderBottomWidth: 1, borderBottomColor: '#1a1a28', marginBottom: 8 }} contentContainerStyle={{ paddingHorizontal: 8, gap: 2 }}>
-        {([
+      {/* ── Panel Tab Navigation with prev/next ── */}
+      {(() => {
+        const allTabs = [
           { key: 'overview', label: 'Overview' },
-          ...(agent.providerType === 'openclaw' ? [{ key: 'openclaw', label: 'KingClaw' as const }] : []),
+          ...(agent.providerType === 'openclaw' ? [{ key: 'openclaw', label: 'KingClaw' }] : []),
           { key: 'terminal', label: 'Terminal' },
           { key: 'memory', label: 'Memory' },
           { key: 'runs', label: 'Runs' },
@@ -1110,20 +1110,59 @@ export default function AgentPanel({
           { key: 'spirit', label: 'Spirit' },
           { key: 'activity', label: 'Activity' },
           { key: 'customize', label: 'Customize' },
-        ] as const).map(tab => (
-          <Pressable
-            key={tab.key}
-            onPress={() => setPanelTab(tab.key as any)}
-            accessibilityRole="tab"
-            style={[
-              { paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 2, borderBottomColor: panelTab === tab.key ? (agent.color || '#6366f1') : 'transparent' },
-              ...(Platform.OS === 'web' ? [{ cursor: 'pointer', transition: 'all 0.15s ease' } as any] : []),
-            ]}
-          >
-            <Text style={{ color: panelTab === tab.key ? '#f0f0f5' : '#606075', fontSize: 11, fontWeight: panelTab === tab.key ? '700' : '500', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>{tab.label}</Text>
-          </Pressable>
-        ))}
-      </ScrollView>
+        ];
+        const currentIdx = allTabs.findIndex(t => t.key === panelTab);
+        const prevTab = currentIdx > 0 ? allTabs[currentIdx - 1] : null;
+        const nextTab = currentIdx < allTabs.length - 1 ? allTabs[currentIdx + 1] : null;
+
+        return (
+          <>
+            <View style={{ flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#1a1a28', marginBottom: 8 }}>
+              {/* Prev arrow */}
+              <Pressable
+                onPress={() => prevTab && setPanelTab(prevTab.key as any)}
+                disabled={!prevTab}
+                style={[{ paddingHorizontal: 8, paddingVertical: 8, opacity: prevTab ? 1 : 0.2 }, Platform.OS === 'web' && { cursor: prevTab ? 'pointer' : 'default' } as any]}
+              >
+                <Text style={{ color: '#606075', fontSize: 14, fontWeight: '700', fontFamily: MONO }}>{'<'}</Text>
+              </Pressable>
+
+              {/* Scrollable tabs */}
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flex: 1, maxHeight: 36 }} contentContainerStyle={{ gap: 2 }}>
+                {allTabs.map(tab => (
+                  <Pressable
+                    key={tab.key}
+                    onPress={() => setPanelTab(tab.key as any)}
+                    accessibilityRole="tab"
+                    style={[
+                      { paddingHorizontal: 10, paddingVertical: 8, borderBottomWidth: 2, borderBottomColor: panelTab === tab.key ? (agent.color || '#6366f1') : 'transparent' },
+                      ...(Platform.OS === 'web' ? [{ cursor: 'pointer', transition: 'all 0.15s ease' } as any] : []),
+                    ]}
+                  >
+                    <Text style={{ color: panelTab === tab.key ? '#f0f0f5' : '#606075', fontSize: 10, fontWeight: panelTab === tab.key ? '700' : '500', fontFamily: MONO }}>{tab.label}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+
+              {/* Next arrow */}
+              <Pressable
+                onPress={() => nextTab && setPanelTab(nextTab.key as any)}
+                disabled={!nextTab}
+                style={[{ paddingHorizontal: 8, paddingVertical: 8, opacity: nextTab ? 1 : 0.2 }, Platform.OS === 'web' && { cursor: nextTab ? 'pointer' : 'default' } as any]}
+              >
+                <Text style={{ color: '#606075', fontSize: 14, fontWeight: '700', fontFamily: MONO }}>{'>'}</Text>
+              </Pressable>
+            </View>
+
+            {/* Tab position indicator */}
+            <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 3, marginBottom: 6 }}>
+              {allTabs.map((tab, i) => (
+                <View key={tab.key} style={{ width: i === currentIdx ? 12 : 4, height: 3, borderRadius: 2, backgroundColor: i === currentIdx ? (agent.color || '#6366f1') : '#1a1a28' }} />
+              ))}
+            </View>
+          </>
+        );
+      })()}
 
       {/* ── OVERVIEW TAB — one-stop agent command center ── */}
       {panelTab === 'overview' && (() => {
@@ -2117,6 +2156,47 @@ export default function AgentPanel({
           })()}
         </View>
       )}
+
+      {/* ── Next Tab Footer ── */}
+      {(() => {
+        const allTabs = [
+          { key: 'overview', label: 'Overview' },
+          ...(agent.providerType === 'openclaw' ? [{ key: 'openclaw', label: 'KingClaw' }] : []),
+          { key: 'terminal', label: 'Terminal' },
+          { key: 'memory', label: 'Memory' },
+          { key: 'runs', label: 'Runs' },
+          { key: 'evolution', label: 'Evolution' },
+          { key: 'spirit', label: 'Spirit' },
+          { key: 'activity', label: 'Activity' },
+          { key: 'customize', label: 'Customize' },
+        ];
+        const currentIdx = allTabs.findIndex(t => t.key === panelTab);
+        const prevTab = currentIdx > 0 ? allTabs[currentIdx - 1] : null;
+        const nextTab = currentIdx < allTabs.length - 1 ? allTabs[currentIdx + 1] : null;
+
+        return (
+          <View style={{ flexDirection: 'row', gap: 6, paddingHorizontal: 8, paddingVertical: 10, borderTopWidth: 1, borderTopColor: '#1a1a28' }}>
+            {prevTab && (
+              <Pressable
+                onPress={() => setPanelTab(prevTab.key as any)}
+                style={[{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              >
+                <Text style={{ color: '#606075', fontSize: 10, fontFamily: MONO }}>{'<'}</Text>
+                <Text style={{ color: '#a0a0b0', fontSize: 10, fontWeight: '600', fontFamily: MONO }}>{prevTab.label}</Text>
+              </Pressable>
+            )}
+            {nextTab && (
+              <Pressable
+                onPress={() => setPanelTab(nextTab.key as any)}
+                style={[{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, backgroundColor: (agent.color || '#6366f1') + '12', borderWidth: 1, borderColor: (agent.color || '#6366f1') + '30', borderRadius: 2 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              >
+                <Text style={{ color: agent.color || '#6366f1', fontSize: 10, fontWeight: '600', fontFamily: MONO }}>{nextTab.label}</Text>
+                <Text style={{ color: agent.color || '#6366f1', fontSize: 10, fontFamily: MONO }}>{'>'}</Text>
+              </Pressable>
+            )}
+          </View>
+        );
+      })()}
 
       </ScrollView>
     </Animated.View>
