@@ -84,7 +84,7 @@ export default function JoinCircleScreen({ navigation }: any) {
     awardXP(user.id, getXPForAction('circle_join'), 'circle_join', { circle_id: circle.id }).catch(console.error);
 
     showAlert("You're in!", `Welcome to ${circle.name}.`);
-    navigation.goBack();
+    navigation.replace('CircleDetail', { circleId: circle.id, circleName: circle.name });
   };
 
   return (
