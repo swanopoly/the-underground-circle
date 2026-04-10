@@ -47,6 +47,7 @@ interface Props {
   onClose: () => void;
   isDesktop?: boolean;
   onRenameAgent?: (agentId: string, newName: string) => void;
+  onRemoveAgent?: (agent: OfficeAgent) => Promise<void> | void;
   sessionTags?: Map<string, SessionTag[]>;
   onAddSessionTag?: (sessionKey: string, tag: SessionTag) => void;
   onRemoveSessionTag?: (sessionKey: string, tagKey: string) => void;
@@ -226,18 +227,18 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerTy
   return (
     <View style={{ gap: 8 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>AGENT MEMORY</Text>
-        <Text style={{ color: '#3a3a4e', fontSize: 9, fontFamily: MONO }}>({filtered.length}/{memories.length})</Text>
+        <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>AGENT MEMORY</Text>
+        <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>({filtered.length}/{memories.length})</Text>
         <Pressable
           onPress={handleForceSave}
           disabled={saving}
-          style={[{ marginLeft: 'auto', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, backgroundColor: '#22c55e20', borderWidth: 1, borderColor: '#22c55e40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          style={[{ marginLeft: 'auto', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, backgroundColor: '#22c55e20', borderWidth: 1, borderColor: '#22c55e40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
         >
-          <Text style={{ color: '#22c55e', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>{saving ? 'SAVING...' : 'FORCE SAVE'}</Text>
+          <Text style={{ color: '#22c55e', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{saving ? 'SAVING...' : 'FORCE SAVE'}</Text>
         </Pressable>
       </View>
       {saveResult && (
-        <Text style={{ color: saveResult.startsWith('ERROR') || saveResult.startsWith('EXCEPTION') ? '#ef4444' : '#22c55e', fontSize: 8, fontFamily: MONO }}>{saveResult}</Text>
+        <Text style={{ color: saveResult.startsWith('ERROR') || saveResult.startsWith('EXCEPTION') ? '#ef4444' : '#22c55e', fontSize: 11, fontFamily: MONO }}>{saveResult}</Text>
       )}
 
       {/* View mode toggle */}
@@ -247,12 +248,12 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerTy
             key={mode}
             onPress={() => setViewMode(mode)}
             style={[{
-              paddingHorizontal: 8, paddingVertical: 3, borderRadius: 2,
+              paddingHorizontal: 8, paddingVertical: 5, borderRadius: 2,
               backgroundColor: viewMode === mode ? accentColor + '20' : 'transparent',
               borderWidth: 1, borderColor: viewMode === mode ? accentColor + '40' : '#1a1a28',
             }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
           >
-            <Text style={{ color: viewMode === mode ? accentColor : '#3a3a4e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>
+            <Text style={{ color: viewMode === mode ? accentColor : '#3a3a4e', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>
               {mode.toUpperCase()}
             </Text>
           </Pressable>
@@ -265,13 +266,13 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerTy
           value={newMemory}
           onChangeText={setNewMemory}
           placeholder="Add a memory..."
-          placeholderTextColor="#3a3a4e"
-          style={{ flex: 1, color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 4, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+          placeholderTextColor="#606075"
+          style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
           onSubmitEditing={handleAdd}
           returnKeyType="done"
         />
-        <Pressable onPress={handleAdd} style={[{ backgroundColor: accentColor + '20', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 2, borderWidth: 1, borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-          <Text style={{ color: accentColor, fontSize: 9, fontWeight: '700', fontFamily: MONO }}>+</Text>
+        <Pressable onPress={handleAdd} style={[{ backgroundColor: accentColor + '20', paddingHorizontal: 8, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+          <Text style={{ color: accentColor, fontSize: 12, fontWeight: '700', fontFamily: MONO }}>+</Text>
         </Pressable>
       </View>
 
@@ -282,20 +283,20 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerTy
             value={newSkill}
             onChangeText={setNewSkill}
             placeholder="Add a skill/instruction..."
-            placeholderTextColor="#3a3a4e"
-            style={{ flex: 1, color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 4, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+            placeholderTextColor="#606075"
+            style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
             onSubmitEditing={handleAddSkill}
             returnKeyType="done"
           />
-          <Pressable onPress={handleAddSkill} style={[{ backgroundColor: '#a855f720', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 2, borderWidth: 1, borderColor: '#a855f740' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-            <Text style={{ color: '#a855f7', fontSize: 9, fontWeight: '700', fontFamily: MONO }}>+Skill</Text>
+          <Pressable onPress={handleAddSkill} style={[{ backgroundColor: '#a855f720', paddingHorizontal: 8, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#a855f740' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+            <Text style={{ color: '#a855f7', fontSize: 12, fontWeight: '700', fontFamily: MONO }}>+Skill</Text>
           </Pressable>
         </View>
       )}
 
       {/* Error message */}
       {addError && (
-        <Text style={{ color: '#ef4444', fontSize: 9, fontFamily: MONO, padding: 4 }}>{addError}</Text>
+        <Text style={{ color: '#ef4444', fontSize: 12, fontFamily: MONO, padding: 4 }}>{addError}</Text>
       )}
 
       {/* Memory list */}
@@ -303,38 +304,38 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerTy
         {loading ? (
           <ActivityIndicator size="small" color={accentColor} style={{ padding: 20 }} />
         ) : filtered.length === 0 ? (
-          <Text style={{ color: '#3a3a4e', fontSize: 10, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No memories yet. Chat with the agent to build memory.</Text>
+          <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No memories yet. Chat with the agent to build memory.</Text>
         ) : (
           filtered.map((mem: any) => (
-            <View key={mem.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 8, marginBottom: 4 }}>
+            <View key={mem.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12, marginBottom: 4 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 3 }}>
-                <View style={{ backgroundColor: (kindColors[mem.memory_kind] || '#606075') + '20', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 2 }}>
-                  <Text style={{ color: kindColors[mem.memory_kind] || '#606075', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>{(mem.memory_kind || 'fact').toUpperCase()}</Text>
+                <View style={{ backgroundColor: (kindColors[mem.memory_kind] || '#606075') + '20', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 2 }}>
+                  <Text style={{ color: kindColors[mem.memory_kind] || '#606075', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{(mem.memory_kind || 'fact').toUpperCase()}</Text>
                 </View>
-                <View style={{ backgroundColor: '#1a1a28', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 2 }}>
-                  <Text style={{ color: '#606075', fontSize: 7, fontFamily: MONO }}>{mem.scope}</Text>
+                <View style={{ backgroundColor: '#1a1a28', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 2 }}>
+                  <Text style={{ color: '#909098', fontSize: 10, fontFamily: MONO }}>{mem.scope}</Text>
                 </View>
-                <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO, marginLeft: 'auto' }}>{new Date(mem.created_at).toLocaleDateString()}</Text>
+                <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO, marginLeft: 'auto' }}>{new Date(mem.created_at).toLocaleDateString()}</Text>
               </View>
-              <Text style={{ color: '#a0a0b0', fontSize: 10, fontWeight: '600', fontFamily: MONO, marginBottom: 2 }}>{mem.title}</Text>
+              <Text style={{ color: '#a0a0b0', fontSize: 13, fontWeight: '600', fontFamily: MONO, marginBottom: 2 }}>{mem.title}</Text>
               {editingId === mem.id ? (
                 <View style={{ gap: 4 }}>
                   <TextInput value={editContent} onChangeText={setEditContent} multiline autoFocus
-                    style={{ color: '#f0f0f5', fontSize: 9, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#2a2a3e', borderRadius: 2, padding: 6, minHeight: 36, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any} />
+                    style={{ color: '#f0f0f5', fontSize: 12, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#2a2a3e', borderRadius: 2, padding: 10, minHeight: 36, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any} />
                   <View style={{ flexDirection: 'row', gap: 4 }}>
-                    <Pressable onPress={() => handleSave(mem.id)} style={{ backgroundColor: '#22c55e20', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e40' }}><Text style={{ color: '#22c55e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>Save</Text></Pressable>
-                    <Pressable onPress={() => setEditingId(null)} style={{ backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}><Text style={{ color: '#606075', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>Cancel</Text></Pressable>
+                    <Pressable onPress={() => handleSave(mem.id)} style={{ backgroundColor: '#22c55e20', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e40' }}><Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>Save</Text></Pressable>
+                    <Pressable onPress={() => setEditingId(null)} style={{ backgroundColor: '#1a1a28', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}><Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>Cancel</Text></Pressable>
                   </View>
                 </View>
               ) : (
                 <>
-                  <Text style={{ color: '#808090', fontSize: 9, fontFamily: MONO, lineHeight: 14 }}>{mem.content}</Text>
+                  <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO, lineHeight: 18 }}>{mem.content}</Text>
                   <View style={{ flexDirection: 'row', gap: 4, marginTop: 4 }}>
-                    <Pressable onPress={() => { setEditingId(mem.id); setEditContent(mem.content); }} style={[{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                      <Text style={{ color: '#a0a0b0', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>Edit</Text>
+                    <Pressable onPress={() => { setEditingId(mem.id); setEditContent(mem.content); }} style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Text style={{ color: '#a0a0b0', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>Edit</Text>
                     </Pressable>
-                    <Pressable onPress={() => handleDelete(mem.id)} style={[{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                      <Text style={{ color: '#ef4444', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>Delete</Text>
+                    <Pressable onPress={() => handleDelete(mem.id)} style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Text style={{ color: '#ef4444', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>Delete</Text>
                     </Pressable>
                   </View>
                 </>
@@ -380,15 +381,15 @@ function AgentRunsPanel({ circleId, agentName, accentColor }: { circleId: string
   return (
     <View style={{ gap: 8 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>AGENT RUNS</Text>
-        <Text style={{ color: '#3a3a4e', fontSize: 9, fontFamily: MONO }}>({runs.length})</Text>
+        <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>AGENT RUNS</Text>
+        <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>({runs.length})</Text>
       </View>
 
       <ScrollView style={{ maxHeight: 400 }} nestedScrollEnabled showsVerticalScrollIndicator>
         {loading ? (
           <ActivityIndicator size="small" color={accentColor} style={{ padding: 20 }} />
         ) : runs.length === 0 ? (
-          <Text style={{ color: '#3a3a4e', fontSize: 10, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No runs yet.</Text>
+          <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No runs yet.</Text>
         ) : (
           runs.map((run: any) => {
             const isExpanded = expandedRun === run.id;
@@ -397,24 +398,24 @@ function AgentRunsPanel({ circleId, agentName, accentColor }: { circleId: string
               <View key={run.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isExpanded ? sc + '40' : '#1a1a28', borderRadius: 2, marginBottom: 4, overflow: 'hidden' }}>
                 <Pressable
                   onPress={() => { if (isExpanded) { setExpandedRun(null); } else { setExpandedRun(run.id); loadSteps(run.id); } }}
-                  style={[{ padding: 8 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  style={[{ padding: 12 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                 >
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                     <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: sc }} />
-                    <Text style={{ color: '#f0f0f5', fontSize: 10, fontWeight: '600', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{run.title || 'Untitled run'}</Text>
-                    <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>{run.status.toUpperCase()}</Text>
+                    <Text style={{ color: '#f0f0f5', fontSize: 13, fontWeight: '600', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{run.title || 'Untitled run'}</Text>
+                    <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{run.status.toUpperCase()}</Text>
                   </View>
                   <View style={{ flexDirection: 'row', gap: 8, marginTop: 3 }}>
-                    <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>{run.surface}</Text>
-                    {run.mode !== 'talk' && <Text style={{ color: '#606075', fontSize: 8, fontFamily: MONO }}>{run.mode}</Text>}
-                    {run.delegated_to && <Text style={{ color: '#a855f7', fontSize: 8, fontFamily: MONO }}>{run.delegated_to}</Text>}
-                    <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO, marginLeft: 'auto' }}>{new Date(run.created_at).toLocaleTimeString()}</Text>
+                    <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{run.surface}</Text>
+                    {run.mode !== 'talk' && <Text style={{ color: '#909098', fontSize: 11, fontFamily: MONO }}>{run.mode}</Text>}
+                    {run.delegated_to && <Text style={{ color: '#a855f7', fontSize: 11, fontFamily: MONO }}>{run.delegated_to}</Text>}
+                    <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, marginLeft: 'auto' }}>{new Date(run.created_at).toLocaleTimeString()}</Text>
                   </View>
                   {(run.input_tokens > 0 || run.output_tokens > 0) && (
                     <View style={{ flexDirection: 'row', gap: 8, marginTop: 2 }}>
-                      <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>In: {formatTokens(run.input_tokens)}</Text>
-                      <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>Out: {formatTokens(run.output_tokens)}</Text>
-                      {run.estimated_cost > 0 && <Text style={{ color: '#22c55e', fontSize: 7, fontFamily: MONO }}>${run.estimated_cost.toFixed(4)}</Text>}
+                      <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO }}>In: {formatTokens(run.input_tokens)}</Text>
+                      <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO }}>Out: {formatTokens(run.output_tokens)}</Text>
+                      {run.estimated_cost > 0 && <Text style={{ color: '#22c55e', fontSize: 10, fontFamily: MONO }}>${run.estimated_cost.toFixed(4)}</Text>}
                     </View>
                   )}
                 </Pressable>
@@ -423,7 +424,7 @@ function AgentRunsPanel({ circleId, agentName, accentColor }: { circleId: string
                 {isExpanded && (
                   <View style={{ paddingHorizontal: 8, paddingBottom: 8, borderTopWidth: 1, borderTopColor: '#1a1a28', paddingTop: 6 }}>
                     {steps.length === 0 ? (
-                      <Text style={{ color: '#3a3a4e', fontSize: 9, fontFamily: MONO, fontStyle: 'italic' }}>No steps recorded.</Text>
+                      <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO, fontStyle: 'italic' }}>No steps recorded.</Text>
                     ) : (
                       steps.map((step: any, i: number) => {
                         const stepColors: Record<string, string> = { plan: '#6366f1', message: '#22c55e', tool_call: '#f59e0b', delegation: '#a855f7', error: '#ef4444', finalize: '#22d3ee', thinking: '#606075' };
@@ -432,12 +433,12 @@ function AgentRunsPanel({ circleId, agentName, accentColor }: { circleId: string
                             <View style={{ width: 2, backgroundColor: stepColors[step.step_kind] || '#1a1a28', borderRadius: 1 }} />
                             <View style={{ flex: 1 }}>
                               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                                <Text style={{ color: stepColors[step.step_kind] || '#606075', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{step.step_kind}</Text>
-                                {step.tool_name && <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>{step.tool_name}</Text>}
-                                {step.delegated_to && <Text style={{ color: '#a855f7', fontSize: 7, fontFamily: MONO }}>{step.delegated_to}</Text>}
+                                <Text style={{ color: stepColors[step.step_kind] || '#606075', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{step.step_kind}</Text>
+                                {step.tool_name && <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO }}>{step.tool_name}</Text>}
+                                {step.delegated_to && <Text style={{ color: '#a855f7', fontSize: 10, fontFamily: MONO }}>{step.delegated_to}</Text>}
                               </View>
-                              <Text style={{ color: '#808090', fontSize: 9, fontFamily: MONO }} numberOfLines={2}>{step.title}</Text>
-                              {step.body && <Text style={{ color: '#606075', fontSize: 8, fontFamily: MONO, marginTop: 1 }} numberOfLines={3}>{step.body.slice(0, 200)}</Text>}
+                              <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }} numberOfLines={2}>{step.title}</Text>
+                              {step.body && <Text style={{ color: '#909098', fontSize: 11, fontFamily: MONO, marginTop: 1 }} numberOfLines={3}>{step.body.slice(0, 200)}</Text>}
                             </View>
                           </View>
                         );
@@ -556,11 +557,11 @@ function OpenSwanFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
       <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: accentColor + '35', borderRadius: 3, padding: 10 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
           <View style={{ width: 24, height: 24, borderRadius: 3, backgroundColor: accentColor + '18', borderWidth: 1, borderColor: accentColor + '35', alignItems: 'center', justifyContent: 'center' }}>
-            <Text style={{ color: accentColor, fontSize: 11, fontWeight: '800', fontFamily: MONO }}>OC</Text>
+            <Text style={{ color: accentColor, fontSize: 14, fontWeight: '800', fontFamily: MONO }}>OC</Text>
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={{ color: '#f0f0f5', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>KINGCLAW RUNTIME PANEL</Text>
-            <Text style={{ color: '#606075', fontSize: 9, fontFamily: MONO }} numberOfLines={1}>
+            <Text style={{ color: '#f0f0f5', fontSize: 14, fontWeight: '700', fontFamily: MONO }}>KINGCLAW RUNTIME PANEL</Text>
+            <Text style={{ color: '#909098', fontSize: 12, fontFamily: MONO }} numberOfLines={1}>
               {connection?.endpoint || 'No active OpenSwan endpoint resolved'}
             </Text>
           </View>
@@ -568,7 +569,7 @@ function OpenSwanFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
             onPress={refresh}
             style={[{ paddingHorizontal: 10, paddingVertical: 5, borderRadius: 3, borderWidth: 1, borderColor: accentColor + '40', backgroundColor: accentColor + '12' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
           >
-            <Text style={{ color: accentColor, fontSize: 9, fontWeight: '700', fontFamily: MONO }}>{refreshing ? 'SYNC..' : 'REFRESH'}</Text>
+            <Text style={{ color: accentColor, fontSize: 12, fontWeight: '700', fontFamily: MONO }}>{refreshing ? 'SYNC..' : 'REFRESH'}</Text>
           </Pressable>
         </View>
 
@@ -579,41 +580,41 @@ function OpenSwanFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
             { label: 'Cron Jobs', value: String(jobs.length), color: '#f59e0b' },
             { label: 'Enabled Jobs', value: String(enabledJobs), color: '#22c55e' },
           ].map((item) => (
-            <View key={item.label} style={{ width: '23%', backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 8 }}>
-              <Text style={{ color: '#3a3a4e', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>{item.label.toUpperCase()}</Text>
-              <Text style={{ color: item.color, fontSize: 14, fontWeight: '800', fontFamily: MONO, marginTop: 2 }}>{item.value}</Text>
+            <View key={item.label} style={{ width: '23%', backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12 }}>
+              <Text style={{ color: '#808090', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{item.label.toUpperCase()}</Text>
+              <Text style={{ color: item.color, fontSize: 16, fontWeight: '800', fontFamily: MONO, marginTop: 2 }}>{item.value}</Text>
             </View>
           ))}
         </View>
 
-        {error ? <Text style={{ color: '#ef4444', fontSize: 9, fontFamily: MONO, marginTop: 8 }}>{error}</Text> : null}
+        {error ? <Text style={{ color: '#ef4444', fontSize: 12, fontFamily: MONO, marginTop: 8 }}>{error}</Text> : null}
       </View>
 
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
         {capabilityCards.map((card) => (
           <View key={card.label} style={{ width: '48%', backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 9 }}>
-            <Text style={{ color: '#3a3a4e', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>{card.label.toUpperCase()}</Text>
-            <Text style={{ color: card.color, fontSize: 11, fontWeight: '700', fontFamily: MONO, marginTop: 3 }}>{card.value}</Text>
-            <Text style={{ color: '#606075', fontSize: 8, fontFamily: MONO, marginTop: 3, lineHeight: 12 }}>{card.note}</Text>
+            <Text style={{ color: '#808090', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{card.label.toUpperCase()}</Text>
+            <Text style={{ color: card.color, fontSize: 14, fontWeight: '700', fontFamily: MONO, marginTop: 3 }}>{card.value}</Text>
+            <Text style={{ color: '#909098', fontSize: 11, fontFamily: MONO, marginTop: 3, lineHeight: 16 }}>{card.note}</Text>
           </View>
         ))}
       </View>
 
       <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10, gap: 8 }}>
-        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>SESSIONS</Text>
+        <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>SESSIONS</Text>
         {loading ? (
           <ActivityIndicator size="small" color={accentColor} />
         ) : activeSession ? (
           <>
-            <View style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: accentColor + '30', borderRadius: 3, padding: 8 }}>
+            <View style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: accentColor + '30', borderRadius: 3, padding: 12 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Text style={{ color: accentColor, fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{activeSession.kind || 'session'}</Text>
-                <Text style={{ color: '#a0a0b0', fontSize: 10, fontFamily: MONO, flex: 1 }} numberOfLines={1}>{activeSession.sessionKey}</Text>
-                <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>{formatRelativeTime(activeSession.lastActivity)}</Text>
+                <Text style={{ color: accentColor, fontSize: 13, fontWeight: '700', fontFamily: MONO }}>{activeSession.kind || 'session'}</Text>
+                <Text style={{ color: '#a0a0b0', fontSize: 13, fontFamily: MONO, flex: 1 }} numberOfLines={1}>{activeSession.sessionKey}</Text>
+                <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{formatRelativeTime(activeSession.lastActivity)}</Text>
               </View>
-              {activeSession.model ? <Text style={{ color: '#6366f1', fontSize: 9, fontFamily: MONO, marginTop: 4 }}>{activeSession.model}</Text> : null}
+              {activeSession.model ? <Text style={{ color: '#6366f1', fontSize: 12, fontFamily: MONO, marginTop: 4 }}>{activeSession.model}</Text> : null}
               {activeSession.lastMessages?.length ? (
-                <Text style={{ color: '#808090', fontSize: 8, fontFamily: MONO, marginTop: 5, lineHeight: 12 }} numberOfLines={3}>
+                <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, marginTop: 5, lineHeight: 16 }} numberOfLines={3}>
                   {activeSession.lastMessages[activeSession.lastMessages.length - 1]?.content}
                 </Text>
               ) : null}
@@ -622,53 +623,53 @@ function OpenSwanFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
             {sessions.length > 1 ? (
               <View style={{ gap: 4 }}>
                 {sessions.slice(0, 5).map((session) => (
-                  <View key={session.sessionKey} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 2 }}>
+                  <View key={session.sessionKey} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6 }}>
                     <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: session.sessionKey === activeSession.sessionKey ? accentColor : '#2a2a3e' }} />
-                    <Text style={{ color: '#a0a0b0', fontSize: 9, fontFamily: MONO, flex: 1 }} numberOfLines={1}>{session.sessionKey}</Text>
-                    <Text style={{ color: '#606075', fontSize: 8, fontFamily: MONO }}>{session.kind}</Text>
+                    <Text style={{ color: '#a0a0b0', fontSize: 12, fontFamily: MONO, flex: 1 }} numberOfLines={1}>{session.sessionKey}</Text>
+                    <Text style={{ color: '#909098', fontSize: 11, fontFamily: MONO }}>{session.kind}</Text>
                   </View>
                 ))}
               </View>
             ) : null}
           </>
         ) : (
-          <Text style={{ color: '#3a3a4e', fontSize: 9, fontFamily: MONO, fontStyle: 'italic' }}>No sessions returned by the gateway.</Text>
+          <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO, fontStyle: 'italic' }}>No sessions returned by the gateway.</Text>
         )}
       </View>
 
       <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10, gap: 8 }}>
-        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>SUBAGENTS + AUTOMATIONS</Text>
+        <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>SUBAGENTS + AUTOMATIONS</Text>
         <View style={{ flexDirection: 'row', gap: 8 }}>
           <View style={{ flex: 1, gap: 4 }}>
-            <Text style={{ color: '#a855f7', fontSize: 9, fontWeight: '700', fontFamily: MONO }}>Subagents</Text>
+            <Text style={{ color: '#a855f7', fontSize: 12, fontWeight: '700', fontFamily: MONO }}>Subagents</Text>
             {subagents.length === 0 ? (
-              <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO, fontStyle: 'italic' }}>No subagents reported.</Text>
+              <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, fontStyle: 'italic' }}>No subagents reported.</Text>
             ) : subagents.slice(0, 4).map((subagent) => (
-              <View key={subagent.id} style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 6 }}>
-                <Text style={{ color: '#f0f0f5', fontSize: 8, fontWeight: '700', fontFamily: MONO }} numberOfLines={1}>{subagent.name || subagent.id}</Text>
-                <Text style={{ color: '#606075', fontSize: 7, fontFamily: MONO }} numberOfLines={1}>{subagent.model || subagent.status || 'unknown'}</Text>
-                {subagent.task ? <Text style={{ color: '#808090', fontSize: 7, fontFamily: MONO, marginTop: 2 }} numberOfLines={2}>{subagent.task}</Text> : null}
+              <View key={subagent.id} style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
+                <Text style={{ color: '#f0f0f5', fontSize: 11, fontWeight: '700', fontFamily: MONO }} numberOfLines={1}>{subagent.name || subagent.id}</Text>
+                <Text style={{ color: '#909098', fontSize: 10, fontFamily: MONO }} numberOfLines={1}>{subagent.model || subagent.status || 'unknown'}</Text>
+                {subagent.task ? <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO, marginTop: 2 }} numberOfLines={2}>{subagent.task}</Text> : null}
               </View>
             ))}
           </View>
 
           <View style={{ flex: 1, gap: 4 }}>
-            <Text style={{ color: '#f59e0b', fontSize: 9, fontWeight: '700', fontFamily: MONO }}>Cron Jobs</Text>
+            <Text style={{ color: '#f59e0b', fontSize: 12, fontWeight: '700', fontFamily: MONO }}>Cron Jobs</Text>
             {jobs.length === 0 ? (
-              <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO, fontStyle: 'italic' }}>No cron jobs configured.</Text>
+              <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, fontStyle: 'italic' }}>No cron jobs configured.</Text>
             ) : jobs.slice(0, 4).map((job) => (
-              <View key={job.id} style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 6 }}>
+              <View key={job.id} style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                   <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: job.enabled ? '#22c55e' : '#3a3a4e' }} />
-                  <Text style={{ color: '#f0f0f5', fontSize: 8, fontWeight: '700', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{job.name || job.id}</Text>
+                  <Text style={{ color: '#f0f0f5', fontSize: 11, fontWeight: '700', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{job.name || job.id}</Text>
                   <Pressable
                     onPress={() => runAction(`Run ${job.id}`, async (config) => { await manageCronJob(config, 'run', job.id); })}
-                    style={[{ paddingHorizontal: 5, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b40', backgroundColor: '#f59e0b12' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                    style={[{ paddingHorizontal: 5, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b40', backgroundColor: '#f59e0b12' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                   >
-                    <Text style={{ color: '#f59e0b', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>{actionState === `Run ${job.id}` ? '..' : 'RUN'}</Text>
+                    <Text style={{ color: '#f59e0b', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{actionState === `Run ${job.id}` ? '..' : 'RUN'}</Text>
                   </Pressable>
                 </View>
-                {job.nextRun ? <Text style={{ color: '#606075', fontSize: 7, fontFamily: MONO, marginTop: 2 }} numberOfLines={1}>next {job.nextRun}</Text> : null}
+                {job.nextRun ? <Text style={{ color: '#909098', fontSize: 10, fontFamily: MONO, marginTop: 2 }} numberOfLines={1}>next {job.nextRun}</Text> : null}
               </View>
             ))}
           </View>
@@ -676,17 +677,17 @@ function OpenSwanFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
       </View>
 
       <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10, gap: 8 }}>
-        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>OPENCLAW ACTIONS</Text>
+        <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>OPENCLAW ACTIONS</Text>
 
         <View style={{ gap: 4 }}>
-          <Text style={{ color: '#3a3a4e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>SEND TO SESSION</Text>
+          <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>SEND TO SESSION</Text>
           <View style={{ flexDirection: 'row', gap: 6 }}>
             <TextInput
               value={messageInput}
               onChangeText={setMessageInput}
               placeholder="send a session message..."
-              placeholderTextColor="#3a3a4e"
-              style={{ flex: 1, color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+              placeholderTextColor="#606075"
+              style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
             />
             <Pressable
               onPress={() => messageInput.trim() && runAction('Send message', async (config) => {
@@ -695,20 +696,20 @@ function OpenSwanFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
               })}
               style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: accentColor + '40', backgroundColor: accentColor + '12' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
             >
-              <Text style={{ color: accentColor, fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{actionState === 'Send message' ? '..' : 'SEND'}</Text>
+              <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{actionState === 'Send message' ? '..' : 'SEND'}</Text>
             </Pressable>
           </View>
         </View>
 
         <View style={{ gap: 4 }}>
-          <Text style={{ color: '#3a3a4e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>SPAWN SUBAGENT</Text>
+          <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>SPAWN SUBAGENT</Text>
           <View style={{ flexDirection: 'row', gap: 6 }}>
             <TextInput
               value={spawnInput}
               onChangeText={setSpawnInput}
               placeholder="delegate a background task..."
-              placeholderTextColor="#3a3a4e"
-              style={{ flex: 1, color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+              placeholderTextColor="#606075"
+              style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
             />
             <Pressable
               onPress={() => spawnInput.trim() && runAction('Spawn subagent', async (config) => {
@@ -717,20 +718,20 @@ function OpenSwanFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
               })}
               style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#a855f740', backgroundColor: '#a855f712' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
             >
-              <Text style={{ color: '#a855f7', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{actionState === 'Spawn subagent' ? '..' : 'SPAWN'}</Text>
+              <Text style={{ color: '#a855f7', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{actionState === 'Spawn subagent' ? '..' : 'SPAWN'}</Text>
             </Pressable>
           </View>
         </View>
 
         <View style={{ gap: 4 }}>
-          <Text style={{ color: '#3a3a4e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>MEMORY SEARCH</Text>
+          <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>MEMORY SEARCH</Text>
           <View style={{ flexDirection: 'row', gap: 6 }}>
             <TextInput
               value={memoryQuery}
               onChangeText={setMemoryQuery}
               placeholder="search agent memory..."
-              placeholderTextColor="#3a3a4e"
-              style={{ flex: 1, color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+              placeholderTextColor="#606075"
+              style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
             />
             <Pressable
               onPress={() => memoryQuery.trim() && runAction('Search memory', async (config) => {
@@ -739,10 +740,10 @@ function OpenSwanFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
               })}
               style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e40', backgroundColor: '#22c55e12' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
             >
-              <Text style={{ color: '#22c55e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{actionState === 'Search memory' ? '..' : 'SEARCH'}</Text>
+              <Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{actionState === 'Search memory' ? '..' : 'SEARCH'}</Text>
             </Pressable>
           </View>
-          {memoryResult ? <Text style={{ color: '#808090', fontSize: 8, fontFamily: MONO, lineHeight: 12 }} selectable>{memoryResult}</Text> : null}
+          {memoryResult ? <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, lineHeight: 16 }} selectable>{memoryResult}</Text> : null}
         </View>
       </View>
     </View>
@@ -855,65 +856,65 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
       {/* Header */}
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
         <View style={{ width: 20, height: 20, borderRadius: 2, backgroundColor: '#f59e0b15', borderWidth: 1, borderColor: '#f59e0b30', justifyContent: 'center', alignItems: 'center' }}>
-          <Text style={{ color: '#f59e0b', fontSize: 9, fontWeight: '800', fontFamily: MONO }}>C</Text>
+          <Text style={{ color: '#f59e0b', fontSize: 12, fontWeight: '800', fontFamily: MONO }}>C</Text>
         </View>
-        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>CRON JOBS</Text>
-        <Text style={{ color: '#3a3a4e', fontSize: 9, fontFamily: MONO }}>({jobs.length})</Text>
-        <Pressable onPress={refresh} style={[{ marginLeft: 'auto', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e', backgroundColor: '#1a1a28' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-          <Text style={{ color: '#606075', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{loading ? '..' : 'REFRESH'}</Text>
+        <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>CRON JOBS</Text>
+        <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>({jobs.length})</Text>
+        <Pressable onPress={refresh} style={[{ marginLeft: 'auto', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e', backgroundColor: '#1a1a28' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+          <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{loading ? '..' : 'REFRESH'}</Text>
         </Pressable>
-        <Pressable onPress={() => setShowCreate(!showCreate)} style={[{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e30', backgroundColor: '#22c55e10' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-          <Text style={{ color: '#22c55e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{showCreate ? 'CANCEL' : '+ NEW'}</Text>
+        <Pressable onPress={() => setShowCreate(!showCreate)} style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e30', backgroundColor: '#22c55e10' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+          <Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{showCreate ? 'CANCEL' : '+ NEW'}</Text>
         </Pressable>
       </View>
 
       <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10, gap: 6 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <View style={{ backgroundColor: connection?.status === 'connected' ? '#22c55e15' : '#1a1a28', borderWidth: 1, borderColor: connection?.status === 'connected' ? '#22c55e35' : '#2a2a3e', borderRadius: 2, paddingHorizontal: 6, paddingVertical: 2 }}>
-            <Text style={{ color: connection?.status === 'connected' ? '#22c55e' : '#606075', fontSize: 8, fontFamily: MONO }}>
+          <View style={{ backgroundColor: connection?.status === 'connected' ? '#22c55e15' : '#1a1a28', borderWidth: 1, borderColor: connection?.status === 'connected' ? '#22c55e35' : '#2a2a3e', borderRadius: 2, paddingHorizontal: 10, paddingVertical: 6 }}>
+            <Text style={{ color: connection?.status === 'connected' ? '#22c55e' : '#606075', fontSize: 11, fontFamily: MONO }}>
               {connection?.status === 'connected' ? 'KINGCLAW CONNECTED' : 'KINGCLAW NOT CONNECTED'}
             </Text>
           </View>
-          <View style={{ backgroundColor: '#6366f110', borderWidth: 1, borderColor: '#6366f125', borderRadius: 2, paddingHorizontal: 6, paddingVertical: 2 }}>
-            <Text style={{ color: '#6366f1', fontSize: 8, fontFamily: MONO }}>GATEWAY JOBS</Text>
+          <View style={{ backgroundColor: '#6366f110', borderWidth: 1, borderColor: '#6366f125', borderRadius: 2, paddingHorizontal: 10, paddingVertical: 6 }}>
+            <Text style={{ color: '#6366f1', fontSize: 11, fontFamily: MONO }}>GATEWAY JOBS</Text>
           </View>
-          <View style={{ backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff14', borderRadius: 2, paddingHorizontal: 6, paddingVertical: 2 }}>
-            <Text style={{ color: '#808090', fontSize: 8, fontFamily: MONO }}>{jobs.length} JOBS</Text>
+          <View style={{ backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff14', borderRadius: 2, paddingHorizontal: 10, paddingVertical: 6 }}>
+            <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{jobs.length} JOBS</Text>
           </View>
           {lastRefreshedAt && (
-            <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>REFRESHED {formatRelativeTime(lastRefreshedAt)}</Text>
+            <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>REFRESHED {formatRelativeTime(lastRefreshedAt)}</Text>
           )}
         </View>
-        <Text style={{ color: '#808090', fontSize: 9, fontFamily: MONO, lineHeight: 14 }}>
+        <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO, lineHeight: 18 }}>
           OpenSwan jobs run on the connected OpenSwan runtime. Circle Automations run inside Underground Circle and are managed separately in the Automations dashboard.
         </Text>
       </View>
 
-      {error && <Text style={{ color: '#ef4444', fontSize: 9, fontFamily: MONO }}>{error}</Text>}
+      {error && <Text style={{ color: '#ef4444', fontSize: 12, fontFamily: MONO }}>{error}</Text>}
 
       {/* Create new job form */}
       {showCreate && (
         <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#22c55e25', borderRadius: 2, padding: 10, gap: 6 }}>
-          <Text style={{ color: '#22c55e', fontSize: 9, fontWeight: '700', fontFamily: MONO, letterSpacing: 0.5 }}>NEW CRON JOB</Text>
+          <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '700', fontFamily: MONO, letterSpacing: 0.5 }}>NEW CRON JOB</Text>
 
           <TextInput
             value={newJob.name} onChangeText={v => setNewJob(p => ({ ...p, name: v }))}
-            placeholder="Job name (e.g. daily-digest)" placeholderTextColor="#3a3a4e"
-            style={{ color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 5, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+            placeholder="Job name (e.g. daily-digest)" placeholderTextColor="#606075"
+            style={{ color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 5, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
           />
 
           <View style={{ gap: 4 }}>
-            <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>SCHEDULE</Text>
+            <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>SCHEDULE</Text>
             <TextInput
               value={newJob.schedule} onChangeText={v => setNewJob(p => ({ ...p, schedule: v }))}
-              placeholder="Cron expression (e.g. 0 9 * * *)" placeholderTextColor="#3a3a4e"
-              style={{ color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 5, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+              placeholder="Cron expression (e.g. 0 9 * * *)" placeholderTextColor="#606075"
+              style={{ color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 5, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
             />
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 4 }}>
               {SCHEDULE_PRESETS.map(p => (
                 <Pressable key={p.cron} onPress={() => setNewJob(prev => ({ ...prev, schedule: p.cron }))}
-                  style={[{ backgroundColor: newJob.schedule === p.cron ? '#f59e0b15' : '#1a1a28', paddingHorizontal: 6, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: newJob.schedule === p.cron ? '#f59e0b30' : '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                  <Text style={{ color: newJob.schedule === p.cron ? '#f59e0b' : '#606075', fontSize: 8, fontFamily: MONO }}>{p.label}</Text>
+                  style={[{ backgroundColor: newJob.schedule === p.cron ? '#f59e0b15' : '#1a1a28', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: newJob.schedule === p.cron ? '#f59e0b30' : '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                  <Text style={{ color: newJob.schedule === p.cron ? '#f59e0b' : '#606075', fontSize: 11, fontFamily: MONO }}>{p.label}</Text>
                 </Pressable>
               ))}
             </ScrollView>
@@ -921,24 +922,24 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
 
           <TextInput
             value={newJob.task} onChangeText={v => setNewJob(p => ({ ...p, task: v }))}
-            placeholder="Task prompt (what should the agent do?)" placeholderTextColor="#3a3a4e"
+            placeholder="Task prompt (what should the agent do?)" placeholderTextColor="#606075"
             multiline numberOfLines={3}
-            style={{ color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 5, minHeight: 60, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+            style={{ color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 5, minHeight: 60, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
           />
 
           <View style={{ flexDirection: 'row', gap: 4 }}>
-            <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO, paddingTop: 4 }}>SESSION:</Text>
+            <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, paddingTop: 4 }}>SESSION:</Text>
             {['isolated', 'main', 'current'].map(t => (
               <Pressable key={t} onPress={() => setNewJob(p => ({ ...p, sessionTarget: t }))}
-                style={[{ backgroundColor: newJob.sessionTarget === t ? '#6366f115' : '#1a1a28', paddingHorizontal: 6, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: newJob.sessionTarget === t ? '#6366f130' : '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                <Text style={{ color: newJob.sessionTarget === t ? '#6366f1' : '#606075', fontSize: 8, fontFamily: MONO }}>{t.toUpperCase()}</Text>
+                style={[{ backgroundColor: newJob.sessionTarget === t ? '#6366f115' : '#1a1a28', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: newJob.sessionTarget === t ? '#6366f130' : '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                <Text style={{ color: newJob.sessionTarget === t ? '#6366f1' : '#606075', fontSize: 11, fontFamily: MONO }}>{t.toUpperCase()}</Text>
               </Pressable>
             ))}
           </View>
 
           <Pressable onPress={handleCreate} disabled={!newJob.name || !newJob.schedule || !newJob.task || actionLoading === 'create'}
             style={[{ backgroundColor: '#22c55e15', borderWidth: 1, borderColor: '#22c55e40', borderRadius: 2, paddingVertical: 6, alignItems: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-            <Text style={{ color: '#22c55e', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{actionLoading === 'create' ? 'CREATING...' : 'CREATE JOB'}</Text>
+            <Text style={{ color: '#22c55e', fontSize: 13, fontWeight: '700', fontFamily: MONO }}>{actionLoading === 'create' ? 'CREATING...' : 'CREATE JOB'}</Text>
           </Pressable>
         </View>
       )}
@@ -948,7 +949,7 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
         {loading && jobs.length === 0 ? (
           <ActivityIndicator size="small" color={accentColor} style={{ padding: 20 }} />
         ) : jobs.length === 0 ? (
-          <Text style={{ color: '#3a3a4e', fontSize: 10, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No cron jobs configured. Click + NEW to create one.</Text>
+          <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No cron jobs configured. Click + NEW to create one.</Text>
         ) : (
           jobs.map(job => {
             const isEnabled = job.enabled;
@@ -957,61 +958,61 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
                 {/* Job header */}
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                   <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: isEnabled ? '#22c55e' : '#606075' }} />
-                  <Text style={{ color: '#f0f0f5', fontSize: 11, fontWeight: '700', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{job.name || job.id.slice(0, 8)}</Text>
-                  <Text style={{ color: isEnabled ? '#22c55e' : '#606075', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{isEnabled ? 'ENABLED' : 'DISABLED'}</Text>
+                  <Text style={{ color: '#f0f0f5', fontSize: 14, fontWeight: '700', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{job.name || job.id.slice(0, 8)}</Text>
+                  <Text style={{ color: isEnabled ? '#22c55e' : '#606075', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{isEnabled ? 'ENABLED' : 'DISABLED'}</Text>
                 </View>
 
                 {/* Schedule info */}
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}>
                   {job.schedule && (
                     <View style={{ backgroundColor: '#f59e0b10', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b25' }}>
-                      <Text style={{ color: '#f59e0b', fontSize: 8, fontFamily: MONO }}>{formatCronSchedule(job.schedule) || JSON.stringify(job.schedule)}</Text>
+                      <Text style={{ color: '#f59e0b', fontSize: 11, fontFamily: MONO }}>{formatCronSchedule(job.schedule) || JSON.stringify(job.schedule)}</Text>
                     </View>
                   )}
                   {job.sessionTarget && (
                     <View style={{ backgroundColor: '#6366f110', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#6366f125' }}>
-                      <Text style={{ color: '#6366f1', fontSize: 8, fontFamily: MONO }}>{job.sessionTarget}</Text>
+                      <Text style={{ color: '#6366f1', fontSize: 11, fontFamily: MONO }}>{job.sessionTarget}</Text>
                     </View>
                   )}
                   {job.timezone && (
                     <View style={{ backgroundColor: '#14b8a610', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#14b8a625' }}>
-                      <Text style={{ color: '#14b8a6', fontSize: 8, fontFamily: MONO }}>{job.timezone}</Text>
+                      <Text style={{ color: '#14b8a6', fontSize: 11, fontFamily: MONO }}>{job.timezone}</Text>
                     </View>
                   )}
                   {job.status && (
                     <View style={{ backgroundColor: '#a855f710', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#a855f725' }}>
-                      <Text style={{ color: '#a855f7', fontSize: 8, fontFamily: MONO }}>{job.status}</Text>
+                      <Text style={{ color: '#a855f7', fontSize: 11, fontFamily: MONO }}>{job.status}</Text>
                     </View>
                   )}
-                  <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>ID: {job.id.slice(0, 8)}</Text>
+                  <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>ID: {job.id.slice(0, 8)}</Text>
                 </View>
 
                 {/* Timing */}
                 <View style={{ flexDirection: 'row', gap: 12, marginBottom: 6 }}>
                   {job.lastRun && (
                     <View>
-                      <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>LAST RUN</Text>
-                      <Text style={{ color: '#808090', fontSize: 9, fontFamily: MONO }}>{formatRelativeTime(job.lastRun)}</Text>
+                      <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO }}>LAST RUN</Text>
+                      <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>{formatRelativeTime(job.lastRun)}</Text>
                     </View>
                   )}
                   {job.nextRun && (
                     <View>
-                      <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>NEXT RUN</Text>
-                      <Text style={{ color: '#f59e0b', fontSize: 9, fontFamily: MONO }}>{formatRelativeTime(job.nextRun)}</Text>
-                      <Text style={{ color: '#606075', fontSize: 7, fontFamily: MONO }}>{new Date(job.nextRun).toLocaleString()}</Text>
+                      <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO }}>NEXT RUN</Text>
+                      <Text style={{ color: '#f59e0b', fontSize: 12, fontFamily: MONO }}>{formatRelativeTime(job.nextRun)}</Text>
+                      <Text style={{ color: '#909098', fontSize: 10, fontFamily: MONO }}>{new Date(job.nextRun).toLocaleString()}</Text>
                     </View>
                   )}
                   {typeof job.runCount === 'number' && (
                     <View>
-                      <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>RUNS</Text>
-                      <Text style={{ color: '#808090', fontSize: 9, fontFamily: MONO }}>{job.runCount}</Text>
+                      <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO }}>RUNS</Text>
+                      <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>{job.runCount}</Text>
                     </View>
                   )}
                 </View>
 
                 {/* Payload preview */}
                 {job.payload && (
-                  <Text style={{ color: '#606075', fontSize: 8, fontFamily: MONO, marginBottom: 6 }} numberOfLines={2}>
+                  <Text style={{ color: '#909098', fontSize: 11, fontFamily: MONO, marginBottom: 6 }} numberOfLines={2}>
                     {typeof job.payload === 'string' ? job.payload : JSON.stringify(job.payload).slice(0, 120)}
                   </Text>
                 )}
@@ -1019,20 +1020,20 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
                 {/* Actions */}
                 <View style={{ flexDirection: 'row', gap: 4 }}>
                   <Pressable onPress={() => handleAction('run', job.id)}
-                    style={[{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e30', backgroundColor: '#22c55e08' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                    <Text style={{ color: '#22c55e', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>
+                    style={[{ paddingHorizontal: 8, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e30', backgroundColor: '#22c55e08' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                    <Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>
                       {actionLoading === `run-${job.id}` ? '..' : 'RUN NOW'}
                     </Text>
                   </Pressable>
                   <Pressable onPress={() => handleAction('update', job.id, { enabled: !isEnabled })}
-                    style={[{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b30', backgroundColor: '#f59e0b08' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                    <Text style={{ color: '#f59e0b', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>
+                    style={[{ paddingHorizontal: 8, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b30', backgroundColor: '#f59e0b08' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                    <Text style={{ color: '#f59e0b', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>
                       {actionLoading === `update-${job.id}` ? '..' : isEnabled ? 'DISABLE' : 'ENABLE'}
                     </Text>
                   </Pressable>
                   <Pressable onPress={() => handleAction('remove', job.id)}
-                    style={[{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: '#ef444430', backgroundColor: '#ef444408' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                    <Text style={{ color: '#ef4444', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>
+                    style={[{ paddingHorizontal: 8, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: '#ef444430', backgroundColor: '#ef444408' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                    <Text style={{ color: '#ef4444', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>
                       {actionLoading === `remove-${job.id}` ? '..' : 'DELETE'}
                     </Text>
                   </Pressable>
@@ -1096,9 +1097,9 @@ function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string) => Pro
     <View style={{ paddingHorizontal: 8, marginBottom: 8 }} nativeID="section-agent-remote-shell">
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6 }}>
         <View style={{ width: 18, height: 18, borderRadius: 2, backgroundColor: '#22c55e15', borderWidth: 1, borderColor: '#22c55e30', justifyContent: 'center', alignItems: 'center' }}>
-          <Text style={{ color: '#22c55e', fontSize: 9, fontWeight: '800', fontFamily: MONO }}>$</Text>
+          <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '800', fontFamily: MONO }}>$</Text>
         </View>
-        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>REMOTE SHELL</Text>
+        <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>REMOTE SHELL</Text>
       </View>
 
       {/* Quick commands */}
@@ -1108,11 +1109,11 @@ function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string) => Pro
             key={q.cmd}
             onPress={() => { setCmdInput(q.cmd); runCmd(q.cmd); }}
             style={[
-              { backgroundColor: '#0a0a10', borderRadius: 2, borderWidth: 1, borderColor: '#1a1a28', paddingHorizontal: 8, paddingVertical: 4 },
+              { backgroundColor: '#0a0a10', borderRadius: 2, borderWidth: 1, borderColor: '#1a1a28', paddingHorizontal: 8, paddingVertical: 6 },
               Platform.OS === 'web' && { cursor: 'pointer' } as any,
             ]}
           >
-            <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO }}>
+            <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO }}>
               <Text style={{ color: '#22c55e', fontWeight: '700' }}>{q.icon}</Text> {q.label}
             </Text>
           </Pressable>
@@ -1121,7 +1122,7 @@ function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string) => Pro
 
       {/* Input row */}
       <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#05050a', borderRadius: 2, borderWidth: 1, borderColor: '#1a1a28', paddingHorizontal: 8, gap: 6, marginBottom: 4 }}>
-        <Text style={{ color: '#22c55e', fontSize: 14, fontWeight: '800', fontFamily: MONO }}>$</Text>
+        <Text style={{ color: '#22c55e', fontSize: 16, fontWeight: '800', fontFamily: MONO }}>$</Text>
         <TextInput
           style={{ flex: 1, color: '#e8e8f8', fontSize: 12, fontFamily: MONO, paddingVertical: 8, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
           value={cmdInput}
@@ -1138,22 +1139,22 @@ function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string) => Pro
           onPress={() => cmdInput.trim() && runCmd(cmdInput.trim())}
           disabled={cmdRunning}
         >
-          <Text style={{ color: '#050508', fontSize: 10, fontWeight: '800', fontFamily: MONO }}>{cmdRunning ? '..' : 'RUN'}</Text>
+          <Text style={{ color: '#050508', fontSize: 13, fontWeight: '800', fontFamily: MONO }}>{cmdRunning ? '..' : 'RUN'}</Text>
         </Pressable>
       </View>
 
       {/* Output */}
       <ScrollView
         ref={scrollRef}
-        style={{ height: outputHeight, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 8 }}
+        style={{ height: outputHeight, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12 }}
         nestedScrollEnabled
         showsVerticalScrollIndicator
       >
         {!cmdOutput && !cmdRunning && (
-          <Text style={{ color: '#3a3a4e', fontSize: 11, fontFamily: MONO, fontStyle: 'italic' }}>Run a command to see output...</Text>
+          <Text style={{ color: '#808090', fontSize: 14, fontFamily: MONO, fontStyle: 'italic' }}>Run a command to see output...</Text>
         )}
         {cmdRunning && <ActivityIndicator size="small" color="#22c55e" style={{ marginBottom: 4 }} />}
-        {cmdOutput ? <Text style={{ color: '#c9d1e8', fontSize: 11, fontFamily: MONO, lineHeight: 16 }} selectable>{cmdOutput}</Text> : null}
+        {cmdOutput ? <Text style={{ color: '#c9d1e8', fontSize: 14, fontFamily: MONO, lineHeight: 16 }} selectable>{cmdOutput}</Text> : null}
       </ScrollView>
 
       {/* Resize handle */}
@@ -1213,28 +1214,28 @@ function AgentQuickTerminal({ agentName, agentId, circleId }: { agentName: strin
     <View style={{ flex: 1, paddingHorizontal: 8 }} nativeID="section-agent-quick-terminal">
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6 }}>
         <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: sending ? '#f59e0b' : '#22c55e' }} />
-        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>{agentName.toUpperCase()} TERMINAL</Text>
-        <Text style={{ color: '#3a3a4e', fontSize: 9, marginLeft: 'auto' as any }}>{history.length} msg</Text>
+        <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>{agentName.toUpperCase()} TERMINAL</Text>
+        <Text style={{ color: '#808090', fontSize: 12, marginLeft: 'auto' as any }}>{history.length} msg</Text>
       </View>
-      <ScrollView ref={scrollRef} style={{ height: outputHeight, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 2, padding: 8 }} nestedScrollEnabled showsVerticalScrollIndicator>
-        {history.length === 0 && <Text style={{ color: '#3a3a4e', fontSize: 11, fontFamily: MONO, fontStyle: 'italic' }}>Type a command to talk to {agentName}...</Text>}
+      <ScrollView ref={scrollRef} style={{ height: outputHeight, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 2, padding: 12 }} nestedScrollEnabled showsVerticalScrollIndicator>
+        {history.length === 0 && <Text style={{ color: '#808090', fontSize: 14, fontFamily: MONO, fontStyle: 'italic' }}>Type a command to talk to {agentName}...</Text>}
         {history.map((h, i) => (
           <View key={i} style={{ marginBottom: 6 }}>
-            <Text style={{ color: h.role === 'user' ? '#8b5cf6' : h.role === 'error' ? '#ef4444' : '#22c55e', fontSize: 9, fontWeight: '700', fontFamily: MONO, marginBottom: 2 }}>
+            <Text style={{ color: h.role === 'user' ? '#8b5cf6' : h.role === 'error' ? '#ef4444' : '#22c55e', fontSize: 12, fontWeight: '700', fontFamily: MONO, marginBottom: 2 }}>
               {h.role === 'user' ? '> YOU' : h.role === 'error' ? '! ERROR' : `< ${agentName.toUpperCase()}`}
             </Text>
-            <Text style={{ color: h.role === 'error' ? '#ef4444' : '#c9d1e8', fontSize: 11, fontFamily: MONO, lineHeight: 16 }} selectable>{h.text}</Text>
+            <Text style={{ color: h.role === 'error' ? '#ef4444' : '#c9d1e8', fontSize: 14, fontFamily: MONO, lineHeight: 16 }} selectable>{h.text}</Text>
           </View>
         ))}
-        {sending && <Text style={{ color: '#f59e0b', fontSize: 11, fontFamily: MONO }}>thinking...</Text>}
+        {sending && <Text style={{ color: '#f59e0b', fontSize: 14, fontFamily: MONO }}>thinking...</Text>}
       </ScrollView>
       {Platform.OS === 'web' && (
         <View onPointerDown={handleResizeStart as any} style={{ height: 6, backgroundColor: '#1a1a2e', borderRadius: 3, marginVertical: 2, alignItems: 'center' as any, justifyContent: 'center' as any, ...(Platform.OS === 'web' ? { cursor: 'ns-resize' } as any : {}) }}>
           <View style={{ width: 30, height: 2, backgroundColor: '#2a2a3e', borderRadius: 1 }} />
         </View>
       )}
-      <View style={{ flexDirection: 'row', alignItems: 'flex-end' as any, backgroundColor: '#08081a', borderRadius: 2, borderWidth: 1, borderColor: '#1e1e3a', paddingHorizontal: 8, paddingVertical: 4, gap: 6 }}>
-        <Text style={{ color: '#8b5cf6', fontSize: 14, fontWeight: '800', fontFamily: MONO, paddingBottom: 4 }}>{'>'}</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'flex-end' as any, backgroundColor: '#08081a', borderRadius: 2, borderWidth: 1, borderColor: '#1e1e3a', paddingHorizontal: 8, paddingVertical: 6, gap: 6 }}>
+        <Text style={{ color: '#8b5cf6', fontSize: 16, fontWeight: '800', fontFamily: MONO, paddingBottom: 4 }}>{'>'}</Text>
         <TextInput
           style={{ flex: 1, color: '#e8e8f8', fontSize: 12, fontFamily: MONO, minHeight: 36, maxHeight: 100, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
           value={input} onChangeText={setInput}
@@ -1243,7 +1244,7 @@ function AgentQuickTerminal({ agentName, agentId, circleId }: { agentName: strin
         />
         <Pressable onPress={handleSend} disabled={sending || !input.trim()} accessibilityRole="button"
           style={{ backgroundColor: '#8b5cf6', borderRadius: 2, paddingHorizontal: 10, paddingVertical: 6, opacity: sending || !input.trim() ? 0.4 : 1 }}>
-          <Text style={{ color: '#fff', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>{sending ? '..' : '>>'}</Text>
+          <Text style={{ color: '#fff', fontSize: 14, fontWeight: '800', fontFamily: MONO }}>{sending ? '..' : '>>'}</Text>
         </Pressable>
       </View>
     </View>
@@ -1254,6 +1255,7 @@ function AgentQuickTerminal({ agentName, agentId, circleId }: { agentName: strin
 
 export default function AgentPanel({
   agent, onClose, isDesktop, onRenameAgent,
+  onRemoveAgent,
   sessionTags, onAddSessionTag, onRemoveSessionTag, circleId,
   appearances, onAppearanceChange, environmentType, onRunCommand,
 }: Props) {
@@ -1292,6 +1294,7 @@ export default function AgentPanel({
   const personalityScrollX = useRef(0);
   const [currentSpirit, setCurrentSpirit] = useState<string | null>(null);
   const [dbAgentId, setDbAgentId] = useState<string | null>(null);
+  const [removingAgent, setRemovingAgent] = useState(false);
   const [renamingAgent, setRenamingAgent] = useState(false);
   const [agentNameDraft, setAgentNameDraft] = useState('');
   const [isMainAgent, setIsMainAgent] = useState(false);
@@ -1450,6 +1453,7 @@ export default function AgentPanel({
   const statusColor = getOfficeStatusColor(agent.status);
   const statusLabel = getOfficeStatusLabel(agent.status).toUpperCase();
   const currentTags = sessionTags?.get(sessionKey!) || [];
+  const canRemoveAgent = !!onRemoveAgent && !!dbAgentId && agent.id !== 'default::blackswan';
 
   return (
     <Animated.View style={[
@@ -1566,6 +1570,36 @@ export default function AgentPanel({
         <Text style={styles.connectionType}>{PROVIDER_META[agent.providerType]?.label || agent.providerType}</Text>
       </View>
 
+      {canRemoveAgent && (
+        <View style={{ paddingHorizontal: 8, marginBottom: 8 }}>
+          <Pressable
+            onPress={async () => {
+              if (removingAgent || !onRemoveAgent) return;
+              setRemovingAgent(true);
+              try {
+                await onRemoveAgent(agent);
+              } finally {
+                setRemovingAgent(false);
+              }
+            }}
+            style={[{
+              alignSelf: 'flex-start',
+              paddingHorizontal: 10,
+              paddingVertical: 6,
+              borderRadius: 3,
+              borderWidth: 1,
+              borderColor: '#ef444455',
+              backgroundColor: '#ef444414',
+              opacity: removingAgent ? 0.65 : 1,
+            }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={{ color: '#ef4444', fontSize: 12, fontWeight: '800', fontFamily: MONO }}>
+              {removingAgent ? 'REMOVING...' : 'REMOVE AGENT'}
+            </Text>
+          </Pressable>
+        </View>
+      )}
+
       {/* ── Panel Tab Navigation with prev/next ── */}
       {(() => {
         const allTabs = [
@@ -1593,22 +1627,22 @@ export default function AgentPanel({
                 disabled={!prevTab}
                 style={[{ paddingHorizontal: 8, paddingVertical: 8, opacity: prevTab ? 1 : 0.2 }, Platform.OS === 'web' && { cursor: prevTab ? 'pointer' : 'default' } as any]}
               >
-                <Text style={{ color: '#606075', fontSize: 14, fontWeight: '700', fontFamily: MONO }}>{'<'}</Text>
+                <Text style={{ color: '#909098', fontSize: 16, fontWeight: '700', fontFamily: MONO }}>{'<'}</Text>
               </Pressable>
 
               {/* Scrollable tabs */}
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flex: 1, maxHeight: 36 }} contentContainerStyle={{ gap: 2 }}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flex: 1, maxHeight: 44 }} contentContainerStyle={{ gap: 4 }}>
                 {allTabs.map(tab => (
                   <Pressable
                     key={tab.key}
                     onPress={() => setPanelTab(tab.key as any)}
                     accessibilityRole="tab"
                     style={[
-                      { paddingHorizontal: 10, paddingVertical: 8, borderBottomWidth: 2, borderBottomColor: panelTab === tab.key ? (agent.color || '#6366f1') : 'transparent' },
+                      { paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 3, borderBottomColor: panelTab === tab.key ? (agent.color || '#6366f1') : 'transparent', backgroundColor: panelTab === tab.key ? (agent.color || '#6366f1') + '12' : 'transparent', borderRadius: 4 },
                       ...(Platform.OS === 'web' ? [{ cursor: 'pointer', transition: 'all 0.15s ease' } as any] : []),
                     ]}
                   >
-                    <Text style={{ color: panelTab === tab.key ? '#f0f0f5' : '#606075', fontSize: 10, fontWeight: panelTab === tab.key ? '700' : '500', fontFamily: MONO }}>{tab.label}</Text>
+                    <Text style={{ color: panelTab === tab.key ? '#f0f0f5' : '#909098', fontSize: 14, fontWeight: panelTab === tab.key ? '700' : '500', fontFamily: MONO }}>{tab.label}</Text>
                   </Pressable>
                 ))}
               </ScrollView>
@@ -1619,14 +1653,14 @@ export default function AgentPanel({
                 disabled={!nextTab}
                 style={[{ paddingHorizontal: 8, paddingVertical: 8, opacity: nextTab ? 1 : 0.2 }, Platform.OS === 'web' && { cursor: nextTab ? 'pointer' : 'default' } as any]}
               >
-                <Text style={{ color: '#606075', fontSize: 14, fontWeight: '700', fontFamily: MONO }}>{'>'}</Text>
+                <Text style={{ color: '#909098', fontSize: 16, fontWeight: '700', fontFamily: MONO }}>{'>'}</Text>
               </Pressable>
             </View>
 
             {/* Tab position indicator */}
             <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 3, marginBottom: 6 }}>
               {allTabs.map((tab, i) => (
-                <View key={tab.key} style={{ width: i === currentIdx ? 12 : 4, height: 3, borderRadius: 2, backgroundColor: i === currentIdx ? (agent.color || '#6366f1') : '#1a1a28' }} />
+                <View key={tab.key} style={{ width: i === currentIdx ? 14 : 5, height: 4, borderRadius: 2, backgroundColor: i === currentIdx ? (agent.color || '#6366f1') : '#2a2a3e' }} />
               ))}
             </View>
           </>
@@ -1654,57 +1688,57 @@ export default function AgentPanel({
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 2, borderColor: isActive ? statusColor + '60' : '#1a1a28', borderRadius: 2, padding: 12, ...(isActive && Platform.OS === 'web' ? { boxShadow: `0 0 12px ${statusColor}20` } as any : {}) }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
               <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: statusColor, ...(isActive && Platform.OS === 'web' ? { boxShadow: `0 0 6px ${statusColor}` } as any : {}) }} />
-              <Text style={{ color: statusColor, fontSize: 14, fontWeight: '800', fontFamily: MONO, letterSpacing: 1 }}>{statusLabel}</Text>
-              <Text style={{ color: '#3a3a4e', fontSize: 10, fontFamily: MONO, marginLeft: 'auto' }}>{formatRelativeTime(agent.lastActive)}</Text>
+              <Text style={{ color: statusColor, fontSize: 16, fontWeight: '800', fontFamily: MONO, letterSpacing: 1 }}>{statusLabel}</Text>
+              <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, marginLeft: 'auto' }}>{formatRelativeTime(agent.lastActive)}</Text>
             </View>
 
             {/* Current tool in use */}
             {agent.currentToolName ? (
-              <View style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: (toolColors[agent.currentToolName] || agent.color) + '40', borderRadius: 2, padding: 8, marginBottom: 6 }}>
+              <View style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: (toolColors[agent.currentToolName] || agent.color) + '40', borderRadius: 2, padding: 12, marginBottom: 6 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                   <View style={{ width: 22, height: 22, borderRadius: 2, backgroundColor: (toolColors[agent.currentToolName] || agent.color) + '20', justifyContent: 'center', alignItems: 'center' }}>
-                    <Text style={{ color: toolColors[agent.currentToolName] || agent.color, fontSize: 9, fontWeight: '800', fontFamily: MONO }}>
+                    <Text style={{ color: toolColors[agent.currentToolName] || agent.color, fontSize: 12, fontWeight: '800', fontFamily: MONO }}>
                       {agent.currentToolName === 'Read' ? 'R' : agent.currentToolName === 'Write' ? 'W' : agent.currentToolName === 'Edit' ? 'E' : agent.currentToolName === 'Bash' ? '>_' : agent.currentToolName === 'Grep' ? '?' : agent.currentToolName === 'Agent' ? 'A' : agent.currentToolName.charAt(0)}
                     </Text>
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={{ color: toolColors[agent.currentToolName] || agent.color, fontSize: 12, fontWeight: '700', fontFamily: MONO }}>{agent.currentToolName}</Text>
                     {agent.currentToolFile ? (
-                      <Text style={{ color: '#606075', fontSize: 9, fontFamily: MONO, marginTop: 1 }} numberOfLines={1}>{shortPath(agent.currentToolFile)}</Text>
+                      <Text style={{ color: '#909098', fontSize: 12, fontFamily: MONO, marginTop: 1 }} numberOfLines={1}>{shortPath(agent.currentToolFile)}</Text>
                     ) : null}
                   </View>
-                  {isActive && <Text style={{ color: statusColor, fontSize: 8, fontWeight: '700', fontFamily: MONO, letterSpacing: 1 }}>LIVE</Text>}
+                  {isActive && <Text style={{ color: statusColor, fontSize: 11, fontWeight: '700', fontFamily: MONO, letterSpacing: 1 }}>LIVE</Text>}
                 </View>
               </View>
             ) : agent.activity && agent.activity !== 'Idle' ? (
-              <Text style={{ color: '#a0a0b0', fontSize: 11, fontFamily: MONO, marginBottom: 4 }}>{agent.activity}</Text>
+              <Text style={{ color: '#a0a0b0', fontSize: 14, fontFamily: MONO, marginBottom: 4 }}>{agent.activity}</Text>
             ) : null}
 
             {/* Last user request */}
             {agent.lastUserMessage ? (
               <View style={{ marginBottom: 4 }}>
-                <Text style={{ color: '#3a3a4e', fontSize: 8, fontWeight: '700', letterSpacing: 1, marginBottom: 2 }}>USER REQUEST</Text>
-                <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO, lineHeight: 15 }} numberOfLines={3}>{agent.lastUserMessage}</Text>
+                <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', letterSpacing: 1, marginBottom: 2 }}>USER REQUEST</Text>
+                <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, lineHeight: 15 }} numberOfLines={3}>{agent.lastUserMessage}</Text>
               </View>
             ) : null}
 
             {/* Last assistant response snippet */}
             {agent.lastAssistantText ? (
               <View style={{ marginTop: 4 }}>
-                <Text style={{ color: '#3a3a4e', fontSize: 8, fontWeight: '700', letterSpacing: 1, marginBottom: 2 }}>AGENT RESPONSE</Text>
-                <Text style={{ color: '#a0a0b0', fontSize: 10, fontFamily: MONO, lineHeight: 15 }} numberOfLines={3}>{agent.lastAssistantText}</Text>
+                <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', letterSpacing: 1, marginBottom: 2 }}>AGENT RESPONSE</Text>
+                <Text style={{ color: '#a0a0b0', fontSize: 13, fontFamily: MONO, lineHeight: 15 }} numberOfLines={3}>{agent.lastAssistantText}</Text>
               </View>
             ) : null}
           </View>
 
           {/* ── MEMORY SYNC STATUS — shows for all bridge-connected agents ── */}
           {['claude-code', 'cursor', 'codex', 'gemini'].includes(agent.providerType) && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 6 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
               <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: agent.status === 'active' || agent.status === 'building' ? '#22c55e' : '#3a3a4e' }} />
-              <Text style={{ color: '#606075', fontSize: 8, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>
+              <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>
                 MEMORY SYNC {agent.status === 'active' || agent.status === 'building' ? 'ACTIVE' : 'IDLE'}
               </Text>
-              <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO, marginLeft: 'auto' }}>
+              <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, marginLeft: 'auto' }}>
                 Session context auto-saved every 30s
               </Text>
             </View>
@@ -1715,16 +1749,16 @@ export default function AgentPanel({
             <View style={{ gap: 6 }}>
               {/* Rename agent */}
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                <Text style={{ color: '#606075', fontSize: 8, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>AGENT NAME</Text>
+                <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>AGENT NAME</Text>
                 {renamingAgent ? (
                   <View style={{ flexDirection: 'row', flex: 1, gap: 4 }}>
                     <TextInput
                       value={agentNameDraft}
                       onChangeText={setAgentNameDraft}
                       placeholder={agent.name}
-                      placeholderTextColor="#3a3a4e"
+                      placeholderTextColor="#606075"
                       autoFocus
-                      style={{ flex: 1, color: '#f0f0f5', fontSize: 10, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 6, paddingVertical: 3, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+                      style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 10, paddingVertical: 5, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
                       onSubmitEditing={async () => {
                         if (agentNameDraft.trim()) {
                           const { renameAgent } = await import('../../../../lib/agentIdentity');
@@ -1734,13 +1768,13 @@ export default function AgentPanel({
                         setRenamingAgent(false);
                       }}
                     />
-                    <Pressable onPress={() => setRenamingAgent(false)} style={{ paddingHorizontal: 6, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}>
-                      <Text style={{ color: '#606075', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>Cancel</Text>
+                    <Pressable onPress={() => setRenamingAgent(false)} style={{ paddingHorizontal: 10, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}>
+                      <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>Cancel</Text>
                     </Pressable>
                   </View>
                 ) : (
-                  <Pressable onPress={() => { setAgentNameDraft(agent.name); setRenamingAgent(true); }} style={[{ paddingHorizontal: 6, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                    <Text style={{ color: '#a0a0b0', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>Rename</Text>
+                  <Pressable onPress={() => { setAgentNameDraft(agent.name); setRenamingAgent(true); }} style={[{ paddingHorizontal: 10, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                    <Text style={{ color: '#a0a0b0', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>Rename</Text>
                   </Pressable>
                 )}
               </View>
@@ -1756,11 +1790,11 @@ export default function AgentPanel({
                   flexDirection: 'row', alignItems: 'center', gap: 6,
                   backgroundColor: isMainAgent ? agent.color + '20' : '#0a0a10',
                   borderWidth: 1, borderColor: isMainAgent ? agent.color + '60' : '#1a1a28',
-                  borderRadius: 2, padding: 6,
+                  borderRadius: 2, padding: 10,
                 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
               >
-                <Text style={{ fontSize: 10 }}>{isMainAgent ? '\u2605' : '\u2606'}</Text>
-                <Text style={{ color: isMainAgent ? agent.color : '#606075', fontSize: 8, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>
+                <Text style={{ fontSize: 13 }}>{isMainAgent ? '\u2605' : '\u2606'}</Text>
+                <Text style={{ color: isMainAgent ? agent.color : '#606075', fontSize: 11, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>
                   {isMainAgent ? 'MAIN PIXEL AGENT' : 'SET AS MAIN PIXEL AGENT'}
                 </Text>
               </Pressable>
@@ -1769,17 +1803,17 @@ export default function AgentPanel({
 
           {/* ── MODEL + PROVIDER BAR ── */}
           <View style={{ flexDirection: 'row', gap: 6 }}>
-            <View style={{ flex: 1, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 8 }}>
-              <Text style={{ color: '#3a3a4e', fontSize: 8, fontWeight: '700', letterSpacing: 0.5 }}>MODEL</Text>
-              <Text style={{ color: '#6366f1', fontSize: 11, fontWeight: '700', fontFamily: MONO, marginTop: 2 }} numberOfLines={1}>{agent.model !== 'unknown' ? agent.model : '—'}</Text>
+            <View style={{ flex: 1, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12 }}>
+              <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', letterSpacing: 0.5 }}>MODEL</Text>
+              <Text style={{ color: '#6366f1', fontSize: 14, fontWeight: '700', fontFamily: MONO, marginTop: 2 }} numberOfLines={1}>{agent.model !== 'unknown' ? agent.model : '—'}</Text>
             </View>
-            <View style={{ flex: 1, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 8 }}>
-              <Text style={{ color: '#3a3a4e', fontSize: 8, fontWeight: '700', letterSpacing: 0.5 }}>PROVIDER</Text>
-              <Text style={{ color: '#a0a0b0', fontSize: 11, fontWeight: '700', fontFamily: MONO, marginTop: 2 }} numberOfLines={1}>{PROVIDER_META[agent.providerType]?.label || agent.providerType}</Text>
+            <View style={{ flex: 1, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12 }}>
+              <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', letterSpacing: 0.5 }}>PROVIDER</Text>
+              <Text style={{ color: '#a0a0b0', fontSize: 14, fontWeight: '700', fontFamily: MONO, marginTop: 2 }} numberOfLines={1}>{PROVIDER_META[agent.providerType]?.label || agent.providerType}</Text>
             </View>
-            <View style={{ flex: 1, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 8 }}>
-              <Text style={{ color: '#3a3a4e', fontSize: 8, fontWeight: '700', letterSpacing: 0.5 }}>TURNS</Text>
-              <Text style={{ color: '#f0f0f5', fontSize: 11, fontWeight: '700', fontFamily: MONO, marginTop: 2 }}>{agent.turns || agent.messagesProcessed || 0}</Text>
+            <View style={{ flex: 1, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12 }}>
+              <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', letterSpacing: 0.5 }}>TURNS</Text>
+              <Text style={{ color: '#f0f0f5', fontSize: 14, fontWeight: '700', fontFamily: MONO, marginTop: 2 }}>{agent.turns || agent.messagesProcessed || 0}</Text>
             </View>
           </View>
 
@@ -1793,14 +1827,14 @@ export default function AgentPanel({
               { label: 'Cached', value: formatTokens(agent.cachedTokens), color: '#f59e0b', icon: 'C' },
               { label: 'Cache Hit', value: cacheHitPct(agent.cachedTokens, agent.inputTokens), color: agent.cachedTokens > agent.inputTokens * 0.3 ? '#22c55e' : '#ef4444', icon: '%' },
             ].map((stat, i) => (
-              <View key={i} style={{ width: '31%', backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 8 }}>
+              <View key={i} style={{ width: '31%', backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 2 }}>
                   <View style={{ width: 14, height: 14, borderRadius: 2, backgroundColor: stat.color + '15', justifyContent: 'center', alignItems: 'center' }}>
-                    <Text style={{ color: stat.color, fontSize: 7, fontWeight: '800', fontFamily: MONO }}>{stat.icon}</Text>
+                    <Text style={{ color: stat.color, fontSize: 10, fontWeight: '800', fontFamily: MONO }}>{stat.icon}</Text>
                   </View>
-                  <Text style={{ color: '#3a3a4e', fontSize: 7, fontWeight: '600', letterSpacing: 0.5 }}>{stat.label.toUpperCase()}</Text>
+                  <Text style={{ color: '#808090', fontSize: 10, fontWeight: '600', letterSpacing: 0.5 }}>{stat.label.toUpperCase()}</Text>
                 </View>
-                <Text style={{ color: stat.color, fontSize: 14, fontWeight: '700', fontFamily: MONO }}>{stat.value}</Text>
+                <Text style={{ color: stat.color, fontSize: 16, fontWeight: '700', fontFamily: MONO }}>{stat.value}</Text>
               </View>
             ))}
           </View>
@@ -1809,8 +1843,8 @@ export default function AgentPanel({
           {agent.tokensUsed > 0 && (
             <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
-                <Text style={{ color: '#3a3a4e', fontSize: 8, fontWeight: '700', letterSpacing: 1 }}>TOKEN DISTRIBUTION</Text>
-                <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>{formatTokens(agent.tokensUsed)} total</Text>
+                <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', letterSpacing: 1 }}>TOKEN DISTRIBUTION</Text>
+                <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{formatTokens(agent.tokensUsed)} total</Text>
               </View>
               <View style={{ height: 8, borderRadius: 2, backgroundColor: '#1a1a28', flexDirection: 'row', overflow: 'hidden' }}>
                 <View style={{ flex: agent.cachedTokens || 0, backgroundColor: '#f59e0b' }} />
@@ -1818,9 +1852,9 @@ export default function AgentPanel({
                 <View style={{ flex: agent.outputTokens || 1, backgroundColor: '#22c55e' }} />
               </View>
               <View style={{ flexDirection: 'row', gap: 12, marginTop: 4 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}><View style={{ width: 6, height: 6, borderRadius: 1, backgroundColor: '#f59e0b' }} /><Text style={{ color: '#606075', fontSize: 8 }}>Cached</Text></View>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}><View style={{ width: 6, height: 6, borderRadius: 1, backgroundColor: '#6366f1' }} /><Text style={{ color: '#606075', fontSize: 8 }}>New Input</Text></View>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}><View style={{ width: 6, height: 6, borderRadius: 1, backgroundColor: '#22c55e' }} /><Text style={{ color: '#606075', fontSize: 8 }}>Output</Text></View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}><View style={{ width: 6, height: 6, borderRadius: 1, backgroundColor: '#f59e0b' }} /><Text style={{ color: '#909098', fontSize: 11 }}>Cached</Text></View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}><View style={{ width: 6, height: 6, borderRadius: 1, backgroundColor: '#6366f1' }} /><Text style={{ color: '#909098', fontSize: 11 }}>New Input</Text></View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}><View style={{ width: 6, height: 6, borderRadius: 1, backgroundColor: '#22c55e' }} /><Text style={{ color: '#909098', fontSize: 11 }}>Output</Text></View>
               </View>
             </View>
           )}
@@ -1828,16 +1862,16 @@ export default function AgentPanel({
           {/* ── RECENT TOOL CALLS — timeline with file context ── */}
           {(agent.recentToolCalls?.length || 0) > 0 ? (
             <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-              <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>TOOL TIMELINE ({agent.recentToolCalls!.length})</Text>
+              <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>TOOL TIMELINE ({agent.recentToolCalls!.length})</Text>
               {[...agent.recentToolCalls!].reverse().map((tc, i) => {
                 const tc_color = toolColors[tc.tool] || agent.color;
                 return (
-                  <View key={i} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginBottom: 4, paddingVertical: 2 }}>
-                    <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO, width: 44, textAlign: 'right', paddingTop: 2 }}>{tc.ts ? formatMsgTime(tc.ts) : '—'}</Text>
+                  <View key={i} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginBottom: 4, paddingVertical: 6 }}>
+                    <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, width: 44, textAlign: 'right', paddingTop: 2 }}>{tc.ts ? formatMsgTime(tc.ts) : '—'}</Text>
                     <View style={{ width: 2, backgroundColor: i === 0 ? tc_color : '#1a1a28', alignSelf: 'stretch', borderRadius: 1 }} />
                     <View style={{ flex: 1 }}>
-                      <Text style={{ color: tc_color, fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{tc.tool}</Text>
-                      {tc.file ? <Text style={{ color: '#606075', fontSize: 8, fontFamily: MONO, marginTop: 1 }} numberOfLines={1}>{shortPath(tc.file)}</Text> : null}
+                      <Text style={{ color: tc_color, fontSize: 13, fontWeight: '700', fontFamily: MONO }}>{tc.tool}</Text>
+                      {tc.file ? <Text style={{ color: '#909098', fontSize: 11, fontFamily: MONO, marginTop: 1 }} numberOfLines={1}>{shortPath(tc.file)}</Text> : null}
                     </View>
                   </View>
                 );
@@ -1845,13 +1879,13 @@ export default function AgentPanel({
             </View>
           ) : agent.recentActions.length > 0 ? (
             <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-              <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>TOOLS USED ({agent.recentActions.length})</Text>
+              <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>TOOLS USED ({agent.recentActions.length})</Text>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4 }}>
                 {agent.recentActions.map((action, i) => {
                   const ac = toolColors[action] || agent.color;
                   return (
-                    <View key={i} style={{ backgroundColor: ac + '15', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: ac + '30' }}>
-                      <Text style={{ color: ac, fontSize: 9, fontWeight: '700', fontFamily: MONO }}>{action}</Text>
+                    <View key={i} style={{ backgroundColor: ac + '15', paddingHorizontal: 8, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: ac + '30' }}>
+                      <Text style={{ color: ac, fontSize: 12, fontWeight: '700', fontFamily: MONO }}>{action}</Text>
                     </View>
                   );
                 })}
@@ -1862,16 +1896,16 @@ export default function AgentPanel({
           {/* ── ACTIVE FILES — what the agent is touching ── */}
           {(agent.activeFiles?.length || 0) > 0 && (
             <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-              <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>ACTIVE FILES ({agent.activeFiles!.length})</Text>
+              <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>ACTIVE FILES ({agent.activeFiles!.length})</Text>
               {agent.activeFiles!.map((f, i) => {
                 const ext = f.split('.').pop() || '';
                 const extColor = { ts: '#3178c6', tsx: '#3178c6', js: '#f7df1e', jsx: '#f7df1e', py: '#3776ab', json: '#f59e0b', md: '#606075', sql: '#22c55e', css: '#ec4899' }[ext] || '#a0a0b0';
                 return (
-                  <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 2 }}>
+                  <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6 }}>
                     <View style={{ width: 14, height: 14, borderRadius: 2, backgroundColor: extColor + '20', justifyContent: 'center', alignItems: 'center' }}>
-                      <Text style={{ color: extColor, fontSize: 6, fontWeight: '800', fontFamily: MONO }}>{ext.slice(0, 3).toUpperCase()}</Text>
+                      <Text style={{ color: extColor, fontSize: 9, fontWeight: '800', fontFamily: MONO }}>{ext.slice(0, 3).toUpperCase()}</Text>
                     </View>
-                    <Text style={{ color: '#a0a0b0', fontSize: 9, fontFamily: MONO, flex: 1 }} numberOfLines={1}>{shortPath(f)}</Text>
+                    <Text style={{ color: '#a0a0b0', fontSize: 12, fontFamily: MONO, flex: 1 }} numberOfLines={1}>{shortPath(f)}</Text>
                   </View>
                 );
               })}
@@ -1880,7 +1914,7 @@ export default function AgentPanel({
 
           {/* ── SESSION DETAILS ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-            <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>SESSION</Text>
+            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>SESSION</Text>
             {[
               { label: 'Session ID', value: agent.sessionKey || agent.id.split('::')[1] || agent.id },
               { label: 'Connection', value: agent.connectionName },
@@ -1893,33 +1927,33 @@ export default function AgentPanel({
               { label: 'Cost/Turn', value: agent.turns > 0 ? `$${(agent.costToday / agent.turns).toFixed(4)}` : '—' },
               { label: 'Tokens/Turn', value: agent.turns > 0 ? formatTokens(Math.round(agent.tokensUsed / agent.turns)) : '—' },
             ].map((row, i, arr) => (
-              <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3, borderBottomWidth: i < arr.length - 1 ? 1 : 0, borderBottomColor: '#111118' }}>
-                <Text style={{ color: '#3a3a4e', fontSize: 9, fontWeight: '600', fontFamily: MONO }}>{row.label}</Text>
-                <Text style={{ color: '#a0a0b0', fontSize: 9, fontFamily: MONO, maxWidth: '60%', textAlign: 'right' }} numberOfLines={1}>{row.value}</Text>
+              <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 5, borderBottomWidth: i < arr.length - 1 ? 1 : 0, borderBottomColor: '#111118' }}>
+                <Text style={{ color: '#808090', fontSize: 12, fontWeight: '600', fontFamily: MONO }}>{row.label}</Text>
+                <Text style={{ color: '#a0a0b0', fontSize: 12, fontFamily: MONO, maxWidth: '60%', textAlign: 'right' }} numberOfLines={1}>{row.value}</Text>
               </View>
             ))}
           </View>
 
           {/* ── RUNTIME HEALTH ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10, marginBottom: 8 }}>
-            <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>RUNTIME</Text>
+            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>RUNTIME</Text>
             <View style={{ flexDirection: 'row', gap: 6 }}>
-              <View style={{ flex: 1, alignItems: 'center', paddingVertical: 4 }}>
+              <View style={{ flex: 1, alignItems: 'center', paddingVertical: 6 }}>
                 <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: isActive ? '#22c55e' : agent.status === 'idle' ? '#f59e0b' : '#ef4444', marginBottom: 3 }} />
-                <Text style={{ color: '#a0a0b0', fontSize: 9, fontWeight: '700', fontFamily: MONO }}>{isActive ? 'HEALTHY' : agent.status === 'idle' ? 'IDLE' : 'DOWN'}</Text>
-                <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>Gateway</Text>
+                <Text style={{ color: '#a0a0b0', fontSize: 12, fontWeight: '700', fontFamily: MONO }}>{isActive ? 'HEALTHY' : agent.status === 'idle' ? 'IDLE' : 'DOWN'}</Text>
+                <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO }}>Gateway</Text>
               </View>
-              <View style={{ flex: 1, alignItems: 'center', paddingVertical: 4 }}>
-                <Text style={{ color: '#6366f1', fontSize: 14, fontWeight: '800', fontFamily: MONO }}>{agent.turns || 0}</Text>
-                <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>Turns</Text>
+              <View style={{ flex: 1, alignItems: 'center', paddingVertical: 6 }}>
+                <Text style={{ color: '#6366f1', fontSize: 16, fontWeight: '800', fontFamily: MONO }}>{agent.turns || 0}</Text>
+                <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO }}>Turns</Text>
               </View>
-              <View style={{ flex: 1, alignItems: 'center', paddingVertical: 4 }}>
-                <Text style={{ color: '#22c55e', fontSize: 14, fontWeight: '800', fontFamily: MONO }}>${agent.costToday.toFixed(2)}</Text>
-                <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>Cost</Text>
+              <View style={{ flex: 1, alignItems: 'center', paddingVertical: 6 }}>
+                <Text style={{ color: '#22c55e', fontSize: 16, fontWeight: '800', fontFamily: MONO }}>${agent.costToday.toFixed(2)}</Text>
+                <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO }}>Cost</Text>
               </View>
-              <View style={{ flex: 1, alignItems: 'center', paddingVertical: 4 }}>
-                <Text style={{ color: '#a0a0b0', fontSize: 14, fontWeight: '800', fontFamily: MONO }}>{agent.subagentCount || 0}</Text>
-                <Text style={{ color: '#3a3a4e', fontSize: 7, fontFamily: MONO }}>Sub-Agents</Text>
+              <View style={{ flex: 1, alignItems: 'center', paddingVertical: 6 }}>
+                <Text style={{ color: '#a0a0b0', fontSize: 16, fontWeight: '800', fontFamily: MONO }}>{agent.subagentCount || 0}</Text>
+                <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO }}>Sub-Agents</Text>
               </View>
             </View>
           </View>
@@ -2042,8 +2076,8 @@ export default function AgentPanel({
                   <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 3, justifyContent: 'center' }}>
                     {options.map(opt => (
                       <Pressable key={opt} onPress={() => setCustomKnobs(prev => ({ ...prev, [label === 'ACTION' ? 'actionPosture' : label === 'EVIDENCE' ? 'evidencePosture' : label === 'COMMUNICATION' ? 'communicationDensity' : label === 'SKEPTICISM' ? 'skepticism' : 'riskTier']: opt }))}
-                        style={[{ paddingHorizontal: 4, paddingVertical: 2, borderRadius: 4, borderWidth: 1, borderColor: value === opt ? (colors?.[opt] || '#6366f1') + '60' : '#1e1e3a', backgroundColor: value === opt ? (colors?.[opt] || '#6366f1') + '15' : 'transparent' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                        <Text style={{ fontSize: 8, fontFamily: 'monospace', fontWeight: '700', color: value === opt ? (colors?.[opt] || '#6366f1') : '#555' }}>{opt.replace(/-/g, ' ').toUpperCase()}</Text>
+                        style={[{ paddingHorizontal: 8, paddingVertical: 6, borderRadius: 4, borderWidth: 1, borderColor: value === opt ? (colors?.[opt] || '#6366f1') + '60' : '#1e1e3a', backgroundColor: value === opt ? (colors?.[opt] || '#6366f1') + '15' : 'transparent' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                        <Text style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: '700', color: value === opt ? (colors?.[opt] || '#6366f1') : '#555' }}>{opt.replace(/-/g, ' ').toUpperCase()}</Text>
                       </Pressable>
                     ))}
                   </View>
@@ -2072,7 +2106,7 @@ export default function AgentPanel({
                       }}
                       style={[{ paddingVertical: 5, paddingHorizontal: 10, borderRadius: 6, backgroundColor: editingSpirit ? '#6366f120' : '#ffffff08', borderWidth: 1, borderColor: editingSpirit ? '#6366f140' : '#ffffff15' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                     >
-                      <Text style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: '700', color: editingSpirit ? '#6366f1' : '#888' }}>{editingSpirit ? 'EDITING' : 'EDIT'}</Text>
+                      <Text style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: '700', color: editingSpirit ? '#6366f1' : '#888' }}>{editingSpirit ? 'EDITING' : 'EDIT'}</Text>
                     </Pressable>
                     <Pressable onPress={async () => { const id = await ensureDbAgent(); if (id) { await updateAgentSpirit(id, null, null); setCurrentSpirit(null); setEditingSpirit(false); } }}
                       style={[styles.spiritClearBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
@@ -2092,7 +2126,7 @@ export default function AgentPanel({
                     <Text style={styles.spiritKnobLabel}>SKILL</Text>
                     {editingSpirit ? (
                       <TextInput value={customKnobs.skillBundle} onChangeText={v => setCustomKnobs(prev => ({ ...prev, skillBundle: v }))}
-                        style={{ fontSize: 9, color: '#6366f1', fontFamily: 'monospace', fontWeight: '700', textAlign: 'center', borderBottomWidth: 1, borderBottomColor: '#1e1e3a', paddingVertical: 2 }} placeholder="skill-name" placeholderTextColor="#333" />
+                        style={{ fontSize: 12, color: '#6366f1', fontFamily: 'monospace', fontWeight: '700', textAlign: 'center', borderBottomWidth: 1, borderBottomColor: '#1e1e3a', paddingVertical: 6 }} placeholder="skill-name" placeholderTextColor="#333" />
                     ) : (
                       <Text style={[styles.spiritKnobValue, { color: '#6366f1' }]} numberOfLines={1}>{knobs.skillBundle}</Text>
                     )}
@@ -2104,7 +2138,7 @@ export default function AgentPanel({
                   <Text style={styles.spiritKnobLabel}>ESCALATES WHEN</Text>
                   {editingSpirit ? (
                     <TextInput value={customKnobs.escalationTrigger} onChangeText={v => setCustomKnobs(prev => ({ ...prev, escalationTrigger: v }))}
-                      style={[styles.spiritEscalationText, { borderBottomWidth: 1, borderBottomColor: '#1e1e3a', paddingVertical: 4 }]}
+                      style={[styles.spiritEscalationText, { borderBottomWidth: 1, borderBottomColor: '#1e1e3a', paddingVertical: 6 }]}
                       placeholder="e.g. failing tests, unclear requirements" placeholderTextColor="#333" />
                   ) : (
                     <Text style={styles.spiritEscalationText}>{knobs.escalationTrigger}</Text>
@@ -2113,7 +2147,7 @@ export default function AgentPanel({
 
                 {/* System prompt — collapsible, editable */}
                 <Pressable onPress={() => setShowSoul(!showSoul)} style={[{ marginTop: 10, paddingVertical: 6 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                  <Text style={{ color: '#888', fontSize: 11, fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1 }}>
+                  <Text style={{ color: '#888', fontSize: 14, fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1 }}>
                     {showSoul ? '▼' : '▶'} SYSTEM PROMPT ({Math.round(prompt.length / 100) * 100}+ chars)
                   </Text>
                 </Pressable>
@@ -2121,11 +2155,11 @@ export default function AgentPanel({
                   <View style={{ marginTop: 4 }}>
                     {editingSpirit ? (
                       <TextInput value={customPrompt} onChangeText={setCustomPrompt} multiline
-                        style={{ backgroundColor: '#000', borderWidth: 1, borderColor: '#1e1e3a', borderRadius: 8, padding: 12, color: '#ccc', fontFamily: 'monospace', fontSize: 11, minHeight: 200, maxHeight: 400, textAlignVertical: 'top' }}
+                        style={{ backgroundColor: '#000', borderWidth: 1, borderColor: '#1e1e3a', borderRadius: 8, padding: 12, color: '#ccc', fontFamily: 'monospace', fontSize: 14, minHeight: 200, maxHeight: 400, textAlignVertical: 'top' }}
                         placeholder="System prompt instructions..." placeholderTextColor="#333" />
                     ) : (
                       <ScrollView style={{ maxHeight: 300, backgroundColor: '#000', borderWidth: 1, borderColor: '#1e1e3a', borderRadius: 8, padding: 12 }}>
-                        <Text style={{ color: '#aaa', fontFamily: 'monospace', fontSize: 11, lineHeight: 17 }} selectable>{prompt}</Text>
+                        <Text style={{ color: '#aaa', fontFamily: 'monospace', fontSize: 14, lineHeight: 17 }} selectable>{prompt}</Text>
                       </ScrollView>
                     )}
                   </View>
@@ -2336,7 +2370,7 @@ export default function AgentPanel({
                   </Pressable>
                 ) : null}
                 {soulStatus ? (
-                  <Text style={{ fontSize: 8, color: soulStatus.startsWith('Error') ? '#ef4444' : '#22c55e', fontFamily: 'monospace' }}>
+                  <Text style={{ fontSize: 11, color: soulStatus.startsWith('Error') ? '#ef4444' : '#22c55e', fontFamily: 'monospace' }}>
                     {soulStatus}
                   </Text>
                 ) : null}
@@ -2401,29 +2435,29 @@ export default function AgentPanel({
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
               <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: statusColor }} />
               <Text style={{ color: statusColor, fontSize: 13, fontWeight: '700', fontFamily: MONO }}>{statusLabel.toUpperCase()}</Text>
-              <Text style={{ color: '#606075', fontSize: 10, marginLeft: 'auto' }}>{formatRelativeTime(agent.lastActive)}</Text>
+              <Text style={{ color: '#909098', fontSize: 13, marginLeft: 'auto' }}>{formatRelativeTime(agent.lastActive)}</Text>
             </View>
             {agent.activity && agent.activity !== 'Idle' && (
-              <Text style={{ color: '#a0a0b0', fontSize: 11, fontFamily: MONO, marginBottom: 4 }}>{agent.activity}</Text>
+              <Text style={{ color: '#a0a0b0', fontSize: 14, fontFamily: MONO, marginBottom: 4 }}>{agent.activity}</Text>
             )}
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
-              <View style={{ backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}>
-                <Text style={{ color: '#a0a0b0', fontSize: 9, fontFamily: MONO }}>{PROVIDER_META[agent.providerType]?.label || agent.providerType}</Text>
+              <View style={{ backgroundColor: '#1a1a28', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}>
+                <Text style={{ color: '#a0a0b0', fontSize: 12, fontFamily: MONO }}>{PROVIDER_META[agent.providerType]?.label || agent.providerType}</Text>
               </View>
               {agent.model !== 'unknown' && (
-                <View style={{ backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}>
-                  <Text style={{ color: '#6366f1', fontSize: 9, fontFamily: MONO }}>{agent.model}</Text>
+                <View style={{ backgroundColor: '#1a1a28', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}>
+                  <Text style={{ color: '#6366f1', fontSize: 12, fontFamily: MONO }}>{agent.model}</Text>
                 </View>
               )}
-              <View style={{ backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}>
-                <Text style={{ color: '#606075', fontSize: 9, fontFamily: MONO }}>{agent.connectionName}</Text>
+              <View style={{ backgroundColor: '#1a1a28', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}>
+                <Text style={{ color: '#909098', fontSize: 12, fontFamily: MONO }}>{agent.connectionName}</Text>
               </View>
             </View>
           </View>
 
           {/* ── Token Breakdown ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-            <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 8 }}>TOKEN BREAKDOWN</Text>
+            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 8 }}>TOKEN BREAKDOWN</Text>
             {/* Token bar visualization */}
             {agent.tokensUsed > 0 && (
               <View style={{ height: 6, borderRadius: 2, backgroundColor: '#1a1a28', flexDirection: 'row', overflow: 'hidden', marginBottom: 8 }}>
@@ -2442,8 +2476,8 @@ export default function AgentPanel({
                 { label: 'CACHE HIT', value: cacheHitPct(agent.cachedTokens, agent.inputTokens), color: agent.cachedTokens > agent.inputTokens * 0.5 ? '#22c55e' : '#ef4444' },
               ].map((t, i) => (
                 <View key={i} style={{ width: '31%', marginBottom: 4 }}>
-                  <Text style={{ color: t.color, fontSize: 14, fontWeight: '700', fontFamily: MONO }}>{t.value}</Text>
-                  <Text style={{ color: '#3a3a4e', fontSize: 8, fontWeight: '600', letterSpacing: 0.5, marginTop: 1 }}>{t.label}</Text>
+                  <Text style={{ color: t.color, fontSize: 16, fontWeight: '700', fontFamily: MONO }}>{t.value}</Text>
+                  <Text style={{ color: '#808090', fontSize: 11, fontWeight: '600', letterSpacing: 0.5, marginTop: 1 }}>{t.label}</Text>
                 </View>
               ))}
             </View>
@@ -2451,32 +2485,32 @@ export default function AgentPanel({
 
           {/* ── Cost Analysis ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-            <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 8 }}>COST ANALYSIS</Text>
+            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 8 }}>COST ANALYSIS</Text>
             <View style={{ flexDirection: 'row', gap: 6 }}>
               {[
                 { label: 'SESSION', value: `$${agent.costToday.toFixed(4)}`, color: '#22c55e' },
                 { label: 'TOTAL', value: `$${((agent as any).costTotal || agent.costToday).toFixed(4)}`, color: '#22d3ee' },
                 { label: 'COST/TURN', value: agent.turns > 0 ? `$${(agent.costToday / agent.turns).toFixed(4)}` : '—', color: '#a0a0b0' },
               ].map((c, i) => (
-                <View key={i} style={{ flex: 1, backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 8, alignItems: 'center' }}>
-                  <Text style={{ color: c.color, fontSize: 14, fontWeight: '800', fontFamily: MONO }}>{c.value}</Text>
-                  <Text style={{ color: '#3a3a4e', fontSize: 8, fontWeight: '600', letterSpacing: 0.5, marginTop: 2 }}>{c.label}</Text>
+                <View key={i} style={{ flex: 1, backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12, alignItems: 'center' }}>
+                  <Text style={{ color: c.color, fontSize: 16, fontWeight: '800', fontFamily: MONO }}>{c.value}</Text>
+                  <Text style={{ color: '#808090', fontSize: 11, fontWeight: '600', letterSpacing: 0.5, marginTop: 2 }}>{c.label}</Text>
                 </View>
               ))}
             </View>
             {/* Efficiency metrics */}
             <View style={{ flexDirection: 'row', gap: 6, marginTop: 6 }}>
               <View style={{ flex: 1 }}>
-                <Text style={{ color: '#606075', fontSize: 8 }}>Tokens/Turn</Text>
-                <Text style={{ color: '#a0a0b0', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{agent.turns > 0 ? formatTokens(Math.round(agent.tokensUsed / agent.turns)) : '—'}</Text>
+                <Text style={{ color: '#909098', fontSize: 11 }}>Tokens/Turn</Text>
+                <Text style={{ color: '#a0a0b0', fontSize: 14, fontWeight: '700', fontFamily: MONO }}>{agent.turns > 0 ? formatTokens(Math.round(agent.tokensUsed / agent.turns)) : '—'}</Text>
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={{ color: '#606075', fontSize: 8 }}>Output Ratio</Text>
-                <Text style={{ color: '#a0a0b0', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{agent.tokensUsed > 0 ? Math.round((agent.outputTokens / agent.tokensUsed) * 100) + '%' : '—'}</Text>
+                <Text style={{ color: '#909098', fontSize: 11 }}>Output Ratio</Text>
+                <Text style={{ color: '#a0a0b0', fontSize: 14, fontWeight: '700', fontFamily: MONO }}>{agent.tokensUsed > 0 ? Math.round((agent.outputTokens / agent.tokensUsed) * 100) + '%' : '—'}</Text>
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={{ color: '#606075', fontSize: 8 }}>Turns</Text>
-                <Text style={{ color: '#a0a0b0', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{agent.turns || agent.messagesProcessed || 0}</Text>
+                <Text style={{ color: '#909098', fontSize: 11 }}>Turns</Text>
+                <Text style={{ color: '#a0a0b0', fontSize: 14, fontWeight: '700', fontFamily: MONO }}>{agent.turns || agent.messagesProcessed || 0}</Text>
               </View>
             </View>
           </View>
@@ -2484,7 +2518,7 @@ export default function AgentPanel({
           {/* ── Tools Used ── */}
           {agent.recentActions.length > 0 && (
             <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-              <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 8 }}>TOOLS USED ({agent.recentActions.length})</Text>
+              <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 8 }}>TOOLS USED ({agent.recentActions.length})</Text>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4 }}>
                 {agent.recentActions.map((action, i) => {
                   const toolColors: Record<string, string> = {
@@ -2494,8 +2528,8 @@ export default function AgentPanel({
                   };
                   const tc = toolColors[action] || agent.color;
                   return (
-                    <View key={i} style={{ backgroundColor: tc + '15', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: tc + '30' }}>
-                      <Text style={{ color: tc, fontSize: 9, fontWeight: '700', fontFamily: MONO }}>{action}</Text>
+                    <View key={i} style={{ backgroundColor: tc + '15', paddingHorizontal: 8, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: tc + '30' }}>
+                      <Text style={{ color: tc, fontSize: 12, fontWeight: '700', fontFamily: MONO }}>{action}</Text>
                     </View>
                   );
                 })}
@@ -2505,7 +2539,7 @@ export default function AgentPanel({
 
           {/* ── Session Identity ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-            <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>SESSION INFO</Text>
+            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>SESSION INFO</Text>
             {[
               { label: 'Session ID', value: agent.sessionKey || agent.id.split('::')[1] || agent.id },
               { label: 'Connection', value: agent.connectionName },
@@ -2516,16 +2550,16 @@ export default function AgentPanel({
               { label: 'Last Active', value: agent.lastActive ? new Date(agent.lastActive).toLocaleString() : '—' },
               { label: 'Uptime', value: agent.uptime || formatRelativeTime(agent.lastActive) },
             ].map((row, i) => (
-              <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3, borderBottomWidth: i < 7 ? 1 : 0, borderBottomColor: '#1a1a28' }}>
-                <Text style={{ color: '#3a3a4e', fontSize: 9, fontWeight: '600', fontFamily: MONO }}>{row.label}</Text>
-                <Text style={{ color: '#a0a0b0', fontSize: 9, fontFamily: MONO, maxWidth: '65%', textAlign: 'right' }} numberOfLines={1}>{row.value}</Text>
+              <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 5, borderBottomWidth: i < 7 ? 1 : 0, borderBottomColor: '#1a1a28' }}>
+                <Text style={{ color: '#808090', fontSize: 12, fontWeight: '600', fontFamily: MONO }}>{row.label}</Text>
+                <Text style={{ color: '#a0a0b0', fontSize: 12, fontFamily: MONO, maxWidth: '65%', textAlign: 'right' }} numberOfLines={1}>{row.value}</Text>
               </View>
             ))}
           </View>
 
           {/* ── Message History ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-            <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 8 }}>
+            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 8 }}>
               MESSAGE LOG {agent.recentMessages.length > 0 ? `(${agent.recentMessages.length})` : ''}
             </Text>
             {agent.recentMessages.length > 0 ? (
@@ -2533,32 +2567,32 @@ export default function AgentPanel({
                 <View key={i} style={{ marginBottom: 8, paddingBottom: 8, borderBottomWidth: i < agent.recentMessages.length - 1 ? 1 : 0, borderBottomColor: '#1a1a28' }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 3 }}>
                     <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: msg.role === 'assistant' ? agent.color : '#606075' }} />
-                    <Text style={{ color: msg.role === 'assistant' ? agent.color : '#606075', fontSize: 8, fontWeight: '800', fontFamily: MONO, letterSpacing: 1 }}>{msg.role.toUpperCase()}</Text>
-                    <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO, marginLeft: 'auto' }}>{formatMsgTime(msg.timestamp)}</Text>
+                    <Text style={{ color: msg.role === 'assistant' ? agent.color : '#606075', fontSize: 11, fontWeight: '800', fontFamily: MONO, letterSpacing: 1 }}>{msg.role.toUpperCase()}</Text>
+                    <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, marginLeft: 'auto' }}>{formatMsgTime(msg.timestamp)}</Text>
                   </View>
-                  <Text style={{ color: i === 0 ? '#d0d0d8' : '#808090', fontSize: 11, fontFamily: MONO, lineHeight: 16, paddingLeft: 12 }} numberOfLines={4}>
+                  <Text style={{ color: i === 0 ? '#d0d0d8' : '#808090', fontSize: 14, fontFamily: MONO, lineHeight: 16, paddingLeft: 12 }} numberOfLines={4}>
                     {msg.content}
                   </Text>
                 </View>
               ))
             ) : agent.recentActions.length > 0 ? (
               <View>
-                <Text style={{ color: '#3a3a4e', fontSize: 9, fontStyle: 'italic', marginBottom: 6 }}>No messages — showing tool activity:</Text>
+                <Text style={{ color: '#808090', fontSize: 12, fontStyle: 'italic', marginBottom: 6 }}>No messages — showing tool activity:</Text>
                 {agent.recentActions.map((action, i) => (
-                  <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 3 }}>
+                  <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 5 }}>
                     <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: i === 0 ? agent.color : '#2a2a3e' }} />
-                    <Text style={{ color: i === 0 ? '#a0a0b0' : '#606075', fontSize: 10, fontFamily: MONO }}>{action}</Text>
+                    <Text style={{ color: i === 0 ? '#a0a0b0' : '#606075', fontSize: 13, fontFamily: MONO }}>{action}</Text>
                   </View>
                 ))}
               </View>
             ) : (
-              <Text style={{ color: '#3a3a4e', fontSize: 10, fontFamily: MONO, fontStyle: 'italic' }}>No recent activity</Text>
+              <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, fontStyle: 'italic' }}>No recent activity</Text>
             )}
           </View>
 
           {/* ── Performance Summary ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-            <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>PERFORMANCE</Text>
+            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>PERFORMANCE</Text>
             <View style={{ flexDirection: 'row', gap: 8 }}>
               {[
                 { label: 'Messages', value: String(agent.messagesProcessed || agent.turns || 0), icon: '>' },
@@ -2567,10 +2601,10 @@ export default function AgentPanel({
               ].map((p, i) => (
                 <View key={i} style={{ flex: 1, alignItems: 'center', paddingVertical: 6 }}>
                   <View style={{ width: 24, height: 24, borderRadius: 2, backgroundColor: agent.color + '15', borderWidth: 1, borderColor: agent.color + '30', justifyContent: 'center', alignItems: 'center', marginBottom: 4 }}>
-                    <Text style={{ color: agent.color, fontSize: 10, fontWeight: '800', fontFamily: MONO }}>{p.icon}</Text>
+                    <Text style={{ color: agent.color, fontSize: 13, fontWeight: '800', fontFamily: MONO }}>{p.icon}</Text>
                   </View>
                   <Text style={{ color: '#f0f0f5', fontSize: 13, fontWeight: '700', fontFamily: MONO }}>{p.value}</Text>
-                  <Text style={{ color: '#3a3a4e', fontSize: 8, marginTop: 2 }}>{p.label}</Text>
+                  <Text style={{ color: '#808090', fontSize: 11, marginTop: 2 }}>{p.label}</Text>
                 </View>
               ))}
             </View>
@@ -2746,14 +2780,14 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingVertical: 12,
-    paddingHorizontal: 4,
+    paddingHorizontal: 8,
     borderBottomWidth: 1,
     borderBottomColor: '#1e1e3a',
     marginBottom: 8,
   },
   desktopHeaderTitle: {
     color: '#555',
-    fontSize: 10,
+    fontSize: 13,
     fontWeight: '800',
     letterSpacing: 2,
     fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
@@ -2770,7 +2804,7 @@ const styles = StyleSheet.create({
   },
   desktopCloseBtnText: {
     color: '#666',
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: '600',
   },
   handleArea: {
@@ -2830,7 +2864,7 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   renameHint: {
-    fontSize: 10,
+    fontSize: 13,
     opacity: 0.4,
   },
   renameRow: {
@@ -2845,10 +2879,10 @@ const styles = StyleSheet.create({
     borderColor: '#6366f1',
     borderRadius: 6,
     paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingVertical: 6,
     color: '#eee',
     fontFamily: 'monospace',
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: '800',
   },
   renameSaveBtn: {
@@ -2863,7 +2897,7 @@ const styles = StyleSheet.create({
   },
   renameSaveText: {
     color: '#22c55e',
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: '800',
   },
   renameCancelBtn: {
@@ -2895,13 +2929,13 @@ const styles = StyleSheet.create({
   modelBadge: {
     backgroundColor: '#ffffff08',
     paddingHorizontal: 8,
-    paddingVertical: 3,
+    paddingVertical: 5,
     borderRadius: 6,
     borderWidth: 1,
     borderColor: '#ffffff10',
   },
   modelText: {
-    fontSize: 10,
+    fontSize: 13,
     color: '#777',
     fontFamily: 'monospace',
     fontWeight: '700',
@@ -2911,7 +2945,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
     paddingVertical: 6,
     borderRadius: 12,
     borderWidth: 1,
@@ -2930,11 +2964,11 @@ const styles = StyleSheet.create({
   // Connection source
   connectionRow: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
-    marginBottom: 10, paddingHorizontal: 4,
+    marginBottom: 10, paddingHorizontal: 8,
   },
   connectionIcon: { fontSize: 16 },
   connectionName: { fontSize: 13, fontWeight: '700', fontFamily: 'monospace' },
-  connectionType: { fontSize: 11, color: '#666', fontFamily: 'monospace' },
+  connectionType: { fontSize: 14, color: '#666', fontFamily: 'monospace' },
   // Activity bar
   activityBar: {
     flexDirection: 'row',
@@ -2971,7 +3005,7 @@ const styles = StyleSheet.create({
     borderColor: '#1e1e3a',
     borderRadius: 10,
     paddingVertical: 10,
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
     alignItems: 'center',
     minWidth: '30%' as any,
     flex: 1,
@@ -2983,7 +3017,7 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
   },
   gridLabel: {
-    fontSize: 10,
+    fontSize: 13,
     color: '#666',
     fontFamily: 'monospace',
     marginTop: 3,
@@ -2995,17 +3029,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     marginBottom: 10,
-    paddingHorizontal: 4,
+    paddingHorizontal: 8,
   },
   sessionKeyLabel: {
-    fontSize: 9,
+    fontSize: 12,
     color: '#444',
     fontFamily: 'monospace',
     fontWeight: '800',
     letterSpacing: 1,
   },
   sessionKeyValue: {
-    fontSize: 9,
+    fontSize: 12,
     color: '#555',
     fontFamily: 'monospace',
     flex: 1,
@@ -3030,7 +3064,7 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   actionTime: {
-    fontSize: 10,
+    fontSize: 13,
     color: '#444',
     fontFamily: 'monospace',
     width: 56,
@@ -3044,7 +3078,7 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   actionRole: {
-    fontSize: 7,
+    fontSize: 10,
     fontWeight: '800',
     fontFamily: 'monospace',
     letterSpacing: 1,
@@ -3058,7 +3092,7 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   noActivity: {
-    fontSize: 10,
+    fontSize: 13,
     color: '#333',
     fontFamily: 'monospace',
     fontStyle: 'italic',
@@ -3134,7 +3168,7 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { boxShadow: '0 0 8px rgba(255,255,255,0.4)' } as any : {}),
   },
   custItemCheck: {
-    fontSize: 14,
+    fontSize: 16,
     color: '#fff',
     fontWeight: '900',
     textShadowColor: '#000',
@@ -3162,7 +3196,7 @@ const styles = StyleSheet.create({
     fontSize: 24,
   },
   custItemLabel: {
-    fontSize: 9,
+    fontSize: 12,
     color: '#666',
     fontFamily: 'monospace',
     fontWeight: '700',
@@ -3174,20 +3208,20 @@ const styles = StyleSheet.create({
   // Spirit styles
   spiritRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 4, paddingVertical: 10,
+    paddingHorizontal: 8, paddingVertical: 10,
   },
   spiritLabel: {
     color: '#aaa', fontSize: 13, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1.5,
   },
   spiritBadge: {
-    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8,
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8,
     borderWidth: 1, borderColor: '#6366f140', backgroundColor: '#6366f115',
   },
   spiritBadgeText: {
-    color: '#6366f1', fontSize: 11, fontWeight: '700', fontFamily: 'monospace',
+    color: '#6366f1', fontSize: 14, fontWeight: '700', fontFamily: 'monospace',
   },
   spiritNone: {
-    color: '#555', fontSize: 11, fontFamily: 'monospace',
+    color: '#555', fontSize: 14, fontFamily: 'monospace',
   },
   spiritPicker: {
     padding: 12, gap: 10,
@@ -3207,21 +3241,21 @@ const styles = StyleSheet.create({
     color: '#fff', fontSize: 15, fontWeight: '800', fontFamily: 'monospace',
   },
   spiritDetailTagline: {
-    color: '#888', fontSize: 11, fontFamily: 'monospace', marginTop: 2,
+    color: '#888', fontSize: 14, fontFamily: 'monospace', marginTop: 2,
   },
   spiritKnobsGrid: {
     flexDirection: 'row', flexWrap: 'wrap', gap: 8,
   },
   spiritKnob: {
     width: '30%' as any, backgroundColor: '#0a0a1a', borderRadius: 8,
-    borderWidth: 1, borderColor: '#1e1e3a', padding: 8, alignItems: 'center',
+    borderWidth: 1, borderColor: '#1e1e3a', padding: 12, alignItems: 'center',
   },
   spiritKnobLabel: {
-    color: '#555', fontSize: 8, fontWeight: '800', fontFamily: 'monospace',
+    color: '#555', fontSize: 11, fontWeight: '800', fontFamily: 'monospace',
     letterSpacing: 1, marginBottom: 4,
   },
   spiritKnobValue: {
-    fontSize: 11, fontWeight: '800', fontFamily: 'monospace', textAlign: 'center',
+    fontSize: 14, fontWeight: '800', fontFamily: 'monospace', textAlign: 'center',
   },
   spiritEscalation: {
     marginTop: 10, backgroundColor: '#0a0a1a', borderRadius: 8,
@@ -3231,11 +3265,11 @@ const styles = StyleSheet.create({
     color: '#ccc', fontSize: 12, fontFamily: 'monospace', marginTop: 4, lineHeight: 18,
   },
   spiritClearBtn: {
-    paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8,
+    paddingVertical: 6, paddingHorizontal: 14, borderRadius: 8,
     backgroundColor: '#ef444415', borderWidth: 1, borderColor: '#ef444430',
   },
   spiritClearText: {
-    color: '#ef4444', fontSize: 11, fontWeight: '700', fontFamily: 'monospace',
+    color: '#ef4444', fontSize: 14, fontWeight: '700', fontFamily: 'monospace',
   },
   spiritCatLabel: {
     fontSize: 12, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1.5,
@@ -3254,7 +3288,7 @@ const styles = StyleSheet.create({
     color: '#6366f1', fontSize: 12, fontWeight: '800', fontFamily: 'monospace', textAlign: 'center',
   },
   spiritTagline: {
-    color: '#666', fontSize: 10, fontFamily: 'monospace', lineHeight: 15, marginTop: 2, textAlign: 'center',
+    color: '#666', fontSize: 13, fontFamily: 'monospace', lineHeight: 15, marginTop: 2, textAlign: 'center',
   },
 
   // Inline soul section (inside spirit picker)
@@ -3288,12 +3322,12 @@ const styles = StyleSheet.create({
 
   // Soul / personality styles
   soulActiveBadge: {
-    paddingHorizontal: 10, paddingVertical: 3, borderRadius: 8,
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8,
     borderWidth: 1, borderColor: '#6366f140', backgroundColor: '#6366f115',
     marginLeft: 8,
   },
   soulActiveBadgeText: {
-    fontSize: 10, color: '#aaa', fontFamily: 'monospace', fontWeight: '700',
+    fontSize: 13, color: '#aaa', fontFamily: 'monospace', fontWeight: '700',
   },
   soulBody: {
     gap: 10, paddingTop: 10,
@@ -3305,12 +3339,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row', gap: 6,
   },
   soulCategoryTab: {
-    flex: 1, paddingVertical: 8, paddingHorizontal: 6, borderRadius: 8,
+    flex: 1, paddingVertical: 8, paddingHorizontal: 10, borderRadius: 8,
     borderWidth: 1, borderColor: '#1e1e3a', backgroundColor: '#000000',
     alignItems: 'center',
   },
   soulCategoryText: {
-    fontSize: 11, color: '#666', fontFamily: 'monospace', fontWeight: '700',
+    fontSize: 14, color: '#666', fontFamily: 'monospace', fontWeight: '700',
   },
   soulCard: {
     backgroundColor: '#000000', borderWidth: 1, borderColor: '#1e1e3a',
@@ -3323,7 +3357,7 @@ const styles = StyleSheet.create({
     fontSize: 13, fontWeight: '800', color: '#bbb', fontFamily: 'monospace', flex: 1,
   },
   soulCardDesc: {
-    fontSize: 11, color: '#666', fontFamily: 'monospace', lineHeight: 16,
+    fontSize: 14, color: '#666', fontFamily: 'monospace', lineHeight: 16,
   },
   soulInput: {
     backgroundColor: '#000000', borderWidth: 1, borderColor: '#1e1e3a',
