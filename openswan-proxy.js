@@ -18,17 +18,24 @@ const GATEWAY_HOST = 'localhost';
 const GATEWAY_PORT = 18789;
 const PROXY_PORT   = 18790;
 
-// ─── Auto-load gateway auth token from OpenSwan config ───────────────────────
+// ─── Auto-load gateway auth token from OpenClaw/OpenSwan config ─────────────
 let GATEWAY_TOKEN = '';
-try {
-  const configPath = path.join(os.homedir(), '.openswan', 'openswan.json');
-  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-  GATEWAY_TOKEN = config?.gateway?.auth?.token || '';
-  if (GATEWAY_TOKEN) {
-    console.log('[proxy] Auth token loaded from ~/.openswan/openswan.json');
-  }
-} catch (e) {
-  console.warn('[proxy] Could not load OpenSwan config — auth token not available');
+const CONFIG_PATHS = [
+  path.join(os.homedir(), '.openclaw', 'openclaw.json'),
+  path.join(os.homedir(), '.openswan', 'openswan.json'),
+];
+for (const configPath of CONFIG_PATHS) {
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    GATEWAY_TOKEN = config?.gateway?.auth?.token || '';
+    if (GATEWAY_TOKEN) {
+      console.log(`[proxy] Auth token loaded from ${configPath}`);
+      break;
+    }
+  } catch {}
+}
+if (!GATEWAY_TOKEN) {
+  console.warn('[proxy] No auth token found — checked:', CONFIG_PATHS.join(', '));
 }
 
 const CORS_HEADERS = {
