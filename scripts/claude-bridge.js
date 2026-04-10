@@ -314,8 +314,8 @@ function scanDirectory(claudeDir) {
           }
         }
 
-        // Capture last user message
-        if (entry.type === 'human' && entry.message) {
+        // Capture last user message (Claude Code uses type 'user', not 'human')
+        if ((entry.type === 'human' || entry.type === 'user') && entry.message) {
           const hContent = entry.message.content;
           if (typeof hContent === 'string' && hContent.trim()) {
             lastUserMessage = hContent.trim().slice(0, 500);
