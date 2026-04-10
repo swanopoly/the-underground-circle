@@ -242,7 +242,7 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerTy
       )}
 
       {/* View mode toggle */}
-      <View style={{ flexDirection: 'row', gap: 2, marginBottom: 4 }}>
+      <View style={{ flexDirection: 'row', gap: 2, marginBottom: 8 }}>
         {(['all', 'shared', 'private', 'skills'] as const).map(mode => (
           <Pressable
             key={mode}
@@ -307,7 +307,7 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerTy
           <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No memories yet. Chat with the agent to build memory.</Text>
         ) : (
           filtered.map((mem: any) => (
-            <View key={mem.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12, marginBottom: 4 }}>
+            <View key={mem.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12, marginBottom: 8 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 3 }}>
                 <View style={{ backgroundColor: (kindColors[mem.memory_kind] || '#606075') + '20', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 2 }}>
                   <Text style={{ color: kindColors[mem.memory_kind] || '#606075', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{(mem.memory_kind || 'fact').toUpperCase()}</Text>
@@ -395,7 +395,7 @@ function AgentRunsPanel({ circleId, agentName, accentColor }: { circleId: string
             const isExpanded = expandedRun === run.id;
             const sc = statusColors[run.status] || '#606075';
             return (
-              <View key={run.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isExpanded ? sc + '40' : '#1a1a28', borderRadius: 2, marginBottom: 4, overflow: 'hidden' }}>
+              <View key={run.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isExpanded ? sc + '40' : '#1a1a28', borderRadius: 2, marginBottom: 8, overflow: 'hidden' }}>
                 <Pressable
                   onPress={() => { if (isExpanded) { setExpandedRun(null); } else { setExpandedRun(run.id); loadSteps(run.id); } }}
                   style={[{ padding: 12 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
@@ -429,7 +429,7 @@ function AgentRunsPanel({ circleId, agentName, accentColor }: { circleId: string
                       steps.map((step: any, i: number) => {
                         const stepColors: Record<string, string> = { plan: '#6366f1', message: '#22c55e', tool_call: '#f59e0b', delegation: '#a855f7', error: '#ef4444', finalize: '#22d3ee', thinking: '#606075' };
                         return (
-                          <View key={step.id} style={{ flexDirection: 'row', gap: 6, marginBottom: 4 }}>
+                          <View key={step.id} style={{ flexDirection: 'row', gap: 6, marginBottom: 8 }}>
                             <View style={{ width: 2, backgroundColor: stepColors[step.step_kind] || '#1a1a28', borderRadius: 1 }} />
                             <View style={{ flex: 1 }}>
                               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
@@ -553,7 +553,7 @@ function OpenSwanFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
   ];
 
   return (
-    <View style={{ paddingHorizontal: 8, gap: 8, paddingBottom: 12 }} nativeID="section-openswan-frontend">
+    <View style={{ paddingHorizontal: 12, gap: 16, paddingBottom: 16 }} nativeID="section-openswan-frontend">
       <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: accentColor + '35', borderRadius: 3, padding: 10 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
           <View style={{ width: 24, height: 24, borderRadius: 3, backgroundColor: accentColor + '18', borderWidth: 1, borderColor: accentColor + '35', alignItems: 'center', justifyContent: 'center' }}>
@@ -573,7 +573,7 @@ function OpenSwanFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
           </Pressable>
         </View>
 
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 10 }}>
           {[
             { label: 'Sessions', value: String(sessions.length), color: '#6366f1' },
             { label: 'Subagents', value: String(subagentCount), color: '#a855f7' },
@@ -590,7 +590,7 @@ function OpenSwanFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
         {error ? <Text style={{ color: '#ef4444', fontSize: 12, fontFamily: MONO, marginTop: 8 }}>{error}</Text> : null}
       </View>
 
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
         {capabilityCards.map((card) => (
           <View key={card.label} style={{ width: '48%', backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 9 }}>
             <Text style={{ color: '#808090', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{card.label.toUpperCase()}</Text>
@@ -954,16 +954,16 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
           jobs.map(job => {
             const isEnabled = job.enabled;
             return (
-              <View key={job.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isEnabled ? '#f59e0b20' : '#1a1a28', borderRadius: 2, padding: 10, marginBottom: 4 }}>
+              <View key={job.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isEnabled ? '#f59e0b20' : '#1a1a28', borderRadius: 2, padding: 10, marginBottom: 8 }}>
                 {/* Job header */}
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 }}>
                   <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: isEnabled ? '#22c55e' : '#606075' }} />
                   <Text style={{ color: '#f0f0f5', fontSize: 14, fontWeight: '700', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{job.name || job.id.slice(0, 8)}</Text>
                   <Text style={{ color: isEnabled ? '#22c55e' : '#606075', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{isEnabled ? 'ENABLED' : 'DISABLED'}</Text>
                 </View>
 
                 {/* Schedule info */}
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 10 }}>
                   {job.schedule && (
                     <View style={{ backgroundColor: '#f59e0b10', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b25' }}>
                       <Text style={{ color: '#f59e0b', fontSize: 11, fontFamily: MONO }}>{formatCronSchedule(job.schedule) || JSON.stringify(job.schedule)}</Text>
@@ -988,7 +988,7 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
                 </View>
 
                 {/* Timing */}
-                <View style={{ flexDirection: 'row', gap: 12, marginBottom: 6 }}>
+                <View style={{ flexDirection: 'row', gap: 12, marginBottom: 10 }}>
                   {job.lastRun && (
                     <View>
                       <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO }}>LAST RUN</Text>
@@ -1012,7 +1012,7 @@ function CronJobsPanel({ agent, circleId, accentColor }: { agent: OfficeAgent; c
 
                 {/* Payload preview */}
                 {job.payload && (
-                  <Text style={{ color: '#909098', fontSize: 11, fontFamily: MONO, marginBottom: 6 }} numberOfLines={2}>
+                  <Text style={{ color: '#909098', fontSize: 11, fontFamily: MONO, marginBottom: 10 }} numberOfLines={2}>
                     {typeof job.payload === 'string' ? job.payload : JSON.stringify(job.payload).slice(0, 120)}
                   </Text>
                 )}
@@ -1103,7 +1103,7 @@ function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string) => Pro
       </View>
 
       {/* Quick commands */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 6, maxHeight: 32 }} contentContainerStyle={{ gap: 4 }}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 10, maxHeight: 32 }} contentContainerStyle={{ gap: 4 }}>
         {QUICK_COMMANDS.map(q => (
           <Pressable
             key={q.cmd}
@@ -1121,7 +1121,7 @@ function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string) => Pro
       </ScrollView>
 
       {/* Input row */}
-      <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#05050a', borderRadius: 2, borderWidth: 1, borderColor: '#1a1a28', paddingHorizontal: 8, gap: 6, marginBottom: 4 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#05050a', borderRadius: 2, borderWidth: 1, borderColor: '#1a1a28', paddingHorizontal: 8, gap: 6, marginBottom: 8 }}>
         <Text style={{ color: '#22c55e', fontSize: 16, fontWeight: '800', fontFamily: MONO }}>$</Text>
         <TextInput
           style={{ flex: 1, color: '#e8e8f8', fontSize: 12, fontFamily: MONO, paddingVertical: 8, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
@@ -1153,7 +1153,7 @@ function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string) => Pro
         {!cmdOutput && !cmdRunning && (
           <Text style={{ color: '#808090', fontSize: 14, fontFamily: MONO, fontStyle: 'italic' }}>Run a command to see output...</Text>
         )}
-        {cmdRunning && <ActivityIndicator size="small" color="#22c55e" style={{ marginBottom: 4 }} />}
+        {cmdRunning && <ActivityIndicator size="small" color="#22c55e" style={{ marginBottom: 8 }} />}
         {cmdOutput ? <Text style={{ color: '#c9d1e8', fontSize: 14, fontFamily: MONO, lineHeight: 16 }} selectable>{cmdOutput}</Text> : null}
       </ScrollView>
 
@@ -1220,7 +1220,7 @@ function AgentQuickTerminal({ agentName, agentId, circleId }: { agentName: strin
       <ScrollView ref={scrollRef} style={{ height: outputHeight, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 2, padding: 12 }} nestedScrollEnabled showsVerticalScrollIndicator>
         {history.length === 0 && <Text style={{ color: '#808090', fontSize: 14, fontFamily: MONO, fontStyle: 'italic' }}>Type a command to talk to {agentName}...</Text>}
         {history.map((h, i) => (
-          <View key={i} style={{ marginBottom: 6 }}>
+          <View key={i} style={{ marginBottom: 10 }}>
             <Text style={{ color: h.role === 'user' ? '#8b5cf6' : h.role === 'error' ? '#ef4444' : '#22c55e', fontSize: 12, fontWeight: '700', fontFamily: MONO, marginBottom: 2 }}>
               {h.role === 'user' ? '> YOU' : h.role === 'error' ? '! ERROR' : `< ${agentName.toUpperCase()}`}
             </Text>
@@ -1252,6 +1252,93 @@ function AgentQuickTerminal({ agentName, agentId, circleId }: { agentName: strin
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+
+// ── Animated Tab Position Indicator (LoadingWave-inspired) ───────────────────
+const TAB_DOT_COLORS = ['#6366f1', '#a855f7', '#3b82f6', '#22c55e', '#f59e0b', '#ec4899', '#22d3ee'];
+let _tabDotStyleInjected = false;
+
+function AnimatedTabDots({ count, activeIndex, accentColor }: { count: number; activeIndex: number; accentColor: string }) {
+  useEffect(() => {
+    if (Platform.OS !== 'web' || _tabDotStyleInjected) return;
+    _tabDotStyleInjected = true;
+    const style = document.createElement('style');
+    style.id = 'uc-tab-dot-css';
+    style.textContent = `
+      @keyframes uc-tab-dot-pulse {
+        0%, 100% { transform: scale(0.8); opacity: 0.35; }
+        50% { transform: scale(1.15); opacity: 0.7; }
+      }
+      @keyframes uc-tab-dot-active {
+        0%, 100% { transform: scale(1); opacity: 1; }
+        50% { transform: scale(1.3); opacity: 1; }
+      }
+      @keyframes uc-tab-dot-glow {
+        0%, 100% { box-shadow: 0 0 4px currentColor; }
+        50% { box-shadow: 0 0 12px currentColor, 0 0 20px currentColor; }
+      }
+      .uc-tab-dot {
+        display: inline-block;
+        border-radius: 50%;
+        transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+      .uc-tab-dot-idle {
+        animation: uc-tab-dot-pulse 2.5s ease-in-out infinite;
+      }
+      .uc-tab-dot-active {
+        animation: uc-tab-dot-active 1.8s ease-in-out infinite, uc-tab-dot-glow 1.8s ease-in-out infinite;
+      }
+    `;
+    document.head.appendChild(style);
+  }, []);
+
+  if (Platform.OS === 'web') {
+    return (
+      <View style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6, marginBottom: 10, marginTop: 4, minHeight: 12 }}>
+        {Array.from({ length: count }).map((_, i) => {
+          const isActive = i === activeIndex;
+          const color = isActive ? accentColor : TAB_DOT_COLORS[i % TAB_DOT_COLORS.length];
+          return (
+            <div
+              key={i}
+              className={`uc-tab-dot ${isActive ? 'uc-tab-dot-active' : 'uc-tab-dot-idle'}`}
+              style={{
+                width: isActive ? 18 : 7,
+                height: 7,
+                borderRadius: isActive ? 4 : 4,
+                backgroundColor: color,
+                color: color,
+                animationDelay: isActive ? '0s' : `${i * 0.18}s`,
+                opacity: isActive ? 1 : 0.5,
+              }}
+            />
+          );
+        })}
+      </View>
+    );
+  }
+
+  // Native fallback — static dots with color
+  return (
+    <View style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6, marginBottom: 10, marginTop: 4, minHeight: 12 }}>
+      {Array.from({ length: count }).map((_, i) => {
+        const isActive = i === activeIndex;
+        const color = isActive ? accentColor : TAB_DOT_COLORS[i % TAB_DOT_COLORS.length] + '60';
+        return (
+          <View
+            key={i}
+            style={{
+              width: isActive ? 18 : 7,
+              height: 7,
+              borderRadius: 4,
+              backgroundColor: color,
+              opacity: isActive ? 1 : 0.5,
+            }}
+          />
+        );
+      })}
+    </View>
+  );
+}
 
 export default function AgentPanel({
   agent, onClose, isDesktop, onRenameAgent,
@@ -1657,12 +1744,8 @@ export default function AgentPanel({
               </Pressable>
             </View>
 
-            {/* Tab position indicator */}
-            <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 3, marginBottom: 6 }}>
-              {allTabs.map((tab, i) => (
-                <View key={tab.key} style={{ width: i === currentIdx ? 14 : 5, height: 4, borderRadius: 2, backgroundColor: i === currentIdx ? (agent.color || '#6366f1') : '#2a2a3e' }} />
-              ))}
-            </View>
+            {/* Tab position indicator — animated dots */}
+            <AnimatedTabDots count={allTabs.length} activeIndex={currentIdx} accentColor={agent.color || '#6366f1'} />
           </>
         );
       })()}
@@ -1682,7 +1765,7 @@ export default function AgentPanel({
         };
         const isActive = agent.status === 'active' || agent.status === 'building';
         return (
-        <View nativeID="section-agent-overview" style={{ paddingHorizontal: 8, gap: 8, paddingBottom: 12 }}>
+        <View nativeID="section-agent-overview" style={{ paddingHorizontal: 12, gap: 16, paddingBottom: 16 }}>
 
           {/* ── LIVE STATUS HERO — what the agent is doing RIGHT NOW ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 2, borderColor: isActive ? statusColor + '60' : '#1a1a28', borderRadius: 2, padding: 12, ...(isActive && Platform.OS === 'web' ? { boxShadow: `0 0 12px ${statusColor}20` } as any : {}) }}>
@@ -1694,7 +1777,7 @@ export default function AgentPanel({
 
             {/* Current tool in use */}
             {agent.currentToolName ? (
-              <View style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: (toolColors[agent.currentToolName] || agent.color) + '40', borderRadius: 2, padding: 12, marginBottom: 6 }}>
+              <View style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: (toolColors[agent.currentToolName] || agent.color) + '40', borderRadius: 2, padding: 12, marginBottom: 10 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                   <View style={{ width: 22, height: 22, borderRadius: 2, backgroundColor: (toolColors[agent.currentToolName] || agent.color) + '20', justifyContent: 'center', alignItems: 'center' }}>
                     <Text style={{ color: toolColors[agent.currentToolName] || agent.color, fontSize: 12, fontWeight: '800', fontFamily: MONO }}>
@@ -1711,12 +1794,12 @@ export default function AgentPanel({
                 </View>
               </View>
             ) : agent.activity && agent.activity !== 'Idle' ? (
-              <Text style={{ color: '#a0a0b0', fontSize: 14, fontFamily: MONO, marginBottom: 4 }}>{agent.activity}</Text>
+              <Text style={{ color: '#a0a0b0', fontSize: 14, fontFamily: MONO, marginBottom: 8 }}>{agent.activity}</Text>
             ) : null}
 
             {/* Last user request */}
             {agent.lastUserMessage ? (
-              <View style={{ marginBottom: 4 }}>
+              <View style={{ marginBottom: 8 }}>
                 <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', letterSpacing: 1, marginBottom: 2 }}>USER REQUEST</Text>
                 <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, lineHeight: 15 }} numberOfLines={3}>{agent.lastUserMessage}</Text>
               </View>
@@ -1818,7 +1901,7 @@ export default function AgentPanel({
           </View>
 
           {/* ── COST + TOKEN GRID ── */}
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
             {[
               { label: 'API Cost', value: `$${agent.costToday.toFixed(4)}`, color: '#22c55e', icon: '$' },
               { label: 'Total Tokens', value: formatTokens(agent.tokensUsed), color: '#6366f1', icon: '#' },
@@ -1842,7 +1925,7 @@ export default function AgentPanel({
           {/* ── TOKEN BAR VISUALIZATION ── */}
           {agent.tokensUsed > 0 && (
             <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
                 <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', letterSpacing: 1 }}>TOKEN DISTRIBUTION</Text>
                 <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{formatTokens(agent.tokensUsed)} total</Text>
               </View>
@@ -1862,11 +1945,11 @@ export default function AgentPanel({
           {/* ── RECENT TOOL CALLS — timeline with file context ── */}
           {(agent.recentToolCalls?.length || 0) > 0 ? (
             <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-              <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>TOOL TIMELINE ({agent.recentToolCalls!.length})</Text>
+              <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>TOOL TIMELINE ({agent.recentToolCalls!.length})</Text>
               {[...agent.recentToolCalls!].reverse().map((tc, i) => {
                 const tc_color = toolColors[tc.tool] || agent.color;
                 return (
-                  <View key={i} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginBottom: 4, paddingVertical: 6 }}>
+                  <View key={i} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginBottom: 8, paddingVertical: 6 }}>
                     <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, width: 44, textAlign: 'right', paddingTop: 2 }}>{tc.ts ? formatMsgTime(tc.ts) : '—'}</Text>
                     <View style={{ width: 2, backgroundColor: i === 0 ? tc_color : '#1a1a28', alignSelf: 'stretch', borderRadius: 1 }} />
                     <View style={{ flex: 1 }}>
@@ -1879,7 +1962,7 @@ export default function AgentPanel({
             </View>
           ) : agent.recentActions.length > 0 ? (
             <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-              <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>TOOLS USED ({agent.recentActions.length})</Text>
+              <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>TOOLS USED ({agent.recentActions.length})</Text>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4 }}>
                 {agent.recentActions.map((action, i) => {
                   const ac = toolColors[action] || agent.color;
@@ -1896,7 +1979,7 @@ export default function AgentPanel({
           {/* ── ACTIVE FILES — what the agent is touching ── */}
           {(agent.activeFiles?.length || 0) > 0 && (
             <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-              <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>ACTIVE FILES ({agent.activeFiles!.length})</Text>
+              <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>ACTIVE FILES ({agent.activeFiles!.length})</Text>
               {agent.activeFiles!.map((f, i) => {
                 const ext = f.split('.').pop() || '';
                 const extColor = { ts: '#3178c6', tsx: '#3178c6', js: '#f7df1e', jsx: '#f7df1e', py: '#3776ab', json: '#f59e0b', md: '#606075', sql: '#22c55e', css: '#ec4899' }[ext] || '#a0a0b0';
@@ -1914,7 +1997,7 @@ export default function AgentPanel({
 
           {/* ── SESSION DETAILS ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>SESSION</Text>
+            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>SESSION</Text>
             {[
               { label: 'Session ID', value: agent.sessionKey || agent.id.split('::')[1] || agent.id },
               { label: 'Connection', value: agent.connectionName },
@@ -1936,7 +2019,7 @@ export default function AgentPanel({
 
           {/* ── RUNTIME HEALTH ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10, marginBottom: 8 }}>
-            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>RUNTIME</Text>
+            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>RUNTIME</Text>
             <View style={{ flexDirection: 'row', gap: 6 }}>
               <View style={{ flex: 1, alignItems: 'center', paddingVertical: 6 }}>
                 <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: isActive ? '#22c55e' : agent.status === 'idle' ? '#f59e0b' : '#ef4444', marginBottom: 3 }} />
@@ -2241,7 +2324,7 @@ export default function AgentPanel({
                         }
                       }}
                       style={[styles.spiritCard, active && { borderColor: (profile.color || '#22c55e') + '60', backgroundColor: (profile.color || '#22c55e') + '10' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                      <View style={{ alignItems: 'center', marginBottom: 6 }}>
+                      <View style={{ alignItems: 'center', marginBottom: 10 }}>
                         <Text style={{ fontSize: 28 }}>{profile.emoji || '🤖'}</Text>
                       </View>
                       <Text style={[styles.spiritName, active && { color: profile.color || '#22c55e' }]} numberOfLines={1}>{profile.name}</Text>
@@ -2275,7 +2358,7 @@ export default function AgentPanel({
                         Platform.OS === 'web' && { cursor: 'pointer' } as any,
                       ]}
                     >
-                      <View style={{ alignItems: 'center', marginBottom: 6 }}>
+                      <View style={{ alignItems: 'center', marginBottom: 10 }}>
                         {ICON_CATALOG[spirit.id] ? (
                           <FlatIcon name={spirit.id} size={32} glow={active} />
                         ) : (
@@ -2428,19 +2511,19 @@ export default function AgentPanel({
 
       {/* ── ACTIVITY TAB — comprehensive agent telemetry ── */}
       {panelTab === 'activity' && (
-        <View nativeID="section-agent-activity-detail" style={{ paddingHorizontal: 8, gap: 8, paddingBottom: 12 }}>
+        <View nativeID="section-agent-activity-detail" style={{ paddingHorizontal: 12, gap: 16, paddingBottom: 16 }}>
 
           {/* ── Session Status Card ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
               <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: statusColor }} />
               <Text style={{ color: statusColor, fontSize: 13, fontWeight: '700', fontFamily: MONO }}>{statusLabel.toUpperCase()}</Text>
               <Text style={{ color: '#909098', fontSize: 13, marginLeft: 'auto' }}>{formatRelativeTime(agent.lastActive)}</Text>
             </View>
             {agent.activity && agent.activity !== 'Idle' && (
-              <Text style={{ color: '#a0a0b0', fontSize: 14, fontFamily: MONO, marginBottom: 4 }}>{agent.activity}</Text>
+              <Text style={{ color: '#a0a0b0', fontSize: 14, fontFamily: MONO, marginBottom: 8 }}>{agent.activity}</Text>
             )}
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 4 }}>
               <View style={{ backgroundColor: '#1a1a28', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}>
                 <Text style={{ color: '#a0a0b0', fontSize: 12, fontFamily: MONO }}>{PROVIDER_META[agent.providerType]?.label || agent.providerType}</Text>
               </View>
@@ -2466,7 +2549,7 @@ export default function AgentPanel({
                 <View style={{ flex: agent.outputTokens || 1, backgroundColor: '#22c55e' }} />
               </View>
             )}
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
               {[
                 { label: 'TOTAL', value: formatTokens(agent.tokensUsed), color: '#f0f0f5' },
                 { label: 'INPUT', value: formatTokens(agent.inputTokens), color: '#6366f1' },
@@ -2475,7 +2558,7 @@ export default function AgentPanel({
                 { label: 'NEW', value: formatTokens(agent.newTokens || (agent.inputTokens - agent.cachedTokens)), color: '#a0a0b0' },
                 { label: 'CACHE HIT', value: cacheHitPct(agent.cachedTokens, agent.inputTokens), color: agent.cachedTokens > agent.inputTokens * 0.5 ? '#22c55e' : '#ef4444' },
               ].map((t, i) => (
-                <View key={i} style={{ width: '31%', marginBottom: 4 }}>
+                <View key={i} style={{ width: '31%', marginBottom: 8 }}>
                   <Text style={{ color: t.color, fontSize: 16, fontWeight: '700', fontFamily: MONO }}>{t.value}</Text>
                   <Text style={{ color: '#808090', fontSize: 11, fontWeight: '600', letterSpacing: 0.5, marginTop: 1 }}>{t.label}</Text>
                 </View>
@@ -2539,7 +2622,7 @@ export default function AgentPanel({
 
           {/* ── Session Identity ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>SESSION INFO</Text>
+            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>SESSION INFO</Text>
             {[
               { label: 'Session ID', value: agent.sessionKey || agent.id.split('::')[1] || agent.id },
               { label: 'Connection', value: agent.connectionName },
@@ -2577,7 +2660,7 @@ export default function AgentPanel({
               ))
             ) : agent.recentActions.length > 0 ? (
               <View>
-                <Text style={{ color: '#808090', fontSize: 12, fontStyle: 'italic', marginBottom: 6 }}>No messages — showing tool activity:</Text>
+                <Text style={{ color: '#808090', fontSize: 12, fontStyle: 'italic', marginBottom: 10 }}>No messages — showing tool activity:</Text>
                 {agent.recentActions.map((action, i) => (
                   <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 5 }}>
                     <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: i === 0 ? agent.color : '#2a2a3e' }} />
@@ -2592,7 +2675,7 @@ export default function AgentPanel({
 
           {/* ── Performance Summary ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 6 }}>PERFORMANCE</Text>
+            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>PERFORMANCE</Text>
             <View style={{ flexDirection: 'row', gap: 8 }}>
               {[
                 { label: 'Messages', value: String(agent.messagesProcessed || agent.turns || 0), icon: '>' },
@@ -2600,7 +2683,7 @@ export default function AgentPanel({
                 { label: 'Efficiency', value: agent.cachedTokens > 0 ? cacheHitPct(agent.cachedTokens, agent.inputTokens) : '—', icon: '%' },
               ].map((p, i) => (
                 <View key={i} style={{ flex: 1, alignItems: 'center', paddingVertical: 6 }}>
-                  <View style={{ width: 24, height: 24, borderRadius: 2, backgroundColor: agent.color + '15', borderWidth: 1, borderColor: agent.color + '30', justifyContent: 'center', alignItems: 'center', marginBottom: 4 }}>
+                  <View style={{ width: 24, height: 24, borderRadius: 2, backgroundColor: agent.color + '15', borderWidth: 1, borderColor: agent.color + '30', justifyContent: 'center', alignItems: 'center', marginBottom: 8 }}>
                     <Text style={{ color: agent.color, fontSize: 13, fontWeight: '800', fontFamily: MONO }}>{p.icon}</Text>
                   </View>
                   <Text style={{ color: '#f0f0f5', fontSize: 13, fontWeight: '700', fontFamily: MONO }}>{p.value}</Text>
@@ -3055,13 +3138,13 @@ const styles = StyleSheet.create({
     color: '#888',
     fontFamily: 'monospace',
     letterSpacing: 2,
-    marginBottom: 6,
+    marginBottom: 10,
   },
   actionRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: 8,
-    marginBottom: 6,
+    marginBottom: 10,
   },
   actionTime: {
     fontSize: 13,
@@ -3139,7 +3222,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#2a2a2a',
-    marginBottom: 4,
+    marginBottom: 8,
   },
   custSectionTitle: {
     fontSize: 12,
@@ -3148,10 +3231,10 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
     letterSpacing: 2,
     marginTop: 10,
-    marginBottom: 6,
+    marginBottom: 10,
   },
   custScroll: {
-    marginBottom: 4,
+    marginBottom: 8,
   },
   custItemSwatch: {
     width: 40,
@@ -3252,7 +3335,7 @@ const styles = StyleSheet.create({
   },
   spiritKnobLabel: {
     color: '#555', fontSize: 11, fontWeight: '800', fontFamily: 'monospace',
-    letterSpacing: 1, marginBottom: 4,
+    letterSpacing: 1, marginBottom: 8,
   },
   spiritKnobValue: {
     fontSize: 14, fontWeight: '800', fontFamily: 'monospace', textAlign: 'center',
@@ -3273,17 +3356,17 @@ const styles = StyleSheet.create({
   },
   spiritCatLabel: {
     fontSize: 12, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1.5,
-    marginBottom: 6, marginTop: 8,
+    marginBottom: 10, marginTop: 8,
   },
   spiritGrid: {
-    flexDirection: 'row', flexWrap: 'wrap', gap: 6,
+    flexDirection: 'row', flexWrap: 'wrap', gap: 10,
   },
   spiritCard: {
     width: '48%', padding: 12, borderRadius: 10,
     borderWidth: 1, borderColor: '#1e1e3a', backgroundColor: '#0a0a0a',
     alignItems: 'center',
   },
-  spiritEmoji: { fontSize: 28, marginBottom: 4 },
+  spiritEmoji: { fontSize: 28, marginBottom: 8 },
   spiritName: {
     color: '#6366f1', fontSize: 12, fontWeight: '800', fontFamily: 'monospace', textAlign: 'center',
   },
@@ -3348,7 +3431,7 @@ const styles = StyleSheet.create({
   },
   soulCard: {
     backgroundColor: '#000000', borderWidth: 1, borderColor: '#1e1e3a',
-    borderRadius: 10, padding: 12, gap: 4, marginBottom: 6,
+    borderRadius: 10, padding: 12, gap: 4, marginBottom: 10,
   },
   soulCardHeader: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
