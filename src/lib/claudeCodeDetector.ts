@@ -550,7 +550,9 @@ export async function saveSessionsToMemory(
       tools.length > 0 ? `Current tools: ${tools.join(', ')}` : '',
     ].filter(Boolean).join('\n');
 
+    const title = `CC Project: ${project}`;
     try {
+      // Look up by title + source_surface (not session_id which is UUID)
       let existingQuery = supabase
         .from('memory_entries')
         .select('id')
@@ -558,7 +560,7 @@ export async function saveSessionsToMemory(
         .eq('scope', 'session')
         .eq('memory_kind', 'context')
         .eq('source_surface', 'claude_code_bridge')
-        .eq('session_id', bucketId)
+        .eq('title', title)
         .order('created_at', { ascending: false })
         .limit(1);
 
@@ -571,10 +573,11 @@ export async function saveSessionsToMemory(
       if (existing) {
         const { error: updateError } = await supabase.from('memory_entries').update({
           content,
-          title: `CC Project: ${project}`,
+          title,
           visibility,
           updated_at: new Date().toISOString(),
           metadata: {
+            bucketId,
             projectKey,
             projectDir: latest.projectDir,
             mergedSessionIds: sortedSessions.map(s => s.sessionId),
@@ -588,15 +591,15 @@ export async function saveSessionsToMemory(
           scope: 'session',
           circleId,
           userId: sessionMode === 'shared' ? undefined : userId,
-          sessionId: bucketId,
           memoryKind: 'context',
-          title: `CC Project: ${project}`,
+          title,
           content,
           sourceSurface: 'claude_code_bridge',
           visibility,
           retrievalMode: 'startup',
           importance: 0.72,
           metadata: {
+            bucketId,
             projectKey,
             projectDir: latest.projectDir,
             mergedSessionIds: sortedSessions.map(s => s.sessionId),

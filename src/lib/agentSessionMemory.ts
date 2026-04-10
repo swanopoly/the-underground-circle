@@ -171,8 +171,9 @@ export async function saveAgentSessionsToMemory(
       activeFiles.length > 0 ? `Active files: ${activeFiles.join(', ')}` : '',
     ].filter(Boolean).join('\n');
 
+    const title = `${label} Project: ${project}`;
     try {
-      // Check for existing entry by session_id bucket
+      // Look up by title + source_surface (session_id is UUID, can't use for text bucket keys)
       let existingQuery = supabase
         .from('memory_entries')
         .select('id')
@@ -180,7 +181,7 @@ export async function saveAgentSessionsToMemory(
         .eq('scope', 'session')
         .eq('memory_kind', 'context')
         .eq('source_surface', sourceSurface)
-        .eq('session_id', bucketId)
+        .eq('title', title)
         .order('created_at', { ascending: false })
         .limit(1);
 
@@ -190,8 +191,6 @@ export async function saveAgentSessionsToMemory(
       const { data: existing, error: existingError } = await existingQuery.maybeSingle();
       if (existingError) throw existingError;
 
-      const title = `${label} Project: ${project}`;
-
       if (existing) {
         const { error: updateError } = await supabase.from('memory_entries').update({
           content,
@@ -199,6 +198,7 @@ export async function saveAgentSessionsToMemory(
           visibility,
           updated_at: new Date().toISOString(),
           metadata: {
+            bucketId,
             projectKey,
             projectDir: latest.projectDir,
             provider,
@@ -213,7 +213,6 @@ export async function saveAgentSessionsToMemory(
           scope: 'session',
           circleId,
           userId: sessionMode === 'shared' ? undefined : userId,
-          sessionId: bucketId,
           memoryKind: 'context',
           title,
           content,
@@ -222,6 +221,7 @@ export async function saveAgentSessionsToMemory(
           retrievalMode: 'startup',
           importance: 0.72,
           metadata: {
+            bucketId,
             projectKey,
             projectDir: latest.projectDir,
             provider,

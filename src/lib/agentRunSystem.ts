@@ -121,13 +121,18 @@ export interface MemoryEntry {
 }
 
 export async function getCircleSessionMemoryMode(circleId: string): Promise<SessionMemoryMode> {
-  const { data } = await supabase
-    .from('circles')
-    .select('settings')
-    .eq('id', circleId)
-    .single();
-
-  return data?.settings?.sessionMemoryMode === 'shared' ? 'shared' : 'private';
+  try {
+    const { data, error } = await supabase
+      .from('circles')
+      .select('settings')
+      .eq('id', circleId)
+      .single();
+    // If settings column doesn't exist (400) or any error, default to private
+    if (error || !data) return 'private';
+    return (data as any)?.settings?.sessionMemoryMode === 'shared' ? 'shared' : 'private';
+  } catch {
+    return 'private';
+  }
 }
 
 // ── 1. Create Run ───────────────────────────────────────────────────────────
