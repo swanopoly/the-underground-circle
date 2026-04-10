@@ -1512,13 +1512,27 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     const rest = deduped.filter(a => a.providerType !== 'claude-code');
 
     const sorted = [...rest].sort((a, b) => {
+      // 1. Status rank: building > active > idle > error > offline
       const rankDiff = getDisplayAgentSortRank(a) - getDisplayAgentSortRank(b);
       if (rankDiff !== 0) return rankDiff;
+      // 2. Most usage (tokens) first
+      const usageA = (a.tokensUsed || 0) + (a.turns || 0) * 100;
+      const usageB = (b.tokensUsed || 0) + (b.turns || 0) * 100;
+      if (usageB !== usageA) return usageB - usageA;
+      // 3. Most recent activity
       const ta = a.lastActive ? new Date(a.lastActive).getTime() : 0;
       const tb = b.lastActive ? new Date(b.lastActive).getTime() : 0;
       return tb - ta;
     });
-    return [DEFAULT_AGENT, ...claudeCodeAgents, ...sorted];
+    // Also sort Claude Code agents by usage
+    const sortedCC = [...claudeCodeAgents].sort((a, b) => {
+      const rankDiff = getDisplayAgentSortRank(a) - getDisplayAgentSortRank(b);
+      if (rankDiff !== 0) return rankDiff;
+      const usageA = (a.tokensUsed || 0) + (a.turns || 0) * 100;
+      const usageB = (b.tokensUsed || 0) + (b.turns || 0) * 100;
+      return usageB - usageA;
+    });
+    return [DEFAULT_AGENT, ...sortedCC, ...sorted];
   }, [userAgents, getDisplayAgentSortRank]);
 
   // Resolve appearance — lookup by id first, fall back to name for legacy data

@@ -9,7 +9,7 @@ import AuthNavigator from './src/navigation/AuthNavigator';
 import MainNavigator from './src/navigation/MainNavigator';
 import ErrorBoundary from './src/components/ErrorBoundary';
 import AppHeader from './src/components/AppHeader';
-import { startAgentAutoConnect, stopAgentAutoConnect } from './src/lib/agentAutoConnect';
+import { startAgentAutoConnect, stopAgentAutoConnect, setAutoConnectCircleId } from './src/lib/agentAutoConnect';
 import { acceptInvite, lookupInvite } from './src/lib/invites';
 import OnboardingFlow, { isOnboardingComplete } from './src/components/OnboardingFlow';
 import { buildAppActions } from './src/components/command/commandActions';
@@ -203,7 +203,28 @@ export default function App() {
   const [navReady, setNavReady] = useState(false);
   const [initialNavState, setInitialNavState] = useState<object | undefined>(undefined);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [hasCircles, setHasCircles] = useState(false);
   const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  const refreshHasCircles = async (userId: string): Promise<boolean> => {
+    try {
+      const { data, count } = await supabase
+        .from('circle_members')
+        .select('circle_id', { count: 'exact' })
+        .eq('user_id', userId)
+        .limit(1);
+      const nextHasCircles = (count || 0) > 0;
+      setHasCircles(nextHasCircles);
+      // Set the first circle for agent auto-connect memory saves
+      if (data && data.length > 0 && data[0].circle_id) {
+        setAutoConnectCircleId(data[0].circle_id);
+      }
+      return nextHasCircles;
+    } catch {
+      setHasCircles(false);
+      return false;
+    }
+  };
 
   useEffect(() => {
     // Pulse animation
@@ -250,11 +271,15 @@ export default function App() {
       if (session) {
         startAgentAutoConnect();
         // Redeem pending invite if user just logged in with one
-        handlePendingInvite(session.user.id);
-        // Show onboarding for new users
-        if (!isOnboardingComplete()) {
-          setShowOnboarding(true);
-        }
+        handlePendingInvite(session.user.id).finally(() => {
+          refreshHasCircles(session.user.id).then((userHasCircles) => {
+            if (!userHasCircles && !isOnboardingComplete()) {
+              setShowOnboarding(true);
+            }
+          }).catch(() => {});
+        });
+      } else {
+        setHasCircles(false);
       }
     }).catch(() => {
       setLoading(false);
@@ -269,10 +294,20 @@ export default function App() {
         startAgentAutoConnect();
         // Redeem pending invite after auth
         if (event === 'SIGNED_IN') {
-          handlePendingInvite(session.user.id);
+          handlePendingInvite(session.user.id).finally(() => {
+            refreshHasCircles(session.user.id).then((userHasCircles) => {
+              if (!userHasCircles && !isOnboardingComplete()) {
+                setShowOnboarding(true);
+              } else {
+                setShowOnboarding(false);
+              }
+            }).catch(() => {});
+          });
         }
       } else if (event === 'SIGNED_OUT') {
         stopAgentAutoConnect();
+        setShowOnboarding(false);
+        setHasCircles(false);
       }
     });
 
@@ -309,7 +344,7 @@ export default function App() {
         <StatusBar barStyle="light-content" />
         {session ? <MainWithHeader /> : <AuthNavigator />}
       </NavigationContainer>
-      {showOnboarding && session && (
+      {showOnboarding && session && !hasCircles && (
         <OnboardingFlow
           userId={session.user.id}
           onComplete={() => setShowOnboarding(false)}

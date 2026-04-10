@@ -410,7 +410,12 @@ export async function saveMemory(opts: {
     .select()
     .single();
 
-  if (error) { console.error('[AgentRunSystem] saveMemory error:', error); return null; }
+  if (error) {
+    console.error('[AgentRunSystem] saveMemory FAILED:', error.message, '| code:', error.code, '| hint:', error.hint, '| details:', error.details);
+    console.error('[AgentRunSystem] saveMemory params: scope=', opts.scope, 'circleId=', opts.circleId, 'userId=', opts.userId, 'kind=', opts.memoryKind);
+    return null;
+  }
+  console.log('[AgentRunSystem] saveMemory OK:', opts.title?.slice(0, 50));
   return mapMemory(data);
 }
 

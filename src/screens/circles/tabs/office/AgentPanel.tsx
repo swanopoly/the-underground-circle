@@ -142,24 +142,44 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerTy
     } catch {}
   };
 
+  const [addError, setAddError] = useState<string | null>(null);
+
   const handleAdd = async () => {
     if (!newMemory.trim()) return;
+    setAddError(null);
     try {
       const { rememberFromChat } = await import('../../../../lib/memoryService');
-      await rememberFromChat(circleId, userId || '', newMemory.trim());
+      const result = await rememberFromChat(circleId, userId || '', newMemory.trim());
+      if (!result) {
+        setAddError('Save failed — check console for RLS/auth errors');
+        console.error('[AgentMemoryPanel] rememberFromChat returned null. circleId:', circleId, 'userId:', userId);
+        return;
+      }
       setNewMemory('');
       load();
-    } catch {}
+    } catch (err: any) {
+      console.error('[AgentMemoryPanel] handleAdd error:', err);
+      setAddError(err?.message || 'Failed to save memory');
+    }
   };
 
   const handleAddSkill = async () => {
     if (!newSkill.trim()) return;
+    setAddError(null);
     try {
       const { rememberFromChat } = await import('../../../../lib/memoryService');
-      await rememberFromChat(circleId, userId || '', newSkill.trim(), 'instruction');
+      const result = await rememberFromChat(circleId, userId || '', newSkill.trim(), 'instruction');
+      if (!result) {
+        setAddError('Save failed — check console for RLS/auth errors');
+        console.error('[AgentMemoryPanel] rememberFromChat (skill) returned null. circleId:', circleId, 'userId:', userId);
+        return;
+      }
       setNewSkill('');
       load();
-    } catch {}
+    } catch (err: any) {
+      console.error('[AgentMemoryPanel] handleAddSkill error:', err);
+      setAddError(err?.message || 'Failed to save skill');
+    }
   };
 
   const kindColors: Record<string, string> = { preference: '#a855f7', fact: '#6366f1', decision: '#f59e0b', finding: '#22c55e', instruction: '#ec4899', policy: '#3b82f6', context: '#606075' };
@@ -222,6 +242,11 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerTy
             <Text style={{ color: '#a855f7', fontSize: 9, fontWeight: '700', fontFamily: MONO }}>+Skill</Text>
           </Pressable>
         </View>
+      )}
+
+      {/* Error message */}
+      {addError && (
+        <Text style={{ color: '#ef4444', fontSize: 9, fontFamily: MONO, padding: 4 }}>{addError}</Text>
       )}
 
       {/* Memory list */}
