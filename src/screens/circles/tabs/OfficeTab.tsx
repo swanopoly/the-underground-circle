@@ -1535,10 +1535,23 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     return [DEFAULT_AGENT, ...sortedCC, ...sorted];
   }, [userAgents, getDisplayAgentSortRank]);
 
-  // Resolve appearance — lookup by id first, fall back to name for legacy data
+  // Resolve appearance — lookup by id, name, then legacy provider names
+  const PROVIDER_LEGACY_NAMES_LOOKUP: Record<string, string[]> = {
+    'claude-code': ['Claude Code', 'CC', 'C3PO'],
+    'cursor': ['Cursor'],
+    'codex': ['Codex'],
+    'gemini': ['Gemini', 'Gemini CLI'],
+  };
   const getAppearance = useCallback((agent: OfficeAgent) => {
     if (agent.id === DEFAULT_AGENT.id) return appearances[agent.id] || appearances[agent.name] || UC_AGENT_APPEARANCE;
-    return appearances[agent.id] || appearances[agent.name];
+    let result = appearances[agent.id] || appearances[agent.name];
+    if (!result && agent.providerType) {
+      const legacyNames = PROVIDER_LEGACY_NAMES_LOOKUP[agent.providerType] || [];
+      for (const ln of legacyNames) {
+        if (appearances[ln]) { result = appearances[ln]; break; }
+      }
+    }
+    return result;
   }, [appearances]);
 
   // Auto-assign random outfits to new agents + backfill pets/auras for existing agents
@@ -1547,10 +1560,23 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     const pick = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
     const petPool: AgentAppearance['pet'][] = ['cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab', 'snake', 'bat', 'skull', 'mushroom', 'spider', 'shark', 'bones'];
     const auraPool: AgentAppearance['aura'][] = ['fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow', 'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy'];
+    // Legacy provider-name fallbacks for appearance lookup
+    const PROVIDER_LEGACY_NAMES: Record<string, string[]> = {
+      'claude-code': ['Claude Code', 'CC', 'C3PO'],
+      'cursor': ['Cursor'],
+      'codex': ['Codex'],
+      'gemini': ['Gemini', 'Gemini CLI'],
+    };
     const updates: Record<string, AgentAppearance> = {};
     for (const agent of userAgents) {
-      // Check by id first, then fall back to legacy name-based key and migrate
-      const existing = appearances[agent.id] || appearances[agent.name];
+      // Check by id first, then name, then legacy provider names
+      let existing = appearances[agent.id] || appearances[agent.name];
+      if (!existing && agent.providerType) {
+        const legacyNames = PROVIDER_LEGACY_NAMES[agent.providerType] || [];
+        for (const ln of legacyNames) {
+          if (appearances[ln]) { existing = appearances[ln]; break; }
+        }
+      }
       if (!existing) {
         updates[agent.id] = generateRandomAppearance();
       } else {
