@@ -41,6 +41,9 @@ yarn-error.*
 /android
 .env
 
+# synced agent memory (local cache, regenerated from Supabase)
+.agent-memory/
+
 # Local Netlify folder
 .netlify
 

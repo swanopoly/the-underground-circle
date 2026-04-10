@@ -487,6 +487,20 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ── GET /memory — serve synced agent memories from .agent-memory/context.md ──
+  if (url === '/memory') {
+    const memoryFile = path.join(__dirname, '..', '.agent-memory', 'context.md');
+    try {
+      const content = fs.readFileSync(memoryFile, 'utf-8');
+      res.writeHead(200, { ...CORS, 'Content-Type': 'text/markdown' });
+      res.end(content);
+    } catch {
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify({ error: 'No synced memories. Run: node scripts/sync-memories.js' }));
+    }
+    return;
+  }
+
   // ── POST /exec — run a shell command (restricted) ──────────────────────────
   if (url === '/exec' && req.method === 'POST') {
     // Only allow requests from localhost origins

@@ -28,7 +28,8 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "generate-sprites": "node scripts/generate-theme-sprites.js"
+    "generate-sprites": "node scripts/generate-theme-sprites.js",
+    "sync-memories": "node scripts/sync-memories.js"
   },
   "dependencies": {
     "@internationalized/date": "^3.12.0",

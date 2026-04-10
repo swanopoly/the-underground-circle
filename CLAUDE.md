@@ -91,6 +91,14 @@ It's the **AI-powered project manager nobody asked to be**. Small crews (2-8 peo
 
 ---
 
+## Agent Memory
+
+On session start, read `.agent-memory/context.md` if it exists — it contains memories synced from Supabase (decisions, preferences, session context, skills). To refresh: `npm run sync-memories`.
+
+The memory file is auto-generated. Don't edit it directly. To add memories, use the Agent Panel Memory tab in the app, or chat with BlackSwan and it will extract them automatically.
+
+If `.agent-memory/context.md` doesn't exist, run `node scripts/sync-memories.js` to create it. The bridge also serves memories at `http://localhost:7778/memory`.
+
 ## Environment
 
 - **Supabase project:** rjkniqiqdtroeholxacg.supabase.co
