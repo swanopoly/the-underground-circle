@@ -8,6 +8,15 @@
 
 import { supabase } from './supabase';
 
+// ── Auth Helper ─────────────────────────────────────────────────────────────
+
+async function verifyAuth(): Promise<string | null> {
+  try {
+    const { data } = await supabase.auth.getUser();
+    return data.user?.id || null;
+  } catch { return null; }
+}
+
 // ── Generic Session Interface ───────────────────────────────────────────────
 
 export interface AgentSessionForMemory {
@@ -74,6 +83,13 @@ export async function saveAgentSessionsToMemory(
   let skipped = 0;
 
   if (sessions.length === 0) return { saved: 0, skipped: 0 };
+
+  // Verify auth session exists — RLS requires authenticated user
+  const authUid = await verifyAuth();
+  if (!authUid) {
+    console.warn(`[agentSessionMemory] No auth session, skipping save for ${provider}`);
+    return { saved: 0, skipped: sessions.length };
+  }
 
   // Get circle session memory mode
   let sessionMode: 'shared' | 'private' = 'private';

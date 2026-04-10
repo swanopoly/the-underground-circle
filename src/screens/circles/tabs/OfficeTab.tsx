@@ -1089,7 +1089,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               // Auto-save session context to memory (throttled to every 30s)
               if (circleId && userId && Date.now() - lastMemorySaveRef.current > 30_000) {
                 lastMemorySaveRef.current = Date.now();
-                saveSessionsToMemory(circleId, userId, sessions).catch(() => {});
+                saveSessionsToMemory(circleId, userId, sessions)
+                  .then(r => { if (r) console.log('[OfficeTab] Memory save result:', r); })
+                  .catch(err => console.error('[OfficeTab] Memory save FAILED:', err));
               }
             });
             ccPollerRef.current.start(5000);

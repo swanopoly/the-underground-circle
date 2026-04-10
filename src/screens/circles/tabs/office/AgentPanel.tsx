@@ -184,12 +184,61 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerTy
 
   const kindColors: Record<string, string> = { preference: '#a855f7', fact: '#6366f1', decision: '#f59e0b', finding: '#22c55e', instruction: '#ec4899', policy: '#3b82f6', context: '#606075' };
 
+  const [saving, setSaving] = useState(false);
+  const [saveResult, setSaveResult] = useState<string | null>(null);
+
+  const handleForceSave = async () => {
+    setSaving(true);
+    setSaveResult(null);
+    try {
+      // Try direct memory insert to test the pipeline
+      const { supabase } = await import('../../../../lib/supabase');
+      const { data: auth } = await supabase.auth.getUser();
+      if (!auth.user) { setSaveResult('ERROR: Not authenticated'); setSaving(false); return; }
+
+      const { data, error } = await supabase.from('memory_entries').insert({
+        scope: 'session',
+        circle_id: circleId,
+        user_id: auth.user.id,
+        memory_kind: 'context',
+        title: `Manual save: ${agentName} session`,
+        content: `Agent ${agentName} session context saved manually at ${new Date().toISOString()}. Provider: ${providerType || 'unknown'}.`,
+        source_surface: providerType ? `${providerType}_bridge` : 'manual',
+        visibility: 'private',
+        importance: 0.5,
+        retrieval_mode: 'startup',
+        metadata: { manual: true, agentName, providerType },
+      }).select().single();
+
+      if (error) {
+        setSaveResult(`ERROR: ${error.message} (${error.code})`);
+        console.error('[AgentMemoryPanel] Force save failed:', error);
+      } else {
+        setSaveResult(`Saved! ID: ${data.id.slice(0, 8)}`);
+        load(); // reload the memory list
+      }
+    } catch (err: any) {
+      setSaveResult(`EXCEPTION: ${err.message}`);
+    }
+    setSaving(false);
+  };
+
   return (
     <View style={{ gap: 8 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
         <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>AGENT MEMORY</Text>
         <Text style={{ color: '#3a3a4e', fontSize: 9, fontFamily: MONO }}>({filtered.length}/{memories.length})</Text>
+        <Pressable
+          onPress={handleForceSave}
+          disabled={saving}
+          style={[{ marginLeft: 'auto', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, backgroundColor: '#22c55e20', borderWidth: 1, borderColor: '#22c55e40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        >
+          <Text style={{ color: '#22c55e', fontSize: 7, fontWeight: '700', fontFamily: MONO }}>{saving ? 'SAVING...' : 'FORCE SAVE'}</Text>
+        </Pressable>
       </View>
+      {saveResult && (
+        <Text style={{ color: saveResult.startsWith('ERROR') || saveResult.startsWith('EXCEPTION') ? '#ef4444' : '#22c55e', fontSize: 8, fontFamily: MONO }}>{saveResult}</Text>
+      )}
 
       {/* View mode toggle */}
       <View style={{ flexDirection: 'row', gap: 2, marginBottom: 4 }}>

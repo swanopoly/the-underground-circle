@@ -476,6 +476,14 @@ export async function saveSessionsToMemory(
   let saved = 0;
   let skipped = 0;
 
+  // Verify auth session exists before attempting save
+  const { data: authCheck } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+  if (!authCheck?.user) {
+    console.warn('[claudeCodeDetector] saveSessionsToMemory: no auth session, skipping');
+    return { saved: 0, skipped: sessions.length };
+  }
+  console.log('[claudeCodeDetector] saveSessionsToMemory: auth OK, user=', authCheck.user.id, 'circleId=', circleId, 'sessions=', sessions.length);
+
   const mainSessions = sessions.filter(s => s.kind === 'main' || !s.kind);
   const sessionMode = await getCircleSessionMemoryMode(circleId);
   const visibility = sessionMode === 'shared' ? 'circle_shared' : 'private';
