@@ -1765,7 +1765,7 @@ export default function AgentPanel({
         };
         const isActive = agent.status === 'active' || agent.status === 'building';
         return (
-        <View nativeID="section-agent-overview" style={{ paddingHorizontal: 12, gap: 16, paddingBottom: 16 }}>
+        <View nativeID="section-agent-overview" style={{ paddingHorizontal: 12, gap: 20, paddingBottom: 20 }}>
 
           {/* ── LIVE STATUS HERO — what the agent is doing RIGHT NOW ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 2, borderColor: isActive ? statusColor + '60' : '#1a1a28', borderRadius: 2, padding: 12, ...(isActive && Platform.OS === 'web' ? { boxShadow: `0 0 12px ${statusColor}20` } as any : {}) }}>
@@ -1814,22 +1814,31 @@ export default function AgentPanel({
             ) : null}
           </View>
 
-          {/* ── MEMORY SYNC STATUS — shows for all bridge-connected agents ── */}
+          {/* ══════════ AGENT SETTINGS ══════════ */}
           {['claude-code', 'cursor', 'codex', 'gemini'].includes(agent.providerType) && (
+            <>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+              <View style={{ height: 1, flex: 1, backgroundColor: '#1a1a28' }} />
+              <Text style={{ color: '#606075', fontSize: 10, fontWeight: '700', letterSpacing: 2, fontFamily: MONO }}>AGENT SETTINGS</Text>
+              <View style={{ height: 1, flex: 1, backgroundColor: '#1a1a28' }} />
+            </View>
+
+            {/* Memory sync status */}
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
               <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: agent.status === 'active' || agent.status === 'building' ? '#22c55e' : '#3a3a4e' }} />
               <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>
                 MEMORY SYNC {agent.status === 'active' || agent.status === 'building' ? 'ACTIVE' : 'IDLE'}
               </Text>
               <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, marginLeft: 'auto' }}>
-                Session context auto-saved every 30s
+                Auto-saved every 30s
               </Text>
             </View>
+            </>
           )}
 
           {/* ── AGENT IDENTITY — rename + set as main ── */}
           {['claude-code', 'cursor', 'codex', 'gemini'].includes(agent.providerType) && (
-            <View style={{ gap: 6 }}>
+            <View style={{ gap: 8 }}>
               {/* Rename agent */}
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                 <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>AGENT NAME</Text>
@@ -1883,6 +1892,13 @@ export default function AgentPanel({
               </Pressable>
             </View>
           )}
+
+          {/* ══════════ STATS ══════════ */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+            <View style={{ height: 1, flex: 1, backgroundColor: '#1a1a28' }} />
+            <Text style={{ color: '#606075', fontSize: 10, fontWeight: '700', letterSpacing: 2, fontFamily: MONO }}>STATS</Text>
+            <View style={{ height: 1, flex: 1, backgroundColor: '#1a1a28' }} />
+          </View>
 
           {/* ── MODEL + PROVIDER BAR ── */}
           <View style={{ flexDirection: 'row', gap: 6 }}>
@@ -1942,6 +1958,15 @@ export default function AgentPanel({
             </View>
           )}
 
+          {/* ══════════ TOOLS & FILES ══════════ */}
+          {((agent.recentToolCalls?.length || 0) > 0 || agent.recentActions.length > 0 || (agent.activeFiles?.length || 0) > 0) && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+              <View style={{ height: 1, flex: 1, backgroundColor: '#1a1a28' }} />
+              <Text style={{ color: '#606075', fontSize: 10, fontWeight: '700', letterSpacing: 2, fontFamily: MONO }}>TOOLS & FILES</Text>
+              <View style={{ height: 1, flex: 1, backgroundColor: '#1a1a28' }} />
+            </View>
+          )}
+
           {/* ── RECENT TOOL CALLS — timeline with file context ── */}
           {(agent.recentToolCalls?.length || 0) > 0 ? (
             <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
@@ -1995,9 +2020,16 @@ export default function AgentPanel({
             </View>
           )}
 
+          {/* ══════════ SESSION ══════════ */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+            <View style={{ height: 1, flex: 1, backgroundColor: '#1a1a28' }} />
+            <Text style={{ color: '#606075', fontSize: 10, fontWeight: '700', letterSpacing: 2, fontFamily: MONO }}>SESSION</Text>
+            <View style={{ height: 1, flex: 1, backgroundColor: '#1a1a28' }} />
+          </View>
+
           {/* ── SESSION DETAILS ── */}
           <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
-            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>SESSION</Text>
+            <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>DETAILS</Text>
             {[
               { label: 'Session ID', value: agent.sessionKey || agent.id.split('::')[1] || agent.id },
               { label: 'Connection', value: agent.connectionName },
@@ -2010,7 +2042,7 @@ export default function AgentPanel({
               { label: 'Cost/Turn', value: agent.turns > 0 ? `$${(agent.costToday / agent.turns).toFixed(4)}` : '—' },
               { label: 'Tokens/Turn', value: agent.turns > 0 ? formatTokens(Math.round(agent.tokensUsed / agent.turns)) : '—' },
             ].map((row, i, arr) => (
-              <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 5, borderBottomWidth: i < arr.length - 1 ? 1 : 0, borderBottomColor: '#111118' }}>
+              <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 7, borderBottomWidth: i < arr.length - 1 ? 1 : 0, borderBottomColor: '#111118' }}>
                 <Text style={{ color: '#808090', fontSize: 12, fontWeight: '600', fontFamily: MONO }}>{row.label}</Text>
                 <Text style={{ color: '#a0a0b0', fontSize: 12, fontFamily: MONO, maxWidth: '60%', textAlign: 'right' }} numberOfLines={1}>{row.value}</Text>
               </View>
