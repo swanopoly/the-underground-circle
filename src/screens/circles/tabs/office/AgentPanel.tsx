@@ -1570,14 +1570,14 @@ export default function AgentPanel({
       {(() => {
         const allTabs = [
           { key: 'overview', label: 'Overview' },
+          { key: 'activity', label: 'Activity' },
+          { key: 'memory', label: 'Memory' },
+          { key: 'cron', label: 'Cron Jobs' },
+          { key: 'spirit', label: 'Spirit' },
+          { key: 'evolution', label: 'XP & Achievements' },
+          { key: 'runs', label: 'Runs' },
           ...(agent.providerType === 'openswan' ? [{ key: 'openswan', label: 'OpenSwan' }] : []),
           { key: 'terminal', label: 'Terminal' },
-          { key: 'memory', label: 'Memory' },
-          { key: 'runs', label: 'Runs' },
-          { key: 'cron', label: 'Cron Jobs' },
-          { key: 'evolution', label: 'Evolution' },
-          { key: 'spirit', label: 'Spirit' },
-          { key: 'activity', label: 'Activity' },
           { key: 'customize', label: 'Customize' },
         ];
         const currentIdx = allTabs.findIndex(t => t.key === panelTab);
