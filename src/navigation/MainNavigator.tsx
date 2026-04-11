@@ -4,6 +4,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import CirclesScreen from '../screens/circles/CirclesScreen';
 import CircleDetailScreen from '../screens/circles/CircleDetailScreen';
 import CreateCircleScreen from '../screens/circles/CreateCircleScreen';
+import DiscoverScreen from '../screens/circles/DiscoverScreen';
 import JoinCircleScreen from '../screens/circles/JoinCircleScreen';
 import CircleSettingsScreen from '../screens/circles/CircleSettingsScreen';
 import EditProfileScreen from '../screens/profile/EditProfileScreen';
@@ -41,6 +42,7 @@ export default function MainNavigator() {
     >
       <Stack.Screen name="CirclesList" component={CirclesScreen} />
       <Stack.Screen name="CreateCircle" component={CreateCircleScreen} />
+      <Stack.Screen name="Discover" component={DiscoverScreen} />
       <Stack.Screen name="JoinCircle" component={JoinCircleScreen} />
       <Stack.Screen name="CircleDetail" component={CircleDetailScreen} />
       <Stack.Screen name="CircleSettings" component={CircleSettingsScreen} />

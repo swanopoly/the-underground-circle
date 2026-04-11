@@ -210,7 +210,7 @@ const CircleCard = React.memo(function CircleCard({ item, onPress, index }: { it
 });
 
 // ─── Create / Join Card ────────────────────────────────────────────────────
-function CreateJoinCard({ onCreate, onJoin }: { onCreate: () => void; onJoin: () => void }) {
+function CreateJoinCard({ onCreate, onJoin, onDiscover }: { onCreate: () => void; onJoin: () => void; onDiscover?: () => void }) {
   const [hovered, setHovered] = useState<string | null>(null);
   const fadeAnim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
@@ -246,6 +246,18 @@ function CreateJoinCard({ onCreate, onJoin }: { onCreate: () => void; onJoin: ()
           >
             <Text style={s.createBtnText}>Join with Code</Text>
           </Pressable>
+          {onDiscover && (
+            <Pressable
+              style={[s.createBtn, hovered === 'd' && s.createBtnHover]}
+              onPress={onDiscover}
+              onHoverIn={() => setHovered('d')}
+              onHoverOut={() => setHovered(null)}
+              accessibilityRole="button"
+              accessibilityLabel="Discover public circles"
+            >
+              <Text style={[s.createBtnText, { color: '#6366f1' }]}>Discover Circles</Text>
+            </Pressable>
+          )}
         </View>
       </View>
     </Animated.View>
@@ -379,7 +391,7 @@ export default function CirclesScreen({ navigation }: any) {
               </View>
             ))}
             <View style={[s.gridItem, isDesktop && circles.length > 1 && { width: '48%' }]}>
-              <CreateJoinCard onCreate={() => navigation.navigate('CreateCircle')} onJoin={() => navigation.navigate('JoinCircle')} />
+              <CreateJoinCard onCreate={() => navigation.navigate('CreateCircle')} onJoin={() => navigation.navigate('JoinCircle')} onDiscover={() => navigation.navigate('Discover')} />
             </View>
           </View>
         )}

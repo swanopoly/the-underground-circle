@@ -162,6 +162,7 @@ const linking: LinkingOptions<any> = {
       // Main
       CirclesList: 'circles',
       CreateCircle: 'circles/create',
+      Discover: 'discover',
       JoinCircle: 'circles/join',
       CircleDetail: {
         path: 'circle/:circleId/:tab?',
