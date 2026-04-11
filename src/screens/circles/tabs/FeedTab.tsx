@@ -671,7 +671,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
   const [editGoal, setEditGoal] = useState<GoalWithCount | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [createInColumn, setCreateInColumn] = useState<TaskStatus>('todo');
-  const [mobileTab, setMobileTab] = useState<MobileTab>('board');
+  const [mobileTab, setMobileTab] = useState<MobileTab>('missions');
   const [centerTab, setCenterTab] = useState<CenterTab>('missions');
   const { width } = useWindowDimensions();
   const isMobile = width < MOBILE_BREAKPOINT;

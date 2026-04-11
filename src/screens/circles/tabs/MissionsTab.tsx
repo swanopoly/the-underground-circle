@@ -979,9 +979,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: GRID.lg,
-    paddingTop: GRID.lg,
-    paddingBottom: GRID.md,
+    paddingHorizontal: GRID.md,
+    paddingTop: GRID.md,
+    paddingBottom: GRID.sm,
   },
   title: {
     color: PIXEL_COLORS.text0,
@@ -998,9 +998,10 @@ const styles = StyleSheet.create({
   // Filter pills
   filterRow: {
     flexDirection: 'row',
-    paddingHorizontal: GRID.lg,
+    paddingHorizontal: GRID.md,
     gap: GRID.sm,
     marginBottom: GRID.md,
+    flexWrap: 'wrap',
   },
   filterPill: {
     paddingHorizontal: GRID.md,
@@ -1019,8 +1020,8 @@ const styles = StyleSheet.create({
   // List
   list: { flex: 1 },
   listContent: {
-    paddingHorizontal: GRID.lg,
-    paddingBottom: 80,
+    paddingHorizontal: GRID.md,
+    paddingBottom: 100,
   },
   loadingBox: {
     paddingTop: 40,
@@ -1123,15 +1124,15 @@ const styles = StyleSheet.create({
     gap: GRID.md,
   },
   detailContent: {
-    paddingHorizontal: GRID.lg,
-    paddingBottom: 80,
+    paddingHorizontal: GRID.md,
+    paddingBottom: 100,
   },
   detailTitle: {
     color: PIXEL_COLORS.text0,
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '800',
-    lineHeight: 30,
-    marginTop: GRID.lg,
+    lineHeight: 28,
+    marginTop: GRID.md,
   },
   detailDesc: {
     color: PIXEL_COLORS.text1,
@@ -1315,10 +1316,11 @@ const styles = StyleSheet.create({
   },
   modal: {
     ...pixelCard,
-    width: '90%',
+    width: '94%',
     maxWidth: 480,
-    padding: GRID.xl,
+    padding: GRID.lg,
     zIndex: 101,
+    maxHeight: '85%',
   },
   modalTitle: {
     color: PIXEL_COLORS.text0,

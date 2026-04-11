@@ -115,6 +115,7 @@ const styles = StyleSheet.create({
     position: 'absolute' as any,
     top: Platform.OS === 'web' ? 56 : 80,
     right: 12,
+    left: Platform.OS === 'web' ? undefined : 12,
     zIndex: 9999,
     gap: 8,
     maxWidth: 320,
