@@ -904,6 +904,12 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
 
       if (isInput) return;
 
+      // M — toggle missions panel
+      if (e.key === 'm' || e.key === 'M') {
+        setCenterTab(centerTab === 'missions' ? 'activity' : 'missions');
+        e.preventDefault();
+        return;
+      }
       if (e.key === 'n' || e.key === 'N') {
         setCreateInColumn('todo');
         setShowCreate(true);

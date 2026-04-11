@@ -14,6 +14,7 @@ import { acceptInvite, lookupInvite } from './src/lib/invites';
 import OnboardingFlow, { isOnboardingComplete } from './src/components/OnboardingFlow';
 import { buildAppActions } from './src/components/command/commandActions';
 import XPOverlay from './src/components/rpg/XPOverlay';
+import { ToastProvider } from './src/components/Toast';
 
 // Conditionally import the web-only command palette provider
 let CommandPaletteProvider: React.FC<{ children: React.ReactNode; actions: any[] }> | null = null;
@@ -334,23 +335,25 @@ export default function App() {
 
   return (
     <ErrorBoundary>
-      <NavigationContainer
-        linking={linking}
-        initialState={session ? validNavState : undefined}
-        onStateChange={(state) => {
-          if (state && session) saveNavState(state);
-        }}
-      >
-        <StatusBar barStyle="light-content" />
-        {session ? <MainWithHeader /> : <AuthNavigator />}
-      </NavigationContainer>
-      {showOnboarding && session && !hasCircles && (
-        <OnboardingFlow
-          userId={session.user.id}
-          onComplete={() => setShowOnboarding(false)}
-        />
-      )}
-      {session && <XPOverlay />}
+      <ToastProvider>
+        <NavigationContainer
+          linking={linking}
+          initialState={session ? validNavState : undefined}
+          onStateChange={(state) => {
+            if (state && session) saveNavState(state);
+          }}
+        >
+          <StatusBar barStyle="light-content" />
+          {session ? <MainWithHeader /> : <AuthNavigator />}
+        </NavigationContainer>
+        {showOnboarding && session && !hasCircles && (
+          <OnboardingFlow
+            userId={session.user.id}
+            onComplete={() => setShowOnboarding(false)}
+          />
+        )}
+        {session && <XPOverlay />}
+      </ToastProvider>
     </ErrorBoundary>
   );
 }

@@ -42,6 +42,7 @@ import {
 import { backfillGitHubProof } from '../../../lib/proofOfWork';
 import { addProofOfWork } from '../../../lib/missions';
 import { dispatchTaskToAgent } from '../../../lib/missionAgentDispatch';
+import { useToast } from '../../../components/Toast';
 
 interface Props {
   circleId: string;
@@ -326,6 +327,7 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
   missionId: string; circleId: string; accentColor: string; onBack: () => void;
 }) {
   const { mission, tasks, agents, loading, refresh } = useMissionDetail(missionId);
+  const { show: showToast } = useToast();
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [addingTask, setAddingTask] = useState(false);
   const [members, setMembers] = useState<CircleMember[]>([]);
@@ -368,7 +370,8 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
     await updateMissionTask(task.id, { status: next });
     refresh();
 
-    // Generate proof-of-work when task is completed
+    // Toast + proof-of-work when task is completed
+    if (next === 'done') showToast(`Completed: ${task.title}`, 'success');
     if (next === 'done' && mission) {
       const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
       addProofOfWork({
@@ -387,6 +390,7 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
       const allDone = tasks.every(t => t.id === task.id ? true : t.status === 'done');
       if (allDone && mission?.status === 'active') {
         await updateMission(missionId, { status: 'completed' });
+        showToast(`Mission complete: ${mission.title}`, 'success');
         // Proof for mission completion
         addProofOfWork({
           circle_id: circleId,
@@ -616,8 +620,10 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
                   setRunningTaskId(null);
                   if (result.success) {
                     setAgentResult({ taskId: task.id, text: result.response });
+                    showToast(`${task.agent_name} completed task`, 'success');
                   } else {
                     setAgentResult({ taskId: task.id, text: `Error: ${result.error}` });
+                    showToast(`Agent failed: ${result.error}`, 'error');
                   }
                   refresh();
                 }}
