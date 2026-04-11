@@ -218,7 +218,7 @@ export async function saveAgentSessionsToMemory(
           content,
           sourceSurface,
           visibility,
-          retrievalMode: 'startup',
+          retrievalMode: 'on_demand', // New sessions start as on_demand; promoted to startup below
           importance: 0.72,
           metadata: {
             bucketId,
@@ -239,6 +239,38 @@ export async function saveAgentSessionsToMemory(
       skipped++;
     }
     console.log(`[agentSessionMemory] ${provider}/${projectKey}: saved=${saved}, skipped=${skipped}`);
+  }
+
+  // ── Promote only the 3 most recent session memories to 'startup', demote rest ──
+  // This prevents old session memories from bloating every system prompt.
+  try {
+    const { data: allSessionMems } = await supabase
+      .from('memory_entries')
+      .select('id, updated_at, retrieval_mode')
+      .eq('circle_id', circleId)
+      .eq('scope', 'session')
+      .eq('source_surface', sourceSurface)
+      .eq('is_active', true)
+      .order('updated_at', { ascending: false })
+      .limit(50);
+
+    if (allSessionMems && allSessionMems.length > 0) {
+      const toPromote = allSessionMems.slice(0, 3).filter(m => m.retrieval_mode !== 'startup');
+      const toDemote = allSessionMems.slice(3).filter(m => m.retrieval_mode === 'startup');
+
+      if (toPromote.length > 0) {
+        await supabase.from('memory_entries')
+          .update({ retrieval_mode: 'startup' })
+          .in('id', toPromote.map(m => m.id));
+      }
+      if (toDemote.length > 0) {
+        await supabase.from('memory_entries')
+          .update({ retrieval_mode: 'on_demand' })
+          .in('id', toDemote.map(m => m.id));
+      }
+    }
+  } catch (err) {
+    console.warn(`[agentSessionMemory] Failed to promote/demote session memories:`, err);
   }
 
   console.log(`[agentSessionMemory] Final result for ${provider}: saved=${saved}, skipped=${skipped}`);
