@@ -48,7 +48,7 @@ import GoalDetailModal from './kanban/GoalDetailModal';
 
 import { LoadingScreen as FeedLoadingAnimation } from '../../../components/LoadingWave';
 import MissionsTab from './MissionsTab';
-import { useMissions, useMissionDetail, missionProgress, isOverdue } from '../../../lib/missions';
+import { useMissions, useMissionDetail, missionProgress, isOverdue, type Mission } from '../../../lib/missions';
 
 // ─── Task Search Bar (rendered in FeedTab, right under OrchestraPanel) ────
 
@@ -1082,6 +1082,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
             members={kanban.members}
             agents={sortedAgentsForAssign}
             goals={goalsHook.goals}
+            missions={allMissions}
             onClose={() => setShowCreate(false)}
             onCreate={async (fields) => {
               await kanban.createTask(fields);
@@ -1230,6 +1231,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
           members={kanban.members}
           agents={agents}
           goals={goalsHook.goals}
+          missions={allMissions}
           onClose={() => setShowCreate(false)}
           onCreate={async (fields) => {
             await kanban.createTask(fields);
@@ -1248,6 +1250,7 @@ interface CreateModalProps {
   members: KanbanMember[];
   agents: CircleOfficeAgent[];
   goals: GoalWithCount[];
+  missions?: Mission[];
   onClose: () => void;
   onCreate: (fields: {
     title: string;
@@ -1259,10 +1262,11 @@ interface CreateModalProps {
     assigned_agent_ids?: string[];
     due_date?: string | null;
     goal_id?: string | null;
+    mission_id?: string | null;
   }) => void;
 }
 
-function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: CreateModalProps) {
+function CreateTaskModal({ column, members, agents, goals, missions, onClose, onCreate }: CreateModalProps) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('normal');
@@ -1270,6 +1274,7 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
   const [assignedAgentIds, setAssignedAgentIds] = useState<string[]>([]);
   const [dueDate, setDueDate] = useState('');
   const [selectedGoalId, setSelectedGoalId] = useState<string | null>(null);
+  const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
   const [error, setError] = useState('');
 
   const columnDef = COLUMNS.find(c => c.key === column) || COLUMNS[1];
@@ -1287,8 +1292,11 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
       assigned_agent_ids: assignedAgentIds,
       due_date: dueDate || null,
       goal_id: selectedGoalId,
+      mission_id: selectedMissionId,
     });
   };
+
+  const activeMissions = (missions || []).filter(m => m.status === 'active');
 
   return (
     <View style={m.overlay}>
@@ -1354,6 +1362,34 @@ function CreateTaskModal({ column, members, agents, goals, onClose, onCreate }: 
                     >
                       <View style={[m.chipDot, { backgroundColor: gColor }]} />
                       <Text style={[m.chipText, active && { color: gColor }]} numberOfLines={1}>{g.name}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </>
+          )}
+
+          {/* Mission link */}
+          {activeMissions.length > 0 && (
+            <>
+              <Text style={m.sectionLabel}>Link to Mission</Text>
+              <View style={m.chipRow}>
+                <Pressable
+                  onPress={() => setSelectedMissionId(null)}
+                  style={[m.chip, !selectedMissionId && m.chipActive]}
+                >
+                  <Text style={[m.chipText, !selectedMissionId && { color: '#e8e8e8' }]}>None</Text>
+                </Pressable>
+                {activeMissions.map(mi => {
+                  const active = selectedMissionId === mi.id;
+                  return (
+                    <Pressable
+                      key={mi.id}
+                      onPress={() => setSelectedMissionId(active ? null : mi.id)}
+                      style={[m.chip, active && { backgroundColor: '#6366f115', borderColor: '#6366f130' }]}
+                    >
+                      <View style={[m.chipDot, { backgroundColor: '#6366f1' }]} />
+                      <Text style={[m.chipText, active && { color: '#6366f1' }]} numberOfLines={1}>{mi.title}</Text>
                     </Pressable>
                   );
                 })}
