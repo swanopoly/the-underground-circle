@@ -82,13 +82,18 @@ export async function getAgentControl(
   circleId: string,
   sessionKey: string,
 ): Promise<AgentControl | null> {
-  const { data } = await supabase
-    .from('agent_controls')
-    .select('*')
-    .eq('circle_id', circleId)
-    .eq('session_key', sessionKey)
-    .single();
-  return data;
+  try {
+    const { data, error } = await supabase
+      .from('agent_controls')
+      .select('*')
+      .eq('circle_id', circleId)
+      .eq('session_key', sessionKey)
+      .maybeSingle();
+    if (error) return null;
+    return data;
+  } catch {
+    return null;
+  }
 }
 
 export async function upsertAgentControl(

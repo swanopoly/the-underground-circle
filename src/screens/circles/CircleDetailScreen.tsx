@@ -42,6 +42,7 @@ if (Platform.OS === 'web' && typeof document !== 'undefined' && !document.getEle
       0%, 100% { transform: scaleX(1); opacity: 0.8; }
       50% { transform: scaleX(1.4); opacity: 1; }
     }
+    .uc-tab-dot { animation: uc-tab-dot-pulse 2s ease-in-out infinite; }
   `;
   document.head.appendChild(style);
 }
@@ -399,7 +400,14 @@ function TabPill({ icon, flatIcon, label, active, accentColor, tabColor, isMobil
       </Text>
       {/* Animated dot under active tab */}
       {active && (
-        <View style={[styles.tabDot, { backgroundColor: tabColor }]} />
+        Platform.OS === 'web' ? (
+          <div className="uc-tab-dot" style={{
+            position: 'absolute', bottom: -1, width: 14, height: 4,
+            borderRadius: 2, backgroundColor: tabColor,
+          }} />
+        ) : (
+          <View style={[styles.tabDot, { backgroundColor: tabColor }]} />
+        )
       )}
     </Pressable>
   );
@@ -651,9 +659,6 @@ const styles = StyleSheet.create({
     width: 14,
     height: 4,
     borderRadius: 2,
-    ...(Platform.OS === 'web' ? {
-      animation: 'uc-tab-dot-pulse 2s ease-in-out infinite',
-    } as any : {}),
   },
 
   // Tab content

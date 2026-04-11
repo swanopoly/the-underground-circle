@@ -121,18 +121,23 @@ export interface MemoryEntry {
 }
 
 export async function getCircleSessionMemoryMode(circleId: string): Promise<SessionMemoryMode> {
+  // The 'settings' column doesn't exist on circles table yet.
+  // When it's added, uncomment the query below. Until then, default to 'private'
+  // to avoid 400 errors on every session memory save.
+  return 'private';
+  /*
   try {
     const { data, error } = await supabase
       .from('circles')
       .select('settings')
       .eq('id', circleId)
       .single();
-    // If settings column doesn't exist (400) or any error, default to private
     if (error || !data) return 'private';
     return (data as any)?.settings?.sessionMemoryMode === 'shared' ? 'shared' : 'private';
   } catch {
     return 'private';
   }
+  */
 }
 
 // ── 1. Create Run ───────────────────────────────────────────────────────────
