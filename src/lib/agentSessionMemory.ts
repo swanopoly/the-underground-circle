@@ -208,18 +208,19 @@ export async function saveAgentSessionsToMemory(
         }).eq('id', existing.id);
         if (updateError) throw updateError;
       } else {
-        const { saveMemory } = await import('./agentRunSystem');
-        const savedMemory = await saveMemory({
+        // Insert new session memory — unique constraint prevents duplicates from race conditions
+        const { error: insertError } = await supabase.from('memory_entries').insert({
           scope: 'session',
-          circleId,
-          userId: sessionMode === 'shared' ? undefined : userId,
-          memoryKind: 'context',
+          circle_id: circleId,
+          user_id: sessionMode === 'shared' ? null : userId,
+          memory_kind: 'context',
           title,
           content,
-          sourceSurface,
+          source_surface: sourceSurface,
           visibility,
-          retrievalMode: 'on_demand', // New sessions start as on_demand; promoted to startup below
+          retrieval_mode: 'on_demand',
           importance: 0.72,
+          is_active: true,
           metadata: {
             bucketId,
             projectKey,
@@ -229,7 +230,14 @@ export async function saveAgentSessionsToMemory(
             sessionMemoryMode: sessionMode,
           },
         });
-        if (!savedMemory) throw new Error('saveMemory returned null');
+        if (insertError) {
+          // Duplicate key = race condition, another process saved first — update instead
+          if (insertError.code === '23505') {
+            console.log(`[agentSessionMemory] Duplicate detected for ${projectKey}, updating instead`);
+          } else {
+            throw insertError;
+          }
+        }
       }
 
       _savedHashes.set(bucketId, hash);

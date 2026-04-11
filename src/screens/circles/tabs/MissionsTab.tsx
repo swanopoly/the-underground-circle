@@ -45,6 +45,7 @@ import { dispatchTaskToAgent } from '../../../lib/missionAgentDispatch';
 import { useToast } from '../../../components/Toast';
 import { useMissionStreak } from '../../../lib/missionStreaks';
 import { notifyMissionComplete, notifyStreakMilestone } from '../../../lib/notifications';
+import MissionCelebration from '../../../components/MissionCelebration';
 
 interface Props {
   circleId: string;
@@ -396,6 +397,7 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
   const [editDeadline, setEditDeadline] = useState('');
   const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
   const [agentResult, setAgentResult] = useState<{ taskId: string; text: string } | null>(null);
+  const [celebrating, setCelebrating] = useState(false);
 
   // Load circle members for assignment
   useEffect(() => {
@@ -461,6 +463,7 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
         await updateMission(missionId, { status: 'completed' });
         showToast(`Mission complete: ${mission.title}`, 'success');
         notifyMissionComplete(mission.title).catch(() => {});
+        setCelebrating(true);
         // Proof for mission completion
         addProofOfWork({
           circle_id: circleId,
@@ -491,6 +494,15 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
 
   return (
     <View style={styles.container} nativeID="section-mission-detail">
+      {/* Mission completion celebration */}
+      {celebrating && mission && (
+        <MissionCelebration
+          missionTitle={mission.title}
+          taskCount={tasks.length}
+          onDismiss={() => setCelebrating(false)}
+        />
+      )}
+
       {/* Back button + title */}
       <View style={styles.detailHeader}>
         <Pressable onPress={onBack} style={styles.backBtn}>
