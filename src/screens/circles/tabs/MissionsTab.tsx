@@ -27,6 +27,7 @@ import {
   isOverdue,
   formatDeadline,
   powIcon,
+  getMissionAnalytics,
   Mission,
   MissionTask,
   MissionStatus,
@@ -145,9 +146,12 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
   const [filter, setFilter] = useState<'all' | 'active' | 'completed'>('all');
   const [showProof, setShowProof] = useState(false);
 
+  const [analytics, setAnalytics] = useState<{ completionRate: number; completedTasks: number; totalTasks: number; overdueCount: number } | null>(null);
+
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setMainUserId(data.user?.id || null)).catch(() => {});
-  }, []);
+    getMissionAnalytics(circleId).then(a => setAnalytics(a)).catch(() => {});
+  }, [circleId]);
 
   const filtered = missions.filter(m => {
     if (filter === 'active') return m.status === 'active';
@@ -187,6 +191,26 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
           <Text style={styles.createBtnText}>+ NEW MISSION</Text>
         </Pressable>
       </View>
+
+      {/* Analytics bar */}
+      {analytics && analytics.totalTasks > 0 && (
+        <View style={styles.analyticsRow}>
+          <View style={styles.analyticItem}>
+            <Text style={styles.analyticValue}>{analytics.completionRate}%</Text>
+            <Text style={styles.analyticLabel}>done</Text>
+          </View>
+          <View style={styles.analyticItem}>
+            <Text style={styles.analyticValue}>{analytics.completedTasks}/{analytics.totalTasks}</Text>
+            <Text style={styles.analyticLabel}>tasks</Text>
+          </View>
+          {analytics.overdueCount > 0 && (
+            <View style={styles.analyticItem}>
+              <Text style={[styles.analyticValue, { color: PIXEL_COLORS.red }]}>{analytics.overdueCount}</Text>
+              <Text style={styles.analyticLabel}>overdue</Text>
+            </View>
+          )}
+        </View>
+      )}
 
       {/* Filters */}
       <View style={styles.filterRow}>
@@ -1034,6 +1058,29 @@ const styles = StyleSheet.create({
     color: PIXEL_COLORS.text2,
     fontSize: 12,
     marginTop: 2,
+  },
+
+  // Analytics bar
+  analyticsRow: {
+    flexDirection: 'row',
+    paddingHorizontal: GRID.md,
+    gap: GRID.lg,
+    marginBottom: GRID.sm,
+  },
+  analyticItem: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 4,
+  },
+  analyticValue: {
+    color: PIXEL_COLORS.text0,
+    fontSize: 14,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  analyticLabel: {
+    color: PIXEL_COLORS.text3,
+    fontSize: 11,
   },
 
   // Filter pills

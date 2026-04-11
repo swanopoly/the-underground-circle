@@ -79,7 +79,7 @@ export default function DiscoverScreen({ navigation }: any) {
     setJoining(circle.id);
     setJoinError('');
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
       if (!user) { setJoinError('Not logged in'); setJoining(null); return; }
 
       // Check if already a member
@@ -88,7 +88,7 @@ export default function DiscoverScreen({ navigation }: any) {
         .select('id')
         .eq('circle_id', circle.id)
         .eq('user_id', user.id)
-        .single();
+        .maybeSingle();
 
       if (existing) {
         // Already a member — navigate directly

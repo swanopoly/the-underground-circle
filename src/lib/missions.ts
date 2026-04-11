@@ -146,12 +146,13 @@ export async function deleteMission(missionId: string): Promise<{ error: string 
 // ─── Mission Tasks CRUD ──────────────────────────────────────────────────────
 
 export async function getMissionTasks(missionId: string): Promise<MissionTask[]> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('mission_tasks')
     .select('*')
     .eq('mission_id', missionId)
     .order('sort_order', { ascending: true });
 
+  if (error) console.warn('getMissionTasks error:', error.message);
   return (data || []) as MissionTask[];
 }
 
@@ -421,6 +422,43 @@ export function formatDeadline(deadline: string | null): string {
   if (days === 1) return 'Due tomorrow';
   if (days <= 7) return `${days}d left`;
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+/** Compute mission analytics for a circle */
+export async function getMissionAnalytics(circleId: string): Promise<{
+  totalMissions: number;
+  activeMissions: number;
+  completedMissions: number;
+  totalTasks: number;
+  completedTasks: number;
+  overdueCount: number;
+  completionRate: number;
+  avgTasksPerMission: number;
+}> {
+  const missions = await getMissions(circleId);
+  const allMissions = [...missions]; // getMissions excludes archived
+  const active = allMissions.filter(m => m.status === 'active');
+  const completed = allMissions.filter(m => m.status === 'completed');
+  const overdue = active.filter(m => isOverdue(m));
+
+  let totalTasks = 0;
+  let completedTasks = 0;
+  for (const m of allMissions.slice(0, 20)) {
+    const tasks = await getMissionTasks(m.id);
+    totalTasks += tasks.length;
+    completedTasks += tasks.filter(t => t.status === 'done').length;
+  }
+
+  return {
+    totalMissions: allMissions.length,
+    activeMissions: active.length,
+    completedMissions: completed.length,
+    totalTasks,
+    completedTasks,
+    overdueCount: overdue.length,
+    completionRate: totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0,
+    avgTasksPerMission: allMissions.length > 0 ? Math.round(totalTasks / allMissions.length) : 0,
+  };
 }
 
 const POW_ICONS: Record<PowType, string> = {

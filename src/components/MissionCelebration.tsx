@@ -62,7 +62,7 @@ export default function MissionCelebration({ missionTitle, taskCount, onDismiss 
     // Auto-dismiss after 3s
     const timer = setTimeout(onDismiss, 3000);
     return () => clearTimeout(timer);
-  }, []);
+  }, [onDismiss]);
 
   return (
     <Pressable style={styles.overlay} onPress={onDismiss}>
