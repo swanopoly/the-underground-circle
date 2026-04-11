@@ -36,20 +36,19 @@ import { LoadingScreen } from '../../components/LoadingWave';
 // Core tabs (Chat, Office, Rooms) always mounted; secondary tabs lazy-mount on first visit
 
 // Gated tabs — hidden from nav until the feature is complete (see docs/NEXT_LEVEL_PLAN.md Phase 0.3)
-const GATED_TABS = new Set(['WALLET', 'BACKPACK']);
+const GATED_TABS = new Set(['WALLET']);
 
 const TAB_META_ALL: { key: string; label: string; icon: string; flatIcon?: string }[] = [
   { key: 'CHAT', label: 'Chat', icon: '💬', flatIcon: 'chat' },
   { key: 'OFFICE', label: 'Office', icon: '🏢', flatIcon: 'office' },
-  { key: 'MISSIONS', label: 'Missions', icon: '🎯', flatIcon: 'feed' },
+  { key: 'FEED', label: 'Feed', icon: '🎯', flatIcon: 'feed' },
   { key: 'ROOMS', label: 'Rooms', icon: '🏠', flatIcon: 'rooms' },
   { key: 'BACKPACK', label: 'Backpack', icon: '🎒', flatIcon: 'backpack' },
-  { key: 'FEED', label: 'Feed', icon: '📋', flatIcon: 'feed' },
-  { key: 'WALLET', label: 'Wallet', icon: '💰', flatIcon: 'wallet' },
   { key: 'INTEGRATIONS', label: 'Integrations', icon: '🔗', flatIcon: 'integrations' },
   { key: 'CHALLENGES', label: 'Challenges', icon: '🏆', flatIcon: 'challenges' },
   { key: 'MEMBERS', label: 'Members', icon: '👥', flatIcon: 'members' },
   { key: 'ANALYTICS', label: 'Analytics', icon: '📊', flatIcon: 'analytics' },
+  { key: 'WALLET', label: 'Wallet', icon: '💰', flatIcon: 'wallet' },
   { key: 'PROFILE', label: 'Profile', icon: '👤', flatIcon: 'profile' },
 ];
 
@@ -194,7 +193,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
         setActiveStreakCount(Math.max(1, Math.floor(mc * 0.7)));
         cacheCircle(circleId, circleRes.data, mc);
       }
-      // Smart default: if user has no saved tab and circle has missions, show MISSIONS
+      // Smart default: if user has no saved tab and circle has missions, show FEED (missions live in Feed now)
       try {
         const hasSavedTab = Platform.OS === 'web' && localStorage.getItem(`${TAB_STORAGE_KEY}_${circleId}`);
         if (!hasSavedTab && !routeTab) {
@@ -205,7 +204,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
             .eq('status', 'active')
             .limit(1);
           if (missions && missions.length > 0) {
-            setActiveTab('MISSIONS');
+            setActiveTab('FEED');
           }
         }
       } catch {}
@@ -278,20 +277,14 @@ export default function CircleDetailScreen({ route, navigation }: any) {
           <ChatTab circleId={circleId} accentColor={accentColor} />
         </LazyTab>
       )}
-      <LazyTab tabKey="MISSIONS" activeTab={activeTab}>
-        <MissionsTab circleId={circleId} accentColor={accentColor} />
-      </LazyTab>
       <LazyTab tabKey="ROOMS" activeTab={activeTab}>
         <RoomsTab circleId={circleId} accentColor={accentColor} />
       </LazyTab>
-      {/* BACKPACK — gated (see docs/NEXT_LEVEL_PLAN.md Phase 0.3) */}
-      {!GATED_TABS.has('BACKPACK') && (
-        <LazyTab tabKey="BACKPACK" activeTab={activeTab}>
-          <BackpackTab circleId={circleId} accentColor={accentColor} />
-        </LazyTab>
-      )}
+      <LazyTab tabKey="BACKPACK" activeTab={activeTab}>
+        <BackpackTab circleId={circleId} accentColor={accentColor} />
+      </LazyTab>
       <LazyTab tabKey="FEED" activeTab={activeTab}>
-        <FeedTab circleId={circleId} />
+        <FeedTab circleId={circleId} accentColor={accentColor} />
       </LazyTab>
       <LazyTab tabKey="CHALLENGES" activeTab={activeTab}>
         <ChallengesTab circleId={circleId} />

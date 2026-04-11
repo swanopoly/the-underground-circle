@@ -47,6 +47,7 @@ import GoalDetailModal from './kanban/GoalDetailModal';
 // ─── Loading Animation (uses shared circle loader) ──────────────────────
 
 import { LoadingScreen as FeedLoadingAnimation } from '../../../components/LoadingWave';
+import MissionsTab from './MissionsTab';
 
 // ─── Task Search Bar (rendered in FeedTab, right under OrchestraPanel) ────
 
@@ -633,8 +634,8 @@ function timeAgo(dateStr: string): string {
 
 const MOBILE_BREAKPOINT = 768;
 
-type MobileTab = 'goals' | 'activity' | 'agents' | 'board' | 'ai-tools';
-type CenterTab = 'activity' | 'agents' | 'ai-tools';
+type MobileTab = 'missions' | 'goals' | 'activity' | 'agents' | 'board' | 'ai-tools';
+type CenterTab = 'missions' | 'activity' | 'agents' | 'ai-tools';
 
 const AGENT_ASSIGNMENT_STATUS_ORDER: Record<AgentStatus, number> = {
   active: 0,
@@ -658,7 +659,7 @@ function compareAgentsForAssignment(
   return a.name.localeCompare(b.name);
 }
 
-export default function FeedTab({ circleId }: { circleId: string }) {
+export default function FeedTab({ circleId, accentColor }: { circleId: string; accentColor?: string }) {
   const kanban = useKanbanData(circleId);
   const goalsHook = useGoals(circleId);
   const plansHook = usePlans(circleId);
@@ -670,7 +671,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
   const [showCreate, setShowCreate] = useState(false);
   const [createInColumn, setCreateInColumn] = useState<TaskStatus>('todo');
   const [mobileTab, setMobileTab] = useState<MobileTab>('board');
-  const [centerTab, setCenterTab] = useState<CenterTab>('activity');
+  const [centerTab, setCenterTab] = useState<CenterTab>('missions');
   const { width } = useWindowDimensions();
   const isMobile = width < MOBILE_BREAKPOINT;
   const searchInputRef = useRef<TextInput>(null);
@@ -939,6 +940,11 @@ export default function FeedTab({ circleId }: { circleId: string }) {
         />
 
         <View style={s.mobileBody}>
+          {mobileTab === 'missions' && (
+            <View style={s.mobilePanel}>
+              <MissionsTab circleId={circleId} accentColor={accentColor || '#6366f1'} />
+            </View>
+          )}
           {mobileTab === 'goals' && (
             <View style={s.mobilePanel}>
               <GoalsPanel
@@ -1006,6 +1012,7 @@ export default function FeedTab({ circleId }: { circleId: string }) {
         {/* Mobile tab bar */}
         <View style={s.mobileTabBar}>
           {([
+            { key: 'missions' as MobileTab, label: 'Missions', icon: '\uD83C\uDFAF' },
             { key: 'goals' as MobileTab, label: 'Goals', icon: '\u2299' },
             { key: 'activity' as MobileTab, label: 'Activity', icon: '\u26A1' },
             { key: 'agents' as MobileTab, label: 'Agents', icon: '\u2699' },
@@ -1102,9 +1109,15 @@ export default function FeedTab({ circleId }: { circleId: string }) {
           onGenerateTasks={plansHook.generateTasksFromPlan}
         />
 
-        {/* Center panel: Activity / Agent Tasks toggle */}
+        {/* Center panel: Missions / Activity / Agent Tasks toggle */}
         <View style={ct.wrapper}>
           <View style={ct.tabs}>
+            <Pressable
+              onPress={() => setCenterTab('missions')}
+              style={[ct.tab, centerTab === 'missions' && ct.tabActive]}
+            >
+              <Text style={[ct.tabText, centerTab === 'missions' && ct.tabTextActive]}>{'\uD83C\uDFAF'} Missions</Text>
+            </Pressable>
             <Pressable
               onPress={() => setCenterTab('activity')}
               style={[ct.tab, centerTab === 'activity' && ct.tabActive]}
@@ -1124,7 +1137,9 @@ export default function FeedTab({ circleId }: { circleId: string }) {
               <Text style={[ct.tabText, centerTab === 'ai-tools' && ct.tabTextActive]}>{'\uD83E\uDD17'} AI Tools</Text>
             </Pressable>
           </View>
-          {centerTab === 'activity' ? (
+          {centerTab === 'missions' ? (
+            <MissionsTab circleId={circleId} accentColor={accentColor || '#6366f1'} />
+          ) : centerTab === 'activity' ? (
             <ActivityFeedPanel circleId={circleId} agents={agents} />
           ) : centerTab === 'ai-tools' ? (
             <HuggingSwanPanel circleId={circleId} />
