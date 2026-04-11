@@ -174,12 +174,13 @@ const s = StyleSheet.create({
   container: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
     backgroundColor: '#000000',
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
-    paddingVertical: 5,
-    paddingHorizontal: 14,
-    gap: 10,
+    borderBottomColor: '#111',
+    paddingVertical: 4,
+    paddingHorizontal: 12,
+    gap: 8,
   },
   section: {
     flexDirection: 'row',

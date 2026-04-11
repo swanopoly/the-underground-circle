@@ -799,6 +799,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
   const [debouncedSearchText] = useDebouncedValue(searchText, 300);
   const [filterPriority, setFilterPriority] = useState<TaskPriority | null>(null);
   const [filterAssignee, setFilterAssignee] = useState<string | null>(null);
+  const [searchExpanded, setSearchExpanded] = useState(false);
 
   // Collect unique assignees for filter chips
   const assigneeOptions = useMemo(() => {
@@ -917,7 +918,8 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
         return;
       }
       if (e.key === '/') {
-        searchInputRef.current?.focus();
+        setSearchExpanded(true);
+        setTimeout(() => searchInputRef.current?.focus(), 100);
         e.preventDefault();
         return;
       }
@@ -1097,17 +1099,36 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
       <AgentTopBar agents={orchestraAgents} />
       {Platform.OS === 'web' && <CircleStoriesRail circleId={circleId} accentColor="#6366f1" />}
       <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} missionStats={missionStats} />
-      <TaskSearchBar
-        searchText={searchText}
-        onSearchChange={setSearchText}
-        filterPriority={filterPriority}
-        onFilterPriority={setFilterPriority}
-        filterAssignee={filterAssignee}
-        onFilterAssignee={setFilterAssignee}
-        assigneeOptions={assigneeOptions}
-        searchInputRef={searchInputRef}
-        totalTasks={totalTasks}
-      />
+
+      {/* Collapsible search bar — click to expand, / key also opens */}
+      {searchExpanded ? (
+        <TaskSearchBar
+          searchText={searchText}
+          onSearchChange={setSearchText}
+          filterPriority={filterPriority}
+          onFilterPriority={setFilterPriority}
+          filterAssignee={filterAssignee}
+          onFilterAssignee={setFilterAssignee}
+          assigneeOptions={assigneeOptions}
+          searchInputRef={searchInputRef}
+          totalTasks={totalTasks}
+        />
+      ) : (
+        <Pressable
+          onPress={() => { setSearchExpanded(true); setTimeout(() => searchInputRef.current?.focus(), 100); }}
+          style={{
+            flexDirection: 'row', alignItems: 'center', gap: 8,
+            paddingHorizontal: 16, paddingVertical: 6,
+            borderBottomWidth: 1, borderBottomColor: '#111',
+          }}
+        >
+          <Text style={{ color: '#404050', fontSize: 12, fontFamily: 'monospace' }}>/</Text>
+          <Text style={{ color: '#404050', fontSize: 12 }}>Search {totalTasks} tasks...</Text>
+          {(searchText || filterPriority || filterAssignee) && (
+            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#6366f1', marginLeft: 4 }} />
+          )}
+        </Pressable>
+      )}
 
       <View style={s.body}>
         <GoalsPanel
