@@ -25,6 +25,54 @@ interface CommandResult {
   success: boolean;
 }
 
+// ─── /help — All Available Commands ──────────────────────────────────────────
+
+export function executeHelpCommand(): CommandResult {
+  return {
+    message: [
+      '**Available Commands**\n',
+      '**Missions**',
+      '`/mission` — show active missions + progress',
+      '`/mission create <title>` — create a new mission',
+      '`/mission complete` — mark latest mission done',
+      '`/mission help` — mission command details',
+      '',
+      '**Status**',
+      '`/summary` — full circle status report (missions, proof, team, streaks)',
+      '`/status` — alias for /summary',
+      '',
+      '**Rooms**',
+      '`/room list` — list project rooms',
+      '`/room create <name>` — create a new room',
+      '`/room <name> <message>` — send to a room',
+      '',
+      '**GitHub**',
+      '`/gh status` — connected repos + activity',
+      '`/gh tree` — repo file tree',
+      '`/gh cat <path>` — show file contents',
+      '`/gh commits` — recent commits',
+      '`/gh prs` — open pull requests',
+      '`/gh help` — all GitHub commands',
+      '',
+      '**AI Tools**',
+      '`/summarize <text>` — summarize text',
+      '`/translate <text>` — translate text',
+      '`/imagine <prompt>` — generate image',
+      '`/code <task>` — code generation',
+      '',
+      '**Memory**',
+      '`/memories` — open memory viewer',
+      '`/remember <text>` — save a memory',
+      '`/forget <text>` — delete matching memories',
+      '',
+      '**Other**',
+      '`/help` — this message',
+      '`@blackswan <message>` — talk to BlackSwan directly',
+    ].join('\n'),
+    success: true,
+  };
+}
+
 // ─── /summary — Full Circle Status Report ────────────────────────────────────
 
 export async function executeSummaryCommand(ctx: CommandContext): Promise<CommandResult> {

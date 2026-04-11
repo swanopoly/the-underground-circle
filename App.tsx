@@ -229,6 +229,12 @@ export default function App() {
   };
 
   useEffect(() => {
+    // Setup notifications
+    import('./src/lib/notifications').then(n => {
+      n.setupNotifications();
+      n.requestNotificationPermission();
+    }).catch(() => {});
+
     // Pulse animation
     Animated.loop(
       Animated.sequence([

@@ -1192,6 +1192,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
 
+    // ─── Help command — list all slash commands ──────────────────────────────
+    if (lowerContent === '/help' || lowerContent === '/commands') {
+      (async () => {
+        const { executeHelpCommand } = await import('../../../lib/missionChatCommands');
+        addBotMessage(executeHelpCommand().message, undefined, { localOnly: true });
+      })();
+      return;
+    }
+
     // ─── Mission commands — intercept /mission requests ──────────────────────
     if (lowerContent.startsWith('/mission') && (lowerContent === '/mission' || lowerContent[8] === ' ')) {
       (async () => {

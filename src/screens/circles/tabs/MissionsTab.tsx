@@ -44,6 +44,7 @@ import { addProofOfWork } from '../../../lib/missions';
 import { dispatchTaskToAgent } from '../../../lib/missionAgentDispatch';
 import { useToast } from '../../../components/Toast';
 import { useMissionStreak } from '../../../lib/missionStreaks';
+import { notifyMissionComplete, notifyStreakMilestone } from '../../../lib/notifications';
 
 interface Props {
   circleId: string;
@@ -437,6 +438,7 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
       }
       if (streakResult?.milestoneReached) {
         showToast(`Milestone: ${streakResult.milestoneReached}!`, 'warning');
+        notifyStreakMilestone(streakResult.streak.currentStreak, streakResult.milestoneReached).catch(() => {});
       }
     }
     if (next === 'done' && mission) {
@@ -458,6 +460,7 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
       if (allDone && mission?.status === 'active') {
         await updateMission(missionId, { status: 'completed' });
         showToast(`Mission complete: ${mission.title}`, 'success');
+        notifyMissionComplete(mission.title).catch(() => {});
         // Proof for mission completion
         addProofOfWork({
           circle_id: circleId,
