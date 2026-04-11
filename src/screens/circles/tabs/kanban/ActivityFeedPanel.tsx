@@ -61,14 +61,25 @@ interface TaskRunFeedItem {
   started_at: string;
 }
 
+interface ProofItem {
+  id: string;
+  pow_type: string;
+  title: string;
+  agent_name: string | null;
+  created_at: string;
+  detail: any;
+}
+
 export default function ActivityFeedPanel({ circleId, agents }: Props) {
   const [items, setItems] = useState<ActivityItem[]>([]);
   const [runs, setRuns] = useState<AutomationRun[]>([]);
   const [taskRuns, setTaskRuns] = useState<TaskRunFeedItem[]>([]);
+  const [proofItems, setProofItems] = useState<ProofItem[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const automationRunsSupportedRef = useRef(true);
   const taskRunsSupportedRef = useRef(true);
+  const proofSupportedRef = useRef(true);
 
   const fetchActivity = useCallback(async () => {
     try {
@@ -115,6 +126,23 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
           console.warn('[ActivityFeedPanel] task_runs unavailable:', taskRunRes.error.message);
         } else if (taskRunRes.data) {
           setTaskRuns(taskRunRes.data);
+        }
+      }
+
+      // Fetch proof-of-work entries
+      if (proofSupportedRef.current) {
+        const powRes = await supabase
+          .from('proof_of_work')
+          .select('id, pow_type, title, agent_name, created_at, detail')
+          .eq('circle_id', circleId)
+          .order('created_at', { ascending: false })
+          .limit(20);
+
+        if (powRes.error) {
+          proofSupportedRef.current = false;
+          setProofItems([]);
+        } else if (powRes.data) {
+          setProofItems(powRes.data);
         }
       }
     } catch (err) {
@@ -276,11 +304,42 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
           );
         })}
 
-        {items.length === 0 && (
+        {/* Proof-of-work entries */}
+        {proofItems.map(pow => {
+          const powColors: Record<string, string> = {
+            commit: '#22d3ee', pr: '#a855f7', deploy: '#f59e0b',
+            agent_run: '#22c55e', checkin: '#6366f1', manual: '#e8e8e8',
+          };
+          const powIcons: Record<string, string> = {
+            commit: '>_', pr: '[]', deploy: '//',
+            agent_run: '$', checkin: '#', manual: '+',
+          };
+          const color = powColors[pow.pow_type] || '#888';
+          const icon = powIcons[pow.pow_type] || '+';
+          return (
+            <View key={`pow-${pow.id}`} style={s.item}>
+              <View style={s.itemRow}>
+                <View style={[s.iconCircle, { backgroundColor: color + '18' }]}>
+                  <Text style={[s.iconText, { color }]}>{icon}</Text>
+                </View>
+                <View style={s.itemContent}>
+                  <View style={s.itemNameRow}>
+                    <Text style={[s.itemAgent, { color }]}>{pow.agent_name || 'proof'}</Text>
+                    <Text style={[s.sourceBadge, { color }]}>POW</Text>
+                  </View>
+                  <Text style={s.itemAction}>{pow.title}</Text>
+                  <Text style={s.timestamp}>{timeAgo(pow.created_at)}</Text>
+                </View>
+              </View>
+            </View>
+          );
+        })}
+
+        {items.length === 0 && proofItems.length === 0 && (
           <View style={s.empty}>
             <Text style={s.emptyIcon}>&#x26A1;</Text>
             <Text style={s.emptyText}>No activity yet</Text>
-            <Text style={s.emptySubtext}>Agent actions will appear here</Text>
+            <Text style={s.emptySubtext}>Agent actions and proof-of-work will appear here</Text>
           </View>
         )}
       </ScrollView>

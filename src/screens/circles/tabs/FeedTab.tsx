@@ -48,6 +48,7 @@ import GoalDetailModal from './kanban/GoalDetailModal';
 
 import { LoadingScreen as FeedLoadingAnimation } from '../../../components/LoadingWave';
 import MissionsTab from './MissionsTab';
+import { useMissions, useMissionDetail, missionProgress, isOverdue } from '../../../lib/missions';
 
 // ─── Task Search Bar (rendered in FeedTab, right under OrchestraPanel) ────
 
@@ -828,6 +829,18 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
     return { activeCount, runsThisWeek };
   }, [automations, dashStats]);
 
+  // Mission stats for OrchestraPanel
+  const { missions: allMissions } = useMissions(circleId);
+  const missionStats = useMemo(() => {
+    const active = allMissions.filter(m => m.status === 'active');
+    const overdueCount = active.filter(m => isOverdue(m)).length;
+    return {
+      active: active.length,
+      overdue: overdueCount,
+      avgProgress: 0, // computed async below isn't worth it here — we show count + overdue
+    };
+  }, [allMissions]);
+
   // Task health stats for OrchestraPanel
   const taskStats = useMemo(() => {
     const allTasks = Object.values(kanban.tasksByColumn).flat();
@@ -926,7 +939,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
       <View style={s.container}>
         <AgentTopBar agents={orchestraAgents} />
         {Platform.OS === 'web' && <CircleStoriesRail circleId={circleId} accentColor="#6366f1" />}
-        <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} />
+        <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} missionStats={missionStats} />
         <TaskSearchBar
           searchText={searchText}
           onSearchChange={setSearchText}
@@ -1077,7 +1090,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
     <View style={s.container}>
       <AgentTopBar agents={orchestraAgents} />
       {Platform.OS === 'web' && <CircleStoriesRail circleId={circleId} accentColor="#6366f1" />}
-      <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} />
+      <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} missionStats={missionStats} />
       <TaskSearchBar
         searchText={searchText}
         onSearchChange={setSearchText}

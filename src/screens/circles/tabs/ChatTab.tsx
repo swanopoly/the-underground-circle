@@ -871,7 +871,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return msg;
   };
 
-  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; memoriesUsed?: string[] }) => {
+  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; memoriesUsed?: string[]; localOnly?: boolean }) => {
     const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const msg: ChatMessage = {
       id: msgId,
@@ -908,8 +908,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       })();
     }
 
-    // Persist bot message with retry
-    if (currentUserId) {
+    // Persist bot message with retry (skip for local-only slash command responses)
+    if (currentUserId && !extra?.localOnly) {
       const persistBot = async (attempt = 0) => {
         try {
           const { error } = await supabase.from('messages').insert({
@@ -1202,9 +1202,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             circleId,
             userId: currentUserId || '',
           });
-          addBotMessage(result.message || 'No response.');
+          addBotMessage(result.message || 'No response.', undefined, { localOnly: true });
         } catch (e: any) {
-          addBotMessage(`Mission error: ${e.message || 'Unknown error'}`);
+          addBotMessage(`Mission error: ${e.message || 'Unknown error'}`, undefined, { localOnly: true });
         } finally {
           setBotTyping(false);
         }

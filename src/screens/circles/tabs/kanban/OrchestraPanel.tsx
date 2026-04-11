@@ -18,9 +18,14 @@ interface Props {
     dueToday: number;
     completedThisWeek: number;
   };
+  missionStats?: {
+    active: number;
+    overdue: number;
+    avgProgress: number;
+  };
 }
 
-export default function OrchestraPanel({ agents, automationStats, taskStats }: Props) {
+export default function OrchestraPanel({ agents, automationStats, taskStats, missionStats }: Props) {
   const { modelCounts, statusSummary } = useMemo(() => {
     const counts: Record<string, number> = {};
     const statuses = { working: 0, reviewing: 0, idle: 0 };
@@ -132,6 +137,30 @@ export default function OrchestraPanel({ agents, automationStats, taskStats }: P
             {taskStats!.completedThisWeek > 0 && (
               <Text style={s.statusText}>
                 <Text style={{ color: '#22c55e' }}>{taskStats!.completedThisWeek}</Text> done/wk
+              </Text>
+            )}
+          </View>
+        </>
+      )}
+
+      {/* Mission stats */}
+      {missionStats && missionStats.active > 0 && (
+        <>
+          <View style={s.divider} />
+          <View style={s.section}>
+            <View style={[s.modelChip, { backgroundColor: '#6366f110' }]}>
+              <Text style={{ fontSize: 10 }}>{'\uD83C\uDFAF'}</Text>
+              <Text style={[s.modelLabel, { color: '#6366f1' }]}>missions</Text>
+              <Text style={[s.modelCount, { color: '#6366f1' }]}>{missionStats.active}</Text>
+            </View>
+            {missionStats.avgProgress > 0 && (
+              <Text style={s.statusText}>
+                <Text style={{ color: '#22c55e' }}>{missionStats.avgProgress}%</Text> avg
+              </Text>
+            )}
+            {missionStats.overdue > 0 && (
+              <Text style={s.statusText}>
+                <Text style={{ color: '#ef4444' }}>{missionStats.overdue}</Text> overdue
               </Text>
             )}
           </View>
