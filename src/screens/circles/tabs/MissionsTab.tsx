@@ -41,6 +41,7 @@ import {
 } from '../../../lib/missionTemplates';
 import { backfillGitHubProof } from '../../../lib/proofOfWork';
 import { addProofOfWork } from '../../../lib/missions';
+import { dispatchTaskToAgent } from '../../../lib/missionAgentDispatch';
 
 interface Props {
   circleId: string;
@@ -333,6 +334,8 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
   const [editTitle, setEditTitle] = useState('');
   const [editDesc, setEditDesc] = useState('');
   const [editDeadline, setEditDeadline] = useState('');
+  const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
+  const [agentResult, setAgentResult] = useState<{ taskId: string; text: string } | null>(null);
 
   // Load circle members for assignment
   useEffect(() => {
@@ -592,11 +595,56 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
                 )}
               </View>
             </Pressable>
+            {/* Run with agent button — only for agent-assigned, pending tasks */}
+            {task.agent_name && task.status !== 'done' && (
+              <Pressable
+                style={[styles.runBtn, runningTaskId === task.id && { opacity: 0.5 }]}
+                disabled={runningTaskId === task.id}
+                onPress={async () => {
+                  if (!mission) return;
+                  setRunningTaskId(task.id);
+                  setAgentResult(null);
+                  const result = await dispatchTaskToAgent({
+                    taskId: task.id,
+                    taskTitle: task.title,
+                    taskDescription: task.description || undefined,
+                    missionId,
+                    missionTitle: mission.title,
+                    circleId,
+                    agentName: task.agent_name!,
+                  });
+                  setRunningTaskId(null);
+                  if (result.success) {
+                    setAgentResult({ taskId: task.id, text: result.response });
+                  } else {
+                    setAgentResult({ taskId: task.id, text: `Error: ${result.error}` });
+                  }
+                  refresh();
+                }}
+              >
+                <Text style={styles.runBtnText}>{runningTaskId === task.id ? '...' : 'Run'}</Text>
+              </Pressable>
+            )}
             <Pressable onPress={() => handleDeleteTask(task.id)} style={styles.deleteBtn}>
               <Text style={styles.deleteBtnText}>x</Text>
             </Pressable>
           </View>
         ))}
+
+        {/* Agent result display */}
+        {agentResult && (
+          <View style={styles.agentResultBox}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: GRID.sm }}>
+              <Text style={[pixelLabel]}>AGENT RESPONSE</Text>
+              <Pressable onPress={() => setAgentResult(null)}>
+                <Text style={{ color: PIXEL_COLORS.text3, fontSize: 12, fontFamily: 'monospace' }}>x</Text>
+              </Pressable>
+            </View>
+            <Text style={{ color: PIXEL_COLORS.text0, fontSize: 13, lineHeight: 20 }}>
+              {agentResult.text}
+            </Text>
+          </View>
+        )}
 
         {/* Member assignment dropdown */}
         {assigningTaskId && (
@@ -1264,6 +1312,33 @@ const styles = StyleSheet.create({
     color: PIXEL_COLORS.text2,
     fontSize: 13,
     fontWeight: '600',
+  },
+
+  // Run button for agent tasks
+  runBtn: {
+    paddingHorizontal: GRID.sm,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: PIXEL_COLORS.green + '40',
+    backgroundColor: PIXEL_COLORS.green + '10',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  runBtnText: {
+    color: PIXEL_COLORS.green,
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+    fontFamily: 'monospace',
+  },
+
+  // Agent result display
+  agentResultBox: {
+    ...pixelInset,
+    padding: GRID.md,
+    marginTop: GRID.md,
+    borderLeftWidth: 3,
+    borderLeftColor: PIXEL_COLORS.green + '60',
   },
 
   // Assignment dropdown
