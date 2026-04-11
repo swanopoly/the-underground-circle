@@ -162,24 +162,31 @@ export async function autoExtractAndSave(
     if (duplicate) {
       // Update existing memory — supersedes the old version
       try {
-        await supabase
+        const { error } = await supabase
           .from('memory_entries')
           .update({
             content: mem.content,
             memory_kind: mem.kind,
             updated_at: new Date().toISOString(),
-            status: 'active',
           })
           .eq('id', duplicate.id);
-        updated++;
-      } catch {}
+        if (error) {
+          console.warn('[AgentMemory] Update failed:', error.message);
+          rejected++;
+        } else {
+          updated++;
+        }
+      } catch (e) {
+        console.warn('[AgentMemory] Update error:', e);
+        rejected++;
+      }
     } else {
       // Save new memory with proper scope, importance, and retrieval mode
       const scope: MemoryScope = ['preference', 'instruction'].includes(mem.kind) ? 'user' : 'circle';
       const importance = mem.kind === 'instruction' ? 0.9 : mem.kind === 'decision' ? 0.8 : mem.kind === 'preference' ? 0.7 : 0.5;
       const retrievalMode = ['instruction', 'preference'].includes(mem.kind) ? 'startup' : 'on_demand';
 
-      await saveMemory({
+      const result = await saveMemory({
         scope,
         circleId,
         userId: scope === 'user' ? userId : undefined,
@@ -192,7 +199,7 @@ export async function autoExtractAndSave(
         visibility: scope === 'user' ? 'private' : 'circle_shared',
       });
 
-      saved++;
+      if (result) { saved++; } else { rejected++; }
     }
   }
 

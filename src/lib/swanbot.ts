@@ -538,7 +538,7 @@ async function buildSystemPromptAsync(context: SwanBotContext, data: CircleConte
     const profile = await loadUserProfile();
     const profileCtx = generateProfileContext(profile);
     if (profileCtx) extras.push(profileCtx);
-  } catch {}
+  } catch (e) { console.warn('[SwanBot] Profile load failed:', e); }
 
   // Load memory hierarchy for this circle
   try {
@@ -547,7 +547,7 @@ async function buildSystemPromptAsync(context: SwanBotContext, data: CircleConte
       const memCtx = await buildMemoryContext(context.circleId, undefined, context.userId);
       if (memCtx) extras.push(memCtx);
     }
-  } catch {}
+  } catch (e) { console.warn('[SwanBot] Memory context failed:', e); }
 
   // Load active missions for this circle
   try {
@@ -574,7 +574,7 @@ async function buildSystemPromptAsync(context: SwanBotContext, data: CircleConte
         extras.push(missionLines.join('\n'));
       }
     }
-  } catch {}
+  } catch (e) { console.warn('[SwanBot] Mission loading failed:', e); }
 
   // Load last session context so agent can continue where it left off
   try {
@@ -582,7 +582,7 @@ async function buildSystemPromptAsync(context: SwanBotContext, data: CircleConte
       const lastSession = await getLastSessionContext(context.circleId, context.userId);
       if (lastSession) extras.push(lastSession);
     }
-  } catch {}
+  } catch (e) { console.warn('[SwanBot] Session context failed:', e); }
 
   if (extras.length === 0) return base;
 

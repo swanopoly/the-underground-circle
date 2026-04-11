@@ -83,7 +83,7 @@ export async function pruneStaleMemories(circleId: string): Promise<number> {
     const score = calculateTrustScore(mem);
     if (score < 0.3) { // low trust = safe to prune
       await supabase.from('memory_entries')
-        .update({ is_active: false, status: 'stale', updated_at: new Date().toISOString() })
+        .update({ is_active: false, updated_at: new Date().toISOString() })
         .eq('id', mem.id);
       pruned++;
     }
@@ -203,7 +203,7 @@ export async function consolidateMemories(circleId: string): Promise<{ merged: n
       // Deactivate the merged duplicates
       for (const other of others) {
         await supabase.from('memory_entries')
-          .update({ is_active: false, status: 'stale', updated_at: new Date().toISOString() })
+          .update({ is_active: false, updated_at: new Date().toISOString() })
           .eq('id', other.id);
         processed.add(other.id);
         merged++;
