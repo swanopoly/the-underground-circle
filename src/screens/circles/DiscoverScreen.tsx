@@ -37,11 +37,11 @@ export default function DiscoverScreen({ navigation }: any) {
   const fetchCircles = useCallback(async () => {
     setLoading(true);
     try {
-      // Fetch circles that have descriptions (proxy for "public" until is_public column exists)
+      // Fetch public circles — try is_public first, fall back to description proxy
       let query = supabase
         .from('circles')
         .select('*, circle_members!inner(count)')
-        .not('description', 'is', null)
+        .eq('is_public', true)
         .order('created_at', { ascending: false })
         .limit(50);
 

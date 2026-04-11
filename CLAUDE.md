@@ -1,21 +1,56 @@
 # CLAUDE.md — The Underground Circle
 
 > Comprehensive project context for AI agents (Claude Code, OpenSwan, Codex, etc.)
-> Last updated: 2026-04-10 (Circle Missions + feature gating — see docs/NEXT_LEVEL_PLAN.md)
+> Last updated: 2026-04-11 (Missions system, memory overhaul, discovery, notifications)
 
-### NEW: Circle Missions (Phase 1 — The Core Loop)
-The mission system is the core accountability feature. See `docs/NEXT_LEVEL_PLAN.md` for the full plan.
+### Circle Missions — The Core Accountability Loop
+Missions live inside the Feed tab as a center panel sub-tab. See `docs/NEXT_LEVEL_PLAN.md` for the full plan.
 
-**Built (2026-04-10):**
-- `supabase/migrations/20260410_circle_missions.sql` — 4 tables: circle_missions, mission_tasks, mission_agents, proof_of_work + RLS ⚠️ NOT YET RUN
+**Mission System (built 2026-04-10/11):**
+- `supabase/migrations/20260410_circle_missions.sql` — 4 tables: circle_missions, mission_tasks, mission_agents, proof_of_work + RLS ✅ RUN
 - `src/lib/missions.ts` — Full CRUD, realtime subscriptions, React hooks, helpers
-- `src/screens/circles/tabs/MissionsTab.tsx` — Mission list, detail view, task management, create modal
-- MissionsTab wired into CircleDetailScreen (3rd tab after Chat + Office)
+- `src/lib/missionTemplates.ts` — 8 pre-built templates (Dev Sprint, Bug Hunt, Content Push, etc.)
+- `src/lib/missionChatCommands.ts` — /mission, /summary, /help slash commands
+- `src/lib/missionAgentDispatch.ts` — Send tasks to BlackSwan for execution
+- `src/lib/missionStreaks.ts` — Daily task completion streaks with milestones + bonus XP
+- `src/lib/proofOfWork.ts` — Auto-generate feed entries from GitHub events + agent runs
+- `src/screens/circles/tabs/MissionsTab.tsx` — Full mission UI inside Feed center panel
+- `src/components/MissionCelebration.tsx` — Confetti animation on mission completion
+- `src/components/Toast.tsx` — Toast notification system (ToastProvider in App.tsx)
+- `src/lib/notifications.ts` — Push notifications via expo-notifications + browser API
 
-**Gated Features (Phase 0.3):**
-WALLET and BACKPACK tabs are hidden via `GATED_TABS` set in CircleDetailScreen.
-These contain incomplete features (trading bot, LLM benchmarks, scrabble, wallet dashboard).
-To re-enable: remove the key from `GATED_TABS` in CircleDetailScreen.tsx.
+**Features:**
+- Mission list with status cards, progress rings, filter pills
+- Mission detail with task checkboxes, member assignment dropdown, agent Run button, inline editing
+- 8 templates with category filters (Dev, Content, Ops, Learning, General)
+- /mission status report in chat, /summary full circle report, /help command list
+- Task completion → proof-of-work entry + streak update + toast + push notification
+- Mission completion → celebration animation + notification
+- GitHub webhook auto-creates proof-of-work entries
+- BlackSwan system prompt includes active mission context
+- 4 mission automation templates (daily digest, overdue nudge, weekly retro, completion celebration)
+- Smart default tab (Feed opens when circle has active missions)
+- Mission count badge in AppHeader
+- Circle list shows active mission count
+- Per-tab colors with animated pulsing dots (each tab has unique color)
+
+**Gated Features:**
+Only WALLET tab is gated via `GATED_TABS` in CircleDetailScreen. BACKPACK is restored.
+
+**New Screens:**
+- `src/screens/auth/LandingPage.tsx` — Marketing landing page for unauthenticated visitors
+- `src/screens/circles/DiscoverScreen.tsx` — Browse and join public circles at /discover
+
+**Memory Architecture (overhauled 2026-04-11):**
+- Session memories: only 3 most recent get retrieval_mode='startup', rest are 'on_demand'
+- Startup bundle capped at 3000 chars, system prompt extras capped at 4000 chars
+- circle_memory RLS fixed (was USING(true), now requires circle membership)
+- blackswan_memory table dropped (legacy, unused)
+- Session cleanup cron: deactivates >30 day old sessions, demotes >14 day startup sessions
+- Unique index prevents duplicate session memories from race conditions
+- Removed all references to non-existent 'status' column on memory_entries
+- saveMemory() return values now checked, silent catch blocks now log warnings
+- circles.settings column added for sessionMemoryMode configuration
 
 ---
 

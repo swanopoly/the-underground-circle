@@ -635,6 +635,37 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
           </View>
         </Section>
 
+        {/* ─── Discovery ─── */}
+        {isCreator && (
+          <Section title="DISCOVERY" accentColor="#6366f1">
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 8 }}>
+              <View>
+                <Text style={{ color: '#e0e0e8', fontSize: 13, fontWeight: '600' }}>Public Circle</Text>
+                <Text style={{ color: '#808090', fontSize: 11, marginTop: 2 }}>Show in /discover so anyone can join</Text>
+              </View>
+              <Pressable
+                onPress={async () => {
+                  const newVal = !(circle as any)?.is_public;
+                  await supabase.from('circles').update({ is_public: newVal }).eq('id', circleId);
+                  setCircle((prev: any) => prev ? { ...prev, is_public: newVal } : prev);
+                }}
+                style={{
+                  width: 44, height: 24, borderRadius: 12,
+                  backgroundColor: (circle as any)?.is_public ? '#22c55e' : '#333',
+                  justifyContent: 'center',
+                  paddingHorizontal: 2,
+                }}
+              >
+                <View style={{
+                  width: 20, height: 20, borderRadius: 10,
+                  backgroundColor: '#fff',
+                  alignSelf: (circle as any)?.is_public ? 'flex-end' : 'flex-start',
+                }} />
+              </Pressable>
+            </View>
+          </Section>
+        )}
+
         {/* ─── Danger Zone ─── */}
         <Section title="DANGER ZONE" accentColor="#ef4444">
           <Pressable onPress={handleLeaveCircle} style={[styles.dangerBtn, leaveConfirm && { backgroundColor: '#ef444415', borderColor: '#ef4444' }]}>
