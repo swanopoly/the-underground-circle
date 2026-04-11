@@ -33,23 +33,36 @@ import { Circle } from '../../types';
 import ErrorBoundary from '../../components/ErrorBoundary';
 import { LoadingScreen } from '../../components/LoadingWave';
 
+// ─── Inject CSS animation for tab dot pulse (web only) ───────────────────
+if (Platform.OS === 'web' && typeof document !== 'undefined' && !document.getElementById('uc-tab-dot-css')) {
+  const style = document.createElement('style');
+  style.id = 'uc-tab-dot-css';
+  style.textContent = `
+    @keyframes uc-tab-dot-pulse {
+      0%, 100% { transform: scaleX(1); opacity: 0.8; }
+      50% { transform: scaleX(1.4); opacity: 1; }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 // Core tabs (Chat, Office, Rooms) always mounted; secondary tabs lazy-mount on first visit
 
 // Gated tabs — hidden from nav until the feature is complete (see docs/NEXT_LEVEL_PLAN.md Phase 0.3)
 const GATED_TABS = new Set(['WALLET']);
 
-const TAB_META_ALL: { key: string; label: string; icon: string; flatIcon?: string }[] = [
-  { key: 'CHAT', label: 'Chat', icon: '💬', flatIcon: 'chat' },
-  { key: 'OFFICE', label: 'Office', icon: '🏢', flatIcon: 'office' },
-  { key: 'FEED', label: 'Feed', icon: '🎯', flatIcon: 'feed' },
-  { key: 'ROOMS', label: 'Rooms', icon: '🏠', flatIcon: 'rooms' },
-  { key: 'BACKPACK', label: 'Backpack', icon: '🎒', flatIcon: 'backpack' },
-  { key: 'INTEGRATIONS', label: 'Integrations', icon: '🔗', flatIcon: 'integrations' },
-  { key: 'CHALLENGES', label: 'Challenges', icon: '🏆', flatIcon: 'challenges' },
-  { key: 'MEMBERS', label: 'Members', icon: '👥', flatIcon: 'members' },
-  { key: 'ANALYTICS', label: 'Analytics', icon: '📊', flatIcon: 'analytics' },
-  { key: 'WALLET', label: 'Wallet', icon: '💰', flatIcon: 'wallet' },
-  { key: 'PROFILE', label: 'Profile', icon: '👤', flatIcon: 'profile' },
+const TAB_META_ALL: { key: string; label: string; icon: string; flatIcon?: string; color: string }[] = [
+  { key: 'CHAT', label: 'Chat', icon: '💬', flatIcon: 'chat', color: '#22c55e' },
+  { key: 'OFFICE', label: 'Office', icon: '🏢', flatIcon: 'office', color: '#6366f1' },
+  { key: 'FEED', label: 'Feed', icon: '🎯', flatIcon: 'feed', color: '#f59e0b' },
+  { key: 'ROOMS', label: 'Rooms', icon: '🏠', flatIcon: 'rooms', color: '#a855f7' },
+  { key: 'BACKPACK', label: 'Backpack', icon: '🎒', flatIcon: 'backpack', color: '#ec4899' },
+  { key: 'INTEGRATIONS', label: 'Integrations', icon: '🔗', flatIcon: 'integrations', color: '#3b82f6' },
+  { key: 'CHALLENGES', label: 'Challenges', icon: '🏆', flatIcon: 'challenges', color: '#ef4444' },
+  { key: 'MEMBERS', label: 'Members', icon: '👥', flatIcon: 'members', color: '#14b8a6' },
+  { key: 'ANALYTICS', label: 'Analytics', icon: '📊', flatIcon: 'analytics', color: '#22d3ee' },
+  { key: 'WALLET', label: 'Wallet', icon: '💰', flatIcon: 'wallet', color: '#f97316' },
+  { key: 'PROFILE', label: 'Profile', icon: '👤', flatIcon: 'profile', color: '#8b5cf6' },
 ];
 
 const TAB_META = TAB_META_ALL.filter(t => !GATED_TABS.has(t.key));
@@ -345,10 +358,11 @@ function LazyTab({ tabKey, activeTab, children }: { tabKey: string; activeTab: s
 
 // ─── Tab Pill ───────────────────────────────────────────────────────
 
-function TabPill({ icon, flatIcon, label, active, accentColor, isMobile, onPress }: {
-  icon: string; flatIcon?: string; label: string; active: boolean; accentColor: string; isMobile: boolean; onPress: () => void;
+function TabPill({ icon, flatIcon, label, active, accentColor, tabColor, isMobile, onPress }: {
+  icon: string; flatIcon?: string; label: string; active: boolean; accentColor: string; tabColor: string; isMobile: boolean; onPress: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
+  const color = active ? tabColor : accentColor;
 
   return (
     <Pressable
@@ -357,7 +371,7 @@ function TabPill({ icon, flatIcon, label, active, accentColor, isMobile, onPress
       onHoverOut={() => setHovered(false)}
       style={[
         styles.tabPill,
-        active && { backgroundColor: accentColor + '20', borderColor: accentColor + '60' },
+        active && { backgroundColor: tabColor + '15', borderColor: tabColor + '50' },
         hovered && !active && { backgroundColor: '#ffffff08', borderColor: '#333' },
         isMobile && styles.tabPillMobile,
       ]}
@@ -378,11 +392,15 @@ function TabPill({ icon, flatIcon, label, active, accentColor, isMobile, onPress
       )}
       <Text style={[
         styles.tabPillText,
-        { color: active ? accentColor : hovered ? '#ccc' : '#888' },
+        { color: active ? tabColor : hovered ? '#ccc' : '#888' },
         active && { fontWeight: '800' },
       ]}>
         {label}
       </Text>
+      {/* Animated dot under active tab */}
+      {active && (
+        <View style={[styles.tabDot, { backgroundColor: tabColor }]} />
+      )}
     </Pressable>
   );
 }
@@ -433,6 +451,7 @@ function TabBarScroller({ tabs, activeTab, accentColor, isMobile, onTabPress }: 
               label={tab.label}
               active={activeTab === tab.key}
               accentColor={accentColor}
+              tabColor={tab.color}
               isMobile={false}
               onPress={() => onTabPress(tab.key)}
             />
@@ -471,6 +490,7 @@ function TabBarScroller({ tabs, activeTab, accentColor, isMobile, onTabPress }: 
             label={tab.label}
             active={activeTab === tab.key}
             accentColor={accentColor}
+            tabColor={tab.color}
             isMobile={isMobile}
             onPress={() => onTabPress(tab.key)}
           />
@@ -624,6 +644,16 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
     letterSpacing: 0.3,
+  },
+  tabDot: {
+    position: 'absolute' as any,
+    bottom: -1,
+    width: 14,
+    height: 4,
+    borderRadius: 2,
+    ...(Platform.OS === 'web' ? {
+      animation: 'uc-tab-dot-pulse 2s ease-in-out infinite',
+    } as any : {}),
   },
 
   // Tab content

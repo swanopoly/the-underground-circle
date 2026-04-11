@@ -214,42 +214,71 @@ export default function AgentControlCard({
   const content = (
     <>
       {/* ── SECTION: agent-bridge-status — Connection health ─────────────── */}
-      <View style={c.connRow} nativeID="section-agent-bridge-status">
-        <View style={[c.connDot, { backgroundColor: bridgeOk ? '#22c55e' : bridgeOk === false ? '#ef4444' : '#4b5563' }]} />
-        <Text style={c.connText}>{statusMsg || 'Checking bridge...'}</Text>
+      <View style={[c.connRow, {
+        backgroundColor: bridgeOk ? '#22c55e08' : bridgeOk === false ? '#ef444408' : 'transparent',
+        borderRadius: 8, padding: 8, marginBottom: 8,
+      }]} nativeID="section-agent-bridge-status">
+        <View style={[c.connDot, {
+          backgroundColor: bridgeOk ? '#22c55e' : bridgeOk === false ? '#ef4444' : '#4b5563',
+          width: 8, height: 8, borderRadius: 4,
+        }]} />
+        <Text style={[c.connText, {
+          color: bridgeOk ? '#22c55e' : bridgeOk === false ? '#ef4444' : '#6b7280',
+          fontWeight: '600',
+        }]}>{statusMsg || 'Checking bridge...'}</Text>
         <Pressable onPress={checkBridge} style={{ padding: 4, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
           <Text style={{ color: '#6b7280', fontSize: 10, fontFamily: MONO }}>refresh</Text>
         </Pressable>
       </View>
 
-      {/* ── Provider info ───────────────────────────────────────────────────── */}
-      <Text style={c.providerText}>
-        {agent.model !== 'unknown' ? agent.model : provider}
-        {agent.connectionName ? ` via ${agent.connectionName}` : ''}
-      </Text>
+      {/* ── Provider + Model info ───────────────────────────────────────────── */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <View style={{
+          backgroundColor: (agent.color || '#6366f1') + '18',
+          paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6,
+          borderWidth: 1, borderColor: (agent.color || '#6366f1') + '30',
+        }}>
+          <Text style={{ color: agent.color || '#6366f1', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>
+            {agent.model !== 'unknown' ? agent.model : provider}
+          </Text>
+        </View>
+        {agent.connectionName && (
+          <Text style={{ color: '#4b5563', fontSize: 10, fontFamily: MONO }}>
+            via {agent.connectionName}
+          </Text>
+        )}
+      </View>
 
-      {/* ── Activity ────────────────────────────────────────────────────────── */}
+      {/* ── Current Activity — highlighted when active ─────────────────────── */}
       {agent.activity && agent.activity !== 'Idling' ? (
-        <Text style={c.activityText} numberOfLines={2}>{agent.activity}</Text>
+        <View style={{
+          backgroundColor: '#f59e0b0c', borderLeftWidth: 3, borderLeftColor: '#f59e0b60',
+          paddingVertical: 6, paddingHorizontal: 10, borderRadius: 4, marginBottom: 8,
+        }}>
+          <Text style={{ color: '#f59e0b', fontSize: 9, fontWeight: '700', fontFamily: MONO, letterSpacing: 0.5, marginBottom: 2 }}>
+            CURRENT TASK
+          </Text>
+          <Text style={[c.activityText, { color: '#e8e8f0', marginBottom: 0 }]} numberOfLines={2}>{agent.activity}</Text>
+        </View>
       ) : null}
 
       {/* ── SECTION: agent-power-buttons — Kill/Resume/Disconnect ─────── */}
-      <View style={c.powerRow} nativeID="section-agent-power-buttons">
+      <View style={[c.powerRow, { gap: 6 }]} nativeID="section-agent-power-buttons">
         {isPaused ? (
-          <Pressable style={[c.powerBtn, c.btnResume]} onPress={handleResume} disabled={saving}>
-            <Text style={c.btnText}>{saving ? '...' : '▶ RESUME'}</Text>
+          <Pressable style={[c.powerBtn, c.btnResume, { flex: 1 }]} onPress={handleResume} disabled={saving}>
+            <Text style={[c.btnText, { color: '#22c55e' }]}>{saving ? '...' : '> RESUME'}</Text>
           </Pressable>
         ) : (
-          <Pressable style={[c.powerBtn, c.btnKill]} onPress={handleKill} disabled={saving}>
-            <Text style={c.btnText}>{saving ? '...' : '⏸ KILL AGENT'}</Text>
+          <Pressable style={[c.powerBtn, c.btnKill, { flex: 1 }]} onPress={handleKill} disabled={saving}>
+            <Text style={[c.btnText, { color: '#ef4444' }]}>{saving ? '...' : '|| KILL'}</Text>
           </Pressable>
         )}
-        <Pressable style={[c.powerBtn, c.btnDisconnect]} onPress={handleDisconnect} disabled={saving}>
-          <Text style={c.btnText}>⏻ DISCONNECT</Text>
+        <Pressable style={[c.powerBtn, c.btnDisconnect, { flex: 1 }]} onPress={handleDisconnect} disabled={saving}>
+          <Text style={[c.btnText, { color: '#f59e0b' }]}>x DISCONNECT</Text>
         </Pressable>
         {!embedded && (
-          <Pressable style={[c.powerBtn, c.btnPanel]} onPress={onOpenPanel}>
-            <Text style={c.btnText}>⚙ FULL PANEL</Text>
+          <Pressable style={[c.powerBtn, c.btnPanel, { flex: 1 }]} onPress={onOpenPanel}>
+            <Text style={[c.btnText, { color: '#6366f1' }]}>+ FULL PANEL</Text>
           </Pressable>
         )}
       </View>
