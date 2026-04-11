@@ -53,6 +53,51 @@ interface Props {
   accentColor?: string;
 }
 
+// ─── Proof Quick Add ─────────────────────────────────────────────────────────
+
+function ProofQuickAdd({ circleId, accentColor }: { circleId: string; accentColor: string }) {
+  const [text, setText] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const handleSubmit = async () => {
+    if (!text.trim() || saving) return;
+    setSaving(true);
+    try {
+      const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+      await addProofOfWork({
+        circle_id: circleId,
+        user_id: user?.id,
+        pow_type: 'manual',
+        title: text.trim(),
+      });
+      setText('');
+    } catch {}
+    setSaving(false);
+  };
+
+  return (
+    <View style={styles.proofQuickAdd}>
+      <TextInput
+        style={styles.proofQuickInput}
+        placeholder="What did you ship?"
+        placeholderTextColor={PIXEL_COLORS.text3}
+        value={text}
+        onChangeText={setText}
+        onSubmitEditing={handleSubmit}
+        returnKeyType="send"
+        maxLength={200}
+      />
+      <Pressable
+        style={[styles.proofQuickBtn, { backgroundColor: text.trim() ? accentColor : PIXEL_COLORS.bg3 }]}
+        onPress={handleSubmit}
+        disabled={saving || !text.trim()}
+      >
+        <Text style={styles.proofQuickBtnText}>{saving ? '..' : 'Log'}</Text>
+      </Pressable>
+    </View>
+  );
+}
+
 // ─── Daily Focus ─────────────────────────────────────────────────────────────
 
 function DailyFocus({ missions, streak, accentColor, onSelectMission }: {
@@ -339,11 +384,14 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
 
         {showProof && (
           <View style={styles.proofSection}>
+            {/* Quick log work input */}
+            <ProofQuickAdd circleId={circleId} accentColor={accentColor} />
+
             {proofLoading && <ActivityIndicator color={accentColor} size="small" />}
             {!proofLoading && proofEntries.length === 0 && (
               <View style={{ alignItems: 'center', paddingVertical: GRID.lg }}>
                 <Text style={[pixelMuted, { textAlign: 'center', marginBottom: GRID.md }]}>
-                  No proof yet. Connect GitHub or complete agent tasks to generate proof.
+                  No proof yet. Log what you shipped, connect GitHub, or complete tasks.
                 </Text>
                 <Pressable
                   style={[styles.actionBtn, { borderColor: accentColor + '40' }]}
@@ -503,7 +551,11 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
   const handleAddTask = async () => {
     if (!newTaskTitle.trim()) return;
     setAddingTask(true);
-    await createMissionTask(missionId, newTaskTitle.trim());
+    // Support "title | description" format
+    const parts = newTaskTitle.split('|').map(s => s.trim());
+    const title = parts[0];
+    const description = parts[1] || undefined;
+    await createMissionTask(missionId, title, { description });
     setNewTaskTitle('');
     setAddingTask(false);
     refresh();
@@ -764,6 +816,11 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
                   <Text style={[styles.taskAgent, { color: PIXEL_COLORS.text3 }]}>tap to assign</Text>
                 )}
               </View>
+              {task.description && (
+                <Text style={{ color: PIXEL_COLORS.text2, fontSize: 11, lineHeight: 16, marginTop: 3 }} numberOfLines={2}>
+                  {task.description}
+                </Text>
+              )}
             </Pressable>
             {/* Run with agent button — only for agent-assigned, pending tasks */}
             {task.agent_name && task.status !== 'done' && (
@@ -857,7 +914,7 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
         <View style={styles.addTaskRow}>
           <TextInput
             style={styles.addTaskInput}
-            placeholder="Add a task..."
+            placeholder="Add a task... (use | for description)"
             placeholderTextColor={PIXEL_COLORS.text3}
             value={newTaskTitle}
             onChangeText={setNewTaskTitle}
@@ -1606,6 +1663,34 @@ const styles = StyleSheet.create({
   assignName: {
     color: PIXEL_COLORS.text0,
     fontSize: 13,
+  },
+
+  // Proof quick add
+  proofQuickAdd: {
+    flexDirection: 'row',
+    gap: GRID.sm,
+    marginBottom: GRID.md,
+  },
+  proofQuickInput: {
+    flex: 1,
+    ...pixelInset,
+    color: PIXEL_COLORS.text0,
+    fontSize: 13,
+    paddingHorizontal: GRID.md,
+    paddingVertical: GRID.sm,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+  },
+  proofQuickBtn: {
+    paddingHorizontal: GRID.md,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  proofQuickBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
   },
 
   // Proof-of-Work feed
