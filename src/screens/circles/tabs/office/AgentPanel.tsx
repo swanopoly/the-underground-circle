@@ -183,7 +183,8 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerTy
     }
   };
 
-  const kindColors: Record<string, string> = { preference: '#a855f7', fact: '#6366f1', decision: '#f59e0b', finding: '#22c55e', instruction: '#ec4899', policy: '#3b82f6', context: '#606075' };
+  // Toned-down kind colors — neutral for most, accent only for actionable types
+  const kindColors: Record<string, string> = { preference: '#909098', fact: '#909098', decision: '#a0a0b0', finding: '#909098', instruction: '#a0a0b0', policy: '#909098', context: '#606075' };
 
   const [saving, setSaving] = useState(false);
   const [saveResult, setSaveResult] = useState<string | null>(null);
@@ -408,7 +409,7 @@ function AgentRunsPanel({ circleId, agentName, accentColor }: { circleId: string
                   <View style={{ flexDirection: 'row', gap: 8, marginTop: 3 }}>
                     <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{run.surface}</Text>
                     {run.mode !== 'talk' && <Text style={{ color: '#909098', fontSize: 11, fontFamily: MONO }}>{run.mode}</Text>}
-                    {run.delegated_to && <Text style={{ color: '#a855f7', fontSize: 11, fontFamily: MONO }}>{run.delegated_to}</Text>}
+                    {run.delegated_to && <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{run.delegated_to}</Text>}
                     <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, marginLeft: 'auto' }}>{new Date(run.created_at).toLocaleTimeString()}</Text>
                   </View>
                   {(run.input_tokens > 0 || run.output_tokens > 0) && (
@@ -427,7 +428,7 @@ function AgentRunsPanel({ circleId, agentName, accentColor }: { circleId: string
                       <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO, fontStyle: 'italic' }}>No steps recorded.</Text>
                     ) : (
                       steps.map((step: any, i: number) => {
-                        const stepColors: Record<string, string> = { plan: '#6366f1', message: '#22c55e', tool_call: '#f59e0b', delegation: '#a855f7', error: '#ef4444', finalize: '#22d3ee', thinking: '#606075' };
+                        const stepColors: Record<string, string> = { plan: '#909098', message: '#909098', tool_call: '#a0a0b0', delegation: '#909098', error: '#ef4444', finalize: '#909098', thinking: '#606075' };
                         return (
                           <View key={step.id} style={{ flexDirection: 'row', gap: 6, marginBottom: 8 }}>
                             <View style={{ width: 2, backgroundColor: stepColors[step.step_kind] || '#1a1a28', borderRadius: 1 }} />
@@ -435,7 +436,7 @@ function AgentRunsPanel({ circleId, agentName, accentColor }: { circleId: string
                               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                                 <Text style={{ color: stepColors[step.step_kind] || '#606075', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{step.step_kind}</Text>
                                 {step.tool_name && <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO }}>{step.tool_name}</Text>}
-                                {step.delegated_to && <Text style={{ color: '#a855f7', fontSize: 10, fontFamily: MONO }}>{step.delegated_to}</Text>}
+                                {step.delegated_to && <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO }}>{step.delegated_to}</Text>}
                               </View>
                               <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }} numberOfLines={2}>{step.title}</Text>
                               {step.body && <Text style={{ color: '#909098', fontSize: 11, fontFamily: MONO, marginTop: 1 }} numberOfLines={3}>{step.body.slice(0, 200)}</Text>}
@@ -575,14 +576,14 @@ function OpenSwanFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
 
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 10 }}>
           {[
-            { label: 'Sessions', value: String(sessions.length), color: '#6366f1' },
-            { label: 'Subagents', value: String(subagentCount), color: '#a855f7' },
-            { label: 'Cron Jobs', value: String(jobs.length), color: '#f59e0b' },
-            { label: 'Enabled Jobs', value: String(enabledJobs), color: '#22c55e' },
+            { label: 'Sessions', value: String(sessions.length) },
+            { label: 'Subagents', value: String(subagentCount) },
+            { label: 'Cron Jobs', value: String(jobs.length) },
+            { label: 'Enabled Jobs', value: String(enabledJobs) },
           ].map((item) => (
             <View key={item.label} style={{ width: '23%', backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12 }}>
-              <Text style={{ color: '#808090', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{item.label.toUpperCase()}</Text>
-              <Text style={{ color: item.color, fontSize: 16, fontWeight: '800', fontFamily: MONO, marginTop: 2 }}>{item.value}</Text>
+              <Text style={{ color: '#606070', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{item.label.toUpperCase()}</Text>
+              <Text style={{ color: '#e0e0e8', fontSize: 16, fontWeight: '800', fontFamily: MONO, marginTop: 2 }}>{item.value}</Text>
             </View>
           ))}
         </View>
@@ -612,7 +613,7 @@ function OpenSwanFrontendPanel({ agent, accentColor }: { agent: OfficeAgent; acc
                 <Text style={{ color: '#a0a0b0', fontSize: 13, fontFamily: MONO, flex: 1 }} numberOfLines={1}>{activeSession.sessionKey}</Text>
                 <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{formatRelativeTime(activeSession.lastActivity)}</Text>
               </View>
-              {activeSession.model ? <Text style={{ color: '#6366f1', fontSize: 12, fontFamily: MONO, marginTop: 4 }}>{activeSession.model}</Text> : null}
+              {activeSession.model ? <Text style={{ color: '#a0a0b0', fontSize: 12, fontFamily: MONO, marginTop: 4 }}>{activeSession.model}</Text> : null}
               {activeSession.lastMessages?.length ? (
                 <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, marginTop: 5, lineHeight: 16 }} numberOfLines={3}>
                   {activeSession.lastMessages[activeSession.lastMessages.length - 1]?.content}
@@ -2583,16 +2584,16 @@ export default function AgentPanel({
             )}
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
               {[
-                { label: 'TOTAL', value: formatTokens(agent.tokensUsed), color: '#f0f0f5' },
-                { label: 'INPUT', value: formatTokens(agent.inputTokens), color: '#6366f1' },
-                { label: 'OUTPUT', value: formatTokens(agent.outputTokens), color: '#22c55e' },
-                { label: 'CACHED', value: formatTokens(agent.cachedTokens), color: '#f59e0b' },
-                { label: 'NEW', value: formatTokens(agent.newTokens || (agent.inputTokens - agent.cachedTokens)), color: '#a0a0b0' },
-                { label: 'CACHE HIT', value: cacheHitPct(agent.cachedTokens, agent.inputTokens), color: agent.cachedTokens > agent.inputTokens * 0.5 ? '#22c55e' : '#ef4444' },
+                { label: 'TOTAL', value: formatTokens(agent.tokensUsed) },
+                { label: 'INPUT', value: formatTokens(agent.inputTokens) },
+                { label: 'OUTPUT', value: formatTokens(agent.outputTokens) },
+                { label: 'CACHED', value: formatTokens(agent.cachedTokens) },
+                { label: 'NEW', value: formatTokens(agent.newTokens || (agent.inputTokens - agent.cachedTokens)) },
+                { label: 'CACHE HIT', value: cacheHitPct(agent.cachedTokens, agent.inputTokens) },
               ].map((t, i) => (
                 <View key={i} style={{ width: '31%', marginBottom: 8 }}>
-                  <Text style={{ color: t.color, fontSize: 16, fontWeight: '700', fontFamily: MONO }}>{t.value}</Text>
-                  <Text style={{ color: '#808090', fontSize: 11, fontWeight: '600', letterSpacing: 0.5, marginTop: 1 }}>{t.label}</Text>
+                  <Text style={{ color: '#e0e0e8', fontSize: 16, fontWeight: '700', fontFamily: MONO }}>{t.value}</Text>
+                  <Text style={{ color: '#606070', fontSize: 11, fontWeight: '600', letterSpacing: 0.5, marginTop: 1 }}>{t.label}</Text>
                 </View>
               ))}
             </View>
@@ -2603,13 +2604,13 @@ export default function AgentPanel({
             <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 8 }}>COST ANALYSIS</Text>
             <View style={{ flexDirection: 'row', gap: 6 }}>
               {[
-                { label: 'SESSION', value: `$${agent.costToday.toFixed(4)}`, color: '#22c55e' },
-                { label: 'TOTAL', value: `$${((agent as any).costTotal || agent.costToday).toFixed(4)}`, color: '#22d3ee' },
-                { label: 'COST/TURN', value: agent.turns > 0 ? `$${(agent.costToday / agent.turns).toFixed(4)}` : '—', color: '#a0a0b0' },
+                { label: 'SESSION', value: `$${agent.costToday.toFixed(4)}` },
+                { label: 'TOTAL', value: `$${((agent as any).costTotal || agent.costToday).toFixed(4)}` },
+                { label: 'COST/TURN', value: agent.turns > 0 ? `$${(agent.costToday / agent.turns).toFixed(4)}` : '—' },
               ].map((c, i) => (
                 <View key={i} style={{ flex: 1, backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12, alignItems: 'center' }}>
-                  <Text style={{ color: c.color, fontSize: 16, fontWeight: '800', fontFamily: MONO }}>{c.value}</Text>
-                  <Text style={{ color: '#808090', fontSize: 11, fontWeight: '600', letterSpacing: 0.5, marginTop: 2 }}>{c.label}</Text>
+                  <Text style={{ color: '#e0e0e8', fontSize: 16, fontWeight: '800', fontFamily: MONO }}>{c.value}</Text>
+                  <Text style={{ color: '#606070', fontSize: 11, fontWeight: '600', letterSpacing: 0.5, marginTop: 2 }}>{c.label}</Text>
                 </View>
               ))}
             </View>
