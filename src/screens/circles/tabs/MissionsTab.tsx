@@ -49,6 +49,39 @@ interface Props {
   accentColor?: string;
 }
 
+// ─── Progress Ring (web SVG) ─────────────────────────────────────────────────
+
+function ProgressRing({ progress, size = 36, strokeWidth = 3, color }: {
+  progress: number; size?: number; strokeWidth?: number; color: string;
+}) {
+  if (Platform.OS !== 'web') {
+    // Native fallback — simple percentage text
+    return (
+      <View style={{ width: size, height: size, borderRadius: size / 2, borderWidth: strokeWidth, borderColor: color + '30', alignItems: 'center', justifyContent: 'center' }}>
+        <Text style={{ color, fontSize: 10, fontWeight: '700', fontFamily: 'monospace' }}>{progress}%</Text>
+      </View>
+    );
+  }
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const offset = circumference - (progress / 100) * circumference;
+
+  return (
+    <View style={{ width: size, height: size }}>
+      {/* @ts-ignore — SVG works on web */}
+      <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
+        <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke={color + '20'} strokeWidth={strokeWidth} />
+        <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke={color} strokeWidth={strokeWidth}
+          strokeDasharray={circumference} strokeDashoffset={offset} strokeLinecap="round"
+          style={{ transition: 'stroke-dashoffset 0.5s ease' } as any} />
+      </svg>
+      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+        <Text style={{ color, fontSize: 9, fontWeight: '700', fontFamily: 'monospace' }}>{progress}%</Text>
+      </View>
+    </View>
+  );
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function proofTypeColor(type: string): string {
@@ -297,18 +330,26 @@ function MissionCard({ mission, accentColor, onPress }: {
         <Text style={styles.cardDesc} numberOfLines={2}>{mission.description}</Text>
       )}
 
-      {/* Progress bar */}
+      {/* Progress ring + bar */}
       {tasks.length > 0 && (
-        <View style={styles.progressSection}>
-          <View style={styles.progressBarBg}>
-            <View style={[styles.progressBarFill, {
-              width: `${progress}%` as any,
-              backgroundColor: mission.status === 'completed' ? PIXEL_COLORS.green : accentColor,
-            }]} />
+        <View style={[styles.progressSection, { flexDirection: 'row', alignItems: 'center', gap: 10 }]}>
+          <ProgressRing
+            progress={progress}
+            color={mission.status === 'completed' ? PIXEL_COLORS.green : accentColor}
+            size={34}
+            strokeWidth={3}
+          />
+          <View style={{ flex: 1 }}>
+            <View style={styles.progressBarBg}>
+              <View style={[styles.progressBarFill, {
+                width: `${progress}%` as any,
+                backgroundColor: mission.status === 'completed' ? PIXEL_COLORS.green : accentColor,
+              }]} />
+            </View>
+            <Text style={styles.progressLabel}>
+              {tasks.filter(t => t.status === 'done').length}/{tasks.length} tasks
+            </Text>
           </View>
-          <Text style={styles.progressLabel}>
-            {tasks.filter(t => t.status === 'done').length}/{tasks.length} tasks · {progress}%
-          </Text>
         </View>
       )}
     </Pressable>
