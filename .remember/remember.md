@@ -1,20 +1,17 @@
 # Handoff
 
 ## State
-Massive session April 2-8. Memory system is now production-grade with 3 migrations: `20260408_unified_agent_runs.sql` (7 tables), `20260408_memory_privacy_fix.sql` (RLS + columns), `20260408_memory_v2_retrieval_privacy.sql` (visibility, sources, evaluations, snapshots, access log, FTS index). Key systems built: unified agent run system, 4-layer memory (working/episodic/semantic/procedural), trust scoring with 90-day decay, contradiction detection, consolidation engine, quality gating, conversational router, subagent delegation (7 specialists), plugin system (8 plugins), WordPress auto-posting (12 commands + featured images), model capability router, OpenSwan control panel, customizable agent name, deep thinking enabled. All compile clean. All pushed to GitHub.
+24 commits to main this session. Full mission system with templates, tasks, agent dispatch, proof-of-work, streaks, celebration animation. Missions live inside Feed tab center panel (380px wide). Memory architecture overhauled: session bloat fixed, token budgets capped, RLS fixed, dedup constraint, blackswan_memory dropped. Landing page, circle discovery, agent reputation badges, push notifications all built. AgentPanel cleaned to 5-color palette. All edge functions deployed. Production build verified.
 
 ## Next
-1. **Run 3 migrations** — `20260408_unified_agent_runs.sql`, `20260408_memory_privacy_fix.sql`, `20260408_memory_v2_retrieval_privacy.sql` in Supabase SQL Editor (in order)
-2. **Deploy edge function** — `npx supabase functions deploy swanbot-ai`
-3. **pgvector** — enable pgvector extension in Supabase for semantic retrieval (future: add embedding column + hybrid search)
-4. **Mobile optimization** — still not started
-5. **Evaluator loops** — pre-publish quality checks on artifacts
-6. **Live streaming tool output** — show agent work in real-time
+1. Run pending SQL if not done: `ALTER TABLE circles ADD COLUMN IF NOT EXISTS is_public boolean DEFAULT false; ALTER TABLE circles ADD COLUMN IF NOT EXISTS settings jsonb DEFAULT '{}'::jsonb; NOTIFY pgrst, 'reload schema';`
+2. Run session dedup constraint: `CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_session_dedup ON memory_entries (circle_id, source_surface, title, COALESCE(user_id, '00000000-0000-0000-0000-000000000000')) WHERE scope = 'session' AND is_active = true;`
+3. Phase 4: Stripe pricing integration
+4. Phase 3.2: Landing page needs screenshots/demo content
 
 ## Context
-- All `🦢` replaced with FlatIcon `robot` (backward-compatible regex)
-- Agent name customizable per circle (localStorage `uc_agent_name_${circleId}`)
-- Conversation history persists to localStorage, triple-layer checkpoint (beforeunload + visibilitychange + 5min interval)
-- Memory consolidation runs after every extraction cycle
-- Codex dropped multiple audit docs — all reviewed and integrated
-- Master plan at `docs/page-audits/claude-cowork-openswan-integration-master-plan-2026-04-08.md` (Phase 1 complete, 2-4 partially done, 5-6 remain)
+- Codex runs simultaneously and may modify agentRunSystem.ts, memoryService.ts, agentMemory.ts — check git log before editing
+- `20260408_unified_agent_runs.sql` has broken FKs — use `20260411_memory_entries_standalone.sql` instead
+- Tab dot animation uses `<div className="uc-tab-dot">` on web (not RN View) to avoid animation CSS warning
+- Feed center panel is 380px, GoalsPanel is 220px, Kanban is flex:1
+- Search bar is collapsible on desktop (collapsed by default, / key expands)

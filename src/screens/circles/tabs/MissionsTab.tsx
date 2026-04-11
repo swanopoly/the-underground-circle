@@ -53,6 +53,56 @@ interface Props {
   accentColor?: string;
 }
 
+// ─── Daily Focus ─────────────────────────────────────────────────────────────
+
+function DailyFocus({ missions, streak, accentColor, onSelectMission }: {
+  missions: Mission[];
+  streak: { currentStreak: number; totalTasksCompleted: number } | null;
+  accentColor: string;
+  onSelectMission: (id: string) => void;
+}) {
+  const { useMissionDetail: _unused, ...rest } = {} as any; // avoid import
+  // Find the most urgent mission (overdue first, then closest deadline)
+  const sorted = [...missions].sort((a, b) => {
+    const aOverdue = isOverdue(a) ? 0 : 1;
+    const bOverdue = isOverdue(b) ? 0 : 1;
+    if (aOverdue !== bOverdue) return aOverdue - bOverdue;
+    if (a.deadline && b.deadline) return new Date(a.deadline).getTime() - new Date(b.deadline).getTime();
+    return 0;
+  });
+  const top = sorted[0];
+  if (!top) return null;
+
+  const nudges = [
+    'Ship something today.',
+    'Small progress > no progress.',
+    'Your circle is watching.',
+    'One task at a time.',
+    'Build momentum.',
+  ];
+  const nudge = nudges[Math.floor(Date.now() / 86400000) % nudges.length];
+
+  return (
+    <Pressable
+      style={[styles.focusCard, { borderLeftColor: isOverdue(top) ? PIXEL_COLORS.red : accentColor }]}
+      onPress={() => onSelectMission(top.id)}
+    >
+      <View style={styles.focusRow}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.focusLabel}>FOCUS</Text>
+          <Text style={styles.focusTitle} numberOfLines={1}>{top.title}</Text>
+          <Text style={styles.focusDeadline}>
+            {formatDeadline(top.deadline)}
+            {streak && streak.currentStreak > 0 ? ` · ${streak.currentStreak}d streak` : ''}
+          </Text>
+        </View>
+        <Text style={[styles.focusArrow, { color: accentColor }]}>{'>'}</Text>
+      </View>
+      <Text style={styles.focusNudge}>{nudge}</Text>
+    </Pressable>
+  );
+}
+
 // ─── Progress Ring (web SVG) ─────────────────────────────────────────────────
 
 function ProgressRing({ progress, size = 36, strokeWidth = 3, color }: {
@@ -191,6 +241,16 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
           <Text style={styles.createBtnText}>+ NEW MISSION</Text>
         </Pressable>
       </View>
+
+      {/* Daily Focus — what to work on right now */}
+      {missions.filter(m => m.status === 'active').length > 0 && (
+        <DailyFocus
+          missions={missions.filter(m => m.status === 'active')}
+          streak={mainStreak}
+          accentColor={accentColor}
+          onSelectMission={setSelectedId}
+        />
+      )}
 
       {/* Analytics bar */}
       {analytics && analytics.totalTasks > 0 && (
@@ -1058,6 +1118,50 @@ const styles = StyleSheet.create({
     color: PIXEL_COLORS.text2,
     fontSize: 12,
     marginTop: 2,
+  },
+
+  // Daily Focus
+  focusCard: {
+    marginHorizontal: GRID.md,
+    marginBottom: GRID.sm,
+    backgroundColor: PIXEL_COLORS.bg2,
+    borderLeftWidth: 3,
+    borderRadius: 8,
+    padding: GRID.md,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background-color 0.15s' } as any : {}),
+  },
+  focusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: GRID.sm,
+  },
+  focusLabel: {
+    color: PIXEL_COLORS.text3,
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 1.5,
+    marginBottom: 2,
+  },
+  focusTitle: {
+    color: PIXEL_COLORS.text0,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  focusDeadline: {
+    color: PIXEL_COLORS.text2,
+    fontSize: 11,
+    marginTop: 2,
+  },
+  focusArrow: {
+    fontSize: 18,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  focusNudge: {
+    color: PIXEL_COLORS.text3,
+    fontSize: 11,
+    fontStyle: 'italic',
+    marginTop: GRID.xs,
   },
 
   // Analytics bar
