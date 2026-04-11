@@ -39,7 +39,7 @@ export default function OnboardingFlow({ userId, circleId, onComplete }: Props) 
     onComplete();
   }, [onComplete]);
 
-  const totalSteps = 2;
+  const totalSteps = 3;
 
   return (
     <Modal transparent animationType="fade" visible>
@@ -56,26 +56,39 @@ export default function OnboardingFlow({ userId, circleId, onComplete }: Props) 
 
           {step === 0 && (
             <View style={styles.stepContent}>
-              <Text style={styles.heading}>Meet BlackSwan{'\n'}Your AI Agent</Text>
+              <Text style={styles.heading}>Ship Together{'\n'}Stay Accountable</Text>
               <Text style={styles.sub}>
-                BlackSwan is built into the app — no downloads, no setup.{'\n\n'}
-                It watches your GitHub, tracks who's shipping, and keeps your team honest. Connect your own coding agents (Claude Code, Codex, Gemini CLI) later from the Office tab.
+                The Underground Circle is where teams set goals, assign AI agents, and prove they shipped.{'\n\n'}
+                No more standups. No more "what are you working on?" Just missions, proof, and results.
               </Text>
               <Pressable onPress={() => setStep(1)} style={styles.ctaBtn}>
-                <Text style={styles.ctaBtnText}>Let's go</Text>
+                <Text style={styles.ctaBtnText}>How it works</Text>
               </Pressable>
             </View>
           )}
 
           {step === 1 && (
             <View style={styles.stepContent}>
-              <Text style={styles.heading}>Create or Join a Circle</Text>
+              <Text style={styles.heading}>Missions + AI Agents</Text>
               <Text style={styles.sub}>
-                A circle is your team workspace. BlackSwan lives there and watches your code.{'\n\n'}
-                You can create your own or join an existing one with an invite code.
+                Create missions with deadlines and tasks. Assign BlackSwan (your built-in AI) to monitor progress, review code, and nudge slackers.{'\n\n'}
+                Every commit, PR, and completed task becomes visible proof-of-work for your team.
+              </Text>
+              <Pressable onPress={() => setStep(2)} style={styles.ctaBtn}>
+                <Text style={styles.ctaBtnText}>Got it</Text>
+              </Pressable>
+            </View>
+          )}
+
+          {step === 2 && (
+            <View style={styles.stepContent}>
+              <Text style={styles.heading}>Create Your Circle</Text>
+              <Text style={styles.sub}>
+                Start a circle, invite your team, and create your first mission.{'\n\n'}
+                Connect GitHub to auto-track commits and PRs. BlackSwan handles the rest.
               </Text>
               <Pressable onPress={handleFinish} style={styles.ctaBtn}>
-                <Text style={styles.ctaBtnText}>Open the app</Text>
+                <Text style={styles.ctaBtnText}>Let's ship</Text>
               </Pressable>
             </View>
           )}

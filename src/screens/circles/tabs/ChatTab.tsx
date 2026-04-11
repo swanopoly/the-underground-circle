@@ -110,6 +110,17 @@ const QUICK_PROMPTS = [
 
 const PROMPT_CATEGORIES = [
   {
+    title: '🎯 MISSIONS',
+    color: '#6366f1',
+    prompts: [
+      { label: 'Mission Status', desc: 'See all active missions', text: '/mission' },
+      { label: 'New Mission', desc: 'Create from chat', text: '/mission create ' },
+      { label: 'Mission Help', desc: 'Available commands', text: '/mission help' },
+      { label: 'What should I work on?', desc: 'AI picks your next task', text: 'Based on our active missions, what should I work on next?' },
+      { label: 'Sprint Review', desc: 'How did we do?', text: 'Review our mission progress this week — what shipped, what slipped, what to focus on next' },
+    ],
+  },
+  {
     title: '🎮 GAMES & FUN',
     color: '#a855f7',
     prompts: [
@@ -1178,6 +1189,26 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
     if (lowerContent === '/memories' || lowerContent === '/memory') {
       setShowMemoryViewer(true);
+      return;
+    }
+
+    // ─── Mission commands — intercept /mission requests ──────────────────────
+    if (lowerContent.startsWith('/mission') && (lowerContent === '/mission' || lowerContent[8] === ' ')) {
+      (async () => {
+        setBotTyping(true);
+        try {
+          const { executeMissionCommand } = await import('../../../lib/missionChatCommands');
+          const result = await executeMissionCommand(content, {
+            circleId,
+            userId: currentUserId || '',
+          });
+          addBotMessage(result.message || 'No response.');
+        } catch (e: any) {
+          addBotMessage(`Mission error: ${e.message || 'Unknown error'}`);
+        } finally {
+          setBotTyping(false);
+        }
+      })();
       return;
     }
 

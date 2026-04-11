@@ -25,6 +25,7 @@ import RoomsTab from './tabs/RoomsTab';
 import AnalyticsTab from './tabs/AnalyticsTab';
 import IntegrationsTab from './tabs/IntegrationsTab';
 import BackpackTab from './tabs/BackpackTab';
+import MissionsTab from './tabs/MissionsTab';
 import FloatingChat from '../../components/FloatingChat';
 import TutorialController from '../../components/onboarding/TutorialController';
 
@@ -34,9 +35,13 @@ import { LoadingScreen } from '../../components/LoadingWave';
 
 // Core tabs (Chat, Office, Rooms) always mounted; secondary tabs lazy-mount on first visit
 
-const TAB_META: { key: string; label: string; icon: string; flatIcon?: string }[] = [
+// Gated tabs — hidden from nav until the feature is complete (see docs/NEXT_LEVEL_PLAN.md Phase 0.3)
+const GATED_TABS = new Set(['WALLET', 'BACKPACK']);
+
+const TAB_META_ALL: { key: string; label: string; icon: string; flatIcon?: string }[] = [
   { key: 'CHAT', label: 'Chat', icon: '💬', flatIcon: 'chat' },
   { key: 'OFFICE', label: 'Office', icon: '🏢', flatIcon: 'office' },
+  { key: 'MISSIONS', label: 'Missions', icon: '🎯', flatIcon: 'feed' },
   { key: 'ROOMS', label: 'Rooms', icon: '🏠', flatIcon: 'rooms' },
   { key: 'BACKPACK', label: 'Backpack', icon: '🎒', flatIcon: 'backpack' },
   { key: 'FEED', label: 'Feed', icon: '📋', flatIcon: 'feed' },
@@ -47,6 +52,8 @@ const TAB_META: { key: string; label: string; icon: string; flatIcon?: string }[
   { key: 'ANALYTICS', label: 'Analytics', icon: '📊', flatIcon: 'analytics' },
   { key: 'PROFILE', label: 'Profile', icon: '👤', flatIcon: 'profile' },
 ];
+
+const TAB_META = TAB_META_ALL.filter(t => !GATED_TABS.has(t.key));
 
 const TABS = TAB_META.map(t => t.key) as readonly string[];
 type Tab = string;
@@ -187,6 +194,21 @@ export default function CircleDetailScreen({ route, navigation }: any) {
         setActiveStreakCount(Math.max(1, Math.floor(mc * 0.7)));
         cacheCircle(circleId, circleRes.data, mc);
       }
+      // Smart default: if user has no saved tab and circle has missions, show MISSIONS
+      try {
+        const hasSavedTab = Platform.OS === 'web' && localStorage.getItem(`${TAB_STORAGE_KEY}_${circleId}`);
+        if (!hasSavedTab && !routeTab) {
+          const { data: missions } = await supabase
+            .from('circle_missions')
+            .select('id', { count: 'exact' })
+            .eq('circle_id', circleId)
+            .eq('status', 'active')
+            .limit(1);
+          if (missions && missions.length > 0) {
+            setActiveTab('MISSIONS');
+          }
+        }
+      } catch {}
     } catch (error) {
       console.error('Error loading circle data:', error);
     } finally {
@@ -256,12 +278,18 @@ export default function CircleDetailScreen({ route, navigation }: any) {
           <ChatTab circleId={circleId} accentColor={accentColor} />
         </LazyTab>
       )}
+      <LazyTab tabKey="MISSIONS" activeTab={activeTab}>
+        <MissionsTab circleId={circleId} accentColor={accentColor} />
+      </LazyTab>
       <LazyTab tabKey="ROOMS" activeTab={activeTab}>
         <RoomsTab circleId={circleId} accentColor={accentColor} />
       </LazyTab>
-      <LazyTab tabKey="BACKPACK" activeTab={activeTab}>
-        <BackpackTab circleId={circleId} accentColor={accentColor} />
-      </LazyTab>
+      {/* BACKPACK — gated (see docs/NEXT_LEVEL_PLAN.md Phase 0.3) */}
+      {!GATED_TABS.has('BACKPACK') && (
+        <LazyTab tabKey="BACKPACK" activeTab={activeTab}>
+          <BackpackTab circleId={circleId} accentColor={accentColor} />
+        </LazyTab>
+      )}
       <LazyTab tabKey="FEED" activeTab={activeTab}>
         <FeedTab circleId={circleId} />
       </LazyTab>
@@ -277,9 +305,12 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       <LazyTab tabKey="INTEGRATIONS" activeTab={activeTab}>
         <IntegrationsTab circleId={circleId} />
       </LazyTab>
-      <LazyTab tabKey="WALLET" activeTab={activeTab}>
-        <WalletTab circleId={circleId} />
-      </LazyTab>
+      {/* WALLET — gated (see docs/NEXT_LEVEL_PLAN.md Phase 0.3) */}
+      {!GATED_TABS.has('WALLET') && (
+        <LazyTab tabKey="WALLET" activeTab={activeTab}>
+          <WalletTab circleId={circleId} />
+        </LazyTab>
+      )}
       <LazyTab tabKey="PROFILE" activeTab={activeTab}>
         <ProfileTab circleId={circleId} navigation={navigation} />
       </LazyTab>

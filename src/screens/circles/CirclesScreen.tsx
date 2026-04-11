@@ -165,11 +165,13 @@ const CircleCard = React.memo(function CircleCard({ item, onPress, index }: { it
             </View>
           </View>
 
-          {/* Agent status */}
+          {/* Agent status + mission indicator */}
           <View style={s.agentBar}>
             <Text style={s.agentPrompt}>{'>'}</Text>
             <Text style={[s.agentText, stats.isActive && { color: GREEN_DIM }]} numberOfLines={1}>
-              {stats.agentStatus}
+              {(item as any).active_missions > 0
+                ? `${(item as any).active_missions} active mission${(item as any).active_missions !== 1 ? 's' : ''}`
+                : stats.agentStatus}
             </Text>
             {stats.isActive && Platform.OS === 'web' && (
               <Text style={s.agentCursor}>█</Text>
@@ -326,8 +328,15 @@ export default function CirclesScreen({ navigation }: any) {
 
       const { data: memberships } = await supabase.from('circle_members').select('circle_id').eq('user_id', user.id).limit(50);
       if (!memberships?.length) { setCircles([]); return; }
-      const { data } = await supabase.from('circles').select('*, circle_members!inner(count)').in('id', memberships.map(m => m.circle_id)).limit(50);
-      setCircles((data || []).map((c: any) => ({ ...c, member_count: c.circle_members?.[0]?.count || 0 })));
+      const circleIds = memberships.map(m => m.circle_id);
+      const [{ data }, { data: missionCounts }] = await Promise.all([
+        supabase.from('circles').select('*, circle_members!inner(count)').in('id', circleIds).limit(50),
+        supabase.from('circle_missions').select('circle_id, status').in('circle_id', circleIds).eq('status', 'active'),
+      ]);
+      // Count active missions per circle
+      const missionMap: Record<string, number> = {};
+      (missionCounts || []).forEach((m: any) => { missionMap[m.circle_id] = (missionMap[m.circle_id] || 0) + 1; });
+      setCircles((data || []).map((c: any) => ({ ...c, member_count: c.circle_members?.[0]?.count || 0, active_missions: missionMap[c.id] || 0 })));
     } catch (err) { console.error('CirclesScreen fetch error:', err); }
   }, []);
 

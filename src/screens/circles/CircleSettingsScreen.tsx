@@ -232,10 +232,17 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
     }
   };
 
+  const [leaveConfirm, setLeaveConfirm] = useState(false);
   const handleLeaveCircle = async () => {
+    if (!leaveConfirm) { setLeaveConfirm(true); return; }
     if (!currentUserId) return;
-    await supabase.from('circle_members').delete().eq('circle_id', circleId).eq('user_id', currentUserId);
-    navigation.navigate('CirclesList');
+    try {
+      await supabase.from('circle_members').delete().eq('circle_id', circleId).eq('user_id', currentUserId);
+      navigation.navigate('CirclesList');
+    } catch (e) {
+      console.error('Error leaving circle:', e);
+      setLeaveConfirm(false);
+    }
   };
 
   const copyInviteCode = async () => {
@@ -630,8 +637,10 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
 
         {/* ─── Danger Zone ─── */}
         <Section title="DANGER ZONE" accentColor="#ef4444">
-          <Pressable onPress={handleLeaveCircle} style={styles.dangerBtn}>
-            <Text style={styles.dangerBtnText}>LEAVE CIRCLE</Text>
+          <Pressable onPress={handleLeaveCircle} style={[styles.dangerBtn, leaveConfirm && { backgroundColor: '#ef444415', borderColor: '#ef4444' }]}>
+            <Text style={[styles.dangerBtnText, leaveConfirm && { color: '#ef4444' }]}>
+              {leaveConfirm ? 'TAP AGAIN TO CONFIRM LEAVE' : 'LEAVE CIRCLE'}
+            </Text>
           </Pressable>
           {isCreator && (
             <Pressable onPress={handleDeleteCircle} style={[styles.dangerBtn, { backgroundColor: '#ef444415', borderColor: '#ef4444' }]}>

@@ -533,6 +533,33 @@ async function buildSystemPromptAsync(context: SwanBotContext, data: CircleConte
     }
   } catch {}
 
+  // Load active missions for this circle
+  try {
+    if (context.circleId) {
+      const { getMissions, getMissionTasks, missionProgress, formatDeadline, isOverdue } = await import('./missions');
+      const missions = await getMissions(context.circleId);
+      const activeMissions = missions.filter(m => m.status === 'active');
+      if (activeMissions.length > 0) {
+        const missionLines: string[] = ['## Active Missions'];
+        for (const m of activeMissions.slice(0, 5)) {
+          const tasks = await getMissionTasks(m.id);
+          const progress = missionProgress(tasks);
+          const done = tasks.filter(t => t.status === 'done').length;
+          const overdue = isOverdue(m);
+          const deadline = formatDeadline(m.deadline);
+          missionLines.push(`- **${m.title}** — ${progress}% (${done}/${tasks.length} tasks) — ${deadline}${overdue ? ' ⚠️ OVERDUE' : ''}`);
+          const blocked = tasks.filter(t => t.status === 'blocked');
+          if (blocked.length > 0) {
+            missionLines.push(`  Blocked: ${blocked.map(t => t.title).join(', ')}`);
+          }
+        }
+        missionLines.push('');
+        missionLines.push('When users ask about missions or progress, reference this data. Nudge on overdue missions. Celebrate completed ones.');
+        extras.push(missionLines.join('\n'));
+      }
+    }
+  } catch {}
+
   // Load last session context so agent can continue where it left off
   try {
     if (context.circleId) {

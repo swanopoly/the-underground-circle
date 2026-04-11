@@ -792,6 +792,41 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    // ── Generate Proof-of-Work entry for the missions feed ─────────────────
+    // Maps GitHub events to proof_of_work table entries (see docs/NEXT_LEVEL_PLAN.md)
+    try {
+      const powTypeMap: Record<string, string> = {
+        push: 'commit',
+        pull_request: 'pr',
+        workflow_run: 'deploy',
+        check_run: 'deploy',
+        deployment: 'deploy',
+        deployment_status: 'deploy',
+      };
+      const powType = powTypeMap[eventType];
+      if (powType) {
+        await supabase.from('proof_of_work').insert({
+          circle_id: connection.circle_id,
+          pow_type: powType,
+          title: parsed.title,
+          detail: {
+            event_type: eventType,
+            action,
+            repo: `${repoOwner}/${repoName}`,
+            url: parsed.url,
+            author: parsed.author,
+            ref: parsed.ref,
+            commits_count: parsed.commitsCount,
+            additions: parsed.additions,
+            deletions: parsed.deletions,
+          },
+        });
+      }
+    } catch (powErr) {
+      // Non-fatal — proof_of_work table may not exist yet (migration pending)
+      console.warn('proof_of_work insert skipped:', powErr);
+    }
+
     // Dispatch matching event-triggered automations
     try {
       // Fetch all enabled GitHub-triggered automations for this circle

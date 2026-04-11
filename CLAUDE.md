@@ -1,7 +1,21 @@
 # CLAUDE.md — The Underground Circle
 
 > Comprehensive project context for AI agents (Claude Code, OpenSwan, Codex, etc.)
-> Last updated: 2026-03-11 (Strategic pivot: GitHub integration + AI agent loop as core product)
+> Last updated: 2026-04-10 (Circle Missions + feature gating — see docs/NEXT_LEVEL_PLAN.md)
+
+### NEW: Circle Missions (Phase 1 — The Core Loop)
+The mission system is the core accountability feature. See `docs/NEXT_LEVEL_PLAN.md` for the full plan.
+
+**Built (2026-04-10):**
+- `supabase/migrations/20260410_circle_missions.sql` — 4 tables: circle_missions, mission_tasks, mission_agents, proof_of_work + RLS ⚠️ NOT YET RUN
+- `src/lib/missions.ts` — Full CRUD, realtime subscriptions, React hooks, helpers
+- `src/screens/circles/tabs/MissionsTab.tsx` — Mission list, detail view, task management, create modal
+- MissionsTab wired into CircleDetailScreen (3rd tab after Chat + Office)
+
+**Gated Features (Phase 0.3):**
+WALLET and BACKPACK tabs are hidden via `GATED_TABS` set in CircleDetailScreen.
+These contain incomplete features (trading bot, LLM benchmarks, scrabble, wallet dashboard).
+To re-enable: remove the key from `GATED_TABS` in CircleDetailScreen.tsx.
 
 ---
 
