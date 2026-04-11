@@ -60,6 +60,7 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
   const [inviteCopied, setInviteCopied] = useState(false);
   const [bridgeConnecting, setBridgeConnecting] = useState(false);
   const [bridgeResult, setBridgeResult] = useState<'idle' | 'success' | 'partial' | 'error'>('idle');
+  const [missionCount, setMissionCount] = useState(0);
 
   // ── Animated values ────────────────────────────────────────────────────────
 
@@ -109,6 +110,21 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
     });
     return unsubscribe;
   }, [navigation]);
+
+  // ── Mission count ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!circleId) { setMissionCount(0); return; }
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from('circle_missions')
+          .select('id', { count: 'exact' })
+          .eq('circle_id', circleId)
+          .eq('status', 'active');
+        setMissionCount(data?.length || 0);
+      } catch { setMissionCount(0); }
+    })();
+  }, [circleId]);
 
   // ── Animation helpers ──────────────────────────────────────────────────────
 
@@ -276,6 +292,11 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
           <Text style={styles.centerTitleText} numberOfLines={1}>
             {circleName ? circleName.toUpperCase() : (title || 'Dashboard')}
           </Text>
+          {missionCount > 0 && (
+            <View style={styles.missionBadge}>
+              <Text style={styles.missionBadgeText}>{missionCount}</Text>
+            </View>
+          )}
         </View>
 
         <View style={styles.rightSection}>
@@ -495,8 +516,24 @@ const styles = StyleSheet.create({
   centerTitle: {
     position: 'absolute', left: 0, right: 0, top: 0, bottom: 0,
     justifyContent: 'center', alignItems: 'center',
+    flexDirection: 'row',
   },
   centerTitleText: { color: '#f0f6fc', fontSize: 15, fontWeight: '700', letterSpacing: 1 },
+  missionBadge: {
+    backgroundColor: '#6366f120',
+    borderWidth: 1,
+    borderColor: '#6366f150',
+    borderRadius: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    marginLeft: 6,
+  },
+  missionBadgeText: {
+    color: '#6366f1',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
   rightSection: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   headerIcon: {
     width: 32, height: 32, borderRadius: 6,
