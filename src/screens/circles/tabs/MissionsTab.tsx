@@ -43,6 +43,7 @@ import { backfillGitHubProof } from '../../../lib/proofOfWork';
 import { addProofOfWork } from '../../../lib/missions';
 import { dispatchTaskToAgent } from '../../../lib/missionAgentDispatch';
 import { useToast } from '../../../components/Toast';
+import { useMissionStreak } from '../../../lib/missionStreaks';
 
 interface Props {
   circleId: string;
@@ -135,10 +136,16 @@ const TASK_STATUS_COLORS: Record<TaskStatus, string> = {
 export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indigo }: Props) {
   const { missions, loading } = useMissions(circleId);
   const { entries: proofEntries, loading: proofLoading } = useProofOfWork(circleId);
+  const [mainUserId, setMainUserId] = useState<string | null>(null);
+  const { streak: mainStreak } = useMissionStreak(mainUserId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [filter, setFilter] = useState<'all' | 'active' | 'completed'>('all');
   const [showProof, setShowProof] = useState(false);
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setMainUserId(data.user?.id || null)).catch(() => {});
+  }, []);
 
   const filtered = missions.filter(m => {
     if (filter === 'active') return m.status === 'active';
@@ -167,6 +174,8 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
             {missions.filter(m => m.status === 'active').length} active
             {missions.filter(m => m.status === 'completed').length > 0 &&
               ` · ${missions.filter(m => m.status === 'completed').length} completed`}
+            {mainStreak && mainStreak.currentStreak > 0 &&
+              ` · ${mainStreak.currentStreak}d streak`}
           </Text>
         </View>
         <Pressable
@@ -369,7 +378,14 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
 }) {
   const { mission, tasks, agents, loading, refresh } = useMissionDetail(missionId);
   const { show: showToast } = useToast();
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const { streak, recordCompletion } = useMissionStreak(currentUserId);
   const [newTaskTitle, setNewTaskTitle] = useState('');
+
+  // Get current user ID for streaks
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setCurrentUserId(data.user?.id || null)).catch(() => {});
+  }, []);
   const [addingTask, setAddingTask] = useState(false);
   const [members, setMembers] = useState<CircleMember[]>([]);
   const [assigningTaskId, setAssigningTaskId] = useState<string | null>(null);
@@ -411,8 +427,18 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
     await updateMissionTask(task.id, { status: next });
     refresh();
 
-    // Toast + proof-of-work when task is completed
-    if (next === 'done') showToast(`Completed: ${task.title}`, 'success');
+    // Toast + streak + proof-of-work when task is completed
+    if (next === 'done') {
+      showToast(`Completed: ${task.title}`, 'success');
+      // Update mission streak
+      const streakResult = recordCompletion();
+      if (streakResult?.bonusXP) {
+        showToast(`Streak ${streakResult.streak.currentStreak}d +${streakResult.bonusXP} XP`, 'info');
+      }
+      if (streakResult?.milestoneReached) {
+        showToast(`Milestone: ${streakResult.milestoneReached}!`, 'warning');
+      }
+    }
     if (next === 'done' && mission) {
       const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
       addProofOfWork({

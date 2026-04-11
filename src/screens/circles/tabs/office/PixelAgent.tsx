@@ -7,6 +7,23 @@ import { ThoughtBubble as ThoughtData, generateThoughtBubble } from '../../../..
 import { animLoop } from '../../../../lib/animationHelpers';
 import { getSpiritById } from '../../../../lib/agentSpirits';
 
+// ─── Agent Reputation ────────────────────────────────────────────────────────
+
+type ReputationTier = 'S' | 'A' | 'B' | 'C' | 'D';
+
+const REPUTATION_COLORS: Record<ReputationTier, string> = {
+  S: '#fbbf24', A: '#22c55e', B: '#3b82f6', C: '#f59e0b', D: '#6b7280',
+};
+
+function getAgentReputation(turns: number, tokens: number, costToday?: number): { tier: ReputationTier; color: string } {
+  // Simple reputation based on activity — more turns + efficiency = higher tier
+  if (turns >= 50) return { tier: 'S', color: REPUTATION_COLORS.S };
+  if (turns >= 20) return { tier: 'A', color: REPUTATION_COLORS.A };
+  if (turns >= 10) return { tier: 'B', color: REPUTATION_COLORS.B };
+  if (turns >= 3) return { tier: 'C', color: REPUTATION_COLORS.C };
+  return { tier: 'D', color: REPUTATION_COLORS.D };
+}
+
 interface Props {
   agent: OfficeAgent;
   appearance?: AgentAppearance;
@@ -1966,9 +1983,31 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
           </Animated.View>
         )}
 
-        {/* Name label */}
+        {/* Name label + reputation badge */}
         <View style={styles.nameContainer}>
           <Text style={[styles.name, { color: agent.color }]} numberOfLines={1}>{agent.name}</Text>
+          {turns > 0 && (() => {
+            const rep = getAgentReputation(turns, tokens);
+            return (
+              <View style={{
+                backgroundColor: rep.color + '20',
+                borderWidth: 1,
+                borderColor: rep.color + '50',
+                borderRadius: 4,
+                paddingHorizontal: 3 * scale,
+                paddingVertical: 0.5 * scale,
+                marginLeft: 2 * scale,
+              }}>
+                <Text style={{
+                  color: rep.color,
+                  fontSize: 7 * scale,
+                  fontWeight: '900',
+                  fontFamily: 'monospace',
+                  letterSpacing: 0.5,
+                }}>{rep.tier}</Text>
+              </View>
+            );
+          })()}
         </View>
 
         {/* XP bar */}
@@ -2810,7 +2849,8 @@ const styles = StyleSheet.create({
   },
   // Name
   nameContainer: {
-    alignItems: 'center', marginTop: 2,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    marginTop: 2,
     backgroundColor: '#0a0a1499',
     paddingHorizontal: 4, paddingVertical: 1,
     borderRadius: 3,
