@@ -116,8 +116,8 @@ const PROMPT_CATEGORIES = [
       { label: 'Mission Status', desc: 'See all active missions', text: '/mission' },
       { label: 'New Mission', desc: 'Create from chat', text: '/mission create ' },
       { label: 'Mission Help', desc: 'Available commands', text: '/mission help' },
+      { label: 'Full Summary', desc: 'Missions + proof + stats', text: '/summary' },
       { label: 'What should I work on?', desc: 'AI picks your next task', text: 'Based on our active missions, what should I work on next?' },
-      { label: 'Sprint Review', desc: 'How did we do?', text: 'Review our mission progress this week — what shipped, what slipped, what to focus on next' },
     ],
   },
   {
@@ -1205,6 +1205,26 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           addBotMessage(result.message || 'No response.', undefined, { localOnly: true });
         } catch (e: any) {
           addBotMessage(`Mission error: ${e.message || 'Unknown error'}`, undefined, { localOnly: true });
+        } finally {
+          setBotTyping(false);
+        }
+      })();
+      return;
+    }
+
+    // ─── Summary command — full circle status report ──────────────────────────
+    if (lowerContent === '/summary' || lowerContent === '/status') {
+      (async () => {
+        setBotTyping(true);
+        try {
+          const { executeSummaryCommand } = await import('../../../lib/missionChatCommands');
+          const result = await executeSummaryCommand({
+            circleId,
+            userId: currentUserId || '',
+          });
+          addBotMessage(result.message || 'No data yet.', undefined, { localOnly: true });
+        } catch (e: any) {
+          addBotMessage(`Summary error: ${e.message || 'Unknown error'}`, undefined, { localOnly: true });
         } finally {
           setBotTyping(false);
         }

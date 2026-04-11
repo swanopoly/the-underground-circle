@@ -25,6 +25,71 @@ interface CommandResult {
   success: boolean;
 }
 
+// ─── /summary — Full Circle Status Report ────────────────────────────────────
+
+export async function executeSummaryCommand(ctx: CommandContext): Promise<CommandResult> {
+  const lines: string[] = [];
+  lines.push('**Circle Status Report**\n');
+
+  // Missions
+  const missions = await getMissions(ctx.circleId);
+  const active = missions.filter(m => m.status === 'active');
+  const completed = missions.filter(m => m.status === 'completed');
+
+  lines.push(`**Missions** — ${active.length} active, ${completed.length} completed`);
+  for (const m of active.slice(0, 5)) {
+    const tasks = await getMissionTasks(m.id);
+    const progress = missionProgress(tasks);
+    const done = tasks.filter(t => t.status === 'done').length;
+    const overdue = isOverdue(m);
+    lines.push(`  ${overdue ? '!!' : '>>'} ${m.title} — ${progress}% (${done}/${tasks.length}) — ${formatDeadline(m.deadline)}${overdue ? ' OVERDUE' : ''}`);
+  }
+
+  // Proof of work (recent)
+  try {
+    const { getProofOfWork } = await import('./missions');
+    const proof = await getProofOfWork(ctx.circleId, 10);
+    if (proof.length > 0) {
+      lines.push('');
+      lines.push(`**Recent Proof** — ${proof.length} entries`);
+      for (const p of proof.slice(0, 5)) {
+        const age = Math.floor((Date.now() - new Date(p.created_at).getTime()) / 3600000);
+        const ageStr = age < 1 ? 'just now' : age < 24 ? `${age}h ago` : `${Math.floor(age / 24)}d ago`;
+        lines.push(`  [${p.pow_type}] ${p.title.slice(0, 60)} — ${ageStr}`);
+      }
+    }
+  } catch {}
+
+  // Members
+  try {
+    const { data: members } = await import('./supabase').then(m => m.supabase
+      .from('circle_members')
+      .select('user_id, profiles(display_name, username)')
+      .eq('circle_id', ctx.circleId));
+    if (members) {
+      lines.push('');
+      lines.push(`**Team** — ${members.length} member${members.length !== 1 ? 's' : ''}`);
+      lines.push(`  ${members.map((m: any) => m.profiles?.display_name || m.profiles?.username || 'member').join(', ')}`);
+    }
+  } catch {}
+
+  // Streak info
+  try {
+    const { loadStreak, isStreakActive } = await import('./missionStreaks');
+    const streak = loadStreak(ctx.userId);
+    if (streak.totalTasksCompleted > 0) {
+      lines.push('');
+      lines.push(`**Your Stats** — ${streak.totalTasksCompleted} tasks completed, ${streak.currentStreak}d streak${isStreakActive(streak) ? ' (active)' : ' (broken)'}, longest: ${streak.longestStreak}d`);
+    }
+  } catch {}
+
+  if (lines.length <= 1) {
+    return { message: 'No activity yet. Create a mission and start shipping!', success: true };
+  }
+
+  return { message: lines.join('\n'), success: true };
+}
+
 /**
  * Execute a /mission command
  * Usage:
