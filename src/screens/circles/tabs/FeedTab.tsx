@@ -1131,30 +1131,20 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
         {/* Center panel: Missions / Activity / Agent Tasks toggle */}
         <View style={ct.wrapper}>
           <View style={ct.tabs}>
-            <Pressable
-              onPress={() => setCenterTab('missions')}
-              style={[ct.tab, centerTab === 'missions' && ct.tabActive]}
-            >
-              <Text style={[ct.tabText, centerTab === 'missions' && ct.tabTextActive]}>{'\uD83C\uDFAF'} Missions</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => setCenterTab('activity')}
-              style={[ct.tab, centerTab === 'activity' && ct.tabActive]}
-            >
-              <Text style={[ct.tabText, centerTab === 'activity' && ct.tabTextActive]}>{'\u26A1'} Activity</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => setCenterTab('agents')}
-              style={[ct.tab, centerTab === 'agents' && ct.tabActive]}
-            >
-              <Text style={[ct.tabText, centerTab === 'agents' && ct.tabTextActive]}>{'\u2699'} Agent Tasks</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => setCenterTab('ai-tools')}
-              style={[ct.tab, centerTab === 'ai-tools' && ct.tabActive]}
-            >
-              <Text style={[ct.tabText, centerTab === 'ai-tools' && ct.tabTextActive]}>{'\uD83E\uDD17'} AI Tools</Text>
-            </Pressable>
+            {([
+              { key: 'missions' as CenterTab, label: 'Missions' },
+              { key: 'activity' as CenterTab, label: 'Activity' },
+              { key: 'agents' as CenterTab, label: 'Agents' },
+              { key: 'ai-tools' as CenterTab, label: 'AI Tools' },
+            ]).map(tab => (
+              <Pressable
+                key={tab.key}
+                onPress={() => setCenterTab(tab.key)}
+                style={[ct.tab, centerTab === tab.key && ct.tabActive]}
+              >
+                <Text style={[ct.tabText, centerTab === tab.key && ct.tabTextActive]}>{tab.label}</Text>
+              </Pressable>
+            ))}
           </View>
           {centerTab === 'missions' ? (
             <MissionsTab circleId={circleId} accentColor={accentColor || '#6366f1'} />
@@ -1494,17 +1484,22 @@ const s = StyleSheet.create({
 
 const ct = StyleSheet.create({
   wrapper: {
-    width: 260,
-    backgroundColor: '#0d0d0d',
+    width: 380,
+    backgroundColor: '#0a0a0a',
+    borderRightWidth: 1,
+    borderRightColor: '#151515',
+    borderLeftWidth: 1,
+    borderLeftColor: '#151515',
   },
   tabs: {
     flexDirection: 'row',
     borderBottomWidth: 1,
-    borderBottomColor: '#151515',
+    borderBottomColor: '#1a1a1a',
+    paddingHorizontal: 4,
   },
   tab: {
     flex: 1,
-    paddingVertical: 8,
+    paddingVertical: 10,
     alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
   },
@@ -1513,14 +1508,13 @@ const ct = StyleSheet.create({
     borderBottomColor: '#6366f1',
   },
   tabText: {
-    color: '#444444',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
+    color: '#505050',
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.3,
   },
   tabTextActive: {
-    color: '#c0c0c0',
+    color: '#d0d0d0',
   },
 });
 

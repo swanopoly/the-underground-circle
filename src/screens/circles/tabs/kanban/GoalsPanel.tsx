@@ -607,7 +607,7 @@ const s = StyleSheet.create({
     color: '#ccc',
   },
   container: {
-    width: 260,
+    width: 220,
     backgroundColor: '#000000',
     borderRightWidth: 1,
     borderRightColor: '#1a1a1a',
