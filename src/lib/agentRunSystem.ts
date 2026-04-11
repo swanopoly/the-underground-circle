@@ -121,23 +121,17 @@ export interface MemoryEntry {
 }
 
 export async function getCircleSessionMemoryMode(circleId: string): Promise<SessionMemoryMode> {
-  // The 'settings' column doesn't exist on circles table yet.
-  // When it's added, uncomment the query below. Until then, default to 'private'
-  // to avoid 400 errors on every session memory save.
-  return 'private';
-  /*
   try {
     const { data, error } = await supabase
       .from('circles')
       .select('settings')
       .eq('id', circleId)
-      .single();
+      .maybeSingle();
     if (error || !data) return 'private';
     return (data as any)?.settings?.sessionMemoryMode === 'shared' ? 'shared' : 'private';
   } catch {
     return 'private';
   }
-  */
 }
 
 // ── 1. Create Run ───────────────────────────────────────────────────────────
@@ -550,7 +544,6 @@ export async function buildMemoryContext(circleId: string, roomId?: string, user
     limit: 25,
   }))
     .filter(m => m.retrieval_mode !== 'manual_only');
-  if (memories.length === 0) return '';
 
   // Priority sort: by importance (if available) then kind
   const kindPriority: Record<string, number> = {
@@ -585,6 +578,21 @@ export async function buildMemoryContext(circleId: string, roomId?: string, user
   const MAX_CHARS = 3000;
   let totalChars = 0;
   const sections: string[] = [];
+
+  try {
+    const { data: sharedDoc } = await supabase
+      .from('circle_memory')
+      .select('content, last_edited_at, updated_at')
+      .eq('circle_id', circleId)
+      .single();
+
+    const sharedContent = sharedDoc?.content?.trim();
+    if (sharedContent) {
+      const docBlock = `### Shared Circle Memory\n${sharedContent.slice(0, 900)}`;
+      sections.push(docBlock);
+      totalChars += docBlock.length;
+    }
+  } catch {}
 
   // Render in priority order: room > user > circle
   for (const scope of ['room', 'user', 'circle'] as const) {

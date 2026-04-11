@@ -208,6 +208,17 @@ export async function saveSessionToMemory(circleId: string, userId: string): Pro
       await autoExtractAndSave(circleId, userId, history);
     } catch {}
   }
+
+  // 3. Save a compacted resume payload so future sessions can pick up open decisions.
+  if (history.length >= 6) {
+    try {
+      const { compactConversation, saveCompactedSession } = await import('./memoryService');
+      const compact = await compactConversation(history);
+      if (compact.summary || compact.decisions.length > 0 || compact.openQuestions.length > 0) {
+        await saveCompactedSession(circleId, userId, compact);
+      }
+    } catch {}
+  }
 }
 
 /**
@@ -242,16 +253,19 @@ export async function getLastSessionContext(circleId: string, userId?: string): 
 
     // Show active agent sessions first — so agent knows what's happening across all sessions
     if (agentSessions.length > 0) {
-      const agentLines = agentSessions.map((m: any) => m.content).join('\n---\n');
+      const agentLines = agentSessions
+        .slice(0, 3)
+        .map((m: any) => m.content.slice(0, 500))
+        .join('\n---\n');
       parts.push(`## Active Agent Sessions (${agentSessions.length})\n${agentLines}`);
     }
 
     // Show previous chat session context
     if (chatSessions.length > 0) {
-      const last = chatSessions[0];
-      parts.push(`## Previous Session\n${last.content}`);
-      if (chatSessions.length > 1) {
-        parts.push(`(${chatSessions.length - 1} earlier sessions also in memory)`);
+      const recentSessions = chatSessions.slice(0, 2);
+      parts.push(`## Previous Sessions\n${recentSessions.map((m: any) => m.content.slice(0, 700)).join('\n---\n')}`);
+      if (chatSessions.length > recentSessions.length) {
+        parts.push(`(${chatSessions.length - recentSessions.length} earlier sessions also in memory)`);
       }
     }
 
@@ -267,7 +281,9 @@ export async function getLastSessionContext(circleId: string, userId?: string): 
     }
 
     if (durableMemories.length > 0) {
-      const lines = durableMemories.map(m => `- [${m.memory_kind}] ${m.title}: ${m.content.slice(0, 150)}`);
+      const lines = durableMemories
+        .slice(0, 8)
+        .map(m => `- [${m.memory_kind}] ${m.title}: ${m.content.slice(0, 150)}`);
       parts.push(`## Persistent Knowledge\n${lines.join('\n')}`);
     }
 
@@ -568,7 +584,20 @@ async function buildSystemPromptAsync(context: SwanBotContext, data: CircleConte
     }
   } catch {}
 
-  return extras.length > 0 ? base + '\n\n' + extras.join('\n\n') : base;
+  if (extras.length === 0) return base;
+
+  // Cap total extras to ~4000 chars to stay within context budget
+  const MAX_EXTRAS_CHARS = 4000;
+  let combined = extras.join('\n\n');
+  if (combined.length > MAX_EXTRAS_CHARS) {
+    combined = combined.slice(0, MAX_EXTRAS_CHARS);
+    const lastBreak = combined.lastIndexOf('\n');
+    if (lastBreak > MAX_EXTRAS_CHARS * 0.7) {
+      combined = combined.slice(0, lastBreak);
+    }
+  }
+
+  return base + '\n\n' + combined;
 }
 
 function buildSystemPrompt(context: SwanBotContext, data: CircleContextData): string {
