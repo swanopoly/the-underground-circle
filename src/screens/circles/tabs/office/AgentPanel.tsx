@@ -1192,6 +1192,7 @@ function AgentQuickTerminal({ agentName, agentId, circleId }: { agentName: strin
       const resp = await getSwanBotResponse(`@${agentName}: ${msg}`, {
         userId: (await supabase.auth.getUser()).data.user?.id || '',
         circleId,
+        agentId,
       });
       setHistory(prev => [...prev, { role: 'agent', text: resp }]);
     } catch (e: any) {
@@ -1348,9 +1349,52 @@ export default function AgentPanel({
   appearances, onAppearanceChange, environmentType, onRunCommand,
 }: Props) {
   const slideAnim = useRef(new Animated.Value(400)).current;
-  const [panelWidth, setPanelWidth] = useState(540);
+
+  // ── Resizable panel dimensions ─────────────────────────────────────────────
+  // Defaults to full viewport on first open; persists per-user via localStorage.
+  const getInitialWidth = (): number => {
+    if (Platform.OS !== 'web') return 0;
+    try {
+      const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('uc_agent_panel_w') : null;
+      if (stored) return Math.max(360, parseInt(stored, 10));
+    } catch {}
+    return typeof window !== 'undefined' ? window.innerWidth : 1200;
+  };
+  const getInitialHeight = (): number => {
+    if (Platform.OS !== 'web') return 0;
+    try {
+      const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('uc_agent_panel_h') : null;
+      if (stored) return Math.max(300, parseInt(stored, 10));
+    } catch {}
+    return typeof window !== 'undefined' ? window.innerHeight : 800;
+  };
+  const [panelWidth, setPanelWidth] = useState<number>(getInitialWidth);
+  const [panelHeight, setPanelHeight] = useState<number>(getInitialHeight);
   const dragStartX = useRef(0);
-  const dragStartW = useRef(540);
+  const dragStartY = useRef(0);
+  const dragStartW = useRef(0);
+  const dragStartH = useRef(0);
+
+  // Persist dimensions on change
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof localStorage === 'undefined') return;
+    try { localStorage.setItem('uc_agent_panel_w', String(panelWidth)); } catch {}
+  }, [panelWidth]);
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof localStorage === 'undefined') return;
+    try { localStorage.setItem('uc_agent_panel_h', String(panelHeight)); } catch {}
+  }, [panelHeight]);
+
+  // Clamp panel to viewport on window resize so it never overflows
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    const onResize = () => {
+      setPanelWidth(w => Math.min(w, window.innerWidth));
+      setPanelHeight(h => Math.min(h, window.innerHeight));
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState('');
   const [panelTab, setPanelTab] = useState<'overview' | 'openswan' | 'terminal' | 'memory' | 'runs' | 'cron' | 'evolution' | 'spirit' | 'activity' | 'customize'>('overview');
@@ -1389,7 +1433,10 @@ export default function AgentPanel({
 
   useEffect(() => {
     if (agent) {
-      slideAnim.setValue(isDesktop ? 420 : 400);
+      // Use current panel width so the panel slides in from just off-screen
+      // (not from a hardcoded 420px) — keeps animation consistent when panel is large
+      const offscreen = isDesktop ? Math.min(panelWidth, 600) : 400;
+      slideAnim.setValue(offscreen);
       Animated.spring(slideAnim, {
         toValue: 0,
         useNativeDriver: Platform.OS !== 'web',
@@ -1397,8 +1444,9 @@ export default function AgentPanel({
         friction: 16,
       }).start();
     } else {
+      const offscreen = isDesktop ? Math.min(panelWidth, 600) : 400;
       Animated.timing(slideAnim, {
-        toValue: isDesktop ? 420 : 400,
+        toValue: offscreen,
         duration: 200,
         useNativeDriver: Platform.OS !== 'web',
       }).start();
@@ -1543,32 +1591,116 @@ export default function AgentPanel({
   const currentTags = sessionTags?.get(sessionKey!) || [];
   const canRemoveAgent = !!onRemoveAgent && !!dbAgentId && agent.id !== 'default::blackswan';
 
+  // Max viewport dimensions — for clamping resize within visible area
+  const viewportW = (typeof window !== 'undefined' ? window.innerWidth : 1920);
+  const viewportH = (typeof window !== 'undefined' ? window.innerHeight : 1080);
+
+  // Resize handlers — extracted for reuse across left/bottom/corner handles
+  const startResizeWidth = (startPageX: number) => {
+    dragStartX.current = startPageX;
+    dragStartW.current = panelWidth;
+    const onMove = (ev: MouseEvent) => {
+      const delta = dragStartX.current - ev.pageX;
+      setPanelWidth(Math.max(360, Math.min(viewportW, dragStartW.current + delta)));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+  const startResizeHeight = (startPageY: number) => {
+    dragStartY.current = startPageY;
+    dragStartH.current = panelHeight;
+    const onMove = (ev: MouseEvent) => {
+      const delta = ev.pageY - dragStartY.current;
+      setPanelHeight(Math.max(300, Math.min(viewportH, dragStartH.current + delta)));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+  };
+  const startResizeBoth = (startPageX: number, startPageY: number) => {
+    dragStartX.current = startPageX;
+    dragStartY.current = startPageY;
+    dragStartW.current = panelWidth;
+    dragStartH.current = panelHeight;
+    const onMove = (ev: MouseEvent) => {
+      const dX = dragStartX.current - ev.pageX;
+      const dY = ev.pageY - dragStartY.current;
+      setPanelWidth(Math.max(360, Math.min(viewportW, dragStartW.current + dX)));
+      setPanelHeight(Math.max(300, Math.min(viewportH, dragStartH.current + dY)));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'nesw-resize';
+    document.body.style.userSelect = 'none';
+  };
+
+  // Maximize/restore toggle — double-click on left edge
+  const maximize = () => {
+    setPanelWidth(viewportW);
+    setPanelHeight(viewportH);
+  };
+
   return (
     <Animated.View style={[
       styles.panel,
       isDesktop
         ? { transform: [{ translateX: slideAnim }] }
         : { transform: [{ translateY: slideAnim }] },
-      isDesktop && [styles.panelDesktop, { width: panelWidth }],
+      isDesktop && [styles.panelDesktop, { width: panelWidth, height: panelHeight }],
     ]}>
-      {/* Resize drag handle — left edge (desktop only, web only) */}
+      {/* Resize handles — desktop/web only */}
       {isDesktop && Platform.OS === 'web' && (
-        <View
-          onPointerDown={(e: any) => {
-            dragStartX.current = e.nativeEvent?.pageX || e.pageX || 0;
-            dragStartW.current = panelWidth;
-            const onMove = (ev: MouseEvent) => {
-              const delta = dragStartX.current - ev.pageX;
-              setPanelWidth(Math.max(360, Math.min(900, dragStartW.current + delta)));
-            };
-            const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
-            window.addEventListener('mousemove', onMove);
-            window.addEventListener('mouseup', onUp);
-          }}
-          style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, zIndex: 10, cursor: 'col-resize', justifyContent: 'center', alignItems: 'center' } as any}
-        >
-          <View style={{ width: 2, height: 40, borderRadius: 1, backgroundColor: '#2a2a3e' }} />
-        </View>
+        <>
+          {/* Left edge — drag to change width */}
+          <View
+            onPointerDown={(e: any) => startResizeWidth(e.nativeEvent?.pageX || e.pageX || 0)}
+            // @ts-ignore — onDoubleClick is web-only
+            onDoubleClick={maximize}
+            style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, zIndex: 10, cursor: 'col-resize', justifyContent: 'center', alignItems: 'center' } as any}
+          >
+            <View style={{ width: 2, height: 40, borderRadius: 1, backgroundColor: '#2a2a3e' }} />
+          </View>
+          {/* Bottom edge — drag to change height */}
+          <View
+            onPointerDown={(e: any) => startResizeHeight(e.nativeEvent?.pageY || e.pageY || 0)}
+            style={{ position: 'absolute', left: 6, right: 0, bottom: 0, height: 6, zIndex: 10, cursor: 'row-resize', justifyContent: 'center', alignItems: 'center' } as any}
+          >
+            <View style={{ width: 40, height: 2, borderRadius: 1, backgroundColor: '#2a2a3e' }} />
+          </View>
+          {/* Bottom-left corner — diagonal resize */}
+          <View
+            onPointerDown={(e: any) => {
+              const x = e.nativeEvent?.pageX || e.pageX || 0;
+              const y = e.nativeEvent?.pageY || e.pageY || 0;
+              startResizeBoth(x, y);
+            }}
+            style={{ position: 'absolute', left: 0, bottom: 0, width: 14, height: 14, zIndex: 11, cursor: 'nesw-resize' } as any}
+          >
+            <View style={{ position: 'absolute', left: 4, bottom: 4, width: 6, height: 1, backgroundColor: '#3a3a4e' } as any} />
+            <View style={{ position: 'absolute', left: 4, bottom: 7, width: 3, height: 1, backgroundColor: '#3a3a4e' } as any} />
+          </View>
+        </>
       )}
       {/* Close button (desktop: top-right X, mobile: drag handle) */}
       {isDesktop ? (
@@ -2876,17 +3008,20 @@ const styles = StyleSheet.create({
   },
   panelDesktop: {
     top: 0,
-    bottom: 0,
+    bottom: undefined as any,  // explicit height controls vertical size (not bottom: 0)
     left: 'auto' as any,
     right: 0,
-    maxHeight: '100%' as any,
+    maxHeight: undefined as any,  // remove the 100% cap — height is explicit
     borderRadius: 0,
     borderTopLeftRadius: 12,
     borderBottomLeftRadius: 12,
     borderTopRightRadius: 0,
+    borderBottomRightRadius: 0,
     borderTopWidth: 0,
     borderLeftWidth: 1,
+    borderBottomWidth: 1,
     borderLeftColor: '#1e1e3a',
+    borderBottomColor: '#1e1e3a',
     ...(Platform.OS === 'web' ? {
       boxShadow: '-8px 0 30px rgba(0,0,0,0.5)',
     } as any : {}),
