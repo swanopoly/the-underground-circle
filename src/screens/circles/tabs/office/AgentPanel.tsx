@@ -3057,9 +3057,9 @@ const styles = StyleSheet.create({
   },
   panelDesktop: {
     // Position & size are computed inline (centered in viewport)
-    bottom: undefined as any,
-    right: undefined as any,
-    maxHeight: undefined as any,
+    bottom: 'auto' as any,        // override base panel's bottom:0
+    right: 'auto' as any,         // override base panel's right:0
+    maxHeight: 'none' as any,     // override base panel's maxHeight:70% (was clamping desktop!)
     borderRadius: 16,
     borderTopLeftRadius: 16,
     borderBottomLeftRadius: 16,
