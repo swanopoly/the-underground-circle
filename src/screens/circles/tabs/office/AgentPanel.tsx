@@ -96,8 +96,8 @@ function cacheHitPct(cachedTokens: number, totalInputTokens: number): string {
 
 // ── SECTION: agent-memory-panel — Memory viewer/editor for this agent ────────
 
-function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerType }: {
-  circleId: string; userId?: string; agentName: string; accentColor: string; providerType?: string;
+function AgentMemoryPanel({ circleId, userId, agentName, accentColor }: {
+  circleId: string; userId?: string; agentName: string; accentColor: string;
 }) {
   const [memories, setMemories] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -187,43 +187,30 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerTy
   // Toned-down kind colors — neutral for most, accent only for actionable types
   const kindColors: Record<string, string> = { preference: '#909098', fact: '#909098', decision: '#a0a0b0', finding: '#909098', instruction: '#a0a0b0', policy: '#909098', context: '#606075' };
 
-  const [saving, setSaving] = useState(false);
+  const [savingStandard, setSavingStandard] = useState(false);
   const [saveResult, setSaveResult] = useState<string | null>(null);
 
-  const handleForceSave = async () => {
-    setSaving(true);
+  const handleSaveReasoningStandard = async () => {
+    if (!userId) {
+      setSaveResult('ERROR: Not authenticated');
+      return;
+    }
+    setSavingStandard(true);
     setSaveResult(null);
     try {
-      // Try direct memory insert to test the pipeline
-      const { supabase } = await import('../../../../lib/supabase');
-      const { data: auth } = await supabase.auth.getUser();
-      if (!auth.user) { setSaveResult('ERROR: Not authenticated'); setSaving(false); return; }
-
-      const { data, error } = await supabase.from('memory_entries').insert({
-        scope: 'session',
-        circle_id: circleId,
-        user_id: auth.user.id,
-        memory_kind: 'context',
-        title: `Manual save: ${agentName} session`,
-        content: `Agent ${agentName} session context saved manually at ${new Date().toISOString()}. Provider: ${providerType || 'unknown'}.`,
-        source_surface: providerType ? `${providerType}_bridge` : 'manual',
-        visibility: 'private',
-        importance: 0.5,
-        retrieval_mode: 'startup',
-        metadata: { manual: true, agentName, providerType },
-      }).select().single();
-
-      if (error) {
-        setSaveResult(`ERROR: ${error.message} (${error.code})`);
-        console.error('[AgentMemoryPanel] Force save failed:', error);
-      } else {
-        setSaveResult(`Saved! ID: ${data.id.slice(0, 8)}`);
-        load(); // reload the memory list
+      const { saveResponseStandardMemory } = await import('../../../../lib/memoryService');
+      const saved = await saveResponseStandardMemory(circleId, userId);
+      if (!saved) {
+        setSaveResult('ERROR: Failed to save reasoning standard');
+        return;
       }
+      setSaveResult('Saved reasoning standard');
+      load();
     } catch (err: any) {
-      setSaveResult(`EXCEPTION: ${err.message}`);
+      console.error('[AgentMemoryPanel] handleSaveReasoningStandard error:', err);
+      setSaveResult(`ERROR: ${err?.message || 'Failed to save reasoning standard'}`);
     }
-    setSaving(false);
+    setSavingStandard(false);
   };
 
   return (
@@ -232,16 +219,19 @@ function AgentMemoryPanel({ circleId, userId, agentName, accentColor, providerTy
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>AGENT MEMORY</Text>
         <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>({filtered.length}/{memories.length})</Text>
         <Pressable
-          onPress={handleForceSave}
-          disabled={saving}
-          style={[{ marginLeft: 'auto', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, backgroundColor: '#22c55e20', borderWidth: 1, borderColor: '#22c55e40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          onPress={handleSaveReasoningStandard}
+          disabled={savingStandard}
+          style={[{ marginLeft: 'auto', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, backgroundColor: accentColor + '20', borderWidth: 1, borderColor: accentColor + '40', opacity: savingStandard ? 0.7 : 1 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
         >
-          <Text style={{ color: '#22c55e', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{saving ? 'SAVING...' : 'FORCE SAVE'}</Text>
+          <Text style={{ color: accentColor, fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{savingStandard ? 'SAVING...' : 'SAVE REASONING STD'}</Text>
         </Pressable>
       </View>
       {saveResult && (
         <Text style={{ color: saveResult.startsWith('ERROR') || saveResult.startsWith('EXCEPTION') ? '#ef4444' : '#22c55e', fontSize: 11, fontFamily: MONO }}>{saveResult}</Text>
       )}
+      <Text style={{ color: '#707086', fontSize: 11, fontFamily: MONO, lineHeight: 16 }}>
+        Saves a persistent startup instruction that tells agents to reason deeply, work step-by-step, and prioritize quality over brevity.
+      </Text>
 
       {/* View mode toggle */}
       <View style={{ flexDirection: 'row', gap: 2, marginBottom: 8 }}>
@@ -1357,20 +1347,20 @@ export default function AgentPanel({
   const getInitialWidth = (): number => {
     if (Platform.OS !== 'web') return 0;
     try {
-      const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('uc_agent_panel_w') : null;
+      const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('uc_agent_panel_w_v2') : null;
       if (stored) return Math.max(360, parseInt(stored, 10));
     } catch {}
     const vw = typeof window !== 'undefined' ? window.innerWidth : 1200;
-    return Math.max(480, Math.round(vw * 0.82));
+    return Math.max(480, vw - POPUP_PADDING * 2);  // near-full viewport minus padding
   };
   const getInitialHeight = (): number => {
     if (Platform.OS !== 'web') return 0;
     try {
-      const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('uc_agent_panel_h') : null;
+      const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('uc_agent_panel_h_v2') : null;
       if (stored) return Math.max(300, parseInt(stored, 10));
     } catch {}
     const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
-    return Math.max(480, Math.round(vh * 0.85));
+    return Math.max(480, vh - POPUP_PADDING * 2);  // near-full viewport minus padding
   };
   const [panelWidth, setPanelWidth] = useState<number>(getInitialWidth);
   const [panelHeight, setPanelHeight] = useState<number>(getInitialHeight);
@@ -1382,11 +1372,11 @@ export default function AgentPanel({
   // Persist dimensions on change
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof localStorage === 'undefined') return;
-    try { localStorage.setItem('uc_agent_panel_w', String(panelWidth)); } catch {}
+    try { localStorage.setItem('uc_agent_panel_w_v2', String(panelWidth)); } catch {}
   }, [panelWidth]);
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof localStorage === 'undefined') return;
-    try { localStorage.setItem('uc_agent_panel_h', String(panelHeight)); } catch {}
+    try { localStorage.setItem('uc_agent_panel_h_v2', String(panelHeight)); } catch {}
   }, [panelHeight]);
 
   // Clamp panel to viewport on window resize so it never overflows
@@ -2693,7 +2683,7 @@ export default function AgentPanel({
       {/* ── MEMORY TAB — view and edit agent memories ── */}
       {panelTab === 'memory' && circleId && (
         <View nativeID="section-agent-memory" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
-          <AgentMemoryPanel circleId={circleId} userId={userId || undefined} agentName={agent.name} accentColor={agent.color || '#6366f1'} providerType={agent.providerType} />
+          <AgentMemoryPanel circleId={circleId} userId={userId || undefined} agentName={agent.name} accentColor={agent.color || '#6366f1'} />
         </View>
       )}
 
@@ -3063,6 +3053,9 @@ const styles = StyleSheet.create({
     borderLeftColor: '#1e1e3a',
     borderBottomColor: '#1e1e3a',
     ...(Platform.OS === 'web' ? {
+      // position: 'fixed' so popup floats over entire viewport, not constrained to OfficeTab bounds
+      position: 'fixed',
+      zIndex: 100,
       // Multi-layer shadow for 3D "floating card" feel
       boxShadow: '0 24px 60px rgba(0,0,0,0.6), 0 8px 24px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.03) inset',
     } as any : {
