@@ -1342,25 +1342,29 @@ export default function AgentPanel({
   const slideAnim = useRef(new Animated.Value(400)).current;
 
   // ── Resizable panel dimensions ─────────────────────────────────────────────
-  // Defaults to ~85% viewport so it looks like a floating popup with office visible around it.
-  const POPUP_PADDING = 32;  // margin between panel edge and viewport edge
+  // Default size ~65% viewport so it looks like a true centered popup with visible office around it.
+  // User can resize up to near-full-viewport minus padding.
+  const POPUP_PADDING = 32;
+  const DEFAULT_W_RATIO = 0.65;
+  const DEFAULT_H_RATIO = 0.78;
   const getInitialWidth = (): number => {
     if (Platform.OS !== 'web') return 0;
     try {
-      const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('uc_agent_panel_w_v2') : null;
+      const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('uc_agent_panel_w_v3') : null;
       if (stored) return Math.max(360, parseInt(stored, 10));
     } catch {}
     const vw = typeof window !== 'undefined' ? window.innerWidth : 1200;
-    return Math.max(480, vw - POPUP_PADDING * 2);  // near-full viewport minus padding
+    // Cap at 900px on very wide screens so it stays a readable popup, not an ultrawide banner
+    return Math.min(Math.max(560, Math.round(vw * DEFAULT_W_RATIO)), 1000);
   };
   const getInitialHeight = (): number => {
     if (Platform.OS !== 'web') return 0;
     try {
-      const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('uc_agent_panel_h_v2') : null;
+      const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('uc_agent_panel_h_v3') : null;
       if (stored) return Math.max(300, parseInt(stored, 10));
     } catch {}
     const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
-    return Math.max(480, vh - POPUP_PADDING * 2);  // near-full viewport minus padding
+    return Math.max(480, Math.round(vh * DEFAULT_H_RATIO));
   };
   const [panelWidth, setPanelWidth] = useState<number>(getInitialWidth);
   const [panelHeight, setPanelHeight] = useState<number>(getInitialHeight);
@@ -1372,11 +1376,11 @@ export default function AgentPanel({
   // Persist dimensions on change
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof localStorage === 'undefined') return;
-    try { localStorage.setItem('uc_agent_panel_w_v2', String(panelWidth)); } catch {}
+    try { localStorage.setItem('uc_agent_panel_w_v3', String(panelWidth)); } catch {}
   }, [panelWidth]);
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof localStorage === 'undefined') return;
-    try { localStorage.setItem('uc_agent_panel_h_v2', String(panelHeight)); } catch {}
+    try { localStorage.setItem('uc_agent_panel_h_v3', String(panelHeight)); } catch {}
   }, [panelHeight]);
 
   // Clamp panel to viewport on window resize so it never overflows
@@ -1425,30 +1429,29 @@ export default function AgentPanel({
   const [agentNameDraft, setAgentNameDraft] = useState('');
   const [isMainAgent, setIsMainAgent] = useState(false);
 
-  // Pop-out scale animation — grows from click origin (0 → 1) instead of sliding
-  const scaleAnim = useRef(new Animated.Value(0)).current;
+  // Fast popup animation — subtle scale bump + fade
+  const scaleAnim = useRef(new Animated.Value(0.92)).current;
   const opacityAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     if (agent) {
-      scaleAnim.setValue(0.2);
+      scaleAnim.setValue(0.92);
       opacityAnim.setValue(0);
       Animated.parallel([
-        Animated.spring(scaleAnim, {
+        Animated.timing(scaleAnim, {
           toValue: 1,
+          duration: 160,
           useNativeDriver: Platform.OS !== 'web',
-          tension: 90,
-          friction: 12,
         }),
         Animated.timing(opacityAnim, {
           toValue: 1,
-          duration: 180,
+          duration: 140,
           useNativeDriver: Platform.OS !== 'web',
         }),
       ]).start();
-      // Keep slideAnim stable — mobile bottom sheet still uses it
-      slideAnim.setValue(isDesktop ? 0 : 400);
+      // Mobile bottom sheet slide
       if (!isDesktop) {
+        slideAnim.setValue(400);
         Animated.spring(slideAnim, {
           toValue: 0,
           useNativeDriver: Platform.OS !== 'web',
@@ -1458,11 +1461,11 @@ export default function AgentPanel({
       }
     } else {
       Animated.parallel([
-        Animated.timing(scaleAnim, { toValue: 0.3, duration: 160, useNativeDriver: Platform.OS !== 'web' }),
-        Animated.timing(opacityAnim, { toValue: 0, duration: 160, useNativeDriver: Platform.OS !== 'web' }),
+        Animated.timing(scaleAnim, { toValue: 0.92, duration: 120, useNativeDriver: Platform.OS !== 'web' }),
+        Animated.timing(opacityAnim, { toValue: 0, duration: 120, useNativeDriver: Platform.OS !== 'web' }),
       ]).start();
       if (!isDesktop) {
-        Animated.timing(slideAnim, { toValue: 400, duration: 200, useNativeDriver: Platform.OS !== 'web' }).start();
+        Animated.timing(slideAnim, { toValue: 400, duration: 180, useNativeDriver: Platform.OS !== 'web' }).start();
       }
     }
   }, [agent, isDesktop]);
@@ -1679,22 +1682,36 @@ export default function AgentPanel({
   };
 
   return (
+    <>
+      {/* Backdrop — dims the office behind the popup (desktop only) */}
+      {isDesktop && Platform.OS === 'web' && (
+        <Animated.View
+          pointerEvents="auto"
+          style={{
+            position: 'fixed',
+            top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: 'rgba(0,0,0,0.45)',
+            zIndex: 99,
+            opacity: opacityAnim,
+          } as any}
+          // @ts-ignore onClick web only
+          onClick={onClose}
+        />
+      )}
     <Animated.View style={[
       styles.panel,
       isDesktop
         ? {
             transform: [{ scale: scaleAnim }],
             opacity: opacityAnim,
-            ...(Platform.OS === 'web' && popoutOrigin ? {
-              // Origin at click point, relative to panel's top-right position
-              // Panel is positioned at top:POPUP_PADDING, right:POPUP_PADDING
-              // So panel's top-left in viewport = (viewportW - POPUP_PADDING - panelWidth, POPUP_PADDING)
-              // transform-origin is relative to element — compute click offset within element
-              transformOrigin: `${popoutOrigin.x - (viewportW - POPUP_PADDING - panelWidth)}px ${popoutOrigin.y - POPUP_PADDING}px`,
-            } as any : {}),
+            // Center the popup in the viewport
+            width: panelWidth,
+            height: panelHeight,
+            left: Math.max(POPUP_PADDING, (viewportW - panelWidth) / 2),
+            top: Math.max(POPUP_PADDING, (viewportH - panelHeight) / 2),
           }
         : { transform: [{ translateY: slideAnim }] },
-      isDesktop && [styles.panelDesktop, { width: panelWidth, height: panelHeight }],
+      isDesktop && styles.panelDesktop,
     ]}>
       {/* Resize handles — desktop/web only */}
       {isDesktop && Platform.OS === 'web' && (
@@ -1743,7 +1760,11 @@ export default function AgentPanel({
         </Pressable>
       )}
 
-      <ScrollView style={styles.scrollContent} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        style={styles.scrollContent}
+        contentContainerStyle={isDesktop ? { paddingHorizontal: 20, paddingBottom: 32 } : undefined}
+        showsVerticalScrollIndicator={false}
+      >
       {/* Agent header */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
@@ -3015,6 +3036,7 @@ export default function AgentPanel({
 
       </ScrollView>
     </Animated.View>
+    </>
   );
 }
 
@@ -3034,30 +3056,26 @@ const styles = StyleSheet.create({
     maxHeight: '70%' as any,
   },
   panelDesktop: {
-    top: 32,                      // POPUP_PADDING — floats with margin from top
-    bottom: undefined as any,     // explicit height controls vertical size
-    left: 'auto' as any,
-    right: 32,                    // POPUP_PADDING — doesn't touch right edge
+    // Position & size are computed inline (centered in viewport)
+    bottom: undefined as any,
+    right: undefined as any,
     maxHeight: undefined as any,
-    borderRadius: 16,             // rounded on all 4 corners (popup card)
+    borderRadius: 16,
     borderTopLeftRadius: 16,
     borderBottomLeftRadius: 16,
     borderTopRightRadius: 16,
     borderBottomRightRadius: 16,
     borderWidth: 1,
-    borderColor: '#1e1e3a',
-    borderTopWidth: 1,
-    borderLeftWidth: 1,
-    borderBottomWidth: 1,
-    borderRightWidth: 1,
-    borderLeftColor: '#1e1e3a',
-    borderBottomColor: '#1e1e3a',
+    borderColor: '#2a2a3e',
+    // Remove mobile-specific padding; let inner content handle its own
+    paddingHorizontal: 0,
+    paddingBottom: 0,
+    overflow: 'hidden' as any,  // clip children to rounded corners
     ...(Platform.OS === 'web' ? {
-      // position: 'fixed' so popup floats over entire viewport, not constrained to OfficeTab bounds
       position: 'fixed',
       zIndex: 100,
       // Multi-layer shadow for 3D "floating card" feel
-      boxShadow: '0 24px 60px rgba(0,0,0,0.6), 0 8px 24px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.03) inset',
+      boxShadow: '0 24px 60px rgba(0,0,0,0.6), 0 8px 24px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.04) inset',
     } as any : {
       shadowColor: '#000',
       shadowOffset: { width: 0, height: 16 },
@@ -3071,10 +3089,10 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingVertical: 12,
-    paddingHorizontal: 8,
+    paddingHorizontal: 20,
     borderBottomWidth: 1,
     borderBottomColor: '#1e1e3a',
-    marginBottom: 8,
+    marginBottom: 0,
   },
   desktopHeaderTitle: {
     color: '#555',
