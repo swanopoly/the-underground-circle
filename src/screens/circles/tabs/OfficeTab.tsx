@@ -76,6 +76,7 @@ import {
   CircleOfficeAgent,
   loadCircleOfficeAgents,
   publishAgentToCircle,
+  removeCircleOfficeAgent,
   subscribeToCircleOffice,
   PROVIDER_DISPLAY,
   createBlackSwanAgent,
@@ -183,6 +184,8 @@ interface Props {
 
 export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady }: Props) {
   const [selectedAgent, setSelectedAgent] = useState<OfficeAgent | null>(null);
+  // Click origin for pop-out animation (where the user clicked the agent on screen)
+  const [panelOrigin, setPanelOrigin] = useState<{ x: number; y: number } | null>(null);
   const [showCustomize, setShowCustomize] = useState(false);
   const [showMcpHub, setShowMcpHub] = useState(false);
   const [showRewards, setShowRewards] = useState(false);
@@ -1624,13 +1627,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     },
   );
 
-  // Filter agents for current floor — but if none are assigned yet, show all on current floor
+  // Filter agents for current floor using explicit per-floor assignments.
   const agents = useMemo(() => {
     const floorIds = currentFloor?.agentIds;
-    if (!floorIds || floorIds.length === 0) return displayAgents;
+    const hasAnyAssignments = floors.some(f => (f.agentIds?.length || 0) > 0);
+    if (!hasAnyAssignments) {
+      return displayAgents.slice(0, DESK_POSITIONS.length);
+    }
+    if (!floorIds || floorIds.length === 0) return [];
     const onFloor = new Set(floorIds);
     const filtered = displayAgents.filter(a => onFloor.has(a.id));
-    if (filtered.length === 0) return displayAgents;
+    if (filtered.length === 0) return [];
     // Ensure BlackSwan first, then Claude Code, then sort remaining
     const blackSwan = filtered.find(a => a.id === DEFAULT_AGENT.id);
     const claudeCode = filtered.filter(a => a.id !== DEFAULT_AGENT.id && a.providerType === 'claude-code');
@@ -1641,30 +1648,31 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       const tb = b.lastActive ? new Date(b.lastActive).getTime() : 0;
       return tb - ta;
     });
-    return [...(blackSwan ? [blackSwan] : []), ...claudeCode, ...rest];
-  }, [displayAgents, currentFloor?.agentIds, getDisplayAgentSortRank]);
+    return [...(blackSwan ? [blackSwan] : []), ...claudeCode, ...rest].slice(0, DESK_POSITIONS.length);
+  }, [displayAgents, currentFloor?.agentIds, floors, getDisplayAgentSortRank]);
 
-  // Auto-assign new agents to first floor (runs only when agent count changes)
-  const prevAgentCountRef = useRef(0);
+  // Auto-distribute agents across floors by desk capacity so each floor gets a unique roster.
+  const prevAgentLayoutKeyRef = useRef('');
   useEffect(() => {
     if (displayAgents.length === 0 || floors.length === 0) return;
-    if (displayAgents.length === prevAgentCountRef.current) return;
-    prevAgentCountRef.current = displayAgents.length;
-
-    const allAgentIds = displayAgents.map(a => a.id);
-    const assignedIds = new Set(floors.flatMap(f => f.agentIds));
-    const unassignedIds = allAgentIds.filter(id => !assignedIds.has(id));
-
-    if (unassignedIds.length > 0) {
-      setFloors(prev => {
-        const targetFloorId = prev.some(f => f.id === currentFloorId) ? currentFloorId : prev[0].id;
-        return prev.map((f) =>
-          f.id === targetFloorId ? { ...f, agentIds: [...f.agentIds, ...unassignedIds] } : f
-        );
-      });
-    }
+    const orderedFloors = [...floors].sort((a, b) => a.order - b.order);
+    const capacity = DESK_POSITIONS.length;
+    const nextAssignments = new Map<string, string[]>();
+    orderedFloors.forEach((floor, index) => {
+      const start = index * capacity;
+      nextAssignments.set(floor.id, displayAgents.slice(start, start + capacity).map(agent => agent.id));
+    });
+    const layoutKey = orderedFloors.map(floor => `${floor.id}:${(nextAssignments.get(floor.id) || []).join(',')}`).join('|');
+    if (layoutKey === prevAgentLayoutKeyRef.current) return;
+    prevAgentLayoutKeyRef.current = layoutKey;
+    setFloors(prev => prev.map(floor => {
+      const nextIds = nextAssignments.get(floor.id) || [];
+      return JSON.stringify(floor.agentIds || []) === JSON.stringify(nextIds)
+        ? floor
+        : { ...floor, agentIds: nextIds };
+    }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [displayAgents.length]);
+  }, [displayAgents, floors]);
 
   // Update status history when agent state materially changes
   useEffect(() => {
@@ -1858,14 +1866,34 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const scaledH = FLOOR_H * officeScale;
   const needsHScroll = rawScale < 0.55;
 
-  const handleAgentPress = useCallback((agent: OfficeAgent) => {
+  const handleAgentPress = useCallback((agent: OfficeAgent, event?: any) => {
     if (editMode) return;
+    // Capture click coordinates for pop-out animation origin (web only)
+    if (Platform.OS === 'web' && event) {
+      const x = event.nativeEvent?.pageX ?? event.pageX;
+      const y = event.nativeEvent?.pageY ?? event.pageY;
+      if (typeof x === 'number' && typeof y === 'number') {
+        setPanelOrigin({ x, y });
+      }
+    }
     setSelectedAgent(prev => prev?.id === agent.id ? null : agent);
   }, [editMode]);
 
   const handleOpenAutomate = useCallback(() => {
     setTerminalInitialTab('automations');
     setTerminalSize('full');
+  }, []);
+
+  const handleRemovePublishedAgent = useCallback(async (agent: OfficeAgent) => {
+    const publishedAgentId = agent.id.startsWith('db::') ? agent.sessionKey : null;
+    if (!publishedAgentId) return;
+    const { error } = await removeCircleOfficeAgent(publishedAgentId);
+    if (error) {
+      console.error('[OfficeTab] Failed to remove published agent:', error);
+      return;
+    }
+    setSelectedAgent(null);
+    setCircleOfficeAgents(prev => prev.filter(a => a.id !== publishedAgentId));
   }, []);
 
   const handleFloorPress = (x: number, y: number) => {
@@ -2226,6 +2254,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       f.id === currentFloorId ? {
         ...f,
         furniture: f.furniture.map(item => item.id === id ? { ...item, itemWidth: w, itemHeight: h } : item),
+      } : f
+    ));
+  };
+
+  const handleFurnitureItemUpdate = (id: string, fields: Partial<FurnitureItem>) => {
+    setFloors(prev => prev.map(f =>
+      f.id === currentFloorId ? {
+        ...f,
+        furniture: f.furniture.map(item => item.id === id ? { ...item, ...fields } : item),
       } : f
     ));
   };
@@ -3179,6 +3216,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                     onPress={() => handleSwitchFloor(floor.id)}
                     style={[
                       styles.floorChip,
+                      editMode && floors.length > 1 && styles.floorChipWithDelete,
                       isActive && styles.floorChipActive,
                       Platform.OS === 'web' && { cursor: 'pointer' } as any
                     ]}
@@ -3252,9 +3290,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             </Pressable>
             <Pressable
               onPress={toggleSessionMemoryMode}
+              disabled={savingSessionMemoryMode}
               style={[
                 styles.toolbarBtn,
                 sessionMemoryMode === 'shared' && styles.toolbarBtnActiveMemory,
+                savingSessionMemoryMode && { opacity: 0.7 },
                 Platform.OS === 'web' && { cursor: 'pointer' } as any,
               ]}
             >
@@ -3266,7 +3306,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                 {sessionMemoryMode === 'shared' ? 'Memory Shared' : 'Memory Private'}
               </Text>
             </Pressable>
-            <Pressable onPress={() => setShowMcpHub(true)} style={[styles.toolbarBtn,
+            <Pressable onPress={() => setShowMcpHub(v => !v)} style={[styles.toolbarBtn,
+              showMcpHub && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' },
               Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
               <Text style={styles.toolbarBtnIcon}>🔌</Text>
               <Text style={styles.toolbarBtnText}>MCP</Text>
@@ -3286,6 +3327,21 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               </Pressable>
             )}
           </View>
+        </View>
+      )}
+
+      {viewMode === 'office' && (showGitHubFeed || showSoundMixer) && (
+        <View style={styles.officeDashboardPanels}>
+          {showGitHubFeed && (
+            <View style={styles.officeDashboardPanel}>
+              <GitHubWallFeed circleId={circleId} accentColor={accentColor} />
+            </View>
+          )}
+          {showSoundMixer && Platform.OS === 'web' && (
+            <View style={[styles.officeDashboardPanel, styles.soundPanelWrap]}>
+              <SoundMixer accentColor={accentColor} />
+            </View>
+          )}
         </View>
       )}
 
@@ -3570,8 +3626,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                       onFurnitureMove={editMode ? handleFurnitureMove : undefined}
                       onFurnitureResize={editMode ? handleFurnitureResize : undefined}
                       onFurnitureInteract={handleFurnitureInteract}
+                      onFurnitureItemUpdate={handleFurnitureItemUpdate}
                       onPokerAction={handlePokerAction}
-                      agents={displayAgents}
+                      agents={agents}
                       selectedFurnitureId={editMode ? selectedFurnitureId : null}
                     />
                     <Whiteboard editable={editMode} notes={whiteboardNotes} onNotesChange={setWhiteboardNotes} agents={displayAgents} statusHistory={statusHistory} cronJobs={cronJobs} circleId={circleId} connectedCount={connections.filter(c => c.status === 'connected').length} totalConnections={connections.length} />
@@ -3874,9 +3931,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       {!editMode && (
         <AgentPanel
           agent={selectedAgent}
-          onClose={() => { setSelectedAgent(null); }}
+          onClose={() => { setSelectedAgent(null); setPanelOrigin(null); }}
           isDesktop={isDesktop}
           onRenameAgent={handleRenameAgent}
+          onRemoveAgent={handleRemovePublishedAgent}
           sessionTags={sessionTags}
           onAddSessionTag={handleAddSessionTag}
           onRemoveSessionTag={handleRemoveSessionTag}
@@ -3885,6 +3943,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           onAppearanceChange={(id, a) => setAppearances(prev => ({ ...prev, [id]: a }))}
           environmentType={currentTheme.environmentType}
           onRunCommand={handleRunCommand}
+          popoutOrigin={panelOrigin}
         />
       )}
 
@@ -5441,6 +5500,26 @@ const styles = StyleSheet.create({
   },
   floorList: { gap: 4, flexDirection: 'row', alignItems: 'center' },
   barActions: { flexDirection: 'row', alignItems: 'center', gap: 5, flexShrink: 0 },
+  officeDashboardPanels: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    paddingHorizontal: 8,
+    paddingTop: 8,
+    paddingBottom: 4,
+    flexWrap: 'wrap',
+    backgroundColor: '#000000',
+    borderBottomWidth: 1,
+    borderBottomColor: '#111111',
+  },
+  officeDashboardPanel: {
+    minWidth: 220,
+    maxWidth: 360,
+    flexShrink: 1,
+  },
+  soundPanelWrap: {
+    maxWidth: 220,
+  },
   floorChip: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     paddingHorizontal: 8, paddingVertical: 4,
@@ -5562,9 +5641,25 @@ const styles = StyleSheet.create({
   editScrollArrowText: {
     fontSize: 22, fontWeight: '700' as const,
   },
-  floorChipWrap: { flexDirection: 'row', alignItems: 'center', marginRight: 4 },
-  floorDeleteBtn: { marginLeft: -2, marginRight: 6, width: 14, height: 14, borderRadius: 7, backgroundColor: '#ffffff10', borderWidth: 1, borderColor: '#ffffff20', alignItems: 'center', justifyContent: 'center', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
-  floorDeleteBtnText: { fontSize: 7, color: '#ef4444', fontWeight: '800', lineHeight: 14 },
+  floorChipWrap: { position: 'relative', flexDirection: 'row', alignItems: 'center', marginRight: 6 },
+  floorChipWithDelete: { paddingRight: 18 },
+  floorDeleteBtn: {
+    position: 'absolute',
+    right: 2,
+    top: '50%',
+    marginTop: -8,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: '#160b0b',
+    borderWidth: 1,
+    borderColor: '#ef444455',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 5,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  floorDeleteBtnText: { fontSize: 8, color: '#ef4444', fontWeight: '800', lineHeight: 16 },
   clearBtn: {
     marginTop: 6, paddingVertical: 4, paddingHorizontal: 10, borderRadius: 4,
     backgroundColor: '#ffffff10', alignSelf: 'flex-start',
