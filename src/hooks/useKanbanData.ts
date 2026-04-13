@@ -13,6 +13,8 @@ import { inferTaskCapabilityProfile, getTaskCapabilityProfile } from '../lib/tas
 import {
   createInitialTaskRunSteps, appendTaskRunStep, createTaskRunArtifact,
   ensureTaskAcceptanceChecks, evaluateTaskRunChecks, canTaskRunMarkComplete,
+  buildTaskExecutionMemoryBrief, saveTaskCompletionMemory, saveTaskBlockerMemory, saveTaskRunResumeSnapshot,
+  loadCollaborativeHandoffs, markCollaborativeHandoffsConsumed, saveTaskRunHandoff,
 } from '../lib/taskExecutionRuntime';
 import { loadCircleOfficeAgents, CircleOfficeAgent, createBlackSwanAgent } from '../lib/circleOffice';
 import {
@@ -56,6 +58,7 @@ export interface KanbanData {
   uploadTaskFile: (taskId: string, file: File) => Promise<TaskAttachment | null>;
   fetchTaskRuns: (taskId: string) => Promise<TaskRun[]>;
   runAgentOnTask: (taskId: string, agentId?: string, options?: AgentRunOptions) => Promise<string | null>;
+  runAssignedAgentsOnTask: (taskId: string, options?: AgentRunOptions) => Promise<string | null>;
   updateFocusChain: (taskId: string, chain: FocusChainItem[]) => Promise<void>;
   toggleTaskMode: (taskId: string, mode: 'plan' | 'execute') => Promise<void>;
   recordTaskCost: (taskId: string, cost: number, tokens: number, durationMs: number) => Promise<void>;
@@ -70,12 +73,19 @@ export interface AgentRunOptions {
   thinkingLevel?: ThinkingLevel;
   model?: AgentModel;
   mode?: AgentMode;
+  parentRunId?: string;
+  triggerSource?: 'manual' | 'collaborative';
+  collaborationBrief?: string;
+  handoffToAgentId?: string | null;
+  handoffToAgentName?: string | null;
+  handoffObjective?: string | null;
 }
 
 export interface CreateTaskFields {
   title: string;
   description?: string;
   image_url?: string | null;
+  room_id?: string | null;
   priority?: TaskPriority;
   status?: TaskStatus;
   assigned_to?: string | null;
@@ -88,6 +98,7 @@ export interface CreateTaskFields {
   plan_step_id?: string | null;
   focus_chain?: FocusChainItem[];
   mode?: 'plan' | 'execute';
+  mission_id?: string | null;
 }
 
 const TASK_RUN_MARKER_START = '[[TASK_RUN_JSON]]';
@@ -107,6 +118,179 @@ function uniqueAgentIds(...sources: Array<Array<string | null | undefined> | str
     }
   }
   return output;
+}
+
+type ProjectTeamContext = {
+  room: { id: string; name: string; status: string; description?: string | null; color?: string | null } | null;
+  agentIds: string[];
+  agentNames: string[];
+  activityLines: string[];
+};
+
+function describeAssignmentRole(role: TaskAgentAssignment['role'] | undefined): string {
+  switch (role) {
+    case 'owner':
+      return 'Own the final outcome, integrate work, and move the task toward completion.';
+    case 'planner':
+      return 'Break the work down, clarify approach, and set up the downstream agents.';
+    case 'reviewer':
+      return 'Critically review the work, catch gaps, and recommend corrections or completion.';
+    case 'observer':
+      return 'Watch for risks, edge cases, or coordination issues and report them clearly.';
+    case 'executor':
+    default:
+      return 'Execute concrete task work and produce actionable output.';
+  }
+}
+
+function buildCollaborativeAgentBrief(params: {
+  task: KanbanTask;
+  assignment?: TaskAgentAssignment | null;
+  agentName: string;
+  orderedAgentIds: string[];
+  orderedAgentNames: string[];
+  priorOutputs: Array<{ agentName: string; summary: string }>;
+  roleObjective?: string;
+}): string {
+  const role = params.assignment?.role || 'executor';
+  const parts: string[] = [
+    '=== COLLABORATION BRIEF ===',
+    `You are part of a coordinated multi-agent run for this task.`,
+    `Your role: ${role}`,
+    `Role guidance: ${describeAssignmentRole(role)}`,
+    params.roleObjective ? `Your specific objective: ${params.roleObjective}` : '',
+    `Team order: ${params.orderedAgentNames.join(' -> ')}`,
+  ];
+
+  if (params.priorOutputs.length > 0) {
+    parts.push('Previous agent handoffs:');
+    for (const prior of params.priorOutputs.slice(-3)) {
+      parts.push(`- ${prior.agentName}: ${prior.summary.slice(0, 220)}`);
+    }
+  } else {
+    parts.push('You are the first active agent in this collaborative sequence.');
+  }
+
+  parts.push('Your output should make life easier for the next assigned agent, not restart from scratch.');
+  parts.push('Be explicit about what you completed, what remains, and what the next agent should do.');
+
+  return parts.join('\n');
+}
+
+function buildCollaborativeExecutionPlan(params: {
+  task: KanbanTask;
+  assignments: TaskAgentAssignment[];
+  agentNamesById: Map<string, string>;
+}): Array<{ agentId: string; agentName: string; role: TaskAgentAssignment['role']; objective: string }> {
+  const orderedAssignments = params.assignments.length > 0
+    ? params.assignments
+    : uniqueAgentIds(params.task.assigned_agent_ids, params.task.assigned_agent_id).map((agentId, index) => ({
+        id: `synthetic-${agentId}`,
+        task_id: params.task.id,
+        circle_id: params.task.circle_id,
+        agent_id: agentId,
+        role: index === 0 ? 'owner' as const : 'executor' as const,
+        assignment_type: 'legacy' as const,
+        required_for_completion: true,
+        required_for_review: false,
+        status: 'assigned' as const,
+        order_index: index,
+      }));
+
+  return orderedAssignments
+    .slice()
+    .sort((a, b) => (a.order_index ?? 999) - (b.order_index ?? 999))
+    .map((assignment, index, list) => {
+      const agentName = params.agentNamesById.get(assignment.agent_id)
+        || (assignment.agent_id === 'blackswan-default' ? 'BlackSwan' : assignment.agent_id);
+      const role = assignment.role || 'executor';
+      const hasLaterAgents = index < list.length - 1;
+
+      let objective = '';
+      switch (role) {
+        case 'planner':
+          objective = `Break the task into concrete execution phases, identify risks, and set up the downstream agents with a clear approach.`;
+          break;
+        case 'reviewer':
+          objective = `Review the accumulated work, identify gaps or regressions, and recommend the exact fixes or final state decision.`;
+          break;
+        case 'observer':
+          objective = `Watch for blockers, contradictions, and edge cases in the collaborative work. Surface risks and missed constraints clearly.`;
+          break;
+        case 'owner':
+          objective = hasLaterAgents
+            ? `Own the outcome. Start the work, set direction, and later integrate the team output toward completion.`
+            : `Own the final outcome. Integrate the work, close open loops, and determine whether the task is actually complete.`;
+          break;
+        case 'executor':
+        default:
+          objective = hasLaterAgents
+            ? `Execute a concrete slice of the task and leave a clean handoff for the next assigned agent.`
+            : `Execute the remaining concrete work and push the task as far toward completion as possible.`;
+          break;
+      }
+
+      if (params.task.description) {
+        objective += ` Keep the task description in scope: ${params.task.description.slice(0, 180)}.`;
+      }
+
+      return {
+        agentId: assignment.agent_id,
+        agentName,
+        role,
+        objective,
+      };
+    });
+}
+
+async function resolveProjectAgentIdsForRoom(roomId: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('project_room_agents')
+    .select('agent_session_key, status')
+    .eq('room_id', roomId)
+    .neq('status', 'offline')
+    .order('last_active_at', { ascending: false });
+  if (error) {
+    console.warn('[useKanbanData] project room agent lookup failed:', error.message);
+    return [];
+  }
+  return uniqueAgentIds((data || []).map((row: any) => row.agent_session_key));
+}
+
+async function fetchProjectTeamContext(roomId: string): Promise<ProjectTeamContext> {
+  const [{ data: room }, { data: roomAgents }, { data: activity }] = await Promise.all([
+    supabase
+      .from('project_rooms')
+      .select('id, name, status, description, color')
+      .eq('id', roomId)
+      .maybeSingle(),
+    supabase
+      .from('project_room_agents')
+      .select('agent_session_key, agent_name, status, current_task, last_active_at')
+      .eq('room_id', roomId)
+      .order('last_active_at', { ascending: false })
+      .limit(8),
+    supabase
+      .from('project_room_activity')
+      .select('agent_name, activity_type, title, body, created_at')
+      .eq('room_id', roomId)
+      .order('created_at', { ascending: false })
+      .limit(6),
+  ]);
+
+  const activeAgents = (roomAgents || []).filter((row: any) => row.status !== 'offline');
+  return {
+    room: room || null,
+    agentIds: uniqueAgentIds(activeAgents.map((row: any) => row.agent_session_key)),
+    agentNames: activeAgents
+      .map((row: any) => String(row.agent_name || row.agent_session_key || '').trim())
+      .filter(Boolean),
+    activityLines: (activity || []).slice(0, 5).map((row: any) => {
+      const title = String(row.title || '').trim();
+      const body = String(row.body || '').trim();
+      return `${row.agent_name || 'Agent'} [${row.activity_type || 'activity'}]: ${(title || body).slice(0, 220)}`;
+    }),
+  };
 }
 
 function normalizeTask(task: any): KanbanTask {
@@ -353,7 +537,7 @@ export function useKanbanData(circleId: string): KanbanData {
     try {
       const { data, error } = await supabase
         .from('tasks')
-        .select('*, creator:profiles!tasks_created_by_fkey(username, display_name), assignee:profiles!tasks_assigned_to_fkey(username, display_name), goal:goals!tasks_goal_id_fkey(id, name, status)')
+        .select('*, creator:profiles!tasks_created_by_fkey(username, display_name), assignee:profiles!tasks_assigned_to_fkey(username, display_name), goal:goals!tasks_goal_id_fkey(id, name, status), room:project_rooms!tasks_room_id_fkey(id, name, status, color)')
         .eq('circle_id', circleId)
         .order('position', { ascending: true })
         .limit(200);
@@ -600,7 +784,10 @@ export function useKanbanData(circleId: string): KanbanData {
   const createTask = useCallback(async (fields: CreateTaskFields) => {
     if (!currentUserId || !fields.title.trim()) return;
     const status = fields.status || 'todo';
-    const desiredAgentIds = uniqueAgentIds(fields.assigned_agent_ids, fields.assigned_agent_id);
+    const inheritedRoomAgentIds = fields.room_id && (!fields.assigned_agent_ids || fields.assigned_agent_ids.length === 0) && !fields.assigned_agent_id
+      ? await resolveProjectAgentIdsForRoom(fields.room_id)
+      : [];
+    const desiredAgentIds = uniqueAgentIds(fields.assigned_agent_ids, fields.assigned_agent_id, inheritedRoomAgentIds);
     const primaryAgentId = desiredAgentIds[0] || null;
     const completionPolicy = fields.completion_policy || (desiredAgentIds.length > 1 ? 'all_assigned' : 'single_owner');
 
@@ -613,6 +800,7 @@ export function useKanbanData(circleId: string): KanbanData {
       title: fields.title.trim(),
       description: fields.description?.trim() || null,
       image_url: fields.image_url || null,
+      room_id: fields.room_id || null,
       priority: fields.priority || 'normal',
       status,
       assigned_to: fields.assigned_to || null,
@@ -674,14 +862,39 @@ export function useKanbanData(circleId: string): KanbanData {
 
     if (newStatus === 'done' && currentUserId) {
       awardXP(currentUserId, getXPForAction('task_complete'), 'task_complete', { task_id: taskId }).catch(console.error);
+
+      // Auto-generate proof-of-work if task is linked to a mission
+      const task = tasks.find(t => t.id === taskId);
+      if (task && (task as any).mission_id) {
+        (async () => {
+          try {
+            const { addProofOfWork } = await import('../lib/missions');
+            await addProofOfWork({
+              circle_id: circleId,
+              mission_id: (task as any).mission_id,
+              user_id: currentUserId,
+              pow_type: 'manual',
+              title: `Completed: ${task.title}`,
+              detail: { task_id: taskId, source: 'kanban' },
+            });
+          } catch (e) {
+            console.warn('Failed to create proof-of-work for completed task:', e);
+          }
+        })();
+      }
     }
-  }, [tasks, currentUserId, fetchTasks]);
+  }, [tasks, currentUserId, circleId, fetchTasks]);
 
   const updateTask = useCallback(async (taskId: string, fields: Partial<KanbanTask>) => {
     const managesAssignments = Object.prototype.hasOwnProperty.call(fields, 'assigned_agent_ids') || Object.prototype.hasOwnProperty.call(fields, 'assigned_agent_id');
+    const shouldInheritRoomAgents = Object.prototype.hasOwnProperty.call(fields, 'room_id')
+      && !managesAssignments
+      && !!fields.room_id;
     const desiredAgentIds = managesAssignments
       ? uniqueAgentIds((fields as any).assigned_agent_ids, fields.assigned_agent_id)
-      : null;
+      : shouldInheritRoomAgents
+        ? await resolveProjectAgentIdsForRoom(fields.room_id as string)
+        : null;
 
     const payload: any = { ...fields };
     delete payload.assigned_agent_ids;
@@ -708,7 +921,7 @@ export function useKanbanData(circleId: string): KanbanData {
       return;
     }
 
-    if (managesAssignments && desiredAgentIds) {
+    if ((managesAssignments || shouldInheritRoomAgents) && desiredAgentIds) {
       await syncTaskAssignments(taskId, desiredAgentIds, desiredAgentIds[0] || null);
     }
 
@@ -904,6 +1117,15 @@ export function useKanbanData(circleId: string): KanbanData {
     // ── Task execution runtime: infer profile ─────────────────────────
     const profileKey = (task as any).capability_profile_key || inferTaskCapabilityProfile({ title: task.title, description: task.description || undefined });
     const profile = getTaskCapabilityProfile(profileKey);
+    const projectTeamContext = task.room_id ? await fetchProjectTeamContext(task.room_id).catch(() => null) : null;
+    const structuredHandoffs = options?.parentRunId && options?.triggerSource === 'collaborative'
+      ? await loadCollaborativeHandoffs({
+          taskId: task.id,
+          orchestratorRunId: options.parentRunId,
+          agentId: targetAgentId,
+          limit: 3,
+        }).catch(() => [])
+      : [];
 
     const parts: string[] = [];
     if (mode === 'plan') {
@@ -925,10 +1147,65 @@ export function useKanbanData(circleId: string): KanbanData {
     if (task.due_date) parts.push(`Due: ${task.due_date}`);
     if (task.assignee) parts.push(`Assigned member: ${task.assignee.display_name || task.assignee.username}`);
     if (task.goal) parts.push(`Goal: ${task.goal.name} (${task.goal.status})`);
+    if (projectTeamContext?.room) {
+      parts.push(`Project room: ${projectTeamContext.room.name} (${projectTeamContext.room.status})`);
+      if (projectTeamContext.room.description) {
+        parts.push(`Project context: ${projectTeamContext.room.description}`);
+      }
+    } else if (task.room?.name) {
+      parts.push(`Project room: ${task.room.name} (${task.room.status})`);
+    }
     if (task.focus_chain && task.focus_chain.length > 0) {
       parts.push(`Focus chain: ${task.focus_chain.map(item => `${item.done ? '[x]' : '[ ]'} ${item.text}`).join(' | ')}`);
     }
     if (commentHistory) parts.push(commentHistory);
+    if (options?.collaborationBrief) {
+      parts.push('');
+      parts.push(options.collaborationBrief);
+    }
+    if (structuredHandoffs.length > 0) {
+      parts.push('');
+      parts.push('=== STRUCTURED HANDOFFS ===');
+      for (const handoff of structuredHandoffs) {
+        parts.push(`From: ${handoff.from_agent_name || 'Previous agent'}`);
+        if (handoff.objective) parts.push(`Objective: ${handoff.objective}`);
+        if (handoff.summary) parts.push(`Summary: ${handoff.summary}`);
+        if (handoff.blockers.length > 0) parts.push(`Blockers: ${handoff.blockers.join('; ')}`);
+        if (handoff.next_actions.length > 0) parts.push(`Next actions: ${handoff.next_actions.join('; ')}`);
+        if (handoff.deliverable_excerpt) parts.push(`Deliverable excerpt: ${handoff.deliverable_excerpt}`);
+        parts.push('---');
+      }
+    }
+    if (projectTeamContext?.room) {
+      parts.push('');
+      parts.push('=== PROJECT TEAM CONTEXT ===');
+      parts.push(`Room: ${projectTeamContext.room.name}`);
+      if (projectTeamContext.agentNames.length > 0) {
+        parts.push(`Project agents: ${projectTeamContext.agentNames.join(', ')}`);
+      }
+      if (projectTeamContext.activityLines.length > 0) {
+        parts.push('Recent room activity:');
+        for (const line of projectTeamContext.activityLines) parts.push(`- ${line}`);
+      }
+    }
+
+    try {
+      const taskMemoryBrief = await buildTaskExecutionMemoryBrief({
+        circleId: task.circle_id,
+        userId: currentUserId,
+        roomId: task.room_id || undefined,
+        taskId: task.id,
+        title: task.title,
+        description: task.description || undefined,
+        profileKey,
+        agentId: targetAgentId,
+        agentName: targetAgentName,
+      });
+      if (taskMemoryBrief) {
+        parts.push('');
+        parts.push(taskMemoryBrief);
+      }
+    } catch {}
 
     // Task runtime context
     if (profile) {
@@ -968,16 +1245,20 @@ export function useKanbanData(circleId: string): KanbanData {
       circle_id: task.circle_id,
       assignment_id: assignment?.id || null,
       agent_id: targetAgentId,
+      parent_run_id: options?.parentRunId || null,
       run_kind: mode === 'plan' ? 'plan' : 'execute',
       status: 'running',
-      trigger_source: 'manual',
+      trigger_source: options?.triggerSource || 'manual',
       input_payload: {
         options: { thinkingLevel, model: modelWithThinking || null, mode },
         task_snapshot: {
           id: task.id,
+          room_id: task.room_id || null,
           title: task.title,
+          description: task.description || null,
           status: task.status,
           priority: task.priority,
+          capability_profile_key: profileKey,
           goal_id: task.goal_id || null,
           assigned_agent_ids: uniqueAgentIds(task.assigned_agent_ids, task.assigned_agent_id),
           completion_policy: resolveCompletionPolicy(task),
@@ -1041,6 +1322,7 @@ export function useKanbanData(circleId: string): KanbanData {
       const cost = estimateRunCost(tokenCount);
       const nextStatus = resolveNextStatus(task, parsed.output, mode, targetAgentId);
       const assignmentStatus = mode === 'plan' ? 'assigned' : parsed.output.mark_complete ? 'completed' : 'in_progress';
+      let completionGatePassed = nextStatus === 'done';
 
       await upsertAssignmentStatus(task, targetAgentId, assignmentStatus);
       await applyTaskRunMetrics(taskId, cost, tokenCount, durationMs, nextStatus);
@@ -1055,6 +1337,39 @@ export function useKanbanData(circleId: string): KanbanData {
         model_used: result.model || modelWithThinking || null,
         completed_at: new Date().toISOString(),
       });
+      if (taskRunId) {
+        saveTaskRunResumeSnapshot({
+          taskRunId,
+          taskId: task.id,
+          circleId: task.circle_id,
+          summary: parsed.output.summary || deliverable.slice(0, 240),
+          blockers: Array.isArray(parsed.output.blockers) ? parsed.output.blockers : [],
+          nextActions: Array.isArray(parsed.output.next_actions) ? parsed.output.next_actions : [],
+          artifacts: attachments,
+          deliverable,
+        }).catch(() => {});
+      }
+      if (structuredHandoffs.length > 0) {
+        markCollaborativeHandoffsConsumed(structuredHandoffs.map(handoff => handoff.id)).catch(() => {});
+      }
+      if (taskRunId && options?.parentRunId && options?.handoffToAgentId) {
+        saveTaskRunHandoff({
+          taskId: task.id,
+          circleId: task.circle_id,
+          orchestratorRunId: options.parentRunId,
+          fromTaskRunId: taskRunId,
+          fromAgentId: targetAgentId,
+          fromAgentName: targetAgentName,
+          toAgentId: options.handoffToAgentId,
+          toAgentName: options.handoffToAgentName || null,
+          objective: options.handoffObjective || undefined,
+          summary: parsed.output.summary || deliverable.slice(0, 240),
+          blockers: Array.isArray(parsed.output.blockers) ? parsed.output.blockers : [],
+          nextActions: Array.isArray(parsed.output.next_actions) ? parsed.output.next_actions : [],
+          artifacts: attachments,
+          deliverable,
+        }).catch(() => {});
+      }
       const modeTag = mode === 'plan' ? '[PLAN]' : '[EXEC]';
       const modelTag = model ? ` | ${model}` : '';
       const thinkTag = thinkingLevel !== 'balanced' ? ` | ${thinkingLevel}` : '';
@@ -1086,14 +1401,49 @@ export function useKanbanData(circleId: string): KanbanData {
         if (parsed.output.mark_complete && nextStatus === 'done') {
           const canComplete = await canTaskRunMarkComplete(taskRunId, task.id, task.circle_id);
           if (!canComplete) {
+            completionGatePassed = false;
             // Agent says complete but checks/approvals block it — override to in_progress
             await supabase.from('tasks').update({ status: 'in_progress' }).eq('id', taskId);
             appendTaskRunStep(taskRunId, task.id, task.circle_id, 'check_eval', 'Completion blocked', 'Required checks or approvals not yet passed').catch(() => {});
+          } else {
+            completionGatePassed = true;
           }
         }
 
         // Finalize step
         appendTaskRunStep(taskRunId, task.id, task.circle_id, 'finalize', 'Run finalized').catch(() => {});
+      }
+
+      if (mode === 'execute' && parsed.output.mark_complete && completionGatePassed) {
+        saveTaskCompletionMemory({
+          circleId: task.circle_id,
+          userId: currentUserId,
+          taskId: task.id,
+          title: task.title,
+          description: task.description || undefined,
+          profileKey,
+          agentId: targetAgentId,
+          agentName: targetAgentName,
+          summary: parsed.output.summary,
+          deliverable,
+          artifacts: attachments,
+        }).catch(() => {});
+      }
+
+      if (mode === 'execute' && (!parsed.output.mark_complete || !completionGatePassed)) {
+        saveTaskBlockerMemory({
+          circleId: task.circle_id,
+          userId: currentUserId,
+          taskId: task.id,
+          title: task.title,
+          description: task.description || undefined,
+          profileKey,
+          agentId: targetAgentId,
+          agentName: targetAgentName,
+          blockers: Array.isArray(parsed.output.blockers) ? parsed.output.blockers : [],
+          nextActions: Array.isArray(parsed.output.next_actions) ? parsed.output.next_actions : [],
+          summary: parsed.output.summary,
+        }).catch(() => {});
       }
 
       if (nextStatus === 'done' && currentUserId) {
@@ -1131,6 +1481,150 @@ export function useKanbanData(circleId: string): KanbanData {
     updateTaskRunRecord,
     upsertAssignmentStatus,
   ]);
+
+  const runAssignedAgentsOnTask = useCallback(async (taskId: string, options?: AgentRunOptions): Promise<string | null> => {
+    const task = tasks.find(t => t.id === taskId);
+    if (!task || !currentUserId) return null;
+    const completionPolicy = resolveCompletionPolicy(task);
+    const projectTeamContext = task.room_id ? await fetchProjectTeamContext(task.room_id).catch(() => null) : null;
+
+    const targetAgentIds = uniqueAgentIds(
+      (task.agent_assignments || [])
+        .slice()
+        .sort((a, b) => (a.order_index ?? 999) - (b.order_index ?? 999))
+        .map(assignment => assignment.agent_id),
+      task.assigned_agent_ids,
+      task.assigned_agent_id,
+      projectTeamContext?.agentIds || [],
+    );
+
+    const orderedAgents = targetAgentIds.length > 0 ? targetAgentIds : ['blackswan-default'];
+    const outputs: string[] = [];
+    const handoffs: Array<{ agentName: string; summary: string }> = [];
+    const agentNamesById = new Map(orderedAgents.map(agentId => ([
+      agentId,
+      agents.find(agent => agent.id === agentId)?.name ||
+      (agentId === 'blackswan-default' ? 'BlackSwan' : agentId),
+    ])));
+    const executionPlan = buildCollaborativeExecutionPlan({
+      task,
+      assignments: (task.agent_assignments || []).filter(assignment => orderedAgents.includes(assignment.agent_id)),
+      agentNamesById,
+    });
+    const orderedAgentNames = executionPlan.map(step => step.agentName);
+    const orchestratorRunId = await createTaskRunRecord({
+      task_id: task.id,
+      circle_id: task.circle_id,
+      assignment_id: null,
+      agent_id: 'orchestrator',
+      parent_run_id: null,
+      run_kind: 'orchestrator',
+      status: 'running',
+      trigger_source: 'manual',
+      input_payload: {
+        mode: options?.mode || 'execute',
+        strategy: 'sequential_collaboration',
+        assigned_agent_ids: orderedAgents,
+        completion_policy: completionPolicy,
+        room_id: task.room_id || null,
+        project_team: projectTeamContext ? {
+          room: projectTeamContext.room,
+          agents: projectTeamContext.agentNames,
+        } : null,
+        execution_plan: executionPlan,
+      },
+      summary: `Coordinating ${orderedAgents.length} assigned agents`,
+      model_used: options?.model && options.model !== 'auto' ? options.model : null,
+    });
+
+    await insertTaskComment({
+      taskId,
+      taskRunId: orchestratorRunId,
+      content: `[ORCHESTRATOR] Starting collaborative ${options?.mode || 'execute'} run with ${orderedAgents.length} assigned agents.\nProject: ${projectTeamContext?.room?.name || task.room?.name || 'none'}\nOrder: ${orderedAgentNames.join(' -> ')}\nCompletion policy: ${completionPolicy}\nPlan:\n${executionPlan.map((step, index) => `${index + 1}. ${step.agentName} [${step.role}] - ${step.objective}`).join('\n')}`,
+    });
+
+    for (const [planIndex, planStep] of executionPlan.entries()) {
+      const nextPlanStep = executionPlan[planIndex + 1] || null;
+      const targetAgentId = planStep.agentId;
+      const assignment = (task.agent_assignments || []).find(item => item.agent_id === targetAgentId) || null;
+      const agentName = planStep.agentName;
+      const collaborationBrief = buildCollaborativeAgentBrief({
+        task,
+        assignment,
+        agentName,
+        orderedAgentIds: orderedAgents,
+        orderedAgentNames,
+        priorOutputs: handoffs,
+        roleObjective: planStep.objective,
+      });
+
+      const result = await runAgentOnTask(taskId, targetAgentId, {
+        ...options,
+        parentRunId: orchestratorRunId || undefined,
+        triggerSource: 'collaborative',
+        collaborationBrief,
+        handoffToAgentId: nextPlanStep?.agentId || null,
+        handoffToAgentName: nextPlanStep?.agentName || null,
+        handoffObjective: nextPlanStep?.objective || null,
+      });
+
+      if (result) {
+        outputs.push(`## ${agentName}\n${result}`);
+        handoffs.push({
+          agentName,
+          summary: result.slice(0, 320),
+        });
+        await insertTaskComment({
+          taskId,
+          taskRunId: orchestratorRunId,
+          content: `[ORCHESTRATOR] Handoff from ${agentName}: ${result.slice(0, 320)}`,
+        });
+      }
+
+      if (completionPolicy === 'any_assigned') {
+        const { data: refreshedTask } = await supabase
+          .from('tasks')
+          .select('status')
+          .eq('id', taskId)
+          .maybeSingle();
+        if (refreshedTask && normalizeStatus(refreshedTask.status) === 'done') {
+          break;
+        }
+      }
+    }
+
+    const collaborativeSummary = outputs.length > 0
+      ? `Collaborative run complete. ${outputs.length} agent output${outputs.length === 1 ? '' : 's'} recorded.`
+      : 'Collaborative run completed with no agent output.';
+
+    if (orchestratorRunId) {
+      await updateTaskRunRecord(orchestratorRunId, {
+        status: 'completed',
+        summary: collaborativeSummary,
+        output_payload: {
+          summary: collaborativeSummary,
+          participating_agents: orderedAgents,
+          completion_policy: completionPolicy,
+          room_id: task.room_id || null,
+          project_team: projectTeamContext ? {
+            room: projectTeamContext.room,
+            agents: projectTeamContext.agentNames,
+          } : null,
+          execution_plan: executionPlan,
+          handoffs: handoffs.map(handoff => ({ agent: handoff.agentName, summary: handoff.summary })),
+        },
+        completed_at: new Date().toISOString(),
+      });
+    }
+
+    await insertTaskComment({
+      taskId,
+      taskRunId: orchestratorRunId,
+      content: `[ORCHESTRATOR] ${collaborativeSummary}`,
+    });
+
+    return outputs.length > 0 ? outputs.join('\n\n') : null;
+  }, [agents, createTaskRunRecord, currentUserId, insertTaskComment, runAgentOnTask, tasks, updateTaskRunRecord]);
 
   const updateFocusChain = useCallback(async (taskId: string, chain: FocusChainItem[]) => {
     const { error } = await supabase.from('tasks').update({ focus_chain: chain }).eq('id', taskId);
@@ -1173,6 +1667,7 @@ export function useKanbanData(circleId: string): KanbanData {
     uploadTaskFile,
     fetchTaskRuns,
     runAgentOnTask,
+    runAssignedAgentsOnTask,
     updateFocusChain,
     toggleTaskMode,
     recordTaskCost,
