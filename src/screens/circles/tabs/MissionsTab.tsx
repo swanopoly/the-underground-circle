@@ -46,6 +46,7 @@ import { dispatchTaskToAgent } from '../../../lib/missionAgentDispatch';
 import { useToast } from '../../../components/Toast';
 import { useMissionStreak } from '../../../lib/missionStreaks';
 import { notifyMissionComplete, notifyStreakMilestone } from '../../../lib/notifications';
+import { suggestBestAgent } from '../../../lib/agentRouting';
 import MissionCelebration from '../../../components/MissionCelebration';
 
 interface Props {
@@ -822,6 +823,44 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
                 </Text>
               )}
             </Pressable>
+            {/* Suggest agent button — for unassigned pending tasks */}
+            {!task.agent_name && !task.assignee_id && task.status !== 'done' && (
+              <Pressable
+                style={styles.suggestBtn}
+                onPress={async () => {
+                  try {
+                    // Lazy-load office agents
+                    const { data } = await supabase
+                      .from('circle_office_agents')
+                      .select('*')
+                      .eq('circle_id', circleId)
+                      .eq('is_published', true);
+                    const agents = (data || []) as any[];
+                    if (agents.length === 0) {
+                      showToast('No agents available in circle', 'warning');
+                      return;
+                    }
+                    const suggestion = await suggestBestAgent({
+                      circleId,
+                      agents,
+                      taskTitle: task.title,
+                      taskDescription: task.description || undefined,
+                    });
+                    if (suggestion) {
+                      await updateMissionTask(task.id, { agent_name: suggestion.agent.name });
+                      showToast(`Assigned ${suggestion.agent.name} (${suggestion.score}% match)`, 'info');
+                      refresh();
+                    } else {
+                      showToast('No agent suggestion found', 'warning');
+                    }
+                  } catch (e: any) {
+                    showToast(`Suggest error: ${e.message}`, 'error');
+                  }
+                }}
+              >
+                <Text style={styles.suggestBtnText}>?</Text>
+              </Pressable>
+            )}
             {/* Run with agent button — only for agent-assigned, pending tasks */}
             {task.agent_name && task.status !== 'done' && (
               <Pressable
@@ -1610,6 +1649,26 @@ const styles = StyleSheet.create({
     color: PIXEL_COLORS.text2,
     fontSize: 13,
     fontWeight: '600',
+  },
+
+  // Suggest agent button
+  suggestBtn: {
+    paddingHorizontal: GRID.sm,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: PIXEL_COLORS.indigo + '40',
+    backgroundColor: PIXEL_COLORS.indigo + '10',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 26,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  suggestBtnText: {
+    color: PIXEL_COLORS.indigo,
+    fontSize: 12,
+    fontWeight: '700',
+    fontFamily: 'monospace',
   },
 
   // Run button for agent tasks
