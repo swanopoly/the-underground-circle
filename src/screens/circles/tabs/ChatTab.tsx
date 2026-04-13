@@ -121,6 +121,20 @@ const PROMPT_CATEGORIES = [
     ],
   },
   {
+    title: '🤖 AI TOOLS',
+    color: '#22d3ee',
+    prompts: [
+      { label: 'Summarize', desc: 'Summarize text or URL', text: '/summarize ' },
+      { label: 'Translate', desc: 'Translate to another language', text: '/translate ' },
+      { label: 'Imagine', desc: 'Generate an image', text: '/imagine ' },
+      { label: 'Code', desc: 'Generate code from description', text: '/code ' },
+      { label: 'Classify', desc: 'Classify text into categories', text: '/classify ' },
+      { label: 'Q&A', desc: 'Answer a question', text: '/qa ' },
+      { label: 'Speak', desc: 'Text to speech', text: '/speak ' },
+      { label: 'Build Page', desc: 'Generate a webpage', text: '/build-page ' },
+    ],
+  },
+  {
     title: '🎮 GAMES & FUN',
     color: '#a855f7',
     prompts: [

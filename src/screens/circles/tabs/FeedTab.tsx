@@ -33,6 +33,7 @@ import type { OpenSwanSession } from '../../../lib/openswanService';
 import { loadAgentIdentities, type AgentIdentity } from '../../../lib/agentIdentity';
 import { storage } from '../../../lib/storage';
 import { useCircleAutomations, useDashboardStats } from '../../../services/automationService';
+import { useProjectRooms } from '../../../services/projectRooms';
 
 import { supabase } from '../../../lib/supabase';
 import CircleStoriesRail from '../../../components/stories/CircleStoriesRail.web';
@@ -59,7 +60,10 @@ function TaskSearchBar({
   onFilterPriority,
   filterAssignee,
   onFilterAssignee,
+  filterRoom,
+  onFilterRoom,
   assigneeOptions,
+  roomOptions,
   searchInputRef,
   totalTasks,
 }: {
@@ -69,11 +73,14 @@ function TaskSearchBar({
   onFilterPriority: (p: TaskPriority | null) => void;
   filterAssignee: string | null;
   onFilterAssignee: (a: string | null) => void;
+  filterRoom: string | null;
+  onFilterRoom: (roomId: string | null) => void;
   assigneeOptions: { id: string; label: string; color: string }[];
+  roomOptions: { id: string; label: string; color: string }[];
   searchInputRef?: React.RefObject<TextInput | null>;
   totalTasks: number;
 }) {
-  const hasFilters = searchText || filterPriority || filterAssignee;
+  const hasFilters = searchText || filterPriority || filterAssignee || filterRoom;
   return (
     <View style={fb.filterBar}>
       <View style={fb.searchRow}>
@@ -88,7 +95,7 @@ function TaskSearchBar({
           maxLength={100}
         />
         {hasFilters ? (
-          <Pressable onPress={() => { onSearchChange(''); onFilterPriority(null); onFilterAssignee(null); }} style={fb.clearBtn}>
+          <Pressable onPress={() => { onSearchChange(''); onFilterPriority(null); onFilterAssignee(null); onFilterRoom(null); }} style={fb.clearBtn}>
             <Text style={fb.clearBtnText}>Clear</Text>
           </Pressable>
         ) : null}
@@ -111,6 +118,15 @@ function TaskSearchBar({
             <Pressable key={opt.id} onPress={() => onFilterAssignee(active ? null : opt.id)} style={[fb.filterChip, active && { backgroundColor: opt.color + '18', borderColor: opt.color + '30' }]}>
               <View style={[fb.filterChipDot, { backgroundColor: opt.color }]} />
               <Text style={[fb.filterChipText, active && { color: opt.color }]} numberOfLines={1}>{opt.label}</Text>
+            </Pressable>
+          );
+        })}
+        {roomOptions.map(opt => {
+          const active = filterRoom === opt.id;
+          return (
+            <Pressable key={opt.id} onPress={() => onFilterRoom(active ? null : opt.id)} style={[fb.filterChip, active && { backgroundColor: opt.color + '18', borderColor: opt.color + '30' }]}>
+              <View style={[fb.filterChipDot, { backgroundColor: opt.color }]} />
+              <Text style={[fb.filterChipText, active && { color: opt.color }]} numberOfLines={1}>Room: {opt.label}</Text>
             </Pressable>
           );
         })}
@@ -399,6 +415,7 @@ function AgentTasksPanel({
   searchText,
   filterPriority,
   filterAssignee,
+  filterRoom,
 }: {
   tasksByColumn: TasksByColumn;
   agents: CircleOfficeAgent[];
@@ -406,6 +423,7 @@ function AgentTasksPanel({
   searchText: string;
   filterPriority: TaskPriority | null;
   filterAssignee: string | null;
+  filterRoom: string | null;
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [filterAgent, setFilterAgent] = useState<string | null>(null);
@@ -438,6 +456,7 @@ function AgentTasksPanel({
         return false;
       }
     }
+    if (filterRoom && task.room_id !== filterRoom) return false;
     if (!searchQuery) return true;
 
     const haystack = [task.title, task.description || '', meta.prompt, meta.response]
@@ -799,7 +818,9 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
   const [debouncedSearchText] = useDebouncedValue(searchText, 300);
   const [filterPriority, setFilterPriority] = useState<TaskPriority | null>(null);
   const [filterAssignee, setFilterAssignee] = useState<string | null>(null);
+  const [filterRoom, setFilterRoom] = useState<string | null>(null);
   const [searchExpanded, setSearchExpanded] = useState(false);
+  const [activityExpanded, setActivityExpanded] = useState(false);
 
   // Collect unique assignees for filter chips
   const assigneeOptions = useMemo(() => {
@@ -821,6 +842,17 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
     }
     return opts;
   }, [kanban.tasksByColumn, agents]);
+  const roomOptions = useMemo(() => {
+    const opts: { id: string; label: string; color: string }[] = [];
+    const seen = new Set<string>();
+    const allTasks = Object.values(kanban.tasksByColumn).flat();
+    for (const t of allTasks) {
+      if (!t.room_id || seen.has(t.room_id) || !t.room?.name) continue;
+      seen.add(t.room_id);
+      opts.push({ id: t.room_id, label: t.room.name, color: t.room.color || '#22d3ee' });
+    }
+    return opts;
+  }, [kanban.tasksByColumn]);
 
   const totalTasks = useMemo(() => Object.values(kanban.tasksByColumn).reduce((sum, arr) => sum + arr.length, 0), [kanban.tasksByColumn]);
 
@@ -872,19 +904,27 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
 
   // Filter tasks by goal
   const filteredTasksByColumn = useMemo(() => {
-    if (!filteredGoalId) return kanban.tasksByColumn;
+    if (!filteredGoalId && !filterRoom) return kanban.tasksByColumn;
     const filtered = {} as TasksByColumn;
     for (const key of Object.keys(kanban.tasksByColumn) as TaskStatus[]) {
-      filtered[key] = kanban.tasksByColumn[key].filter(t => (t as any).goal_id === filteredGoalId);
+      filtered[key] = kanban.tasksByColumn[key].filter(t => {
+        if (filteredGoalId && (t as any).goal_id !== filteredGoalId) return false;
+        if (filterRoom && t.room_id !== filterRoom) return false;
+        return true;
+      });
     }
     return filtered;
-  }, [kanban.tasksByColumn, filteredGoalId]);
+  }, [kanban.tasksByColumn, filteredGoalId, filterRoom]);
 
 
   // Batch move handler
   const handleBatchMove = useCallback(async (taskIds: string[], newStatus: TaskStatus) => {
     await Promise.all(taskIds.map(id => kanban.moveTask(id, newStatus)));
   }, [kanban.moveTask]);
+
+  const handleBatchAssignRoom = useCallback(async (taskIds: string[], roomId: string | null) => {
+    await Promise.all(taskIds.map(id => kanban.updateTask(id, { room_id: roomId } as any)));
+  }, [kanban.updateTask]);
 
   // Archive done handler (deletes old completed tasks)
   const handleArchiveDone = useCallback(async (taskIds: string[]) => {
@@ -955,7 +995,10 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
           onFilterPriority={setFilterPriority}
           filterAssignee={filterAssignee}
           onFilterAssignee={setFilterAssignee}
+          filterRoom={filterRoom}
+          onFilterRoom={setFilterRoom}
           assigneeOptions={assigneeOptions}
+          roomOptions={roomOptions}
           searchInputRef={searchInputRef}
           totalTasks={totalTasks}
         />
@@ -1002,6 +1045,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
                 searchText={debouncedSearchText}
                 filterPriority={filterPriority}
                 filterAssignee={filterAssignee}
+                filterRoom={filterRoom}
               />
             </View>
           )}
@@ -1022,10 +1066,13 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
               onQuickAdd={(status, title) => kanban.createTask({ title, status })}
               onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
               onBatchMove={handleBatchMove}
+              onBatchAssignRoom={handleBatchAssignRoom}
+              roomOptions={roomOptions}
               onArchiveDone={handleArchiveDone}
               externalSearchText={debouncedSearchText}
               externalFilterPriority={filterPriority}
               externalFilterAssignee={filterAssignee}
+              externalFilterRoom={filterRoom}
             />
           )}
         </View>
@@ -1035,10 +1082,8 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
           {([
             { key: 'missions' as MobileTab, label: 'Missions', icon: '\uD83C\uDFAF' },
             { key: 'goals' as MobileTab, label: 'Goals', icon: '\u2299' },
-            { key: 'activity' as MobileTab, label: 'Activity', icon: '\u26A1' },
-            { key: 'agents' as MobileTab, label: 'Agents', icon: '\u2699' },
-            { key: 'ai-tools' as MobileTab, label: 'AI Tools', icon: '\uD83E\uDD17' },
             { key: 'board' as MobileTab, label: 'Board', icon: '\u25A6' },
+            { key: 'activity' as MobileTab, label: 'Activity', icon: '\u26A1' },
           ]).map(tab => {
             const isActive = mobileTab === tab.key;
             return (
@@ -1078,6 +1123,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
 
         {showCreate && (
           <CreateTaskModal
+            circleId={circleId}
             column={createInColumn}
             members={kanban.members}
             agents={sortedAgentsForAssign}
@@ -1110,7 +1156,10 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
           onFilterPriority={setFilterPriority}
           filterAssignee={filterAssignee}
           onFilterAssignee={setFilterAssignee}
+          filterRoom={filterRoom}
+          onFilterRoom={setFilterRoom}
           assigneeOptions={assigneeOptions}
+          roomOptions={roomOptions}
           searchInputRef={searchInputRef}
           totalTasks={totalTasks}
         />
@@ -1125,7 +1174,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
         >
           <Text style={{ color: '#404050', fontSize: 12, fontFamily: 'monospace' }}>/</Text>
           <Text style={{ color: '#404050', fontSize: 12 }}>Search {totalTasks} tasks...</Text>
-          {(searchText || filterPriority || filterAssignee) && (
+          {(searchText || filterPriority || filterAssignee || filterRoom) && (
             <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#6366f1', marginLeft: 4 }} />
           )}
         </Pressable>
@@ -1150,40 +1199,9 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
           onGenerateTasks={plansHook.generateTasksFromPlan}
         />
 
-        {/* Center panel: Missions / Activity / Agent Tasks toggle */}
+        {/* Center panel: Missions only (full height) */}
         <View style={ct.wrapper}>
-          <View style={ct.tabs}>
-            {([
-              { key: 'missions' as CenterTab, label: 'Missions' },
-              { key: 'activity' as CenterTab, label: 'Activity' },
-              { key: 'agents' as CenterTab, label: 'Agents' },
-              { key: 'ai-tools' as CenterTab, label: 'AI Tools' },
-            ]).map(tab => (
-              <Pressable
-                key={tab.key}
-                onPress={() => setCenterTab(tab.key)}
-                style={[ct.tab, centerTab === tab.key && ct.tabActive]}
-              >
-                <Text style={[ct.tabText, centerTab === tab.key && ct.tabTextActive]}>{tab.label}</Text>
-              </Pressable>
-            ))}
-          </View>
-          {centerTab === 'missions' ? (
-            <MissionsTab circleId={circleId} accentColor={accentColor || '#6366f1'} />
-          ) : centerTab === 'activity' ? (
-            <ActivityFeedPanel circleId={circleId} agents={agents} />
-          ) : centerTab === 'ai-tools' ? (
-            <HuggingSwanPanel circleId={circleId} />
-          ) : (
-            <AgentTasksPanel
-              tasksByColumn={filteredTasksByColumn}
-              agents={agents}
-              onCardPress={setDetailTask}
-              searchText={debouncedSearchText}
-              filterPriority={filterPriority}
-              filterAssignee={filterAssignee}
-            />
-          )}
+          <MissionsTab circleId={circleId} accentColor={accentColor || '#6366f1'} />
         </View>
 
         <KanbanBoard
@@ -1196,11 +1214,40 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
           onQuickAdd={(status, title) => kanban.createTask({ title, status })}
           onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
           onBatchMove={handleBatchMove}
+          onBatchAssignRoom={handleBatchAssignRoom}
+          roomOptions={roomOptions}
           onArchiveDone={handleArchiveDone}
           externalSearchText={debouncedSearchText}
           externalFilterPriority={filterPriority}
           externalFilterAssignee={filterAssignee}
+          externalFilterRoom={filterRoom}
         />
+      </View>
+
+      {/* Collapsible Activity strip at bottom */}
+      <View style={{ borderTopWidth: 1, borderTopColor: '#151515', backgroundColor: '#0a0a0a' }}>
+        <Pressable
+          onPress={() => setActivityExpanded(!activityExpanded)}
+          style={{
+            flexDirection: 'row', alignItems: 'center', gap: 8,
+            paddingHorizontal: 16, paddingVertical: 8,
+          }}
+        >
+          <Text style={{ color: '#606070', fontSize: 10, fontWeight: '700', letterSpacing: 1 }}>
+            ACTIVITY
+          </Text>
+          <Text style={{ color: '#404050', fontSize: 11, flex: 1 }}>
+            {activityExpanded ? 'Hide feed' : 'Show recent agent activity'}
+          </Text>
+          <Text style={{ color: '#606070', fontSize: 14, fontFamily: 'monospace' }}>
+            {activityExpanded ? '−' : '+'}
+          </Text>
+        </Pressable>
+        {activityExpanded && (
+          <View style={{ height: 240, borderTopWidth: 1, borderTopColor: '#151515' }}>
+            <ActivityFeedPanel circleId={circleId} agents={agents} />
+          </View>
+        )}
       </View>
 
       {detailTask && (
@@ -1227,6 +1274,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
 
       {showCreate && (
         <CreateTaskModal
+          circleId={circleId}
           column={createInColumn}
           members={kanban.members}
           agents={agents}
@@ -1246,6 +1294,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
 // ─── Create Task Modal ──────────────────────────────────────────────────────
 
 interface CreateModalProps {
+  circleId: string;
   column: TaskStatus;
   members: KanbanMember[];
   agents: CircleOfficeAgent[];
@@ -1262,11 +1311,13 @@ interface CreateModalProps {
     assigned_agent_ids?: string[];
     due_date?: string | null;
     goal_id?: string | null;
+    room_id?: string | null;
     mission_id?: string | null;
   }) => void;
 }
 
-function CreateTaskModal({ column, members, agents, goals, missions, onClose, onCreate }: CreateModalProps) {
+function CreateTaskModal({ circleId, column, members, agents, goals, missions, onClose, onCreate }: CreateModalProps) {
+  const { rooms } = useProjectRooms(circleId);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('normal');
@@ -1274,6 +1325,7 @@ function CreateTaskModal({ column, members, agents, goals, missions, onClose, on
   const [assignedAgentIds, setAssignedAgentIds] = useState<string[]>([]);
   const [dueDate, setDueDate] = useState('');
   const [selectedGoalId, setSelectedGoalId] = useState<string | null>(null);
+  const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
   const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
   const [error, setError] = useState('');
 
@@ -1292,6 +1344,7 @@ function CreateTaskModal({ column, members, agents, goals, missions, onClose, on
       assigned_agent_ids: assignedAgentIds,
       due_date: dueDate || null,
       goal_id: selectedGoalId,
+      room_id: selectedRoomId,
       mission_id: selectedMissionId,
     });
   };
@@ -1339,6 +1392,34 @@ function CreateTaskModal({ column, members, agents, goals, missions, onClose, on
             multiline
             maxLength={500}
           />
+
+          {rooms.length > 0 && (
+            <>
+              <Text style={m.sectionLabel}>Project Room</Text>
+              <View style={m.chipRow}>
+                <Pressable
+                  onPress={() => setSelectedRoomId(null)}
+                  style={[m.chip, !selectedRoomId && m.chipActive]}
+                >
+                  <Text style={[m.chipText, !selectedRoomId && { color: '#e8e8e8' }]}>None</Text>
+                </Pressable>
+                {rooms.map(room => {
+                  const active = selectedRoomId === room.id;
+                  const color = room.color || '#22d3ee';
+                  return (
+                    <Pressable
+                      key={room.id}
+                      onPress={() => setSelectedRoomId(active ? null : room.id)}
+                      style={[m.chip, active && { backgroundColor: color + '15', borderColor: color + '30' }]}
+                    >
+                      <View style={[m.chipDot, { backgroundColor: color }]} />
+                      <Text style={[m.chipText, active && { color }]} numberOfLines={1}>{room.name}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </>
+          )}
 
           {/* Goal selector */}
           {goals.length > 0 && (
