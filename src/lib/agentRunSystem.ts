@@ -16,7 +16,7 @@ export type RunStatus = 'queued' | 'planning' | 'running' | 'waiting_approval' |
 export type StepKind = 'plan' | 'thinking' | 'tool_call' | 'tool_result' | 'message' | 'artifact_create' | 'approval_request' | 'approval_result' | 'delegation' | 'error' | 'finalize' | 'context_edit';
 export type ArtifactKind = 'text' | 'code_patch' | 'image' | 'screenshot' | 'report' | 'webpage' | 'table' | 'research_brief' | 'design_spec' | 'social_post' | 'email_draft' | 'spec_doc' | 'checklist' | 'link_bundle' | 'audio' | 'video' | 'file' | 'diff' | 'translation' | 'classification' | 'test_result';
 export type ApprovalKind = 'tool_use' | 'publish' | 'external_send' | 'file_write' | 'browser_action' | 'cost_threshold' | 'privileged_action' | 'plan_approval' | 'deliverable_review';
-export type MemoryScope = 'org' | 'circle' | 'room' | 'user' | 'session';
+export type MemoryScope = 'org' | 'circle' | 'room' | 'user' | 'session' | 'agent';
 export type MemoryKind = 'fact' | 'instruction' | 'preference' | 'decision' | 'finding' | 'policy' | 'context';
 export type SessionMemoryMode = 'private' | 'shared';
 
@@ -101,6 +101,7 @@ export interface MemoryEntry {
   scope: MemoryScope;
   circle_id?: string;
   room_id?: string;
+  agent_id?: string;
   user_id?: string;
   session_id?: string;
   memory_kind: MemoryKind;
@@ -373,6 +374,7 @@ export async function saveMemory(opts: {
   scope: MemoryScope;
   circleId?: string;
   roomId?: string;
+  agentId?: string;
   userId?: string;
   sessionId?: string;
   memoryKind: MemoryKind;
@@ -388,6 +390,7 @@ export async function saveMemory(opts: {
   // Auto-set visibility based on scope
   const visibility = opts.visibility || (
     opts.scope === 'user' ? 'private' :
+    opts.scope === 'agent' ? 'circle_shared' :
     opts.scope === 'room' ? 'room_shared' :
     opts.scope === 'session' ? 'private' :
     'circle_shared'
@@ -399,6 +402,7 @@ export async function saveMemory(opts: {
       scope: opts.scope,
       circle_id: opts.circleId,
       room_id: opts.roomId,
+      agent_id: opts.agentId,
       user_id: opts.userId,
       session_id: opts.sessionId,
       memory_kind: opts.memoryKind,
@@ -426,6 +430,7 @@ export async function saveMemory(opts: {
 export async function loadMemories(opts: {
   circleId: string;
   roomId?: string;
+  agentId?: string;
   userId?: string;
   scopes?: MemoryScope[];
   limit?: number;
@@ -436,7 +441,7 @@ export async function loadMemories(opts: {
 
   // 1. Load shared non-session memories (visible to all circle members)
   const sharedScopes = (opts.scopes || ['circle', 'room', 'session', 'org'])
-    .filter(s => s !== 'user' && s !== 'session');
+    .filter(s => s !== 'user' && s !== 'session' && s !== 'agent');
   if (sharedScopes.length > 0) {
     let sharedQuery = supabase
       .from('memory_entries')
@@ -502,6 +507,21 @@ export async function loadMemories(opts: {
     if (data) results.push(...data.map(mapMemory));
   }
 
+  const wantsAgent = !!opts.agentId && (!!opts.scopes && opts.scopes.includes('agent'));
+  if (wantsAgent && opts.agentId) {
+    const { data } = await supabase
+      .from('memory_entries')
+      .select('*')
+      .eq('circle_id', opts.circleId)
+      .eq('scope', 'agent')
+      .eq('agent_id', opts.agentId)
+      .eq('is_active', true)
+      .order('updated_at', { ascending: false })
+      .limit(20);
+
+    if (data) results.push(...data.map(mapMemory));
+  }
+
   // Sort combined results by recency and cap
   results.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
   return results.slice(0, opts.limit || 50);
@@ -535,12 +555,13 @@ export async function promoteMemory(
  * Budget: capped at ~3000 chars to prevent context bloat.
  * Priority: instructions > preferences > decisions > facts > findings > context
  */
-export async function buildMemoryContext(circleId: string, roomId?: string, userId?: string): Promise<string> {
+export async function buildMemoryContext(circleId: string, roomId?: string, userId?: string, agentId?: string): Promise<string> {
   const memories = (await loadMemories({
     circleId,
     roomId,
+    agentId,
     userId, // REQUIRED for safe user-scope loading
-    scopes: ['circle', 'room', 'user'],
+    scopes: agentId ? ['circle', 'room', 'user', 'agent'] : ['circle', 'room', 'user'],
     limit: 25,
   }))
     .filter(m => m.retrieval_mode !== 'manual_only');
@@ -594,8 +615,9 @@ export async function buildMemoryContext(circleId: string, roomId?: string, user
     }
   } catch {}
 
-  // Render in priority order: room > user > circle
-  for (const scope of ['room', 'user', 'circle'] as const) {
+  // Render in priority order: agent > room > user > circle
+  const scopeOrder: MemoryScope[] = agentId ? ['agent', 'room', 'user', 'circle'] : ['room', 'user', 'circle'];
+  for (const scope of scopeOrder) {
     const entries = grouped[scope];
     if (!entries || entries.length === 0) continue;
 
@@ -607,7 +629,11 @@ export async function buildMemoryContext(circleId: string, roomId?: string, user
       totalChars += line.length;
     }
     if (lines.length > 0) {
-      const label = scope === 'room' ? 'Project' : scope === 'user' ? 'Personal' : 'Circle';
+      const label =
+        scope === 'agent' ? 'Agent' :
+        scope === 'room' ? 'Project' :
+        scope === 'user' ? 'Personal' :
+        'Circle';
       sections.push(`### ${label} Memory\n${lines.join('\n')}`);
     }
   }
@@ -776,7 +802,7 @@ function mapApproval(d: any): RunApproval {
 function mapMemory(d: any): MemoryEntry {
   return {
     id: d.id, scope: d.scope, circle_id: d.circle_id, room_id: d.room_id,
-    session_id: d.session_id,
+    session_id: d.session_id, agent_id: d.agent_id,
     user_id: d.user_id, memory_kind: d.memory_kind, title: d.title,
     content: d.content, source_run_id: d.source_run_id, source_surface: d.source_surface,
     is_active: d.is_active, visibility: d.visibility, importance: d.importance,
