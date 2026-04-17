@@ -13,9 +13,35 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+type ErrorCode =
+  | "validation"
+  | "unauthenticated"
+  | "key_missing"
+  | "unsupported_provider"
+  | "upstream_error"
+  | "internal";
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+function errResponse(status: number, code: ErrorCode, message: string): Response {
+  return jsonResponse({ error: message, code }, status);
+}
+
+function mapUpstreamError(message: string): Response {
+  if (/ API \d{3}: /.test(message)) {
+    return errResponse(502, "upstream_error", message);
+  }
+  return errResponse(500, "internal", message);
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-type Provider = "openai" | "anthropic" | "openrouter" | "groq" | "ollama" | "github-models" | "huggingface";
+type Provider = "openai" | "anthropic" | "openrouter" | "groq" | "ollama" | "github-models" | "huggingface" | "zai" | "minimax" | "openai-embed";
 
 interface LLMProxyRequest {
   provider: Provider;
@@ -28,6 +54,17 @@ interface LLMProxyRequest {
   thinkingLevel?: "fast" | "balanced" | "deep";
   // Direct key (for testing — bypasses DB lookup)
   api_key?: string;
+  // Embedding-mode input (only used when provider === 'openai-embed').
+  // Accepts either a single string or a batch; batches are more efficient.
+  input?: string | string[];
+}
+
+interface EmbeddingProxyResponse {
+  embeddings: number[][];          // one vector per input string
+  model: string;
+  provider: "openai-embed";
+  dimensions: number;
+  input_tokens: number;
 }
 
 interface LLMProxyResponse {
@@ -52,10 +89,12 @@ const PROVIDER_ENDPOINTS: Record<string, string> = {
   groq: "https://api.groq.com/openai/v1/chat/completions",
   "github-models": "https://models.inference.ai.azure.com/chat/completions",
   huggingface: "https://router.huggingface.co/v1/chat/completions",
+  zai: "https://api.z.ai/api/paas/v4/chat/completions",
+  minimax: "https://api.minimax.io/v1/text/chatcompletion_v2",
 };
 
 // OpenAI-compatible providers (same request/response format)
-const OPENAI_COMPATIBLE: Provider[] = ["openai", "openrouter", "groq", "ollama", "github-models", "huggingface"];
+const OPENAI_COMPATIBLE: Provider[] = ["openai", "openrouter", "groq", "ollama", "github-models", "huggingface", "zai", "minimax"];
 
 // ─── Cost estimation ────────────────────────────────────────────────────────
 
@@ -95,6 +134,14 @@ const MODEL_COSTS: Record<string, [number, number]> = {
   "google/gemma-2-27b-it": [0.27, 0.27],
   "meta-llama/Llama-3.1-8B-Instruct": [0, 0],
   "mistralai/Mistral-7B-Instruct-v0.3": [0, 0],
+  // z.ai
+  "glm-5": [0.50, 1.50],
+  "glm-4-plus": [0.50, 1.50],
+  "glm-4-air": [0.10, 0.30],
+  "glm-4-flash": [0, 0],
+  // MiniMax
+  "MiniMax-M1": [0.40, 2.20],
+  "MiniMax-Text-01": [0.20, 1.10],
 };
 
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
@@ -330,6 +377,48 @@ async function callAnthropic(
   };
 }
 
+// ─── OpenAI embeddings ──────────────────────────────────────────────────────
+// Dedicated branch because the request/response shape, endpoint, and token
+// accounting are all different from chat. We skip personality + context
+// injection entirely — embeddings of "You are a senior engineer..." would
+// poison retrieval.
+
+async function callOpenAIEmbed(
+  apiKey: string,
+  model: string,
+  inputs: string[],
+): Promise<EmbeddingProxyResponse> {
+  const res = await fetch("https://api.openai.com/v1/embeddings", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model, input: inputs }),
+    signal: AbortSignal.timeout(60_000),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`openai-embed API ${res.status}: ${err}`);
+  }
+
+  const data = await res.json();
+  // Response: { data: [{ embedding: number[], index: number }, ...], usage: { prompt_tokens } }
+  const embeddings: number[][] = (data.data || [])
+    .sort((a: any, b: any) => a.index - b.index)
+    .map((row: any) => row.embedding as number[]);
+  const firstDim = embeddings[0]?.length || 0;
+
+  return {
+    embeddings,
+    model: data.model || model,
+    provider: "openai-embed",
+    dimensions: firstDim,
+    input_tokens: data.usage?.prompt_tokens || 0,
+  };
+}
+
 // ─── Main handler ───────────────────────────────────────────────────────────
 
 Deno.serve(async (req: Request) => {
@@ -338,21 +427,21 @@ Deno.serve(async (req: Request) => {
   }
 
   if (req.method === "GET") {
-    return new Response(
-      JSON.stringify({ status: "ok", service: "llm-proxy", providers: Object.keys(PROVIDER_ENDPOINTS).concat(["anthropic", "ollama"]) }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
+    return jsonResponse({ status: "ok", service: "llm-proxy", providers: Object.keys(PROVIDER_ENDPOINTS).concat(["anthropic", "ollama"]) });
   }
 
   try {
     const body: LLMProxyRequest = await req.json();
     const { provider, model, messages, circleId, thinkingLevel } = body;
 
-    if (!provider || !model || !messages?.length) {
-      return new Response(
-        JSON.stringify({ error: "Missing provider, model, or messages" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+    // Embedding requests use a completely different request shape — validate
+    // and dispatch early so the chat-path guards don't reject `!messages`.
+    const isEmbed = provider === "openai-embed";
+    if (!isEmbed && (!provider || !model || !messages?.length)) {
+      return errResponse(400, "validation", "Missing provider, model, or messages.");
+    }
+    if (isEmbed && !body.input) {
+      return errResponse(400, "validation", "openai-embed requires `input` (string or string[]).");
     }
 
     // Create service role client
@@ -377,10 +466,63 @@ Deno.serve(async (req: Request) => {
     }
 
     if (!userId) {
-      return new Response(
-        JSON.stringify({ error: "Not authenticated — valid JWT required" }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+      return errResponse(401, "unauthenticated", "Not authenticated — valid JWT required.");
+    }
+
+    // ── Embedding fast-path ────────────────────────────────────────────────
+    // Resolved BEFORE chat-path work so we don't waste time loading
+    // personality / context strings that don't apply to embeddings.
+    if (isEmbed) {
+      const rawInput = body.input!;
+      const inputs = Array.isArray(rawInput) ? rawInput : [rawInput];
+      // Truncate per-item to 8k tokens worth (~30k chars). OpenAI's limit is
+      // 8192 tokens for text-embedding-3-small; we leave slack for safety.
+      const bounded = inputs.map(s => (s || "").slice(0, 30000)).filter(Boolean);
+      if (bounded.length === 0) {
+        return errResponse(400, "validation", "openai-embed input is empty.");
+      }
+
+      // API key: prefer user's stored OpenAI key, fall back to platform
+      // secret so embeddings work out-of-the-box without each user setting up
+      // their own key.
+      let embedKey: string | null = body.api_key || null;
+      if (!embedKey) {
+        const keyData = await getUserApiKey(supabase, userId, "openai");
+        embedKey = keyData?.apiKey || Deno.env.get("OPENAI_API_KEY") || null;
+      }
+      if (!embedKey) {
+        return errResponse(
+          400,
+          "key_missing",
+          "No OpenAI key available for embeddings. Add one in Settings → API Keys or set OPENAI_API_KEY.",
+        );
+      }
+
+      const embedModel = model || "text-embedding-3-small";
+      try {
+        const result = await callOpenAIEmbed(embedKey, embedModel, bounded);
+
+        // Light usage tracking — reuse the existing table
+        try {
+          await supabase.from("user_ai_usage").insert({
+            user_id: userId,
+            circle_id: circleId || null,
+            model: result.model,
+            provider: result.provider,
+            input_tokens: result.input_tokens,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            // OpenAI text-embedding-3-small: $0.02 per 1M input tokens
+            estimated_cost: (result.input_tokens * 0.02) / 1_000_000,
+            source: "llm-proxy-embed",
+          });
+        } catch { /* non-critical */ }
+
+        return jsonResponse(result);
+      } catch (err: any) {
+        return mapUpstreamError(err?.message || "Embedding call failed");
+      }
     }
 
     // Get API key — from request body (testing) or from encrypted DB
@@ -390,14 +532,19 @@ Deno.serve(async (req: Request) => {
     if (!apiKey) {
       const keyData = await getUserApiKey(supabase, userId, provider);
       if (!keyData) {
-        // Fallback: try platform's own Anthropic key for anthropic provider
+        // Fallback: try platform secrets for providers we host a default key for
         if (provider === "anthropic") {
           apiKey = Deno.env.get("ANTHROPIC_API_KEY") || null;
+        } else if (provider === "zai") {
+          apiKey = Deno.env.get("ZAI_API_KEY") || null;
+        } else if (provider === "minimax") {
+          apiKey = Deno.env.get("MINIMAX_API_KEY") || null;
         }
         if (!apiKey) {
-          return new Response(
-            JSON.stringify({ error: `No API key stored for provider: ${provider}. Add your key in Settings → API Keys.` }),
-            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+          return errResponse(
+            400,
+            "key_missing",
+            `No API key stored for provider: ${provider}. Add your key in Settings → API Keys.`,
           );
         }
       } else {
@@ -454,10 +601,7 @@ Deno.serve(async (req: Request) => {
       }
       result = await callOpenAICompatible(endpoint, apiKey!, model, finalMessages, temperature, maxTokens, provider);
     } else {
-      return new Response(
-        JSON.stringify({ error: `Unsupported provider: ${provider}` }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+      return errResponse(400, "unsupported_provider", `Unsupported provider: ${provider}`);
     }
 
     // Track usage in user_ai_usage if available
@@ -478,14 +622,9 @@ Deno.serve(async (req: Request) => {
       // Non-critical — don't fail if tracking table doesn't exist
     }
 
-    return new Response(JSON.stringify(result), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return jsonResponse(result);
   } catch (err: any) {
     console.error("llm-proxy error:", err);
-    return new Response(
-      JSON.stringify({ error: err.message }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
+    return mapUpstreamError(err?.message || "Internal server error");
   }
 });

@@ -1,15 +1,18 @@
 // Enhanced Office Chat Commands - Multi-Agent Collaboration
+import { getAgentIdentityKey } from './agentIdentity';
 import { OfficeAgent } from './officeAgents';
-import { AgentConnection, PROVIDER_META } from './connectionManager';
+import { AgentConnection } from './connectionManager';
 import { OpenSwanConfig } from './openswanService';
 import {
-  Project, loadProjects, saveProjects, createProject,
-  assignAgentToProject, unassignAgentFromProject, deleteProject, getAgentProjects,
+  Project, loadProjects, createProject,
+  assignAgentToProject, unassignAgentFromProject, deleteProject,
+  migrateLegacyProjectsToSupabase,
 } from './projectManagement';
 import {
   sendMessageToAgent, broadcastMessage, sendMessageToProject,
   addMessage as addAgentMessage,
 } from './agentMessaging';
+import { migrateLegacyTasksToSupabase } from './agentCollaboration';
 
 export interface CommandResult {
   response: string;
@@ -23,11 +26,10 @@ export interface CommandResult {
 export async function processCollaborationCommand(
   command: string,
   agents: OfficeAgent[],
-  connections: AgentConnection[],
+  _connections: AgentConnection[],
   getConfig: (id: string) => OpenSwanConfig | null,
 ): Promise<CommandResult | null> {
   const cmd = command.toLowerCase().trim();
-  const parts = command.trim().split(' ');
 
   // ─── PROJECT COMMANDS ──────────────────────────────────
 
@@ -123,6 +125,60 @@ export async function processCollaborationCommand(
     };
   }
 
+  if (
+    cmd === 'project migrate legacy'
+    || cmd === 'projects migrate legacy'
+    || cmd === 'migrate legacy'
+  ) {
+    try {
+      const projectMappings = await migrateLegacyProjectsToSupabase();
+      const taskMappings = await migrateLegacyTasksToSupabase(projectMappings);
+
+      const projectPreview = projectMappings
+        .slice(0, 5)
+        .map(item => `   • ${item.name}: ${item.legacyId} → ${item.roomId}`)
+        .join('\n');
+      const taskPreview = taskMappings
+        .slice(0, 5)
+        .map(item => `   • ${item.title}: ${item.legacyTaskId} → ${item.taskId}`)
+        .join('\n');
+
+      const responseLines = [
+        '✅ Legacy migration complete',
+        '',
+        `Projects migrated: ${projectMappings.length}`,
+        `Tasks migrated: ${taskMappings.length}`,
+      ];
+
+      if (projectPreview) {
+        responseLines.push('', 'Project mappings:', projectPreview);
+      }
+
+      if (taskPreview) {
+        responseLines.push('', 'Task mappings:', taskPreview);
+      }
+
+      if (projectMappings.length === 0 && taskMappings.length === 0) {
+        responseLines.push('', 'No legacy local projects or tasks needed migration.');
+      } else {
+        responseLines.push(
+          '',
+          'Migrated local data was archived, and any unmigrated task data remains in local storage for retry.',
+        );
+      }
+
+      return {
+        response: responseLines.join('\n'),
+        success: true,
+      };
+    } catch (error: any) {
+      return {
+        response: `❌ Legacy migration failed: ${error?.message || 'Unknown error'}`,
+        success: false,
+      };
+    }
+  }
+
   // ─── MESSAGING COMMANDS ──────────────────────────────────
 
   if (cmd.startsWith('msg @')) {
@@ -211,7 +267,7 @@ export async function processCollaborationCommand(
         return { response: `❌ No connection config for ${agent.name}`, success: false };
       }
       
-      const sessionKey = agent.id.includes('::') ? agent.id.split('::')[1] : agent.id;
+      const sessionKey = getAgentIdentityKey(agent);
       const result = await sendMessageToAgent(config, sessionKey, message);
       
       addAgentMessage({
@@ -274,6 +330,7 @@ export function getCollaborationHelp(): string {
     `• project assign [id] @agent — Assign agent\n` +
     `• project remove [id] @agent — Remove agent\n` +
     `• project delete [id] — Delete project\n` +
+    `• project migrate legacy — Promote legacy local projects/tasks\n` +
     `\n` +
     `MESSAGING:\n` +
     `• msg @agent [text] — Message one agent\n` +

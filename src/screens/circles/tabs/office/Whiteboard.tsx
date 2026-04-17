@@ -353,6 +353,7 @@ export default function Whiteboard({
               <Text style={[s.statValue, { color: farmMetrics.totalCostToday > 0 ? '#22c55e' : '#444' }]}>
                 ${farmMetrics.totalCostToday.toFixed(2)}
               </Text>
+              <CostBurnSparkline cost={farmMetrics.totalCostToday} />
               <Text style={s.statLabel}>COST</Text>
             </View>
 
@@ -488,6 +489,81 @@ function MetricCell({ label, value, color }: { label: string; value: string; col
     </View>
   );
 }
+
+// ── COST BURN SPARKLINE ────────────────────────────────────────────────────
+// Tiny 30-min rolling bar chart. Samples the live cumulative cost every 30s,
+// converts to per-sample deltas, and renders them inline under the dollar
+// value so you can see *when* spending is happening — not just the total.
+// Renders nothing until we have at least one meaningful delta so the cell
+// doesn't look broken on a fresh page load.
+
+const BURN_SAMPLE_COUNT = 30;     // 30 samples × 30s = 15 min in view at most
+const BURN_SAMPLE_INTERVAL_MS = 30_000;
+
+function CostBurnSparkline({ cost }: { cost: number }) {
+  const [samples, setSamples] = useState<Array<{ t: number; cost: number }>>(
+    () => [{ t: Date.now(), cost: cost || 0 }],
+  );
+
+  // Bucket samples on a fixed interval so spikes from re-renders don't
+  // flood the chart. We use an effect tied to the cost value — whenever it
+  // changes, we either append (if past interval) or overwrite the last
+  // bucket so each bar represents real wall-clock time.
+  useEffect(() => {
+    setSamples(prev => {
+      const last = prev[prev.length - 1];
+      const now = Date.now();
+      if (last && now - last.t < BURN_SAMPLE_INTERVAL_MS) {
+        const next = prev.slice(0, -1);
+        next.push({ t: last.t, cost });
+        return next;
+      }
+      const next = [...prev, { t: now, cost }];
+      return next.slice(-BURN_SAMPLE_COUNT);
+    });
+  }, [cost]);
+
+  const deltas: number[] = [];
+  for (let i = 1; i < samples.length; i++) {
+    deltas.push(Math.max(0, samples[i].cost - samples[i - 1].cost));
+  }
+  const hasSignal = deltas.some(d => d > 0);
+  if (!hasSignal) return null;
+
+  const max = Math.max(...deltas, 0.0001);
+  return (
+    <View style={sparkStyles.row}>
+      {deltas.map((d, i) => {
+        const h = Math.max(1, Math.round((d / max) * 14));
+        return (
+          <View
+            key={`${samples[i]?.t}-${i}`}
+            style={[
+              sparkStyles.bar,
+              { height: h, backgroundColor: d > 0 ? '#22c55e' : '#22c55e30' },
+            ]}
+          />
+        );
+      })}
+    </View>
+  );
+}
+
+const sparkStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 1,
+    height: 14,
+    marginTop: 2,
+    marginBottom: 2,
+  },
+  bar: {
+    width: 3,
+    borderTopLeftRadius: 1,
+    borderTopRightRadius: 1,
+  },
+});
 
 // ── OVERVIEW TAB ───────────────────────────────────────────────────────────
 function OverviewTab({ agents, sortedAgents, activities, runningTasks, farmMetrics, healthCheck, workloads, costOpts, todayStats, reward, badgeColor }: any) {

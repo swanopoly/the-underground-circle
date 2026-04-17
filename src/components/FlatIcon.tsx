@@ -42,7 +42,7 @@ const ICON_CATALOG: Record<string, number> = {
   // Misc
   rocket:        2449848,
   code:          2092621,
-  security:      2592258,
+  shield:        2592258,
   brain:         15557942,
   robot:         3398643,
   workspace:     1599808,

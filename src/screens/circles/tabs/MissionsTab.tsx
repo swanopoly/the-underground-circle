@@ -249,6 +249,26 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
     getMissionAnalytics(circleId).then(a => setAnalytics(a)).catch(() => {});
   }, [circleId]);
 
+  // Deep-link consumption — if the user landed via /join/{code}?mission={id}
+  // and the App.tsx URL parser stored that mission ID, auto-open it once the
+  // mission list has loaded. The key is cleared after consumption so a refresh
+  // doesn't re-trigger it.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof localStorage === 'undefined') return;
+    if (loading || missions.length === 0) return;
+    let pending: string | null = null;
+    try { pending = localStorage.getItem('uc_pending_mission_deeplink'); } catch {}
+    if (!pending) return;
+    // Only honor the deep-link if the mission belongs to this circle (defends
+    // against the user accepting an invite to circle A but the link references
+    // a mission in circle B).
+    const found = missions.find(m => m.id === pending);
+    if (found) {
+      setSelectedId(pending);
+    }
+    try { localStorage.removeItem('uc_pending_mission_deeplink'); } catch {}
+  }, [loading, missions]);
+
   const filtered = missions.filter(m => {
     if (filter === 'active') return m.status === 'active';
     if (filter === 'completed') return m.status === 'completed';
@@ -640,10 +660,37 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
         />
       )}
 
-      {/* Back button + title */}
+      {/* Back button + share + title */}
       <View style={styles.detailHeader}>
         <Pressable onPress={onBack} style={styles.backBtn}>
           <Text style={styles.backBtnText}>{'<'} Back</Text>
+        </Pressable>
+        <Pressable onPress={async () => {
+          // Generate (or reuse) a link invite for this circle and append the
+          // mission ID as a deep-link param. App.tsx captures ?mission= and
+          // MissionsTab auto-opens it on the recipient's first load.
+          const { createLinkInvite } = await import('../../../lib/invites');
+          const { shareLink, shareResultMessage } = await import('../../../lib/share');
+          const { invite, url, error } = await createLinkInvite(circleId, { expiresInDays: 30 });
+          if (error || !url || !invite) {
+            const msg = `Couldn't create share link: ${error || 'unknown'}`;
+            if (Platform.OS === 'web') alert(msg);
+            else { const { Alert } = await import('react-native'); Alert.alert('Share', msg); }
+            return;
+          }
+          const fullUrl = `${url}?mission=${missionId}`;
+          const result = await shareLink({
+            title: `Mission: ${mission.title}`,
+            text: `Join me on this mission: ${mission.title}${mission.deadline ? ` — by ${new Date(mission.deadline).toLocaleDateString()}` : ''}`,
+            url: fullUrl,
+          });
+          const msg = shareResultMessage(result);
+          if (msg) {
+            if (Platform.OS === 'web') showToast(msg, 'info');
+            else { const { Alert } = await import('react-native'); Alert.alert('Share', msg); }
+          }
+        }} style={styles.shareBtn}>
+          <Text style={styles.shareBtnText}>↗ Share</Text>
         </Pressable>
         <View style={[styles.statusBadge, {
           backgroundColor: STATUS_COLORS[mission.status] + '20',
@@ -1451,6 +1498,22 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     fontFamily: 'monospace',
+  },
+  shareBtn: {
+    backgroundColor: PIXEL_COLORS.green + '14',
+    borderWidth: 1,
+    borderColor: PIXEL_COLORS.green + '55',
+    paddingHorizontal: GRID.sm,
+    paddingVertical: 5,
+    borderRadius: 6,
+    marginRight: 'auto',
+  },
+  shareBtnText: {
+    color: PIXEL_COLORS.green,
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    letterSpacing: 0.5,
   },
 
   // Actions

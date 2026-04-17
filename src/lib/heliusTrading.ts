@@ -15,6 +15,7 @@
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from './supabase';
+import { deleteLocalSecret, readLocalSecret, writeLocalSecret } from './localSecrets';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -73,11 +74,21 @@ function getHeliusKeyCacheId(userId: string): string {
 
 async function readHeliusKeyFromLocalCache(userId: string): Promise<string | null> {
   try {
-    let encoded: string | null;
-    if (Platform.OS === 'web' && typeof localStorage !== 'undefined') {
-      encoded = localStorage.getItem(getHeliusKeyCacheId(userId));
-    } else {
-      encoded = await AsyncStorage.getItem(getHeliusKeyCacheId(userId));
+    let encoded = await readLocalSecret('helius_api_key', userId);
+    if (!encoded) {
+      if (Platform.OS === 'web' && typeof localStorage !== 'undefined') {
+        encoded = localStorage.getItem(getHeliusKeyCacheId(userId)) || '';
+      } else {
+        encoded = (await AsyncStorage.getItem(getHeliusKeyCacheId(userId))) || '';
+      }
+      if (encoded) {
+        await writeLocalSecret('helius_api_key', userId, encoded);
+        if (Platform.OS === 'web' && typeof localStorage !== 'undefined') {
+          localStorage.removeItem(getHeliusKeyCacheId(userId));
+        } else {
+          await AsyncStorage.removeItem(getHeliusKeyCacheId(userId));
+        }
+      }
     }
     if (!encoded) return null;
     // Decode the obfuscated key (reverse of cacheHeliusApiKeyLocally)
@@ -98,11 +109,7 @@ export async function cacheHeliusApiKeyLocally(userId: string, apiKey: string): 
   try {
     // Encrypt the API key before storing to prevent plaintext leakage via XSS or filesystem access
     const encoded = btoa(apiKey.split('').reverse().join('') + ':' + Date.now());
-    if (Platform.OS === 'web' && typeof localStorage !== 'undefined') {
-      localStorage.setItem(getHeliusKeyCacheId(userId), encoded);
-      return;
-    }
-    await AsyncStorage.setItem(getHeliusKeyCacheId(userId), encoded);
+    await writeLocalSecret('helius_api_key', userId, encoded);
   } catch {
     // Ignore local cache failures; the backend remains the source of truth.
   }
@@ -110,6 +117,7 @@ export async function cacheHeliusApiKeyLocally(userId: string, apiKey: string): 
 
 export async function clearHeliusApiKeyLocalCache(userId: string): Promise<void> {
   try {
+    await deleteLocalSecret('helius_api_key', userId);
     if (Platform.OS === 'web' && typeof localStorage !== 'undefined') {
       localStorage.removeItem(getHeliusKeyCacheId(userId));
       return;
@@ -2779,7 +2787,6 @@ function mapFeaturedTrade(d: any): FeaturedTrade {
     createdAt: d.created_at,
   };
 }
-
 
 
 

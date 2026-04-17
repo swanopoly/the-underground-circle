@@ -24,6 +24,12 @@ function getAgentReputation(turns: number, tokens: number, costToday?: number): 
   return { tier: 'D', color: REPUTATION_COLORS.D };
 }
 
+function getBuildXpGain(deltaTurns: number, deltaTokens: number): number {
+  const turnXp = Math.max(0, deltaTurns) * 18;
+  const tokenXp = Math.max(0, Math.round(deltaTokens / 160));
+  return Math.max(6, turnXp + tokenXp);
+}
+
 interface Props {
   agent: OfficeAgent;
   appearance?: AgentAppearance;
@@ -508,8 +514,9 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
       if (agent.status === 'active' || agent.status === 'building') {
         buildStartTime.current = Date.now();
         comboCount.current++;
-        const buildStarts = ['BUILDING', 'LOCKED IN', 'LET\'S GO', 'ON IT', 'WORKING'];
-        spawnFloat(`+${buildStarts[Math.floor(Math.random() * buildStarts.length)]}`, '#22c55e');
+        const buildStarts = ['BUILDING', 'BUILD MODE', 'LOCKED IN', 'SHIPPING', 'XP ONLINE', 'WORK IN FLIGHT'];
+        spawnFloat(buildStarts[Math.floor(Math.random() * buildStarts.length)], '#22c55e');
+        spawnFloat('+BUILD XP', '#fbbf24', 220);
         // Combo streaks
         if (comboCount.current >= 3) spawnFloat(`${comboCount.current}x COMBO!`, '#a855f7', 300);
         if (comboCount.current >= 5) spawnFloat('ON FIRE!', '#f97316', 500);
@@ -572,6 +579,9 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
       const delta = turns - lastTurns.current;
       if (delta > 0) {
         spawnFloat(`+${delta} MSG`, '#38bdf8');
+        if (agent.status === 'active' || agent.status === 'building') {
+          spawnFloat(`+${getBuildXpGain(delta, 0)} BUILD XP`, '#fbbf24', 140);
+        }
         // Turn milestones
         if (lastTurns.current < 5 && turns >= 5) spawnFloat('5 MSGS', '#a78bfa', 350);
         if (lastTurns.current < 10 && turns >= 10) spawnFloat('10 MSGS!', '#a78bfa', 350);
@@ -591,6 +601,9 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
       if (delta > 50) {
         const k = Math.round(delta / 1000);
         spawnFloat(k > 0 ? `+${k}K TKN` : `+${delta} TKN`, '#34d399', 200);
+        if (agent.status === 'active' || agent.status === 'building') {
+          spawnFloat(`+${getBuildXpGain(0, delta)} BUILD XP`, '#fbbf24', 300);
+        }
         // Token milestones
         if (lastTokens.current < 1000 && tokens >= 1000) spawnFloat('1K TOKENS', '#6ee7b7', 500);
         if (lastTokens.current < 5000 && tokens >= 5000) spawnFloat('5K TOKENS', '#6ee7b7', 500);
@@ -633,14 +646,14 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     // ─── 6. Periodic indicators during builds ──────────────────────
     if ((agent.status === 'active' || agent.status === 'building') && buildStartTime.current > 0) {
       const elapsed = Date.now() - buildStartTime.current;
-      if (elapsed > 10000 && elapsed < 11000) spawnFloat('THINKING...', '#94a3b8');
+      if (elapsed > 10000 && elapsed < 11000) spawnFloat('BUILDING', '#60a5fa');
       if (elapsed > 20000 && elapsed < 21000) {
-        const mid = ['COOKING...', 'PROCESSING...', 'ALMOST...', 'CRAFTING...'];
+        const mid = ['BUILDING XP', 'COOKING...', 'CRAFTING...', 'STACKING WORK'];
         spawnFloat(mid[Math.floor(Math.random() * mid.length)], '#94a3b8');
       }
-      if (elapsed > 30000 && elapsed < 31000) spawnFloat('DEEP WORK...', '#818cf8');
+      if (elapsed > 30000 && elapsed < 31000) spawnFloat('DEEP BUILD', '#818cf8');
       if (elapsed > 45000 && elapsed < 46000) spawnFloat('IN THE ZONE', '#a78bfa');
-      if (elapsed > 60000 && elapsed < 61000) spawnFloat('GRINDING...', '#a855f7');
+      if (elapsed > 60000 && elapsed < 61000) spawnFloat('STACKING XP', '#fbbf24');
       if (elapsed > 90000 && elapsed < 91000) spawnFloat('STILL AT IT...', '#c084fc');
       if (elapsed > 120000 && elapsed < 121000) spawnFloat('MARATHON!', '#ec4899');
       if (elapsed > 180000 && elapsed < 181000) spawnFloat('ABSOLUTE UNIT!', '#f472b6');
@@ -648,9 +661,9 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
 
     // ─── 6b. Random building encouragement ──────────────────────
     if ((agent.status === 'active' || agent.status === 'building') && Date.now() - lastFloatTime.current > 8000) {
-      if (Math.random() < 0.20) {
-        const buildVibes = ['COOKING', 'IN THE ZONE', 'FOCUSED', 'FLOW STATE', 'HEADS DOWN', 'LOCKED IN', 'BUILDING...', 'CRAFTING', 'SHIPPING'];
-        const buildColors = ['#818cf8', '#a78bfa', '#c084fc', '#6366f1'];
+      if (Math.random() < 0.38) {
+        const buildVibes = ['BUILDING', 'BUILDING XP', 'WORK IN MOTION', 'HEADS DOWN', 'LOCKED IN', 'FLOW STATE', 'CRAFTING', 'SHIPPING', 'STACKING WINS'];
+        const buildColors = ['#60a5fa', '#fbbf24', '#a78bfa', '#c084fc', '#6366f1'];
         spawnFloat(buildVibes[Math.floor(Math.random() * buildVibes.length)], buildColors[Math.floor(Math.random() * buildColors.length)]);
       }
     }
@@ -1856,6 +1869,23 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
           </View>
         )}
 
+        {/* Swan pet — HuggingSwan as OpenSwan's companion */}
+        {(a.pet || 'none') === 'swan' && (
+          <Animated.View style={[styles.petSwan, { transform: [{ translateX: petWander }, { translateY: Animated.add(petBounce, petWanderY) }] }]}>
+            <View style={styles.swanBody} />
+            <View style={styles.swanBellyHighlight} />
+            <Animated.View style={[styles.swanWing, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-6deg', '14deg'] }) }] }]} />
+            <Animated.View style={[styles.swanWingTip, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-10deg', '18deg'] }) }] }]} />
+            <Animated.View style={[styles.swanNeck, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-3deg', '5deg'] }) }] }]} />
+            <Animated.View style={[styles.swanNeckCurve, { transform: [{ rotate: petTail.interpolate({ inputRange: [-1, 1], outputRange: ['-2deg', '4deg'] }) }] }]} />
+            <View style={styles.swanHead} />
+            <View style={styles.swanEye} />
+            <View style={styles.swanBeak} />
+            <View style={styles.swanBeakTip} />
+            <View style={styles.swanTail} />
+          </Animated.View>
+        )}
+
         {/* Aura effects — animated */}
         {(a.aura || 'none') === 'fire' && (
           <Animated.View style={[styles.auraFire, { transform: [{ scale: auraPulse }] }]}>
@@ -3053,6 +3083,20 @@ const styles = StyleSheet.create({
   dogLegBL: { position: 'absolute', bottom: 0, left: PX * 4.2, width: PX * 0.6, height: PX * 1, backgroundColor: '#8a6518', borderBottomLeftRadius: PX * 0.2, borderBottomRightRadius: PX * 0.2 },
   dogLegBR: { position: 'absolute', bottom: 0, left: PX * 5, width: PX * 0.6, height: PX * 1, backgroundColor: '#8a6518', borderBottomLeftRadius: PX * 0.2, borderBottomRightRadius: PX * 0.2 },
   dogTail: { position: 'absolute', bottom: PX * 2, left: PX * 5.2, width: PX * 0.6, height: PX * 2, backgroundColor: '#a07020', borderTopRightRadius: PX * 1, borderTopLeftRadius: PX * 0.5, transformOrigin: 'center bottom' },
+
+  // Swan pet — HuggingSwan companion. White body, curved neck, orange beak.
+  petSwan: { position: 'absolute', bottom: PX * 0.5, right: -PX * 5, width: PX * 6, height: PX * 5.5, zIndex: 8 },
+  swanBody: { position: 'absolute', bottom: PX * 0.4, left: PX * 0.6, width: PX * 4.2, height: PX * 2.4, backgroundColor: '#fafafa', borderRadius: PX * 1.5, borderWidth: 0.5, borderColor: '#cbd5e1' },
+  swanBellyHighlight: { position: 'absolute', bottom: PX * 0.6, left: PX * 1.2, width: PX * 3, height: PX * 1.2, backgroundColor: '#ffffff', borderRadius: PX * 0.8, opacity: 0.85 },
+  swanWing: { position: 'absolute', bottom: PX * 1, left: PX * 1.2, width: PX * 2.6, height: PX * 1.8, backgroundColor: '#f1f5f9', borderTopLeftRadius: PX * 1.2, borderBottomLeftRadius: PX * 0.4, borderTopRightRadius: PX * 0.6, transformOrigin: 'right center', borderWidth: 0.5, borderColor: '#cbd5e1' },
+  swanWingTip: { position: 'absolute', bottom: PX * 1.4, left: PX * 0.8, width: PX * 1.4, height: PX * 0.8, backgroundColor: '#e2e8f0', borderTopLeftRadius: PX * 0.6, transformOrigin: 'right center' },
+  swanNeck: { position: 'absolute', bottom: PX * 2.3, left: PX * 3.2, width: PX * 0.7, height: PX * 2, backgroundColor: '#fafafa', borderTopRightRadius: PX * 0.4, borderBottomRightRadius: PX * 0.2, transformOrigin: 'center bottom', borderWidth: 0.5, borderColor: '#cbd5e1' },
+  swanNeckCurve: { position: 'absolute', bottom: PX * 3.6, left: PX * 3.6, width: PX * 0.7, height: PX * 1.1, backgroundColor: '#fafafa', borderTopRightRadius: PX * 0.5, transformOrigin: 'center bottom', borderWidth: 0.5, borderColor: '#cbd5e1' },
+  swanHead: { position: 'absolute', bottom: PX * 4.4, left: PX * 3.7, width: PX * 1.1, height: PX * 1, backgroundColor: '#fafafa', borderRadius: PX * 0.55, borderWidth: 0.5, borderColor: '#cbd5e1' },
+  swanEye: { position: 'absolute', bottom: PX * 4.9, left: PX * 4.3, width: PX * 0.3, height: PX * 0.3, backgroundColor: '#0f172a', borderRadius: PX * 0.15 },
+  swanBeak: { position: 'absolute', bottom: PX * 4.5, left: PX * 4.6, width: PX * 0.9, height: PX * 0.4, backgroundColor: '#f59e0b', borderTopRightRadius: PX * 0.2, borderBottomRightRadius: PX * 0.2 },
+  swanBeakTip: { position: 'absolute', bottom: PX * 4.45, left: PX * 5.3, width: PX * 0.3, height: PX * 0.5, backgroundColor: '#1f2937', borderRadius: PX * 0.1 },
+  swanTail: { position: 'absolute', bottom: PX * 1.8, left: PX * 0.1, width: PX * 0.9, height: PX * 0.7, backgroundColor: '#fafafa', borderTopLeftRadius: PX * 0.4, borderBottomLeftRadius: PX * 0.2, borderWidth: 0.5, borderColor: '#cbd5e1', transform: [{ rotate: '-15deg' }] },
 
   petBird: { position: 'absolute', top: 8, right: -6, width: PX * 5.5, height: PX * 4.5, zIndex: 8 },
   birdBody: { position: 'absolute', bottom: PX * 0.6, left: PX * 1.2, width: PX * 2.5, height: PX * 2, backgroundColor: '#3b82f6', borderRadius: PX * 0.8 },

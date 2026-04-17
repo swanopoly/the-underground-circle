@@ -1,30 +1,28 @@
 /**
  * computerUse.ts — Computer-Use Engine
  *
- * Manages permissions, executes browser actions via Playwright MCP,
- * and captures screenshots for AI agent feedback loops.
- *
- * Bridge: localhost:7778 (/exec for shell, /mcp for MCP tool calls)
- * Playwright MCP tools: browser_navigate, browser_click, browser_fill_form,
- *   browser_take_screenshot, browser_press_key, browser_select_option, browser_wait_for
+ * Plans browser actions, checks permissions, and executes them through
+ * a bridge-backed browser runtime. The local Playwright MCP bridge remains
+ * the default backend, and Browserbase Stagehand is used when a connected
+ * Browserbase integration is available for the active circle.
  */
 
+import { getCircleIntegration, getCircleIntegrationSecretValues } from './circleIntegrations';
 import { getSwanBotResponse as getAIResponse } from './swanbot';
 
-// ─── Types ──────────────────────────────────────────────────────────────────
-
 export type ComputerUsePermission = 'none' | 'ask_every_time' | 'ask_for_new_sites' | 'trusted';
+export type ComputerUseBackend = 'playwright_bridge' | 'browserbase_stagehand';
 
 export interface BrowserAction {
   id: string;
   type: 'navigate' | 'click' | 'fill' | 'screenshot' | 'select' | 'press_key' | 'wait' | 'scroll';
-  target?: string;      // URL, selector, or element description
-  value?: string;       // text to fill, key to press
-  description: string;  // human-readable description of what this action does
+  target?: string;
+  value?: string;
+  description: string;
   requiresApproval: boolean;
   status: 'pending' | 'approved' | 'rejected' | 'executing' | 'completed' | 'failed';
-  screenshotBefore?: string; // base64
-  screenshotAfter?: string;  // base64
+  screenshotBefore?: string;
+  screenshotAfter?: string;
   error?: string;
   executedAt?: string;
 }
@@ -39,6 +37,15 @@ export interface ComputerUseSession {
   currentUrl?: string;
   startedAt: string;
   approvedDomains: string[];
+  circleId?: string;
+  backend: ComputerUseBackend;
+  backendLabel: string;
+  backendDetails?: string;
+  backendSessionId?: string;
+  backendLiveUrl?: string;
+  sourceMessageId?: string;
+  sourceRunId?: string | null;
+  sourcePlanId?: string;
 }
 
 export interface ComputerUseResult {
@@ -46,14 +53,106 @@ export interface ComputerUseResult {
   message: string;
   screenshotUrl?: string;
   actions: BrowserAction[];
+  currentUrl?: string;
+  backendSessionId?: string;
+  backendLiveUrl?: string;
 }
 
-// ─── Constants ──────────────────────────────────────────────────────────────
+export interface ComputerUsePlanSummary {
+  ok: boolean;
+  task: string;
+  backend: ComputerUseBackend;
+  backendLabel: string;
+  backendDetails?: string;
+  actions: BrowserAction[];
+  requiresApproval: boolean;
+  summaryText: string;
+}
+
+export interface BrowserPlanCardData {
+  planId: string;
+  task: string;
+  backend: ComputerUseBackend;
+  backendLabel: string;
+  backendDetails?: string;
+  requiresApproval: boolean;
+  status: 'planned' | 'approval_requested' | 'launched' | 'completed' | 'failed';
+  launchedAt?: string;
+  completedAt?: string;
+  backendSessionId?: string;
+  backendLiveUrl?: string;
+  actions: Array<Pick<BrowserAction, 'id' | 'type' | 'target' | 'value' | 'description' | 'requiresApproval'>>;
+}
+
+export type BrowserPlanEventKind =
+  | 'planned'
+  | 'approval_requested'
+  | 'launched'
+  | 'completed'
+  | 'failed'
+  | 'opened_live_session'
+  | 'cancelled';
+
+export interface BrowserPlanEvent {
+  id: string;
+  planId: string;
+  kind: BrowserPlanEventKind;
+  at: string;
+  summary: string;
+  backend?: ComputerUseBackend;
+  backendLabel?: string;
+  backendSessionId?: string;
+  backendLiveUrl?: string;
+}
+
+export interface BrowserSessionRecord {
+  id: string;
+  planId?: string;
+  task: string;
+  backend: ComputerUseBackend;
+  backendLabel: string;
+  backendDetails?: string;
+  status: ComputerUseSession['status'];
+  startedAt: string;
+  completedAt?: string;
+  currentUrl?: string;
+  backendSessionId?: string;
+  backendLiveUrl?: string;
+  actions: BrowserAction[];
+}
+
+interface ComputerUseBackendContext {
+  backend: ComputerUseBackend;
+  label: string;
+  details?: string;
+  browserbase?: {
+    apiKey: string;
+    projectId: string;
+    region?: string;
+  };
+}
+
+interface StagehandRunnerPayload {
+  mode: 'init' | 'action' | 'screenshot';
+  apiKey: string;
+  projectId: string;
+  region?: string;
+  sessionId?: string;
+  action?: Pick<BrowserAction, 'type' | 'target' | 'value' | 'description'>;
+}
+
+interface StagehandRunnerResponse {
+  ok: boolean;
+  error?: string;
+  sessionId?: string;
+  currentUrl?: string;
+  screenshot?: string | null;
+}
 
 const BRIDGE_URL = 'http://localhost:7778';
 const BRIDGE_TIMEOUT = 15000;
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
+const STAGEHAND_TIMEOUT = 120000;
+const STAGEHAND_RUNNER = 'node scripts/stagehand-runner.mjs';
 
 function generateId(): string {
   return `cu_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -65,6 +164,34 @@ function extractDomain(url: string): string {
   } catch {
     return url;
   }
+}
+
+function encodeBase64(value: string): string {
+  try {
+    return btoa(unescape(encodeURIComponent(value)));
+  } catch {
+    const bufferCtor = (globalThis as any).Buffer;
+    if (bufferCtor) return bufferCtor.from(value, 'utf8').toString('base64');
+    throw new Error('Base64 encoding unavailable in this environment');
+  }
+}
+
+function parseJsonFromExecOutput(raw: string): any {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    const lines = trimmed.split('\n').map((line) => line.trim()).filter(Boolean);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      try {
+        return JSON.parse(lines[index]);
+      } catch {
+        continue;
+      }
+    }
+  }
+  return null;
 }
 
 async function probeBridge(): Promise<boolean> {
@@ -79,16 +206,64 @@ async function probeBridge(): Promise<boolean> {
   }
 }
 
-// ─── Core Functions ─────────────────────────────────────────────────────────
+async function callBridgeExec(command: string, timeoutMs: number = BRIDGE_TIMEOUT): Promise<any> {
+  const online = await probeBridge();
+  if (!online) {
+    throw new Error('Bridge not reachable at localhost:7778');
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const res = await fetch(`${BRIDGE_URL}/exec`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command }),
+    signal: controller.signal,
+  });
+  clearTimeout(timeout);
+  if (!res.ok) {
+    throw new Error(`Bridge /exec failed: ${res.status}`);
+  }
+  return res.json();
+}
 
-/**
- * Creates a new computer-use session.
- */
-export function createSession(
+async function resolveComputerUseBackend(circleId?: string): Promise<ComputerUseBackendContext> {
+  if (!circleId) {
+    return { backend: 'playwright_bridge', label: 'Local Playwright Bridge', details: 'No circle context provided' };
+  }
+
+  const integration = await getCircleIntegration(circleId, 'browserbase');
+  if (!integration || integration.is_active === false || integration.status === 'disabled') {
+    return { backend: 'playwright_bridge', label: 'Local Playwright Bridge' };
+  }
+
+  const secrets = await getCircleIntegrationSecretValues(integration.id);
+  const apiKey = String(secrets.api_key || '').trim();
+  const projectId = String(secrets.project_id || '').trim();
+  const region = String(secrets.session_region || '').trim() || undefined;
+
+  if (!apiKey || !projectId) {
+    return {
+      backend: 'playwright_bridge',
+      label: 'Local Playwright Bridge',
+      details: 'Browserbase connected, but api_key/project_id are incomplete',
+    };
+  }
+
+  return {
+    backend: 'browserbase_stagehand',
+    label: 'Browserbase Stagehand',
+    details: integration.display_name || String(integration.metadata?.workspaceName || 'Connected Browserbase workspace'),
+    browserbase: { apiKey, projectId, region },
+  };
+}
+
+export async function createSession(
   agentName: string,
   task: string,
-  permission: ComputerUsePermission
-): ComputerUseSession {
+  permission: ComputerUsePermission,
+  opts?: { circleId?: string }
+): Promise<ComputerUseSession> {
+  const backend = await resolveComputerUseBackend(opts?.circleId);
   return {
     id: generateId(),
     agentName,
@@ -98,13 +273,39 @@ export function createSession(
     status: 'planning',
     startedAt: new Date().toISOString(),
     approvedDomains: [],
+    circleId: opts?.circleId,
+    backend: backend.backend,
+    backendLabel: backend.label,
+    backendDetails: backend.details,
   };
 }
 
-/**
- * Uses AI to plan a series of browser actions for the task.
- * Calls getSwanBotResponse with a structured prompt, then parses JSON output.
- */
+export async function createSessionFromBrowserPlan(
+  agentName: string,
+  permission: ComputerUsePermission,
+  plan: BrowserPlanCardData,
+  opts?: { circleId?: string; sourceMessageId?: string; sourceRunId?: string | null },
+): Promise<ComputerUseSession> {
+  const session = await createSession(agentName, plan.task, permission, opts);
+  session.backend = plan.backend;
+  session.backendLabel = plan.backendLabel;
+  session.backendDetails = plan.backendDetails;
+  session.actions = plan.actions.map((action) => ({
+    id: action.id,
+    type: action.type,
+    target: action.target,
+    value: action.value,
+    description: action.description,
+    requiresApproval: action.requiresApproval,
+    status: permission === 'trusted' ? 'approved' : 'pending',
+  }));
+  session.status = permission === 'trusted' ? 'executing' : 'awaiting_approval';
+  session.sourceMessageId = opts?.sourceMessageId;
+  session.sourceRunId = opts?.sourceRunId || null;
+  session.sourcePlanId = plan.planId;
+  return session;
+}
+
 export async function planActions(
   task: string,
   context?: string
@@ -135,19 +336,15 @@ Return ONLY the JSON array:`;
     userName: 'ComputerUse',
   });
 
-  // Extract JSON array from the response
   let parsed: any[] = [];
   try {
-    // Try direct parse first
     parsed = JSON.parse(aiResponse);
   } catch {
-    // Try to extract JSON from markdown code blocks or mixed text
     const jsonMatch = aiResponse.match(/\[[\s\S]*?\]/);
     if (jsonMatch) {
       try {
         parsed = JSON.parse(jsonMatch[0]);
       } catch {
-        // Fall back to a single navigate action
         parsed = [
           { type: 'navigate', target: task, description: `Navigate to: ${task}` },
           { type: 'screenshot', description: 'Capture the page' },
@@ -161,7 +358,6 @@ Return ONLY the JSON array:`;
     }
   }
 
-  // Convert to BrowserAction[]
   return parsed.map((item: any, index: number) => ({
     id: `action_${Date.now()}_${index}`,
     type: item.type || 'navigate',
@@ -173,10 +369,6 @@ Return ONLY the JSON array:`;
   }));
 }
 
-/**
- * Low-level helper that calls Playwright MCP via the bridge's /mcp endpoint.
- * Falls back to /exec with playwright CLI if /mcp is unavailable.
- */
 export async function callPlaywrightMCP(
   toolName: string,
   params: Record<string, any>
@@ -186,7 +378,6 @@ export async function callPlaywrightMCP(
     throw new Error('Bridge not reachable at localhost:7778');
   }
 
-  // Try /mcp endpoint first
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), BRIDGE_TIMEOUT);
@@ -205,14 +396,12 @@ export async function callPlaywrightMCP(
     clearTimeout(timeout);
 
     if (res.ok) {
-      const data = await res.json();
-      return data;
+      return res.json();
     }
   } catch {
-    // /mcp not available, fall through to /exec fallback
+    // Fall through to /exec fallback
   }
 
-  // Fallback: Use /exec to run playwright CLI commands
   let command = '';
   switch (toolName) {
     case 'mcp__playwright__browser_navigate':
@@ -228,25 +417,79 @@ export async function callPlaywrightMCP(
       command = `echo "Unsupported MCP tool: ${toolName}"`;
   }
 
-  const execRes = await fetch(`${BRIDGE_URL}/exec`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ command }),
-  });
-
-  if (!execRes.ok) {
-    throw new Error(`Bridge /exec failed: ${execRes.status}`);
-  }
-
-  return execRes.json();
+  return callBridgeExec(command);
 }
 
-/**
- * Takes a screenshot and returns base64 data.
- * Tries Playwright MCP first, falls back to screencapture on Mac.
- */
-export async function takeScreenshot(): Promise<string | null> {
-  // Try Playwright MCP screenshot
+async function callStagehandRunner(payload: StagehandRunnerPayload): Promise<StagehandRunnerResponse> {
+  const encoded = encodeBase64(JSON.stringify(payload));
+  const result = await callBridgeExec(`${STAGEHAND_RUNNER} '${encoded}'`, STAGEHAND_TIMEOUT);
+  const raw = `${result?.stdout || result?.output || result?.stderr || ''}`;
+  const parsed = parseJsonFromExecOutput(raw) as StagehandRunnerResponse | null;
+  if (parsed?.ok) return parsed;
+  if (parsed && !parsed.ok) {
+    throw new Error(parsed.error || 'Stagehand runner failed');
+  }
+  throw new Error(raw.trim() || 'Stagehand runner returned no structured output');
+}
+
+async function ensureStagehandSession(session: ComputerUseSession): Promise<void> {
+  if (session.backend !== 'browserbase_stagehand' || session.backendSessionId) return;
+  const backend = await resolveComputerUseBackend(session.circleId);
+  if (backend.backend !== 'browserbase_stagehand' || !backend.browserbase) {
+    throw new Error('Browserbase Stagehand is not configured for this circle');
+  }
+  const init = await callStagehandRunner({
+    mode: 'init',
+    apiKey: backend.browserbase.apiKey,
+    projectId: backend.browserbase.projectId,
+    region: backend.browserbase.region,
+  });
+  if (!init.sessionId) {
+    throw new Error('Stagehand did not return a Browserbase session id');
+  }
+  session.backendSessionId = init.sessionId;
+  session.backendLiveUrl = `https://www.browserbase.com/sessions/${init.sessionId}`;
+  session.currentUrl = init.currentUrl || session.currentUrl;
+}
+
+async function runStagehandSessionCommand(
+  session: ComputerUseSession,
+  mode: 'action' | 'screenshot',
+  action?: Pick<BrowserAction, 'type' | 'target' | 'value' | 'description'>,
+): Promise<StagehandRunnerResponse> {
+  const backend = await resolveComputerUseBackend(session.circleId);
+  if (backend.backend !== 'browserbase_stagehand' || !backend.browserbase) {
+    throw new Error('Browserbase Stagehand is not configured for this circle');
+  }
+  await ensureStagehandSession(session);
+  const response = await callStagehandRunner({
+    mode,
+    apiKey: backend.browserbase.apiKey,
+    projectId: backend.browserbase.projectId,
+    region: backend.browserbase.region,
+    sessionId: session.backendSessionId,
+    action,
+  });
+  if (response.sessionId) {
+    session.backendSessionId = response.sessionId;
+    session.backendLiveUrl = `https://www.browserbase.com/sessions/${response.sessionId}`;
+  }
+  if (response.currentUrl) {
+    session.currentUrl = response.currentUrl;
+  }
+  return response;
+}
+
+export async function takeScreenshot(session?: ComputerUseSession): Promise<string | null> {
+  if (session?.backend === 'browserbase_stagehand') {
+    try {
+      const result = await runStagehandSessionCommand(session, 'screenshot');
+      if (result.screenshot) return result.screenshot;
+    } catch {
+      // Fall through to bridge fallback if Stagehand screenshot fails
+    }
+  }
+
   try {
     const result = await callPlaywrightMCP('mcp__playwright__browser_take_screenshot', {});
     if (result && result.screenshot) {
@@ -256,122 +499,113 @@ export async function takeScreenshot(): Promise<string | null> {
       return result;
     }
   } catch {
-    // Playwright MCP failed, try shell fallback
+    // Try shell fallback
   }
 
-  // Fallback: macOS screencapture
   try {
     const ts = Date.now();
     const path = `/tmp/cu_screenshot_${ts}.png`;
-    const res = await fetch(`${BRIDGE_URL}/exec`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: `screencapture -x ${path} && base64 ${path} && rm ${path}` }),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      const output = data.output || data.stdout || '';
-      if (output && output.length > 100) {
-        return output.trim();
-      }
+    const res = await callBridgeExec(`screencapture -x ${path} && base64 ${path} && rm ${path}`);
+    const output = res.output || res.stdout || '';
+    if (output && output.length > 100) {
+      return output.trim();
     }
   } catch {
-    // Both methods failed
+    // Ignore
   }
 
   return null;
 }
 
-/**
- * Executes a single browser action via the bridge.
- * Returns the updated action with status + screenshot.
- */
-export async function executeAction(action: BrowserAction): Promise<BrowserAction> {
+export async function executeAction(
+  action: BrowserAction,
+  session?: ComputerUseSession,
+): Promise<BrowserAction> {
   const updated: BrowserAction = { ...action, status: 'executing', executedAt: new Date().toISOString() };
 
   try {
-    // Take screenshot before action
-    const beforeShot = await takeScreenshot();
-    if (beforeShot) {
-      updated.screenshotBefore = beforeShot;
-    }
+    const beforeShot = await takeScreenshot(session);
+    if (beforeShot) updated.screenshotBefore = beforeShot;
 
-    // Execute the action
-    switch (action.type) {
-      case 'navigate': {
-        await callPlaywrightMCP('mcp__playwright__browser_navigate', {
-          url: action.target || '',
-        });
-        break;
-      }
-      case 'click': {
-        await callPlaywrightMCP('mcp__playwright__browser_click', {
-          selector: action.target || '',
-          element: action.target || '',
-        });
-        break;
-      }
-      case 'fill': {
-        await callPlaywrightMCP('mcp__playwright__browser_fill_form', {
-          selector: action.target || '',
-          value: action.value || '',
-        });
-        break;
-      }
-      case 'screenshot': {
-        const shot = await takeScreenshot();
-        if (shot) {
-          updated.screenshotAfter = shot;
+    if (session?.backend === 'browserbase_stagehand') {
+      switch (action.type) {
+        case 'screenshot': {
+          const shot = await takeScreenshot(session);
+          if (shot) updated.screenshotAfter = shot;
+          updated.status = 'completed';
+          return updated;
         }
-        updated.status = 'completed';
-        return updated;
+        case 'wait': {
+          const ms = parseInt(action.value || '1000', 10);
+          await new Promise(resolve => setTimeout(resolve, Math.min(ms, 10000)));
+          break;
+        }
+        default: {
+          await runStagehandSessionCommand(session, 'action', action);
+          break;
+        }
       }
-      case 'select': {
-        await callPlaywrightMCP('mcp__playwright__browser_select_option', {
-          selector: action.target || '',
-          value: action.value || '',
-        });
-        break;
+    } else {
+      switch (action.type) {
+        case 'navigate':
+          await callPlaywrightMCP('mcp__playwright__browser_navigate', { url: action.target || '' });
+          if (session && action.target) session.currentUrl = action.target;
+          break;
+        case 'click':
+          await callPlaywrightMCP('mcp__playwright__browser_click', {
+            selector: action.target || '',
+            element: action.target || '',
+          });
+          break;
+        case 'fill':
+          await callPlaywrightMCP('mcp__playwright__browser_fill_form', {
+            selector: action.target || '',
+            value: action.value || '',
+          });
+          break;
+        case 'screenshot': {
+          const shot = await takeScreenshot(session);
+          if (shot) updated.screenshotAfter = shot;
+          updated.status = 'completed';
+          return updated;
+        }
+        case 'select':
+          await callPlaywrightMCP('mcp__playwright__browser_select_option', {
+            selector: action.target || '',
+            value: action.value || '',
+          });
+          break;
+        case 'press_key':
+          await callPlaywrightMCP('mcp__playwright__browser_press_key', {
+            key: action.value || action.target || '',
+          });
+          break;
+        case 'wait': {
+          const ms = parseInt(action.value || '1000', 10);
+          await new Promise(resolve => setTimeout(resolve, Math.min(ms, 10000)));
+          break;
+        }
+        case 'scroll':
+          await callPlaywrightMCP('mcp__playwright__browser_press_key', {
+            key: action.value === 'up' ? 'PageUp' : 'PageDown',
+          });
+          break;
+        default:
+          throw new Error(`Unknown action type: ${action.type}`);
       }
-      case 'press_key': {
-        await callPlaywrightMCP('mcp__playwright__browser_press_key', {
-          key: action.value || action.target || '',
-        });
-        break;
-      }
-      case 'wait': {
-        const ms = parseInt(action.value || '1000', 10);
-        await new Promise(resolve => setTimeout(resolve, Math.min(ms, 10000)));
-        break;
-      }
-      case 'scroll': {
-        await callPlaywrightMCP('mcp__playwright__browser_press_key', {
-          key: action.value === 'up' ? 'PageUp' : 'PageDown',
-        });
-        break;
-      }
-      default:
-        throw new Error(`Unknown action type: ${action.type}`);
     }
 
-    // Take screenshot after action
-    const afterShot = await takeScreenshot();
-    if (afterShot) {
-      updated.screenshotAfter = afterShot;
-    }
-
+    const afterShot = await takeScreenshot(session);
+    if (afterShot) updated.screenshotAfter = afterShot;
     updated.status = 'completed';
   } catch (err: any) {
     updated.status = 'failed';
-    updated.error = err.message || 'Unknown error';
+    updated.error = err?.message || 'Unknown error';
   }
 
   return updated;
 }
 
-/**
- * Checks whether an action can execute without explicit user approval.
- */
 export function checkPermission(
   session: ComputerUseSession,
   action: BrowserAction
@@ -384,9 +618,7 @@ export function checkPermission(
     case 'ask_every_time':
       return false;
     case 'ask_for_new_sites': {
-      // Allow if it's not a navigate action
       if (action.type !== 'navigate') return true;
-      // Check if the domain is already approved
       const domain = extractDomain(action.target || '');
       return session.approvedDomains.includes(domain);
     }
@@ -395,11 +627,6 @@ export function checkPermission(
   }
 }
 
-/**
- * Executes all approved actions in sequence.
- * Calls onActionComplete after each one for live UI updates.
- * Takes a screenshot before and after each action.
- */
 export async function executePlan(
   session: ComputerUseSession,
   onActionComplete: (action: BrowserAction, index: number) => void
@@ -407,26 +634,20 @@ export async function executePlan(
   const results: BrowserAction[] = [];
   let lastScreenshot: string | undefined;
 
-  for (let i = 0; i < session.actions.length; i++) {
+  for (let i = 0; i < session.actions.length; i += 1) {
     const action = session.actions[i];
 
-    // Skip rejected or already completed actions
     if (action.status === 'rejected' || action.status === 'completed') {
       results.push(action);
       continue;
     }
 
-    // Check if action is approved
-    if (action.status !== 'approved') {
-      // Check auto-approval based on permission level
-      if (!checkPermission(session, action)) {
-        results.push({ ...action, status: 'pending' });
-        continue;
-      }
+    if (action.status !== 'approved' && !checkPermission(session, action)) {
+      results.push({ ...action, status: 'pending' });
+      continue;
     }
 
-    // Execute the action
-    const result = await executeAction(action);
+    const result = await executeAction(action, session);
     results.push(result);
     onActionComplete(result, i);
 
@@ -434,17 +655,18 @@ export async function executePlan(
       lastScreenshot = result.screenshotAfter;
     }
 
-    // If action failed, stop execution
     if (result.status === 'failed') {
       return {
         success: false,
         message: `Failed at step ${i + 1}: ${result.error || 'Unknown error'}`,
         screenshotUrl: lastScreenshot ? `data:image/png;base64,${lastScreenshot}` : undefined,
         actions: results,
+        currentUrl: session.currentUrl,
+        backendSessionId: session.backendSessionId,
+        backendLiveUrl: session.backendLiveUrl,
       };
     }
 
-    // Track approved domains for ask_for_new_sites permission
     if (action.type === 'navigate' && action.target) {
       const domain = extractDomain(action.target);
       if (!session.approvedDomains.includes(domain)) {
@@ -452,14 +674,10 @@ export async function executePlan(
       }
     }
 
-    // Small delay between actions for stability
     await new Promise(resolve => setTimeout(resolve, 500));
   }
 
-  const allCompleted = results.every(
-    a => a.status === 'completed' || a.status === 'rejected'
-  );
-
+  const allCompleted = results.every(a => a.status === 'completed' || a.status === 'rejected');
   return {
     success: allCompleted,
     message: allCompleted
@@ -467,5 +685,88 @@ export async function executePlan(
       : `Completed ${results.filter(a => a.status === 'completed').length}/${results.length} actions`,
     screenshotUrl: lastScreenshot ? `data:image/png;base64,${lastScreenshot}` : undefined,
     actions: results,
+    currentUrl: session.currentUrl,
+    backendSessionId: session.backendSessionId,
+    backendLiveUrl: session.backendLiveUrl,
+  };
+}
+
+export async function describeComputerUsePlan(opts: {
+  task: string;
+  circleId?: string;
+  agentName?: string;
+}): Promise<ComputerUsePlanSummary> {
+  const task = opts.task.trim();
+  const session = await createSession(
+    opts.agentName || 'OpenSwan',
+    task,
+    'ask_every_time',
+    { circleId: opts.circleId },
+  );
+  const actions = await planActions(task);
+  session.actions = actions;
+
+  const summaryText = [
+    `Browser backend: ${session.backendLabel}${session.backendDetails ? ` (${session.backendDetails})` : ''}`,
+    `Planned actions: ${actions.length}`,
+    ...actions.slice(0, 8).map((action, index) =>
+      `${index + 1}. ${action.type.toUpperCase()}${action.target ? ` ${action.target}` : ''} — ${action.description}`),
+    actions.length > 8 ? `...and ${actions.length - 8} more action(s)` : '',
+    'This plan requires user approval before live browser execution.',
+  ].filter(Boolean).join('\n');
+
+  return {
+    ok: true,
+    task,
+    backend: session.backend,
+    backendLabel: session.backendLabel,
+    backendDetails: session.backendDetails,
+    actions,
+    requiresApproval: true,
+    summaryText,
+  };
+}
+
+export function toBrowserSessionRecord(
+  session: ComputerUseSession,
+  result?: ComputerUseResult | { success: boolean },
+): BrowserSessionRecord {
+  const isTerminal = !!result;
+  return {
+    id: session.backendSessionId || session.id,
+    planId: session.sourcePlanId,
+    task: session.task,
+    backend: session.backend,
+    backendLabel: session.backendLabel,
+    backendDetails: session.backendDetails,
+    status: isTerminal
+      ? (result.success ? 'completed' : 'failed')
+      : session.status,
+    startedAt: session.startedAt,
+    completedAt: isTerminal ? new Date().toISOString() : undefined,
+    currentUrl: session.currentUrl,
+    backendSessionId: session.backendSessionId,
+    backendLiveUrl: session.backendLiveUrl,
+    actions: session.actions,
+  };
+}
+
+export function toBrowserPlanCardData(plan: ComputerUsePlanSummary): BrowserPlanCardData {
+  return {
+    planId: `browser-plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    task: plan.task,
+    backend: plan.backend,
+    backendLabel: plan.backendLabel,
+    backendDetails: plan.backendDetails,
+    requiresApproval: plan.requiresApproval,
+    status: 'planned',
+    actions: plan.actions.map((action) => ({
+      id: action.id,
+      type: action.type,
+      target: action.target,
+      value: action.value,
+      description: action.description,
+      requiresApproval: action.requiresApproval,
+    })),
   };
 }

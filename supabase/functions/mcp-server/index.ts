@@ -4,7 +4,7 @@
  * Supports MCP-over-HTTP protocol.
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.95.3';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',

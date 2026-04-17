@@ -8,7 +8,7 @@ import {
   Platform, KeyboardAvoidingView, Image, ActivityIndicator,
 } from 'react-native';
 import {
-  KanbanTask, TaskComment, TaskAttachment, TaskStatus, TaskPriority, TaskRun,
+  KanbanTask, TaskComment, TaskAttachment, TaskStatus, TaskPriority, TaskRun, TaskCompletionPolicy,
   COLUMNS, PRIORITY_COLORS, PRIORITY_LABELS, DEFAULT_AGENT_ROSTER,
 } from '../../../../types/kanban';
 import type { KanbanData, KanbanMember, ThinkingLevel, AgentModel, AgentMode } from '../../../../hooks/useKanbanData';
@@ -22,6 +22,10 @@ import TaskRunTimeline from './TaskRunTimeline';
 import TaskArtifactsPanel from './TaskArtifactsPanel';
 import TaskChecksPanel from './TaskChecksPanel';
 import TaskApprovalsPanel from './TaskApprovalsPanel';
+import { useProjectRooms } from '../../../../services/projectRooms';
+import { listCircleIntegrations } from '../../../../lib/circleIntegrations';
+import { getInstalledProviderSet, recommendMarketplaceItemsForWork } from '../../../../lib/marketplaceRecommendations';
+import type { CircleIntegrationGroupKey } from '../../../../lib/circleIntegrationCatalog';
 
 // ─── Automation Report Section Parser ────────────────────────────────────────
 
@@ -314,6 +318,7 @@ interface Props {
   agents: CircleOfficeAgent[];
   goals?: GoalWithCount[];
   circleId: string;
+  onOpenMarketplace?: (focus?: { itemId?: string | null; groupKey?: CircleIntegrationGroupKey | null }) => void;
   onClose: () => void;
 }
 
@@ -334,7 +339,7 @@ function sortAgentsForAssignment(agents: CircleOfficeAgent[]): CircleOfficeAgent
   });
 }
 
-export default function TaskDetailModal({ task: initialTask, kanban, agents, goals, circleId, onClose }: Props) {
+export default function TaskDetailModal({ task: initialTask, kanban, agents, goals, circleId, onOpenMarketplace, onClose }: Props) {
   const task = kanban.tasks.find(t => t.id === initialTask.id) || initialTask;
 
   const [editing, setEditing] = useState(false);
@@ -343,6 +348,9 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
   const [priority, setPriority] = useState<TaskPriority>(task.priority);
   const [assignedTo, setAssignedTo] = useState<string | null>(task.assigned_to);
   const [assignedAgentIds, setAssignedAgentIds] = useState<string[]>(task.assigned_agent_ids || (task.assigned_agent_id ? [task.assigned_agent_id] : []));
+  const [completionPolicy, setCompletionPolicy] = useState<TaskCompletionPolicy>(task.completion_policy || ((task.assigned_agent_ids || (task.assigned_agent_id ? [task.assigned_agent_id] : [])).length > 1 ? 'any_assigned' : 'single_owner'));
+  const [selectedRoomId, setSelectedRoomId] = useState<string | null>(task.room_id || null);
+  const [assignmentMode, setAssignmentMode] = useState<'manual' | 'room_team'>('manual');
   const [dueDate, setDueDate] = useState(task.due_date || '');
 
   const [comments, setComments] = useState<TaskComment[]>([]);
@@ -369,6 +377,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
   const [agentMode, setAgentMode] = useState<AgentMode>('execute');
   const [commentAttachments, setCommentAttachments] = useState<TaskAttachment[]>([]);
   const [commentUploading, setCommentUploading] = useState(false);
+  const [installedProviders, setInstalledProviders] = useState<Set<string>>(new Set());
   const commentFileRef = useRef<HTMLInputElement | null>(null);
 
   // Cleanup file inputs on unmount
@@ -393,6 +402,9 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
       setPriority(task.priority);
       setAssignedTo(task.assigned_to);
       setAssignedAgentIds(task.assigned_agent_ids || (task.assigned_agent_id ? [task.assigned_agent_id] : []));
+      setCompletionPolicy(task.completion_policy || ((task.assigned_agent_ids || (task.assigned_agent_id ? [task.assigned_agent_id] : [])).length > 1 ? 'any_assigned' : 'single_owner'));
+      setSelectedRoomId(task.room_id || null);
+      setAssignmentMode('manual');
       setDueDate(task.due_date || '');
     }
     setSelectedAgentId(task.assigned_agent_ids?.[0] || task.assigned_agent_id || 'blackswan-default');
@@ -417,6 +429,18 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
     () => sortAgentsForAssignment(agents.length > 0 ? agents : kanban.agents),
     [agents, kanban.agents],
   );
+  const { rooms } = useProjectRooms(circleId);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const integrations = await listCircleIntegrations(circleId);
+      if (!cancelled) {
+        setInstalledProviders(getInstalledProviderSet(integrations.map(item => item.provider)));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [circleId]);
 
   // Realtime comments
   useEffect(() => {
@@ -431,15 +455,23 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
   }, [task.id, loadComments]);
 
   const handleSave = async () => {
-    await kanban.updateTask(task.id, {
+    const baseFields: any = {
       title: title.trim(),
       description: description.trim() || null,
       priority,
-      assigned_to: assignedTo,
-      assigned_agent_id: assignedAgentIds[0] || null,
-      assigned_agent_ids: assignedAgentIds,
+      room_id: selectedRoomId || null,
+      completion_policy: completionPolicy,
       due_date: dueDate || null,
-    } as any);
+    };
+    if (assignmentMode === 'room_team' && selectedRoomId) {
+      baseFields.assigned_to = null;
+      baseFields.inherit_room_agents = true;
+    } else {
+      baseFields.assigned_to = assignedTo;
+      baseFields.assigned_agent_id = assignedAgentIds[0] || null;
+      baseFields.assigned_agent_ids = assignedAgentIds;
+    }
+    await kanban.updateTask(task.id, baseFields as any);
     setEditing(false);
   };
 
@@ -551,6 +583,30 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
     }
   }, [task.id, selectedAgentId, thinkingLevel, agentModel, agentMode, kanban]);
 
+  const handleRunAssignedAgents = useCallback(async () => {
+    setAgentRunning(true);
+    setAgentResult(null);
+    setAgentError(null);
+    try {
+      const result = await kanban.runAssignedAgentsOnTask(task.id, {
+        thinkingLevel,
+        model: agentModel,
+        mode: agentMode,
+      });
+      if (result) {
+        setAgentResult(result);
+        await loadTaskRuns();
+      } else {
+        setAgentError('Assigned agents returned no response');
+      }
+    } catch (err) {
+      setAgentError('Assigned agents failed to run');
+      console.error('handleRunAssignedAgents error:', err);
+    } finally {
+      setAgentRunning(false);
+    }
+  }, [task.id, thinkingLevel, agentModel, agentMode, kanban, loadTaskRuns]);
+
   const selectedAgent = availableAgents.find(a => a.id === selectedAgentId)
     || { id: 'blackswan-default', name: 'BlackSwan', color: '#b5b5b5' };
 
@@ -558,12 +614,27 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
     .map(agentId => availableAgents.find(a => a.id === agentId))
     .filter(Boolean) as CircleOfficeAgent[];
   const assignedAgent = assignedAgents[0] || null;
+  const ownershipAssignments = (task.agent_assignments || [])
+    .filter(assignment => assignedAgentIds.includes(assignment.agent_id))
+    .sort((a, b) => (a.order_index ?? 999) - (b.order_index ?? 999));
   const assignedMember = assignedTo
     ? kanban.members.find(m => m.id === assignedTo)
     : null;
   const taskAssignedAgents = (task.assigned_agent_ids || (task.assigned_agent_id ? [task.assigned_agent_id] : []))
     .map(agentId => availableAgents.find(a => a.id === agentId))
     .filter(Boolean) as CircleOfficeAgent[];
+  const marketplaceRecommendations = useMemo(
+    () => recommendMarketplaceItemsForWork({
+      title: task.title,
+      description: task.description || undefined,
+      installedProviders,
+      extraText: [
+        ...ownershipAssignments.flatMap(assignment => assignment.required_connectors || []),
+        ...ownershipAssignments.flatMap(assignment => assignment.required_capabilities || []),
+      ],
+    }),
+    [installedProviders, ownershipAssignments, task.description, task.title],
+  );
 
   const currentCol = COLUMNS.find(c => c.key === task.status) || COLUMNS[1];
 
@@ -592,6 +663,27 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
       ? prev.filter(id => id !== agentId)
       : [...prev, agentId]);
   };
+
+  useEffect(() => {
+    setCompletionPolicy(prev => {
+      if (assignedAgentIds.length <= 1 && prev !== 'single_owner') return 'single_owner';
+      if (assignedAgentIds.length > 1 && prev === 'single_owner') return 'any_assigned';
+      return prev;
+    });
+  }, [assignedAgentIds]);
+
+  useEffect(() => {
+    if (!selectedRoomId && assignmentMode === 'room_team') {
+      setAssignmentMode('manual');
+    }
+  }, [selectedRoomId, assignmentMode]);
+
+  useEffect(() => {
+    if (assignmentMode !== 'room_team') return;
+    setAssignedTo(null);
+    setAssignedAgentIds([]);
+    setShowAssignees(false);
+  }, [assignmentMode]);
 
   return (
     <View style={s.overlay}>
@@ -768,6 +860,36 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
             ) : (
               <Text style={[s.fieldValue, !task.description && s.fieldEmpty]}>
                 {task.description || 'No description'}
+              </Text>
+            )}
+
+            <Text style={s.sectionLabel}>Project Room</Text>
+            {editing ? (
+              <View style={s.chipRow}>
+                <Pressable
+                  onPress={() => setSelectedRoomId(null)}
+                  style={[s.chip, !selectedRoomId && { backgroundColor: '#e8e8e812', borderColor: '#e8e8e830' }]}
+                >
+                  <Text style={[s.chipText, !selectedRoomId && { color: '#e8e8e8' }]}>None</Text>
+                </Pressable>
+                {rooms.map(room => {
+                  const active = selectedRoomId === room.id;
+                  const color = room.color || '#22d3ee';
+                  return (
+                    <Pressable
+                      key={room.id}
+                      onPress={() => setSelectedRoomId(active ? null : room.id)}
+                      style={[s.chip, active && { backgroundColor: color + '15', borderColor: color + '30' }]}
+                    >
+                      <View style={[s.chipDot, { backgroundColor: color }]} />
+                      <Text style={[s.chipText, active && { color }]}>{room.name}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ) : (
+              <Text style={[s.fieldValue, !task.room?.name && s.fieldEmpty]}>
+                {task.room?.name || 'No project room'}
               </Text>
             )}
 
@@ -949,6 +1071,22 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                 </Pressable>
               </View>
 
+              {taskAssignedAgents.length > 1 && (
+                <Pressable
+                  onPress={handleRunAssignedAgents}
+                  style={[
+                    s.runAgentBtn,
+                    { width: '100%', marginTop: 8, backgroundColor: '#22c55e12', borderColor: '#22c55e30' },
+                    agentRunning && { opacity: 0.5 },
+                  ]}
+                  disabled={agentRunning}
+                >
+                  <Text style={[s.runAgentBtnText, { color: '#22c55e' }]}>
+                    {agentMode === 'plan' ? 'PLAN WITH TEAM' : `RUN ${taskAssignedAgents.length} ASSIGNED AGENTS`}
+                  </Text>
+                </Pressable>
+              )}
+
               {/* Agent picker dropdown */}
               {showAgentPicker && (
                 <View style={s.agentPickerList}>
@@ -1048,8 +1186,38 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
             )}
 
             {/* Assignee */}
+            <Text style={s.sectionLabel}>Assignment source</Text>
+            {editing ? (
+              <View style={s.chipRow}>
+                <Pressable
+                  onPress={() => setAssignmentMode('manual')}
+                  style={[s.chip, assignmentMode === 'manual' && { backgroundColor: '#e8e8e812', borderColor: '#e8e8e830' }]}
+                >
+                  <Text style={[s.chipText, assignmentMode === 'manual' && { color: '#e8e8e8' }]}>Custom assignees</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => selectedRoomId && setAssignmentMode('room_team')}
+                  style={[s.chip, assignmentMode === 'room_team' && { backgroundColor: '#22d3ee15', borderColor: '#22d3ee30' }, !selectedRoomId && { opacity: 0.4 }]}
+                  disabled={!selectedRoomId}
+                >
+                  <Text style={[s.chipText, assignmentMode === 'room_team' && { color: '#22d3ee' }]}>Use room team</Text>
+                </Pressable>
+              </View>
+            ) : (
+              <Text style={s.fieldValue}>
+                {task.room_id && taskAssignedAgents.length > 0 ? 'Custom assignees or room team' : 'Custom assignees'}
+              </Text>
+            )}
+
             <Text style={s.sectionLabel}>Assigned to</Text>
             {editing ? (
+              assignmentMode === 'room_team' ? (
+                <View style={s.noteBox}>
+                  <Text style={s.noteText}>
+                    Saving will replace the task assignees with the active agents from the selected project room.
+                  </Text>
+                </View>
+              ) : (
               <View>
                 <Pressable onPress={() => setShowAssignees(p => !p)} style={s.assigneeToggle}>
                   <View style={s.assigneeToggleLeft}>
@@ -1137,6 +1305,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                   </View>
                 )}
               </View>
+              )
             ) : (
               <View style={s.assigneeDisplay}>
                 {taskAssignedAgents.length > 0 ? (
@@ -1164,6 +1333,138 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                 ) : (
                   <Text style={s.fieldEmpty}>Unassigned</Text>
                 )}
+              </View>
+            )}
+
+            {ownershipAssignments.length > 0 && (
+              <>
+                <Text style={s.sectionLabel}>Ownership readiness</Text>
+                <View style={s.ownershipPanel}>
+                  {ownershipAssignments.map(assignment => {
+                    const agent = availableAgents.find(item => item.id === assignment.agent_id);
+                    const tone = assignment.ownership_status === 'blocked'
+                      ? { label: 'BLOCKED', color: '#ef4444', bg: '#ef444415', border: '#ef444430' }
+                      : assignment.ownership_status === 'assisted'
+                        ? { label: 'ASSISTED', color: '#f59e0b', bg: '#f59e0b15', border: '#f59e0b30' }
+                        : { label: 'FULL', color: '#22c55e', bg: '#22c55e15', border: '#22c55e30' };
+                    return (
+                      <View key={assignment.id} style={s.ownershipRow}>
+                        <View style={s.ownershipHeader}>
+                          <View style={s.ownershipAgent}>
+                            <View style={[s.assigneeAvatar, { backgroundColor: agent?.color || '#e8e8e8' }]}>
+                              <Text style={s.assigneeAvatarText}>{(agent?.name || assignment.agent_id)[0].toUpperCase()}</Text>
+                            </View>
+                            <View style={{ flex: 1 }}>
+                              <Text style={s.ownershipAgentName}>{agent?.name || assignment.agent_id}</Text>
+                              <Text style={s.ownershipAgentMeta}>{assignment.role || 'executor'}</Text>
+                            </View>
+                          </View>
+                          <View style={[s.ownershipBadge, { backgroundColor: tone.bg, borderColor: tone.border }]}>
+                            <Text style={[s.ownershipBadgeText, { color: tone.color }]}>{tone.label}</Text>
+                          </View>
+                        </View>
+                        {assignment.ownership_summary ? (
+                          <Text style={s.ownershipSummary}>{assignment.ownership_summary}</Text>
+                        ) : null}
+                        {assignment.required_connectors && assignment.required_connectors.length > 0 ? (
+                          <Text style={s.ownershipDetail}>Required connectors: {assignment.required_connectors.join(', ')}</Text>
+                        ) : null}
+                        {assignment.required_capabilities && assignment.required_capabilities.length > 0 ? (
+                          <Text style={s.ownershipDetail}>Required capabilities: {assignment.required_capabilities.join(', ')}</Text>
+                        ) : null}
+                        {assignment.missing_connectors && assignment.missing_connectors.length > 0 ? (
+                          <Text style={[s.ownershipDetail, { color: '#fca5a5' }]}>Missing connectors: {assignment.missing_connectors.join(', ')}</Text>
+                        ) : null}
+                        {assignment.missing_capabilities && assignment.missing_capabilities.length > 0 ? (
+                          <Text style={[s.ownershipDetail, { color: '#fcd34d' }]}>Missing capabilities: {assignment.missing_capabilities.join(', ')}</Text>
+                        ) : null}
+                        {(assignment.missing_connectors?.length || assignment.missing_capabilities?.length) ? (
+                          <Text style={s.ownershipHint}>Connect the missing systems in Marketplace before expecting full ownership.</Text>
+                        ) : null}
+                      </View>
+                    );
+                  })}
+                </View>
+              </>
+            )}
+
+            {marketplaceRecommendations.length > 0 && (
+              <>
+                <Text style={s.sectionLabel}>Marketplace guidance</Text>
+                <View style={s.ownershipPanel}>
+                  <View style={s.marketplaceGuidanceCard}>
+                    <View style={s.marketplaceGuidanceRow}>
+                      {marketplaceRecommendations.slice(0, 8).map(recommendation => (
+                        <Pressable
+                          key={recommendation.item.id}
+                          onPress={() => onOpenMarketplace?.({ itemId: recommendation.item.id, groupKey: recommendation.item.group })}
+                          style={[
+                            s.marketplaceGuidanceChip,
+                            recommendation.installed ? s.marketplaceGuidanceChipInstalled : s.marketplaceGuidanceChipMissing,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              s.marketplaceGuidanceChipText,
+                              recommendation.installed && s.marketplaceGuidanceChipTextInstalled,
+                            ]}
+                          >
+                            {recommendation.item.label}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                    <View style={s.marketplaceGuidanceFooter}>
+                      <Text style={[s.marketplaceGuidanceText, { flex: 1 }]}>
+                        Missing items are the highest-leverage Marketplace installs for this task. Installed items are already usable by the circle runtime.
+                      </Text>
+                      {onOpenMarketplace ? (
+                        <Pressable
+                          onPress={() => {
+                            const target = marketplaceRecommendations.find(item => !item.installed) || marketplaceRecommendations[0];
+                            if (target) onOpenMarketplace({ itemId: target.item.id, groupKey: target.item.group });
+                          }}
+                          style={s.marketplaceOpenBtn}
+                        >
+                          <Text style={s.marketplaceOpenBtnText}>Open Marketplace</Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
+                  </View>
+                </View>
+              </>
+            )}
+
+            <Text style={s.sectionLabel}>Completion policy</Text>
+            {editing ? (
+              <View style={s.chipRow}>
+                {[
+                  { key: 'single_owner' as TaskCompletionPolicy, label: 'Owner finishes', hint: 'One primary assignee is responsible for completion.' },
+                  { key: 'any_assigned' as TaskCompletionPolicy, label: 'Any assigned can finish', hint: 'One assigned agent can complete the task while others collaborate.' },
+                  { key: 'all_assigned' as TaskCompletionPolicy, label: 'All assigned must finish', hint: 'Use for strict review, handoff, or signoff workflows.' },
+                ].map(option => {
+                  const active = completionPolicy === option.key;
+                  return (
+                    <Pressable
+                      key={option.key}
+                      onPress={() => setCompletionPolicy(option.key)}
+                      style={[s.policyChip, active && s.policyChipActive]}
+                    >
+                      <Text style={[s.policyChipTitle, active && s.policyChipTitleActive]}>{option.label}</Text>
+                      <Text style={[s.policyChipHint, active && s.policyChipHintActive]}>{option.hint}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ) : (
+              <View style={s.inlineBadge}>
+                <Text style={s.fieldValue}>
+                  {task.completion_policy === 'all_assigned'
+                    ? 'All assigned must finish'
+                    : task.completion_policy === 'single_owner'
+                      ? 'Owner finishes'
+                      : 'Any assigned can finish'}
+                </Text>
               </View>
             )}
 
@@ -1690,6 +1991,19 @@ const s = StyleSheet.create({
     color: '#3e3e3e',
     fontStyle: 'italic',
   },
+  noteBox: {
+    backgroundColor: '#0a0a0a',
+    borderWidth: 1,
+    borderColor: '#1a1a1a',
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  noteText: {
+    color: '#9a9a9a',
+    fontSize: 12,
+    lineHeight: 18,
+  },
   input: {
     backgroundColor: '#0a0a0a',
     borderWidth: 1,
@@ -1731,6 +2045,38 @@ const s = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     color: '#6f6f6f',
+  },
+  policyChip: {
+    minWidth: 148,
+    maxWidth: 220,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: '#1a1a1a',
+    borderRadius: 12,
+    backgroundColor: '#0a0a0a',
+    gap: 4,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
+  },
+  policyChipActive: {
+    borderColor: '#3a3a3a',
+    backgroundColor: '#151515',
+  },
+  policyChipTitle: {
+    color: '#b8b8b8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  policyChipTitleActive: {
+    color: '#e8e8e8',
+  },
+  policyChipHint: {
+    color: '#6f6f6f',
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  policyChipHintActive: {
+    color: '#9e9e9e',
   },
   inlineBadge: {
     borderRadius: 20,
@@ -2382,5 +2728,126 @@ const s = StyleSheet.create({
   commentAttFileSize: {
     color: '#6f6f6f',
     fontSize: 10,
+  },
+  ownershipPanel: {
+    gap: 10,
+    marginBottom: 6,
+  },
+  ownershipRow: {
+    backgroundColor: '#0f1014',
+    borderWidth: 1,
+    borderColor: '#1b1d24',
+    borderRadius: 12,
+    padding: 12,
+    gap: 6,
+  },
+  ownershipHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 10,
+  },
+  ownershipAgent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  ownershipAgentName: {
+    color: '#e8e8e8',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  ownershipAgentMeta: {
+    color: '#6f6f6f',
+    fontSize: 11,
+    textTransform: 'uppercase' as any,
+    letterSpacing: 0.6,
+  },
+  ownershipBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  ownershipBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  ownershipSummary: {
+    color: '#cfcfcf',
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  ownershipDetail: {
+    color: '#9e9e9e',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  ownershipHint: {
+    color: '#6f6f6f',
+    fontSize: 11,
+    lineHeight: 16,
+    marginTop: 2,
+  },
+  marketplaceGuidanceCard: {
+    backgroundColor: '#0f1014',
+    borderWidth: 1,
+    borderColor: '#1b1d24',
+    borderRadius: 12,
+    padding: 12,
+    gap: 10,
+  },
+  marketplaceGuidanceRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  marketplaceGuidanceChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  marketplaceGuidanceChipInstalled: {
+    backgroundColor: '#102115',
+    borderColor: '#1d6b3a',
+  },
+  marketplaceGuidanceChipMissing: {
+    backgroundColor: '#161921',
+    borderColor: '#293140',
+  },
+  marketplaceGuidanceChipText: {
+    color: '#cbd5e1',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  marketplaceGuidanceChipTextInstalled: {
+    color: '#86efac',
+  },
+  marketplaceGuidanceText: {
+    color: '#7d8798',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  marketplaceGuidanceFooter: {
+    flexDirection: 'row',
+    gap: 10,
+    alignItems: 'center',
+  },
+  marketplaceOpenBtn: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#2d3f5e',
+    backgroundColor: '#111827',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  marketplaceOpenBtnText: {
+    color: '#93c5fd',
+    fontSize: 11,
+    fontWeight: '700',
   },
 });

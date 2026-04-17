@@ -740,6 +740,7 @@ export async function invokeDirect(
         const geminiResult = await getSwanBotResponse(req.command, {
           userId: req.senderId || req.messageId,
           circleId: req.circleId,
+          agentId: agent.id,
         });
         return {
           success: true,
@@ -892,6 +893,7 @@ export async function invokeAndStream(
           const geminiResult = await getSwanBotResponse(req.command, {
             userId: req.senderId || req.messageId,
             circleId: req.circleId,
+            agentId: agent.id,
           });
           result = {
             success: true,

@@ -15,7 +15,7 @@ import { useKanbanData, type KanbanMember } from '../../../hooks/useKanbanData';
 import { useGoals } from '../../../hooks/useGoals';
 import { usePlans } from '../../../hooks/usePlans';
 import {
-  KanbanTask, TaskStatus, TaskPriority, TasksByColumn,
+  KanbanTask, TaskStatus, TaskPriority, TaskCompletionPolicy, TasksByColumn,
   COLUMNS, PRIORITY_COLORS, PRIORITY_LABELS,
 } from '../../../types/kanban';
 import type { GoalWithCount } from '../../../hooks/useGoals';
@@ -32,8 +32,10 @@ import { sessionsToAgents } from '../../../lib/officeAgents';
 import type { OpenSwanSession } from '../../../lib/openswanService';
 import { loadAgentIdentities, type AgentIdentity } from '../../../lib/agentIdentity';
 import { storage } from '../../../lib/storage';
+import { getAdaptiveFeedDefaults, loadAdaptiveWorkspaceSettings, loadCircleWorkspaceProfile, recordFeedActivity } from '../../../lib/workspaceAdaptation';
 import { useCircleAutomations, useDashboardStats } from '../../../services/automationService';
 import { useProjectRooms } from '../../../services/projectRooms';
+import type { CircleIntegrationGroupKey } from '../../../lib/circleIntegrationCatalog';
 
 import { supabase } from '../../../lib/supabase';
 import CircleStoriesRail from '../../../components/stories/CircleStoriesRail.web';
@@ -655,7 +657,7 @@ function timeAgo(dateStr: string): string {
 const MOBILE_BREAKPOINT = 768;
 
 type MobileTab = 'missions' | 'goals' | 'activity' | 'agents' | 'board' | 'ai-tools';
-type CenterTab = 'missions' | 'activity' | 'agents' | 'ai-tools';
+type DesktopLowerTab = 'activity' | 'agents' | 'ai-tools';
 
 const AGENT_ASSIGNMENT_STATUS_ORDER: Record<AgentStatus, number> = {
   active: 0,
@@ -679,7 +681,49 @@ function compareAgentsForAssignment(
   return a.name.localeCompare(b.name);
 }
 
-export default function FeedTab({ circleId, accentColor }: { circleId: string; accentColor?: string }) {
+function filterTasksByBoardControls(
+  tasksByColumn: TasksByColumn,
+  filters: {
+    searchText: string;
+    filterPriority: TaskPriority | null;
+    filterAssignee: string | null;
+    filterRoom: string | null;
+  },
+): TasksByColumn {
+  const q = filters.searchText.toLowerCase().trim();
+  const hasFilters = q || filters.filterPriority || filters.filterAssignee || filters.filterRoom;
+  if (!hasFilters) return tasksByColumn;
+
+  const result = {} as TasksByColumn;
+  for (const key of Object.keys(tasksByColumn) as TaskStatus[]) {
+    result[key] = tasksByColumn[key].filter(t => {
+      if (filters.filterPriority && t.priority !== filters.filterPriority) return false;
+      if (filters.filterAssignee) {
+        if (filters.filterAssignee.startsWith('agent:')) {
+          const assignedAgentIds = t.assigned_agent_ids || (t.assigned_agent_id ? [t.assigned_agent_id] : []);
+          if (!assignedAgentIds.includes(filters.filterAssignee.slice(6))) return false;
+        } else if (t.assigned_to !== filters.filterAssignee) {
+          return false;
+        }
+      }
+      if (filters.filterRoom && t.room_id !== filters.filterRoom) return false;
+      if (!q) return true;
+      const haystack = `${t.title}\n${t.description || ''}`.toLowerCase();
+      return haystack.includes(q);
+    });
+  }
+  return result;
+}
+
+export default function FeedTab({
+  circleId,
+  accentColor,
+  onOpenMarketplace,
+}: {
+  circleId: string;
+  accentColor?: string;
+  onOpenMarketplace?: (focus?: { itemId?: string | null; groupKey?: CircleIntegrationGroupKey | null }) => void;
+}) {
   const kanban = useKanbanData(circleId);
   const goalsHook = useGoals(circleId);
   const plansHook = usePlans(circleId);
@@ -691,7 +735,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
   const [showCreate, setShowCreate] = useState(false);
   const [createInColumn, setCreateInColumn] = useState<TaskStatus>('todo');
   const [mobileTab, setMobileTab] = useState<MobileTab>('missions');
-  const [centerTab, setCenterTab] = useState<CenterTab>('missions');
+  const [desktopLowerTab, setDesktopLowerTab] = useState<DesktopLowerTab>('activity');
   const { width } = useWindowDimensions();
   const isMobile = width < MOBILE_BREAKPOINT;
   const searchInputRef = useRef<TextInput>(null);
@@ -821,6 +865,36 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
   const [filterRoom, setFilterRoom] = useState<string | null>(null);
   const [searchExpanded, setSearchExpanded] = useState(false);
   const [activityExpanded, setActivityExpanded] = useState(false);
+  const { rooms: projectRooms } = useProjectRooms(circleId);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      loadCircleWorkspaceProfile(circleId),
+      loadAdaptiveWorkspaceSettings(circleId),
+    ]).then(([profile, settings]) => {
+      if (cancelled) return;
+      const adaptive = getAdaptiveFeedDefaults(profile, settings);
+      setMobileTab(adaptive.mobileTab as MobileTab);
+      setDesktopLowerTab(adaptive.desktopLowerTab as DesktopLowerTab);
+      setSearchExpanded(adaptive.searchExpanded);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [circleId]);
+
+  useEffect(() => {
+    recordFeedActivity(circleId, 'mobile_tab', mobileTab).catch(() => {});
+  }, [circleId, mobileTab]);
+
+  useEffect(() => {
+    recordFeedActivity(circleId, 'desktop_lower_tab', desktopLowerTab).catch(() => {});
+  }, [circleId, desktopLowerTab]);
+
+  useEffect(() => {
+    if (searchExpanded) {
+      recordFeedActivity(circleId, 'search_expand').catch(() => {});
+    }
+  }, [circleId, searchExpanded]);
 
   // Collect unique assignees for filter chips
   const assigneeOptions = useMemo(() => {
@@ -842,9 +916,19 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
     }
     return opts;
   }, [kanban.tasksByColumn, agents]);
+
+  const handleOpenMarketplace = useCallback((focus?: { itemId?: string | null; groupKey?: CircleIntegrationGroupKey | null }) => {
+    recordFeedActivity(circleId, 'marketplace_jump').catch(() => {});
+    onOpenMarketplace?.(focus);
+  }, [circleId, onOpenMarketplace]);
   const roomOptions = useMemo(() => {
     const opts: { id: string; label: string; color: string }[] = [];
     const seen = new Set<string>();
+    for (const room of projectRooms) {
+      if (seen.has(room.id)) continue;
+      seen.add(room.id);
+      opts.push({ id: room.id, label: room.name, color: room.color || '#22d3ee' });
+    }
     const allTasks = Object.values(kanban.tasksByColumn).flat();
     for (const t of allTasks) {
       if (!t.room_id || seen.has(t.room_id) || !t.room?.name) continue;
@@ -852,7 +936,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
       opts.push({ id: t.room_id, label: t.room.name, color: t.room.color || '#22d3ee' });
     }
     return opts;
-  }, [kanban.tasksByColumn]);
+  }, [kanban.tasksByColumn, projectRooms]);
 
   const totalTasks = useMemo(() => Object.values(kanban.tasksByColumn).reduce((sum, arr) => sum + arr.length, 0), [kanban.tasksByColumn]);
 
@@ -902,19 +986,23 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
     return { total: allTasks.length, completed, inProgress, overdue, dueToday, completedThisWeek };
   }, [kanban.tasksByColumn]);
 
-  // Filter tasks by goal
-  const filteredTasksByColumn = useMemo(() => {
-    if (!filteredGoalId && !filterRoom) return kanban.tasksByColumn;
+  const goalFilteredTasksByColumn = useMemo(() => {
+    if (!filteredGoalId) return kanban.tasksByColumn;
     const filtered = {} as TasksByColumn;
     for (const key of Object.keys(kanban.tasksByColumn) as TaskStatus[]) {
-      filtered[key] = kanban.tasksByColumn[key].filter(t => {
-        if (filteredGoalId && (t as any).goal_id !== filteredGoalId) return false;
-        if (filterRoom && t.room_id !== filterRoom) return false;
-        return true;
-      });
+      filtered[key] = kanban.tasksByColumn[key].filter(t => (t as any).goal_id === filteredGoalId);
     }
     return filtered;
-  }, [kanban.tasksByColumn, filteredGoalId, filterRoom]);
+  }, [kanban.tasksByColumn, filteredGoalId]);
+
+  const visibleTasksByColumn = useMemo(() => (
+    filterTasksByBoardControls(goalFilteredTasksByColumn, {
+      searchText: debouncedSearchText,
+      filterPriority,
+      filterAssignee,
+      filterRoom,
+    })
+  ), [goalFilteredTasksByColumn, debouncedSearchText, filterPriority, filterAssignee, filterRoom]);
 
 
   // Batch move handler
@@ -945,12 +1033,6 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
 
       if (isInput) return;
 
-      // M — toggle missions panel
-      if (e.key === 'm' || e.key === 'M') {
-        setCenterTab(centerTab === 'missions' ? 'activity' : 'missions');
-        e.preventDefault();
-        return;
-      }
       if (e.key === 'n' || e.key === 'N') {
         setCreateInColumn('todo');
         setShowCreate(true);
@@ -1022,6 +1104,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
                 onCreateTask={kanban.createTask}
                 onEditGoal={setEditGoal}
                 plans={plansHook.plans}
+                onOpenMarketplace={handleOpenMarketplace}
                 circleId={circleId}
                 onCreatePlan={plansHook.createPlan}
                 onUpdatePlan={plansHook.updatePlan}
@@ -1039,7 +1122,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
             <View style={s.mobilePanel}>
               <ActiveRunsWidget circleId={circleId} />
               <AgentTasksPanel
-                tasksByColumn={filteredTasksByColumn}
+                tasksByColumn={visibleTasksByColumn}
                 agents={agents}
                 onCardPress={setDetailTask}
                 searchText={debouncedSearchText}
@@ -1058,32 +1141,39 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
           {mobileTab === 'board' && (
             <KanbanBoard
               columns={COLUMNS}
-              tasksByColumn={filteredTasksByColumn}
+              tasksByColumn={visibleTasksByColumn}
               agents={agents}
               goals={goalsHook.goals}
               onCardPress={setDetailTask}
               onMoveTask={kanban.moveTask}
-              onQuickAdd={(status, title) => kanban.createTask({ title, status })}
+              onQuickAdd={(status, title) => kanban.createTask({
+                title,
+                status,
+                goal_id: filteredGoalId || undefined,
+                room_id: filterRoom || undefined,
+              })}
               onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
               onBatchMove={handleBatchMove}
               onBatchAssignRoom={handleBatchAssignRoom}
               roomOptions={roomOptions}
               onArchiveDone={handleArchiveDone}
-              externalSearchText={debouncedSearchText}
-              externalFilterPriority={filterPriority}
-              externalFilterAssignee={filterAssignee}
-              externalFilterRoom={filterRoom}
             />
           )}
         </View>
 
         {/* Mobile tab bar */}
-        <View style={s.mobileTabBar}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={s.mobileTabBar}
+        >
           {([
             { key: 'missions' as MobileTab, label: 'Missions', icon: '\uD83C\uDFAF' },
             { key: 'goals' as MobileTab, label: 'Goals', icon: '\u2299' },
             { key: 'board' as MobileTab, label: 'Board', icon: '\u25A6' },
             { key: 'activity' as MobileTab, label: 'Activity', icon: '\u26A1' },
+            { key: 'agents' as MobileTab, label: 'Agents', icon: '\u2699' },
+            { key: 'ai-tools' as MobileTab, label: 'AI Tools', icon: '\uD83E\uDD17' },
           ]).map(tab => {
             const isActive = mobileTab === tab.key;
             return (
@@ -1097,17 +1187,18 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
               </Pressable>
             );
           })}
-        </View>
+        </ScrollView>
 
         {detailTask && (
-          <TaskDetailModal
-            task={detailTask}
-            kanban={kanban}
-            agents={sortedAgentsForAssign}
-            goals={goalsHook.goals}
-            circleId={circleId}
-            onClose={() => setDetailTask(null)}
-          />
+      <TaskDetailModal
+        task={detailTask}
+        kanban={kanban}
+        agents={sortedAgentsForAssign}
+        goals={goalsHook.goals}
+        circleId={circleId}
+        onOpenMarketplace={handleOpenMarketplace}
+        onClose={() => setDetailTask(null)}
+      />
         )}
 
         {editGoal && (
@@ -1129,6 +1220,8 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
             agents={sortedAgentsForAssign}
             goals={goalsHook.goals}
             missions={allMissions}
+            initialGoalId={filteredGoalId}
+            initialRoomId={filterRoom}
             onClose={() => setShowCreate(false)}
             onCreate={async (fields) => {
               await kanban.createTask(fields);
@@ -1197,6 +1290,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
           onUpdatePlan={plansHook.updatePlan}
           onDeletePlan={plansHook.deletePlan}
           onGenerateTasks={plansHook.generateTasksFromPlan}
+          onOpenMarketplace={handleOpenMarketplace}
         />
 
         {/* Center panel: Missions only (full height) */}
@@ -1206,46 +1300,107 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
 
         <KanbanBoard
           columns={COLUMNS}
-          tasksByColumn={filteredTasksByColumn}
+          tasksByColumn={visibleTasksByColumn}
           agents={agents}
           goals={goalsHook.goals}
           onCardPress={setDetailTask}
           onMoveTask={kanban.moveTask}
-          onQuickAdd={(status, title) => kanban.createTask({ title, status })}
+          onQuickAdd={(status, title) => kanban.createTask({
+            title,
+            status,
+            goal_id: filteredGoalId || undefined,
+            room_id: filterRoom || undefined,
+          })}
           onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
           onBatchMove={handleBatchMove}
           onBatchAssignRoom={handleBatchAssignRoom}
           roomOptions={roomOptions}
           onArchiveDone={handleArchiveDone}
-          externalSearchText={debouncedSearchText}
-          externalFilterPriority={filterPriority}
-          externalFilterAssignee={filterAssignee}
-          externalFilterRoom={filterRoom}
         />
       </View>
 
       {/* Collapsible Activity strip at bottom */}
       <View style={{ borderTopWidth: 1, borderTopColor: '#151515', backgroundColor: '#0a0a0a' }}>
-        <Pressable
-          onPress={() => setActivityExpanded(!activityExpanded)}
+        <View
           style={{
             flexDirection: 'row', alignItems: 'center', gap: 8,
             paddingHorizontal: 16, paddingVertical: 8,
           }}
         >
-          <Text style={{ color: '#606070', fontSize: 10, fontWeight: '700', letterSpacing: 1 }}>
-            ACTIVITY
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+            {([
+              { key: 'activity' as DesktopLowerTab, label: 'ACTIVITY' },
+              { key: 'agents' as DesktopLowerTab, label: 'AGENT TASKS' },
+              { key: 'ai-tools' as DesktopLowerTab, label: 'AI TOOLS' },
+            ]).map(tab => {
+              const active = desktopLowerTab === tab.key;
+              return (
+                <Pressable
+                  key={tab.key}
+                  onPress={() => {
+                    setDesktopLowerTab(tab.key);
+                    if (!activityExpanded) setActivityExpanded(true);
+                  }}
+                  style={{
+                    paddingHorizontal: 10,
+                    paddingVertical: 4,
+                    borderRadius: 999,
+                    borderWidth: 1,
+                    borderColor: active ? '#6366f155' : '#1f1f28',
+                    backgroundColor: active ? '#6366f118' : '#0f0f15',
+                  }}
+                >
+                  <Text style={{ color: active ? '#c7d2fe' : '#606070', fontSize: 10, fontWeight: '700', letterSpacing: 1 }}>
+                    {tab.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+          <Text style={{ color: '#404050', fontSize: 11, flex: 1, textAlign: 'right' }}>
+            {activityExpanded
+              ? desktopLowerTab === 'activity'
+                ? 'Hide feed'
+                : desktopLowerTab === 'agents'
+                  ? 'Hide agent task stream'
+                  : 'Hide AI tool feed'
+              : desktopLowerTab === 'activity'
+                ? 'Show recent agent activity'
+                : desktopLowerTab === 'agents'
+                  ? 'Show agent task stream'
+                  : 'Show AI tool feed'}
           </Text>
-          <Text style={{ color: '#404050', fontSize: 11, flex: 1 }}>
-            {activityExpanded ? 'Hide feed' : 'Show recent agent activity'}
-          </Text>
-          <Text style={{ color: '#606070', fontSize: 14, fontFamily: 'monospace' }}>
-            {activityExpanded ? '−' : '+'}
-          </Text>
-        </Pressable>
+          <Pressable
+            onPress={() => setActivityExpanded(!activityExpanded)}
+            style={{ paddingHorizontal: 8, paddingVertical: 4 }}
+          >
+            <Text style={{ color: '#606070', fontSize: 14, fontFamily: 'monospace' }}>
+              {activityExpanded ? '−' : '+'}
+            </Text>
+          </Pressable>
+        </View>
         {activityExpanded && (
           <View style={{ height: 240, borderTopWidth: 1, borderTopColor: '#151515' }}>
-            <ActivityFeedPanel circleId={circleId} agents={agents} />
+            {desktopLowerTab === 'activity' ? (
+              <ActivityFeedPanel circleId={circleId} agents={agents} />
+            ) : desktopLowerTab === 'agents' ? (
+              <View style={{ flex: 1, paddingTop: 10 }}>
+                <ActiveRunsWidget circleId={circleId} />
+                <AgentTasksPanel
+                  tasksByColumn={visibleTasksByColumn}
+                  agents={agents}
+                  onCardPress={setDetailTask}
+                  searchText={debouncedSearchText}
+                  filterPriority={filterPriority}
+                  filterAssignee={filterAssignee}
+                  filterRoom={filterRoom}
+                />
+              </View>
+            ) : (
+              <View style={{ flex: 1, paddingTop: 10 }}>
+                <HuggingSwanPanel circleId={circleId} />
+              </View>
+            )}
           </View>
         )}
       </View>
@@ -1257,6 +1412,7 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
           agents={sortedAgentsForAssign}
           goals={goalsHook.goals}
           circleId={circleId}
+          onOpenMarketplace={handleOpenMarketplace}
           onClose={() => setDetailTask(null)}
         />
       )}
@@ -1280,6 +1436,8 @@ export default function FeedTab({ circleId, accentColor }: { circleId: string; a
           agents={agents}
           goals={goalsHook.goals}
           missions={allMissions}
+          initialGoalId={filteredGoalId}
+          initialRoomId={filterRoom}
           onClose={() => setShowCreate(false)}
           onCreate={async (fields) => {
             await kanban.createTask(fields);
@@ -1300,6 +1458,8 @@ interface CreateModalProps {
   agents: CircleOfficeAgent[];
   goals: GoalWithCount[];
   missions?: Mission[];
+  initialGoalId?: string | null;
+  initialRoomId?: string | null;
   onClose: () => void;
   onCreate: (fields: {
     title: string;
@@ -1309,6 +1469,8 @@ interface CreateModalProps {
     assigned_to?: string | null;
     assigned_agent_id?: string | null;
     assigned_agent_ids?: string[];
+    inherit_room_agents?: boolean;
+    completion_policy?: TaskCompletionPolicy;
     due_date?: string | null;
     goal_id?: string | null;
     room_id?: string | null;
@@ -1316,32 +1478,79 @@ interface CreateModalProps {
   }) => void;
 }
 
-function CreateTaskModal({ circleId, column, members, agents, goals, missions, onClose, onCreate }: CreateModalProps) {
+function CreateTaskModal({
+  circleId,
+  column,
+  members,
+  agents,
+  goals,
+  missions,
+  initialGoalId,
+  initialRoomId,
+  onClose,
+  onCreate,
+}: CreateModalProps) {
   const { rooms } = useProjectRooms(circleId);
+  const hasInitialRoom = !!initialRoomId;
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('normal');
   const [assignedTo, setAssignedTo] = useState<string | null>(null);
   const [assignedAgentIds, setAssignedAgentIds] = useState<string[]>([]);
+  const [assignmentMode, setAssignmentMode] = useState<'manual' | 'room_team'>(hasInitialRoom ? 'room_team' : 'manual');
+  const [completionPolicy, setCompletionPolicy] = useState<TaskCompletionPolicy>('single_owner');
   const [dueDate, setDueDate] = useState('');
-  const [selectedGoalId, setSelectedGoalId] = useState<string | null>(null);
-  const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
+  const [selectedGoalId, setSelectedGoalId] = useState<string | null>(initialGoalId || null);
+  const [selectedRoomId, setSelectedRoomId] = useState<string | null>(initialRoomId || null);
   const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
   const [error, setError] = useState('');
 
   const columnDef = COLUMNS.find(c => c.key === column) || COLUMNS[1];
   const sortedAgentsForAssign = useMemo(() => [...agents].sort(compareAgentsForAssignment), [agents]);
+  const initialGoal = useMemo(() => goals.find(goal => goal.id === initialGoalId) || null, [goals, initialGoalId]);
+  const initialRoom = useMemo(() => rooms.find(room => room.id === initialRoomId) || null, [rooms, initialRoomId]);
+
+  useEffect(() => {
+    setSelectedGoalId(initialGoalId || null);
+  }, [initialGoalId]);
+
+  useEffect(() => {
+    setSelectedRoomId(initialRoomId || null);
+  }, [initialRoomId]);
+
+  useEffect(() => {
+    if (assignmentMode === 'room_team') {
+      setCompletionPolicy(prev => prev === 'single_owner' ? 'any_assigned' : prev);
+      return;
+    }
+    setCompletionPolicy(assignedAgentIds.length > 1 ? 'any_assigned' : 'single_owner');
+  }, [assignedAgentIds, assignmentMode]);
+
+  useEffect(() => {
+    if (!selectedRoomId && assignmentMode === 'room_team') {
+      setAssignmentMode('manual');
+    }
+  }, [selectedRoomId, assignmentMode]);
+
+  useEffect(() => {
+    if (assignmentMode !== 'room_team') return;
+    setAssignedTo(null);
+    setAssignedAgentIds([]);
+  }, [assignmentMode]);
 
   const handleCreate = () => {
     if (!title.trim()) { setError('Give the task a title'); return; }
+    const useRoomTeam = assignmentMode === 'room_team' && !!selectedRoomId;
     onCreate({
       title: title.trim(),
       description: description.trim() || undefined,
       priority,
       status: column,
-      assigned_to: assignedTo,
-      assigned_agent_id: assignedAgentIds[0] || null,
-      assigned_agent_ids: assignedAgentIds,
+      assigned_to: useRoomTeam ? null : assignedTo,
+      assigned_agent_id: useRoomTeam ? undefined : assignedAgentIds[0] || null,
+      assigned_agent_ids: useRoomTeam ? undefined : assignedAgentIds,
+      inherit_room_agents: useRoomTeam,
+      completion_policy: completionPolicy,
       due_date: dueDate || null,
       goal_id: selectedGoalId,
       room_id: selectedRoomId,
@@ -1392,6 +1601,26 @@ function CreateTaskModal({ circleId, column, members, agents, goals, missions, o
             multiline
             maxLength={500}
           />
+
+          {(initialRoom || initialGoal) && (
+            <View style={m.contextBox}>
+              <Text style={m.contextLabel}>Starting from current board context</Text>
+              <View style={m.contextChipRow}>
+                {initialRoom && (
+                  <View style={[m.contextChip, { borderColor: (initialRoom.color || '#22d3ee') + '35' }]}>
+                    <View style={[m.contextChipDot, { backgroundColor: initialRoom.color || '#22d3ee' }]} />
+                    <Text style={m.contextChipText}>Room: {initialRoom.name}</Text>
+                  </View>
+                )}
+                {initialGoal && (
+                  <View style={[m.contextChip, { borderColor: '#22c55e35' }]}>
+                    <View style={[m.contextChipDot, { backgroundColor: '#22c55e' }]} />
+                    <Text style={m.contextChipText}>Goal: {initialGoal.name}</Text>
+                  </View>
+                )}
+              </View>
+            </View>
+          )}
 
           {rooms.length > 0 && (
             <>
@@ -1498,39 +1727,85 @@ function CreateTaskModal({ circleId, column, members, agents, goals, missions, o
           </View>
 
           {/* Assign */}
-          <Text style={m.sectionLabel}>Assign to</Text>
+          <Text style={m.sectionLabel}>Assignment source</Text>
           <View style={m.chipRow}>
             <Pressable
-              onPress={() => { setAssignedTo(null); setAssignedAgentIds([]); }}
-              style={[m.chip, !assignedTo && assignedAgentIds.length === 0 && m.chipActive]}
+              onPress={() => setAssignmentMode('manual')}
+              style={[m.chip, assignmentMode === 'manual' && m.chipActive]}
             >
-              <Text style={[m.chipText, !assignedTo && assignedAgentIds.length === 0 && { color: '#e8e8e8' }]}>Nobody</Text>
+              <Text style={[m.chipText, assignmentMode === 'manual' && { color: '#e8e8e8' }]}>Custom assignees</Text>
             </Pressable>
-            {members.map(mem => (
+            <Pressable
+              onPress={() => selectedRoomId && setAssignmentMode('room_team')}
+              style={[m.chip, assignmentMode === 'room_team' && m.chipActive, !selectedRoomId && { opacity: 0.4 }]}
+              disabled={!selectedRoomId}
+            >
+              <Text style={[m.chipText, assignmentMode === 'room_team' && { color: '#e8e8e8' }]}>Use room team</Text>
+            </Pressable>
+          </View>
+
+          <Text style={m.sectionLabel}>Assign to</Text>
+          {assignmentMode === 'room_team' ? (
+            <View style={m.noteBox}>
+              <Text style={m.noteText}>
+                This task will inherit the active agents assigned to the selected project room when it is created.
+              </Text>
+            </View>
+          ) : (
+            <View style={m.chipRow}>
               <Pressable
-                key={mem.id}
-                onPress={() => { setAssignedTo(mem.id); setAssignedAgentIds([]); }}
-                style={[m.chip, assignedTo === mem.id && m.chipActive]}
+                onPress={() => { setAssignedTo(null); setAssignedAgentIds([]); }}
+                style={[m.chip, !assignedTo && assignedAgentIds.length === 0 && m.chipActive]}
               >
-                <Text style={[m.chipText, assignedTo === mem.id && { color: '#e8e8e8' }]}>
-                  {mem.display_name || mem.username}
-                </Text>
+                <Text style={[m.chipText, !assignedTo && assignedAgentIds.length === 0 && { color: '#e8e8e8' }]}>Nobody</Text>
               </Pressable>
-            ))}
-            {sortedAgentsForAssign.map(a => {
-              const active = assignedAgentIds.includes(a.id);
-              const isOnline = a.status === 'active' || a.status === 'building' || a.status === 'idle';
+              {members.map(mem => (
+                <Pressable
+                  key={mem.id}
+                  onPress={() => { setAssignedTo(mem.id); setAssignedAgentIds([]); }}
+                  style={[m.chip, assignedTo === mem.id && m.chipActive]}
+                >
+                  <Text style={[m.chipText, assignedTo === mem.id && { color: '#e8e8e8' }]}>
+                    {mem.display_name || mem.username}
+                  </Text>
+                </Pressable>
+              ))}
+              {sortedAgentsForAssign.map(a => {
+                const active = assignedAgentIds.includes(a.id);
+                const isOnline = a.status === 'active' || a.status === 'building' || a.status === 'idle';
+                return (
+                  <Pressable
+                    key={a.id}
+                    onPress={() => {
+                      setAssignedTo(null);
+                      setAssignedAgentIds(prev => prev.includes(a.id) ? prev.filter(id => id !== a.id) : [...prev, a.id]);
+                    }}
+                    style={[m.chip, active && { backgroundColor: (a.color || '#e8e8e8') + '15', borderColor: (a.color || '#e8e8e8') + '30' }, !isOnline && { opacity: 0.35 }]}
+                  >
+                    <View style={[m.chipDot, { backgroundColor: isOnline ? (a.color || '#e8e8e8') : '#555' }]} />
+                    <Text style={[m.chipText, active && { color: a.color || '#e8e8e8' }]}>{active ? '✓ ' : ''}{a.name}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          )}
+
+          <Text style={m.sectionLabel}>Completion policy</Text>
+          <View style={m.chipRow}>
+            {[
+              { key: 'single_owner' as TaskCompletionPolicy, label: 'Owner finishes', hint: 'One primary assignee is responsible for completion.' },
+              { key: 'any_assigned' as TaskCompletionPolicy, label: 'Any assigned can finish', hint: 'Collaborators can help, but one successful agent can complete it.' },
+              { key: 'all_assigned' as TaskCompletionPolicy, label: 'All assigned must finish', hint: 'Use for strict review or multi-signoff workflows.' },
+            ].map(option => {
+              const active = completionPolicy === option.key;
               return (
                 <Pressable
-                  key={a.id}
-                  onPress={() => {
-                    setAssignedTo(null);
-                    setAssignedAgentIds(prev => prev.includes(a.id) ? prev.filter(id => id !== a.id) : [...prev, a.id]);
-                  }}
-                  style={[m.chip, active && { backgroundColor: (a.color || '#e8e8e8') + '15', borderColor: (a.color || '#e8e8e8') + '30' }, !isOnline && { opacity: 0.35 }]}
+                  key={option.key}
+                  onPress={() => setCompletionPolicy(option.key)}
+                  style={[m.policyChip, active && m.policyChipActive]}
                 >
-                  <View style={[m.chipDot, { backgroundColor: isOnline ? (a.color || '#e8e8e8') : '#555' }]} />
-                  <Text style={[m.chipText, active && { color: a.color || '#e8e8e8' }]}>{active ? '✓ ' : ''}{a.name}</Text>
+                  <Text style={[m.policyChipTitle, active && m.policyChipTitleActive]}>{option.label}</Text>
+                  <Text style={[m.policyChipHint, active && m.policyChipHintActive]}>{option.hint}</Text>
                 </Pressable>
               );
             })}
@@ -1587,11 +1862,13 @@ const s = StyleSheet.create({
     borderTopColor: '#151515',
     paddingVertical: 6,
     paddingHorizontal: 12,
+    gap: 8,
   },
   mobileTabBtn: {
-    flex: 1,
     alignItems: 'center',
     gap: 3,
+    minWidth: 72,
+    paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 12,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
@@ -2082,6 +2359,47 @@ const m = StyleSheet.create({
     minHeight: 70,
     textAlignVertical: 'top',
   },
+  contextBox: {
+    backgroundColor: '#0c0c0c',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1a1a1a',
+    padding: 12,
+    marginBottom: 10,
+    gap: 8,
+  },
+  contextLabel: {
+    color: '#6f6f6f',
+    fontSize: 11,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  contextChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  contextChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 16,
+    borderWidth: 1,
+    backgroundColor: '#121212',
+  },
+  contextChipDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  contextChipText: {
+    color: '#b8b8b8',
+    fontSize: 11,
+    fontWeight: '600',
+  },
   sectionLabel: {
     color: '#6f6f6f',
     fontSize: 12,
@@ -2120,6 +2438,51 @@ const m = StyleSheet.create({
     color: '#555555',
     fontSize: 12,
     fontWeight: '600',
+  },
+  noteBox: {
+    backgroundColor: '#0c0c0c',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1a1a1a',
+    padding: 12,
+    marginBottom: 10,
+  },
+  noteText: {
+    color: '#9a9a9a',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  policyChip: {
+    minWidth: 140,
+    maxWidth: 220,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1e1e1e',
+    backgroundColor: '#0c0c0c',
+    gap: 4,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s' } as any : {}),
+  },
+  policyChipActive: {
+    borderColor: '#3a3a3a',
+    backgroundColor: '#161616',
+  },
+  policyChipTitle: {
+    color: '#b8b8b8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  policyChipTitleActive: {
+    color: '#e8e8e8',
+  },
+  policyChipHint: {
+    color: '#666666',
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  policyChipHintActive: {
+    color: '#9a9a9a',
   },
   btnRow: {
     gap: 8,

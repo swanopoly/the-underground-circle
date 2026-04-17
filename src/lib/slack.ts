@@ -38,25 +38,38 @@ const SLACK_SCOPES = 'chat:write,channels:read,channels:history,commands,users:r
 
 // ─── Connection ─────────────────────────────────────────────────────
 
+// Per-session flag. Once we've observed that `slack_connections` doesn't
+// exist in this project's schema, stop calling it so every page-load
+// doesn't emit a 404 to the browser console.
+let slackConnectionsUnavailable = false;
+
 export async function getSlackConfig(circleId: string): Promise<SlackConnection | null> {
-  const { data } = await supabase
+  if (slackConnectionsUnavailable) return null;
+  const { data, error } = await supabase
     .from('slack_connections')
     .select('*')
     .eq('circle_id', circleId)
     .eq('is_active', true)
-    .single();
-
+    .maybeSingle();
+  if ((error as any)?.code === 'PGRST205' || (error as any)?.code === 'PGRST204') {
+    slackConnectionsUnavailable = true;
+    return null;
+  }
   return data;
 }
 
 export async function getSlackConfigByOrg(orgId: string): Promise<SlackConnection | null> {
-  const { data } = await supabase
+  if (slackConnectionsUnavailable) return null;
+  const { data, error } = await supabase
     .from('slack_connections')
     .select('*')
     .eq('org_id', orgId)
     .eq('is_active', true)
-    .single();
-
+    .maybeSingle();
+  if ((error as any)?.code === 'PGRST205' || (error as any)?.code === 'PGRST204') {
+    slackConnectionsUnavailable = true;
+    return null;
+  }
   return data;
 }
 

@@ -17,6 +17,7 @@ export interface FocusChainItem {
 export type TaskCompletionPolicy = 'single_owner' | 'all_assigned' | 'any_assigned';
 export type TaskAssignmentRole = 'owner' | 'executor' | 'reviewer' | 'planner' | 'observer';
 export type TaskAssignmentStatus = 'assigned' | 'in_progress' | 'completed' | 'blocked' | 'skipped';
+export type TaskOwnershipStatus = 'full' | 'assisted' | 'blocked';
 export type TaskRunKind = 'plan' | 'execute' | 'review' | 'automation' | 'orchestrator';
 export type TaskRunStatus = 'running' | 'completed' | 'failed' | 'blocked' | 'cancelled';
 
@@ -36,6 +37,13 @@ export interface TaskAgentAssignment {
   started_at?: string | null;
   completed_at?: string | null;
   updated_at?: string;
+  ownership_status?: TaskOwnershipStatus | null;
+  ownership_summary?: string | null;
+  required_connectors?: string[];
+  required_capabilities?: string[];
+  missing_connectors?: string[];
+  missing_capabilities?: string[];
+  ownership_updated_at?: string | null;
 }
 
 export interface TaskRunArtifact {
@@ -75,6 +83,13 @@ export interface TaskRun {
   duration_ms?: number | null;
   error_message?: string | null;
   model_used?: string | null;
+  ownership_status?: TaskOwnershipStatus | null;
+  ownership_summary?: string | null;
+  required_connectors?: string[];
+  required_capabilities?: string[];
+  missing_connectors?: string[];
+  missing_capabilities?: string[];
+  ownership_updated_at?: string | null;
   started_at: string;
   completed_at?: string | null;
 }
@@ -93,6 +108,7 @@ export interface PlanStep {
 export interface CirclePlan {
   id: string;
   circle_id: string;
+  room_id?: string | null;
   title: string;
   description: string | null;
   status: PlanStatus;
@@ -102,6 +118,11 @@ export interface CirclePlan {
     qa_pairs?: Array<{ q: string; a: string }>;
     references?: string[];
     findings?: string[];
+    marketplace?: {
+      required_connectors?: string[];
+      required_capabilities?: string[];
+      last_audited_at?: string;
+    };
   };
   created_by: string;
   assigned_agent_ids: string[];
@@ -111,11 +132,13 @@ export interface CirclePlan {
   actual_cost: number;
   created_at: string;
   updated_at: string;
+  room?: { id: string; name: string; status: string; color?: string | null } | null;
 }
 
 export interface KanbanTask {
   id: string;
   circle_id: string;
+  room_id?: string | null;
   title: string;
   description: string | null;
   image_url?: string | null;
@@ -151,6 +174,7 @@ export interface KanbanTask {
   creator?: { username: string; display_name: string };
   assignee?: { username: string; display_name: string } | null;
   goal?: { id: string; name: string; status: string } | null;
+  room?: { id: string; name: string; status: string; color?: string | null } | null;
 }
 
 export interface TaskAttachment {

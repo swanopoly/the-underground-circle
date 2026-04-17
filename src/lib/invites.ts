@@ -174,13 +174,17 @@ export async function acceptInvite(inviteCode: string): Promise<{
 
   if (existing) return { error: 'You are already a member of this circle' };
 
-  // Add to circle
+  // Add to circle — record who invited them so we can award referral credit.
+  // Self-referrals (which shouldn't happen via the UI) are skipped via the
+  // RPC's guard, but we still set referred_by for analytics integrity.
+  const isSelfReferral = invite.invited_by === user.id;
   const { error: joinError } = await supabase
     .from('circle_members')
     .insert({
       circle_id: invite.circle_id,
       user_id: user.id,
       role: invite.role === 'admin' ? 'creator' : 'member', // map admin → creator role
+      referred_by: isSelfReferral ? null : invite.invited_by,
     });
 
   if (joinError) return { error: joinError.message };
@@ -196,7 +200,36 @@ export async function acceptInvite(inviteCode: string): Promise<{
     })
     .eq('id', invite.id);
 
+  // Award referral bonus to the inviter — atomic, idempotent server-side.
+  // We don't await this strictly; if the RPC fails we still want the user
+  // to land in the circle. Errors are logged so they're debuggable.
+  if (!isSelfReferral && invite.invited_by) {
+    supabase
+      .rpc('award_referral_bonus', {
+        p_inviter_id: invite.invited_by,
+        p_invitee_id: user.id,
+        p_circle_id: invite.circle_id,
+      })
+      .then(({ error: bonusErr }) => {
+        if (bonusErr) console.warn('[invites] award_referral_bonus failed:', bonusErr);
+      });
+  }
+
   return { circleId: invite.circle_id };
+}
+
+// ─── Referral stats ─────────────────────────────────────────────────
+
+/**
+ * How many distinct people did this user invite who actually joined?
+ * Used to display "X people joined through you" in profile/settings.
+ */
+export async function getReferralCount(userId: string): Promise<number> {
+  const { count } = await supabase
+    .from('circle_members')
+    .select('user_id', { count: 'exact', head: true })
+    .eq('referred_by', userId);
+  return count || 0;
 }
 
 // ─── Revoke Invite ──────────────────────────────────────────────────

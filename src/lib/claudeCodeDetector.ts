@@ -4,12 +4,14 @@
  * No manual configuration needed — if the bridge is running, agents appear.
  */
 
-import { OfficeAgent, AgentStatus } from './officeAgents';
+import { OfficeAgent } from './officeAgents';
 import { ProviderType } from './connectionManager';
 import { estimateCostWithCache } from './modelPricing';
 import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
 import { supabase } from './supabase';
 import { getCircleSessionMemoryMode } from './agentRunSystem';
+import { promoteExternalAgentSessionKnowledge } from './memoryService';
+import { deriveSessionStatus, clampToDbStatus, type AgentStatus } from './officeAgents';
 
 const BRIDGE_URL = 'http://localhost:7778';
 
@@ -40,6 +42,43 @@ export interface ClaudeCodeSession {
   activeFiles?: string[];
   currentToolName?: string;
   currentToolFile?: string;
+}
+
+// Derive the strict office status for a Claude Code session. A subagent that
+// is still firing tools also bumps the parent into 'active', so a session
+// running a sub-task doesn't look idle.
+function sessionToDerivedStatus(
+  session: ClaudeCodeSession,
+  subagents: ClaudeCodeSession[],
+): AgentStatus {
+  const subActive = subagents.some(s =>
+    s.currentToolName ||
+    (s.lastActivity && Date.now() - new Date(s.lastActivity).getTime() < 15_000)
+  );
+  if (subActive) return 'active';
+  return deriveSessionStatus({
+    lastActivityIso: session.lastActivity,
+    currentToolName: session.currentToolName,
+  });
+}
+
+function taskLabelForStatus(
+  status: AgentStatus,
+  project: string,
+  session: ClaudeCodeSession,
+  subagents: ClaudeCodeSession[],
+): string {
+  const sub = subagents.length > 0 ? ` (+${subagents.length} sub)` : '';
+  if (status === 'active') {
+    if (session.currentToolName) {
+      const file = session.currentToolFile ? ` ${session.currentToolFile.split('/').pop()}` : '';
+      return `Using ${session.currentToolName}${file}${sub}`;
+    }
+    return `Working on ${project}${sub}`;
+  }
+  if (status === 'building') return `Building on ${project}${sub}`;
+  if (status === 'idle') return `Open on ${project}${sub}`;
+  return `Session ended on ${project}`;
 }
 
 // Colors for auto-detected agents (amber/gold tones to match Claude Code branding)
@@ -245,7 +284,7 @@ export async function publishClaudeCodeAgent(
       const session = mainSessions[i];
       const name = friendlyName(session);
       const subagents = sessions?.filter(s => s.kind === 'subagent' && s.parentSessionId === session.sessionId) || [];
-      const isActive = session.status === 'active' || subagents.some(s => s.status === 'active');
+      const status = sessionToDerivedStatus(session, subagents);
       const project = session.projectDir.split('/').pop() || 'project';
 
       await publishAgentToCircle({
@@ -261,11 +300,9 @@ export async function publishClaudeCodeAgent(
       await supabase
         .from('circle_office_agents')
         .update({
-          status: isActive ? 'building' : 'idle',
-          current_task: isActive
-            ? `Working on ${project}${subagents.length > 0 ? ` (+${subagents.length} sub)` : ''}`
-            : `Idle on ${project}`,
-          last_active_at: new Date().toISOString(),
+          status: clampToDbStatus(status),
+          current_task: taskLabelForStatus(status, project, session, subagents),
+          last_active_at: session.lastActivity || new Date().toISOString(),
           updated_at: new Date().toISOString(),
         })
         .eq('circle_id', circleId)
@@ -325,17 +362,15 @@ export async function updateClaudeCodeAgentStatus(
       for (const session of mainSessions) {
         const name = friendlyName(session);
         const subagents = sessions.filter(s => s.kind === 'subagent' && s.parentSessionId === session.sessionId);
-        const isActive = session.status === 'active' || subagents.some(s => s.status === 'active');
+        const status = sessionToDerivedStatus(session, subagents);
         const project = session.projectDir.split('/').pop() || 'project';
 
         await supabase
           .from('circle_office_agents')
           .update({
-            status: isActive ? 'building' : 'idle',
-            current_task: isActive
-              ? `Working on ${project}${subagents.length > 0 ? ` (+${subagents.length} sub)` : ''}`
-              : `Idle on ${project}`,
-            last_active_at: new Date().toISOString(),
+            status: clampToDbStatus(status),
+            current_task: taskLabelForStatus(status, project, session, subagents),
+            last_active_at: session.lastActivity || new Date().toISOString(),
             updated_at: new Date().toISOString(),
           })
           .eq('circle_id', circleId)
@@ -345,25 +380,32 @@ export async function updateClaudeCodeAgentStatus(
       return;
     }
 
-    // Single session — update the standard "Claude Code" agent
-    const activeSessions = sessions.filter(s => s.status === 'active');
+    // Single session — update the standard "Claude Code" agent. Pick the
+    // most-recent main session as the representative for status derivation.
     const subagentSessions = sessions.filter(s => s.kind === 'subagent');
-    const activeSubagents = subagentSessions.filter(s => s.status === 'active');
-
-    const status = activeSessions.length > 0 ? 'building' : 'idle';
+    const newestMain = [...mainSessions].sort((a, b) => {
+      const at = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
+      const bt = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
+      return bt - at;
+    })[0];
+    const status: AgentStatus = newestMain
+      ? sessionToDerivedStatus(newestMain, subagentSessions.filter(s => s.parentSessionId === newestMain.sessionId))
+      : 'idle';
 
     let currentTask: string;
-    if (activeSubagents.length > 0) {
-      const project = activeSubagents[0].projectDir.split('/').pop() || 'project';
-      currentTask = `Subagent active on ${project}` + (activeSubagents.length > 1 ? ` (+${activeSubagents.length - 1} more)` : '');
-    } else if (activeSessions.length > 0) {
-      const project = activeSessions[0].projectDir.split('/').pop() || 'project';
-      currentTask = `Working on ${project}`;
+    if (newestMain && status !== 'offline') {
+      const project = newestMain.projectDir.split('/').pop() || 'project';
+      currentTask = taskLabelForStatus(
+        status,
+        project,
+        newestMain,
+        subagentSessions.filter(s => s.parentSessionId === newestMain.sessionId),
+      );
     } else if (sessions.length > 0) {
       const parts: string[] = [];
       if (mainSessions.length > 0) parts.push(`${mainSessions.length} main`);
       if (subagentSessions.length > 0) parts.push(`${subagentSessions.length} sub`);
-      currentTask = `${parts.join(' + ')} session(s) idle`;
+      currentTask = `${parts.join(' + ')} session(s) quiet`;
     } else {
       currentTask = 'Session ended — idling';
     }
@@ -371,7 +413,7 @@ export async function updateClaudeCodeAgentStatus(
     await supabase
       .from('circle_office_agents')
       .update({
-        status,
+        status: clampToDbStatus(status),
         current_task: currentTask,
         last_active_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -482,7 +524,6 @@ export async function saveSessionsToMemory(
     console.warn('[claudeCodeDetector] saveSessionsToMemory: no auth session, skipping');
     return { saved: 0, skipped: sessions.length };
   }
-  console.log('[claudeCodeDetector] saveSessionsToMemory: auth OK, user=', authCheck.user.id, 'circleId=', circleId, 'sessions=', sessions.length);
 
   const mainSessions = sessions.filter(s => s.kind === 'main' || !s.kind);
   const sessionMode = await getCircleSessionMemoryMode(circleId);
@@ -580,6 +621,15 @@ export async function saveSessionsToMemory(
             bucketId,
             projectKey,
             projectDir: latest.projectDir,
+            provider: 'claude-code',
+            providerLabel: 'CC',
+            latestTask: latest.lastUserMessage || null,
+            recentTasks: sortedSessions.map(s => s.lastUserMessage || '').filter(Boolean).slice(0, 6),
+            recentResponses: sortedSessions.map(s => s.lastAssistantText || '').filter(Boolean).slice(0, 4),
+            activeFiles,
+            currentTools: tools,
+            latestStatus: latest.status || null,
+            latestModel: latest.model || null,
             mergedSessionIds: sortedSessions.map(s => s.sessionId),
             sessionMemoryMode: sessionMode,
           },
@@ -602,6 +652,15 @@ export async function saveSessionsToMemory(
             bucketId,
             projectKey,
             projectDir: latest.projectDir,
+            provider: 'claude-code',
+            providerLabel: 'CC',
+            latestTask: latest.lastUserMessage || null,
+            recentTasks: sortedSessions.map(s => s.lastUserMessage || '').filter(Boolean).slice(0, 6),
+            recentResponses: sortedSessions.map(s => s.lastAssistantText || '').filter(Boolean).slice(0, 4),
+            activeFiles,
+            currentTools: tools,
+            latestStatus: latest.status || null,
+            latestModel: latest.model || null,
             mergedSessionIds: sortedSessions.map(s => s.sessionId),
             sessionMemoryMode: sessionMode,
           },
@@ -611,6 +670,29 @@ export async function saveSessionsToMemory(
 
       _savedContextHashes.set(bucketId, hash);
       saved++;
+
+      void promoteExternalAgentSessionKnowledge({
+        circleId,
+        userId,
+        provider: 'claude-code',
+        sessions: sortedSessions.map((session) => ({
+          sessionId: session.sessionId,
+          projectDir: session.projectDir,
+          model: session.model,
+          status: session.status,
+          task: session.lastUserMessage,
+          lastActivity: session.lastActivity,
+          messageCount: session.messageCount,
+          recentActions: session.recentActions,
+          lastUserMessage: session.lastUserMessage,
+          lastAssistantText: session.lastAssistantText,
+          activeFiles: session.activeFiles,
+          currentToolName: session.currentToolName,
+        })),
+        shareWithCircle: sessionMode === 'shared',
+      }).catch((err) => {
+        console.warn('[claudeCodeDetector] Failed to promote Claude knowledge:', err);
+      });
     } catch (err) {
       console.warn('[claudeCodeDetector] Failed to save session context:', err);
       skipped++;

@@ -7,6 +7,7 @@
  */
 
 import { supabase } from './supabase';
+import { promoteExternalAgentSessionKnowledge } from './memoryService';
 
 // ── Auth Helper ─────────────────────────────────────────────────────────────
 
@@ -78,7 +79,6 @@ export async function saveAgentSessionsToMemory(
   userId: string,
   sessions: AgentSessionForMemory[],
 ): Promise<{ saved: number; skipped: number }> {
-  console.log(`[agentSessionMemory] saveAgentSessionsToMemory called: ${sessions.length} sessions for ${provider}, circle=${circleId}, user=${userId}`);
   let saved = 0;
   let skipped = 0;
 
@@ -202,6 +202,15 @@ export async function saveAgentSessionsToMemory(
             projectKey,
             projectDir: latest.projectDir,
             provider,
+            providerLabel: label,
+            latestTask: latest.task || null,
+            recentTasks: sorted.map(s => s.task || s.lastUserMessage || '').filter(Boolean).slice(0, 6),
+            recentResponses: sorted.map(s => s.lastAssistantText || '').filter(Boolean).slice(0, 4),
+            activeFiles,
+            currentTools: sorted.map(s => s.currentToolName || '').filter(Boolean).slice(0, 6),
+            recentActions: sorted.flatMap(s => s.recentActions || []).filter(Boolean).slice(0, 10),
+            latestStatus: latest.status || null,
+            latestModel: latest.model || null,
             mergedSessionIds: sorted.map(s => s.sessionId),
             sessionMemoryMode: sessionMode,
           },
@@ -226,6 +235,15 @@ export async function saveAgentSessionsToMemory(
             projectKey,
             projectDir: latest.projectDir,
             provider,
+            providerLabel: label,
+            latestTask: latest.task || null,
+            recentTasks: sorted.map(s => s.task || s.lastUserMessage || '').filter(Boolean).slice(0, 6),
+            recentResponses: sorted.map(s => s.lastAssistantText || '').filter(Boolean).slice(0, 4),
+            activeFiles,
+            currentTools: sorted.map(s => s.currentToolName || '').filter(Boolean).slice(0, 6),
+            recentActions: sorted.flatMap(s => s.recentActions || []).filter(Boolean).slice(0, 10),
+            latestStatus: latest.status || null,
+            latestModel: latest.model || null,
             mergedSessionIds: sorted.map(s => s.sessionId),
             sessionMemoryMode: sessionMode,
           },
@@ -242,11 +260,20 @@ export async function saveAgentSessionsToMemory(
 
       _savedHashes.set(bucketId, hash);
       saved++;
+
+      void promoteExternalAgentSessionKnowledge({
+        circleId,
+        userId,
+        provider,
+        sessions: sorted,
+        shareWithCircle: sessionMode === 'shared',
+      }).catch((err) => {
+        console.warn(`[agentSessionMemory] Failed to promote ${provider} knowledge for ${projectKey}:`, err);
+      });
     } catch (err) {
       console.warn(`[agentSessionMemory] Failed to save ${provider} session context for ${projectKey}:`, err);
       skipped++;
     }
-    console.log(`[agentSessionMemory] ${provider}/${projectKey}: saved=${saved}, skipped=${skipped}`);
   }
 
   // ── Promote only the 3 most recent session memories to 'startup', demote rest ──
@@ -281,6 +308,8 @@ export async function saveAgentSessionsToMemory(
     console.warn(`[agentSessionMemory] Failed to promote/demote session memories:`, err);
   }
 
-  console.log(`[agentSessionMemory] Final result for ${provider}: saved=${saved}, skipped=${skipped}`);
+  if (saved > 0) {
+    console.log(`[agentSessionMemory] ${provider}: saved=${saved}, skipped=${skipped}`);
+  }
   return { saved, skipped };
 }

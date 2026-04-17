@@ -30,6 +30,76 @@ import { getUserAgents } from '../../lib/agents';
 
 const fmt = (n: number) => n.toLocaleString();
 
+// ── Hero aura: rotating conic-gradient border + layered 3D shadows ──────────
+// Injected once into <head> on web. Uses @property to animate the gradient's
+// `--ang` angle smoothly without rotating child content. Falls back to a
+// static gradient on browsers without @property support (Firefox <128 etc.) —
+// border still looks right, just doesn't spin.
+const HERO_AURA_STYLE_ID = 'uc-profile-hero-aura-css';
+function ensureHeroAuraStyle() {
+  if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+  if (document.getElementById(HERO_AURA_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = HERO_AURA_STYLE_ID;
+  style.textContent = `
+    @property --uc-aura-ang {
+      syntax: '<angle>';
+      initial-value: 0deg;
+      inherits: false;
+    }
+    .uc-profile-hero-aura {
+      position: relative;
+      border-radius: 22px;
+      padding: 2px;
+      background: conic-gradient(
+        from var(--uc-aura-ang, 0deg),
+        #6366f1, #ec4899, #f59e0b, #22d3ee,
+        #a855f7, #06b6d4, #6366f1
+      );
+      animation: uc-aura-rotate 8s linear infinite;
+      box-shadow:
+        0 30px 60px -20px rgba(99, 102, 241, 0.45),
+        0 18px 40px -16px rgba(236, 72, 153, 0.35),
+        0 0 80px -10px rgba(34, 211, 238, 0.18),
+        0 1px 0 rgba(255, 255, 255, 0.04) inset;
+      transform: perspective(1400px) rotateX(1.5deg);
+      will-change: --uc-aura-ang, transform;
+    }
+    .uc-profile-hero-aura::after {
+      /* Soft outer glow that breathes with the border */
+      content: '';
+      position: absolute;
+      inset: -8px;
+      border-radius: 28px;
+      padding: 8px;
+      background: conic-gradient(
+        from var(--uc-aura-ang, 0deg),
+        #6366f140, #ec489940, #f59e0b40, #22d3ee40,
+        #a855f740, #06b6d440, #6366f140
+      );
+      filter: blur(14px);
+      opacity: 0.55;
+      z-index: -1;
+      pointer-events: none;
+    }
+    .uc-profile-hero-inner {
+      position: relative;
+      border-radius: 20px;
+      background: linear-gradient(180deg, #0a0a0f 0%, #050508 100%);
+      overflow: hidden;
+    }
+    @keyframes uc-aura-rotate {
+      to { --uc-aura-ang: 360deg; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .uc-profile-hero-aura {
+        animation: none;
+      }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 function getLevelColor(level: number): string {
   if (level >= 50) return '#fbbf24'; // gold
   if (level >= 30) return '#a855f7'; // purple
@@ -253,6 +323,9 @@ export default function ProfileScreen({ navigation }: any) {
   const { width: screenWidth } = useWindowDimensions();
   const isDesktop = screenWidth > 640;
 
+  // One-time CSS injection for the rotating-light hero border (web only).
+  ensureHeroAuraStyle();
+
   return (
     <View style={styles.container}>
       <View style={[styles.header, isDesktop && styles.headerDesktop]}>
@@ -283,67 +356,80 @@ export default function ProfileScreen({ navigation }: any) {
             </Pressable>
           )}
 
-          {/* Hero Section */}
-          <Card style={styles.heroCard}>
-            <View style={styles.heroSection}>
-              <Pressable onPress={() => navigation.navigate('EditProfile')}>
-                <View style={[styles.avatarRing, { borderColor: themeColor }]}>
-                  <View style={styles.avatar}>
-                    <Text style={styles.avatarText}>
-                      {profile?.display_name?.charAt(0)?.toUpperCase() || '?'}
+          {/* Hero Section — wrapped in the rotating-light aura on web. The
+              outer View is a plain block; the className spread is RN-Web only
+              and adds the conic-gradient rotating border via injected CSS.
+              On native the wrapper is a no-op pass-through. */}
+          <View
+            {...(Platform.OS === 'web' ? ({ className: 'uc-profile-hero-aura' } as any) : {})}
+            style={styles.heroAuraWrapper}
+          >
+            <View
+              {...(Platform.OS === 'web' ? ({ className: 'uc-profile-hero-inner' } as any) : {})}
+              style={styles.heroAuraInner}
+            >
+              <Card style={styles.heroCard}>
+                <View style={styles.heroSection}>
+                  <Pressable onPress={() => navigation.navigate('EditProfile')}>
+                    <View style={[styles.avatarRing, { borderColor: themeColor }]}>
+                      <View style={styles.avatar}>
+                        <Text style={styles.avatarText}>
+                          {profile?.display_name?.charAt(0)?.toUpperCase() || '?'}
+                        </Text>
+                      </View>
+                    </View>
+                  </Pressable>
+                  <Text style={styles.displayName}>{profile?.display_name || 'Loading...'}</Text>
+                  <Text style={styles.username}>@{profile?.username || '...'}</Text>
+
+                  {/* Status Message */}
+                  {profile?.status_message ? (
+                    <Text style={styles.statusMessage}>"{profile.status_message}"</Text>
+                  ) : null}
+
+                  <View style={[styles.titleBadge, { borderColor: themeColor }]}>
+                    <Text style={[styles.titleText, { color: themeColor }]}>
+                      {levelInfo.title.toUpperCase()}
                     </Text>
                   </View>
-                </View>
-              </Pressable>
-              <Text style={styles.displayName}>{profile?.display_name || 'Loading...'}</Text>
-              <Text style={styles.username}>@{profile?.username || '...'}</Text>
-              
-              {/* Status Message */}
-              {profile?.status_message && (
-                <Text style={styles.statusMessage}>"{profile.status_message}"</Text>
-              )}
-              
-              <View style={[styles.titleBadge, { borderColor: themeColor }]}>
-                <Text style={[styles.titleText, { color: themeColor }]}>
-                  {levelInfo.title.toUpperCase()}
-                </Text>
-              </View>
-              
-              {/* XP Progress Bar */}
-              <View style={styles.xpContainer}>
-                <View style={styles.xpHeader}>
-                  <Text style={[styles.levelLabel, { color: levelColor }]}>
-                    Level {levelInfo.level}
-                  </Text>
-                  <Text style={styles.xpText}>
-                    {fmt(xp)} / {fmt(nextLevelXP)} XP
-                  </Text>
-                </View>
-                <View style={styles.progressBarContainer}>
-                  <View style={styles.progressBarBg}>
-                    <Animated.View 
-                      style={[
-                        styles.progressBarFill, 
-                        { width: xpBarWidth, backgroundColor: levelColor }
-                      ]} 
-                    />
+
+                  {/* XP Progress Bar */}
+                  <View style={styles.xpContainer}>
+                    <View style={styles.xpHeader}>
+                      <Text style={[styles.levelLabel, { color: levelColor }]}>
+                        Level {levelInfo.level}
+                      </Text>
+                      <Text style={styles.xpText}>
+                        {fmt(xp)} / {fmt(nextLevelXP)} XP
+                      </Text>
+                    </View>
+                    <View style={styles.progressBarContainer}>
+                      <View style={styles.progressBarBg}>
+                        <Animated.View
+                          style={[
+                            styles.progressBarFill,
+                            { width: xpBarWidth, backgroundColor: levelColor }
+                          ]}
+                        />
+                      </View>
+                      <Text style={styles.progressPercent}>
+                        {Math.round(levelInfo.progress * 100)}%
+                      </Text>
+                    </View>
+                    {levelInfo.level < 100 && (
+                      <Text style={styles.nextLevelText}>
+                        {fmt(nextLevelXP - xp)} XP to Level {levelInfo.level + 1}
+                      </Text>
+                    )}
                   </View>
-                  <Text style={styles.progressPercent}>
-                    {Math.round(levelInfo.progress * 100)}%
+
+                  <Text style={styles.memberSince}>
+                    Member since {profile?.created_at ? new Date(profile.created_at).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '...'}
                   </Text>
                 </View>
-                {levelInfo.level < 100 && (
-                  <Text style={styles.nextLevelText}>
-                    {fmt(nextLevelXP - xp)} XP to Level {levelInfo.level + 1}
-                  </Text>
-                )}
-              </View>
-              
-              <Text style={styles.memberSince}>
-                Member since {profile?.created_at ? new Date(profile.created_at).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '...'}
-              </Text>
+              </Card>
             </View>
-          </Card>
+          </View>
 
           {/* XP Progress Bar */}
           <Card style={styles.xpCard}>
@@ -761,16 +847,39 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: 60, paddingBottom: 20, paddingHorizontal: 24,
+    paddingTop: 60, paddingBottom: 20, paddingHorizontal: 32,
     borderBottomWidth: 1, borderBottomColor: '#222',
-    maxWidth: 480, alignSelf: 'center' as const, width: '100%',
+    width: '100%',
   },
-  headerDesktop: { maxWidth: 640 },
+  // Desktop header keeps full width — no narrow gutter on big screens
+  headerDesktop: { paddingHorizontal: 48 },
   headerTitle: { color: '#fff', fontSize: 22, fontWeight: '900', letterSpacing: 3 },
   editButton: { color: '#6366f1', fontSize: 14, fontWeight: '700', letterSpacing: 1 },
   scrollContent: { flexGrow: 1 },
-  inner: { width: '100%', maxWidth: 480, alignSelf: 'center' as const, paddingHorizontal: 20, paddingTop: 20 },
-  innerDesktop: { maxWidth: 640 },
+  // Page body is full width with a generous max — same pattern as AgentsScreen.
+  // Old narrow 480/640 cap was a phone-first design that wasted half the
+  // screen on desktop.
+  inner: {
+    width: '100%',
+    maxWidth: 1600,
+    alignSelf: 'center' as const,
+    paddingHorizontal: 24,
+    paddingTop: 28,
+    paddingBottom: 60,
+  },
+  innerDesktop: { paddingHorizontal: 40 },
+
+  // Hero aura wrapper — shape only (the visual is in the injected CSS class
+  // .uc-profile-hero-aura on web). Native pass-through.
+  heroAuraWrapper: {
+    marginTop: 8,
+    marginBottom: 18,
+    borderRadius: 22,
+  },
+  heroAuraInner: {
+    borderRadius: 20,
+    overflow: 'hidden' as any,
+  },
 
   // Hero
   heroCard: { alignItems: 'center', padding: 28, marginBottom: 12 },

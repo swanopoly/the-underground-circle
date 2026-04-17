@@ -293,7 +293,7 @@ export async function verifyWalletOwnership(
         // Verify the Solana signature using tweetnacl-compatible ed25519 check
         try {
           const { PublicKey } = require('@solana/web3.js');
-          const nacl = await import('tweetnacl').catch(() => null);
+          const nacl = await import('tweetnacl').catch(() => null) as any;
           const pubKeyBytes = new PublicKey(address).toBytes();
           const sigBytes = signResult.signature instanceof Uint8Array
             ? signResult.signature

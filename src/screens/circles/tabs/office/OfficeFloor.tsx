@@ -3,6 +3,12 @@ import { View, Text, StyleSheet, Pressable, Platform, Image } from 'react-native
 import { OfficeTheme, OFFICE_THEMES, FurnitureItem, FurnitureType, EnvironmentType, isInteractiveFurniture, FURNITURE_CATALOG } from '../../../../lib/officeConfig';
 import type { OfficeAgent } from '../../../../lib/officeAgents';
 import {
+  OFFICE_DESK_POSITIONS,
+  OFFICE_FLOOR_GRID_SIZE,
+  OFFICE_FLOOR_HEIGHT,
+  OFFICE_FLOOR_WIDTH,
+} from './officeFloorLayout';
+import {
   EnterKeyItem, ButtonPanelItem, AlarmBellItem, LaunchPadItem,
   JukeboxItem, DiceRollerItem, GongItem, ConfettiCannonItem,
   TimerDisplayItem, ScoreboardItem, StatusBoardItem, CommandConsoleItem,
@@ -24,9 +30,9 @@ import {
 } from './InteractiveFurniture';
 import { THEME_BACKGROUNDS } from '../../../../lib/themeBackgrounds';
 
-const GRID_SIZE = 16;
-export const FLOOR_W = 900;
-export const FLOOR_H = 970;
+const GRID_SIZE = OFFICE_FLOOR_GRID_SIZE;
+const FLOOR_W = OFFICE_FLOOR_WIDTH;
+const FLOOR_H = OFFICE_FLOOR_HEIGHT;
 
 // Darken a hex color for sticky note fold shadow
 function darkenColor(hex: string): string {
@@ -37,24 +43,7 @@ function darkenColor(hex: string): string {
   return `rgb(${r},${g},${b})`;
 }
 
-  // Advanced Volumetric FX injected
-  const renderAtmospherics = () => {
-    return (
-      <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 120, zIndex: 1, pointerEvents: 'none' }}>
-        <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 120, backgroundColor: 'rgba(0,0,0,0.1)', borderTopLeftRadius: 100, transform: [{ scaleY: 0.5 }] }} />
-        <View style={{ position: 'absolute', bottom: 20, left: -50, width: 300, height: 80, backgroundColor: 'rgba(255,255,255,0.02)', borderRadius: 150, transform: [{ scaleX: 2.5 }, { rotate: '15deg' }] }} />
-        <View style={{ position: 'absolute', bottom: -10, right: -50, width: 400, height: 100, backgroundColor: 'rgba(0,0,0,0.05)', borderRadius: 200, transform: [{ scaleX: 3 }, { rotate: '-10deg' }] }} />
-      </View>
-    );
-  };
-
-
-export const DESK_POSITIONS = [
-  { x: 40, y: 260 }, { x: 220, y: 260 }, { x: 400, y: 260 }, { x: 580, y: 260 },
-  { x: 40, y: 390 }, { x: 220, y: 390 }, { x: 400, y: 390 }, { x: 580, y: 390 },
-  { x: 40, y: 520 }, { x: 220, y: 520 }, { x: 400, y: 520 }, { x: 580, y: 520 },
-  { x: 40, y: 650 }, { x: 220, y: 650 }, { x: 400, y: 650 }, { x: 580, y: 650 },
-];
+const DESK_POSITIONS = OFFICE_DESK_POSITIONS;
 
 interface Props {
   theme?: OfficeTheme;
@@ -64,6 +53,7 @@ interface Props {
   onFurnitureMove?: (id: string, x: number, y: number) => void;
   onFurnitureResize?: (id: string, w: number, h: number) => void;
   onFurnitureInteract?: (id: string, type: FurnitureType) => void;
+  onFurnitureItemUpdate?: (id: string, fields: Partial<FurnitureItem>) => void;
   onPokerAction?: (id: string, action: string, amount?: number) => void;
   agents?: OfficeAgent[];
   selectedFurnitureId?: string | null;
@@ -2579,19 +2569,20 @@ function findParentScale(el: HTMLElement): number {
 
 const MIN_ITEM_SIZE = 16;
 
-function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract, onPokerAction, editMode, selected, agents }: {
+function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract, onItemUpdate, onPokerAction, editMode, selected, agents }: {
   item: FurnitureItem;
   theme: OfficeTheme;
   onPress: () => void;
   onMove?: (x: number, y: number) => void;
   onResize?: (w: number, h: number) => void;
   onInteract?: () => void;
+  onItemUpdate?: (fields: Partial<FurnitureItem>) => void;
   onPokerAction?: (action: string, amount?: number) => void;
   editMode?: boolean;
   selected?: boolean;
   agents?: OfficeAgent[];
 }) {
-  const content = renderFurnitureContent(item, theme, agents, item.type === 'poker_table' ? onPokerAction : undefined);
+  const content = renderFurnitureContent(item, theme, agents, item.type === 'poker_table' ? onPokerAction : undefined, onItemUpdate);
   const isInteractive = isInteractiveFurniture(item.type);
 
   // Look up the catalog natural size for this item type
@@ -2827,7 +2818,13 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract,
   );
 }
 
-function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme, agents?: OfficeAgent[], onPokerAction?: (action: string, amount?: number) => void) {
+function renderFurnitureContent(
+  item: FurnitureItem,
+  theme: OfficeTheme,
+  agents?: OfficeAgent[],
+  onPokerAction?: (action: string, amount?: number) => void,
+  onItemUpdate?: (fields: Partial<FurnitureItem>) => void,
+) {
   switch (item.type) {
     case 'plant':
       return (
@@ -3110,7 +3107,7 @@ function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme, agents?
     case 'retro_console': return <RetroConsoleItem item={item} theme={theme} />;
     case 'scrabble_board': return <ScrabbleBoardItem item={item} theme={theme} />;
     case 'farm_plot': return <FarmPlotItem item={item} theme={theme} />;
-    case 'office_pet': return <OfficePetItem item={item} theme={theme} />;
+    case 'office_pet': return <OfficePetItem item={item} theme={theme} onItemUpdate={onItemUpdate} />;
     case 'crypto_ticker': return <CryptoTickerItem item={item} theme={theme} />;
     case 'github_feed': return <GitHubFeedItem item={item} theme={theme} />;
     case 'calendar_widget': return <CalendarWidgetItem item={item} theme={theme} />;
@@ -3127,7 +3124,7 @@ function renderFurnitureContent(item: FurnitureItem, theme: OfficeTheme, agents?
 //  MAIN FLOOR COMPONENT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function OfficeFloorInner({ theme: themeProp, furniture = [], onFloorPress, onFurniturePress, onFurnitureMove, onFurnitureResize, onFurnitureInteract, onPokerAction, agents, selectedFurnitureId, editMode }: Props) {
+function OfficeFloorInner({ theme: themeProp, furniture = [], onFloorPress, onFurniturePress, onFurnitureMove, onFurnitureResize, onFurnitureInteract, onFurnitureItemUpdate, onPokerAction, agents, selectedFurnitureId, editMode }: Props) {
   const theme = themeProp || OFFICE_THEMES.underground;
   const env = theme.environmentType || 'office';
 
@@ -3201,6 +3198,7 @@ function OfficeFloorInner({ theme: themeProp, furniture = [], onFloorPress, onFu
           onMove={onFurnitureMove ? (x, y) => onFurnitureMove(item.id, x, y) : undefined}
           onResize={onFurnitureResize ? (w, h) => onFurnitureResize(item.id, w, h) : undefined}
           onInteract={onFurnitureInteract ? () => onFurnitureInteract(item.id, item.type) : undefined}
+          onItemUpdate={onFurnitureItemUpdate ? (fields) => onFurnitureItemUpdate(item.id, fields) : undefined}
           onPokerAction={onPokerAction ? (action, amount) => onPokerAction(item.id, action, amount) : undefined}
           editMode={editMode}
           selected={selectedFurnitureId === item.id}

@@ -1,6 +1,13 @@
 import { supabase } from './supabase';
 import { AgentBot } from '../types';
 import { createHash } from 'crypto';
+import { readLocalSecret, writeLocalSecret } from './localSecrets';
+
+const AGENT_SECRET_PLACEHOLDER = '__local_secret__';
+
+function agentSecretId(agentId: string): string {
+  return agentId;
+}
 
 // Agent management
 export async function getUserAgents(): Promise<AgentBot[]> {
@@ -29,8 +36,7 @@ export async function createAgent(
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error('User not authenticated');
 
-  // Hash the API key for security
-  const apiKeyHash = createHash('sha256').update(apiKey).digest('hex');
+  const apiKeyFingerprint = createHash('sha256').update(apiKey).digest('hex');
 
   const { data, error } = await supabase
     .from('agents_bots')
@@ -38,17 +44,22 @@ export async function createAgent(
       owner_id: user.id,
       name,
       api_endpoint: apiEndpoint,
-      api_key_hash: apiKeyHash,
+      api_key_hash: AGENT_SECRET_PLACEHOLDER,
       type,
       description,
       avatar_url: avatarUrl,
-      metadata: metadata || {},
+      metadata: {
+        ...(metadata || {}),
+        secretStorage: 'local_only',
+        apiKeyFingerprint,
+      },
       is_active: true,
     })
     .select()
     .single();
 
   if (error) throw error;
+  await writeLocalSecret('legacy_agent_api_key', agentSecretId(data.id), apiKey);
   return data;
 }
 
@@ -111,13 +122,18 @@ export async function sendMessageToAgent(
   if (agentError || !agent) throw new Error('Agent not found');
   if (!agent.is_active) throw new Error('Agent is not active');
 
+  const localApiKey = await readLocalSecret('legacy_agent_api_key', agentSecretId(agent.id));
+  if (!localApiKey) {
+    throw new Error('This legacy agent is missing its local API key on this device. Re-save the agent credentials.');
+  }
+
   try {
     // Make API call to the agent's endpoint
     const response = await fetch(agent.api_endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${agent.api_key_hash}`, // In practice, decrypt the stored key
+        'Authorization': `Bearer ${localApiKey}`,
       },
       body: JSON.stringify({
         message,

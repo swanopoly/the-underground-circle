@@ -290,7 +290,7 @@ export default function CreateCircleScreen({ route, navigation }: any) {
 
     setLoading(false);
     showAlert('Circle created!', `Invite code: ${circle.invite_code}`);
-    navigation.replace('CircleDetail', { circleId: circle.id, circleName: name });
+    navigation.replace('CircleDetail', { circleId: circle.id, circleName: circle.name, tab: 'OFFICE' });
   };
 
   const addTag = () => {

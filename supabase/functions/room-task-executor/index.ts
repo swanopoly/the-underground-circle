@@ -8,7 +8,8 @@
  * Secrets: ANTHROPIC_API_KEY (required), BRAVE_API_KEY (optional, for web_research)
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.95.3';
+import { errResponse, getAuthenticatedUser, jsonResponse } from '../_shared/edge.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -213,35 +214,8 @@ async function handleRunScript(supabase: any, body: any): Promise<{ ok: boolean;
   ].join('\n');
 
   const aiResponse = await callClaude(systemPrompt, prompt);
-  const codeMatch = aiResponse.match(/```python\n([\s\S]+?)```/);
-  const script = codeMatch ? codeMatch[1].trim() : null;
-
-  let output = '';
-  let executed = false;
-
-  // Step 2: Try to execute with python3
-  if (script) {
-    try {
-      const cmd = new Deno.Command('python3', {
-        args: ['-c', script],
-        stdout: 'piped',
-        stderr: 'piped',
-      });
-      const proc = await cmd.output();
-      const stdout = new TextDecoder().decode(proc.stdout);
-      const stderr = new TextDecoder().decode(proc.stderr);
-      output = stdout || stderr;
-      executed = true;
-    } catch {
-      // python3 not available — that's fine
-    }
-  }
-
-  const content = executed
-    ? `⚙️ **Script Executed**\n\n${aiResponse}\n\n---\n**Output:**\n\`\`\`\n${output.slice(0, 4000)}\n\`\`\``
-    : `⚙️ **Script Generated** (python3 not available on server)\n\n${aiResponse}`;
-
-  await postAgentOutput(supabase, roomId, agentName || 'Agent', content, taskId, { task_type: 'run_script', executed });
+  const content = `⚙️ **Script Generated**\n\n${aiResponse}\n\n---\n**Execution note:** direct server-side script execution is disabled for security. Review and run this script in a controlled environment.`;
+  await postAgentOutput(supabase, roomId, agentName || 'Agent', content, taskId, { task_type: 'run_script', executed: false, execution_disabled: true });
   return { ok: true, responseLength: content.length };
 }
 
@@ -272,7 +246,6 @@ async function handleFileOps(supabase: any, body: any): Promise<{ ok: boolean; r
 async function handleDbQuery(supabase: any, body: any): Promise<{ ok: boolean; responseLength: number }> {
   const { taskId, roomId, prompt, agentName, sql } = body;
 
-  // Validate SELECT-only
   if (sql) {
     const normalized = sql.trim().toUpperCase();
     const forbidden = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE', 'GRANT', 'REVOKE'];
@@ -283,22 +256,12 @@ async function handleDbQuery(supabase: any, body: any): Promise<{ ok: boolean; r
         return { ok: false, responseLength: errMsg.length };
       }
     }
-
-    // Execute via RPC or direct query
-    const { data, error } = await supabase.rpc('exec_sql', { query: sql }).maybeSingle();
-    if (error) {
-      // Fallback: ask Claude to interpret the prompt instead
-      const aiResponse = await callClaude(
-        'You are a database expert. The user wanted to run a SQL query but it failed. Help them understand the error and suggest fixes.',
-        `Query: ${sql}\nError: ${error.message}\nOriginal request: ${prompt}`,
-      );
-      await postAgentOutput(supabase, roomId, agentName || 'Agent', `🗄️ **Query Error**\n\n${aiResponse}`, taskId, { task_type: 'db_query', error: error.message });
-      return { ok: true, responseLength: aiResponse.length };
-    }
-
-    const resultStr = JSON.stringify(data, null, 2);
-    const content = `🗄️ **Query Results**\n\n\`\`\`sql\n${sql}\n\`\`\`\n\n\`\`\`json\n${resultStr.slice(0, 6000)}\n\`\`\``;
-    await postAgentOutput(supabase, roomId, agentName || 'Agent', content, taskId, { task_type: 'db_query' });
+    const aiResponse = await callClaude(
+      'You are a database expert. Review the proposed SQL query for correctness, safety, and performance. Explain what it does and call out any risk areas. Do not execute it.',
+      `Original request: ${prompt}\n\nSQL:\n${sql}`,
+    );
+    const content = `🗄️ **Query Review Only**\n\n\`\`\`sql\n${sql}\n\`\`\`\n\n${aiResponse}\n\n---\n**Execution note:** direct database execution is disabled in this edge function for security.`;
+    await postAgentOutput(supabase, roomId, agentName || 'Agent', content, taskId, { task_type: 'db_query', execution_disabled: true });
     return { ok: true, responseLength: content.length };
   }
 
@@ -324,34 +287,19 @@ async function handleApiCall(supabase: any, body: any): Promise<{ ok: boolean; r
     return { ok: true, responseLength: aiResponse.length };
   }
 
-  // Make the fetch call server-side
-  try {
-    const fetchOpts: RequestInit = {
-      method: method || 'GET',
-      headers: headers || {},
-      signal: AbortSignal.timeout(15000),
-    };
-    if (reqBody && method !== 'GET') {
-      fetchOpts.body = typeof reqBody === 'string' ? reqBody : JSON.stringify(reqBody);
-    }
-    const apiRes = await fetch(endpoint, fetchOpts);
-    const responseText = await apiRes.text();
-    let formattedResponse: string;
-    try {
-      const json = JSON.parse(responseText);
-      formattedResponse = `\`\`\`json\n${JSON.stringify(json, null, 2).slice(0, 6000)}\n\`\`\``;
-    } catch {
-      formattedResponse = `\`\`\`\n${responseText.slice(0, 6000)}\n\`\`\``;
-    }
-
-    const content = `🌐 **API Response** (${apiRes.status} ${apiRes.statusText})\n\n**${method || 'GET'}** \`${endpoint}\`\n\n${formattedResponse}`;
-    await postAgentOutput(supabase, roomId, agentName || 'Agent', content, taskId, { task_type: 'api_call', status_code: apiRes.status });
-    return { ok: true, responseLength: content.length };
-  } catch (err: any) {
-    const errMsg = `🌐 **API Error**\n\nFailed to call \`${endpoint}\`: ${err.message}`;
-    await postAgentOutput(supabase, roomId, agentName || 'Agent', errMsg, taskId, { task_type: 'api_call', error: err.message });
-    return { ok: true, responseLength: errMsg.length };
-  }
+  const aiResponse = await callClaude(
+    'You are an API integration expert. Review the proposed HTTP request, identify security and correctness issues, and provide a safe request example. Do not execute the request.',
+    [
+      `Original request: ${prompt}`,
+      `Endpoint: ${endpoint}`,
+      `Method: ${method || 'GET'}`,
+      headers ? `Headers: ${JSON.stringify(headers)}` : '',
+      reqBody ? `Body: ${typeof reqBody === 'string' ? reqBody : JSON.stringify(reqBody)}` : '',
+    ].filter(Boolean).join('\n'),
+  );
+  const content = `🌐 **API Call Review Only**\n\n**${method || 'GET'}** \`${endpoint}\`\n\n${aiResponse}\n\n---\n**Execution note:** arbitrary outbound API execution is disabled in this edge function for SSRF protection.`;
+  await postAgentOutput(supabase, roomId, agentName || 'Agent', content, taskId, { task_type: 'api_call', execution_disabled: true });
+  return { ok: true, responseLength: content.length };
 }
 
 // ─── Main Handler ─────────────────────────────────────────────────────────────
@@ -362,9 +310,7 @@ Deno.serve(async (req: Request) => {
   }
 
   if (req.method === 'GET') {
-    return new Response(JSON.stringify({ status: 'ok', service: 'room-task-executor' }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
+    return jsonResponse({ status: 'ok', service: 'room-task-executor' });
   }
 
   try {
@@ -379,7 +325,37 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    const user = await getAuthenticatedUser(req);
+    if (!user) {
+      return errResponse(401, 'unauthenticated', 'Valid JWT required.');
+    }
+
     const supabase = createSupabaseClient();
+    const { data: room } = await supabase
+      .from('circle_rooms')
+      .select('id, circle_id')
+      .eq('id', roomId)
+      .maybeSingle();
+    if (!room?.circle_id) {
+      return errResponse(404, 'room_not_found', 'Room not found.');
+    }
+    const { data: membership } = await supabase
+      .from('circle_members')
+      .select('user_id')
+      .eq('circle_id', room.circle_id)
+      .eq('user_id', user.id)
+      .maybeSingle();
+    if (!membership) {
+      return errResponse(403, 'forbidden', 'Not authorized for this room.');
+    }
+    const { data: taskRow } = await supabase
+      .from('room_tasks')
+      .select('id, room_id')
+      .eq('id', taskId)
+      .maybeSingle();
+    if (!taskRow || taskRow.room_id !== roomId) {
+      return errResponse(403, 'task_mismatch', 'Task does not belong to this room.');
+    }
 
     // Post "working on it" system message
     await postSystemMessage(supabase, roomId, agentName || 'Agent', `🤔 ${agentName || 'Agent'} is working on: ${body.taskName || prompt.slice(0, 60)}...`);

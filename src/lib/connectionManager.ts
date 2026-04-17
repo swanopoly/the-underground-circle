@@ -1,5 +1,7 @@
 import { storage } from './storage';
 import { supabase } from './supabase';
+import { Platform } from 'react-native';
+import { readLocalSecret, writeLocalSecret } from './localSecrets';
 
 export type ProviderType =
   | 'openswan' | 'claude-code' | 'generic-agent' | 'codex' | 'gemini' | 'cursor' | 'blackswan-local'
@@ -47,6 +49,7 @@ export const PROVIDER_META: Record<ProviderType, { icon: string; label: string; 
 
 const STORAGE_KEY = '@office_connections';
 const LEGACY_PROVIDER = `open${'claw'}`;
+const SECRET_PLACEHOLDER = '__local_secret__';
 
 function normalizeProvider(provider: string | null | undefined): ProviderType {
   if (provider === LEGACY_PROVIDER) return 'openswan';
@@ -76,9 +79,31 @@ async function saveLocal(connections: AgentConnection[]): Promise<void> {
   // Strip secrets (tokens) from local storage — only save metadata needed for reconnection
   const toSave = connections.map(({ status, error, sessionCount, agentIds, token, ...rest }) => ({
     ...rest,
-    token: token ? '***' : undefined, // Redact — tokens are recovered from Supabase on load
+    token: token ? '***' : undefined, // Redact — tokens are recovered from secure local storage on load
   }));
   await storage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+}
+
+async function readSecret(id: string): Promise<string> {
+  return readLocalSecret('office_connection', id);
+}
+
+async function writeSecret(id: string, token: string): Promise<void> {
+  await writeLocalSecret('office_connection', id, token);
+}
+
+async function persistSecrets(connections: AgentConnection[]): Promise<void> {
+  await Promise.all(connections.map(conn => writeSecret(conn.id, conn.token || '')));
+}
+
+async function hydrateConnectionsWithSecrets(connections: AgentConnection[]): Promise<AgentConnection[]> {
+  return Promise.all(connections.map(async (conn) => {
+    const secureToken = await readSecret(conn.id);
+    return {
+      ...conn,
+      token: secureToken || conn.token || '',
+    };
+  }));
 }
 
 // ─── Supabase ↔ AgentConnection mapping ──────────────────────────────
@@ -89,7 +114,7 @@ function toSupabaseRow(conn: AgentConnection, userId: string) {
     owner_id: userId,
     name: conn.name,
     api_endpoint: conn.endpoint,
-    api_key_hash: conn.token, // NOTE: stored as plaintext despite column name — RLS restricts to owner only
+    api_key_hash: SECRET_PLACEHOLDER,
     type: conn.provider === 'openswan' ? 'assistant'
         : conn.provider === 'claude-code' ? 'assistant'
         : conn.provider === 'codex' ? 'assistant'
@@ -103,18 +128,23 @@ function toSupabaseRow(conn: AgentConnection, userId: string) {
       color: conn.color,
       localId: conn.id,
       lastConnected: conn.lastConnected,
+      hasLocalToken: !!conn.token,
+      secretStorage: 'local_only',
     },
   };
 }
 
 function fromSupabaseRow(row: any): AgentConnection {
   const meta = row.metadata || {};
+  const legacyRemoteToken = typeof row.api_key_hash === 'string' && row.api_key_hash !== SECRET_PLACEHOLDER
+    ? row.api_key_hash
+    : '';
   return {
     id: meta.localId || `conn_${row.id.slice(0, 8)}`,
     name: row.name,
     provider: normalizeProvider(meta.provider),
     endpoint: row.api_endpoint,
-    token: row.api_key_hash,
+    token: legacyRemoteToken,
     enabled: row.is_active,
     color: meta.color || '#6366f1',
     lastConnected: meta.lastConnected,
@@ -223,19 +253,35 @@ export async function loadConnections(): Promise<AgentConnection[]> {
   const local = await loadLocal();
   const userId = await getUser();
 
-  if (!userId) return local; // Not logged in — local only
+  if (!userId) return hydrateConnectionsWithSecrets(local); // Not logged in — local only
 
   const remote = await loadRemote(userId);
   const merged = mergeConnections(local, remote);
+  const hydrated = await hydrateConnectionsWithSecrets(merged);
+
+  let needsSecretMigration = false;
+  for (const conn of hydrated) {
+    const hasLegacyRemoteSecret = !!remote.find(r => r.id === conn.id && r.token);
+    const hasSecureLocalSecret = !!(await readSecret(conn.id));
+    if (!hasSecureLocalSecret && hasLegacyRemoteSecret && conn.token) {
+      await writeSecret(conn.id, conn.token);
+      needsSecretMigration = true;
+    }
+  }
+  const finalConnections = await hydrateConnectionsWithSecrets(hydrated);
 
   // Persist merged result locally (so offline has latest)
-  await saveLocal(merged);
+  await saveLocal(finalConnections);
+  if (needsSecretMigration) {
+    void saveConnections(finalConnections);
+  }
 
-  return merged;
+  return finalConnections;
 }
 
 export async function saveConnections(connections: AgentConnection[]): Promise<void> {
   // Always save locally first (fast, offline-safe)
+  await persistSecrets(connections);
   await saveLocal(connections);
 
   // Then sync to cloud in background
@@ -264,6 +310,7 @@ export async function saveConnections(connections: AgentConnection[]): Promise<v
   }
 
   // Re-save locally with updated remoteIds
+  await persistSecrets(connections);
   await saveLocal(connections);
 }
 
@@ -338,6 +385,7 @@ export function isValidEndpoint(endpoint: string): boolean {
  */
 export async function probeEndpointHealth(endpoint: string): Promise<boolean> {
   if (!isValidEndpoint(endpoint)) return false;
+  if (Platform.OS === 'web' && /localhost:18789(?:\/|$)/.test(endpoint)) return false;
   try {
     const normalized = endpoint.replace(/\/$/, '');
     const res = await fetch(`${normalized}/health`, {

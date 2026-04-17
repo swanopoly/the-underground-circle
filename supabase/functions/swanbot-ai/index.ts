@@ -2,6 +2,7 @@
 // Gathers circle context, sends to Claude, returns intelligent response
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
+import { createServiceRoleClient, errResponse, getAuthenticatedUser } from "../_shared/edge.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -16,6 +17,7 @@ interface RequestBody {
   userId: string;
   model?: string | null; // 'blackswan' | 'claude-haiku' | 'claude-sonnet' | 'claude-opus' | null (auto)
   thinkingLevel?: "fast" | "balanced" | "deep"; // Controls extended thinking
+  maxTokens?: number;
   targetAgentName?: string; // Name of the targeted agent (e.g. "MyBot") — defaults to "BlackSwan"
   wikiContext?: string;
 }
@@ -298,7 +300,7 @@ async function gatherCircleContext(supabase: any, circleId: string, userId: stri
   const [
     memberXp, userAchievements, activeChallenges, userGoals,
     agentActivity, githubEvents, githubRepos, knowledgeEntries,
-    rooms, automations, memories, agentPersonality, agentSpirit,
+    rooms, automations, memories, agentPersonality, agentSpirit, soulWisdomRows,
   ] = await Promise.all([
     memberIds.length > 0
       ? supabase.from("user_xp").select("user_id, total_xp, level, title").in("user_id", memberIds).then((r: any) => r.data || [])
@@ -314,11 +316,16 @@ async function gatherCircleContext(supabase: any, circleId: string, userId: stri
     safe(supabase.from("circle_rooms").select("id, name, description, language, updated_at").eq("circle_id", circleId).eq("is_active", true).order("updated_at", { ascending: false }).limit(10)),
     // New: active automations
     safe(supabase.from("circle_automations").select("name, trigger_type, schedule, enabled, last_run_at, last_error, agent, spirit").eq("circle_id", circleId).eq("enabled", true).limit(15)),
-    // Persistent memories
-    safe(supabase.from("blackswan_memory").select("key, value, category, importance, updated_at").eq("circle_id", circleId).order("importance", { ascending: false }).order("updated_at", { ascending: false }).limit(20)),
+    // Persistent memories — Phase 0-4 architecture: use memory_entries (the
+    // real pipeline table with soul routing + embeddings) instead of the
+    // legacy blackswan_memory table. Ordered by importance then recency so
+    // the top-N are the most load-bearing facts about this circle.
+    safe(supabase.from("memory_entries").select("title, content, memory_kind, importance, scope, retrieval_mode, metadata, updated_at").eq("circle_id", circleId).eq("is_active", true).order("importance", { ascending: false }).order("updated_at", { ascending: false }).limit(30)),
     // Agent personality + spirit + spawn config — load for TARGETED agent, fallback to BlackSwan
     safeSingle(supabase.from("agent_personalities").select("personality").eq("user_id", userId).eq("circle_id", circleId).eq("agent_name", targetAgentName || "BlackSwan").maybeSingle()),
     safeSingle(supabase.from("circle_office_agents").select("spirit, current_goal").eq("circle_id", circleId).eq("name", targetAgentName || "BlackSwan").maybeSingle()),
+    // SOUL wisdom — Phase 3: pre-distilled guidance for this agent's spirit
+    safe(supabase.from("soul_wisdom").select("soul_key, body, generated_at, source_count").eq("circle_id", circleId).limit(5)),
   ]);
 
   // ── Batch 3: Room files + messages (depends on rooms) ──
@@ -364,6 +371,7 @@ async function gatherCircleContext(supabase: any, circleId: string, userId: stri
     memories,
     agentPersonality: agentPersonality?.personality || null,
     spirit: agentSpirit?.spirit || null,
+    soulWisdom: soulWisdomRows || [],
     spawnConfig: (() => {
       try {
         return agentSpirit?.current_goal ? JSON.parse(agentSpirit.current_goal) : null;
@@ -550,19 +558,35 @@ ${ctx.knowledgeEntries.map((k: any) => {
     prompt += "\n\n" + skillPrompt;
   }
 
-  // ── Inject gotchas as guardrails (highest priority memories) ──
-  const gotchas = memories.filter((m: any) => m.category === "gotcha");
-  if (gotchas.length > 0) {
-    prompt += `\n\n## ⚠️ Guardrails (Past Mistakes — DO NOT REPEAT)
-${gotchas.map((m: any) => `- ${m.value}`).join("\n")}`;
+  // ── Inject SOUL wisdom (Phase 3 — pre-distilled per-circle guidance) ──
+  if (ctx.soulWisdom?.length > 0 && ctx.spirit) {
+    const soulKey = `soul:${ctx.spirit}`;
+    const wisdom = ctx.soulWisdom.find((w: any) => w.soul_key === soulKey);
+    if (wisdom?.body) {
+      const soulName = ctx.spirit.replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase());
+      prompt += `\n\n## ${soulName} Wisdom in This Circle${wisdom.generated_at ? ` (updated ${wisdom.generated_at.slice(0, 10)})` : ""}
+${wisdom.body}`;
+    }
   }
 
-  // ── Inject other persistent memories ──
-  const nonGotchas = memories.filter((m: any) => m.category !== "gotcha");
-  if (nonGotchas.length > 0) {
+  // ── Inject persistent memories (Phase 0-4 memory_entries architecture) ──
+  // Handles both old format (blackswan_memory: m.category + m.value) and
+  // new format (memory_entries: m.memory_kind + m.content + m.title).
+  const instructions = memories.filter((m: any) =>
+    m.memory_kind === "instruction" || m.retrieval_mode === "startup" || m.category === "gotcha"
+  );
+  if (instructions.length > 0) {
+    prompt += `\n\n## Guardrails and Instructions
+${instructions.map((m: any) => `- ${m.title ? `${m.title}: ` : ""}${m.content || m.value || ""}`).join("\n")}`;
+  }
+
+  const durableMemories = memories.filter((m: any) =>
+    m.memory_kind !== "instruction" && m.retrieval_mode !== "startup" && m.category !== "gotcha"
+  );
+  if (durableMemories.length > 0) {
     prompt += `\n\n## Things I Remember About This Circle
 Use these to personalize responses. Learned from past conversations.
-${nonGotchas.map((m: any) => `- [${m.category}] ${m.value}`).join("\n")}`;
+${durableMemories.map((m: any) => `- [${m.memory_kind || m.category || "fact"}] ${m.title ? `${m.title}: ` : ""}${m.content || m.value || ""}`).join("\n")}`;
   }
 
   if (ctx.wikiContext) {
@@ -628,6 +652,7 @@ interface CallClaudeOptions {
   modelKey?: string | null;
   conversationMessages?: Array<{ role: string; content: string }>;
   thinkingLevel?: "fast" | "balanced" | "deep";
+  maxTokens?: number;
   supabase?: any;
   circleId?: string;
   userId?: string;
@@ -1689,7 +1714,7 @@ async function callClaude(systemPrompt: string, userMessage: string, options: Ca
     throw new Error("ANTHROPIC_API_KEY not set");
   }
 
-  const { modelKey, conversationMessages, thinkingLevel, supabase, circleId, userId, enableTools } = options;
+  const { modelKey, conversationMessages, thinkingLevel, maxTokens: requestedMaxTokens, supabase, circleId, userId, enableTools } = options;
   const modelId = (modelKey && CLAUDE_MODEL_MAP[modelKey]) || CLAUDE_MODEL_MAP["claude-haiku"];
 
   // Build messages array — include recent conversation for multi-turn context
@@ -1718,6 +1743,9 @@ async function callClaude(systemPrompt: string, userMessage: string, options: Ca
   if (thinkingLevel === "deep") maxTokens = 8192;
   else if (thinkingLevel === "balanced") maxTokens = 4096;
   else if (thinkingLevel === "fast") maxTokens = 1024;
+  if (typeof requestedMaxTokens === "number" && Number.isFinite(requestedMaxTokens) && requestedMaxTokens > 0) {
+    maxTokens = Math.max(maxTokens, Math.min(32000, Math.floor(requestedMaxTokens)));
+  }
 
   // Build request body
   const requestBody: any = {
@@ -1739,7 +1767,10 @@ async function callClaude(systemPrompt: string, userMessage: string, options: Ca
       type: "enabled",
       budget_tokens: budget,
     };
-    requestBody.max_tokens = thinkingLevel === "deep" ? 16000 : 8192;
+    requestBody.max_tokens = Math.max(
+      requestBody.max_tokens,
+      thinkingLevel === "deep" ? 16000 : 8192,
+    );
   }
 
   // ─── Agentic tool-use loop with guardrails ──────────────────────────
@@ -2060,19 +2091,31 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { message, circleId, userId, model, thinkingLevel, targetAgentName, wikiContext }: RequestBody = await req.json();
+    const { message, circleId, userId: _ignoredUserId, model, thinkingLevel, maxTokens, targetAgentName, wikiContext }: RequestBody = await req.json();
+    const user = await getAuthenticatedUser(req);
 
-    if (!message || !circleId || !userId) {
+    if (!user) {
+      return errResponse(401, "unauthenticated", "Valid JWT required.");
+    }
+
+    if (!message || !circleId) {
       return new Response(
-        JSON.stringify({ error: "Missing required fields: message, circleId, userId" }),
+        JSON.stringify({ error: "Missing required fields: message, circleId" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // Create Supabase client with service role for full access
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+    const userId = user.id;
+    const supabase = createServiceRoleClient();
+    const { data: membership } = await supabase
+      .from("circle_members")
+      .select("user_id")
+      .eq("circle_id", circleId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (!membership) {
+      return errResponse(403, "forbidden", "Not authorized for this circle.");
+    }
 
     // Gather full circle context (includes relevant knowledge entries + memories)
     // Pass targetAgentName so we load the correct agent's spirit + spawn config
@@ -2586,6 +2629,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         modelKey: claudeModelKey,
         conversationMessages,
         thinkingLevel: thinkingLevel || "balanced",
+        maxTokens,
         supabase,
         circleId,
         userId,

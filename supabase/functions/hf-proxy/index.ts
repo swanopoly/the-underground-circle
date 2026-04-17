@@ -6,14 +6,62 @@
  * speech-to-text, translation, and raw Space invocation.
  *
  * Uses the new HF Inference Providers router (router.huggingface.co).
+ *
+ * Error response shape: { error: string, code: ErrorCode }
+ *   token_missing      — HF_TOKEN env var not set on the edge function
+ *   token_invalid      — HF returned 401 (token rejected)
+ *   token_rate_limited — HF returned 429
+ *   tool_not_found     — toolId provided but RLS denied access
+ *   model_not_found    — HF returned 404 for the requested model
+ *   bad_request        — Malformed inputs
+ *   upstream_error     — Other HF API failure (passes through status + body)
+ *   internal           — Unclassified
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.95.3';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
+
+type ErrorCode =
+  | 'token_missing'
+  | 'token_invalid'
+  | 'token_rate_limited'
+  | 'tool_not_found'
+  | 'model_not_found'
+  | 'bad_request'
+  | 'upstream_error'
+  | 'internal';
+
+function errResponse(status: number, code: ErrorCode, message: string) {
+  return new Response(
+    JSON.stringify({ error: message, code }),
+    { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+  );
+}
+
+/**
+ * Translate an HF API error into a structured response. Status-driven so
+ * downstream clients can show the right "fix this by…" guidance.
+ */
+async function hfApiErrorResponse(response: Response): Promise<Response> {
+  const body = await response.text();
+  if (response.status === 401) {
+    return errResponse(401, 'token_invalid',
+      'HuggingFace rejected the API token. The HF_TOKEN env var is set but invalid or revoked. Generate a new token at https://huggingface.co/settings/tokens.');
+  }
+  if (response.status === 429) {
+    return errResponse(429, 'token_rate_limited',
+      'HuggingFace rate limit hit. Wait a minute and retry, or upgrade your HF account for higher quotas.');
+  }
+  if (response.status === 404) {
+    return errResponse(404, 'model_not_found',
+      `HuggingFace doesn't recognize the requested model. ${body.slice(0, 200)}`);
+  }
+  return errResponse(502, 'upstream_error', `HF API ${response.status}: ${body.slice(0, 300)}`);
+}
 
 // Task-specific default models
 const DEFAULT_MODELS: Record<string, string> = {
@@ -40,12 +88,23 @@ Deno.serve(async (req: Request) => {
     return new Response('ok', { headers: corsHeaders });
   }
 
-  try {
-    const hfToken = Deno.env.get('HF_TOKEN');
-    if (!hfToken) throw new Error('HF_TOKEN not set');
+  // Fail fast on missing token with a clear, actionable error code so the
+  // client can render "HuggingFace not configured — set HF_TOKEN" instead of
+  // a generic "command failed". This was the #1 silent failure mode.
+  const hfToken = Deno.env.get('HF_TOKEN');
+  if (!hfToken) {
+    console.error('[hf-proxy] HF_TOKEN env var not set');
+    return errResponse(503, 'token_missing',
+      'HuggingFace is not configured on the server. Set HF_TOKEN via `npx supabase secrets set HF_TOKEN=hf_xxx` and redeploy hf-proxy.');
+  }
 
+  try {
     const body = await req.json();
-    const { task, model, inputs, toolId, circleId, options } = body;
+    const { task, model, inputs, toolId, options } = body;
+
+    if (!inputs && task !== 'help') {
+      return errResponse(400, 'bad_request', 'Missing `inputs` in request body.');
+    }
 
     // If toolId is provided, verify access via RLS
     if (toolId) {
@@ -62,7 +121,8 @@ Deno.serve(async (req: Request) => {
         .single();
 
       if (toolError || !tool) {
-        throw new Error('Tool not found or access denied');
+        return errResponse(403, 'tool_not_found',
+          'HuggingFace tool not found or access denied (you may not be a member of this circle).');
       }
     }
 
@@ -363,9 +423,21 @@ Deno.serve(async (req: Request) => {
 
   } catch (error: any) {
     console.error('hf-proxy error:', error);
-    return new Response(JSON.stringify({ error: error.message }), {
-      status: 400,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
+    const message = error?.message || 'Internal error';
+    // Pattern-match the per-task throws (`HF Chat Error: 401 — …`) into
+    // structured codes so the client UI can show specific guidance.
+    if (/\b401\b/.test(message)) {
+      return errResponse(401, 'token_invalid',
+        'HuggingFace rejected the API token. Generate a new one at https://huggingface.co/settings/tokens and update HF_TOKEN.');
+    }
+    if (/\b429\b/.test(message)) {
+      return errResponse(429, 'token_rate_limited',
+        'HuggingFace rate limit hit. Wait a minute and retry.');
+    }
+    if (/\b404\b/.test(message)) {
+      return errResponse(404, 'model_not_found',
+        `HuggingFace doesn't recognize that model. ${message}`);
+    }
+    return errResponse(500, 'internal', message);
   }
 });

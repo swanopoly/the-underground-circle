@@ -111,7 +111,7 @@ export default function IntegrationsScreen({ navigation }: any) {
         <Pressable onPress={() => navigation.goBack()}>
           <Text style={styles.headerBack}>← BACK</Text>
         </Pressable>
-        <Text style={styles.headerTitle}>INTEGRATIONS</Text>
+        <Text style={styles.headerTitle}>MARKETPLACE</Text>
         <View style={{ width: 60 }} />
       </View>
 
@@ -119,19 +119,19 @@ export default function IntegrationsScreen({ navigation }: any) {
         <View style={styles.inner}>
           {/* Overview Card */}
           <Card style={styles.overviewCard}>
-            <Text style={styles.overviewTitle}>CONNECTED SERVICES</Text>
+            <Text style={styles.overviewTitle}>MARKETPLACE APPS</Text>
             <View style={styles.overviewStats}>
               <Text style={styles.overviewNumber}>{connectedCount}</Text>
               <Text style={styles.overviewLabel}>of {totalPlatforms} platforms</Text>
             </View>
             <Text style={styles.overviewDesc}>
-              Connect your favorite platforms to sync data and automate your grinding experience.
+              Install services and app capabilities that the rest of the circle can use across chat, Office, and execution.
             </Text>
           </Card>
 
           {/* Social & Communication */}
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>SOCIAL & COMMUNICATION</Text>
+            <Text style={styles.sectionTitle}>COMMS & COMMUNITY</Text>
             {(['discord', 'twitter'] as const).map(platform => {
               const connection = platformConnections[platform];
               const integration = getConnectionStatus(platform);
@@ -180,7 +180,7 @@ export default function IntegrationsScreen({ navigation }: any) {
 
           {/* Development */}
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>DEVELOPMENT</Text>
+            <Text style={styles.sectionTitle}>CODE & DELIVERY</Text>
             {(['github'] as const).map(platform => {
               const connection = platformConnections[platform];
               const integration = getConnectionStatus(platform);
@@ -346,7 +346,7 @@ export default function IntegrationsScreen({ navigation }: any) {
           <Card style={styles.privacyCard}>
             <Text style={styles.privacyTitle}>🔒 PRIVACY & SECURITY</Text>
             <Text style={styles.privacyDesc}>
-              Your integration data is encrypted and stored securely. You can disconnect any service at any time.
+              Integration settings sync with your account, while connection secrets stay local to this device when supported.
             </Text>
             <Text style={styles.privacyNote}>
               We only access the minimum data required for each integration and never share your personal information.

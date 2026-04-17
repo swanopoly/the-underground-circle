@@ -3,7 +3,11 @@ import {
   View, Text, StyleSheet, Pressable, ScrollView, TextInput,
   Platform, Animated, Easing,
 } from 'react-native';
-import { WIKI_ARTICLES, WikiArticle, WikiCategoryInfo, getCategoryInfo, searchArticles } from '../../lib/wikiData';
+import { WIKI_ARTICLES, WikiArticle, WikiCategoryInfo, getCategoryInfo, getPrimaryLessonRefForArticle, searchArticles } from '../../lib/wikiData';
+import { getLesson, getModule } from '../../lib/schoolsData';
+import { getWikiProgress, WikiProgress } from '../../lib/wikiProgress';
+import { getContinueLessonQueue, getProgress, SchoolsProgress } from '../../lib/schoolsProgress';
+import { interleaveQueues } from '../../lib/learningPath';
 import StaggerGroup from '../../components/motion/StaggerGroup';
 import FadeSlideIn from '../../components/motion/FadeSlideIn';
 
@@ -142,9 +146,134 @@ function SearchResultCard({ article, onPress }: {
   );
 }
 
+function ContinueReadingCard({ article, onPress }: {
+  article: WikiArticle;
+  onPress: () => void;
+}) {
+  return (
+    <View style={s.continueWrap} nativeID="section-wiki-continue">
+      <Pressable
+        onPress={onPress}
+        accessibilityRole="button"
+        accessibilityLabel={`Continue reading ${article.title}`}
+        style={s.continueCard}
+      >
+        <View style={[s.continueAccent, { backgroundColor: article.color }]} />
+        <View style={s.continueInner}>
+          <View style={[s.continueIconBox, { backgroundColor: article.color + '15' }]}>
+            <Text style={[s.continueIconText, { color: article.color }]}>{article.icon}</Text>
+          </View>
+          <View style={s.continueTextWrap}>
+            <Text style={[s.continueLabel, { color: article.color }]}>CONTINUE WHERE YOU LEFT OFF</Text>
+            <Text style={s.continueTitle}>{article.title}</Text>
+            <Text style={s.continueSubtitle}>{article.subtitle}</Text>
+          </View>
+          <Text style={[s.continueArrow, { color: article.color }]}>{'-->'}</Text>
+        </View>
+      </Pressable>
+    </View>
+  );
+}
+
+function ResearchControlCard({ onPress }: { onPress: () => void }) {
+  return (
+    <View style={s.continueWrap} nativeID="section-wiki-research-control">
+      <Pressable
+        onPress={onPress}
+        accessibilityRole="button"
+        accessibilityLabel="Open Research Control Center"
+        style={s.continueCard}
+      >
+        <View style={[s.continueAccent, { backgroundColor: '#22c55e' }]} />
+        <View style={s.continueInner}>
+          <View style={[s.continueIconBox, { backgroundColor: '#22c55e15' }]}>
+            <Text style={[s.continueIconText, { color: '#22c55e' }]}>{'R'}</Text>
+          </View>
+          <View style={s.continueTextWrap}>
+            <Text style={[s.continueLabel, { color: '#22c55e' }]}>KNOWLEDGE OPS</Text>
+            <Text style={s.continueTitle}>Research Control Center</Text>
+            <Text style={s.continueSubtitle}>Daily digests, research-agent runs, and which SOULs are learning from them.</Text>
+          </View>
+          <Text style={[s.continueArrow, { color: '#22c55e' }]}>{'-->'}</Text>
+        </View>
+      </Pressable>
+    </View>
+  );
+}
+
+function LearningPathCard({ label, title, subtitle, accentColor, icon, onPress }: {
+  label: string;
+  title: string;
+  subtitle: string;
+  accentColor: string;
+  icon: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${label}: ${title}`}
+      style={s.pathCard}
+    >
+      <View style={[s.pathAccent, { backgroundColor: accentColor }]} />
+      <View style={s.pathInner}>
+        <View style={[s.pathIconBox, { backgroundColor: accentColor + '15' }]}>
+          <Text style={[s.pathIconText, { color: accentColor }]}>{icon}</Text>
+        </View>
+        <View style={s.pathTextWrap}>
+          <Text style={[s.pathLabel, { color: accentColor }]}>{label}</Text>
+          <Text style={s.pathTitle}>{title}</Text>
+          <Text style={s.pathSubtitle}>{subtitle}</Text>
+        </View>
+        <Text style={[s.pathArrow, { color: accentColor }]}>{'-->'}</Text>
+      </View>
+    </Pressable>
+  );
+}
+
+function PathQueueCard({ label, title, subtitle, accentColor, icon, onPress }: {
+  label: string;
+  title: string;
+  subtitle: string;
+  accentColor: string;
+  icon: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${label}: ${title}`}
+      style={s.queueCard}
+    >
+      <View style={[s.queueIconBox, { backgroundColor: accentColor + '15' }]}>
+        <Text style={[s.queueIconText, { color: accentColor }]}>{icon}</Text>
+      </View>
+      <View style={s.queueTextWrap}>
+        <Text style={[s.queueLabel, { color: accentColor }]}>{label}</Text>
+        <Text style={s.queueTitle}>{title}</Text>
+        <Text style={s.queueSubtitle}>{subtitle}</Text>
+      </View>
+      <Text style={[s.queueArrow, { color: accentColor }]}>{'-->'}</Text>
+    </Pressable>
+  );
+}
+
+type WikiQueuedItem =
+  | { kind: 'article'; article: WikiArticle }
+  | { kind: 'lesson'; item: { ref: import('../../lib/schoolsData').LessonRef; lesson: import('../../lib/schoolsData').Lesson; module: import('../../lib/schoolsData').Module } };
+
 // ── Main Screen ───────────────────────────────────────────────────────────
 export default function WikiScreen({ navigation }: any) {
   const [searchQuery, setSearchQuery] = useState('');
+  const [wikiProgress, setWikiProgress] = useState<WikiProgress>({ readArticleIds: [] });
+  const [schoolsProgress, setSchoolsProgress] = useState<SchoolsProgress>({
+    lessons: {},
+    totalXpEarned: 0,
+    lessonsCompleted: 0,
+    currentStreak: 0,
+  });
   const searchResults = searchQuery.length > 1 ? searchArticles(searchQuery) : [];
 
   const headerAnim = useRef(new Animated.Value(0)).current;
@@ -152,12 +281,51 @@ export default function WikiScreen({ navigation }: any) {
 
   const categories = getCategoryInfo();
   const featuredArticles = WIKI_ARTICLES.slice(0, 5);
+  const totalArticles = WIKI_ARTICLES.length;
+  const readCount = wikiProgress.readArticleIds.length;
+  const categoryCount = categories.length;
   const isSearchActive = searchQuery.length > 1;
+  const continueArticle =
+    (wikiProgress.lastReadArticleId ? WIKI_ARTICLES.find(article => article.id === wikiProgress.lastReadArticleId) : undefined) ||
+    WIKI_ARTICLES.find(article => !wikiProgress.readArticleIds.includes(article.id));
+  const unreadArticleQueue = WIKI_ARTICLES.filter(article => !wikiProgress.readArticleIds.includes(article.id)).slice(0, 4);
+  const lessonQueue = getContinueLessonQueue(schoolsProgress, 4)
+    .map(item => {
+      const lesson = getLesson(item.trackId, item.moduleId, item.lessonId);
+      const module = getModule(item.trackId, item.moduleId);
+      return lesson && module ? { ref: item, lesson, module } : null;
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  const continueLessonRef = continueArticle ? getPrimaryLessonRefForArticle(continueArticle.id) : undefined;
+  const continueLesson = continueLessonRef
+    ? getLesson(continueLessonRef.trackId, continueLessonRef.moduleId, continueLessonRef.lessonId)
+    : undefined;
+  const continueLessonModule = continueLessonRef
+    ? getModule(continueLessonRef.trackId, continueLessonRef.moduleId)
+    : undefined;
 
   useEffect(() => {
     Animated.timing(headerAnim, { toValue: 1, duration: 500, delay: 100, useNativeDriver: false }).start();
     Animated.timing(searchBarAnim, { toValue: 1, duration: 400, delay: 200, useNativeDriver: false }).start();
   }, [headerAnim, searchBarAnim]);
+
+  useEffect(() => {
+    let mounted = true;
+    Promise.all([getWikiProgress(), getProgress()]).then(([nextWikiProgress, nextSchoolsProgress]) => {
+      if (!mounted) return;
+      setWikiProgress(nextWikiProgress);
+      setSchoolsProgress(nextSchoolsProgress);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+  const queuedItems = interleaveQueues<WikiQueuedItem>([
+    unreadArticleQueue.slice(1).map(article => ({ kind: 'article', article })),
+    lessonQueue
+      .filter(item => !(continueLessonRef && item.ref.lessonId === continueLessonRef.lessonId && item.ref.moduleId === continueLessonRef.moduleId && item.ref.trackId === continueLessonRef.trackId))
+      .map(item => ({ kind: 'lesson', item })),
+  ], 4);
 
   return (
     <View style={s.page} nativeID="section-wiki-hub">
@@ -171,8 +339,30 @@ export default function WikiScreen({ navigation }: any) {
           <View style={{ flex: 1, marginLeft: 16 }}>
             <Text style={s.headerSubtitle}>Knowledge Base</Text>
             <Text style={s.headerTitle}>AI Wiki</Text>
+            <Text style={s.headerBody}>
+              Durable field notes on models, agents, frameworks, research fronts, and the operating patterns behind OpenSwan.
+            </Text>
           </View>
         </Animated.View>
+
+        <View style={s.heroGrid} nativeID="section-wiki-overview">
+          <View style={s.heroCard}>
+            <Text style={s.heroLabel}>Coverage</Text>
+            <Text style={s.heroValue}>{totalArticles}</Text>
+            <Text style={s.heroMeta}>articles across {categoryCount} categories</Text>
+          </View>
+          <View style={s.heroCard}>
+            <Text style={s.heroLabel}>Progress</Text>
+            <Text style={s.heroValue}>{readCount}</Text>
+            <Text style={s.heroMeta}>articles read in this workspace</Text>
+          </View>
+          <View style={s.heroCardWide}>
+            <Text style={s.heroLabel}>Why This Exists</Text>
+            <Text style={s.heroNarrative}>
+              The wiki is the durable layer. Research Control handles fresh automated intelligence. Schools turns the strongest ideas into execution.
+            </Text>
+          </View>
+        </View>
 
         {/* ── SECTION: Search Bar ── */}
         <Animated.View style={[s.searchBarWrap, { opacity: searchBarAnim }]} nativeID="section-wiki-search">
@@ -194,6 +384,80 @@ export default function WikiScreen({ navigation }: any) {
             )}
           </View>
         </Animated.View>
+
+        {!isSearchActive && continueArticle && (
+          <>
+            <ContinueReadingCard
+              article={continueArticle}
+              onPress={() => navigation.navigate('WikiArticle', { articleId: continueArticle.id })}
+            />
+            <View style={s.pathWrap} nativeID="section-wiki-learning-path">
+              <Text style={s.pathSectionLabel}>Learning Path</Text>
+              <Text style={s.pathSectionTitle}>Read, Then Build</Text>
+              <Text style={s.pathSectionSubtitle}>
+                Pair the current Wiki thread with the next practical lesson so the knowledge turns into action.
+              </Text>
+              <View style={s.pathStack}>
+                <LearningPathCard
+                  label="READ NEXT"
+                  title={continueArticle.title}
+                  subtitle={continueArticle.subtitle}
+                  accentColor={continueArticle.color}
+                  icon={continueArticle.icon}
+                  onPress={() => navigation.navigate('WikiArticle', { articleId: continueArticle.id })}
+                />
+                {continueLessonRef && continueLesson && continueLessonModule && (
+                  <LearningPathCard
+                    label="BUILD NEXT"
+                    title={continueLesson.title}
+                    subtitle={continueLessonModule.title}
+                    accentColor={'#f59e0b'}
+                    icon={'S'}
+                    onPress={() => navigation.navigate('SchoolsLesson', {
+                      trackId: continueLessonRef.trackId,
+                      moduleId: continueLessonRef.moduleId,
+                      lessonId: continueLessonRef.lessonId,
+                    })}
+                  />
+                )}
+              </View>
+              {queuedItems.length > 0 && (
+                <View style={s.queueWrap}>
+                  <Text style={s.queueHeading}>Queued Next</Text>
+                  {queuedItems.map(entry => entry.kind === 'article' ? (
+                    <PathQueueCard
+                      key={`queued-${entry.article.id}`}
+                      label="READ LATER"
+                      title={entry.article.title}
+                      subtitle={entry.article.subtitle}
+                      accentColor={entry.article.color}
+                      icon={entry.article.icon}
+                      onPress={() => navigation.navigate('WikiArticle', { articleId: entry.article.id })}
+                    />
+                  ) : (
+                    <PathQueueCard
+                      key={`queued-lesson-${entry.item.ref.trackId}-${entry.item.ref.moduleId}-${entry.item.ref.lessonId}`}
+                      label="BUILD LATER"
+                      title={entry.item.lesson.title}
+                      subtitle={entry.item.module.title}
+                      accentColor={'#f59e0b'}
+                      icon={'S'}
+                      onPress={() => navigation.navigate('SchoolsLesson', {
+                        trackId: entry.item.ref.trackId,
+                        moduleId: entry.item.ref.moduleId,
+                        lessonId: entry.item.ref.lessonId,
+                      })}
+                    />
+                  ))}
+                </View>
+              )}
+            </View>
+          </>
+        )}
+
+        {!isSearchActive && (
+          <ResearchControlCard onPress={() => navigation.navigate('ResearchControlCenter')} />
+        )}
 
         {isSearchActive ? (
           /* ── SECTION: Search Results ── */
@@ -259,18 +523,49 @@ export default function WikiScreen({ navigation }: any) {
 // ── Styles ─────────────────────────────────────────────────────────────────
 const s = StyleSheet.create({
   page: { flex: 1, backgroundColor: BG_PAGE },
-  scroll: { paddingTop: 32, paddingBottom: 48, paddingHorizontal: 24 },
+  scroll: { paddingTop: 32, paddingBottom: 48, paddingHorizontal: 24, maxWidth: 1320, width: '100%', alignSelf: 'center' },
 
   // Header
   header: {
-    flexDirection: 'row', alignItems: 'center', maxWidth: 720, width: '100%', alignSelf: 'center', marginBottom: 24,
+    flexDirection: 'row', alignItems: 'flex-start', width: '100%', marginBottom: 24,
   },
   backText: { fontSize: 13, fontWeight: '500', color: '#06b6d4' },
   headerSubtitle: { fontSize: 13, fontWeight: '500', color: TEXT_TER, marginBottom: 2 },
   headerTitle: { fontSize: 28, fontWeight: '700', color: TEXT_PRI, letterSpacing: -0.5 },
+  headerBody: { fontSize: 14, lineHeight: 21, color: TEXT_SEC, marginTop: 10, maxWidth: 760 },
+
+  heroGrid: {
+    width: '100%',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 14,
+    marginBottom: 24,
+  },
+  heroCard: {
+    minWidth: 220,
+    flexGrow: 1,
+    backgroundColor: BG_SURFACE,
+    borderWidth: 1,
+    borderColor: BORDER_DEF,
+    borderRadius: R_CARD,
+    padding: 18,
+  },
+  heroCardWide: {
+    minWidth: 320,
+    flexGrow: 2,
+    backgroundColor: BG_SURFACE,
+    borderWidth: 1,
+    borderColor: BORDER_DEF,
+    borderRadius: R_CARD,
+    padding: 18,
+  },
+  heroLabel: { fontSize: 11, fontWeight: '700', letterSpacing: 1.1, color: TEXT_TER, textTransform: 'uppercase' },
+  heroValue: { fontSize: 30, fontWeight: '800', color: TEXT_PRI, marginTop: 10 },
+  heroMeta: { fontSize: 13, color: TEXT_SEC, marginTop: 8 },
+  heroNarrative: { fontSize: 14, lineHeight: 22, color: TEXT_SEC, marginTop: 10, maxWidth: 760 },
 
   // Search Bar
-  searchBarWrap: { maxWidth: 720, width: '100%', alignSelf: 'center', marginBottom: 28 },
+  searchBarWrap: { width: '100%', marginBottom: 28 },
   searchBarInner: {
     flexDirection: 'row', alignItems: 'center', backgroundColor: BG_INPUT,
     borderWidth: 1, borderColor: BORDER_DEF, borderRadius: R_BTN,
@@ -284,8 +579,60 @@ const s = StyleSheet.create({
   searchClear: { fontSize: 13, fontWeight: '700', color: TEXT_SEC, padding: 4 },
 
   // Section
-  sectionWrap: { maxWidth: 720, width: '100%', alignSelf: 'center', marginBottom: 28 },
+  sectionWrap: { width: '100%', marginBottom: 28 },
   sectionTitle: { fontSize: 16, fontWeight: '600', color: TEXT_SEC, marginBottom: 14, letterSpacing: 0.3 },
+
+  // Continue
+  continueWrap: { width: '100%', marginBottom: 24 },
+  continueCard: {
+    backgroundColor: BG_SURFACE, borderWidth: 1, borderColor: BORDER_DEF, borderRadius: R_CARD,
+    overflow: 'hidden',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  continueAccent: { height: 3, width: '100%' },
+  continueInner: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 18 },
+  continueIconBox: { width: 40, height: 40, borderRadius: R_BTN, justifyContent: 'center', alignItems: 'center' },
+  continueIconText: { fontSize: 14, fontWeight: '700' },
+  continueTextWrap: { flex: 1 },
+  continueLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 1.1, marginBottom: 5 },
+  continueTitle: { fontSize: 16, fontWeight: '600', color: TEXT_PRI, marginBottom: 3 },
+  continueSubtitle: { fontSize: 12, fontWeight: '400', color: TEXT_SEC },
+  continueArrow: { fontSize: 14, fontWeight: '700' },
+
+  // Learning path
+  pathWrap: { width: '100%', marginBottom: 24 },
+  pathSectionLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 1.1, color: TEXT_TER, marginBottom: 6 },
+  pathSectionTitle: { fontSize: 20, fontWeight: '700', color: TEXT_PRI, letterSpacing: -0.3, marginBottom: 4 },
+  pathSectionSubtitle: { fontSize: 13, fontWeight: '400', color: TEXT_SEC, lineHeight: 20, marginBottom: 12 },
+  pathStack: { gap: 10 },
+  pathCard: {
+    backgroundColor: BG_SURFACE, borderWidth: 1, borderColor: BORDER_DEF, borderRadius: R_CARD,
+    overflow: 'hidden',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  pathAccent: { height: 3, width: '100%' },
+  pathInner: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 16 },
+  pathIconBox: { width: 40, height: 40, borderRadius: R_BTN, justifyContent: 'center', alignItems: 'center' },
+  pathIconText: { fontSize: 14, fontWeight: '700' },
+  pathTextWrap: { flex: 1 },
+  pathLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 1.1, marginBottom: 4 },
+  pathTitle: { fontSize: 15, fontWeight: '600', color: TEXT_PRI, marginBottom: 3 },
+  pathSubtitle: { fontSize: 12, fontWeight: '400', color: TEXT_SEC },
+  pathArrow: { fontSize: 14, fontWeight: '700' },
+  queueWrap: { marginTop: 12, gap: 8 },
+  queueHeading: { fontSize: 12, fontWeight: '600', color: TEXT_TER, marginBottom: 2 },
+  queueCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: BG_RAISED,
+    borderWidth: 1, borderColor: BORDER_DEF, borderRadius: R_BTN, padding: 12,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  queueIconBox: { width: 34, height: 34, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
+  queueIconText: { fontSize: 12, fontWeight: '700' },
+  queueTextWrap: { flex: 1 },
+  queueLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 1, marginBottom: 3 },
+  queueTitle: { fontSize: 13, fontWeight: '600', color: TEXT_PRI, marginBottom: 2 },
+  queueSubtitle: { fontSize: 11, fontWeight: '400', color: TEXT_SEC },
+  queueArrow: { fontSize: 13, fontWeight: '700' },
 
   // Category Card
   catGrid: { gap: 12 },

@@ -7,10 +7,14 @@ import CreateCircleScreen from '../screens/circles/CreateCircleScreen';
 import DiscoverScreen from '../screens/circles/DiscoverScreen';
 import JoinCircleScreen from '../screens/circles/JoinCircleScreen';
 import CircleSettingsScreen from '../screens/circles/CircleSettingsScreen';
-import EditProfileScreen from '../screens/profile/EditProfileScreen';
+import ProfileScreen from '../screens/profile/ProfileScreen';
 import FriendsScreen from '../screens/friends/FriendsScreen';
 import DMScreen from '../screens/friends/DMScreen';
-import AgentsScreen from '../screens/agents/AgentsScreen';
+// AgentsScreenLive is the rebuilt multi-source fleet view (pinned defaults +
+// live sessions + bonded agents + providers). The original AgentsScreen.tsx
+// is owned by root in the repo so we route past it; once chowned it can be
+// replaced and this import flipped back.
+import AgentsScreen from '../screens/agents/AgentsScreenLive';
 import IntegrationsScreen from '../screens/integrations/IntegrationsScreen';
 import InviteManageScreen from '../screens/circles/InviteManageScreen';
 import OrgListScreen from '../screens/organizations/OrgListScreen';
@@ -29,6 +33,10 @@ import SchoolsLessonScreen from '../screens/schools/SchoolsLessonScreen';
 import WikiScreen from '../screens/wiki/WikiScreen';
 import WikiCategoryScreen from '../screens/wiki/WikiCategoryScreen';
 import WikiArticleScreen from '../screens/wiki/WikiArticleScreen';
+import ResearchControlCenterScreen from '../screens/wiki/ResearchControlCenterScreen';
+import ResearchDocumentDetailScreen from '../screens/wiki/ResearchDocumentDetailScreen';
+import ResearchRunDetailScreen from '../screens/wiki/ResearchRunDetailScreen';
+import SoulMemoryScreen from '../screens/wiki/SoulMemoryScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -47,7 +55,8 @@ export default function MainNavigator() {
       <Stack.Screen name="CircleDetail" component={CircleDetailScreen} />
       <Stack.Screen name="CircleSettings" component={CircleSettingsScreen} />
       {/* Profile sub-screens */}
-      <Stack.Screen name="EditProfile" component={EditProfileScreen} />
+      <Stack.Screen name="Profile" component={ProfileScreen} />
+      <Stack.Screen name="EditProfile" component={ProfileScreen} />
       <Stack.Screen name="Friends" component={FriendsScreen} />
       <Stack.Screen name="DMScreen" component={DMScreen} />
       <Stack.Screen name="Agents" component={AgentsScreen} />
@@ -70,6 +79,10 @@ export default function MainNavigator() {
       <Stack.Screen name="SchoolsLesson" component={SchoolsLessonScreen} />
       {/* AI Wiki */}
       <Stack.Screen name="Wiki" component={WikiScreen} />
+      <Stack.Screen name="ResearchControlCenter" component={ResearchControlCenterScreen} />
+      <Stack.Screen name="ResearchDocumentDetail" component={ResearchDocumentDetailScreen} />
+      <Stack.Screen name="ResearchRunDetail" component={ResearchRunDetailScreen} />
+      <Stack.Screen name="SoulMemory" component={SoulMemoryScreen} />
       <Stack.Screen name="WikiCategory" component={WikiCategoryScreen} />
       <Stack.Screen name="WikiArticle" component={WikiArticleScreen} />
     </Stack.Navigator>

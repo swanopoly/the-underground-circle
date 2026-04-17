@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -8,9 +8,26 @@ import {
   Platform,
   Pressable,
   Animated,
+  Image,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { getSwanBotResponse, SwanBotContext } from '../lib/swanbot';
+import {
+  getMatchingChatSlashCommands,
+  type ChatSlashCommand,
+} from '../lib/chatSlashCommands';
+import ChatBotIdentityRow from './chat/ChatBotIdentityRow';
+import ChatInlineRichText from './chat/ChatInlineRichText';
+import ChatSlashCommandPalette from './chat/ChatSlashCommandPalette';
+import {
+  formatPersistedChatBotMessage,
+  getChatAgentAvatarSource,
+  isPersistedChatBotMessage,
+  loadChatAgentAvatar,
+  loadChatAgentName,
+  MAIN_CHAT_AGENT_NAME,
+} from '../lib/chatAgentIdentity';
+import { shapePersistedChatMessage } from '../lib/chatMessageShape';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -53,6 +70,10 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
   const [minimized, setMinimized] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [currentUserName, setCurrentUserName] = useState('You');
+  const [agentName, setAgentName] = useState<string>(MAIN_CHAT_AGENT_NAME);
+  const [agentAvatarUri, setAgentAvatarUri] = useState<string | null>(null);
+  const [focused, setFocused] = useState(false);
+  const [highlightedSlashIndex, setHighlightedSlashIndex] = useState(0);
 
   // Position and size (web dragging/resizing)
   const [posX, setPosX] = useState(DEFAULT_RIGHT);
@@ -67,6 +88,9 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
   const resizeRef = useRef<{ startX: number; startY: number; startW: number; startH: number } | null>(null);
   const headerRef = useRef<View>(null);
   const resizeHandleRef = useRef<View>(null);
+  const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const agentNameRef = useRef(agentName);
+  const sendLockRef = useRef(false);
 
   // Animation
   const scaleAnim = useRef(new Animated.Value(0)).current;
@@ -92,6 +116,37 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
     initUser();
     loadMessages();
   }, [circleId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadChatAgentName(circleId).then((savedName) => {
+      if (!cancelled) setAgentName(savedName);
+    }).catch(() => {});
+    loadChatAgentAvatar(circleId).then((savedAvatar) => {
+      if (!cancelled) setAgentAvatarUri(savedAvatar);
+    }).catch(() => {
+      if (!cancelled) setAgentAvatarUri(null);
+    });
+    return () => { cancelled = true; };
+  }, [circleId]);
+
+  useEffect(() => {
+    agentNameRef.current = agentName;
+    setMessages(prev => prev.map(message =>
+      message.isBot && message.userName !== agentName
+        ? { ...message, userName: agentName }
+        : message
+    ));
+  }, [agentName]);
+
+  const agentAvatarSource = getChatAgentAvatarSource(agentAvatarUri);
+  const slashCommands = useMemo(() => getMatchingChatSlashCommands(input), [input]);
+  const slashToken = input.trimStart().split(/\s+/, 1)[0] || '';
+  const showSlashCommands = focused && /^\/[^\s]*$/.test(slashToken) && slashCommands.length > 0;
+
+  useEffect(() => {
+    setHighlightedSlashIndex(0);
+  }, [slashToken, slashCommands.length]);
 
   const initUser = async () => {
     try {
@@ -119,23 +174,12 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
 
       if (!error && data && data.length > 0) {
         const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
-        const loaded: FloatingMessage[] = data.map((m: any) => {
-          const isBot = m.is_bot === true
-            || (m.content || '').startsWith('\u{1F9A2} **Agent:**')
-            || (m.content || '').startsWith('\u{1F9A2} **BlackSwan:**')
-            || (m.content || '').startsWith('\u{1F9A2} **SwanBot:**');
-          return {
-            id: m.id,
-            dbId: m.id,
-            content: isBot
-              ? (m.content || '').replace(/^\u{1F9A2} \*\*(SwanBot|BlackSwan|Agent):\*\* /u, '').replace(/^\u{1F451} \*\*OpenSwan:\*\* /u, '')
-              : (m.content || ''),
-            isBot,
-            isUser: m.user_id === user?.id && !isBot,
-            userName: isBot ? 'Agent \u{1F9A2}' : (m.user?.display_name || m.user?.username || 'Unknown'),
-            timestamp: new Date(m.created_at),
-          };
-        });
+        const loaded: FloatingMessage[] = data.map((m: any) =>
+          shapePersistedChatMessage(m, {
+            currentUserId: user?.id,
+            botDisplayName: agentName,
+          })
+        );
         setMessages(loaded);
       }
     } catch (e) {
@@ -157,24 +201,14 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
         filter: `circle_id=eq.${circleId}`,
       }, (payload: any) => {
         const newMsg = payload.new;
-        if (newMsg.user_id === currentUserId) return;
+        const isBotFromDb = isPersistedChatBotMessage(newMsg.content, newMsg.is_bot === true);
+        if (newMsg.user_id === currentUserId && !isBotFromDb) return;
 
-        const isBotMsg = newMsg.is_bot === true
-          || (newMsg.content || '').startsWith('\u{1F9A2} **Agent:**')
-          || (newMsg.content || '').startsWith('\u{1F9A2} **BlackSwan:**')
-          || (newMsg.content || '').startsWith('\u{1F9A2} **SwanBot:**');
-
-        const msg: FloatingMessage = {
-          id: newMsg.id,
-          dbId: newMsg.id,
-          content: isBotMsg
-            ? (newMsg.content || '').replace(/^\u{1F9A2} \*\*(SwanBot|BlackSwan|Agent):\*\* /u, '').replace(/^\u{1F451} \*\*OpenSwan:\*\* /u, '')
-            : (newMsg.content || ''),
-          isBot: isBotMsg,
-          isUser: false,
-          userName: isBotMsg ? 'Agent \u{1F9A2}' : 'Circle Member',
-          timestamp: new Date(newMsg.created_at),
-        };
+        const msg: FloatingMessage = shapePersistedChatMessage(newMsg, {
+          currentUserId,
+          botDisplayName: agentNameRef.current,
+          fallbackUserName: 'Circle Member',
+        });
 
         // Resolve sender name
         if (!newMsg.is_bot) {
@@ -193,6 +227,24 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
 
         setMessages(prev => {
           if (prev.some(m => m.dbId === newMsg.id)) return prev;
+          const incomingTs = new Date(newMsg.created_at || Date.now()).getTime();
+          const optimisticMatchIndex = prev.findIndex(m => {
+            if ((m as any).dbId) return false;
+            if (m.isBot !== msg.isBot || m.isUser !== msg.isUser) return false;
+            if (m.content.trim() !== msg.content.trim()) return false;
+            return Math.abs(m.timestamp.getTime() - incomingTs) < 15000;
+          });
+          if (optimisticMatchIndex >= 0) {
+            const next = [...prev];
+            next[optimisticMatchIndex] = {
+              ...next[optimisticMatchIndex],
+              dbId: newMsg.id,
+              id: msg.id,
+              timestamp: msg.timestamp,
+              userName: msg.userName,
+            };
+            return next;
+          }
           return [...prev, msg];
         });
       })
@@ -310,9 +362,41 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
 
   // ─── Send Message ───────────────────────────────────────────────────────
 
+  const applySlashCommand = useCallback((command: ChatSlashCommand) => {
+    if (blurTimeoutRef.current) {
+      clearTimeout(blurTimeoutRef.current);
+      blurTimeoutRef.current = null;
+    }
+    setInput(command.insertText);
+    setHighlightedSlashIndex(0);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
+
   const sendMessage = useCallback(async () => {
+    if (sendLockRef.current) return;
     const content = input.trim();
     if (!content || !currentUserId) return;
+    sendLockRef.current = true;
+    setTimeout(() => { sendLockRef.current = false; }, 350);
+
+    const lowerContent = content.toLowerCase().trim();
+    if (lowerContent === '/help' || lowerContent === '/commands') {
+      try {
+        const { executeHelpCommand } = await import('../lib/missionChatCommands');
+        const helpMessage = executeHelpCommand().message;
+        const botMsg: FloatingMessage = {
+          id: `bot-${Date.now()}`,
+          content: helpMessage,
+          isBot: true,
+          isUser: false,
+          userName: agentName,
+          timestamp: new Date(),
+        };
+        setMessages(prev => [...prev, botMsg]);
+        setInput('');
+        return;
+      } catch {}
+    }
 
     // Optimistic local message
     const localId = `user-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -362,7 +446,7 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
         // Build chat context from recent messages
         const recentMsgs = messages.slice(-10);
         const chatHistory = recentMsgs.map(m =>
-          `${m.isBot ? 'Agent' : (m.userName || 'User')}: ${m.content.slice(0, 300)}`
+          `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content.slice(0, 300)}`
         ).join('\n');
 
         const context: SwanBotContext = {
@@ -380,7 +464,7 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
           content: botResponse,
           isBot: true,
           isUser: false,
-          userName: 'Agent \u{1F9A2}',
+          userName: agentName,
           timestamp: new Date(),
         };
         setMessages(prev => [...prev, botMsg]);
@@ -390,7 +474,7 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
           const { error: botInsertErr } = await supabase.from('messages').insert({
             circle_id: circleId,
             user_id: currentUserId,
-            content: `\u{1F9A2} **Agent:** ${botResponse}`,
+            content: formatPersistedChatBotMessage(agentName, botResponse),
             reactions: {},
             is_bot: true,
           });
@@ -399,7 +483,7 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
             await supabase.from('messages').insert({
               circle_id: circleId,
               user_id: currentUserId,
-              content: `\u{1F9A2} **Agent:** ${botResponse}`,
+              content: formatPersistedChatBotMessage(agentName, botResponse),
             });
           }
         } catch (e: any) {
@@ -411,14 +495,14 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
           content: 'Something went wrong. Try again.',
           isBot: true,
           isUser: false,
-          userName: 'Agent \u{1F9A2}',
+          userName: agentName,
           timestamp: new Date(),
         };
         setMessages(prev => [...prev, errMsg]);
       }
       setBotTyping(false);
     }
-  }, [input, currentUserId, currentUserName, circleId]);
+  }, [input, currentUserId, currentUserName, circleId, messages, agentName]);
 
   // ─── Render ─────────────────────────────────────────────────────────────
 
@@ -435,9 +519,18 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
         ]}
       >
         {!isUser && (
-          <Text style={[styles.msgName, isBot && { color: accentColor }]}>
-            {item.userName}
-          </Text>
+          isBot ? (
+            <ChatBotIdentityRow
+              agentAvatarSource={agentAvatarSource}
+              agentName={item.userName}
+              accentColor={accentColor}
+              compact
+            />
+          ) : (
+            <Text style={styles.msgName}>
+              {item.userName}
+            </Text>
+          )
         )}
         <View style={[
           styles.msgBubble,
@@ -445,16 +538,18 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
           isBot && styles.msgBubbleBot,
           isUser && { backgroundColor: accentColor + '30', borderColor: accentColor + '50' },
         ]}>
-          <Text style={[styles.msgText, isUser && { color: '#f0f0f5' }]}>
-            {item.content}
-          </Text>
+          <ChatInlineRichText
+            content={item.content}
+            accentColor={accentColor}
+            textColor={isUser ? '#f0f0f5' : '#d0d0dc'}
+          />
         </View>
         <Text style={styles.msgTime}>
           {item.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
         </Text>
       </View>
     );
-  }, [accentColor]);
+  }, [accentColor, agentAvatarSource]);
 
   const containerStyle: any = Platform.OS === 'web'
     ? {
@@ -500,9 +595,9 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
         style={[styles.header, { borderBottomColor: accentColor + '30' }]}
       >
         <View style={styles.headerLeft}>
-          <View style={[styles.headerDot, { backgroundColor: accentColor }]} />
+          <Image source={agentAvatarSource} style={styles.headerAvatar} resizeMode="contain" />
           <Text style={styles.headerTitle} numberOfLines={1}>
-            Chat - {circleName.toUpperCase()}
+            {agentName} · {circleName.toUpperCase()}
           </Text>
         </View>
         <View style={styles.headerButtons}>
@@ -555,7 +650,7 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
           />
           {botTyping && (
             <View style={styles.typingRow}>
-              <Text style={[styles.typingText, { color: accentColor }]}>Agent is typing...</Text>
+              <Text style={[styles.typingText, { color: accentColor }]}>{agentName} is typing...</Text>
             </View>
           )}
         </View>
@@ -564,14 +659,66 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
       {/* ── SECTION: Input ── */}
       {!minimized && (
         <View nativeID="section-floating-chat-input" style={[styles.inputContainer, { borderTopColor: accentColor + '30' }]}>
+          {showSlashCommands && (
+            <ChatSlashCommandPalette
+              accentColor={accentColor}
+              commands={slashCommands}
+              highlightedIndex={highlightedSlashIndex}
+              onHighlightIndexChange={setHighlightedSlashIndex}
+              onSelect={applySlashCommand}
+              variant="compact"
+            />
+          )}
           <TextInput
             ref={inputRef}
             style={[styles.input, Platform.OS === 'web' ? { outlineWidth: 0, outlineStyle: 'none' } as any : {}]}
             value={input}
             onChangeText={setInput}
-            placeholder={`Ask BlackSwan...`}
+            placeholder={`Ask ${agentName}...`}
             placeholderTextColor="#606075"
-            onSubmitEditing={() => sendMessage()}
+          onSubmitEditing={() => {
+            if (Platform.OS === 'web') return;
+            if (showSlashCommands) {
+              const selected = slashCommands[highlightedSlashIndex] || slashCommands[0];
+              if (selected) {
+                applySlashCommand(selected);
+                return;
+                }
+              }
+              sendMessage();
+            }}
+            onKeyPress={(e: any) => {
+              if (Platform.OS === 'web' && showSlashCommands) {
+                if (e.nativeEvent?.key === 'ArrowDown') {
+                  e.preventDefault?.();
+                  setHighlightedSlashIndex((prev: number) => (prev + 1) % slashCommands.length);
+                  return;
+                }
+                if (e.nativeEvent?.key === 'ArrowUp') {
+                  e.preventDefault?.();
+                  setHighlightedSlashIndex((prev: number) => (prev - 1 + slashCommands.length) % slashCommands.length);
+                  return;
+                }
+                if ((e.nativeEvent?.key === 'Enter' || e.nativeEvent?.key === 'Tab') && !e.nativeEvent?.shiftKey) {
+                  e.preventDefault?.();
+                  const selected = slashCommands[highlightedSlashIndex] || slashCommands[0];
+                  if (selected) applySlashCommand(selected);
+                }
+              }
+            }}
+            onFocus={() => {
+              if (blurTimeoutRef.current) {
+                clearTimeout(blurTimeoutRef.current);
+                blurTimeoutRef.current = null;
+              }
+              setFocused(true);
+            }}
+            onBlur={() => {
+              blurTimeoutRef.current = setTimeout(() => {
+                setFocused(false);
+                blurTimeoutRef.current = null;
+              }, 120);
+            }}
             returnKeyType="send"
             multiline={false}
           />
@@ -631,10 +778,9 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 8,
   },
-  headerDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+  headerAvatar: {
+    width: 18,
+    height: 18,
   },
   headerTitle: {
     color: '#a0a0b0',
@@ -710,11 +856,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#0f0f18',
     borderColor: '#1a1a28',
   },
-  msgText: {
-    color: '#f0f0f5',
-    fontSize: 13,
-    lineHeight: 18,
-  },
   msgTime: {
     color: '#606075',
     fontSize: 9,
@@ -761,6 +902,14 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#1a1a28',
     gap: 6,
+    position: 'relative',
+  },
+  slashCommandPopup: {
+    position: 'absolute' as any,
+    left: 8,
+    right: 8,
+    bottom: 54,
+    zIndex: 20,
   },
   input: {
     flex: 1,

@@ -2,6 +2,7 @@
 // Progress tracking for Schools education section — AsyncStorage-based
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { LessonRef, TRACKS } from './schoolsData';
 
 const PROGRESS_KEY = '@schools_progress';
 
@@ -138,4 +139,80 @@ export function getModuleCompletedCount(
     }
   }
   return completed;
+}
+
+export function getRecommendedNextLessonRef(
+  progress: SchoolsProgress,
+  trackId: string,
+  moduleId: string,
+  lessonId: string,
+): LessonRef | undefined {
+  const track = TRACKS.find(item => item.id === trackId);
+  if (!track) return undefined;
+
+  const flattened: LessonRef[] = track.modules.flatMap(module =>
+    module.lessons.map(lesson => ({
+      trackId,
+      moduleId: module.id,
+      lessonId: lesson.id,
+      moduleTitle: module.title,
+      lessonTitle: lesson.title,
+    }))
+  );
+
+  const currentIndex = flattened.findIndex(
+    item => item.moduleId === moduleId && item.lessonId === lessonId
+  );
+  if (currentIndex === -1) return undefined;
+
+  for (let index = currentIndex + 1; index < flattened.length; index += 1) {
+    const candidate = flattened[index];
+    if (!isLessonCompleted(progress, candidate.trackId, candidate.moduleId, candidate.lessonId)) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
+export function getContinueLessonRef(progress: SchoolsProgress): LessonRef | undefined {
+  for (const track of TRACKS) {
+    for (const module of track.modules) {
+      for (const lesson of module.lessons) {
+        if (!isLessonCompleted(progress, track.id, module.id, lesson.id)) {
+          return {
+            trackId: track.id,
+            moduleId: module.id,
+            lessonId: lesson.id,
+            moduleTitle: module.title,
+            lessonTitle: lesson.title,
+          };
+        }
+      }
+    }
+  }
+
+  return undefined;
+}
+
+export function getContinueLessonQueue(progress: SchoolsProgress, limit = 3): LessonRef[] {
+  const queue: LessonRef[] = [];
+
+  for (const track of TRACKS) {
+    for (const module of track.modules) {
+      for (const lesson of module.lessons) {
+        if (isLessonCompleted(progress, track.id, module.id, lesson.id)) continue;
+        queue.push({
+          trackId: track.id,
+          moduleId: module.id,
+          lessonId: lesson.id,
+          moduleTitle: module.title,
+          lessonTitle: lesson.title,
+        });
+        if (queue.length >= limit) return queue;
+      }
+    }
+  }
+
+  return queue;
 }

@@ -3,11 +3,11 @@ import {
   View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Image,
   useWindowDimensions, Platform, Linking, Modal, TextInput,
 } from 'react-native';
-import OfficeFloorView, { DESK_POSITIONS, FLOOR_W, FLOOR_H } from './office/OfficeFloor';
+import OfficeFloorView from './office/OfficeFloor';
 import PixelAgent from './office/PixelAgent';
-import ServerRack from './office/ServerRack';
-import Whiteboard from './office/Whiteboard';
 import AgentPanel from './office/AgentPanel';
+import { OfficeIntelligenceSection, OfficeRuntimeSection, OfficeWorkspaceSection } from './office/OfficeSections';
+import { OFFICE_DESK_POSITIONS, OFFICE_FLOOR_HEIGHT, OFFICE_FLOOR_WIDTH } from './office/officeFloorLayout';
 import CustomizePanel, { TelegramConfig } from './office/CustomizePanel';
 import McpPanel from './office/McpPanel';
 import type { OfficeCommand } from './office/OfficeChat';
@@ -28,13 +28,14 @@ import {
 import { validateOfficeLayout } from '../../../lib/officeValidation';
 import { useCustomThemes, customThemeToOfficeTheme, CUSTOM_THEME_PREFIX, CustomThemeRecord } from '../../../services/customThemes';
 import { enrichAgentsWithCache, enrichSessionsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
-import { restoreAllAgents, recordAgentActivity, renameAgent as renameAgentIdentity } from '../../../lib/agentIdentity';
+import { restoreAllAgents, recordAgentActivity, renameAgent as renameAgentIdentity, updateAgentIdentity, getAgentIdentityByAgent, getAgentIdentityKey, applyIdentityToAgent } from '../../../lib/agentIdentity';
+import { loadAgentIdentities, type AgentIdentity } from '../../../lib/agentIdentity';
 import {
   verifyBot, getChat, TelegramPoller, TelegramMessage,
 } from '../../../lib/telegramService';
 import {
   OpenSwanConfig, OpenSwanPoller, OpenSwanSession, OpenSwanUpdate,
-  testConnection, listAgents, listCronJobs, CronJob,
+  testConnection, listAgents, listCronJobs, supportsOpenSwanToolRpcEndpoint, CronJob,
 } from '../../../lib/openswanService';
 import {
   openOAuthPopup, checkOAuthStatus, disconnectOAuth, fetchCalendarEvents, fetchEmails,
@@ -76,11 +77,11 @@ import {
   CircleOfficeAgent,
   loadCircleOfficeAgents,
   publishAgentToCircle,
-  removeCircleOfficeAgent,
   subscribeToCircleOffice,
   PROVIDER_DISPLAY,
   createBlackSwanAgent,
   BLACKSWAN_AGENT_ID,
+  hideAgentInOffice,
 } from '../../../lib/circleOffice';
 import {
   CHESS_INITIAL_BOARD, getChessLegalMoves, applyChessMove, isCheckmate, isStalemate, isInCheck,
@@ -99,7 +100,6 @@ import {
   AgentLiveState,
   ConnectionStatus,
 } from '../../../lib/agentPresence';
-import OfficeTerminal from '../../../components/OfficeTerminal';
 import {
   subscribeToTerminalCommands,
   respondToCommand,
@@ -115,7 +115,10 @@ import {
   invokeSelectedAgents,
 } from '../../../lib/agentInvocation';
 import { getCircleSessionMemoryMode } from '../../../lib/agentRunSystem';
+import { buildOfficeRoster } from '../../../lib/officeRoster';
 import { useUserApiKeys } from '../../../lib/llmProviders';
+import { useOfficeSurfaceState } from './office/useOfficeSurfaceState';
+import { getAdaptiveOfficeDefaults, loadAdaptiveWorkspaceSettings, loadCircleWorkspaceProfile, recordOfficeActivity } from '../../../lib/workspaceAdaptation';
 import {
   IdleBehaviorConfig, loadIdleConfig, saveIdleConfig,
   startIdleScheduler, stopIdleScheduler, getDefaultIdleConfig,
@@ -182,13 +185,27 @@ interface Props {
   onReady?: () => void;
 }
 
+type WhiteboardModule = typeof import('./office/Whiteboard');
+type ServerRackModule = typeof import('./office/ServerRack');
+type OfficeTerminalModule = typeof import('../../../components/OfficeTerminal');
+
 export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady }: Props) {
+  const surfaceState = useOfficeSurfaceState();
   const [selectedAgent, setSelectedAgent] = useState<OfficeAgent | null>(null);
+  // Filter chips that sit above the agents list. Persisted in localStorage so
+  // a user who always works in "mine" doesn't have to re-toggle every visit.
+  type AgentFilterMode = 'all' | 'mine' | 'active' | 'bonded';
+  const [agentFilterMode, setAgentFilterMode] = useState<AgentFilterMode>(() => {
+    if (typeof window === 'undefined' || !window.localStorage) return 'all';
+    const stored = window.localStorage.getItem('uc_office_agent_filter_v1');
+    return (stored === 'mine' || stored === 'active' || stored === 'bonded') ? stored as AgentFilterMode : 'all';
+  });
+  const persistAgentFilter = useCallback((mode: AgentFilterMode) => {
+    setAgentFilterMode(mode);
+    try { window.localStorage?.setItem('uc_office_agent_filter_v1', mode); } catch {}
+  }, []);
   // Click origin for pop-out animation (where the user clicked the agent on screen)
   const [panelOrigin, setPanelOrigin] = useState<{ x: number; y: number } | null>(null);
-  const [showCustomize, setShowCustomize] = useState(false);
-  const [showMcpHub, setShowMcpHub] = useState(false);
-  const [showRewards, setShowRewards] = useState(false);
   const [celebrationBadge, setCelebrationBadge] = useState<Badge | null>(null);
   const [dancingAgentId, setDancingAgentId] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | undefined>();
@@ -199,7 +216,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // showControlCard removed — controls now embedded in AgentPanel
 
   // Agent control hook for selected agent
-  const selectedSessionKey = selectedAgent?.sessionKey || '';
+  const selectedSessionKey = getAgentIdentityKey(selectedAgent);
   const agentControl = useAgentControl(circleId, selectedSessionKey);
 
   // Remote shell: execute command on agent's machine via bridge /exec
@@ -268,24 +285,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [appearances, setAppearances] = useState<Record<string, AgentAppearance>>({});
   const appearancesLoadedRef = useRef(false);
   const prefsLoadedRef = useRef(false);
-  const [editMode, setEditMode] = useState(false);
-  const [placingType, setPlacingType] = useState<string | null>(null);
   const [activeCatalogCat, setActiveCatalogCat] = useState<string>('connected');
   const catalogScrollRef = useRef<ScrollView>(null);
-  const [selectedFurnitureId, setSelectedFurnitureId] = useState<string | null>(null);
   const [whiteboardNotes, setWhiteboardNotes] = useState<string[]>([]);
   const [chatMinimized, setChatMinimized] = useState(false);
-  const [terminalSize, setTerminalSize] = useState<'closed' | 'half' | 'full'>('closed');
-  const [terminalInitialTab, setTerminalInitialTab] = useState<'commands' | 'automations'>('commands');
-  // ─── Shared terminal state — both the tab view and the bottom drawer
-  //     use these so input/target stay in sync (true mirror behaviour) ──────
-  const [terminalInput, setTerminalInput]         = useState('');
-  const [terminalTargetId, setTerminalTargetId]   = useState<string | null>('blackswan-default');
-  const [terminalTargetName, setTerminalTargetName] = useState('@BlackSwan');
-  const [terminalModel, setTerminalModel]         = useState<string | null>('blackswan');
-  const [terminalTargetIds, setTerminalTargetIds] = useState<string[] | null>(['blackswan-default']);
   const [statusHistory, setStatusHistory] = useState<Array<OfficeAgent[]>>([]);
   const [enrichedAgents, setEnrichedAgents] = useState<OfficeAgent[]>([]);
+  const [agentIdentities, setAgentIdentities] = useState<Map<string, AgentIdentity>>(new Map());
   const enrichedAgentsRef = useRef<OfficeAgent[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
@@ -305,6 +311,74 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [showActionResult, setShowActionResult] = useState(false);
   const [enrichedSessions, setEnrichedSessions] = useState<OpenSwanSession[]>([]);
   const enrichedSessionSignatureRef = useRef('');
+  const {
+    showCustomize, setShowCustomize,
+    showMcpHub, setShowMcpHub,
+    showRewards, setShowRewards,
+    showSetupWizard, setShowSetupWizard,
+    showConnectAgent, setShowConnectAgent,
+    showGitHubFeed, setShowGitHubFeed,
+    showSoundMixer, setShowSoundMixer,
+    showPublishModal, setShowPublishModal,
+    editMode, setEditMode,
+    placingType, setPlacingType,
+    selectedFurnitureId, setSelectedFurnitureId,
+    terminalSize, setTerminalSize,
+    terminalInitialTab, setTerminalInitialTab,
+    terminalInput, setTerminalInput,
+    terminalTargetId, setTerminalTargetId,
+    terminalTargetName, setTerminalTargetName,
+    terminalModel, setTerminalModel,
+    terminalTargetIds, setTerminalTargetIds,
+    nftPickerVisible, setNftPickerVisible,
+    stickyEditorVisible, setStickyEditorVisible,
+    emulatorVisible, setEmulatorVisible,
+    scrabbleVisible, setScrabbleVisible,
+    pokerVisible, setPokerVisible,
+    phoneVisible, setPhoneVisible,
+    hfExplorerVisible, setHfExplorerVisible,
+    hfRunnerVisible, setHfRunnerVisible,
+    serviceModalVisible, setServiceModalVisible,
+  } = surfaceState;
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      loadCircleWorkspaceProfile(circleId),
+      loadAdaptiveWorkspaceSettings(circleId),
+    ]).then(([profile, settings]) => {
+      if (cancelled) return;
+      const adaptive = getAdaptiveOfficeDefaults(profile, settings);
+      setTerminalInitialTab(adaptive.terminalInitialTab);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [circleId, setTerminalInitialTab]);
+
+  useEffect(() => {
+    if (selectedAgent) {
+      recordOfficeActivity(circleId, 'select_agent').catch(() => {});
+      recordOfficeActivity(circleId, 'runtime').catch(() => {});
+    }
+  }, [circleId, selectedAgent]);
+
+  useEffect(() => {
+    if (editMode || placingType || selectedFurnitureId) {
+      recordOfficeActivity(circleId, 'workspace').catch(() => {});
+    }
+  }, [circleId, editMode, placingType, selectedFurnitureId]);
+
+  useEffect(() => {
+    if (showGitHubFeed || showSoundMixer) {
+      recordOfficeActivity(circleId, 'intelligence').catch(() => {});
+    }
+  }, [circleId, showGitHubFeed, showSoundMixer]);
+
+  useEffect(() => {
+    if (terminalSize !== 'closed') {
+      recordOfficeActivity(circleId, 'runtime').catch(() => {});
+      recordOfficeActivity(circleId, terminalInitialTab === 'automations' ? 'terminal_automations' : 'terminal_commands').catch(() => {});
+    }
+  }, [circleId, terminalInitialTab, terminalSize]);
 
   // ─── Multi-floor state ──────────────────────────────
   const [floors, setFloors] = useState<OfficeFloor[]>(DEFAULT_FLOORS);
@@ -313,7 +387,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [currentFloorId, setCurrentFloorId] = useState<string>('floor_1');
 
   // ─── Image / NFT picker state ───────────────────────────────────────────
-  const [nftPickerVisible, setNftPickerVisible] = useState(false);
   const [nftPickerTargetId, setNftPickerTargetId] = useState<string | null>(null);
   const [userNfts, setUserNfts] = useState<NFT[]>([]);
   const [nftsLoading, setNftsLoading] = useState(false);
@@ -321,7 +394,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // ─── Sticky note editor state ───────────────────────────────────────────
-  const [stickyEditorVisible, setStickyEditorVisible] = useState(false);
   const [stickyEditorTargetId, setStickyEditorTargetId] = useState<string | null>(null);
   const [stickyTab, setStickyTab] = useState<'write' | 'draw' | 'gif'>('write');
   const [stickyText, setStickyText] = useState('');
@@ -332,22 +404,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const stickyDrawingRef = useRef(false);
 
   // ─── Retro emulator state ────────────────────────────────────────────
-  const [emulatorVisible, setEmulatorVisible] = useState(false);
   const [emulatorSystem, setEmulatorSystem] = useState<string>('gba');
 
   // ─── Scrabble state ────────────────────────────────────────────────
-  const [scrabbleVisible, setScrabbleVisible] = useState(false);
-  const [pokerVisible, setPokerVisible] = useState(false);
 
   // ─── Phone messenger state ─────────────────────────────────────────
-  const [phoneVisible, setPhoneVisible] = useState(false);
 
   // ─── Hugging Face state ───────────────────────────────────────────
-  const [hfExplorerVisible, setHfExplorerVisible] = useState(false);
-  const [hfRunnerVisible, setHfRunnerVisible] = useState(false);
 
   // ─── Service connector state ────────────────────────────────────────────
-  const [serviceModalVisible, setServiceModalVisible] = useState(false);
   const [serviceModalTargetId, setServiceModalTargetId] = useState<string | null>(null);
   const [serviceModalType, setServiceModalType] = useState<string>('');
   const [serviceUrl, setServiceUrl] = useState('');
@@ -370,14 +435,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [floorEffects, setFloorEffects] = useState<Array<{ id: string; type: string; x: number; y: number; createdAt: number }>>([]);
 
   // ─── Setup wizard ─────────────────────────────────────────────────────────
-  const [showSetupWizard, setShowSetupWizard] = useState(false);
 
   // ─── Cloud agent connect modal ─────────────────────────────────────────────
-  const [showConnectAgent, setShowConnectAgent] = useState(false);
 
   // ─── Office enhancement panels ────────────────────────────────────────────
-  const [showGitHubFeed, setShowGitHubFeed] = useState(false);
-  const [showSoundMixer, setShowSoundMixer] = useState(false);
+  const [whiteboardModule, setWhiteboardModule] = useState<WhiteboardModule | null>(null);
+  const [serverRackModule, setServerRackModule] = useState<ServerRackModule | null>(null);
+  const [officeTerminalModule, setOfficeTerminalModule] = useState<OfficeTerminalModule | null>(null);
 
   // ─── Multi-connection state ──────────────────────────────
   const [connections, setConnections] = useState<AgentConnection[]>([]);
@@ -725,7 +789,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   // Publish the user's first connection as their circle office agent
   // ─── Manual agent publish modal ──────────────────────────────────────────
-  const [showPublishModal, setShowPublishModal] = useState(false);
   const [publishName, setPublishName] = useState('');
   const [publishProvider, setPublishProvider] = useState('openswan');
 
@@ -1449,25 +1512,56 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   // Use enriched agents if available (has cached costs/tokens), fallback to fresh agents
   const userAgents = useMemo(() => {
-    if (enrichedAgents.length === 0) return allAgents;
+    if (enrichedAgents.length === 0) {
+      return allAgents.map(agent => applyIdentityToAgent(agent, getAgentIdentityByAgent(agentIdentities, agent)));
+    }
     const enrichedById = new Map(enrichedAgents.map(agent => [agent.id, agent]));
     return allAgents.map(agent => {
       const enriched = enrichedById.get(agent.id);
-      if (!enriched) return agent;
+      const identity = getAgentIdentityByAgent(agentIdentities, agent);
+      if (!enriched) return applyIdentityToAgent(agent, identity);
+      const hydrated = applyIdentityToAgent({ ...enriched, ...agent }, identity);
       return {
-        ...enriched,
-        ...agent,
+        ...hydrated,
         recentActions: enriched.recentActions,
         recentMessages: enriched.recentMessages,
         cachedTokens: enriched.cachedTokens,
         newTokens: enriched.newTokens,
       };
     });
-  }, [allAgents, enrichedAgents]);
+  }, [agentIdentities, allAgents, enrichedAgents]);
 
   useEffect(() => {
     enrichedAgentsRef.current = userAgents;
   }, [userAgents]);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    const warmModules = () => {
+      if (!whiteboardModule) import('./office/Whiteboard').then(setWhiteboardModule).catch(() => {});
+      if (!serverRackModule) import('./office/ServerRack').then(setServerRackModule).catch(() => {});
+    };
+    const idleHost = globalThis as any;
+    if (typeof idleHost.requestIdleCallback === 'function') {
+      const id = idleHost.requestIdleCallback(() => warmModules(), { timeout: 700 });
+      return () => {
+        if (typeof idleHost.cancelIdleCallback === 'function') idleHost.cancelIdleCallback(id);
+      };
+    }
+    const timeoutId = setTimeout(warmModules, 180);
+    return () => clearTimeout(timeoutId);
+  }, [isDesktop, whiteboardModule, serverRackModule]);
+
+  useEffect(() => {
+    if (terminalSize === 'closed' || officeTerminalModule) return;
+    import('../../../components/OfficeTerminal').then(setOfficeTerminalModule).catch(() => {});
+  }, [terminalSize, officeTerminalModule]);
+
+  const refreshAgentIdentities = useCallback(async () => {
+    try {
+      setAgentIdentities(await loadAgentIdentities());
+    } catch {}
+  }, []);
 
   const userAgentsStatusKey = useMemo(() => JSON.stringify(userAgents.map(agent => [
     agent.id,
@@ -1488,57 +1582,57 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     agent.inputTokens || 0,
     agent.outputTokens || 0,
   ])), [userAgents]);
-  const getDisplayAgentSortRank = useCallback((agent: OfficeAgent) => {
-    if (agent.status === 'building') return 0;
-    if (agent.status === 'active') return 1;
-    if (agent.status === 'idle') {
-      if (agent.providerType === 'cursor' || agent.providerType === 'gemini') return 5;
-      return 2;
-    }
-    if (agent.status === 'error') return 3;
-    return 4;
-  }, []);
-
-  // BlackSwan first, then Claude Code, then active sessions
   const displayAgents = useMemo(() => {
-    // Final dedup by name — keep the most recently active version
-    const byName = new Map<string, typeof userAgents[0]>();
-    for (const a of userAgents) {
-      const existing = byName.get(a.name);
-      if (!existing) { byName.set(a.name, a); continue; }
-      const existingTime = existing.lastActive ? new Date(existing.lastActive).getTime() : 0;
-      const newTime = a.lastActive ? new Date(a.lastActive).getTime() : 0;
-      if (newTime > existingTime) byName.set(a.name, a);
+    return buildOfficeRoster({
+      agents: userAgents,
+      currentUserId,
+      circleAgents: mergedCircleAgents,
+      connections,
+      identities: agentIdentities,
+      selectedAgentId: selectedAgent?.id || null,
+    });
+  }, [userAgents, currentUserId, mergedCircleAgents, connections, agentIdentities, selectedAgent?.id]);
+
+  // Precompute filter counts so every chip can show its hit count inline.
+  // `mine` is bridge-pushed agents owned by the current user plus the default
+  // OpenSwan (which conceptually belongs to every user who looks at it).
+  // `bonded` is circle_office_agents rows — anything persisted vs synthetic.
+  const agentFilterCounts = useMemo(() => {
+    const isMine = (a: OfficeAgent) => (
+      a.id === DEFAULT_AGENT.id
+      || (a as any).ownerId === currentUserId
+      || (currentUserId && mergedCircleAgents.find(c => c.name === a.name && (c as any).ownerId === currentUserId))
+    );
+    const isBonded = (a: OfficeAgent) => !a.isSynthetic || a.id === DEFAULT_AGENT.id;
+    const isActive = (a: OfficeAgent) => a.status === 'active' || a.status === 'building';
+    return {
+      all: displayAgents.length,
+      mine: displayAgents.filter(isMine).length,
+      active: displayAgents.filter(isActive).length,
+      bonded: displayAgents.filter(isBonded).length,
+    };
+  }, [displayAgents, currentUserId, mergedCircleAgents]);
+
+  const filteredDisplayAgents = useMemo(() => {
+    if (agentFilterMode === 'all') return displayAgents;
+    if (agentFilterMode === 'mine') {
+      return displayAgents.filter(a => (
+        a.id === DEFAULT_AGENT.id
+        || (a as any).ownerId === currentUserId
+        || (currentUserId && mergedCircleAgents.find(c => c.name === a.name && (c as any).ownerId === currentUserId))
+      ));
     }
-    const deduped = Array.from(byName.values());
-
-    // Pull out Claude Code agent(s) to pin them FIRST (C3PO)
-    const claudeCodeAgents = deduped.filter(a => a.providerType === 'claude-code');
-    const rest = deduped.filter(a => a.providerType !== 'claude-code');
-
-    const sorted = [...rest].sort((a, b) => {
-      // 1. Status rank: building > active > idle > error > offline
-      const rankDiff = getDisplayAgentSortRank(a) - getDisplayAgentSortRank(b);
-      if (rankDiff !== 0) return rankDiff;
-      // 2. Most usage (tokens) first
-      const usageA = (a.tokensUsed || 0) + (a.turns || 0) * 100;
-      const usageB = (b.tokensUsed || 0) + (b.turns || 0) * 100;
-      if (usageB !== usageA) return usageB - usageA;
-      // 3. Most recent activity
-      const ta = a.lastActive ? new Date(a.lastActive).getTime() : 0;
-      const tb = b.lastActive ? new Date(b.lastActive).getTime() : 0;
-      return tb - ta;
-    });
-    // Also sort Claude Code agents by usage
-    const sortedCC = [...claudeCodeAgents].sort((a, b) => {
-      const rankDiff = getDisplayAgentSortRank(a) - getDisplayAgentSortRank(b);
-      if (rankDiff !== 0) return rankDiff;
-      const usageA = (a.tokensUsed || 0) + (a.turns || 0) * 100;
-      const usageB = (b.tokensUsed || 0) + (b.turns || 0) * 100;
-      return usageB - usageA;
-    });
-    return [DEFAULT_AGENT, ...sortedCC, ...sorted];
-  }, [userAgents, getDisplayAgentSortRank]);
+    if (agentFilterMode === 'active') {
+      return displayAgents.filter(a => a.status === 'active' || a.status === 'building');
+    }
+    if (agentFilterMode === 'bonded') {
+      return displayAgents.filter(a => !a.isSynthetic || a.id === DEFAULT_AGENT.id);
+    }
+    return displayAgents;
+  }, [displayAgents, agentFilterMode, currentUserId, mergedCircleAgents]);
+  const WhiteboardView = whiteboardModule?.default;
+  const ServerRackView = serverRackModule?.default;
+  const OfficeTerminalView = officeTerminalModule?.default;
 
   // Resolve appearance — lookup by id, name, then legacy provider names
   const PROVIDER_LEGACY_NAMES_LOOKUP: Record<string, string[]> = {
@@ -1548,8 +1642,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     'gemini': ['Gemini', 'Gemini CLI'],
   };
   const getAppearance = useCallback((agent: OfficeAgent) => {
-    if (agent.id === DEFAULT_AGENT.id) return appearances[agent.id] || appearances[agent.name] || UC_AGENT_APPEARANCE;
-    let result = appearances[agent.id] || appearances[agent.name];
+    const identityKey = getAgentIdentityKey(agent);
+    const identityAppearance = agentIdentities.get(identityKey)?.appearance;
+    if (agent.id === DEFAULT_AGENT.id) {
+      return appearances[agent.id] || appearances[identityKey] || identityAppearance || appearances[agent.name] || UC_AGENT_APPEARANCE;
+    }
+    let result = appearances[agent.id] || appearances[identityKey] || identityAppearance || appearances[agent.name];
     if (!result && agent.providerType) {
       const legacyNames = PROVIDER_LEGACY_NAMES_LOOKUP[agent.providerType] || [];
       for (const ln of legacyNames) {
@@ -1557,7 +1655,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       }
     }
     return result;
-  }, [appearances]);
+  }, [agentIdentities, appearances]);
 
   // Auto-assign random outfits to new agents + backfill pets/auras for existing agents
   useEffect(() => {
@@ -1575,7 +1673,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     const updates: Record<string, AgentAppearance> = {};
     for (const agent of userAgents) {
       // Check by id first, then name, then legacy provider names
-      let existing = appearances[agent.id] || appearances[agent.name];
+      const identityKey = getAgentIdentityKey(agent);
+      let existing = appearances[agent.id] || appearances[identityKey] || appearances[agent.name];
       if (!existing && agent.providerType) {
         const legacyNames = PROVIDER_LEGACY_NAMES[agent.providerType] || [];
         for (const ln of legacyNames) {
@@ -1583,11 +1682,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         }
       }
       if (!existing) {
-        updates[agent.id] = generateRandomAppearance();
+        const generated = generateRandomAppearance();
+        updates[agent.id] = generated;
+        updates[identityKey] = generated;
       } else {
-        // Migrate legacy name-keyed appearance to id-keyed
-        if (!appearances[agent.id] && appearances[agent.name]) {
+        // Migrate legacy name/session-key keyed appearance to id-keyed and identity-keyed
+        if (!appearances[agent.id] && (appearances[agent.name] || appearances[identityKey])) {
           updates[agent.id] = existing;
+        }
+        if (!appearances[identityKey]) {
+          updates[identityKey] = existing;
         }
         // Backfill: give existing agents a pet/aura if they don't have one
         let changed = false;
@@ -1600,7 +1704,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           patched.aura = pick(auraPool);
           changed = true;
         }
-        if (changed) updates[agent.id] = patched;
+        if (changed) {
+          updates[agent.id] = patched;
+          updates[identityKey] = patched;
+        }
       }
     }
     if (Object.keys(updates).length > 0) {
@@ -1632,31 +1739,22 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     const floorIds = currentFloor?.agentIds;
     const hasAnyAssignments = floors.some(f => (f.agentIds?.length || 0) > 0);
     if (!hasAnyAssignments) {
-      return displayAgents.slice(0, DESK_POSITIONS.length);
+      return displayAgents.slice(0, OFFICE_DESK_POSITIONS.length);
     }
     if (!floorIds || floorIds.length === 0) return [];
     const onFloor = new Set(floorIds);
-    const filtered = displayAgents.filter(a => onFloor.has(a.id));
-    if (filtered.length === 0) return [];
-    // Ensure BlackSwan first, then Claude Code, then sort remaining
-    const blackSwan = filtered.find(a => a.id === DEFAULT_AGENT.id);
-    const claudeCode = filtered.filter(a => a.id !== DEFAULT_AGENT.id && a.providerType === 'claude-code');
-    const rest = filtered.filter(a => a.id !== DEFAULT_AGENT.id && a.providerType !== 'claude-code').sort((a, b) => {
-      const rankDiff = getDisplayAgentSortRank(a) - getDisplayAgentSortRank(b);
-      if (rankDiff !== 0) return rankDiff;
-      const ta = a.lastActive ? new Date(a.lastActive).getTime() : 0;
-      const tb = b.lastActive ? new Date(b.lastActive).getTime() : 0;
-      return tb - ta;
-    });
-    return [...(blackSwan ? [blackSwan] : []), ...claudeCode, ...rest].slice(0, DESK_POSITIONS.length);
-  }, [displayAgents, currentFloor?.agentIds, floors, getDisplayAgentSortRank]);
+    // displayAgents is already sorted by the new rules: working-first, then
+    // BlackSwan, then Claude Code, then others. Preserve that order for the
+    // floor subset — no re-sort needed.
+    return displayAgents.filter(a => onFloor.has(a.id)).slice(0, OFFICE_DESK_POSITIONS.length);
+  }, [displayAgents, currentFloor?.agentIds, floors]);
 
   // Auto-distribute agents across floors by desk capacity so each floor gets a unique roster.
   const prevAgentLayoutKeyRef = useRef('');
   useEffect(() => {
     if (displayAgents.length === 0 || floors.length === 0) return;
     const orderedFloors = [...floors].sort((a, b) => a.order - b.order);
-    const capacity = DESK_POSITIONS.length;
+    const capacity = OFFICE_DESK_POSITIONS.length;
     const nextAssignments = new Map<string, string[]>();
     orderedFloors.forEach((floor, index) => {
       const start = index * capacity;
@@ -1706,6 +1804,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           enrichAgentsWithCache(allAgents),
         ]);
         const fullyEnriched = await restoreAllAgents(cacheEnriched);
+        const identities = await loadAgentIdentities();
+        setAgentIdentities(identities);
 
         // Unblock render immediately
         setEnrichedAgents(fullyEnriched);
@@ -1722,6 +1822,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     };
     doEnrich();
   }, [sessionsTick, agentNames, sessionTags]);
+
+  useEffect(() => {
+    void refreshAgentIdentities();
+  }, [refreshAgentIdentities]);
 
   // Enrich sessions for Cost Dashboard
   useEffect(() => {
@@ -1848,6 +1952,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       for (const conn of openswanConns) {
         const config: OpenSwanConfig = { endpoint: conn.endpoint, token: conn.token };
         try {
+          if (!supportsOpenSwanToolRpcEndpoint(config.endpoint)) continue;
           const result = await listCronJobs(config);
           if (result.ok) allJobs.push(...result.jobs);
         } catch {} // endpoint may not support cron
@@ -1861,9 +1966,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   // Scale
   const availableW = winW - 24;
-  const rawScale = availableW / FLOOR_W;
+  const rawScale = availableW / OFFICE_FLOOR_WIDTH;
   const officeScale = Math.max(0.55, rawScale);
-  const scaledH = FLOOR_H * officeScale;
+  const scaledH = OFFICE_FLOOR_HEIGHT * officeScale;
   const needsHScroll = rawScale < 0.55;
 
   const handleAgentPress = useCallback((agent: OfficeAgent, event?: any) => {
@@ -1885,16 +1990,40 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   }, []);
 
   const handleRemovePublishedAgent = useCallback(async (agent: OfficeAgent) => {
-    const publishedAgentId = agent.id.startsWith('db::') ? agent.sessionKey : null;
-    if (!publishedAgentId) return;
-    const { error } = await removeCircleOfficeAgent(publishedAgentId);
-    if (error) {
-      console.error('[OfficeTab] Failed to remove published agent:', error);
-      return;
+    if (!circleId || !agent?.name) return;
+    if (agent.id === 'default::blackswan') return; // OpenSwan can't be removed
+    try {
+      const { data: auth } = await supabase.auth.getUser();
+      if (!auth?.user) return;
+      // Find the DB row for this agent (look up by circle + owner + name).
+      // Bridge agents publish themselves with the live name, so name is the
+      // most reliable join key across both bridge-pushed and DB-managed rows.
+      const { data: rows } = await supabase
+        .from('circle_office_agents')
+        .select('id, name')
+        .eq('circle_id', circleId)
+        .eq('owner_id', auth.user.id)
+        .ilike('name', agent.name);
+      const matched = rows ?? [];
+      // Hide first so re-publishes from the bridge poller skip during deletion
+      hideAgentInOffice(circleId, agent.name);
+      if (matched.length > 0) {
+        const ids = matched.map(r => r.id);
+        const { error } = await supabase
+          .from('circle_office_agents')
+          .delete()
+          .in('id', ids);
+        if (error) {
+          console.error('[OfficeTab] Failed to remove published agent:', error);
+          return;
+        }
+        setCircleOfficeAgents(prev => prev.filter(a => !ids.includes(a.id)));
+      }
+      setSelectedAgent(null);
+    } catch (err) {
+      console.error('[OfficeTab] Remove agent error:', err);
     }
-    setSelectedAgent(null);
-    setCircleOfficeAgents(prev => prev.filter(a => a.id !== publishedAgentId));
-  }, []);
+  }, [circleId]);
 
   const handleFloorPress = (x: number, y: number) => {
     if (!editMode) return;
@@ -3079,23 +3208,34 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     }
   };
 
-  const handleRenameAgent = useCallback(async (agentId: string, newName: string) => {
-    // Extract sessionKey from agentId
-    const sessionKey = agentId.includes('::') ? agentId.split('::')[1] : agentId;
-    
-    // Save to agent identity system (persistent across reconnections)
-    await renameAgentIdentity(sessionKey, newName);
-    
-    // Also update legacy agentNames for backward compatibility
-    const updated = { ...agentNames, [agentId]: newName };
+  const handleRenameAgent = useCallback(async (agent: OfficeAgent, newName: string) => {
+    const normalizedName = newName.trim();
+    if (!normalizedName) return;
+
+    const identityKey = getAgentIdentityKey(agent);
+
+    await renameAgentIdentity(identityKey, normalizedName);
+
+    const updated = {
+      ...agentNames,
+      [agent.id]: normalizedName,
+      [identityKey]: normalizedName,
+    };
     setAgentNames(updated);
     storage.setItem(STORAGE_KEY_AGENT_NAMES, JSON.stringify(updated)).catch(() => {});
     pushOfficePreferences({ agentNames: updated });
 
-    // Update selected agent if it's the one being renamed
-    if (selectedAgent?.id === agentId) {
-      setSelectedAgent(prev => prev ? { ...prev, name: newName } : null);
+    if (selectedAgent?.id === agent.id) {
+      setSelectedAgent(prev => prev ? { ...prev, name: normalizedName, sessionKey: identityKey } : null);
     }
+
+    setEnrichedAgents(prev => prev.map(existing => (
+      existing.id === agent.id || existing.sessionKey === identityKey
+        ? { ...existing, name: normalizedName, sessionKey: identityKey }
+        : existing
+    )));
+
+    setAgentIdentities(await loadAgentIdentities());
   }, [agentNames, selectedAgent, pushOfficePreferences]);
 
   // ─── Floor action handlers ──────────────────────────────
@@ -3203,273 +3343,55 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
       {/* Marquee ticker removed — too noisy for the Office view */}
 
-      {/* Combined floor selector + action bar */}
-      {viewMode === 'office' && (
-        <View style={styles.floorBar}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.floorList} style={{ flex: 1 }}>
-            {[...floors].sort((a, b) => a.order - b.order).map((floor) => {
-              const floorAgentCount = displayAgents.filter(a => floor.agentIds?.includes(a.id)).length;
-              const isActive = floor.id === currentFloorId;
-              return (
-                <View key={floor.id} style={styles.floorChipWrap}>
-                  <Pressable
-                    onPress={() => handleSwitchFloor(floor.id)}
-                    style={[
-                      styles.floorChip,
-                      editMode && floors.length > 1 && styles.floorChipWithDelete,
-                      isActive && styles.floorChipActive,
-                      Platform.OS === 'web' && { cursor: 'pointer' } as any
-                    ]}
-                  >
-                    <Text style={[styles.floorChipText, isActive && styles.floorChipTextActive]}>
-                      {floor.name}
-                    </Text>
-                    {floorAgentCount > 0 && (
-                      <View style={styles.floorAgentBadge}>
-                        <Text style={styles.floorAgentBadgeText}>{floorAgentCount}</Text>
-                      </View>
-                    )}
-                    <View style={[styles.floorThemeDot, { backgroundColor: resolveTheme(floor.themeId).accentGlow }]} />
-                  </Pressable>
-                  {editMode && floors.length > 1 && (
-                    <Pressable
-                      onPress={() => handleDeleteFloor(floor.id)}
-                      style={[styles.floorDeleteBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                    >
-                      <Text style={styles.floorDeleteBtnText}>✕</Text>
-                    </Pressable>
-                  )}
-                </View>
-              );
-            })}
-            <Pressable
-              onPress={handleAddFloor}
-              style={[styles.floorAddBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-            >
-              <Text style={styles.floorAddBtnText}>+ FLOOR</Text>
-            </Pressable>
-          </ScrollView>
-          <View style={styles.barActions}>
-            {connections.some(c => c.enabled && c.status !== 'connected' && c.status !== 'connecting') && (
-              <Pressable
-                onPress={handleReconnectAll}
-                style={[styles.toolbarBtn, styles.reconnectBtnStyle, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              >
-                <Text style={styles.toolbarBtnIcon}>🔌</Text>
-                <Text style={[styles.toolbarBtnText, { color: '#6366f1' }]}>Reconnect</Text>
-              </Pressable>
-            )}
-            <Pressable
-              onPress={() => { setEditMode(!editMode); setPlacingType(null); setSelectedFurnitureId(null); }}
-              style={[editMode ? [styles.toolbarBtn, styles.toolbarBtnActiveGreen] : styles.toolbarBtn,
-                Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-            >
-              {editMode ? (
-                <Text style={[styles.toolbarBtnText, { color: '#22c55e' }]}>✓ Done</Text>
-              ) : (
-                <>
-                  <Text style={styles.toolbarBtnIcon}>🪑</Text>
-                  <Text style={styles.toolbarBtnText}>Add Items</Text>
-                </>
-              )}
-            </Pressable>
-            <Pressable onPress={() => setShowRewards(true)} style={[styles.toolbarBtn,
-              Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-              <Text style={styles.toolbarBtnIcon}>🏆</Text>
-              <Text style={styles.toolbarBtnText}>Achievements</Text>
-            </Pressable>
-            <Pressable onPress={() => setShowConnectAgent(true)} style={[styles.toolbarBtn,
-              Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-              <Text style={styles.toolbarBtnIcon}>☁️</Text>
-              <Text style={styles.toolbarBtnText}>Connect Agent</Text>
-            </Pressable>
-            <Pressable onPress={() => setShowCustomize(true)} style={[styles.toolbarBtn,
-              Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-              <Text style={styles.toolbarBtnIcon}>🔧</Text>
-              <Text style={styles.toolbarBtnText}>Customize</Text>
-            </Pressable>
-            <Pressable
-              onPress={toggleSessionMemoryMode}
-              disabled={savingSessionMemoryMode}
-              style={[
-                styles.toolbarBtn,
-                sessionMemoryMode === 'shared' && styles.toolbarBtnActiveMemory,
-                savingSessionMemoryMode && { opacity: 0.7 },
-                Platform.OS === 'web' && { cursor: 'pointer' } as any,
-              ]}
-            >
-              <Text style={styles.toolbarBtnIcon}>{savingSessionMemoryMode ? '…' : '🧠'}</Text>
-              <Text style={[
-                styles.toolbarBtnText,
-                sessionMemoryMode === 'shared' && styles.toolbarBtnTextActiveMemory,
-              ]}>
-                {sessionMemoryMode === 'shared' ? 'Memory Shared' : 'Memory Private'}
-              </Text>
-            </Pressable>
-            <Pressable onPress={() => setShowMcpHub(v => !v)} style={[styles.toolbarBtn,
-              showMcpHub && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' },
-              Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-              <Text style={styles.toolbarBtnIcon}>🔌</Text>
-              <Text style={styles.toolbarBtnText}>MCP</Text>
-            </Pressable>
-            <Pressable onPress={() => setShowGitHubFeed(!showGitHubFeed)} style={[styles.toolbarBtn,
-              showGitHubFeed && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' },
-              Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-              <Text style={styles.toolbarBtnIcon}>{'{}'}</Text>
-              <Text style={styles.toolbarBtnText}>GitHub</Text>
-            </Pressable>
-            {Platform.OS === 'web' && (
-              <Pressable onPress={() => setShowSoundMixer(!showSoundMixer)} style={[styles.toolbarBtn,
-                showSoundMixer && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' },
-                Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                <Text style={styles.toolbarBtnIcon}>{'(('}</Text>
-                <Text style={styles.toolbarBtnText}>Sound</Text>
-              </Pressable>
-            )}
-          </View>
-        </View>
-      )}
+      <OfficeWorkspaceSection
+        viewMode={viewMode}
+        floors={floors}
+        displayAgents={displayAgents}
+        currentFloorId={currentFloorId}
+        editMode={editMode}
+        currentFloor={currentFloor}
+        placingType={placingType}
+        selectedFurnitureId={selectedFurnitureId}
+        resolveTheme={resolveTheme}
+        connections={connections}
+        accentColor={accentColor}
+        savingSessionMemoryMode={savingSessionMemoryMode}
+        sessionMemoryMode={sessionMemoryMode}
+        showMcpHub={showMcpHub}
+        showGitHubFeed={showGitHubFeed}
+        showSoundMixer={showSoundMixer}
+        onSwitchFloor={handleSwitchFloor}
+        onDeleteFloor={handleDeleteFloor}
+        onAddFloor={handleAddFloor}
+        onToggleEditMode={() => { setEditMode(!editMode); setPlacingType(null); setSelectedFurnitureId(null); }}
+        onReconnectAll={handleReconnectAll}
+        onShowRewards={() => setShowRewards(true)}
+        onShowConnectAgent={() => setShowConnectAgent(true)}
+        onShowCustomize={() => setShowCustomize(true)}
+        onToggleSessionMemoryMode={toggleSessionMemoryMode}
+        onToggleMcpHub={() => setShowMcpHub(v => !v)}
+        onToggleGitHubFeed={() => setShowGitHubFeed(!showGitHubFeed)}
+        onToggleSoundMixer={() => setShowSoundMixer(!showSoundMixer)}
+        onCancelPlacing={() => setPlacingType(null)}
+        onClearFloorFurniture={() => setFloors(prev => prev.map(f => f.id === currentFloorId ? { ...f, furniture: [] } : f))}
+        setPlacingType={setPlacingType}
+        setActiveCatalogCat={setActiveCatalogCat}
+        catalogScrollRef={catalogScrollRef}
+        activeCatalogCat={activeCatalogCat}
+        styles={styles}
+        FURNITURE_CATALOG={FURNITURE_CATALOG}
+      />
 
-      {viewMode === 'office' && (showGitHubFeed || showSoundMixer) && (
-        <View style={styles.officeDashboardPanels}>
-          {showGitHubFeed && (
-            <View style={styles.officeDashboardPanel}>
-              <GitHubWallFeed circleId={circleId} accentColor={accentColor} />
-            </View>
-          )}
-          {showSoundMixer && Platform.OS === 'web' && (
-            <View style={[styles.officeDashboardPanel, styles.soundPanelWrap]}>
-              <SoundMixer accentColor={accentColor} />
-            </View>
-          )}
-        </View>
-      )}
-
-      {/* Enhancement panels moved to Agent Panel — Office stays clean */}
-
-      {/* Edit toolbar */}
-      {viewMode === 'office' && editMode && (
-        <View style={styles.editToolbar}>
-          <View style={styles.editToolbarHeader}>
-            <Text style={styles.editLabel}>
-              {placingType ? `TAP FLOOR — PLACING: ${placingType.toUpperCase()}` : selectedFurnitureId ? 'DRAG TO MOVE · CORNERS TO RESIZE · TAP DELETE TO REMOVE' : 'SELECT ITEM BELOW, TAP TO PLACE · DRAG TO MOVE'}
-            </Text>
-            <View style={styles.editToolbarActions}>
-              {placingType && (
-                <Pressable onPress={() => setPlacingType(null)} style={[styles.editActionBtn, { borderColor: '#ffffff25' }]}>
-                  <Text style={[styles.editActionBtnText, { color: '#9e9e9e' }]}>CANCEL</Text>
-                </Pressable>
-              )}
-              {currentFloor.furniture.length > 0 && (
-                <Pressable onPress={() => {
-                  setFloors(prev => prev.map(f => f.id === currentFloorId ? { ...f, furniture: [] } : f));
-                }} style={[styles.editActionBtn, { borderColor: '#ffffff25' }]}>
-                  <Text style={[styles.editActionBtnText, { color: '#9e9e9e' }]}>CLEAR ALL</Text>
-                </Pressable>
-              )}
-            </View>
-          </View>
-
-          {/* Category rows — vertical scroll, one row visible at a time with arrow nav */}
-          {(() => {
-            const allCats = (['games', 'connected', 'vibe', 'productivity', 'fun', 'furniture'] as const).filter(
-              cat => FURNITURE_CATALOG.some(f => f.category === cat)
-            );
-            const catColors: Record<string, string> = {
-              games: '#ef4444', connected: '#22c55e', vibe: '#a855f7', productivity: '#3b82f6',
-              fun: '#f59e0b', furniture: '#6f6f6f',
-            };
-            const catIcons: Record<string, string> = {
-              games: '🃏', connected: '🔗', vibe: '✨', productivity: '📊',
-              fun: '🎮', furniture: '🪑',
-            };
-            return (
-              <View style={styles.editCatalogWrap}>
-                {/* Category tab bar */}
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.editCatTabs}>
-                  {allCats.map(cat => {
-                    const count = FURNITURE_CATALOG.filter(f => f.category === cat).length;
-                    return (
-                      <Pressable
-                        key={cat}
-                        onPress={() => { setActiveCatalogCat(cat as any); catalogScrollRef.current?.scrollTo?.({ x: 0, animated: false }); }}
-                        style={[
-                          styles.editCatTab,
-                          activeCatalogCat === cat && { borderColor: catColors[cat] + '80', backgroundColor: catColors[cat] + '15' },
-                          Platform.OS === 'web' && { cursor: 'pointer' } as any,
-                        ]}
-                      >
-                        <Text style={{ fontSize: 10 }}>{catIcons[cat]}</Text>
-                        <Text style={[styles.editCatTabText, { color: activeCatalogCat === cat ? catColors[cat] : '#666' }]}>
-                          {cat.toUpperCase()}
-                        </Text>
-                        <Text style={[styles.editCatTabCount, { color: catColors[cat] + '80' }]}>{count}</Text>
-                      </Pressable>
-                    );
-                  })}
-                </ScrollView>
-
-                {/* Active category row with scroll arrows */}
-                {(() => {
-                  const cat = activeCatalogCat || 'connected';
-                  const items = FURNITURE_CATALOG.filter(f => f.category === cat);
-                  const color = catColors[cat] || '#888';
-                  return (
-                    <View style={styles.editCatRowWrap}>
-                      {/* Left arrow */}
-                      {items.length > 3 && (
-                        <Pressable
-                          onPress={() => catalogScrollRef.current?.scrollTo?.({ x: 0, animated: true })}
-                          style={[styles.editScrollArrow, styles.editScrollArrowLeft, { borderColor: color + '40' },
-                            Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                        >
-                          <Text style={[styles.editScrollArrowText, { color }]}>‹</Text>
-                        </Pressable>
-                      )}
-
-                      <ScrollView
-                        ref={catalogScrollRef}
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                        contentContainerStyle={styles.editItems}
-                        style={{ flex: 1 }}
-                      >
-                        {items.map(item => {
-                          const isActive = placingType === item.type;
-                          return (
-                            <Pressable
-                              key={item.type}
-                              onPress={() => setPlacingType(isActive ? null : item.type as any)}
-                              style={[styles.editItem, isActive && styles.editItemActive,
-                                isActive && { borderColor: color + '80', shadowColor: color, shadowOffset: { width: 0, height: 0 }, shadowRadius: 8, shadowOpacity: 0.5 },
-                                Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                            >
-                              <Text style={styles.editItemIcon}>{item.icon}</Text>
-                              <Text style={[styles.editItemName, isActive && { color: '#eee' }]}>{item.name}</Text>
-                              {item.description ? <Text style={styles.editItemDesc} numberOfLines={2}>{item.description}</Text> : null}
-                            </Pressable>
-                          );
-                        })}
-                      </ScrollView>
-
-                      {/* Right arrow */}
-                      {items.length > 3 && (
-                        <Pressable
-                          onPress={() => catalogScrollRef.current?.scrollToEnd?.({ animated: true })}
-                          style={[styles.editScrollArrow, styles.editScrollArrowRight, { borderColor: color + '40' },
-                            Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                        >
-                          <Text style={[styles.editScrollArrowText, { color }]}>›</Text>
-                        </Pressable>
-                      )}
-                    </View>
-                  );
-                })()}
-              </View>
-            );
-          })()}
-        </View>
-      )}
+      <OfficeIntelligenceSection
+        viewMode={viewMode}
+        showGitHubFeed={showGitHubFeed}
+        showSoundMixer={showSoundMixer}
+        circleId={circleId}
+        accentColor={accentColor}
+        styles={styles}
+        GitHubWallFeed={GitHubWallFeed}
+        SoundMixer={SoundMixer}
+      />
 
 
       {/* Main Content — Office Floor View */}
@@ -3516,6 +3438,32 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                 </View>
               </Pressable>
             )}
+            {/* ── Agent filter chips ───────────────────────────────────── */}
+            <View style={officeFilterChipStyles.row}>
+              {(['all', 'mine', 'active', 'bonded'] as const).map(mode => {
+                const isActive = agentFilterMode === mode;
+                const count = agentFilterCounts[mode];
+                return (
+                  <Pressable
+                    key={mode}
+                    onPress={() => persistAgentFilter(mode)}
+                    style={[
+                      officeFilterChipStyles.chip,
+                      isActive && officeFilterChipStyles.chipActive,
+                      Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                    ]}
+                  >
+                    <Text style={[officeFilterChipStyles.label, isActive && officeFilterChipStyles.labelActive]}>
+                      {mode === 'all' ? 'ALL' : mode === 'mine' ? 'MINE' : mode === 'active' ? 'ACTIVE' : 'BONDED'}
+                    </Text>
+                    <Text style={[officeFilterChipStyles.count, isActive && officeFilterChipStyles.countActive]}>
+                      {count}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
             {userAgents.length === 0 ? (
               <View style={styles.mobileEmpty}>
                 {(() => {
@@ -3563,8 +3511,25 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                   );
                 })()}
               </View>
+            ) : filteredDisplayAgents.length === 0 ? (
+              <View style={styles.mobileEmpty}>
+                <Text style={styles.mobileEmptyIcon}>🔍</Text>
+                <Text style={styles.mobileEmptyTitle}>No {agentFilterMode === 'all' ? '' : agentFilterMode} agents</Text>
+                <Text style={styles.mobileEmptyText}>
+                  {agentFilterMode === 'mine' ? 'You haven\'t bonded any agents yet.'
+                    : agentFilterMode === 'active' ? 'No one is working right now.'
+                    : agentFilterMode === 'bonded' ? 'No persisted agents in this circle.'
+                    : 'No agents to show.'}
+                </Text>
+                <Pressable
+                  onPress={() => persistAgentFilter('all')}
+                  style={{ marginTop: 12, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#ffffff40', backgroundColor: '#ffffff08' }}
+                >
+                  <Text style={{ color: '#e8e8e8', fontSize: 11, fontWeight: '800', letterSpacing: 0.6, fontFamily: 'monospace' }}>SHOW ALL</Text>
+                </Pressable>
+              </View>
             ) : (
-              displayAgents.map((agent) => {
+              filteredDisplayAgents.map((agent) => {
                 const statusColor = getOfficeStatusColor(agent.status);
                 const statusLabel = getOfficeStatusLabel(agent.status);
                 const isSelected = selectedAgent?.id === agent.id;
@@ -3584,6 +3549,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                       <View style={styles.mobileCardInfo}>
                         <View style={styles.mobileCardNameRow}>
                           <Text style={styles.mobileCardName}>{agent.name}</Text>
+                          {agent.isProviderMain ? (
+                            <Text style={[styles.mobileCardMainBadge, { color: agent.color || accentColor }]}>MAIN</Text>
+                          ) : null}
                           <View style={[styles.mobileCardStatus, { backgroundColor: statusColor }]} />
                           <Text style={[styles.mobileCardStatusText, { color: statusColor }]}>{statusLabel}</Text>
                         </View>
@@ -3615,8 +3583,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           <>
             <ScrollView style={styles.officeScroll} showsVerticalScrollIndicator={true}>
               <ScrollView horizontal={needsHScroll} scrollEnabled={needsHScroll} showsHorizontalScrollIndicator={needsHScroll}>
-                <View style={[styles.officeScaleOuter, { height: scaledH, width: needsHScroll ? FLOOR_W * officeScale : '100%' as any }]}>
-                  <View style={[styles.officeWrapper, { width: FLOOR_W, height: FLOOR_H, transform: [{ scale: officeScale }] }]}>
+                <View style={[styles.officeScaleOuter, { height: scaledH, width: needsHScroll ? OFFICE_FLOOR_WIDTH * officeScale : '100%' as any }]}>
+                  <View style={[styles.officeWrapper, { width: OFFICE_FLOOR_WIDTH, height: OFFICE_FLOOR_HEIGHT, transform: [{ scale: officeScale }] }]}>
                     <OfficeFloorView
                       theme={currentTheme}
                       furniture={currentFloor.furniture}
@@ -3631,8 +3599,30 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                       agents={agents}
                       selectedFurnitureId={editMode ? selectedFurnitureId : null}
                     />
-                    <Whiteboard editable={editMode} notes={whiteboardNotes} onNotesChange={setWhiteboardNotes} agents={displayAgents} statusHistory={statusHistory} cronJobs={cronJobs} circleId={circleId} connectedCount={connections.filter(c => c.status === 'connected').length} totalConnections={connections.length} />
-                    <ServerRack agents={displayAgents} />
+                    {WhiteboardView ? (
+                      <WhiteboardView
+                        editable={editMode}
+                        notes={whiteboardNotes}
+                        onNotesChange={setWhiteboardNotes}
+                        agents={displayAgents}
+                        statusHistory={statusHistory}
+                        cronJobs={cronJobs}
+                        circleId={circleId}
+                        connectedCount={connections.filter(c => c.status === 'connected').length}
+                        totalConnections={connections.length}
+                      />
+                    ) : (
+                      <View style={styles.desktopWidgetPlaceholder}>
+                        <Text style={styles.desktopWidgetPlaceholderTitle}>Loading whiteboard…</Text>
+                      </View>
+                    )}
+                    {ServerRackView ? (
+                      <ServerRackView agents={displayAgents} />
+                    ) : (
+                      <View style={[styles.desktopWidgetPlaceholder, styles.desktopWidgetPlaceholderRack]}>
+                        <Text style={styles.desktopWidgetPlaceholderTitle}>Loading rack…</Text>
+                      </View>
+                    )}
                     {userAgents.length === 0 && !anyConnected && connections.filter(c => c.status === 'connecting').length === 0 && (
                       <View style={styles.emptyOverlay}>
                         {connections.filter(c => c.status === 'error').length > 0 ? (
@@ -3655,7 +3645,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                       </View>
                     )}
                     {agents.map((agent, i) => {
-                      const pos = DESK_POSITIONS[i];
+                      const pos = OFFICE_DESK_POSITIONS[i];
                       if (!pos) return null;
                       return (
                         <View key={agent.id} style={[styles.agentPosition, { left: pos.x - 2, top: pos.y - 50 }]}>
@@ -3805,6 +3795,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                         Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                     >
                       <View style={[styles.quickProviderDot, { backgroundColor: PROVIDER_META[agent.providerType]?.color || '#6f6f6f' }]} />
+                      {agent.isProviderMain ? <Text style={[styles.quickMainMark, { color: agent.color || accentColor }]}>★</Text> : null}
                       <View style={[styles.quickDot, {
                         backgroundColor: getOfficeStatusColor(agent.status),
                       }]} />
@@ -3818,113 +3809,31 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           </>
         )}
 
-        {/* Terminal toggle bar */}
-        <View style={styles.chatToggle}>
-          <View style={styles.terminalBar}>
-            <Pressable
-              onPress={() => { setTerminalInitialTab('commands'); setTerminalSize(terminalSize === 'closed' ? 'full' : 'closed'); }}
-              style={[styles.terminalBarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              accessibilityRole="button"
-              accessibilityLabel={terminalSize === 'closed' ? 'Open terminal' : 'Close terminal'}
-            >
-              <Text style={styles.chatToggleText}>
-                {terminalSize === 'closed' ? '▲ TERMINAL' : '▼ HIDE'}
-              </Text>
-            </Pressable>
-            <Pressable
-              onPress={() => { setTerminalInitialTab('automations'); setTerminalSize('full'); }}
-              style={[styles.terminalBarBtn, { marginLeft: 4 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              accessibilityRole="button"
-              accessibilityLabel="Open automations"
-            >
-              <Text style={[styles.chatToggleText, { color: '#f59e0b' }]}>⚡ AUTOMATIONS</Text>
-            </Pressable>
-            {terminalSize !== 'closed' && (
-              <View style={styles.terminalSizeButtons}>
-                <Pressable
-                  onPress={() => setTerminalSize('half')}
-                  style={[styles.terminalSizeBtn, terminalSize === 'half' && styles.terminalSizeBtnActive,
-                    Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                >
-                  <Text style={[styles.terminalSizeBtnText, terminalSize === 'half' && styles.terminalSizeBtnTextActive]}>▬</Text>
-                </Pressable>
-                <Pressable
-                  onPress={() => setTerminalSize('full')}
-                  style={[styles.terminalSizeBtn, terminalSize === 'full' && styles.terminalSizeBtnActive,
-                    Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                >
-                  <Text style={[styles.terminalSizeBtnText, terminalSize === 'full' && styles.terminalSizeBtnTextActive]}>⬜</Text>
-                </Pressable>
-              </View>
-            )}
-          </View>
-        </View>
-
-        {/* Terminal - half size (mirrors the Terminal tab — shared state) */}
-        {terminalSize === 'half' && (
-          <View style={styles.chatPane}>
-            <OfficeTerminal
-              circleId={circleId}
-              userId={currentUserId}
-              userDisplayName={currentUserName}
-              agents={mergedCircleAgents}
-              myAgentIds={mergedCircleAgents.filter(a => a.ownerId === currentUserId).map(a => a.id)}
-              sharedInput={terminalInput}
-              onSharedInputChange={setTerminalInput}
-              sharedTargetId={terminalTargetId}
-              sharedTargetName={terminalTargetName}
-              onSharedSelectTarget={(id, name) => { setTerminalTargetId(id); setTerminalTargetName(name); }}
-              sharedModel={terminalModel}
-              onSharedModelChange={setTerminalModel}
-              sharedTargetIds={terminalTargetIds}
-              onSharedSelectTargets={(ids, _names) => setTerminalTargetIds(ids)}
-              onCommandSent={handleCommandSent}
-              byoProviderKeys={providerKeys}
-              initialTab={terminalInitialTab}
-              compact
-            />
-          </View>
-        )}
-
-        {/* Terminal - fullscreen overlay (same mirror) */}
-        {terminalSize === 'full' && (
-          <View style={styles.terminalFullscreen}>
-            {/* Exit fullscreen button */}
-            <View style={styles.terminalFullscreenHeader}>
-              <Pressable
-                onPress={() => setTerminalSize('half')}
-                style={[styles.terminalFullscreenBtn, Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}]}
-              >
-                <Text style={styles.terminalFullscreenBtnText}>▬ Half</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => setTerminalSize('closed')}
-                style={[styles.terminalFullscreenBtn, Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}]}
-              >
-                <Text style={styles.terminalFullscreenBtnText}>✕ Close</Text>
-              </Pressable>
-            </View>
-            <OfficeTerminal
-              circleId={circleId}
-              userId={currentUserId}
-              userDisplayName={currentUserName}
-              agents={mergedCircleAgents}
-              myAgentIds={mergedCircleAgents.filter(a => a.ownerId === currentUserId).map(a => a.id)}
-              sharedInput={terminalInput}
-              onSharedInputChange={setTerminalInput}
-              sharedTargetId={terminalTargetId}
-              sharedTargetName={terminalTargetName}
-              onSharedSelectTarget={(id, name) => { setTerminalTargetId(id); setTerminalTargetName(name); }}
-              sharedModel={terminalModel}
-              onSharedModelChange={setTerminalModel}
-              sharedTargetIds={terminalTargetIds}
-              onSharedSelectTargets={(ids, _names) => setTerminalTargetIds(ids)}
-              onCommandSent={handleCommandSent}
-              byoProviderKeys={providerKeys}
-              initialTab={terminalInitialTab}
-            />
-          </View>
-        )}
+        <OfficeRuntimeSection
+          terminalSize={terminalSize}
+          setTerminalSize={setTerminalSize}
+          setTerminalInitialTab={setTerminalInitialTab}
+          styles={styles}
+          accentColor={accentColor}
+          OfficeTerminalView={OfficeTerminalView}
+          terminalInitialTab={terminalInitialTab}
+          terminalInput={terminalInput}
+          setTerminalInput={setTerminalInput}
+          terminalTargetId={terminalTargetId}
+          terminalTargetName={terminalTargetName}
+          setTerminalTargetId={setTerminalTargetId}
+          setTerminalTargetName={setTerminalTargetName}
+          terminalModel={terminalModel}
+          setTerminalModel={setTerminalModel}
+          terminalTargetIds={terminalTargetIds}
+          setTerminalTargetIds={setTerminalTargetIds}
+          circleId={circleId}
+          currentUserId={currentUserId}
+          currentUserName={currentUserName}
+          mergedCircleAgents={mergedCircleAgents}
+          handleCommandSent={handleCommandSent}
+          providerKeys={providerKeys}
+        />
       </View>
 
       {/* Agent detail panel (includes bridge status + power controls + remote shell) */}
@@ -3934,13 +3843,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           onClose={() => { setSelectedAgent(null); setPanelOrigin(null); }}
           isDesktop={isDesktop}
           onRenameAgent={handleRenameAgent}
+          onAgentIdentityChange={refreshAgentIdentities}
           onRemoveAgent={handleRemovePublishedAgent}
           sessionTags={sessionTags}
           onAddSessionTag={handleAddSessionTag}
           onRemoveSessionTag={handleRemoveSessionTag}
           circleId={circleId}
           appearances={appearances}
-          onAppearanceChange={(id, a) => setAppearances(prev => ({ ...prev, [id]: a }))}
+          onAppearanceChange={(id, a) => {
+            const identityKey = getAgentIdentityKey(selectedAgent) || id;
+            setAppearances(prev => ({ ...prev, [id]: a, [identityKey]: a }));
+            void updateAgentIdentity(identityKey, { appearance: a, isCustomized: true });
+          }}
           environmentType={currentTheme.environmentType}
           onRunCommand={handleRunCommand}
           popoutOrigin={panelOrigin}
@@ -4890,9 +4804,31 @@ function CircleOfficePanel({
   compact?: boolean;
   connectionStatus?: 'connecting' | 'live' | 'reconnecting' | 'offline';
 }) {
+  const formatBuildMetric = (value: number): string => {
+    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+    if (value >= 10_000) return `${Math.round(value / 1000)}K`;
+    if (value >= 1_000) return `${(value / 1000).toFixed(1)}K`;
+    return `${Math.max(0, Math.round(value))}`;
+  };
+
+  const getBuildMinutes = (agent: CircleOfficeAgent): number => {
+    const ts = new Date(agent.lastActiveAt || agent.updatedAt || Date.now()).getTime();
+    if (!Number.isFinite(ts)) return 1;
+    const mins = Math.round((Date.now() - ts) / 60000);
+    return Math.max(1, Math.min(45, mins));
+  };
+
+  const getBuildXp = (agent: CircleOfficeAgent): number => {
+    const tokenXp = Math.round(((agent.input_tokens_today || 0) + (agent.output_tokens_today || 0) + ((agent.cached_tokens_today || 0) * 0.35)) / 180);
+    const actionXp = (agent.message_count_today || 0) * 26;
+    const liveXp = agent.status === 'building' ? getBuildMinutes(agent) * 8 : 0;
+    return Math.max(agent.status === 'building' ? 24 : 0, tokenXp + actionXp + liveXp);
+  };
+
   const building = agents.filter(a => a.status === 'building');
   const connected = agents.filter(a => isConnectedOfficeStatus(a.status) && a.status !== 'building');
   const offline = agents.filter(a => !isConnectedOfficeStatus(a.status));
+  const totalBuildingXp = building.reduce((sum, agent) => sum + getBuildXp(agent), 0);
 
   if (compact) {
     // Horizontal strip for desktop — scrollable row of agent chips
@@ -4904,6 +4840,7 @@ function CircleOfficePanel({
           {agents.map(agent => {
             const display = PROVIDER_DISPLAY[agent.provider] || PROVIDER_DISPLAY['generic-agent'];
             const statusColor = agent.status === 'building' ? '#22c55e' : getOfficeStatusColor(agent.status);
+            const buildXp = getBuildXp(agent);
             return (
               <View key={agent.id} style={[coStyles.compactChip, { borderColor: display.color + '44' }]}>
                 {/* Live pulse for building */}
@@ -4914,6 +4851,9 @@ function CircleOfficePanel({
                 <View>
                   <Text style={coStyles.compactOwner}>{agent.ownerDisplayName}</Text>
                   <Text style={coStyles.compactAgentName} numberOfLines={1}>{agent.name}</Text>
+                  {agent.status === 'building' && (
+                    <Text style={coStyles.compactBuildXp}>BUILDING · +{formatBuildMetric(buildXp)} XP</Text>
+                  )}
                 </View>
                 <View style={[coStyles.statusDot, { backgroundColor: statusColor }]} />
                 {agent.status === 'building' && agent.currentTask && (
@@ -4950,7 +4890,7 @@ function CircleOfficePanel({
           </View>
         </View>
         <View style={coStyles.panelStats}>
-          {building.length > 0 && <Text style={coStyles.statBuilding}>⚡ {building.length} building</Text>}
+          {building.length > 0 && <Text style={coStyles.statBuilding}>⚡ {building.length} BUILDING · +{formatBuildMetric(totalBuildingXp)} XP</Text>}
           {connected.length > 0 && <Text style={coStyles.statIdle}>🟢 {connected.length} connected</Text>}
           {offline.length > 0 && <Text style={coStyles.statOffline}>⚫ {offline.length} away</Text>}
         </View>
@@ -4962,13 +4902,19 @@ function CircleOfficePanel({
         const isConnected = isConnectedOfficeStatus(agent.status) && !isBuilding;
         const isOffline = !isConnectedOfficeStatus(agent.status) && !isBuilding;
         const lastSeen = getLastSeen(agent.lastActiveAt);
+        const buildXp = getBuildXp(agent);
+        const buildMinutes = getBuildMinutes(agent);
+        const buildTokens = (agent.input_tokens_today || 0) + (agent.output_tokens_today || 0) + (agent.cached_tokens_today || 0);
+        const buildActions = agent.message_count_today || 0;
 
         return (
           <View
             key={agent.id}
             style={[
               coStyles.agentCard,
+              isBuilding && coStyles.buildingAgentCard,
               { borderColor: isBuilding ? display.color + '66' : isConnected ? display.color + '33' : '#000000' },
+              isBuilding && { backgroundColor: display.color + '10' },
               agent.isOwn && coStyles.ownAgentCard,
               isOffline && coStyles.offlineCard,
             ]}
@@ -4983,8 +4929,8 @@ function CircleOfficePanel({
                 <View style={[coStyles.statusDot, {
                   backgroundColor: isBuilding ? '#3b82f6' : isConnected ? '#22c55e' : '#333',
                 }]} />
-                <Text style={[coStyles.statusText, isOffline && { color: '#444' }]}>
-                  {isBuilding ? 'building' : isConnected ? 'connected' : lastSeen.text}
+                <Text style={[coStyles.statusText, isBuilding && coStyles.statusTextBuilding, isOffline && { color: '#444' }]}>
+                  {isBuilding ? 'BUILDING NOW' : isConnected ? 'connected' : lastSeen.text}
                 </Text>
               </View>
             </View>
@@ -5010,6 +4956,27 @@ function CircleOfficePanel({
                 {agent.currentGoal && (
                   <Text style={coStyles.goalText}>🎯 {agent.currentGoal}</Text>
                 )}
+                <View style={coStyles.buildStatRow}>
+                  <View style={[coStyles.buildStatPill, { borderColor: display.color + '55', backgroundColor: display.color + '18' }]}>
+                    <Text style={coStyles.buildStatValue}>+{formatBuildMetric(buildXp)}</Text>
+                    <Text style={coStyles.buildStatLabel}>BUILD XP</Text>
+                  </View>
+                  <View style={coStyles.buildStatPill}>
+                    <Text style={coStyles.buildStatValue}>{formatBuildMetric(buildActions)}</Text>
+                    <Text style={coStyles.buildStatLabel}>ACTIONS</Text>
+                  </View>
+                  <View style={coStyles.buildStatPill}>
+                    <Text style={coStyles.buildStatValue}>{formatBuildMetric(buildTokens)}</Text>
+                    <Text style={coStyles.buildStatLabel}>TOKENS</Text>
+                  </View>
+                  <View style={coStyles.buildStatPill}>
+                    <Text style={coStyles.buildStatValue}>{buildMinutes}M</Text>
+                    <Text style={coStyles.buildStatLabel}>HOT</Text>
+                  </View>
+                </View>
+                <Text style={coStyles.buildingFlavor}>
+                  BUILDING hard. The work is live and momentum is compounding.
+                </Text>
               </View>
             )}
 
@@ -5144,6 +5111,7 @@ const coStyles = StyleSheet.create({
   compactIcon: { fontSize: 14 },
   compactOwner: { color: '#888', fontSize: 10 },
   compactAgentName: { color: '#ccc', fontSize: 12, fontWeight: '600', maxWidth: 80 },
+  compactBuildXp: { color: '#60a5fa', fontSize: 9, fontWeight: '800', marginTop: 1, letterSpacing: 0.4 },
   compactTask: { color: '#555', fontSize: 11, maxWidth: 120, fontStyle: 'italic' },
   statusDot: { width: 7, height: 7, borderRadius: 3.5, marginLeft: 2 },
 
@@ -5166,6 +5134,13 @@ const coStyles = StyleSheet.create({
     backgroundColor: '#111', borderRadius: 14, borderWidth: 1,
     padding: 14, marginBottom: 10, marginHorizontal: 4,
   },
+  buildingAgentCard: {
+    shadowColor: '#3b82f6',
+    shadowOpacity: 0.18,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4,
+  },
   ownAgentCard: { borderStyle: 'dashed' },
   offlineCard: { opacity: 0.6 },
 
@@ -5179,6 +5154,7 @@ const coStyles = StyleSheet.create({
 
   statusChip: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   statusText: { color: '#666', fontSize: 12 },
+  statusTextBuilding: { color: '#60a5fa', fontWeight: '900', letterSpacing: 0.6 },
 
   agentIdentity: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
   ownerAvatar: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
@@ -5187,9 +5163,21 @@ const coStyles = StyleSheet.create({
   ownerName: { color: '#555', fontSize: 12 },
 
   taskBlock: { borderLeftWidth: 3, paddingLeft: 10, marginBottom: 8 },
-  taskLabel: { color: '#555', fontSize: 10, fontWeight: '700', letterSpacing: 1, marginBottom: 2 },
+  taskLabel: { color: '#60a5fa', fontSize: 10, fontWeight: '900', letterSpacing: 1.4, marginBottom: 4 },
   taskText: { color: '#ddd', fontSize: 14, lineHeight: 20 },
   goalText: { color: '#888', fontSize: 12, marginTop: 4 },
+  buildStatRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10, marginBottom: 8 },
+  buildStatPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#2c3344',
+    backgroundColor: '#111827',
+  },
+  buildStatValue: { color: '#f8fafc', fontSize: 12, fontWeight: '900' },
+  buildStatLabel: { color: '#7dd3fc', fontSize: 9, fontWeight: '800', letterSpacing: 0.5, marginTop: 1 },
+  buildingFlavor: { color: '#93c5fd', fontSize: 11, fontWeight: '700', letterSpacing: 0.3 },
 
   sessionLink: { marginBottom: 4 },
   sessionLinkText: { fontSize: 12, fontWeight: '600' },
@@ -5697,6 +5685,7 @@ const styles = StyleSheet.create({
   mobileCardInfo: { flex: 1, gap: 3 },
   mobileCardNameRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   mobileCardName: { fontSize: 16, fontWeight: '800', color: '#eee', fontFamily: 'monospace' },
+  mobileCardMainBadge: { fontSize: 10, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
   mobileCardStatus: { width: 8, height: 8, borderRadius: 4 },
   mobileCardStatusText: { fontSize: 12, fontFamily: 'monospace', fontWeight: '600', textTransform: 'uppercase' as any },
   mobileCardRole: { fontSize: 13, color: '#888', fontFamily: 'monospace' },
@@ -5715,6 +5704,16 @@ const styles = StyleSheet.create({
   emptyTitle: { fontSize: 13, color: '#666', fontFamily: 'monospace', fontWeight: '800', textAlign: 'center' },
   emptyText: { fontSize: 10, color: '#555', fontFamily: 'monospace', textAlign: 'center' },
   emptySub: { fontSize: 9, color: '#444', fontFamily: 'monospace', fontStyle: 'italic', textAlign: 'center' },
+  desktopWidgetPlaceholder: {
+    position: 'absolute', top: 12, right: 12, minWidth: 148, paddingHorizontal: 12, paddingVertical: 8,
+    backgroundColor: '#05050bcc', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 10, zIndex: 6,
+  },
+  desktopWidgetPlaceholderRack: {
+    top: 104,
+  },
+  desktopWidgetPlaceholderTitle: {
+    fontSize: 10, color: '#7a7a8a', fontFamily: 'monospace', fontWeight: '700',
+  },
   agentPosition: { position: 'absolute', zIndex: 10 },
   quickBar: {
     borderTopWidth: 1, borderTopColor: '#2a2a2a', paddingVertical: 6, paddingHorizontal: 8,
@@ -5725,6 +5724,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4, borderRadius: 10, borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
   },
   quickProviderDot: { width: 4, height: 4, borderRadius: 2 },
+  quickMainMark: { fontSize: 9, fontWeight: '900', fontFamily: 'monospace' },
   quickDot: { width: 4, height: 4, borderRadius: 2 },
   quickName: { fontSize: 9, color: '#666', fontFamily: 'monospace', fontWeight: '600' },
   quickCost: { fontSize: 8, color: '#444', fontFamily: 'monospace' },
@@ -5738,6 +5738,13 @@ const styles = StyleSheet.create({
   },
   terminalBarBtn: {
     paddingVertical: 4, paddingHorizontal: 12,
+  },
+  terminalLoader: {
+    flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10,
+    backgroundColor: '#040409',
+  },
+  terminalLoaderText: {
+    fontSize: 12, color: '#7a7a8a', fontFamily: 'monospace',
   },
   chatToggleText: { fontSize: 13, color: '#888', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1 },
   terminalSizeButtons: {
@@ -5833,5 +5840,58 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontFamily: 'monospace',
     fontWeight: '600',
+  },
+});
+
+// ─── Filter chip row above the agent list ───────────────────────────────────
+
+const officeFilterChipStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 8,
+  },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#262626',
+    backgroundColor: '#0a0a0a',
+  },
+  chipActive: {
+    borderColor: '#ffffff',
+    backgroundColor: '#141414',
+  },
+  label: {
+    color: '#a3a3a3',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    fontFamily: 'monospace',
+  },
+  labelActive: {
+    color: '#ffffff',
+  },
+  count: {
+    color: '#525252',
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 3,
+    backgroundColor: '#000000',
+    minWidth: 16,
+    textAlign: 'center',
+  },
+  countActive: {
+    color: '#ffffff',
+    backgroundColor: '#1f1f1f',
   },
 });

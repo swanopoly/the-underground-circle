@@ -84,6 +84,8 @@ const WEBPAGE_PATTERNS = [
   /\b(build|create|make|generate|design)\b.*(web ?page|website|landing page|html|page|site|dashboard|ui|interface|form|layout)/i,
   /\b(html|css|webpage|landing page|web design)\b/i,
   /\bbuild.*(page|site|app)\b/i,
+  /\bfigma\b.*\b(build|code|html|page|site|website|landing)\b/i,
+  /\b(build|code|turn|convert)\b.*\bfigma\b/i,
 ];
 
 const CODE_PATTERNS = [

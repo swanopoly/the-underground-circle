@@ -209,7 +209,8 @@ npm start
 | `OFFICE_IMPROVEMENTS.md` | Research & strategy (5 phases) | 12.7 KB |
 | `agentFarmMetrics.ts` | Analytics engine code | 15.7 KB |
 | `FarmHealthDashboard.tsx` | Dashboard UI component | 29.4 KB |
-| `IMPLEMENTATION_ROADMAP.md` | Integration guide & roadmap | 12.2 KB |
+| `OFFICE_ROADMAP.md` | Living Office direction | current |
+| `PLAN_STATUS_AUDIT.md` | Current planning-doc audit | current |
 | `QUICK_WIN_EXAMPLE.md` | Agent of the Day tutorial | 13.6 KB |
 | `README_OFFICE_IMPROVEMENTS.md` | Executive summary | 10.7 KB |
 | `TESTING_GUIDE.md` | Complete test scenarios | 9.9 KB |

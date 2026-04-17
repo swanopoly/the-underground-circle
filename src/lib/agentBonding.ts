@@ -10,7 +10,7 @@
 
 import { supabase } from './supabase';
 import { OfficeAgent } from './officeAgents';
-import { AgentIdentity, loadAgentIdentities, saveAgentIdentities } from './agentIdentity';
+import { AgentIdentity, getAgentIdentityKey, loadAgentIdentities, saveAgentIdentities } from './agentIdentity';
 
 // ─── Bond Level Thresholds ──────────────────────────────────────────────────
 
@@ -91,7 +91,7 @@ export async function getOrCreateBond(
   circleId: string,
   agent: OfficeAgent,
 ): Promise<AgentBond | null> {
-  const sessionKey = agent.sessionKey || (agent.id.includes('::') ? agent.id.split('::')[1] : agent.id);
+  const sessionKey = getAgentIdentityKey(agent);
 
   // Try to load existing bond
   const { data: existing } = await supabase
@@ -172,8 +172,8 @@ export async function recordBondInteraction(
   await supabase
     .from('agent_bonds')
     .update({
-      interaction_count: supabase.rpc ? undefined : 0, // handled by RPC
-      total_tokens_together: supabase.rpc ? undefined : 0,
+      interaction_count: undefined, // handled by RPC
+      total_tokens_together: undefined,
       last_interaction_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     })
@@ -371,8 +371,8 @@ export function prioritizeAgents(
   const bondMap = new Map(bonds.map(b => [b.agentSessionKey, b]));
 
   return [...agents].sort((a, b) => {
-    const keyA = a.sessionKey || (a.id.includes('::') ? a.id.split('::')[1] : a.id);
-    const keyB = b.sessionKey || (b.id.includes('::') ? b.id.split('::')[1] : b.id);
+    const keyA = getAgentIdentityKey(a);
+    const keyB = getAgentIdentityKey(b);
     const bondA = bondMap.get(keyA);
     const bondB = bondMap.get(keyB);
 

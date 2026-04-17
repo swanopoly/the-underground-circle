@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { View, Text, StyleSheet, Pressable, ScrollView, Platform, Animated, Easing, NativeSyntheticEvent, NativeScrollEvent } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { getTrack, getModule, getLesson, Lesson, LessonSection, QuizQuestion } from '../../lib/schoolsData';
-import { getProgress, completeLesson, isLessonCompleted, getLessonProgress, SchoolsProgress } from '../../lib/schoolsProgress';
+import { getTrack, getModule, getLesson, Lesson, LessonSection, QuizQuestion, LessonRef } from '../../lib/schoolsData';
+import { getProgress, completeLesson, isLessonCompleted, getRecommendedNextLessonRef, SchoolsProgress } from '../../lib/schoolsProgress';
+import { WikiArticle, getArticlesForLesson } from '../../lib/wikiData';
 
 // ─── Design Tokens ────────────────────────────────────────────────────────
 const BG_PAGE = '#050508', BG_SURFACE = '#0a0a10', BG_RAISED = '#0f0f18', BG_INPUT = '#1a1a28';
@@ -143,12 +144,64 @@ function QuizQuestionCard({ question, qIndex, selectedAnswers, revealed, onSelec
   );
 }
 
+function RelatedWikiCard({ article, onPress }: {
+  article: WikiArticle;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`Open wiki article ${article.title}`}
+      style={s.relatedWikiCard}
+    >
+      <View style={[s.relatedWikiAccent, { backgroundColor: article.color }]} />
+      <View style={s.relatedWikiInner}>
+        <View style={[s.relatedWikiIconBox, { backgroundColor: article.color + '15' }]}>
+          <Text style={[s.relatedWikiIconText, { color: article.color }]}>{article.icon}</Text>
+        </View>
+        <View style={s.relatedWikiTextWrap}>
+          <Text style={s.relatedWikiLabel}>WIKI DEEP DIVE</Text>
+          <Text style={s.relatedWikiTitle}>{article.title}</Text>
+          <Text style={s.relatedWikiSubtitle}>{article.subtitle}</Text>
+        </View>
+        <Text style={[s.relatedWikiArrow, { color: article.color }]}>{'-->'}</Text>
+      </View>
+    </Pressable>
+  );
+}
+
+function NextStepCard({ nextLesson, onOpenLesson }: {
+  nextLesson: LessonRef;
+  onOpenLesson: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onOpenLesson}
+      accessibilityRole="button"
+      accessibilityLabel={`Open next lesson ${nextLesson.lessonTitle}`}
+      style={s.nextStepCard}
+    >
+      <View style={s.nextStepAccent} />
+      <View style={s.nextStepInner}>
+        <View style={s.nextStepTextWrap}>
+          <Text style={s.nextStepLabel}>NEXT STEP</Text>
+          <Text style={s.nextStepTitle}>{nextLesson.lessonTitle}</Text>
+          <Text style={s.nextStepSubtitle}>{nextLesson.moduleTitle}</Text>
+        </View>
+        <Text style={s.nextStepArrow}>{'-->'}</Text>
+      </View>
+    </Pressable>
+  );
+}
+
 // ─── Main Screen ───────────────────────────────────────────────────────────
 export default function SchoolsLessonScreen({ navigation, route }: any) {
   const { trackId, moduleId, lessonId } = route.params;
   const track = getTrack(trackId);
   const module = getModule(trackId, moduleId);
   const lesson = getLesson(trackId, moduleId, lessonId);
+  const relatedWikiArticles = getArticlesForLesson(trackId, moduleId, lessonId);
 
   const [selectedAnswers, setSelectedAnswers] = useState<Record<string, number>>({});
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
@@ -164,6 +217,7 @@ export default function SchoolsLessonScreen({ navigation, route }: any) {
   const headerAnim = useRef(new Animated.Value(0)).current;
   const contentHeight = useRef(0);
   const scrollViewHeight = useRef(0);
+  const nextLesson = getRecommendedNextLessonRef(progress, trackId, moduleId, lessonId);
 
   useFocusEffect(useCallback(() => {
     getProgress().then((p) => {
@@ -207,8 +261,9 @@ export default function SchoolsLessonScreen({ navigation, route }: any) {
 
   const handleComplete = async () => {
     const answerIndices = quizQuestions.map(q => selectedAnswers[q.id] ?? -1);
-    await completeLesson(trackId, moduleId, lessonId, quizScorePercent, answerIndices, lesson.xpReward);
-    navigation.goBack();
+    const nextProgress = await completeLesson(trackId, moduleId, lessonId, quizScorePercent, answerIndices, lesson.xpReward);
+    setProgress(nextProgress);
+    setCompleted(true);
   };
 
   const handleScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -257,6 +312,25 @@ export default function SchoolsLessonScreen({ navigation, route }: any) {
           ))}
         </View>
 
+        {relatedWikiArticles.length > 0 && (
+          <View nativeID="section-lesson-related-wiki" style={s.relatedWikiWrap}>
+            <View style={s.relatedWikiHeader}>
+              <Text style={s.relatedWikiHeaderLabel}>Go Deeper</Text>
+              <Text style={s.relatedWikiHeaderTitle}>Related Wiki Articles</Text>
+              <Text style={s.relatedWikiHeaderSubtitle}>
+                Keep moving from lessons into reference material and project patterns.
+              </Text>
+            </View>
+            {relatedWikiArticles.map(article => (
+              <RelatedWikiCard
+                key={article.id}
+                article={article}
+                onPress={() => navigation.navigate('WikiArticle', { articleId: article.id })}
+              />
+            ))}
+          </View>
+        )}
+
         {/* ── SECTION: Quiz ── */}
         {quizQuestions.length > 0 && (
           <View nativeID="section-lesson-quiz" style={s.quizContainer}>
@@ -290,9 +364,21 @@ export default function SchoolsLessonScreen({ navigation, route }: any) {
         {/* ── SECTION: Complete Button ── */}
         <View nativeID="section-lesson-complete" style={s.completeContainer}>
           {completed ? (
-            <View style={s.completedBanner}>
-              <Text style={s.completedBannerIcon}>[/]</Text>
-              <Text style={s.completedBannerText}>Lesson Completed</Text>
+            <View style={s.completedStack}>
+              <View style={s.completedBanner}>
+                <Text style={s.completedBannerIcon}>[/]</Text>
+                <Text style={s.completedBannerText}>Lesson Completed</Text>
+              </View>
+              {nextLesson && (
+                <NextStepCard
+                  nextLesson={nextLesson}
+                  onOpenLesson={() => navigation.replace('SchoolsLesson', {
+                    trackId: nextLesson.trackId,
+                    moduleId: nextLesson.moduleId,
+                    lessonId: nextLesson.lessonId,
+                  })}
+                />
+              )}
             </View>
           ) : (
             <Pressable
@@ -351,6 +437,34 @@ const s = StyleSheet.create({
 
   // Content
   contentContainer: { maxWidth: 720, width: '100%', alignSelf: 'center', gap: 14, marginTop: 8 },
+  relatedWikiWrap: { maxWidth: 720, width: '100%', alignSelf: 'center', marginTop: 28, gap: 12 },
+  relatedWikiHeader: { marginBottom: 4 },
+  relatedWikiHeaderLabel: {
+    fontSize: 10, fontWeight: '700', letterSpacing: 1.2, color: AMBER, marginBottom: 6,
+  },
+  relatedWikiHeaderTitle: {
+    fontSize: 20, fontWeight: '700', color: TEXT_PRI, letterSpacing: -0.3, marginBottom: 4,
+  },
+  relatedWikiHeaderSubtitle: { fontSize: 13, fontWeight: '400', color: TEXT_TER, lineHeight: 20 },
+  relatedWikiCard: {
+    backgroundColor: BG_SURFACE,
+    borderWidth: 1,
+    borderColor: BORDER_DEF,
+    borderRadius: R_CARD,
+    overflow: 'hidden',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  relatedWikiAccent: { height: 3, width: '100%' },
+  relatedWikiInner: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 16 },
+  relatedWikiIconBox: {
+    width: 42, height: 42, borderRadius: 12, alignItems: 'center', justifyContent: 'center',
+  },
+  relatedWikiIconText: { fontSize: 16, fontWeight: '700', color: TEXT_PRI },
+  relatedWikiTextWrap: { flex: 1 },
+  relatedWikiLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 1, color: TEXT_TER, marginBottom: 4 },
+  relatedWikiTitle: { fontSize: 15, fontWeight: '600', color: TEXT_PRI, marginBottom: 3 },
+  relatedWikiSubtitle: { fontSize: 13, fontWeight: '400', color: TEXT_SEC, lineHeight: 19 },
+  relatedWikiArrow: { fontSize: 14, fontWeight: '700' },
 
   // Section Card
   sectionCard: {
@@ -444,6 +558,7 @@ const s = StyleSheet.create({
 
   // Complete Container
   completeContainer: { maxWidth: 720, width: '100%', alignSelf: 'center', marginTop: 28 },
+  completedStack: { gap: 12 },
   completeBtn: {
     backgroundColor: AMBER, paddingVertical: 16, borderRadius: R_BTN, alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
@@ -463,4 +578,19 @@ const s = StyleSheet.create({
   },
   completedBannerIcon: { fontSize: 16, fontWeight: '700', color: GREEN },
   completedBannerText: { fontSize: 14, fontWeight: '500', color: TEXT_TER },
+  nextStepCard: {
+    backgroundColor: BG_SURFACE,
+    borderWidth: 1,
+    borderColor: AMBER_BORDER,
+    borderRadius: R_CARD,
+    overflow: 'hidden',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  nextStepAccent: { height: 3, backgroundColor: AMBER, width: '100%' },
+  nextStepInner: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 16 },
+  nextStepTextWrap: { flex: 1 },
+  nextStepLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 1.1, color: AMBER, marginBottom: 4 },
+  nextStepTitle: { fontSize: 15, fontWeight: '600', color: TEXT_PRI, marginBottom: 3 },
+  nextStepSubtitle: { fontSize: 12, fontWeight: '400', color: TEXT_SEC },
+  nextStepArrow: { fontSize: 14, fontWeight: '700', color: AMBER },
 });

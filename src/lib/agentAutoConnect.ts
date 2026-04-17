@@ -61,7 +61,6 @@ import {
   OpenSwanPoller,
   OpenSwanUpdate,
   testConnection,
-  listAgents,
 } from './openswanService';
 import { OfficeAgent } from './officeAgents';
 import { Platform } from 'react-native';
@@ -118,10 +117,18 @@ const CC_DETECT_INTERVAL = 20000; // Claude Code bridge detection interval (20s)
 const OC_RECONNECT_INTERVAL = 20000; // OpenSwan reconnect check interval (20s)
 
 // Alternate OpenSwan endpoints to try (CORS proxy first, then direct gateway)
-const OPENCLAW_FALLBACK_ENDPOINTS = [
-  'http://localhost:18790', // CORS proxy (preferred)
-  'http://localhost:18789', // Direct gateway (may work if CORS is configured)
-];
+const OPENCLAW_FALLBACK_ENDPOINTS = Platform.OS === 'web'
+  ? [
+      'http://localhost:18790', // Web can only use the proxy safely
+    ]
+  : [
+      'http://localhost:18790', // CORS proxy (preferred)
+      'http://localhost:18789', // Direct gateway (may work if CORS is configured)
+    ];
+
+function hasAuthFailure(conn: AgentConnection): boolean {
+  return typeof conn.error === 'string' && /authentication failed|wrong or missing token/i.test(conn.error);
+}
 
 // ── Public getters ───────────────────────────────────────────────────────────
 
@@ -205,7 +212,7 @@ export async function reconnectAllBridges(): Promise<BridgeStatus> {
   // Retry failed OpenSwan connections
   let ocReconnected = 0;
   const failedConns = _connections.filter(
-    c => c.enabled && (c.status === "error" || c.status === "disconnected"),
+    c => c.enabled && (c.status === "error" || c.status === "disconnected") && !hasAuthFailure(c),
   );
   for (const conn of failedConns) {
     try {
@@ -486,7 +493,7 @@ function _startRetryLoop() {
 
       // Only retry connections that were previously connected (not ones that never connected)
       const failedConns = _connections.filter(
-        c => c.enabled && (c.status === 'error' || c.status === 'disconnected') && c.lastConnected,
+        c => c.enabled && (c.status === 'error' || c.status === 'disconnected') && c.lastConnected && !hasAuthFailure(c),
       );
 
       if (failedConns.length === 0) {
@@ -569,7 +576,7 @@ function _startVisibilityListener() {
 
     // Retry failed OpenSwan connections
     const failedConns = _connections.filter(
-      c => c.enabled && (c.status === 'error' || c.status === 'disconnected'),
+      c => c.enabled && (c.status === 'error' || c.status === 'disconnected') && !hasAuthFailure(c),
     );
     for (const conn of failedConns) {
       _connectWithFallback(conn);
@@ -795,8 +802,16 @@ async function _connectWithFallback(conn: AgentConnection) {
   }
 
   if (!result.ok) {
+    const isAuthFailure = result.diagnostic?.errorCode === 'auth';
     _connections = _connections.map(c =>
-      c.id === conn.id ? { ...c, status: 'error' as const, error: result.error || 'Connection failed' } : c,
+      c.id === conn.id
+        ? {
+            ...c,
+            status: isAuthFailure ? 'disconnected' as const : 'error' as const,
+            error: result.error || 'Connection failed',
+            lastConnected: isAuthFailure ? undefined : c.lastConnected,
+          }
+        : c,
     );
     _notify();
     return;
@@ -805,10 +820,10 @@ async function _connectWithFallback(conn: AgentConnection) {
   // Store initial sessions
   _sessionsMap.set(conn.id, result.sessions || []);
 
-  // Fetch agent ids
-  let agentIds: string[] = [];
-  const agentsResult = await listAgents(config);
-  if (agentsResult.ok && agentsResult.agents) agentIds = agentsResult.agents;
+  // Agent listing is optional and can be incompatible on some bridge/proxy
+  // endpoints. Do not probe it during initial auto-connect; fetch lazily in
+  // panels that actually need agent ids.
+  const agentIds: string[] = [];
 
   // Update connection status
   _connections = _connections.map(c =>
@@ -838,6 +853,22 @@ async function _connectWithFallback(conn: AgentConnection) {
     _notify();
   }, (error: string) => {
     // Poller detected persistent failure — mark connection as error so retry timer picks it up
+    const unsupported = /does not support openswan tool rpcs/i.test(error);
+    if (unsupported) {
+      console.log('[agentAutoConnect] Poller disabled for', conn.id, ':', error);
+      _ocPollers.delete(conn.id);
+      _connections = _connections.map(c =>
+        c.id === conn.id
+          ? {
+              ...c,
+              status: 'connected' as const,
+              error: undefined,
+            }
+          : c,
+      );
+      _notify();
+      return;
+    }
     console.log('[agentAutoConnect] Poller error for', conn.id, ':', error);
     _ocPollers.delete(conn.id);
     _connections = _connections.map(c =>

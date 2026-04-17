@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { deleteLocalSecret, readLocalSecret, writeLocalSecret } from './localSecrets';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -10,6 +11,26 @@ export interface SiteCredential {
   label: string;
   isActive: boolean;
   metadata: Record<string, unknown>;
+}
+
+interface CredentialRow {
+  id: string;
+  platform: string;
+  site_url: string | null;
+  username: string | null;
+  label: string;
+  is_active: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+interface StoredCredentialRow {
+  id: string;
+  platform: string;
+  label: string;
+  metadata?: Record<string, unknown>;
+  credential_encrypted?: string | null;
+  user_id?: string | null;
+  circle_id?: string | null;
 }
 
 export type WordPressPostStatus = 'publish' | 'draft' | 'pending' | 'future' | 'private';
@@ -90,11 +111,22 @@ export interface WordPressTag {
   count: number;
 }
 
+let userSiteCredentialsUnavailable = false;
+
+function isMissingRelationError(error: any, relation: string): boolean {
+  if (!error) return false;
+  const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.toLowerCase();
+  return error?.code === 'PGRST205'
+    || error?.status === 404
+    || message.includes(`'public.${relation.toLowerCase()}'`)
+    || message.includes(relation.toLowerCase());
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-/** Simple Base64 encoding for client-side credential obfuscation.
- *  NOT real encryption — real encryption should happen server-side
- *  when an edge function is added. This prevents plaintext storage. */
+const SITE_CREDENTIAL_PLACEHOLDER = '__local_secret__';
+
+/** Legacy Base64 encoding used only to migrate older remotely stored credentials. */
 function encodeCredential(credential: string): string {
   try {
     return btoa(unescape(encodeURIComponent(credential)));
@@ -109,6 +141,76 @@ function decodeCredential(encoded: string): string {
   } catch {
     return atob(encoded);
   }
+}
+
+function userSiteSecretId(userId: string, platform: string, label: string): string {
+  return `${userId}:${platform}:${label}`;
+}
+
+function circleSiteSecretId(circleId: string, platform: string, label: string): string {
+  return `${circleId}:${platform}:${label}`;
+}
+
+function getStoredSecretId(
+  row: StoredCredentialRow | null | undefined,
+  scope: 'user' | 'circle',
+): string | null {
+  if (!row) {
+    return null;
+  }
+
+  if (typeof row.metadata?.secretKey === 'string') {
+    return row.metadata.secretKey;
+  }
+
+  if (scope === 'circle') {
+    return row.circle_id ? circleSiteSecretId(row.circle_id, row.platform, row.label) : null;
+  }
+
+  return row.user_id ? userSiteSecretId(row.user_id, row.platform, row.label) : null;
+}
+
+async function resolveStoredCredential(
+  row: StoredCredentialRow | null | undefined,
+  scope: 'user' | 'circle',
+): Promise<string | null> {
+  const secretId = getStoredSecretId(row, scope);
+  if (!row || !secretId) {
+    return null;
+  }
+
+  const namespace = scope === 'circle' ? 'circle_site_credential' : 'user_site_credential';
+  const localCredential = await readLocalSecret(namespace, secretId);
+  if (localCredential) {
+    return localCredential;
+  }
+
+  const legacyRemoteCredential = typeof row.credential_encrypted === 'string'
+    && row.credential_encrypted !== SITE_CREDENTIAL_PLACEHOLDER
+    ? decodeCredential(row.credential_encrypted)
+    : null;
+
+  if (!legacyRemoteCredential) {
+    return null;
+  }
+
+  await writeLocalSecret(namespace, secretId, legacyRemoteCredential);
+
+  void supabase
+    .from(scope === 'circle' ? 'circle_site_credentials' : 'user_site_credentials')
+    .update({
+      credential_encrypted: SITE_CREDENTIAL_PLACEHOLDER,
+      metadata: {
+        ...(row.metadata || {}),
+        secretStorage: 'local_only',
+        secretKey: secretId,
+        hasLocalCredential: true,
+      },
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', row.id);
+
+  return legacyRemoteCredential;
 }
 
 /** Build Basic Auth header for WordPress REST API */
@@ -142,6 +244,9 @@ export async function storeSiteCredential(
   metadata: Record<string, unknown> = {},
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    if (userSiteCredentialsUnavailable) {
+      return { success: false, error: 'user_site_credentials table is unavailable in this project' };
+    }
     const { data: userData, error: userError } = await supabase.auth.getUser().catch(() => ({
       data: null as any,
       error: { message: 'Auth error' },
@@ -150,7 +255,8 @@ export async function storeSiteCredential(
       return { success: false, error: 'Not authenticated' };
     }
 
-    const encrypted = encodeCredential(credential);
+    const secretId = userSiteSecretId(userData.user.id, platform, label);
+    await writeLocalSecret('user_site_credential', secretId, credential);
 
     const { error } = await supabase.from('user_site_credentials').upsert(
       {
@@ -158,9 +264,14 @@ export async function storeSiteCredential(
         platform,
         site_url: siteUrl,
         username,
-        credential_encrypted: encrypted,
+        credential_encrypted: SITE_CREDENTIAL_PLACEHOLDER,
         label,
-        metadata,
+        metadata: {
+          ...metadata,
+          secretStorage: 'local_only',
+          secretKey: secretId,
+          hasLocalCredential: true,
+        },
         is_active: true,
         updated_at: new Date().toISOString(),
       },
@@ -168,12 +279,70 @@ export async function storeSiteCredential(
     );
 
     if (error) {
-      console.error('[SiteAutomation] Store credential error:', error);
+      if (isMissingRelationError(error, 'user_site_credentials')) {
+        userSiteCredentialsUnavailable = true;
+      }
+      if (!isMissingRelationError(error, 'user_site_credentials')) {
+        console.error('[SiteAutomation] Store credential error:', error);
+      }
       return { success: false, error: error.message };
     }
     return { success: true };
   } catch (err: any) {
     console.error('[SiteAutomation] Store credential exception:', err);
+    return { success: false, error: err.message || 'Unknown error' };
+  }
+}
+
+export async function storeCircleSiteCredential(
+  circleId: string,
+  platform: string,
+  siteUrl: string | null,
+  username: string | null,
+  credential: string,
+  label: string = 'default',
+  metadata: Record<string, unknown> = {},
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { data: userData, error: userError } = await supabase.auth.getUser().catch(() => ({
+      data: null as any,
+      error: { message: 'Auth error' },
+    }));
+    if (userError || !userData?.user) {
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    const secretId = circleSiteSecretId(circleId, platform, label);
+    await writeLocalSecret('circle_site_credential', secretId, credential);
+    const { error } = await supabase.from('circle_site_credentials').upsert(
+      {
+        circle_id: circleId,
+        created_by: userData.user.id,
+        platform,
+        site_url: siteUrl,
+        username,
+        credential_encrypted: SITE_CREDENTIAL_PLACEHOLDER,
+        label,
+        metadata: {
+          ...metadata,
+          circleId,
+          secretStorage: 'local_only',
+          secretKey: secretId,
+          hasLocalCredential: true,
+        },
+        is_active: true,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'circle_id,platform,label' },
+    );
+
+    if (error) {
+      console.error('[SiteAutomation] Store circle credential error:', error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    console.error('[SiteAutomation] Store circle credential exception:', err);
     return { success: false, error: err.message || 'Unknown error' };
   }
 }
@@ -184,6 +353,7 @@ export async function loadSiteCredentials(
   platform?: string,
 ): Promise<SiteCredential[]> {
   try {
+    if (userSiteCredentialsUnavailable) return [];
     let query = supabase
       .from('user_site_credentials')
       .select('id, platform, site_url, username, label, is_active, metadata')
@@ -197,11 +367,19 @@ export async function loadSiteCredentials(
     const { data, error } = await query;
 
     if (error) {
-      console.error('[SiteAutomation] Load credentials error:', error);
+      if (isMissingRelationError(error, 'user_site_credentials')) {
+        userSiteCredentialsUnavailable = true;
+      }
+      // PGRST205 = table missing from schema cache. The hint says to use
+      // `circle_site_credentials` — the migration hasn't landed yet. Return
+      // empty quietly instead of a scary red log on every page load.
+      if (!isMissingRelationError(error, 'user_site_credentials')) {
+        console.warn('[SiteAutomation] Load credentials error:', error.message);
+      }
       return [];
     }
 
-    return (data || []).map((row: any) => ({
+    return (data || []).map((row: CredentialRow) => ({
       id: row.id,
       platform: row.platform,
       siteUrl: row.site_url,
@@ -216,19 +394,78 @@ export async function loadSiteCredentials(
   }
 }
 
+export async function loadCircleSiteCredentials(
+  circleId: string,
+  platform?: string,
+): Promise<SiteCredential[]> {
+  try {
+    let query = supabase
+      .from('circle_site_credentials')
+      .select('id, platform, site_url, username, label, is_active, metadata')
+      .eq('circle_id', circleId)
+      .eq('is_active', true)
+      .order('created_at', { ascending: false });
+
+    if (platform) {
+      query = query.eq('platform', platform);
+    }
+
+    const { data, error } = await query;
+    if (error) {
+      console.error('[SiteAutomation] Load circle credentials error:', error);
+      return [];
+    }
+
+    return (data || []).map((row: CredentialRow) => ({
+      id: row.id,
+      platform: row.platform,
+      siteUrl: row.site_url,
+      username: row.username,
+      label: row.label,
+      isActive: row.is_active,
+      metadata: row.metadata || {},
+    }));
+  } catch (err) {
+    console.error('[SiteAutomation] Load circle credentials exception:', err);
+    return [];
+  }
+}
+
 // ─── 3. Delete Credential ──────────────────────────────────────────────────
 
 export async function deleteSiteCredential(
   id: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    if (userSiteCredentialsUnavailable) {
+      return { success: true };
+    }
+    const { data: row, error: rowError } = await supabase
+      .from('user_site_credentials')
+      .select('id, user_id, platform, label, metadata')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (isMissingRelationError(rowError, 'user_site_credentials')) {
+      userSiteCredentialsUnavailable = true;
+      return { success: true };
+    }
+
     const { error } = await supabase
       .from('user_site_credentials')
       .delete()
       .eq('id', id);
 
     if (error) {
+      if (isMissingRelationError(error, 'user_site_credentials')) {
+        userSiteCredentialsUnavailable = true;
+        return { success: true };
+      }
       return { success: false, error: error.message };
+    }
+    const secretId = getStoredSecretId(row as StoredCredentialRow | null, 'user');
+    if (secretId) {
+      await deleteLocalSecret('user_site_credential', secretId);
     }
     return { success: true };
   } catch (err: any) {
@@ -471,13 +708,31 @@ export async function getDecryptedCredential(
 ): Promise<string | null> {
   try {
     const { data, error } = await supabase
+      .from('circle_site_credentials')
+      .select('id, circle_id, platform, label, metadata, credential_encrypted')
+      .eq('id', credentialId)
+      .maybeSingle();
+
+    if (!error && data) {
+      return resolveStoredCredential(data as StoredCredentialRow, 'circle');
+    }
+
+    if (userSiteCredentialsUnavailable) return null;
+    const { data: userData, error: userError } = await supabase
       .from('user_site_credentials')
-      .select('credential_encrypted')
+      .select('id, user_id, platform, label, metadata, credential_encrypted')
       .eq('id', credentialId)
       .single();
 
-    if (error || !data) return null;
-    return decodeCredential(data.credential_encrypted);
+    if (userError) {
+      if (isMissingRelationError(userError, 'user_site_credentials')) {
+        userSiteCredentialsUnavailable = true;
+        return null;
+      }
+      return null;
+    }
+    if (!userData) return null;
+    return resolveStoredCredential(userData as StoredCredentialRow, 'user');
   } catch {
     return null;
   }
@@ -729,28 +984,61 @@ export const wpBlock = {
 
 // ─── 18. Auto-load WordPress credentials for agent use ────────────────────────
 
-export async function getActiveWordPressCredentials(): Promise<{
+export async function getActiveWordPressCredentials(circleId?: string): Promise<{
   siteUrl: string; username: string; appPassword: string;
 } | null> {
   try {
     const { data: userData } = await supabase.auth.getUser().catch(() => ({ data: null as any }));
     if (!userData?.user) return null;
 
+    if (circleId) {
+      const { data: circleData, error: circleError } = await supabase
+        .from('circle_site_credentials')
+        .select('id, circle_id, site_url, username, platform, label, metadata, credential_encrypted')
+        .eq('circle_id', circleId)
+        .eq('platform', 'wordpress')
+        .eq('is_active', true)
+        .order('updated_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!circleError && circleData) {
+        const appPassword = await resolveStoredCredential(circleData as StoredCredentialRow, 'circle');
+        if (!appPassword) return null;
+        return {
+          siteUrl: circleData.site_url,
+          username: circleData.username,
+          appPassword,
+        };
+      }
+    }
+
+    if (userSiteCredentialsUnavailable) {
+      return null;
+    }
     const { data, error } = await supabase
       .from('user_site_credentials')
-      .select('site_url, username, credential_encrypted')
+      .select('id, user_id, site_url, username, platform, label, credential_encrypted, metadata')
       .eq('user_id', userData.user.id)
       .eq('platform', 'wordpress')
       .eq('is_active', true)
       .order('updated_at', { ascending: false })
-      .limit(1)
-      .single();
+      .limit(10);
 
-    if (error || !data) return null;
+    if (error && isMissingRelationError(error, 'user_site_credentials')) {
+      userSiteCredentialsUnavailable = true;
+      return null;
+    }
+    if (error || !data || data.length === 0) return null;
+    const preferred = circleId
+      ? (data as any[]).find(row => row?.metadata?.circleId === circleId) || data[0]
+      : data[0];
+    const appPassword = await resolveStoredCredential(preferred as StoredCredentialRow, 'user');
+    if (!appPassword) return null;
     return {
-      siteUrl: data.site_url,
-      username: data.username,
-      appPassword: decodeCredential(data.credential_encrypted),
+      siteUrl: preferred.site_url,
+      username: preferred.username,
+      appPassword,
     };
   } catch { return null; }
 }

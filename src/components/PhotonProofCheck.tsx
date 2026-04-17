@@ -39,7 +39,7 @@ export default function PhotonProofCheck({ circleId, onProofComplete, onCancel }
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [currentStreak, setCurrentStreak] = useState(0);
-  const cameraRef = useRef<CameraView>(null);
+  const cameraRef = useRef<any>(null);
 
   useEffect(() => {
     fetchCurrentStreak();
@@ -241,7 +241,7 @@ export default function PhotonProofCheck({ circleId, onProofComplete, onCancel }
   };
 
   const toggleCameraFacing = () => {
-    setFacing(current => (current === 'back' ? 'front' : 'back'));
+    setFacing((current: CameraType) => (current === 'back' ? 'front' : 'back'));
   };
 
   if (!permission) {

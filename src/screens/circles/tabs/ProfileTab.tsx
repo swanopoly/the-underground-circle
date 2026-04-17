@@ -1,5 +1,7 @@
 import React from 'react';
 import ProfileScreen from '../../profile/ProfileScreen';
+import { ScrollView } from 'react-native';
+import AdaptiveWorkspaceCard from '../../../components/profile/AdaptiveWorkspaceCard';
 
 interface Props {
   circleId: string;
@@ -7,5 +9,10 @@ interface Props {
 }
 
 export default function ProfileTab({ circleId, navigation }: Props) {
-  return <ProfileScreen navigation={navigation} />;
+  return (
+    <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
+      <ProfileScreen navigation={navigation} />
+      <AdaptiveWorkspaceCard circleId={circleId} />
+    </ScrollView>
+  );
 }

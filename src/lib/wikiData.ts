@@ -3,6 +3,10 @@
 // Educational content about AI agents, tools, models, and design techniques.
 // Connects to the Schools education section via relatedLessonIds.
 // =============================================================================
+import { buildImpactDomainCoverageSummary, buildImpactDomainGuidance, inferImpactDomain } from './impactDomains';
+import { getSpiritById } from './agentSpirits';
+import { getSpiritCareerProfile } from './spiritCareerProfiles';
+import { getSpiritOperationsProfile } from './spiritOperationsProfiles';
 
 export type WikiCategory = 'agents' | 'models' | 'frameworks' | 'design' | 'open-source' | 'mcp' | 'foundations' | 'landscape';
 
@@ -223,6 +227,211 @@ export const WIKI_ARTICLES: WikiArticle[] = [
           'Keep foundations evergreen',
           'Track moving fronts in dated radar reports',
           'Map every big shift back to product implications',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'top-coding-languages-2026',
+    title: 'Top Coding Languages For Product Builders',
+    subtitle: 'Which languages matter most right now, why rankings disagree, and how each one could improve this app.',
+    category: 'landscape',
+    icon: '>>',
+    color: '#84cc16',
+    relatedLessonIds: [
+      'ai-tech:ai-coding:top-coding-languages-2026',
+      'ai-tech:ai-coding:language-strategy-for-products',
+    ],
+    tags: ['languages', 'typescript', 'python', 'go', 'rust', 'product strategy'],
+    content: [
+      {
+        title: 'Why Language Rankings Disagree',
+        content:
+          'There is no single best leaderboard for programming languages because each source measures something different. Stack Overflow captures self-reported usage. GitHub captures repository and contribution activity. RedMonk blends code activity with developer discussion. TIOBE measures broader search, education, and vendor visibility. That is why Python, JavaScript, TypeScript, Java, C#, Go, and Rust can all look "top" depending on the lens.',
+        bulletPoints: [
+          'Stack Overflow 2024: JavaScript still leads broad reported usage',
+          'GitHub Octoverse 2024: Python moved to number one on GitHub with TypeScript in third',
+          'RedMonk January 2025: JavaScript, Python, and Java remain highly durable',
+          'TIOBE 2026: Python stays first with C, Java, C++, C#, and JavaScript still prominent',
+        ],
+      },
+      {
+        title: 'The Languages That Matter Most',
+        content:
+          'For modern builders, the most strategically useful languages are not just the biggest by raw popularity. They are the languages with clear product roles. TypeScript and JavaScript dominate product surfaces and web/mobile development. Python dominates AI, notebooks, and data tooling. Go is excellent for compact services and infrastructure utilities. Rust is increasingly important where security and performance matter. Java and C# still matter for enterprise integration. Kotlin and Swift matter for deeper native mobile work. SQL matters because product intelligence lives in data models and queries.',
+        tableData: {
+          headers: ['Language', 'Where It Wins', 'What It Could Improve In This App'],
+          rows: [
+            ['TypeScript / JavaScript', 'UI, shared product logic, fast iteration', 'Keep the main app, dashboards, wiki, and school UX moving fast'],
+            ['Python', 'AI, notebooks, education, data workflows', 'Power AI labs, school projects, research utilities, and agent tools'],
+            ['Go', 'Small services, MCP servers, networking tools', 'Run bridge services, sync workers, and backend utility processes'],
+            ['Rust', 'Safety and performance', 'Support future secure local runtimes and indexing layers'],
+            ['Java / C#', 'Enterprise systems and integrations', 'Connect to school and institutional software ecosystems'],
+            ['Kotlin / Swift', 'Native mobile depth', 'Improve device-specific features beyond Expo defaults'],
+            ['SQL', 'Analytics, retrieval, personalization', 'Strengthen school progress, wiki discovery, and memory retrieval'],
+          ],
+        },
+      },
+      {
+        title: 'The Best Strategy For Underground Circle',
+        content:
+          'The app should not chase language novelty. It should use the right language for each layer. TypeScript should stay the default for the product itself because this codebase already gets the compounding value of shared web and mobile logic. Python should be the main expansion language for AI learning, research notebooks, lightweight automations, and beginner-friendly projects. Go should power lean services and MCP infrastructure where operational simplicity matters. Rust should be reserved for places where memory safety or performance is a real product need rather than a branding decision.',
+        bulletPoints: [
+          'Keep the core app in TypeScript',
+          'Use Python for AI education and experiments',
+          'Use Go for services and infrastructure',
+          'Use Rust only where safety or speed is genuinely the bottleneck',
+        ],
+      },
+      {
+        title: 'What To Build Next',
+        content:
+          'The clearest product move is to turn language strategy into a learning advantage. The school section should teach not only how to prompt AI, but how to choose the right language for the right job. The wiki should help users understand why a product might mix TypeScript, Python, SQL, and Go instead of pretending one language solves everything.',
+        bulletPoints: [
+          'Add beginner Python projects to the school section',
+          'Add a language-strategy lesson for product design decisions',
+          'Teach users how app, agent, and infrastructure layers use different tools',
+          'Tie wiki articles directly to school lessons so the app feels like a connected learning system',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'python-study-bot-pattern',
+    title: 'Python Study Bot Pattern',
+    subtitle: 'How to design a simple command-line tutor that teaches product loops, scoring, and iteration.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#f59e0b',
+    relatedLessonIds: [
+      'ai-tech:python-project-lab:python-study-bot-cli',
+    ],
+    tags: ['python', 'cli', 'study bot', 'education', 'product loop'],
+    content: [
+      {
+        title: 'Why A CLI Study Bot Is A Strong First Build',
+        content:
+          'A study bot is a strong beginner project because it contains a real product loop without needing a full interface stack. The user gives input, the program chooses content, the program evaluates answers, and the user gets feedback. That teaches much more than isolated syntax drills because it turns code into a usable tool.',
+        bulletPoints: [
+          'Input: user chooses a topic or starts a quiz',
+          'Logic: the program selects questions and tracks score',
+          'Output: the program gives feedback and a final result',
+          'Iteration: the builder can add hints, retries, and saved progress',
+        ],
+      },
+      {
+        title: 'The Core Design Pattern',
+        content:
+          'The cleanest version of this project keeps the question bank simple and the control flow obvious. Start with a small list of questions, loop through them one at a time, compare answers, and print a summary. Do not hide the core loop behind too many abstractions at first. The point is to understand product flow and state clearly.',
+        bulletPoints: [
+          'Use a small question bank first',
+          'Track score in one obvious place',
+          'Return immediate feedback after each answer',
+          'End with a summary the user can learn from',
+        ],
+      },
+      {
+        title: 'What To Improve After Version One',
+        content:
+          'Once the first version works, the most useful improvements are not flashy. Add answer normalization, optional hints, question difficulty, or a saved high score. Those changes teach iteration, user experience, and state handling, which are the real builder skills hidden inside a small tutorial project.',
+        bulletPoints: [
+          'Normalize user input before checking answers',
+          'Add hints instead of only right/wrong outcomes',
+          'Store simple progress or scores in a file',
+          'Keep each improvement small and testable',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'python-data-journal-pattern',
+    title: 'Python Data Journal Pattern',
+    subtitle: 'A beginner-friendly path from daily entries to useful summaries, trends, and product thinking.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#f59e0b',
+    relatedLessonIds: [
+      'ai-tech:python-project-lab:python-data-journal',
+    ],
+    tags: ['python', 'data journal', 'analytics', 'habits', 'product thinking'],
+    content: [
+      {
+        title: 'Why This Project Matters',
+        content:
+          'A data journal teaches one of the most important lessons in software: information becomes useful when it is structured, stored, and summarized. This project is not just about files and lists. It is about turning repeated entries into a dashboard-like result a person can actually use.',
+        bulletPoints: [
+          'Collect a repeated kind of input',
+          'Store it in a durable format',
+          'Turn the raw entries into a useful summary',
+          'Help the user see a pattern or make a decision',
+        ],
+      },
+      {
+        title: 'The Product Loop Inside The Project',
+        content:
+          'The hidden product pattern is simple but powerful: ask for a small piece of data, save it consistently, and later return an insight. That is the same pattern behind study tracking, mood journaling, recommendation systems, and progress dashboards. A beginner project like this quietly teaches the logic behind much larger products.',
+        bulletPoints: [
+          'Input capture matters',
+          'Consistent data structure matters',
+          'Summary logic creates value',
+          'Insight is the bridge from data to product usefulness',
+        ],
+      },
+      {
+        title: 'What To Add Next',
+        content:
+          'After a first version, the strongest next steps are simple analytics improvements: weekly averages, streaks, tags, or a text summary that explains what changed over time. Later, a builder can imagine layering on AI for pattern explanation or coaching, but the first win is getting the data model and summary logic right.',
+        bulletPoints: [
+          'Add weekly or category averages',
+          'Add highs, lows, or streak tracking',
+          'Generate one short summary sentence from the data',
+          'Keep AI as an optional later layer, not the first dependency',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'python-mcp-tool-pattern',
+    title: 'Python MCP Tool Pattern',
+    subtitle: 'Designing one small Python capability that an AI system can call safely and usefully.',
+    category: 'mcp',
+    icon: '<>',
+    color: '#a855f7',
+    relatedLessonIds: [
+      'ai-tech:python-project-lab:python-mcp-starter',
+    ],
+    tags: ['python', 'mcp', 'tools', 'agent design', 'structured outputs'],
+    content: [
+      {
+        title: 'Why Tools Matter More Than Prompts Alone',
+        content:
+          'A chat model can explain things, but a tool gives the model a capability. That is the key shift in agent design. A small Python tool that returns flashcards, a checklist, or a note summary teaches how AI systems become useful through actions and structured results, not just fluent text.',
+        bulletPoints: [
+          'Prompting shapes behavior',
+          'Tools extend what the system can actually do',
+          'Structured outputs make downstream use easier',
+        ],
+      },
+      {
+        title: 'The Smallest Useful Tool Design',
+        content:
+          'The best first tool does one thing well. Define its input clearly, keep the output structured, and make the boundary obvious. If a tool returns a study checklist, decide exactly what input it accepts, what shape the response uses, and what the tool should never touch. That is already real agent design.',
+        bulletPoints: [
+          'One clear capability',
+          'One clear input contract',
+          'One predictable output shape',
+          'One explicit safety boundary',
+        ],
+      },
+      {
+        title: 'What Makes A Tool Safe And Reliable',
+        content:
+          'Good tool design includes limits. Decide whether the tool only reads data, whether it can write anything, and what should still require human approval. Reliability also improves when the tool returns structured values instead of an unbounded paragraph. The combination of clarity, boundaries, and structured output makes tool-using AI systems much easier to trust.',
+        bulletPoints: [
+          'Prefer read-only tools first',
+          'Return structured data where possible',
+          'Validate input before acting',
+          'Keep sensitive actions behind approvals',
         ],
       },
     ],
@@ -3903,6 +4112,401 @@ mcp.run(transport="sse", host="0.0.0.0", port=8080)`,
       },
     ],
   },
+  {
+    id: 'frontier-ai-labs-2026',
+    title: 'Frontier AI Labs In 2026',
+    subtitle: 'What OpenAI, Anthropic, Google DeepMind, and Meta FAIR are prioritizing now, and what those agendas mean for builders.',
+    category: 'landscape',
+    icon: '>>',
+    color: '#84cc16',
+    tags: ['research', 'labs', 'openai', 'anthropic', 'deepmind', 'meta', '2026'],
+    content: [
+      {
+        title: 'Why Track Research Labs As Agendas, Not Just Brands',
+        content:
+          'A useful AI wiki should not treat frontier labs as interchangeable model vendors. Each lab is making different bets about what intelligence should look like in products and infrastructure. The highest-signal way to track them is to watch their research agenda: coding agents, long-horizon work, computer use, scientific reasoning, open-weight ecosystems, perception systems, and interpretability or safety scaffolding.',
+        bulletPoints: [
+          'OpenAI is pushing integrated reasoning, coding, tool search, and computer-use into one mainline stack',
+          'Anthropic is pushing long-horizon agentic work, context management, and multi-agent coordination',
+          'Google DeepMind is pushing science-grade reasoning, multimodality, and specialized technical performance',
+          'Meta FAIR is pushing open research artifacts, open models, perception systems, and world-model style capability',
+        ],
+      },
+      {
+        title: 'OpenAI: Professional Work, Tool Search, And Computer Use',
+        content:
+          'On March 5, 2026, OpenAI introduced GPT-5.4 as its most capable frontier model for professional work. The important signal is not only benchmark movement. It is that OpenAI is collapsing reasoning, coding, agent workflows, high-context work, and computer use into one model line. GPT-5.4 is positioned as a model that can plan, operate across tools, handle software environments, and sustain longer task horizons with up to 1 million tokens of context. That points toward a product strategy where the best model is not just a better answer engine, but a stronger operator across connected software systems.',
+        bulletPoints: [
+          'Official source: OpenAI, “Introducing GPT-5.4,” March 5, 2026',
+          'Key themes: 1M-token context, native computer use, stronger coding, stronger tool search',
+          'Product implication: OpenAI is optimizing for agent runtime reliability, not only chat quality',
+          'What builders should watch: workflow completion, connector/tool discovery, and long-context verification patterns',
+        ],
+      },
+      {
+        title: 'Anthropic: Longer Tasks, Context Compaction, And Agent Teams',
+        content:
+          'On February 5, 2026, Anthropic introduced Claude Opus 4.6 and made the strategic direction unusually clear. The model is framed around planning carefully, sustaining longer coding and knowledge-work tasks, operating more reliably in large codebases, and coordinating richer agentic workflows. Anthropic also paired the model with context compaction, adaptive thinking, effort controls, and research-preview agent teams in Claude Code. That means Anthropic is not only improving model intelligence. It is investing in the runtime mechanics that let one model or multiple sub-agents keep going without collapsing under long context windows.',
+        bulletPoints: [
+          'Official source: Anthropic, “Introducing Claude Opus 4.6,” February 5, 2026',
+          'Key themes: long-horizon coding, 1M-token context beta, context compaction, adaptive thinking, agent teams',
+          'Product implication: Anthropic is treating context management and delegation as core product capability',
+          'What builders should watch: specialist agents, context summarization, and multi-run orchestration instead of single-turn prompting',
+        ],
+      },
+      {
+        title: 'Google DeepMind: Science, Engineering, And Multimodal Reasoning',
+        content:
+          'Google DeepMind is emphasizing a different frontier story: scientific and engineering rigor. In February 2026, DeepMind published Gemini 3.1 Pro as its most advanced model for complex tasks and highlighted Deep Think as its most specialized reasoning mode for science, research, and engineering. Across official pages and model cards, the messaging is consistent: very large multimodal context, hard technical problem solving, programming and mathematical performance, and deployment into scientific and engineering workflows. This is the clearest signal that Google DeepMind wants to own the “AI for research and technical discovery” lane, not only consumer productivity.',
+        bulletPoints: [
+          'Official sources: Google DeepMind, “Gemini 3.1 Pro” model card (published February 19, 2026); Gemini Deep Think pages and February 11, 2026 research post',
+          'Key themes: multimodal reasoning, scientific problem solving, programming and math rigor, evaluation-heavy positioning',
+          'Product implication: DeepMind is optimizing for technical depth and science-facing workflows',
+          'What builders should watch: multimodal repo comprehension, scientific assistants, and domain-specific reasoning performance',
+        ],
+      },
+      {
+        title: 'Meta FAIR: Open Research, Perception, And World Models',
+        content:
+          'Meta FAIR still matters because it is shaping the open side of the ecosystem. Its public positioning centers on open source AI, research artifacts, and the idea that broadly available models and datasets accelerate innovation. The most revealing recent signals are not only model families like Llama. They are FAIR’s research pushes in perception and world modeling, such as V-JEPA 2 in June 2025, along with ongoing work in segmentation, visual understanding, and iterative multimodal generation. Meta is less focused on one vertically integrated assistant product and more focused on seeding capability into the broader ecosystem through open-weight models, research releases, and platform spread.',
+        bulletPoints: [
+          'Official sources: Meta AI open source AI hub; Meta FAIR “Introducing V-JEPA 2” and related 2025 perception/localization releases',
+          'Key themes: open-weight diffusion of capability, perception systems, world models, research artifacts, ecosystem leverage',
+          'Product implication: Meta keeps strengthening the open infrastructure layer that other builders can compose into products',
+          'What builders should watch: open model quality, perception stacks, robotics/world-model work, and deployable research artifacts',
+        ],
+      },
+      {
+        title: 'Model Snapshot: What Each Lab Is Shipping Into Products',
+        content:
+          'One practical way to compare labs is to look at the models they are turning into product surfaces right now. The pattern is clear: OpenAI and Anthropic are making coding and long-horizon execution central, Google DeepMind is making scientific and multimodal reasoning central, and Meta is making open-weight capability and perception central.',
+        tableData: {
+          headers: ['Lab', 'Current Model Signal', 'What It Is Best Framed For', 'What Builders Should Learn'],
+          rows: [
+            ['OpenAI', 'GPT-5.4', 'Professional work, coding, tool search, computer use, very long context', 'Design for tool execution and end-to-end workflow completion'],
+            ['Anthropic', 'Claude Opus 4.6 / Sonnet 4.6', 'Long-horizon coding, review, delegation, context-heavy work', 'Design for context compaction, delegation, and durable task state'],
+            ['Google DeepMind', 'Gemini 3.1 Pro / Deep Think', 'Science, engineering, multimodality, technical reasoning', 'Design for multimodal technical workflows and domain-specific reasoning'],
+            ['Meta FAIR', 'Llama 4 + FAIR perception/world-model work', 'Open deployment, perception, ecosystem leverage', 'Design for composability, controllable infra, and open-weight customization'],
+          ],
+        },
+      },
+      {
+        title: 'Interactive Example: Turn Lab Research Into Product Questions',
+        content:
+          'A good wiki article should not only summarize research. It should help the reader use it. The easiest way to do that is to turn each lab agenda into product questions a builder can actually ask while designing a feature.',
+        codeExample: `Prompt drill: "I want to build a coding assistant for this app. Which frontier lab agenda should influence the architecture most?"
+
+What to look for in the answer:
+- OpenAI lens: Do I need tool search, computer use, and one strong general model?
+- Anthropic lens: Do I need sub-agents, context compaction, and long task memory?
+- DeepMind lens: Do I need stronger multimodal understanding or scientific/technical depth?
+- Meta lens: Do I need open-weight deployment, perception, or lower-cost infrastructure control?
+
+Better follow-up:
+"Map this feature idea across OpenAI, Anthropic, DeepMind, and Meta-style product bets, then tell me which runtime patterns I should steal."`,
+      },
+      {
+        title: 'The Real Cross-Lab Shift',
+        content:
+          'Across these labs, the shared trend is that frontier value is moving from “answer quality” toward “system quality.” The winning research agendas are converging on a few durable ingredients: better coding execution, stronger long-horizon reasoning, more usable tools, multimodal context, verification, and runtime patterns that let systems operate for longer without degrading. The labs still differ in style, but they are no longer competing only on chatbot polish. They are competing on who can make AI behave like a dependable working system.',
+        bulletPoints: [
+          'Agents are becoming first-class product surfaces',
+          'Runtime and tool infrastructure now matter as much as the model',
+          'Scientific and engineering use cases are becoming more central to frontier positioning',
+          'Open ecosystems still matter because they shape deployment, cost, and control',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'ai-university-research-fronts-2026',
+    title: 'AI University Research Fronts',
+    subtitle: 'What Stanford HAI, MIT CSAIL, Berkeley BAIR, and CMU are contributing that companies alone are not.',
+    category: 'landscape',
+    icon: '>>',
+    color: '#84cc16',
+    tags: ['research', 'universities', 'stanford', 'mit', 'berkeley', 'cmu', '2026'],
+    content: [
+      {
+        title: 'Why Schools Still Matter In The Frontier Era',
+        content:
+          'Industry now produces most notable frontier models, but universities remain essential because they work on the pieces companies often under-emphasize in product launches: measurement, transparency, interpretability, alignment methods, agent robustness, real-world deployment studies, and field-specific scientific infrastructure. If a wiki only tracks companies, it misses the institutions that are still defining how AI is evaluated, governed, and applied across disciplines.',
+        bulletPoints: [
+          'Universities are still strongest in evaluation, scientific rigor, interpretability, and public research artifacts',
+          'Academic labs often surface failures, tradeoffs, and measurement gaps that product pages do not',
+          'University work is often the clearest signal for what will become durable infrastructure rather than temporary hype',
+        ],
+      },
+      {
+        title: 'Stanford HAI: Measuring The Field, Not Just Building It',
+        content:
+          'Stanford HAI remains one of the most important institutions for understanding the field at system scale. The 2026 AI Index report, released in April 2026, is especially important because it reframes the frontier as an infrastructure and governance story, not just a model race. It reports that industry produced more than 90% of notable AI models in 2025, while transparency dropped, compute continued rising, open-source activity kept scaling, and AI research expanded across science and medicine. For builders, Stanford HAI is valuable because it provides the best high-level map of what is actually changing underneath the product layer.',
+        bulletPoints: [
+          'Official source: Stanford HAI, 2026 AI Index report and chapter pages',
+          'Key themes: industry dominance, transparency decline, open-source scale, compute concentration, science adoption, policy expansion',
+          'Product implication: AI product decisions now depend on infrastructure concentration, evaluation literacy, and policy awareness',
+          'Best use of Stanford HAI material: treat it as the field-level dashboard for strategy and risk, not just an academic report',
+        ],
+      },
+      {
+        title: 'MIT CSAIL: Agent Search, Interpretability, And Model Science',
+        content:
+          'MIT CSAIL is especially strong where agent systems meet rigorous technical questions. Recent CSAIL work highlights automated interpretability agents, search-augmented agent programming, and deeper study of how models retrieve and use internal knowledge. The most practical signal for builders is that MIT keeps turning agent reliability problems into systems problems: how to search when models err, how to interpret what models are doing, and how to make long workflows more dependable. That is exactly the kind of work that becomes crucial once teams move past demos and into production AI systems.',
+        bulletPoints: [
+          'Official sources: CSAIL coverage of EnCompass (December 22, 2025), MAIA, and automated interpretability work',
+          'Key themes: agent search/backtracking, automated interpretability, understanding model behavior at scale',
+          'Product implication: robust agents need search, monitoring, and interpretability scaffolding, not just better prompts',
+          'What to import into product architecture: retries, branch search, introspection, and evidence-oriented debugging',
+        ],
+      },
+      {
+        title: 'Berkeley BAIR: Real-World Reinforcement Learning And Embodied Systems',
+        content:
+          'Berkeley BAIR remains one of the clearest signals for how reinforcement learning and embodied AI leave the toy stage. A strong example is BAIR’s March 25, 2025 report on scaling reinforcement learning for traffic smoothing with a 100-autonomous-vehicle highway deployment. This is important because it shows BAIR still pushing AI into real systems where optimization, control, safety, and deployment constraints all matter at once. Berkeley continues to be one of the best places to watch if you care about robotics, embodied intelligence, real-world RL, and the engineering side of decision-making systems.',
+        bulletPoints: [
+          'Official source: BAIR blog, “Scaling Up Reinforcement Learning for Traffic Smoothing: A 100-AV Highway Deployment,” March 25, 2025',
+          'Key themes: deployment-grade RL, embodied systems, control under real-world constraints, safety-performance tradeoffs',
+          'Product implication: when agents move from text tasks to physical or operational systems, simulation and deployment quality dominate',
+          'What builders should learn here: agentic systems are easier to trust when they are grounded in measurable environment feedback',
+        ],
+      },
+      {
+        title: 'CMU: Breadth Across Agents, Alignment, Retrieval, And Efficiency',
+        content:
+          'Carnegie Mellon’s machine learning ecosystem matters because it consistently covers a wide spread of modern AI research fronts rather than only one niche. Its 2025 conference overviews show strong activity in AI/LLM agents, code models, retrieval-augmented systems, interpretability, multilinguality, alignment, and efficiency. The important signal is not a single headline model. It is that CMU remains a broad and durable generator of methods, benchmarks, and talent across the entire language-model stack. For a product team, CMU is a strong indicator of where the next wave of practical research abstractions will come from.',
+        bulletPoints: [
+          'Official sources: ML@CMU overviews for ICLR 2025, EMNLP 2025, and NeurIPS 2025',
+          'Key themes: agents, code models, retrieval, alignment, interpretability, multilinguality, efficiency',
+          'Product implication: the future stack will be assembled from many method advances, not one magic model release',
+          'Best use of CMU coverage: track research breadth to see which subfields are accelerating together',
+        ],
+      },
+      {
+        title: 'Research Fronts To Turn Into Product Experiments',
+        content:
+          'The best way to use university research is to convert it into experiments inside the product, not just admire it from a distance. Stanford HAI suggests what to measure at field scale. MIT suggests how to improve runtime reliability. Berkeley suggests where feedback-rich environments matter. CMU suggests which method clusters are maturing at once.',
+        tableData: {
+          headers: ['Institution', 'Research Front', 'Product Experiment To Try'],
+          rows: [
+            ['Stanford HAI', 'Ecosystem measurement and transparency', 'Track model/provider transparency and evaluation evidence in internal model selection'],
+            ['MIT CSAIL', 'Agent search and interpretability', 'Add retries, branch search, and introspection summaries to long OpenSwan runs'],
+            ['Berkeley BAIR', 'Embodied/RL deployment thinking', 'Use closed-loop verification and environment feedback instead of one-shot agent execution'],
+            ['CMU', 'Agents + retrieval + efficiency breadth', 'Benchmark combinations of retrieval, planning, and small-model assistance rather than relying on one large model'],
+          ],
+        },
+      },
+      {
+        title: 'Interactive Example: Use A University Lens On A Feature',
+        content:
+          'If you want the wiki to teach judgment, not just facts, every research trend should come with a way to apply it. This drill turns academic directions into concrete product review prompts.',
+        codeExample: `Feature review drill:
+"I want OpenSwan to handle long coding tasks better. Review the problem through four lenses:
+1. Stanford HAI: what should we measure?
+2. MIT CSAIL: what runtime reliability or interpretability mechanisms are missing?
+3. Berkeley BAIR: where do we need feedback loops instead of one-shot execution?
+4. CMU: which method combinations should we test together?"
+
+Expected output:
+- metrics to add
+- runtime upgrades to add
+- evaluation loop ideas
+- research-inspired experiments worth shipping`,
+      },
+      {
+        title: 'What Universities Add That Labs Usually Do Not',
+        content:
+          'The major labs are building the most visible systems, but universities are still where the field gets legible. Stanford HAI measures the ecosystem. MIT CSAIL studies reliability and interpretability. Berkeley BAIR pushes embodied and reinforcement learning into real settings. CMU keeps broad pressure on agents, language, retrieval, and evaluation. Together, these institutions fill the gaps left by product-led frontier development: public measurement, reproducibility, method diversity, and research that is valuable even when it is not immediately monetizable.',
+        bulletPoints: [
+          'Use industry sources to track capability pushes',
+          'Use university sources to track rigor, measurement, and blind spots',
+          'A strong wiki should combine both because product quality depends on both',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'agent-evals-interpretability-2026',
+    title: 'Agent Evals & Interpretability In 2026',
+    subtitle: 'How top labs are making agent systems more measurable, debuggable, and trustworthy beyond demo quality.',
+    category: 'landscape',
+    icon: '>>',
+    color: '#84cc16',
+    tags: ['evals', 'interpretability', 'reliability', 'agents', 'alignment', '2026'],
+    content: [
+      {
+        title: 'Why This Matters Now',
+        content:
+          'The AI field is moving from “can the model answer well?” to “can the system complete work reliably?” That shift makes evaluations and interpretability much more important. If an agent writes code, calls tools, runs tests, or delegates to specialists, the product needs a way to measure success, inspect failure, and understand whether behavior is improving or drifting.',
+        bulletPoints: [
+          'Evals are how teams separate impressive demos from dependable systems',
+          'Interpretability is how teams understand why a system behaves well or badly',
+          'Agent products need both, because tool use and long-horizon work create more failure modes than single-turn chat',
+        ],
+      },
+      {
+        title: 'OpenAI: Preparedness, System Cards, And Scalable Testing',
+        content:
+          'OpenAI’s strongest public signal here is not a single paper but its evaluation and governance stack. On April 15, 2025, OpenAI published an updated Preparedness Framework that sharpened risk categories, defined operational thresholds, and emphasized scalable evaluations that can keep up with faster model iteration. Around the same time, OpenAI system cards for reasoning and tool-using models increasingly framed capability together with safety testing, red teaming, and evaluation reporting. The lesson for builders is simple: a serious agent runtime should have repeatable checks and deployment gates, not just prompt tweaks.',
+        bulletPoints: [
+          'Official sources: OpenAI Preparedness Framework update (April 15, 2025) and OpenAI o3/o4-mini System Card (April 16, 2025)',
+          'Key themes: scalable evals, expert deep dives, deployment thresholds, tool-using model assessment',
+          'Product implication: agent systems need explicit verification and release criteria',
+        ],
+      },
+      {
+        title: 'Anthropic: Mechanistic Interpretability And Character Control',
+        content:
+          'Anthropic has one of the clearest public interpretability programs in frontier AI. Its interpretability team positions “safety through understanding” as a core goal, and its recent work covers circuit tracing, hidden objective audits, persona vectors, introspection, and the assistant axis for stabilizing model character. The important product lesson is that agent quality is not only about getting better outputs. It is also about understanding the internal tendencies that create sycophancy, drift, hidden goals, or unstable personality under pressure.',
+        bulletPoints: [
+          'Official source: Anthropic Interpretability Research hub and 2025-2026 publications',
+          'Key themes: tracing model reasoning, monitoring hidden objectives, controlling persona drift, understanding character stability',
+          'Product implication: specialist agents need monitored behavior, not only stronger prompts',
+        ],
+      },
+      {
+        title: 'Universities: Measurement, Transparency, And Runtime Rigor',
+        content:
+          'Universities continue to supply the rigor layer that product launches often skip. Stanford HAI’s AI Index keeps the field measurable at ecosystem scale. MIT CSAIL keeps turning agent reliability into systems questions like search, debugging, and interpretability. CMU and similar research ecosystems keep pressure on evaluation breadth across agents, code models, retrieval, efficiency, and real-world deployment. If frontier labs define the capability race, universities help define whether anyone can really trust and compare the results.',
+        bulletPoints: [
+          'Stanford HAI is strongest at field-level measurement and trend visibility',
+          'MIT CSAIL is strongest where agent reliability meets systems design and interpretability',
+          'CMU and peer labs matter because they broaden the benchmark and methods conversation beyond a single company stack',
+        ],
+      },
+      {
+        title: 'What To Measure In A Coding Agent',
+        content:
+          'A coding agent should be measured as a workflow system, not just a chat system. That means you care about whether it selected the right tools, changed the right files, passed verification, recovered from failure, and produced an understandable artifact trail. Teams that only track thumbs-up or vibe-based quality will not know why performance changes over time.',
+        tableData: {
+          headers: ['Layer', 'What To Measure', 'Why It Matters'],
+          rows: [
+            ['Planning', 'task classification, tool plan quality, delegation choice', 'Shows whether the agent starts from the right execution posture'],
+            ['Execution', 'tool success rate, command failure rate, retry rate', 'Shows whether the runtime can actually operate'],
+            ['Verification', 'typecheck pass rate, test pass rate, preview success', 'Shows whether work is correct instead of merely plausible'],
+            ['Review', 'false-positive review rate, missed-issue rate, fix success', 'Shows whether critique is useful or noisy'],
+            ['User trust', 'reopen rate, manual takeover rate, accepted artifacts', 'Shows whether the agent is helping or creating cleanup work'],
+          ],
+        },
+      },
+      {
+        title: 'Interactive Example: Build A Real Eval Loop',
+        content:
+          'This article should help someone design a better runtime, not just admire research. The fastest way to do that is to turn eval thinking into a repeatable review prompt.',
+        codeExample: `Agent eval drill:
+"Review this coding-agent run and score it across planning, execution, verification, and trust.
+Tell me:
+1. what failed,
+2. what was not measured,
+3. what should become an automated check,
+4. what part of the agent needs interpretability or monitoring."
+
+Better follow-up:
+"Design a minimal eval suite for this feature with pass/fail criteria, retry rules, and evidence we should store in the run ledger."`,
+      },
+      {
+        title: 'The Practical Lesson',
+        content:
+          'The frontier is no longer just about who has the smartest model. It is about who can make an agent observable, steerable, and reliable under real workloads. Evals make systems measurable. Interpretability makes them legible. Without both, a team is mostly operating on taste and hope.',
+        bulletPoints: [
+          'Treat evaluation as product infrastructure, not a side task',
+          'Treat interpretability as a debugging and governance advantage, not a research luxury',
+          'The best agent systems will combine tool evidence, runtime traces, and targeted evals into one operating loop',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'physical-ai-robotics-fronts-2026',
+    title: 'Physical AI & Robotics Fronts',
+    subtitle: 'How top labs and schools are turning multimodal models into systems that perceive, plan, and act in the physical world.',
+    category: 'landscape',
+    icon: '>>',
+    color: '#84cc16',
+    tags: ['robotics', 'physical-ai', 'embodied', 'deepmind', 'mit', 'berkeley', 'cmu', '2026'],
+    content: [
+      {
+        title: 'Why Physical AI Changes The Conversation',
+        content:
+          'Embodied AI forces the field to prove itself against the world instead of only against text benchmarks. A robot or physical agent has to perceive correctly, plan safely, use tools, adapt to feedback, and complete tasks under uncertainty. That makes robotics one of the clearest places to see which AI ideas are robust and which were only impressive in chat.',
+        bulletPoints: [
+          'Physical AI raises the bar on grounding, planning, safety, and feedback',
+          'Embodied systems make simulation, verification, and deployment constraints unavoidable',
+          'A serious AI wiki should connect robotics research back to agent runtime design',
+        ],
+      },
+      {
+        title: 'Google DeepMind: General-Purpose Robot Planning',
+        content:
+          'Google DeepMind’s robotics push is one of the clearest signs that frontier labs want AI agents to leave the browser and act in the world. In September 2025, DeepMind introduced Gemini Robotics 1.5 and Gemini Robotics-ER 1.5 as models that perceive, plan, think, use tools, and act across complex multi-step physical tasks. The important lesson is not only “robots are getting smarter.” It is that the same agent design patterns showing up in coding systems — planning, tool use, long-horizon execution, explicit reasoning, and environment feedback — are becoming central in physical AI too.',
+        bulletPoints: [
+          'Official source: Google DeepMind, “Gemini Robotics 1.5 brings AI agents into the physical world,” September 25, 2025',
+          'Key themes: vision-language-action models, embodied reasoning, digital tool use, multi-step plans, cross-embodiment transfer',
+          'Product implication: agent runtimes should be built for action loops, not just response generation',
+        ],
+      },
+      {
+        title: 'MIT CSAIL: Generative Design Meets Physics',
+        content:
+          'MIT CSAIL’s June 27, 2025 robotics work is a useful counterpoint to pure language-model hype. Researchers combined generative AI with physics simulation to improve robot designs and test them before fabrication. That matters because it shows a broader pattern: high-value AI systems increasingly combine model generation with environment simulation and measurable feedback. For software builders, that maps directly to sandboxes, previews, tests, and verification loops.',
+        bulletPoints: [
+          'Official source: MIT CSAIL / MIT News, “Using generative AI to help robots jump higher and land better,” June 27, 2025',
+          'Key themes: simulation-guided generation, design search, environment feedback, test-before-deploy',
+          'Product implication: generated work should move through simulated or sandboxed verification whenever possible',
+        ],
+      },
+      {
+        title: 'Berkeley BAIR: Closed-Loop Deployment Thinking',
+        content:
+          'Berkeley BAIR remains especially important because it keeps proving that reinforcement learning and agent control only become trustworthy when they are closed-loop and deployed carefully. Its March 25, 2025 traffic smoothing deployment with 100 autonomous vehicles is a strong example. Even though it is not a chatbot story, it teaches a direct lesson for software agents: measurable environment feedback and staged deployment matter more than one-shot cleverness.',
+        bulletPoints: [
+          'Official source: BAIR blog, “Scaling Up Reinforcement Learning for Traffic Smoothing: A 100-AV Highway Deployment,” March 25, 2025',
+          'Key themes: deployment-grade RL, simulation-to-real thinking, safety/performance tradeoffs, measurable control',
+          'Product implication: agent systems get more trustworthy when they close the loop with feedback and evidence',
+        ],
+      },
+      {
+        title: 'CMU: Physical AI As An Ecosystem, Not A Demo',
+        content:
+          'CMU’s 2026 physical AI and robotics coverage shows another pattern worth learning from: the best robotics progress often comes from ecosystems, not isolated demos. CMU frames physical AI as the intersection of autonomy, perception, human-centered deployment, and real test environments. That is a useful product lesson for software teams too. Strong agent systems need infrastructure around the model: workspaces, execution environments, evaluation loops, and domain-specific testing grounds.',
+        bulletPoints: [
+          'Official source: Carnegie Mellon University, “From Foundational Robotics to Physical AI,” February 13, 2026',
+          'Key themes: long-horizon robotics, real-world testing, infrastructure, human-centered deployment',
+          'Product implication: build an ecosystem around the agent, not just a single assistant surface',
+        ],
+      },
+      {
+        title: 'Translate Robotics Research Into Software-Agent Design',
+        content:
+          'The point of learning from physical AI is not to pretend every product is a robot. It is to steal the right architecture lessons. Embodied systems force strong habits that software agents also need: explicit planning, feedback loops, environment state, verification, and runtime observability.',
+        tableData: {
+          headers: ['Robotics Research Pattern', 'Software-Agent Equivalent', 'Why It Transfers'],
+          rows: [
+            ['Simulation before deployment', 'Sandbox preview / test environment', 'Lets the agent fail safely before touching the real workspace'],
+            ['Environment feedback', 'Typecheck, tests, lint, UI preview', 'Turns generation into a closed loop instead of one shot'],
+            ['Embodied planning', 'Task plans + tool graphs + sub-agents', 'Improves long-horizon execution'],
+            ['Cross-embodiment transfer', 'Cross-workspace reusable skills', 'Lets one learned capability move across contexts'],
+            ['Safety layers', 'Approvals, tool gating, verification thresholds', 'Prevents clever failure from looking like success'],
+          ],
+        },
+      },
+      {
+        title: 'Interactive Example: Use A Robotics Lens On OpenSwan',
+        content:
+          'This should become a design exercise, not just background reading. The robotics lens is especially useful when you want to harden an agent runtime.',
+        codeExample: `Physical-AI prompt drill:
+"Review OpenSwan like a robotics system, not a chatbot.
+Where does it need:
+1. stronger environment sensing,
+2. better task planning,
+3. safer execution,
+4. tighter verification,
+5. better recovery after failure?"
+
+Better follow-up:
+"Map the missing pieces into runtime upgrades, sandbox features, tool gating, and eval loops."`,
+      },
+    ],
+  },
 ];
 
 // =============================================================================
@@ -3939,6 +4543,30 @@ export function getRelatedArticles(articleId: string): WikiArticle[] {
   return WIKI_ARTICLES.filter(a =>
     a.id !== articleId && a.tags.some(t => article.tags.includes(t))
   ).slice(0, 5);
+}
+
+export function getArticlesForLesson(trackId: string, moduleId: string, lessonId: string): WikiArticle[] {
+  const lessonRef = `${trackId}:${moduleId}:${lessonId}`;
+  return WIKI_ARTICLES.filter(article => article.relatedLessonIds?.includes(lessonRef));
+}
+
+export function getPrimaryLessonRefForArticle(articleId: string): { trackId: string; moduleId: string; lessonId: string } | undefined {
+  const article = getArticle(articleId);
+  const raw = article?.relatedLessonIds?.[0];
+  if (!raw) return undefined;
+  const [trackId, moduleId, lessonId] = raw.split(':');
+  if (!trackId || !moduleId || !lessonId) return undefined;
+  return { trackId, moduleId, lessonId };
+}
+
+export function getNextWikiArticle(articleId: string): WikiArticle | undefined {
+  const currentIndex = WIKI_ARTICLES.findIndex(article => article.id === articleId);
+  if (currentIndex === -1) return undefined;
+
+  const related = getRelatedArticles(articleId)[0];
+  if (related) return related;
+
+  return WIKI_ARTICLES[currentIndex + 1];
 }
 
 function normalizeWikiText(value: string): string {
@@ -4019,11 +4647,13 @@ export function buildWikiKnowledgeBundle(query: string, limit = 6): string {
   const categorySummary = getCategoryInfo()
     .map(category => `${category.title}: ${category.articleCount}`)
     .join(' | ');
+  const domainSummary = buildImpactDomainCoverageSummary();
+  const domainGuidance = buildImpactDomainGuidance({ query, domainKey: inferImpactDomain({ query }) });
 
-  const intro = `Wiki coverage map: ${categorySummary}.`;
+  const intro = `Wiki coverage map: ${categorySummary}. Impact domains: ${domainSummary}.`;
 
   if (relevant.length === 0) {
-    return `${intro}\nNo direct article match found for this query, but the AI wiki covers agents, models, frameworks, design, open-source AI, MCP, foundations, and landscape topics.`;
+    return `${intro}\n${domainGuidance ? `${domainGuidance}\n` : ''}No direct article match found for this query, but the AI wiki covers agents, models, frameworks, design, open-source AI, MCP, foundations, and landscape topics.`;
   }
 
   const articleLines = relevant.map(article => {
@@ -4038,7 +4668,100 @@ export function buildWikiKnowledgeBundle(query: string, limit = 6): string {
     ].filter(Boolean).join('\n');
   }).join('\n');
 
-  return `${intro}\nRelevant wiki articles for "${query}":\n${articleLines}`;
+  return `${intro}\n${domainGuidance ? `${domainGuidance}\n` : ''}Relevant wiki articles for "${query}":\n${articleLines}`;
+}
+
+function uniqueWikiArticles(articles: WikiArticle[]): WikiArticle[] {
+  const seen = new Set<string>();
+  const next: WikiArticle[] = [];
+  for (const article of articles) {
+    if (seen.has(article.id)) continue;
+    seen.add(article.id);
+    next.push(article);
+  }
+  return next;
+}
+
+function buildSpiritWikiQuery(spiritId?: string | null, query?: string): string {
+  if (!spiritId) return query || '';
+  const spirit = getSpiritById(spiritId);
+  const career = getSpiritCareerProfile(spiritId);
+  const operations = getSpiritOperationsProfile(spiritId);
+  return [
+    query || '',
+    spirit?.name || '',
+    spirit?.tagline || '',
+    spirit?.skillBundle || '',
+    career?.seniorRoleTitle || '',
+    career?.tags.join(' ') || '',
+    career?.ownershipAreas.join(' ') || '',
+    operations?.companyFunction || '',
+    operations?.mission || '',
+    operations?.tags.join(' ') || '',
+    operations?.tooling.join(' ') || '',
+  ].filter(Boolean).join(' ');
+}
+
+export function getRelevantSpiritWikiArticles(
+  query: string,
+  spiritId?: string | null,
+  limit = 6,
+): WikiArticle[] {
+  const spiritQuery = buildSpiritWikiQuery(spiritId, query).trim();
+  const spirit = spiritId ? getSpiritById(spiritId) : null;
+
+  const explicitArticles = spirit
+    ? getRelevantWikiArticles(
+        [
+          spirit.name,
+          spirit.tagline,
+          spirit.skillBundle,
+          ...(spirit.category === 'engineering'
+            ? ['coding agents frameworks models mcp evals open source']
+            : spirit.category === 'creative'
+              ? ['design creativity visual systems multimodal open source']
+              : spirit.category === 'leadership'
+                ? ['ai landscape strategy product management research']
+                : ['ai foundations research interpretability landscape']
+          ),
+        ].join(' '),
+        4,
+      )
+    : [];
+
+  return uniqueWikiArticles([
+    ...getRelevantWikiArticles(spiritQuery || query, limit),
+    ...explicitArticles,
+  ]).slice(0, limit);
+}
+
+export function buildSpiritWikiKnowledgeBundle(
+  query: string,
+  spiritId?: string | null,
+  limit = 6,
+): string {
+  if (!spiritId) return '';
+  const spirit = getSpiritById(spiritId);
+  const relevant = getRelevantSpiritWikiArticles(query, spiritId, limit);
+  if (relevant.length === 0) return '';
+
+  const intro = spirit
+    ? `=== SOUL WIKI INFUSION: ${spirit.name} (${spirit.id}) ===`
+    : '=== SOUL WIKI INFUSION ===';
+
+  const lines = relevant.map((article) => {
+    const keySection = article.content[0];
+    const bullets = (keySection?.bulletPoints || []).slice(0, 3).join(' | ');
+    return [
+      `- ${article.title} [${article.category}]`,
+      `  Subtitle: ${article.subtitle}`,
+      `  Tags: ${article.tags.slice(0, 6).join(', ')}`,
+      `  Why it matters to this spirit: ${keySection?.content || article.subtitle}`,
+      bullets ? `  Highlights: ${bullets}` : '',
+    ].filter(Boolean).join('\n');
+  }).join('\n');
+
+  return `${intro}\n${lines}`;
 }
 
 export function buildWikiSearchResponse(query: string, limit = 5): string {

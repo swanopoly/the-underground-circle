@@ -3,22 +3,27 @@
  * Shows as a center tab in FeedTab. Supports create, expand, status, generate tasks.
  */
 
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import {
   View, Text, Pressable, TextInput, ScrollView,
   StyleSheet, Platform, ActivityIndicator,
 } from 'react-native';
 import { CirclePlan, PlanStatus, PlanStep } from '../../../../types/kanban';
+import { useProjectRooms } from '../../../../services/projectRooms';
+import { listCircleIntegrations } from '../../../../lib/circleIntegrations';
+import { getInstalledProviderSet, getPrimaryMarketplaceGap, recommendMarketplaceItemsForWork } from '../../../../lib/marketplaceRecommendations';
+import type { CircleIntegrationGroupKey } from '../../../../lib/circleIntegrationCatalog';
 
 type PlanStepStatus = 'pending' | 'in_progress' | 'done';
 
 interface Props {
   circleId: string;
   plans: CirclePlan[];
-  onCreatePlan: (fields: { title: string; description: string }) => Promise<any>;
+  onCreatePlan: (fields: { title: string; description: string; room_id?: string | null }) => Promise<any>;
   onUpdatePlan: (id: string, fields: Partial<CirclePlan>) => Promise<void>;
   onDeletePlan: (id: string) => Promise<void>;
   onGenerateTasks: (planId: string) => Promise<void>;
+  onOpenMarketplace?: (focus?: { itemId?: string | null; groupKey?: CircleIntegrationGroupKey | null }) => void;
 }
 
 const STATUS_COLORS: Record<PlanStatus, string> = {
@@ -63,17 +68,20 @@ function timeAgo(dateStr: string): string {
 }
 
 export default function PlanningPanel({
-  circleId, plans, onCreatePlan, onUpdatePlan, onDeletePlan, onGenerateTasks,
+  circleId, plans, onCreatePlan, onUpdatePlan, onDeletePlan, onGenerateTasks, onOpenMarketplace,
 }: Props) {
+  const { rooms } = useProjectRooms(circleId);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
+  const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [generatingId, setGeneratingId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
   const [showContextId, setShowContextId] = useState<string | null>(null);
+  const [installedProviders, setInstalledProviders] = useState<Set<string>>(new Set());
 
   // Sort: active first, then by updated_at desc
   const sortedPlans = useMemo(() => {
@@ -84,15 +92,27 @@ export default function PlanningPanel({
     });
   }, [plans]);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const integrations = await listCircleIntegrations(circleId);
+      if (!cancelled) {
+        setInstalledProviders(getInstalledProviderSet(integrations.map(item => item.provider)));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [circleId]);
+
   const handleCreate = useCallback(async () => {
     const title = newTitle.trim();
     if (!title) return;
     setCreating(true);
     setCreateError(null);
     try {
-      await onCreatePlan({ title, description: newDesc.trim() });
+      await onCreatePlan({ title, description: newDesc.trim(), room_id: selectedRoomId || null });
       setNewTitle('');
       setNewDesc('');
+      setSelectedRoomId(null);
       setShowCreateForm(false);
     } catch (err) {
       console.warn('[PlanningPanel] create failed:', err);
@@ -181,10 +201,34 @@ export default function PlanningPanel({
                 <Text style={s.createBtnText}>Create Plan</Text>
               )}
             </Pressable>
-            <Pressable onPress={() => { setShowCreateForm(false); setNewTitle(''); setNewDesc(''); }} style={s.cancelFormBtn}>
+            <Pressable onPress={() => { setShowCreateForm(false); setNewTitle(''); setNewDesc(''); setSelectedRoomId(null); }} style={s.cancelFormBtn}>
               <Text style={s.cancelFormText}>Cancel</Text>
             </Pressable>
           </View>
+          {rooms.length > 0 && (
+            <View style={s.roomPicker}>
+              <Text style={s.roomPickerLabel}>Project room</Text>
+              <View style={s.roomPills}>
+                <Pressable
+                  onPress={() => setSelectedRoomId(null)}
+                  style={[s.roomPill, !selectedRoomId && s.roomPillActive]}
+                >
+                  <Text style={[s.roomPillText, !selectedRoomId && s.roomPillTextActive]}>None</Text>
+                </Pressable>
+                {rooms.map(room => (
+                  <Pressable
+                    key={room.id}
+                    onPress={() => setSelectedRoomId(room.id)}
+                    style={[s.roomPill, selectedRoomId === room.id && s.roomPillActive]}
+                  >
+                    <Text style={[s.roomPillText, selectedRoomId === room.id && s.roomPillTextActive]}>
+                      {room.name}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          )}
           {createError && (
             <Text style={s.createErrorText}>{createError}</Text>
           )}
@@ -205,6 +249,15 @@ export default function PlanningPanel({
         const isGenerating = generatingId === plan.id;
         const isDeleteConfirm = deleteConfirmId === plan.id;
         const showContext = showContextId === plan.id;
+        const marketplaceRecommendations = recommendMarketplaceItemsForWork({
+          title: plan.title,
+          description: plan.description || undefined,
+          tags: plan.tags,
+          extraText: plan.steps.map(step => `${step.title} ${step.description || ''}`),
+          installedProviders,
+        });
+        const marketplaceGap = getPrimaryMarketplaceGap(marketplaceRecommendations);
+        const primaryMarketplaceTarget = marketplaceRecommendations.find(item => !item.installed) || marketplaceRecommendations[0];
 
         return (
           <View key={plan.id} style={[s.planCard, isExpanded && s.planCardExpanded]}>
@@ -243,6 +296,52 @@ export default function PlanningPanel({
                 {/* Description */}
                 {plan.description && (
                   <Text style={s.planDescription}>{plan.description}</Text>
+                )}
+                {plan.room && (
+                  <View style={s.linkedRoomBadge}>
+                    <Text style={s.linkedRoomText}>Room: {plan.room.name}</Text>
+                  </View>
+                )}
+
+                {marketplaceRecommendations.length > 0 && (
+                  <View style={s.marketplaceSection}>
+                    <Text style={s.sectionLabel}>Marketplace readiness</Text>
+                    <View style={s.marketplaceRow}>
+                      {marketplaceRecommendations.slice(0, 6).map(recommendation => (
+                        <Pressable
+                          key={recommendation.item.id}
+                          onPress={() => onOpenMarketplace?.({ itemId: recommendation.item.id, groupKey: recommendation.item.group })}
+                          style={[
+                            s.marketplaceChip,
+                            recommendation.installed ? s.marketplaceChipInstalled : s.marketplaceChipMissing,
+                            !onOpenMarketplace && { opacity: 1 },
+                          ]}
+                        >
+                          <Text style={[s.marketplaceChipText, recommendation.installed && s.marketplaceChipTextInstalled]}>
+                            {recommendation.item.label}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                    {marketplaceGap ? (
+                      <View style={s.marketplaceHintRow}>
+                        <Text style={[s.marketplaceHint, { flex: 1 }]}>{marketplaceGap}</Text>
+                        {onOpenMarketplace ? (
+                          <Pressable
+                            onPress={() => onOpenMarketplace({
+                              itemId: primaryMarketplaceTarget?.item.id || null,
+                              groupKey: primaryMarketplaceTarget?.item.group || null,
+                            })}
+                            style={s.marketplaceLinkBtn}
+                          >
+                            <Text style={s.marketplaceLinkBtnText}>Open Marketplace</Text>
+                          </Pressable>
+                        ) : null}
+                      </View>
+                    ) : (
+                      <Text style={s.marketplaceHint}>This plan already aligns with the installed marketplace coverage.</Text>
+                    )}
+                  </View>
                 )}
 
                 {/* Status selector */}
@@ -488,6 +587,100 @@ const s = StyleSheet.create({
     fontSize: 12,
     fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
   },
+  roomPicker: {
+    gap: 8,
+  },
+  roomPickerLabel: {
+    color: '#7c7ca0',
+    fontSize: 12,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+    textTransform: 'uppercase' as any,
+  },
+  roomPills: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  marketplaceSection: {
+    gap: 8,
+    marginTop: 2,
+  },
+  marketplaceRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  marketplaceChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  marketplaceChipInstalled: {
+    backgroundColor: '#102115',
+    borderColor: '#1d6b3a',
+  },
+  marketplaceChipMissing: {
+    backgroundColor: '#171a22',
+    borderColor: '#2b3342',
+  },
+  marketplaceChipText: {
+    color: '#cbd5e1',
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+  },
+  marketplaceChipTextInstalled: {
+    color: '#86efac',
+  },
+  marketplaceHint: {
+    color: '#7d8798',
+    fontSize: 11,
+    lineHeight: 17,
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+  },
+  marketplaceHintRow: {
+    flexDirection: 'row',
+    gap: 10,
+    alignItems: 'center',
+  },
+  marketplaceLinkBtn: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#2d3f5e',
+    backgroundColor: '#111827',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  marketplaceLinkBtnText: {
+    color: '#93c5fd',
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+  },
+  roomPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#2a2a42',
+    backgroundColor: '#0c0c14',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  roomPillActive: {
+    borderColor: '#6366f155',
+    backgroundColor: '#6366f118',
+  },
+  roomPillText: {
+    color: '#8d8da8',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  roomPillTextActive: {
+    color: '#8b93ff',
+  },
   // Empty state
   emptyState: {
     paddingVertical: 40,
@@ -511,6 +704,23 @@ const s = StyleSheet.create({
   },
   planCardExpanded: {
     borderColor: '#2a2a4a',
+  },
+  linkedRoomBadge: {
+    alignSelf: 'flex-start',
+    marginTop: 8,
+    marginBottom: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: '#06b6d415',
+    borderWidth: 1,
+    borderColor: '#06b6d430',
+  },
+  linkedRoomText: {
+    color: '#67e8f9',
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
   },
   planCardHeader: {
     padding: 14,

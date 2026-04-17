@@ -19,12 +19,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-};
+import { corsHeaders, errResponse, jsonResponse } from "../_shared/edge.ts";
 
 // Agent type → display metadata
 const AGENT_META: Record<string, { name: string; icon: string; color: string; provider: string }> = {
@@ -57,10 +52,7 @@ Deno.serve(async (req: Request) => {
   }
 
   if (req.method !== "POST") {
-    return new Response(
-      JSON.stringify({ error: "POST only" }),
-      { status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
+    return errResponse(405, "method_not_allowed", "POST only");
   }
 
   try {
@@ -73,10 +65,7 @@ Deno.serve(async (req: Request) => {
     const token = authHeader.replace(/^Bearer\s+/i, "").trim();
 
     if (!token) {
-      return new Response(
-        JSON.stringify({ error: "Missing Authorization: Bearer <connect_token>" }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+      return errResponse(401, "missing_token", "Missing Authorization: Bearer <connect_token>");
     }
 
     const { data: tokenRow, error: tokenErr } = await sb
@@ -86,10 +75,7 @@ Deno.serve(async (req: Request) => {
       .single();
 
     if (tokenErr || !tokenRow) {
-      return new Response(
-        JSON.stringify({ error: "Invalid connect token" }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+      return errResponse(401, "invalid_token", "Invalid connect token");
     }
 
     const userId = tokenRow.user_id;
@@ -183,10 +169,7 @@ Deno.serve(async (req: Request) => {
     }
 
     if (!circleId) {
-      return new Response(
-        JSON.stringify({ error: "No circle found. Join a circle first or specify circle_id." }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+      return errResponse(400, "circle_missing", "No circle found. Join a circle first or specify circle_id.");
     }
 
     // ── SECURITY: Verify user is a member of this circle ─────────────────────
@@ -199,10 +182,7 @@ Deno.serve(async (req: Request) => {
       .single();
 
     if (!memberCheck) {
-      return new Response(
-        JSON.stringify({ error: "Not a member of this circle" }),
-        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+      return errResponse(403, "forbidden", "Not a member of this circle");
     }
 
     // ── Get user profile ─────────────────────────────────────────────────────
@@ -276,27 +256,18 @@ Deno.serve(async (req: Request) => {
 
     if (upsertErr) {
       console.error("[agent-connect] Upsert error:", upsertErr);
-      return new Response(
-        JSON.stringify({ error: upsertErr.message }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+      return errResponse(500, "upsert_failed", upsertErr.message);
     }
 
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        agent_id: upserted?.id,
-        circle_id: circleId,
-        status,
-        event,
-      }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
+    return jsonResponse({
+      ok: true,
+      agent_id: upserted?.id,
+      circle_id: circleId,
+      status,
+      event,
+    });
   } catch (error: any) {
     console.error("[agent-connect] Error:", error);
-    return new Response(
-      JSON.stringify({ error: error.message }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
+    return errResponse(500, "internal", error?.message || "Internal server error");
   }
 });

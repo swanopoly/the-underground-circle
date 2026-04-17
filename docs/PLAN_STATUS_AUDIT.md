@@ -1,95 +1,73 @@
-# Plan Status Audit — 2026-04-13
+# Plan Document Audit — 2026-04-15
 
-After 28 commits across multiple sessions, here's where we stand against the NEXT_LEVEL_PLAN:
+This file is now the canonical audit of the repo's planning documents.
+It replaces the older feature-status snapshot that had gone stale.
 
-## ✅ Phase 0: Foundation — COMPLETE
+## Living docs to keep
 
-- ✅ 0.1 Pending migrations: circle_missions, memory_entries, cleanup, circles settings + is_public, tasks mission_id, session dedup
-- ✅ 0.2 Edge functions deployed: github-webhook, automation-executor, swanbot-ai
-- ✅ 0.3 Unfinished features gated: WALLET tab hidden (BACKPACK restored per user request)
-- ✅ 0.4 Production reliability: ErrorBoundary on all tabs, confirmation dialogs, loading states
-- ✅ 0.5 Security: token gating, input maxLengths, circle_memory RLS fixed
+These are still useful, still referenced, or still govern unfinished work:
 
-## ✅ Phase 1: Mission Loop — COMPLETE
+- `docs/NEXT_LEVEL_PLAN.md`
+  - still referenced by missions / proof-of-work / gating code
+  - remains the broad product strategy doc
+- `docs/OFFICE_ROADMAP.md`
+  - still referenced from repo guidance
+  - remains the high-level Office product direction
+- `docs/OPENSWAN_CHAT_ARCHITECTURE_PLAN.md`
+  - active architecture reference for OpenSwan/chat runtime
+- `docs/CHAT_LIVE_BUILDER_ROADMAP.md`
+  - still referenced from builder code and prompt docs
+  - still relevant because the builder is only partially complete
+- `docs/AGENT_MEMORY_GOD_PLAN.md`
+  - still referenced directly from memory/runtime code
+  - remains the canonical memory architecture plan
+- `docs/SOULS_SPIRITS_SKILLS_ROADMAP.md`
+  - still referenced from SOUL/spirit docs and still unfinished
+- `docs/OPENSWAN_SUBAGENT_ARCHITECTURE_PLAN.md`
+  - still relevant for delegated-run/runtime work
+- `docs/OPENSWAN_AGENT_IMPLEMENTATION_PLAN.md`
+  - still relevant for typed runtime / verification / workspace work
 
-- ✅ 1.1 Circle Missions: full CRUD, templates (8), tasks, agents, deadlines, status
-- ✅ 1.2 Proof-of-Work Feed: auto from GitHub webhooks, task completion, manual "What did you ship?" input
-- ✅ 1.3 Mission Templates: 8 pre-built (Dev Sprint, Bug Hunt, Content Push, Launch Prep, etc.)
-- ✅ 1.4 BlackSwan as Mission Tracker: system prompt includes active missions, 4 automation templates (daily digest, overdue nudge, weekly retro, completion celebration)
+## Removed as redundant or stale
 
-## ⚠️ Phase 2: Agent Intelligence — PARTIAL
+These were deleted because they no longer add unique planning value:
 
-- ⚠️ 2.1 BlackSwan Cloud Mode: edge function works but not proactively scheduled in production
-- ✅ 2.2 Agent Task Queue: missionAgentDispatch.ts dispatches tasks to BlackSwan with "Run" button
-- ✅ 2.3 Agent Reputation: S/A/B/C/D badges on pixel agents based on turns
-- ❌ 2.4 Smart Routing: not built — agent suggestions based on task history
+- `docs/IMPLEMENTATION_ROADMAP.md`
+  - redundant with `docs/OFFICE_ROADMAP.md`
+  - overly tactical and partially obsolete
+- `docs/TODO_OFFICE.md`
+  - very old pre-live Office checklist
+  - superseded by the current Office roadmap and shipped code
+- `docs/master-plan-addendum-2026-04-08.md`
+  - one-time merge note / handoff artifact
+  - not a living plan
 
-## ✅ Phase 3: User Acquisition — MOSTLY COMPLETE
+## Intentionally not removed
 
-- ⚠️ 3.1 60-Second Onboarding: 3-step flow built, needs real screenshots/flow polish
-- ⚠️ 3.2 Landing Page: built (LandingPage.tsx) — needs actual screenshots/demo video
-- ✅ 3.3 Push Notifications: expo-notifications + browser API, fires on task/mission events
-- ❌ 3.4 Invite Virality: invites work but no referral incentives or shareable mission cards
+- `docs/page-audits/*`
+  - many of these are historical audits or implementation dossiers, not the
+    main living plan set
+  - they may still contain useful rationale and defect history even when the
+    implementation has moved on
+- `docs/wiki/*`
+  - these are content/reference documents, not plan clutter
 
-## ❌ Phase 4: Revenue — NOT STARTED
+## Current guidance
 
-- ❌ 4.1 Pricing Tiers: Free / Pro / Team / Enterprise not defined in code
-- ❌ 4.2 Stripe Integration: stripe-webhook edge function exists but no checkout flow
-- ⚠️ 4.3 Enterprise Features: SSOConfigScreen, WhiteLabelScreen, BillingScreen exist but not fully wired
+If a future agent needs planning context, the preferred reading order is:
 
-## ❌ Phase 5: Network Effects — NOT STARTED
+1. `docs/NEXT_LEVEL_PLAN.md`
+2. `docs/OFFICE_ROADMAP.md`
+3. `docs/OPENSWAN_CHAT_ARCHITECTURE_PLAN.md`
+4. `docs/AGENT_MEMORY_GOD_PLAN.md`
+5. `docs/CHAT_LIVE_BUILDER_ROADMAP.md`
+6. `docs/SOULS_SPIRITS_SKILLS_ROADMAP.md`
 
-- ❌ 5.1 Cross-Circle Agent Reputation
-- ❌ 5.2 Wallet-Native Bounties
-- ❌ 5.3 Template Marketplace
-- ✅ Public API + SDK partial — DiscoverScreen lists public circles
+## Audit rule going forward
 
-## Bonus Work Done (Not in Original Plan)
+Delete a plan doc when at least one of these is true:
 
-- ✅ Mission celebration animation (confetti)
-- ✅ Daily Focus card (top urgent mission)
-- ✅ Mission analytics bar (completion rate, overdue count)
-- ✅ Mission streaks with milestones and bonus XP
-- ✅ Per-tab colors with animated pulsing dots
-- ✅ Toast notification system
-- ✅ Circle discovery page (/discover)
-- ✅ Kanban-Mission linking with auto proof-of-work
-- ✅ Feed simplification (Missions-only center, collapsible Activity strip)
-- ✅ AgentPanel professional color palette (18+ colors → 5)
-- ✅ AI Tools moved to Chat quick prompts (8 slash commands)
-- ✅ /summary, /help, /mission slash commands
-- ✅ Memory architecture overhaul (6 bugs fixed, bloat prevention, RLS, TTL, dedup constraint)
-
-## Next Priorities
-
-### Immediate (this week)
-1. **Polish landing page** with real screenshots + demo GIF
-2. **Onboarding flow polish** — add "Connect GitHub" step as the value-demo moment
-3. **Smart Agent Routing** (P2.4) — suggest best agent for a task based on history
-
-### Short-term (next 2 weeks)
-4. **Stripe checkout** — wire up the existing BillingScreen to actual payments
-5. **Invite virality** — shareable mission cards, referral incentives
-6. **Mobile app build** — test iOS/Android via Expo EAS
-
-### Long-term (month 2+)
-7. **Cross-circle agent reputation**
-8. **Wallet-native bounties** on missions
-9. **Template marketplace** (missions + circles + agents)
-10. **Public REST API + webhooks** for external tools
-
-## Known Issues
-
-- Pre-existing TS errors in: PhotonProofCheck (gated), LoginScreen (React Native Web typing), crypto.ts (tweetnacl types)
-- OpenSwan gateway CORS errors (localhost-only feature)
-- expo-notifications may not fully work on all web browsers
-- Some migrations pending user execution in Supabase SQL Editor
-
-## Session Stats
-
-- **28 commits** shipped to main
-- **~8,000+ lines** across 23 new files
-- **40+ modified files**
-- **All edge functions deployed** (github-webhook, automation-executor, swanbot-ai)
-- **7 SQL migrations** run in Supabase
-- **Production build verified** (expo export --platform web succeeds)
+- it is fully superseded by a newer living doc
+- it is only a session handoff / addendum / merge note
+- the codebase no longer references it and its roadmap has already shipped
+- its remaining useful content has been merged into a stronger canonical doc

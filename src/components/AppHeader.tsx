@@ -36,9 +36,9 @@ const MENU_ENTRIES: MenuEntry[] = [
   { label: 'AI Wiki',       icon: '◈', flatIcon: 'wiki',          screen: 'Wiki' },
   'divider',
   { label: 'Agents',        icon: '⬡', flatIcon: 'agents',        screen: 'Agents' },
-  { label: 'Integrations',  icon: '⚙', flatIcon: 'integrations',  screen: 'Integrations' },
+  { label: 'Marketplace',   icon: '🛍', flatIcon: 'integrations',  screen: 'Integrations' },
   'divider',
-  { label: 'Profile',       icon: '●', flatIcon: 'profile',       screen: 'EditProfile' },
+  { label: 'Profile',       icon: '●', flatIcon: 'profile',       screen: 'Profile' },
 ];
 
 const MENU_ITEM_COUNT = MENU_ENTRIES.filter(e => e !== 'divider').length;
@@ -354,7 +354,7 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
           </Pressable>
 
           <Pressable
-            onPress={() => navigation.navigate('EditProfile')}
+            onPress={() => navigation.navigate('Profile')}
             style={({ pressed }) => [styles.avatarButton, pressed && styles.pressed]}
           >
             {avatarUrl ? (

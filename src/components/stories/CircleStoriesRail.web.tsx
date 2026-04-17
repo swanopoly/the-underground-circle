@@ -98,18 +98,18 @@ export default function CircleStoriesRail({ circleId, accentColor }: Props) {
           .limit(30),
         supabase
           .from('agent_activity')
-          .select('id, agent_name, action, detail, created_at')
+          .select('id, agent_name, title, body, created_at')
           .eq('circle_id', circleId)
           .gte('created_at', since)
           .order('created_at', { ascending: false })
           .limit(30),
         supabase
           .from('tasks')
-          .select('id, title, assignee_name, completed_at, updated_at')
+          .select('id, title, completed_at')
           .eq('circle_id', circleId)
           .eq('status', 'done')
-          .gte('updated_at', since)
-          .order('updated_at', { ascending: false })
+          .gte('completed_at', since)
+          .order('completed_at', { ascending: false })
           .limit(20),
       ]);
 
@@ -165,8 +165,8 @@ export default function CircleStoriesRail({ circleId, accentColor }: Props) {
           content: ({ action, isPaused }) => (
             <StoryContent
               heading={name}
-              subheading={row.action || 'Activity'}
-              body={row.detail || '(no details)'}
+              subheading={row.title || 'Activity'}
+              body={row.body || '(no details)'}
               accentColor={map.get(key)!.color}
               timestamp={row.created_at}
             />
@@ -176,7 +176,7 @@ export default function CircleStoriesRail({ circleId, accentColor }: Props) {
 
       // -- Completed tasks --
       for (const row of (tasks.data ?? [])) {
-        const name = row.assignee_name || 'Unassigned';
+        const name = 'Completed Work';
         const key = `task-${name}`;
         if (!map.has(key)) {
           map.set(key, {
@@ -196,7 +196,7 @@ export default function CircleStoriesRail({ circleId, accentColor }: Props) {
               subheading="Task Completed"
               body={row.title || '(untitled task)'}
               accentColor="#22c55e"
-              timestamp={row.completed_at || row.updated_at}
+              timestamp={(row as any).completed_at || new Date().toISOString()}
             />
           ),
         });

@@ -6,7 +6,11 @@
  */
 
 import { supabase } from './supabase';
-import { buildWikiKnowledgeBundle, buildWikiSearchResponse } from './wikiData';
+import { buildPromptMemoryBundle, type PromptMemoryReference } from './memoryService';
+import { buildSpiritWikiKnowledgeBundle, buildWikiKnowledgeBundle, buildWikiSearchResponse } from './wikiData';
+import { buildResearchKnowledgeBundle, buildResearchSearchResponse, buildSpiritResearchKnowledgeBundle } from './researchKnowledge';
+import { getAgentIdentityKey, loadAgentIdentities } from './agentIdentity';
+import type { OpenSwanExecutionStatus } from './openswanExecution';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -15,17 +19,110 @@ export type SwanBotContext = {
   circleId?: string;
   circleName?: string;
   userName?: string;
+  agentId?: string;
+  agentName?: string;
   discordContext?: string;
   model?: string | null;
+  thinkingLevel?: 'fast' | 'balanced' | 'deep';
+  maxTokens?: number;
   chatHistory?: string;
   wikiContext?: string;
+  memoryContext?: string;
+  memoryRefs?: PromptMemoryReference[];
+  spiritId?: string | null;
+  attachmentContext?: string;
 };
+
+async function resolveContextSpiritId(context: SwanBotContext): Promise<string | null> {
+  if (context.spiritId) return context.spiritId;
+  if (!context.agentId && !context.agentName) return null;
+  try {
+    const identities = await loadAgentIdentities();
+    const identityKey = getAgentIdentityKey({ id: context.agentId || '', name: context.agentName || '' });
+    return identities.get(identityKey)?.spiritId || null;
+  } catch (error) {
+    console.warn('[SwanBot] Failed to resolve spirit identity for wiki infusion:', error);
+    return null;
+  }
+}
+
+function buildOpenSwanRuntimeContextBundle(args: {
+  context: SwanBotContext;
+  data: CircleContextData;
+  activeSoulKey?: string | null;
+  identity?: any;
+  spirit?: { id: string; name: string; tagline: string } | null;
+}): string | null {
+  const { context, data, activeSoulKey, identity, spirit } = args;
+  const sections: string[] = [];
+
+  sections.push([
+    '## Runtime Bundle · AGENTS.md',
+    `Service: OpenSwan inside The Underground Circle${context.circleName ? ` for ${context.circleName}` : ''}.`,
+    'Mode: persistent chat/runtime agent with typed tools, memory retrieval, verification, browser planning, and approvals.',
+    'Execution rule: prefer the smallest direct answer for lightweight asks; escalate into tool use, planning, browser work, or verification only when the request actually needs it.',
+    'Steering rule: when the user changes direction mid-stream, treat the newest user message as the current priority rather than clinging to stale plans.',
+  ].join('\n'));
+
+  const identityLines = ['## Runtime Bundle · IDENTITY.md'];
+  if (context.agentName) identityLines.push(`Agent name: ${context.agentName}`);
+  if (context.agentId) identityLines.push(`Agent id: ${context.agentId}`);
+  if (identity?.customProfileName) identityLines.push(`Custom profile: ${identity.customProfileName}`);
+  if (identity?.boundAiProvider || identity?.boundModel) {
+    identityLines.push(`Preferred runtime: ${identity?.boundAiProvider || 'unknown'} / ${identity?.boundModel || 'unknown'}`);
+  }
+  if (identityLines.length > 1) sections.push(identityLines.join('\n'));
+
+  const userLines = ['## Runtime Bundle · USER.md'];
+  userLines.push(`User: ${context.userName || 'unknown'}`);
+  if (context.circleName) userLines.push(`Circle: ${context.circleName}`);
+  if (context.discordContext) userLines.push(`Discord context: ${context.discordContext}`);
+  userLines.push('Preference rule: durable user preferences and accepted memories outrank default style or generic best practices unless the user overrides them.');
+  sections.push(userLines.join('\n'));
+
+  const soulLines = ['## Runtime Bundle · SOUL.md'];
+  if (spirit) {
+    soulLines.push(`Spirit: ${spirit.name} (${spirit.id})`);
+    soulLines.push(`Tagline: ${spirit.tagline}`);
+  }
+  if (activeSoulKey) soulLines.push(`Active soul key: ${activeSoulKey}`);
+  if (identity?.soulPrompt?.trim()) {
+    soulLines.push('Saved soul prompt:');
+    soulLines.push(identity.soulPrompt.trim().slice(0, 1200));
+  }
+  if (soulLines.length > 1) sections.push(soulLines.join('\n'));
+
+  sections.push([
+    '## Runtime Bundle · TOOLS.md',
+    'Context sources available: persistent memory, SOUL wisdom, wiki/research knowledge, attachments, session continuity, and circle/task data when present.',
+    'Action surface available: tasks, goals, missions, messages, rooms/files, approvals, research, browser planning, and verification-aware execution.',
+    'Safety rule: state-changing or external-side-effect actions may require approval; do not pretend an action already happened if the runtime only planned it.',
+  ].join('\n'));
+
+  return sections.filter(Boolean).join('\n\n') || null;
+}
+
+async function buildCombinedKnowledgeBundle(
+  query: string,
+  circleId?: string,
+  spiritId?: string | null,
+): Promise<string> {
+  const [wikiBundle, spiritWikiBundle, researchBundle] = await Promise.all([
+    Promise.resolve(buildWikiKnowledgeBundle(query, 6)),
+    Promise.resolve(buildSpiritWikiKnowledgeBundle(query, spiritId, 6)),
+    buildResearchKnowledgeBundle({ query, circleId, spiritId, limit: 4 }),
+  ]);
+
+  const spiritResearchBundle = await buildSpiritResearchKnowledgeBundle({ query, circleId, spiritId, limit: 4 });
+
+  return [wikiBundle, spiritWikiBundle, researchBundle, spiritResearchBundle].filter(Boolean).join('\n\n');
+}
 
 export interface SwanBotStructuredToolAction {
   kind: 'hf_tool' | 'tool';
   tool_name: string;
   title: string;
-  status: 'completed' | 'failed';
+  status: 'completed' | 'failed' | 'manual_required' | 'blocked';
   model?: string | null;
   input_preview?: string | null;
   output_preview?: string | null;
@@ -352,6 +449,44 @@ export function clearConversationHistory(circleId: string): void {
   try { localStorage.removeItem(`${HISTORY_STORAGE_PREFIX}${circleId}`); } catch {}
 }
 
+// ─── Custom-model proxy routing (GLM-5, MiniMax, etc.) ──────────────────────
+// Maps a chat-picker model id to the llm-proxy provider key. Returning null
+// means "use the default Claude path".
+function pickProviderForModel(modelId: string | null | undefined): string | null {
+  if (!modelId) return null;
+  if (modelId === 'glm-5' || modelId.startsWith('glm-')) return 'zai';
+  if (modelId.startsWith('MiniMax-') || modelId.startsWith('minimax-')) return 'minimax';
+  return null;
+}
+
+async function callLlmProxy(
+  provider: string,
+  model: string,
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+  circleId?: string,
+): Promise<string | null> {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session?.access_token) return null;
+  const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
+  if (!supabaseUrl) return null;
+  const url = `${supabaseUrl}/functions/v1/llm-proxy`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({ provider, model, messages, circleId }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    console.warn(`[SwanBot] llm-proxy ${provider} ${res.status}: ${text}`);
+    return null;
+  }
+  const data = await res.json();
+  return typeof data?.response === 'string' && data.response.length > 0 ? data.response : null;
+}
+
 // ─── AI Edge Function Call ───────────────────────────────────────────────────
 
 async function callSwanBotAI(
@@ -361,10 +496,15 @@ async function callSwanBotAI(
   discordContext?: string,
   model?: string | null,
   wikiContext?: string,
+  thinkingLevel: 'fast' | 'balanced' | 'deep' = 'deep',
+  maxTokens = 6144,
 ): Promise<string | null> {
   try {
     const { data: authData } = await supabase.auth.getSession();
     const accessToken = authData.session?.access_token;
+    if (!accessToken) {
+      return null;
+    }
     const { data, error } = await supabase.functions.invoke('swanbot-ai', {
       ...(accessToken
         ? { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -375,13 +515,16 @@ async function callSwanBotAI(
         userId,
         discordContext,
         wikiContext,
-        model: model || 'claude-haiku',
-        maxTokens: 4096,
-        thinkingLevel: 'deep',
+        model: model || 'claude-sonnet-4-6',
+        maxTokens,
+        thinkingLevel,
       },
     });
     if (error) {
-      console.warn('[SwanBot] Edge function error:', error?.message || error);
+      const message = error?.message || String(error);
+      if (!/401|non-2xx/i.test(message)) {
+        console.warn('[SwanBot] Edge function error:', message);
+      }
       return null;
     }
     if (data?.error) {
@@ -402,6 +545,8 @@ async function callSwanBotAIStructured(
   discordContext?: string,
   model?: string | null,
   wikiContext?: string,
+  thinkingLevel: 'fast' | 'balanced' | 'deep' = 'deep',
+  maxTokens = 6144,
 ): Promise<SwanBotStructuredResponse | null> {
   try {
     const { data: authData } = await supabase.auth.getSession();
@@ -416,9 +561,9 @@ async function callSwanBotAIStructured(
         userId,
         discordContext,
         wikiContext,
-        model: model || 'claude-haiku',
-        maxTokens: 4096,
-        thinkingLevel: 'deep',
+        model: model || 'claude-sonnet-4-6',
+        maxTokens,
+        thinkingLevel,
       },
     });
     if (error || data?.error) return null;
@@ -468,9 +613,9 @@ async function callGemini(
         userName: name, streakInfo, memberList, checkInInfo, taskInfo,
         discordContext: context.discordContext || '',
       }, context.circleId);
-      systemPrompt = dbPrompt?.content || await buildSystemPromptAsync(context, circleData);
+      systemPrompt = dbPrompt?.content || await buildSystemPromptAsync(context, circleData, message);
     } catch {
-      systemPrompt = await buildSystemPromptAsync(context, circleData);
+      systemPrompt = await buildSystemPromptAsync(context, circleData, message);
     }
     const history = context.circleId ? getHistory(context.circleId) : [];
 
@@ -528,26 +673,142 @@ async function callGemini(
   }
 }
 
-async function buildSystemPromptAsync(context: SwanBotContext, data: CircleContextData): Promise<string> {
+async function buildSystemPromptAsync(
+  context: SwanBotContext,
+  data: CircleContextData,
+  currentMessage?: string,
+): Promise<string> {
   const base = buildSystemPrompt(context, data);
   const extras: string[] = [];
 
   // Load user profile for personalization
+  // Shared timeout for async extras — if embedding infra or memory service
+  // is slow, we don't block the entire chat turn waiting.
+  const withTimeout = <T>(p: Promise<T>, ms = 3000): Promise<T | null> =>
+    Promise.race([p, new Promise<null>(r => setTimeout(() => r(null), ms))]);
+
   try {
     const { loadUserProfile, generateProfileContext } = await import('./userChatProfile');
-    const profile = await loadUserProfile();
-    const profileCtx = generateProfileContext(profile);
+    const profile = await withTimeout(loadUserProfile());
+    const profileCtx = profile ? generateProfileContext(profile) : null;
     if (profileCtx) extras.push(profileCtx);
   } catch (e) { console.warn('[SwanBot] Profile load failed:', e); }
 
-  // Load memory hierarchy for this circle
+  // Load memory hierarchy for this circle (Phase 0/Phase 1 startup bundle)
   try {
     const { buildMemoryContext } = await import('./agentRunSystem');
     if (context.circleId) {
-      const memCtx = await buildMemoryContext(context.circleId, undefined, context.userId);
+      const memCtx = await withTimeout(buildMemoryContext(context.circleId, undefined, context.userId, context.agentId, context.agentName));
       if (memCtx) extras.push(memCtx);
     }
   } catch (e) { console.warn('[SwanBot] Memory context failed:', e); }
+
+  // Phase 2/3 — resolve the active SOUL once, use it for both blocks.
+  let activeSoulKey: string | null = null;
+  try {
+    const spiritId = await resolveContextSpiritId(context);
+    activeSoulKey = spiritId ? `soul:${spiritId}` : null;
+  } catch (e) { console.warn('[SwanBot] Soul resolution failed:', e); }
+
+  // Phase 3 — Block B: pre-distilled SOUL wisdom for this circle. Weekly
+  // synthesized by the `distil-soul-wisdom` edge fn. Persistent guidance
+  // that sits BEFORE the turn-specific retrieval so the model reads the
+  // general "what has this SOUL learned" rules first, then the specific
+  // memory matches for this message.
+  try {
+    if (context.circleId && activeSoulKey) {
+      const { loadSoulWisdomWithFallback, formatSoulWisdomBlock } = await import('./memoryService');
+      const wisdom = await withTimeout(loadSoulWisdomWithFallback({
+        circleId: context.circleId,
+        soulKey: activeSoulKey,
+        userId: context.userId,
+        agentId: context.agentId,
+        queryText: currentMessage,
+      }));
+      const wisdomBlock = formatSoulWisdomBlock(wisdom);
+      if (wisdomBlock) extras.push(wisdomBlock);
+    }
+  } catch (e) { console.warn('[SwanBot] Soul wisdom load failed:', e); }
+
+  // Phase 2 — Block C: turn-time semantic retrieval. Uses the current user
+  // message as the query vector, scored with soul-affinity + recency +
+  // importance. Fire-and-forget on failure so a cold embedding infra never
+  // blocks chat.
+  try {
+    if (context.circleId && currentMessage?.trim()) {
+      const { retrieveForTurn } = await import('./memoryService');
+      const retrieval = await withTimeout(
+        retrieveForTurn({
+          queryText: currentMessage,
+          circleId: context.circleId,
+          userId: context.userId,
+          activeSoulKey,
+          surface: 'main_chat',
+          budgetChars: 1500,
+          finalCount: 12,
+        }),
+      );
+      if (retrieval?.formatted) extras.push(retrieval.formatted);
+    }
+  } catch (e) { console.warn('[SwanBot] Turn retrieval failed:', e); }
+
+  // Phase C1 — Block D: attachment context. When the caller has passed a
+  // pre-built attachment summary (from `buildAttachmentContext` in
+  // chatAttachments.ts), inject it here. Text files are inlined, images
+  // get OCR alt-text, binaries show filename + mime for reference.
+  if ((context as any).attachmentContext) {
+    extras.push((context as any).attachmentContext);
+  }
+
+  // Phase C5 — Block E: skills prompt fragment. Loads enabled skills for
+  // the active SOUL in this circle and injects their prompt fragments so
+  // the model knows what tools/workflows it has access to.
+  try {
+    if (context.circleId && activeSoulKey) {
+      const { buildSkillsPromptBlock } = await import('./skillRegistry');
+      const skillsBlock = await withTimeout(buildSkillsPromptBlock(context.circleId, activeSoulKey, context.userId));
+      if (skillsBlock) extras.push(skillsBlock);
+    }
+  } catch (e) { console.warn('[SwanBot] Skills block failed:', e); }
+
+  // Load stable agent identity context so Office-saved spirit/soul settings
+  // survive session churn and provider-main restoration.
+  let identity: any = null;
+  let spirit: { id: string; name: string; tagline: string } | null = null;
+  try {
+    if (context.agentId || context.agentName) {
+      const { getAgentIdentityKey, loadAgentIdentities } = await import('./agentIdentity');
+      const { getSpiritById } = await import('./agentSpirits');
+      const identities = await loadAgentIdentities();
+      const identityKey = getAgentIdentityKey({ id: context.agentId || '', name: context.agentName || '' });
+      identity = identities.get(identityKey);
+      if (identity) {
+        spirit = identity.spiritId ? (getSpiritById(identity.spiritId) || null) : null;
+        const identityLines = ['## Agent Identity'];
+        if (spirit) {
+          identityLines.push(`Spirit: ${spirit.name} (${spirit.id})`);
+          identityLines.push(`Spirit tagline: ${spirit.tagline}`);
+        }
+        if (identity.soulPrompt?.trim()) {
+          identityLines.push('Saved Soul Prompt:');
+          identityLines.push(identity.soulPrompt.trim().slice(0, 1200));
+        }
+        if (identity.boundAiProvider || identity.boundModel) {
+          identityLines.push(`Preferred runtime: ${(identity.boundAiProvider || 'unknown')} / ${(identity.boundModel || 'unknown')}`);
+        }
+        if (identityLines.length > 1) extras.push(identityLines.join('\n'));
+      }
+    }
+  } catch (e) { console.warn('[SwanBot] Agent identity context failed:', e); }
+
+  const runtimeBundle = buildOpenSwanRuntimeContextBundle({
+    context,
+    data,
+    activeSoulKey,
+    identity,
+    spirit,
+  });
+  if (runtimeBundle) extras.unshift(runtimeBundle);
 
   // Load active missions for this circle
   try {
@@ -586,8 +847,14 @@ async function buildSystemPromptAsync(context: SwanBotContext, data: CircleConte
 
   if (extras.length === 0) return base;
 
-  // Cap total extras to ~4000 chars to stay within context budget
-  const MAX_EXTRAS_CHARS = 4000;
+  // Cache boundary — Anthropic's prompt caching caches the prefix of the
+  // system prompt. Everything ABOVE this line is stable across turns (base
+  // personality, rules, capabilities). Everything BELOW is dynamic per-turn
+  // (memories, missions, session context). The boundary helps Claude cache
+  // the stable prefix and only re-process the dynamic tail.
+  const CACHE_BOUNDARY = '\n\n---\n<!-- dynamic context below — changes per turn -->\n';
+
+  const MAX_EXTRAS_CHARS = 6800;
   let combined = extras.join('\n\n');
   if (combined.length > MAX_EXTRAS_CHARS) {
     combined = combined.slice(0, MAX_EXTRAS_CHARS);
@@ -597,7 +864,7 @@ async function buildSystemPromptAsync(context: SwanBotContext, data: CircleConte
     }
   }
 
-  return base + '\n\n' + combined;
+  return base + CACHE_BOUNDARY + combined;
 }
 
 function buildSystemPrompt(context: SwanBotContext, data: CircleContextData): string {
@@ -680,7 +947,8 @@ ${context.discordContext ? `- Discord: ${context.discordContext}` : ''}
 - Never lecture. But do go deep when depth is warranted.
 - When given a task, DO IT — don't describe what you would do. Generate the code, write the plan, create the content. Be action-oriented.
 - When you use the internal AI Wiki for an answer, mention the most relevant article titles naturally at the end under **Sources from the AI Wiki** when that would help the user.
-${context.wikiContext ? `\n## Internal AI Wiki Knowledge\nUse this as trusted internal reference knowledge from the app's AI Wiki. Prefer it when answering questions about AI agents, models, MCP, browser automation, retrieval, evals, multimodal tooling, safety, design-to-code, and related topics.\n${context.wikiContext}` : ''}
+${context.memoryContext ? `\n## Persistent Memory\nUse this as remembered context from prior work, explicit user preferences, agent-private memory, and SOUL-specific operating memory. Treat high-confidence memory as durable guidance unless the user overrides it.\n${context.memoryContext}` : ''}
+${context.wikiContext ? `\n## Internal Knowledge Base\nUse this as trusted internal reference knowledge from the app's knowledge base. It may include AI Wiki material, curated research corpus entries, and domain guidance. Prefer it when answering questions about AI systems, scientific research, medical-imaging support, disease-identification workflows, materials, renewable energy, and related human-impact topics.\n${context.wikiContext}` : ''}
 ${context.chatHistory ? `\n## Recent Chat Context\nHere are the last few messages in this conversation — use them to stay in context:\n${context.chatHistory}` : ''}`;
 }
 
@@ -760,7 +1028,14 @@ type CmdHandler = {
 const localCommands: CmdHandler[] = [
   {
     match: /^(help|commands|what can you do)\s*[?!]?$/i,
-    handler: async () => `🦢 **Here's what I got:**\n\n📋 **"my tasks"** — your open tasks\n📊 **"status"** — circle stats\n🔥 **"streak"** — your streak\n🏆 **"leaderboard"** — rankings\n✅ **"who checked in"** — today's check-ins\n📅 **"daily plan"** — plan your day\n📝 **"create task [title]"** — make a task\n📚 **"/wiki [topic]"** — search the AI Wiki\n🔎 **"search wiki [topic]"** — same thing\n\nOr just... talk to me. I'm not just commands, I'm a whole vibe. 🦢`,
+    handler: async () => `🦢 **Here's what I got:**\n\n📋 **"my tasks"** — your open tasks\n📊 **"status"** — circle stats\n🔥 **"streak"** — your streak\n🏆 **"leaderboard"** — rankings\n✅ **"who checked in"** — today's check-ins\n📅 **"daily plan"** — plan your day\n📝 **"create task [title]"** — make a task\n📚 **"/wiki [topic]"** — search the AI Wiki\n🔬 **"/research [topic]"** — search the curated research corpus\n🔎 **"search wiki [topic]"** — same thing\n\nOr just talk to me directly — I can use the knowledge base and research corpus when it helps.`,
+  },
+  {
+    match: /^(?:\/research|search research|research)\s+(.+)$/i,
+    handler: async (ctx, match) => {
+      const query = match[1].trim();
+      return buildResearchSearchResponse({ query, circleId: ctx.circleId, limit: 5 });
+    },
   },
   {
     match: /^(?:\/wiki|search wiki|wiki)\s+(.+)$/i,
@@ -849,6 +1124,22 @@ const localCommands: CmdHandler[] = [
   },
 ];
 
+export async function tryHandleLocalSwanBotCommand(
+  message: string,
+  context: SwanBotContext,
+): Promise<string | null> {
+  const cleaned = message.replace(/@(agent|blackswan|swanbot|swan)\b/gi, '').trim();
+  if (!cleaned) return null;
+  for (const cmd of localCommands) {
+    const match = cleaned.match(cmd.match);
+    if (!match) continue;
+    const response = await cmd.handler(context, match);
+    if (context.circleId) addToHistory(context.circleId, 'model', response);
+    return response;
+  }
+  return null;
+}
+
 // ─── Main Response Engine ────────────────────────────────────────────────────
 
 export async function getSwanBotResponse(
@@ -856,10 +1147,6 @@ export async function getSwanBotResponse(
   context: SwanBotContext
 ): Promise<string> {
   const cleaned = message.replace(/@(agent|blackswan|swanbot|swan)\b/gi, '').trim();
-  const enrichedContext: SwanBotContext = {
-    ...context,
-    wikiContext: context.wikiContext || buildWikiKnowledgeBundle(cleaned, 6),
-  };
 
   if (!cleaned) {
     return "What's good? 🦢";
@@ -871,18 +1158,32 @@ export async function getSwanBotResponse(
   }
 
   // Check for exact command matches first (instant, structured data queries)
-  for (const cmd of localCommands) {
-    const match = cleaned.match(cmd.match);
-    if (match) {
-      try {
-        const response = await cmd.handler(context, match);
-        if (context.circleId) addToHistory(context.circleId, 'model', response);
-        return response;
-      } catch (err: any) {
-        return `Something broke: ${err.message}`;
-      }
-    }
+  try {
+    const localResponse = await tryHandleLocalSwanBotCommand(cleaned, context);
+    if (localResponse) return localResponse;
+  } catch (err: any) {
+    return `Something broke: ${err.message}`;
   }
+
+  const spiritId = await resolveContextSpiritId(context);
+  const knowledgeBundle = context.wikiContext || await buildCombinedKnowledgeBundle(cleaned, context.circleId, spiritId);
+  const memoryBundle = context.memoryContext || (context.circleId
+    ? (await buildPromptMemoryBundle({
+        circleId: context.circleId,
+        userId: context.userId,
+        query: cleaned,
+        agentId: context.agentId,
+        agentName: context.agentName,
+        spiritId,
+        surface: 'main_chat',
+      })).memoryContext
+    : '');
+  const enrichedContext: SwanBotContext = {
+    ...context,
+    wikiContext: knowledgeBundle,
+    memoryContext: memoryBundle,
+    spiritId,
+  };
 
   // Tier 1: Try BlackSwan LLM (local, zero cost — only works when ollama is running)
   try {
@@ -913,6 +1214,34 @@ export async function getSwanBotResponse(
     console.warn('[SwanBot] Tier 1: BlackSwan LLM error:', err);
   }
 
+  // Tier 1.5: Custom-model override — when the user explicitly picked GLM-5,
+  // a MiniMax model, or another non-Anthropic model, route through llm-proxy
+  // instead of going to swanbot-ai (which only knows Claude).
+  const customModelProvider = pickProviderForModel(enrichedContext.model);
+  if (customModelProvider) {
+    try {
+      const circleData = await getCircleContextData(enrichedContext);
+      const systemPrompt = await buildSystemPromptAsync(enrichedContext, circleData);
+      const history = enrichedContext.circleId ? getHistory(enrichedContext.circleId) : [];
+      const proxyMessages = [
+        { role: 'system' as const, content: systemPrompt },
+        ...history.slice(-10).map(h => ({
+          role: (h.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+          content: h.text,
+        })),
+        { role: 'user' as const, content: cleaned },
+      ];
+      const proxyResponse = await callLlmProxy(customModelProvider, enrichedContext.model!, proxyMessages, enrichedContext.circleId);
+      if (proxyResponse) {
+        if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', proxyResponse);
+        return proxyResponse;
+      }
+      console.warn(`[SwanBot] Tier 1.5: ${customModelProvider} returned empty — falling through to Claude.`);
+    } catch (err) {
+      console.warn(`[SwanBot] Tier 1.5: ${customModelProvider} error — falling through:`, err);
+    }
+  }
+
   // Tier 2: Try AI Edge Function (Claude Haiku — primary for web)
   if (enrichedContext.circleId) {
     console.log('[SwanBot] Tier 2: Calling swanbot-ai edge function...');
@@ -923,6 +1252,8 @@ export async function getSwanBotResponse(
       enrichedContext.discordContext,
       enrichedContext.model,
       enrichedContext.wikiContext,
+      enrichedContext.thinkingLevel || 'deep',
+      enrichedContext.maxTokens || 6144,
     );
     if (aiResponse) {
       console.log('[SwanBot] Tier 2: Got response from edge function');
@@ -966,14 +1297,30 @@ export async function getSwanBotStructuredResponse(
   context: SwanBotContext
 ): Promise<SwanBotStructuredResponse> {
   const cleaned = message.replace(/@(agent|blackswan|swanbot|swan)\b/gi, '').trim();
-  const enrichedContext: SwanBotContext = {
-    ...context,
-    wikiContext: context.wikiContext || buildWikiKnowledgeBundle(cleaned, 6),
-  };
 
   if (!cleaned) {
     return { response: "What's good? 🦢" };
   }
+
+  const spiritId = await resolveContextSpiritId(context);
+  const knowledgeBundle = context.wikiContext || await buildCombinedKnowledgeBundle(cleaned, context.circleId, spiritId);
+  const memoryBundle = context.memoryContext || (context.circleId
+    ? (await buildPromptMemoryBundle({
+        circleId: context.circleId,
+        userId: context.userId,
+        query: cleaned,
+        agentId: context.agentId,
+        agentName: context.agentName,
+        spiritId,
+        surface: 'main_chat',
+      })).memoryContext
+    : '');
+  const enrichedContext: SwanBotContext = {
+    ...context,
+    wikiContext: knowledgeBundle,
+    memoryContext: memoryBundle,
+    spiritId,
+  };
 
   const structured = enrichedContext.circleId
     ? await callSwanBotAIStructured(
@@ -983,6 +1330,8 @@ export async function getSwanBotStructuredResponse(
         enrichedContext.discordContext,
         enrichedContext.model,
         enrichedContext.wikiContext,
+        enrichedContext.thinkingLevel || 'deep',
+        enrichedContext.maxTokens || 6144,
       )
     : null;
 
@@ -994,4 +1343,144 @@ export async function getSwanBotStructuredResponse(
 
   const response = await getSwanBotResponse(message, context);
   return { response };
+}
+
+/**
+ * Execute one round of Anthropic tool-use within a chat turn. The model
+ * may respond with `tool_use` content blocks; we dispatch each one via
+ * the `openswanTools` registry and feed the results back until the model
+ * produces a final text response (or we hit MAX_TOOL_ROUNDS).
+ *
+ * Phase C4: this sits between the prompt-builder and the final response
+ * formatter. Callers get the accumulated text + list of tool events.
+ */
+export async function executeToolUseLoop(opts: {
+  systemPrompt: string;
+  userMessage: string;
+  model: string;
+  circleId: string;
+  userId: string;
+  threadId?: string;
+  runId?: string;
+  activeSoulKey?: string;
+  activePluginIds?: string[];
+  allowedToolNames?: string[];
+  surface?: 'main_chat' | 'room_chat' | 'office' | 'task_run';
+}): Promise<{ response: string; toolEvents: Array<{ tool: string; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }> }> {
+  const { MAX_TOOL_ROUNDS, getToolDefinitions, dispatchToolDetailed } = await import('./openswanTools/index');
+  const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat');
+  if (tools.length === 0) {
+    return { response: '', toolEvents: [] };
+  }
+
+  const toolCtx = {
+    circleId: opts.circleId,
+    userId: opts.userId,
+    threadId: opts.threadId,
+    runId: opts.runId,
+    activeSoulKey: opts.activeSoulKey,
+    activePluginIds: opts.activePluginIds,
+    surface: opts.surface || 'main_chat',
+  };
+
+  const anthropicTools = tools.map(t => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.input_schema,
+  }));
+
+  const messages: Array<{ role: string; content: any }> = [
+    { role: 'user', content: opts.userMessage },
+  ];
+
+  const toolEvents: Array<{ tool: string; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }> = [];
+
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    // Call supabase edge fn or direct API
+    const { data, error } = await supabase.functions.invoke('swanbot-ai', {
+      body: {
+        message: opts.userMessage,
+        circleId: opts.circleId,
+        userId: opts.userId,
+        model: opts.model,
+        tools: anthropicTools,
+        tool_messages: messages.length > 1 ? messages : undefined,
+        system_override: opts.systemPrompt,
+      },
+    });
+
+    if (error || !data) {
+      return { response: data?.response || 'Tool-use call failed.', toolEvents };
+    }
+
+    // Check if the response contains tool_use blocks
+    const content = data.content || [];
+    const toolUseBlocks = Array.isArray(content)
+      ? content.filter((b: any) => b.type === 'tool_use')
+      : [];
+
+    if (toolUseBlocks.length === 0) {
+      // Model gave a final text response
+      const textBlock = Array.isArray(content)
+        ? content.find((b: any) => b.type === 'text')
+        : null;
+      return {
+        response: textBlock?.text || data.response || '',
+        toolEvents,
+      };
+    }
+
+    // Dispatch each tool call
+    const toolResults: Array<{ type: string; tool_use_id: string; content: string }> = [];
+    for (const block of toolUseBlocks) {
+      const dispatched = await dispatchToolDetailed(block.name, block.input || {}, toolCtx);
+      toolEvents.push({ tool: block.name, input: block.input, result: dispatched.text, status: dispatched.status, metadata: dispatched.metadata });
+      toolResults.push({
+        type: 'tool_result',
+        tool_use_id: block.id,
+        content: dispatched.text,
+      });
+    }
+
+    // Feed results back for the next round
+    messages.push({ role: 'assistant', content });
+    messages.push({ role: 'user', content: toolResults });
+  }
+
+  return { response: 'Tool-use limit reached.', toolEvents };
+}
+
+/**
+ * Build the full OpenSwan system prompt (Blocks A-E) WITHOUT calling any
+ * LLM. Returns a string the caller can pass to `streamChatResponse` or
+ * any other chat endpoint as the `system` parameter.
+ *
+ * Phase C2: this is the bridge between the prompt-composition pipeline
+ * (which lives in swanbot.ts) and the streaming pipeline (which uses the
+ * `chat-stream` edge fn). The caller builds the prompt, hands it to the
+ * SSE consumer, and gets token-by-token deltas.
+ */
+export async function buildStreamableSystemPrompt(opts: {
+  circleId: string;
+  userId: string;
+  currentMessage: string;
+  model?: string | null;
+  userName?: string;
+  agentId?: string;
+  agentName?: string;
+  chatHistory?: string;
+}): Promise<string> {
+  const context: SwanBotContext = {
+    userId: opts.userId,
+    circleId: opts.circleId,
+    userName: opts.userName,
+    agentId: opts.agentId,
+    agentName: opts.agentName,
+    model: opts.model,
+    chatHistory: opts.chatHistory,
+  };
+  const circleData = opts.circleId
+    ? await getCircleContextData(context)
+    : { members: [], todayCheckIns: [], recentMessages: [], stats: null, userProfile: null };
+  return buildSystemPromptAsync(context, circleData, opts.currentMessage);
 }

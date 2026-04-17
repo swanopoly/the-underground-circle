@@ -97,10 +97,10 @@ export default function ComputerUseButton({
     }
   }, []);
 
-  const handleAllow = useCallback((permission: ComputerUsePermission) => {
+  const handleAllow = useCallback(async (permission: ComputerUsePermission) => {
     setShowPermission(false);
 
-    const session = createSession(agentName, pendingTask, permission);
+    const session = await createSession(agentName, pendingTask, permission, { circleId });
     session.actions = plannedActions.map(a => ({
       ...a,
       status: permission === 'trusted' ? 'approved' as const : 'pending' as const,
@@ -113,7 +113,7 @@ export default function ComputerUseButton({
     setPlannedActions([]);
     setPendingTask('');
     setTaskInput('');
-  }, [agentName, pendingTask, plannedActions, onSessionStart]);
+  }, [agentName, pendingTask, plannedActions, onSessionStart, circleId]);
 
   const handleDeny = useCallback(() => {
     setShowPermission(false);

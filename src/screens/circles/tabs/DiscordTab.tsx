@@ -211,6 +211,9 @@ export default function DiscordTab({ circleId }: { circleId: string }) {
           secureTextEntry
           autoCapitalize="none"
         />
+        <Text style={st.securityNote}>
+          Stored locally on this device. Reconnect on other devices if you want Discord access there.
+        </Text>
 
         <Text style={st.inputLabel}>SERVER ID</Text>
         <TextInput
@@ -430,6 +433,7 @@ const st = StyleSheet.create({
   stepLabel: { color: '#fff', fontSize: 14, fontWeight: '700' },
   stepDesc: { color: '#666', fontSize: 12, marginTop: 4, lineHeight: 18 },
   inputLabel: { color: '#555', fontSize: 10, letterSpacing: 2, fontWeight: '700', marginBottom: 6 },
+  securityNote: { color: '#666', fontSize: 11, lineHeight: 16, marginTop: -6, marginBottom: 12 },
   input: {
     backgroundColor: '#111', borderWidth: 1, borderColor: '#222', borderRadius: 10,
     padding: 14, color: '#fff', fontSize: 15, marginBottom: 16,

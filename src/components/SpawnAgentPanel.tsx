@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { AGENT_SPIRITS, SPIRIT_CATEGORIES, type AgentSpirit } from '../lib/agentSpirits';
 import { publishAgentToCircle, updateAgentSpirit, PROVIDER_DISPLAY } from '../lib/circleOffice';
+import { updateAgentIdentity } from '../lib/agentIdentity';
 
 const MONO = Platform.OS === 'ios' ? 'Courier' : 'monospace';
 
@@ -239,7 +240,8 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
       );
     }
 
-    // Store extended config as current_task metadata (JSON)
+    // Store extended config in the published office row so chat + Office can
+    // reuse model/runtime preferences for assign and restore flows.
     if (result.agent) {
       const extendedConfig = {
         modelPreference: config.modelPreference,
@@ -254,10 +256,29 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
         .from('circle_office_agents')
         .update({
           current_goal: JSON.stringify(extendedConfig),
+          model_name: config.modelPreference === 'auto' ? null : config.modelPreference,
           status: 'idle',
           updated_at: new Date().toISOString(),
         })
         .eq('id', result.agent.id);
+
+      await updateAgentIdentity(result.agent.id, {
+        customName: config.name.trim(),
+        customColor: config.color,
+        spiritId: config.spirit?.id || null,
+        spiritEmoji: config.spirit?.emoji || null,
+        soulPrompt: config.customInstructions || null,
+        customProfileName: config.spirit?.name || null,
+        boundAiProvider: config.provider,
+        boundModel: config.modelPreference === 'auto' ? undefined : config.modelPreference,
+        tags: Array.from(new Set([
+          config.provider,
+          ...(config.tools || []),
+          ...(config.traits || []),
+          config.autonomy,
+        ].filter(Boolean))),
+        isCustomized: true,
+      });
     }
 
     setDeploying(false);

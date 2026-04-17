@@ -1,6 +1,30 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { CirclePlan, PlanStep, PlanStatus } from '../types/kanban';
+import { inferTaskIntegrationRequirements } from '../lib/circleIntegrations';
+
+function buildPlanMarketplaceContext(fields: {
+  title?: string | null;
+  description?: string | null;
+  steps?: Array<{ title?: string | null; description?: string | null }>;
+}) {
+  const combinedDescription = [
+    fields.description || '',
+    ...(fields.steps || []).map(step => `${step.title || ''} ${step.description || ''}`),
+  ].join(' ');
+  const inferred = inferTaskIntegrationRequirements({
+    title: fields.title || '',
+    description: combinedDescription,
+  });
+  if (inferred.requiredConnectors.length === 0 && inferred.requiredCapabilities.length === 0) {
+    return undefined;
+  }
+  return {
+    required_connectors: inferred.requiredConnectors,
+    required_capabilities: inferred.requiredCapabilities,
+    last_audited_at: new Date().toISOString(),
+  };
+}
 
 export function usePlans(circleId: string) {
   const [plans, setPlans] = useState<CirclePlan[]>([]);
@@ -11,7 +35,7 @@ export function usePlans(circleId: string) {
     try {
       const { data, error } = await supabase
         .from('circle_plans')
-        .select('*')
+        .select('*, room:project_rooms!circle_plans_room_id_fkey(id, name, status, color)')
         .eq('circle_id', circleId)
         .order('created_at', { ascending: false });
 
@@ -52,13 +76,22 @@ export function usePlans(circleId: string) {
   const createPlan = async (fields: Partial<CirclePlan>) => {
     const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
     if (!user) return;
+    const marketplace = buildPlanMarketplaceContext({
+      title: fields.title,
+      description: fields.description,
+      steps: fields.steps,
+    });
     const { error } = await supabase.from('circle_plans').insert({
       circle_id: circleId,
       title: fields.title || 'New Plan',
       description: fields.description || null,
       status: fields.status || 'draft',
       steps: fields.steps || [],
-      context: fields.context || {},
+      context: {
+        ...(fields.context || {}),
+        ...(marketplace ? { marketplace } : {}),
+      },
+      room_id: fields.room_id || null,
       assigned_agent_ids: fields.assigned_agent_ids || [],
       goal_id: fields.goal_id || null,
       tags: fields.tags || [],
@@ -71,9 +104,23 @@ export function usePlans(circleId: string) {
   };
 
   const updatePlan = async (planId: string, fields: Partial<CirclePlan>) => {
+    const existingPlan = plans.find(plan => plan.id === planId);
+    const marketplace = buildPlanMarketplaceContext({
+      title: fields.title ?? existingPlan?.title,
+      description: fields.description ?? existingPlan?.description,
+      steps: fields.steps ?? existingPlan?.steps,
+    });
     const { error } = await supabase
       .from('circle_plans')
-      .update({ ...fields, updated_at: new Date().toISOString() })
+      .update({
+        ...fields,
+        context: {
+          ...(existingPlan?.context || {}),
+          ...(fields.context || {}),
+          ...(marketplace ? { marketplace } : {}),
+        },
+        updated_at: new Date().toISOString(),
+      })
       .eq('id', planId);
     if (error) console.error('updatePlan error:', error);
     else fetchPlans();
@@ -111,6 +158,17 @@ export function usePlans(circleId: string) {
     const pendingSteps = plan.steps.filter(s => s.status !== 'done' && !s.task_id);
     if (pendingSteps.length === 0) return;
 
+    let effectiveAgentIds = Array.isArray(plan.assigned_agent_ids) ? [...plan.assigned_agent_ids] : [];
+    if (effectiveAgentIds.length === 0 && plan.room_id) {
+      const { data: roomAgents } = await supabase
+        .from('project_room_agents')
+        .select('agent_session_key, status')
+        .eq('room_id', plan.room_id)
+        .neq('status', 'offline')
+        .order('last_active_at', { ascending: false });
+      effectiveAgentIds = Array.from(new Set((roomAgents || []).map((row: any) => String(row.agent_session_key || '').trim()).filter(Boolean)));
+    }
+
     const { data: existingTasks } = await supabase
       .from('tasks')
       .select('position')
@@ -129,8 +187,9 @@ export function usePlans(circleId: string) {
       priority: 'normal' as const,
       status: 'todo' as const,
       position: nextPos + i,
-      assigned_agent_id: plan.assigned_agent_ids?.[0] || null,
-      completion_policy: (plan.assigned_agent_ids?.length || 0) > 1 ? 'all_assigned' : 'single_owner',
+      room_id: plan.room_id || null,
+      assigned_agent_id: effectiveAgentIds[0] || null,
+      completion_policy: effectiveAgentIds.length > 1 ? 'any_assigned' : 'single_owner',
       plan_id: planId,
       plan_step_id: step.id,
       goal_id: plan.goal_id || null,
@@ -148,10 +207,10 @@ export function usePlans(circleId: string) {
     }
 
     if (inserted && inserted.length === pendingSteps.length) {
-      if (plan.assigned_agent_ids?.length) {
+      if (effectiveAgentIds.length) {
         try {
           const assignmentRows = inserted.flatMap((row: any) =>
-            plan.assigned_agent_ids.map((agentId, index) => ({
+            effectiveAgentIds.map((agentId, index) => ({
               task_id: row.id,
               circle_id: circleId,
               agent_id: agentId,

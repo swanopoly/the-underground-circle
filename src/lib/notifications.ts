@@ -146,6 +146,7 @@ export async function notifyStreakMilestone(streakDays: number, milestoneName: s
  * Call once on app startup.
  */
 export async function setupNotifications(): Promise<void> {
+  if (Platform.OS === 'web') return;
   const notif = await getNotifications();
   if (!notif) return;
 

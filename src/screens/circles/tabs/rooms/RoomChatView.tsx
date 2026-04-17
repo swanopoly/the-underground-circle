@@ -12,8 +12,9 @@ import {
 } from 'react-native';
 import { ROOM_CHAT_PRESETS, type ChatPreset, type RoomMessage } from './roomTypes';
 import { useRoomMessages } from './roomHooks';
-import { getSwanBotResponse } from '../../../../lib/swanbot';
 import { supabase } from '../../../../lib/supabase';
+import ChatArtifacts from '../../../../components/chat/ChatArtifacts';
+import { sendRoomStructuredChatMessage } from '../../../../lib/roomChatService';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -90,49 +91,20 @@ function RoomChatView({ roomId, circleId, accentColor, activeFile }: Props) {
 
     setInput('');
 
-    // Post user message to room_messages
-    const { error: insertErr } = await supabase.from('room_messages').insert({
-      room_id: roomId,
-      user_id: userIdRef.current,
-      content: trimmed,
-      message_type: 'chat',
-      metadata: activeFile ? { attached_file: activeFile.name } : {},
-    });
-    if (insertErr) {
-      console.warn('Failed to insert message:', insertErr.message);
-    }
-
     // Build context for AI
     setBotTyping(true);
     try {
-      // Gather recent messages for context
-      const recentContext = messages
-        .slice(-10)
-        .map((m) => {
-          const role = m.agentName ? 'agent' : 'user';
-          return `${role}: ${m.content}`;
-        })
-        .join('\n');
-
-      const fileContext = activeFile
-        ? `\n\n[Attached file: ${activeFile.name} (${activeFile.file_type})]\n\`\`\`\n${activeFile.content.slice(0, 3000)}\n\`\`\``
-        : '';
-
-      const chatHistory = recentContext + fileContext;
-
-      const aiResponse = await getSwanBotResponse(trimmed, {
-        userId: userIdRef.current,
+      await sendRoomStructuredChatMessage({
+        roomId,
         circleId,
-        chatHistory,
-      });
-
-      // Post AI response
-      await supabase.from('room_messages').insert({
-        room_id: roomId,
-        agent_name: 'BlackSwan',
-        content: aiResponse,
-        message_type: 'agent_output',
-        metadata: {},
+        userId: userIdRef.current,
+        content: trimmed,
+        activeFile,
+        recentMessages: messages.map((message) => ({
+          content: message.content,
+          metadata: message.metadata,
+          agent_name: message.agentName,
+        })),
       });
     } catch (err: any) {
       // Post error as system message
@@ -234,6 +206,8 @@ function RoomChatView({ roomId, circleId, accentColor, activeFile }: Props) {
           }
 
           if (isAgent) {
+            const artifacts = Array.isArray(msg.metadata?.artifacts) ? msg.metadata.artifacts : [];
+            const memoriesUsed = Array.isArray(msg.metadata?.memories_used) ? msg.metadata.memories_used : [];
             return (
               <View key={msg.id} style={styles.agentMsg}>
                 <View style={[styles.agentAccent, { backgroundColor: '#22c55e' }]} />
@@ -245,6 +219,23 @@ function RoomChatView({ roomId, circleId, accentColor, activeFile }: Props) {
                     <Text style={styles.msgTime}>{timeAgo(msg.createdAt)}</Text>
                   </View>
                   <Text style={styles.agentText} selectable>{msg.content}</Text>
+                  {artifacts.length > 0 && (
+                    <ChatArtifacts
+                      artifacts={artifacts as any}
+                      accentColor={accentColor}
+                      circleId={circleId}
+                      roomContext={{ roomId }}
+                    />
+                  )}
+                  {memoriesUsed.length > 0 && (
+                    <View style={styles.memoryChipRow}>
+                      {memoriesUsed.slice(0, 5).map((memory, index) => (
+                        <View key={`${String(memory)}-${index}`} style={styles.memoryChip}>
+                          <Text style={styles.memoryChipText}>{String(memory)}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  )}
                 </View>
               </View>
             );
@@ -452,6 +443,26 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: MONO,
     lineHeight: 18,
+  },
+  memoryChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 6,
+  },
+  memoryChip: {
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    borderRadius: 2,
+    borderWidth: 1,
+    borderColor: '#224328',
+    backgroundColor: '#08100a',
+  },
+  memoryChipText: {
+    color: '#bfe0c4',
+    fontSize: 9,
+    fontFamily: MONO,
+    fontWeight: '700',
   },
 
   // User messages (right-aligned)

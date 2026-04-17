@@ -312,15 +312,16 @@ export async function submitPhotonProof(
       success: true, 
       proof: {
         id: data.id,
-        userId,
-        circleId: request.circleId,
-        timestamp: new Date(data.timestamp),
-        photoUrl: data.photo_url,
-        lightLevel: data.light_level,
+        user_id: userId,
+        circle_id: request.circleId,
+        timestamp: data.timestamp,
+        photo_url: data.photo_url,
+        light_level: data.light_level,
         verified: data.verified,
         streak: data.streak,
         latitude: data.latitude,
         longitude: data.longitude,
+        created_at: data.created_at || data.timestamp,
       },
       validation 
     };
@@ -359,15 +360,16 @@ export async function getUserPhotonHistory(
   
   return (data || []).map(d => ({
     id: d.id,
-    userId: d.user_id,
-    circleId: d.circle_id,
-    timestamp: new Date(d.timestamp),
-    photoUrl: d.photo_url,
-    lightLevel: d.light_level,
+    user_id: d.user_id,
+    circle_id: d.circle_id,
+    timestamp: d.timestamp,
+    photo_url: d.photo_url,
+    light_level: d.light_level,
     verified: d.verified,
     streak: d.streak,
     latitude: d.latitude,
     longitude: d.longitude,
+    created_at: d.created_at || d.timestamp,
   }));
 }
 

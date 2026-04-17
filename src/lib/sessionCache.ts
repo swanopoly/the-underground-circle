@@ -1,5 +1,6 @@
 // Session Cache - Persistent storage for agent session data
 import { storage } from './storage';
+import { getAgentIdentityKey } from './agentIdentity';
 import { OfficeAgent } from './officeAgents';
 
 const STORAGE_KEY_SESSION_CACHE = '@office_session_cache';
@@ -201,8 +202,7 @@ export async function enrichAgentsWithCache(agents: OfficeAgent[]): Promise<Offi
   const todaySnapshot = dailyCosts.find(s => s.date === today);
 
   return agents.map(agent => {
-    // Extract sessionKey from agent.id (format: "connectionId::sessionKey")
-    const sessionKey = agent.id.includes('::') ? agent.id.split('::')[1] : agent.id;
+    const sessionKey = getAgentIdentityKey(agent);
     const cached = cache.get(sessionKey);
     
     if (cached) {
@@ -237,8 +237,7 @@ export async function takeSnapshot(
 ): Promise<void> {
   // Save current agent states to cache
   const sessions: CachedSession[] = agents.map(agent => {
-    // Extract sessionKey from agent.id
-    const sessionKey = agent.id.includes('::') ? agent.id.split('::')[1] : agent.id;
+    const sessionKey = getAgentIdentityKey(agent);
     const tags = sessionTags?.get(agent.id);
     const tagKeys = tags?.map((t: any) => t.key) || [];
     

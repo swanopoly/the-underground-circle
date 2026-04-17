@@ -587,37 +587,144 @@ const server = http.createServer((req, res) => {
   }
 
 
-  // ── POST /spawn — spawn a new Claude Code session with a task ──────────────
-  if (url === '/spawn' && req.method === 'POST') {
+  // ── POST /secrets — fetch credentials from 1Password via op CLI ──────────────
+  // Body: { item: "WordPress Warsaw", vault?: "Agent Credentials", fields?: ["username","password"] }
+  // Requires: `op` CLI installed + OP_SERVICE_ACCOUNT_TOKEN env var set
+  // Returns: { ok: true, fields: { username: "...", password: "..." } }
+  if (url === '/secrets' && req.method === 'POST') {
     let body = '';
-    req.on('data', c => { body += c; if (body.length > 64000) req.destroy(); });
+    req.on('data', c => { body += c; if (body.length > 8000) req.destroy(); });
     req.on('end', () => {
       let parsed;
       try { parsed = JSON.parse(body); } catch { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' })); return; }
-      const { task, model, workdir } = parsed;
-      if (!task) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'Missing task' })); return; }
+      const { item, vault, fields, uri } = parsed;
 
-      const cwd = workdir || process.cwd();
-      const modelFlag = model ? `--model ${model}` : '';
-      // Spawn claude in background with the task as prompt, capture session output
-      const escaped = task.replace(/'/g, "'\\''");
-      const cmd = `cd "${cwd}" && nohup claude ${modelFlag} --dangerously-skip-permissions -p "${escaped}" > /tmp/claude-spawn-$$.log 2>&1 & echo $!`;
+      if (!item && !uri) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Missing item name or op:// URI' }));
+        return;
+      }
 
-      const { exec } = require('child_process');
-      exec(cmd, { timeout: 10000, shell: '/bin/bash' }, (err, stdout, stderr) => {
-        if (err) {
-          res.writeHead(500, CORS);
-          res.end(JSON.stringify({ ok: false, error: err.message }));
-          return;
+      // Check if op CLI is available
+      try { execSync('op --version', { timeout: 5000, stdio: 'pipe' }); } catch {
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ ok: false, error: '1Password CLI (op) not found. Install: https://1password.com/downloads/command-line/' }));
+        return;
+      }
+
+      try {
+        let result;
+        if (uri) {
+          // Direct op:// URI resolution: op read "op://vault/item/field"
+          const out = execSync(`op read "${uri}"`, { timeout: 10000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+          result = { value: out };
+        } else {
+          // Item get with specific fields
+          const vaultFlag = vault ? ` --vault "${vault}"` : '';
+          const fieldsFlag = fields?.length ? ` --fields "${fields.join(',')}"` : '';
+          const cmd = `op item get "${item}"${vaultFlag}${fieldsFlag} --format json`;
+          const out = execSync(cmd, { timeout: 10000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+          const data = JSON.parse(out);
+          // Normalize: if fields were requested, data is an array of {id, value, label}
+          if (Array.isArray(data)) {
+            const fieldMap = {};
+            for (const f of data) { fieldMap[f.label || f.id] = f.value; }
+            result = fieldMap;
+          } else if (data.fields) {
+            const fieldMap = {};
+            for (const f of data.fields) {
+              if (f.value) fieldMap[f.label || f.id] = f.value;
+            }
+            result = fieldMap;
+          } else {
+            result = data;
+          }
         }
-        const pid = stdout.trim();
         res.writeHead(200, CORS);
-        res.end(JSON.stringify({
-          ok: true,
-          pid,
-          message: `Spawned Claude Code session (PID ${pid}) with task: ${task.slice(0, 100)}`,
-        }));
-      });
+        res.end(JSON.stringify({ ok: true, fields: result }));
+      } catch (err) {
+        const msg = err.stderr ? err.stderr.toString().trim() : (err.message || 'op command failed');
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ ok: false, error: msg }));
+      }
+    });
+    return;
+  }
+
+  // ── POST /spawn — spawn one or more Claude Code sessions with tasks ─────────
+  // Body: { task, model?, workdir?, count?, tasks?, useWorktree? }
+  //   - task + count: spawn N sessions with the same task (appends index)
+  //   - tasks: array of { task, model? } to spawn one per entry
+  //   - useWorktree: if true, each session gets its own git worktree branch
+  if (url === '/spawn' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 128000) req.destroy(); });
+    req.on('end', async () => {
+      let parsed;
+      try { parsed = JSON.parse(body); } catch { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' })); return; }
+
+      // Normalize into an array of { task, model }
+      let items = [];
+      if (Array.isArray(parsed.tasks)) {
+        items = parsed.tasks.filter(t => t && t.task).slice(0, 20);
+      } else if (parsed.task) {
+        const count = Math.min(Math.max(parseInt(parsed.count) || 1, 1), 20);
+        for (let i = 0; i < count; i++) {
+          const suffix = count > 1 ? ` (agent ${i + 1}/${count})` : '';
+          items.push({ task: parsed.task + suffix, model: parsed.model });
+        }
+      }
+      if (items.length === 0) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'Missing task or tasks[]' })); return; }
+
+      const baseCwd = parsed.workdir || process.cwd();
+      const useWorktree = !!parsed.useWorktree;
+      const results = [];
+
+      for (let i = 0; i < items.length; i++) {
+        const { task, model } = items[i];
+        const modelFlag = model ? `--model ${model}` : '';
+        let cwd = baseCwd;
+
+        // Optional: git worktree isolation per agent
+        if (useWorktree) {
+          try {
+            const branch = `openswan-agent-${Date.now()}-${i}`;
+            const worktreeDir = path.join(baseCwd, '.openswan-worktrees', branch);
+            execSync(`mkdir -p "${path.dirname(worktreeDir)}"`, { cwd: baseCwd });
+            execSync(`git worktree add "${worktreeDir}" -b "${branch}" HEAD 2>/dev/null || git worktree add "${worktreeDir}" "${branch}" 2>/dev/null`, { cwd: baseCwd, timeout: 15000 });
+            cwd = worktreeDir;
+          } catch (wtErr) {
+            // Fall back to shared workspace if worktree fails
+            console.warn(`[spawn] Worktree creation failed for agent ${i}:`, wtErr.message);
+          }
+        }
+
+        const escaped = task.replace(/'/g, "'\\''");
+        const logFile = `/tmp/claude-spawn-${Date.now()}-${i}.log`;
+        const cmd = `cd "${cwd}" && nohup claude ${modelFlag} --dangerously-skip-permissions -p "${escaped}" > "${logFile}" 2>&1 & echo $!`;
+
+        try {
+          const pid = await new Promise((resolve, reject) => {
+            exec(cmd, { timeout: 15000, shell: '/bin/bash' }, (err, stdout) => {
+              if (err) reject(err);
+              else resolve(stdout.trim());
+            });
+          });
+          results.push({ ok: true, pid, task: task.slice(0, 120), cwd, logFile });
+        } catch (err) {
+          results.push({ ok: false, error: err.message, task: task.slice(0, 120) });
+        }
+      }
+
+      const succeeded = results.filter(r => r.ok).length;
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify({
+        ok: succeeded > 0,
+        spawned: succeeded,
+        total: items.length,
+        results,
+        message: `Spawned ${succeeded}/${items.length} Claude Code session${succeeded !== 1 ? 's' : ''}`,
+      }));
     });
     return;
   }

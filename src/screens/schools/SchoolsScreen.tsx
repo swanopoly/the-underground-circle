@@ -2,7 +2,10 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { View, Text, StyleSheet, Pressable, ScrollView, Platform, Animated, Easing } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { TRACKS, getTotalLessons, getTotalXP, Track } from '../../lib/schoolsData';
-import { getProgress, getTrackProgress, SchoolsProgress } from '../../lib/schoolsProgress';
+import { getContinueLessonQueue, getContinueLessonRef, getProgress, getTrackProgress, SchoolsProgress } from '../../lib/schoolsProgress';
+import { getArticlesForLesson } from '../../lib/wikiData';
+import { getWikiProgress, WikiProgress } from '../../lib/wikiProgress';
+import { interleaveQueues } from '../../lib/learningPath';
 
 // ─── Design Tokens ────────────────────────────────────────────────────────
 const BG_PAGE = '#050508', BG_SURFACE = '#0a0a10', BG_RAISED = '#0f0f18', BG_INPUT = '#1a1a28';
@@ -135,6 +138,117 @@ function WikiLinkCard({ onPress }: { onPress: () => void }) {
   );
 }
 
+function ResearchControlLinkCard({ onPress }: { onPress: () => void }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <View style={{ maxWidth: 720, width: '100%', alignSelf: 'center', marginTop: 16 }} nativeID="section-schools-research-link">
+      <Pressable
+        onPress={onPress}
+        onHoverIn={() => setHovered(true)}
+        onHoverOut={() => setHovered(false)}
+        accessibilityRole="button"
+        accessibilityLabel="Browse Research Control Center"
+        style={[s.wikiCard, hovered && s.wikiCardHover]}
+      >
+        <View style={[s.wikiAccent, { backgroundColor: '#22c55e' }]} />
+        <View style={s.wikiInner}>
+          <View style={[s.wikiIconBox, { borderColor: '#22c55e30', backgroundColor: '#22c55e15' }]}>
+            <Text style={[s.wikiIconText, { color: '#22c55e' }]}>{'R'}</Text>
+          </View>
+          <View style={s.wikiTitleWrap}>
+            <Text style={s.wikiTitle}>Research Control Center</Text>
+            <Text style={s.wikiSubtitle}>See what the daily research agents are learning and feeding into the SOULs</Text>
+          </View>
+          <Text style={[s.wikiArrow, { color: '#22c55e' }]}>{'-->'}</Text>
+        </View>
+      </Pressable>
+    </View>
+  );
+}
+
+function ContinueLearningCard({ title, subtitle, onPress }: {
+  title: string;
+  subtitle: string;
+  onPress: () => void;
+}) {
+  return (
+    <View style={s.continueWrap} nativeID="section-schools-continue">
+      <Pressable
+        onPress={onPress}
+        accessibilityRole="button"
+        accessibilityLabel={`Continue with ${title}`}
+        style={s.continueCard}
+      >
+        <View style={s.continueAccent} />
+        <View style={s.continueInner}>
+          <View style={s.continueTextWrap}>
+            <Text style={s.continueLabel}>CONTINUE WHERE YOU LEFT OFF</Text>
+            <Text style={s.continueTitle}>{title}</Text>
+            <Text style={s.continueSubtitle}>{subtitle}</Text>
+          </View>
+          <Text style={s.continueArrow}>{'-->'}</Text>
+        </View>
+      </Pressable>
+    </View>
+  );
+}
+
+function LearningPathCard({ label, title, subtitle, accentColor, onPress }: {
+  label: string;
+  title: string;
+  subtitle: string;
+  accentColor: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${label}: ${title}`}
+      style={s.pathCard}
+    >
+      <View style={[s.pathAccent, { backgroundColor: accentColor }]} />
+      <View style={s.pathInner}>
+        <View style={s.pathTextWrap}>
+          <Text style={[s.pathLabel, { color: accentColor }]}>{label}</Text>
+          <Text style={s.pathTitle}>{title}</Text>
+          <Text style={s.pathSubtitle}>{subtitle}</Text>
+        </View>
+        <Text style={[s.pathArrow, { color: accentColor }]}>{'-->'}</Text>
+      </View>
+    </Pressable>
+  );
+}
+
+function PathQueueCard({ label, title, subtitle, accentColor, onPress }: {
+  label: string;
+  title: string;
+  subtitle: string;
+  accentColor: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${label}: ${title}`}
+      style={s.queueCard}
+    >
+      <View style={[s.queueDot, { backgroundColor: accentColor }]} />
+      <View style={s.queueTextWrap}>
+        <Text style={[s.queueLabel, { color: accentColor }]}>{label}</Text>
+        <Text style={s.queueTitle}>{title}</Text>
+        <Text style={s.queueSubtitle}>{subtitle}</Text>
+      </View>
+      <Text style={[s.queueArrow, { color: accentColor }]}>{'-->'}</Text>
+    </Pressable>
+  );
+}
+
+type SchoolsQueuedItem =
+  | { kind: 'lesson'; item: import('../../lib/schoolsData').LessonRef }
+  | { kind: 'article'; item: import('../../lib/wikiData').WikiArticle };
+
 // ─── Main Screen ───────────────────────────────────────────────────────────
 export default function SchoolsScreen({ navigation }: any) {
   const [progress, setProgress] = useState<SchoolsProgress>({
@@ -143,12 +257,21 @@ export default function SchoolsScreen({ navigation }: any) {
     lessonsCompleted: 0,
     currentStreak: 0,
   });
+  const [wikiProgress, setWikiProgress] = useState<WikiProgress>({ readArticleIds: [] });
 
   const headerAnim = useRef(new Animated.Value(0)).current;
   const overviewAnim = useRef(new Animated.Value(0)).current;
 
   useFocusEffect(useCallback(() => {
-    getProgress().then(setProgress);
+    let active = true;
+    Promise.all([getProgress(), getWikiProgress()]).then(([schoolsProgress, nextWikiProgress]) => {
+      if (!active) return;
+      setProgress(schoolsProgress);
+      setWikiProgress(nextWikiProgress);
+    });
+    return () => {
+      active = false;
+    };
   }, []));
 
   useEffect(() => {
@@ -160,6 +283,23 @@ export default function SchoolsScreen({ navigation }: any) {
   const totalProgressPercent = totalLessonsAll > 0
     ? Math.round((progress.lessonsCompleted / totalLessonsAll) * 100)
     : 0;
+  const continueLesson = getContinueLessonRef(progress);
+  const lessonQueue = getContinueLessonQueue(progress, 3);
+  const continueWikiArticle = continueLesson
+    ? getArticlesForLesson(continueLesson.trackId, continueLesson.moduleId, continueLesson.lessonId)[0]
+    : undefined;
+  const unreadReadQueue = lessonQueue
+    .map(item => ({
+      lesson: item,
+      article: getArticlesForLesson(item.trackId, item.moduleId, item.lessonId)[0],
+    }))
+    .filter((item): item is { lesson: typeof lessonQueue[number]; article: NonNullable<typeof continueWikiArticle> } => (
+      Boolean(item.article) && !wikiProgress.readArticleIds.includes(item.article.id)
+    ));
+  const queuedItems = interleaveQueues<SchoolsQueuedItem>([
+    lessonQueue.slice(1).map(item => ({ kind: 'lesson', item })),
+    unreadReadQueue.slice(1).map(item => ({ kind: 'article', item: item.article })),
+  ], 4);
 
   return (
     <View style={s.page} nativeID="section-schools-hub">
@@ -199,6 +339,78 @@ export default function SchoolsScreen({ navigation }: any) {
           </View>
         </Animated.View>
 
+        {continueLesson && (
+          <ContinueLearningCard
+            title={continueLesson.lessonTitle}
+            subtitle={continueLesson.moduleTitle}
+            onPress={() => navigation.navigate('SchoolsLesson', {
+              trackId: continueLesson.trackId,
+              moduleId: continueLesson.moduleId,
+              lessonId: continueLesson.lessonId,
+            })}
+          />
+        )}
+
+        {continueLesson && (
+          <View style={s.pathWrap} nativeID="section-schools-learning-path">
+            <Text style={s.pathSectionLabel}>Learning Path</Text>
+            <Text style={s.pathSectionTitle}>Build And Read Side By Side</Text>
+            <Text style={s.pathSectionSubtitle}>
+              Keep one foot in hands-on lessons and one foot in deeper reference material.
+            </Text>
+            <View style={s.pathStack}>
+              <LearningPathCard
+                label="BUILD NEXT"
+                title={continueLesson.lessonTitle}
+                subtitle={continueLesson.moduleTitle}
+                accentColor={AMBER}
+                onPress={() => navigation.navigate('SchoolsLesson', {
+                  trackId: continueLesson.trackId,
+                  moduleId: continueLesson.moduleId,
+                  lessonId: continueLesson.lessonId,
+                })}
+              />
+              {continueWikiArticle && (
+                <LearningPathCard
+                  label="READ NEXT"
+                  title={continueWikiArticle.title}
+                  subtitle={continueWikiArticle.subtitle}
+                  accentColor={CYAN}
+                  onPress={() => navigation.navigate('WikiArticle', { articleId: continueWikiArticle.id })}
+                />
+              )}
+            </View>
+            {queuedItems.length > 0 && (
+              <View style={s.queueWrap}>
+                <Text style={s.queueHeading}>Queued Next</Text>
+                {queuedItems.map(entry => entry.kind === 'lesson' ? (
+                  <PathQueueCard
+                    key={`lesson-${entry.item.trackId}-${entry.item.moduleId}-${entry.item.lessonId}`}
+                    label="BUILD LATER"
+                    title={entry.item.lessonTitle}
+                    subtitle={entry.item.moduleTitle}
+                    accentColor={AMBER}
+                    onPress={() => navigation.navigate('SchoolsLesson', {
+                      trackId: entry.item.trackId,
+                      moduleId: entry.item.moduleId,
+                      lessonId: entry.item.lessonId,
+                    })}
+                  />
+                ) : (
+                  <PathQueueCard
+                    key={`wiki-${entry.item.id}`}
+                    label="READ LATER"
+                    title={entry.item.title}
+                    subtitle={entry.item.subtitle}
+                    accentColor={CYAN}
+                    onPress={() => navigation.navigate('WikiArticle', { articleId: entry.item.id })}
+                  />
+                ))}
+              </View>
+            )}
+          </View>
+        )}
+
         {/* ── SECTION: Track Cards ── */}
         <View nativeID="section-schools-tracks" style={s.tracksContainer}>
           {TRACKS.map((track, index) => (
@@ -214,6 +426,7 @@ export default function SchoolsScreen({ navigation }: any) {
 
         {/* ── SECTION: Wiki Link ── */}
         <WikiLinkCard onPress={() => navigation.navigate('Wiki')} />
+        <ResearchControlLinkCard onPress={() => navigation.navigate('ResearchControlCenter')} />
 
         {/* ── SECTION: Footer ── */}
         <View style={s.footer} nativeID="section-schools-footer">
@@ -253,6 +466,53 @@ const s = StyleSheet.create({
   overviewStatValue: { fontSize: 22, fontWeight: '700', marginBottom: 4 },
   overviewStatLabel: { fontSize: 11, fontWeight: '500', color: TEXT_TER, textAlign: 'center' },
   overviewStatDivider: { width: 1, height: 32, backgroundColor: BORDER_DEF },
+
+  // Continue
+  continueWrap: { maxWidth: 720, width: '100%', alignSelf: 'center', marginBottom: 24 },
+  continueCard: {
+    backgroundColor: BG_SURFACE, borderWidth: 1, borderColor: AMBER_BORDER, borderRadius: R_CARD,
+    overflow: 'hidden',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  continueAccent: { height: 3, width: '100%', backgroundColor: AMBER },
+  continueInner: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 18 },
+  continueTextWrap: { flex: 1 },
+  continueLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 1.1, color: AMBER, marginBottom: 5 },
+  continueTitle: { fontSize: 16, fontWeight: '600', color: TEXT_PRI, marginBottom: 3 },
+  continueSubtitle: { fontSize: 13, fontWeight: '400', color: TEXT_SEC },
+  continueArrow: { fontSize: 14, fontWeight: '700', color: AMBER },
+
+  // Learning path
+  pathWrap: { maxWidth: 720, width: '100%', alignSelf: 'center', marginBottom: 28 },
+  pathSectionLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 1.1, color: TEXT_TER, marginBottom: 6 },
+  pathSectionTitle: { fontSize: 20, fontWeight: '700', color: TEXT_PRI, letterSpacing: -0.3, marginBottom: 4 },
+  pathSectionSubtitle: { fontSize: 13, fontWeight: '400', color: TEXT_SEC, lineHeight: 20, marginBottom: 12 },
+  pathStack: { gap: 10 },
+  pathCard: {
+    backgroundColor: BG_SURFACE, borderWidth: 1, borderColor: BORDER_DEF, borderRadius: R_CARD,
+    overflow: 'hidden',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  pathAccent: { height: 3, width: '100%' },
+  pathInner: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 16 },
+  pathTextWrap: { flex: 1 },
+  pathLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 1.1, marginBottom: 4 },
+  pathTitle: { fontSize: 15, fontWeight: '600', color: TEXT_PRI, marginBottom: 3 },
+  pathSubtitle: { fontSize: 12, fontWeight: '400', color: TEXT_SEC },
+  pathArrow: { fontSize: 14, fontWeight: '700' },
+  queueWrap: { marginTop: 12, gap: 8 },
+  queueHeading: { fontSize: 12, fontWeight: '600', color: TEXT_TER, marginBottom: 2 },
+  queueCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: BG_RAISED,
+    borderWidth: 1, borderColor: BORDER_DEF, borderRadius: R_BTN, padding: 12,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  queueDot: { width: 8, height: 8, borderRadius: 4, marginTop: 2 },
+  queueTextWrap: { flex: 1 },
+  queueLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 1, marginBottom: 3 },
+  queueTitle: { fontSize: 13, fontWeight: '600', color: TEXT_PRI, marginBottom: 2 },
+  queueSubtitle: { fontSize: 11, fontWeight: '400', color: TEXT_SEC },
+  queueArrow: { fontSize: 13, fontWeight: '700' },
 
   // Tracks
   tracksContainer: { maxWidth: 720, width: '100%', alignSelf: 'center', gap: 14 },

@@ -1,5 +1,12 @@
 import { supabase } from './supabase';
 import { Integration, FriendRequest, Friend } from '../types';
+import { deleteLocalSecret, writeLocalSecret } from './localSecrets';
+
+const LEGACY_SECRET_PLACEHOLDER = '__local_secret__';
+
+function integrationSecretId(userId: string, platform: Integration['platform']): string {
+  return `${userId}:${platform}`;
+}
 
 // Integration management
 export async function getUserIntegrations(userId: string): Promise<Integration[]> {
@@ -25,8 +32,9 @@ export async function connectIntegration(
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error('User not authenticated');
 
-  // For demo purposes, we'll store tokens as-is. 
-  // In production, encrypt these before storage!
+  await writeLocalSecret('legacy_integration_access_token', integrationSecretId(user.id, platform), accessToken);
+  await writeLocalSecret('legacy_integration_refresh_token', integrationSecretId(user.id, platform), refreshToken || '');
+
   const { data, error } = await supabase
     .from('integrations')
     .upsert({
@@ -34,9 +42,14 @@ export async function connectIntegration(
       platform,
       platform_user_id: platformUserId,
       platform_username: platformUsername,
-      access_token_encrypted: accessToken, // Should be encrypted!
-      refresh_token_encrypted: refreshToken, // Should be encrypted!
-      metadata: metadata || {},
+      access_token_encrypted: LEGACY_SECRET_PLACEHOLDER,
+      refresh_token_encrypted: refreshToken ? LEGACY_SECRET_PLACEHOLDER : null,
+      metadata: {
+        ...(metadata || {}),
+        secretStorage: 'local_only',
+        hasAccessToken: true,
+        hasRefreshToken: !!refreshToken,
+      },
       is_active: true,
       connected_at: new Date().toISOString(),
     })
@@ -53,11 +66,22 @@ export async function disconnectIntegration(platform: Integration['platform']): 
 
   const { error } = await supabase
     .from('integrations')
-    .update({ is_active: false })
+    .update({
+      is_active: false,
+      access_token_encrypted: LEGACY_SECRET_PLACEHOLDER,
+      refresh_token_encrypted: null,
+      metadata: {
+        secretStorage: 'local_only',
+        hasAccessToken: false,
+        hasRefreshToken: false,
+      },
+    })
     .eq('user_id', user.id)
     .eq('platform', platform);
 
   if (error) throw error;
+  await deleteLocalSecret('legacy_integration_access_token', integrationSecretId(user.id, platform));
+  await deleteLocalSecret('legacy_integration_refresh_token', integrationSecretId(user.id, platform));
 }
 
 // Friend system

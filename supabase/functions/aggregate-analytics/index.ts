@@ -1,12 +1,12 @@
 // Aggregate Analytics — Supabase Edge Function (daily cron)
 // Computes daily rollups for each circle into circle_analytics_daily
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
+import {
+  corsHeaders,
+  createServiceRoleClient,
+  errResponse,
+  jsonResponse,
+} from "../_shared/edge.ts";
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -14,10 +14,7 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-    );
+    const supabase = createServiceRoleClient();
 
     const today = new Date().toISOString().split("T")[0];
     const todayStart = `${today}T00:00:00Z`;
@@ -29,10 +26,7 @@ Deno.serve(async (req: Request) => {
       .select("id");
 
     if (!circles || circles.length === 0) {
-      return new Response(
-        JSON.stringify({ processed: 0 }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return jsonResponse({ processed: 0 });
     }
 
     let processed = 0;
@@ -134,15 +128,9 @@ Deno.serve(async (req: Request) => {
       processed++;
     }
 
-    return new Response(
-      JSON.stringify({ processed, date: today }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return jsonResponse({ processed, date: today });
   } catch (error: any) {
     console.error("Aggregate analytics error:", error);
-    return new Response(
-      JSON.stringify({ error: error.message }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return errResponse(500, "internal", error?.message || "Internal server error");
   }
 });

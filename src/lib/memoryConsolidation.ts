@@ -95,53 +95,120 @@ export async function pruneStaleMemories(circleId: string): Promise<number> {
 
 /**
  * Check if a new memory contradicts existing memories.
- * Uses keyword overlap + opposite sentiment detection.
+ *
+ * Phase 4 upgrade: first use embeddings (`match_memories` RPC) to cheaply
+ * narrow the candidate pool to the top-10 semantically closest memories.
+ * Keyword + negation signals then decide whether it's a contradiction or
+ * a restatement. If embeddings aren't available yet (PGRST202, migration
+ * not run), we fall back to the original keyword-only scan.
  */
 export async function detectContradictions(
   circleId: string,
   newMemory: { title: string; content: string; kind: string },
 ): Promise<{ contradicts: boolean; conflictingMemories: MemoryEntry[]; suggestion: string }> {
-  // Find memories with overlapping topics
-  const keywords = extractKeywords(newMemory.title + ' ' + newMemory.content);
-  if (keywords.length === 0) return { contradicts: false, conflictingMemories: [], suggestion: '' };
+  const queryText = `${newMemory.title}\n${newMemory.content}`;
+  if (!queryText.trim()) return { contradicts: false, conflictingMemories: [], suggestion: '' };
 
-  const existing = await loadMemories({ circleId, scopes: ['circle', 'user'], limit: 100 });
+  // Step 1 — try semantic candidate narrowing first
+  let candidates: { id: string; title: string; content: string; scope: string; memory_kind: string; importance: number; metadata: Record<string, unknown>; similarity: number }[] = [];
+  try {
+    const { semanticSearchMemories } = await import('./memoryEmbeddings');
+    candidates = await semanticSearchMemories({
+      queryText,
+      circleId,
+      matchThreshold: 0.78,      // only truly-similar memories are contradiction-worthy
+      limit: 10,
+    });
+  } catch { /* fall through to keyword scan */ }
 
+  // Step 2 — fallback: load by keyword overlap if embeddings yielded nothing
+  // (migration not run yet, rate-limited, or simply no embedded neighbors)
+  let pool: Array<{ id: string; title: string; content: string; scope: string; memory_kind: string }> = candidates;
+  if (pool.length === 0) {
+    const existing = await loadMemories({ circleId, scopes: ['circle', 'user'], limit: 100 });
+    const keywords = extractKeywords(queryText);
+    if (keywords.length === 0) {
+      return { contradicts: false, conflictingMemories: [], suggestion: '' };
+    }
+    pool = existing.filter(m => {
+      const mk = extractKeywords(`${m.title} ${m.content}`);
+      return keywords.filter(k => mk.includes(k)).length >= 2;
+    });
+  }
+
+  // Step 3 — apply contradiction signals to the pool
   const conflicts: MemoryEntry[] = [];
-  for (const mem of existing) {
-    const memKeywords = extractKeywords(mem.title + ' ' + mem.content);
-    const overlap = keywords.filter(k => memKeywords.includes(k));
-
-    if (overlap.length >= 2) {
-      // Check for negation/opposite patterns
-      const newLower = newMemory.content.toLowerCase();
-      const existLower = mem.content.toLowerCase();
-
-      const hasNegation =
-        (newLower.includes('not ') && !existLower.includes('not ')) ||
-        (!newLower.includes('not ') && existLower.includes('not ')) ||
-        (newLower.includes("don't") && !existLower.includes("don't")) ||
-        (newLower.includes('instead of') || newLower.includes('rather than') || newLower.includes('changed to') || newLower.includes('switched to'));
-
-      // Check for value changes (e.g., "uses React" vs "uses Vue")
-      const hasValueChange = overlap.length >= 2 && (
-        newLower.includes('use ') !== existLower.includes('use ') ||
-        newLower.includes('prefer') !== existLower.includes('prefer')
-      );
-
-      if (hasNegation || hasValueChange) {
-        conflicts.push(mem);
-      }
+  const newLower = newMemory.content.toLowerCase();
+  for (const mem of pool) {
+    const existLower = mem.content.toLowerCase();
+    const hasNegation =
+      (newLower.includes('not ') !== existLower.includes('not ')) ||
+      (newLower.includes("don't") !== existLower.includes("don't")) ||
+      newLower.includes('instead of') ||
+      newLower.includes('rather than') ||
+      newLower.includes('changed to') ||
+      newLower.includes('switched to');
+    const hasValueSwap =
+      (newLower.includes('use ') !== existLower.includes('use ')) ||
+      (newLower.includes('prefer') !== existLower.includes('prefer'));
+    if (hasNegation || hasValueSwap) {
+      conflicts.push(mem as unknown as MemoryEntry);
     }
   }
 
-  if (conflicts.length === 0) return { contradicts: false, conflictingMemories: [], suggestion: '' };
-
+  if (conflicts.length === 0) {
+    return { contradicts: false, conflictingMemories: [], suggestion: '' };
+  }
   return {
     contradicts: true,
     conflictingMemories: conflicts,
     suggestion: `New memory "${newMemory.title}" may contradict ${conflicts.length} existing memor${conflicts.length === 1 ? 'y' : 'ies'}. Consider updating the old ${conflicts.length === 1 ? 'one' : 'ones'} instead.`,
   };
+}
+
+// ── Session Decay (mirrors the SQL RPC — useful for UI / admin tools) ──────
+
+/**
+ * Run the server-side `decay_session_memories()` RPC. Same logic as the
+ * daily cron, exposed here so the AgentMemoryPanel can offer a "clean up
+ * old sessions" button.
+ */
+export async function decaySessionMemories(): Promise<{ demoted: number; deactivated: number } | null> {
+  try {
+    const { data, error } = await supabase.rpc('decay_session_memories');
+    if (error) {
+      if ((error as any).code !== 'PGRST202') {
+        console.warn('[memoryConsolidation] decay rpc failed:', error.message);
+      }
+      return null;
+    }
+    const row = Array.isArray(data) ? data[0] : data;
+    return { demoted: row?.demoted || 0, deactivated: row?.deactivated || 0 };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Run the embedding-based near-duplicate collapse for a specific circle.
+ * Same server-side logic as the daily cron but scoped to one circle.
+ */
+export async function collapseNearDuplicates(circleId: string): Promise<number> {
+  try {
+    const { data, error } = await supabase.rpc('collapse_near_dup_by_embedding', {
+      p_circle_id: circleId,
+    });
+    if (error) {
+      if ((error as any).code !== 'PGRST202') {
+        console.warn('[memoryConsolidation] near-dup collapse failed:', error.message);
+      }
+      return 0;
+    }
+    const row = Array.isArray(data) ? data[0] : data;
+    return row?.merged || 0;
+  } catch {
+    return 0;
+  }
 }
 
 // ── Memory Consolidation ("Sleep" Pattern) ──────────────────────────────────

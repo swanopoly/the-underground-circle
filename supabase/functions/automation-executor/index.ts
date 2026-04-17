@@ -7,6 +7,12 @@
 // Secrets: ANTHROPIC_API_KEY (required)
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
+import {
+  errResponse,
+  getAuthenticatedUser,
+  isServiceRoleRequest,
+  jsonResponse,
+} from "../_shared/edge.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -1103,10 +1109,13 @@ Deno.serve(async (req: Request) => {
   }
 
   if (req.method === "GET") {
-    return new Response(
-      JSON.stringify({ status: "ok", service: "automation-executor" }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
+    return jsonResponse({ status: "ok", service: "automation-executor" });
+  }
+
+  const isServiceCaller = isServiceRoleRequest(req);
+  const authedUser = isServiceCaller ? null : await getAuthenticatedUser(req);
+  if (!isServiceCaller && !authedUser) {
+    return errResponse(401, "unauthorized", "automation-executor requires user or service-role authorization");
   }
 
   const supabase = createClient(
@@ -1116,13 +1125,27 @@ Deno.serve(async (req: Request) => {
 
   try {
     const body: AutomationRequest = await req.json();
-    const { automationId, circleId, triggerSource, triggeredBy, eventPayload, retryCount = 0, dryRun = false } = body;
+    const { automationId, circleId, triggerSource, eventPayload, retryCount = 0, dryRun = false } = body;
+    const triggeredBy = authedUser?.id ?? body.triggeredBy ?? null;
 
     if (!automationId || !circleId) {
-      return new Response(
-        JSON.stringify({ error: "Missing automationId or circleId" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+      return jsonResponse({ error: "Missing automationId or circleId" }, 400);
+    }
+
+    if (!isServiceCaller && triggerSource !== "manual") {
+      return errResponse(403, "forbidden", "Only service-role callers may trigger non-manual automations");
+    }
+
+    if (authedUser) {
+      const { data: membership, error: membershipError } = await supabase
+        .from("circle_members")
+        .select("circle_id")
+        .eq("circle_id", circleId)
+        .eq("user_id", authedUser.id)
+        .maybeSingle();
+      if (membershipError || !membership) {
+        return errResponse(403, "forbidden", "You are not a member of this circle");
+      }
     }
 
     // 1. Load automation config
@@ -1133,17 +1156,15 @@ Deno.serve(async (req: Request) => {
       .single();
 
     if (autoErr || !automation) {
-      return new Response(
-        JSON.stringify({ error: "Automation not found" }),
-        { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+      return jsonResponse({ error: "Automation not found" }, 404);
+    }
+
+    if (automation.circle_id !== circleId) {
+      return errResponse(400, "circle_mismatch", "Automation does not belong to the requested circle");
     }
 
     if (!automation.enabled && triggerSource !== "manual") {
-      return new Response(
-        JSON.stringify({ error: "Automation is disabled" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+      return jsonResponse({ error: "Automation is disabled" }, 400);
     }
 
     // 2. Create run record

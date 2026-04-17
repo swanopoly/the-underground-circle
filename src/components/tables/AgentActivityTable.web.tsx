@@ -12,8 +12,8 @@ import { DataTable, type ColumnDef } from './DataTable.web';
 
 interface AgentActivityRow {
   agent_name: string;
-  action: string;
-  detail: string;
+  title: string;
+  body: string;
   created_at: string;
 }
 
@@ -29,12 +29,12 @@ const columns: ColumnDef<AgentActivityRow, any>[] = [
     size: 160,
   },
   {
-    accessorKey: 'action',
-    header: 'Action',
+    accessorKey: 'title',
+    header: 'Title',
     size: 140,
   },
   {
-    accessorKey: 'detail',
+    accessorKey: 'body',
     header: 'Detail',
     size: 320,
   },
@@ -76,7 +76,7 @@ export default function AgentActivityTable({ circleId, accentColor }: AgentActiv
 
       const { data: rows, error: err } = await supabase
         .from('agent_activity')
-        .select('agent_name, action, detail, created_at')
+        .select('agent_name, title, body, created_at')
         .eq('circle_id', circleId)
         .order('created_at', { ascending: false })
         .limit(100);

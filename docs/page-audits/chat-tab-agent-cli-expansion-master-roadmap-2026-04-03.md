@@ -6,7 +6,7 @@ Related repo context:
 
 - `AGENT.md`
 - `docs/OFFICE_ROADMAP.md`
-- `docs/IMPLEMENTATION_ROADMAP.md`
+- `docs/PLAN_STATUS_AUDIT.md`
 - `docs/PRIORITY_FEATURES.md`
 - `docs/page-audits/chat-tab-agent-cli-deep-audit-2026-04-03.md`
 - `docs/page-audits/chat-tab-agent-cli-implementation-spec-2026-04-03.md`

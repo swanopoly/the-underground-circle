@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { View, Text, Animated, Easing, Pressable, Platform, Linking } from 'react-native';
 import { animLoop } from '../../../../lib/animationHelpers';
 import type { FurnitureItem, OfficeTheme } from '../../../../lib/officeConfig';
@@ -13,7 +13,11 @@ import {
   PET_FOOD_INFO, PET_FOOD_TYPES, PET_TRICK_INFO, PET_ACCESSORY_INFO, PET_ACHIEVEMENTS,
 } from '../../../../lib/circleGames';
 
-interface ItemProps { item: FurnitureItem; theme: OfficeTheme; }
+interface ItemProps {
+  item: FurnitureItem;
+  theme: OfficeTheme;
+  onItemUpdate?: (fields: Partial<FurnitureItem>) => void;
+}
 interface DataItemProps extends ItemProps { agents?: OfficeAgent[]; }
 
 const S: any = Platform.OS === 'web' ? { cursor: 'default' } : {};
@@ -3804,44 +3808,57 @@ export function FarmPlotItem({ item, theme }: ItemProps) {
 
 // ─── AI Companion (Cosmic Tamagotchi) ───────────────────────────────────────
 
-export function OfficePetItem({ item, theme }: ItemProps) {
+export function OfficePetItem({ item, theme, onItemUpdate }: ItemProps) {
   const petType = (item.petType || 'cat') as PetType;
   const [name, setName] = useState(item.petName || PET_INFO[petType]?.name || 'Companion');
-  const [hunger, setHunger] = useState(item.petHunger ?? 80);
-  const [happiness, setHappiness] = useState(item.petHappiness ?? 80);
-  const [energy, setEnergy] = useState(item.petEnergy ?? 80);
-  const [cleanliness, setCleanliness] = useState(100);
-  const [lastCleaned, setLastCleaned] = useState(Date.now());
-  const [xp, setXp] = useState(item.petXp ?? 0);
-  const [gold, setGold] = useState(0);
-  const [lastFed, setLastFed] = useState(item.petLastFed ?? Date.now());
-  const [lastPlayed, setLastPlayed] = useState(item.petLastPlayed ?? Date.now());
-  const [lastSlept, setLastSlept] = useState(item.petLastSlept ?? Date.now());
   const [showActions, setShowActions] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
   const [showFood, setShowFood] = useState(false);
   const [showTricks, setShowTricks] = useState(false);
   const [showAccessories, setShowAccessories] = useState(false);
-  const [activePetType, setActivePetType] = useState(petType);
-  const [accessory, setAccessory] = useState<PetAccessory>('none');
   const [actionFlash, setActionFlash] = useState<string | null>(null);
-  const [trickCount, setTrickCount] = useState(0);
-  const [foodsTried, setFoodsTried] = useState<Set<PetFood>>(new Set());
-  const [earnedAchievements, setEarnedAchievements] = useState<string[]>([]);
+  const [clock, setClock] = useState(() => Date.now());
 
-  // Stat decay tick
   useEffect(() => {
-    const iv = setInterval(() => {
-      const s = computePetStats(hunger, happiness, energy, lastFed, lastPlayed, lastSlept, cleanliness, lastCleaned);
-      setHunger(s.hunger);
-      setHappiness(s.happiness);
-      setEnergy(s.energy);
-      setCleanliness(s.cleanliness);
-    }, 5000);
-    return () => clearInterval(iv);
-  }, [lastFed, lastPlayed, lastSlept, lastCleaned]);
+    setName(item.petName || PET_INFO[petType]?.name || 'Companion');
+  }, [item.petName, petType]);
 
-  const stats = computePetStats(hunger, happiness, energy, lastFed, lastPlayed, lastSlept, cleanliness, lastCleaned);
+  useEffect(() => {
+    const iv = setInterval(() => setClock(Date.now()), 5000);
+    return () => clearInterval(iv);
+  }, []);
+
+  const hungerBase = item.petHunger ?? 80;
+  const happinessBase = item.petHappiness ?? 80;
+  const energyBase = item.petEnergy ?? 80;
+  const cleanlinessBase = item.petCleanliness ?? 100;
+  const xp = item.petXp ?? 0;
+  const gold = item.petGold ?? 12;
+  const lastFed = item.petLastFed ?? clock;
+  const lastPlayed = item.petLastPlayed ?? clock;
+  const lastSlept = item.petLastSlept ?? clock;
+  const lastCleaned = item.petLastCleaned ?? clock;
+  const activePetType = petType;
+  const accessory = (item.petAccessory || 'none') as PetAccessory;
+  const trickCount = item.petTrickCount ?? 0;
+  const foodsTried = useMemo(() => {
+    try {
+      const parsed = item.petFoodsTried ? JSON.parse(item.petFoodsTried) : [];
+      return new Set((Array.isArray(parsed) ? parsed : []).filter(Boolean) as PetFood[]);
+    } catch {
+      return new Set<PetFood>();
+    }
+  }, [item.petFoodsTried]);
+  const earnedAchievements = useMemo(() => {
+    try {
+      const parsed = item.petAchievements ? JSON.parse(item.petAchievements) : [];
+      return Array.isArray(parsed) ? parsed.filter(Boolean) as string[] : [];
+    } catch {
+      return [] as string[];
+    }
+  }, [item.petAchievements]);
+
+  const stats = computePetStats(hungerBase, happinessBase, energyBase, lastFed, lastPlayed, lastSlept, cleanlinessBase, lastCleaned);
   const stage = getPetStage(xp);
   const petInfo = PET_INFO[activePetType];
   const petEmoji = petInfo?.stages[stage] || '\u{1F95A}';
@@ -3851,19 +3868,48 @@ export function OfficePetItem({ item, theme }: ItemProps) {
   ];
   const xpProgress = stage === 'legendary' ? 100 : Math.min(100, (xp / nextStageXp) * 100);
   const accessoryIcon = PET_ACCESSORY_INFO[accessory]?.icon || '';
+  const questDay = item.petQuestDay || new Date(clock).toISOString().slice(0, 10);
+  const completedQuestIds = useMemo(() => {
+    try {
+      const parsed = item.petQuestCompleted ? JSON.parse(item.petQuestCompleted) : [];
+      return new Set((Array.isArray(parsed) ? parsed : []).filter(Boolean) as string[]);
+    } catch {
+      return new Set<string>();
+    }
+  }, [item.petQuestCompleted]);
+  const questSeed = questDay.split('-').reduce((sum, part) => sum + Number(part || 0), 0) + activePetType.length;
+  const dailyQuests = [
+    { id: 'feed', label: 'Feed', icon: '\u{1F35A}', reward: 4 },
+    { id: 'play', label: 'Play', icon: '\u{1F3BE}', reward: 4 },
+    { id: 'clean', label: 'Clean', icon: '\u2728', reward: 5 },
+    { id: questSeed % 2 === 0 ? 'trick' : 'rest', label: questSeed % 2 === 0 ? 'Trick' : 'Rest', icon: questSeed % 2 === 0 ? '\u{1F3AA}' : '\u{1F4A4}', reward: 6 },
+  ];
+  const allQuestsComplete = dailyQuests.every(q => completedQuestIds.has(q.id));
+  const streak = item.petStreak ?? 0;
+  const moodLine =
+    stats.mood === 'excited' ? `${name} is radiating chaos energy.` :
+    stats.mood === 'happy' ? `${name} wants to show off.` :
+    stats.mood === 'neutral' ? `${name} is orbiting quietly.` :
+    stats.mood === 'sad' ? `${name} needs a little attention.` :
+    stats.mood === 'dirty' ? `${name} rolled through stardust sludge.` :
+    stats.mood === 'sick' ? `${name} looks glitchy and low-power.` :
+    stats.mood === 'dead' ? `${name} needs a respawn.` :
+    `${name} is charging in dream mode.`;
 
-  // Check achievements
   useEffect(() => {
-    const a: string[] = [];
-    if (foodsTried.size > 0) a.push('first_feed');
-    if (stage === 'teen' || stage === 'adult' || stage === 'legendary') a.push('teen_stage');
-    if (stage === 'adult' || stage === 'legendary') a.push('adult_stage');
-    if (stage === 'legendary') a.push('legendary');
-    if (trickCount >= 5) a.push('trick_5');
-    if (foodsTried.size >= 5) a.push('all_food');
-    if (accessory !== 'none') a.push('accessorize');
-    setEarnedAchievements(a);
-  }, [foodsTried, stage, trickCount, accessory]);
+    const achievements = new Set(earnedAchievements);
+    if (foodsTried.size > 0) achievements.add('first_feed');
+    if (stage === 'teen' || stage === 'adult' || stage === 'legendary') achievements.add('teen_stage');
+    if (stage === 'adult' || stage === 'legendary') achievements.add('adult_stage');
+    if (stage === 'legendary') achievements.add('legendary');
+    if (trickCount >= 5) achievements.add('trick_5');
+    if (foodsTried.size >= PET_FOOD_TYPES.length) achievements.add('all_food');
+    if (accessory !== 'none') achievements.add('accessorize');
+    const next = Array.from(achievements);
+    if (JSON.stringify(next) !== JSON.stringify(earnedAchievements)) {
+      onItemUpdate?.({ petAchievements: JSON.stringify(next) });
+    }
+  }, [accessory, earnedAchievements, foodsTried, onItemUpdate, stage, trickCount]);
 
   // Bounce animation
   const bounce = useRef(new Animated.Value(0)).current;
@@ -3883,46 +3929,99 @@ export function OfficePetItem({ item, theme }: ItemProps) {
     setTimeout(() => setActionFlash(null), 800);
   };
 
+  const updatePet = (fields: Partial<FurnitureItem>) => {
+    onItemUpdate?.({
+      petType: activePetType,
+      petName: name,
+      petStage: stage,
+      petMood: stats.mood,
+      petBornAt: item.petBornAt ?? clock,
+      ...fields,
+    });
+  };
+
+  const buildQuestFields = (questId: string, reward: number, baseGold: number): Partial<FurnitureItem> => {
+    const currentDay = new Date(Date.now()).toISOString().slice(0, 10);
+    const normalizedCompleted = item.petQuestDay === currentDay ? new Set(completedQuestIds) : new Set<string>();
+    if (normalizedCompleted.has(questId)) return {};
+    normalizedCompleted.add(questId);
+    const updatedFields: Partial<FurnitureItem> = {
+      petQuestDay: currentDay,
+      petQuestCompleted: JSON.stringify(Array.from(normalizedCompleted)),
+      petGold: baseGold + reward,
+    };
+    const completedAll = dailyQuests.every(q => normalizedCompleted.has(q.id));
+    if (completedAll) {
+      updatedFields.petGold = (updatedFields.petGold ?? baseGold) + 10;
+      const previousQuestDay = item.petQuestDay;
+      const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+      updatedFields.petStreak = previousQuestDay === yesterday ? streak + 1 : previousQuestDay === currentDay ? Math.max(streak, 1) : 1;
+      flash('\u{1F525}');
+    }
+    return updatedFields;
+  };
+
   const closeAllPopups = () => { setShowActions(false); setShowFood(false); setShowTricks(false); setShowAccessories(false); setShowPicker(false); };
 
   const handleFeed = (food: PetFood) => {
     const result = feedPet(food);
     if (gold < result.cost) return;
-    setGold(g => g - result.cost);
-    setHunger(h => Math.min(100, h + result.hungerGain));
-    setHappiness(hp => Math.min(100, hp + result.happinessGain));
-    setLastFed(Date.now());
-    setXp(x => x + result.xp);
-    setFoodsTried(s => new Set(s).add(food));
+    const nextFoods = new Set(foodsTried);
+    nextFoods.add(food);
+    const baseGold = gold - result.cost;
+    updatePet({
+      petGold: baseGold,
+      petHunger: Math.min(100, stats.hunger + result.hungerGain),
+      petHappiness: Math.min(100, stats.happiness + result.happinessGain),
+      petLastFed: Date.now(),
+      petXp: xp + result.xp,
+      petFoodsTried: JSON.stringify(Array.from(nextFoods)),
+      ...buildQuestFields('feed', 4, baseGold),
+    });
     flash(PET_FOOD_INFO[food].icon);
     closeAllPopups();
   };
 
   const handlePlay = () => {
     const result = playWithPet();
-    setHappiness(h => Math.min(100, h + result.happinessGain));
-    setEnergy(e => Math.max(0, e - result.energyCost));
-    setLastPlayed(Date.now());
-    setXp(x => x + result.xp);
+    const baseGold = gold + 4;
+    updatePet({
+      petHappiness: Math.min(100, stats.happiness + result.happinessGain),
+      petEnergy: Math.max(0, stats.energy - result.energyCost),
+      petLastPlayed: Date.now(),
+      petXp: xp + result.xp,
+      petGold: baseGold,
+      ...buildQuestFields('play', 4, baseGold),
+    });
     flash('\u{1F3BE}');
     closeAllPopups();
   };
 
   const handleRest = () => {
     const result = restPet();
-    setEnergy(e => Math.min(100, e + result.energyGain));
-    setLastSlept(Date.now());
-    setXp(x => x + result.xp);
+    const baseGold = gold + 2;
+    updatePet({
+      petEnergy: Math.min(100, stats.energy + result.energyGain),
+      petLastSlept: Date.now(),
+      petXp: xp + result.xp,
+      petGold: baseGold,
+      ...buildQuestFields('rest', 3, baseGold),
+    });
     flash('\u{1F4A4}');
     closeAllPopups();
   };
 
   const handleBath = () => {
     const result = bathPet();
-    setCleanliness(c => Math.min(100, c + result.cleanlinessGain));
-    setHappiness(hp => Math.min(100, hp + result.happinessGain));
-    setLastCleaned(Date.now());
-    setXp(x => x + result.xp);
+    const baseGold = gold + 3;
+    updatePet({
+      petCleanliness: Math.min(100, stats.cleanliness + result.cleanlinessGain),
+      petHappiness: Math.min(100, stats.happiness + result.happinessGain),
+      petLastCleaned: Date.now(),
+      petXp: xp + result.xp,
+      petGold: baseGold,
+      ...buildQuestFields('clean', 5, baseGold),
+    });
     flash('\u{1F6BF}');
     closeAllPopups();
   };
@@ -3930,11 +4029,13 @@ export function OfficePetItem({ item, theme }: ItemProps) {
   const handleMedicine = () => {
     if (gold < 25) return;
     const result = medicinePet();
-    setGold(g => g - result.cost);
-    setHunger(h => Math.min(100, h + result.hungerGain));
-    setHappiness(hp => Math.min(100, hp + result.happinessGain));
-    setEnergy(e => Math.min(100, e + result.energyGain));
-    setXp(x => x + result.xp);
+    updatePet({
+      petGold: gold - result.cost,
+      petHunger: Math.min(100, stats.hunger + result.hungerGain),
+      petHappiness: Math.min(100, stats.happiness + result.happinessGain),
+      petEnergy: Math.min(100, stats.energy + result.energyGain),
+      petXp: xp + result.xp,
+    });
     flash('\u{1F48A}');
     closeAllPopups();
   };
@@ -3942,12 +4043,20 @@ export function OfficePetItem({ item, theme }: ItemProps) {
   const handleTrick = (trick: PetTrick) => {
     const result = doTrick(trick, stage);
     if (result.success) {
-      setXp(x => x + result.xp);
-      setHappiness(hp => Math.min(100, hp + result.happinessGain));
-      setTrickCount(t => t + 1);
+      const baseGold = gold + 6;
+      updatePet({
+        petXp: xp + result.xp,
+        petHappiness: Math.min(100, stats.happiness + result.happinessGain),
+        petTrickCount: trickCount + 1,
+        petGold: baseGold,
+        ...buildQuestFields('trick', 6, baseGold),
+      });
       flash(PET_TRICK_INFO[trick].icon);
     } else {
-      setHappiness(hp => Math.max(0, hp + result.happinessGain));
+      updatePet({
+        petHappiness: Math.max(0, stats.happiness + result.happinessGain),
+        petGold: gold + 1,
+      });
       flash('\u274C');
     }
     closeAllPopups();
@@ -3956,19 +4065,31 @@ export function OfficePetItem({ item, theme }: ItemProps) {
   const handleBuyAccessory = (acc: PetAccessory) => {
     const info = PET_ACCESSORY_INFO[acc];
     if (gold < info.cost) return;
-    setGold(g => g - info.cost);
-    setAccessory(acc);
+    updatePet({ petGold: gold - info.cost, petAccessory: acc });
     flash(info.icon);
     closeAllPopups();
   };
 
   const handleReset = () => {
-    setHunger(80); setHappiness(80); setEnergy(80); setCleanliness(100);
-    setXp(0); setGold(0);
-    setLastFed(Date.now()); setLastPlayed(Date.now()); setLastSlept(Date.now()); setLastCleaned(Date.now());
-    setAccessory('none');
+    const revivedAchievements = Array.from(new Set([...earnedAchievements, 'revive']));
+    updatePet({
+      petHunger: 80,
+      petHappiness: 80,
+      petEnergy: 80,
+      petCleanliness: 100,
+      petXp: 0,
+      petGold: 12,
+      petLastFed: Date.now(),
+      petLastPlayed: Date.now(),
+      petLastSlept: Date.now(),
+      petLastCleaned: Date.now(),
+      petAccessory: 'none',
+      petTrickCount: 0,
+      petFoodsTried: JSON.stringify([]),
+      petAchievements: JSON.stringify(revivedAchievements),
+      petQuestCompleted: JSON.stringify([]),
+    });
     closeAllPopups();
-    setEarnedAchievements(prev => [...prev, 'revive']);
   };
 
   const statBar = (value: number, color: string, icon: string) => (
@@ -4013,11 +4134,17 @@ export function OfficePetItem({ item, theme }: ItemProps) {
         )}
       </Pressable>
 
+      <View style={{ width: '100%', marginTop: -2, marginBottom: 2, paddingHorizontal: 2 }}>
+        <Text numberOfLines={1} style={{ color: '#a5b4fc', fontSize: 3.5, textAlign: 'center', fontFamily: 'monospace' }}>
+          {moodLine}
+        </Text>
+      </View>
+
       {/* Stage + XP */}
       <View style={{ width: '100%', marginBottom: 2 }}>
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
           <Text style={{ color: '#818cf8', fontSize: 4, fontWeight: '700', fontFamily: 'monospace', textTransform: 'uppercase' }}>{stage}</Text>
-          <Text style={{ color: '#6b6b80', fontSize: 3, fontFamily: 'monospace' }}>{xp}xp</Text>
+          <Text style={{ color: '#6b6b80', fontSize: 3, fontFamily: 'monospace' }}>{xp}xp {'\u00B7'} {streak}{'\u{1F525}'}</Text>
         </View>
         <View style={{ height: 2, backgroundColor: '#0a0a18', borderRadius: 1, overflow: 'hidden', marginTop: 1 }}>
           <View style={{ width: `${xpProgress}%` as any, height: '100%', backgroundColor: petInfo?.color || '#818cf8', borderRadius: 1 }} />
@@ -4040,6 +4167,24 @@ export function OfficePetItem({ item, theme }: ItemProps) {
           ))}
         </View>
       )}
+
+      <View style={{ width: '100%', marginTop: 2, paddingHorizontal: 2 }}>
+        <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 2, flexWrap: 'wrap' }}>
+          {dailyQuests.map(q => (
+            <View key={q.id} style={{ flexDirection: 'row', alignItems: 'center', gap: 1, paddingHorizontal: 2, paddingVertical: 1, borderRadius: 8, backgroundColor: completedQuestIds.has(q.id) ? '#22c55e20' : '#111827' }}>
+              <Text style={{ fontSize: 5 }}>{q.icon}</Text>
+              <Text style={{ color: completedQuestIds.has(q.id) ? '#86efac' : '#94a3b8', fontSize: 3, fontFamily: 'monospace' }}>
+                {completedQuestIds.has(q.id) ? 'DONE' : q.label.toUpperCase()}
+              </Text>
+            </View>
+          ))}
+        </View>
+        {!allQuestsComplete && (
+          <Text style={{ color: '#64748b', fontSize: 3, textAlign: 'center', marginTop: 1, fontFamily: 'monospace' }}>
+            Finish the set for +10\u2B50
+          </Text>
+        )}
+      </View>
 
       {/* Main action buttons popup */}
       {showActions && (
@@ -4168,7 +4313,7 @@ export function OfficePetItem({ item, theme }: ItemProps) {
               const owned = accessory === key;
               const canAfford = gold >= info.cost;
               return (
-                <Pressable key={key} onPress={(e) => { e.stopPropagation?.(); if (owned) { setAccessory('none'); } else if (canAfford) { handleBuyAccessory(key as PetAccessory); } }}
+                <Pressable key={key} onPress={(e) => { e.stopPropagation?.(); if (owned) { updatePet({ petAccessory: 'none' }); closeAllPopups(); } else if (canAfford) { handleBuyAccessory(key as PetAccessory); } }}
                   style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: owned ? '#f472b620' : canAfford ? '#f472b610' : '#333', opacity: owned || canAfford ? 1 : 0.3, ...CP }}>
                   <Text style={{ fontSize: 8 }}>{info.icon}</Text>
                   <Text style={{ color: '#ccc', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>{info.name}</Text>
@@ -4195,7 +4340,34 @@ export function OfficePetItem({ item, theme }: ItemProps) {
           {PET_TYPES.map(pt => (
             <Pressable
               key={pt}
-              onPress={(e) => { e.stopPropagation?.(); setActivePetType(pt); setName(PET_INFO[pt].name); closeAllPopups(); handleReset(); }}
+              onPress={(e) => {
+                e.stopPropagation?.();
+                setName(PET_INFO[pt].name);
+                closeAllPopups();
+                onItemUpdate?.({
+                  petType: pt,
+                  petName: PET_INFO[pt].name,
+                  petHunger: 80,
+                  petHappiness: 80,
+                  petEnergy: 80,
+                  petCleanliness: 100,
+                  petXp: 0,
+                  petGold: 12,
+                  petLastFed: Date.now(),
+                  petLastPlayed: Date.now(),
+                  petLastSlept: Date.now(),
+                  petLastCleaned: Date.now(),
+                  petAccessory: 'none',
+                  petTrickCount: 0,
+                  petFoodsTried: JSON.stringify([]),
+                  petAchievements: JSON.stringify([]),
+                  petQuestDay: new Date().toISOString().slice(0, 10),
+                  petQuestCompleted: JSON.stringify([]),
+                  petStreak: 0,
+                  petMood: 'happy',
+                  petBornAt: Date.now(),
+                });
+              }}
               style={{
                 alignItems: 'center', padding: 2, borderRadius: 3,
                 backgroundColor: activePetType === pt ? PET_INFO[pt].color + '20' : 'transparent',

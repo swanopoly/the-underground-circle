@@ -353,6 +353,7 @@ export async function sendMessage(
   userId: string,
   content: string,
   messageType: RoomMessage['messageType'] = 'chat',
+  metadata?: Record<string, unknown>,
 ): Promise<string | null> {
   try {
     const { data, error } = await supabase
@@ -362,6 +363,7 @@ export async function sendMessage(
         user_id: userId,
         content,
         message_type: messageType,
+        metadata: metadata ?? {},
       })
       .select('id')
       .single();

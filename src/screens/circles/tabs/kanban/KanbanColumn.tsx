@@ -26,6 +26,8 @@ interface Props {
   onDragLeave?: () => void;
   onDrop?: (taskId: string) => void;
   onBatchMove?: (taskIds: string[], newStatus: TaskStatus) => void;
+  onBatchAssignRoom?: (taskIds: string[], roomId: string | null) => void;
+  roomOptions?: Array<{ id: string; label: string; color: string }>;
   onArchiveDone?: (taskIds: string[]) => void;
 }
 
@@ -33,7 +35,7 @@ export default function KanbanColumn({
   column, tasks, agents, goals, isFullWidth, isDragOver,
   onCardPress, onMoveTask, onQuickAdd, onAddTask,
   onDragStart, onDragEnd, onDragEnter, onDragLeave, onDrop,
-  onBatchMove, onArchiveDone,
+  onBatchMove, onBatchAssignRoom, roomOptions, onArchiveDone,
 }: Props) {
   const [quickAddText, setQuickAddText] = useState('');
   const [quickAddFocused, setQuickAddFocused] = useState(false);
@@ -169,6 +171,35 @@ export default function KanbanColumn({
               ))}
             </View>
           </View>
+          {roomOptions && roomOptions.length > 0 && (
+            <View style={s.batchSection}>
+              <Text style={s.batchSectionLabel}>ASSIGN ALL TO ROOM</Text>
+              <View style={s.batchMoveRow}>
+                <Pressable
+                  onPress={() => {
+                    if (onBatchAssignRoom && tasks.length > 0) onBatchAssignRoom(tasks.map(t => t.id), null);
+                    setShowBatchMenu(false);
+                  }}
+                  style={s.batchMoveChip}
+                >
+                  <Text style={s.batchMoveText}>No room</Text>
+                </Pressable>
+                {roomOptions.map(room => (
+                  <Pressable
+                    key={room.id}
+                    onPress={() => {
+                      if (onBatchAssignRoom && tasks.length > 0) onBatchAssignRoom(tasks.map(t => t.id), room.id);
+                      setShowBatchMenu(false);
+                    }}
+                    style={s.batchMoveChip}
+                  >
+                    <View style={[s.batchMoveDot, { backgroundColor: room.color }]} />
+                    <Text style={[s.batchMoveText, { color: room.color }]}>{room.label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          )}
           {/* Archive done */}
           {column.key === 'done' && archivableTasks.length > 0 && (
             !confirmArchive ? (

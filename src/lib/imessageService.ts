@@ -3,8 +3,11 @@
 //           Telegram (Bot API), Discord (Bot API)
 
 import { storage } from './storage';
+import { deleteLocalSecret, readLocalSecret, writeLocalSecret } from './localSecrets';
 
 const STORAGE_KEY = '@phone_messenger_config';
+const SECRET_FIELDS = ['bbPassword', 'androidApiKey', 'telegramBotToken', 'discordBotToken'] as const;
+type SecretField = typeof SECRET_FIELDS[number];
 
 // ─── Unified Types ───────────────────────────────────────────────────────────
 
@@ -25,6 +28,8 @@ export interface PlatformConfig {
   discordBotToken?: string;
   discordChannelId?: string;
 }
+
+type StoredPlatformConfig = Omit<PlatformConfig, SecretField> & Partial<Record<SecretField, string | undefined>>;
 
 export interface UnifiedChat {
   id: string;
@@ -105,14 +110,26 @@ export const PLATFORM_INFO: Record<MessagingPlatform, {
 // ─── Config Storage ──────────────────────────────────────────────────────────
 
 export async function saveConfig(config: PlatformConfig): Promise<void> {
-  await storage.setItem(STORAGE_KEY, JSON.stringify(config));
+  const persisted: StoredPlatformConfig = { ...config };
+  for (const field of SECRET_FIELDS) {
+    await writeLocalSecret('phone_messenger', field, config[field] || '');
+    delete persisted[field];
+  }
+  await storage.setItem(STORAGE_KEY, JSON.stringify(persisted));
 }
 
 export async function loadConfig(): Promise<PlatformConfig | null> {
   try {
     const raw = await storage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    return JSON.parse(raw) as PlatformConfig;
+    const parsed = JSON.parse(raw) as StoredPlatformConfig;
+    const secrets = await Promise.all(
+      SECRET_FIELDS.map(async (field) => [field, await readLocalSecret('phone_messenger', field)] as const)
+    );
+    return {
+      ...parsed,
+      ...Object.fromEntries(secrets.filter(([, value]) => value)),
+    } as PlatformConfig;
   } catch {
     return null;
   }
@@ -120,6 +137,7 @@ export async function loadConfig(): Promise<PlatformConfig | null> {
 
 export async function clearConfig(): Promise<void> {
   await storage.removeItem(STORAGE_KEY);
+  await Promise.all(SECRET_FIELDS.map(field => deleteLocalSecret('phone_messenger', field)));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

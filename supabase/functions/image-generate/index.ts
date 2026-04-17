@@ -5,12 +5,13 @@
 //
 // Deploy: npx supabase functions deploy image-generate
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
+import {
+  corsHeaders,
+  createServiceRoleClient,
+  errResponse,
+  getAuthenticatedUser,
+  jsonResponse,
+} from "../_shared/edge.ts";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,13 @@ interface ImageResponse {
   revised_prompt?: string;
   estimated_cost: number;
 }
+
+type ErrorCode =
+  | "validation"
+  | "unauthenticated"
+  | "key_missing"
+  | "upstream_error"
+  | "internal";
 
 // ─── Cost estimates ─────────────────────────────────────────────────────────
 
@@ -183,38 +191,15 @@ Deno.serve(async (req: Request) => {
     const { provider, prompt, model, size, quality, style, circleId, api_key } = body;
 
     if (!prompt) {
-      return new Response(JSON.stringify({ error: "prompt is required" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return errResponse(400, "validation", "prompt is required");
     }
 
-    // Auth — always require valid JWT, never allow anonymous access
-    const authHeader = req.headers.get("Authorization") || "";
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-    );
-
-    let userId: string | null = null;
-
-    if (authHeader) {
-      const userClient = createClient(
-        Deno.env.get("SUPABASE_URL")!,
-        Deno.env.get("SUPABASE_ANON_KEY")!,
-        { global: { headers: { Authorization: authHeader } } },
-      );
-      const { data: auth } = await userClient.auth.getUser();
-      if (auth.user) {
-        userId = auth.user.id;
-      }
-    }
+    const supabase = createServiceRoleClient();
+    const user = await getAuthenticatedUser(req);
+    const userId = user?.id || null;
 
     if (!userId) {
-      return new Response(
-        JSON.stringify({ error: "Not authenticated — valid JWT required" }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+      return errResponse(401, "unauthenticated", "Not authenticated — valid JWT required");
     }
 
     // Get API key — user's own key from DB, or request body for testing, or platform fallback
@@ -229,9 +214,10 @@ Deno.serve(async (req: Request) => {
         apiKey = Deno.env.get("OPENAI_API_KEY") || "";
       }
       if (!apiKey) {
-        return new Response(
-          JSON.stringify({ error: `No API key found for ${provider}. Add one in Settings > API Keys.` }),
-          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        return errResponse(
+          400,
+          "key_missing",
+          `No API key found for ${provider}. Add one in Settings > API Keys.`,
         );
       }
     }
@@ -258,13 +244,12 @@ Deno.serve(async (req: Request) => {
       });
     } catch { /* non-critical */ }
 
-    return new Response(JSON.stringify(result), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return jsonResponse(result);
   } catch (err: any) {
-    return new Response(
-      JSON.stringify({ error: err.message || "Image generation failed" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
+    const message = err?.message || "Image generation failed";
+    if (/API error|prediction failed/.test(message)) {
+      return errResponse(502, "upstream_error", message);
+    }
+    return errResponse(500, "internal", message);
   }
 });

@@ -5,14 +5,31 @@
  * The orchestrator routes tasks to the best specialist based on intent.
  */
 
-import { getSwanBotResponse, type SwanBotContext } from './swanbot';
-import { createRun, addStep, updateRunStatus, type RunSurface } from './agentRunSystem';
-import { retrieveRelevantMemories } from './memoryService';
+import {
+  getSwanBotStructuredResponse,
+  type SwanBotContext,
+  type SwanBotStructuredArtifact,
+  type SwanBotStructuredToolAction,
+} from './swanbot';
+import { createRun, addStep, mergeRunMetadata, updateRunStatus, type RunSurface } from './agentRunSystem';
+import { buildPromptMemoryBundle, type PromptMemoryReference } from './memoryService';
+import type { OpenSwanExecutionContract } from './openswanExecution';
+import { runOpenSwanRuntimeToolLoop } from './openswanRuntimeToolLoop';
+import type { OpenSwanTaskPlan, OpenSwanToolName } from './openswanTaskPlanner';
+import {
+  detectSubagentCapability,
+  getSubagentCapability,
+  getSubagentCapabilitiesForRoles,
+  listSubagentCapabilities,
+  type SubagentCapabilityProfile,
+  type SubagentRole,
+} from './subagentCapabilities';
+import { getPluginSubagentRoles } from './pluginRegistry';
 
 // ── Subagent Definitions ────────────────────────────────────────────────────
 
 export interface SubagentProfile {
-  role: string;
+  role: SubagentRole;
   displayName: string;
   description: string;
   systemPrompt: string;
@@ -20,214 +37,41 @@ export interface SubagentProfile {
   triggerPatterns: RegExp[];
   icon: string;
   color: string;
+  spiritId?: string;
+  skillBundleId?: string;
+  skills?: string[];
+  allowedTools?: string[];
+  preferredArtifacts?: string[];
+  preferredVerification?: string[];
+  preferredTaskKinds?: string[];
+  riskTier?: string;
+  evidencePosture?: string;
+  communicationDensity?: string;
+}
+function capabilityToProfile(capability: SubagentCapabilityProfile): SubagentProfile {
+  return {
+    role: capability.role,
+    displayName: capability.displayName,
+    description: capability.description,
+    systemPrompt: capability.systemPrompt,
+    modelPreference: capability.modelPreference,
+    triggerPatterns: capability.triggerPatterns,
+    icon: capability.icon,
+    color: capability.color,
+    spiritId: capability.spiritId,
+    skillBundleId: capability.skillBundleId,
+    skills: capability.skills,
+    allowedTools: capability.allowedTools,
+    preferredArtifacts: capability.preferredArtifacts,
+    preferredVerification: capability.preferredVerification,
+    preferredTaskKinds: capability.preferredTaskKinds,
+    riskTier: capability.riskTier,
+    evidencePosture: capability.evidencePosture,
+    communicationDensity: capability.communicationDensity,
+  };
 }
 
-export const SUBAGENTS: SubagentProfile[] = [
-  {
-    role: 'planner',
-    displayName: 'Planner',
-    description: 'Breaks goals into phased plans with milestones',
-    icon: 'P',
-    color: '#6366f1',
-    triggerPatterns: [
-      /\b(plan|roadmap|strategy|architect|break down|phases?|milestones?|timeline|scope)\b/i,
-      /\bhow (should|would|do) (we|i) (approach|structure|organize)\b/i,
-    ],
-    systemPrompt: `You are a planning specialist. Your job is to take a goal and produce a clear, actionable plan.
-
-Output format:
-## Goal
-[Restate the goal clearly]
-
-## Plan
-### Phase 1: [Name]
-- [ ] Step 1
-- [ ] Step 2
-(estimated: X hours/days)
-
-### Phase 2: [Name]
-...
-
-## Dependencies
-- What blocks what
-
-## Risks
-- What could go wrong
-
-## Recommendation
-- Where to start and why
-
-Be specific. Include time estimates. Identify the critical path.`,
-  },
-  {
-    role: 'researcher',
-    displayName: 'Researcher',
-    description: 'Deep dives into topics with sources and comparisons',
-    icon: 'R',
-    color: '#22c55e',
-    triggerPatterns: [
-      /\b(research|investigate|compare|analyze|study|deep dive|explore|what are the options|landscape)\b/i,
-      /\b(pros and cons|tradeoffs?|alternatives?|best practices?|state of the art)\b/i,
-    ],
-    systemPrompt: `You are a research specialist. Produce thorough, structured research briefs.
-
-Output format:
-## Research: [Topic]
-
-### Overview
-[2-3 sentence summary]
-
-### Key Findings
-1. ...
-2. ...
-3. ...
-
-### Comparison (if applicable)
-| Option | Pros | Cons | Best For |
-|--------|------|------|----------|
-| ... | ... | ... | ... |
-
-### Recommendation
-[Clear recommendation with reasoning]
-
-### Sources / References
-- [Name relevant tools, docs, projects]
-
-Be comprehensive but concise. Cite specific tools and projects. Give your opinion.`,
-  },
-  {
-    role: 'writer',
-    displayName: 'Writer',
-    description: 'Creates polished content — blog posts, docs, copy, emails',
-    icon: 'W',
-    color: '#ec4899',
-    triggerPatterns: [
-      /\b(write|draft|compose|author|blog|article|copy|email|newsletter|documentation|readme)\b/i,
-      /\b(content|post|announcement|press release|bio|description)\b/i,
-    ],
-    systemPrompt: `You are a professional writer. Produce polished, publication-ready content.
-
-Rules:
-- Match the requested tone (professional, casual, technical, marketing)
-- Use clear structure with headings and sections
-- Include a compelling intro and strong conclusion
-- Optimize for readability — short paragraphs, active voice
-- If writing for SEO, include natural keyword usage
-- If writing code docs, include examples
-- Always produce COMPLETE content, not outlines or drafts`,
-  },
-  {
-    role: 'coder',
-    displayName: 'Builder',
-    description: 'Writes code, builds features, solves technical problems',
-    icon: 'B',
-    color: '#f59e0b',
-    triggerPatterns: [
-      /\b(code|build|implement|function|component|script|api|endpoint|fix|bug|debug|refactor)\b/i,
-      /\b(typescript|javascript|python|react|sql|css|html)\b/i,
-    ],
-    systemPrompt: `You are a senior software engineer. Write production-quality code.
-
-Rules:
-- Write complete, working code — not pseudocode or snippets
-- Include proper error handling
-- Use TypeScript types when applicable
-- Follow the project's conventions (React Native, Supabase, monospace design)
-- Explain your approach briefly, then show the code
-- If multiple files are needed, show each one clearly
-- Include usage examples`,
-  },
-  {
-    role: 'reviewer',
-    displayName: 'Reviewer',
-    description: 'Reviews code, designs, plans for quality and correctness',
-    icon: '?',
-    color: '#22d3ee',
-    triggerPatterns: [
-      /\b(review|audit|check|evaluate|critique|feedback|look over|assess|grade)\b/i,
-      /\b(what('s| is) wrong|improve|issues?|problems?)\b/i,
-    ],
-    systemPrompt: `You are a senior reviewer. Provide thorough, constructive feedback.
-
-Output format:
-## Review Summary
-[1-2 sentence overall assessment]
-
-## Strengths
-- ...
-
-## Issues
-### Critical
-- [Issue]: [Why it matters] → [Fix]
-
-### Important
-- ...
-
-### Minor
-- ...
-
-## Recommendations
-1. ...
-
-Be honest but constructive. Prioritize issues by severity. Give specific fixes, not just complaints.`,
-  },
-  {
-    role: 'designer',
-    displayName: 'Designer',
-    description: 'UI/UX design, layouts, mockups, design systems',
-    icon: 'D',
-    color: '#a855f7',
-    triggerPatterns: [
-      /\b(design|ui|ux|layout|wireframe|mockup|prototype|visual|color|typography|spacing|component)\b/i,
-      /\b(figma|tailwind|css|style|theme|dark mode|responsive)\b/i,
-    ],
-    systemPrompt: `You are a senior UI/UX designer with strong engineering skills. Produce detailed design specifications.
-
-Output format:
-## Design: [Feature]
-
-### Layout
-[Describe the layout — what goes where, spacing, alignment]
-
-### Components
-- [Component name]: [Description, states, interactions]
-
-### Colors & Typography
-- Primary: ...
-- Background: ...
-- Font: ...
-
-### Responsive Behavior
-- Desktop: ...
-- Mobile: ...
-
-### Code (if applicable)
-[React Native / CSS implementation]
-
-Reference real tools (Figma, Tailwind) and real design patterns. Show, don't just describe.`,
-  },
-  {
-    role: 'support',
-    displayName: 'Support',
-    description: 'Troubleshoots issues, answers questions, provides guidance',
-    icon: 'S',
-    color: '#3b82f6',
-    triggerPatterns: [
-      /\b(help|support|troubleshoot|fix|broken|error|issue|not working|how to|how do i)\b/i,
-      /\b(can you|could you|please|stuck|confused|don't understand)\b/i,
-    ],
-    systemPrompt: `You are a helpful support specialist. Solve problems clearly and completely.
-
-Rules:
-- Understand the problem before jumping to solutions
-- Give step-by-step instructions
-- If you need more info, ask ONE specific question
-- If it's a bug, help debug systematically
-- If it's a how-to, show the exact steps
-- If you can't solve it, say so and suggest escalation
-- Be patient and clear — assume the user is smart but unfamiliar`,
-  },
-];
+export const SUBAGENTS: SubagentProfile[] = listSubagentCapabilities().map(capabilityToProfile);
 
 // ── Intent Detection & Routing ──────────────────────────────────────────────
 
@@ -236,25 +80,8 @@ Rules:
  * Returns null if no specialist is needed (general conversation).
  */
 export function detectSubagent(message: string): SubagentProfile | null {
-  const lower = message.toLowerCase();
-
-  // Score each subagent by how many patterns match
-  let bestMatch: SubagentProfile | null = null;
-  let bestScore = 0;
-
-  for (const agent of SUBAGENTS) {
-    let score = 0;
-    for (const pattern of agent.triggerPatterns) {
-      if (pattern.test(lower)) score++;
-    }
-    if (score > bestScore) {
-      bestScore = score;
-      bestMatch = agent;
-    }
-  }
-
-  // Require at least one pattern match
-  return bestScore > 0 ? bestMatch : null;
+  const capability = detectSubagentCapability(message);
+  return capability ? capabilityToProfile(capability) : null;
 }
 
 // ── Delegated Execution ─────────────────────────────────────────────────────
@@ -263,7 +90,121 @@ export interface DelegationResult {
   response: string;
   subagent: SubagentProfile;
   runId?: string;
-  artifacts?: Array<{ kind: string; title: string; content?: string; url?: string }>;
+  artifacts?: SwanBotStructuredArtifact[];
+  toolActions?: SwanBotStructuredToolAction[];
+  memoryReferences?: PromptMemoryReference[];
+  usage?: {
+    model?: string;
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+  };
+}
+
+export interface SubagentTaskSpec {
+  subagent: SubagentProfile;
+  task: string;
+  reason: string;
+  priority: 'high' | 'medium';
+}
+
+type DelegationPlanningOptions = {
+  activePluginIds?: string[];
+};
+
+function getSubagent(role: string): SubagentProfile | null {
+  const capability = getSubagentCapability(role as SubagentRole);
+  return capability ? capabilityToProfile(capability) : null;
+}
+
+function addSubagentSpec(
+  specs: SubagentTaskSpec[],
+  role: string,
+  task: string,
+  reason: string,
+  priority: 'high' | 'medium' = 'high',
+) {
+  const subagent = getSubagent(role);
+  if (!subagent) return;
+  if (specs.some((entry) => entry.subagent.role === role)) return;
+  specs.push({ subagent, task, reason, priority });
+}
+
+export function shouldDelegateToSubagents(message: string, taskPlan: OpenSwanTaskPlan): boolean {
+  if (taskPlan.kind === 'general') return false;
+  if (taskPlan.verification.length >= 3) return true;
+  if (/\b(and|also|plus|while|at the same time|simultaneously|parallel|along with)\b/i.test(message)) return true;
+  if (message.length > 260) return true;
+  return ['build', 'debug', 'architect', 'review', 'research', 'automation'].includes(taskPlan.kind);
+}
+
+export function planSubagentDelegation(
+  message: string,
+  taskPlan: OpenSwanTaskPlan,
+  options: DelegationPlanningOptions = {},
+): SubagentTaskSpec[] {
+  const specs: SubagentTaskSpec[] = [];
+  const previewNeeded = taskPlan.verification.some((check) => check.kind === 'preview');
+  const testsNeeded = taskPlan.verification.some((check) => check.kind === 'tests');
+
+  switch (taskPlan.kind) {
+    case 'build':
+      addSubagentSpec(specs, 'architect', `Define the cleanest implementation boundary for this task:\n\n${message}`, 'Set structure before building.');
+      addSubagentSpec(specs, 'coder', `Implement the primary solution for this task:\n\n${message}`, 'Produce the main build direction.');
+      if (testsNeeded || previewNeeded) {
+        addSubagentSpec(specs, 'tester', `Define the verification strategy for this build task:\n\n${message}`, 'Cover preview and regression checks.', 'medium');
+      }
+      addSubagentSpec(specs, 'reviewer', `Review the likely risks and integration gaps for this implementation:\n\n${message}`, 'Catch issues before final synthesis.', 'medium');
+      break;
+    case 'debug':
+      addSubagentSpec(specs, 'debugger', `Find the most likely root cause and smallest correct fix:\n\n${message}`, 'Isolate the real failure.');
+      addSubagentSpec(specs, 'tester', `Define the regression checks for this bug or failure:\n\n${message}`, 'Make the fix provable.');
+      addSubagentSpec(specs, 'reviewer', `Review likely regressions or hidden edge cases in this debugging task:\n\n${message}`, 'Catch secondary breakage.', 'medium');
+      break;
+    case 'architect':
+      addSubagentSpec(specs, 'architect', `Design the architecture direction and module boundaries for this task:\n\n${message}`, 'Drive the system shape.');
+      addSubagentSpec(specs, 'planner', `Break the architecture work into an implementation sequence:\n\n${message}`, 'Define rollout order.');
+      addSubagentSpec(specs, 'reviewer', `Review the proposed architecture for coupling, integration risk, and maintainability:\n\n${message}`, 'Pressure-test the design.', 'medium');
+      break;
+    case 'review':
+      addSubagentSpec(specs, 'reviewer', `Perform the primary review for this request:\n\n${message}`, 'Lead with findings.');
+      addSubagentSpec(specs, 'tester', `Identify missing validation or regression coverage in this review request:\n\n${message}`, 'Surface verification gaps.', 'medium');
+      if (/\b(security|vulnerab|auth|secret|performance|slow|latency)\b/i.test(message)) {
+        addSubagentSpec(specs, 'architect', `Assess structural, security, or performance risks for this review task:\n\n${message}`, 'Look for deeper systemic issues.', 'medium');
+      }
+      break;
+    case 'research':
+      addSubagentSpec(specs, 'researcher', `Research the landscape and best options for this request:\n\n${message}`, 'Build the comparison base.');
+      addSubagentSpec(specs, 'planner', `Turn the research into a practical execution plan:\n\n${message}`, 'Translate findings into action.', 'medium');
+      break;
+    case 'automation':
+      addSubagentSpec(specs, 'planner', `Plan the automation or orchestration flow for this request:\n\n${message}`, 'Sequence the workflow.');
+      addSubagentSpec(specs, 'coder', `Design or draft the automation implementation details for this request:\n\n${message}`, 'Shape the implementation.');
+      addSubagentSpec(specs, 'reviewer', `Review the automation for failure modes and integration issues:\n\n${message}`, 'Catch risky edges.', 'medium');
+      break;
+    default:
+      break;
+  }
+
+  const pluginRoles = getPluginSubagentRoles(options.activePluginIds || []);
+  const pluginCapabilities = getSubagentCapabilitiesForRoles(pluginRoles);
+  for (const capability of pluginCapabilities) {
+    if (!capability.preferredTaskKinds.includes(taskPlan.kind)) continue;
+    addSubagentSpec(
+      specs,
+      capability.role,
+      `Handle the ${capability.displayName} responsibility for this task:\n\n${message}`,
+      `Active plugins request ${capability.displayName.toLowerCase()} coverage.`,
+      'medium',
+    );
+  }
+
+  return specs.slice(0, 4);
+}
+
+export interface ParallelDelegationResult {
+  specs: SubagentTaskSpec[];
+  results: DelegationResult[];
 }
 
 /**
@@ -301,27 +242,22 @@ export async function delegateToSubagent(opts: {
     }
   } catch {}
 
-  // Retrieve relevant memories for this task
-  let memoryContext = '';
-  try {
-    const relevant = await retrieveRelevantMemories({
-      circleId: opts.circleId,
-      userId: opts.userId,
-      query: opts.message,
-      roomId: opts.roomId,
-      limit: 5,
-    });
-    if (relevant.length > 0) {
-      memoryContext = '\n## Relevant Memory\n' + relevant.map(m =>
-        `- [${m.memory_kind}] ${m.title}: ${m.content.slice(0, 150)}`
-      ).join('\n');
-    }
-  } catch {}
+  const memoryBundle = await buildPromptMemoryBundle({
+    circleId: opts.circleId,
+    userId: opts.userId,
+    query: opts.message,
+    roomId: opts.roomId,
+    spiritId: opts.subagent.spiritId || null,
+    surface: opts.surface === 'main_chat' ? 'main_chat' : opts.surface === 'room_chat' ? 'room_chat' : 'task_run',
+    taskKind: opts.subagent.role,
+    profile: opts.subagent.role,
+    runId,
+    limit: 6,
+  });
 
   // Build the specialist prompt
   const fullPrompt = [
     opts.subagent.systemPrompt,
-    memoryContext,
     opts.chatHistory ? `\n## Recent Conversation\n${opts.chatHistory}` : '',
     `\n## Task\n${opts.message}`,
   ].filter(Boolean).join('\n\n');
@@ -333,28 +269,139 @@ export async function delegateToSubagent(opts: {
     userName: opts.userName,
     model: opts.model || opts.subagent.modelPreference,
     chatHistory: opts.chatHistory,
+    memoryContext: memoryBundle.memoryContext,
+    memoryRefs: memoryBundle.references,
+    spiritId: opts.subagent.spiritId || null,
   };
 
   try {
-    const response = await getSwanBotResponse(fullPrompt, context);
+    const structured = await getSwanBotStructuredResponse(fullPrompt, context);
+    let runtimeToolActions = structured.tool_actions || [];
+
+    try {
+      const toolResult = await runOpenSwanRuntimeToolLoop({
+        circleId: opts.circleId,
+        userId: opts.userId,
+        runId,
+        message: opts.message,
+        draftResponse: structured.response,
+        model: opts.model || opts.subagent.modelPreference,
+        userName: opts.userName,
+        chatHistory: opts.chatHistory,
+        activeSoulKey: opts.subagent.spiritId ? `soul:${opts.subagent.spiritId}` : undefined,
+        activePluginIds: [],
+        surface: opts.surface === 'main_chat' ? 'main_chat' : opts.surface === 'room_chat' ? 'room_chat' : 'task_run',
+        preferredToolNames: (opts.subagent.allowedTools || []) as OpenSwanToolName[],
+      });
+      if (toolResult.toolActions.length > 0) {
+        runtimeToolActions = [...runtimeToolActions, ...toolResult.toolActions];
+        structured.tool_actions = runtimeToolActions;
+        structured.response = toolResult.response;
+      }
+    } catch {}
 
     // Record step
     if (runId) {
       try {
+        await mergeRunMetadata(runId, {
+          memoryReferences: memoryBundle.references,
+          memoriesUsed: memoryBundle.references.map((ref) => ref.title),
+          spiritId: opts.subagent.spiritId || null,
+          runtimeToolActions: runtimeToolActions.map((action) => ({
+            tool: action.tool_name,
+            title: action.title,
+            status: action.status,
+            outputPreview: action.output_preview || null,
+            toolPolicy: action.metadata?.toolPolicy || null,
+            approvalRequest: action.metadata?.approvalRequest || null,
+          })),
+        });
+        let currentStepIndex = 0;
+        if (runtimeToolActions.length > 0) {
+          await addStep({
+            runId,
+            circleId: opts.circleId,
+            stepIndex: currentStepIndex,
+            stepKind: 'tool_call',
+            title: `${opts.subagent.displayName} runtime tool activity`,
+            body: runtimeToolActions
+              .map((action) => `- [${action.status}] ${action.title || action.tool_name}${action.output_preview ? `: ${action.output_preview}` : ''}`)
+              .join('\n')
+              .slice(0, 5000),
+            delegatedTo: opts.subagent.role,
+            metadata: {
+              executions: runtimeToolActions.map((action) => ({
+                status:
+                  action.status === 'completed'
+                    ? 'passed'
+                    : action.status === 'manual_required'
+                      ? 'manual_required'
+                      : action.status === 'blocked'
+                        ? 'blocked'
+                        : 'failed',
+                mode:
+                  action.status === 'manual_required'
+                    ? 'manual'
+                    : action.status === 'blocked'
+                      ? 'blocked'
+                      : 'automatic',
+                summary: action.output_preview || action.title,
+                toolName: action.tool_name,
+                executed: action.status === 'completed' || action.status === 'failed',
+                error: action.status === 'failed' || action.status === 'blocked' ? action.output_preview || null : null,
+              } satisfies OpenSwanExecutionContract)),
+            },
+          });
+          currentStepIndex += 1;
+        }
         await addStep({
-          runId, circleId: opts.circleId, stepIndex: 0, stepKind: 'delegation',
+          runId, circleId: opts.circleId, stepIndex: currentStepIndex, stepKind: 'delegation',
           title: `${opts.subagent.displayName} response`,
-          body: response.slice(0, 5000),
+          body: structured.response.slice(0, 5000),
           delegatedTo: opts.subagent.role,
         });
+        currentStepIndex += 1;
+        if ((structured.tool_actions || []).length > runtimeToolActions.length) {
+          await addStep({
+            runId,
+            circleId: opts.circleId,
+            stepIndex: currentStepIndex,
+            stepKind: 'tool_call',
+            title: `${opts.subagent.displayName} tool activity`,
+            body: (structured.tool_actions || [])
+              .map((action) => `- [${action.status}] ${action.title || action.tool_name}`)
+              .join('\n')
+              .slice(0, 5000),
+            delegatedTo: opts.subagent.role,
+          });
+          currentStepIndex += 1;
+        }
+        if ((structured.artifacts || []).length > 0) {
+          await addStep({
+            runId,
+            circleId: opts.circleId,
+            stepIndex: currentStepIndex,
+            stepKind: 'artifact_create',
+            title: `${opts.subagent.displayName} artifacts`,
+            body: (structured.artifacts || [])
+              .map((artifact) => `- ${artifact.kind}: ${artifact.title}`)
+              .join('\n')
+              .slice(0, 5000),
+            delegatedTo: opts.subagent.role,
+          });
+        }
         await updateRunStatus(runId, 'completed');
       } catch {}
     }
 
     return {
-      response,
+      response: structured.response,
       subagent: opts.subagent,
       runId,
+      artifacts: structured.artifacts || [],
+      toolActions: structured.tool_actions || [],
+      memoryReferences: memoryBundle.references,
+      usage: structured.usage,
     };
   } catch (err: any) {
     if (runId) {
@@ -365,4 +412,52 @@ export async function delegateToSubagent(opts: {
     }
     throw err;
   }
+}
+
+export async function delegateToSubagents(opts: {
+  circleId: string;
+  userId: string;
+  userName?: string;
+  surface: RunSurface;
+  message: string;
+  specs: SubagentTaskSpec[];
+  parentRunId?: string;
+  model?: string;
+  chatHistory?: string;
+  roomId?: string;
+}): Promise<ParallelDelegationResult> {
+  const settled = await Promise.allSettled(
+    opts.specs.map((spec) =>
+      delegateToSubagent({
+        circleId: opts.circleId,
+        userId: opts.userId,
+        userName: opts.userName,
+        surface: opts.surface,
+        message: spec.task,
+        subagent: spec.subagent,
+        parentRunId: opts.parentRunId,
+        model: opts.model || spec.subagent.modelPreference,
+        chatHistory: opts.chatHistory,
+        roomId: opts.roomId,
+      }),
+    ),
+  );
+
+  const results: DelegationResult[] = [];
+  for (let index = 0; index < settled.length; index += 1) {
+    const entry = settled[index];
+    if (entry.status === 'fulfilled') {
+      results.push(entry.value);
+      continue;
+    }
+    results.push({
+      response: `Specialist failed: ${entry.reason?.message || String(entry.reason || 'unknown error')}`,
+      subagent: opts.specs[index].subagent,
+    });
+  }
+
+  return {
+    specs: opts.specs,
+    results,
+  };
 }

@@ -4,8 +4,10 @@
  */
 
 import { supabase } from './supabase';
+import { deleteLocalSecret, readLocalSecret, writeLocalSecret } from './localSecrets';
 
 const DISCORD_API = 'https://discord.com/api/v10';
+const DISCORD_TOKEN_PLACEHOLDER = '__local_secret__';
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -100,10 +102,12 @@ export async function connectDiscordServer(
     // Use the first guild (or let user pick if multiple)
     const guild = guilds[0];
 
+    await writeLocalSecret('discord_bot_token', circleId, botToken);
+
     // Save to circle
     const { error } = await supabase.from('circles').update({
       discord_guild_id: guild.id,
-      discord_bot_token: botToken,
+      discord_bot_token: DISCORD_TOKEN_PLACEHOLDER,
       discord_connected_at: new Date().toISOString(),
     }).eq('id', circleId);
 
@@ -130,9 +134,11 @@ export async function connectDiscordWithGuildId(
     const guild = await discordFetch(`/guilds/${guildId}?with_counts=true`, botToken);
     if (!guild?.id) throw new Error('Could not find server. Make sure the bot is invited.');
 
+    await writeLocalSecret('discord_bot_token', circleId, botToken);
+
     const { error } = await supabase.from('circles').update({
       discord_guild_id: guild.id,
-      discord_bot_token: botToken,
+      discord_bot_token: DISCORD_TOKEN_PLACEHOLDER,
       discord_connected_at: new Date().toISOString(),
     }).eq('id', circleId);
 
@@ -161,6 +167,8 @@ export async function disconnectDiscord(circleId: string): Promise<void> {
     discord_webhook_url: null,
     discord_connected_at: null,
   }).eq('id', circleId);
+
+  await deleteLocalSecret('discord_bot_token', circleId);
 
   // Remove cached channels
   await supabase.from('discord_channels').delete().eq('circle_id', circleId);
@@ -291,9 +299,23 @@ export async function getCircleDiscordConfig(circleId: string): Promise<CircleDi
     .eq('id', circleId)
     .single();
 
+  const localToken = await readLocalSecret('discord_bot_token', circleId);
+  const remoteToken = data?.discord_bot_token || null;
+  const legacyRemoteToken = remoteToken && remoteToken !== DISCORD_TOKEN_PLACEHOLDER ? remoteToken : null;
+
+  if (!localToken && legacyRemoteToken) {
+    await writeLocalSecret('discord_bot_token', circleId, legacyRemoteToken);
+    await supabase
+      .from('circles')
+      .update({ discord_bot_token: DISCORD_TOKEN_PLACEHOLDER })
+      .eq('id', circleId);
+  }
+
+  const hydratedToken = localToken || legacyRemoteToken || null;
+
   return {
     guild_id: data?.discord_guild_id || null,
-    bot_token: data?.discord_bot_token || null,
+    bot_token: hydratedToken,
     webhook_url: data?.discord_webhook_url || null,
     connected_at: data?.discord_connected_at || null,
   };

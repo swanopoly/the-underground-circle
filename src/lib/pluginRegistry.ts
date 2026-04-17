@@ -112,6 +112,7 @@ export const PLUGINS: Plugin[] = [
     color: '#10b981',
     category: 'growth',
     subagentRoles: ['researcher', 'writer'],
+    connectorRequirements: ['google-analytics', 'search_console', 'wordpress'],
     quickStarts: [
       { label: 'SEO Audit', prompt: 'Audit [URL] for SEO — technical issues, content gaps, keyword opportunities' },
       { label: 'Growth Strategy', prompt: 'Create a growth strategy for [product] — channels, experiments, metrics, timeline' },
@@ -127,6 +128,7 @@ export const PLUGINS: Plugin[] = [
     color: '#3b82f6',
     category: 'support',
     subagentRoles: ['support'],
+    connectorRequirements: ['slack', 'discord'],
     quickStarts: [
       { label: 'Write FAQ', prompt: 'Generate an FAQ for [product/feature] covering the top 10 questions users ask' },
       { label: 'Triage Bug', prompt: 'Triage this bug report: [description]. Severity? Root cause? Fix?' },
@@ -142,6 +144,7 @@ export const PLUGINS: Plugin[] = [
     color: '#f472b6',
     category: 'community',
     subagentRoles: ['writer', 'support'],
+    connectorRequirements: ['discord', 'slack'],
     quickStarts: [
       { label: 'Community Update', prompt: 'Write a community update post covering [recent developments]' },
       { label: 'Event Plan', prompt: 'Plan a community event: [type] — agenda, logistics, promotion, follow-up' },
@@ -157,6 +160,7 @@ export const PLUGINS: Plugin[] = [
     color: '#22d3ee',
     category: 'operations',
     subagentRoles: ['researcher', 'writer'],
+    connectorRequirements: ['slack', 'google-analytics', 'hubspot'],
     quickStarts: [
       { label: 'Status Report', prompt: 'Write a status report covering: what was accomplished, what\'s in progress, blockers, and next steps' },
       { label: 'Decision Brief', prompt: 'Write a decision brief for [topic] — options, tradeoffs, data, recommendation' },
@@ -201,4 +205,16 @@ export function buildPluginPrompt(activePluginIds: string[]): string {
     }
   }
   return parts.length > 0 ? `## Active Plugins\n${parts.join('\n\n')}` : '';
+}
+
+export function getPluginConnectorRequirements(activePluginIds: string[]): string[] {
+  return Array.from(new Set(
+    activePluginIds.flatMap(id => getPlugin(id)?.connectorRequirements || []),
+  ));
+}
+
+export function getPluginSubagentRoles(activePluginIds: string[]): string[] {
+  return Array.from(new Set(
+    activePluginIds.flatMap(id => getPlugin(id)?.subagentRoles || []),
+  ));
 }

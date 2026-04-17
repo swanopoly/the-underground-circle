@@ -66,8 +66,8 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
   {
     id: 'connect-integration',
     title: 'Connect Your First Service',
-    description: 'Go to Integrations and connect GitHub, WordPress, or another service your agent can use.',
-    action: 'Connect at least one integration',
+    description: 'Go to Marketplace and connect GitHub, WordPress, or another service your agent can use.',
+    action: 'Install at least one marketplace app',
     target: 'integrations',
     completed: false,
   },

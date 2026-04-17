@@ -1,5 +1,6 @@
 // OpenSwan Gateway API client for the Office Dashboard
 // Connects to a user's OpenSwan instance to get real agent data
+import { Platform } from 'react-native';
 import { estimateCostWithCache } from './modelPricing';
 import { diagnoseConnection, DiagnosticResult } from './connectionDiagnostics';
 
@@ -51,16 +52,51 @@ export interface OpenSwanToolResult {
   error?: { type: string; message: string };
 }
 
+function isWebDirectLocalGateway(endpoint: string): boolean {
+  return Platform.OS === 'web' && /localhost:18789(?:\/|$)/.test(endpoint);
+}
+
 // ─── Low-level API ────────────────────────────────────
 
 const unsupportedToolCache = new Set<string>();
+const unsupportedToolEndpointCache = new Set<string>();
+
+function normalizeEndpoint(endpoint: string): string {
+  return endpoint.replace(/\/$/, '');
+}
+
+export function supportsOpenSwanToolRpcEndpoint(endpoint: string): boolean {
+  return !unsupportedToolEndpointCache.has(normalizeEndpoint(endpoint));
+}
+
+// Per-tool timeouts. List-style calls should fail fast so a stalled
+// gateway can't wedge the UI's polling loop; send/history can be slower
+// because they touch long-running sessions.
+const FAST_TOOL_TIMEOUT_MS = 8_000;
+const SLOW_TOOL_TIMEOUT_MS = 30_000;
+const FAST_TOOLS = new Set(['sessions_list', 'session_status']);
 
 async function invokeToolRaw(
   config: OpenSwanConfig,
   tool: string,
   args: Record<string, any> = {},
 ): Promise<OpenSwanToolResult> {
-  const toolKey = `${config.endpoint.replace(/\/$/, '')}::${tool}`;
+  if (isWebDirectLocalGateway(config.endpoint)) {
+    return {
+      ok: false,
+      error: { type: 'unavailable', message: 'Direct local gateway is not available on web' },
+    };
+  }
+
+  const endpointKey = normalizeEndpoint(config.endpoint);
+  if (unsupportedToolEndpointCache.has(endpointKey)) {
+    return {
+      ok: false,
+      error: { type: 'unsupported', message: 'Endpoint does not support OpenSwan tool RPCs' },
+    };
+  }
+
+  const toolKey = `${endpointKey}::${tool}`;
   if (unsupportedToolCache.has(toolKey)) {
     return {
       ok: false,
@@ -68,19 +104,50 @@ async function invokeToolRaw(
     };
   }
 
-  const res = await fetch(`${config.endpoint}/tools/invoke`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${config.token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ tool, args }),
-  });
-  if (res.status === 404) {
-    unsupportedToolCache.add(toolKey);
+  const timeoutMs = FAST_TOOLS.has(tool) ? FAST_TOOL_TIMEOUT_MS : SLOW_TOOL_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res: Response;
+  try {
+    res = await fetch(`${endpointKey}/tools/invoke`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${config.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ tool, args }),
+      signal: controller.signal,
+    });
+  } catch (error: any) {
+    clearTimeout(timer);
+    const aborted = error?.name === 'AbortError';
+    const message = aborted
+      ? `Timeout after ${timeoutMs}ms — gateway unresponsive`
+      : (typeof error?.message === 'string' ? error.message : 'Network request failed');
     return {
       ok: false,
-      error: { type: 'unsupported', message: `Tool not supported: ${tool}` },
+      error: {
+        type: aborted ? 'timeout' : (message.includes('CORS') ? 'cors' : 'network'),
+        message,
+      },
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (res.status === 404 || res.status === 405) {
+    unsupportedToolCache.add(toolKey);
+    unsupportedToolEndpointCache.add(endpointKey);
+    return {
+      ok: false,
+      error: { type: 'unsupported', message: 'Endpoint does not support OpenSwan tool RPCs' },
+    };
+  }
+  if (res.status === 401 || res.status === 403) {
+    return {
+      ok: false,
+      error: { type: 'auth', message: 'Authentication failed — wrong or missing token' },
     };
   }
   return res.json();
@@ -140,6 +207,28 @@ export async function testConnection(config: OpenSwanConfig): Promise<{
       messageLimit: 1,
     });
     if (!result.ok) {
+      if (result.error?.type === 'auth') {
+        return {
+          ok: false,
+          error: result.error.message,
+          diagnostic: {
+            ok: false,
+            errorCode: 'auth',
+            message: result.error.message,
+            fix: 'Get your token with this command:',
+            fixAction: 'copy_command',
+            fixValue: 'cat ~/.openswan/openswan.json | grep gatewayToken',
+          },
+        };
+      }
+      if (
+        result.error?.type === 'unavailable' ||
+        result.error?.type === 'cors' ||
+        result.error?.type === 'network' ||
+        result.error?.type === 'unsupported'
+      ) {
+        return { ok: false, error: result.error.message };
+      }
       // Run diagnostics to get an actionable error
       const diagnostic = await diagnoseConnection(config.endpoint, config.token);
       return { ok: false, error: diagnostic.message, diagnostic };
@@ -292,12 +381,20 @@ function normalizeCronJob(raw: any): CronJob | null {
 }
 
 export async function listCronJobs(config: OpenSwanConfig): Promise<{ ok: boolean; jobs: CronJob[]; error?: string }> {
+  if (!supportsOpenSwanToolRpcEndpoint(config.endpoint)) {
+    return { ok: true, jobs: [] };
+  }
   try {
     const data = await invokeToolRaw(config, 'cron', {
       action: 'list',
       includeDisabled: true,
     });
-    if (!data.ok) return { ok: false, jobs: [], error: data.error?.message || 'Failed to load cron jobs' };
+    if (!data.ok) {
+      if (data.error?.type === 'unsupported') {
+        return { ok: true, jobs: [] };
+      }
+      return { ok: false, jobs: [], error: data.error?.message || 'Failed to load cron jobs' };
+    }
     // The response has content[0].text which is a text summary, and details with structured data
     if (data?.result?.details?.jobs) {
       return {
@@ -336,9 +433,17 @@ export async function sendAgentTask(
 export async function listAgents(
   config: OpenSwanConfig,
 ): Promise<{ ok: boolean; agents?: string[]; error?: string }> {
+  if (!supportsOpenSwanToolRpcEndpoint(config.endpoint)) {
+    return { ok: true, agents: [] };
+  }
   try {
     const result = await invokeToolRaw(config, 'agents_list', {});
-    if (!result.ok) return { ok: false, error: result.error?.message };
+    if (!result.ok) {
+      if (result.error?.type === 'unsupported') {
+        return { ok: true, agents: [] };
+      }
+      return { ok: false, error: result.error?.message };
+    }
     // Extract agent ids from nested result
     const raw = result.result;
     let agents: string[] = [];

@@ -44,6 +44,10 @@ export interface OfficeAgent {
   subagentCount?: number;
   version?: string;
   slug?: string;
+  runtimeKind?: string;
+  parentSessionKey?: string;
+  isSynthetic?: boolean;
+  isProviderMain?: boolean;
 }
 
 export const STATUS_COLORS: Record<AgentStatus, string> = {
@@ -80,6 +84,63 @@ export function getOfficeStatusSortRank(status: AgentStatus | string | undefined
   return 4;
 }
 
+// ─── Unified status derivation for session-based agents ──────────────────────
+// Strict thresholds so the badges actually mean something:
+//   ACTIVE   = a tool/message is in flight RIGHT NOW (<15s mtime OR open tool)
+//   BUILDING = working between turns (15s–3 min)
+//   IDLE     = session open but quiet (3 min–1 h)
+//   OFFLINE  = disconnected or no activity for ≥1 h
+//
+// `currentToolName` short-circuits to ACTIVE because it means the bridge saw
+// an unfinished tool_use entry (no tool_result yet) — that IS a live action.
+
+export const STATUS_THRESHOLD_ACTIVE_MS = 15_000;       // 15 seconds
+export const STATUS_THRESHOLD_BUILDING_MS = 3 * 60_000; // 3 minutes
+export const STATUS_THRESHOLD_IDLE_MS = 60 * 60_000;    // 1 hour
+
+export function deriveSessionStatus(opts: {
+  lastActivityIso?: string | null;
+  currentToolName?: string | null;
+  fallback?: AgentStatus;
+}): AgentStatus {
+  if (opts.currentToolName && opts.currentToolName.length > 0) return 'active';
+  if (!opts.lastActivityIso) return opts.fallback ?? 'offline';
+  const ts = new Date(opts.lastActivityIso).getTime();
+  if (!Number.isFinite(ts)) return opts.fallback ?? 'offline';
+  const age = Date.now() - ts;
+  if (age < STATUS_THRESHOLD_ACTIVE_MS) return 'active';
+  if (age < STATUS_THRESHOLD_BUILDING_MS) return 'building';
+  if (age < STATUS_THRESHOLD_IDLE_MS) return 'idle';
+  return 'offline';
+}
+
+// `circle_office_agents.status` has a CHECK constraint that only accepts
+// `idle | building | offline`. Our in-memory state uses the richer
+// `active | building | idle | offline` set; clamp before any DB write so
+// PostgREST doesn't reject the row.
+export type DbAgentStatus = 'idle' | 'building' | 'offline';
+export function clampToDbStatus(status: AgentStatus | string | undefined): DbAgentStatus {
+  if (status === 'building' || status === 'active') return 'building';
+  if (status === 'idle') return 'idle';
+  return 'offline';
+}
+
+// Heartbeat-based status for synthesized agents (OpenSwan default, bonded
+// API-only providers without session files). Heartbeat publishers tick every
+// 30s, so the active window is wider than for session-based agents.
+export function deriveHeartbeatStatus(opts: {
+  lastHeartbeatIso?: string | null;
+  fallback?: AgentStatus;
+}): AgentStatus {
+  if (!opts.lastHeartbeatIso) return opts.fallback ?? 'offline';
+  const ts = new Date(opts.lastHeartbeatIso).getTime();
+  if (!Number.isFinite(ts)) return opts.fallback ?? 'offline';
+  const age = Date.now() - ts;
+  if (age < 60_000) return 'active';      // beat in last 60s
+  if (age < 5 * 60_000) return 'idle';    // beat in last 5 min
+  return 'offline';
+}
+
 // Agent colors for assignment
 export const AGENT_COLORS = [
   '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899',
@@ -90,15 +151,18 @@ export const AGENT_COLORS = [
 // Empty default — no mock data
 export const OFFICE_AGENTS: OfficeAgent[] = [];
 
-// Default agent provided by the app — always present in the office
+// Default agent provided by the app — always present in the office.
+// Display name is "OpenSwan" (the public-facing brand). Internal id, sessionKey
+// and providerType keep the legacy "blackswan" tokens so routing, prompts, and
+// historic data stay intact.
 export const DEFAULT_AGENT: OfficeAgent = {
   id: 'default::blackswan',
-  name: 'BlackSwan',
+  name: 'OpenSwan',
   role: 'Circle AI',
   status: 'active',
   color: '#ef4444',
   deskIndex: 0,
-  activity: 'Watching the circle',
+  activity: 'Watching the circle · HF tools ready',
   messagesProcessed: 0,
   uptimeHours: 0,
   uptime: 'always on',
@@ -117,8 +181,52 @@ export const DEFAULT_AGENT: OfficeAgent = {
   sessionKey: 'blackswan',
   model: 'blackswan-7b',
   connectionId: 'default',
-  connectionName: 'BlackSwan',
+  connectionName: 'OpenSwan',
   providerType: 'blackswan-local',
+  runtimeKind: 'main',
+  isSynthetic: true,
+  isProviderMain: true,
+};
+
+// Second default agent — HuggingSwan, the HuggingFace inference proxy.
+// Specializes in TASK execution: image generation, text-to-speech, code
+// generation, summarization, translation. Routed through hf-proxy edge fn.
+//
+// Sits at desk index 1 (right after BlackSwan). Distinct yellow brand color
+// from HF. Status='idle' since it's request-driven (no ambient activity);
+// flips to 'building' transiently while a /imagine or /code is in flight
+// (handled by the chat command path that updates `agent_activity`).
+export const HUGGINGSWAN_AGENT: OfficeAgent = {
+  id: 'default::huggingswan',
+  name: 'HuggingSwan',
+  role: 'HF Tools',
+  status: 'idle',
+  color: '#ffbd45',
+  deskIndex: 1,
+  activity: 'Ready: /imagine, /speak, /code, /summarize, /translate',
+  messagesProcessed: 0,
+  uptimeHours: 0,
+  uptime: 'always on',
+  lastActive: new Date().toISOString(),
+  recentActions: [],
+  recentMessages: [],
+  costToday: 0,
+  costTotal: 0,
+  costWeek: 0,
+  tokensUsed: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  cachedTokens: 0,
+  newTokens: 0,
+  turns: 0,
+  sessionKey: 'huggingswan',
+  model: 'hf-router',
+  connectionId: 'default',
+  connectionName: 'HuggingSwan',
+  providerType: 'huggingface',
+  runtimeKind: 'main',
+  isSynthetic: true,
+  isProviderMain: true,
 };
 
 // Pricing is centralized in modelPricing.ts — single source of truth
@@ -164,6 +272,8 @@ export function sessionsToAgents(
     connectionId,
     connectionName,
     providerType,
+    runtimeKind: s.kind || (s.isSubagent ? 'subagent' : 'session'),
+    parentSessionKey: s.parentSessionKey,
   }));
 }
 

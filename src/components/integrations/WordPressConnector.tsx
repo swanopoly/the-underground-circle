@@ -11,6 +11,7 @@ import {
   Linking,
 } from 'react-native';
 import {
+  storeCircleSiteCredential,
   testWordPressConnection,
   storeSiteCredential,
 } from '../../lib/siteAutomation';
@@ -64,22 +65,38 @@ export default function WordPressConnector({
     setSaving(true);
     setSaveError(null);
     try {
-      const result = await storeSiteCredential(
-        'wordpress',
-        siteUrl.trim(),
-        username.trim(),
-        appPassword.trim(),
-        'default',
-        {
+      const metadata = {
+        circleId,
+        siteName: testResult?.siteName || '',
+        connectedAt: new Date().toISOString(),
+      };
+
+      const [circleResult, userResult] = await Promise.all([
+        storeCircleSiteCredential(
           circleId,
-          siteName: testResult?.siteName || '',
-          connectedAt: new Date().toISOString(),
-        },
-      );
-      if (result.success) {
+          'wordpress',
+          siteUrl.trim(),
+          username.trim(),
+          appPassword.trim(),
+          'default',
+          metadata,
+        ),
+        storeSiteCredential(
+          'wordpress',
+          siteUrl.trim(),
+          username.trim(),
+          appPassword.trim(),
+          'default',
+          metadata,
+        ),
+      ]);
+
+      if (circleResult.success) {
+        onConnected();
+      } else if (userResult.success) {
         onConnected();
       } else {
-        setSaveError(result.error || 'Failed to save credentials');
+        setSaveError(circleResult.error || userResult.error || 'Failed to save credentials');
       }
     } catch (err: any) {
       setSaveError(err.message || 'Save failed');
@@ -147,6 +164,9 @@ export default function WordPressConnector({
           autoCorrect={false}
           secureTextEntry
         />
+        <Text style={styles.noteText}>
+          Stored locally on this device. Reconnect WordPress on other devices if you want publishing there too.
+        </Text>
       </View>
 
       {/* ── Instructions ── */}
@@ -330,6 +350,13 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#e0e0e0',
     ...(Platform.OS === 'web' ? { outlineWidth: 0 } as any : {}),
+  },
+  noteText: {
+    marginTop: 8,
+    fontFamily: 'monospace',
+    fontSize: 10,
+    color: '#777',
+    lineHeight: 15,
   },
 
   // Instructions

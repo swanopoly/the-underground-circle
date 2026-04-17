@@ -21,12 +21,26 @@ import { supabase } from '../../../lib/supabase';
 import { getSwanBotResponse as getAIResponse } from '../../../lib/swanbot';
 import { dispatchBridgeTask, spawnNewSession, wakeAndAssignTask } from '../../../lib/bridgeTaskDispatcher';
 import SpawnAgentPanel from '../../../components/SpawnAgentPanel';
+import ChatArtifacts from '../../../components/chat/ChatArtifacts';
+import CodingWorkbenchPreview from '../../../components/chat/CodingWorkbenchPreview';
+import RunExecutionCard from '../../../components/chat/RunExecutionCard';
+import RunHistoryDrawer from '../../../components/chat/RunHistoryDrawer';
 import {
   getStoredToken, storeToken, removeToken, validateToken as ghValidateToken,
   listRepos, getRepoTree, getFileContent, groupTreeByFolder,
   connectViaOAuth, getOAuthStatus, getConnectedRepos,
   type GitHubUser, type GitHubRepo, type GitHubTreeEntry,
 } from '../../../lib/github';
+import { sendRoomStructuredChatMessage } from '../../../lib/roomChatService';
+import { ROOM_WORKSPACE_FOCUS_FILE_EVENT, ROOM_WORKSPACE_OPEN_EVENT } from '../../../lib/roomWorkspaceLauncher';
+import { SESSION_PROFILE_OPTIONS, getSessionProfileMeta, loadRoomSessionProfile, saveRoomSessionProfile, type SessionCodingProfile } from '../../../lib/chatSessionProfile';
+import { isCodingGenerationRequest } from '../../../lib/codingWorkbench';
+import { getRoomChatSessionActions } from '../../../lib/sessionPromptCatalog';
+import {
+  executeOpenSwanVerificationCheck,
+  upsertOpenSwanVerificationResult,
+} from '../../../lib/openswanVerificationRuntime';
+import { appendRunToolEvent, mergeRunMetadata } from '../../../lib/agentRunSystem';
 import RoomFileTree from '../../../components/rooms/RoomFileTree.web';
 import type { RoomFileEntry } from '../../../components/rooms/roomTreeAdapter';
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -562,7 +576,6 @@ function highlightLine(line: string, lang: string): React.ReactNode[] {
 import RoomWorkspaceShell from './rooms/RoomWorkspaceShell';
 import NewRoomCard from './rooms/RoomCard';
 import { useRoomList } from './rooms/roomHooks';
-import { ROOM_CHAT_PRESETS } from './rooms/roomTypes';
 
 export default function RoomsTab({ circleId, accentColor }: Props) {
   // Use new room module for list + workspace
@@ -583,6 +596,19 @@ function NewRoomsTab({ circleId, accentColor }: Props) {
     }
     return null;
   });
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const handleOpenRoomWorkspace = (event: Event) => {
+      const detail = (event as CustomEvent<{ circleId?: string; roomId?: string }>).detail;
+      if (!detail?.circleId || detail.circleId !== circleId || !detail.roomId) return;
+      setSelectedRoomId(detail.roomId);
+    };
+    window.addEventListener(ROOM_WORKSPACE_OPEN_EVENT, handleOpenRoomWorkspace as EventListener);
+    return () => {
+      window.removeEventListener(ROOM_WORKSPACE_OPEN_EVENT, handleOpenRoomWorkspace as EventListener);
+    };
+  }, [circleId]);
 
   // Persist selection
   useEffect(() => {
@@ -654,6 +680,7 @@ function NewRoomsTab({ circleId, accentColor }: Props) {
 function LegacyRoomsTab({ circleId, accentColor }: Props) {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
+  const [requestedWorkspaceRoomId, setRequestedWorkspaceRoomId] = useState<string | null>(null);
   const savedRoomIdRef = React.useRef(storageGet(ROOM_STORAGE.selectedRoom(circleId)));
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -665,6 +692,28 @@ function LegacyRoomsTab({ circleId, accentColor }: Props) {
       if (saved) setSelectedRoom(saved);
     }
   }, [rooms]);
+
+  React.useEffect(() => {
+    if (!requestedWorkspaceRoomId) return;
+    const nextRoom = rooms.find((room) => room.id === requestedWorkspaceRoomId);
+    if (!nextRoom) return;
+    setSelectedRoom(nextRoom);
+    setRequestedWorkspaceRoomId(null);
+  }, [requestedWorkspaceRoomId, rooms]);
+
+  React.useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const handleOpenRoomWorkspace = (event: Event) => {
+      const detail = (event as CustomEvent<{ circleId?: string; roomId?: string }>).detail;
+      if (!detail?.circleId || detail.circleId !== circleId || !detail.roomId) return;
+      savedRoomIdRef.current = detail.roomId;
+      setRequestedWorkspaceRoomId(detail.roomId);
+    };
+    window.addEventListener(ROOM_WORKSPACE_OPEN_EVENT, handleOpenRoomWorkspace as EventListener);
+    return () => {
+      window.removeEventListener(ROOM_WORKSPACE_OPEN_EVENT, handleOpenRoomWorkspace as EventListener);
+    };
+  }, [circleId]);
 
   // Persist selected room to localStorage
   React.useEffect(() => {
@@ -788,51 +837,58 @@ function RoomCard({ room, accentColor, isMobile, onPress, onDelete }: {
   const statusColor = roomStatus === 'active' ? '#22c55e' : roomStatus === 'paused' ? '#f59e0b' : '#606075';
 
   return (
-    <Pressable onPress={onPress}
-      onHoverIn={() => setHovered(true)} onHoverOut={() => setHovered(false)}
-      accessibilityRole="button" accessibilityLabel={`Open room ${room.name}`}
-      style={[s.card, hovered && { borderColor:accentColor+'60', backgroundColor:'#0f0f18' }, isMobile && s.cardMobile,
-        ...(Platform.OS === 'web' ? [{ transition: 'all 0.2s ease', cursor: 'pointer' } as any] : []),
-      ]}>
-      {/* Left accent stripe */}
-      <View style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, backgroundColor: statusColor, borderTopLeftRadius: 12, borderBottomLeftRadius: 12 }} />
+    <View style={{ position: 'relative' }}>
+      <Pressable onPress={onPress}
+        onHoverIn={() => setHovered(true)} onHoverOut={() => setHovered(false)}
+        accessibilityRole="button" accessibilityLabel={`Open room ${room.name}`}
+        style={[s.card, hovered && { borderColor:accentColor+'60', backgroundColor:'#0f0f18' }, isMobile && s.cardMobile,
+          ...(Platform.OS === 'web' ? [{ transition: 'all 0.2s ease', cursor: 'pointer' } as any] : []),
+        ]}>
+        {/* Left accent stripe */}
+        <View style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, backgroundColor: statusColor, borderTopLeftRadius: 12, borderBottomLeftRadius: 12 }} />
 
-      <View style={[s.cardHeader, { paddingLeft: 8 }]}>
-        <Text style={s.cardIcon}>{icon}</Text>
-        <Text style={s.cardName} numberOfLines={1}>{room.name}</Text>
-        <View style={[s.langBadge,{backgroundColor:langColor+'20',borderColor:langColor+'50'}]}>
-          <Text style={[s.langBadgeText,{color:langColor}]}>{room.language.toUpperCase()}</Text>
+        <View style={[s.cardHeader, { paddingLeft: 8, paddingRight: 34 }]}>
+          <Text style={s.cardIcon}>{icon}</Text>
+          <Text style={s.cardName} numberOfLines={1}>{room.name}</Text>
+          <View style={[s.langBadge,{backgroundColor:langColor+'20',borderColor:langColor+'50'}]}>
+            <Text style={[s.langBadgeText,{color:langColor}]}>{room.language.toUpperCase()}</Text>
+          </View>
         </View>
-        <Pressable onPress={e=>{e.stopPropagation?.();onDelete();}} style={s.cardDelete} hitSlop={8}
-          accessibilityRole="button" accessibilityLabel="Delete room">
-          <Text style={s.cardDeleteText}>x</Text>
-        </Pressable>
-      </View>
-      {room.description && <Text style={[s.cardDesc, { paddingLeft: 8 }]} numberOfLines={2}>{room.description}</Text>}
+        {room.description && <Text style={[s.cardDesc, { paddingLeft: 8, paddingRight: 34 }]} numberOfLines={2}>{room.description}</Text>}
 
-      {/* Stats row */}
-      <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 8, paddingTop: 6, paddingBottom: 4, flexWrap: 'wrap' }}>
-        {fileCount !== null && (
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
-            <Text style={{ color: '#606075', fontSize: 9, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontWeight: '700' }}>F</Text>
-            <Text style={{ color: '#a0a0b0', fontSize: 10 }}>{fileCount}</Text>
-          </View>
-        )}
-        {taskCount !== null && taskCount > 0 && (
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
-            <Text style={{ color: '#606075', fontSize: 9, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontWeight: '700' }}>T</Text>
-            <Text style={{ color: '#a0a0b0', fontSize: 10 }}>{taskCount}</Text>
-          </View>
-        )}
-        {msgCount !== null && msgCount > 0 && (
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
-            <Text style={{ color: '#606075', fontSize: 9, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontWeight: '700' }}>..</Text>
-            <Text style={{ color: '#a0a0b0', fontSize: 10 }}>{msgCount}</Text>
-          </View>
-        )}
-        <Text style={[s.cardTime, { marginLeft: 'auto' }]}>{timeAgo(room.updated_at)}</Text>
-      </View>
-    </Pressable>
+        {/* Stats row */}
+        <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 8, paddingTop: 6, paddingBottom: 4, paddingRight: 34, flexWrap: 'wrap' }}>
+          {fileCount !== null && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+              <Text style={{ color: '#606075', fontSize: 9, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontWeight: '700' }}>F</Text>
+              <Text style={{ color: '#a0a0b0', fontSize: 10 }}>{fileCount}</Text>
+            </View>
+          )}
+          {taskCount !== null && taskCount > 0 && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+              <Text style={{ color: '#606075', fontSize: 9, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontWeight: '700' }}>T</Text>
+              <Text style={{ color: '#a0a0b0', fontSize: 10 }}>{taskCount}</Text>
+            </View>
+          )}
+          {msgCount !== null && msgCount > 0 && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+              <Text style={{ color: '#606075', fontSize: 9, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontWeight: '700' }}>..</Text>
+              <Text style={{ color: '#a0a0b0', fontSize: 10 }}>{msgCount}</Text>
+            </View>
+          )}
+          <Text style={[s.cardTime, { marginLeft: 'auto' }]}>{timeAgo(room.updated_at)}</Text>
+        </View>
+      </Pressable>
+      <Pressable
+        onPress={onDelete}
+        style={[s.cardDelete, { position: 'absolute', top: 10, right: 10 }]}
+        hitSlop={8}
+        accessibilityRole="button"
+        accessibilityLabel="Delete room"
+      >
+        <Text style={s.cardDeleteText}>x</Text>
+      </Pressable>
+    </View>
   );
 }
 
@@ -1003,6 +1059,7 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
     Platform.OS === 'web' ? ((storageGet(`uc_room_tree_view_${room.id}`) as 'list' | 'tree') || 'list') : 'list'
   );
   const [rightPanelWidth, setRightPanelWidth] = useState(parseInt(storageGet(ROOM_STORAGE.panelWidth(room.id)) || '320', 10));
+  const pendingGeneratedFileIdRef = React.useRef<string | null>(null);
   // ── Persist room-level UI state ──────────────────────────────────────────
   React.useEffect(() => {
     if (openTabs.length > 0) {
@@ -1067,9 +1124,20 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
       // 1. Try stored PAT token first (fast, local)
       const token = await getStoredToken(room.circle_id);
       if (token) {
-        const { user } = await ghValidateToken(token);
+        const { user, status } = await ghValidateToken(token);
         if (user) { setGhConnected(true); setGhUser(user); return; }
-        else { await removeToken(room.circle_id); }
+        // Only wipe the PAT on definitive auth failure (401 bad creds / 403 scopes).
+        // Keep it on network (status 0), 5xx, 429 rate-limit — those are transient and
+        // would otherwise silently disconnect the user. Surface a reconnect hint instead.
+        if (status === 401 || status === 403) {
+          await removeToken(room.circle_id);
+        } else {
+          // Treat the saved token as still-valid; fall through to show the connected state
+          // so the user can retry. getGitHubToken() will still hand it out to API calls.
+          setGhConnected(true);
+          setGhUser({ login: 'stored-pat', avatar_url: '', name: 'GitHub (offline check)', id: 0 } as GitHubUser);
+          return;
+        }
       }
       // 2. Check if connected via OAuth (Integrations tab) — uses circle_github_connections table
       try {
@@ -1125,6 +1193,37 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
     setOpenTabs(p => p.find(t => t.id === file.id) ? p : [...p, file]);
     setActiveTabId(file.id);
   }, []);
+
+  React.useEffect(() => {
+    if (Platform.OS !== 'web') return;
+
+    const handleFocusWorkspaceFile = (event: Event) => {
+      const detail = (event as CustomEvent<{ roomId?: string; primaryFileId?: string | null; preferredPanel?: string }>).detail;
+      if (!detail?.roomId || detail.roomId !== room.id) return;
+      setRightPanel(detail.preferredPanel === 'chat' ? 'chat' : 'playground');
+      if (!detail.primaryFileId) return;
+      pendingGeneratedFileIdRef.current = detail.primaryFileId;
+      const nextFile = files.find(file => file.id === detail.primaryFileId);
+      if (nextFile) {
+        openFile(nextFile);
+        pendingGeneratedFileIdRef.current = null;
+      }
+    };
+
+    window.addEventListener(ROOM_WORKSPACE_FOCUS_FILE_EVENT, handleFocusWorkspaceFile as EventListener);
+    return () => {
+      window.removeEventListener(ROOM_WORKSPACE_FOCUS_FILE_EVENT, handleFocusWorkspaceFile as EventListener);
+    };
+  }, [files, openFile, room.id]);
+
+  React.useEffect(() => {
+    const pendingFileId = pendingGeneratedFileIdRef.current;
+    if (!pendingFileId) return;
+    const nextFile = files.find(file => file.id === pendingFileId);
+    if (!nextFile) return;
+    openFile(nextFile);
+    pendingGeneratedFileIdRef.current = null;
+  }, [files, openFile]);
 
   const openGitHubFile = useCallback(async (entry: GitHubTreeEntry) => {
     if (!ghRepo) return;
@@ -2116,6 +2215,8 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   const [input, setInput]         = useState('');
   const [showAssign, setShowAssign] = useState(false);
   const [showSpawnAgent, setShowSpawnAgent] = useState(false);
+  const [showRunHistory, setShowRunHistory] = useState(false);
+  const [retryingLedgerCheck, setRetryingLedgerCheck] = useState<{ messageId: string; checkId: string } | null>(null);
   const [liveAgents, setLiveAgents] = useState<LiveAgent[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<LiveAgent | null>(null);
   const [selectedFile, setSelectedFile]   = useState<string>('');   // file name
@@ -2123,7 +2224,9 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   const [taskPrompt, setTaskPrompt] = useState('');
   const [assigning, setAssigning]  = useState(false);
   const [agentConnections, setAgentConnections] = useState<any[]>([]);
+  const [sessionProfile, setSessionProfile] = useState<SessionCodingProfile>('auto');
   const scrollRef = useRef<ScrollView>(null);
+  const codingWorkbenchStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Load agent connections from local storage (user's own OpenSwan instances)
   useEffect(() => {
@@ -2184,20 +2287,84 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       .then(({ data }) => setRoomFiles(data || []));
   }, [roomId]);
 
+  useEffect(() => {
+    let cancelled = false;
+    loadRoomSessionProfile(roomId).then((profile) => {
+      if (!cancelled) setSessionProfile(profile);
+    }).catch(() => {
+      if (!cancelled) setSessionProfile('auto');
+    });
+    return () => { cancelled = true; };
+  }, [roomId]);
+
   const [botTyping, setBotTyping] = useState(false);
+  const [codingWorkbenchPrompt, setCodingWorkbenchPrompt] = useState<string | null>(null);
+  const [codingWorkbenchTick, setCodingWorkbenchTick] = useState(0);
+  const [currentRunStep, setCurrentRunStep] = useState('');
+  const currentProfileMeta = getSessionProfileMeta(sessionProfile);
+
+  const handleSessionProfileSelect = useCallback(async (nextProfile: SessionCodingProfile) => {
+    setSessionProfile(nextProfile);
+    try {
+      await saveRoomSessionProfile(roomId, nextProfile);
+    } catch {}
+  }, [roomId]);
+
+  const startCodingWorkbench = useCallback((prompt: string) => {
+    if (!isCodingGenerationRequest(prompt, sessionProfile)) return;
+    if (codingWorkbenchStopTimeoutRef.current) {
+      clearTimeout(codingWorkbenchStopTimeoutRef.current);
+      codingWorkbenchStopTimeoutRef.current = null;
+    }
+    setCodingWorkbenchPrompt(prompt);
+    setCodingWorkbenchTick(0);
+    setCurrentRunStep('Booting OpenSwan session');
+  }, [sessionProfile]);
+
+  const stopCodingWorkbench = useCallback(() => {
+    if (codingWorkbenchStopTimeoutRef.current) {
+      clearTimeout(codingWorkbenchStopTimeoutRef.current);
+      codingWorkbenchStopTimeoutRef.current = null;
+    }
+    setCodingWorkbenchPrompt(null);
+    setCodingWorkbenchTick(0);
+    setCurrentRunStep('');
+  }, []);
+
+  const stopCodingWorkbenchAfter = useCallback((delayMs = 0) => {
+    if (codingWorkbenchStopTimeoutRef.current) {
+      clearTimeout(codingWorkbenchStopTimeoutRef.current);
+      codingWorkbenchStopTimeoutRef.current = null;
+    }
+    if (delayMs <= 0) {
+      stopCodingWorkbench();
+      return;
+    }
+    setCurrentRunStep('Refining the final build');
+    codingWorkbenchStopTimeoutRef.current = setTimeout(() => {
+      codingWorkbenchStopTimeoutRef.current = null;
+      stopCodingWorkbench();
+    }, delayMs);
+  }, [stopCodingWorkbench]);
+
+  useEffect(() => {
+    if (!botTyping || !codingWorkbenchPrompt) return;
+    const id = setInterval(() => setCodingWorkbenchTick((tick) => tick + 1), 220);
+    return () => clearInterval(id);
+  }, [botTyping, codingWorkbenchPrompt]);
 
   const send = async () => {
     if (!input.trim()) return;
     const { data: { user } } = await supabase.auth.getUser();
     const content = input.trim();
     const lowerContent = content.toLowerCase();
-    await supabase.from('room_messages').insert({
-      room_id: roomId, user_id: user?.id || null, content, message_type: 'chat',
-    });
     setInput('');
 
     // ─── /room commands ─────────────────────────────────────────────────
     if (lowerContent.startsWith('/room ') || lowerContent === '/room') {
+      await supabase.from('room_messages').insert({
+        room_id: roomId, user_id: user?.id || null, content, message_type: 'chat',
+      });
       setBotTyping(true);
       try {
         const { executeRoomCommand } = await import('../../../lib/roomChatCommands');
@@ -2221,6 +2388,9 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
 
     // ─── /gh commands ───────────────────────────────────────────────────
     if (lowerContent.startsWith('/gh ') || lowerContent === '/gh') {
+      await supabase.from('room_messages').insert({
+        room_id: roomId, user_id: user?.id || null, content, message_type: 'chat',
+      });
       setBotTyping(true);
       try {
         const { executeGitHubCommand } = await import('../../../lib/githubChatCommands');
@@ -2244,98 +2414,32 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
 
     // ─── Smart command detection — special prompts that load extra context ──
     const isAtMentioningSomeoneElse = /^@(?!agent|blackswan|swanbot|swan\b)\w/i.test(content.trim());
+    if (isAtMentioningSomeoneElse) {
+      await supabase.from('room_messages').insert({
+        room_id: roomId,
+        user_id: user?.id || null,
+        content,
+        message_type: 'chat',
+        metadata: activeFile ? { attached_file: activeFile.name } : {},
+      });
+      return;
+    }
+
     if (!isAtMentioningSomeoneElse) {
       const cleanContent = content.replace(/@(agent|blackswan|swanbot|swan)\s*/gi, '').trim() || content;
       setBotTyping(true);
+      startCodingWorkbench(cleanContent);
       try {
-        // Build base context
-        const recentMsgs = messages.slice(-8).map(m =>
-          `${m.metadata?.bot ? 'Agent' : 'User'}: ${(m.content || '').slice(0, 200)}`
-        ).join('\n');
-
-        const fileContext = activeFile
-          ? `\n\nCurrently viewing file: ${activeFile.name} (${activeFile.file_type || 'text'})\nFile content (first 2000 chars):\n${(activeFile.content || '').slice(0, 2000)}`
-          : '';
-
-        // ── Detect intent and load appropriate context ──────────────────
-        let specialContext = '';
-        let specialPromptPrefix = '';
-
-        // REVIEW — loads all files for comprehensive code review
-        const isReviewRequest = /review|audit|check.*files|look.*files|scan|analyze.*code|all.*files|code.*quality/i.test(cleanContent);
-        // SECURITY — focused security audit
-        const isSecurityRequest = /security|vulnerab|xss|injection|owasp|exploit|auth.*issue|secret|leak|exposed/i.test(cleanContent);
-        // PERFORMANCE — performance analysis
-        const isPerfRequest = /performance|optimize|slow|fast|speed|memory|bundle.*size|lazy.*load|cache|render/i.test(cleanContent);
-        // REFACTOR — refactoring suggestions
-        const isRefactorRequest = /refactor|simplif|clean.*up|dry|extract|decompos|split.*file|too.*long|too.*big|complex/i.test(cleanContent);
-        // TESTS — test generation
-        const isTestRequest = /test|spec|unit.*test|integration.*test|coverage|jest|vitest|assert|expect/i.test(cleanContent);
-        // DOCS — documentation generation
-        const isDocsRequest = /document|readme|jsdoc|typedoc|comment|explain.*code|what.*does.*this/i.test(cleanContent);
-        // RESEARCH — deep research on a topic
-        const isResearchRequest = /research|deep.*dive|how.*does|how.*to|best.*practice|compare|alternatives|pros.*cons|tradeoff/i.test(cleanContent);
-        // DEBUG — help debugging
-        const isDebugRequest = /debug|error|bug|crash|broken|not.*working|fix.*this|why.*fail|exception|trace/i.test(cleanContent);
-        // ARCHITECTURE — architecture review
-        const isArchRequest = /architect|structure|pattern|design.*pattern|dependency|coupling|solid|separation|layers/i.test(cleanContent);
-        // TYPES — TypeScript type analysis
-        const isTypeRequest = /type.*error|typescript|interface|generic|type.*safe|strict|any.*type|infer/i.test(cleanContent);
-
-        // Load all files for review-type requests
-        const needsAllFiles = isReviewRequest || isSecurityRequest || isPerfRequest || isRefactorRequest || isArchRequest;
-        if (needsAllFiles) {
-          const { data: allFiles } = await supabase
-            .from('room_files')
-            .select('name, file_type, content, size_bytes')
-            .eq('room_id', roomId)
-            .eq('is_deleted', false)
-            .order('name');
-          if (allFiles && allFiles.length > 0) {
-            const fileSummaries = allFiles.map((f: any) => {
-              const truncated = (f.content || '').slice(0, 3000);
-              return `\n--- ${f.name} (${f.file_type || 'text'}, ${f.size_bytes || 0}B) ---\n${truncated}${(f.content || '').length > 3000 ? '\n... (truncated)' : ''}`;
-            });
-            specialContext = `\n\n## ALL ROOM FILES (${allFiles.length} files)\n${fileSummaries.join('\n')}`;
-          }
-        } else if (roomFiles.length > 0) {
-          specialContext = `\n\nRoom files available: ${roomFiles.map(f => f.name).join(', ')}`;
-        }
-
-        // Add specialized instructions based on intent
-        if (isSecurityRequest) {
-          specialPromptPrefix = `[SECURITY AUDIT MODE] Analyze the code for security vulnerabilities. Check for: XSS, SQL injection, command injection, insecure secrets handling, missing auth checks, CORS issues, prototype pollution, path traversal, insecure dependencies, exposed API keys. Rate severity (Critical/High/Medium/Low) for each finding. Provide specific line-level fixes.\n\nUser request: `;
-        } else if (isPerfRequest) {
-          specialPromptPrefix = `[PERFORMANCE REVIEW MODE] Analyze the code for performance issues. Check for: unnecessary re-renders, missing memoization, N+1 queries, large bundle imports, unoptimized images, missing lazy loading, expensive computations in render, memory leaks from subscriptions/timers, missing virtualization for long lists. Suggest specific optimizations with code examples.\n\nUser request: `;
-        } else if (isRefactorRequest) {
-          specialPromptPrefix = `[REFACTOR MODE] Analyze the code and suggest refactoring improvements. Check for: DRY violations, god objects/functions, unclear naming, excessive nesting, missing abstractions, files that do too much, tightly coupled modules, dead code. Prioritize suggestions by impact. Show before/after code examples.\n\nUser request: `;
-        } else if (isTestRequest) {
-          specialPromptPrefix = `[TEST GENERATION MODE] Generate comprehensive tests for the code. Include: unit tests for pure functions, integration tests for API calls, edge cases, error paths, boundary values, mocking strategies for external dependencies. Use the project's testing conventions. Output complete runnable test files.\n\nUser request: `;
-        } else if (isDocsRequest) {
-          specialPromptPrefix = `[DOCUMENTATION MODE] Generate clear, useful documentation. Include: function/component purpose, parameters with types, return values, usage examples, edge cases, related functions. Match the project's existing doc style. Be concise but complete.\n\nUser request: `;
-        } else if (isResearchRequest) {
-          specialPromptPrefix = `[DEEP RESEARCH MODE] Provide thorough, well-researched analysis. Include: current best practices, comparison of approaches with tradeoffs, real-world examples, links to authoritative sources when possible, concrete recommendations with reasoning. Structure with clear headings. Go deep — this is not a quick answer.\n\nUser request: `;
-        } else if (isDebugRequest) {
-          specialPromptPrefix = `[DEBUG MODE] Help diagnose and fix the issue. Approach systematically: 1) Understand the expected vs actual behavior, 2) Identify potential causes, 3) Check for common pitfalls in this stack (React Native, Supabase, TypeScript), 4) Suggest debugging steps, 5) Provide the fix with explanation. Ask clarifying questions if needed.\n\nUser request: `;
-        } else if (isArchRequest) {
-          specialPromptPrefix = `[ARCHITECTURE REVIEW MODE] Analyze the code architecture. Evaluate: separation of concerns, dependency direction, module boundaries, data flow patterns, error handling strategy, state management approach, API design, scalability considerations. Provide specific architectural recommendations with diagrams (ASCII) where helpful.\n\nUser request: `;
-        } else if (isTypeRequest) {
-          specialPromptPrefix = `[TYPE ANALYSIS MODE] Analyze TypeScript types and suggest improvements. Check for: any types that should be narrowed, missing generics, interfaces vs types, discriminated unions, utility types that could simplify, incorrect nullability, missing readonly, unsafe type assertions. Show corrected type definitions.\n\nUser request: `;
-        } else if (isReviewRequest) {
-          specialPromptPrefix = `[CODE REVIEW MODE] Do a thorough code review. Check: correctness, error handling, edge cases, naming clarity, code style consistency, potential bugs, security issues, performance concerns, accessibility, and maintainability. Organize findings by severity. Suggest fixes with code examples.\n\nUser request: `;
-        }
-
-        const fullPrompt = specialPromptPrefix + cleanContent;
-
-        const response = await getAIResponse(fullPrompt, {
+        await sendRoomStructuredChatMessage({
+          roomId,
+          circleId: circleId || '',
           userId: user?.id || 'anonymous',
-          circleId,
-          chatHistory: recentMsgs + fileContext + specialContext,
-        });
-        await supabase.from('room_messages').insert({
-          room_id: roomId, user_id: null, agent_name: 'Agent',
-          content: response, message_type: 'agent_output',
-          metadata: { bot: true, bot_name: 'Agent' },
+          content: cleanContent,
+          activeFile,
+          recentMessages: messages,
+          availableFiles: roomFiles,
+          profile: sessionProfile,
+          onStageChange: (_stage, label) => setCurrentRunStep(label),
         });
       } catch {
         await supabase.from('room_messages').insert({
@@ -2343,7 +2447,10 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           content: 'Something went wrong. Try again.',
           message_type: 'agent_output', metadata: { bot: true, bot_name: 'Agent' },
         });
-      } finally { setBotTyping(false); }
+      } finally {
+        setBotTyping(false);
+        stopCodingWorkbenchAfter(isCodingGenerationRequest(cleanContent, sessionProfile) ? 2600 : 0);
+      }
     }
   };
 
@@ -2356,6 +2463,82 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       if (data) setMessages(data);
     }
   };
+
+  const handleRunLedgerUpdate = async (messageId: string, update: { verification_results?: any[]; tool_events?: any[] }) => {
+    setMessages((prev) => prev.map((message) => (
+      message.id === messageId
+        ? {
+            ...message,
+            metadata: {
+              ...(message.metadata || {}),
+              ...(update.tool_events ? { tool_events: update.tool_events } : {}),
+              ...(update.verification_results ? { verification_results: update.verification_results } : {}),
+            },
+          }
+        : message
+    )));
+
+    const existing = messages.find((message) => message.id === messageId);
+    if (!existing) return;
+    const nextMetadata = {
+      ...(existing.metadata || {}),
+      ...(update.tool_events ? { tool_events: update.tool_events } : {}),
+      ...(update.verification_results ? { verification_results: update.verification_results } : {}),
+    };
+    await supabase.from('room_messages').update({ metadata: nextMetadata }).eq('id', messageId);
+  };
+
+  const handleRetryVerificationCheck = useCallback(async (
+    messageId: string,
+    checkId: string,
+  ) => {
+    const message = messages.find((entry) => entry.id === messageId);
+    const taskPlan = message?.metadata?.task_plan;
+    const runId = typeof message?.metadata?.run_id === 'string' ? message.metadata.run_id : null;
+    const currentToolEvents = Array.isArray(message?.metadata?.tool_events) ? message.metadata.tool_events : [];
+    const currentVerificationResults = Array.isArray(message?.metadata?.verification_results) ? message.metadata.verification_results : [];
+    const check = Array.isArray(taskPlan?.verification)
+      ? taskPlan.verification.find((entry: any) => entry?.id === checkId)
+      : null;
+    if (!check) return;
+
+    setRetryingLedgerCheck({ messageId, checkId });
+    let nextToolEvents = [...currentToolEvents];
+
+    try {
+      const result = await executeOpenSwanVerificationCheck(check, {
+        onToolEvent: (event) => {
+          nextToolEvents = [...nextToolEvents, event];
+          void handleRunLedgerUpdate(messageId, { tool_events: nextToolEvents });
+          if (runId && circleId) {
+            void appendRunToolEvent({ runId, circleId, event });
+            void mergeRunMetadata(runId, { tool_events: nextToolEvents });
+          }
+        },
+      });
+
+      const nextVerificationResults = upsertOpenSwanVerificationResult(
+        currentVerificationResults,
+        result,
+      );
+
+      await handleRunLedgerUpdate(messageId, {
+        tool_events: nextToolEvents,
+        verification_results: nextVerificationResults,
+      });
+
+      if (runId) {
+        void mergeRunMetadata(runId, {
+          tool_events: nextToolEvents,
+          verification_results: nextVerificationResults,
+        });
+      }
+    } finally {
+      setRetryingLedgerCheck((current) => (
+        current?.messageId === messageId && current.checkId === checkId ? null : current
+      ));
+    }
+  }, [circleId, handleRunLedgerUpdate, messages]);
 
   const assignToAgent = async () => {
     if (!selectedAgent || !taskPrompt.trim()) return;
@@ -2437,6 +2620,8 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             const aiPrompt = `[Task from Rooms, assigned to ${selectedAgent.name}]${filePart}\n${taskPrompt.trim()}${fileCtx}`;
             const aiResponse = await getAIResponse(aiPrompt, {
               userId: user?.id || 'anonymous', circleId,
+              agentName: selectedAgent.name,
+              userName: user?.user_metadata?.display_name || user?.email || undefined,
             });
             await postResult(true, `**${selectedAgent.name}** [AI draft — not executed by agent]:\n\n${aiResponse}`, 'ai-fallback');
           }
@@ -2448,6 +2633,8 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             const aiPrompt = `[Task from Rooms, assigned to ${selectedAgent.name}]${filePart}\n${taskPrompt.trim()}${fileCtx}`;
             const aiResponse = await getAIResponse(aiPrompt, {
               userId: user?.id || 'anonymous', circleId,
+              agentName: selectedAgent.name,
+              userName: user?.user_metadata?.display_name || user?.email || undefined,
             });
             await postResult(true, `**${selectedAgent.name}** [AI draft — not executed by agent]:\n\n${aiResponse}`, 'ai-fallback');
           } catch {
@@ -2461,6 +2648,8 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           const aiPrompt = `[Task from Rooms, assigned to ${selectedAgent.name}]${filePart}\n${taskPrompt.trim()}${fileCtx}`;
           const aiResponse = await getAIResponse(aiPrompt, {
             userId: user?.id || 'anonymous', circleId,
+            agentName: selectedAgent.name,
+            userName: user?.user_metadata?.display_name || user?.email || undefined,
           });
           await postResult(true, `**${selectedAgent.name}** [AI draft — not executed by agent]:\n\n${aiResponse}`, 'ai');
         } catch (err: any) {
@@ -2511,17 +2700,58 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         {botTyping && (
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
             <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#f59e0b' }} />
-            <Text style={{ color: '#f59e0b', fontSize: 10, fontWeight: '600' }}>thinking...</Text>
+            <Text style={{ color: '#f59e0b', fontSize: 10, fontWeight: '600' }}>{currentRunStep || 'thinking...'}</Text>
           </View>
         )}
         <Pressable onPress={() => { setShowSpawnAgent(p => !p); if (showAssign) setShowAssign(false); }}
           style={[chatSt.assignToggle, showSpawnAgent && { backgroundColor: '#22c55e15', borderColor: '#22c55e50' }]}>
           <Text style={[chatSt.assignToggleText, showSpawnAgent && { color: '#22c55e' }]}>+ Spawn</Text>
         </Pressable>
+        <Pressable onPress={() => setShowRunHistory(true)}
+          style={[s.panelBtn, { backgroundColor: '#0f172a', borderColor: '#1f2937' }]}>
+          <Text style={{ color: '#94a3b8', fontSize: 11, fontWeight: '700' }}>RUNS</Text>
+        </Pressable>
         <Pressable onPress={() => { setShowAssign(p => !p); if (showSpawnAgent) setShowSpawnAgent(false); }}
           style={[s.panelBtn, { backgroundColor: accentColor + '15', borderColor: accentColor + '40' }]}>
           <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }}>Assign</Text>
         </Pressable>
+      </View>
+      <RunHistoryDrawer
+        visible={showRunHistory}
+        circleId={circleId || ''}
+        roomId={roomId}
+        title="Room Run History"
+        onClose={() => setShowRunHistory(false)}
+      />
+
+      <View style={{ paddingHorizontal: 10, paddingTop: 8, paddingBottom: 6, borderBottomWidth: 1, borderBottomColor: '#1a1a28', gap: 6 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <Text style={{ color: '#5b6475', fontSize: 9, fontWeight: '900', letterSpacing: 1 }}>SOUL MODE</Text>
+          <Text style={{ color: currentProfileMeta.color, fontSize: 10, fontWeight: '800' }}>{currentProfileMeta.label.toUpperCase()}</Text>
+        </View>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+          {SESSION_PROFILE_OPTIONS.map((option) => {
+            const active = option.id === sessionProfile;
+            return (
+              <Pressable
+                key={option.id}
+                onPress={() => { void handleSessionProfileSelect(option.id); }}
+                style={{
+                  paddingHorizontal: 9,
+                  paddingVertical: 5,
+                  borderRadius: 999,
+                  borderWidth: 1,
+                  borderColor: active ? option.color : '#1f2937',
+                  backgroundColor: active ? `${option.color}16` : '#0b0d12',
+                }}
+              >
+                <Text style={{ color: active ? option.color : '#64748b', fontSize: 9, fontWeight: '900', letterSpacing: 0.6 }}>
+                  {option.shortLabel}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
       </View>
 
       {/* ── Agent Assignment Panel ── */}
@@ -2618,7 +2848,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         contentContainerStyle={{ paddingHorizontal: 10, paddingVertical: 6, gap: 6 }}
         style={{ maxHeight: 38, borderBottomWidth: 1, borderBottomColor: '#1a1a28' }}
       >
-        {ROOM_CHAT_PRESETS.map(preset => (
+        {getRoomChatSessionActions(sessionProfile).map(preset => (
           <Pressable
             key={preset.id}
             onPress={() => { setInput(preset.prompt); }}
@@ -2635,7 +2865,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             ]}
           >
             <View style={{ width: 18, height: 18, borderRadius: 4, backgroundColor: preset.color + '25', justifyContent: 'center', alignItems: 'center' }}>
-              <Text style={{ color: preset.color, fontSize: 9, fontWeight: '800', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>{preset.icon}</Text>
+              <Text style={{ color: preset.color, fontSize: 9, fontWeight: '800', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>{preset.label.slice(0, 2).toUpperCase()}</Text>
             </View>
             <Text style={{ color: preset.color, fontSize: 10, fontWeight: '600' }}>{preset.label}</Text>
           </Pressable>
@@ -2643,9 +2873,34 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       </ScrollView>
 
       {/* Messages */}
+      {codingWorkbenchPrompt && (
+        <View style={{ paddingHorizontal: 10, paddingTop: 8 }}>
+          <CodingWorkbenchPreview
+            prompt={codingWorkbenchPrompt}
+            tick={codingWorkbenchTick}
+            accentColor={accentColor}
+            selectedModel={currentProfileMeta.label}
+            title={currentRunStep || 'OpenSwan is building directly into this room...'}
+          />
+        </View>
+      )}
+
       <ScrollView ref={scrollRef} style={s.msgList} contentContainerStyle={{ padding: 10, gap: 6 }}>
         {messages.length === 0 && <Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginTop: 20, fontStyle: 'italic' }}>No messages yet</Text>}
-        {messages.map(m => <MsgBubble key={m.id} msg={m} accentColor={accentColor} onDelete={handleDeleteMessage} />)}
+        {messages.map(m => (
+          <MsgBubble
+            key={m.id}
+            msg={m}
+            accentColor={accentColor}
+            circleId={circleId || ''}
+            roomId={roomId}
+            sessionProfile={sessionProfile}
+            onRunLedgerUpdate={handleRunLedgerUpdate}
+            onRetryCheck={handleRetryVerificationCheck}
+            retryingCheckId={retryingLedgerCheck?.messageId === m.id ? retryingLedgerCheck.checkId : null}
+            onDelete={handleDeleteMessage}
+          />
+        ))}
       </ScrollView>
 
       {/* Active file chip */}
@@ -2683,7 +2938,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             </Pressable>
           </View>
           <SpawnAgentPanel
-            circleId={circleId}
+            circleId={circleId || ''}
             onCreated={(_agentId: string, _agentName: string) => {
               setShowSpawnAgent(false);
               supabase.from('circle_office_agents')
@@ -2857,8 +3112,19 @@ function AgentThinkingLoader() {
   );
 }
 
-const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, onDelete }: { msg: RoomMessage; accentColor: string; onDelete?: (id: string) => void }) {
+const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete }: {
+  msg: RoomMessage;
+  accentColor: string;
+  circleId: string;
+  roomId: string;
+  sessionProfile?: SessionCodingProfile;
+  onRunLedgerUpdate?: (messageId: string, update: { verification_results?: any[]; tool_events?: any[] }) => void;
+  onRetryCheck?: (messageId: string, checkId: string) => void;
+  retryingCheckId?: string | null;
+  onDelete?: (id: string) => void;
+}) {
   const time = new Date(msg.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  const artifacts = Array.isArray(msg.metadata?.artifacts) ? msg.metadata.artifacts : [];
   if (msg.message_type==='edit_event')
     return <View style={{alignItems:'center',flexDirection:'row',justifyContent:'center',gap:6}}><Text style={{color:'#555',fontSize:11,fontStyle:'italic'}}>✏️ {msg.content} · {time}</Text>{onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{opacity:0.4}}><Text style={{color:'#f85149',fontSize:10}}>×</Text></Pressable>}</View>;
   if (msg.message_type==='system')
@@ -2867,6 +3133,11 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, onDelete }: 
     const isTask = msg.metadata?.task === true;
     const targetFile = msg.metadata?.target_file;
     const status = msg.metadata?.status;
+    const runId = msg.metadata?.run_id;
+    const taskPlan = msg.metadata?.task_plan;
+    const toolEvents = Array.isArray(msg.metadata?.tool_events) ? msg.metadata.tool_events : [];
+    const verificationResults = Array.isArray(msg.metadata?.verification_results) ? msg.metadata.verification_results : [];
+    const delegatedSubagents = Array.isArray(msg.metadata?.delegated_subagents) ? msg.metadata.delegated_subagents : [];
     return (
       <View style={{borderLeftWidth:3,borderLeftColor:isTask?'#6366f1':'#3b82f6',paddingLeft:10,paddingVertical:7,backgroundColor:isTask?'#6366f108':'#3b82f608',borderRadius:12}}>
         <View style={{flexDirection:'row',gap:8,marginBottom:3,flexWrap:'wrap',alignItems:'center'}}>
@@ -2886,7 +3157,39 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, onDelete }: 
           <Text style={{color:'#444',fontSize:10}}>{time}</Text>
           {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ marginLeft: 'auto' as any, opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
         </View>
+        {delegatedSubagents.length > 0 ? (
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}>
+            {delegatedSubagents.map((name: string) => (
+              <View key={name} style={{ backgroundColor: '#0ea5e915', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 999, borderWidth: 1, borderColor: '#0ea5e940' }}>
+                <Text style={{ color: '#67e8f9', fontSize: 8, fontWeight: '800', fontFamily: MONO }}>{String(name).toUpperCase()}</Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
         <Text style={{color:'#ccc',fontSize:12,lineHeight:18}}>{isTask ? msg.metadata?.prompt || msg.content : msg.content}</Text>
+        {artifacts.length > 0 && (
+          <ChatArtifacts
+            artifacts={artifacts}
+            accentColor={accentColor}
+            circleId={circleId}
+            sessionProfile={sessionProfile}
+            runId={typeof runId === 'string' ? runId : null}
+            onRunLedgerUpdate={(update) => onRunLedgerUpdate?.(msg.id, {
+              tool_events: update.toolEvents,
+              verification_results: update.verificationResults,
+            })}
+            roomContext={{ roomId }}
+          />
+        )}
+        <RunExecutionCard
+          taskPlan={taskPlan}
+          toolEvents={toolEvents}
+          verificationResults={verificationResults}
+          delegatedSubagents={delegatedSubagents}
+          accentColor={accentColor}
+          onRetryCheck={onRetryCheck ? (checkId) => onRetryCheck(msg.id, checkId) : undefined}
+          retryingCheckId={retryingCheckId}
+        />
         {isTask && msg.metadata?.status === 'pending' && <AgentThinkingLoader />}
         {isTask && msg.metadata?.status === 'error' && (
           <Text style={{color:'#ef4444',fontSize:10,marginTop:4,fontStyle:'italic'}}>
@@ -3032,10 +3335,10 @@ function APIsPanel({ room, accentColor }: { room: Room; accentColor: string }) {
         </ScrollView>
       ))}
 
-      {/* Integrations */}
+      {/* Marketplace integrations */}
       <View style={s.integrationsSection}>
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-          <Text style={s.apiLabel}>INTEGRATIONS</Text>
+          <Text style={s.apiLabel}>MARKETPLACE APPS</Text>
           <HelpTip color="#888" text="Supported platforms and SDKs you can use with Room APIs. Use the Supabase client library for your language to interact with any Room API. All standard Supabase SDKs (JS, Python, Flutter, etc.) work out of the box." />
         </View>
         <ArrowScrollView scrollStyle={{paddingHorizontal:4}}>
@@ -4686,12 +4989,12 @@ function GitHubPanel({ circleId, accentColor, ghConnected, ghUser, ghRepo,
         </View>
         <Text style={{color:'#fff',fontSize:16,fontWeight:'700',marginBottom:8,textAlign:'center'}}>GitHub Not Connected</Text>
         <Text style={{color:'#666',fontSize:13,lineHeight:20,marginBottom:20,textAlign:'center',maxWidth:320}}>
-          Connect your GitHub account from the Integrations tab to browse repos, view files, and track shipping.
+          Connect your GitHub account from Marketplace to browse repos, view files, and track shipping.
         </Text>
         <Text style={{color:'#444',fontSize:11,textAlign:'center'}}>
-          Go to Integrations {'→'} GitHub {'→'} Connect
+          Go to Marketplace {'→'} GitHub {'→'} Connect
         </Text>
-        {/* Legacy connect UI removed — single connection point in Integrations */}
+        {/* Legacy connect UI removed — single connection point in Marketplace */}
       </ScrollView>
     );
   }

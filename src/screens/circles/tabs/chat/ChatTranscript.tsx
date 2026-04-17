@@ -1,6 +1,8 @@
 import React, { useRef, useEffect, useCallback } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, Image } from 'react-native';
 import { ChatEntry, ChatRun, RUN_STATUS_CONFIG } from './chatTypes';
+import type { PromptMemoryReference } from '../../../../lib/memoryService';
+import type { ResearchDocumentReference } from '../../../../lib/researchControl';
 import type { WikiArticleReference } from '../../../../lib/wikiData';
 import type { SwanBotStructuredArtifact } from '../../../../lib/swanbot';
 
@@ -9,6 +11,54 @@ interface Props {
   runs: ChatRun[];
   onSelectRun: (run: ChatRun) => void;
   accentColor: string;
+}
+
+function formatMemoryRecencyLabel(ref: PromptMemoryReference): string {
+  const timestamp = ref.lastAccessedAt || ref.updatedAt;
+  if (!timestamp) return 'unknown freshness';
+  const ageMs = Date.now() - new Date(timestamp).getTime();
+  const ageHours = ageMs / 3_600_000;
+  if (ageHours < 24) return 'fresh today';
+  const ageDays = ageHours / 24;
+  if (ageDays < 7) return `${Math.max(1, Math.round(ageDays))}d old`;
+  if (ageDays < 30) return `${Math.max(1, Math.round(ageDays / 7))}w old`;
+  return `${Math.max(1, Math.round(ageDays / 30))}mo old`;
+}
+
+function formatMemoryStrengthLabel(ref: PromptMemoryReference): string {
+  const score = ref.importance ?? 0.5;
+  if (score >= 0.9) return 'core';
+  if (score >= 0.75) return 'strong';
+  if (score >= 0.6) return 'active';
+  return 'light';
+}
+
+function formatMemoryStateLabel(ref: PromptMemoryReference): string {
+  if (ref.memoryState === 'distilled') return 'distilled guidance';
+  if (ref.retrievalMode === 'startup' && ref.pinned) return 'pinned startup';
+  if (ref.retrievalMode === 'startup') return 'startup guidance';
+  if (ref.pinned) return 'pinned';
+  if (ref.memoryState === 'supporting') return 'supporting';
+  return 'retrieved';
+}
+
+function formatMemoryTrustLabel(ref: PromptMemoryReference): string {
+  const helpfulness = ref.helpfulness;
+  if (helpfulness == null) return 'unrated';
+  if (helpfulness >= 0.8) return 'trusted';
+  if (helpfulness >= 0.6) return 'proven';
+  if (helpfulness <= 0.3) return 'weak';
+  return 'mixed';
+}
+
+function formatMemorySourceLabel(ref: PromptMemoryReference): string | null {
+  switch (ref.sourceSurface) {
+    case 'claude_code_bridge': return 'Claude Code';
+    case 'codex_bridge': return 'Codex';
+    case 'cursor_bridge': return 'Cursor';
+    case 'gemini_bridge': return 'Gemini';
+    default: return null;
+  }
 }
 
 function formatEntryTime(iso: string): string {
@@ -30,6 +80,13 @@ function UserBubble({ entry, accentColor }: { entry: ChatEntry; accentColor: str
 
 function AssistantBubble({ entry, accentColor }: { entry: ChatEntry; accentColor: string }) {
   const wikiRefs = (entry.metadata?.wikiRefs as WikiArticleReference[] | undefined) || [];
+  const researchRefs = (entry.metadata?.researchRefs as ResearchDocumentReference[] | undefined) || [];
+  const memoryRefs = (entry.metadata?.memoryRefs as PromptMemoryReference[] | undefined)
+    || (entry.metadata?.memory_references as PromptMemoryReference[] | undefined)
+    || [];
+  const memoriesUsed = (entry.metadata?.memoriesUsed as string[] | undefined)
+    || (entry.metadata?.memories_used as string[] | undefined)
+    || [];
   const artifacts = (entry.metadata?.artifacts as SwanBotStructuredArtifact[] | undefined) || [];
 
   return (
@@ -73,6 +130,47 @@ function AssistantBubble({ entry, accentColor }: { entry: ChatEntry; accentColor
                 <Text style={styles.wikiRefSubtitle} numberOfLines={2}>{ref.subtitle}</Text>
               </View>
             ))}
+          </View>
+        ) : null}
+        {researchRefs.length > 0 ? (
+          <View style={styles.wikiRefsWrap}>
+            <Text style={styles.wikiRefsLabel}>Research shaping this response</Text>
+            {researchRefs.slice(0, 3).map(ref => (
+              <View key={ref.id} style={[styles.wikiRefCard, { borderColor: ref.color + '40', backgroundColor: ref.color + '10' }]}>
+                <Text style={[styles.wikiRefTitle, { color: ref.color }]}>{ref.title}</Text>
+                <Text style={styles.wikiRefMeta}>
+                  {(ref.profileKey || ref.sourceType || 'research').toUpperCase()} • {ref.reviewStatus.toUpperCase()}
+                </Text>
+                <Text style={styles.wikiRefSubtitle} numberOfLines={2}>{ref.subtitle}</Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
+        {(memoryRefs.length > 0 || memoriesUsed.length > 0) ? (
+          <View style={styles.wikiRefsWrap}>
+            <Text style={styles.wikiRefsLabel}>Persistent memory used</Text>
+            {memoryRefs.length > 0 ? memoryRefs.slice(0, 4).map((ref) => (
+              <View key={ref.id} style={styles.memoryRefCard}>
+                <Text style={styles.memoryRefTitle}>{ref.title}</Text>
+                <Text style={styles.memoryRefMeta}>
+                  {formatMemoryStateLabel(ref).toUpperCase()} • {String(ref.scope).toUpperCase()} • {String(ref.memoryKind).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryTrustLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}{formatMemorySourceLabel(ref) ? ` • ${formatMemorySourceLabel(ref)!.toUpperCase()}` : ''}{ref.soulKey ? ` • ${ref.soulKey.replace(/^soul:/, '').toUpperCase()}` : ''}
+                </Text>
+                {ref.matchReason || ref.helpfulness != null ? (
+                  <Text style={styles.wikiRefSubtitle}>
+                    {ref.matchReason || ''}
+                    {ref.helpfulness != null ? `${ref.matchReason ? ' · ' : ''}prior feedback: ${formatMemoryTrustLabel(ref)}` : ''}
+                  </Text>
+                ) : null}
+              </View>
+            )) : (
+              <View style={styles.memoryChipRow}>
+                {memoriesUsed.slice(0, 5).map((memory, index) => (
+                  <View key={`${memory}-${index}`} style={styles.memoryChip}>
+                    <Text style={styles.memoryChipText}>{memory}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
           </View>
         ) : null}
         <Text style={styles.assistantTimestamp}>{formatEntryTime(entry.createdAt)}</Text>
@@ -294,6 +392,42 @@ const styles = StyleSheet.create({
     color: '#d0ddca',
     fontSize: 12,
     lineHeight: 16,
+  },
+  memoryRefCard: {
+    borderWidth: 1,
+    borderColor: '#213224',
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: '#0a140b',
+  },
+  memoryRefTitle: {
+    color: '#d7ecd1',
+    fontSize: 12,
+    fontWeight: '800',
+    marginBottom: 2,
+  },
+  memoryRefMeta: {
+    color: '#86a186',
+    fontSize: 10,
+  },
+  memoryChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  memoryChip: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#29402b',
+    backgroundColor: '#0d1810',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  memoryChipText: {
+    color: '#d7ecd1',
+    fontSize: 11,
+    fontWeight: '700',
   },
   timestampText: {
     color: '#738373',

@@ -2,6 +2,7 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, Modal, TextInput, Pressable, Platform } from 'react-native';
 import PixelButton from './PixelButton';
+import { getAgentIdentityKey } from '../lib/agentIdentity';
 import { OfficeAgent } from '../lib/officeAgents';
 import { Project, loadProjects } from '../lib/projectManagement';
 import { OpenSwanConfig } from '../lib/openswanService';
@@ -107,7 +108,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult, compact
     for (const agent of activeAgents) {
       const config = getConfig(agent.connectionId);
       if (config) {
-        const sessionKey = agent.id.includes('::') ? agent.id.split('::')[1] : agent.id;
+        const sessionKey = getAgentIdentityKey(agent);
         const result = await sendContextualMessage(
           config,
           sessionKey,
@@ -162,7 +163,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult, compact
     for (const agent of projectAgents) {
       const config = getConfig(agent.connectionId);
       if (config) {
-        const sessionKey = agent.id.includes('::') ? agent.id.split('::')[1] : agent.id;
+        const sessionKey = getAgentIdentityKey(agent);
         const result = await sendContextualMessage(
           config,
           sessionKey,
@@ -217,7 +218,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult, compact
         // Notify agent and log
         const config = getConfig(bestAgent.connectionId);
         if (config) {
-          const sessionKey = bestAgent.id.includes('::') ? bestAgent.id.split('::')[1] : bestAgent.id;
+          const sessionKey = getAgentIdentityKey(bestAgent);
           await sendContextualMessage(
             config,
             sessionKey,

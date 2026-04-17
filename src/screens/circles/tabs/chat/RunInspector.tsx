@@ -15,6 +15,8 @@ import {
   RUN_STATUS_CONFIG,
   MODE_CONFIG,
 } from './chatTypes';
+import { getOpenSwanExecutionStatusColor, getOpenSwanExecutionStatusLabel, type OpenSwanExecutionContract, type OpenSwanExecutionStatus } from '../../../../lib/openswanExecution';
+import type { BrowserPlanEvent } from '../../../../lib/computerUse';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -48,11 +50,22 @@ function formatDuration(startIso: string, endIso?: string | null): string {
 function getStepKindIcon(kind: string): string {
   switch (kind) {
     case 'tool': return '()';
+    case 'tool_call': return '()';
+    case 'tool_result': return '=>';
     case 'thought': return '..';
+    case 'thinking': return '..';
     case 'output': return '>>';
+    case 'message': return '>>';
     case 'error': return '!!';
     case 'approval': return '??';
+    case 'approval_request': return '??';
+    case 'approval_result': return 'OK';
     case 'status': return '--';
+    case 'plan': return 'P';
+    case 'artifact_create': return '[]';
+    case 'delegation': return '@@';
+    case 'finalize': return '++';
+    case 'context_edit': return '{}';
     default: return '--';
   }
 }
@@ -60,13 +73,53 @@ function getStepKindIcon(kind: string): string {
 function getStepKindColor(kind: string): string {
   switch (kind) {
     case 'tool': return '#6366f1';
+    case 'tool_call': return '#6366f1';
+    case 'tool_result': return '#8b5cf6';
     case 'thought': return '#22d3ee';
+    case 'thinking': return '#22d3ee';
     case 'output': return '#22c55e';
+    case 'message': return '#22c55e';
     case 'error': return '#ef4444';
     case 'approval': return '#f59e0b';
+    case 'approval_request': return '#f59e0b';
+    case 'approval_result': return '#22c55e';
     case 'status': return '#a0a0b0';
+    case 'plan': return '#60a5fa';
+    case 'artifact_create': return '#f472b6';
+    case 'delegation': return '#a78bfa';
+    case 'finalize': return '#34d399';
+    case 'context_edit': return '#94a3b8';
     default: return '#606075';
   }
+}
+
+function getStepStatusColor(status: string): string {
+  switch (status) {
+    case 'failed':
+      return '#ef4444';
+    case 'blocked':
+      return '#a78bfa';
+    case 'running':
+      return '#f59e0b';
+    case 'completed':
+      return '#22c55e';
+    case 'skipped':
+      return '#94a3b8';
+    default:
+      return '#a0a0b0';
+  }
+}
+
+function extractExecutions(step: ChatRunStep): OpenSwanExecutionContract[] {
+  const executions = Array.isArray(step.metadata?.executions)
+    ? step.metadata.executions.filter(Boolean)
+    : [];
+  return executions as OpenSwanExecutionContract[];
+}
+
+function extractBrowserPlanEvent(step: ChatRunStep): BrowserPlanEvent | null {
+  const raw = step.metadata?.browserPlanEvent;
+  return raw && typeof raw === 'object' ? raw as BrowserPlanEvent : null;
 }
 
 function getArtifactKindIcon(kind: string): string {
@@ -229,6 +282,8 @@ function DetailsTab({ steps }: { steps: ChatRunStep[] }) {
       {steps.map((step, index) => {
         const icon = getStepKindIcon(step.stepKind);
         const color = getStepKindColor(step.stepKind);
+        const executions = extractExecutions(step);
+        const browserPlanEvent = extractBrowserPlanEvent(step);
         return (
           <View key={step.id} style={styles.stepCard}>
             <View style={styles.stepHeader}>
@@ -240,8 +295,8 @@ function DetailsTab({ steps }: { steps: ChatRunStep[] }) {
                 <Text style={[styles.stepKind, { color }]}>{step.stepKind}</Text>
               </View>
               {step.status && (
-                <View style={[styles.stepStatusPill, { backgroundColor: getStepKindColor(step.status === 'failed' ? 'error' : 'output') + '18' }]}>
-                  <Text style={[styles.stepStatusText, { color: getStepKindColor(step.status === 'failed' ? 'error' : 'output') }]}>
+                <View style={[styles.stepStatusPill, { backgroundColor: getStepStatusColor(step.status) + '18' }]}>
+                  <Text style={[styles.stepStatusText, { color: getStepStatusColor(step.status) }]}>
                     {step.status}
                   </Text>
                 </View>
@@ -250,6 +305,44 @@ function DetailsTab({ steps }: { steps: ChatRunStep[] }) {
             {step.body && (
               <Text style={styles.stepBody} numberOfLines={6}>{step.body}</Text>
             )}
+            {browserPlanEvent ? (
+              <View style={styles.browserPlanEventCard}>
+                <Text style={styles.browserPlanEventTitle}>
+                  {browserPlanEvent.backendLabel || 'Browser Session'}
+                </Text>
+                <Text style={styles.browserPlanEventMeta}>
+                  {browserPlanEvent.kind.replace(/_/g, ' ').toUpperCase()} · {new Date(browserPlanEvent.at).toLocaleString()}
+                </Text>
+                {browserPlanEvent.backendSessionId ? (
+                  <Text style={styles.executionMeta} numberOfLines={1}>{browserPlanEvent.backendSessionId}</Text>
+                ) : null}
+                {browserPlanEvent.backendLiveUrl ? (
+                  <Text style={styles.executionMeta} numberOfLines={1}>{browserPlanEvent.backendLiveUrl}</Text>
+                ) : null}
+              </View>
+            ) : null}
+            {executions.length > 0 ? (
+              <View style={styles.executionList}>
+                {executions.map((execution, executionIndex) => (
+                  <View key={`${step.id}-execution-${executionIndex}`} style={styles.executionRow}>
+                    <Text style={[styles.executionPill, { color: getOpenSwanExecutionStatusColor(execution.status as OpenSwanExecutionStatus) }]}>
+                      {getOpenSwanExecutionStatusLabel(execution.status as OpenSwanExecutionStatus)}
+                    </Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.executionSummary} numberOfLines={2}>
+                        {execution.checkLabel || execution.toolName || execution.summary}
+                      </Text>
+                      {execution.command ? (
+                        <Text style={styles.executionMeta} numberOfLines={1}>{execution.command}</Text>
+                      ) : null}
+                      {execution.error ? (
+                        <Text style={styles.executionError} numberOfLines={2}>{execution.error}</Text>
+                      ) : null}
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ) : null}
             {index < steps.length - 1 && <View style={styles.stepConnector} />}
           </View>
         );
@@ -567,11 +660,71 @@ const styles = StyleSheet.create({
     marginLeft: 32,
     marginBottom: 8,
   },
+  browserPlanEventCard: {
+    marginLeft: 32,
+    marginBottom: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#8b5cf630',
+    backgroundColor: '#8b5cf612',
+  },
+  browserPlanEventTitle: {
+    color: '#e5e7eb',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  browserPlanEventMeta: {
+    color: '#c4b5fd',
+    fontSize: 10,
+    fontFamily: MONO,
+    marginTop: 2,
+    marginBottom: 2,
+  },
   stepConnector: {
     width: 1,
     height: 8,
     backgroundColor: '#1a1a28',
     marginLeft: 12,
+  },
+  executionList: {
+    marginTop: 10,
+    gap: 6,
+  },
+  executionRow: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'flex-start',
+    backgroundColor: '#0f1722',
+    borderWidth: 1,
+    borderColor: '#ffffff12',
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+  },
+  executionPill: {
+    fontFamily: MONO,
+    fontSize: 10,
+    fontWeight: '700',
+    width: 50,
+  },
+  executionSummary: {
+    color: '#d6d8df',
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  executionMeta: {
+    color: '#8a8f9d',
+    fontSize: 10,
+    fontFamily: MONO,
+    marginTop: 2,
+  },
+  executionError: {
+    color: '#ef4444',
+    fontSize: 10,
+    lineHeight: 14,
+    marginTop: 2,
   },
 
   // ── Artifacts ──

@@ -12,6 +12,7 @@ import type { Goal, CirclePlan } from '../../../../types/kanban';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
 import type { CreateTaskFields } from '../../../../hooks/useKanbanData';
 import PlanningPanel from './PlanningPanel';
+import type { CircleIntegrationGroupKey } from '../../../../lib/circleIntegrationCatalog';
 
 type SidebarTab = 'goals' | 'plans';
 
@@ -32,12 +33,13 @@ interface Props {
   onUpdatePlan?: (id: string, fields: Partial<CirclePlan>) => Promise<void>;
   onDeletePlan?: (id: string) => Promise<void>;
   onGenerateTasks?: (planId: string) => Promise<void>;
+  onOpenMarketplace?: (focus?: { itemId?: string | null; groupKey?: CircleIntegrationGroupKey | null }) => void;
 }
 
 export default function GoalsPanel({
   goals, agents, filteredGoalId, onFilter,
   onCreateGoal, onUpdateGoal, onDeleteGoal, onCreateTask, onEditGoal,
-  plans, circleId, onCreatePlan, onUpdatePlan, onDeletePlan, onGenerateTasks,
+  plans, circleId, onCreatePlan, onUpdatePlan, onDeletePlan, onGenerateTasks, onOpenMarketplace,
 }: Props) {
   const [showAdd, setShowAdd] = useState(false);
   const [editGoal, setEditGoal] = useState<GoalWithCount | null>(null);
@@ -75,6 +77,7 @@ export default function GoalsPanel({
           onUpdatePlan={onUpdatePlan}
           onDeletePlan={onDeletePlan}
           onGenerateTasks={onGenerateTasks}
+          onOpenMarketplace={onOpenMarketplace}
         />
       ) : sidebarTab === 'plans' ? (
         <View style={{ padding: 16, alignItems: 'center' }}>

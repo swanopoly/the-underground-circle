@@ -242,6 +242,30 @@ export async function loadCircleOfficeAgents(circleId: string): Promise<{
   }
 }
 
+// ─── Hidden-agent suppression ─────────────────────────────────────────────────
+// In-memory set of `${circleId}::${name}` keys whose owners have explicitly
+// removed them from the office. Bridge pollers re-publish on every tick (every
+// 5s), so without this the row would be re-created seconds after deletion.
+// The set lives until the next tab reload — which is the right scope: a fresh
+// session means the user wants their agents discoverable again.
+const _hiddenAgents = new Set<string>();
+
+function hiddenKey(circleId: string, name: string): string {
+  return `${circleId}::${name.toLowerCase()}`;
+}
+
+export function hideAgentInOffice(circleId: string, name: string): void {
+  _hiddenAgents.add(hiddenKey(circleId, name));
+}
+
+export function unhideAgentInOffice(circleId: string, name: string): void {
+  _hiddenAgents.delete(hiddenKey(circleId, name));
+}
+
+export function isAgentHiddenInOffice(circleId: string, name: string): boolean {
+  return _hiddenAgents.has(hiddenKey(circleId, name));
+}
+
 // ─── Publish an agent to the circle office ────────────────────────────────────
 
 export async function publishAgentToCircle(input: PublishAgentInput): Promise<{
@@ -249,6 +273,9 @@ export async function publishAgentToCircle(input: PublishAgentInput): Promise<{
   error?: string;
 }> {
   try {
+    if (isAgentHiddenInOffice(input.circleId, input.name)) {
+      return { error: 'agent_hidden' };
+    }
     const user = await getCurrentUser();
     if (!user) return { error: 'Not authenticated' };
 
@@ -420,6 +447,27 @@ export async function updateAgentGatewayUrl(
       .from('circle_office_agents')
       .update({ gateway_url: gatewayUrl, is_public: isPublic, updated_at: new Date().toISOString() })
       .eq('id', agentId);
+    return error ? { error: error.message } : {};
+  } catch (e: any) {
+    return { error: e.message };
+  }
+}
+
+// ─── Remove a published agent row owned by the current user ─────────────────
+
+export async function removeCircleOfficeAgent(
+  agentId: string
+): Promise<{ error?: string }> {
+  try {
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) return { error: 'Not authenticated' };
+
+    const { error } = await supabase
+      .from('circle_office_agents')
+      .delete()
+      .eq('id', agentId)
+      .eq('owner_id', auth.user.id);
+
     return error ? { error: error.message } : {};
   } catch (e: any) {
     return { error: e.message };

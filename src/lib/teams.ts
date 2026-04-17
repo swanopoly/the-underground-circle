@@ -45,25 +45,37 @@ const TEAMS_SCOPES = 'ChannelMessage.Send Channel.ReadBasic.All Team.ReadBasic.A
 
 // ─── Connection ─────────────────────────────────────────────────────
 
+// Per-session flag. Once we've observed `teams_connections` is missing we
+// stop hitting the endpoint so the browser stops logging 404s.
+let teamsConnectionsUnavailable = false;
+
 export async function getTeamsConfig(circleId: string): Promise<TeamsConnection | null> {
-  const { data } = await supabase
+  if (teamsConnectionsUnavailable) return null;
+  const { data, error } = await supabase
     .from('teams_connections')
     .select('*')
     .eq('circle_id', circleId)
     .eq('is_active', true)
-    .single();
-
+    .maybeSingle();
+  if ((error as any)?.code === 'PGRST205' || (error as any)?.code === 'PGRST204') {
+    teamsConnectionsUnavailable = true;
+    return null;
+  }
   return data;
 }
 
 export async function getTeamsConfigByOrg(orgId: string): Promise<TeamsConnection | null> {
-  const { data } = await supabase
+  if (teamsConnectionsUnavailable) return null;
+  const { data, error } = await supabase
     .from('teams_connections')
     .select('*')
     .eq('org_id', orgId)
     .eq('is_active', true)
-    .single();
-
+    .maybeSingle();
+  if ((error as any)?.code === 'PGRST205' || (error as any)?.code === 'PGRST204') {
+    teamsConnectionsUnavailable = true;
+    return null;
+  }
   return data;
 }
 

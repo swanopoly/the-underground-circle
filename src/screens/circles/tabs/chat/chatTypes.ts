@@ -70,7 +70,7 @@ export interface ChatRunStep {
   stepKind: ChatStepKind;
   title: string;
   body: string | null;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'blocked' | 'skipped';
   sortOrder: number;
   metadata: Record<string, unknown>;
   createdAt: string;

@@ -8,6 +8,7 @@
  */
 
 import { getSwanBotResponse, getSwanBotStructuredResponse, SwanBotContext } from './swanbot';
+import { callHfProxy, hfErrorGuidance } from './hfProxy';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -275,25 +276,42 @@ async function handleImagine(
   if (!prompt) {
     return { success: false, message: 'Usage: `/imagine <prompt>`' };
   }
-  try {
-    const structured = await getSwanBotStructuredResponse(`/imagine ${prompt}`, buildSwanBotContext(ctx));
+
+  // Real image generation — call hf-proxy. Claude (SwanBot) cannot generate
+  // images, so the previous SwanBot path returned text descriptions only.
+  // Default model: black-forest-labs/FLUX.1-schnell (set in hf-proxy).
+  // Note: text-to-image returns { image: dataUrl, ... }, while other binary
+  // tasks return { data: dataUrl, ... }. Tolerate both.
+  const result = await callHfProxy<{ image?: string; data?: string }>({
+    task: 'text-to-image',
+    inputs: prompt,
+    circleId: ctx.circleId,
+  });
+
+  if (!result.ok) {
     return {
-      success: true,
-      message: structured.response,
-      artifacts: structured.artifacts as HfCommandResult['artifacts'],
-      toolActions: structured.tool_actions?.map(action => ({
-        kind: action.kind,
-        toolName: action.tool_name,
-        title: action.title,
-        status: action.status,
-        model: action.model || undefined,
-        inputPreview: action.input_preview || undefined,
-        outputPreview: action.output_preview || undefined,
-      })),
+      success: false,
+      message: `**Image generation failed**\n\n${result.error}\n\n_${hfErrorGuidance(result.code)}_`,
     };
-  } catch (e: any) {
-    return { success: false, message: `Image generation failed: ${e.message}` };
   }
+
+  const imageDataUrl = result.result?.image || result.result?.data;
+  if (!imageDataUrl) {
+    return { success: false, message: 'Image generation returned no data.' };
+  }
+
+  return {
+    success: true,
+    message: `**Generated image:** _${prompt}_`,
+    artifacts: [{
+      kind: 'image',
+      title: prompt.slice(0, 80),
+      url: imageDataUrl,
+      content: prompt,
+      metadata: { model: result.model, source: 'huggingface' },
+    }],
+    toolActions: buildToolAction('hf_imagine', 'Generate Image', prompt, `Image (${result.model})`),
+  };
 }
 
 async function handleVision(
@@ -367,11 +385,48 @@ async function handleCode(
   ctx: { circleId: string; userId: string; userName?: string; model?: string },
 ): Promise<HfCommandResult> {
   if (!text) return { success: false, message: 'Usage: `/code <task>`' };
+
+  // Primary: Qwen3-Coder via hf-proxy. It's a code-specialist model, so it
+  // typically beats general-purpose Claude for code-gen latency + quality.
+  // Pass task='chat' explicitly with the Qwen model — hf-proxy's OpenAI-
+  // compatible endpoint accepts any model id via the router.
+  const QWEN_CODER = 'Qwen/Qwen3-Coder-Next';
+  const codePrompt = `You are a precise code assistant. Return only the code (with brief comments explaining tricky parts). Do not wrap in markdown unless multiple files. Task:\n\n${text}`;
+
+  const hf = await callHfProxy<{ choices?: Array<{ message?: { content?: string } }> }>({
+    task: 'chat',
+    model: QWEN_CODER,
+    inputs: { messages: [{ role: 'user', content: codePrompt }] },
+    circleId: ctx.circleId,
+    options: { max_tokens: 2048, temperature: 0.2 },
+  });
+
+  if (hf.ok) {
+    const code = hf.result?.choices?.[0]?.message?.content?.trim();
+    if (code) {
+      return {
+        success: true,
+        message: `**Code (${hf.model.split('/').pop()})**\n\n${code}`,
+        artifacts: [{
+          kind: 'code',
+          title: text.slice(0, 80),
+          content: code,
+          metadata: { model: hf.model, source: 'huggingface', backend: 'qwen3-coder' },
+        }],
+        toolActions: buildToolAction('hf_code', 'Code Generation', text, code),
+      };
+    }
+  }
+
+  // Graceful fallback: HF unavailable (token missing, rate-limited, network).
+  // Code-gen is high-stakes — users want SOMETHING, not just an error. Fall
+  // back to SwanBot/Claude with a note about the degraded path.
   try {
     const structured = await getSwanBotStructuredResponse(`/code ${text}`, buildSwanBotContext(ctx));
+    const fallbackNotice = hf.ok ? '' : `\n\n_Note: generated via Claude (HuggingFace fallback: ${hf.code})_`;
     return {
       success: true,
-      message: structured.response,
+      message: structured.response + fallbackNotice,
       artifacts: structured.artifacts as HfCommandResult['artifacts'],
       toolActions: structured.tool_actions?.map(action => ({
         kind: action.kind,
@@ -384,7 +439,15 @@ async function handleCode(
       })),
     };
   } catch (e: any) {
-    return { success: false, message: `Code generation failed: ${e.message}` };
+    // Both paths failed — surface the original HF error since it's likely
+    // the more actionable one (e.g. "set HF_TOKEN"), with the Claude error
+    // appended as context.
+    return {
+      success: false,
+      message: hf.ok
+        ? `**Code generation failed**\n\n${e.message}`
+        : `**Code generation failed**\n\nHuggingFace: ${hf.error}\nClaude fallback: ${e.message}\n\n_${hfErrorGuidance(hf.code)}_`,
+    };
   }
 }
 
@@ -393,25 +456,42 @@ async function handleSpeak(
   ctx: { circleId: string; userId: string; userName?: string; model?: string },
 ): Promise<HfCommandResult> {
   if (!text) return { success: false, message: 'Usage: `/speak <text>`' };
-  try {
-    const structured = await getSwanBotStructuredResponse(`/speak ${text}`, buildSwanBotContext(ctx));
+
+  // Real text-to-speech — call hf-proxy. SwanBot/Claude can't synthesize
+  // audio, so the previous path returned only text descriptions.
+  // Default model: espnet/kan-bayashi_ljspeech_vits (set in hf-proxy).
+  // Tolerates both `{ data }` (TTS) and `{ image }` (some HF endpoints
+  // mislabel content type) shapes for forward-compat.
+  const result = await callHfProxy<{ data?: string; image?: string }>({
+    task: 'text-to-speech',
+    inputs: text,
+    circleId: ctx.circleId,
+  });
+
+  if (!result.ok) {
     return {
-      success: true,
-      message: structured.response,
-      artifacts: structured.artifacts as HfCommandResult['artifacts'],
-      toolActions: structured.tool_actions?.map(action => ({
-        kind: action.kind,
-        toolName: action.tool_name,
-        title: action.title,
-        status: action.status,
-        model: action.model || undefined,
-        inputPreview: action.input_preview || undefined,
-        outputPreview: action.output_preview || undefined,
-      })),
+      success: false,
+      message: `**Speech generation failed**\n\n${result.error}\n\n_${hfErrorGuidance(result.code)}_`,
     };
-  } catch (e: any) {
-    return { success: false, message: `Speech generation failed: ${e.message}` };
   }
+
+  const audioDataUrl = result.result?.data || result.result?.image;
+  if (!audioDataUrl) {
+    return { success: false, message: 'Speech generation returned no audio.' };
+  }
+
+  return {
+    success: true,
+    message: `**Generated audio:** _"${text.slice(0, 120)}${text.length > 120 ? '…' : ''}"_`,
+    artifacts: [{
+      kind: 'audio',
+      title: text.slice(0, 80),
+      url: audioDataUrl,
+      content: text,
+      metadata: { model: result.model, source: 'huggingface' },
+    }],
+    toolActions: buildToolAction('hf_speak', 'Text to Speech', text, `Audio (${result.model})`),
+  };
 }
 
 function handleHelp(): HfCommandResult {

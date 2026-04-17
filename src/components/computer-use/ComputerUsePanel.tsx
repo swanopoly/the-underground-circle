@@ -28,6 +28,7 @@ interface ComputerUsePanelProps {
   onPause: () => void;
   onResume: () => void;
   onCancel: () => void;
+  onOpenSession?: () => void;
   accentColor: string;
 }
 
@@ -79,6 +80,7 @@ export default function ComputerUsePanel({
   onPause,
   onResume,
   onCancel,
+  onOpenSession,
   accentColor,
 }: ComputerUsePanelProps) {
   const [selectedScreenshot, setSelectedScreenshot] = useState<string | null>(null);
@@ -154,6 +156,14 @@ export default function ComputerUsePanel({
         <Text style={[styles.permissionValue, { color: accentColor }]}>
           {PERMISSION_LABELS[session.permission]}
         </Text>
+        {!!session.backendLabel && (
+          <>
+            <Text style={styles.permissionLabel}>  BACKEND:</Text>
+            <Text style={[styles.permissionValue, { color: '#8b5cf6' }]} numberOfLines={1}>
+              {session.backendLabel}
+            </Text>
+          </>
+        )}
         {session.currentUrl && (
           <>
             <Text style={styles.permissionLabel}>  URL:</Text>
@@ -161,6 +171,22 @@ export default function ComputerUsePanel({
           </>
         )}
       </View>
+
+      {session.backendLiveUrl ? (
+        <View style={styles.sessionLinkRow}>
+          <Text style={styles.permissionLabel}>SESSION:</Text>
+          <Pressable
+            onPress={onOpenSession}
+            accessibilityRole="button"
+            accessibilityLabel="Open live browser session"
+            style={styles.sessionLinkButton}
+          >
+            <Text style={styles.sessionLinkButtonText}>
+              {session.backendSessionId ? `OPEN ${session.backendSessionId}` : 'OPEN LIVE SESSION'}
+            </Text>
+          </Pressable>
+        </View>
+      ) : null}
 
       {/* ── Progress Bar ── */}
       {totalCount > 0 && (
@@ -487,6 +513,31 @@ const styles = StyleSheet.create({
     color: '#9e9e9e',
     marginLeft: 4,
     flex: 1,
+  },
+  sessionLinkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+    gap: 8,
+    backgroundColor: '#050508',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a2e',
+  },
+  sessionLinkButton: {
+    backgroundColor: '#8b5cf620',
+    borderWidth: 1,
+    borderColor: '#8b5cf650',
+    borderRadius: 2,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  sessionLinkButtonText: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#c4b5fd',
+    letterSpacing: 0.5,
   },
   progressContainer: {
     flexDirection: 'row',

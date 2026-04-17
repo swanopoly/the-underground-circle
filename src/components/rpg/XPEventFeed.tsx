@@ -31,6 +31,16 @@ interface FeedEvent {
   created_at: string;
 }
 
+let progressionFeedUnavailable = false;
+function isMissingProgressionTable(error: any): boolean {
+  if (!error) return false;
+  const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.toLowerCase();
+  return error?.code === 'PGRST205'
+    || error?.status === 404
+    || message.includes("'public.progression_events'")
+    || message.includes('progression_events');
+}
+
 // ─── Animated Row ───────────────────────────────────────────────────────────
 
 function FeedRow({ event, isNew }: { event: FeedEvent; isNew: boolean }) {
@@ -166,6 +176,10 @@ export default function XPEventFeed({ circleId, userId, limit = 20 }: Props) {
     let cancelled = false;
 
     async function loadEvents() {
+      if (progressionFeedUnavailable) {
+        if (!cancelled) setEvents([]);
+        return;
+      }
       const { data, error } = await supabase
         .from('progression_events')
         .select('id, agent_id, event_kind, xp_type, effective_amount, created_at')
@@ -173,6 +187,12 @@ export default function XPEventFeed({ circleId, userId, limit = 20 }: Props) {
         .eq('user_id', userId)
         .order('created_at', { ascending: false })
         .limit(limit);
+
+      if (isMissingProgressionTable(error)) {
+        progressionFeedUnavailable = true;
+        if (!cancelled) setEvents([]);
+        return;
+      }
 
       if (!cancelled && data && !error) {
         setEvents(data as FeedEvent[]);
@@ -185,6 +205,7 @@ export default function XPEventFeed({ circleId, userId, limit = 20 }: Props) {
 
   // Realtime subscription
   useEffect(() => {
+    if (progressionFeedUnavailable) return;
     const channel = supabase
       .channel(`xp-feed-${circleId}`)
       .on(

@@ -23,7 +23,8 @@ import WalletTab from './tabs/WalletTab';
 import ProfileTab from './tabs/ProfileTab';
 import RoomsTab from './tabs/RoomsTab';
 import AnalyticsTab from './tabs/AnalyticsTab';
-import IntegrationsTab from './tabs/IntegrationsTab';
+import MarketplaceTab from './tabs/IntegrationsTab';
+import type { CircleIntegrationGroupKey } from '../../lib/circleIntegrationCatalog';
 import BackpackTab from './tabs/BackpackTab';
 import MissionsTab from './tabs/MissionsTab';
 import FloatingChat from '../../components/FloatingChat';
@@ -32,6 +33,8 @@ import TutorialController from '../../components/onboarding/TutorialController';
 import { Circle } from '../../types';
 import ErrorBoundary from '../../components/ErrorBoundary';
 import { LoadingScreen } from '../../components/LoadingWave';
+import { getAdaptiveLandingTab, loadAdaptiveWorkspaceSettings, loadCircleWorkspaceProfile, recordWorkspaceTabVisit } from '../../lib/workspaceAdaptation';
+import { ROOM_WORKSPACE_OPEN_EVENT } from '../../lib/roomWorkspaceLauncher';
 
 // ─── Inject CSS animation for tab dot pulse (web only) ───────────────────
 if (Platform.OS === 'web' && typeof document !== 'undefined' && !document.getElementById('uc-tab-dot-css')) {
@@ -54,11 +57,11 @@ const GATED_TABS = new Set(['WALLET']);
 
 const TAB_META_ALL: { key: string; label: string; icon: string; flatIcon?: string; color: string }[] = [
   { key: 'CHAT', label: 'Chat', icon: '💬', flatIcon: 'chat', color: '#22c55e' },
+  { key: 'ROOMS', label: 'Rooms', icon: '🏠', flatIcon: 'rooms', color: '#a855f7' },
   { key: 'OFFICE', label: 'Office', icon: '🏢', flatIcon: 'office', color: '#6366f1' },
   { key: 'FEED', label: 'Feed', icon: '🎯', flatIcon: 'feed', color: '#f59e0b' },
-  { key: 'ROOMS', label: 'Rooms', icon: '🏠', flatIcon: 'rooms', color: '#a855f7' },
   { key: 'BACKPACK', label: 'Backpack', icon: '🎒', flatIcon: 'backpack', color: '#ec4899' },
-  { key: 'INTEGRATIONS', label: 'Integrations', icon: '🔗', flatIcon: 'integrations', color: '#3b82f6' },
+  { key: 'INTEGRATIONS', label: 'Marketplace', icon: '🛍️', flatIcon: 'integrations', color: '#3b82f6' },
   { key: 'CHALLENGES', label: 'Challenges', icon: '🏆', flatIcon: 'challenges', color: '#ef4444' },
   { key: 'MEMBERS', label: 'Members', icon: '👥', flatIcon: 'members', color: '#14b8a6' },
   { key: 'ANALYTICS', label: 'Analytics', icon: '📊', flatIcon: 'analytics', color: '#22d3ee' },
@@ -70,6 +73,11 @@ const TAB_META = TAB_META_ALL.filter(t => !GATED_TABS.has(t.key));
 
 const TABS = TAB_META.map(t => t.key) as readonly string[];
 type Tab = string;
+type MarketplaceFocus = {
+  itemId?: string | null;
+  groupKey?: CircleIntegrationGroupKey | null;
+  ts: number;
+} | null;
 
 // Persist active tab per circle across refreshes
 const TAB_STORAGE_KEY = 'uc_active_tab';
@@ -173,6 +181,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   // Chat pop-out state — renders FloatingChat overlay that persists across tabs
   const [chatPopout, setChatPopout] = useState(false);
   const [chatMountKey, setChatMountKey] = useState(0);
+  const [marketplaceFocus, setMarketplaceFocus] = useState<MarketplaceFocus>(null);
 
   // Loading gate: show loading screen until circle data + Office tab are both ready
   const [circleLoaded, setCircleLoaded] = useState(!!cached.circle);
@@ -189,23 +198,65 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   }, [circleId]);
 
   useEffect(() => {
+    let cancelled = false;
+    if (routeTab) return;
+    const hasSavedTab = Platform.OS === 'web'
+      ? !!localStorage.getItem(`${TAB_STORAGE_KEY}_${circleId}`)
+      : false;
+    if (hasSavedTab) return;
+    Promise.all([
+      loadCircleWorkspaceProfile(circleId),
+      loadAdaptiveWorkspaceSettings(circleId),
+    ]).then(([profile, settings]) => {
+      if (cancelled) return;
+      const recommended = getAdaptiveLandingTab(profile, settings);
+      if (recommended && recommended !== activeTab) {
+        setActiveTabRaw(recommended);
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [circleId, routeTab]);
+
+  useEffect(() => {
+    if (!activeTab || !TABS.includes(activeTab)) return;
+    recordWorkspaceTabVisit(circleId, activeTab as any).catch(() => {});
+  }, [circleId, activeTab]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+
+    const handleOpenRoomWorkspace = (event: Event) => {
+      const detail = (event as CustomEvent<{ circleId?: string }>).detail;
+      if (!detail?.circleId || detail.circleId !== circleId) return;
+      setActiveTab('ROOMS');
+    };
+
+    window.addEventListener(ROOM_WORKSPACE_OPEN_EVENT, handleOpenRoomWorkspace as EventListener);
+    return () => {
+      window.removeEventListener(ROOM_WORKSPACE_OPEN_EVENT, handleOpenRoomWorkspace as EventListener);
+    };
+  }, [circleId, setActiveTab]);
+
+  useEffect(() => {
     loadCircleData();
   }, [circleId]);
 
 
   const loadCircleData = async () => {
     try {
-      const [circleRes, memberRes] = await Promise.all([
+      const [circleRes, memberRes] = await Promise.allSettled([
         supabase.from('circles').select('*').eq('id', circleId).single(),
         supabase.from('circle_members').select('user_id').eq('circle_id', circleId),
       ]);
-      if (circleRes.data) {
-        setCircle(circleRes.data);
-        const mc = memberRes.data?.length || 0;
+      const circleData = circleRes.status === 'fulfilled' ? circleRes.value.data : null;
+      const memberData = memberRes.status === 'fulfilled' ? memberRes.value.data : [];
+      if (circleData) {
+        setCircle(circleData);
+        const mc = memberData?.length || 0;
         setMemberCount(mc);
         setOnlineMembers(Math.max(1, Math.floor(mc * 0.5)));
         setActiveStreakCount(Math.max(1, Math.floor(mc * 0.7)));
-        cacheCircle(circleId, circleRes.data, mc);
+        cacheCircle(circleId, circleData, mc);
       }
       // Smart default: if user has no saved tab and circle has missions, show FEED (missions live in Feed now)
       try {
@@ -243,6 +294,14 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   // Office is always mounted eagerly so it can load behind the loading screen.
   // The onReady callback fires once Office has fetched its core data.
   const handleOfficeReady = useCallback(() => setOfficeReady(true), []);
+  const openMarketplace = useCallback((focus?: { itemId?: string | null; groupKey?: CircleIntegrationGroupKey | null }) => {
+    setMarketplaceFocus({
+      itemId: focus?.itemId || null,
+      groupKey: focus?.groupKey || null,
+      ts: Date.now(),
+    });
+    setActiveTab('INTEGRATIONS');
+  }, [setActiveTab]);
 
   return (
     <View style={styles.container}>
@@ -298,7 +357,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
         <BackpackTab circleId={circleId} accentColor={accentColor} />
       </LazyTab>
       <LazyTab tabKey="FEED" activeTab={activeTab}>
-        <FeedTab circleId={circleId} accentColor={accentColor} />
+        <FeedTab circleId={circleId} accentColor={accentColor} onOpenMarketplace={openMarketplace} />
       </LazyTab>
       <LazyTab tabKey="CHALLENGES" activeTab={activeTab}>
         <ChallengesTab circleId={circleId} />
@@ -310,7 +369,12 @@ export default function CircleDetailScreen({ route, navigation }: any) {
         <AnalyticsTab circleId={circleId} />
       </LazyTab>
       <LazyTab tabKey="INTEGRATIONS" activeTab={activeTab}>
-        <IntegrationsTab circleId={circleId} />
+        <MarketplaceTab
+          circleId={circleId}
+          initialFocusItemId={marketplaceFocus?.itemId || null}
+          initialFocusGroup={marketplaceFocus?.groupKey || null}
+          focusTs={marketplaceFocus?.ts || 0}
+        />
       </LazyTab>
       {/* WALLET — gated (see docs/NEXT_LEVEL_PLAN.md Phase 0.3) */}
       {!GATED_TABS.has('WALLET') && (

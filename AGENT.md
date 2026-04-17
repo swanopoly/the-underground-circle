@@ -14,7 +14,7 @@ Before making changes, read these in order:
 3. `Gemini.md` - condensed engineering guarantees
 4. `docs/OFFICE_ROADMAP.md` - Office product direction
 5. `docs/OFFICE_TAB_SPEC.md` - original Office design intent
-6. `docs/IMPLEMENTATION_ROADMAP.md` - Office analytics / farm ideas
+6. `docs/PLAN_STATUS_AUDIT.md` - current audit of which plan docs are still canonical
 7. `docs/REAL_DATA_AUDIT.md` - real-data assumptions for Office features
 8. `LAUNCH_AUDIT.md` - launch blockers, security gaps, UX debt
 9. `docs/agent-role-research.md` - prompt/persona research for agent roles

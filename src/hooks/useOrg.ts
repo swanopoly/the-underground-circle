@@ -1,6 +1,11 @@
 /**
  * Organization context hook — provides current org info and features.
  * Used by feature-gated components to check plan access.
+ *
+ * Auto-refresh: subscribes to realtime changes on `organizations` and
+ * `org_features` for this orgId. When the Stripe webhook flips `plan` after
+ * a checkout, every component using this hook re-renders with the new
+ * entitlements without the user needing to reload.
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -11,6 +16,7 @@ import {
   type Organization,
   type OrgFeatures,
 } from '../lib/organizations';
+import { supabase } from '../lib/supabase';
 
 interface UseOrgReturn {
   org: Organization | null;
@@ -73,6 +79,30 @@ export function useOrg(orgId: string | null | undefined): UseOrgReturn {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Realtime invalidation — fires when `organizations.plan` or `org_features`
+  // flags change (e.g. Stripe webhook landed after a successful checkout).
+  // Without this, feature gates elsewhere in the app stay stale until the
+  // user reloads the page or navigates.
+  useEffect(() => {
+    if (!orgId) return;
+    const channel = supabase
+      .channel(`org-entitlements:${orgId}`)
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'organizations',
+        filter: `id=eq.${orgId}`,
+      }, () => { void refresh(); })
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'org_features',
+        filter: `org_id=eq.${orgId}`,
+      }, () => { void refresh(); })
+      .subscribe();
+    return () => { void supabase.removeChannel(channel); };
+  }, [orgId, refresh]);
 
   return {
     org,

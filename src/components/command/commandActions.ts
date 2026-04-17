@@ -21,7 +21,7 @@ export function buildAppActions(navigate: (screen: string, params?: any) => void
       { id: 'circle-backpack',     name: 'Backpack',     shortcut: ['g', 'b'], section: 'Circle Dashboard', perform: goTab('BACKPACK'),     keywords: 'backpack tools bench models llm cost performance' },
       { id: 'circle-feed',         name: 'Feed',         shortcut: ['g', 'f'], section: 'Circle Dashboard', perform: goTab('FEED'),         keywords: 'feed kanban tasks board todo work items' },
       { id: 'circle-wallet',       name: 'Wallet',       shortcut: ['g', 'w'], section: 'Circle Dashboard', perform: goTab('WALLET'),       keywords: 'wallet crypto ethereum solana tokens send receive' },
-      { id: 'circle-integrations', name: 'Integrations', shortcut: ['g', 'i'], section: 'Circle Dashboard', perform: goTab('INTEGRATIONS'), keywords: 'integrations github slack wordpress connect api webhook' },
+      { id: 'circle-integrations', name: 'Marketplace', shortcut: ['g', 'i'], section: 'Circle Dashboard', perform: goTab('INTEGRATIONS'), keywords: 'marketplace integrations github slack wordpress connect api webhook apps' },
       { id: 'circle-challenges',   name: 'Challenges',                         section: 'Circle Dashboard', perform: goTab('CHALLENGES'),   keywords: 'challenges goals compete leaderboard xp badges' },
       { id: 'circle-members',      name: 'Members',      shortcut: ['g', 'm'], section: 'Circle Dashboard', perform: goTab('MEMBERS'),      keywords: 'members team people circle invite online' },
       { id: 'circle-analytics',    name: 'Analytics',    shortcut: ['g', 'a'], section: 'Circle Dashboard', perform: goTab('ANALYTICS'),    keywords: 'analytics stats metrics usage tokens cost charts' },
@@ -56,10 +56,10 @@ export function buildAppActions(navigate: (screen: string, params?: any) => void
   //  SOCIAL — Friends, Profile, Agents
   // ═══════════════════════════════════════════════════════════════════════════
   actions.push(
-    { id: 'social-profile',  name: 'Edit Profile',    shortcut: ['g', 'p'], section: 'Social', perform: () => navigate('EditProfile'), keywords: 'profile edit settings avatar username display name' },
+    { id: 'social-profile',  name: 'Profile',    shortcut: ['g', 'p'], section: 'Social', perform: () => navigate('Profile'), keywords: 'profile edit settings avatar username display name' },
     { id: 'social-friends',  name: 'Friends',                               section: 'Social', perform: () => navigate('Friends'),     keywords: 'friends dm messages social chat direct' },
     { id: 'social-agents',   name: 'Agents',                                section: 'Social', perform: () => navigate('Agents'),      keywords: 'agents manage bots ai pixel office configure' },
-    { id: 'social-standalone-integrations', name: 'Integrations Hub',       section: 'Social', perform: () => navigate('Integrations'), keywords: 'integrations hub connections api keys global' },
+    { id: 'social-standalone-integrations', name: 'Marketplace Hub',        section: 'Social', perform: () => navigate('Integrations'), keywords: 'marketplace integrations hub connections api keys global apps' },
   );
 
   // ═══════════════════════════════════════════════════════════════════════════

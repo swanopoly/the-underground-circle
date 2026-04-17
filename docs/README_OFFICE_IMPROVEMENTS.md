@@ -98,8 +98,8 @@ Beautiful 5-tab dashboard:
   - ⚠️ WARNING (high costs, low activity)
   - ℹ️ INFO (stale agents, low utilization)
 
-### 🗺️ 4. Implementation Roadmap
-**File:** `IMPLEMENTATION_ROADMAP.md` (12.2 KB)
+### 🗺️ 4. Current Planning Docs
+**Files:** `OFFICE_ROADMAP.md` + `PLAN_STATUS_AUDIT.md`
 
 Step-by-step integration guide:
 - How to add dashboard to OfficeTab
@@ -119,7 +119,8 @@ Step-by-step integration guide:
 | `OFFICE_IMPROVEMENTS.md` | 12.7 KB | Research & strategy document |
 | `src/lib/agentFarmMetrics.ts` | 15.7 KB | Analytics engine (6 major functions) |
 | `src/components/FarmHealthDashboard.tsx` | 29.4 KB | 5-tab dashboard UI component |
-| `IMPLEMENTATION_ROADMAP.md` | 12.2 KB | Integration guide & action plan |
+| `OFFICE_ROADMAP.md` | living | Office product direction |
+| `PLAN_STATUS_AUDIT.md` | living | canonical plan-doc audit |
 | **TOTAL** | **70.0 KB** | **Complete agent farm upgrade** |
 
 ---
@@ -128,10 +129,11 @@ Step-by-step integration guide:
 
 ### Option 1: Quick Integration (30 minutes)
 1. Open `OfficeTab.tsx`
-2. Follow steps in `IMPLEMENTATION_ROADMAP.md` → "Integration Steps"
-3. Add 🏥 button to title bar
-4. Import and render `<FarmHealthDashboard />`
-5. Test all 5 tabs
+2. Follow the Office direction in `OFFICE_ROADMAP.md`
+3. Use `PLAN_STATUS_AUDIT.md` to confirm which docs are still canonical
+4. Add 🏥 button to title bar
+5. Import and render `<FarmHealthDashboard />`
+6. Test all 5 tabs
 
 ### Option 2: Gradual Rollout (1-2 weeks)
 1. Week 1: Add dashboard + implement 3 Quick Wins
@@ -139,7 +141,7 @@ Step-by-step integration guide:
 3. Iterate based on user feedback
 
 ### Option 3: Full Feature Development (1 month)
-Follow the complete roadmap in `IMPLEMENTATION_ROADMAP.md`:
+Follow the living roadmap in `OFFICE_ROADMAP.md`:
 - Phase 1: Core dashboard + quick wins
 - Phase 2: Medium priority features
 - Phase 3: Advanced features
@@ -287,7 +289,7 @@ Based on real AI agent farm research, industry benchmarks, and proven patterns.
 - [ ] Read `OFFICE_IMPROVEMENTS.md` (10 min)
 - [ ] Review `agentFarmMetrics.ts` functions (5 min)
 - [ ] Preview `FarmHealthDashboard.tsx` components (5 min)
-- [ ] Follow integration steps in `IMPLEMENTATION_ROADMAP.md` (30 min)
+- [ ] Review `OFFICE_ROADMAP.md` + `PLAN_STATUS_AUDIT.md` (15 min)
 - [ ] Test with your live agents (10 min)
 - [ ] Implement first Quick Win (15 min)
 - [ ] Share feedback & iterate 🚀
@@ -297,7 +299,8 @@ Based on real AI agent farm research, industry benchmarks, and proven patterns.
 ## 📞 Support & Next Steps
 
 ### Questions?
-- Check `IMPLEMENTATION_ROADMAP.md` for detailed guides
+- Check `OFFICE_ROADMAP.md` for the living Office direction
+- Check `PLAN_STATUS_AUDIT.md` for the current canonical doc set
 - Review code comments in source files
 - Refer to research in `OFFICE_IMPROVEMENTS.md`
 

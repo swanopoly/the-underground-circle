@@ -341,10 +341,12 @@ export default function CirclesScreen({ navigation }: any) {
       const { data: memberships } = await supabase.from('circle_members').select('circle_id').eq('user_id', user.id).limit(50);
       if (!memberships?.length) { setCircles([]); return; }
       const circleIds = memberships.map(m => m.circle_id);
-      const [{ data }, { data: missionCounts }] = await Promise.all([
+      const [circlesResult, missionsResult] = await Promise.allSettled([
         supabase.from('circles').select('*, circle_members!inner(count)').in('id', circleIds).limit(50),
         supabase.from('circle_missions').select('circle_id, status').in('circle_id', circleIds).eq('status', 'active'),
       ]);
+      const data = circlesResult.status === 'fulfilled' ? (circlesResult.value.data || []) : [];
+      const missionCounts = missionsResult.status === 'fulfilled' ? (missionsResult.value.data || []) : [];
       // Count active missions per circle
       const missionMap: Record<string, number> = {};
       (missionCounts || []).forEach((m: any) => { missionMap[m.circle_id] = (missionMap[m.circle_id] || 0) + 1; });
@@ -473,7 +475,6 @@ const s = StyleSheet.create({
   },
   onlineDot: {
     width: 7, height: 7, borderRadius: 4, backgroundColor: GREEN,
-    ...(Platform.OS === 'web' ? { animation: 'uc-breathe 2s ease-in-out infinite' } as any : {}),
   },
   pillText: { fontSize: 12, fontWeight: '600', color: TEXT_SEC },
 
@@ -487,7 +488,6 @@ const s = StyleSheet.create({
   agentText: { color: TEXT_DIS, fontSize: 12, fontFamily: MONO, flex: 1 },
   agentCursor: {
     color: GREEN, fontSize: 11, fontFamily: MONO,
-    ...(Platform.OS === 'web' ? { animation: 'uc-cursor-blink 1s step-end infinite' } as any : {}),
   },
 
   // Stats

@@ -8,6 +8,7 @@
  */
 
 import { supabase } from './supabase';
+import type { BrowserPlanEvent } from './computerUse';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -65,6 +66,7 @@ export interface RunStep {
   duration_ms?: number;
   tokens_used: number;
   created_at: string;
+  metadata: Record<string, unknown>;
 }
 
 export interface RunArtifact {
@@ -184,7 +186,7 @@ export async function createRun(opts: {
 export async function updateRunStatus(
   runId: string,
   status: RunStatus,
-  extra?: Partial<{ plan_summary: string; current_step_index: number; total_steps: number; completed_at: string; input_tokens: number; output_tokens: number; cached_tokens: number; estimated_cost: number; started_at: string }>,
+  extra?: Partial<{ plan_summary: string; current_step_index: number; total_steps: number; completed_at: string; input_tokens: number; output_tokens: number; cached_tokens: number; estimated_cost: number; started_at: string; metadata: Record<string, unknown> }>,
 ): Promise<boolean> {
   const updates: Record<string, unknown> = { status, updated_at: new Date().toISOString() };
   if (status === 'running' && !extra?.started_at) updates.started_at = new Date().toISOString();
@@ -194,6 +196,148 @@ export async function updateRunStatus(
   const { error } = await supabase.from('agent_runs').update(updates).eq('id', runId);
   if (error) { console.error('[AgentRunSystem] updateRunStatus error:', error); return false; }
   return true;
+}
+
+export async function mergeRunMetadata(runId: string, patch: Record<string, unknown>): Promise<boolean> {
+  try {
+    const { data, error } = await supabase
+      .from('agent_runs')
+      .select('metadata')
+      .eq('id', runId)
+      .single();
+    if (error) {
+      console.error('[AgentRunSystem] mergeRunMetadata load error:', error);
+      return false;
+    }
+    const nextMetadata = {
+      ...((data as any)?.metadata || {}),
+      ...patch,
+    };
+    const { error: updateError } = await supabase
+      .from('agent_runs')
+      .update({ metadata: nextMetadata, updated_at: new Date().toISOString() })
+      .eq('id', runId);
+    if (updateError) {
+      console.error('[AgentRunSystem] mergeRunMetadata update error:', updateError);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('[AgentRunSystem] mergeRunMetadata exception:', err);
+    return false;
+  }
+}
+
+async function getNextRunStepIndex(runId: string): Promise<number> {
+  try {
+    const { data, error } = await supabase
+      .from('agent_run_steps')
+      .select('step_index')
+      .eq('run_id', runId)
+      .order('step_index', { ascending: false })
+      .limit(1);
+    if (error) return 0;
+    return data && data.length > 0 ? ((data[0] as any).step_index || 0) + 1 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export async function appendRunToolEvent(opts: {
+  runId: string;
+  circleId: string;
+  event: {
+    tool: string;
+    status: 'planned' | 'running' | 'passed' | 'failed' | 'manual_required' | 'blocked';
+    summary: string;
+    command?: string;
+    metadata?: Record<string, unknown>;
+  };
+}): Promise<boolean> {
+  const stepIndex = await getNextRunStepIndex(opts.runId);
+  const added = await addStep({
+    runId: opts.runId,
+    circleId: opts.circleId,
+    stepIndex,
+    stepKind: opts.event.status === 'planned' || opts.event.status === 'running' ? 'tool_call' : 'tool_result',
+    title: opts.event.tool,
+    body: opts.event.summary,
+    toolName: opts.event.tool,
+    toolOutput: opts.event.command,
+    status: opts.event.status,
+    metadata: opts.event.metadata,
+  });
+  return !!added;
+}
+
+function mapBrowserPlanEventToExecutionStatus(kind: BrowserPlanEvent['kind']): 'planned' | 'running' | 'passed' | 'failed' | 'manual_required' | 'blocked' {
+  switch (kind) {
+    case 'planned':
+      return 'planned';
+    case 'approval_requested':
+      return 'manual_required';
+    case 'launched':
+      return 'running';
+    case 'completed':
+    case 'opened_live_session':
+      return 'passed';
+    case 'failed':
+      return 'failed';
+    case 'cancelled':
+      return 'blocked';
+    default:
+      return 'planned';
+  }
+}
+
+function mapBrowserPlanEventToStepStatus(kind: BrowserPlanEvent['kind']): 'pending' | 'running' | 'completed' | 'failed' | 'blocked' {
+  switch (kind) {
+    case 'approval_requested':
+      return 'pending';
+    case 'launched':
+      return 'running';
+    case 'failed':
+      return 'failed';
+    case 'cancelled':
+      return 'blocked';
+    default:
+      return 'completed';
+  }
+}
+
+export async function appendRunBrowserPlanEvent(opts: {
+  runId: string;
+  circleId: string;
+  event: BrowserPlanEvent;
+}): Promise<boolean> {
+  const stepIndex = await getNextRunStepIndex(opts.runId);
+  const executionStatus = mapBrowserPlanEventToExecutionStatus(opts.event.kind);
+  const added = await addStep({
+    runId: opts.runId,
+    circleId: opts.circleId,
+    stepIndex,
+    stepKind: opts.event.kind === 'approval_requested' ? 'approval_request' : 'tool_call',
+    title: `Browser ${opts.event.kind.replace(/_/g, ' ')}`,
+    body: opts.event.summary,
+    toolName: 'browser.session',
+    toolOutput: opts.event.backendLiveUrl || opts.event.backendSessionId,
+    status: mapBrowserPlanEventToStepStatus(opts.event.kind),
+    metadata: {
+      browserPlanEvent: opts.event,
+      executions: [
+        {
+          status: executionStatus,
+          mode: 'automatic',
+          summary: opts.event.summary,
+          toolName: 'browser.session',
+          command: opts.event.backendSessionId || opts.event.backendLiveUrl,
+          executed: executionStatus !== 'manual_required' && executionStatus !== 'planned',
+          error: executionStatus === 'failed' ? opts.event.summary : null,
+        },
+      ],
+    },
+  });
+  return !!added;
 }
 
 // ── 3. Add Step ─────────────────────────────────────────────────────────────
@@ -213,6 +357,7 @@ export async function addStep(opts: {
   status?: string;
   durationMs?: number;
   tokensUsed?: number;
+  metadata?: Record<string, unknown>;
 }): Promise<RunStep | null> {
   const { data, error } = await supabase
     .from('agent_run_steps')
@@ -231,6 +376,7 @@ export async function addStep(opts: {
       status: opts.status || 'completed',
       duration_ms: opts.durationMs,
       tokens_used: opts.tokensUsed || 0,
+      metadata: opts.metadata || {},
     })
     .select()
     .single();
@@ -327,14 +473,36 @@ export async function getRun(runId: string): Promise<AgentRun | null> {
 
 export async function listRuns(
   circleId: string,
-  opts?: { surface?: RunSurface; status?: RunStatus; roomId?: string; userId?: string; limit?: number },
+  opts?: { surface?: RunSurface; status?: RunStatus; roomId?: string; userId?: string; agentId?: string; limit?: number },
 ): Promise<AgentRun[]> {
   let query = supabase.from('agent_runs').select('*').eq('circle_id', circleId).order('created_at', { ascending: false }).limit(opts?.limit || 50);
   if (opts?.surface) query = query.eq('surface', opts.surface);
   if (opts?.status) query = query.eq('status', opts.status);
   if (opts?.roomId) query = query.eq('room_id', opts.roomId);
   if (opts?.userId) query = query.eq('user_id', opts.userId);
+  // agent_runs.agent_id is a UUID; skip the filter when the caller passed a
+  // non-UUID (e.g. a live session id like `codex::codex-70025`) to avoid 400s.
+  if (opts?.agentId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opts.agentId)) {
+    query = query.eq('agent_id', opts.agentId);
+  }
   const { data, error } = await query;
+  if (error || !data) return [];
+  return data.map(mapRun);
+}
+
+export async function listChatSessionRuns(
+  circleId: string,
+  chatSessionId: string,
+  limit = 50,
+): Promise<AgentRun[]> {
+  const { data, error } = await supabase
+    .from('agent_runs')
+    .select('*')
+    .eq('circle_id', circleId)
+    .eq('surface', 'main_chat')
+    .eq('chat_session_id', chatSessionId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
   if (error || !data) return [];
   return data.map(mapRun);
 }
@@ -387,33 +555,37 @@ export async function saveMemory(opts: {
   retrievalMode?: 'startup' | 'on_demand' | 'manual_only';
   metadata?: Record<string, unknown>;
 }): Promise<MemoryEntry | null> {
-  // Auto-set visibility based on scope
+  const basePayload = {
+    scope: opts.scope,
+    circle_id: opts.circleId,
+    room_id: opts.roomId,
+    agent_id: opts.agentId,
+    user_id: opts.userId,
+    session_id: opts.sessionId,
+    memory_kind: opts.memoryKind,
+    title: opts.title,
+    content: opts.content,
+    source_run_id: opts.sourceRunId,
+    source_surface: opts.sourceSurface,
+    importance: opts.importance,
+    retrieval_mode: opts.retrievalMode,
+    metadata: opts.metadata || {},
+  };
+
+  // Auto-set visibility based on scope.
   const visibility = opts.visibility || (
     opts.scope === 'user' ? 'private' :
-    opts.scope === 'agent' ? 'circle_shared' :
+    opts.scope === 'agent' ? 'private' :
     opts.scope === 'room' ? 'room_shared' :
     opts.scope === 'session' ? 'private' :
     'circle_shared'
   );
 
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from('memory_entries')
     .insert({
-      scope: opts.scope,
-      circle_id: opts.circleId,
-      room_id: opts.roomId,
-      agent_id: opts.agentId,
-      user_id: opts.userId,
-      session_id: opts.sessionId,
-      memory_kind: opts.memoryKind,
-      title: opts.title,
-      content: opts.content,
-      source_run_id: opts.sourceRunId,
-      source_surface: opts.sourceSurface,
+      ...basePayload,
       visibility,
-      importance: opts.importance,
-      retrieval_mode: opts.retrievalMode,
-      metadata: opts.metadata || {},
     })
     .select()
     .single();
@@ -509,15 +681,20 @@ export async function loadMemories(opts: {
 
   const wantsAgent = !!opts.agentId && (!!opts.scopes && opts.scopes.includes('agent'));
   if (wantsAgent && opts.agentId) {
-    const { data } = await supabase
+    let agentQuery = supabase
       .from('memory_entries')
       .select('*')
       .eq('circle_id', opts.circleId)
       .eq('scope', 'agent')
       .eq('agent_id', opts.agentId)
+      .eq('visibility', 'private')
       .eq('is_active', true)
       .order('updated_at', { ascending: false })
       .limit(20);
+
+    if (opts.userId) agentQuery = agentQuery.eq('user_id', opts.userId);
+
+    const { data } = await agentQuery;
 
     if (data) results.push(...data.map(mapMemory));
   }
@@ -555,7 +732,7 @@ export async function promoteMemory(
  * Budget: capped at ~3000 chars to prevent context bloat.
  * Priority: instructions > preferences > decisions > facts > findings > context
  */
-export async function buildMemoryContext(circleId: string, roomId?: string, userId?: string, agentId?: string): Promise<string> {
+export async function buildMemoryContext(circleId: string, roomId?: string, userId?: string, agentId?: string, agentName?: string): Promise<string> {
   const memories = (await loadMemories({
     circleId,
     roomId,
@@ -567,14 +744,25 @@ export async function buildMemoryContext(circleId: string, roomId?: string, user
     .filter(m => m.retrieval_mode !== 'manual_only');
 
   // Priority sort: by importance (if available) then kind
+  let activeSoulKey: string | null = null;
+  try {
+    if (agentId && userId) {
+      const { getAgentSoulInfo } = await import('./agentSoulMemory');
+      activeSoulKey = (await getAgentSoulInfo({ circleId, agentId, agentName, userId })).soulKey;
+    }
+  } catch {}
   const kindPriority: Record<string, number> = {
     instruction: 0, preference: 1, policy: 2, decision: 3, fact: 4, finding: 5, context: 6,
   };
   memories.sort((a, b) => {
+    const aSoul = String(a.metadata?.soul_key || '');
+    const bSoul = String(b.metadata?.soul_key || '');
+    const aSoulBoost = activeSoulKey && a.scope === 'agent' ? (aSoul === activeSoulKey ? 0.3 : aSoul ? -0.05 : 0.08) : 0;
+    const bSoulBoost = activeSoulKey && b.scope === 'agent' ? (bSoul === activeSoulKey ? 0.3 : bSoul ? -0.05 : 0.08) : 0;
     const aStartupBoost = a.retrieval_mode === 'startup' ? 0.25 : 0;
     const bStartupBoost = b.retrieval_mode === 'startup' ? 0.25 : 0;
-    const aImp = (a.importance ?? (1.0 - (kindPriority[a.memory_kind] ?? 9) / 10)) + aStartupBoost;
-    const bImp = (b.importance ?? (1.0 - (kindPriority[b.memory_kind] ?? 9) / 10)) + bStartupBoost;
+    const aImp = (a.importance ?? (1.0 - (kindPriority[a.memory_kind] ?? 9) / 10)) + aStartupBoost + aSoulBoost;
+    const bImp = (b.importance ?? (1.0 - (kindPriority[b.memory_kind] ?? 9) / 10)) + bStartupBoost + bSoulBoost;
     if (bImp !== aImp) return bImp - aImp;
     return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
   });
@@ -603,7 +791,7 @@ export async function buildMemoryContext(circleId: string, roomId?: string, user
   try {
     const { data: sharedDoc } = await supabase
       .from('circle_memory')
-      .select('content, last_edited_at, updated_at')
+      .select('content, last_edited_at')
       .eq('circle_id', circleId)
       .single();
 
@@ -777,7 +965,7 @@ function mapStep(d: any): RunStep {
     title: d.title, body: d.body, tool_name: d.tool_name, tool_input: d.tool_input,
     tool_output: d.tool_output, delegated_to: d.delegated_to, child_run_id: d.child_run_id,
     status: d.status, duration_ms: d.duration_ms, tokens_used: d.tokens_used || 0,
-    created_at: d.created_at,
+    created_at: d.created_at, metadata: d.metadata || {},
   };
 }
 

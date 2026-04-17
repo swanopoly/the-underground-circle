@@ -377,7 +377,7 @@ export interface AgentAppearance {
   backItem: 'none' | 'cape' | 'backpack' | 'wings' | 'jetpack' | 'shield' | 'sword' | 'quiver' | 'crab_shell' | 'tentacles' | 'rocket' | 'scroll' | 'boombox';
   eyeColor: string;
   facialHair: 'none' | 'stubble' | 'beard' | 'mustache' | 'goatee' | 'fu_manchu' | 'sideburns' | 'soul_patch';
-  pet: 'none' | 'cat' | 'dog' | 'bird' | 'robot' | 'dragon' | 'alien' | 'crab' | 'snake' | 'bat' | 'skull' | 'mushroom' | 'spider' | 'shark' | 'bones';
+  pet: 'none' | 'cat' | 'dog' | 'bird' | 'robot' | 'dragon' | 'alien' | 'crab' | 'snake' | 'bat' | 'skull' | 'mushroom' | 'spider' | 'shark' | 'bones' | 'swan';
   aura: 'none' | 'fire' | 'ice' | 'electric' | 'nature' | 'shadow' | 'rainbow' | 'glitch' | 'cosmic' | 'toxic' | 'holy' | 'void' | 'galaxy';
   handItem: 'none' | 'lightsaber' | 'coffee' | 'laptop' | 'flag' | 'wand' | 'crab_claws' | 'sword_hand' | 'pizza' | 'microphone' | 'torch';
 }
@@ -414,7 +414,9 @@ export const DEFAULT_APPEARANCE: AgentAppearance = {
   handItem: 'none',
 };
 
-// Default appearance for the built-in BlackSwan agent (crab-red theme)
+// Default appearance for the built-in OpenSwan agent.
+// Pet is a swan — represents HuggingSwan as an integrated companion rather
+// than a separate roster slot.
 export const UC_AGENT_APPEARANCE: AgentAppearance = {
   skinTone: '#f0a0a0',       // pale crab-red skin
   hairStyle: 'bald',         // no hair
@@ -428,7 +430,7 @@ export const UC_AGENT_APPEARANCE: AgentAppearance = {
   backItem: 'crab_shell',    // crab shell
   eyeColor: '#ff4444',       // bright red eyes
   facialHair: 'none',
-  pet: 'crab',               // crab companion
+  pet: 'swan',               // HuggingSwan as a swan companion
   aura: 'fire',              // fire aura
   handItem: 'crab_claws',    // crab claws
 };
@@ -449,7 +451,7 @@ export function generateRandomAppearance(): AgentAppearance {
     backItem: pick<AgentAppearance['backItem']>(['none', 'cape', 'backpack', 'wings', 'jetpack', 'shield', 'sword', 'quiver', 'tentacles', 'rocket', 'scroll', 'boombox']),
     eyeColor: pick(EYE_COLORS),
     facialHair: pick<AgentAppearance['facialHair']>(['none', 'none', 'none', 'stubble', 'beard', 'mustache', 'goatee', 'fu_manchu', 'sideburns', 'soul_patch']),
-    pet: pick<AgentAppearance['pet']>(['none', 'none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab', 'snake', 'bat', 'skull', 'mushroom', 'spider', 'shark', 'bones']),
+    pet: pick<AgentAppearance['pet']>(['none', 'none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab', 'snake', 'bat', 'skull', 'mushroom', 'spider', 'shark', 'bones', 'swan']),
     aura: pick<AgentAppearance['aura']>(['none', 'none', 'fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow', 'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy']),
     handItem: pick<AgentAppearance['handItem']>(['none', 'none', 'coffee', 'laptop', 'flag', 'wand', 'sword_hand', 'pizza', 'microphone', 'torch']),
   };
@@ -679,6 +681,16 @@ export interface FurnitureItem {
   petLastSlept?: number;            // office_pet: timestamp
   petMood?: string;                 // office_pet: happy|neutral|sad|sick|sleeping|dead
   petBornAt?: number;               // office_pet: timestamp
+  petCleanliness?: number;          // office_pet: 0-100
+  petLastCleaned?: number;          // office_pet: timestamp
+  petGold?: number;                 // office_pet: earned currency
+  petAccessory?: string;            // office_pet: equipped accessory
+  petTrickCount?: number;           // office_pet: successful tricks
+  petFoodsTried?: string;           // office_pet: JSON array of tried foods
+  petAchievements?: string;         // office_pet: JSON array of achievement ids
+  petQuestDay?: string;             // office_pet: YYYY-MM-DD
+  petQuestCompleted?: string;       // office_pet: JSON array of completed quest ids
+  petStreak?: number;               // office_pet: consecutive quest streak
 }
 
 export type FurnitureCategory = 'games' | 'connected' | 'vibe' | 'productivity' | 'fun' | 'furniture';
@@ -972,6 +984,16 @@ export const THEME_OUTFITS: Record<EnvironmentType, ThemeOutfit> = {
     chestOverlay: 'parka',
     chestColor: '#1e40af',
     bootColor: '#1e3a5f',
+  },
+  cathedral: {
+    label: 'Canon',
+    headgear: 'hood',
+    headgearColor: '#4b1020',
+    chestOverlay: 'robe',
+    chestColor: '#2a1020',
+    beltStyle: 'rope',
+    beltColor: '#b8860b',
+    accentColor: '#b8860b',
   },
 };
 

@@ -53,6 +53,14 @@ export interface Track {
   modules: Module[];
 }
 
+export interface LessonRef {
+  trackId: string;
+  moduleId: string;
+  lessonId: string;
+  moduleTitle: string;
+  lessonTitle: string;
+}
+
 export const TRACKS: Track[] = [
   // =====================================================================
   // TRACK 1: AI TECHNOLOGY
@@ -1282,6 +1290,159 @@ export const TRACKS: Track[] = [
             ],
           },
           {
+            id: 'top-coding-languages-2026',
+            title: 'Top Coding Languages Right Now',
+            subtitle: 'Why different languages win at different jobs',
+            xpReward: 80,
+            durationMinutes: 22,
+            sections: [
+              {
+                type: 'learn',
+                title: 'There Is No Single Best Language',
+                content: 'If you search for "the best programming language," you will get confident answers that contradict each other. That happens because different rankings measure different things. Some track what developers say they use. Others track open-source activity. Others track education, hiring visibility, and vendor presence. The right question is not which language is best. It is which language is best for a particular kind of work.',
+                bulletPoints: [
+                  'JavaScript and TypeScript dominate web and app development',
+                  'Python dominates AI, data science, and beginner-friendly automation',
+                  'Go is strong for servers, tools, and infrastructure',
+                  'Rust is strong for safety and performance-sensitive systems',
+                  'SQL matters because data and analytics power product intelligence',
+                ],
+              },
+              {
+                type: 'explore',
+                title: 'How Rankings Differ',
+                content: 'A Stack Overflow survey can show broad developer usage, while GitHub can show which languages drive active projects and contributions. That is why one source may put JavaScript first while another puts Python first. Instead of treating this as a contradiction, think of it as a clue: language popularity depends on what kind of work you are measuring.',
+              },
+              {
+                type: 'connect',
+                title: 'How This Maps To Real Products',
+                content: 'A modern product often uses more than one language because products have multiple layers. A mobile app might use TypeScript for the interface, SQL for analytics, Python for AI experiments, and Go for backend services. Choosing languages by layer is a stronger habit than forcing every problem into a single tool.',
+                bulletPoints: [
+                  'Frontend and app logic often optimize for speed of iteration',
+                  'AI layers optimize for libraries, data tools, and experimentation',
+                  'Infrastructure layers optimize for reliability and deployment simplicity',
+                  'Analytics layers optimize for clear data models and query power',
+                ],
+              },
+              {
+                type: 'challenge',
+                title: 'Language Matchmaker',
+                content: 'Take a product idea you care about and split it into four layers: interface, AI or data layer, service layer, and analytics layer. Choose the language you would use for each one and explain why. Your goal is not to use the same language everywhere. Your goal is to justify good tradeoffs.',
+              },
+            ],
+            quiz: [
+              {
+                id: 'q-tcl-1',
+                question: 'Why do programming language rankings often disagree with each other?',
+                options: [
+                  'Because one of them is always fake',
+                  'Because they measure different kinds of activity like usage, code activity, or search visibility',
+                  'Because programming languages change names every year',
+                  'Because developers randomly vote for languages they have never used',
+                ],
+                correctIndex: 1,
+                explanation: 'Different rankings use different data sources and methodologies. A survey, an open-source activity report, and a search-based index can all tell different but useful stories about language popularity.',
+              },
+              {
+                id: 'q-tcl-2',
+                question: 'Which language is especially important for AI, notebooks, and data science work?',
+                options: [
+                  'Python',
+                  'HTML',
+                  'CSS',
+                  'Scratch',
+                ],
+                correctIndex: 0,
+                explanation: 'Python is the dominant language for AI and data science because of its huge ecosystem of libraries, notebooks, tutorials, and beginner-friendly syntax.',
+              },
+              {
+                id: 'q-tcl-3',
+                question: 'What is the strongest way to choose languages for a product?',
+                options: [
+                  'Pick whichever language is currently trending on social media',
+                  'Use one language for everything even if it fits poorly',
+                  'Choose languages based on the job each layer of the product needs to do',
+                  'Avoid learning multiple languages no matter what the product requires',
+                ],
+                correctIndex: 2,
+                explanation: 'Strong product teams choose tools based on the job to be done. Interface, AI, infrastructure, and analytics layers often benefit from different languages and ecosystems.',
+              },
+            ],
+          },
+          {
+            id: 'language-strategy-for-products',
+            title: 'Language Strategy For Products',
+            subtitle: 'Choosing tools like a builder, not a fan',
+            xpReward: 85,
+            durationMinutes: 24,
+            sections: [
+              {
+                type: 'learn',
+                title: 'Think In Layers',
+                content: 'Good builders stop arguing about languages in the abstract and start mapping them to product layers. A language is not a personality trait. It is a tool with tradeoffs. TypeScript is usually excellent for interactive product surfaces. Python is excellent for AI learning and experimentation. Go is excellent for compact deployable services. Rust is excellent when safety and performance become central.',
+                bulletPoints: [
+                  'Use TypeScript where shared product velocity matters',
+                  'Use Python where AI libraries and learning matter',
+                  'Use Go where services should stay simple and fast',
+                  'Use Rust where bugs would be expensive or dangerous',
+                ],
+              },
+              {
+                type: 'explore',
+                title: 'A Product Stack Example',
+                content: 'Imagine you are building a collaborative AI study app. The mobile and web interface could be built in TypeScript. The recommendation and progress engine could rely on SQL. A notebook-driven curriculum experiment could use Python. A fast event-ingestion or MCP service could use Go. This is not complexity for its own sake. It is a strategy for matching tools to roles.',
+              },
+              {
+                type: 'reflect',
+                title: 'The Cost Of Bad Language Decisions',
+                content: 'The wrong language choice can slow a team down for years. Sometimes teams use a systems language for ordinary product work and lose iteration speed. Other times they force a scripting language into performance-critical infrastructure and suffer reliability problems. The goal is not perfection on day one. The goal is to make choices that preserve both speed and room to grow.',
+              },
+              {
+                type: 'challenge',
+                title: 'Design Your Stack',
+                content: 'Sketch your ideal stack for an app with chat, AI tutors, progress tracking, a live dashboard, and an agent-control panel. Decide which layers belong in TypeScript, Python, Go, Rust, or SQL. Then write one paragraph defending why each language earns its place.',
+              },
+            ],
+            quiz: [
+              {
+                id: 'q-lsp-1',
+                question: 'What does it mean to choose a language "by layer"?',
+                options: [
+                  'Choosing a language based on logo color',
+                  'Using different languages for interface, AI, services, or analytics depending on what each layer needs',
+                  'Choosing a new language every week',
+                  'Letting the AI randomly select your stack',
+                ],
+                correctIndex: 1,
+                explanation: 'Choosing by layer means matching the tool to the job. Different parts of a product have different needs, so one language is not always the best fit for every layer.',
+              },
+              {
+                id: 'q-lsp-2',
+                question: 'Why is TypeScript often a strong default for product interfaces?',
+                options: [
+                  'Because it is only used by large companies',
+                  'Because it combines JavaScript ecosystem reach with stronger structure for large apps',
+                  'Because it is the fastest language ever created',
+                  'Because it automatically writes design decisions for you',
+                ],
+                correctIndex: 1,
+                explanation: 'TypeScript builds on JavaScript and adds types that help larger codebases stay understandable. That makes it especially useful for product teams shipping complex web and app experiences.',
+              },
+              {
+                id: 'q-lsp-3',
+                question: 'When is Rust most justified in a product stack?',
+                options: [
+                  'Whenever you want to look advanced',
+                  'For ordinary text and form screens',
+                  'When safety or performance is a real constraint, not just a preference',
+                  'Only for game development',
+                ],
+                correctIndex: 2,
+                explanation: 'Rust is most valuable when memory safety, correctness, or performance are important enough to justify its steeper complexity. It is not necessary for every part of a product.',
+              },
+            ],
+          },
+          {
             id: 'building-a-chatbot',
             title: 'Building a Chatbot',
             subtitle: 'Your first AI application',
@@ -1426,6 +1587,248 @@ export const TRACKS: Track[] = [
                 ],
                 correctIndex: 1,
                 explanation: 'A clear problem statement guides every subsequent decision in your project. Without it, you risk building something that does not solve a real need or getting lost in the many possibilities AI offers. Start with the problem, then work toward the solution.',
+              },
+            ],
+          },
+        ],
+      },
+      {
+        id: 'python-project-lab',
+        title: 'Python Project Lab',
+        subtitle: 'Small tools, real builder skills',
+        description: 'Build beginner-friendly Python projects that connect coding, AI thinking, and product design. This module turns Python from a concept into a tool you can use.',
+        icon: 'terminal',
+        color: '#22c55e',
+        difficulty: 'intermediate',
+        ageRange: '14-18',
+        badgeId: 'badge-python-project-lab',
+        badgeName: 'Python Builder',
+        lessons: [
+          {
+            id: 'python-study-bot-cli',
+            title: 'Python Study Bot CLI',
+            subtitle: 'Build a simple command-line tutor',
+            xpReward: 85,
+            durationMinutes: 24,
+            sections: [
+              {
+                type: 'learn',
+                title: 'Why Start With A CLI Project',
+                content: 'A command-line project is one of the fastest ways to become a real builder. You do not need to design screens or fight a complex framework. You can focus on inputs, outputs, data flow, and logic. That makes a Python CLI study bot a strong first project: the user types a topic, the program asks questions, tracks answers, and gives feedback.',
+                bulletPoints: [
+                  'You can build useful tools without a full app interface',
+                  'CLI projects teach logic, state, and flow control clearly',
+                  'Python makes input, loops, and text processing easy to learn',
+                ],
+              },
+              {
+                type: 'explore',
+                title: 'The Core Project Loop',
+                content: 'A study bot can be simple at first. Ask the user to pick a topic, choose three questions from a small question bank, accept user answers, compare them against the expected answer, and keep score. Once that works, you can improve it with hints, difficulty levels, or AI-generated explanations.',
+                bulletPoints: [
+                  'Input: ask the user for a topic or subject',
+                  'Logic: choose questions and track progress',
+                  'Output: show feedback, score, and next steps',
+                  'Expansion: add hints, saved progress, or AI help later',
+                ],
+              },
+              {
+                type: 'challenge',
+                title: 'Build The Bot',
+                content: 'Create a Python command-line study bot for one subject you care about. Include at least five questions, a scoring system, and a summary at the end. Then add one extra feature such as hints, retries, saved scores, or encouraging feedback after wrong answers.',
+              },
+              {
+                type: 'connect',
+                title: 'How This Scales Into Real Products',
+                content: 'Many polished products begin as tiny command-line tools. Once you understand the logic in a CLI, you can move it into a mobile app, website, or AI agent. The important thing is learning the product loop first: input, processing, response, and iteration.',
+              },
+            ],
+            quiz: [
+              {
+                id: 'q-psbc-1',
+                question: 'Why is a CLI project a strong first Python build?',
+                options: [
+                  'Because it avoids all programming logic',
+                  'Because it lets you focus on logic and data flow without a heavy interface layer',
+                  'Because command-line tools are always more advanced than apps',
+                  'Because Python only works in the terminal',
+                ],
+                correctIndex: 1,
+                explanation: 'CLI projects remove a lot of interface complexity, which lets beginners focus on the core programming ideas: inputs, outputs, conditions, loops, and state.',
+              },
+              {
+                id: 'q-psbc-2',
+                question: 'Which feature is most central to a study bot?',
+                options: [
+                  'Tracking user answers and giving feedback',
+                  'Rendering 3D graphics',
+                  'Managing Bluetooth devices',
+                  'Mining cryptocurrency',
+                ],
+                correctIndex: 0,
+                explanation: 'A study bot exists to ask questions, process answers, and return feedback. That core loop matters more than advanced visual features.',
+              },
+              {
+                id: 'q-psbc-3',
+                question: 'What is the best next step after a basic CLI bot works?',
+                options: [
+                  'Delete it and start over in another language',
+                  'Add one small improvement like hints, saved scores, or better feedback',
+                  'Immediately turn it into a massive multiplayer platform',
+                  'Stop testing because the first version is enough',
+                ],
+                correctIndex: 1,
+                explanation: 'Strong builders improve software iteratively. Once the core loop works, adding one thoughtful feature teaches more than restarting from scratch.',
+              },
+            ],
+          },
+          {
+            id: 'python-data-journal',
+            title: 'Python Data Journal',
+            subtitle: 'Track habits and turn them into insight',
+            xpReward: 85,
+            durationMinutes: 24,
+            sections: [
+              {
+                type: 'learn',
+                title: 'Why Data Projects Matter',
+                content: 'A lot of AI work begins with data, not models. If you can collect entries, store them cleanly, and summarize patterns, you are already doing an important kind of technical thinking. A data journal is a great project because it connects simple Python skills to analysis: lists, dictionaries, files, averages, and trends.',
+                bulletPoints: [
+                  'Data projects teach structure and consistency',
+                  'You learn how to store information for later analysis',
+                  'Simple analytics can already create value without complex AI',
+                ],
+              },
+              {
+                type: 'explore',
+                title: 'What The App Should Do',
+                content: 'Your program can ask the user to log a few values each day, such as study time, mood, sleep, or exercise. Store entries in a file, then print summaries like total entries, weekly averages, highest score, or common patterns. Once that works, you can imagine how AI could later add predictions or coaching.',
+                bulletPoints: [
+                  'Collect repeated entries over time',
+                  'Save data so it persists between sessions',
+                  'Summarize the data into something a person can act on',
+                  'Use analysis before adding AI features',
+                ],
+              },
+              {
+                type: 'challenge',
+                title: 'Build Your Journal',
+                content: 'Create a Python data journal that tracks one habit or behavior for at least seven sample entries. Save the data to a file, then print a summary report. Your report should include at least one average, one high or low point, and one sentence about what the data seems to suggest.',
+              },
+              {
+                type: 'reflect',
+                title: 'From Data To Product Thinking',
+                content: 'The moment you turn raw entries into a summary, you are thinking like a product builder. You are not just storing information. You are helping a person understand something and decide what to do next. That is the same mental model behind dashboards, recommendations, and AI coaching tools.',
+              },
+            ],
+            quiz: [
+              {
+                id: 'q-pdj-1',
+                question: 'Why is a data journal a strong beginner Python project?',
+                options: [
+                  'Because it teaches storage, structure, and simple analysis',
+                  'Because it requires no planning at all',
+                  'Because it is only useful for professional data scientists',
+                  'Because it avoids working with real information',
+                ],
+                correctIndex: 0,
+                explanation: 'A data journal teaches core builder habits: collecting structured information, saving it, and turning it into insight through simple summaries.',
+              },
+              {
+                id: 'q-pdj-2',
+                question: 'What should a useful journal summary include?',
+                options: [
+                  'Only raw entries with no interpretation',
+                  'At least one measure like an average or high/low value',
+                  'A random quote from the internet',
+                  'A password list for the user',
+                ],
+                correctIndex: 1,
+                explanation: 'Summaries become useful when they help a person understand patterns. Averages, highs, lows, and short interpretations are the start of that.',
+              },
+              {
+                id: 'q-pdj-3',
+                question: 'Why should you build the data layer before adding AI predictions?',
+                options: [
+                  'Because AI does not need data',
+                  'Because reliable input and clean structure are the foundation for any later intelligence',
+                  'Because Python cannot analyze files',
+                  'Because prediction is illegal in apps',
+                ],
+                correctIndex: 1,
+                explanation: 'AI features are much more useful when they sit on top of clean, consistent data. Good builders make the data layer solid first.',
+              },
+            ],
+          },
+          {
+            id: 'python-mcp-starter',
+            title: 'Python MCP Starter',
+            subtitle: 'Your first tool for an AI agent',
+            xpReward: 95,
+            durationMinutes: 26,
+            sections: [
+              {
+                type: 'learn',
+                title: 'What Makes A Tool Different From A Chat',
+                content: 'A chat response is just text. A tool can actually do something. That distinction is central to modern AI systems. With MCP, an AI model can call tools that read files, fetch structured data, or trigger actions. A beginner Python tool does not need to be fancy. Even a tiny function that returns school deadlines, study tips, or a local note summary teaches the key shift from conversation to capability.',
+                bulletPoints: [
+                  'Chat answers explain things',
+                  'Tools perform actions or retrieve structured information',
+                  'MCP gives AI systems a standard way to access tools',
+                ],
+              },
+              {
+                type: 'explore',
+                title: 'Start With One Useful Capability',
+                content: 'Your first MCP-style project should do one thing well. For example, create a Python function that returns a study checklist, a set of flashcards, or a simple status report from saved notes. The key lesson is not complexity. It is understanding how an AI could ask for a capability and receive structured results instead of only free-form text.',
+              },
+              {
+                type: 'challenge',
+                title: 'Design A Tiny Agent Tool',
+                content: 'Write the specification for one Python tool you would want an AI tutor or coding assistant to call. Define its input, output, and safety boundaries. Then implement the core function in Python, even if you do not fully wire the transport layer. Your goal is to think clearly about what the tool does and what data it should return.',
+              },
+              {
+                type: 'connect',
+                title: 'Why This Matters For Underground Circle',
+                content: 'The Underground Circle is not only a place to chat with AI. It is becoming a place where AI can use context, memory, tools, and structured knowledge. Learning to design small Python tools prepares users for that future much better than prompt practice alone.',
+              },
+            ],
+            quiz: [
+              {
+                id: 'q-pms-1',
+                question: 'What is the biggest difference between a plain chat response and a tool?',
+                options: [
+                  'A tool can perform a capability or return structured data, not just text',
+                  'A tool always uses a different programming language',
+                  'A tool is always offline',
+                  'A tool never needs user input',
+                ],
+                correctIndex: 0,
+                explanation: 'Tools matter because they let an AI system do more than talk. They can fetch data, compute results, or trigger actions in structured ways.',
+              },
+              {
+                id: 'q-pms-2',
+                question: 'What is the best shape for a first MCP-style Python project?',
+                options: [
+                  'A giant system with dozens of features',
+                  'One small, useful capability with clear inputs and outputs',
+                  'A project with no defined purpose',
+                  'Only a design mockup with no logic',
+                ],
+                correctIndex: 1,
+                explanation: 'Small, focused tools teach the core design principle clearly: one capability, clear inputs, structured outputs, and understandable boundaries.',
+              },
+              {
+                id: 'q-pms-3',
+                question: 'Why do safety boundaries matter when designing tools for AI?',
+                options: [
+                  'Because tools should be allowed to do anything',
+                  'Because clear limits help prevent the tool from exposing or changing the wrong data',
+                  'Because safety only matters for large companies',
+                  'Because Python cannot handle restrictions',
+                ],
+                correctIndex: 1,
+                explanation: 'Good tool design includes boundaries. You want to define what data the tool can touch, what actions it can take, and what should still require human review.',
               },
             ],
           },
@@ -6369,6 +6772,42 @@ export function getModule(trackId: string, moduleId: string): Module | undefined
 
 export function getLesson(trackId: string, moduleId: string, lessonId: string): Lesson | undefined {
   return getModule(trackId, moduleId)?.lessons.find(l => l.id === lessonId);
+}
+
+export function getNextLessonRef(trackId: string, moduleId: string, lessonId: string): LessonRef | undefined {
+  const track = getTrack(trackId);
+  if (!track) return undefined;
+
+  for (let moduleIndex = 0; moduleIndex < track.modules.length; moduleIndex += 1) {
+    const module = track.modules[moduleIndex];
+    const lessonIndex = module.lessons.findIndex(l => l.id === lessonId && module.id === moduleId);
+    if (lessonIndex === -1) continue;
+
+    const nextLessonInModule = module.lessons[lessonIndex + 1];
+    if (nextLessonInModule) {
+      return {
+        trackId,
+        moduleId: module.id,
+        lessonId: nextLessonInModule.id,
+        moduleTitle: module.title,
+        lessonTitle: nextLessonInModule.title,
+      };
+    }
+
+    const nextModule = track.modules[moduleIndex + 1];
+    const nextLesson = nextModule?.lessons[0];
+    if (nextModule && nextLesson) {
+      return {
+        trackId,
+        moduleId: nextModule.id,
+        lessonId: nextLesson.id,
+        moduleTitle: nextModule.title,
+        lessonTitle: nextLesson.title,
+      };
+    }
+  }
+
+  return undefined;
 }
 
 export function getTotalLessons(track: Track): number {

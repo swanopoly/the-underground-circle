@@ -17,6 +17,7 @@ import {
   revokeInvite,
   generateInviteUrl,
 } from '../../lib/invites';
+import { shareLink, shareResultMessage } from '../../lib/share';
 import { CircleInvite } from '../../types';
 
 export default function InviteManageScreen({ route, navigation }: any) {
@@ -107,8 +108,32 @@ export default function InviteManageScreen({ route, navigation }: any) {
         await navigator.clipboard.writeText(url);
         setCopiedId(code);
         setTimeout(() => setCopiedId(null), 2000);
-      } catch {}
+      } catch (err) {
+        console.warn('[InviteManageScreen] clipboard copy failed:', err);
+      }
     }
+  };
+
+  // Share button — uses native share sheet on mobile / capable browsers,
+  // falls back to clipboard on desktop. Quietly skips the toast when the
+  // user dismisses the native sheet (kind === 'native', shared === false).
+  const handleShare = async (code: string) => {
+    const url = generateInviteUrl(code);
+    const result = await shareLink({
+      title: `Join ${circleName || 'my circle'} on Underground Circle`,
+      text: `${circleName ? `${circleName} on ` : ''}Underground Circle — missions, agents, and proof-of-work.`,
+      url,
+    });
+    const msg = shareResultMessage(result);
+    if (!msg) return;
+    if (result.kind === 'clipboard') {
+      // Reuse the same "Copied!" indicator UX for consistency
+      setCopiedId(code);
+      setTimeout(() => setCopiedId(null), 2000);
+      return;
+    }
+    if (Platform.OS === 'web') alert(msg);
+    else Alert.alert('Share', msg);
   };
 
   const pendingInvites = invites.filter(i => i.status === 'pending');
@@ -185,6 +210,12 @@ export default function InviteManageScreen({ route, navigation }: any) {
               </Text>
             </View>
             <View style={styles.inviteActions}>
+              <Pressable
+                onPress={() => handleShare(invite.invite_code)}
+                style={styles.shareBtn}
+              >
+                <Text style={styles.shareBtnText}>Share</Text>
+              </Pressable>
               <Pressable
                 onPress={() => handleCopy(invite.invite_code)}
                 style={styles.copyBtn}
@@ -303,6 +334,13 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   copyBtnText: { color: '#6366f1', fontSize: 12, fontFamily: 'monospace' },
+  shareBtn: {
+    backgroundColor: '#22c55e' + '20',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  shareBtnText: { color: '#22c55e', fontSize: 12, fontFamily: 'monospace', fontWeight: '700' },
   revokeBtn: {
     backgroundColor: '#ef4444' + '15',
     paddingHorizontal: 12,

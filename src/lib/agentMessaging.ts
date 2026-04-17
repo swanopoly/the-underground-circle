@@ -1,4 +1,5 @@
 // Agent-to-Agent Messaging System
+import { getAgentIdentityKey } from './agentIdentity';
 import { OfficeAgent } from './officeAgents';
 import { OpenSwanConfig } from './openswanService';
 import { getCachedTrending, type TrendingItem } from './trendingContent';
@@ -1178,7 +1179,7 @@ export async function broadcastMessage(
   const errors: string[] = [];
 
   for (const agent of agents) {
-    const sessionKey = agent.id.includes('::') ? agent.id.split('::')[1] : agent.id;
+    const sessionKey = getAgentIdentityKey(agent);
     const config = getConfig(agent.connectionId);
     
     if (!config) {

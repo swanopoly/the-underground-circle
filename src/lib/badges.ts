@@ -198,8 +198,63 @@ export const TIER_COLORS: Record<BadgeTier, { bg: string; border: string; glow: 
   legendary: { bg: '#001a0f', border: '#00FF9C', glow: '#00FF9C80', label: 'LEGENDARY' },
 };
 
+// ─── ACTION BADGES ───────────────────────────────────────────────────────────
+// Action badges are earned by doing specific things, not by accumulating XP.
+// They share the Badge shape so they render the same way in the UI, but they
+// have pointsRequired: 0 to keep them out of the points-based award loop in
+// rewardService — the server inserts them directly into user_badges via RPCs.
+export const ACTION_BADGES: Badge[] = [
+  // Connector tier — referrals brought into the platform
+  {
+    id: 'connector_1',
+    name: 'Connector',
+    description: 'Brought your first teammate aboard',
+    lore: '"You found someone who needed this. The network grows."',
+    pointsRequired: 0,
+    tier: 'bronze',
+    icon: '🤝',
+    shape: 'shield',
+    color: '#22c55e',
+  },
+  {
+    id: 'connector_5',
+    name: 'Recruiter',
+    description: '5 people joined through you',
+    lore: '"A small crew chose you as the door. That counts."',
+    pointsRequired: 0,
+    tier: 'silver',
+    icon: '🤝',
+    shape: 'shield',
+    color: '#22c55e',
+  },
+  {
+    id: 'connector_10',
+    name: 'Network Architect',
+    description: '10 people joined through you',
+    lore: '"You\'re building the underground itself, one person at a time."',
+    pointsRequired: 0,
+    tier: 'gold',
+    icon: '🤝',
+    shape: 'shield',
+    color: '#22c55e',
+  },
+  {
+    id: 'connector_25',
+    name: 'Kingmaker',
+    description: '25 people joined through you',
+    lore: '"You don\'t join networks. You make them."',
+    pointsRequired: 0,
+    tier: 'platinum',
+    icon: '👑',
+    shape: 'shield',
+    color: '#22c55e',
+  },
+];
+
+const ALL_BADGES = [...BADGES, ...ACTION_BADGES];
+
 export function getBadgeById(id: string): Badge | undefined {
-  return BADGES.find(b => b.id === id);
+  return ALL_BADGES.find(b => b.id === id);
 }
 
 export function getNextBadge(currentPoints: number): Badge | undefined {

@@ -1,12 +1,12 @@
 /**
  * github.ts — GitHub REST API service for browsing repositories
  *
- * Uses plain fetch (no npm packages). Tokens stored per-circle
- * via the cross-platform storage abstraction.
+ * Uses plain fetch (no npm packages). Tokens are stored locally per-circle
+ * via the shared local-secret helper, not synced to the backend.
  */
 
-import { storage } from './storage';
 import { supabase } from './supabase';
+import { deleteLocalSecret, readLocalSecret, writeLocalSecret } from './localSecrets';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -53,27 +53,23 @@ export interface GitHubFileContent {
 
 // ─── Token Storage ────────────────────────────────────────────────────────────
 
-function storageKey(circleId: string): string {
-  return `@github_pat_${circleId}`;
-}
-
 export async function getStoredToken(circleId: string): Promise<string | null> {
-  return storage.getItem(storageKey(circleId));
+  return (await readLocalSecret('github_pat', circleId)) || null;
 }
 
 export async function storeToken(circleId: string, token: string): Promise<void> {
-  await storage.setItem(storageKey(circleId), token);
+  await writeLocalSecret('github_pat', circleId, token);
 }
 
 export async function removeToken(circleId: string): Promise<void> {
-  await storage.removeItem(storageKey(circleId));
+  await deleteLocalSecret('github_pat', circleId);
 }
 
 // ─── API Helpers ──────────────────────────────────────────────────────────────
 
 const API = 'https://api.github.com';
 
-async function ghFetch<T>(path: string, token: string): Promise<{ data: T | null; error: string | null }> {
+async function ghFetch<T>(path: string, token: string): Promise<{ data: T | null; error: string | null; status: number }> {
   try {
     const res = await fetch(`${API}${path}`, {
       headers: {
@@ -84,21 +80,24 @@ async function ghFetch<T>(path: string, token: string): Promise<{ data: T | null
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      return { data: null, error: (body as any).message || `HTTP ${res.status}` };
+      return { data: null, error: (body as any).message || `HTTP ${res.status}`, status: res.status };
     }
     const data = await res.json();
-    return { data: data as T, error: null };
+    return { data: data as T, error: null, status: res.status };
   } catch (e: any) {
-    return { data: null, error: e.message || 'Network error' };
+    // status 0 = network failure / CORS / offline — never an auth problem
+    return { data: null, error: e.message || 'Network error', status: 0 };
   }
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/** Validate a PAT and return the authenticated user */
-export async function validateToken(token: string): Promise<{ user: GitHubUser | null; error: string | null }> {
-  const { data, error } = await ghFetch<GitHubUser>('/user', token);
-  return { user: data, error };
+/** Validate a PAT and return the authenticated user.
+ *  `status` lets callers distinguish auth failure (401/403 → wipe token)
+ *  from transient errors (0/5xx/429 → keep token, retry later). */
+export async function validateToken(token: string): Promise<{ user: GitHubUser | null; error: string | null; status: number }> {
+  const { data, error, status } = await ghFetch<GitHubUser>('/user', token);
+  return { user: data, error, status };
 }
 
 /** List repos visible to the authenticated user (up to 100 per page) */

@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "strict": true
+  },
+  "fmt": {
+    "semiColons": true,
+    "singleQuote": false
+  }
+}

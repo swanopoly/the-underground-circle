@@ -37,7 +37,10 @@ export interface LogActivityParams {
   metadata?: Record<string, any>;
 }
 
+let agentActivityWriteBlocked = false;
+
 export async function logActivity(params: LogActivityParams): Promise<void> {
+  if (agentActivityWriteBlocked) return;
   const { error } = await supabase.from('agent_activity').insert({
     circle_id: params.circle_id,
     agent_name: params.agent_name ?? 'BlackSwan',
@@ -50,6 +53,11 @@ export async function logActivity(params: LogActivityParams): Promise<void> {
     metadata: params.metadata ?? {},
   });
   if (error) {
+    const message = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
+    if (error.code === '42501' || message.includes('row-level security')) {
+      agentActivityWriteBlocked = true;
+      return;
+    }
     console.warn('[agentActivityLogger] Insert failed:', error.message);
   }
 }

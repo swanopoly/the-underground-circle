@@ -25,9 +25,13 @@ if (Platform.OS === 'web') {
 }
 
 const PENDING_INVITE_KEY = 'uc_pending_invite';
+// Optional mission deep-link from a shared URL: /join/{code}?mission={id}
+// Lets a recipient land directly on the mission they were invited to instead
+// of the default tab. MissionsTab consumes + clears this on mount.
+const PENDING_MISSION_KEY = 'uc_pending_mission_deeplink';
 
 /** Redeem a pending invite token after login */
-async function handlePendingInvite(userId: string) {
+async function handlePendingInvite(_userId: string) {
   if (Platform.OS !== 'web') return;
   try {
     const token = localStorage.getItem(PENDING_INVITE_KEY);
@@ -41,40 +45,57 @@ async function handlePendingInvite(userId: string) {
     }
     if (circleId) {
       console.log('Invite redeemed, joined circle:', circleId);
-      // Navigation will pick up the new circle on next render
+      // Navigation will pick up the new circle on next render. The optional
+      // mission deep-link in PENDING_MISSION_KEY (set during URL parsing) is
+      // consumed by MissionsTab once the user lands in that circle.
     }
   } catch (e) {
     console.warn('handlePendingInvite error:', e);
   }
 }
 
-/** Check URL params for invite token or github_connected callback */
-function getUrlParams(): { invite?: string; githubConnected?: boolean; circleId?: string } {
+/** Check URL params for invite token, mission deep-link, or github_connected callback */
+function getUrlParams(): {
+  invite?: string;
+  mission?: string;
+  githubConnected?: boolean;
+  circleId?: string;
+} {
   if (Platform.OS !== 'web') return {};
   try {
     const params = new URLSearchParams(window.location.search);
     const invite = params.get('invite') || undefined;
+    const mission = params.get('mission') || undefined;
     const githubConnected = params.get('github_connected') === '1';
     const circleId = params.get('circle_id') || undefined;
+    // Persist mission deep-link so it survives the login redirect / handler.
+    if (mission) {
+      try { localStorage.setItem(PENDING_MISSION_KEY, mission); } catch {}
+    }
     // Clean URL params after reading (don't leave tokens in the URL bar)
-    if (invite || githubConnected) {
+    if (invite || githubConnected || mission) {
       window.history.replaceState({}, '', window.location.pathname);
     }
-    return { invite, githubConnected, circleId };
+    return { invite, mission, githubConnected, circleId };
   } catch {
     return {};
   }
 }
 
-/** Also handle /join/:code path-based invite URLs */
+/** Also handle /join/:code path-based invite URLs (with optional ?mission=) */
 function getInviteFromPath(): string | undefined {
   if (Platform.OS !== 'web') return undefined;
   try {
     const match = window.location.pathname.match(/^\/join\/([a-zA-Z0-9]+)$/);
-    if (match) {
-      window.history.replaceState({}, '', '/');
-      return match[1];
+    if (!match) return undefined;
+    // Preserve ?mission= for the deep-link before we replace the URL.
+    const params = new URLSearchParams(window.location.search);
+    const mission = params.get('mission');
+    if (mission) {
+      try { localStorage.setItem(PENDING_MISSION_KEY, mission); } catch {}
     }
+    window.history.replaceState({}, '', '/');
+    return match[1];
   } catch {}
   return undefined;
 }
@@ -170,6 +191,7 @@ const linking: LinkingOptions<any> = {
       },
       CircleSettings: 'circle/:circleId/settings',
       // Profile & Social
+      Profile: 'profile',
       EditProfile: 'profile/edit',
       Friends: 'friends',
       DMScreen: 'dm/:friendId',
@@ -232,7 +254,9 @@ export default function App() {
     // Setup notifications
     import('./src/lib/notifications').then(n => {
       n.setupNotifications();
-      n.requestNotificationPermission();
+      if (Platform.OS !== 'web') {
+        n.requestNotificationPermission();
+      }
     }).catch(() => {});
 
     // Pulse animation

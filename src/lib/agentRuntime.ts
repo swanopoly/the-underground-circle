@@ -15,6 +15,8 @@ import {
   inferTaskCapabilityProfile,
   getTaskCapabilityProfile,
 } from './taskCapabilityProfiles';
+import { buildImpactDomainGuidance } from './impactDomains';
+import { buildTaskOwnershipClaim } from './circleIntegrations';
 
 // ─── Unified Types ──────────────────────────────────────────────────────────
 
@@ -288,13 +290,70 @@ export async function executeAgentRun(
     // 1. Build the augmented prompt with memory context
     const modePrefix = getModePromptPrefix(mode);
     const contextParts: string[] = [];
+    let integrationPreflightSummary: string | null = null;
 
     // Inject memory context
     try {
       const { buildMemoryContext } = await import('./agentRunSystem');
-      const memCtx = await buildMemoryContext(circleId, context?.roomId, userId);
+      const memCtx = await buildMemoryContext(circleId, context?.roomId, userId, request.agentId, request.agentName);
       if (memCtx) contextParts.push(memCtx);
     } catch {}
+
+    const inferredProfileKey = request.capabilityProfile || inferTaskCapabilityProfile({
+      title: prompt.slice(0, 160),
+      description: context?.replyTo || context?.chatHistory || context?.fileName || '',
+    });
+    const inferredProfile = getTaskCapabilityProfile(inferredProfileKey);
+    const domainGuidance = buildImpactDomainGuidance({
+      title: prompt,
+      description: context?.chatHistory || context?.replyTo || context?.fileName || '',
+      query: prompt,
+      domainKey: inferredProfile?.impactDomain,
+    });
+    if (domainGuidance) contextParts.push(domainGuidance);
+
+    const ownershipClaim = await buildTaskOwnershipClaim({
+      circleId,
+      title: prompt.slice(0, 200),
+      description: [
+        context?.replyTo || '',
+        context?.chatHistory || '',
+        context?.fileName || '',
+        inferredProfileKey || '',
+      ].filter(Boolean).join(' '),
+      profileKey: inferredProfileKey,
+    });
+
+    if (ownershipClaim.requiredCapabilities.length > 0 || ownershipClaim.requiredConnectors.length > 0) {
+      integrationPreflightSummary = ownershipClaim.ownership.level === 'full'
+        ? 'Integrations ready for full ownership.'
+        : `Missing ${[
+            ownershipClaim.missingConnectors.length > 0 ? `connectors: ${ownershipClaim.missingConnectors.join(', ')}` : '',
+            ownershipClaim.missingCapabilities.length > 0 ? `capabilities: ${ownershipClaim.missingCapabilities.join(', ')}` : '',
+          ].filter(Boolean).join(' | ')}`;
+      contextParts.push(
+        [
+          '=== INTEGRATION PREFLIGHT ===',
+          ownershipClaim.requiredConnectors.length > 0
+            ? `Required connectors: ${ownershipClaim.requiredConnectors.join(', ')}`
+            : null,
+          ownershipClaim.requiredCapabilities.length > 0
+            ? `Required capabilities: ${ownershipClaim.requiredCapabilities.join(', ')}`
+            : null,
+          `Ownership: ${ownershipClaim.ownership.headline}`,
+          ownershipClaim.ownership.level === 'full'
+            ? 'Status: circle integrations are ready for full ownership.'
+            : `Status: missing ${[
+                ownershipClaim.missingConnectors.length > 0 ? `connectors (${ownershipClaim.missingConnectors.join(', ')})` : '',
+                ownershipClaim.missingCapabilities.length > 0 ? `capabilities (${ownershipClaim.missingCapabilities.join(', ')})` : '',
+              ].filter(Boolean).join(' and ')}.`,
+          `Guidance: ${ownershipClaim.ownership.detail}`,
+          ownershipClaim.ownership.level !== 'full'
+            ? 'Instruction: do not claim end-to-end execution for blocked external actions. Produce the exact missing access, connector setup, or handoff needed.'
+            : 'Instruction: the connector surface is available, so you can take full ownership if the rest of the task is within scope.',
+        ].filter(Boolean).join('\n')
+      );
+    }
 
     if (context?.replyTo) {
       contextParts.push(`[Replying to: "${context.replyTo.slice(0, 200)}"]`);
@@ -321,6 +380,8 @@ export async function executeAgentRun(
       userId,
       circleId,
       userName,
+      agentId: request.agentId,
+      agentName: request.agentName,
       model: model || undefined,
       chatHistory: context?.chatHistory,
     };
@@ -342,6 +403,11 @@ export async function executeAgentRun(
     // 6. Build step log
     const steps: AgentRunResult['steps'] = [
       { kind: 'prompt', title: 'Prompt built', summary: `Mode: ${mode}, Surface: ${surface}` },
+      ...(integrationPreflightSummary ? [{
+        kind: 'integration_preflight',
+        title: 'Integration preflight checked',
+        summary: integrationPreflightSummary,
+      }] : []),
       { kind: 'inference', title: 'AI response received', summary: `${response.length} chars` },
     ];
     if (artifacts && artifacts.length > 0) {

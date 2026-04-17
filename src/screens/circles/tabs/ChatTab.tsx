@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -11,18 +11,24 @@ import {
   ScrollView,
   Animated,
   Image,
+  Modal,
+  useWindowDimensions,
 } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
 import { supabase } from '../../../lib/supabase';
 import FlatIcon from '../../../components/FlatIcon';
 import MemoryViewer from '../../../components/agent/MemoryViewer';
+import ChatThreadSidebar, { getInitialSidebarCollapsed, persistSidebarCollapsed } from './chat/ChatThreadSidebar';
+import ChatThreadHeader from './chat/ChatThreadHeader';
+import { createPrivateThread, getCircleDefaultThread, getThread, renameThread, updateThreadDefaultModel } from '../../../lib/circleChatThreads';
 import RunStatusBar from '../../../components/agent/RunStatusBar';
 import PluginPicker from '../../../components/agent/PluginPicker';
 import MemoryToast from '../../../components/agent/MemoryToast';
 import {
   getSwanBotResponse as getAIResponse,
-  getSwanBotStructuredResponse,
   SwanBotContext,
   type SwanBotStructuredArtifact,
+  tryHandleLocalSwanBotCommand,
 } from '../../../lib/swanbot';
 import {
   getConnectedWallet, connectWallet, sendETH, sendSOL, disconnectWallet,
@@ -41,6 +47,21 @@ import { awardXP, getXPForAction } from '../../../lib/gamification';
 import { executeGitHubCommand as executeGitHubChatCommand } from '../../../lib/githubChatCommands';
 import { executeRoomCommand } from '../../../lib/roomChatCommands';
 import { executeHfCommand } from '../../../lib/huggingFaceChatCommands';
+import { extractHtmlFromStream, subscribeBuildStream } from '../../../lib/buildStream';
+import { type BuilderRevision, loadBuilderHistory, pushBuilderRevision, removeBuilderRevision } from '../../../lib/builderHistory';
+import { type BrandPack, buildBrandPromptPrefix, isBrandPackActive, loadBrandPack } from '../../../lib/brandPack';
+import BrandPackEditor from './chat/BrandPackEditor';
+import { type BuilderImage, buildImagesPromptPrefix, loadBuilderImages } from '../../../lib/builderImages';
+import BuilderImagesEditor from './chat/BuilderImagesEditor';
+import BuilderGithubSaveModal from './chat/BuilderGithubSaveModal';
+import BuilderNetlifyDeployModal from './chat/BuilderNetlifyDeployModal';
+import ChatAttachmentStrip from './chat/ChatAttachmentStrip';
+import MessageCitations from './chat/MessageCitations';
+import RunCostDrawer from './chat/RunCostDrawer';
+import SkillAdminPanel from './chat/SkillAdminPanel';
+import SpawnAgentsModal from './chat/SpawnAgentsModal';
+import { createStagedFile, revokeStagedPreviews, uploadAttachment, type StagedFile } from '../../../lib/chatAttachments';
+import { soulKeyForProfile } from '../../../lib/serviceProfileSouls';
 import { dispatchBridgeTask, wakeAndAssignTask } from '../../../lib/bridgeTaskDispatcher';
 import SpawnAgentPanel from '../../../components/SpawnAgentPanel';
 import { storage } from '../../../lib/storage';
@@ -51,174 +72,345 @@ import { executeAgentRun, detectHandoff, HandoffSuggestion } from '../../../lib/
 import HandoffCard from '../../../components/agent/HandoffCard';
 import AgentModeSelector from '../../../components/agent/AgentModeSelector';
 import AddModelPanel from '../../../components/models/AddModelPanel';
-import { pickImage, ChatAttachment, getMediaTypeIcon, prepareImageForAI } from '../../../lib/chatMedia';
+import { pickAttachments, ChatAttachment, getMediaTypeIcon, prepareImageForAI, buildAttachmentPromptContext } from '../../../lib/chatMedia';
+import { buildFigmaPromptFromReferences, resolveFigmaReferences, type FigmaReference } from '../../../lib/figmaBuilder';
 import {
   loadUserProfile, updateProfileFromMessage, updateProfileFromDeletion,
   updateProfileFromReply, saveUserProfile, UserChatProfile,
 } from '../../../lib/userChatProfile';
+import { getAdaptiveChatDefaults, loadAdaptiveWorkspaceSettings, loadCircleWorkspaceProfile, recordChatActivity } from '../../../lib/workspaceAdaptation';
 import {
   createSession as createComputerUseSession,
+  createSessionFromBrowserPlan,
   planActions as planComputerUseActions,
   executePlan as executeComputerUsePlan,
+  type BrowserPlanCardData,
+  type BrowserPlanEvent,
+  type BrowserSessionRecord,
   type ComputerUseSession,
   type ComputerUsePermission,
   type BrowserAction,
+  toBrowserSessionRecord,
 } from '../../../lib/computerUse';
 import ComputerUsePanel from '../../../components/computer-use/ComputerUsePanel';
+import BrowserSessionDrawer from '../../../components/computer-use/BrowserSessionDrawer';
 import ComputerUsePermissionDialog from '../../../components/computer-use/ComputerUsePermissionDialog';
 import ComputerUseButton from '../../../components/computer-use/ComputerUseButton';
+import {
+  getMatchingChatSlashCommands,
+  type ChatSlashCommand,
+} from '../../../lib/chatSlashCommands';
+import ChatArtifacts from '../../../components/chat/ChatArtifacts';
+// V2 Builder adds copy/download/publish toolbar, device frames, and an
+// iframe runtime error overlay. Lives in tabs/chat/ because the components/
+// chat directory is root-owned. See docs/CHAT_LIVE_BUILDER_ROADMAP.md.
+import ChatBuildStudio from './chat/ChatBuildStudioV2';
+import ChatBotIdentityRow from '../../../components/chat/ChatBotIdentityRow';
+import CodingWorkbenchPreview from '../../../components/chat/CodingWorkbenchPreview';
+import ChatInlineRichText from '../../../components/chat/ChatInlineRichText';
+import RunExecutionCard from '../../../components/chat/RunExecutionCard';
+import RunHistoryDrawer from '../../../components/chat/RunHistoryDrawer';
+import ChatSlashCommandPalette from '../../../components/chat/ChatSlashCommandPalette';
+import { buildOpenSwanExecutionStream, type OpenSwanExecutionContract } from '../../../lib/openswanExecution';
+import {
+  clearChatAgentAvatar,
+  getChatAgentAvatarSource,
+  isPersistedChatBotMessage,
+  loadChatAgentAvatar,
+  loadChatAgentName,
+  loadLastThreadBuildArtifact,
+  MAIN_CHAT_AGENT_NAME,
+  readPersistedChatBotMetadata,
+  saveChatAgentAvatar,
+  saveChatAgentName,
+  saveLastThreadBuildArtifact,
+} from '../../../lib/chatAgentIdentity';
+import {
+  buildChatInfluenceReferences,
+  persistMainChatBotMessageWithRetry,
+  updateMainChatBotMessageWithRetry,
+} from '../../../lib/chatAgentService';
+import { deriveChatActivityFlags, shapePersistedChatMessage } from '../../../lib/chatMessageShape';
+import {
+  applyOpenSwanMemoryRecommendation,
+  getLatestSpiritMemoryReferences,
+  rememberFromChat,
+  type OpenSwanMemoryRecommendation,
+  type PromptMemoryReference,
+} from '../../../lib/memoryService';
+import { decayMemoryImportance, pinMemory, promoteMemory, recordMemoryFeedback, softDeleteMemory } from '../../../lib/memoryActions';
+import {
+  getLatestSpiritResearchReferences,
+  type ResearchDocumentReference,
+} from '../../../lib/researchControl';
+import {
+  getCurrentChatUserProfile,
+  loadCircleChatMembers,
+  loadThreadMessages,
+  persistChatMessage,
+} from '../../../lib/chatService';
+import {
+  FEATURED_QUICK_ACTIONS,
+  FEATURED_TOOL_ACTIONS,
+  PROMPT_CATEGORIES,
+  QUICK_PROMPTS,
+  resolveQuickActionExecution,
+} from '../../../lib/chatActions';
+import { detectAgenticCodingProfile } from '../../../lib/agenticCodingProfile';
+import { getSpiritById } from '../../../lib/agentSpirits';
+import { getAgentIdentityKey, loadAgentIdentities } from '../../../lib/agentIdentity';
+import { loadConnections } from '../../../lib/connectionManager';
+import { DEFAULT_AGENT, sessionsToAgents, type OfficeAgent } from '../../../lib/officeAgents';
+import { loadCircleOfficeAgents, type CircleOfficeAgent } from '../../../lib/circleOffice';
+import { listSessions, sendSessionMessage, spawnSubAgent, type OpenSwanConfig } from '../../../lib/openswanService';
+import { type WikiArticleReference } from '../../../lib/wikiData';
+import {
+  loadThreadDelegationMode,
+  loadThreadSessionProfile,
+  resolveSessionCodingProfile,
+  saveThreadDelegationMode,
+  saveThreadSessionProfile,
+  type SessionCodingProfile,
+  type SessionDelegationMode,
+} from '../../../lib/chatSessionProfile';
+import { isCodingGenerationRequest } from '../../../lib/codingWorkbench';
+import { runOpenSwanSessionTurn, type OpenSwanDelegatedAgentDescriptor } from '../../../lib/openswanSessionRuntime';
+import type { OpenSwanTaskPlan } from '../../../lib/openswanTaskPlanner';
+import type { OpenSwanToolEvent } from '../../../lib/openswanToolRuntime';
+import {
+  executeOpenSwanVerificationCheck,
+  type OpenSwanVerificationResult,
+  upsertOpenSwanVerificationResult,
+} from '../../../lib/openswanVerificationRuntime';
+import { addArtifact, appendRunBrowserPlanEvent, appendRunToolEvent, mergeRunMetadata } from '../../../lib/agentRunSystem';
+import { getMainChatSessionActions } from '../../../lib/sessionPromptCatalog';
 
 const REACTIONS_LIST = ['🔥', '💪', '👊', '💯', '⚡', '🎯'];
 const BLACKSWAN_ID = 'blackswan';
 const LOGIN_NEON = '#b8ff61';
-const AGENT_STORAGE_KEY = 'uc_agent_name';
-function loadAgentName(circleId: string): string {
-  try { return localStorage.getItem(`${AGENT_STORAGE_KEY}_${circleId}`) || 'Agent'; } catch { return 'Agent'; }
+const CHAT_SURFACE_MAX_WIDTH = 1680;
+const SESSION_FALLBACK_TITLE = 'OpenSwan Session';
+const DEFAULT_CHAT_MODEL = 'claude-sonnet-4-6';
+type AssignableAgent = {
+  id: string;
+  name: string;
+  status: string;
+  provider: string;
+  color?: string | null;
+  owner_display_name?: string | null;
+  current_task?: string | null;
+  circle_id?: string | null;
+  spirit?: string | null;
+  model?: string | null;
+  sessionKey?: string | null;
+  source?: 'db' | 'openswan-session' | 'bridge-session' | 'default';
+};
+
+function parseAgentExtendedConfig(raw: string | null | undefined): Record<string, any> | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
 }
-function saveAgentName(circleId: string, name: string) {
-  try { localStorage.setItem(`${AGENT_STORAGE_KEY}_${circleId}`, name); } catch {}
+
+function toAssignableDbAgent(agent: CircleOfficeAgent): AssignableAgent {
+  const extended = parseAgentExtendedConfig(agent.currentGoal);
+  return {
+    id: agent.id,
+    name: agent.name,
+    status: agent.status || 'idle',
+    provider: agent.provider,
+    color: agent.color,
+    owner_display_name: agent.ownerDisplayName,
+    current_task: agent.currentTask || null,
+    circle_id: agent.circleId,
+    spirit: agent.spirit || null,
+    model: agent.model_name || extended?.modelPreference || null,
+    sessionKey: agent.provider === 'openswan' ? agent.id : null,
+    source: 'db',
+  };
 }
 
-// ─── Prompt Categories ───────────────────────────────────────────────────────
+function toAssignableSessionAgent(agent: OfficeAgent, circleId: string): AssignableAgent {
+  return {
+    id: agent.id,
+    name: agent.name,
+    status: agent.status,
+    provider: agent.providerType,
+    color: agent.color,
+    owner_display_name: agent.connectionName,
+    current_task: agent.activity || null,
+    circle_id: circleId,
+    spirit: agent.spirit || null,
+    model: agent.model || null,
+    sessionKey: agent.sessionKey || null,
+    source: 'openswan-session',
+  };
+}
+const TITLE_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'at', 'be', 'build', 'can', 'create', 'do', 'for',
+  'from', 'help', 'how', 'i', 'in', 'is', 'it', 'make', 'me', 'my', 'of', 'on',
+  'please', 'show', 'the', 'this', 'to', 'we', 'with', 'you',
+]);
 
-const QUICK_PROMPTS = [
-  { label: '>_ Assign Agent', text: '__ASSIGN_AGENT__' },
-  { label: '+ Spawn Agent', text: '__SPAWN_AGENT__' },
-  { label: '>_ Use Browser', text: '__COMPUTER_USE__' },
-  { label: '📋 My Tasks', text: 'my tasks' },
-  { label: '</> GitHub', text: '/gh help' },
-  { label: '[] Rooms', text: '/room help' },
-  { label: 'AI Summarize', text: '/summarize ' },
-  { label: 'AI Translate', text: '/translate ' },
-  { label: 'AI Imagine', text: '/imagine ' },
-  { label: '✅ Check In', text: '__CHECK_IN__' },
-  { label: '📋 New Task', text: '__NEW_TASK__' },
-  { label: '📅 Daily Plan', text: 'daily plan' },
-  { label: '📊 Status', text: 'status' },
-  { label: '🔥 My Streak', text: 'my streak' },
-  { label: '🗳️ Vote', text: '/proposals' },
-  { label: '💸 Send Crypto', text: '__SEND_CRYPTO__' },
-  { label: '⚔️ Challenge', text: 'challenge a member' },
-  { label: '🎮 Play a Game', text: 'play a game' },
-  { label: '🧠 Trivia', text: 'trivia' },
-  { label: '🤔 Would You Rather', text: 'would you rather' },
-  { label: '🔥 Hot Take', text: 'hot take' },
-  { label: '🖥️ Step Away', text: '__STEP_AWAY__' },
-  { label: '>_ Help', text: 'help' },
-  { label: '☢️ Nuke Chat', text: '__NUKE__' },
-];
+function formatSessionTitleWord(word: string): string {
+  if (!word) return '';
+  if (word.length <= 4 && word === word.toUpperCase()) return word;
+  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+}
 
-const PROMPT_CATEGORIES = [
-  {
-    title: '🎯 MISSIONS',
-    color: '#6366f1',
-    prompts: [
-      { label: 'Mission Status', desc: 'See all active missions', text: '/mission' },
-      { label: 'New Mission', desc: 'Create from chat', text: '/mission create ' },
-      { label: 'Mission Help', desc: 'Available commands', text: '/mission help' },
-      { label: 'Full Summary', desc: 'Missions + proof + stats', text: '/summary' },
-      { label: 'What should I work on?', desc: 'AI picks your next task', text: 'Based on our active missions, what should I work on next?' },
-    ],
-  },
-  {
-    title: '🤖 AI TOOLS',
-    color: '#22d3ee',
-    prompts: [
-      { label: 'Summarize', desc: 'Summarize text or URL', text: '/summarize ' },
-      { label: 'Translate', desc: 'Translate to another language', text: '/translate ' },
-      { label: 'Imagine', desc: 'Generate an image', text: '/imagine ' },
-      { label: 'Code', desc: 'Generate code from description', text: '/code ' },
-      { label: 'Classify', desc: 'Classify text into categories', text: '/classify ' },
-      { label: 'Q&A', desc: 'Answer a question', text: '/qa ' },
-      { label: 'Speak', desc: 'Text to speech', text: '/speak ' },
-      { label: 'Build Page', desc: 'Generate a webpage', text: '/build-page ' },
-    ],
-  },
-  {
-    title: '🎮 GAMES & FUN',
-    color: '#a855f7',
-    prompts: [
-      { label: 'Trivia Battle', desc: 'Test your knowledge', text: 'trivia' },
-      { label: 'Would You Rather', desc: 'Fun dilemmas for the crew', text: 'would you rather' },
-      { label: 'Hot Takes', desc: 'Drop a spicy opinion', text: 'hot take' },
-      { label: 'Two Truths & a Lie', desc: 'Guess which is the lie', text: 'two truths' },
-      { label: 'Rate My Day', desc: 'Score your day 1-10', text: 'rate my day' },
-      { label: 'This or That', desc: 'Quick picks', text: 'this or that' },
-      { label: 'Roast Battle', desc: 'Agent roasts everyone 😈', text: 'roast battle' },
-    ],
-  },
-  {
-    title: '⚔️ CHALLENGES',
-    color: '#ef4444',
-    prompts: [
-      { label: 'Challenge a Member', desc: '1v1 productivity duel', text: 'challenge a member' },
-      { label: 'Speed Task', desc: 'Race to finish first', text: 'speed task' },
-      { label: 'Daily Dare', desc: 'Random dare', text: 'dare' },
-    ],
-  },
-  {
-    title: '📋 TASKS & PRODUCTIVITY',
-    color: '#3b82f6',
-    prompts: [
-      { label: 'My Tasks', desc: 'See your open tasks', text: 'my tasks' },
-      { label: 'Task Board', desc: 'Full circle overview', text: 'tasks' },
-      { label: 'Daily Plan', desc: 'AI daily priorities', text: 'daily plan' },
-      { label: 'Focus Mode', desc: 'Start a Pomodoro', text: 'focus' },
-      { label: 'Accountability', desc: 'Full report', text: 'accountability' },
-    ],
-  },
-  {
-    title: '📊 STATS & TRACKING',
-    color: '#22d3ee',
-    prompts: [
-      { label: 'Circle Status', desc: 'Check-ins, tasks, members', text: 'status' },
-      { label: 'Leaderboard', desc: 'Streak rankings', text: 'leaderboard' },
-      { label: 'Who Checked In', desc: "Today's check-ins", text: 'who checked in' },
-      { label: 'Weekly Review', desc: 'Recap your week', text: 'weekly review' },
-      { label: 'MVP of the Week', desc: 'Who crushed it?', text: 'mvp of the week' },
-    ],
-  },
-  {
-    title: '💸 CRYPTO',
-    color: '#f97316',
-    prompts: [
-      { label: 'Send Crypto', desc: 'Send ETH/SOL to a member', text: '__SEND_CRYPTO__' },
-      { label: 'My Wallet', desc: 'Check your wallet status', text: 'my wallet' },
-      { label: 'Tip a Member', desc: 'Send a small tip', text: '__TIP__' },
-      { label: 'Bounty', desc: 'Set a crypto bounty on a task', text: 'set a bounty on a task' },
-    ],
-  },
-  {
-    title: '🔗 CONNECT',
-    color: '#6366f1',
-    prompts: [
-      { label: 'Discord Activity', desc: 'What\'s happening on Discord', text: 'what\'s happening on discord' },
-      { label: 'Icebreaker', desc: 'Get to know your circle', text: 'icebreaker' },
-      { label: 'Shoutout', desc: 'Hype up a member', text: 'shoutout' },
-    ],
-  },
-  {
-    title: '🗳️ GOVERNANCE (DAO)',
-    color: '#22c55e',
-    prompts: [
-      { label: 'Create Proposal', desc: 'Put something to a vote', text: '/propose ' },
-      { label: 'Quick Poll', desc: 'Ask the crew a question', text: '/poll ' },
-      { label: 'Active Votes', desc: 'See open proposals & polls', text: '/proposals' },
-      { label: 'Pinned Messages', desc: 'See important pinned msgs', text: '/pins' },
-      { label: 'Search Chat', desc: 'Find old messages', text: '/search ' },
-    ],
-  },
-  {
-    title: '🔥 MOTIVATION',
-    color: '#ec4899',
-    prompts: [
-      { label: 'Motivate Me', desc: 'Get fired up', text: 'motivate me' },
-      { label: 'Roast Me', desc: 'If you dare 😈', text: 'roast me' },
-      { label: 'Quote of the Day', desc: 'Inspirational quote', text: 'quote' },
-      { label: 'Pep Talk', desc: 'Personalized encouragement', text: 'pep talk' },
-    ],
-  },
-];
+function deriveSessionTitleFromMessage(content: string): string {
+  const normalized = content
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/[@/#][\w-]+/g, ' ')
+    .replace(/[^\w\s'-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) return SESSION_FALLBACK_TITLE;
+
+  const words = normalized
+    .split(' ')
+    .map(word => word.replace(/^'+|'+$/g, '').trim())
+    .filter(Boolean);
+
+  const prioritized = words.filter(word => {
+    const lower = word.toLowerCase();
+    return word.length > 2 && !TITLE_STOP_WORDS.has(lower);
+  });
+
+  const chosen = (prioritized.length >= 2 ? prioritized : words)
+    .slice(0, 3)
+    .map(formatSessionTitleWord)
+    .filter(Boolean);
+
+  return chosen.length > 0 ? chosen.join(' ') : SESSION_FALLBACK_TITLE;
+}
+
+function isAutoNamedSession(title: string | null | undefined): boolean {
+  const normalized = (title || '').trim().toLowerCase();
+  return normalized === '' || normalized === 'openswan session' || normalized === 'new chat';
+}
+
+function normalizeThreadModelPreference(model: string | null | undefined): string {
+  const normalized = (model || '').trim().toLowerCase();
+  if (!normalized || normalized === 'openswan') return DEFAULT_CHAT_MODEL;
+  return model || DEFAULT_CHAT_MODEL;
+}
+
+function getFallbackSpiritIdForSessionProfile(profile: SessionCodingProfile): string {
+  switch (profile) {
+    case 'auto':
+      return 'sr-engineer';
+    case 'review':
+      return 'code-reviewer';
+    case 'debug':
+      return 'qa-engineer';
+    case 'architect':
+      return 'architect';
+    case 'senior':
+    default:
+      return 'sr-engineer';
+  }
+}
+
+function buildSessionThinkingLabel(agentName: string, selectedModel: string, currentRunStep: string): string {
+  if (currentRunStep.trim()) return currentRunStep.trim();
+  const modelLabel = selectedModel === 'auto' ? 'auto route' : selectedModel;
+  return `${agentName} is reasoning in ${modelLabel}`;
+}
+
+function formatMemoryRecencyLabel(ref: PromptMemoryReference): string {
+  const timestamp = ref.lastAccessedAt || ref.updatedAt;
+  if (!timestamp) return 'unknown freshness';
+  const ageMs = Date.now() - new Date(timestamp).getTime();
+  const ageHours = ageMs / 3_600_000;
+  if (ageHours < 24) return 'fresh today';
+  const ageDays = ageHours / 24;
+  if (ageDays < 7) return `${Math.max(1, Math.round(ageDays))}d old`;
+  if (ageDays < 30) return `${Math.max(1, Math.round(ageDays / 7))}w old`;
+  return `${Math.max(1, Math.round(ageDays / 30))}mo old`;
+}
+
+function formatMemoryStrengthLabel(ref: PromptMemoryReference): string {
+  const score = ref.importance ?? 0.5;
+  if (score >= 0.9) return 'core';
+  if (score >= 0.75) return 'strong';
+  if (score >= 0.6) return 'active';
+  return 'light';
+}
+
+function formatMemoryStateLabel(ref: PromptMemoryReference): string {
+  if (ref.memoryState === 'distilled') return 'distilled guidance';
+  if (ref.retrievalMode === 'startup' && ref.pinned) return 'pinned startup';
+  if (ref.retrievalMode === 'startup') return 'startup guidance';
+  if (ref.pinned) return 'pinned';
+  if (ref.memoryState === 'supporting') return 'supporting';
+  return 'retrieved';
+}
+
+function formatMemoryTrustLabel(ref: PromptMemoryReference): string {
+  const helpfulness = ref.helpfulness;
+  if (helpfulness == null) return 'unrated';
+  if (helpfulness >= 0.8) return 'trusted';
+  if (helpfulness >= 0.6) return 'proven';
+  if (helpfulness <= 0.3) return 'weak';
+  return 'mixed';
+}
+
+function formatMemorySourceLabel(ref: PromptMemoryReference): string | null {
+  switch (ref.sourceSurface) {
+    case 'claude_code_bridge': return 'Claude Code';
+    case 'codex_bridge': return 'Codex';
+    case 'cursor_bridge': return 'Cursor';
+    case 'gemini_bridge': return 'Gemini';
+    default: return null;
+  }
+}
+
+function getMemoryFamily(ref: PromptMemoryReference): 'guidance' | 'pattern' {
+  return ['instruction', 'preference', 'decision', 'policy'].includes(String(ref.memoryKind))
+    ? 'guidance'
+    : 'pattern';
+}
+
+function getMemoryFamilyLabel(ref: PromptMemoryReference): string {
+  return getMemoryFamily(ref) === 'guidance' ? 'Guidance' : 'Pattern';
+}
+
+function mapPersistedRowsToChatMessages(
+  rows: any[],
+  currentUserId: string | undefined,
+  agentName: string,
+  fallbackUserName?: string,
+): ChatMessage[] {
+  return rows.map((row: any) => {
+    const base = shapePersistedChatMessage(row, {
+      currentUserId,
+      botDisplayName: agentName,
+      fallbackUserName,
+    });
+    const metadata = base.isBot ? readPersistedChatBotMetadata(row.content) : null;
+    return {
+      ...base,
+      reactions: row.reactions || {},
+      replyTo: null,
+      artifacts: metadata?.artifacts,
+      wikiRefs: metadata?.wikiRefs,
+      researchRefs: metadata?.researchRefs,
+      memoriesUsed: metadata?.memoriesUsed,
+      memoryRefs: metadata?.memoryRefs,
+      memoryRecommendations: metadata?.memoryRecommendations,
+      executionStream: metadata?.executionStream,
+      browserPlans: metadata?.browserPlans,
+      browserPlanEvents: metadata?.browserPlanEvents,
+      browserSessions: metadata?.browserSessions,
+      ...deriveChatActivityFlags(row.content),
+    };
+  });
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -235,10 +427,24 @@ type ChatMessage = {
   isCheckIn?: boolean;
   isAchievement?: boolean;
   artifacts?: SwanBotStructuredArtifact[];
+  wikiRefs?: WikiArticleReference[];
+  researchRefs?: ResearchDocumentReference[];
   // Memory indicators
   memoriesSaved?: string[];   // titles of memories extracted from this exchange
   memoriesUsed?: string[];    // titles of memories that informed this response
+  memoryRefs?: PromptMemoryReference[];
+  memoryRecommendations?: OpenSwanMemoryRecommendation[];
+  executionStream?: OpenSwanExecutionContract[];
+  browserPlans?: BrowserPlanCardData[];
+  browserPlanEvents?: BrowserPlanEvent[];
+  browserSessions?: BrowserSessionRecord[];
   delegatedTo?: string;       // subagent that handled this message
+  delegatedSubagents?: string[];
+  runId?: string | null;
+  taskPlan?: OpenSwanTaskPlan;
+  toolEvents?: OpenSwanToolEvent[];
+  verificationResults?: OpenSwanVerificationResult[];
+  isPending?: boolean;
 };
 
 // ─── Animation Components ────────────────────────────────────────────────────
@@ -367,8 +573,25 @@ function TypingDots() {
 
 // chatLoadStyles removed — now uses shared LoadingWave component
 
+function formatTimeAgo(date: Date): string {
+  const sec = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (sec < 60) return 'just now';
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
+}
+
 export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleId: string; accentColor?: string }) {
+  const navigation = useNavigation<any>();
+  const { width: viewportWidth } = useWindowDimensions();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // ── Threaded chat state ──────────────────────────────────────────────────
+  // activeThreadId is the row in circle_chat_threads currently displayed.
+  // null until we resolve the circle's default thread. Persisted in the URL
+  // hash so refresh keeps you on the same thread.
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(getInitialSidebarCollapsed);
+  const [threadListRefreshToken, setThreadListRefreshToken] = useState(0);
   const [members, setMembers] = useState<any[]>([]);
   const [input, setInput] = useState('');
   const [botTyping, setBotTyping] = useState(false);
@@ -396,16 +619,53 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [showPinned, setShowPinned] = useState(false);
   const [showCreateProposal, setShowCreateProposal] = useState(false);
   const [showCreatePoll, setShowCreatePoll] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<string>('auto');
+  const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_CHAT_MODEL);
+  const [sessionProfile, setSessionProfile] = useState<SessionCodingProfile>('auto');
+  const [sessionDelegationMode, setSessionDelegationMode] = useState<SessionDelegationMode>('auto');
+  const [codingWorkbenchPrompt, setCodingWorkbenchPrompt] = useState<string | null>(null);
+  const [codingWorkbenchTick, setCodingWorkbenchTick] = useState(0);
+  // Live streaming state for /build-page — filled by subscribeBuildStream()
+  // as tokens arrive from the build-stream edge fn. When the stream finishes
+  // the aggregate goes into a real artifact via addBotMessage() and these
+  // reset, letting the artifact view take over naturally.
+  const [streamingBuildText, setStreamingBuildText] = useState<string>('');
+  const [streamingBuildPhase, setStreamingBuildPhase] = useState<string | null>(null);
+  const streamingBuildCleanupRef = useRef<null | (() => void)>(null);
+  // Builder revision history — last 10 artifacts per thread, newest-first.
+  // Loaded on thread switch; pushed whenever latestBuildArtifact changes.
+  const [builderRevisions, setBuilderRevisions] = useState<BuilderRevision[]>([]);
+  // When the user reverts, we override effectiveBuildArtifact with this
+  // until a new build lands. null = show the natural latest.
+  const [revertedArtifact, setRevertedArtifact] = useState<SwanBotStructuredArtifact | null>(null);
+  // Brand pack — local-only per-circle style overrides auto-prepended to
+  // build-stream prompts. Loads on circle switch.
+  const [brandPack, setBrandPack] = useState<BrandPack | null>(null);
+  const [brandPackEditorOpen, setBrandPackEditorOpen] = useState(false);
+  // Per-thread builder image library — injected into /build-page prompts
+  const [builderImages, setBuilderImages] = useState<BuilderImage[]>([]);
+  const [imagesEditorOpen, setImagesEditorOpen] = useState(false);
+  const [githubSaveOpen, setGithubSaveOpen] = useState(false);
+  const [netlifyDeployOpen, setNetlifyDeployOpen] = useState(false);
+  const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
+  const [globalFileDragActive, setGlobalFileDragActive] = useState(false);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [spawnModalOpen, setSpawnModalOpen] = useState(false);
+  const [buildStudioView, setBuildStudioView] = useState<'code' | 'preview'>('code');
+  const [builderPaneWidth, setBuilderPaneWidth] = useState(48);
+  const [buildStudioDismissed, setBuildStudioDismissed] = useState(false);
+  const [builderModalOpen, setBuilderModalOpen] = useState(false);
+  const [cachedBuildArtifact, setCachedBuildArtifact] = useState<SwanBotStructuredArtifact | null>(null);
   const [chatMode, setChatMode] = useState<string>('none');
-  const [agentName, setAgentNameState] = useState<string>(() => loadAgentName(circleId));
+  const [agentName, setAgentNameState] = useState<string>(MAIN_CHAT_AGENT_NAME);
   const [editingAgentName, setEditingAgentName] = useState(false);
   const [agentNameDraft, setAgentNameDraft] = useState('');
+  const [agentAvatarUri, setAgentAvatarUri] = useState<string | null>(null);
   const setAgentName = useCallback((name: string) => {
-    const trimmed = name.trim() || 'Agent';
+    const trimmed = name.trim() || MAIN_CHAT_AGENT_NAME;
     setAgentNameState(trimmed);
-    saveAgentName(circleId, trimmed);
+    void saveChatAgentName(circleId, trimmed);
   }, [circleId]);
+  const agentAvatarSource = getChatAgentAvatarSource(agentAvatarUri);
   const [pendingHandoff, setPendingHandoff] = useState<HandoffSuggestion | null>(null);
   // Quick action modal states (lifted from old EnhancedQuickBar)
   const [showQuickCheckIn, setShowQuickCheckIn] = useState(false);
@@ -414,22 +674,37 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // Agent assignment
   const [showAssignPanel, setShowAssignPanel] = useState(false);
   const [showSpawnPanel, setShowSpawnPanel] = useState(false);
-  const [liveAgents, setLiveAgents] = useState<any[]>([]);
-  const [selectedAgent, setSelectedAgent] = useState<any>(null);
+  const [liveAgents, setLiveAgents] = useState<AssignableAgent[]>([]);
+  const [selectedAgent, setSelectedAgent] = useState<AssignableAgent | null>(null);
+  const [activeSpiritId, setActiveSpiritId] = useState<string | null>(null);
+  const [soulLearningRefs, setSoulLearningRefs] = useState<ResearchDocumentReference[]>([]);
+  const [soulMemoryRefs, setSoulMemoryRefs] = useState<PromptMemoryReference[]>([]);
   const [taskPrompt, setTaskPrompt] = useState('');
   const [assigning, setAssigning] = useState(false);
   // Media attachments
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [builderFigmaRefs, setBuilderFigmaRefs] = useState<FigmaReference[]>([]);
+  const [selectedBuilderFigmaRefId, setSelectedBuilderFigmaRefId] = useState<string | null>(null);
+  const selectedBuilderFigmaPrompt = useMemo(
+    () => buildFigmaPromptFromReferences(builderFigmaRefs, selectedBuilderFigmaRefId),
+    [builderFigmaRefs, selectedBuilderFigmaRefId],
+  );
   // Computer-use state (web-only)
   const [computerUseSession, setComputerUseSession] = useState<ComputerUseSession | null>(null);
   const [showComputerUsePermission, setShowComputerUsePermission] = useState(false);
   const [pendingComputerUseTask, setPendingComputerUseTask] = useState('');
   const [pendingComputerUseActions, setPendingComputerUseActions] = useState<BrowserAction[]>([]);
+  const [pendingComputerUsePlan, setPendingComputerUsePlan] = useState<BrowserPlanCardData | null>(null);
+  const [pendingComputerUseOrigin, setPendingComputerUseOrigin] = useState<{ messageId: string; runId?: string | null; planId: string } | null>(null);
+  const [selectedBrowserSession, setSelectedBrowserSession] = useState<BrowserSessionRecord | null>(null);
   const [showMemoryViewer, setShowMemoryViewer] = useState(false);
   const [showPluginPicker, setShowPluginPicker] = useState(false);
   const [activePlugins, setActivePlugins] = useState<string[]>([]);
+  const [showRunHistory, setShowRunHistory] = useState(false);
+  const [retryingLedgerCheck, setRetryingLedgerCheck] = useState<{ messageId: string; checkId: string } | null>(null);
   const [runStatus, setRunStatus] = useState<'idle' | 'running' | 'delegated' | 'waiting_approval'>('idle');
   const [activeSubagent, setActiveSubagent] = useState<{ name: string; icon: string; color: string } | null>(null);
+  const [activeDelegatedSubagents, setActiveDelegatedSubagents] = useState<OpenSwanDelegatedAgentDescriptor[]>([]);
   const [currentRunStep, setCurrentRunStep] = useState<string>('');
   const [memoryToast, setMemoryToast] = useState<{ message: string; type: 'saved' | 'updated' | 'conflict' | 'forgotten' } | null>(null);
   // User behavior profile
@@ -437,15 +712,633 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   const flatListRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
+  const codingWorkbenchStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const builderDragContainerRef = useRef<HTMLDivElement | null>(null);
+  const builderDraggingRef = useRef(false);
   const quickScrollRef = useRef<ScrollView>(null);
   const quickScrollX = useRef(0);
   const welcomeAnim = useRef(new Animated.Value(0)).current;
   const newMessageAnims = useRef<Map<string, Animated.Value>>(new Map()).current;
+  const sendLockRef = useRef(false);
+  const scrollOffsetRef = useRef(0);
+  const contentHeightRef = useRef(0);
+  const layoutHeightRef = useRef(0);
+  const pendingRestoreOffsetRef = useRef<number | null>(null);
+  const hasAppliedInitialScrollRef = useRef(false);
+  const wasNearBottomRef = useRef(true);
+  const globalDragDepthRef = useRef(0);
+  const latestBuildArtifact = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      const artifacts = message.artifacts || [];
+      const candidate = artifacts.find((artifact) => artifact.kind === 'webpage' || artifact.kind === 'code');
+      if (candidate) return candidate;
+    }
+    return null;
+  }, [messages]);
+  // revertedArtifact wins over latest so "view an earlier build" sticks
+  // until the user triggers a new one (which clears the revert via the effect
+  // that watches latestBuildArtifact and resets revertedArtifact).
+  const effectiveBuildArtifact = revertedArtifact || latestBuildArtifact || cachedBuildArtifact;
+  const hasBuilderWork = !!codingWorkbenchPrompt || !!effectiveBuildArtifact;
+  const canOpenBuilder = hasBuilderWork || builderRevisions.length > 0;
+  const activeSpirit = useMemo(() => (activeSpiritId ? getSpiritById(activeSpiritId) : null), [activeSpiritId]);
+  // Sidecar shows on any reasonably sized web viewport with an artifact.
+  // Lowered from 1180 → 900 so tablet / narrow-desktop still get the pane.
+  const showWorkbenchSidecar = Platform.OS === 'web' && viewportWidth >= 900 && !buildStudioDismissed && (!!codingWorkbenchPrompt || !!effectiveBuildArtifact);
+  // When there's a saved artifact but the sidecar isn't visible (dismissed
+  // OR the viewport is too narrow), surface a pill that brings it back.
+  const showReopenBuilderPill = !!effectiveBuildArtifact && !showWorkbenchSidecar && Platform.OS === 'web';
+
+  const resolveBuilderArtifact = useCallback((): SwanBotStructuredArtifact | null => {
+    return effectiveBuildArtifact || builderRevisions[0]?.artifact || null;
+  }, [builderRevisions, effectiveBuildArtifact]);
+
+  const openBuilderStudio = useCallback(() => {
+    const artifactToOpen = resolveBuilderArtifact();
+    if (artifactToOpen) {
+      setRevertedArtifact(artifactToOpen);
+      setCachedBuildArtifact(artifactToOpen);
+      if (activeThreadId) {
+        void saveLastThreadBuildArtifact(activeThreadId, artifactToOpen);
+      }
+      setBuildStudioView(artifactToOpen.kind === 'webpage' ? 'preview' : 'code');
+    } else {
+      setBuildStudioView('code');
+    }
+
+    if (Platform.OS === 'web' && viewportWidth >= 900) {
+      setBuildStudioDismissed(false);
+      setBuilderModalOpen(false);
+      return;
+    }
+
+    setBuilderModalOpen(true);
+  }, [activeThreadId, codingWorkbenchPrompt, resolveBuilderArtifact, viewportWidth]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!builderDraggingRef.current || !builderDragContainerRef.current) return;
+      const rect = builderDragContainerRef.current.getBoundingClientRect();
+      if (!rect.width) return;
+      const nextPercent = ((rect.right - event.clientX) / rect.width) * 100;
+      const clamped = Math.max(28, Math.min(72, nextPercent));
+      setBuilderPaneWidth(clamped);
+    };
+
+    const handleMouseUp = () => {
+      builderDraggingRef.current = false;
+      try {
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      } catch {}
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
+
+  const addDroppedFiles = useCallback((files: File[]) => {
+    if (!circleId || !currentUserId || files.length === 0) return;
+    setStagedFiles((prev) => {
+      const remaining = Math.max(0, 10 - prev.length);
+      if (remaining <= 0) return prev;
+      const toAdd = files.slice(0, remaining).map(createStagedFile);
+
+      for (const sf of toAdd) {
+        void (async () => {
+          setStagedFiles((current) => current.map((entry) => entry.id === sf.id ? { ...entry, uploading: true } : entry));
+          try {
+            const attachment = await uploadAttachment({
+              file: sf.file,
+              circleId,
+              threadId: activeThreadId,
+              userId: currentUserId,
+            });
+            setStagedFiles((current) => current.map((entry) => entry.id === sf.id ? { ...entry, uploading: false, attachment } : entry));
+          } catch (error: any) {
+            setStagedFiles((current) => current.map((entry) => entry.id === sf.id ? { ...entry, uploading: false, error: error?.message || 'Upload failed' } : entry));
+          }
+        })();
+      }
+
+      return [...prev, ...toAdd];
+    });
+  }, [activeThreadId, circleId, currentUserId]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+
+    const hasFilePayload = (event: DragEvent) => {
+      const types = Array.from(event.dataTransfer?.types || []);
+      return types.includes('Files');
+    };
+
+    const handleDragEnter = (event: DragEvent) => {
+      if (!hasFilePayload(event)) return;
+      event.preventDefault();
+      globalDragDepthRef.current += 1;
+      setGlobalFileDragActive(true);
+    };
+
+    const handleDragOver = (event: DragEvent) => {
+      if (!hasFilePayload(event)) return;
+      event.preventDefault();
+      if (!globalFileDragActive) setGlobalFileDragActive(true);
+    };
+
+    const handleDragLeave = (event: DragEvent) => {
+      if (!hasFilePayload(event)) return;
+      event.preventDefault();
+      globalDragDepthRef.current = Math.max(0, globalDragDepthRef.current - 1);
+      if (globalDragDepthRef.current === 0) {
+        setGlobalFileDragActive(false);
+      }
+    };
+
+    const handleDrop = (event: DragEvent) => {
+      if (!hasFilePayload(event)) return;
+      event.preventDefault();
+      globalDragDepthRef.current = 0;
+      setGlobalFileDragActive(false);
+      const files = Array.from(event.dataTransfer?.files || []);
+      if (files.length > 0) addDroppedFiles(files);
+    };
+
+    window.addEventListener('dragenter', handleDragEnter);
+    window.addEventListener('dragover', handleDragOver);
+    window.addEventListener('dragleave', handleDragLeave);
+    window.addEventListener('drop', handleDrop);
+    return () => {
+      window.removeEventListener('dragenter', handleDragEnter);
+      window.removeEventListener('dragover', handleDragOver);
+      window.removeEventListener('dragleave', handleDragLeave);
+      window.removeEventListener('drop', handleDrop);
+    };
+  }, [addDroppedFiles, globalFileDragActive]);
 
   // ─── Init ────────────────────────────────────────────────────────────────
 
   useEffect(() => {
     init();
+  }, [circleId]);
+
+  // ── Reload messages when the user switches threads ───────────────────────
+  // Runs only on subsequent thread changes — initial load is handled by init().
+  // Skip when activeThreadId is null (still resolving) or matches the freshly
+  // loaded set.
+  const initialThreadRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!circleId || !activeThreadId) return;
+    if (initialThreadRef.current === null) {
+      initialThreadRef.current = activeThreadId;
+      return; // first set during init() — don't double-load
+    }
+    if (initialThreadRef.current === activeThreadId) return;
+    initialThreadRef.current = activeThreadId;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const { rows } = await loadThreadMessages(circleId, activeThreadId);
+        if (cancelled) return;
+        setMessages(mapPersistedRowsToChatMessages(rows, currentUserId || undefined, agentName));
+      } catch (err) {
+        console.warn('[ChatTab] Thread switch reload failed:', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeThreadId, circleId, currentUserId, agentName]);
+
+  const handleSelectThread = useCallback((id: string) => {
+    setActiveThreadId(id);
+  }, []);
+
+  const handleNewThread = useCallback(async () => {
+    if (!circleId) return;
+    try {
+      const t = await createPrivateThread(circleId, SESSION_FALLBACK_TITLE);
+      setThreadListRefreshToken(prev => prev + 1);
+      setActiveThreadId(t.id);
+      setMessages([]);
+    } catch (err) {
+      console.error('[ChatTab] createPrivateThread failed:', err);
+    }
+  }, [circleId]);
+
+  const handleToggleSidebar = useCallback(() => {
+    setSidebarCollapsed(prev => {
+      const next = !prev;
+      persistSidebarCollapsed(next);
+      return next;
+    });
+  }, []);
+
+  const handleThreadMetaChanged = useCallback(() => {
+    setThreadListRefreshToken(prev => prev + 1);
+  }, []);
+
+  useEffect(() => {
+    if (!activeThreadId) {
+      setSelectedModel(DEFAULT_CHAT_MODEL);
+      return;
+    }
+    let cancelled = false;
+    getThread(activeThreadId)
+      .then((thread) => {
+        if (cancelled || !thread) return;
+        setSelectedModel(normalizeThreadModelPreference(thread.default_model));
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeThreadId, threadListRefreshToken]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const identities = await loadAgentIdentities();
+        const identityKey = getAgentIdentityKey({ id: BLACKSWAN_ID, name: agentName });
+        const resolvedSpiritId = identities.get(identityKey)?.spiritId || getFallbackSpiritIdForSessionProfile(sessionProfile);
+        if (!cancelled) {
+          setActiveSpiritId(resolvedSpiritId);
+        }
+      } catch {
+        if (!cancelled) {
+          setActiveSpiritId(getFallbackSpiritIdForSessionProfile(sessionProfile));
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [agentName, sessionProfile]);
+
+  useEffect(() => {
+    if (!activeSpiritId) {
+      setSoulLearningRefs([]);
+      return;
+    }
+    let cancelled = false;
+    getLatestSpiritResearchReferences({
+      spiritId: activeSpiritId,
+      circleId,
+      limit: 3,
+    }).then((refs) => {
+      if (!cancelled) setSoulLearningRefs(refs);
+    }).catch(() => {
+      if (!cancelled) setSoulLearningRefs([]);
+    });
+    return () => { cancelled = true; };
+  }, [activeSpiritId, circleId]);
+
+  useEffect(() => {
+    if (!activeSpiritId || !currentUserId) {
+      setSoulMemoryRefs([]);
+      return;
+    }
+    let cancelled = false;
+    getLatestSpiritMemoryReferences({
+      spiritId: activeSpiritId,
+      circleId,
+      userId: currentUserId,
+      limit: 4,
+    }).then((refs) => {
+      if (!cancelled) setSoulMemoryRefs(refs);
+    }).catch(() => {
+      if (!cancelled) setSoulMemoryRefs([]);
+    });
+    return () => { cancelled = true; };
+  }, [activeSpiritId, circleId, currentUserId]);
+
+  useEffect(() => {
+    if (!activeThreadId) {
+      setSessionProfile('auto');
+      return;
+    }
+    let cancelled = false;
+    loadThreadSessionProfile(activeThreadId)
+      .then((profile) => {
+        if (!cancelled) setSessionProfile(profile);
+      })
+      .catch(() => {
+        if (!cancelled) setSessionProfile('auto');
+      });
+    return () => { cancelled = true; };
+  }, [activeThreadId]);
+
+  useEffect(() => {
+    if (!activeThreadId) {
+      setSessionDelegationMode('auto');
+      return;
+    }
+    let cancelled = false;
+    loadThreadDelegationMode(activeThreadId)
+      .then((mode) => {
+        if (!cancelled) setSessionDelegationMode(mode);
+      })
+      .catch(() => {
+        if (!cancelled) setSessionDelegationMode('auto');
+      });
+    return () => { cancelled = true; };
+  }, [activeThreadId]);
+
+  const handleSessionModelChange = useCallback(async (nextModel: string) => {
+    setSelectedModel(nextModel);
+    if (!activeThreadId) return;
+    try {
+      const thread = await getThread(activeThreadId);
+      const currentModel = normalizeThreadModelPreference(thread?.default_model);
+      if (currentModel === nextModel) return;
+      await updateThreadDefaultModel(activeThreadId, nextModel);
+      handleThreadMetaChanged();
+    } catch (err) {
+      console.warn('[ChatTab] session model update failed:', err);
+    }
+  }, [activeThreadId, handleThreadMetaChanged]);
+
+  const handleSessionProfileChange = useCallback(async (nextProfile: SessionCodingProfile) => {
+    setSessionProfile(nextProfile);
+    try {
+      await saveThreadSessionProfile(activeThreadId, nextProfile);
+    } catch {}
+  }, [activeThreadId]);
+
+  const handleDelegationModeChange = useCallback(async (nextMode: SessionDelegationMode) => {
+    setSessionDelegationMode(nextMode);
+    try {
+      await saveThreadDelegationMode(activeThreadId, nextMode);
+    } catch {}
+  }, [activeThreadId]);
+
+  const startCodingWorkbench = useCallback((prompt: string) => {
+    if (!isCodingGenerationRequest(prompt, sessionProfile)) return;
+    if (codingWorkbenchStopTimeoutRef.current) {
+      clearTimeout(codingWorkbenchStopTimeoutRef.current);
+      codingWorkbenchStopTimeoutRef.current = null;
+    }
+    setCodingWorkbenchPrompt(prompt);
+    setCodingWorkbenchTick(0);
+  }, [sessionProfile]);
+
+  const stopCodingWorkbench = useCallback(() => {
+    if (codingWorkbenchStopTimeoutRef.current) {
+      clearTimeout(codingWorkbenchStopTimeoutRef.current);
+      codingWorkbenchStopTimeoutRef.current = null;
+    }
+    setCodingWorkbenchPrompt(null);
+    setCodingWorkbenchTick(0);
+    setCurrentRunStep('');
+  }, []);
+
+  const stopCodingWorkbenchAfter = useCallback((delayMs = 0) => {
+    if (codingWorkbenchStopTimeoutRef.current) {
+      clearTimeout(codingWorkbenchStopTimeoutRef.current);
+      codingWorkbenchStopTimeoutRef.current = null;
+    }
+    if (delayMs <= 0) {
+      stopCodingWorkbench();
+      return;
+    }
+    setCurrentRunStep('Refining the final build');
+    codingWorkbenchStopTimeoutRef.current = setTimeout(() => {
+      codingWorkbenchStopTimeoutRef.current = null;
+      stopCodingWorkbench();
+    }, delayMs);
+  }, [stopCodingWorkbench]);
+
+  useEffect(() => {
+    if (!botTyping || !codingWorkbenchPrompt) return;
+    const id = setInterval(() => {
+      setCodingWorkbenchTick((tick) => tick + 1);
+    }, 220);
+    return () => clearInterval(id);
+  }, [botTyping, codingWorkbenchPrompt]);
+
+  useEffect(() => {
+    if (latestBuildArtifact?.kind === 'webpage' && latestBuildArtifact.content) {
+      setBuildStudioView('preview');
+      return;
+    }
+    setBuildStudioView('code');
+  }, [effectiveBuildArtifact?.kind, effectiveBuildArtifact?.content]);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadLastThreadBuildArtifact(activeThreadId)
+      .then((artifact) => {
+        if (!cancelled) setCachedBuildArtifact(artifact);
+      })
+      .catch(() => {
+        if (!cancelled) setCachedBuildArtifact(null);
+      });
+    return () => { cancelled = true; };
+  }, [activeThreadId]);
+
+  useEffect(() => {
+    if (!activeThreadId) return;
+    if (!latestBuildArtifact) return;
+    setCachedBuildArtifact(latestBuildArtifact);
+    // A new build landed — clear any active revert so the strip's "current"
+    // indicator moves to the newest entry.
+    setRevertedArtifact(null);
+    void saveLastThreadBuildArtifact(activeThreadId, latestBuildArtifact);
+    // Push into the revision history. Dedupes by content so streaming the
+    // same HTML twice doesn't spam the strip.
+    void pushBuilderRevision(activeThreadId, latestBuildArtifact, codingWorkbenchPrompt)
+      .then(next => setBuilderRevisions(next));
+  }, [activeThreadId, latestBuildArtifact, codingWorkbenchPrompt]);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadBuilderHistory(activeThreadId)
+      .then(rows => { if (!cancelled) setBuilderRevisions(rows); })
+      .catch(() => { if (!cancelled) setBuilderRevisions([]); });
+    return () => { cancelled = true; };
+  }, [activeThreadId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadBrandPack(circleId)
+      .then(pack => { if (!cancelled) setBrandPack(pack); })
+      .catch(() => { if (!cancelled) setBrandPack(null); });
+    return () => { cancelled = true; };
+  }, [circleId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadBuilderImages(activeThreadId)
+      .then(imgs => { if (!cancelled) setBuilderImages(imgs); })
+      .catch(() => { if (!cancelled) setBuilderImages([]); });
+    return () => { cancelled = true; };
+  }, [activeThreadId]);
+
+  const handleRevertRevision = useCallback((rev: BuilderRevision) => {
+    setRevertedArtifact(rev.artifact);
+    setCachedBuildArtifact(rev.artifact);
+    setBuildStudioDismissed(false);
+    setBuilderModalOpen(false);
+    if (activeThreadId) {
+      void saveLastThreadBuildArtifact(activeThreadId, rev.artifact);
+    }
+    // Reset the view preference — webpage artifacts go to preview by default
+    if (rev.artifact.kind === 'webpage') setBuildStudioView('preview');
+    else setBuildStudioView('code');
+  }, [activeThreadId]);
+
+  const handleDeleteRevision = useCallback(async (revisionId: string) => {
+    if (!activeThreadId) return;
+    const next = await removeBuilderRevision(activeThreadId, revisionId);
+    setBuilderRevisions(next);
+  }, [activeThreadId]);
+
+  // Manual edit from the CODE tab: treat the user's edit like a fresh
+  // revision of the current artifact. We push it into the history strip
+  // and override the live view so PREVIEW + PUBLISH pick up the change.
+  const handleArtifactEdit = useCallback(async (nextContent: string) => {
+    const base = effectiveBuildArtifact;
+    if (!base || !activeThreadId) return;
+    const edited: SwanBotStructuredArtifact = {
+      ...base,
+      content: nextContent,
+      title: base.title ? `${base.title} (edited)` : 'Edited build',
+    };
+    setRevertedArtifact(edited);
+    setCachedBuildArtifact(edited);
+    void saveLastThreadBuildArtifact(activeThreadId, edited);
+    const next = await pushBuilderRevision(activeThreadId, edited, 'manual edit');
+    setBuilderRevisions(next);
+  }, [effectiveBuildArtifact, activeThreadId]);
+
+  // Shared launcher for /build-page streaming. Used by the initial command
+  // dispatch AND by the in-builder "quick tweak" + click-to-edit flows so
+  // all three paths behave identically (same UI, same error handling).
+  const launchBuildStream = useCallback(async (brief: string, systemExtra?: string, friendlyLabel?: string) => {
+    const display = friendlyLabel || brief;
+    startCodingWorkbench(`/build-page ${display}`);
+    setBotTyping(true);
+    setStreamingBuildText('');
+    setStreamingBuildPhase('planning');
+    if (streamingBuildCleanupRef.current) {
+      try { streamingBuildCleanupRef.current(); } catch {}
+    }
+    const brandExtra = buildBrandPromptPrefix(brandPack);
+    const imagesExtra = buildImagesPromptPrefix(builderImages);
+    // Inject memory context so the builder knows circle patterns + user prefs
+    let memoryExtra = '';
+    try {
+      if (circleId) {
+        const { retrieveForTurn } = await import('../../../lib/memoryService');
+        const { formatted } = await retrieveForTurn({
+          queryText: brief, circleId, userId: currentUserId || '',
+          surface: 'main_chat', budgetChars: 800, finalCount: 6,
+        });
+        if (formatted) memoryExtra = formatted;
+      }
+    } catch {}
+    const combinedSystemExtra = [systemExtra, brandExtra, imagesExtra, memoryExtra].filter(Boolean).join('\n\n') || undefined;
+    streamingBuildCleanupRef.current = subscribeBuildStream(
+      { brief, model: selectedModel !== 'auto' ? selectedModel : 'auto', systemExtra: combinedSystemExtra },
+      {
+        onDelta: (_chunk, aggregated) => { setStreamingBuildText(aggregated); },
+        onPhase: (name) => { setStreamingBuildPhase(name); },
+        onDone: (fullText) => {
+          const html = extractHtmlFromStream(fullText);
+          const artifact: SwanBotStructuredArtifact = {
+            kind: 'webpage' as any,
+            title: `Page: ${display.slice(0, 60)}`,
+            content: html,
+          };
+          addBotMessage(`Built a landing page for "${display.slice(0, 80)}".`, [artifact]);
+          setStreamingBuildText('');
+          setStreamingBuildPhase(null);
+          setBotTyping(false);
+          stopCodingWorkbench();
+          streamingBuildCleanupRef.current = null;
+        },
+        onError: (msg) => {
+          addBotMessage(`Build-page stream failed: ${msg}.`);
+          setStreamingBuildText('');
+          setStreamingBuildPhase(null);
+          setBotTyping(false);
+          stopCodingWorkbench();
+          streamingBuildCleanupRef.current = null;
+        },
+      },
+    );
+  }, [brandPack, builderImages, selectedModel, startCodingWorkbench, stopCodingWorkbench]);
+
+  const handleRegenerateTweak = useCallback((tweak: string) => {
+    // Combine the original prompt with the tweak so the new build carries
+    // the user's original intent forward. Pull the prompt from the coding
+    // workbench state — that was seeded when /build-page first fired.
+    const originalBrief = (codingWorkbenchPrompt || '').replace(/^\/build-page\s*/i, '').trim() || 'my landing page';
+    const brief = `${originalBrief}. Additional tweak: ${tweak}`;
+    // If the current artifact has content, carry it as context so the model
+    // iterates instead of regenerating from scratch.
+    const currentHtml = effectiveBuildArtifact?.content;
+    const systemExtra = [
+      selectedBuilderFigmaPrompt || null,
+      currentHtml
+        ? `The CURRENT page is below. Apply the tweak while keeping everything else as close as possible.\n\n<<<CURRENT_HTML>>>\n${currentHtml.slice(0, 8000)}\n<<<END_CURRENT_HTML>>>`
+        : null,
+    ].filter(Boolean).join('\n\n') || undefined;
+    launchBuildStream(brief, systemExtra, `${originalBrief.slice(0, 40)} — ${tweak.slice(0, 40)}`);
+  }, [codingWorkbenchPrompt, effectiveBuildArtifact, launchBuildStream, selectedBuilderFigmaPrompt]);
+
+  const handlePointEdit = useCallback((args: { selector: string; outerHtml: string; tweak: string }) => {
+    const originalBrief = (codingWorkbenchPrompt || '').replace(/^\/build-page\s*/i, '').trim() || 'my landing page';
+    const currentHtml = effectiveBuildArtifact?.content;
+    const systemExtra = [
+      selectedBuilderFigmaPrompt || null,
+      currentHtml
+        ? `The CURRENT full page is:\n<<<CURRENT_HTML>>>\n${currentHtml.slice(0, 10000)}\n<<<END_CURRENT_HTML>>>`
+        : null,
+      `The USER POINTED at this exact element (CSS selector: ${args.selector}):\n<<<TARGET_ELEMENT>>>\n${args.outerHtml}\n<<<END_TARGET_ELEMENT>>>`,
+      `Modify ONLY that element according to the user's instruction. Return the complete revised page HTML.`,
+    ].filter(Boolean).join('\n\n');
+    const brief = `${originalBrief}. Targeted edit to the selected element: ${args.tweak}`;
+    launchBuildStream(brief, systemExtra, `edit ${args.selector.split('>').slice(-1)[0]?.trim() || 'element'} — ${args.tweak.slice(0, 40)}`);
+  }, [codingWorkbenchPrompt, effectiveBuildArtifact, launchBuildStream, selectedBuilderFigmaPrompt]);
+
+  useEffect(() => {
+    if (codingWorkbenchPrompt) {
+      setBuildStudioDismissed(false);
+    }
+  }, [codingWorkbenchPrompt]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    if (!builderModalOpen) return;
+    if (viewportWidth < 900) return;
+    setBuilderModalOpen(false);
+    setBuildStudioDismissed(false);
+  }, [builderModalOpen, viewportWidth]);
+
+  useEffect(() => {
+    scrollOffsetRef.current = 0;
+    contentHeightRef.current = 0;
+    layoutHeightRef.current = 0;
+    pendingRestoreOffsetRef.current = null;
+    hasAppliedInitialScrollRef.current = false;
+    wasNearBottomRef.current = true;
+  }, [circleId, activeThreadId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadChatAgentName(circleId).then((savedName) => {
+      if (!cancelled) setAgentNameState(savedName);
+    }).catch(() => {});
+    loadChatAgentAvatar(circleId).then((savedAvatar) => {
+      if (!cancelled) setAgentAvatarUri(savedAvatar);
+    }).catch(() => {
+      if (!cancelled) setAgentAvatarUri(null);
+    });
+    return () => { cancelled = true; };
   }, [circleId]);
 
   // Load user behavior profile
@@ -457,33 +1350,243 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }).catch(() => {});
   }, []);
 
-  // Load live agents for assignment
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      loadCircleWorkspaceProfile(circleId),
+      loadAdaptiveWorkspaceSettings(circleId),
+    ]).then(([profile, settings]) => {
+      if (cancelled) return;
+      const adaptive = getAdaptiveChatDefaults(profile, settings);
+      setMessageDensity(adaptive.messageDensity);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [circleId]);
+
+  // Load assignable agents for chat dispatch. This includes:
+  // published custom agents, the default OpenSwan agent, live OpenSwan
+  // sessions, and bridge-detected Claude Code sessions.
   useEffect(() => {
     if (!circleId) return;
-    const loadAgents = () => supabase.from('circle_office_agents')
-      .select('id, name, status, owner_id, color, tool_icon, owner_display_name, current_task, circle_id, provider')
-      .eq('circle_id', circleId)
-      .neq('status', 'offline').order('status').limit(50)
-      .then(({ data }) => { if (data) setLiveAgents(data); });
-    loadAgents();
+    const loadAgents = async () => {
+      try {
+        const [officeResult, identities, connections] = await Promise.all([
+          loadCircleOfficeAgents(circleId),
+          loadAgentIdentities(),
+          loadConnections(),
+        ]);
+
+        const assignable = new Map<string, AssignableAgent>();
+        const pushAgent = (agent: AssignableAgent | null | undefined) => {
+          if (!agent?.id) return;
+          const key = agent.sessionKey ? `${agent.provider}::${agent.sessionKey}` : `db::${agent.id}`;
+          const existing = assignable.get(key);
+          if (!existing) {
+            assignable.set(key, agent);
+            return;
+          }
+          assignable.set(key, {
+            ...existing,
+            ...agent,
+            model: agent.model || existing.model,
+            spirit: agent.spirit || existing.spirit,
+            color: agent.color || existing.color,
+            current_task: agent.current_task || existing.current_task,
+          });
+        };
+
+        pushAgent({
+          id: DEFAULT_AGENT.id,
+          name: DEFAULT_AGENT.name,
+          status: DEFAULT_AGENT.status,
+          provider: 'openswan',
+          color: DEFAULT_AGENT.color,
+          owner_display_name: 'OpenSwan',
+          current_task: DEFAULT_AGENT.activity,
+          circle_id: circleId,
+          model: DEFAULT_AGENT.model,
+          sessionKey: null,
+          source: 'default',
+        });
+
+        for (const officeAgent of officeResult.agents || []) {
+          pushAgent(toAssignableDbAgent(officeAgent));
+        }
+
+        const openswanConnections = connections.filter(conn => conn.provider === 'openswan' && !!conn.token);
+        await Promise.all(openswanConnections.map(async (conn) => {
+          const config: OpenSwanConfig = { endpoint: conn.endpoint, token: conn.token };
+          const sessionsResult = await listSessions(config);
+          if (!sessionsResult.ok || !sessionsResult.sessions?.length) return;
+          const sessionAgents = sessionsToAgents(sessionsResult.sessions, conn.id, conn.name, conn.provider);
+          for (const sessionAgent of sessionAgents) {
+            const identityKey = getAgentIdentityKey(sessionAgent);
+            const identity = identities.get(identityKey);
+            pushAgent({
+              ...toAssignableSessionAgent(sessionAgent, circleId),
+              name: identity?.customName || sessionAgent.name,
+              color: identity?.customColor || sessionAgent.color,
+              spirit: identity?.spiritId || sessionAgent.spirit || null,
+              model: identity?.boundModel || sessionAgent.model || null,
+            });
+          }
+        }));
+
+        try {
+          const res = await fetch('http://localhost:7778/sessions', { signal: AbortSignal.timeout(3000) });
+          if (res.ok) {
+            const { sessions } = await res.json();
+            for (const s of sessions || []) {
+              const name = s.slug || s.sessionId?.slice(0, 12) || 'Claude Code';
+              pushAgent({
+                id: `bridge::${s.sessionId}`,
+                name,
+                status: s.status === 'active' ? 'building' : 'idle',
+                provider: 'claude-code',
+                color: '#22d3ee',
+                owner_display_name: 'Bridge',
+                current_task: s.cwd || null,
+                circle_id: circleId,
+                model: s.model || null,
+                sessionKey: s.sessionId || null,
+                source: 'bridge-session',
+              });
+            }
+          }
+        } catch {}
+
+        const ranked = Array.from(assignable.values()).sort((a, b) => {
+          const aDefault = a.id === DEFAULT_AGENT.id ? 1 : 0;
+          const bDefault = b.id === DEFAULT_AGENT.id ? 1 : 0;
+          if (aDefault !== bDefault) return bDefault - aDefault;
+          const statusRank = (status?: string | null) => {
+            if (status === 'building' || status === 'active') return 0;
+            if (status === 'idle') return 1;
+            if (status === 'offline') return 3;
+            return 2;
+          };
+          const rankDiff = statusRank(a.status) - statusRank(b.status);
+          if (rankDiff !== 0) return rankDiff;
+          return (a.name || '').localeCompare(b.name || '');
+        });
+
+        setLiveAgents(ranked);
+      } catch {
+        setLiveAgents([]);
+      }
+    };
+    void loadAgents();
     const ch = supabase.channel(`chat_agents_${circleId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'circle_office_agents' }, loadAgents)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'circle_office_agents' }, () => void loadAgents())
       .subscribe();
     return () => { supabase.removeChannel(ch); };
   }, [circleId]);
 
+  useEffect(() => {
+    if (showAssignPanel || showSpawnPanel) {
+      recordChatActivity(circleId, 'assignment').catch(() => {});
+    }
+  }, [circleId, showAssignPanel, showSpawnPanel]);
+
+  const resolveOpenSwanConnection = useCallback(async (): Promise<OpenSwanConfig | null> => {
+    try {
+      const connections = await loadConnections();
+      const match = connections.find(conn => conn.provider === 'openswan' && !!conn.token);
+      return match ? { endpoint: match.endpoint, token: match.token } : null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const dispatchAssignedAgentTask = useCallback(async (agent: AssignableAgent, task: string): Promise<string> => {
+    const normalizedProvider = (agent.provider || '').toLowerCase().replace(/\s+/g, '-');
+    const preferredModel = agent.model && agent.model !== 'auto' ? agent.model : undefined;
+
+    if (normalizedProvider === 'openswan') {
+      const config = await resolveOpenSwanConnection();
+      if (config) {
+        if (agent.sessionKey && agent.source === 'openswan-session') {
+          const sessionResult = await sendSessionMessage(config, agent.sessionKey, task);
+          if (sessionResult.ok) {
+            return `**${agent.name}** [OpenSwan session ${agent.sessionKey}]:\n\n${sessionResult.reply || 'Message sent.'}`;
+          }
+        }
+
+        const preface = [
+          `You are acting as ${agent.name}.`,
+          agent.spirit ? `Specialty / spirit: ${agent.spirit}.` : '',
+          preferredModel ? `Prefer model: ${preferredModel}.` : '',
+          `Complete this task:\n${task}`,
+        ].filter(Boolean).join('\n');
+        const spawnResult = await spawnSubAgent(config, preface, preferredModel);
+        if (spawnResult.ok) {
+          return `**${agent.name}** [spawned OpenSwan session${preferredModel ? ` · ${preferredModel}` : ''}]:\n\n${spawnResult.reply || 'Session started.'}`;
+        }
+      }
+    }
+
+    const bridgeProviders = ['claude-code', 'codex', 'gemini', 'gemini-cli', 'cursor'];
+    if (bridgeProviders.includes(normalizedProvider)) {
+      const dbId = agent.id?.startsWith('bridge::') ? undefined : agent.id;
+      const result = await wakeAndAssignTask(
+        normalizedProvider,
+        agent.name,
+        task,
+        circleId,
+        dbId,
+        { model: preferredModel },
+      );
+      if (result.ok) {
+        return `**${agent.name}** [executed via ${normalizedProvider}${preferredModel ? ` · ${preferredModel}` : ''}]:\n\n${result.response || 'Done'}`;
+      }
+    }
+
+    const aiResp = await getAIResponse(`[Task for ${agent.name}] ${task}`, {
+      userId: currentUserId || '',
+      circleId,
+      userName: currentUserName,
+      agentId: agent.sessionKey || agent.id,
+      agentName: agent.name,
+      model: preferredModel,
+      spiritId: agent.spirit || undefined,
+    });
+    const viaLabel = preferredModel ? `${normalizedProvider || 'ai'} · ${preferredModel}` : (normalizedProvider || 'ai');
+    return `**${agent.name}** [AI draft via ${viaLabel}]:\n\n${aiResp}`;
+  }, [circleId, currentUserId, currentUserName, resolveOpenSwanConnection]);
+
+  const spawnDedicatedOpenSwanSession = useCallback(async (agent: AssignableAgent, task: string): Promise<string> => {
+    const config = await resolveOpenSwanConnection();
+    if (!config) {
+      throw new Error('No connected OpenSwan runtime found');
+    }
+    const preferredModel = agent.model && agent.model !== 'auto' ? agent.model : undefined;
+    const launchTask = [
+      `Start a fresh OpenSwan session for ${agent.name}.`,
+      agent.spirit ? `Spirit / specialty: ${agent.spirit}.` : '',
+      preferredModel ? `Prefer model: ${preferredModel}.` : '',
+      task.trim() ? `Initial task:\n${task.trim()}` : 'Wait for follow-up instructions after spawning.',
+    ].filter(Boolean).join('\n');
+    const result = await spawnSubAgent(config, launchTask, preferredModel);
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to spawn OpenSwan session');
+    }
+    return `**${agent.name}** [dedicated OpenSwan session${preferredModel ? ` · ${preferredModel}` : ''}]:\n\n${result.reply || 'Session spawned and ready.'}`;
+  }, [resolveOpenSwanConnection]);
+
+  useEffect(() => {
+    if (showPluginPicker) {
+      recordChatActivity(circleId, 'plugin').catch(() => {});
+    }
+  }, [circleId, showPluginPicker]);
+
   const init = async () => {
     try {
     // Get current user
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      setCurrentUserId(user.id);
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('display_name, username')
-        .eq('id', user.id)
-        .single();
-      if (profile) setCurrentUserName(profile.display_name || profile.username || 'You');
+    const currentUser = await getCurrentChatUserProfile();
+    const userId = currentUser?.id;
+    if (userId) {
+      setCurrentUserId(userId);
+      setCurrentUserName(currentUser.displayName);
     }
 
     // Check if first visit (uses cross-platform storage helper)
@@ -503,101 +1606,69 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
     // Fetch members
     try {
-      const { data } = await supabase
-        .from('circle_members')
-        .select('user:profiles(id, username, display_name)')
-        .eq('circle_id', circleId);
-      const m = (data || []).map((d: any) => d.user).filter(Boolean);
-      m.push({ id: BLACKSWAN_ID, username: 'Agent', display_name: agentName });
+      const m = await loadCircleChatMembers(circleId);
+      m.push({ id: BLACKSWAN_ID, username: 'openswan', display_name: agentName });
       setMembers(m);
     } catch (e) { /* circle may not exist yet */ }
 
-    // Load persisted messages
-    try {
-      // Explicitly select only known-safe columns to avoid schema drift errors.
-      // is_bot and reactions are added via migration — use safe fallback if missing.
-      const { data, error } = await supabase
-        .from('messages')
-        .select('id, circle_id, user_id, content, reply_to, created_at, is_bot, reactions, user:profiles(username, display_name)')
-        .eq('circle_id', circleId)
-        .order('created_at', { ascending: true })
-        .limit(100);
-
-      if (error) {
-        // Fallback: if new columns not yet migrated, select without them
-        if (error.code === '42703' || (error.message && error.message.includes('does not exist'))) {
-          console.warn('[ChatTab] Schema migration pending — loading without is_bot/reactions');
-          const { data: fallback, error: fe } = await supabase
-            .from('messages')
-            .select('id, circle_id, user_id, content, reply_to, created_at, user:profiles(username, display_name)')
-            .eq('circle_id', circleId)
-            .order('created_at', { ascending: true })
-            .limit(100);
-          if (!fe && fallback && fallback.length > 0) {
-            const loaded: ChatMessage[] = fallback.map((m: any) => ({
-              id: m.id, dbId: m.id,
-              content: m.content || '',
-              isBot: /^(🦢|🤖) \*\*\w+.*?:\*\*/.test(m.content || '') || (m.content || '').startsWith('👑 **OpenSwan:**'),
-              isUser: m.user_id === user?.id,
-              userName: m.user?.display_name || m.user?.username || 'Unknown',
-              timestamp: new Date(m.created_at),
-              reactions: {}, replyTo: null, isCheckIn: false, isAchievement: false,
-            }));
-            setMessages(loaded);
-          }
-        } else {
-          console.error('[ChatTab] Error loading messages:', error);
+    // Resolve the circle's default thread first so the message query can
+    // filter by thread_id. The migration backfills this row for every circle.
+    let resolvedThreadId: string | null = activeThreadId;
+    if (!resolvedThreadId) {
+      try {
+        const defaultThread = await getCircleDefaultThread(circleId);
+        if (defaultThread) {
+          resolvedThreadId = defaultThread.id;
+          setActiveThreadId(defaultThread.id);
         }
-      } else if (data && data.length > 0) {
-        const loaded: ChatMessage[] = data.map((m: any) => {
-          const isBot = m.is_bot === true
-            || /^(🦢|🤖) \*\*\w+.*?:\*\*/.test(m.content || '')
-            || (m.content || '').startsWith('👑 **OpenSwan:**');
-          return {
-            id: m.id,
-            dbId: m.id,
-            content: isBot
-              ? (m.content || '').replace(/^(🦢|🤖) \*\*\w+.*?:\*\* /, '').replace(/^👑 \*\*OpenSwan:\*\* /, '')
-              : (m.content || ''),
-            isBot,
-            isUser: m.user_id === user?.id && !isBot,
-            userName: isBot ? agentName : (m.user?.display_name || m.user?.username || 'Unknown'),
-            timestamp: new Date(m.created_at),
-            reactions: m.reactions || {},
-            replyTo: null,
-            isCheckIn: (m.content || '').toLowerCase().includes('checked in') || (m.content || '').toLowerCase().includes('streak'),
-            isAchievement: (m.content || '').toLowerCase().includes('achievement') || (m.content || '').toLowerCase().includes('unlocked'),
-          };
-        });
-        setMessages(loaded);
+      } catch (err) {
+        console.warn('[ChatTab] Default thread lookup failed (migration may be pending):', err);
+      }
+    }
+
+    // Load persisted messages — filter by thread_id when we have one so
+    // multi-thread chats stay separated.
+    try {
+      const { rows, usedFallback } = await loadThreadMessages(circleId, resolvedThreadId);
+      if (usedFallback) {
+        console.warn('[ChatTab] Schema migration pending — loading without is_bot/reactions');
+      }
+      if (rows.length > 0) {
+        setMessages(mapPersistedRowsToChatMessages(rows, userId, agentName));
       }
     } catch (e) { 
       console.error('[ChatTab] Unexpected error loading messages:', e);
     }
 
-    // Check wallet
-    try {
-      const w = await getConnectedWallet();
-      if (w) setWallet(w);
-    } catch (e) { /* no wallet */ }
+    setLoaded(true);
 
-    // Load Discord config
-    try {
-      const dConfig = await getCircleDiscordConfig(circleId);
-      setDiscordConfig(dConfig);
-      if (dConfig.guild_id) {
-        const chans = await getCachedChannels(circleId);
-        setDiscordChannels(chans.filter(c => isTextChannel(c.type)).map(c => c.name));
-      }
-    } catch (e) { /* no discord */ }
+    // Non-critical enrichments — load after the chat shell is ready
+    void (async () => {
+      try {
+        const w = await getConnectedWallet();
+        if (w) setWallet(w);
+      } catch {}
+    })();
 
-    // Load proposals and pinned messages
-    try {
-      const props = await getProposals(circleId, 'active');
-      setProposals(props);
-      const pins = await getPinnedMessages(circleId);
-      setPinnedMessages(pins);
-    } catch (e) { /* tables may not exist yet */ }
+    void (async () => {
+      try {
+        const dConfig = await getCircleDiscordConfig(circleId);
+        setDiscordConfig(dConfig);
+        if (dConfig.guild_id) {
+          const chans = await getCachedChannels(circleId);
+          setDiscordChannels(chans.filter(c => isTextChannel(c.type)).map(c => c.name));
+        }
+      } catch {}
+    })();
+
+    void (async () => {
+      try {
+        const props = await getProposals(circleId, 'active');
+        setProposals(props);
+        const pins = await getPinnedMessages(circleId);
+        setPinnedMessages(pins);
+      } catch {}
+    })();
 
     } catch (e) {
       console.error('[ChatTab] init error:', e);
@@ -698,10 +1769,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // ─── Realtime subscription — see other members' messages live ──────────
 
   useEffect(() => {
-    if (!circleId || !currentUserId) return;
+    if (!circleId || !currentUserId || !activeThreadId) return;
 
     const channel = supabase
-      .channel(`circle-chat-${circleId}`)
+      .channel(`circle-chat-${circleId}-${activeThreadId}`)
       .on('postgres_changes', {
         event: 'INSERT',
         schema: 'public',
@@ -709,29 +1780,26 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         filter: `circle_id=eq.${circleId}`,
       }, (payload: any) => {
         const newMsg = payload.new;
+        if ((newMsg.thread_id || null) !== activeThreadId) return;
         // Skip messages we sent ourselves — BUT allow bot messages from FloatingChat
-        const isBotFromPopout = newMsg.is_bot === true || /^(🦢|🤖) \*\*\w+/.test(newMsg.content || '');
+        const isBotFromPopout = isPersistedChatBotMessage(newMsg.content, newMsg.is_bot === true);
         if (newMsg.user_id === currentUserId && !isBotFromPopout) return;
 
-        // Detect bot messages even if is_bot column not yet migrated
-        const isBotMsg = newMsg.is_bot === true
-          || /^(🦢|🤖) \*\*\w+.*?:\*\*/.test(newMsg.content || '')
-          || (newMsg.content || '').startsWith('👑 **OpenSwan:**');
-
         const msg: ChatMessage = {
-          id: newMsg.id,
-          dbId: newMsg.id,
-          content: isBotMsg
-            ? (newMsg.content || '').replace(/^(🦢|🤖) \*\*\w+.*?:\*\* /, '').replace(/^👑 \*\*OpenSwan:\*\* /, '')
-            : (newMsg.content || ''),
-          isBot: isBotMsg,
-          isUser: false,
-          userName: isBotMsg ? agentName : 'Circle Member',
-          timestamp: new Date(newMsg.created_at),
+          ...shapePersistedChatMessage(newMsg, {
+            currentUserId,
+            botDisplayName: agentName,
+            fallbackUserName: 'Circle Member',
+          }),
           reactions: newMsg.reactions || {},
           replyTo: null,
-          isCheckIn: (newMsg.content || '').toLowerCase().includes('checked in'),
-          isAchievement: (newMsg.content || '').toLowerCase().includes('achievement'),
+          artifacts: isBotFromPopout ? (readPersistedChatBotMetadata(newMsg.content)?.artifacts || undefined) : undefined,
+          wikiRefs: isBotFromPopout ? (readPersistedChatBotMetadata(newMsg.content)?.wikiRefs || undefined) : undefined,
+          researchRefs: isBotFromPopout ? (readPersistedChatBotMetadata(newMsg.content)?.researchRefs || undefined) : undefined,
+          memoryRefs: isBotFromPopout ? (readPersistedChatBotMetadata(newMsg.content)?.memoryRefs || undefined) : undefined,
+          memoriesUsed: isBotFromPopout ? (readPersistedChatBotMetadata(newMsg.content)?.memoriesUsed || undefined) : undefined,
+          executionStream: isBotFromPopout ? (readPersistedChatBotMetadata(newMsg.content)?.executionStream || undefined) : undefined,
+          ...deriveChatActivityFlags(newMsg.content),
         };
 
         // Try to resolve the sender's name
@@ -750,8 +1818,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }
 
         setMessages(prev => {
-          // Dedup: skip if we already have this message
           if (prev.some(m => m.dbId === newMsg.id)) return prev;
+
+          const incomingTs = new Date(newMsg.created_at || Date.now()).getTime();
+          const optimisticMatchIndex = prev.findIndex(m => {
+            if (m.dbId) return false;
+            if (m.isBot !== msg.isBot || m.isUser !== msg.isUser) return false;
+            if (m.content.trim() !== msg.content.trim()) return false;
+            const delta = Math.abs(m.timestamp.getTime() - incomingTs);
+            return delta < 15000;
+          });
+
+          if (optimisticMatchIndex >= 0) {
+            const next = [...prev];
+            next[optimisticMatchIndex] = {
+              ...next[optimisticMatchIndex],
+              dbId: newMsg.id,
+              id: msg.id,
+              timestamp: msg.timestamp,
+              userName: msg.userName,
+            };
+            return next;
+          }
+
           return [...prev, msg];
         });
         animateNewMessage(msg.id);
@@ -761,27 +1850,32 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [circleId, currentUserId]);
+  }, [circleId, currentUserId, activeThreadId, agentName]);
 
-  // Auto-scroll to bottom — on new messages and after initial load
+  // With inverted FlatList, scroll management is minimal — the latest
+  // message is always at index 0 which is pinned to the visual bottom.
+  // We only need scrollToBottomDirect for programmatic "jump to latest"
+  // (e.g. after sending a message while scrolled up reading history).
+  const scrollToBottomDirect = useCallback(() => {
+    try { flatListRef.current?.scrollToOffset({ offset: 0, animated: true }); } catch {}
+  }, []);
+
+  // With inverted FlatList, new messages at the end of `messages` become
+  // index 0 of `invertedMessages` and are pinned to the visual bottom
+  // automatically. No scroll management needed for the normal case.
+  // We only jump-to-latest when the user was scrolled up reading history
+  // and a new message arrives they might want to see.
   const prevMsgCount = useRef(0);
-  const loadTimestamp = useRef(Date.now());
   useEffect(() => {
     if (messages.length === 0) return;
     const isNewMsg = messages.length > prevMsgCount.current && prevMsgCount.current > 0;
     prevMsgCount.current = messages.length;
-    if (isNewMsg) {
-      // New message: smooth scroll
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
-    } else {
-      // Initial load / refresh: reset the window and keep scrolling
-      loadTimestamp.current = Date.now();
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: false }), 50);
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: false }), 300);
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: false }), 800);
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: false }), 1500);
+    if (isNewMsg && scrollOffsetRef.current < 200) {
+      // User is near the bottom (offset < 200 in inverted = near latest)
+      // — nudge to 0 to pin exactly at latest
+      setTimeout(scrollToBottomDirect, 50);
     }
-  }, [messages.length]);
+  }, [messages.length, scrollToBottomDirect]);
 
   // ─── Message Animations ──────────────────────────────────────────────────
 
@@ -840,37 +1934,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (currentUserId) {
       const persistMessage = async (attempt = 0) => {
         try {
-          const { data, error } = await supabase.from('messages').insert({
-            circle_id: circleId,
-            user_id: currentUserId,
+          const dbId = await persistChatMessage({
+            circleId,
+            userId: currentUserId,
             content,
+            threadId: activeThreadId,
+            replyToId: replyTo?.dbId || null,
+            isBot: false,
             reactions: {},
-            is_bot: false,
-            ...(replyTo?.dbId ? { reply_to: replyTo.dbId } : {}),
-          }).select('id').single();
-
-          if (error) {
-            // If schema migration hasn't run yet, retry without new columns
-            if (error.code === 'PGRST204' || error.code === '42703') {
-              console.warn('[ChatTab] Retrying insert without is_bot/reactions (migration pending)');
-              const { data: d2, error: e2 } = await supabase.from('messages').insert({
-                circle_id: circleId,
-                user_id: currentUserId,
-                content,
-              }).select('id').single();
-              if (!e2 && d2) {
-                setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, dbId: d2.id } : m));
-              } else {
-                console.error('[ChatTab] Fallback insert failed:', e2?.message);
-              }
-              return;
-            }
-            console.error('[ChatTab] Error persisting message (attempt', attempt + 1, '):', error.code, error.message);
-            if (attempt < 3) {
-              setTimeout(() => persistMessage(attempt + 1), 1000 * (attempt + 1));
-            }
-          } else if (data) {
-            setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, dbId: data.id } : m));
+          });
+          if (dbId) {
+            setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, dbId } : m));
           }
         } catch (e) {
           console.error('[ChatTab] Unexpected error persisting:', e);
@@ -885,7 +1959,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return msg;
   };
 
-  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; memoriesUsed?: string[]; localOnly?: boolean }) => {
+  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[] }) => {
     const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const msg: ChatMessage = {
       id: msgId,
@@ -896,8 +1970,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       timestamp: new Date(),
       reactions: {},
       artifacts,
+      wikiRefs: extra?.wikiRefs,
+      researchRefs: extra?.researchRefs,
       delegatedTo: extra?.delegatedTo,
+      delegatedSubagents: extra?.delegatedSubagents,
+      runId: extra?.runId,
       memoriesUsed: extra?.memoriesUsed,
+      memoryRefs: extra?.memoryRefs,
+      memoryRecommendations: extra?.memoryRecommendations,
+      executionStream: extra?.executionStream,
+      browserPlans: extra?.browserPlans,
+      browserPlanEvents: extra?.browserPlanEvents,
+      browserSessions: extra?.browserSessions,
+      taskPlan: extra?.taskPlan,
+      toolEvents: extra?.toolEvents,
+      verificationResults: extra?.verificationResults,
+      isPending: false,
     };
 
     setMessages(prev => [...prev, msg]);
@@ -923,38 +2011,331 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
 
     // Persist bot message with retry (skip for local-only slash command responses)
-    if (currentUserId && !extra?.localOnly) {
-      const persistBot = async (attempt = 0) => {
-        try {
-          const { error } = await supabase.from('messages').insert({
-            circle_id: circleId,
-            user_id: currentUserId,
-            content: `🤖 **${agentName}:** ${content}`,
-            reactions: {},
-            is_bot: true,
-          });
-          if (error) {
-            // Schema migration pending — retry without new columns
-            if (error.code === 'PGRST204' || error.code === '42703') {
-              console.warn('[ChatTab] Bot message: retrying without is_bot/reactions');
-              await supabase.from('messages').insert({
-                circle_id: circleId,
-                user_id: currentUserId,
-                content: `🤖 **${agentName}:** ${content}`,
-              });
-              return;
-            }
-            console.error('[ChatTab] Error persisting bot message (attempt', attempt + 1, '):', error.code, error.message);
-            if (attempt < 3) setTimeout(() => persistBot(attempt + 1), 1000 * (attempt + 1));
-          }
-        } catch (e) {
-          console.error('[ChatTab] Unexpected error persisting bot msg:', e);
-          if (attempt < 3) setTimeout(() => persistBot(attempt + 1), 1000 * (attempt + 1));
-        }
-      };
-      persistBot();
+    if (currentUserId && activeThreadId && !extra?.localOnly) {
+      persistMainChatBotMessageWithRetry({
+        circleId,
+        userId: currentUserId,
+        agentName,
+        content,
+        threadId: activeThreadId,
+        artifacts,
+        wikiRefs: extra?.wikiRefs,
+        researchRefs: extra?.researchRefs,
+        memoriesUsed: extra?.memoriesUsed,
+        memoryRefs: extra?.memoryRefs,
+        memoryRecommendations: extra?.memoryRecommendations,
+        executionStream: extra?.executionStream,
+        browserPlans: extra?.browserPlans,
+        browserPlanEvents: extra?.browserPlanEvents,
+        browserSessions: extra?.browserSessions,
+        onError: (error) => {
+          console.error('[ChatTab] Unexpected error persisting bot msg:', error);
+        },
+        onPersisted: (dbId) => {
+          setMessages(prev => prev.map((message) => (
+            message.id === msgId ? { ...message, dbId } : message
+          )));
+        },
+      });
     }
+
+    return msg;
   };
+
+  const addPendingBotMessage = (content: string, extra?: { taskPlan?: OpenSwanTaskPlan }) => {
+    const msgId = `bot-pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const msg: ChatMessage = {
+      id: msgId,
+      content,
+      isBot: true,
+      isUser: false,
+      userName: agentName,
+      timestamp: new Date(),
+      reactions: {},
+      taskPlan: extra?.taskPlan,
+      toolEvents: [],
+      verificationResults: [],
+      executionStream: [],
+      isPending: true,
+    };
+    setMessages(prev => [...prev, msg]);
+    animateNewMessage(msg.id);
+    return msg;
+  };
+
+  const updateBotMessage = (
+    messageId: string,
+    patch: Partial<Pick<ChatMessage, 'content' | 'artifacts' | 'wikiRefs' | 'researchRefs' | 'runId' | 'taskPlan' | 'toolEvents' | 'verificationResults' | 'executionStream' | 'browserPlans' | 'browserPlanEvents' | 'browserSessions' | 'isPending' | 'memoriesUsed' | 'memoryRefs' | 'memoryRecommendations' | 'delegatedSubagents'>>,
+  ) => {
+    setMessages(prev => prev.map((message) => (
+      message.id === messageId
+        ? {
+            ...message,
+            ...patch,
+            timestamp: patch.isPending === false ? new Date() : message.timestamp,
+          }
+        : message
+    )));
+  };
+
+  const syncPersistedBotMessage = useCallback((message: ChatMessage | null | undefined) => {
+    if (!message?.dbId || !message.isBot) return;
+    updateMainChatBotMessageWithRetry({
+      messageId: message.dbId,
+      agentName,
+      content: message.content,
+      artifacts: message.artifacts,
+      wikiRefs: message.wikiRefs,
+      researchRefs: message.researchRefs,
+      memoriesUsed: message.memoriesUsed,
+      memoryRefs: message.memoryRefs,
+      memoryRecommendations: message.memoryRecommendations,
+      executionStream: message.executionStream,
+      browserPlans: message.browserPlans,
+      browserPlanEvents: message.browserPlanEvents,
+      browserSessions: message.browserSessions,
+      onError: (error) => {
+        console.error('[ChatTab] Unexpected error updating bot msg:', error);
+      },
+    });
+  }, [agentName]);
+
+  const applyBrowserPlanPatch = useCallback((
+    messageId: string,
+    planId: string,
+    patch: Partial<BrowserPlanCardData>,
+    runId?: string | null,
+  ) => {
+    let nextPlansToPersist: BrowserPlanCardData[] | null = null;
+    let nextMessageToPersist: ChatMessage | null = null;
+    setMessages(prev => prev.map((message) => {
+      if (message.id !== messageId || !message.browserPlans?.length) return message;
+      const nextPlans = message.browserPlans.map((plan) => plan.planId === planId ? { ...plan, ...patch } : plan);
+      nextMessageToPersist = { ...message, browserPlans: nextPlans };
+      nextPlansToPersist = nextPlans;
+      return nextMessageToPersist;
+    }));
+    if (runId && nextPlansToPersist) {
+      void mergeRunMetadata(runId, { browserPlans: nextPlansToPersist });
+    }
+    syncPersistedBotMessage(nextMessageToPersist);
+  }, [syncPersistedBotMessage]);
+
+  const appendBrowserPlanEvent = useCallback((
+    messageId: string,
+    event: BrowserPlanEvent,
+    runId?: string | null,
+  ) => {
+    let nextEventsToPersist: BrowserPlanEvent[] | null = null;
+    let nextMessageToPersist: ChatMessage | null = null;
+    setMessages(prev => prev.map((message) => {
+      if (message.id !== messageId) return message;
+      const nextEvents = [...(message.browserPlanEvents || []), event];
+      nextMessageToPersist = { ...message, browserPlanEvents: nextEvents };
+      nextEventsToPersist = nextEvents;
+      return nextMessageToPersist;
+    }));
+    if (runId && nextEventsToPersist) {
+      void mergeRunMetadata(runId, { browserPlanEvents: nextEventsToPersist });
+      void appendRunBrowserPlanEvent({ runId, circleId, event });
+    }
+    syncPersistedBotMessage(nextMessageToPersist);
+  }, [circleId, syncPersistedBotMessage]);
+
+  const upsertBrowserSessionRecord = useCallback((
+    messageId: string,
+    record: BrowserSessionRecord,
+    runId?: string | null,
+  ) => {
+    let nextSessionsToPersist: BrowserSessionRecord[] | null = null;
+    let nextMessageToPersist: ChatMessage | null = null;
+    setMessages(prev => prev.map((message) => {
+      if (message.id !== messageId) return message;
+      const existing = message.browserSessions || [];
+      const nextSessions = existing.some((session) => session.id === record.id)
+        ? existing.map((session) => (session.id === record.id ? { ...session, ...record } : session))
+        : [...existing, record];
+      nextSessionsToPersist = nextSessions;
+      nextMessageToPersist = { ...message, browserSessions: nextSessions };
+      return nextMessageToPersist;
+    }));
+    if (runId && nextSessionsToPersist) {
+      void mergeRunMetadata(runId, { browserSessions: nextSessionsToPersist });
+    }
+    syncPersistedBotMessage(nextMessageToPersist);
+  }, [syncPersistedBotMessage]);
+
+  const upsertBrowserSessionArtifacts = useCallback((
+    messageId: string,
+    sessionRecord: BrowserSessionRecord,
+    runId?: string | null,
+  ) => {
+    const replayArtifact: SwanBotStructuredArtifact | null = sessionRecord.backendLiveUrl ? {
+      kind: 'webpage',
+      title: `Browser Replay · ${sessionRecord.task}`,
+      url: sessionRecord.backendLiveUrl,
+      metadata: {
+        source: 'browser_session',
+        browserSessionId: sessionRecord.id,
+        browserSessionKind: 'replay',
+        backend: sessionRecord.backend,
+        backendLabel: sessionRecord.backendLabel,
+      },
+    } : null;
+    const latestScreenshot = [...sessionRecord.actions]
+      .reverse()
+      .find((action) => action.screenshotAfter || action.screenshotBefore);
+    const screenshotBase64 = latestScreenshot?.screenshotAfter || latestScreenshot?.screenshotBefore || null;
+    const screenshotArtifact: SwanBotStructuredArtifact | null = screenshotBase64 ? {
+      kind: 'image',
+      title: `Browser Proof · ${sessionRecord.task}`,
+      url: `data:image/png;base64,${screenshotBase64}`,
+      metadata: {
+        source: 'browser_session',
+        browserSessionId: sessionRecord.id,
+        browserSessionKind: 'proof_screenshot',
+        backend: sessionRecord.backend,
+        backendLabel: sessionRecord.backendLabel,
+      },
+    } : null;
+    const nextArtifacts = [replayArtifact, screenshotArtifact].filter(Boolean) as SwanBotStructuredArtifact[];
+    if (nextArtifacts.length === 0) return;
+
+    let nextMessageToPersist: ChatMessage | null = null;
+    setMessages(prev => prev.map((message) => {
+      if (message.id !== messageId) return message;
+      const existingArtifacts = message.artifacts || [];
+      const retainedArtifacts = existingArtifacts.filter((artifact) => {
+        const artifactSessionId = String(artifact.metadata?.browserSessionId || '');
+        return artifactSessionId !== sessionRecord.id;
+      });
+      nextMessageToPersist = { ...message, artifacts: [...retainedArtifacts, ...nextArtifacts] };
+      return nextMessageToPersist;
+    }));
+    syncPersistedBotMessage(nextMessageToPersist);
+
+    if (runId) {
+      if (replayArtifact?.url) {
+        void addArtifact({
+          runId,
+          circleId,
+          artifactKind: 'link_bundle',
+          title: replayArtifact.title,
+          url: replayArtifact.url,
+          metadata: replayArtifact.metadata || {},
+        });
+      }
+      if (screenshotArtifact?.url) {
+        void addArtifact({
+          runId,
+          circleId,
+          artifactKind: 'screenshot',
+          title: screenshotArtifact.title,
+          url: screenshotArtifact.url,
+          metadata: screenshotArtifact.metadata || {},
+        });
+      }
+    }
+  }, [circleId, syncPersistedBotMessage]);
+
+  const handleLaunchBrowserPlan = useCallback((message: ChatMessage, plan: BrowserPlanCardData) => {
+    setPendingComputerUseTask(plan.task);
+    const approvalPlan = { ...plan, status: 'approval_requested' as const };
+    setPendingComputerUsePlan(approvalPlan);
+    setPendingComputerUseOrigin({ messageId: message.id, runId: message.runId, planId: plan.planId });
+    setPendingComputerUseActions(plan.actions.map((action) => ({
+      id: action.id,
+      type: action.type,
+      target: action.target,
+      value: action.value,
+      description: action.description,
+      requiresApproval: action.requiresApproval,
+      status: 'pending' as const,
+    })));
+    setShowComputerUsePermission(true);
+    applyBrowserPlanPatch(message.id, plan.planId, { status: 'approval_requested' }, message.runId);
+    appendBrowserPlanEvent(message.id, {
+      id: `${plan.planId}:approval_requested:${Date.now()}`,
+      planId: plan.planId,
+      kind: 'approval_requested',
+      at: new Date().toISOString(),
+      summary: 'User review requested before launching browser plan',
+      backend: plan.backend,
+      backendLabel: plan.backendLabel,
+    }, message.runId);
+    addBotMessage(`**Browser Plan Ready** Review permissions to launch: ${plan.task}`, undefined, {
+      localOnly: true,
+      browserPlans: [approvalPlan],
+    });
+  }, [appendBrowserPlanEvent, applyBrowserPlanPatch]);
+
+  const handleOpenBrowserSession = useCallback((plan: BrowserPlanCardData) => {
+    const event: BrowserPlanEvent = {
+      id: `${plan.planId}:opened_live_session:${Date.now()}`,
+      planId: plan.planId,
+      kind: 'opened_live_session',
+      at: new Date().toISOString(),
+      summary: 'Opened the live browser session',
+      backend: plan.backend,
+      backendLabel: plan.backendLabel,
+      backendSessionId: plan.backendSessionId,
+      backendLiveUrl: plan.backendLiveUrl,
+    };
+    const ownerMessage = messages.find((message) => message.browserPlans?.some((entry) => entry.planId === plan.planId));
+    if (ownerMessage) {
+      appendBrowserPlanEvent(ownerMessage.id, event, ownerMessage.runId);
+    }
+    if (Platform.OS !== 'web' || !plan.backendLiveUrl) return;
+    try {
+      window.open(plan.backendLiveUrl, '_blank', 'noopener,noreferrer');
+    } catch {}
+  }, [appendBrowserPlanEvent, messages]);
+
+  const finalizeBrowserPlanFromSession = useCallback((session: ComputerUseSession, result?: { success: boolean; backendSessionId?: string; backendLiveUrl?: string }) => {
+    if (!session.sourceMessageId || !session.sourcePlanId) return;
+    const status = result ? (result.success ? 'completed' : 'failed') : 'launched';
+    const eventAt = new Date().toISOString();
+    const timestampPatch = status === 'launched'
+      ? { launchedAt: eventAt }
+      : { completedAt: eventAt };
+    applyBrowserPlanPatch(
+      session.sourceMessageId,
+      session.sourcePlanId,
+      {
+        status,
+        backendSessionId: result?.backendSessionId || session.backendSessionId,
+        backendLiveUrl: result?.backendLiveUrl || session.backendLiveUrl,
+        ...timestampPatch,
+      },
+      session.sourceRunId,
+    );
+    appendBrowserPlanEvent(session.sourceMessageId, {
+      id: `${session.sourcePlanId}:${status}:${Date.now()}`,
+      planId: session.sourcePlanId,
+      kind: status,
+      at: eventAt,
+      summary:
+        status === 'launched'
+          ? `Browser session launched via ${session.backendLabel}`
+          : status === 'completed'
+            ? 'Browser plan completed successfully'
+            : 'Browser plan failed during execution',
+      backend: session.backend,
+      backendLabel: session.backendLabel,
+      backendSessionId: result?.backendSessionId || session.backendSessionId,
+      backendLiveUrl: result?.backendLiveUrl || session.backendLiveUrl,
+    }, session.sourceRunId);
+    upsertBrowserSessionRecord(
+      session.sourceMessageId,
+      toBrowserSessionRecord(session, result),
+      session.sourceRunId,
+    );
+    upsertBrowserSessionArtifacts(
+      session.sourceMessageId,
+      toBrowserSessionRecord(session, result),
+      session.sourceRunId,
+    );
+  }, [appendBrowserPlanEvent, applyBrowserPlanPatch, upsertBrowserSessionArtifacts, upsertBrowserSessionRecord]);
 
   // ─── Send Crypto ──────────────────────────────────────────────────────────
 
@@ -1035,8 +2416,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // ─── Send Message ────────────────────────────────────────────────────────
 
   const sendMessage = async (overrideText?: string) => {
+    if (sendLockRef.current) return;
     const content = (overrideText || input).trim();
     if (!content) return;
+    sendLockRef.current = true;
+    setTimeout(() => { sendLockRef.current = false; }, 350);
 
     // Handle special actions
     if (content === '__SEND_CRYPTO__') {
@@ -1048,9 +2432,27 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       setSendAmount('0.001');
       return;
     }
+    if (content === '__SPAWN_AGENT__' || content === '__SPAWN_AGENTS__') {
+      setSpawnModalOpen(true);
+      return;
+    }
 
     // Capture current attachments before clearing
     const currentAttachments = [...attachments];
+    const resolvedFigmaRefs = (currentUserId && (currentAttachments.some((attachment) => attachment.isFigma) || /figma\.com\//i.test(content)))
+      ? await resolveFigmaReferences({
+          message: content,
+          attachments: currentAttachments,
+          circleId,
+          userId: currentUserId,
+        })
+      : [];
+    const nextSelectedFigmaRefId = resolvedFigmaRefs.some((ref) => ref.id === selectedBuilderFigmaRefId)
+      ? selectedBuilderFigmaRefId
+      : (resolvedFigmaRefs[0]?.id || null);
+    const figmaPromptContext = buildFigmaPromptFromReferences(resolvedFigmaRefs, nextSelectedFigmaRefId);
+    setBuilderFigmaRefs(resolvedFigmaRefs);
+    setSelectedBuilderFigmaRefId(nextSelectedFigmaRefId);
 
     // Add user message immediately
     addUserMessage(content);
@@ -1064,6 +2466,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       profileRef.current = updateProfileFromMessage(profileRef.current, content, true);
       saveUserProfile(profileRef.current).catch(() => {});
     }
+    recordChatActivity(circleId, 'message').catch(() => {});
+    if (content.startsWith('/')) {
+      recordChatActivity(circleId, 'slash').catch(() => {});
+    }
+
+    if (activeThreadId) {
+      void (async () => {
+        try {
+          const thread = await getThread(activeThreadId);
+          if (!thread || thread.visibility === 'circle' || !isAutoNamedSession(thread.title)) return;
+          const nextTitle = deriveSessionTitleFromMessage(content);
+          if (!nextTitle || nextTitle === thread.title) return;
+          await renameThread(thread.id, nextTitle);
+          handleThreadMetaChanged();
+        } catch (err) {
+          console.warn('[ChatTab] auto-title failed:', err);
+        }
+      })();
+    }
 
     // ─── Conversational intent routing (natural language → actions) ─────────
     // Catches "post this to WordPress", "create a task", "remember that...", etc.
@@ -1072,14 +2493,19 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (!lowerContent.startsWith('/')) {
       try {
         const { detectConversationalIntent, executeConversationalIntent } = await import('../../../lib/conversationalRouter');
-        const intent = detectConversationalIntent(content, attachments as any);
+        const intent = detectConversationalIntent(content, currentAttachments as any);
         if (intent.type !== 'none') {
+          const shouldShowWorkbench = isCodingGenerationRequest(content, sessionProfile) || currentAttachments.some((attachment) => attachment.isFigma) || !!figmaPromptContext;
+          if (shouldShowWorkbench) {
+            startCodingWorkbench([content, buildAttachmentPromptContext(currentAttachments), figmaPromptContext].filter(Boolean).join('\n\n'));
+          }
           setBotTyping(true);
           const result = await executeConversationalIntent(intent, {
             circleId, userId: currentUserId || '', userName: currentUserName,
-            fullMessage: content, attachments: attachments as any,
+            fullMessage: content, attachments: currentAttachments as any,
           });
           setBotTyping(false);
+          if (shouldShowWorkbench) stopCodingWorkbench();
           if (result?.handled) {
             if (result.message === '__SHOW_MEMORIES__') {
               setShowMemoryViewer(true);
@@ -1176,7 +2602,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
 
-    // ─── Memory commands — /remember and /forget ────────────────────────────
+    // ─── Memory commands — /remember, /forget, /reasoning-standard ─────────
+    if (lowerContent === '/reasoning-standard' || lowerContent === '/deep-reasoning') {
+      try {
+        const { saveResponseStandardMemory } = await import('../../../lib/memoryService');
+        const mem = await saveResponseStandardMemory(circleId, currentUserId || '');
+        addBotMessage(mem ? 'Saved your deep reasoning standard to memory.' : 'Failed to save reasoning standard.');
+        if (mem) setMemoryToast({ message: 'Saved reasoning standard', type: 'saved' });
+      } catch (e: any) { addBotMessage(`Memory error: ${e.message}`); }
+      return;
+    }
+
     if (lowerContent.startsWith('/remember ')) {
       const what = content.slice(10).trim();
       if (!what) { addBotMessage('Usage: `/remember <something to remember>`'); return; }
@@ -1203,6 +2639,111 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
     if (lowerContent === '/memories' || lowerContent === '/memory') {
       setShowMemoryViewer(true);
+      return;
+    }
+
+    // ─── Schedule / Cron commands ─────────────────────────────────────────────
+    // /schedule <kind> <recurrence?> <payload...> — queue a one-off or recurring action
+    // /cron list — show pending actions, /cron cancel <id> — cancel one
+    if (lowerContent.startsWith('/schedule ') || lowerContent.startsWith('/cron')) {
+      (async () => {
+        setBotTyping(true);
+        try {
+          const { scheduleAction, parseRecurrence, listScheduledActions, cancelAction } = await import('../../../lib/scheduledActions');
+          const args = content.slice(content.indexOf(' ') + 1).trim();
+
+          // /cron list
+          if (lowerContent === '/cron' || lowerContent === '/cron list') {
+            const actions = await listScheduledActions({ circleId, statuses: ['pending', 'running'], limit: 15 });
+            if (actions.length === 0) {
+              addBotMessage('No pending or running scheduled actions.');
+            } else {
+              const lines = actions.map(a =>
+                `- **${a.kind}** [${a.status}] scheduled ${new Date(a.scheduled_for).toLocaleString()}${a.recurrence_label ? ` (${a.recurrence_label})` : ''} — id: \`${a.id.slice(0, 8)}\``
+              );
+              addBotMessage(`**Scheduled Actions (${actions.length})**\n\n${lines.join('\n')}`);
+            }
+            setBotTyping(false);
+            return;
+          }
+
+          // /cron cancel <id-prefix>
+          if (lowerContent.startsWith('/cron cancel ')) {
+            const prefix = args.replace(/^cancel\s+/i, '').trim();
+            const all = await listScheduledActions({ circleId, statuses: ['pending'], limit: 50 });
+            const match = all.find(a => a.id.startsWith(prefix));
+            if (match) {
+              await cancelAction(match.id);
+              addBotMessage(`Canceled action \`${match.id.slice(0, 8)}\` (${match.kind}${match.recurrence_label ? ` — ${match.recurrence_label}` : ''}).`);
+            } else {
+              addBotMessage(`No pending action found matching \`${prefix}\`.`);
+            }
+            setBotTyping(false);
+            return;
+          }
+
+          // /schedule <kind> [every <day>] <payload...>
+          // e.g. /schedule reminder every monday Check deployment status
+          // e.g. /schedule tweet Hello from Underground Circle!
+          const kindMatch = args.match(/^(\w+)\s+/);
+          if (!kindMatch) {
+            addBotMessage('Usage: `/schedule <kind> [every <day>] <message>`\nKinds: wp_post, tweet, bluesky_post, linkedin_post, gmail_send, slack_post, webhook, reminder\n\nExamples:\n`/schedule reminder every monday Check deployment status`\n`/schedule tweet Launch day!`\n\nManage: `/cron list`, `/cron cancel <id>`');
+            setBotTyping(false);
+            return;
+          }
+          const kind = kindMatch[1].toLowerCase();
+          const rest = args.slice(kindMatch[0].length);
+
+          // Parse optional recurrence
+          const recurrence = parseRecurrence(rest);
+          const textAfterRecurrence = recurrence
+            ? rest.replace(new RegExp(`(every\\s+\\w+|daily|weekly|monthly)`, 'i'), '').trim()
+            : rest.trim();
+
+          // Validate kind
+          const VALID_KINDS = ['wp_post','tweet','bluesky_post','linkedin_post','gmail_send','gmail_draft','outlook_send','slack_post','webhook','reminder'];
+          if (!VALID_KINDS.includes(kind)) {
+            addBotMessage(`Unknown kind "${kind}". Valid: ${VALID_KINDS.join(', ')}`);
+            setBotTyping(false); return;
+          }
+          if (!textAfterRecurrence && kind !== 'reminder') {
+            addBotMessage(`Missing content. Usage: \`/schedule ${kind} Your message here\``);
+            setBotTyping(false); return;
+          }
+          if (kind === 'webhook' && !textAfterRecurrence.startsWith('http')) {
+            addBotMessage('Webhook URL must start with http:// or https://');
+            setBotTyping(false); return;
+          }
+          // Build payload with platform-specific char limits
+          let payload: Record<string, any> = {};
+          if (kind === 'reminder') payload = { title: textAfterRecurrence || 'Scheduled reminder', note: '' };
+          else if (kind === 'tweet') payload = { text: textAfterRecurrence.slice(0, 280) };
+          else if (kind === 'bluesky_post') payload = { text: textAfterRecurrence.slice(0, 300) };
+          else if (kind === 'linkedin_post') payload = { text: textAfterRecurrence.slice(0, 3000) };
+          else if (kind === 'slack_post') payload = { channel: '#general', text: textAfterRecurrence };
+          else if (kind === 'wp_post') payload = { title: textAfterRecurrence.slice(0, 80), content: textAfterRecurrence, status: 'draft' };
+          else if (kind === 'webhook') payload = { url: textAfterRecurrence, method: 'POST' };
+          else payload = { text: textAfterRecurrence };
+
+          const action = await scheduleAction({
+            kind: kind as any,
+            circleId,
+            payload,
+            scheduledFor: recurrence
+              ? (await import('../../../lib/scheduledActions')).nextCronOccurrence(recurrence.cron).toISOString()
+              : undefined,
+            recurrence: recurrence?.cron,
+            recurrenceLabel: recurrence?.label,
+          } as any);
+
+          const msg = recurrence
+            ? `Scheduled recurring **${kind}**: "${textAfterRecurrence.slice(0, 60)}"\nRecurrence: ${recurrence.label}\nNext run: ${new Date(action.scheduled_for).toLocaleString()}\nManage: \`/cron list\`, \`/cron cancel ${action.id.slice(0, 8)}\``
+            : `Queued **${kind}**: "${textAfterRecurrence.slice(0, 80)}"\nRuns: now (or at ${new Date(action.scheduled_for).toLocaleString()})\nTrack in the Outbox.`;
+          addBotMessage(msg);
+        } catch (e: any) {
+          addBotMessage(`Schedule error: ${e.message || 'Unknown error'}`);
+        } finally { setBotTyping(false); }
+      })();
       return;
     }
 
@@ -1275,9 +2816,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
 
+    // ─── /build-page — streaming path via the build-stream edge fn ────────────
+    // Fires before the generic HF-command dispatch so the same prefix doesn't
+    // hit both paths. On error we surface the message inline; users can re-
+    // prompt. If the stream server is down, the bot message tells them.
+    if (lowerContent.startsWith('/build-page ') || lowerContent === '/build-page') {
+      const brief = content.replace(/^\/build-page\s*/i, '').trim();
+      if (!brief) {
+        addBotMessage('Usage: `/build-page <brief>` — describe the page you want.');
+        return;
+      }
+      launchBuildStream(brief);
+      return;
+    }
+
     // ─── HF tool commands — intercept /summarize, /translate, etc. ────────────
-    const hfPrefixes = ['/summarize', '/translate', '/classify', '/zero-shot', '/qa', '/imagine', '/vision', '/openmodel', '/build-page', '/code', '/speak', '/hf'];
+    const hfPrefixes = ['/summarize', '/translate', '/classify', '/zero-shot', '/qa', '/imagine', '/vision', '/openmodel', '/code', '/speak', '/hf'];
     if (hfPrefixes.some(p => lowerContent.startsWith(p))) {
+      startCodingWorkbench(content);
       setBotTyping(true);
       try {
         const result = await executeHfCommand(content, {
@@ -1293,7 +2849,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }
       } catch (e: any) {
         addBotMessage(`HF error: ${e.message}`);
-      } finally { setBotTyping(false); }
+      } finally { setBotTyping(false); stopCodingWorkbench(); }
       return;
     }
 
@@ -1337,12 +2893,33 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
 
+    // ─── Lightweight local SwanBot commands — short-circuit before OpenSwan ─
+    try {
+      const localCommandResponse = await tryHandleLocalSwanBotCommand(content, {
+        userId: currentUserId || 'anonymous',
+        circleId,
+        userName: currentUserName,
+        model: selectedModel !== 'auto' ? selectedModel : undefined,
+      });
+      if (localCommandResponse) {
+        addBotMessage(localCommandResponse);
+        return;
+      }
+    } catch (localCmdErr) {
+      console.warn('[ChatTab] local SwanBot command failed:', localCmdErr);
+    }
+
     // ─── Model capability routing — images, webpages, etc. ──────────────────
     try {
       const { routeByCapability } = await import('../../../lib/modelCapabilities');
+      const attachmentPromptContext = buildAttachmentPromptContext(currentAttachments);
+      const contentWithAttachments = [content, attachmentPromptContext, figmaPromptContext].filter(Boolean).join('\n\n');
+      const shouldShowWorkbench = isCodingGenerationRequest(content, sessionProfile) || currentAttachments.some((attachment) => attachment.isFigma) || !!figmaPromptContext;
+      if (shouldShowWorkbench) startCodingWorkbench(contentWithAttachments);
       setBotTyping(true);
-      const capResult = await routeByCapability(content, selectedModel);
+      const capResult = await routeByCapability(contentWithAttachments, selectedModel);
       setBotTyping(false);
+      if (shouldShowWorkbench) stopCodingWorkbench();
       if (capResult.handled) {
         const arts: SwanBotStructuredArtifact[] = (capResult.artifacts || []).map(a => ({
           kind: a.kind as any,
@@ -1366,23 +2943,30 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (!isAtMentioningSomeoneElse) {
       const cleanContent = content.replace(new RegExp(`@(agent|blackswan|swanbot|swan|${escapedName})\\s*`, 'gi'), '').trim() || content;
 
-      // Build chat context from recent messages so the AI understands the conversation
+      // Build chat context with OpenSwan envelope wrapping for temporal awareness
       const recentMessages = messages.slice(-10);
-      const chatHistory = recentMessages.map(m =>
-        `${m.isBot ? 'Agent' : (m.userName || 'User')}: ${m.content.slice(0, 300)}`
-      ).join('\n');
+      const chatHistory = recentMessages.map(m => {
+        const who = m.isBot ? agentName : (m.userName || 'User');
+        const when = m.timestamp ? m.timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '';
+        const ago = m.timestamp ? formatTimeAgo(m.timestamp) : '';
+        return `[${who} · ${when}${ago ? ` · ${ago}` : ''}] ${m.content.slice(0, 300)}`;
+      }).join('\n');
 
       // If replying to a specific message, prepend that context
       const replyContext = replyTo
-        ? `[Replying to ${replyTo.isBot ? 'Agent' : replyTo.userName}: "${replyTo.content.slice(0, 200)}"]\n`
+        ? `[Replying to ${replyTo.isBot ? agentName : replyTo.userName}: "${replyTo.content.slice(0, 200)}"]\n`
         : '';
 
       // Build attachment context for AI
       let attachmentContext = '';
       if (currentAttachments.length > 0) {
-        attachmentContext = currentAttachments
-          .map(a => prepareImageForAI(a))
-          .join('\n');
+        attachmentContext = [
+          buildAttachmentPromptContext(currentAttachments),
+          figmaPromptContext,
+          ...currentAttachments.map(a => prepareImageForAI(a)),
+        ].filter(Boolean).join('\n');
+      } else if (figmaPromptContext) {
+        attachmentContext = figmaPromptContext;
       }
 
       const fullPrompt = [
@@ -1397,6 +2981,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         saveUserProfile(profileRef.current).catch(() => {});
       }
 
+      const isFigmaBuildRequest = currentAttachments.some((attachment) => attachment.isFigma) || !!figmaPromptContext;
+      const resolvedSessionProfile = resolveSessionCodingProfile(sessionProfile, cleanContent, 'main_chat');
+      const workbenchPrompt = [
+        cleanContent,
+        isFigmaBuildRequest ? 'The attached Figma design is the source of truth. Build the resulting webpage as a single complete HTML document.' : '',
+        attachmentContext,
+      ].filter(Boolean).join('\n\n');
+      startCodingWorkbench(workbenchPrompt);
       setBotTyping(true);
       try {
         const context: SwanBotContext = {
@@ -1447,82 +3039,336 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             setPendingHandoff(result.handoffSuggestion);
           }
         } else {
-          // Try subagent delegation — route to specialist if message matches
-          let delegated = false;
           try {
-            const { detectSubagent, delegateToSubagent } = await import('../../../lib/subagentRegistry');
-            const { buildPluginPrompt } = await import('../../../lib/pluginRegistry');
-            const subagent = detectSubagent(cleanContent);
-            if (subagent) {
-              setRunStatus('delegated');
-              setActiveSubagent({ name: subagent.displayName, icon: subagent.icon, color: subagent.color });
-              setCurrentRunStep(`${subagent.displayName} is working...`);
+            const { buildPluginPrompt, getPluginConnectorRequirements } = await import('../../../lib/pluginRegistry');
+            const { getMissingConnectorRequirements } = await import('../../../lib/circleIntegrations');
+            const pluginPrompt = buildPluginPrompt(activePlugins);
+            const requiredConnectors = getPluginConnectorRequirements(activePlugins);
+            const missingConnectors = circleId
+              ? await getMissingConnectorRequirements(circleId, requiredConnectors)
+              : [];
+            const integrationPreflight = missingConnectors.length > 0
+              ? `## Integration Preflight\nMissing circle integrations: ${missingConnectors.join(', ')}\nDo not claim end-to-end ownership of workflows that depend on those systems without first flagging the missing integrations.`
+              : '';
+            const augmentedPrompt = [pluginPrompt, integrationPreflight, fullPrompt].filter(Boolean).join('\n\n');
 
-              // Include active plugin prompts
-              const pluginPrompt = buildPluginPrompt(activePlugins);
-              const augmentedPrompt = pluginPrompt ? `${pluginPrompt}\n\n${fullPrompt}` : fullPrompt;
+            // Phase C2 — SSE streaming fast-path. Fires when the message is
+            // simple enough (solo delegation, no Figma, no specialized agent
+            // mode) so 90% of normal chat turns get token-by-token output.
+            // Falls through to the batch runOpenSwanSessionTurn for complex
+            // runs (parallel delegation, coding generation, agent dispatch).
+            const canStream = sessionDelegationMode !== 'parallel'
+              && !isFigmaBuildRequest
+              && !isCodingGenerationRequest(cleanContent, sessionProfile);
 
-              const result = await delegateToSubagent({
-                circleId,
-                userId: currentUserId || 'anonymous',
-                userName: currentUserName,
-                surface: 'main_chat',
-                message: augmentedPrompt,
-                subagent,
-                model: selectedModel !== 'auto' ? selectedModel : undefined,
-                chatHistory,
-              });
-
-              addBotMessage(result.response, undefined, { delegatedTo: subagent.displayName });
-              delegated = true;
-              setRunStatus('idle');
-              setActiveSubagent(null);
-              setCurrentRunStep('');
-
-              if (profileRef.current) {
-                profileRef.current = updateProfileFromMessage(profileRef.current, result.response, false);
-                saveUserProfile(profileRef.current).catch(() => {});
+            if (canStream) {
+              try {
+                const { buildStreamableSystemPrompt } = await import('../../../lib/swanbot');
+                const { streamChatResponse } = await import('../../../lib/swanbotStream');
+                const { resolveModelForSoul, spiritIdForProfile } = await import('../../../lib/serviceProfileSouls');
+                const systemPrompt = await buildStreamableSystemPrompt({
+                  circleId,
+                  userId: currentUserId || 'anonymous',
+                  currentMessage: cleanContent,
+                  model: selectedModel !== 'auto' ? selectedModel : undefined,
+                  userName: currentUserName,
+                  chatHistory,
+                });
+                const streamModel = resolveModelForSoul(
+                  spiritIdForProfile(resolvedSessionProfile),
+                  selectedModel !== 'auto' ? selectedModel : undefined,
+                );
+                const pendingMsg = addPendingBotMessage('');
+                setRunStatus('running');
+                let accumulated = '';
+                await new Promise<void>((resolve, reject) => {
+                  const handle = streamChatResponse({
+                    messages: [
+                      { role: 'system', content: systemPrompt },
+                      { role: 'user', content: augmentedPrompt },
+                    ],
+                    model: streamModel,
+                    circleId,
+                    onDelta: (text) => {
+                      accumulated += text;
+                      updateBotMessage(pendingMsg.id, { content: accumulated, isPending: false });
+                    },
+                    onUsage: (_usage) => {},
+                    onDone: () => resolve(),
+                    onError: (msg) => reject(new Error(msg)),
+                  });
+                  // Store cancel handle in case we need to abort
+                  streamingBuildCleanupRef.current = handle.cancel;
+                });
+                streamingBuildCleanupRef.current = null;
+                // Post-stream: run memory extraction in background
+                if (accumulated.length > 20) {
+                  void (async () => {
+                    try {
+                      const { autoExtractAndSave } = await import('../../../lib/agentMemory');
+                      await autoExtractAndSave(circleId, currentUserId || '', [
+                        { role: 'user', text: cleanContent },
+                        { role: 'assistant', text: accumulated },
+                      ]);
+                    } catch {}
+                  })();
+                }
+                if (currentUserId && activeThreadId) {
+                  persistMainChatBotMessageWithRetry({
+                    circleId,
+                    userId: currentUserId,
+                    agentName,
+                    content: accumulated,
+                    threadId: activeThreadId,
+                    onError: (error) => console.error('[ChatTab] persist streaming msg:', error),
+                  });
+                }
+                setRunStatus('idle');
+                setBotTyping(false);
+                stopCodingWorkbench();
+                return;
+              } catch (streamErr) {
+                console.warn('[ChatTab] Streaming failed, falling back to batch:', streamErr);
+                // Fall through to batch path below
               }
             }
-          } catch { setRunStatus('idle'); setActiveSubagent(null); }
 
-          if (!delegated) {
-          const structured = await getSwanBotStructuredResponse(fullPrompt, context);
-          const botResponse = structured.response;
-          addBotMessage(botResponse, structured.artifacts);
-          // Track bot response in behavior profile
-          if (profileRef.current) {
-            profileRef.current = updateProfileFromMessage(profileRef.current, botResponse, false);
-            saveUserProfile(profileRef.current).catch(() => {});
-          }
-          // Still detect handoffs in talk mode
-          const handoff = detectHandoff(botResponse, 'main_chat');
-          if (handoff) {
-            setPendingHandoff(handoff);
-          }
-          // Track in unified run system (non-blocking)
-          try {
-            const { createRun, updateRunStatus, addStep } = await import('../../../lib/agentRunSystem');
-            const run = await createRun({
-              circleId, userId: currentUserId || 'anonymous', surface: 'main_chat',
-              title: cleanContent.slice(0, 100), goal: cleanContent.slice(0, 500),
-              mode: 'talk', model: selectedModel !== 'auto' ? selectedModel : undefined,
+            setRunStatus('running');
+            setActiveSubagent(null);
+            setActiveDelegatedSubagents([]);
+            const pendingMessage = addPendingBotMessage(
+              (isCodingGenerationRequest(cleanContent, sessionProfile) || isFigmaBuildRequest)
+                ? 'BUILDING...\nOpenSwan is writing the first draft and preparing files.'
+                : 'OpenSwan is working through this request...',
+            );
+            const structured = await runOpenSwanSessionTurn({
+              message: augmentedPrompt,
+            context,
+            surface: 'main_chat',
+            chatSessionId: activeThreadId,
+            mode: 'talk',
+            title: cleanContent.slice(0, 100) || 'OpenSwan Session',
+            goal: cleanContent.slice(0, 500),
+            sessionProfile: resolvedSessionProfile,
+            delegationMode: sessionDelegationMode,
+            activePluginIds: activePlugins,
+            metadata: {
+              selectedModel,
+              threadId: activeThreadId,
+              attachmentCount: currentAttachments.length,
+              delegationMode: sessionDelegationMode,
+              activePluginIds: activePlugins,
+            },
+            onStageChange: (stage, label) => {
+              setRunStatus(stage === 'delegating' ? 'delegated' : 'running');
+              setCurrentRunStep(label);
+            },
+            onDelegationPlan: (subagents) => {
+              setActiveDelegatedSubagents(subagents);
+              if (subagents[0]) {
+                setActiveSubagent({
+                  name: subagents[0].name,
+                  icon: subagents[0].icon,
+                  color: subagents[0].color,
+                });
+              }
+            },
+          });
+            const botResponse = structured.response;
+            const { wikiRefs, researchRefs } = await buildChatInfluenceReferences({
+              prompt: cleanContent,
+              response: botResponse,
+              circleId,
             });
-            if (run) {
-              await addStep({ runId: run.id, circleId, stepIndex: 0, stepKind: 'message', title: 'Response', body: botResponse.slice(0, 5000) });
-              await updateRunStatus(run.id, 'completed');
+            const executionStream = buildOpenSwanExecutionStream({
+              toolEvents: [],
+              verificationResults: structured.verificationResults,
+            });
+            updateBotMessage(pendingMessage.id, {
+              content: botResponse,
+              artifacts: structured.artifacts,
+              wikiRefs,
+              researchRefs,
+              memoriesUsed: structured.memoriesUsed,
+              memoryRefs: structured.memoryReferences,
+              memoryRecommendations: structured.memoryRecommendations,
+              executionStream,
+              browserPlans: structured.browserPlans,
+              browserPlanEvents: structured.browserPlanEvents,
+              runId: structured.runId,
+              taskPlan: structured.taskPlan,
+              toolEvents: [],
+              verificationResults: structured.verificationResults,
+              delegatedSubagents: structured.delegatedSubagents,
+              isPending: false,
+            });
+            if (profileRef.current) {
+              profileRef.current = updateProfileFromMessage(profileRef.current, botResponse, false);
+              saveUserProfile(profileRef.current).catch(() => {});
             }
-          } catch {}
-          } // close if (!delegated)
+            if (currentUserId && activeThreadId) {
+              persistMainChatBotMessageWithRetry({
+                circleId,
+                userId: currentUserId,
+                agentName,
+                content: botResponse,
+                threadId: activeThreadId,
+                artifacts: structured.artifacts,
+                wikiRefs,
+                researchRefs,
+                memoriesUsed: structured.memoriesUsed,
+                memoryRefs: structured.memoryReferences,
+                memoryRecommendations: structured.memoryRecommendations,
+                executionStream,
+                browserPlans: structured.browserPlans,
+                browserPlanEvents: structured.browserPlanEvents,
+                onError: (error) => {
+                  console.error('[ChatTab] Unexpected error persisting bot msg:', error);
+                },
+                onPersisted: (dbId) => {
+                  setMessages(prev => prev.map((message) => (
+                    message.id === pendingMessage.id ? { ...message, dbId } : message
+                  )));
+                },
+              });
+            }
+            const handoff = detectHandoff(botResponse, 'main_chat');
+            if (handoff) {
+              setPendingHandoff(handoff);
+            }
+            setRunStatus('idle');
+            setActiveSubagent(null);
+            setActiveDelegatedSubagents([]);
+            setCurrentRunStep('');
+          } catch {
+            setRunStatus('idle');
+            setActiveSubagent(null);
+            setActiveDelegatedSubagents([]);
+          }
         }
       } catch (err) {
-        addBotMessage("Something went wrong. Try again.");
+        const errorMessage = (isCodingGenerationRequest(cleanContent, sessionProfile) || isFigmaBuildRequest)
+          ? "Build failed before OpenSwan could finish the draft. Try again."
+          : "Something went wrong. Try again.";
+        setMessages((prev) => {
+          const pendingIndex = [...prev].reverse().findIndex((entry) => entry.isBot && entry.isPending);
+          if (pendingIndex === -1) {
+            return [...prev, {
+              id: `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              content: errorMessage,
+              isBot: true,
+              isUser: false,
+              userName: agentName,
+              timestamp: new Date(),
+              reactions: {},
+              isPending: false,
+            }];
+          }
+          const actualIndex = prev.length - 1 - pendingIndex;
+          return prev.map((entry, index) => (
+            index === actualIndex
+              ? { ...entry, content: errorMessage, isPending: false }
+              : entry
+          ));
+        });
         setRunStatus('idle');
         setActiveSubagent(null);
+        setActiveDelegatedSubagents([]);
+        setCurrentRunStep('');
       }
       setBotTyping(false);
+      stopCodingWorkbenchAfter((isCodingGenerationRequest(cleanContent, sessionProfile) || isFigmaBuildRequest) ? 2600 : 0);
     }
   };
+
+  const handleQuickActionSelection = useCallback((text: string) => {
+    const execution = resolveQuickActionExecution(text);
+    const actionText = execution.text;
+    const mode = execution.mode;
+
+    if (actionText === '__SEND_CRYPTO__') { setShowSendCrypto(true); return; }
+    if (actionText === '__TIP__') {
+      setShowSendCrypto(true);
+      setSendAmount('0.001');
+      return;
+    }
+    if (actionText === '__CHECK_IN__') { setShowQuickCheckIn(true); return; }
+    if (actionText === '__NEW_TASK__') { setShowQuickNewTask(true); return; }
+    if (actionText === '__STEP_AWAY__') { setShowQuickStepAway(true); return; }
+    if (actionText === '__ASSIGN_AGENT__') { setShowAssignPanel(true); setShowSpawnPanel(false); return; }
+    if (actionText === '__SPAWN_AGENT__') { setSpawnModalOpen(true); return; }
+    if (actionText === '__MY_WALLET__') {
+      if (Platform.OS !== 'web') {
+        addBotMessage('Wallet status is only available on web right now.');
+        return;
+      }
+      void (async () => {
+        try {
+          const [connectedWallet, walletStates] = await Promise.all([
+            getConnectedWallet(),
+            getAllWalletStates(),
+          ]);
+          const activeWallet = connectedWallet || wallet;
+          const lines = [
+            walletStates.metamask.available
+              ? `🦊 MetaMask: ${walletStates.metamask.address ? `connected ${shortenAddress(walletStates.metamask.address)}` : 'installed, not connected'}`
+              : '🦊 MetaMask: not installed',
+            walletStates.phantom.available
+              ? `👻 Phantom: ${walletStates.phantom.address ? `connected ${shortenAddress(walletStates.phantom.address)}` : 'installed, not connected'}`
+              : '👻 Phantom: not installed',
+          ];
+          const activeLine = activeWallet
+            ? `\n\nActive wallet: **${activeWallet.chain === 'ethereum' ? 'Ethereum' : 'Solana'}** — \`${shortenAddress(activeWallet.address)}\``
+            : '\n\nNo active wallet selected.';
+          addBotMessage(`**Wallet status**\n\n${lines.join('\n')}${activeLine}`);
+        } catch (error: any) {
+          addBotMessage(`Wallet status error: ${error?.message || 'Unknown error'}`);
+        }
+      })();
+      return;
+    }
+    if (actionText === '__COMPUTER_USE__') {
+      if (Platform.OS !== 'web') return;
+      const taskText = window.prompt('What should the agent do in the browser?');
+      if (!taskText || !taskText.trim()) return;
+      setPendingComputerUseTask(taskText.trim());
+      setPendingComputerUsePlan(null);
+      setPendingComputerUseOrigin(null);
+      setBotTyping(true);
+      planComputerUseActions(taskText.trim()).then(actions => {
+        setBotTyping(false);
+        setPendingComputerUseActions(actions);
+        setShowComputerUsePermission(true);
+      }).catch(() => {
+        setBotTyping(false);
+        const fallback: BrowserAction[] = [{
+          id: `action_${Date.now()}_0`, type: 'navigate', target: taskText.trim(),
+          description: `Complete: ${taskText.trim()}`, requiresApproval: true, status: 'pending',
+        }];
+        setPendingComputerUseActions(fallback);
+        setShowComputerUsePermission(true);
+      });
+      return;
+    }
+    if (actionText === '__NUKE__') {
+      const msg = 'Delete ALL messages in this circle? This cannot be undone.';
+      const doNuke = async () => {
+        const { error } = await supabase.from('messages').delete().eq('circle_id', circleId);
+        if (!error) setMessages([]);
+      };
+      if (Platform.OS === 'web') { if (window.confirm(msg)) doNuke(); }
+      else { import('react-native').then(({ Alert }) => Alert.alert('Nuke Chat', msg, [{ text: 'Cancel' }, { text: 'Delete All', style: 'destructive', onPress: doNuke }])); }
+      return;
+    }
+
+    if (mode === 'prefill') {
+      setInput(actionText);
+      inputRef.current?.focus();
+      return;
+    }
+
+    sendMessage(actionText);
+  }, [circleId, sendMessage, wallet]);
 
   // ─── Governance Handlers ─────────────────────────────────────────────────
 
@@ -1622,6 +3468,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   const handleInputChange = (text: string) => {
     setInput(text);
+    if (text.trimStart().startsWith('/')) {
+      setShowMentions(false);
+      return;
+    }
     const lastAt = text.lastIndexOf('@');
     if (lastAt >= 0) {
       const afterAt = text.slice(lastAt + 1);
@@ -1633,6 +3483,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
     setShowMentions(false);
   };
+
+  const handleChangeAgentAvatar = useCallback(async () => {
+    const picked = await pickAttachments();
+    const first = picked[0];
+    if (!first) return;
+
+    const persistentUri = first.base64
+      ? `data:${first.mimeType};base64,${first.base64}`
+      : first.uri;
+
+    setAgentAvatarUri(persistentUri);
+    await saveChatAgentAvatar(circleId, persistentUri);
+  }, [circleId]);
+
+  const handleResetAgentAvatar = useCallback(async () => {
+    setAgentAvatarUri(null);
+    await clearChatAgentAvatar(circleId);
+  }, [circleId]);
 
   const insertMention = (member: any) => {
     const lastAt = input.lastIndexOf('@');
@@ -1648,114 +3516,196 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       m.display_name?.toLowerCase().includes(mentionQuery)
   );
 
-  // ─── Render Helpers ──────────────────────────────────────────────────────
+  const handleRetryVerificationCheck = useCallback(async (message: ChatMessage, checkId: string) => {
+    if (!message.taskPlan) return;
+    const check = message.taskPlan.verification.find((entry) => entry.id === checkId);
+    if (!check) return;
 
-  const renderInlineText = (content: string) => {
-    const parts = content.split(/(@\w+)/g);
-    return parts.map((part, i) => {
-      if (part.startsWith('@')) {
-        return <Text key={i} style={[styles.mention, { color: accentColor }]}>{part}</Text>;
-      }
-      const boldParts = part.split(/(\*\*[^*]+\*\*)/g);
-      return boldParts.map((bp, j) => {
-        if (bp.startsWith('**') && bp.endsWith('**')) {
-          return <Text key={`${i}-${j}`} style={styles.bold}>{bp.slice(2, -2)}</Text>;
-        }
-        return <Text key={`${i}-${j}`}>{bp}</Text>;
+    setRetryingLedgerCheck({ messageId: message.id, checkId });
+    let nextToolEvents = [...(message.toolEvents || [])];
+
+    try {
+      const result = await executeOpenSwanVerificationCheck(check, {
+        onToolEvent: (event) => {
+          nextToolEvents = [...nextToolEvents, event];
+          const nextExecutionStream = buildOpenSwanExecutionStream({
+            toolEvents: nextToolEvents,
+            verificationResults: message.verificationResults || [],
+          });
+          setMessages((prev) => prev.map((entry) => (
+            entry.id === message.id
+              ? { ...entry, toolEvents: nextToolEvents, executionStream: nextExecutionStream }
+              : entry
+          )));
+          if (message.runId && circleId) {
+            void appendRunToolEvent({ runId: message.runId, circleId, event });
+            void mergeRunMetadata(message.runId, { tool_events: nextToolEvents, execution_stream: nextExecutionStream });
+          }
+        },
       });
-    });
-  };
 
-  const renderArtifacts = (artifacts?: SwanBotStructuredArtifact[]) => {
-    if (!artifacts || artifacts.length === 0) return null;
-    return (
-      <View style={styles.inlineArtifactStack}>
-        {artifacts.map((artifact, index) => (
-          <View key={`${artifact.title}-${index}`} style={styles.inlineArtifactCard}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-              <View style={{ width: 18, height: 18, borderRadius: 2, backgroundColor: accentColor + '20', justifyContent: 'center', alignItems: 'center' }}>
-                <Text style={{ color: accentColor, fontSize: 8, fontWeight: '800', fontFamily: 'monospace' }}>
-                  {artifact.kind === 'image' ? 'IMG' : artifact.kind === 'webpage' ? 'WEB' : artifact.kind === 'code' ? '</>' : artifact.kind === 'audio' ? 'AUD' : 'TXT'}
-                </Text>
-              </View>
-              <Text style={[styles.inlineArtifactTitle, { color: accentColor, flex: 1 }]} numberOfLines={1}>{artifact.title}</Text>
-              {(artifact.metadata as any)?.model && (
-                <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: 'monospace' }}>{String((artifact.metadata as any).model)}</Text>
-              )}
-            </View>
-            {/* Image — URL or base64 data URI */}
-            {artifact.kind === 'image' && artifact.url ? (
-              <View>
-                <Image source={{ uri: artifact.url }} style={styles.inlineArtifactImage} resizeMode="contain" />
-                {Platform.OS === 'web' && artifact.url.startsWith('data:') ? (
-                  <Pressable
-                    onPress={() => {
-                      const w = window.open('');
-                      if (w) { w.document.write(`<img src="${artifact.url}" style="max-width:100%;background:#000">`); w.document.title = artifact.title; }
-                    }}
-                    style={{ marginTop: 4, alignSelf: 'flex-start', backgroundColor: '#1a1a28', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}
-                  >
-                    <Text style={{ color: '#a0a0b0', fontSize: 9, fontFamily: 'monospace' }}>Open Full Size</Text>
-                  </Pressable>
-                ) : null}
-              </View>
-            ) : null}
-            {/* Webpage — live iframe preview on web */}
-            {artifact.kind === 'webpage' && artifact.content && Platform.OS === 'web' ? (
-              <View>
-                <View style={{ height: 300, borderWidth: 1, borderColor: '#2a2a3e', borderRadius: 2, overflow: 'hidden', marginBottom: 4 }}>
-                  <iframe
-                    srcDoc={artifact.content}
-                    style={{ width: '100%', height: '100%', border: 'none', backgroundColor: '#0a0a10' } as any}
-                    sandbox="allow-scripts allow-same-origin"
-                    title={artifact.title}
-                  />
-                </View>
-                <View style={{ flexDirection: 'row', gap: 6 }}>
-                  <Pressable
-                    onPress={() => {
-                      const w = window.open('');
-                      if (w) { w.document.write(artifact.content!); w.document.close(); w.document.title = artifact.title; }
-                    }}
-                    style={{ backgroundColor: '#1a1a28', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}
-                  >
-                    <Text style={{ color: '#a0a0b0', fontSize: 9, fontFamily: 'monospace' }}>Open in New Tab</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => {
-                      const blob = new Blob([artifact.content!], { type: 'text/html' });
-                      const url = URL.createObjectURL(blob);
-                      const a = document.createElement('a');
-                      a.href = url; a.download = `${artifact.title.replace(/\s+/g, '-').toLowerCase()}.html`;
-                      a.click(); URL.revokeObjectURL(url);
-                    }}
-                    style={{ backgroundColor: '#1a1a28', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}
-                  >
-                    <Text style={{ color: '#a0a0b0', fontSize: 9, fontFamily: 'monospace' }}>Download HTML</Text>
-                  </Pressable>
-                </View>
-              </View>
-            ) : (artifact.kind === 'webpage' || artifact.kind === 'code') && artifact.content ? (
-              <ScrollView horizontal style={styles.inlineArtifactCodeScroll} contentContainerStyle={styles.inlineArtifactCodeContent}>
-                <Text style={styles.inlineArtifactCode}>{artifact.content.slice(0, 2000)}</Text>
-              </ScrollView>
-            ) : null}
-            {/* Text content for other kinds */}
-            {artifact.kind !== 'image' && artifact.kind !== 'code' && artifact.kind !== 'webpage' && artifact.content ? (
-              <Text style={styles.inlineArtifactText}>{artifact.content}</Text>
-            ) : null}
-            {artifact.kind === 'audio' && artifact.url ? (
-              <Text style={styles.inlineArtifactMeta}>Audio artifact generated.</Text>
-            ) : null}
-          </View>
-        ))}
-      </View>
-    );
-  };
+      const nextVerificationResults = upsertOpenSwanVerificationResult(
+        message.verificationResults || [],
+        result,
+      );
+      const nextExecutionStream = buildOpenSwanExecutionStream({
+        toolEvents: nextToolEvents,
+        verificationResults: nextVerificationResults,
+      });
+
+      setMessages((prev) => prev.map((entry) => (
+        entry.id === message.id
+          ? {
+              ...entry,
+              toolEvents: nextToolEvents,
+              verificationResults: nextVerificationResults,
+              executionStream: nextExecutionStream,
+            }
+          : entry
+      )));
+
+      if (message.runId) {
+        void mergeRunMetadata(message.runId, {
+          tool_events: nextToolEvents,
+          verification_results: nextVerificationResults,
+          execution_stream: nextExecutionStream,
+        });
+      }
+    } finally {
+      setRetryingLedgerCheck((current) => (
+        current?.messageId === message.id && current.checkId === checkId ? null : current
+      ));
+    }
+  }, [circleId]);
+
+  const handlePromoteMemoryRef = useCallback(async (ref: PromptMemoryReference) => {
+    const ok = await promoteMemory(ref.id);
+    if (!ok) {
+      setMemoryToast({ message: 'Could not promote memory', type: 'conflict' });
+      return;
+    }
+    void recordMemoryFeedback({
+      memoryId: ref.id,
+      action: 'promoted',
+      note: ref.matchReason || 'Promoted from memory influence card',
+      userId: currentUserId || undefined,
+      source: 'chat_memory_influence',
+    });
+    setMemoryToast({ message: `Promoted "${ref.title.slice(0, 42)}"`, type: 'updated' });
+    if (activeSpiritId && currentUserId) {
+      getLatestSpiritMemoryReferences({
+        spiritId: activeSpiritId,
+        circleId,
+        userId: currentUserId,
+        limit: 4,
+      }).then(setSoulMemoryRefs).catch(() => {});
+    }
+  }, [activeSpiritId, circleId, currentUserId]);
+
+  const handlePinMemoryRef = useCallback(async (ref: PromptMemoryReference) => {
+    const ok = await pinMemory(ref.id);
+    if (!ok) {
+      setMemoryToast({ message: 'Could not pin memory', type: 'conflict' });
+      return;
+    }
+    void recordMemoryFeedback({
+      memoryId: ref.id,
+      action: 'pinned',
+      note: ref.matchReason || 'Pinned from memory influence card',
+      userId: currentUserId || undefined,
+      source: 'chat_memory_influence',
+    });
+    setMemoryToast({ message: `Pinned "${ref.title.slice(0, 42)}"`, type: 'updated' });
+  }, [currentUserId]);
+
+  const handleMemoryNotHelpful = useCallback(async (ref: PromptMemoryReference) => {
+    const ok = await decayMemoryImportance(ref.id);
+    if (!ok) {
+      setMemoryToast({ message: 'Could not mark memory as not helpful', type: 'conflict' });
+      return;
+    }
+    void recordMemoryFeedback({
+      memoryId: ref.id,
+      action: 'not_helpful',
+      note: ref.matchReason || 'Marked not helpful from memory influence card',
+      userId: currentUserId || undefined,
+      source: 'chat_memory_influence',
+    });
+    setMemoryToast({ message: `Downranked "${ref.title.slice(0, 42)}"`, type: 'updated' });
+  }, [currentUserId]);
+
+  const handleForgetMemoryRef = useCallback(async (ref: PromptMemoryReference) => {
+    if (!currentUserId) return;
+    const ok = await softDeleteMemory(ref.id, currentUserId, 'chat_memory_forget');
+    if (!ok) {
+      setMemoryToast({ message: 'Could not forget memory', type: 'conflict' });
+      return;
+    }
+    setMemoryToast({ message: `Forgot "${ref.title.slice(0, 42)}"`, type: 'forgotten' });
+    if (activeSpiritId) {
+      getLatestSpiritMemoryReferences({
+        spiritId: activeSpiritId,
+        circleId,
+        userId: currentUserId,
+        limit: 4,
+      }).then(setSoulMemoryRefs).catch(() => {});
+    }
+  }, [activeSpiritId, circleId, currentUserId]);
+
+  const handleRememberResponse = useCallback(async (message: ChatMessage) => {
+    if (!currentUserId) return;
+    const trimmed = (message.content || '').trim();
+    if (!trimmed) return;
+    const content = trimmed.length > 700 ? `${trimmed.slice(0, 697)}...` : trimmed;
+    const saved = await rememberFromChat(circleId, currentUserId, content, 'context');
+    if (!saved) {
+      setMemoryToast({ message: 'Could not save response to memory', type: 'conflict' });
+      return;
+    }
+    setMemoryToast({ message: `Remembered response: "${saved.title.slice(0, 42)}"`, type: 'saved' });
+  }, [circleId, currentUserId]);
+
+  const handleApplyMemoryRecommendation = useCallback(async (recommendation: OpenSwanMemoryRecommendation) => {
+    if (!currentUserId) return;
+    const ok = await applyOpenSwanMemoryRecommendation({
+      circleId,
+      userId: currentUserId,
+      agentId: 'openswan:main_chat',
+      agentName,
+      recommendation,
+    });
+    if (!ok) {
+      setMemoryToast({ message: 'Could not apply memory recommendation', type: 'conflict' });
+      return;
+    }
+    setMemoryToast({
+      message: recommendation.recommendationType === 'promote_existing'
+        ? `Promoted "${recommendation.title.slice(0, 42)}"`
+        : `Saved recommendation: "${recommendation.title.slice(0, 42)}"`,
+      type: 'saved',
+    });
+    if (activeSpiritId) {
+      getLatestSpiritMemoryReferences({
+        spiritId: activeSpiritId,
+        circleId,
+        userId: currentUserId,
+        limit: 4,
+      }).then(setSoulMemoryRefs).catch(() => {});
+    }
+  }, [activeSpiritId, agentName, circleId, currentUserId]);
+
+  // ─── Render Helpers ──────────────────────────────────────────────────────
 
   const renderContent = (item: ChatMessage) => {
     return (
       <View>
+        {item.isPending ? (
+          <View style={{ marginBottom: 6, alignSelf: 'flex-start', backgroundColor: '#22c55e14', borderColor: '#22c55e40', borderWidth: 1, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 4 }}>
+            <Text style={{ color: '#86efac', fontSize: 9, fontWeight: '900', letterSpacing: 0.8, fontFamily: 'monospace' }}>
+              BUILDING NOW
+            </Text>
+          </View>
+        ) : null}
         {/* Subagent delegation badge */}
         {item.delegatedTo && (
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 4 }}>
@@ -1764,21 +3714,205 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             </View>
           </View>
         )}
-        <Text style={[styles.msgContent, { color: messageDensity === 'compact' ? '#bbb' : '#ccc' }]}>
-          {renderInlineText(item.content)}
-        </Text>
-        {renderArtifacts(item.artifacts)}
-        {/* Memory source citations — which memories informed this response */}
-        {item.memoriesUsed && item.memoriesUsed.length > 0 && (
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 3, marginTop: 6 }}>
-            <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: 'monospace' }}>Used:</Text>
-            {item.memoriesUsed.map((m, i) => (
-              <View key={i} style={{ backgroundColor: '#6366f110', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#6366f125' }}>
-                <Text style={{ color: '#6366f1', fontSize: 7, fontFamily: 'monospace' }}>{m}</Text>
+        {item.delegatedSubagents && item.delegatedSubagents.length > 0 ? (
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}>
+            {item.delegatedSubagents.map((name) => (
+              <View key={name} style={{ backgroundColor: '#0ea5e915', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 999, borderWidth: 1, borderColor: '#0ea5e940' }}>
+                <Text style={{ color: '#67e8f9', fontSize: 8, fontWeight: '800', fontFamily: 'monospace' }}>
+                  {name.toUpperCase()}
+                </Text>
               </View>
             ))}
           </View>
-        )}
+        ) : null}
+        <ChatInlineRichText
+          content={item.content}
+          accentColor={accentColor}
+          textColor={messageDensity === 'compact' ? '#bbb' : '#ccc'}
+        />
+        <ChatArtifacts
+          artifacts={item.artifacts}
+          accentColor={accentColor}
+          circleId={circleId}
+          sessionProfile={sessionProfile}
+          runId={item.runId}
+          onRunLedgerUpdate={(update) => {
+            setMessages((prev) => prev.map((message) => (
+              message.id === item.id
+                ? {
+                    ...message,
+                    toolEvents: update.toolEvents ?? message.toolEvents,
+                    verificationResults: update.verificationResults ?? message.verificationResults,
+                    executionStream: buildOpenSwanExecutionStream({
+                      toolEvents: update.toolEvents ?? message.toolEvents,
+                      verificationResults: update.verificationResults ?? message.verificationResults,
+                    }),
+                  }
+                : message
+            )));
+          }}
+        />
+        {(item.wikiRefs && item.wikiRefs.length > 0) || (item.researchRefs && item.researchRefs.length > 0) ? (
+          <View style={styles.messageSourcesWrap}>
+            {item.wikiRefs && item.wikiRefs.length > 0 ? (
+              <View style={styles.messageSourceSection}>
+                <Text style={styles.messageSourceLabel}>AI Wiki</Text>
+                {item.wikiRefs.slice(0, 3).map((ref) => (
+                  <Pressable
+                    key={ref.id}
+                    onPress={() => navigation.navigate('WikiArticle', { articleId: ref.id })}
+                    style={[styles.messageSourceCard, { borderColor: `${ref.color}40`, backgroundColor: `${ref.color}12` }]}
+                  >
+                    <Text style={[styles.messageSourceTitle, { color: ref.color }]}>{ref.title}</Text>
+                    <Text style={styles.messageSourceMeta}>{ref.category.toUpperCase()}</Text>
+                    <Text style={styles.messageSourceSubtitle} numberOfLines={2}>{ref.subtitle}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
+            {item.researchRefs && item.researchRefs.length > 0 ? (
+              <View style={styles.messageSourceSection}>
+                <Text style={styles.messageSourceLabel}>Research Influence</Text>
+                {item.researchRefs.slice(0, 3).map((ref) => (
+                  <Pressable
+                    key={ref.id}
+                    onPress={() => navigation.navigate('ResearchDocumentDetail', { documentId: ref.id })}
+                    style={[styles.messageSourceCard, { borderColor: `${ref.color}40`, backgroundColor: `${ref.color}12` }]}
+                  >
+                    <Text style={[styles.messageSourceTitle, { color: ref.color }]}>{ref.title}</Text>
+                    <Text style={styles.messageSourceMeta}>
+                      {(ref.profileKey || ref.sourceType || 'research').toUpperCase()} • {ref.reviewStatus.toUpperCase()}
+                    </Text>
+                    <Text style={styles.messageSourceSubtitle} numberOfLines={2}>{ref.subtitle}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
+          </View>
+        ) : null}
+        <RunExecutionCard
+          taskPlan={item.taskPlan}
+          toolEvents={item.toolEvents}
+          verificationResults={item.verificationResults}
+          executionStream={item.executionStream}
+          browserPlans={item.browserPlans}
+          browserPlanEvents={item.browserPlanEvents}
+          browserSessions={item.browserSessions}
+          delegatedSubagents={item.delegatedSubagents}
+          accentColor={accentColor}
+          onLaunchBrowserPlan={(plan) => handleLaunchBrowserPlan(item, plan)}
+          onOpenBrowserSession={handleOpenBrowserSession}
+          onOpenBrowserSessionHistory={setSelectedBrowserSession}
+          onRetryCheck={(checkId) => handleRetryVerificationCheck(item, checkId)}
+          retryingCheckId={retryingLedgerCheck?.messageId === item.id ? retryingLedgerCheck.checkId : null}
+        />
+        {(item.memoryRefs && item.memoryRefs.length > 0) || (item.memoriesUsed && item.memoriesUsed.length > 0) ? (
+          <View style={styles.messageSourceSection}>
+            <Text style={styles.messageSourceLabel}>Memory Influence</Text>
+            {item.memoryRefs && item.memoryRefs.length > 0 ? (
+              <>
+                {(['guidance', 'pattern'] as const).map((family) => {
+                  const refs = item.memoryRefs?.filter((ref) => getMemoryFamily(ref) === family).slice(0, 4) || [];
+                  if (refs.length === 0) return null;
+                  return (
+                    <View key={family} style={styles.memoryGroupSection}>
+                      <Text style={styles.memoryGroupLabel}>{family === 'guidance' ? 'Guidance Memory' : 'Execution Patterns'}</Text>
+                      {refs.map((ref) => (
+                        <View
+                          key={ref.id}
+                          style={[
+                            styles.messageSourceCard,
+                            styles.memoryInfluenceCard,
+                            ref.soulKey ? styles.memoryInfluenceCardSoul : null,
+                          ]}
+                        >
+                          <Text style={styles.memoryInfluenceTitle}>{ref.title}</Text>
+                          <Text style={styles.messageSourceMeta}>
+                            {getMemoryFamilyLabel(ref).toUpperCase()} • {formatMemoryStateLabel(ref).toUpperCase()} • {String(ref.scope).toUpperCase()} • {String(ref.memoryKind).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryTrustLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}{formatMemorySourceLabel(ref) ? ` • ${formatMemorySourceLabel(ref)!.toUpperCase()}` : ''}
+                          </Text>
+                          <Text style={styles.messageSourceSubtitle}>
+                            {ref.matchReason ? `${ref.matchReason}. ` : ''}
+                            {ref.retrievalMode === 'startup' ? 'Always-on startup memory.' : 'Retrieved dynamically for this response.'}
+                            {ref.helpfulness != null ? ` Prior feedback: ${formatMemoryTrustLabel(ref)}.` : ''}
+                            {ref.soulKey ? ` Bound to ${ref.soulKey.replace(/^soul:/, '').toUpperCase()}.` : ''}
+                            {ref.taskFit ? ` ${ref.taskFit === 'core' ? 'Core' : ref.taskFit === 'supporting' ? 'Supporting' : 'Background'} for this task.` : ''}
+                          </Text>
+                          <View style={styles.memoryActionRow}>
+                            <Pressable onPress={() => handlePromoteMemoryRef(ref)} style={styles.memoryActionButton}>
+                              <Text style={styles.memoryActionButtonText}>PROMOTE</Text>
+                            </Pressable>
+                            <Pressable onPress={() => handlePinMemoryRef(ref)} style={styles.memoryActionButton}>
+                              <Text style={styles.memoryActionButtonText}>PIN</Text>
+                            </Pressable>
+                            <Pressable onPress={() => handleForgetMemoryRef(ref)} style={[styles.memoryActionButton, styles.memoryForgetButton]}>
+                              <Text style={[styles.memoryActionButtonText, styles.memoryForgetButtonText]}>FORGET</Text>
+                            </Pressable>
+                            <Pressable onPress={() => handleMemoryNotHelpful(ref)} style={styles.memoryActionButton}>
+                              <Text style={styles.memoryActionButtonText}>NOT HELPFUL</Text>
+                            </Pressable>
+                          </View>
+                        </View>
+                      ))}
+                    </View>
+                  );
+                })}
+                <View style={styles.memoryActionRow}>
+                  <Pressable onPress={() => handleRememberResponse(item)} style={styles.memoryActionButton}>
+                    <Text style={styles.memoryActionButtonText}>REMEMBER RESPONSE</Text>
+                  </Pressable>
+                </View>
+              </>
+            ) : (
+              <View style={styles.memoryChipRow}>
+                {item.memoriesUsed?.map((memory, index) => (
+                  <View key={`${memory}-${index}`} style={styles.memoryInfluenceChip}>
+                    <Text style={styles.memoryInfluenceChipText}>{memory}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+          </View>
+        ) : null}
+        {item.memoryRecommendations && item.memoryRecommendations.length > 0 ? (
+          <View style={styles.messageSourceSection}>
+            <Text style={styles.messageSourceLabel}>Memory Recommendations</Text>
+            {item.memoryRecommendations.map((recommendation) => (
+              <View key={recommendation.id} style={[styles.messageSourceCard, styles.memoryInfluenceCard]}>
+                <Text style={styles.memoryInfluenceTitle}>{recommendation.title}</Text>
+                <Text style={styles.messageSourceMeta}>
+                  {recommendation.priority.toUpperCase()} • {recommendation.memoryKind.toUpperCase()} • {recommendation.target.replace(/_/g, ' ').toUpperCase()}
+                </Text>
+                <Text style={styles.messageSourceSubtitle}>
+                  {recommendation.rationale}
+                </Text>
+                <View style={styles.memoryActionRow}>
+                  <Pressable onPress={() => handleApplyMemoryRecommendation(recommendation)} style={styles.memoryActionButton}>
+                    <Text style={styles.memoryActionButtonText}>
+                      {recommendation.recommendationType === 'promote_existing' ? 'PROMOTE MEMORY' : 'SAVE RECOMMENDED MEMORY'}
+                    </Text>
+                  </Pressable>
+                  {recommendation.memoryId ? (
+                    <Pressable
+                      onPress={() => {
+                        void recordMemoryFeedback({
+                          memoryId: recommendation.memoryId!,
+                          action: 'dismissed',
+                          note: recommendation.rationale,
+                          userId: currentUserId || undefined,
+                          source: 'openswan_recommendation',
+                        });
+                        setMemoryToast({ message: 'Dismissed memory recommendation', type: 'updated' });
+                      }}
+                      style={[styles.memoryActionButton, styles.memoryForgetButton]}
+                    >
+                      <Text style={[styles.memoryActionButtonText, styles.memoryForgetButtonText]}>DISMISS</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              </View>
+            ))}
+          </View>
+        ) : null}
         {/* Memory saved indicator — inline chip like ChatGPT */}
         {item.memoriesSaved && item.memoriesSaved.length > 0 && (
           <Pressable
@@ -1797,11 +3931,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     );
   };
 
+  // Inverted data — newest at index 0 for the inverted FlatList. This
+  // pins the latest message at the visual bottom with zero scroll mgmt.
+  const invertedMessages = useMemo(() => [...messages].reverse(), [messages]);
+
+  // In the inverted array, the chronologically PREVIOUS message is at
+  // index+1 (older = higher index).
   const isConsecutive = (index: number) => {
-    if (index === 0) return false;
-    const prev = messages[index - 1];
-    const curr = messages[index];
-    if (prev.isBot !== curr.isBot || prev.isUser !== curr.isUser) return false;
+    if (index >= invertedMessages.length - 1) return false;
+    const curr = invertedMessages[index];
+    const prev = invertedMessages[index + 1]; // chronologically earlier
+    if (!prev || prev.isBot !== curr.isBot || prev.isUser !== curr.isUser) return false;
     return curr.timestamp.getTime() - prev.timestamp.getTime() < 300000;
   };
 
@@ -1839,7 +3979,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           renderContent={renderContent}
           accentColor={accentColor}
           messageDensity={messageDensity}
+          agentAvatarSource={agentAvatarSource}
+          agentName={agentName}
         />
+        {item.isBot && currentUserId && (
+          <View style={{ paddingLeft: 44, gap: 2 }}>
+            <MessageCitations
+              userId={currentUserId}
+              messageTimestamp={item.timestamp.toISOString()}
+              nextMessageTimestamp={index > 0 ? invertedMessages[index - 1]?.timestamp?.toISOString() : undefined}
+              accentColor={accentColor}
+            />
+            <RunCostDrawer
+              userId={currentUserId}
+              messageTimestamp={item.timestamp.toISOString()}
+              nextMessageTimestamp={index > 0 ? invertedMessages[index - 1]?.timestamp?.toISOString() : undefined}
+            />
+          </View>
+        )}
       </Animated.View>
     );
   };
@@ -1848,93 +4005,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   const renderEmptyState = () => (
     <ScrollView contentContainerStyle={styles.emptyContainer}>
-      {isFirstVisit && (
-        <Animated.View
-          style={[
-            styles.welcomeOverlay,
-            {
-              opacity: welcomeAnim,
-              transform: [
-                {
-                  scale: welcomeAnim.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [0.8, 1],
-                  }),
-                },
-              ],
-            },
-          ]}
-        >
-          <Text style={[styles.welcomeText, { color: accentColor }]}>✨ Welcome to the Circle!</Text>
-          <Text style={styles.welcomeSubtext}>Your underground network awaits...</Text>
-        </Animated.View>
-      )}
-
       <View style={[styles.heroSection, Platform.OS === 'web' && styles.heroSectionWeb]}>
         <Image
           source={{ uri: 'https://swanopoly.s3.us-east-1.amazonaws.com/SwanAI/swanai.png' }}
           style={styles.heroBotImage}
           resizeMode="contain"
         />
-        <Text style={[styles.heroTitle, { color: accentColor }]}>CIRCLE CHAT</Text>
-        <Text style={styles.heroSubtitle}>
-          Talk with your crew. Play games. Challenge each other.{'\n'}
-          Tap any button below to get started.
-        </Text>
-        
-        {/* Activity pulse */}
-        <View style={[styles.activityPulse, { borderColor: accentColor + '40' }]}>
-          <Text style={styles.activityText}>{members.length - 1} members • {messages.length} messages</Text>
-        </View>
-      </View>
-
-      {/* Quick actions moved to composer dropdown */}
-
-      {/* Categories with glassmorphism */}
-      <View style={styles.categorySection}>
-        <View style={styles.densityToggle}>
-          <Text style={styles.sectionLabel}>EXPLORE</Text>
-          <Pressable
-            onPress={() => setMessageDensity(messageDensity === 'compact' ? 'cozy' : 'compact')}
-            style={[styles.densityButton, { borderColor: accentColor + '40' }]}
-          >
-            <Text style={[styles.densityButtonText, { color: accentColor }]}>
-              {messageDensity === 'compact' ? '⬜ Compact' : '⬛ Cozy'}
-            </Text>
-          </Pressable>
-        </View>
-
-        {PROMPT_CATEGORIES.map((cat, catIdx) => (
-          <GlassmorphismCard
-            key={catIdx}
-            category={cat}
-            expanded={expandedCategory === catIdx}
-            onToggle={() => setExpandedCategory(expandedCategory === catIdx ? null : catIdx)}
-            onPromptPress={(text: string) => {
-              if (text.endsWith(' ')) {
-                setInput(text);
-                inputRef.current?.focus();
-              } else {
-                sendMessage(text);
-              }
-            }}
-            accentColor={accentColor}
-          />
-        ))}
-      </View>
-
-      {/* Tips with parallax effect */}
-      <View style={styles.tipsSection}>
-        <Text style={styles.sectionLabel}>💡 HOW IT WORKS</Text>
-        {[
-          `Type @${agentName} or tap the bot button to talk to the AI`,
-          '🎮 Play games — trivia, would you rather, hot takes, and more',
-          '⚔️ Challenge members — 1v1 duels, speed tasks, dares',
-          '🧠 AI knows everything — tasks, streak, check-ins, who\'s slacking',
-          'Hover messages to react 🔥 💪 👊 or reply ↩',
-        ].map((tip, i) => (
-          <TipCard key={i} tip={tip} delay={i * 150} accentColor={accentColor} />
-        ))}
       </View>
     </ScrollView>
   );
@@ -1950,7 +4026,37 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   }
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <View style={{ flex: 1, flexDirection: 'row', backgroundColor: '#000' }}>
+      {Platform.OS === 'web' && globalFileDragActive ? (
+        <View pointerEvents="none" style={styles.globalDropOverlay}>
+          <View style={styles.globalDropCard}>
+            <Text style={styles.globalDropTitle}>DROP FILES TO UPLOAD</Text>
+            <Text style={styles.globalDropSubtitle}>Images, docs, code, PDFs, archives, Figma exports, and more</Text>
+          </View>
+        </View>
+      ) : null}
+      {circleId && (
+        <ChatThreadSidebar
+          circleId={circleId}
+          activeThreadId={activeThreadId}
+          onSelectThread={handleSelectThread}
+          onNewThread={handleNewThread}
+          onDeleteThread={async (threadId) => {
+            try {
+              const { deleteThread: dt } = await import('../../../lib/circleChatThreads');
+              await dt(threadId);
+              setThreadListRefreshToken(prev => prev + 1);
+              if (activeThreadId === threadId) setActiveThreadId(null);
+            } catch (err) {
+              console.warn('[ChatTab] delete thread failed:', err);
+            }
+          }}
+          refreshToken={threadListRefreshToken}
+          collapsed={sidebarCollapsed}
+          onToggleCollapsed={handleToggleSidebar}
+        />
+      )}
+      <KeyboardAvoidingView style={[styles.container, { flex: 1 }]} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       {/* Floating elements */}
       {floatingEmojis.map((emoji) => (
         <FloatingEmoji
@@ -1970,61 +4076,148 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         />
       ))}
 
-      {messages.length === 0 ? renderEmptyState() : (
-        <>
-          {/* Agent identity bar — tap to rename */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: '#1a1a28' }}>
-            <FlatIcon name="robot" size={16} />
-            {editingAgentName ? (
-              <TextInput
-                autoFocus
-                value={agentNameDraft}
-                onChangeText={setAgentNameDraft}
-                onSubmitEditing={() => { setAgentName(agentNameDraft); setEditingAgentName(false); }}
-                onBlur={() => { setAgentName(agentNameDraft); setEditingAgentName(false); }}
-                style={{ color: '#f0f0f5', fontSize: 12, fontWeight: '700', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', flex: 1, paddingVertical: 2, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
-                maxLength={24}
-                returnKeyType="done"
-              />
-            ) : (
-              <Pressable
-                onPress={() => { setAgentNameDraft(agentName); setEditingAgentName(true); }}
-                style={[{ flexDirection: 'row', alignItems: 'center', gap: 4 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              >
-                <Text style={{ color: accentColor, fontSize: 12, fontWeight: '700', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>{agentName}</Text>
-                <Text style={{ color: '#3a3a4e', fontSize: 9 }}>E</Text>
-              </Pressable>
-            )}
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginLeft: 'auto' }}>
-              <Pressable
-                onPress={() => setShowPluginPicker(prev => !prev)}
-                style={[{ backgroundColor: activePlugins.length > 0 ? '#22c55e15' : '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: activePlugins.length > 0 ? '#22c55e40' : '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              >
-                <Text style={{ color: activePlugins.length > 0 ? '#22c55e' : '#606075', fontSize: 8, fontWeight: '700', fontFamily: 'monospace' }}>PLUGINS{activePlugins.length > 0 ? ` ${activePlugins.length}` : ''}</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => setShowMemoryViewer(prev => !prev)}
-                style={[{ backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              >
-                <Text style={{ color: '#6366f1', fontSize: 8, fontWeight: '700', fontFamily: 'monospace' }}>MEMORY</Text>
-              </Pressable>
-              <Pressable
-                onPress={async () => {
-                  const { resetAgentMind } = await import('../../../lib/swanbot');
-                  const { cleared } = await resetAgentMind(circleId);
-                  setMessages([]);
-                  addBotMessage(`Mind reset. ${cleared > 0 ? `Cleared ${cleared} memories. ` : ''}Starting fresh.`);
-                }}
-                style={[{ backgroundColor: '#1a1a28', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              >
-                <Text style={{ color: '#ef4444', fontSize: 8, fontWeight: '700', fontFamily: 'monospace' }}>RESET</Text>
+      <BrandPackEditor
+        circleId={circleId}
+        visible={brandPackEditorOpen}
+        onClose={() => setBrandPackEditorOpen(false)}
+        onSaved={(pack) => setBrandPack(pack)}
+      />
+
+      <BuilderImagesEditor
+        threadId={activeThreadId}
+        visible={imagesEditorOpen}
+        onClose={() => setImagesEditorOpen(false)}
+        onChanged={(imgs) => setBuilderImages(imgs)}
+      />
+
+      <BuilderGithubSaveModal
+        circleId={circleId}
+        visible={githubSaveOpen}
+        onClose={() => setGithubSaveOpen(false)}
+        title={effectiveBuildArtifact?.title || 'UC Build'}
+        html={effectiveBuildArtifact?.kind === 'webpage' ? (effectiveBuildArtifact?.content || null) : null}
+      />
+
+      <BuilderNetlifyDeployModal
+        circleId={circleId}
+        visible={netlifyDeployOpen}
+        onClose={() => setNetlifyDeployOpen(false)}
+        title={effectiveBuildArtifact?.title || 'UC Build'}
+        html={effectiveBuildArtifact?.kind === 'webpage' ? (effectiveBuildArtifact?.content || null) : null}
+      />
+
+      <Modal
+        visible={builderModalOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setBuilderModalOpen(false)}
+      >
+        <View style={styles.builderModalScrim}>
+          <View style={styles.builderModalCard}>
+            <View style={styles.builderModalHeader}>
+              <Text style={styles.builderModalTitle}>Live Builder</Text>
+              <Pressable onPress={() => setBuilderModalOpen(false)} style={styles.builderModalCloseButton}>
+                <Text style={styles.builderModalCloseButtonText}>CLOSE</Text>
               </Pressable>
             </View>
+            <ChatBuildStudio
+              accentColor={accentColor}
+              selectedModel={selectedModel}
+              currentRunStep={currentRunStep}
+              prompt={codingWorkbenchPrompt}
+              tick={codingWorkbenchTick}
+              artifact={effectiveBuildArtifact}
+              view={buildStudioView}
+              onViewChange={setBuildStudioView}
+              circleId={circleId}
+              streamingText={streamingBuildText}
+              streamingPhase={streamingBuildPhase}
+              revisions={builderRevisions}
+              activeArtifactContent={effectiveBuildArtifact?.content || null}
+              onRevertRevision={handleRevertRevision}
+              onDeleteRevision={handleDeleteRevision}
+              onOpenBrandPack={() => setBrandPackEditorOpen(true)}
+              brandPackActive={isBrandPackActive(brandPack)}
+              figmaReferences={builderFigmaRefs}
+              selectedFigmaRefId={selectedBuilderFigmaRefId}
+              onSelectFigmaRef={setSelectedBuilderFigmaRefId}
+              onArtifactEdit={handleArtifactEdit}
+              onRegenerateTweak={handleRegenerateTweak}
+              onPointEdit={handlePointEdit}
+              onPickTemplate={(brief, label) => launchBuildStream(brief, selectedBuilderFigmaPrompt || undefined, label)}
+              onOpenImages={() => setImagesEditorOpen(true)}
+              imagesCount={builderImages.length}
+              onOpenGithubSave={() => setGithubSaveOpen(true)}
+              onOpenNetlifyDeploy={() => setNetlifyDeployOpen(true)}
+            />
           </View>
+        </View>
+      </Modal>
+
+      <SpawnAgentsModal
+        visible={spawnModalOpen}
+        onClose={() => setSpawnModalOpen(false)}
+        onSpawned={(result) => {
+          if (result.ok) {
+            const lines = result.results
+              .filter(r => r.ok)
+              .map(r => `- **${r.task.slice(0, 60)}**${r.pid ? ` (PID ${r.pid})` : ''}`);
+            addBotMessage(`Spawned ${result.spawned} agent${result.spawned !== 1 ? 's' : ''}:\n\n${lines.join('\n')}\n\nAgents will appear in the Office once detected.`);
+          } else {
+            addBotMessage(`Agent spawn failed: ${result.message}`);
+          }
+        }}
+      />
+
+      <ChatThreadHeader
+        threadId={activeThreadId}
+        circleId={circleId}
+        currentUserId={currentUserId}
+        refreshToken={threadListRefreshToken}
+        onThreadUpdated={handleThreadMetaChanged}
+        selectedModel={selectedModel}
+        sessionProfile={sessionProfile}
+        delegationMode={sessionDelegationMode}
+        onSessionProfileChange={handleSessionProfileChange}
+        onDelegationModeChange={handleDelegationModeChange}
+        onOpenRunHistory={() => setShowRunHistory(true)}
+      />
+      {showReopenBuilderPill ? (
+        <View style={styles.builderReopenBar}>
+          <Pressable
+            onPress={openBuilderStudio}
+            style={[styles.builderReopenButton, { flexDirection: 'row', alignItems: 'center', gap: 8 }]}
+          >
+            <Text style={[styles.builderReopenButtonText, { color: accentColor }]}>↻ OPEN LAST BUILD</Text>
+            {effectiveBuildArtifact?.title ? (
+              <Text style={{ color: '#7f8ea3', fontSize: 10, fontFamily: 'monospace' }} numberOfLines={1}>
+                — {effectiveBuildArtifact.title.slice(0, 48)}
+              </Text>
+            ) : null}
+          </Pressable>
+        </View>
+      ) : null}
+      <RunHistoryDrawer
+        visible={showRunHistory}
+        circleId={circleId}
+        currentUserId={currentUserId}
+        chatSessionId={activeThreadId}
+        title="OpenSwan Run History"
+        onClose={() => setShowRunHistory(false)}
+      />
+      {messages.length === 0 ? renderEmptyState() : (
+        <View
+          ref={Platform.OS === 'web' ? (node => { builderDragContainerRef.current = node as HTMLDivElement | null; }) : undefined}
+          style={[styles.chatSurfaceRow, showWorkbenchSidecar && styles.chatSurfaceRowSplit]}
+        >
+          <View style={[styles.chatMainPane, showWorkbenchSidecar && { width: `${100 - builderPaneWidth}%` as any }]}>
+        <>
+          {/* Agent identity bar removed — functionality preserved via OpenSwan service menu */}
 
           {/* Plugin Picker Panel */}
           {showPluginPicker && (
             <PluginPicker
+              circleId={circleId}
               activePluginIds={activePlugins}
               onTogglePlugin={(id) => setActivePlugins(prev => prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id])}
               onQuickStart={(prompt) => { setInput(prompt); inputRef.current?.focus(); }}
@@ -2042,6 +4235,75 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               onClose={() => setShowMemoryViewer(false)}
             />
           )}
+
+          {soulLearningRefs.length > 0 ? (
+            <View style={styles.soulLearningRail}>
+              <View style={styles.soulLearningHeader}>
+                <Text style={styles.soulLearningLabel}>
+                  {activeSpirit?.name || 'OpenSwan SOUL'} learning now
+                </Text>
+                <Pressable onPress={() => navigation.navigate('ResearchControlCenter')} style={styles.soulLearningLink}>
+                  <Text style={styles.soulLearningLinkText}>OPEN RESEARCH</Text>
+                </Pressable>
+              </View>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.soulLearningScroll}>
+                {soulLearningRefs.map((ref) => (
+                  <Pressable
+                    key={ref.id}
+                    onPress={() => navigation.navigate('ResearchDocumentDetail', { documentId: ref.id })}
+                    style={[styles.soulLearningCard, { borderColor: `${ref.color}45`, backgroundColor: `${ref.color}12` }]}
+                  >
+                    <Text style={[styles.soulLearningCardTitle, { color: ref.color }]} numberOfLines={1}>{ref.title}</Text>
+                    <Text style={styles.soulLearningCardMeta}>
+                      {(ref.profileKey || ref.sourceType || 'research').toUpperCase()} • {ref.reviewStatus.toUpperCase()}
+                    </Text>
+                    <Text style={styles.soulLearningCardSubtitle} numberOfLines={2}>{ref.subtitle}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
+
+          {soulMemoryRefs.length > 0 ? (
+            <View style={styles.soulLearningRail}>
+              <View style={styles.soulLearningHeader}>
+                <Text style={styles.soulLearningLabel}>
+                  {activeSpirit?.name || 'OpenSwan SOUL'} memory active
+                </Text>
+                <Pressable
+                  onPress={() => navigation.navigate('SoulMemory', {
+                    spiritId: activeSpiritId,
+                    circleId,
+                    userId: currentUserId,
+                  })}
+                  style={styles.soulLearningLink}
+                >
+                  <Text style={styles.soulLearningLinkText}>OPEN MEMORY</Text>
+                </Pressable>
+              </View>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.soulLearningScroll}>
+                {soulMemoryRefs.map((ref) => (
+                  <Pressable
+                    key={ref.id}
+                    onPress={() => navigation.navigate('SoulMemory', {
+                      spiritId: activeSpiritId,
+                      circleId,
+                      userId: currentUserId,
+                    })}
+                    style={[styles.soulLearningCard, styles.soulMemoryCard]}
+                  >
+                    <Text style={styles.soulMemoryCardTitle} numberOfLines={1}>{ref.title}</Text>
+                    <Text style={styles.soulLearningCardMeta}>
+                      {String(ref.memoryKind).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}
+                    </Text>
+                    <Text style={styles.soulLearningCardSubtitle} numberOfLines={2}>
+                      {ref.retrievalMode === 'startup' ? 'Pinned as startup guidance.' : 'Available on demand for matching tasks.'}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
 
           {/* Pinned messages banner */}
           {pinnedMessages.length > 0 && (
@@ -2091,25 +4353,84 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
           <FlatList
             ref={flatListRef}
-            data={messages}
+            data={invertedMessages}
+            inverted
             keyExtractor={(item) => item.id}
             renderItem={renderMessage}
+            style={styles.messageListScroll}
             contentContainerStyle={styles.messageList}
-            onContentSizeChange={() => {
-              // Keep scrolling to bottom for 2s after messages load (covers async image renders)
-              if (Date.now() - loadTimestamp.current < 2000) {
-                flatListRef.current?.scrollToEnd({ animated: false });
-              }
+            onScroll={(e) => {
+              scrollOffsetRef.current = e.nativeEvent.contentOffset.y;
+              contentHeightRef.current = e.nativeEvent.contentSize.height;
+              layoutHeightRef.current = e.nativeEvent.layoutMeasurement.height;
             }}
-            onLayout={() => {
-              if (messages.length > 0) {
-                flatListRef.current?.scrollToEnd({ animated: false });
-              }
-            }}
+            scrollEventThrottle={16}
           />
           
           {/* Quick actions moved to composer dropdown */}
         </>
+          </View>
+          {showWorkbenchSidecar ? (
+            <Pressable
+              onPress={() => {}}
+              onPressIn={Platform.OS === 'web' ? (() => {
+                builderDraggingRef.current = true;
+                try {
+                  document.body.style.cursor = 'col-resize';
+                  document.body.style.userSelect = 'none';
+                } catch {}
+              }) : undefined}
+              style={styles.workbenchDivider}
+            >
+              <View style={styles.workbenchDividerGrip} />
+            </Pressable>
+          ) : null}
+          {showWorkbenchSidecar ? (
+            <View style={[styles.workbenchSidecar, { width: `${builderPaneWidth}%` as any }]}>
+              <View style={styles.workbenchSidecarHeader}>
+                <Text style={styles.workbenchSidecarLabel}>LIVE BUILDER</Text>
+                <View style={styles.workbenchSidecarActions}>
+                  <Pressable
+                    onPress={() => setBuildStudioDismissed(true)}
+                    style={[styles.workbenchSidecarButton, styles.workbenchCloseButton]}
+                  >
+                    <Text style={[styles.workbenchSidecarButtonText, styles.workbenchCloseButtonText]}>CLOSE</Text>
+                  </Pressable>
+                </View>
+              </View>
+              <ChatBuildStudio
+                accentColor={accentColor}
+                selectedModel={selectedModel}
+                currentRunStep={currentRunStep}
+                prompt={codingWorkbenchPrompt}
+                tick={codingWorkbenchTick}
+                artifact={effectiveBuildArtifact}
+                view={buildStudioView}
+                onViewChange={setBuildStudioView}
+                circleId={circleId}
+                streamingText={streamingBuildText}
+                streamingPhase={streamingBuildPhase}
+                revisions={builderRevisions}
+                activeArtifactContent={effectiveBuildArtifact?.content || null}
+                onRevertRevision={handleRevertRevision}
+                onDeleteRevision={handleDeleteRevision}
+                onOpenBrandPack={() => setBrandPackEditorOpen(true)}
+                brandPackActive={isBrandPackActive(brandPack)}
+                figmaReferences={builderFigmaRefs}
+                selectedFigmaRefId={selectedBuilderFigmaRefId}
+                onSelectFigmaRef={setSelectedBuilderFigmaRefId}
+                onArtifactEdit={handleArtifactEdit}
+                onRegenerateTweak={handleRegenerateTweak}
+                onPointEdit={handlePointEdit}
+                onPickTemplate={(brief, label) => launchBuildStream(brief, selectedBuilderFigmaPrompt || undefined, label)}
+                onOpenImages={() => setImagesEditorOpen(true)}
+                imagesCount={builderImages.length}
+                onOpenGithubSave={() => setGithubSaveOpen(true)}
+                onOpenNetlifyDeploy={() => setNetlifyDeployOpen(true)}
+              />
+            </View>
+          ) : null}
+        </View>
       )}
 
       {/* Enhanced crypto panel */}
@@ -2137,12 +4458,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       )}
 
       {/* Enhanced typing indicator */}
-      {botTyping && (
-        <View style={[styles.typingBar, { borderColor: accentColor + '20' }]}>
-          <View style={[styles.typingDot, { backgroundColor: accentColor }]} />
-          <Text style={styles.typingText}>Agent is thinking...</Text>
-          <TypingDots />
-        </View>
+      {botTyping && runStatus === 'idle' && (
+        <>
+          {codingWorkbenchPrompt && !showWorkbenchSidecar && (
+            <CodingWorkbenchPreview
+              prompt={codingWorkbenchPrompt}
+              tick={codingWorkbenchTick}
+              accentColor={accentColor}
+              selectedModel={selectedModel}
+            />
+          )}
+          <View style={[styles.typingBar, { borderColor: accentColor + '20' }]}>
+            <View style={[styles.typingDot, { backgroundColor: accentColor }]} />
+            <Text style={styles.typingText}>{buildSessionThinkingLabel(agentName, selectedModel, currentRunStep)}</Text>
+            <TypingDots />
+          </View>
+        </>
       )}
 
       {/* Enhanced mention popup */}
@@ -2151,6 +4482,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           members={filteredMembers}
           onSelect={insertMention}
           accentColor={accentColor}
+          agentAvatarSource={agentAvatarSource}
         />
       )}
 
@@ -2165,15 +4497,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
       {/* ── Agent Assign/Spawn Panels ── */}
       {showSpawnPanel && (
-        <View style={{ marginHorizontal: 16, marginBottom: 8, borderWidth: 1, borderColor: '#22c55e30', borderRadius: 12, overflow: 'hidden', maxWidth: 860, alignSelf: 'center' as any, width: '100%' }}>
+        <View style={{ marginHorizontal: 16, marginBottom: 8, borderWidth: 1, borderColor: '#22c55e30', borderRadius: 12, overflow: 'hidden', maxWidth: CHAT_SURFACE_MAX_WIDTH, alignSelf: 'center' as any, width: '100%' }}>
           <SpawnAgentPanel
             circleId={circleId}
             onCreated={(_id: string, _name: string) => {
               setShowSpawnPanel(false);
-              supabase.from('circle_office_agents')
-                .select('id, name, status, owner_id, color, tool_icon, owner_display_name, current_task, circle_id, provider')
-                .neq('status', 'offline').order('status').limit(50)
-                .then(({ data }) => { if (data) setLiveAgents(data); });
             }}
             onCancel={() => setShowSpawnPanel(false)}
           />
@@ -2181,79 +4509,259 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       )}
 
       {showAssignPanel && (
-        <View style={{ marginHorizontal: 16, marginBottom: 8, padding: 14, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 12, maxWidth: 860, alignSelf: 'center' as any, width: '100%' }}>
-          <Text style={{ color: '#606075', fontSize: 10, fontWeight: '700', letterSpacing: 1.5, marginBottom: 8 }}>SELECT AGENT</Text>
-          {liveAgents.length === 0 ? (
-            <Text style={{ color: '#555', fontSize: 11, fontStyle: 'italic', marginBottom: 8 }}>No agents online — connect one in the Office tab</Text>
-          ) : (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 10 }}>
-              {liveAgents.map((agent: any) => {
-                const isSelected = selectedAgent?.id === agent.id;
-                const dotColor = ({ active: '#22c55e', idle: '#f59e0b', building: '#6366f1', error: '#ef4444' } as any)[agent.status] || '#888';
-                const agentColor = agent.color || accentColor;
-                return (
-                  <Pressable key={agent.id} onPress={() => setSelectedAgent(isSelected ? null : agent)}
-                    accessibilityRole="button" accessibilityLabel={`Select ${agent.name}`}
-                    style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, borderWidth: 1, borderColor: isSelected ? agentColor + '70' : '#2a2a3e', backgroundColor: isSelected ? agentColor + '15' : '#111118', marginRight: 8 }}>
-                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: dotColor }} />
-                    <View>
-                      <Text style={{ color: isSelected ? agentColor : '#f0f0f5', fontSize: 12, fontWeight: '600' }}>{agent.name}</Text>
-                      {agent.provider && <Text style={{ color: '#58a6ff', fontSize: 9, fontWeight: '600', textTransform: 'uppercase' as any, letterSpacing: 0.5 }}>{agent.provider}</Text>}
-                    </View>
-                    {isSelected && <Text style={{ color: agentColor, fontSize: 12 }}>{'✓'}</Text>}
+        <View style={{ marginHorizontal: 16, marginBottom: 8, padding: 18, backgroundColor: '#0a0f1c', borderWidth: 1, borderColor: '#f59e0b25', borderRadius: 12, maxWidth: CHAT_SURFACE_MAX_WIDTH, alignSelf: 'center' as any, width: '100%', gap: 12, ...(Platform.OS === 'web' ? { boxShadow: '4px 4px 0px #f59e0b0c, 0 0 30px #f59e0b06' } as any : {}) }}>
+          {/* Header */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <View style={{ width: 32, height: 32, borderRadius: 10, borderWidth: 1, borderColor: '#f59e0b35', backgroundColor: '#f59e0b08', alignItems: 'center', justifyContent: 'center', ...(Platform.OS === 'web' ? { boxShadow: '2px 2px 0px #f59e0b0c' } as any : {}) }}>
+              <Text style={{ color: '#f59e0b', fontSize: 13, fontWeight: '900', fontFamily: 'monospace' }}>{'>_'}</Text>
+            </View>
+            <View>
+              <Text style={{ color: '#fff', fontSize: 14, fontWeight: '900', letterSpacing: 2.5, fontFamily: 'monospace' }}>ASSIGN AGENT</Text>
+              <Text style={{ color: '#f59e0b50', fontSize: 10, fontFamily: 'monospace' }}>Dispatch a task to a connected agent</Text>
+            </View>
+            <View style={{ flex: 1 }} />
+            <Pressable
+              onPress={() => { setShowAssignPanel(false); setSelectedAgent(null); setTaskPrompt(''); }}
+              style={({ hovered, pressed }: any) => [
+                { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, borderWidth: 1, borderColor: '#1e293b' },
+                Platform.OS === 'web' && { transition: 'all 0.15s ease' },
+                hovered && { borderColor: '#888', backgroundColor: '#111' },
+                pressed && { backgroundColor: '#222' },
+              ]}
+            >
+              <Text style={{ color: '#666', fontSize: 10, fontWeight: '900', letterSpacing: 1, fontFamily: 'monospace' }}>ESC</Text>
+            </Pressable>
+          </View>
+
+          <View style={{ height: 1, backgroundColor: '#1e293b' }} />
+
+          {/* Agent selector — only active/building/idle agents shown */}
+          {(() => {
+            const activeAgents = liveAgents.filter(a => a.status === 'active' || a.status === 'building' || a.status === 'idle');
+            return (
+              <>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <Text style={{ color: '#f59e0b60', fontSize: 10, fontWeight: '900', letterSpacing: 1.5, fontFamily: 'monospace' }}>
+                    LIVE AGENTS{activeAgents.length > 0 ? ` · ${activeAgents.length}` : ''}
+                  </Text>
+                  <Pressable
+                    onPress={() => { setShowAssignPanel(false); setSpawnModalOpen(true); }}
+                    style={({ hovered, pressed }: any) => [
+                      { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, borderWidth: 1, borderColor: '#f59e0b30' },
+                      Platform.OS === 'web' && { transition: 'all 0.15s ease' } as any,
+                      hovered && { borderColor: '#f59e0b60', backgroundColor: '#f59e0b0a' },
+                      pressed && { transform: [{ scale: 0.95 }] },
+                    ]}
+                  >
+                    <Text style={{ color: '#f59e0b', fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: 'monospace' }}>+ SPAWN NEW</Text>
                   </Pressable>
-                );
-              })}
-            </ScrollView>
-          )}
-          <Text style={{ color: '#606075', fontSize: 10, fontWeight: '700', letterSpacing: 1.5, marginBottom: 6 }}>TASK</Text>
+                </View>
+                {activeAgents.length === 0 ? (
+                  <View style={{ alignItems: 'center', paddingVertical: 16, gap: 8 }}>
+                    <Text style={{ color: '#64748b', fontSize: 12, fontFamily: 'monospace', textAlign: 'center' }}>No live agents detected</Text>
+                    <Pressable
+                      onPress={() => { setShowAssignPanel(false); setSpawnModalOpen(true); }}
+                      style={({ hovered, pressed }: any) => [
+                        { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: '#f59e0b40', backgroundColor: '#f59e0b08' },
+                        Platform.OS === 'web' && { transition: 'all 0.15s ease' } as any,
+                        hovered && { borderColor: '#f59e0b', backgroundColor: '#f59e0b15', transform: [{ translateY: -1 }] },
+                        pressed && { transform: [{ scale: 0.96 }] },
+                      ]}
+                    >
+                      <Text style={{ color: '#f59e0b', fontSize: 12, fontWeight: '900', letterSpacing: 1.5, fontFamily: 'monospace' }}>SPAWN AGENTS</Text>
+                    </Pressable>
+                    <Text style={{ color: '#475569', fontSize: 10, fontFamily: 'monospace', textAlign: 'center' }}>
+                      Launch Claude Code, Codex, or OpenSwan sessions
+                    </Text>
+                  </View>
+                ) : (
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                    {activeAgents.map((agent: any) => {
+                      const isSelected = selectedAgent?.id === agent.id;
+                      const dotColor = ({ active: '#22c55e', idle: '#f59e0b', building: '#6366f1', error: '#ef4444' } as any)[agent.status] || '#888';
+                      const agentColor = agent.color || accentColor;
+                      return (
+                        <Pressable
+                          key={agent.id}
+                          onPress={() => setSelectedAgent(isSelected ? null : agent)}
+                          style={({ hovered, pressed }: any) => [
+                            {
+                              flexDirection: 'row', alignItems: 'center', gap: 8,
+                              paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10,
+                              borderWidth: 1, marginRight: 8,
+                              borderColor: isSelected ? agentColor + '60' : '#1e293b',
+                              backgroundColor: isSelected ? agentColor + '12' : '#0f172a',
+                              ...(isSelected && Platform.OS === 'web' ? { boxShadow: `2px 2px 0px ${agentColor}18` } as any : {}),
+                            },
+                            Platform.OS === 'web' && { transition: 'all 0.15s ease' },
+                            hovered && !isSelected && { borderColor: agentColor + '50', backgroundColor: agentColor + '08', transform: [{ translateY: -1 }] },
+                            pressed && { transform: [{ scale: 0.96 }] },
+                          ]}
+                        >
+                          <View style={{ width: 8, height: 8, borderRadius: 999, backgroundColor: dotColor }} />
+                          <View>
+                            <Text style={{ color: isSelected ? agentColor : '#fff', fontSize: 12, fontWeight: '900', fontFamily: 'monospace' }}>{agent.name}</Text>
+                            {agent.provider && (
+                              <Text style={{ color: isSelected ? agentColor + 'aa' : '#555', fontSize: 9, fontWeight: '700', letterSpacing: 0.5, fontFamily: 'monospace' }}>
+                                {agent.provider.toUpperCase()}{agent.model ? ` · ${String(agent.model).toUpperCase()}` : ''}{agent.sessionKey && agent.source === 'openswan-session' ? ' · SESSION' : ''}
+                              </Text>
+                            )}
+                            {agent.spirit ? (
+                              <Text style={{ color: isSelected ? agentColor + '88' : '#666', fontSize: 8, fontWeight: '700', letterSpacing: 0.4, fontFamily: 'monospace' }}>
+                                {agent.spirit}
+                              </Text>
+                            ) : null}
+                          </View>
+                          {isSelected && <Text style={{ color: agentColor, fontSize: 11, fontWeight: '900', fontFamily: 'monospace' }}>{'//'}  </Text>}
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+                )}
+              </>
+            );
+          })()}
+
+          {/* Task input */}
+          <Text style={{ color: '#f59e0b60', fontSize: 10, fontWeight: '900', letterSpacing: 1.5, fontFamily: 'monospace' }}>TASK</Text>
           <TextInput
-            style={{ backgroundColor: '#1a1a28', color: '#f0f0f5', borderRadius: 10, borderWidth: 1, borderColor: '#2a2a3e', padding: 10, fontSize: 13, minHeight: 50, maxHeight: 100 }}
-            value={taskPrompt} onChangeText={setTaskPrompt}
-            placeholder={`What should ${selectedAgent?.name || 'the agent'} do?`}
-            placeholderTextColor="#555" multiline
-          />
-          <Pressable
-            onPress={async () => {
-              if (!selectedAgent || !taskPrompt.trim()) return;
-              setAssigning(true);
-              addUserMessage(`@${selectedAgent.name}: ${taskPrompt.trim()}`);
-              setBotTyping(true);
-              try {
-                const provider = (selectedAgent.provider || '').toLowerCase().replace(/\s+/g, '-');
-                const bridgeProviders = ['claude-code', 'codex', 'gemini', 'gemini-cli', 'cursor'];
-                let response = '';
-                if (bridgeProviders.includes(provider)) {
-                  const result = await wakeAndAssignTask(
-                    provider, selectedAgent.name, taskPrompt.trim(),
-                    circleId, selectedAgent.id,
-                  );
-                  if (result.ok) {
-                    response = `**${selectedAgent.name}** [executed via ${provider}]:\n\n${result.response || 'Done'}`;
-                  } else {
-                    const aiResp = await getAIResponse(`[Task for ${selectedAgent.name}] ${taskPrompt.trim()}`, { userId: currentUserId || '', circleId, userName: currentUserName });
-                    response = `**${selectedAgent.name}** [AI draft — not executed by agent]:\n\n${aiResp}`;
-                  }
-                } else {
-                  const aiResp = await getAIResponse(`[Task for ${selectedAgent.name}] ${taskPrompt.trim()}`, { userId: currentUserId || '', circleId, userName: currentUserName });
-                  response = `**${selectedAgent.name}** (via Agent AI):\n\n${aiResp}`;
-                }
-                addBotMessage(response);
-                await supabase.from('circle_office_agents')
-                  .update({ current_task: null, status: 'active' })
-                  .eq('id', selectedAgent.id);
-              } catch (e: any) {
-                addBotMessage(`**${selectedAgent.name}** failed: ${e.message || 'Unknown error'}`);
-              } finally {
-                setBotTyping(false); setAssigning(false);
-                setTaskPrompt(''); setSelectedAgent(null); setShowAssignPanel(false);
-              }
+            style={{
+              backgroundColor: '#111827', color: '#e2e8f0', borderRadius: 10,
+              borderWidth: 1, borderColor: '#1e293b', padding: 12,
+              fontSize: 13, fontFamily: 'monospace', minHeight: 60, maxHeight: 120,
+              ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
             }}
-            disabled={!selectedAgent || !taskPrompt.trim() || assigning}
-            accessibilityRole="button"
-            style={{ backgroundColor: accentColor, borderRadius: 10, paddingVertical: 12, alignItems: 'center' as any, marginTop: 10, opacity: selectedAgent && taskPrompt.trim() && !assigning ? 1 : 0.4 }}>
-            <Text style={{ color: '#000', fontSize: 13, fontWeight: '700' }}>{assigning ? 'Assigning...' : 'Assign Task'}</Text>
-          </Pressable>
+            value={taskPrompt}
+            onChangeText={setTaskPrompt}
+            placeholder={`What should ${selectedAgent?.name || 'the agent'} do?`}
+            placeholderTextColor="#444"
+            multiline
+          />
+
+          {selectedAgent?.provider === 'openswan' && (
+            <Pressable
+              onPress={async () => {
+                if (!selectedAgent || assigning) return;
+                setAssigning(true);
+                setBotTyping(true);
+                const requestedTask = taskPrompt.trim();
+                if (requestedTask) addUserMessage(`@${selectedAgent.name}: spawn dedicated OpenSwan session for "${requestedTask}"`);
+                try {
+                  if (selectedAgent.id && selectedAgent.id !== DEFAULT_AGENT.id) {
+                    await supabase.from('circle_office_agents')
+                      .update({
+                        current_task: requestedTask ? requestedTask.slice(0, 120) : 'Launching dedicated OpenSwan session',
+                        status: 'building',
+                        updated_at: new Date().toISOString(),
+                        last_active_at: new Date().toISOString(),
+                      })
+                      .eq('id', selectedAgent.id);
+                  }
+                  const response = await spawnDedicatedOpenSwanSession(selectedAgent, requestedTask);
+                  addBotMessage(response);
+                  if (selectedAgent.id && selectedAgent.id !== DEFAULT_AGENT.id) {
+                    await supabase.from('circle_office_agents')
+                      .update({ current_task: null, status: 'idle' })
+                      .eq('id', selectedAgent.id);
+                  }
+                } catch (e: any) {
+                  addBotMessage(`**${selectedAgent.name}** failed to spawn a dedicated OpenSwan session: ${e.message || 'Unknown error'}`);
+                } finally {
+                  setBotTyping(false);
+                  setAssigning(false);
+                  setTaskPrompt('');
+                  setSelectedAgent(null);
+                  setShowAssignPanel(false);
+                }
+              }}
+              style={({ hovered, pressed }: any) => [
+                {
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  borderRadius: 10,
+                  borderWidth: 1,
+                  borderColor: '#8b5cf6',
+                  backgroundColor: '#8b5cf612',
+                  alignItems: 'center',
+                },
+                Platform.OS === 'web' && { transition: 'all 0.15s ease' },
+                hovered && { backgroundColor: '#8b5cf620', borderColor: '#a78bfa' },
+                pressed && { transform: [{ scale: 0.98 }] },
+              ]}
+            >
+              <Text style={{ color: '#c4b5fd', fontSize: 10, fontWeight: '900', letterSpacing: 1.1, fontFamily: 'monospace' }}>
+                + SPAWN DEDICATED OPENSWAN SESSION
+              </Text>
+            </Pressable>
+          )}
+
+          {/* Action buttons */}
+          <View style={{ flexDirection: 'row', gap: 10 }}>
+            <Pressable
+              onPress={() => { setShowAssignPanel(false); setSelectedAgent(null); setTaskPrompt(''); }}
+              style={({ hovered, pressed }: any) => [
+                { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: '#1e293b' },
+                Platform.OS === 'web' && { transition: 'all 0.15s ease' },
+                hovered && { borderColor: '#888', backgroundColor: '#111' },
+                pressed && { backgroundColor: '#222' },
+              ]}
+            >
+              <Text style={{ color: '#666', fontSize: 11, fontWeight: '900', letterSpacing: 1, fontFamily: 'monospace' }}>CANCEL</Text>
+            </Pressable>
+            <Pressable
+              onPress={async () => {
+                if (!selectedAgent || !taskPrompt.trim()) return;
+                setAssigning(true);
+                addUserMessage(`@${selectedAgent.name}: ${taskPrompt.trim()}`);
+                setBotTyping(true);
+                try {
+                  if (selectedAgent.id && !selectedAgent.id.startsWith('bridge::') && selectedAgent.id !== DEFAULT_AGENT.id) {
+                    await supabase.from('circle_office_agents')
+                      .update({
+                        current_task: taskPrompt.trim().slice(0, 120),
+                        status: 'building',
+                        updated_at: new Date().toISOString(),
+                        last_active_at: new Date().toISOString(),
+                      })
+                      .eq('id', selectedAgent.id);
+                  }
+                  const response = await dispatchAssignedAgentTask(selectedAgent, taskPrompt.trim());
+                  addBotMessage(response);
+                  if (selectedAgent.id && !selectedAgent.id.startsWith('bridge::') && selectedAgent.id !== DEFAULT_AGENT.id) {
+                    await supabase.from('circle_office_agents')
+                      .update({ current_task: null, status: 'idle' })
+                      .eq('id', selectedAgent.id);
+                  }
+                } catch (e: any) {
+                  addBotMessage(`**${selectedAgent.name}** failed: ${e.message || 'Unknown error'}`);
+                } finally {
+                  setBotTyping(false); setAssigning(false);
+                  setTaskPrompt(''); setSelectedAgent(null); setShowAssignPanel(false);
+                }
+              }}
+              disabled={!selectedAgent || !taskPrompt.trim() || assigning}
+              style={({ hovered, pressed }: any) => [
+                {
+                  flex: 1, paddingVertical: 12, borderRadius: 10, borderWidth: 1,
+                  borderColor: selectedAgent ? (selectedAgent.color || '#fff') : '#333',
+                  backgroundColor: selectedAgent ? (selectedAgent.color || '#fff') : '#111',
+                  alignItems: 'center',
+                  opacity: selectedAgent && taskPrompt.trim() && !assigning ? 1 : 0.3,
+                  ...(selectedAgent && Platform.OS === 'web' ? { boxShadow: `4px 4px 0px ${(selectedAgent.color || '#fff')}40` } as any : {}),
+                },
+                Platform.OS === 'web' && { transition: 'all 0.15s ease' },
+                hovered && selectedAgent && {
+                  backgroundColor: (selectedAgent.color || '#fff') + 'dd',
+                  ...(Platform.OS === 'web' ? { boxShadow: `4px 4px 0px ${(selectedAgent.color || '#fff')}50, 0 0 25px ${(selectedAgent.color || '#fff')}30` } as any : {}),
+                },
+                pressed && { transform: [{ scale: 0.98 }] },
+              ]}
+            >
+              <Text style={{ color: '#000', fontSize: 12, fontWeight: '900', letterSpacing: 2, fontFamily: 'monospace' }}>
+                {assigning ? 'DISPATCHING...' : selectedAgent ? `ASSIGN TO ${selectedAgent.name.toUpperCase()}` : 'SELECT AN AGENT'}
+              </Text>
+            </Pressable>
+          </View>
         </View>
       )}
 
@@ -2316,10 +4824,19 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   return { ...s, actions: newActions };
                 });
               }).then(result => {
-                setComputerUseSession(s => s ? { ...s, status: result.success ? 'completed' : 'failed', actions: result.actions } : s);
+                setComputerUseSession(s => s ? {
+                  ...s,
+                  status: result.success ? 'completed' : 'failed',
+                  actions: result.actions,
+                  currentUrl: result.currentUrl || s.currentUrl,
+                  backendSessionId: result.backendSessionId || s.backendSessionId,
+                  backendLiveUrl: result.backendLiveUrl || s.backendLiveUrl,
+                } : s);
+                finalizeBrowserPlanFromSession(updated, result);
                 addBotMessage(`**Computer Use** ${result.success ? 'completed' : 'failed'}: ${result.message}`);
               }).catch(() => {
                 setComputerUseSession(s => s ? { ...s, status: 'failed' } : s);
+                finalizeBrowserPlanFromSession(updated, { success: false });
               });
               return updated;
             });
@@ -2339,10 +4856,19 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   return { ...s, actions: newActions };
                 });
               }).then(result => {
-                setComputerUseSession(s => s ? { ...s, status: result.success ? 'completed' : 'failed', actions: result.actions } : s);
+                setComputerUseSession(s => s ? {
+                  ...s,
+                  status: result.success ? 'completed' : 'failed',
+                  actions: result.actions,
+                  currentUrl: result.currentUrl || s.currentUrl,
+                  backendSessionId: result.backendSessionId || s.backendSessionId,
+                  backendLiveUrl: result.backendLiveUrl || s.backendLiveUrl,
+                } : s);
+                finalizeBrowserPlanFromSession(resumed, result);
                 addBotMessage(`**Computer Use** ${result.success ? 'completed' : 'failed'}: ${result.message}`);
               }).catch(() => {
                 setComputerUseSession(s => s ? { ...s, status: 'failed' } : s);
+                finalizeBrowserPlanFromSession(resumed, { success: false });
               });
               return resumed;
             });
@@ -2350,9 +4876,60 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           onCancel={() => {
             setComputerUseSession(null);
           }}
+          onOpenSession={() => handleOpenBrowserSession({
+            planId: computerUseSession.sourcePlanId || computerUseSession.id,
+            task: computerUseSession.task,
+            backend: computerUseSession.backend,
+            backendLabel: computerUseSession.backendLabel,
+            backendDetails: computerUseSession.backendDetails,
+            requiresApproval: computerUseSession.permission !== 'trusted',
+            status: computerUseSession.status === 'completed'
+              ? 'completed'
+              : computerUseSession.status === 'failed'
+                ? 'failed'
+                : 'launched',
+            launchedAt: computerUseSession.startedAt,
+            backendSessionId: computerUseSession.backendSessionId,
+            backendLiveUrl: computerUseSession.backendLiveUrl,
+            actions: computerUseSession.actions.map((action) => ({
+              id: action.id,
+              type: action.type,
+              target: action.target,
+              value: action.value,
+              description: action.description,
+              requiresApproval: action.requiresApproval,
+            })),
+          })}
           accentColor={accentColor}
         />
       )}
+
+      <BrowserSessionDrawer
+        session={selectedBrowserSession}
+        visible={!!selectedBrowserSession}
+        onClose={() => setSelectedBrowserSession(null)}
+        onOpenLiveSession={(session) => handleOpenBrowserSession({
+          planId: session.planId || session.id,
+          task: session.task,
+          backend: session.backend,
+          backendLabel: session.backendLabel,
+          backendDetails: session.backendDetails,
+          requiresApproval: false,
+          status: session.status === 'completed' ? 'completed' : session.status === 'failed' ? 'failed' : 'launched',
+          launchedAt: session.startedAt,
+          completedAt: session.completedAt,
+          backendSessionId: session.backendSessionId,
+          backendLiveUrl: session.backendLiveUrl,
+          actions: session.actions.map((action) => ({
+            id: action.id,
+            type: action.type,
+            target: action.target,
+            value: action.value,
+            description: action.description,
+            requiresApproval: action.requiresApproval,
+          })),
+        })}
+      />
 
       {/* Computer-Use Permission Dialog (web only) */}
       {Platform.OS === 'web' && showComputerUsePermission && pendingComputerUseActions.length > 0 && (
@@ -2360,16 +4937,39 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           task={pendingComputerUseTask}
           agentName={agentName}
           actions={pendingComputerUseActions}
-          onAllow={(permission: ComputerUsePermission) => {
+          onAllow={async (permission: ComputerUsePermission) => {
             setShowComputerUsePermission(false);
-            const session = createComputerUseSession(agentName, pendingComputerUseTask, permission);
-            session.actions = pendingComputerUseActions.map(a => ({
-              ...a,
-              status: permission === 'trusted' ? 'approved' as const : 'pending' as const,
-            }));
-            session.status = permission === 'trusted' ? 'executing' : 'awaiting_approval';
+            const fallbackPlan: BrowserPlanCardData = {
+              planId: `browser-plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              task: pendingComputerUseTask,
+              backend: 'playwright_bridge',
+              backendLabel: 'Planned Browser Session',
+              requiresApproval: true,
+              status: 'planned',
+              actions: pendingComputerUseActions.map((a) => ({
+                id: a.id,
+                type: a.type,
+                target: a.target,
+                value: a.value,
+                description: a.description,
+                requiresApproval: a.requiresApproval,
+              })),
+            };
+            const session = await createSessionFromBrowserPlan(agentName, permission, pendingComputerUsePlan || fallbackPlan, {
+              circleId,
+              sourceMessageId: pendingComputerUseOrigin?.messageId,
+              sourceRunId: pendingComputerUseOrigin?.runId,
+            });
             setComputerUseSession(session);
-            addBotMessage(`**Computer Use** session started: ${session.task} (${session.actions.length} actions planned)`);
+            if (pendingComputerUseOrigin?.messageId) {
+              upsertBrowserSessionRecord(
+                pendingComputerUseOrigin.messageId,
+                toBrowserSessionRecord(session),
+                pendingComputerUseOrigin.runId,
+              );
+            }
+            finalizeBrowserPlanFromSession(session);
+            addBotMessage(`**Computer Use** session started via ${session.backendLabel}: ${session.task} (${session.actions.length} actions planned)`);
             // Auto-execute if trusted
             if (session.status === 'executing') {
               executeComputerUsePlan(session, (completedAction, idx) => {
@@ -2380,19 +4980,32 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   return { ...s, actions: newActions };
                 });
               }).then(result => {
-                setComputerUseSession(s => s ? { ...s, status: result.success ? 'completed' : 'failed', actions: result.actions } : s);
+                setComputerUseSession(s => s ? {
+                  ...s,
+                  status: result.success ? 'completed' : 'failed',
+                  actions: result.actions,
+                  currentUrl: result.currentUrl || s.currentUrl,
+                  backendSessionId: result.backendSessionId || s.backendSessionId,
+                  backendLiveUrl: result.backendLiveUrl || s.backendLiveUrl,
+                } : s);
+                finalizeBrowserPlanFromSession(session, result);
                 addBotMessage(`**Computer Use** ${result.success ? 'completed' : 'failed'}: ${result.message}`);
               }).catch(() => {
                 setComputerUseSession(s => s ? { ...s, status: 'failed' } : s);
+                finalizeBrowserPlanFromSession(session, { success: false });
               });
             }
             setPendingComputerUseTask('');
             setPendingComputerUseActions([]);
+            setPendingComputerUsePlan(null);
+            setPendingComputerUseOrigin(null);
           }}
           onDeny={() => {
             setShowComputerUsePermission(false);
             setPendingComputerUseTask('');
             setPendingComputerUseActions([]);
+            setPendingComputerUsePlan(null);
+            setPendingComputerUseOrigin(null);
           }}
         />
       )}
@@ -2414,76 +5027,63 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         subagentName={activeSubagent?.name}
         subagentIcon={activeSubagent?.icon}
         subagentColor={activeSubagent?.color}
+        delegatedSubagents={activeDelegatedSubagents}
         currentStep={currentRunStep}
         accentColor={accentColor}
       />
+
+      {/* Phase C1 — Supabase Storage attachment strip (drag-drop + multi-file) */}
+      {circleId && currentUserId && (
+        <ChatAttachmentStrip
+          circleId={circleId}
+          threadId={activeThreadId}
+          userId={currentUserId}
+          staged={stagedFiles}
+          onStagedChange={setStagedFiles}
+          accentColor={accentColor}
+          showAttachButton={false}
+        />
+      )}
 
       <EnhancedInput
         input={input}
         onInputChange={handleInputChange}
         onSend={sendMessage}
         onFocusBot={() => {
-          if (!input.includes('@Agent')) setInput('@Agent ' + input);
+          if (!input.toLowerCase().includes(`@${agentName.toLowerCase()}`)) setInput(`@${agentName} ` + input);
           inputRef.current?.focus();
         }}
         inputRef={inputRef}
         accentColor={accentColor}
         selectedModel={selectedModel}
-        onModelChange={setSelectedModel}
+        onModelChange={handleSessionModelChange}
         attachments={attachments}
         onPickImage={async () => {
-          const result = await pickImage();
-          if (result) setAttachments(prev => [...prev, result]);
+          const results = await pickAttachments();
+          if (results.length > 0) setAttachments(prev => [...prev, ...results]);
         }}
         onRemoveAttachment={(id: string) => setAttachments(prev => prev.filter(a => a.id !== id))}
         chatMode={chatMode}
         onModeChange={setChatMode}
+        sessionProfile={sessionProfile}
         agentName={agentName}
-        onQuickAction={(text: string) => {
-          if (text === '__SEND_CRYPTO__') { setShowSendCrypto(true); return; }
-          if (text === '__CHECK_IN__') { setShowQuickCheckIn(true); return; }
-          if (text === '__NEW_TASK__') { setShowQuickNewTask(true); return; }
-          if (text === '__STEP_AWAY__') { setShowQuickStepAway(true); return; }
-          if (text === '__ASSIGN_AGENT__') { setShowAssignPanel(true); setShowSpawnPanel(false); return; }
-          if (text === '__SPAWN_AGENT__') { setShowSpawnPanel(true); setShowAssignPanel(false); return; }
-          if (text === '__COMPUTER_USE__') {
-            if (Platform.OS !== 'web') return;
-            // Show the task input by prompting the user
-            const taskText = window.prompt('What should the agent do in the browser?');
-            if (!taskText || !taskText.trim()) return;
-            setPendingComputerUseTask(taskText.trim());
-            setBotTyping(true);
-            planComputerUseActions(taskText.trim()).then(actions => {
-              setBotTyping(false);
-              setPendingComputerUseActions(actions);
-              setShowComputerUsePermission(true);
-            }).catch(() => {
-              setBotTyping(false);
-              // Fallback plan
-              const fallback: BrowserAction[] = [{
-                id: `action_${Date.now()}_0`, type: 'navigate', target: taskText.trim(),
-                description: `Complete: ${taskText.trim()}`, requiresApproval: true, status: 'pending',
-              }];
-              setPendingComputerUseActions(fallback);
-              setShowComputerUsePermission(true);
-            });
-            return;
-          }
-          if (text === '__NUKE__') {
-            const msg = 'Delete ALL messages in this circle? This cannot be undone.';
-            const doNuke = async () => {
-              const { error } = await supabase.from('messages').delete().eq('circle_id', circleId);
-              if (!error) setMessages([]);
-            };
-            if (Platform.OS === 'web') { if (window.confirm(msg)) doNuke(); }
-            else { import('react-native').then(({ Alert }) => Alert.alert('Nuke Chat', msg, [{ text: 'Cancel' }, { text: 'Delete All', style: 'destructive', onPress: doNuke }])); }
-            return;
-          }
-          if (text.endsWith(' ')) { setInput(text); inputRef.current?.focus(); return; }
-          sendMessage(text);
+        agentAvatarSource={agentAvatarSource}
+        onQuickAction={handleQuickActionSelection}
+        activePlugins={activePlugins}
+        onOpenPlugins={() => setShowPluginPicker(true)}
+        onOpenMemory={() => setShowMemoryViewer(true)}
+        hasBuilderWork={canOpenBuilder}
+        showWorkbenchSidecar={showWorkbenchSidecar}
+        onToggleBuilder={openBuilderStudio}
+        onResetMind={async () => {
+          const { resetAgentMind } = await import('../../../lib/swanbot');
+          const { cleared } = await resetAgentMind(circleId);
+          setMessages([]);
+          addBotMessage(`Mind reset. ${cleared > 0 ? `Cleared ${cleared} memories. ` : ''}Starting fresh.`);
         }}
       />
-    </KeyboardAvoidingView>
+      </KeyboardAvoidingView>
+    </View>
   );
 }
 
@@ -2692,7 +5292,7 @@ function TipCard({ tip, delay, accentColor }: { tip: string; delay: number; acce
 
 function MessageRow({
   item, consecutive, reactionEntries, currentUserId,
-  showReactions, onToggleReactions, onReply, onReaction, onDelete, renderContent, accentColor, messageDensity,
+  showReactions, onToggleReactions, onReply, onReaction, onDelete, renderContent, accentColor, messageDensity, agentAvatarSource, agentName,
 }: any) {
   const [hovered, setHovered] = useState(false);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2741,24 +5341,40 @@ function MessageRow({
             item.isBot && { backgroundColor: accentColor + '30' },
           ]}>
             {item.isBot ? (
-              <FlatIcon name="robot" size={18} />
+              <Image source={agentAvatarSource} style={styles.mainChatAgentMessageIcon} resizeMode="contain" />
             ) : (
               <Text style={styles.msgAvatarText}>
                 {(item.userName || '?').charAt(0).toUpperCase()}
               </Text>
             )}
           </View>
-          <Text style={[styles.msgName, item.isBot && { color: accentColor }]}>
-            {item.userName || 'Unknown'}
-          </Text>
-          {item.isBot && (
-            <View style={[styles.aiBadge, { backgroundColor: accentColor + '30' }]}>
-              <Text style={[styles.aiBadgeText, { color: accentColor }]}>AI</Text>
+          {item.isBot ? (
+            // Inline identity row — the message bubble already shows the bot
+            // avatar in the circle to the left, so we DON'T render the avatar
+            // image again here next to the name. (FloatingChat still uses
+            // ChatBotIdentityRow with its inline image since it has no
+            // separate avatar circle.)
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={[styles.msgName, { color: accentColor, fontWeight: '700' }]}>
+                {item.userName || agentName}
+              </Text>
+              <View style={{ backgroundColor: accentColor + '30', borderRadius: 12, paddingHorizontal: 6, paddingVertical: 2 }}>
+                <Text style={{ color: accentColor, fontSize: 9, fontWeight: '900', letterSpacing: 1 }}>AI</Text>
+              </View>
+              <Text style={[styles.msgTime, { marginLeft: 'auto' }]}>
+                {item.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </Text>
             </View>
+          ) : (
+            <>
+              <Text style={styles.msgName}>
+                {item.userName || 'Unknown'}
+              </Text>
+              <Text style={styles.msgTime}>
+                {item.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </Text>
+            </>
           )}
-          <Text style={styles.msgTime}>
-            {item.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-          </Text>
         </View>
       )}
 
@@ -3406,7 +6022,7 @@ function EnhancedSendButton({ onPress, disabled, sending, wallet, accentColor }:
   );
 }
 
-function EnhancedMentionPopup({ members, onSelect, accentColor }: any) {
+function EnhancedMentionPopup({ members, onSelect, accentColor, agentAvatarSource }: any) {
   const slideAnim = useRef(new Animated.Value(-50)).current;
 
   useEffect(() => {
@@ -3439,7 +6055,7 @@ function EnhancedMentionPopup({ members, onSelect, accentColor }: any) {
             m.id === BLACKSWAN_ID && { backgroundColor: '#6366f115' },
           ]}>
             {m.id === BLACKSWAN_ID ? (
-              <FlatIcon name="robot" size={16} />
+              <Image source={agentAvatarSource} style={styles.mainChatAgentMentionIcon} resizeMode="contain" />
             ) : (
               <Text style={styles.mentionAvatarText}>
                 {(m.display_name || '?').charAt(0).toUpperCase()}
@@ -3542,6 +6158,8 @@ const CHAT_MODELS = [
   { id: 'qwen-3.5-plus', label: 'Qwen 3.5 Plus', desc: 'Apache 2.0. 1M context.', color: '#ec4899', icon: 'Q+', group: 'open', tags: ['text', 'code'] },
   { id: 'mistral-large-3', label: 'Mistral Large 3', desc: 'EU. 128K context.', color: '#ff6b35', icon: 'ML', group: 'open', tags: ['text', 'code'] },
   { id: 'deepseek-v3', label: 'DeepSeek V3', desc: '671B MoE. Open weights.', color: '#ef4444', icon: 'D3', group: 'open', tags: ['text', 'code'] },
+  { id: 'glm-5', label: 'GLM-5', desc: 'z.ai flagship. Strong reasoning + thinking mode.', color: '#22d3ee', icon: 'G5', group: 'open', tags: ['text', 'code', 'reason'] },
+  { id: 'MiniMax-M1', label: 'MiniMax M1', desc: 'MiniMax flagship. 1M context.', color: '#fb7185', icon: 'Mx', group: 'open', tags: ['text', 'code', 'reason'] },
 ];
 
 const MODEL_GROUPS: { key: string; label: string; color: string }[] = [
@@ -3553,7 +6171,233 @@ const MODEL_GROUPS: { key: string; label: string; color: string }[] = [
   { key: 'open', label: 'OPEN SOURCE', color: '#f59e0b' },
 ];
 
-function EnhancedInput({ input, onInputChange, onSend, onFocusBot, inputRef, accentColor, selectedModel, onModelChange, onQuickAction, attachments, onPickImage, onRemoveAttachment, chatMode, onModeChange, agentName }: any) {
+// ── Quick Actions animated header ───────────────────────────────────────────
+// Dots pulse on hover like loading indicators. Title letters cycle through
+// the dot colors so the whole header comes alive on mouseover.
+
+const QA_DOT_COLORS = ['#22d3ee', '#facc15', '#22c55e', '#ef4444', '#a855f7', '#f97316'];
+const QA_TITLE = 'Quick Actions';
+const toTitleCaseWords = (value: string) =>
+  value
+    .toLowerCase()
+    .split(/[\s_]+/)
+    .filter(Boolean)
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+
+// Formations: circle → triangle → square → DNA helix → circle
+const S = 26;
+const C = S / 2; // center
+const QA_CIRCLE_POINTS = [
+  { x: 8, y: 6.8 },
+  { x: 16.5, y: 6 },
+  { x: 19.2, y: C },
+  { x: 16.5, y: 16.8 },
+  { x: 8.6, y: 16.3 },
+  { x: 5.6, y: 8.2 },
+];
+const qaFormations: Array<{ name: string; pos: Array<{ x: number; y: number }> }> = [
+  // Circle
+  { name: 'circle', pos: QA_CIRCLE_POINTS },
+  // Triangle — 3 vertices + 3 inset points
+  { name: 'triangle', pos: [
+    { x: C, y: 2.1 },
+    { x: S - 2.8, y: S - 3.7 },
+    { x: 2.8, y: S - 3.7 },
+    { x: C + 3.1, y: 6.4 },
+    { x: S - 5.9, y: S - 6.9 },
+    { x: 5.9, y: S - 6.9 },
+  ]},
+  // Square — corners + vertical edge centers
+  { name: 'square', pos: [
+    { x: 2.6, y: 2.6 }, { x: S - 2.6, y: 2.6 },
+    { x: S - 2.6, y: S - 2.6 }, { x: 2.6, y: S - 2.6 },
+    { x: C, y: 2.1 }, { x: C, y: S - 2.1 },
+  ]},
+  // DNA helix — compact double-wave
+  { name: 'dna1', pos: [
+    { x: 2.5, y: 5.1 },
+    { x: 5.3, y: 14.4 },
+    { x: 7.8, y: 6.3 },
+    { x: 10.1, y: 14.9 },
+    { x: 12.6, y: 5.9 },
+    { x: 15.1, y: 14.1 },
+  ]},
+  { name: 'dna2', pos: [
+    { x: 2.5, y: 14.1 },
+    { x: 5.3, y: 6.3 },
+    { x: 7.8, y: 14.1 },
+    { x: 10.1, y: 5.9 },
+    { x: 12.6, y: 14.9 },
+    { x: 15.1, y: 6.6 },
+  ]},
+  // Circle return — keeps hover loop aligned with the same 2-top / 2-bottom / side layout
+  { name: 'circle_return', pos: QA_CIRCLE_POINTS },
+];
+
+function ensureQuickActionStyles() {
+  if (typeof document === 'undefined') return;
+  let el = document.getElementById('uc-qa-header-style') as HTMLStyleElement | null;
+  if (!el) {
+    el = document.createElement('style');
+    el.id = 'uc-qa-header-style';
+    document.head.appendChild(el);
+  }
+
+  // Build a per-dot keyframe that morphs through all formations.
+  // Each formation holds for ~14% of the cycle then transitions to the next.
+  const totalFormations = qaFormations.length;
+  const holdPct = 100 / totalFormations;
+  let dotKeyframes = '';
+  for (let d = 0; d < QA_DOT_COLORS.length; d++) {
+    let kf = `@keyframes uc-qa-morph-${d} {\n`;
+    for (let f = 0; f < totalFormations; f++) {
+      const startPct = (f * holdPct).toFixed(1);
+      const { x, y } = qaFormations[f].pos[d];
+      kf += `  ${startPct}% { left: ${x.toFixed(1)}px; top: ${y.toFixed(1)}px; }\n`;
+    }
+    kf += `  100% { left: ${qaFormations[0].pos[d].x.toFixed(1)}px; top: ${qaFormations[0].pos[d].y.toFixed(1)}px; }\n`;
+    kf += '}\n';
+    dotKeyframes += kf;
+  }
+
+  el.textContent = `
+${dotKeyframes}
+@keyframes uc-qa-glow { 0%,100% { opacity:.68; transform:scale(1); } 50% { opacity:1; transform:scale(1.16); } }
+@keyframes uc-qa-char-shimmer { 0%,100% { opacity:.82; } 50% { opacity:1; filter:brightness(1.18); } }
+@keyframes uc-qa-shape {
+  0%, 18% {
+    width: 3px;
+    height: 3px;
+    border-radius: 999px;
+    transform: rotate(0deg);
+  }
+  25%, 43% {
+    width: 3px;
+    height: 3px;
+    border-radius: 1px;
+    transform: rotate(45deg);
+  }
+  50%, 68% {
+    width: 3px;
+    height: 3px;
+    border-radius: 1px;
+    transform: rotate(0deg);
+  }
+  75%, 93% {
+    width: 2px;
+    height: 4.2px;
+    border-radius: 999px;
+    transform: rotate(24deg);
+  }
+  100% {
+    width: 3px;
+    height: 3px;
+    border-radius: 999px;
+    transform: rotate(0deg);
+  }
+}
+.uc-qa-morph-dot { position:absolute; border-radius:50%; }
+.uc-qa-char { animation: uc-qa-char-shimmer 2s ease-in-out infinite; display:inline-block; }
+.uc-actions-sysfont [class*="r-fontFamily"] { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important; }
+.uc-actions-sysfont { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important; }
+.uc-actions-sysfont div, .uc-actions-sysfont span { font-family: inherit !important; }
+.uc-actions-sysfont .uc-qa-char { font-family: inherit !important; }`;
+}
+
+function QuickActionsHeader({ expanded, isHovered, onPress, onHoverIn, onHoverOut }: {
+  expanded: boolean; isHovered: boolean;
+  onPress: () => void; onHoverIn: () => void; onHoverOut: () => void;
+}) {
+  React.useEffect(() => { if (Platform.OS === 'web') ensureQuickActionStyles(); }, []);
+
+  const dotSize = 3;
+  const cycleDuration = 5.5;
+  const activeColor = 'rgb(245, 158, 11)';
+
+  return (
+    <Pressable
+      onPress={onPress}
+      onHoverIn={onHoverIn}
+      onHoverOut={onHoverOut}
+      style={[
+        styles.actionsAccordionHeader,
+        { paddingVertical: 9 },
+        Platform.OS === 'web' && { transition: 'all 0.25s ease' } as any,
+        isHovered && { backgroundColor: '#0f172a' } as any,
+      ]}
+    >
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+        <View style={{ width: S, height: S, position: 'relative' as any }}>
+          {QA_DOT_COLORS.map((c, i) => (
+            <View
+              key={i}
+              {...({ className: 'uc-qa-morph-dot', style: Platform.OS === 'web' ? {
+                width: dotSize,
+                height: dotSize,
+                backgroundColor: c,
+                left: qaFormations[0].pos[i].x,
+                top: qaFormations[0].pos[i].y,
+                marginLeft: -(dotSize / 2),
+                marginTop: -(dotSize / 2),
+                boxShadow: isHovered ? `0 0 4px ${c}66, 0 0 1px ${c}44` : 'none',
+                transition: 'box-shadow 0.18s ease, opacity 0.18s ease',
+                opacity: isHovered ? 1 : 0.92,
+                animation: `uc-qa-morph-${i} ${cycleDuration}s ease-in-out infinite, uc-qa-glow 1.6s ease-in-out infinite, uc-qa-shape ${cycleDuration}s ease-in-out infinite`,
+                animationDelay: `0s, ${i * 0.2}s, 0s`,
+              } : {
+                width: dotSize,
+                height: dotSize,
+                backgroundColor: c,
+                left: qaFormations[0].pos[i].x,
+                top: qaFormations[0].pos[i].y,
+                marginLeft: -(dotSize / 2),
+                marginTop: -(dotSize / 2),
+              }} as any)}
+            />
+          ))}
+        </View>
+
+        <Text style={[styles.actionsAccordionTitle, { color: isHovered ? activeColor : '#e2e8f0' }]}>
+          {QA_TITLE}
+        </Text>
+      </View>
+      <Text style={[styles.actionsAccordionChevron, isHovered && { fontSize: 13 } as any]}>{expanded ? '▾' : '▸'}</Text>
+    </Pressable>
+  );
+}
+
+function EnhancedInput({
+  input,
+  onInputChange,
+  onSend,
+  onFocusBot,
+  inputRef,
+  accentColor,
+  selectedModel,
+  onModelChange,
+  onQuickAction,
+  attachments,
+  onPickImage,
+  onRemoveAttachment,
+  chatMode,
+  onModeChange,
+  agentName,
+  agentAvatarSource,
+  sessionProfile,
+  activePlugins,
+  onOpenPlugins,
+  onOpenMemory,
+  hasBuilderWork,
+  showWorkbenchSidecar,
+  onToggleBuilder,
+  onResetMind,
+  openswanSessionCount,
+  memoryCount,
+  builderRevisionCount,
+  runStatus,
+  currentRunStep,
+}: any) {
   const [focused, setFocused] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showQuickActions, setShowQuickActions] = useState(false);
@@ -3562,6 +6406,24 @@ function EnhancedInput({ input, onInputChange, onSend, onFocusBot, inputRef, acc
   const [customModels, setCustomModels] = useState<any[]>([]);
   const [hoveredModel, setHoveredModel] = useState<string | null>(null);
   const [hoveredAction, setHoveredAction] = useState<number | null>(null);
+  const [expandedActionSections, setExpandedActionSections] = useState<Record<string, boolean>>({
+    soul: false,
+    quick: false,
+    tools: false,
+    missions: false,
+    ai: false,
+    wordpress: false,
+    games: false,
+    challenges: false,
+    productivity: false,
+    stats: false,
+    crypto: false,
+    connect: false,
+    governance: false,
+    motivation: false,
+  });
+  const [highlightedSlashIndex, setHighlightedSlashIndex] = useState(0);
+  const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Load custom models on mount
   React.useEffect(() => {
@@ -3586,15 +6448,63 @@ function EnhancedInput({ input, onInputChange, onSend, onFocusBot, inputRef, acc
     }
   }, [input]);
 
+  const slashCommands = useMemo(() => getMatchingChatSlashCommands(input), [input]);
+  const slashToken = input.trimStart().split(/\s+/, 1)[0] || '';
+  const showSlashCommands = focused && /^\/[^\s]*$/.test(slashToken) && slashCommands.length > 0;
+
+  useEffect(() => {
+    setHighlightedSlashIndex(0);
+  }, [slashToken, slashCommands.length]);
+
+  const applySlashCommand = useCallback((command: ChatSlashCommand) => {
+    if (blurTimeoutRef.current) {
+      clearTimeout(blurTimeoutRef.current);
+      blurTimeoutRef.current = null;
+    }
+    onInputChange(command.insertText);
+    setHighlightedSlashIndex(0);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [inputRef, onInputChange]);
+
   const handleKeyPress = useCallback((e: any) => {
+    if (Platform.OS === 'web' && showSlashCommands) {
+      if (e.nativeEvent?.key === 'ArrowDown') {
+        e.preventDefault?.();
+        setHighlightedSlashIndex((prev: number) => (prev + 1) % slashCommands.length);
+        return;
+      }
+      if (e.nativeEvent?.key === 'ArrowUp') {
+        e.preventDefault?.();
+        setHighlightedSlashIndex((prev: number) => (prev - 1 + slashCommands.length) % slashCommands.length);
+        return;
+      }
+      if ((e.nativeEvent?.key === 'Enter' || e.nativeEvent?.key === 'Tab') && !e.nativeEvent?.shiftKey) {
+        e.preventDefault?.();
+        const selected = slashCommands[highlightedSlashIndex] || slashCommands[0];
+        if (selected) applySlashCommand(selected);
+        return;
+      }
+    }
     if (Platform.OS === 'web' && e.nativeEvent?.key === 'Enter' && !e.nativeEvent?.shiftKey) {
       e.preventDefault?.();
       if (input.trim()) onSend();
     }
-  }, [input, onSend]);
+  }, [applySlashCommand, highlightedSlashIndex, input, onSend, showSlashCommands, slashCommands]);
 
   const allModels = [...CHAT_MODELS, ...customModels];
   const currentModel = allModels.find(m => m.id === selectedModel) || CHAT_MODELS[0];
+  const soulActions = getMainChatSessionActions(sessionProfile || 'senior');
+  const controlStatusLabel = currentRunStep?.trim()
+    || (runStatus === 'running' ? 'thinking'
+      : runStatus === 'delegated' ? 'delegating'
+      : runStatus === 'waiting_approval' ? 'awaiting approval'
+      : 'ready');
+  const accordionCategories = [
+    { key: 'commands', category: PROMPT_CATEGORIES[0] },
+    { key: 'create', category: PROMPT_CATEGORIES[1] },
+    { key: 'publish', category: PROMPT_CATEGORIES[2] },
+    { key: 'wallet', category: PROMPT_CATEGORIES[3] },
+  ];
 
   const inputStyle = Platform.OS === 'web' ? {
     backdropFilter: 'blur(10px)',
@@ -3633,7 +6543,7 @@ function EnhancedInput({ input, onInputChange, onSend, onFocusBot, inputRef, acc
 
           {/* Model Dropdown */}
           {showModelPicker && !showAddModel && (
-            <View style={[styles.dropdownPanel, { maxHeight: 480, width: 300 }, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)', overflowY: 'auto' } as any] : [])]}>
+            <View style={[styles.dropdownPanel, { maxHeight: 480, width: 300, left: 0, right: 'auto' }, ...(Platform.OS === 'web' ? [{ boxShadow: '4px 4px 0px rgba(99,102,241,0.05), 0 12px 40px rgba(0,0,0,0.6)', overflowY: 'auto' } as any] : [])]}>
               {MODEL_GROUPS.map(group => {
                 const groupModels = CHAT_MODELS.filter((m: any) => m.group === group.key);
                 if (groupModels.length === 0) return null;
@@ -3766,51 +6676,133 @@ function EnhancedInput({ input, onInputChange, onSend, onFocusBot, inputRef, acc
 
           {/* Quick Actions Dropdown */}
           {showQuickActions && (
-            <View style={[styles.dropdownPanel, styles.dropdownPanelWide, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)' } as any] : [])]}>
-              <Text style={styles.dropdownTitle}>Quick Actions</Text>
-              {QUICK_PROMPTS.map((p, i) => (
-                <Pressable
-                  key={i}
-                  onPress={() => { onQuickAction(p.text); setShowQuickActions(false); }}
-                  onHoverIn={() => setHoveredAction(i)}
-                  onHoverOut={() => setHoveredAction(null)}
-                  accessibilityRole="button"
-                  accessibilityLabel={p.label}
-                  style={[
-                    styles.dropdownItem,
-                    hoveredAction === i && { backgroundColor: '#1a1a28' },
-                    ...(Platform.OS === 'web' ? [{ transition: 'all 0.15s ease', cursor: 'pointer' } as any] : []),
-                  ]}
-                >
-                  <Text style={styles.dropdownActionLabel}>{p.label}</Text>
-                </Pressable>
-              ))}
-              <View style={styles.dropdownDivider} />
-              {PROMPT_CATEGORIES.map((cat, ci) => (
-                <View key={ci}>
-                  <Text style={[styles.dropdownCategoryTitle, { color: cat.color }]}>{cat.title}</Text>
-                  {cat.prompts.map((p, pi) => (
+            <View
+              {...(Platform.OS === 'web' ? { className: 'uc-actions-sysfont' } as any : {})}
+              style={[styles.dropdownPanel, styles.dropdownPanelWide, ...(Platform.OS === 'web' ? [{ boxShadow: '4px 4px 0px rgba(99,102,241,0.05), 0 12px 40px rgba(0,0,0,0.6)' } as any] : [])]}
+            >
+              <ScrollView style={styles.actionsAccordionScroll} contentContainerStyle={styles.actionsAccordionContent}>
+                <View style={styles.actionsAccordionSection}>
+                  <QuickActionsHeader
+                    expanded={expandedActionSections.quick}
+                    isHovered={
+                      hoveredAction === -199
+                      || expandedActionSections.quick
+                      || (hoveredAction !== null && hoveredAction >= 50 && hoveredAction < 200)
+                    }
+                    onPress={() => setExpandedActionSections(prev => ({ ...prev, quick: !prev.quick }))}
+                    onHoverIn={() => setHoveredAction(-199)}
+                    onHoverOut={() => setHoveredAction(null)}
+                  />
+                  {expandedActionSections.quick ? (
+                    <View style={styles.actionsAccordionBody}>
+                      {[...FEATURED_QUICK_ACTIONS, ...QUICK_PROMPTS.slice(7)].map((p, i) => (
+                        <Pressable
+                          key={`${p.label}-${i}`}
+                          onPress={() => { onQuickAction(p.text); setShowQuickActions(false); }}
+                          onHoverIn={() => setHoveredAction(50 + i)}
+                          onHoverOut={() => setHoveredAction(null)}
+                          style={[
+                            styles.dropdownItem,
+                            hoveredAction === 50 + i && { backgroundColor: '#1a1a28' },
+                          ]}
+                        >
+                          <Text style={styles.dropdownActionLabel}>{p.label}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  ) : null}
+                </View>
+
+                <View style={styles.dropdownDivider} />
+
+                <View style={styles.actionsAccordionSection}>
+                  <Pressable
+                    onPress={() => setExpandedActionSections(prev => ({ ...prev, tools: !prev.tools }))}
+                    onHoverIn={() => setHoveredAction(-201)}
+                    onHoverOut={() => setHoveredAction(null)}
+                    style={[
+                      styles.actionsAccordionHeader,
+                      Platform.OS === 'web' && { transition: 'all 0.15s ease' } as any,
+                      hoveredAction === -201 && { backgroundColor: '#f59e0b08' } as any,
+                    ]}
+                  >
+                    <Text style={[styles.actionsAccordionTitle, { color: hoveredAction === -201 ? '#f59e0b' : '#e2e8f0' }]}>SwanClaw Tools</Text>
+                    <Text style={styles.actionsAccordionChevron}>{expandedActionSections.tools ? '▾' : '▸'}</Text>
+                  </Pressable>
+                  {expandedActionSections.tools ? (
+                    <View style={styles.actionsAccordionBody}>
+                      {FEATURED_TOOL_ACTIONS.map((tool, toolIndex) => (
+                        <Pressable
+                          key={tool.text}
+                          onPress={() => { onQuickAction(tool.text); setShowQuickActions(false); }}
+                          onHoverIn={() => setHoveredAction(-100 - toolIndex)}
+                          onHoverOut={() => setHoveredAction(null)}
+                          style={[
+                            styles.dropdownItem,
+                            hoveredAction === -100 - toolIndex && { backgroundColor: '#151522' },
+                          ]}
+                        >
+                          {tool.flatIcon ? (
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                              <FlatIcon name={tool.flatIcon} size={14} />
+                              <Text style={[styles.featuredQuickActionText, { color: tool.color }]}>{tool.label}</Text>
+                            </View>
+                          ) : (
+                            <Text style={[styles.featuredQuickActionText, { color: tool.color }]}>{tool.label}</Text>
+                          )}
+                        </Pressable>
+                      ))}
+                    </View>
+                  ) : null}
+                </View>
+
+                <View style={styles.dropdownDivider} />
+
+                {accordionCategories.map(({ key, category }, ci) => (
+                  <View key={key} style={styles.actionsAccordionSection}>
                     <Pressable
-                      key={pi}
-                      onPress={() => { onQuickAction(p.text); setShowQuickActions(false); }}
-                      onHoverIn={() => setHoveredAction(100 + ci * 20 + pi)}
+                      onPress={() => setExpandedActionSections(prev => ({ ...prev, [key]: !prev[key] }))}
+                      onHoverIn={() => setHoveredAction(-300 - ci)}
                       onHoverOut={() => setHoveredAction(null)}
-                      accessibilityRole="button"
-                      accessibilityLabel={p.label}
                       style={[
-                        styles.dropdownItem, { paddingLeft: 20 },
-                        hoveredAction === 100 + ci * 20 + pi && { backgroundColor: cat.color + '10' },
-                        ...(Platform.OS === 'web' ? [{ transition: 'all 0.15s ease', cursor: 'pointer' } as any] : []),
+                        styles.actionsAccordionHeader,
+                        Platform.OS === 'web' && { transition: 'all 0.15s ease' } as any,
+                        hoveredAction === -300 - ci && { backgroundColor: `${category.color}08` } as any,
                       ]}
                     >
-                      <View style={styles.dropdownItemText}>
-                        <Text style={styles.dropdownItemLabel}>{p.label}</Text>
-                        <Text style={styles.dropdownItemDesc}>{p.desc}</Text>
-                      </View>
+                      <Text style={[styles.actionsAccordionTitle, { color: hoveredAction === -300 - ci ? category.color : '#e2e8f0' }]}>
+                        {toTitleCaseWords(category.title)}
+                      </Text>
+                      <Text style={styles.actionsAccordionChevron}>{expandedActionSections[key] ? '▾' : '▸'}</Text>
                     </Pressable>
-                  ))}
-                </View>
-              ))}
+                    {expandedActionSections[key] ? (
+                      <View style={styles.actionsAccordionBody}>
+                        {category.prompts.map((p, pi) => (
+                          <Pressable
+                            key={pi}
+                            onPress={() => { onQuickAction(p.text); setShowQuickActions(false); }}
+                            onHoverIn={() => setHoveredAction(100 + ci * 20 + pi)}
+                            onHoverOut={() => setHoveredAction(null)}
+                            accessibilityRole="button"
+                            accessibilityLabel={p.label}
+                            style={[
+                              styles.dropdownItem, { paddingLeft: 20 },
+                              hoveredAction === 100 + ci * 20 + pi && { backgroundColor: category.color + '10' },
+                              ...(Platform.OS === 'web' ? [{ transition: 'all 0.15s ease', cursor: 'pointer' } as any] : []),
+                            ]}
+                          >
+                            <View style={styles.dropdownItemText}>
+                              <Text style={styles.dropdownItemLabel}>{p.label}</Text>
+                              <Text style={styles.dropdownItemDesc}>{p.desc}</Text>
+                            </View>
+                          </Pressable>
+                        ))}
+                      </View>
+                    ) : null}
+                    {ci < accordionCategories.length - 1 ? <View style={styles.dropdownDivider} /> : null}
+                  </View>
+                ))}
+              </ScrollView>
             </View>
           )}
         </View>
@@ -3820,27 +6812,141 @@ function EnhancedInput({ input, onInputChange, onSend, onFocusBot, inputRef, acc
           <Pressable
             onPress={() => { setShowModePicker(!showModePicker); setShowModelPicker(false); setShowQuickActions(false); }}
             accessibilityRole="button"
-            accessibilityLabel={`Mode: ${(chatMode || 'talk').charAt(0).toUpperCase() + (chatMode || 'talk').slice(1)}`}
-            style={[
+            accessibilityLabel="Open OpenSwan control center"
+            style={({ hovered, pressed }: any) => [
               styles.modelButton,
-              { borderColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || '#22c55e') + '50' },
+              { borderColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '50' },
+              hovered && {
+                borderColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '80',
+                backgroundColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '14',
+                ...(Platform.OS === 'web' ? { boxShadow: `0 10px 28px ${(CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor)}22`, transform: 'translateY(-1px)' } as any : {}),
+              },
+              pressed && { transform: [{ scale: 0.985 }] },
               ...(Platform.OS === 'web' ? [{ transition: 'all 0.2s ease', cursor: 'pointer' } as any] : []),
             ]}
           >
-            <View style={[styles.modelIconBox, { backgroundColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || '#22c55e') + '20' }]}>
-              <Text style={[styles.modelIconText, { color: CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || '#22c55e' }]}>
-                {CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.icon || '..'}
+            <View style={[styles.modelIconBox, { backgroundColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '20' }]}>
+              <Text style={[styles.modelIconText, { color: CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor }]}>
+                OS
               </Text>
             </View>
-            <Text style={[styles.modelButtonLabel, { color: CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || '#22c55e' }]}>
-              {(chatMode || 'talk').charAt(0).toUpperCase() + (chatMode || 'talk').slice(1)}
+            <Text style={[styles.modelButtonLabel, { color: CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor }]}>
+              OpenSwan
             </Text>
             <Text style={styles.modelChevron}>{showModePicker ? '▲' : '▼'}</Text>
           </Pressable>
 
           {showModePicker && (
-            <View style={[styles.dropdownPanel, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)' } as any] : [])]}>
-              <Text style={styles.dropdownTitle}>Agent Mode</Text>
+            <View style={[styles.dropdownPanel, styles.dropdownPanelControlCenter, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)' } as any] : [])]}>
+              <Text style={styles.dropdownTitle}>OpenSwan Control Center</Text>
+              <View style={styles.controlCenterStatusBand}>
+                <View style={styles.controlCenterStatusHeader}>
+                  <View style={[styles.liveMiniDot, { backgroundColor: runStatus === 'idle' ? '#22c55e' : runStatus === 'waiting_approval' ? '#f59e0b' : '#6366f1' }]} />
+                  <Text style={styles.controlCenterStatusLabel}>STATUS</Text>
+                </View>
+                <Text style={styles.controlCenterStatusValue} numberOfLines={2}>{controlStatusLabel}</Text>
+              </View>
+              <View style={styles.controlCenterStatsRow}>
+                <View style={styles.controlCenterStatPill}>
+                  <Text style={styles.controlCenterStatValue}>{openswanSessionCount || 0}</Text>
+                  <Text style={styles.controlCenterStatLabel}>sessions</Text>
+                </View>
+                <View style={styles.controlCenterStatPill}>
+                  <Text style={styles.controlCenterStatValue}>{memoryCount || 0}</Text>
+                  <Text style={styles.controlCenterStatLabel}>memory</Text>
+                </View>
+                <View style={styles.controlCenterStatPill}>
+                  <Text style={styles.controlCenterStatValue}>{activePlugins?.length || 0}</Text>
+                  <Text style={styles.controlCenterStatLabel}>plugins</Text>
+                </View>
+                <View style={styles.controlCenterStatPill}>
+                  <Text style={styles.controlCenterStatValue}>{builderRevisionCount || 0}</Text>
+                  <Text style={styles.controlCenterStatLabel}>builds</Text>
+                </View>
+              </View>
+              <View style={styles.controlCenterGrid}>
+                <Pressable
+                  onPress={() => { onOpenPlugins?.(); setShowModePicker(false); }}
+                  style={({ hovered, pressed }: any) => [
+                    styles.dropdownItem,
+                    styles.controlCenterCard,
+                    hovered && styles.controlCenterCardHover,
+                    pressed && { transform: [{ scale: 0.985 }] },
+                    Platform.OS === 'web' && { cursor: 'pointer', transition: 'all 0.15s ease' } as any,
+                  ]}
+                >
+                  <View style={[styles.dropdownItemIcon, { backgroundColor: '#22c55e20' }]}>
+                    <Text style={[styles.dropdownItemIconText, { color: '#22c55e' }]}>P</Text>
+                  </View>
+                  <View style={styles.dropdownItemText}>
+                    <Text style={styles.dropdownItemLabel}>Plugins</Text>
+                    <Text style={styles.dropdownItemDesc}>{activePlugins.length} active</Text>
+                  </View>
+                </Pressable>
+                <Pressable
+                  onPress={() => { onOpenMemory?.(); setShowModePicker(false); }}
+                  style={({ hovered, pressed }: any) => [
+                    styles.dropdownItem,
+                    styles.controlCenterCard,
+                    hovered && styles.controlCenterCardHover,
+                    pressed && { transform: [{ scale: 0.985 }] },
+                    Platform.OS === 'web' && { cursor: 'pointer', transition: 'all 0.15s ease' } as any,
+                  ]}
+                >
+                  <View style={[styles.dropdownItemIcon, { backgroundColor: '#6366f120' }]}>
+                    <Text style={[styles.dropdownItemIconText, { color: '#6366f1' }]}>M</Text>
+                  </View>
+                  <View style={styles.dropdownItemText}>
+                    <Text style={styles.dropdownItemLabel}>Memory</Text>
+                    <Text style={styles.dropdownItemDesc}>Inspect, search, save</Text>
+                  </View>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    onToggleBuilder?.();
+                    setShowModePicker(false);
+                  }}
+                  style={({ hovered, pressed }: any) => [
+                    styles.dropdownItem,
+                    styles.controlCenterCard,
+                    hovered && styles.controlCenterCardHover,
+                    pressed && { transform: [{ scale: 0.985 }] },
+                    Platform.OS === 'web' && { cursor: 'pointer', transition: 'all 0.15s ease' } as any,
+                  ]}
+                >
+                  <View style={[styles.dropdownItemIcon, { backgroundColor: '#f59e0b20' }]}>
+                    <Text style={[styles.dropdownItemIconText, { color: '#f59e0b' }]}>B</Text>
+                  </View>
+                  <View style={styles.dropdownItemText}>
+                    <Text style={styles.dropdownItemLabel}>Builder</Text>
+                    <Text style={styles.dropdownItemDesc}>
+                      {showWorkbenchSidecar ? 'Open live studio' : hasBuilderWork ? 'Open last build' : 'Open studio'}
+                    </Text>
+                  </View>
+                </Pressable>
+                <Pressable
+                  onPress={async () => {
+                    await onResetMind?.();
+                    setShowModePicker(false);
+                  }}
+                  style={({ hovered, pressed }: any) => [
+                    styles.dropdownItem,
+                    styles.controlCenterCard,
+                    hovered && styles.controlCenterCardHover,
+                    pressed && { transform: [{ scale: 0.985 }] },
+                    Platform.OS === 'web' && { cursor: 'pointer', transition: 'all 0.15s ease' } as any,
+                  ]}
+                >
+                  <View style={[styles.dropdownItemIcon, { backgroundColor: '#ef444420' }]}>
+                    <Text style={[styles.dropdownItemIconText, { color: '#ef4444' }]}>R</Text>
+                  </View>
+                  <View style={styles.dropdownItemText}>
+                    <Text style={styles.dropdownItemLabel}>Reset Mind</Text>
+                    <Text style={styles.dropdownItemDesc}>Clear session state</Text>
+                  </View>
+                </Pressable>
+              </View>
+              <Text style={[styles.dropdownTitle, { fontSize: 11, marginBottom: 8 }]}>Interaction Mode</Text>
               {CHAT_MODE_CONFIG.map(m => {
                 const isActive = (chatMode || 'talk') === m.key;
                 return (
@@ -3849,18 +6955,20 @@ function EnhancedInput({ input, onInputChange, onSend, onFocusBot, inputRef, acc
                     onPress={() => { onModeChange?.(m.key); setShowModePicker(false); }}
                     accessibilityRole="button"
                     accessibilityLabel={`Select ${m.label} mode`}
-                    style={[
+                    style={({ hovered, pressed }: any) => [
                       styles.dropdownItem,
                       isActive && { backgroundColor: m.color + '18', borderColor: m.color + '40' },
+                      hovered && !isActive && { backgroundColor: '#1a1a28', borderColor: m.color + '33' },
+                      pressed && { transform: [{ scale: 0.985 }] },
                       ...(Platform.OS === 'web' ? [{ transition: 'all 0.15s ease', cursor: 'pointer' } as any] : []),
                     ]}
-                  >
-                    <View style={[styles.dropdownItemIcon, { backgroundColor: m.color + '20' }]}>
-                      <Text style={[styles.dropdownItemIconText, { color: m.color }]}>{m.icon}</Text>
-                    </View>
-                    <View style={styles.dropdownItemText}>
-                      <Text style={[styles.dropdownItemLabel, isActive && { color: m.color }]}>{m.label}</Text>
-                      <Text style={styles.dropdownItemDesc}>{m.desc}</Text>
+                    >
+                      <View style={[styles.dropdownItemIcon, { backgroundColor: m.color + '20' }]}>
+                        <Text style={[styles.dropdownItemIconText, { color: m.color }]}>{m.icon}</Text>
+                      </View>
+                    <View style={styles.controlCenterModeText}>
+                      <Text style={[styles.controlCenterModeLabel, isActive && { color: m.color }]}>{m.label}</Text>
+                      <Text style={styles.controlCenterModeDesc}>{m.desc}</Text>
                     </View>
                     {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: m.color }]} />}
                   </Pressable>
@@ -3900,13 +7008,13 @@ function EnhancedInput({ input, onInputChange, onSend, onFocusBot, inputRef, acc
       {/* Input row */}
       <View style={[styles.enhancedInputWrapper, inputStyle]}>
         <Pressable onPress={onFocusBot} style={[styles.enhancedBotTrigger, { backgroundColor: accentColor + '30' }]}>
-          <FlatIcon name="robot" size={18} />
+          <Image source={agentAvatarSource} style={styles.mainChatAgentComposerIcon} resizeMode="contain" />
         </Pressable>
         <Pressable
           onPress={onPickImage}
           style={[styles.enhancedBotTrigger, { backgroundColor: '#2a2a3e40' }]}
           accessibilityRole="button"
-          accessibilityLabel="Attach image"
+          accessibilityLabel="Attach files"
         >
           <Text style={{ fontSize: 16, color: '#a0a0b0' }}>+</Text>
         </Pressable>
@@ -3917,18 +7025,53 @@ function EnhancedInput({ input, onInputChange, onSend, onFocusBot, inputRef, acc
           placeholderTextColor="#444"
           value={input}
           onChangeText={onInputChange}
-          onSubmitEditing={() => onSend()}
+          onSubmitEditing={() => {
+            if (Platform.OS === 'web') return;
+            if (showSlashCommands) {
+              const selected = slashCommands[highlightedSlashIndex] || slashCommands[0];
+              if (selected) {
+                applySlashCommand(selected);
+                return;
+              }
+            }
+            onSend();
+          }}
           onKeyPress={handleKeyPress}
           returnKeyType="send"
           multiline
           maxLength={1000}
-          onFocus={() => { setFocused(true); setShowModelPicker(false); setShowQuickActions(false); }}
-          onBlur={() => setFocused(false)}
+          onFocus={() => {
+            if (blurTimeoutRef.current) {
+              clearTimeout(blurTimeoutRef.current);
+              blurTimeoutRef.current = null;
+            }
+            setFocused(true);
+            setShowModelPicker(false);
+            setShowQuickActions(false);
+          }}
+          onBlur={() => {
+            blurTimeoutRef.current = setTimeout(() => {
+              setFocused(false);
+              blurTimeoutRef.current = null;
+            }, 120);
+          }}
         />
         <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
           <EnhancedSendInputButton onPress={() => onSend()} disabled={!input.trim()} accentColor={accentColor} />
         </Animated.View>
       </View>
+
+      {showSlashCommands && (
+        <View style={styles.slashCommandPopup}>
+          <ChatSlashCommandPalette
+            accentColor={accentColor}
+            commands={slashCommands}
+            highlightedIndex={highlightedSlashIndex}
+            onHighlightIndexChange={setHighlightedSlashIndex}
+            onSelect={applySlashCommand}
+          />
+        </View>
+      )}
     </View>
   );
 }
@@ -4054,7 +7197,7 @@ const warRoomBannerStyles = StyleSheet.create({
   banner: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     paddingHorizontal: 12, paddingVertical: 8,
-    maxWidth: 860, alignSelf: 'center', width: '100%',
+    maxWidth: CHAT_SURFACE_MAX_WIDTH, alignSelf: 'center', width: '100%',
   },
   label: { color: '#555', fontSize: 11, fontWeight: '700', letterSpacing: 0.5 },
   chip: {
@@ -4131,8 +7274,8 @@ const styles = StyleSheet.create({
   } as any,
 
   // Empty state
-  emptyContainer: { padding: 20, maxWidth: 860, alignSelf: 'center', width: '100%' },
-  heroSection: { alignItems: 'center', paddingTop: 100, paddingBottom: 20 },
+  emptyContainer: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 20, maxWidth: CHAT_SURFACE_MAX_WIDTH, alignSelf: 'center', width: '100%' },
+  heroSection: { alignItems: 'center', justifyContent: 'center', paddingTop: 40, paddingBottom: 40 },
   heroSectionWeb: {},
   heroBotAvatar: {
     justifyContent: 'center',
@@ -4141,7 +7284,7 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { className: 'bot-float-anim' } as any : {}),
   } as any,
   heroBotEmoji: { fontSize: 36 },
-  heroBotImage: { width: 180, height: 180, marginBottom: 4 },
+  heroBotImage: { width: 140, height: 140 },
   heroTitle: { fontSize: 24, fontWeight: '900', letterSpacing: 4, marginBottom: 8 },
   heroSubtitle: { color: '#666', fontSize: 14, textAlign: 'center', lineHeight: 20, maxWidth: 360 },
 
@@ -4156,6 +7299,21 @@ const styles = StyleSheet.create({
   activityText: { color: '#888', fontSize: 12, fontWeight: '600' },
 
   sectionLabel: { color: '#555', fontSize: 10, fontWeight: '800', letterSpacing: 2, marginBottom: 10 },
+  soulActionSection: { marginBottom: 24 },
+  soulModeLabel: { fontSize: 11, fontWeight: '900', letterSpacing: 1 },
+  soulActionGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  soulActionCard: {
+    minWidth: 180,
+    flexGrow: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 4,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  soulActionTitle: { fontSize: 11, fontWeight: '900', letterSpacing: 0.6 },
+  soulActionPrompt: { color: '#94a3b8', fontSize: 11, lineHeight: 16 },
 
   // Enhanced prompts
   quickPromptSection: { marginBottom: 24 },
@@ -4265,9 +7423,159 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace', letterSpacing: 1.5,
   },
   moreProposals: { fontSize: 12, color: '#666', fontFamily: 'monospace', textAlign: 'center', paddingVertical: 4 },
+  builderReopenBar: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a28',
+    backgroundColor: '#060910',
+  },
+  builderReopenButton: {
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderColor: '#243246',
+    backgroundColor: '#0a1018',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  builderReopenButtonText: {
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    fontFamily: 'monospace',
+  },
+  builderModalScrim: {
+    flex: 1,
+    backgroundColor: 'rgba(2, 6, 23, 0.82)',
+    paddingHorizontal: 14,
+    paddingVertical: 18,
+  },
+  builderModalCard: {
+    flex: 1,
+    borderRadius: 18,
+    overflow: 'hidden',
+    backgroundColor: '#04070d',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  builderModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#172033',
+    backgroundColor: '#08111d',
+  },
+  builderModalTitle: {
+    color: '#dbeafe',
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 1,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  builderModalCloseButton: {
+    borderWidth: 1,
+    borderColor: '#7f1d1d',
+    backgroundColor: '#2a0c0c',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  builderModalCloseButtonText: {
+    color: '#fca5a5',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  liveMiniDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 999,
+  },
+
+  chatSurfaceRow: {
+    flex: 1,
+    minHeight: 0,
+  },
+  chatSurfaceRowSplit: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+  },
+  workbenchDivider: {
+    width: 10,
+    backgroundColor: '#0b1119',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'col-resize' } as any : {}),
+  },
+  workbenchDividerGrip: {
+    width: 4,
+    height: 48,
+    borderRadius: 999,
+    backgroundColor: '#334155',
+  },
+  workbenchSidecar: {
+    minWidth: 0,
+    backgroundColor: '#04070d',
+    padding: 16,
+    gap: 12,
+  },
+  workbenchSidecarHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  workbenchSidecarActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  workbenchSidecarLabel: {
+    color: '#7f8ea3',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1.1,
+    fontFamily: 'monospace',
+  },
+  workbenchSidecarButton: {
+    borderWidth: 1,
+    borderColor: '#243246',
+    backgroundColor: '#0a1018',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  workbenchSidecarButtonText: {
+    color: '#94a3b8',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    fontFamily: 'monospace',
+  },
+  workbenchCloseButton: {
+    borderColor: '#7f1d1d',
+    backgroundColor: '#2a0c0c',
+  },
+  workbenchCloseButtonText: {
+    color: '#fca5a5',
+  },
+  chatMainPane: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 0,
+  },
+  messageListScroll: {
+    flex: 1,
+    minHeight: 0,
+  },
 
   // Enhanced messages
-  messageList: { padding: 16, maxWidth: 860, alignSelf: 'center', width: '100%', flexGrow: 1, paddingTop: 16 },
+  messageList: { padding: 16, maxWidth: CHAT_SURFACE_MAX_WIDTH, alignSelf: 'center', width: '100%', flexGrow: 1, paddingTop: 16 },
   enhancedMessageRow: {
     borderRadius: 12,
     padding: 8,
@@ -4290,8 +7598,6 @@ const styles = StyleSheet.create({
   msgAvatarMe: { backgroundColor: '#1a1a1a', borderColor: '#2a2a2a' },
   msgAvatarText: { color: '#fff', fontSize: 13, fontWeight: '800' },
   msgName: { color: '#fff', fontSize: 14, fontWeight: '700' },
-  aiBadge: { borderRadius: 12, paddingHorizontal: 6, paddingVertical: 2 },
-  aiBadgeText: { fontSize: 9, fontWeight: '900', letterSpacing: 1 },
   msgTime: { color: '#444', fontSize: 11, marginLeft: 'auto' as any },
 
   msgContentWrap: { marginLeft: 46, position: 'relative' as any, overflow: 'visible' as any, zIndex: 1 },
@@ -4305,56 +7611,179 @@ const styles = StyleSheet.create({
     borderLeftColor: '#2a2a2a',
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(8px)' } as any : {}),
   },
-  msgContent: { fontSize: 15, lineHeight: 22 },
-  mention: { fontWeight: '700', backgroundColor: '#1a1a1a', paddingHorizontal: 4, borderRadius: 12 },
-  bold: { fontWeight: '800', color: '#fff' },
-  inlineArtifactStack: {
+  messageSourcesWrap: {
     marginTop: 10,
-    gap: 8,
+    gap: 10,
   },
-  inlineArtifactCard: {
+  messageSourceSection: {
+    gap: 6,
+  },
+  messageSourceLabel: {
+    color: '#64748b',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1,
+    textTransform: 'uppercase' as any,
+  },
+  messageSourceCard: {
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#24243a',
-    backgroundColor: '#0b0b12',
-    padding: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 2,
   },
-  inlineArtifactTitle: {
-    fontSize: 12,
+  messageSourceTitle: {
+    fontSize: 11,
     fontWeight: '800',
-    marginBottom: 8,
   },
-  inlineArtifactText: {
-    color: '#d7d7e1',
-    fontSize: 13,
-    lineHeight: 18,
+  messageSourceMeta: {
+    color: '#94a3b8',
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.5,
   },
-  inlineArtifactMeta: {
-    color: '#8a8aa3',
-    fontSize: 12,
+  messageSourceSubtitle: {
+    color: '#cbd5e1',
+    fontSize: 11,
+    lineHeight: 15,
   },
-  inlineArtifactImage: {
-    width: '100%' as any,
-    height: 220,
-    borderRadius: 10,
-    backgroundColor: '#111118',
+  memoryInfluenceCard: {
+    borderColor: '#334155',
+    backgroundColor: '#0f172a',
   },
-  inlineArtifactCodeScroll: {
-    borderRadius: 10,
+  memoryInfluenceCardSoul: {
+    borderColor: '#4f46e5',
+    backgroundColor: '#312e8120',
+  },
+  memoryInfluenceTitle: {
+    color: '#c7d2fe',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  memoryGroupSection: {
+    gap: 6,
+  },
+  memoryGroupLabel: {
+    color: '#7dd3fc',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase' as any,
+  },
+  memoryChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  memoryInfluenceChip: {
+    borderRadius: 999,
     borderWidth: 1,
-    borderColor: '#1f1f2f',
-    backgroundColor: '#08080d',
+    borderColor: '#3730a3',
+    backgroundColor: '#312e8120',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
   },
-  inlineArtifactCodeContent: {
-    padding: 10,
+  memoryInfluenceChipText: {
+    color: '#c7d2fe',
+    fontSize: 10,
+    fontWeight: '700',
   },
-  inlineArtifactCode: {
-    color: '#d8f0d0',
-    fontSize: 12,
-    lineHeight: 18,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  memoryActionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 6,
   },
-
+  memoryActionButton: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: '#0b1220',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  memoryActionButtonText: {
+    color: '#cbd5e1',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+  },
+  memoryForgetButton: {
+    borderColor: '#7f1d1d',
+    backgroundColor: '#2a0c0c',
+  },
+  memoryForgetButtonText: {
+    color: '#fca5a5',
+  },
+  soulLearningRail: {
+    marginHorizontal: 12,
+    marginTop: 10,
+    marginBottom: 6,
+    gap: 8,
+  },
+  soulLearningHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  soulLearningLabel: {
+    color: '#94a3b8',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1,
+    textTransform: 'uppercase' as any,
+  },
+  soulLearningLink: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    backgroundColor: '#0f172a',
+  },
+  soulLearningLinkText: {
+    color: '#38bdf8',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+  },
+  soulLearningScroll: {
+    gap: 8,
+    paddingRight: 12,
+  },
+  soulLearningCard: {
+    width: 220,
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    gap: 3,
+  },
+  soulLearningCardTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  soulLearningCardMeta: {
+    color: '#94a3b8',
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  soulLearningCardSubtitle: {
+    color: '#cbd5e1',
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  soulMemoryCard: {
+    borderColor: '#4338ca',
+    backgroundColor: '#1e1b4b',
+  },
+  soulMemoryCardTitle: {
+    color: '#c7d2fe',
+    fontSize: 11,
+    fontWeight: '800',
+  },
   // Enhanced hover actions
   enhancedHoverActions: {
     position: 'absolute',
@@ -4436,7 +7865,7 @@ const styles = StyleSheet.create({
   // Enhanced UI components
   enhancedQuickBar: {
     borderTopWidth: 1,
-    maxWidth: 860,
+    maxWidth: CHAT_SURFACE_MAX_WIDTH,
     alignSelf: 'center',
     width: '100%',
     backgroundColor: '#000000cc',
@@ -4491,7 +7920,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#000000f0',
     borderTopWidth: 1,
     padding: 20,
-    maxWidth: 860,
+    maxWidth: CHAT_SURFACE_MAX_WIDTH,
     alignSelf: 'center',
     width: '100%',
   },
@@ -4601,7 +8030,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     marginHorizontal: 16,
     marginBottom: 6,
-    maxWidth: 860,
+    maxWidth: CHAT_SURFACE_MAX_WIDTH,
     alignSelf: 'center',
     width: '100%',
     overflow: 'hidden',
@@ -4639,7 +8068,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderTopWidth: 1,
     backgroundColor: '#000000f0',
-    maxWidth: 860,
+    maxWidth: CHAT_SURFACE_MAX_WIDTH,
     alignSelf: 'center',
     width: '100%',
     gap: 12,
@@ -4666,7 +8095,7 @@ const styles = StyleSheet.create({
     gap: 10,
     paddingHorizontal: 20,
     paddingVertical: 12,
-    maxWidth: 860,
+    maxWidth: CHAT_SURFACE_MAX_WIDTH,
     alignSelf: 'center',
     width: '100%',
     borderTopWidth: 1,
@@ -4676,16 +8105,16 @@ const styles = StyleSheet.create({
   typingDot: { width: 10, height: 10, borderRadius: 5 },
   typingText: { color: '#666', fontSize: 12, fontStyle: 'italic' },
   typingDotsText: { fontSize: 16, color: '#666' },
-
   // Enhanced input
   enhancedInputBar: {
     borderTopWidth: 1,
     padding: 16,
     backgroundColor: '#000000f5',
-    maxWidth: 860,
+    maxWidth: CHAT_SURFACE_MAX_WIDTH,
     alignSelf: 'center',
     width: '100%',
     gap: 10,
+    position: 'relative',
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(10px)' } as any : {}),
   },
   composerToolbar: {
@@ -4714,11 +8143,13 @@ const styles = StyleSheet.create({
   modelIconText: {
     fontSize: 10,
     fontWeight: '800',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
   },
   modelButtonLabel: {
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: '600',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+    letterSpacing: 0,
   },
   modelChevron: {
     fontSize: 8,
@@ -4733,55 +8164,212 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#2a2a3e',
-    backgroundColor: '#0a0a10',
+    borderColor: '#1e293b',
+    backgroundColor: '#0a0f1c',
   },
   quickActionsIcon: {
-    fontSize: 14,
-    fontWeight: '700',
+    fontSize: 13,
+    fontWeight: '800',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
   },
   quickActionsLabel: {
-    fontSize: 12,
-    fontWeight: '500',
-    color: '#a0a0b0',
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#e2e8f0',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+    letterSpacing: 0,
   },
   dropdownPanel: {
     position: 'absolute',
     bottom: '100%',
     left: 0,
     marginBottom: 6,
-    width: 220,
-    backgroundColor: '#0f0f18',
+    width: 240,
+    backgroundColor: '#0a0f1c',
     borderWidth: 1,
-    borderColor: '#2a2a3e',
-    borderRadius: 14,
-    paddingVertical: 8,
+    borderColor: '#1e293b',
+    borderRadius: 12,
+    paddingVertical: 6,
     zIndex: 100,
-    maxHeight: 400,
-    ...(Platform.OS === 'web' ? { overflowY: 'auto' } as any : {}),
+    maxHeight: 420,
+    ...(Platform.OS === 'web' ? { overflowY: 'auto', boxShadow: '4px 4px 0px rgba(99,102,241,0.05), 0 12px 40px rgba(0,0,0,0.6)' } as any : {}),
   },
   dropdownPanelWide: {
-    width: 280,
-    maxHeight: 480,
+    width: 300,
+    maxHeight: 500,
+  },
+  dropdownPanelControlCenter: {
+    width: 380,
+    maxHeight: 540,
   },
   dropdownTitle: {
     fontSize: 10,
-    fontWeight: '700',
-    color: '#606075',
+    fontWeight: '900',
+    color: '#64748b',
     letterSpacing: 1.5,
     textTransform: 'uppercase',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     paddingHorizontal: 14,
     paddingVertical: 6,
+  },
+  actionsAccordionScroll: {
+    maxHeight: 460,
+  },
+  actionsAccordionContent: {
+    paddingBottom: 6,
+  },
+  actionsAccordionSection: {
+    paddingHorizontal: 6,
+  },
+  actionsAccordionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    borderRadius: 8,
+  },
+  actionsAccordionTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#94a3b8',
+    letterSpacing: 0,
+    textTransform: 'none',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+  },
+  actionsAccordionChevron: {
+    color: '#475569',
+    fontSize: 11,
+    fontWeight: '900',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  actionsAccordionBody: {
+    gap: 1,
+    paddingBottom: 4,
+  },
+  featuredQuickActions: {
+    paddingHorizontal: 6,
+    paddingBottom: 2,
+    gap: 1,
+  },
+  featuredQuickActionItem: {
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 8,
+  },
+  featuredQuickActionText: {
+    fontSize: 14,
+    fontWeight: '600',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
   },
   dropdownItem: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     paddingVertical: 8,
-    borderRadius: 0,
+    borderRadius: 8,
+    marginHorizontal: 2,
+  },
+  controlCenterGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    alignItems: 'stretch',
+    gap: 10,
+    marginBottom: 10,
+    paddingHorizontal: 10,
+  },
+  controlCenterCard: {
+    width: '46.5%',
+    minHeight: 64,
+    borderRadius: 10,
+    backgroundColor: '#0f172a',
+    borderColor: '#1e293b',
+    alignItems: 'center',
+    justifyContent: 'center',
+    textAlign: 'center',
+  },
+  controlCenterCardHover: {
+    borderColor: '#334155',
+    backgroundColor: '#111827',
+    ...(Platform.OS === 'web' ? { boxShadow: '2px 2px 0px rgba(99,102,241,0.08), 0 8px 20px rgba(0,0,0,0.4)', transform: 'translateY(-1px)' } as any : {}),
+  },
+  controlCenterStatusBand: {
+    marginHorizontal: 10,
+    marginBottom: 10,
     borderWidth: 1,
-    borderColor: 'transparent',
+    borderColor: '#232336',
+    backgroundColor: '#111521',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 6,
+  },
+  controlCenterStatusHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  controlCenterStatusLabel: {
+    color: '#7c8aa5',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.9,
+    fontFamily: 'monospace',
+  },
+  controlCenterStatusValue: {
+    color: '#e5eefc',
+    fontSize: 12,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+  },
+  controlCenterStatsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    marginBottom: 10,
+  },
+  controlCenterStatPill: {
+    minWidth: 72,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#232336',
+    backgroundColor: '#10131c',
+    alignItems: 'center',
+    gap: 2,
+  },
+  controlCenterStatValue: {
+    color: '#f8fafc',
+    fontSize: 12,
+    fontWeight: '900',
+    fontFamily: 'monospace',
+  },
+  controlCenterStatLabel: {
+    color: '#7c8aa5',
+    fontSize: 9,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  controlCenterModeText: {
+    flex: 1,
+    alignItems: 'flex-start',
+  },
+  controlCenterModeLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#f0f0f5',
+    textAlign: 'left',
+  },
+  controlCenterModeDesc: {
+    fontSize: 11,
+    color: '#606075',
+    marginTop: 1,
+    textAlign: 'left',
   },
   dropdownItemIcon: {
     width: 28,
@@ -4797,16 +8385,19 @@ const styles = StyleSheet.create({
   },
   dropdownItemText: {
     flex: 1,
+    alignItems: 'flex-start',
   },
   dropdownItemLabel: {
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '600',
-    color: '#f0f0f5',
+    color: '#e2e8f0',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
   },
   dropdownItemDesc: {
-    fontSize: 11,
-    color: '#606075',
-    marginTop: 1,
+    fontSize: 12,
+    color: '#64748b',
+    marginTop: 2,
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
   },
   dropdownActiveDot: {
     width: 8,
@@ -4815,21 +8406,64 @@ const styles = StyleSheet.create({
   },
   dropdownDivider: {
     height: 1,
-    backgroundColor: '#1a1a28',
-    marginVertical: 6,
-    marginHorizontal: 14,
+    backgroundColor: '#1e293b',
+    marginVertical: 4,
+    marginHorizontal: 12,
   },
   dropdownCategoryTitle: {
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
-    letterSpacing: 1,
+    letterSpacing: 1.2,
     paddingHorizontal: 14,
     paddingTop: 8,
     paddingBottom: 4,
+    textTransform: 'uppercase',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
   },
   dropdownActionLabel: {
-    fontSize: 13,
-    color: '#f0f0f5',
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#e2e8f0',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+  },
+  globalDropOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 500,
+    backgroundColor: 'rgba(2, 6, 23, 0.68)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  globalDropCard: {
+    minWidth: 320,
+    maxWidth: 520,
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    borderRadius: 18,
+    borderWidth: 2,
+    borderColor: '#22d3ee',
+    backgroundColor: 'rgba(8, 15, 28, 0.92)',
+    alignItems: 'center',
+    ...(Platform.OS === 'web' ? { boxShadow: '0 16px 60px rgba(34, 211, 238, 0.18)', backdropFilter: 'blur(10px)' } as any : {}),
+  },
+  globalDropTitle: {
+    color: '#22d3ee',
+    fontSize: 16,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  globalDropSubtitle: {
+    marginTop: 8,
+    color: '#cbd5e1',
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 18,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   enhancedInputWrapper: {
     flexDirection: 'row',
@@ -4842,6 +8476,50 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     gap: 8,
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(8px)' } as any : {}),
+  },
+  slashCommandPopup: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    bottom: 88,
+    zIndex: 120,
+  },
+  mainChatAgentIdentityPressable: {
+    width: 24,
+    height: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  mainChatIdentityChip: {
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#2a2a3e',
+    backgroundColor: '#14141c',
+  },
+  mainChatIdentityChipText: {
+    color: '#8c8ca3',
+    fontSize: 8,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    letterSpacing: 0.6,
+  },
+  mainChatAgentIdentityIcon: {
+    width: 18,
+    height: 18,
+  },
+  mainChatAgentMessageIcon: {
+    width: 18,
+    height: 18,
+  },
+  mainChatAgentComposerIcon: {
+    width: 18,
+    height: 18,
+  },
+  mainChatAgentMentionIcon: {
+    width: 16,
+    height: 16,
   },
   enhancedBotTrigger: {
     width: 38,

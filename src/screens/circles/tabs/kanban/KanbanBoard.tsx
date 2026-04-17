@@ -21,10 +21,13 @@ interface Props {
   onQuickAdd: (status: TaskStatus, title: string) => void;
   onAddTask: (status: TaskStatus) => void;
   onBatchMove?: (taskIds: string[], newStatus: TaskStatus) => void;
+  onBatchAssignRoom?: (taskIds: string[], roomId: string | null) => void;
+  roomOptions?: Array<{ id: string; label: string; color: string }>;
   onArchiveDone?: (taskIds: string[]) => void;
   externalSearchText?: string;
   externalFilterPriority?: TaskPriority | null;
   externalFilterAssignee?: string | null;
+  externalFilterRoom?: string | null;
 }
 
 const MOBILE_BREAKPOINT = 768;
@@ -32,8 +35,8 @@ const MOBILE_BREAKPOINT = 768;
 export default function KanbanBoard({
   columns, tasksByColumn, agents, goals,
   onCardPress, onMoveTask, onQuickAdd, onAddTask,
-  onBatchMove, onArchiveDone,
-  externalSearchText, externalFilterPriority, externalFilterAssignee,
+  onBatchMove, onBatchAssignRoom, roomOptions, onArchiveDone,
+  externalSearchText, externalFilterPriority, externalFilterAssignee, externalFilterRoom,
 }: Props) {
   const { width } = useWindowDimensions();
   const isMobile = width < MOBILE_BREAKPOINT;
@@ -43,11 +46,12 @@ export default function KanbanBoard({
   const searchText = externalSearchText ?? '';
   const filterPriority = externalFilterPriority ?? null;
   const filterAssignee = externalFilterAssignee ?? null;
+  const filterRoom = externalFilterRoom ?? null;
 
   // Apply search + filters to tasksByColumn
   const filteredTasksByColumn = useMemo(() => {
     const q = searchText.toLowerCase().trim();
-    const hasFilters = q || filterPriority || filterAssignee;
+    const hasFilters = q || filterPriority || filterAssignee || filterRoom;
     if (!hasFilters) return tasksByColumn;
 
     const result = {} as TasksByColumn;
@@ -63,11 +67,12 @@ export default function KanbanBoard({
             if (t.assigned_to !== filterAssignee) return false;
           }
         }
+        if (filterRoom && t.room_id !== filterRoom) return false;
         return true;
       });
     }
     return result;
-  }, [tasksByColumn, searchText, filterPriority, filterAssignee]);
+  }, [tasksByColumn, searchText, filterPriority, filterAssignee, filterRoom]);
 
   // Drag state
   const [dragOverColumn, setDragOverColumn] = useState<TaskStatus | null>(null);
@@ -131,6 +136,8 @@ export default function KanbanBoard({
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
           onBatchMove={onBatchMove}
+          onBatchAssignRoom={onBatchAssignRoom}
+          roomOptions={roomOptions}
           onArchiveDone={onArchiveDone}
         />
       </View>
@@ -164,6 +171,8 @@ export default function KanbanBoard({
             onDragLeave={() => { if (dragOverColumn === col.key) setDragOverColumn(null); }}
             onDrop={(taskId) => handleDrop(col.key, taskId)}
             onBatchMove={onBatchMove}
+            onBatchAssignRoom={onBatchAssignRoom}
+            roomOptions={roomOptions}
             onArchiveDone={onArchiveDone}
           />
         ))}

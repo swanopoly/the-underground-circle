@@ -78,6 +78,14 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
     .map(agentId => agents.find(a => a.id === agentId))
     .filter(Boolean) as CircleOfficeAgent[];
   const assignedAgent = assignedAgents[0] || null;
+  const ownershipAssignment = (task.agent_assignments || []).find(a => a.ownership_status && a.ownership_status !== 'full')
+    || (task.agent_assignments || []).find(a => a.ownership_status)
+    || null;
+  const ownershipTone = ownershipAssignment?.ownership_status === 'blocked'
+    ? { label: 'BLOCKED', color: '#ef4444', bg: '#ef444415', border: '#ef444430' }
+    : ownershipAssignment?.ownership_status === 'assisted'
+      ? { label: 'ASSISTED', color: '#f59e0b', bg: '#f59e0b15', border: '#f59e0b30' }
+      : null;
 
   // Resolve goal from joined data or from goals list
   const goalData = task.goal
@@ -177,6 +185,21 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
             <View style={s.goalTag}>
               <View style={[s.goalDot, { backgroundColor: goalData.status === 'active' ? '#22c55e' : goalData.status === 'paused' ? '#f59e0b' : '#6f6f6f' }]} />
               <Text style={s.goalName} numberOfLines={1}>{goalData.name}</Text>
+            </View>
+          )}
+
+          {task.room?.name && (
+            <View style={[s.goalTag, s.roomTag, task.room?.color ? { borderColor: task.room.color + '30', backgroundColor: task.room.color + '12' } : null]}>
+              <View style={[s.goalDot, { backgroundColor: task.room?.color || '#22d3ee' }]} />
+              <Text style={[s.goalName, task.room?.color ? { color: task.room.color } : null]} numberOfLines={1}>
+                {task.room.name}
+              </Text>
+            </View>
+          )}
+
+          {ownershipTone && (
+            <View style={[s.ownershipTag, { backgroundColor: ownershipTone.bg, borderColor: ownershipTone.border }]}>
+              <Text style={[s.ownershipTagText, { color: ownershipTone.color }]}>{ownershipTone.label}</Text>
             </View>
           )}
 
@@ -410,6 +433,24 @@ const s = StyleSheet.create({
     paddingHorizontal: 7,
     paddingVertical: 3,
     borderRadius: 6,
+  },
+  roomTag: {
+    borderWidth: 1,
+    marginTop: -2,
+  },
+  ownershipTag: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+    marginTop: -2,
+  },
+  ownershipTagText: {
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    letterSpacing: 0.8,
   },
   goalDot: {
     width: 5,

@@ -17,6 +17,7 @@ import {
   loadCollaborativeHandoffs, markCollaborativeHandoffsConsumed, saveTaskRunHandoff,
 } from '../lib/taskExecutionRuntime';
 import { loadCircleOfficeAgents, CircleOfficeAgent, createBlackSwanAgent } from '../lib/circleOffice';
+import { buildTaskOwnershipClaim } from '../lib/circleIntegrations';
 import {
   KanbanTask,
   TaskComment,
@@ -32,6 +33,7 @@ import {
   TaskRun,
   TaskRunOutput,
   TaskRunStatus,
+  TaskOwnershipStatus,
 } from '../types/kanban';
 
 export interface KanbanMember {
@@ -49,7 +51,7 @@ export interface KanbanData {
   loading: boolean;
   createTask: (fields: CreateTaskFields) => Promise<void>;
   moveTask: (taskId: string, newStatus: TaskStatus) => Promise<void>;
-  updateTask: (taskId: string, fields: Partial<KanbanTask>) => Promise<void>;
+  updateTask: (taskId: string, fields: TaskUpdateFields) => Promise<void>;
   deleteTask: (taskId: string) => Promise<void>;
   approveTask: (taskId: string, agentId: string) => Promise<void>;
   requestChanges: (taskId: string) => Promise<void>;
@@ -99,7 +101,12 @@ export interface CreateTaskFields {
   focus_chain?: FocusChainItem[];
   mode?: 'plan' | 'execute';
   mission_id?: string | null;
+  inherit_room_agents?: boolean;
 }
+
+export type TaskUpdateFields = Partial<KanbanTask> & {
+  inherit_room_agents?: boolean;
+};
 
 const TASK_RUN_MARKER_START = '[[TASK_RUN_JSON]]';
 const TASK_RUN_MARKER_END = '[[/TASK_RUN_JSON]]';
@@ -300,7 +307,7 @@ function normalizeTask(task: any): KanbanTask {
     status: normalizeStatus(task.status),
     peer_approvals: Array.isArray(task.peer_approvals) ? task.peer_approvals : [],
     assigned_agent_ids: assignedAgentIds,
-    completion_policy: task.completion_policy || (assignedAgentIds.length > 1 ? 'all_assigned' : 'single_owner'),
+    completion_policy: task.completion_policy || getDefaultCompletionPolicy(assignedAgentIds.length),
     agent_assignments: Array.isArray(task.agent_assignments) ? task.agent_assignments : [],
     recent_runs: Array.isArray(task.recent_runs) ? task.recent_runs : [],
     last_agent_run_at: task.last_agent_run_at || null,
@@ -405,7 +412,11 @@ function extractCodeAttachments(text: string): TaskAttachment[] {
 }
 
 function resolveCompletionPolicy(task: Pick<KanbanTask, 'completion_policy' | 'assigned_agent_ids' | 'assigned_agent_id'>): TaskCompletionPolicy {
-  return task.completion_policy || (uniqueAgentIds(task.assigned_agent_ids, task.assigned_agent_id).length > 1 ? 'all_assigned' : 'single_owner');
+  return task.completion_policy || getDefaultCompletionPolicy(uniqueAgentIds(task.assigned_agent_ids, task.assigned_agent_id).length);
+}
+
+function getDefaultCompletionPolicy(agentCount: number): TaskCompletionPolicy {
+  return agentCount > 1 ? 'any_assigned' : 'single_owner';
 }
 
 function resolveNextStatus(task: KanbanTask, output: TaskRunOutput, mode: AgentMode, currentAgentId: string): TaskStatus | null {
@@ -445,6 +456,7 @@ export function useKanbanData(circleId: string): KanbanData {
   const [loading, setLoading] = useState(true);
   const fetchRef = useRef(0);
   const assignmentSupportRef = useRef<boolean | null>(null);
+  const assignmentOwnershipSupportRef = useRef<boolean | null>(null);
   const taskRunsSupportRef = useRef<boolean | null>(null);
   const commentTaskRunSupportRef = useRef<boolean | null>(null);
   const completionPolicySupportRef = useRef<boolean | null>(null);
@@ -489,7 +501,7 @@ export function useKanbanData(circleId: string): KanbanData {
             ...task,
             agent_assignments: finalAssignments,
             assigned_agent_ids: uniqueAgentIds(finalAssignments.map(a => a.agent_id), task.assigned_agent_id),
-            completion_policy: task.completion_policy || (finalAssignments.length > 1 ? 'all_assigned' : 'single_owner'),
+            completion_policy: task.completion_policy || getDefaultCompletionPolicy(finalAssignments.length),
           };
         });
       }
@@ -555,18 +567,30 @@ export function useKanbanData(circleId: string): KanbanData {
   }, [circleId, hydrateTaskTracking]);
 
   const fetchMembers = useCallback(async () => {
-    const { data } = await supabase
-      .from('circle_members')
-      .select('user:profiles(id, username, display_name)')
-      .eq('circle_id', circleId)
-      .limit(50);
+    try {
+      const { data, error } = await supabase
+        .from('circle_members')
+        .select('user:profiles(id, username, display_name)')
+        .eq('circle_id', circleId)
+        .limit(50);
 
-    setMembers((data || []).map((m: any) => m.user).filter(Boolean));
+      if (error) {
+        console.error('fetchMembers error:', error);
+        return;
+      }
+      setMembers((data || []).map((m: any) => m.user).filter(Boolean));
+    } catch (err) {
+      console.error('fetchMembers unexpected:', err);
+    }
   }, [circleId]);
 
   const fetchAgents = useCallback(async () => {
-    const { agents: loadedAgents } = await loadCircleOfficeAgents(circleId);
-    setAgents(loadedAgents);
+    try {
+      const { agents: loadedAgents } = await loadCircleOfficeAgents(circleId);
+      setAgents(loadedAgents);
+    } catch (err) {
+      console.error('fetchAgents unexpected:', err);
+    }
   }, [circleId]);
 
   useEffect(() => {
@@ -574,7 +598,7 @@ export function useKanbanData(circleId: string): KanbanData {
     (async () => {
       const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
       if (mounted && user) setCurrentUserId(user.id);
-      await Promise.all([fetchTasks(), fetchMembers(), fetchAgents()]);
+      await Promise.allSettled([fetchTasks(), fetchMembers(), fetchAgents()]);
       if (mounted) setLoading(false);
     })();
     return () => { mounted = false; };
@@ -593,13 +617,48 @@ export function useKanbanData(circleId: string): KanbanData {
 
   const tasksByColumn = useMemo(() => groupByColumn(tasks), [tasks]);
 
-  const syncTaskAssignments = useCallback(async (taskId: string, agentIds: string[], primaryAgentId?: string | null) => {
+  const buildAssignmentOwnershipPayload = useCallback(async (task: Pick<KanbanTask, 'id' | 'circle_id' | 'title' | 'description'> & { capability_profile_key?: string | null }) => {
+    const claim = await buildTaskOwnershipClaim({
+      circleId: task.circle_id,
+      title: task.title,
+      description: task.description || undefined,
+      profileKey: (task as any).capability_profile_key || undefined,
+    });
+    return {
+      ownership_status: claim.ownership.level as TaskOwnershipStatus,
+      ownership_summary: claim.ownership.detail,
+      required_connectors: claim.requiredConnectors,
+      required_capabilities: claim.requiredCapabilities,
+      missing_connectors: claim.missingConnectors,
+      missing_capabilities: claim.missingCapabilities,
+      ownership_updated_at: new Date().toISOString(),
+    };
+  }, []);
+
+  const stripAssignmentOwnershipPayload = useCallback((payload: Record<string, any>) => {
+    const next = { ...payload };
+    delete next.ownership_status;
+    delete next.ownership_summary;
+    delete next.required_connectors;
+    delete next.required_capabilities;
+    delete next.missing_connectors;
+    delete next.missing_capabilities;
+    delete next.ownership_updated_at;
+    return next;
+  }, []);
+
+  const syncTaskAssignments = useCallback(async (
+    taskId: string,
+    agentIds: string[],
+    primaryAgentId?: string | null,
+    taskForOwnership?: Pick<KanbanTask, 'id' | 'circle_id' | 'title' | 'description'> & { capability_profile_key?: string | null },
+  ) => {
     const desiredAgentIds = uniqueAgentIds(agentIds, primaryAgentId);
     if (assignmentSupportRef.current === false) return;
 
     const { data: existingRows, error: existingError } = await supabase
       .from('task_agent_assignments')
-      .select('id, agent_id, role, assignment_type, required_for_completion, required_for_review, status, order_index, assigned_by, assigned_at, started_at, completed_at')
+      .select('id, agent_id, role, assignment_type, required_for_completion, required_for_review, status, order_index, assigned_by, assigned_at, started_at, completed_at, ownership_status, ownership_summary, required_connectors, required_capabilities, missing_connectors, missing_capabilities, ownership_updated_at')
       .eq('task_id', taskId);
 
     if (existingError) {
@@ -610,6 +669,7 @@ export function useKanbanData(circleId: string): KanbanData {
 
     assignmentSupportRef.current = true;
     const existingMap = new Map((existingRows || []).map((row: any) => [row.agent_id, row]));
+    const ownershipPayload = taskForOwnership ? await buildAssignmentOwnershipPayload(taskForOwnership).catch(() => null) : null;
     const upsertRows = desiredAgentIds.map((agentId, index) => {
       const existing = existingMap.get(agentId);
       return {
@@ -626,12 +686,22 @@ export function useKanbanData(circleId: string): KanbanData {
         assigned_at: existing?.assigned_at || new Date().toISOString(),
         started_at: existing?.started_at || null,
         completed_at: existing?.completed_at || null,
+        ...(ownershipPayload || {}),
       };
     });
     if (upsertRows.length > 0) {
-      const { error: upsertError } = await supabase
+      let { error: upsertError } = await supabase
         .from('task_agent_assignments')
         .upsert(upsertRows, { onConflict: 'task_id,agent_id' });
+      if (upsertError && ownershipPayload && String(upsertError.message || '').match(/ownership_|required_connectors|required_capabilities|missing_connectors|missing_capabilities/)) {
+        assignmentOwnershipSupportRef.current = false;
+        const fallbackRows = upsertRows.map(row => stripAssignmentOwnershipPayload(row));
+        ({ error: upsertError } = await supabase
+          .from('task_agent_assignments')
+          .upsert(fallbackRows, { onConflict: 'task_id,agent_id' }));
+      } else if (!upsertError && ownershipPayload) {
+        assignmentOwnershipSupportRef.current = true;
+      }
       if (upsertError) {
         assignmentSupportRef.current = false;
         console.warn('[useKanbanData] task_agent_assignments upsert unavailable:', upsertError.message);
@@ -647,7 +717,7 @@ export function useKanbanData(circleId: string): KanbanData {
       const { error: deleteError } = await supabase.from('task_agent_assignments').delete().in('id', deleteIds);
       if (deleteError) console.error('syncTaskAssignments delete error:', deleteError);
     }
-  }, [circleId, currentUserId]);
+  }, [assignmentOwnershipSupportRef, buildAssignmentOwnershipPayload, circleId, currentUserId, stripAssignmentOwnershipPayload]);
 
   const ensureTaskAssignment = useCallback(async (task: KanbanTask, agentId: string): Promise<TaskAgentAssignment | null> => {
     if (assignmentSupportRef.current === false) return null;
@@ -670,7 +740,18 @@ export function useKanbanData(circleId: string): KanbanData {
       return data as TaskAgentAssignment;
     }
 
-    await syncTaskAssignments(task.id, uniqueAgentIds(task.assigned_agent_ids, task.assigned_agent_id, agentId), task.assigned_agent_id || agentId);
+    await syncTaskAssignments(
+      task.id,
+      uniqueAgentIds(task.assigned_agent_ids, task.assigned_agent_id, agentId),
+      task.assigned_agent_id || agentId,
+      {
+        id: task.id,
+        circle_id: task.circle_id,
+        title: task.title,
+        description: task.description,
+        capability_profile_key: (task as any).capability_profile_key || inferTaskCapabilityProfile({ title: task.title, description: task.description || undefined }),
+      },
+    );
     const { data: inserted, error: insertedError } = await supabase
       .from('task_agent_assignments')
       .select('*')
@@ -686,7 +767,12 @@ export function useKanbanData(circleId: string): KanbanData {
     return (inserted as TaskAgentAssignment | null) || null;
   }, [syncTaskAssignments]);
 
-  const upsertAssignmentStatus = useCallback(async (task: KanbanTask, agentId: string, status: TaskAgentAssignment['status']) => {
+  const upsertAssignmentStatus = useCallback(async (
+    task: KanbanTask,
+    agentId: string,
+    status: TaskAgentAssignment['status'],
+    ownershipPayload?: Record<string, any> | null,
+  ) => {
     if (assignmentSupportRef.current === false) return null;
     const existing = await ensureTaskAssignment(task, agentId);
 
@@ -706,13 +792,24 @@ export function useKanbanData(circleId: string): KanbanData {
       assigned_at: existing?.assigned_at || task.created_at || now,
       started_at: status === 'in_progress' || status === 'completed' ? (existing?.started_at || now) : existing?.started_at || null,
       completed_at: status === 'completed' ? now : status === 'assigned' ? null : existing?.completed_at || null,
+      ...(ownershipPayload || {}),
     };
 
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('task_agent_assignments')
       .upsert(payload, { onConflict: 'task_id,agent_id' })
       .select('*')
       .maybeSingle();
+    if (error && ownershipPayload && String(error.message || '').match(/ownership_|required_connectors|required_capabilities|missing_connectors|missing_capabilities/)) {
+      assignmentOwnershipSupportRef.current = false;
+      ({ data, error } = await supabase
+        .from('task_agent_assignments')
+        .upsert(stripAssignmentOwnershipPayload(payload), { onConflict: 'task_id,agent_id' })
+        .select('*')
+        .maybeSingle());
+    } else if (!error && ownershipPayload) {
+      assignmentOwnershipSupportRef.current = true;
+    }
 
     if (error) {
       assignmentSupportRef.current = false;
@@ -722,11 +819,22 @@ export function useKanbanData(circleId: string): KanbanData {
 
     assignmentSupportRef.current = true;
     return (data as TaskAgentAssignment | null) || existing;
-  }, [currentUserId, ensureTaskAssignment]);
+  }, [currentUserId, ensureTaskAssignment, stripAssignmentOwnershipPayload]);
 
   const createTaskRunRecord = useCallback(async (payload: Record<string, any>): Promise<string | null> => {
     if (taskRunsSupportRef.current === false) return null;
-    const { data, error } = await supabase.from('task_runs').insert(payload).select('id').single();
+    let { data, error } = await supabase.from('task_runs').insert(payload).select('id').single();
+    if (error && String(error.message || '').match(/ownership_|required_connectors|required_capabilities|missing_connectors|missing_capabilities/)) {
+      const fallbackPayload = { ...payload };
+      delete fallbackPayload.ownership_status;
+      delete fallbackPayload.ownership_summary;
+      delete fallbackPayload.required_connectors;
+      delete fallbackPayload.required_capabilities;
+      delete fallbackPayload.missing_connectors;
+      delete fallbackPayload.missing_capabilities;
+      delete fallbackPayload.ownership_updated_at;
+      ({ data, error } = await supabase.from('task_runs').insert(fallbackPayload).select('id').single());
+    }
     if (error) {
       taskRunsSupportRef.current = false;
       console.warn('[useKanbanData] task_runs insert unavailable:', error.message);
@@ -738,7 +846,18 @@ export function useKanbanData(circleId: string): KanbanData {
 
   const updateTaskRunRecord = useCallback(async (taskRunId: string, fields: Record<string, any>) => {
     if (!taskRunId || taskRunsSupportRef.current === false) return;
-    const { error } = await supabase.from('task_runs').update(fields).eq('id', taskRunId);
+    let { error } = await supabase.from('task_runs').update(fields).eq('id', taskRunId);
+    if (error && String(error.message || '').match(/ownership_|required_connectors|required_capabilities|missing_connectors|missing_capabilities/)) {
+      const fallbackFields = { ...fields };
+      delete fallbackFields.ownership_status;
+      delete fallbackFields.ownership_summary;
+      delete fallbackFields.required_connectors;
+      delete fallbackFields.required_capabilities;
+      delete fallbackFields.missing_connectors;
+      delete fallbackFields.missing_capabilities;
+      delete fallbackFields.ownership_updated_at;
+      ({ error } = await supabase.from('task_runs').update(fallbackFields).eq('id', taskRunId));
+    }
     if (error) {
       taskRunsSupportRef.current = false;
       console.warn('[useKanbanData] task_runs update unavailable:', error.message);
@@ -784,12 +903,13 @@ export function useKanbanData(circleId: string): KanbanData {
   const createTask = useCallback(async (fields: CreateTaskFields) => {
     if (!currentUserId || !fields.title.trim()) return;
     const status = fields.status || 'todo';
-    const inheritedRoomAgentIds = fields.room_id && (!fields.assigned_agent_ids || fields.assigned_agent_ids.length === 0) && !fields.assigned_agent_id
+    const shouldInheritRoomAgentsOnCreate = fields.inherit_room_agents !== false;
+    const inheritedRoomAgentIds = shouldInheritRoomAgentsOnCreate && fields.room_id && (!fields.assigned_agent_ids || fields.assigned_agent_ids.length === 0) && !fields.assigned_agent_id
       ? await resolveProjectAgentIdsForRoom(fields.room_id)
       : [];
     const desiredAgentIds = uniqueAgentIds(fields.assigned_agent_ids, fields.assigned_agent_id, inheritedRoomAgentIds);
     const primaryAgentId = desiredAgentIds[0] || null;
-    const completionPolicy = fields.completion_policy || (desiredAgentIds.length > 1 ? 'all_assigned' : 'single_owner');
+    const completionPolicy = fields.completion_policy || getDefaultCompletionPolicy(desiredAgentIds.length);
 
     const colTasks = tasks.filter(t => normalizeStatus(t.status) === status);
     const maxPos = colTasks.length > 0 ? Math.max(...colTasks.map(t => t.position)) : -1;
@@ -829,7 +949,13 @@ export function useKanbanData(circleId: string): KanbanData {
     }
 
     if (desiredAgentIds.length > 0 && insertResult.data?.id) {
-      await syncTaskAssignments(insertResult.data.id, desiredAgentIds, primaryAgentId);
+      await syncTaskAssignments(insertResult.data.id, desiredAgentIds, primaryAgentId, {
+        id: insertResult.data.id,
+        circle_id: circleId,
+        title: fields.title.trim(),
+        description: fields.description?.trim() || null,
+        capability_profile_key: inferTaskCapabilityProfile({ title: fields.title.trim(), description: fields.description || undefined }),
+      });
     }
 
     fetchTasks();
@@ -885,11 +1011,13 @@ export function useKanbanData(circleId: string): KanbanData {
     }
   }, [tasks, currentUserId, circleId, fetchTasks]);
 
-  const updateTask = useCallback(async (taskId: string, fields: Partial<KanbanTask>) => {
-    const managesAssignments = Object.prototype.hasOwnProperty.call(fields, 'assigned_agent_ids') || Object.prototype.hasOwnProperty.call(fields, 'assigned_agent_id');
-    const shouldInheritRoomAgents = Object.prototype.hasOwnProperty.call(fields, 'room_id')
-      && !managesAssignments
+  const updateTask = useCallback(async (taskId: string, fields: TaskUpdateFields) => {
+    const shouldInheritRoomAgents = fields.inherit_room_agents === true
+      && Object.prototype.hasOwnProperty.call(fields, 'room_id')
+      && !Object.prototype.hasOwnProperty.call(fields, 'assigned_agent_ids')
+      && !Object.prototype.hasOwnProperty.call(fields, 'assigned_agent_id')
       && !!fields.room_id;
+    const managesAssignments = Object.prototype.hasOwnProperty.call(fields, 'assigned_agent_ids') || Object.prototype.hasOwnProperty.call(fields, 'assigned_agent_id');
     const desiredAgentIds = managesAssignments
       ? uniqueAgentIds((fields as any).assigned_agent_ids, fields.assigned_agent_id)
       : shouldInheritRoomAgents
@@ -897,6 +1025,7 @@ export function useKanbanData(circleId: string): KanbanData {
         : null;
 
     const payload: any = { ...fields };
+    delete payload.inherit_room_agents;
     delete payload.assigned_agent_ids;
     delete payload.agent_assignments;
     delete payload.recent_runs;
@@ -922,11 +1051,21 @@ export function useKanbanData(circleId: string): KanbanData {
     }
 
     if ((managesAssignments || shouldInheritRoomAgents) && desiredAgentIds) {
-      await syncTaskAssignments(taskId, desiredAgentIds, desiredAgentIds[0] || null);
+      const currentTask = tasks.find(task => task.id === taskId);
+      await syncTaskAssignments(taskId, desiredAgentIds, desiredAgentIds[0] || null, currentTask ? {
+        id: currentTask.id,
+        circle_id: currentTask.circle_id,
+        title: ('title' in fields && fields.title ? String(fields.title) : currentTask.title),
+        description: ('description' in fields ? (fields.description as string | null | undefined) ?? null : currentTask.description) || null,
+        capability_profile_key: (currentTask as any).capability_profile_key || inferTaskCapabilityProfile({
+          title: ('title' in fields && fields.title ? String(fields.title) : currentTask.title),
+          description: ('description' in fields ? (fields.description as string | null | undefined) ?? undefined : currentTask.description || undefined),
+        }),
+      } : undefined);
     }
 
     fetchTasks();
-  }, [fetchTasks, syncTaskAssignments]);
+  }, [fetchTasks, syncTaskAssignments, tasks]);
 
   const deleteTask = useCallback(async (taskId: string) => {
     setTasks(prev => prev.filter(t => t.id !== taskId));
@@ -1094,9 +1233,19 @@ export function useKanbanData(circleId: string): KanbanData {
       task.assigned_agent_id,
     ).map(id => agents.find(agent => agent.id === id)?.name || id);
 
+    const profileKey = (task as any).capability_profile_key || inferTaskCapabilityProfile({ title: task.title, description: task.description || undefined });
+    const profile = getTaskCapabilityProfile(profileKey);
+    const ownershipPayload = await buildAssignmentOwnershipPayload({
+      id: task.id,
+      circle_id: task.circle_id,
+      title: task.title,
+      description: task.description,
+      capability_profile_key: profileKey,
+    }).catch(() => null);
+
     let assignment = await ensureTaskAssignment(task, targetAgentId);
     if (mode === 'execute') {
-      assignment = await upsertAssignmentStatus(task, targetAgentId, 'in_progress');
+      assignment = await upsertAssignmentStatus(task, targetAgentId, 'in_progress', ownershipPayload);
       if (task.status === 'backlog' || task.status === 'todo') {
         await supabase.from('tasks').update({ status: 'in_progress', completed_at: null }).eq('id', taskId);
       }
@@ -1115,8 +1264,6 @@ export function useKanbanData(circleId: string): KanbanData {
     } catch {}
 
     // ── Task execution runtime: infer profile ─────────────────────────
-    const profileKey = (task as any).capability_profile_key || inferTaskCapabilityProfile({ title: task.title, description: task.description || undefined });
-    const profile = getTaskCapabilityProfile(profileKey);
     const projectTeamContext = task.room_id ? await fetchProjectTeamContext(task.room_id).catch(() => null) : null;
     const structuredHandoffs = options?.parentRunId && options?.triggerSource === 'collaborative'
       ? await loadCollaborativeHandoffs({
@@ -1251,6 +1398,14 @@ export function useKanbanData(circleId: string): KanbanData {
       trigger_source: options?.triggerSource || 'manual',
       input_payload: {
         options: { thinkingLevel, model: modelWithThinking || null, mode },
+        ownership_claim: ownershipPayload ? {
+          status: ownershipPayload.ownership_status,
+          summary: ownershipPayload.ownership_summary,
+          required_connectors: ownershipPayload.required_connectors,
+          required_capabilities: ownershipPayload.required_capabilities,
+          missing_connectors: ownershipPayload.missing_connectors,
+          missing_capabilities: ownershipPayload.missing_capabilities,
+        } : null,
         task_snapshot: {
           id: task.id,
           room_id: task.room_id || null,
@@ -1264,6 +1419,13 @@ export function useKanbanData(circleId: string): KanbanData {
           completion_policy: resolveCompletionPolicy(task),
         },
       },
+      ownership_status: ownershipPayload?.ownership_status || null,
+      ownership_summary: ownershipPayload?.ownership_summary || null,
+      required_connectors: ownershipPayload?.required_connectors || [],
+      required_capabilities: ownershipPayload?.required_capabilities || [],
+      missing_connectors: ownershipPayload?.missing_connectors || [],
+      missing_capabilities: ownershipPayload?.missing_capabilities || [],
+      ownership_updated_at: ownershipPayload?.ownership_updated_at || null,
       model_used: modelWithThinking || null,
     });
 
@@ -1300,9 +1462,16 @@ export function useKanbanData(circleId: string): KanbanData {
           status: 'failed',
           error_message: result.error || 'Agent invocation failed',
           model_used: result.model || modelWithThinking || null,
+          ownership_status: ownershipPayload?.ownership_status || null,
+          ownership_summary: ownershipPayload?.ownership_summary || null,
+          required_connectors: ownershipPayload?.required_connectors || [],
+          required_capabilities: ownershipPayload?.required_capabilities || [],
+          missing_connectors: ownershipPayload?.missing_connectors || [],
+          missing_capabilities: ownershipPayload?.missing_capabilities || [],
+          ownership_updated_at: ownershipPayload?.ownership_updated_at || null,
           completed_at: new Date().toISOString(),
         });
-        await upsertAssignmentStatus(task, targetAgentId, 'blocked');
+        await upsertAssignmentStatus(task, targetAgentId, 'blocked', ownershipPayload);
         await insertTaskComment({
           taskId,
           taskRunId,
@@ -1324,7 +1493,7 @@ export function useKanbanData(circleId: string): KanbanData {
       const assignmentStatus = mode === 'plan' ? 'assigned' : parsed.output.mark_complete ? 'completed' : 'in_progress';
       let completionGatePassed = nextStatus === 'done';
 
-      await upsertAssignmentStatus(task, targetAgentId, assignmentStatus);
+      await upsertAssignmentStatus(task, targetAgentId, assignmentStatus, ownershipPayload);
       await applyTaskRunMetrics(taskId, cost, tokenCount, durationMs, nextStatus);
       await updateTaskRunRecord(taskRunId || '', {
         status: 'completed',
@@ -1335,6 +1504,13 @@ export function useKanbanData(circleId: string): KanbanData {
         duration_ms: durationMs,
         cost,
         model_used: result.model || modelWithThinking || null,
+        ownership_status: ownershipPayload?.ownership_status || null,
+        ownership_summary: ownershipPayload?.ownership_summary || null,
+        required_connectors: ownershipPayload?.required_connectors || [],
+        required_capabilities: ownershipPayload?.required_capabilities || [],
+        missing_connectors: ownershipPayload?.missing_connectors || [],
+        missing_capabilities: ownershipPayload?.missing_capabilities || [],
+        ownership_updated_at: ownershipPayload?.ownership_updated_at || null,
         completed_at: new Date().toISOString(),
       });
       if (taskRunId) {
@@ -1461,15 +1637,23 @@ export function useKanbanData(circleId: string): KanbanData {
       await updateTaskRunRecord(taskRunId || '', {
         status: 'failed',
         error_message: err instanceof Error ? err.message : 'Agent run failed unexpectedly',
+        ownership_status: ownershipPayload?.ownership_status || null,
+        ownership_summary: ownershipPayload?.ownership_summary || null,
+        required_connectors: ownershipPayload?.required_connectors || [],
+        required_capabilities: ownershipPayload?.required_capabilities || [],
+        missing_connectors: ownershipPayload?.missing_connectors || [],
+        missing_capabilities: ownershipPayload?.missing_capabilities || [],
+        ownership_updated_at: ownershipPayload?.ownership_updated_at || null,
         completed_at: new Date().toISOString(),
       });
-      await upsertAssignmentStatus(task, targetAgentId, 'blocked');
+      await upsertAssignmentStatus(task, targetAgentId, 'blocked', ownershipPayload);
       fetchTasks();
       return null;
     }
   }, [
     agents,
     applyTaskRunMetrics,
+    buildAssignmentOwnershipPayload,
     circleId,
     createTaskRunRecord,
     currentUserId,

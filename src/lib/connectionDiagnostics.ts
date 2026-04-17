@@ -11,6 +11,7 @@ export type DiagnosticErrorCode =
   | 'refused'
   | 'auth'
   | 'timeout'
+  | 'proxy_incompatible'
   | 'proxy_missing'
   | 'unknown';
 
@@ -43,7 +44,7 @@ export async function diagnoseConnection(
       signal: AbortSignal.timeout(8000),
     });
 
-    // Server responded — check auth
+    // Server responded — check auth / route compatibility
     if (res.status === 401 || res.status === 403) {
       return {
         ok: false,
@@ -52,6 +53,16 @@ export async function diagnoseConnection(
         fix: 'Get your token with this command:',
         fixAction: 'copy_command',
         fixValue: getTokenHint(),
+      };
+    }
+
+    if (res.status === 404 || res.status === 405) {
+      return {
+        ok: false,
+        errorCode: 'proxy_incompatible',
+        message: 'Endpoint responded, but it does not support OpenSwan tool RPCs',
+        fix: 'Point this connection at a compatible OpenSwan gateway/proxy endpoint',
+        fixAction: 'none',
       };
     }
 
@@ -159,6 +170,7 @@ export function errorCodeLabel(code: DiagnosticErrorCode): string {
     case 'refused':       return 'Connection refused';
     case 'auth':          return 'Auth failed';
     case 'timeout':       return 'Timed out';
+    case 'proxy_incompatible': return 'Wrong gateway route';
     case 'proxy_missing': return 'Proxy not running';
     default:              return 'Connection error';
   }

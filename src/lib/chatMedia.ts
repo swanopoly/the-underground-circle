@@ -17,15 +17,48 @@ export interface ChatAttachment {
   size: number;
   base64?: string; // for AI vision
   uploadedUrl?: string; // after Supabase storage upload
+  extractText?: string;
+  isFigma?: boolean;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+const MAX_ATTACHMENTS = 20;
+const MAX_TEXT_EXTRACT = 8_000;
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 const ALLOWED_VIDEO_TYPES = ['video/mp4', 'video/quicktime', 'video/webm'];
 const ALLOWED_AUDIO_TYPES = ['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp4'];
+const TEXT_LIKE_EXTENSIONS = ['txt', 'md', 'markdown', 'json', 'csv', 'ts', 'tsx', 'js', 'jsx', 'html', 'css', 'scss', 'sql', 'py', 'rb', 'go', 'rs', 'java', 'xml', 'yaml', 'yml', 'toml'];
+const FIGMA_EXTENSIONS = ['fig', 'figma'];
 const ALLOWED_TYPES = [...ALLOWED_IMAGE_TYPES, ...ALLOWED_VIDEO_TYPES, ...ALLOWED_AUDIO_TYPES];
+
+function inferAttachmentType(mimeType: string): ChatAttachment['type'] {
+  if (mimeType.startsWith('image/')) return 'image';
+  if (mimeType.startsWith('video/')) return 'video';
+  if (mimeType.startsWith('audio/')) return 'audio';
+  return 'file';
+}
+
+function isTextLikeAttachment(name: string, mimeType: string): boolean {
+  if (mimeType.startsWith('text/')) return true;
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  return TEXT_LIKE_EXTENSIONS.includes(ext);
+}
+
+function isFigmaLikeAttachment(name: string, mimeType: string): boolean {
+  const lower = `${name} ${mimeType}`.toLowerCase();
+  return FIGMA_EXTENSIONS.includes(name.split('.').pop()?.toLowerCase() || '') || lower.includes('figma') || lower.includes('application/vnd.figma');
+}
+
+async function readTextPreview(file: File): Promise<string | undefined> {
+  try {
+    const text = await file.text();
+    return text.slice(0, MAX_TEXT_EXTRACT) || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // ─── Pick Image ──────────────────────────────────────────────────────────────
 
@@ -129,6 +162,60 @@ export async function pickMedia(): Promise<ChatAttachment | null> {
   }
 }
 
+// ─── Pick Files (web-first, multiple) ──────────────────────────────────────
+
+export async function pickAttachments(): Promise<ChatAttachment[]> {
+  if (Platform.OS !== 'web') {
+    const single = await pickImage();
+    return single ? [single] : [];
+  }
+
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.accept = '*';
+    input.onchange = async () => {
+      const files = Array.from(input.files || []).slice(0, MAX_ATTACHMENTS);
+      const picked = await Promise.all(files.map(async (file): Promise<ChatAttachment | null> => {
+        if (file.size > MAX_FILE_SIZE) return null;
+        const mimeType = file.type || 'application/octet-stream';
+        const type = inferAttachmentType(mimeType);
+        const isImage = type === 'image';
+        let base64: string | undefined;
+        if (isImage) {
+          try {
+            base64 = await new Promise<string | undefined>((res) => {
+              const reader = new FileReader();
+              reader.onload = () => {
+                const result = typeof reader.result === 'string' ? reader.result : '';
+                const comma = result.indexOf(',');
+                res(comma >= 0 ? result.slice(comma + 1) : undefined);
+              };
+              reader.onerror = () => res(undefined);
+              reader.readAsDataURL(file);
+            });
+          } catch {}
+        }
+        const extractText = isTextLikeAttachment(file.name, mimeType) ? await readTextPreview(file) : undefined;
+        return {
+          id: `attach-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          type,
+          uri: URL.createObjectURL(file),
+          name: file.name,
+          mimeType,
+          size: file.size,
+          base64,
+          extractText,
+          isFigma: isFigmaLikeAttachment(file.name, mimeType),
+        };
+      }));
+      resolve(picked.filter(Boolean) as ChatAttachment[]);
+    };
+    input.click();
+  });
+}
+
 // ─── Upload to Supabase Storage ──────────────────────────────────────────────
 
 export async function uploadToStorage(
@@ -199,8 +286,16 @@ export async function uploadToStorage(
 // ─── Prepare Image for AI ────────────────────────────────────────────────────
 
 export function prepareImageForAI(attachment: ChatAttachment): string {
+  if (attachment.isFigma) {
+    const preview = attachment.extractText ? `\nExtracted text preview:\n${attachment.extractText.slice(0, 1000)}` : '';
+    return `[User attached a Figma design source "${attachment.name}" (${formatFileSize(attachment.size)}, ${attachment.mimeType}). Treat it as the visual source of truth. If they ask for a webpage, translate this design into a production-ready HTML page with faithful layout, spacing hierarchy, sections, and component structure.${preview}]`;
+  }
+
   if (attachment.type !== 'image') {
-    return `The user has attached a ${attachment.type} file: "${attachment.name}" (${formatFileSize(attachment.size)}). Acknowledge the attachment and respond to their message.`;
+    if (attachment.extractText) {
+      return `[User attached file "${attachment.name}" (${formatFileSize(attachment.size)}, ${attachment.mimeType}). Use this file as context.\n${attachment.extractText.slice(0, 1500)}${attachment.extractText.length > 1500 ? '\n...(truncated)' : ''}]`;
+    }
+    return `The user has attached a ${attachment.type} file: "${attachment.name}" (${formatFileSize(attachment.size)}, ${attachment.mimeType}). Use it as supporting context and acknowledge any limitations if the file is binary.`;
   }
 
   if (attachment.base64) {
@@ -210,6 +305,25 @@ export function prepareImageForAI(attachment: ChatAttachment): string {
   }
 
   return `[User attached an image: "${attachment.name}" (${formatFileSize(attachment.size)}). Acknowledge the image and respond to their message.]`;
+}
+
+export function buildAttachmentPromptContext(attachments: ChatAttachment[]): string {
+  if (!attachments.length) return '';
+  const lines: string[] = ['## Attachments'];
+  for (const attachment of attachments) {
+    const prefix = attachment.isFigma ? '[FIGMA DESIGN]' : `[${attachment.type.toUpperCase()}]`;
+    lines.push(`${prefix} ${attachment.name} — ${attachment.mimeType} — ${formatFileSize(attachment.size)}`);
+    if (attachment.extractText) {
+      lines.push('```');
+      lines.push(attachment.extractText.slice(0, 2000));
+      if (attachment.extractText.length > 2000) lines.push('...(truncated)');
+      lines.push('```');
+    }
+  }
+  if (attachments.some((attachment) => attachment.isFigma)) {
+    lines.push('If the user is asking for a webpage or builder output, convert the Figma design references into a single self-contained HTML implementation.');
+  }
+  return lines.join('\n');
 }
 
 // ─── Media Type Icon ─────────────────────────────────────────────────────────

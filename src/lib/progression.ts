@@ -1,6 +1,20 @@
 // progression.ts — Core progression logic: award XP, evaluate thresholds, create unlocks
 
 import { supabase } from './supabase';
+
+// Per-session flags. Once PostgREST reports PGRST205 (table missing from
+// schema cache) for a progression table we stop hitting it — no migration
+// has been run yet, so every call would otherwise emit a 404 on each page
+// load.
+let progressionEventsMissing = false;
+let agentMasteryMissing = false;
+const isTableMissing = (err: unknown, relation?: string) => {
+  const error = err as any;
+  const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.toLowerCase();
+  return error?.code === 'PGRST205'
+    || error?.status === 404
+    || (!!relation && (message.includes(`'public.${relation.toLowerCase()}'`) || message.includes(relation.toLowerCase())));
+};
 import {
   BOND_XP_AMOUNTS,
   MASTERY_XP_AMOUNTS,
@@ -65,6 +79,7 @@ export interface AgentProgression {
 // ─── Anti-Spam: Repeat Count ────────────────────────────────────────────────
 
 async function getRepeatCount(userId: string, agentId: string, eventKind: string): Promise<number> {
+  if (progressionEventsMissing) return 0;
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const { count, error } = await supabase
     .from('progression_events')
@@ -75,6 +90,10 @@ async function getRepeatCount(userId: string, agentId: string, eventKind: string
     .gte('created_at', since);
 
   if (error) {
+    if (isTableMissing(error, 'progression_events')) {
+      progressionEventsMissing = true;
+      return 0;
+    }
     console.warn('[progression] getRepeatCount error:', error.message);
     return 0;
   }
@@ -93,6 +112,7 @@ export async function awardBondXP(
   comboBonus: number = 0,
   metadata: Record<string, unknown> = {},
 ): Promise<{ effectiveAmount: number; totalBondXP: number } | null> {
+  if (progressionEventsMissing) return null;
   const baseAmount = BOND_XP_AMOUNTS[eventKind];
   if (baseAmount === undefined) {
     console.warn(`[progression] Unknown bond event_kind: ${eventKind}`);
@@ -119,6 +139,10 @@ export async function awardBondXP(
   });
 
   if (insertError) {
+    if (isTableMissing(insertError, 'progression_events')) {
+      progressionEventsMissing = true;
+      return null;
+    }
     console.error('[progression] awardBondXP insert error:', insertError.message);
     return null;
   }
@@ -154,6 +178,7 @@ export async function awardMasteryXP(
   quality: QualityTier = 'normal',
   metadata: Record<string, unknown> = {},
 ): Promise<{ effectiveAmount: number; masteryXP: number; masteryLevel: MasteryLevel } | null> {
+  if (progressionEventsMissing || agentMasteryMissing) return null;
   const baseAmount = MASTERY_XP_AMOUNTS[eventKind];
   if (baseAmount === undefined) {
     console.warn(`[progression] Unknown mastery event_kind: ${eventKind}`);
@@ -180,24 +205,32 @@ export async function awardMasteryXP(
   });
 
   if (insertError) {
+    if (isTableMissing(insertError, 'progression_events')) {
+      progressionEventsMissing = true;
+      return null;
+    }
     console.error('[progression] awardMasteryXP insert error:', insertError.message);
     return null;
   }
 
   // Upsert agent_mastery row
-  const { data: existing } = await supabase
+  const { data: existing, error: existingError } = await supabase
     .from('agent_mastery')
     .select('id, mastery_xp')
     .eq('user_id', userId)
     .eq('agent_id', agentId)
     .eq('spirit', spirit)
     .single();
+  if (isTableMissing(existingError, 'agent_mastery')) {
+    agentMasteryMissing = true;
+    return null;
+  }
 
   const newXP = (existing?.mastery_xp ?? 0) + effectiveAmount;
   const newLevel = getMasteryLevel(newXP);
 
   if (existing) {
-    await supabase
+    const { error: updateError } = await supabase
       .from('agent_mastery')
       .update({
         mastery_xp: newXP,
@@ -206,8 +239,12 @@ export async function awardMasteryXP(
         updated_at: new Date().toISOString(),
       })
       .eq('id', existing.id);
+    if (isTableMissing(updateError, 'agent_mastery')) {
+      agentMasteryMissing = true;
+      return null;
+    }
   } else {
-    await supabase.from('agent_mastery').insert({
+    const { error: insertMasteryError } = await supabase.from('agent_mastery').insert({
       circle_id: circleId,
       user_id: userId,
       agent_id: agentId,
@@ -216,6 +253,10 @@ export async function awardMasteryXP(
       mastery_level: newLevel.level,
       mastery_title: newLevel.title,
     });
+    if (isTableMissing(insertMasteryError, 'agent_mastery')) {
+      agentMasteryMissing = true;
+      return null;
+    }
   }
 
   // Check for mastery level-up and emit RPG event
@@ -238,6 +279,7 @@ export async function awardMasteryXP(
 // ─── Get Bond XP Total ──────────────────────────────────────────────────────
 
 export async function getBondXP(userId: string, agentId: string): Promise<number> {
+  if (progressionEventsMissing) return 0;
   const { data, error } = await supabase
     .from('progression_events')
     .select('effective_amount')
@@ -246,7 +288,11 @@ export async function getBondXP(userId: string, agentId: string): Promise<number
     .eq('xp_type', 'bond');
 
   if (error) {
-    console.error('[progression] getBondXP error:', error.message);
+    if (isTableMissing(error, 'progression_events')) {
+      progressionEventsMissing = true;
+      return 0;
+    }
+    console.warn('[progression] getBondXP error:', error.message);
     return 0;
   }
 
@@ -308,11 +354,19 @@ export async function getAgentProgression(
   const bondXP = await getBondXP(userId, agentId);
   const bondLevel = getBondLevel(bondXP);
 
-  const { data: masteryEntries } = await supabase
-    .from('agent_mastery')
-    .select('*')
-    .eq('user_id', userId)
-    .eq('agent_id', agentId);
+  let masteryEntries: any[] = [];
+  if (!agentMasteryMissing) {
+    const { data, error } = await supabase
+      .from('agent_mastery')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('agent_id', agentId);
+    if (isTableMissing(error, 'agent_mastery')) {
+      agentMasteryMissing = true;
+    } else {
+      masteryEntries = data ?? [];
+    }
+  }
 
   const { data: unlocks } = await supabase
     .from('agent_evolution_unlocks')
@@ -324,7 +378,7 @@ export async function getAgentProgression(
     bondXP,
     bondLevel,
     bondTitle: bondLevel.title,
-    masteryEntries: (masteryEntries ?? []) as AgentMasteryEntry[],
+    masteryEntries: masteryEntries as AgentMasteryEntry[],
     unlocks: (unlocks ?? []) as AgentEvolutionUnlock[],
   };
 }

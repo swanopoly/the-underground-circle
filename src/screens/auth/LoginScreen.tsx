@@ -223,7 +223,7 @@ export default function LoginScreen({ navigation }: any) {
     }
   };
 
-  const passwordRef = useRef<TextInput>(null);
+  const passwordRef = useRef<TextInput | null>(null);
 
   const renderInput = ({
     label,
@@ -246,7 +246,7 @@ export default function LoginScreen({ navigation }: any) {
     keyboardType?: 'default' | 'email-address';
     onSubmitEditing?: () => void;
     returnKeyType?: 'next' | 'go' | 'done';
-    inputRef?: React.RefObject<TextInput>;
+    inputRef?: React.RefObject<TextInput | null>;
   }) => (
     <View style={[styles.fieldShell, focusedField === focusKey && styles.fieldShellFocused]}>
       <Text style={styles.fieldLabel}>{label}</Text>
@@ -643,8 +643,6 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 8,
     marginBottom: 14,
-    // @ts-ignore
-    outlineStyle: 'none',
     transition: 'border-color 0.3s ease, background-color 0.3s ease, box-shadow 0.3s ease',
   },
   fieldShellFocused: {
@@ -664,8 +662,6 @@ const styles = StyleSheet.create({
     color: '#f5f7f2',
     fontSize: 16,
     paddingVertical: 10,
-    // @ts-ignore
-    outlineStyle: 'none',
     outlineWidth: 0,
   },
   primaryButton: {
@@ -681,13 +677,11 @@ const styles = StyleSheet.create({
     // @ts-ignore — web transitions
     transition: 'transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.3s ease, background-color 0.2s ease',
     boxShadow: '0 4px 15px rgba(184, 255, 97, 0.2)',
-    outlineStyle: 'none',
   },
   primaryButtonHovered: {
     transform: [{ translateY: -3 }, { scale: 1.02 }],
     // @ts-ignore
     boxShadow: '0 8px 30px rgba(184, 255, 97, 0.35), 0 0 40px rgba(184, 255, 97, 0.15)',
-    animation: 'uc-glow-pulse 1.5s ease-in-out infinite',
   },
   primaryButtonPressed: {
     transform: [{ translateY: 0 }, { scale: 0.98 }],
@@ -713,7 +707,6 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     // @ts-ignore
     transition: 'transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.3s ease, background-color 0.3s ease, box-shadow 0.3s ease',
-    outlineStyle: 'none',
   },
   secondaryButtonHovered: {
     borderColor: 'rgba(184, 255, 97, 0.5)',

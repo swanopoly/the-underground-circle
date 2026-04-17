@@ -4,7 +4,7 @@
  * Mirrors the Claude Code bridge pattern — if the bridge is running, agents appear.
  */
 
-import { OfficeAgent, AgentStatus } from './officeAgents';
+import { OfficeAgent, AgentStatus, deriveSessionStatus, clampToDbStatus } from './officeAgents';
 import { ProviderType } from './connectionManager';
 import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
 import { supabase } from './supabase';
@@ -34,6 +34,14 @@ const CODEX_COLORS = [
   '#10a37f', '#059669', '#34d399', '#0d9488', '#14b8a6',
   '#047857', '#065f46', '#0f766e', '#115e59', '#064e3b',
 ];
+
+function codexTaskLabel(status: AgentStatus, session: CodexSession): string {
+  const project = session.projectDir.split('/').pop() || 'project';
+  if (status === 'active') return session.task ? `Active: ${session.task}` : `Researching ${project}`;
+  if (status === 'building') return session.task ? `Building: ${session.task}` : `Drafting ${project}`;
+  if (status === 'idle') return `Open on ${project}`;
+  return `Session ended on ${project}`;
+}
 
 // ── Detection ────────────────────────────────────────────────────────────────
 
@@ -178,8 +186,9 @@ export async function publishCodexAgent(
   // Multiple sessions — publish each with unique name
   if (sessions && sessions.length > 1) {
     for (let i = 0; i < sessions.length; i++) {
+      const session = sessions[i];
       const name = `Codex #${i + 1}`;
-      const isActive = sessions[i].status === 'active';
+      const status = deriveSessionStatus({ lastActivityIso: session.lastActivity });
       await publishAgentToCircle({
         circleId, provider: 'codex', name,
         color: CODEX_COLORS[i % CODEX_COLORS.length],
@@ -188,9 +197,9 @@ export async function publishCodexAgent(
       });
       await supabase.from('circle_office_agents')
         .update({
-          status: isActive ? 'building' : 'idle',
-          current_task: sessions[i].task || 'Deep research',
-          last_active_at: new Date().toISOString(),
+          status: clampToDbStatus(status),
+          current_task: codexTaskLabel(status, session),
+          last_active_at: session.lastActivity || new Date().toISOString(),
           updated_at: new Date().toISOString(),
         })
         .eq('circle_id', circleId).eq('name', name);
@@ -240,13 +249,14 @@ export async function updateCodexAgentStatus(
     if (sessions.length > 1) {
       // Multiple sessions — update each named agent
       for (let i = 0; i < sessions.length; i++) {
+        const session = sessions[i];
         const name = `Codex #${i + 1}`;
-        const isActive = sessions[i].status === 'active';
+        const status = deriveSessionStatus({ lastActivityIso: session.lastActivity });
         await supabase.from('circle_office_agents')
           .update({
-            status: isActive ? 'building' : 'idle',
-            current_task: sessions[i].task || 'Deep research',
-            last_active_at: new Date().toISOString(),
+            status: clampToDbStatus(status),
+            current_task: codexTaskLabel(status, session),
+            last_active_at: session.lastActivity || new Date().toISOString(),
             updated_at: new Date().toISOString(),
           })
           .eq('circle_id', circleId)
@@ -256,19 +266,23 @@ export async function updateCodexAgentStatus(
       return;
     }
 
-    // Single session
-    const activeSessions = sessions.filter(s => s.status === 'active');
-    const status = activeSessions.length > 0 ? 'building' : 'idle';
-    const currentTask = activeSessions.length > 0
-      ? activeSessions[0].task || `Researching ${activeSessions[0].projectDir.split('/').pop() || 'project'}`
-      : sessions.length > 0
-        ? `${sessions.length} session(s) idle`
-        : 'Bridge connected';
+    // Single session — pick most recent and derive status from its mtime
+    const newest = [...sessions].sort((a, b) => {
+      const at = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
+      const bt = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
+      return bt - at;
+    })[0];
+    const status: AgentStatus = newest
+      ? deriveSessionStatus({ lastActivityIso: newest.lastActivity })
+      : 'idle';
+    const currentTask = newest
+      ? codexTaskLabel(status, newest)
+      : 'Bridge connected';
 
     await supabase
       .from('circle_office_agents')
       .update({
-        status,
+        status: clampToDbStatus(status),
         current_task: currentTask,
         last_active_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),

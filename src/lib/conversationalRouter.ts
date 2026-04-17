@@ -22,6 +22,7 @@ export type ConversationalIntent =
   | { type: 'wordpress_list' }
   | { type: 'wordpress_schedule'; date?: string; title?: string }
   | { type: 'create_task'; title: string; description?: string }
+  | { type: 'office_agent_task'; agentName: string; modelName?: string; taskTarget: 'latest_user_task' | 'latest_circle_task' }
   | { type: 'remember'; content: string }
   | { type: 'forget'; query: string }
   | { type: 'show_memories' }
@@ -48,10 +49,39 @@ const WP_SCHEDULE_PATTERNS = [
 
 const TASK_CREATE_PATTERNS = [
   /\b(create|add|make|open)\b.*\b(a\s+)?(task|todo|ticket|issue|work item)\b/i,
-  /\b(task|todo)\b.*\b(for|to|about)\b/i,
 ];
 
+const OFFICE_AGENT_PATTERNS = [
+  /\b(spin\s+me\s+up|spin\s+up|create|make)\b.*\b(agent|pixel agent)\b/i,
+  /\b(agent|pixel agent)\b.*\b(called|named)\b/i,
+];
+
+const TASK_ATTACH_PATTERNS = [
+  /\b(add|assign|attach|put)\b.*\b(to|onto|on)\b.*\btask\b/i,
+  /\btask\s+we\s+just\s+made\b/i,
+  /\blatest\s+task\b/i,
+];
+
+function extractOfficeAgentName(message: string): string | null {
+  const quoted = message.match(/\b(?:called|named)\s+"([^"]+)"/i);
+  if (quoted?.[1]) return quoted[1].trim();
+
+  const bare = message.match(/\b(?:called|named)\s+([A-Za-z0-9_-]{2,40})/i);
+  if (bare?.[1]) return bare[1].trim();
+
+  return null;
+}
+
+function extractRequestedModel(message: string): string | undefined {
+  const lower = message.toLowerCase();
+  if (/\bopus\b/.test(lower)) return 'claude-opus-4-6';
+  if (/\bsonnet\b/.test(lower)) return 'claude-sonnet-4-6';
+  if (/\bhaiku\b/.test(lower)) return 'claude-haiku-4-5';
+  return undefined;
+}
+
 const REMEMBER_PATTERNS = [
+  /\b(add|put)\b.*\b(to|in)\s+(?:your\s+)?memory\b/i,
   /\b(remember|save|store|note|keep in mind)\b.*\b(that|this|:)\b/i,
   /\bremember\b/i,
 ];
@@ -72,6 +102,8 @@ const IMAGE_GEN_PATTERNS = [
 
 const WEBPAGE_PATTERNS = [
   /\b(build|create|make|generate)\b.*\b(web ?page|website|landing page|html page|site)\b/i,
+  /\bfigma\b.*\b(build|code|html|page|site|website|landing)\b/i,
+  /\b(build|code|convert|turn)\b.*\bfigma\b/i,
 ];
 
 // ── Detect intent ───────────────────────────────────────────────────────────
@@ -121,6 +153,22 @@ export function detectConversationalIntent(
   }
 
   // Task creation
+  if (
+    OFFICE_AGENT_PATTERNS.some(p => p.test(message))
+    && TASK_ATTACH_PATTERNS.some(p => p.test(message))
+  ) {
+    const agentName = extractOfficeAgentName(message);
+    if (agentName) {
+      return {
+        type: 'office_agent_task',
+        agentName,
+        modelName: extractRequestedModel(message),
+        taskTarget: /\btask\s+we\s+just\s+made\b/i.test(message) ? 'latest_user_task' : 'latest_circle_task',
+      };
+    }
+  }
+
+  // Task creation
   if (TASK_CREATE_PATTERNS.some(p => p.test(message))) {
     const titleMatch = message.match(/(?:task|todo|ticket)\s+(?:to|for|about|called|titled)\s+(.+)/i)
       || message.match(/(?:create|add|make|open)\s+(?:a\s+)?(?:task|todo)\s*[:\-]?\s*(.+)/i);
@@ -130,6 +178,7 @@ export function detectConversationalIntent(
   // Remember
   if (REMEMBER_PATTERNS.some(p => p.test(message))) {
     const content = message
+      .replace(/^(please\s+)?(add|put)\s+(this|that)?\s*(to|in)\s+(?:your\s+)?memory\s*[:,-]?\s*/i, '')
       .replace(/^(please\s+)?remember\s+(that\s+)?/i, '')
       .replace(/^(save|store|note|keep in mind)\s+(that\s+)?/i, '')
       .trim();
@@ -175,12 +224,127 @@ export async function executeConversationalIntent(
   },
 ): Promise<{ handled: boolean; message: string; artifacts?: any[] } | null> {
   switch (intent.type) {
+    case 'office_agent_task': {
+      try {
+        const { publishAgentToCircle, PROVIDER_DISPLAY } = await import('./circleOffice');
+
+        const modelName = intent.modelName || 'claude-sonnet-4-6';
+        const provider = modelName.startsWith('claude-') ? 'anthropic' : 'generic-agent';
+        const providerDisplay = PROVIDER_DISPLAY[provider] || PROVIDER_DISPLAY['generic-agent'];
+
+        const publishResult = await publishAgentToCircle({
+          circleId: context.circleId,
+          provider,
+          name: intent.agentName,
+          color: providerDisplay.color,
+          toolIcon: providerDisplay.icon,
+        });
+
+        if (publishResult.error || !publishResult.agent) {
+          return { handled: true, message: `Failed to create office agent: ${publishResult.error || 'Unknown error'}` };
+        }
+
+        const agentId = publishResult.agent.id;
+
+        await supabase
+          .from('circle_office_agents')
+          .update({
+            model_name: modelName,
+            current_task: 'Waiting for assigned work',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', agentId);
+
+        const taskQuery = supabase
+          .from('tasks')
+          .select('id, title, assigned_agent_id, assigned_agent_ids, circle_id')
+          .eq('circle_id', context.circleId)
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        const scopedTaskQuery = intent.taskTarget === 'latest_user_task'
+          ? taskQuery.eq('created_by', context.userId)
+          : taskQuery;
+
+        const { data: latestTasks, error: latestTaskError } = await scopedTaskQuery;
+        if (latestTaskError || !latestTasks || latestTasks.length === 0) {
+          return {
+            handled: true,
+            message: `Created office agent **${intent.agentName}** on **${providerDisplay.label}** with model **${modelName.replace('claude-', '').replace(/-/g, ' ')}**, but I couldn't find the task to attach it to.`,
+          };
+        }
+
+        const task = latestTasks[0] as any;
+        const assignedAgentIds = Array.isArray(task.assigned_agent_ids)
+          ? task.assigned_agent_ids.filter((value: any) => typeof value === 'string' && value)
+          : [];
+        const nextAssignedAgentIds = Array.from(new Set([
+          ...assignedAgentIds,
+          task.assigned_agent_id,
+          agentId,
+        ].filter((value): value is string => typeof value === 'string' && value.length > 0)));
+
+        await supabase
+          .from('tasks')
+          .update({
+            assigned_agent_id: nextAssignedAgentIds[0] || agentId,
+            assigned_agent_ids: nextAssignedAgentIds,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', task.id);
+
+        await supabase
+          .from('task_agent_assignments')
+          .upsert({
+            task_id: task.id,
+            circle_id: context.circleId,
+            agent_id: agentId,
+            role: nextAssignedAgentIds.length === 1 ? 'owner' : 'executor',
+            assignment_type: 'manual',
+            required_for_completion: true,
+            required_for_review: false,
+            status: 'assigned',
+            order_index: Math.max(nextAssignedAgentIds.indexOf(agentId), 0),
+            assigned_by: context.userId,
+          }, { onConflict: 'task_id,agent_id' });
+
+        try {
+          const { createRun, addStep, updateRunStatus } = await import('./agentRunSystem');
+          const run = await createRun({
+            circleId: context.circleId,
+            userId: context.userId,
+            surface: 'main_chat',
+            title: `Create agent ${intent.agentName} and assign to task`,
+            goal: context.fullMessage,
+            mode: 'execute',
+            provider,
+          });
+          if (run) {
+            await addStep({ runId: run.id, circleId: context.circleId, stepIndex: 0, stepKind: 'tool_call', title: 'Published office agent', body: `${intent.agentName} (${modelName})` });
+            await addStep({ runId: run.id, circleId: context.circleId, stepIndex: 1, stepKind: 'tool_call', title: 'Assigned agent to task', body: `${task.title}` });
+            await updateRunStatus(run.id, 'completed');
+          }
+        } catch {}
+
+        const prettyModel = provider === 'anthropic'
+          ? (modelName.includes('opus') ? 'Opus' : modelName.includes('sonnet') ? 'Sonnet' : 'Haiku')
+          : modelName;
+
+        return {
+          handled: true,
+          message: `Created office agent **${intent.agentName}** with **${prettyModel}** and assigned it to **${task.title}**.`,
+        };
+      } catch (e: any) {
+        return { handled: true, message: `Failed to create and assign the office agent: ${e.message}` };
+      }
+    }
+
     case 'wordpress_publish':
     case 'wordpress_schedule': {
       try {
         const { getActiveWordPressCredentials, publishToWordPress } = await import('./siteAutomation');
         const { getSwanBotResponse } = await import('./swanbot');
-        const creds = await getActiveWordPressCredentials();
+        const creds = await getActiveWordPressCredentials(context.circleId);
         if (!creds) return { handled: true, message: 'No WordPress site connected. Go to **Integrations > WordPress** to add your site.' };
 
         // Use AI to write the content based on the message

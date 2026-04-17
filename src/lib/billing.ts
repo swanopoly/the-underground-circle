@@ -60,40 +60,77 @@ export async function getOrgBilling(orgId: string) {
 
 // ─── Checkout ───────────────────────────────────────────────────────
 
+export type CheckoutErrorCode =
+  | 'config_missing'
+  | 'validation'
+  | 'unauthenticated'
+  | 'forbidden'
+  | 'org_not_found'
+  | 'stripe_invalid_price'
+  | 'stripe_error'
+  | 'internal'
+  | 'network';
+
+/**
+ * Build the success/cancel URLs that Stripe will redirect to. Uses the
+ * current window origin on web so local dev → localhost, production → prod.
+ * Falls back to the known prod host for native.
+ */
+function buildReturnUrls(orgId: string): { successUrl: string; cancelUrl: string } {
+  const origin = (typeof window !== 'undefined' && window.location && window.location.origin)
+    ? window.location.origin
+    : 'https://app.chrisswanson.xyz';
+  return {
+    successUrl: `${origin}/org/${orgId}?billing=success`,
+    cancelUrl: `${origin}/org/${orgId}?billing=canceled`,
+  };
+}
+
 export async function createCheckoutSession(
   orgId: string,
-  priceId: string
-): Promise<{ error?: string }> {
+  priceId: string,
+): Promise<{ error?: string; code?: CheckoutErrorCode }> {
+  const { successUrl, cancelUrl } = buildReturnUrls(orgId);
   const { data, error } = await supabase.functions.invoke('create-checkout', {
-    body: {
-      orgId,
-      priceId,
-      successUrl: `https://app.chrisswanson.xyz/org/${orgId}?billing=success`,
-      cancelUrl: `https://app.chrisswanson.xyz/org/${orgId}?billing=canceled`,
-    },
+    body: { orgId, priceId, successUrl, cancelUrl },
   });
 
-  if (error) return { error: error.message };
-  if (data?.url) {
-    await Linking.openURL(data.url);
+  // supabase.functions.invoke returns data even on 4xx/5xx in recent versions;
+  // the `error` field only fires on transport failures. Check both paths.
+  if (error) {
+    // Transport-level failure (function not deployed, CORS, network).
+    return {
+      error: `Could not reach the checkout service: ${error.message}. Deploy the function with \`npx supabase functions deploy create-checkout\`.`,
+      code: 'network',
+    };
   }
+  if (data?.error) {
+    return { error: data.error as string, code: data.code as CheckoutErrorCode };
+  }
+  if (!data?.url) {
+    return {
+      error: 'Checkout service returned no URL. Try again or check server logs.',
+      code: 'internal',
+    };
+  }
+  await Linking.openURL(data.url);
   return {};
 }
 
 // ─── Portal ─────────────────────────────────────────────────────────
 
 export async function openBillingPortal(orgId: string): Promise<{ error?: string }> {
+  const origin = (typeof window !== 'undefined' && window.location && window.location.origin)
+    ? window.location.origin
+    : 'https://app.chrisswanson.xyz';
   const { data, error } = await supabase.functions.invoke('create-portal-session', {
-    body: {
-      orgId,
-      returnUrl: `https://app.chrisswanson.xyz/org/${orgId}`,
-    },
+    body: { orgId, returnUrl: `${origin}/org/${orgId}` },
   });
 
-  if (error) return { error: error.message };
-  if (data?.url) {
-    await Linking.openURL(data.url);
-  }
+  if (error) return { error: `Could not reach the portal service: ${error.message}` };
+  if (data?.error) return { error: data.error as string };
+  if (!data?.url) return { error: 'Portal returned no URL. Make sure the org has a Stripe customer on file.' };
+  await Linking.openURL(data.url);
   return {};
 }
 

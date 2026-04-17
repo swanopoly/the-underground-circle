@@ -3,7 +3,9 @@ import {
   View, Text, StyleSheet, Pressable, ScrollView,
   Platform, Animated, Easing,
 } from 'react-native';
-import { WikiArticle, WikiSection, getArticle, getRelatedArticles } from '../../lib/wikiData';
+import { WikiArticle, WikiSection, WIKI_ARTICLES, getArticle, getRelatedArticles } from '../../lib/wikiData';
+import { getLesson, getModule } from '../../lib/schoolsData';
+import { getWikiProgress, markWikiArticleRead, WikiProgress } from '../../lib/wikiProgress';
 
 // ── Design Tokens ─────────────────────────────────────────────────────────
 const BG_PAGE = '#050508', BG_SURFACE = '#0a0a10', BG_RAISED = '#0f0f18';
@@ -128,6 +130,7 @@ export default function WikiArticleScreen({ navigation, route }: any) {
   const { articleId } = route.params as { articleId: string };
   const article = getArticle(articleId);
   const relatedArticles = getRelatedArticles(articleId);
+  const [wikiProgress, setWikiProgress] = useState<WikiProgress>({ readArticleIds: [] });
 
   const headerAnim = useRef(new Animated.Value(0)).current;
   const infoAnim = useRef(new Animated.Value(0)).current;
@@ -136,6 +139,20 @@ export default function WikiArticleScreen({ navigation, route }: any) {
     Animated.timing(headerAnim, { toValue: 1, duration: 500, delay: 100, useNativeDriver: false }).start();
     Animated.timing(infoAnim, { toValue: 1, duration: 400, delay: 250, useNativeDriver: false }).start();
   }, [headerAnim, infoAnim]);
+
+  useEffect(() => {
+    let mounted = true;
+    if (!article) return;
+
+    (async () => {
+      const progress = await markWikiArticleRead(article.id);
+      if (mounted) setWikiProgress(progress);
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [article]);
 
   if (!article) {
     return (
@@ -151,6 +168,12 @@ export default function WikiArticleScreen({ navigation, route }: any) {
   }
 
   const hasLessons = article.relatedLessonIds && article.relatedLessonIds.length > 0;
+  const nextArticle =
+    relatedArticles.find(item => !wikiProgress.readArticleIds.includes(item.id)) ||
+    WIKI_ARTICLES.find(item =>
+      item.id !== article.id &&
+      !wikiProgress.readArticleIds.includes(item.id)
+    );
 
   return (
     <View style={s.page} nativeID="section-wiki-article">
@@ -214,8 +237,22 @@ export default function WikiArticleScreen({ navigation, route }: any) {
           <LearnInSchoolsCard
             color={article.color}
             lessonIds={article.relatedLessonIds!}
+            onOpenLesson={(lessonId) => {
+              const [trackId, moduleId, itemLessonId] = lessonId.split(':');
+              navigation.navigate('SchoolsLesson', { trackId, moduleId, lessonId: itemLessonId });
+            }}
             onPress={() => navigation.navigate('Schools')}
           />
+        )}
+
+        {nextArticle && (
+          <View style={s.nextWrap}>
+            <Text style={s.nextHeading}>Next Best Step</Text>
+            <RelatedArticleCard
+              article={nextArticle}
+              onPress={() => navigation.replace('WikiArticle', { articleId: nextArticle.id })}
+            />
+          </View>
         )}
 
         {/* ── SECTION: Footer ── */}
@@ -229,13 +266,23 @@ export default function WikiArticleScreen({ navigation, route }: any) {
 }
 
 // ── Learn in Schools Card ─────────────────────────────────────────────────
-function LearnInSchoolsCard({ color, lessonIds, onPress }: {
+function LearnInSchoolsCard({ color, lessonIds, onOpenLesson, onPress }: {
   color: string;
   lessonIds: string[];
+  onOpenLesson: (lessonId: string) => void;
   onPress: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
   const fadeAnim = useRef(new Animated.Value(0)).current;
+  const lessonRefs = lessonIds
+    .map(value => {
+      const [trackId, moduleId, lessonId] = value.split(':');
+      const lesson = getLesson(trackId, moduleId, lessonId);
+      const module = getModule(trackId, moduleId);
+      if (!lesson || !module) return null;
+      return { key: value, title: lesson.title, moduleTitle: module.title };
+    })
+    .filter((item): item is { key: string; title: string; moduleTitle: string } => Boolean(item));
 
   useEffect(() => {
     Animated.timing(fadeAnim, { toValue: 1, duration: 400, delay: 600, useNativeDriver: false }).start();
@@ -264,6 +311,22 @@ function LearnInSchoolsCard({ color, lessonIds, onPress }: {
           <Text style={[s.learnArrow, { color: '#f59e0b' }]}>{'-->'}</Text>
         </View>
       </Pressable>
+      {lessonRefs.length > 0 && (
+        <View style={s.learnLessonList}>
+          {lessonRefs.slice(0, 3).map(item => (
+            <Pressable
+              key={item.key}
+              onPress={() => onOpenLesson(item.key)}
+              accessibilityRole="button"
+              accessibilityLabel={`Open lesson ${item.title}`}
+              style={[s.learnLessonChip, { borderColor: color + '25' }]}
+            >
+              <Text style={[s.learnLessonModule, { color }]}>{item.moduleTitle}</Text>
+              <Text style={s.learnLessonTitle}>{item.title}</Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
     </Animated.View>
   );
 }
@@ -409,6 +472,20 @@ const s = StyleSheet.create({
   learnSubtitle: { fontSize: 12, fontWeight: '400', color: TEXT_SEC, marginBottom: 4 },
   learnCount: { fontSize: 11, fontWeight: '500', color: TEXT_TER },
   learnArrow: { fontSize: 16, fontWeight: '700' },
+  learnLessonList: { gap: 8, marginTop: 10 },
+  learnLessonChip: {
+    backgroundColor: BG_RAISED,
+    borderWidth: 1,
+    borderColor: BORDER_DEF,
+    borderRadius: R_BTN,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  learnLessonModule: { fontSize: 10, fontWeight: '700', color: '#f59e0b', letterSpacing: 0.8, marginBottom: 4 },
+  learnLessonTitle: { fontSize: 13, fontWeight: '500', color: TEXT_PRI },
+  nextWrap: { maxWidth: 720, width: '100%', alignSelf: 'center', marginBottom: 20 },
+  nextHeading: { fontSize: 16, fontWeight: '600', color: TEXT_SEC, marginBottom: 12, letterSpacing: 0.3 },
 
   // Footer
   footer: { marginTop: 16, alignItems: 'center', maxWidth: 720, width: '100%', alignSelf: 'center' },

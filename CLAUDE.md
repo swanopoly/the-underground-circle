@@ -953,22 +953,25 @@ ollama run blackswan:latest "Deep analysis"  # full power
 
 ---
 
-## Design System — Pixel Art Philosophy
+## Design System — Black & White Terminal Aesthetic
 
-> **LESS EMOJIS.** Use pixel-block text icons (`$`, `>_`, `#`, `[]`, `//`, `P`, etc.) inside small colored boxes instead of emoji. Emoji are acceptable ONLY in user-generated content and agent personality (thought bubbles, chat). All structural UI — headers, nav, compartment icons, stat labels, action buttons — must use monospace text glyphs.
+> **THE DEFINITIVE STYLE GUIDE: `docs/UC_STYLE_GUIDE.md`**
+> All new UI MUST follow this guide. It combines the Spawn Agents modal (pure B&W, sharp, monospace) with the Assign Agent panel (agent color tints, status dots). Read the full spec in the doc.
 
 ### Core Rules
-1. **Sharp edges** — `borderRadius: 2` max. NO rounded corners (12px, 10px, 8px) anywhere.
-2. **Stepped borders** — `borderWidth: 2` (not 1px hairlines). Heavier, blockier.
-3. **Isometric shadow** — `boxShadow: 4px 4px 0px #050508` (web) / `shadowOffset: {4,4}, shadowRadius: 0` (native). NO blur.
-4. **Pixel-grid spacing** — All spacing in multiples of 4px (`PX = 4`). Use `GRID.xs` (4), `GRID.sm` (8), `GRID.md` (12), `GRID.lg` (16), `GRID.xl` (24).
-5. **Monospace everywhere** — `fontFamily: 'monospace'` for ALL text. Headers use `letterSpacing: 2-3, textTransform: 'uppercase'`.
-6. **Dark palette** — Backgrounds: `#050508`, `#0a0a0f`, `#111118`, `#1a1a25`. Borders: `#1a1a2e`, `#2a2a3e`, `#3a3a4e`.
-7. **Neon accents** — Functional color only: indigo `#6366f1`, green `#22c55e`, amber `#f59e0b`, cyan `#06b6d4`, pink `#ec4899`.
-8. **Icon blocks** — `32x32` or `36x36` boxes with `borderWidth: 2, borderRadius: 2`, dark tinted bg (`color + '18'`), containing monospace text.
+1. **Black canvas** — Background `#000`. Insets `#0a0a0a`. Surfaces `#111`. No other background colors.
+2. **Sharp edges** — `borderRadius: 2` max. NO rounded corners. Exception: status dots + avatars (fully round).
+3. **2px borders** — Cards and CTAs use `borderWidth: 2, borderColor: '#fff'`. Inputs use `borderWidth: 1, borderColor: '#333'`.
+4. **Monospace everywhere** — `fontFamily: 'monospace'` for ALL text. Labels: `fontWeight: '900', letterSpacing: 1.5-3`. Body: `fontWeight: '700'`.
+5. **White CTA** — Primary buttons: `backgroundColor: '#fff', color: '#000'`. Ghost: `backgroundColor: '#000', borderColor: '#333', color: '#888'`.
+6. **Color is functional** — White = primary. Grays = secondary. Color ONLY for: status (green/amber/indigo/red), agent identity tints at 10-20% opacity, active selection accent.
+7. **Hover mandatory on web** — Every Pressable: `transition: all 0.15s ease` + hover (border brightens, translateY: -1) + press (scale: 0.96).
+8. **Text-glyph icons** — `//`, `>_`, `+`, `x`, `ESC`, `#`, `N` inside 2px-bordered boxes. No emojis in structural UI.
+9. **White glow** — Modal cards: `boxShadow: '0 0 60px rgba(255,255,255,0.08)'`.
 
-### Design System File
-`src/lib/pixelDesign.ts` — exports `PIXEL_COLORS`, `PIXEL_ICONS`, `GRID`, `PX`, shared style objects (`pixelCard`, `pixelInset`, `pixelButton`, `pixelHeader`, `pixelLabel`, `pixelBody`, `pixelMuted`), and helpers (`iconBoxStyle`, `accentBorder`).
+### Design System Files
+- `docs/UC_STYLE_GUIDE.md` — The full specification with every token, pattern, and "don't" rule
+- `src/lib/pixelDesign.ts` — Shared style objects (`pixelCard`, `pixelButton`, etc.) — update to match new guide
 
 ### Inspiration Sources
 - **eBoy Pixoramas** — isometric depth, dense detail, sharp pixel grids

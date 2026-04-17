@@ -22,10 +22,14 @@ interface Props {
   bondTitle: string;
   bondXP: number;
   bondProgress: number;
+  bondNextXp?: number;        // XP threshold for next bond level; omit if already MAX
+  bondNextTitle?: string;     // Title for next bond level
   masteryLevel: number;
   masteryTitle: string;
   masteryXP: number;
   masteryProgress: number;
+  masteryNextXp?: number;
+  masteryNextTitle?: string;
   spirit?: string;
   unlocks: string[];
   accentColor: string;
@@ -33,8 +37,18 @@ interface Props {
 
 // ─── Animated XP Bar ────────────────────────────────────────────────────────
 
-function RPGBar({ progress, color, level, xp, title, label }: {
-  progress: number; color: string; level: number; xp: number; title: string; label: string;
+function RPGBar({ progress, color, level, xp, title, label, nextXp, nextTitle }: {
+  progress: number;
+  color: string;
+  level: number;
+  xp: number;
+  title: string;
+  label: string;
+  // If provided, the panel renders "XP/NEXT → TITLE" under the bar so users
+  // see exactly how far they are from the next milestone instead of guessing
+  // from a percentage.
+  nextXp?: number;
+  nextTitle?: string;
 }) {
   const fillAnim = useRef(new Animated.Value(0)).current;
   const shimmer = useRef(new Animated.Value(0)).current;
@@ -86,16 +100,29 @@ function RPGBar({ progress, color, level, xp, title, label }: {
         ))}
       </View>
 
-      {/* XP and title */}
+      {/* XP and current title */}
       <View style={barStyles.info}>
         <Text style={[barStyles.xpText, { color }]}>{xp} XP</Text>
         <Text style={barStyles.titleText}>{title}</Text>
       </View>
 
-      {/* Progress % */}
-      <Text style={[barStyles.pctText, { color }]}>
-        {Math.round(progress * 100)}%
-      </Text>
+      {/* Milestone: "X/Y → NextTitle" if there's a next level, else MAX */}
+      {nextXp !== undefined ? (
+        <View style={barStyles.milestoneRow}>
+          <Text style={[barStyles.milestoneXp, { color }]}>
+            {xp}<Text style={barStyles.milestoneDim}>/{nextXp}</Text>
+          </Text>
+          {nextTitle ? (
+            <Text style={barStyles.milestoneNext}>→ {nextTitle}</Text>
+          ) : null}
+          <Text style={[barStyles.pctText, { color }]}>{Math.round(progress * 100)}%</Text>
+        </View>
+      ) : (
+        <View style={barStyles.milestoneRow}>
+          <Text style={[barStyles.milestoneMax, { color }]}>MAX LEVEL</Text>
+          <Text style={[barStyles.pctText, { color }]}>100%</Text>
+        </View>
+      )}
     </View>
   );
 }
@@ -170,7 +197,35 @@ const barStyles = StyleSheet.create({
     fontFamily: MONO,
     fontSize: 8,
     fontWeight: '700',
-    textAlign: 'center',
+    textAlign: 'right',
+    marginLeft: 'auto',
+  },
+  milestoneRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  milestoneXp: {
+    fontFamily: MONO,
+    fontSize: 9,
+    fontWeight: '700',
+  },
+  milestoneDim: {
+    color: '#6b6b80',
+  },
+  milestoneNext: {
+    fontFamily: MONO,
+    fontSize: 8,
+    fontWeight: '600',
+    color: '#8b8ba0',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  milestoneMax: {
+    fontFamily: MONO,
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 1,
   },
 });
 
@@ -243,8 +298,8 @@ const unlockStyles = StyleSheet.create({
 // ─── Main Component ─────────────────────────────────────────────────────────
 
 export default function AgentEvolutionCard({
-  agentName, bondLevel, bondTitle, bondXP, bondProgress,
-  masteryLevel, masteryTitle, masteryXP, masteryProgress,
+  agentName, bondLevel, bondTitle, bondXP, bondProgress, bondNextXp, bondNextTitle,
+  masteryLevel, masteryTitle, masteryXP, masteryProgress, masteryNextXp, masteryNextTitle,
   spirit, unlocks, accentColor,
 }: Props) {
   const entranceAnim = useRef(new Animated.Value(0)).current;
@@ -311,6 +366,8 @@ export default function AgentEvolutionCard({
           xp={bondXP}
           title={bondTitle}
           label="BOND"
+          nextXp={bondNextXp}
+          nextTitle={bondNextTitle}
         />
         <View style={styles.barDivider} />
         <RPGBar
@@ -320,6 +377,8 @@ export default function AgentEvolutionCard({
           xp={masteryXP}
           title={masteryTitle}
           label="MASTERY"
+          nextXp={masteryNextXp}
+          nextTitle={masteryNextTitle}
         />
       </View>
 

@@ -34,8 +34,8 @@ export interface WpCommandResult {
 
 // ── Credential loader ───────────────────────────────────────────────────────
 
-async function getCreds(): Promise<{ siteUrl: string; username: string; appPassword: string } | null> {
-  const creds = await getActiveWordPressCredentials();
+async function getCreds(circleId?: string): Promise<{ siteUrl: string; username: string; appPassword: string } | null> {
+  const creds = await getActiveWordPressCredentials(circleId);
   if (!creds) return null;
   return creds;
 }
@@ -132,18 +132,18 @@ export async function executeWpCommand(
   const cmd = lower.startsWith('/wp ') ? lower.slice(4).trim() : lower.replace(/^\/wp$/, 'help');
 
   if (cmd === 'help') return handleHelp();
-  if (cmd === 'status' || cmd === 'info') return handleStatus();
-  if (cmd.startsWith('list') || cmd === 'posts') return handleList(cmd);
-  if (cmd.startsWith('pages')) return handlePages();
-  if (cmd.startsWith('get ')) return handleGet(cmd.slice(4).trim());
-  if (cmd.startsWith('delete ') || cmd.startsWith('trash ')) return handleDelete(cmd.replace(/^(delete|trash)\s+/, '').trim());
-  if (cmd.startsWith('publish ')) return handlePublish(cmd.slice(8).trim());
+  if (cmd === 'status' || cmd === 'info') return handleStatus(context.circleId);
+  if (cmd.startsWith('list') || cmd === 'posts') return handleList(cmd, context.circleId);
+  if (cmd.startsWith('pages')) return handlePages(context.circleId);
+  if (cmd.startsWith('get ')) return handleGet(cmd.slice(4).trim(), context.circleId);
+  if (cmd.startsWith('delete ') || cmd.startsWith('trash ')) return handleDelete(cmd.replace(/^(delete|trash)\s+/, '').trim(), context.circleId);
+  if (cmd.startsWith('publish ')) return handlePublish(cmd.slice(8).trim(), context.circleId);
   if (cmd.startsWith('draft ')) return handleDraft(trimmed.slice(trimmed.toLowerCase().indexOf('draft ') + 6).trim(), context);
   if (cmd.startsWith('schedule ')) return handleSchedule(trimmed.slice(trimmed.toLowerCase().indexOf('schedule ') + 9).trim(), context);
-  if (cmd.startsWith('edit ')) return handleEdit(cmd.slice(5).trim());
-  if (cmd.startsWith('image ') || cmd.startsWith('featured ')) return handleSetImage(cmd.replace(/^(image|featured)\s+/, '').trim());
-  if (cmd.startsWith('categories') || cmd === 'cats') return handleCategories();
-  if (cmd.startsWith('tags')) return handleTags();
+  if (cmd.startsWith('edit ')) return handleEdit(cmd.slice(5).trim(), context.circleId);
+  if (cmd.startsWith('image ') || cmd.startsWith('featured ')) return handleSetImage(cmd.replace(/^(image|featured)\s+/, '').trim(), context.circleId);
+  if (cmd.startsWith('categories') || cmd === 'cats') return handleCategories(context.circleId);
+  if (cmd.startsWith('tags')) return handleTags(context.circleId);
   if (cmd.startsWith('write ') || cmd.startsWith('create ')) return handleAIWrite(trimmed.slice(trimmed.indexOf(' ') + 1).trim(), context);
 
   return { success: false, message: `Unknown WordPress command: "${cmd}". Type \`/wp help\` for available commands.` };
@@ -180,8 +180,8 @@ async function handleHelp(): Promise<WpCommandResult> {
   };
 }
 
-async function handleStatus(): Promise<WpCommandResult> {
-  const creds = await getCreds();
+async function handleStatus(circleId?: string): Promise<WpCommandResult> {
+  const creds = await getCreds(circleId);
   if (!creds) return noCreds();
 
   const info = await getWordPressSiteInfo(creds.siteUrl);
@@ -206,8 +206,8 @@ async function handleStatus(): Promise<WpCommandResult> {
   };
 }
 
-async function handleList(cmd: string): Promise<WpCommandResult> {
-  const creds = await getCreds();
+async function handleList(cmd: string, circleId?: string): Promise<WpCommandResult> {
+  const creds = await getCreds(circleId);
   if (!creds) return noCreds();
 
   const status = cmd.includes('draft') ? 'draft' : cmd.includes('pending') ? 'pending' : cmd.includes('all') ? 'any' : undefined;
@@ -233,8 +233,8 @@ async function handleList(cmd: string): Promise<WpCommandResult> {
   };
 }
 
-async function handlePages(): Promise<WpCommandResult> {
-  const creds = await getCreds();
+async function handlePages(circleId?: string): Promise<WpCommandResult> {
+  const creds = await getCreds(circleId);
   if (!creds) return noCreds();
 
   const pages = await listWordPressPages(creds.siteUrl, creds.username, creds.appPassword);
@@ -247,8 +247,8 @@ async function handlePages(): Promise<WpCommandResult> {
   };
 }
 
-async function handleGet(idStr: string): Promise<WpCommandResult> {
-  const creds = await getCreds();
+async function handleGet(idStr: string, circleId?: string): Promise<WpCommandResult> {
+  const creds = await getCreds(circleId);
   if (!creds) return noCreds();
 
   const id = parseInt(idStr, 10);
@@ -274,8 +274,8 @@ async function handleGet(idStr: string): Promise<WpCommandResult> {
   };
 }
 
-async function handleDelete(idStr: string): Promise<WpCommandResult> {
-  const creds = await getCreds();
+async function handleDelete(idStr: string, circleId?: string): Promise<WpCommandResult> {
+  const creds = await getCreds(circleId);
   if (!creds) return noCreds();
 
   const id = parseInt(idStr, 10);
@@ -286,8 +286,8 @@ async function handleDelete(idStr: string): Promise<WpCommandResult> {
   return { success: true, message: `Post #${id} moved to trash.` };
 }
 
-async function handlePublish(idStr: string): Promise<WpCommandResult> {
-  const creds = await getCreds();
+async function handlePublish(idStr: string, circleId?: string): Promise<WpCommandResult> {
+  const creds = await getCreds(circleId);
   if (!creds) return noCreds();
 
   const id = parseInt(idStr, 10);
@@ -299,7 +299,7 @@ async function handlePublish(idStr: string): Promise<WpCommandResult> {
 }
 
 async function handleDraft(rawTitle: string, context: { circleId: string; userId: string; userName?: string }): Promise<WpCommandResult> {
-  const creds = await getCreds();
+  const creds = await getCreds(context.circleId);
   if (!creds) return noCreds();
   if (!rawTitle) return { success: false, message: 'Usage: `/wp draft <title>` or `/wp draft <title> | <image_url>`' };
 
@@ -333,7 +333,7 @@ async function handleDraft(rawTitle: string, context: { circleId: string; userId
 }
 
 async function handleSchedule(input: string, context: { circleId: string; userId: string; userName?: string }): Promise<WpCommandResult> {
-  const creds = await getCreds();
+  const creds = await getCreds(context.circleId);
   if (!creds) return noCreds();
 
   // Parse: /wp schedule 2026-04-15 My Post Title | https://img.com/photo.jpg
@@ -378,8 +378,8 @@ async function handleSchedule(input: string, context: { circleId: string; userId
   };
 }
 
-async function handleSetImage(input: string): Promise<WpCommandResult> {
-  const creds = await getCreds();
+async function handleSetImage(input: string, circleId?: string): Promise<WpCommandResult> {
+  const creds = await getCreds(circleId);
   if (!creds) return noCreds();
 
   // Parse: /wp image 42 https://example.com/img.jpg
@@ -398,8 +398,8 @@ async function handleSetImage(input: string): Promise<WpCommandResult> {
   return { success: true, message: `Featured image set on post #${postId}.` };
 }
 
-async function handleEdit(input: string): Promise<WpCommandResult> {
-  const creds = await getCreds();
+async function handleEdit(input: string, circleId?: string): Promise<WpCommandResult> {
+  const creds = await getCreds(circleId);
   if (!creds) return noCreds();
 
   // Parse: /wp edit 123 title: New Title
@@ -419,8 +419,8 @@ async function handleEdit(input: string): Promise<WpCommandResult> {
   return { success: true, message: `Post #${id} updated. ${field} = "${value}"` };
 }
 
-async function handleCategories(): Promise<WpCommandResult> {
-  const creds = await getCreds();
+async function handleCategories(circleId?: string): Promise<WpCommandResult> {
+  const creds = await getCreds(circleId);
   if (!creds) return noCreds();
 
   const cats = await fetchWordPressCategories(creds.siteUrl, creds.username, creds.appPassword);
@@ -430,8 +430,8 @@ async function handleCategories(): Promise<WpCommandResult> {
   return { success: true, message: `**Categories**\n\n| ID | Name | Slug | Posts |\n|---|---|---|---|\n${rows.join('\n')}` };
 }
 
-async function handleTags(): Promise<WpCommandResult> {
-  const creds = await getCreds();
+async function handleTags(circleId?: string): Promise<WpCommandResult> {
+  const creds = await getCreds(circleId);
   if (!creds) return noCreds();
 
   const tags = await fetchWordPressTags(creds.siteUrl, creds.username, creds.appPassword);
@@ -442,7 +442,7 @@ async function handleTags(): Promise<WpCommandResult> {
 }
 
 async function handleAIWrite(rawTopic: string, context: { circleId: string; userId: string; userName?: string }): Promise<WpCommandResult> {
-  const creds = await getCreds();
+  const creds = await getCreds(context.circleId);
   if (!creds) return noCreds();
   if (!rawTopic) return { success: false, message: 'Usage: `/wp write <topic>` or `/wp write <topic> | <image_url>`' };
 

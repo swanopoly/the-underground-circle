@@ -81,7 +81,7 @@ export const ROOM_SECTIONS: { key: RoomSection; label: string; icon: string }[] 
   { key: 'chat', label: 'Chat', icon: '..' },
   { key: 'runs', label: 'Runs', icon: '>' },
   { key: 'tasks', label: 'Tasks', icon: 'T' },
-  { key: 'integrations', label: 'Integrations', icon: '<>' },
+  { key: 'integrations', label: 'Marketplace', icon: '<>' },
   { key: 'settings', label: 'Settings', icon: '*' },
 ];
 
