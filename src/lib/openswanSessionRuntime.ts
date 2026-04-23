@@ -590,7 +590,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       model: opts.context.model || undefined,
       chatHistory: opts.context.chatHistory,
       roomId: opts.roomId,
-      parentAgentId: (opts.context as any)?.agentId || undefined,
+      parentAgentId: opts.context.agentId || undefined,
       parentMode: opts.mode || null,
     });
 

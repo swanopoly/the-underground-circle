@@ -1,22 +1,27 @@
 /**
- * OpenSwanConsole — launch console for an OpenSwan-mode chat turn.
- * Matches the ComputerUseConsole / AssignAgent / Spawn pattern: centered
- * floating card, subtle backdrop blur, accent-color-driven primary
- * button. No full-screen dim overlay (per product direction).
+ * OpenSwanConsole — the OpenSwan Control Panel. Before the user launches
+ * a turn, this surface shows exactly what will happen:
  *
- * Surface this pops up is driven entirely by existing primitives:
- *   - `openswanModePolicy.OPENSWAN_MODE_POLICIES` for the mode palette
- *   - `chatAutomationPlanner.buildChatAutomationPlan` classifies the
- *     user's task with `selectedMode`
- *   - The caller dispatches through `runChatAutomationPlan` as usual
+ *   1. Task — the free-text prompt the user is sending.
+ *   2. Mode — picks the response contract (talk / plan / build / ...).
+ *   3. Diagnostics — for the chosen mode, we show how many tools the
+ *      model will actually see, how many memories will be loaded, and
+ *      whether subagents are likely to spawn. This is the "control"
+ *      part — the user can see the system's posture before committing.
+ *   4. Maintenance — a single "Prune biasing memories" action that
+ *      clears out old memories known to bias refusals (e.g. "agent
+ *      lacks app_tools access"). Uses the existing `rageForget` helper
+ *      with a dry-run preview so nothing is deleted without confirm.
+ *   5. Launch — dispatches task + mode to the caller, which runs it
+ *      through the normal planner / tool-use loop.
  *
- * So the console is glue, not a parallel runtime. Submit returns
- * `{ task, mode, model }` to the caller; the caller decides whether to
- * route via the planner / executor or just call OpenSwan directly.
+ * Every section maps to a specific user need or a specific OpenSwan
+ * failure mode we've seen in logs. Nothing here is decorative.
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Platform,
   Pressable,
   ScrollView,
@@ -29,6 +34,17 @@ import {
   OPENSWAN_MODE_POLICIES,
   type OpenSwanChatMode,
 } from '../../lib/openswanModePolicy';
+import { previewOpenSwanToolsForSurface } from '../../lib/openswanToolRuntime';
+import { buildOpenSwanTaskPlan } from '../../lib/openswanTaskPlanner';
+import {
+  planSubagentDelegation,
+  shouldDelegateToSubagents,
+} from '../../lib/subagentRegistry';
+import { analyzeMessageRouting } from '../../lib/messageRouting';
+import { rageForget } from '../../lib/memoryActions';
+import { supabase } from '../../lib/supabase';
+
+type ToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
 
 interface Props {
   visible: boolean;
@@ -40,6 +56,12 @@ interface Props {
   currentModel?: string | null;
   /** Prefilled task (e.g. when a user clicks "Open in OpenSwan" on a msg). */
   initialTask?: string;
+  /** Circle context — needed for memory preview + prune action. */
+  circleId?: string | null;
+  /** Current user id — needed for the prune audit trail. */
+  userId?: string | null;
+  /** Which surface this launch will run on. Tool filter depends on this. */
+  surface?: ToolSurface;
   onClose: () => void;
   /** Fires when the user confirms. ChatTab hands the task to the planner. */
   onSubmit: (payload: {
@@ -56,6 +78,18 @@ const FIELD_BG = '#0a0f1c';
 const MUTED = '#64748b';
 const TEXT = '#e2e8f0';
 const TEXT_DIM = '#94a3b8';
+const DANGER = '#ef4444';
+const SUCCESS = '#22c55e';
+
+// Known phrases that bias BlackSwan toward refusal on UI-control tasks.
+// These are pruned as one-click maintenance in the control panel.
+const BIASING_MEMORY_PROBES = [
+  'lacks app_tools access',
+  'cannot control desktop',
+  'cannot launch apps',
+  'agent cannot interact',
+  'lacks permission to modify',
+];
 
 const MODE_KEYS: OpenSwanChatMode[] = [
   'talk',
@@ -74,6 +108,9 @@ export default function OpenSwanConsole({
   currentMode,
   currentModel,
   initialTask,
+  circleId,
+  userId,
+  surface = 'main_chat',
   onClose,
   onSubmit,
 }: Props) {
@@ -83,14 +120,129 @@ export default function OpenSwanConsole({
       ? (currentMode as OpenSwanChatMode)
       : 'plan',
   );
+  const [memoryCount, setMemoryCount] = useState<number | null>(null);
+  const [stalePreviewCount, setStalePreviewCount] = useState<number | null>(null);
+  const [pruneBusy, setPruneBusy] = useState(false);
+  const [pruneMessage, setPruneMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (!visible) return;
     setTask(initialTask || '');
+    setPruneMessage(null);
     if ((MODE_KEYS as string[]).includes(String(currentMode || ''))) {
       setMode(currentMode as OpenSwanChatMode);
     }
   }, [visible, initialTask, currentMode]);
+
+  // ── Tool + subagent + memory previews (live on mode / task changes) ──
+
+  const toolPreview = useMemo(
+    () => previewOpenSwanToolsForSurface(surface as any, mode),
+    [surface, mode],
+  );
+
+  const subagentPlan = useMemo(() => {
+    const trimmed = task.trim();
+    if (!trimmed) return { willSpawn: false, specs: [] as { role: string; displayName: string }[] };
+    try {
+      const routingSurface = surface === 'room_chat' ? 'room_chat' : 'main_chat';
+      const analysis = analyzeMessageRouting(trimmed, routingSurface);
+      const plan = buildOpenSwanTaskPlan(trimmed, analysis.route.profile, analysis.entities);
+      const willSpawn = shouldDelegateToSubagents(trimmed, plan);
+      if (!willSpawn) return { willSpawn: false, specs: [] };
+      const specs = planSubagentDelegation(trimmed, plan).map((s) => ({
+        role: s.subagent.role,
+        displayName: s.subagent.displayName,
+      }));
+      return { willSpawn: specs.length > 0, specs };
+    } catch {
+      return { willSpawn: false, specs: [] };
+    }
+  }, [task, surface]);
+
+  // Memory count probe — counts active memory_entries for this circle so
+  // the user sees how much context the agent will scan. Cheap query, runs
+  // on open + whenever circleId changes. Not tied to task text because the
+  // actual retrieval is semantic and we'd be lying to show a specific
+  // number that would only be true after full retrieval runs.
+  const memoryProbeRef = useRef(0);
+  useEffect(() => {
+    if (!visible || !circleId) {
+      setMemoryCount(null);
+      return;
+    }
+    const token = ++memoryProbeRef.current;
+    (async () => {
+      try {
+        const { count } = await supabase
+          .from('memory_entries')
+          .select('id', { count: 'exact', head: true })
+          .eq('circle_id', circleId)
+          .eq('is_active', true);
+        if (memoryProbeRef.current === token) {
+          setMemoryCount(typeof count === 'number' ? count : null);
+        }
+      } catch {
+        if (memoryProbeRef.current === token) setMemoryCount(null);
+      }
+    })();
+  }, [visible, circleId]);
+
+  // Stale-memory dry-run probe — runs rageForget in dryRun=true for each
+  // known biasing phrase so the "Prune" button has a candidate count to
+  // show the user before they commit. Dry-run is read-only.
+  const staleProbeRef = useRef(0);
+  useEffect(() => {
+    if (!visible || !circleId || !userId) {
+      setStalePreviewCount(null);
+      return;
+    }
+    const token = ++staleProbeRef.current;
+    (async () => {
+      const ids = new Set<string>();
+      for (const probe of BIASING_MEMORY_PROBES) {
+        try {
+          const r = await rageForget({ circleId, userId, query: probe, dryRun: true });
+          r.deactivated.forEach((id) => ids.add(id));
+        } catch { /* skip this probe */ }
+      }
+      if (staleProbeRef.current === token) setStalePreviewCount(ids.size);
+    })();
+  }, [visible, circleId, userId]);
+
+  const handlePrune = useCallback(async () => {
+    if (!circleId || !userId || pruneBusy) return;
+    if (!stalePreviewCount) {
+      setPruneMessage('No biasing memories found. Nothing to prune.');
+      return;
+    }
+    if (
+      Platform.OS === 'web' &&
+      typeof window !== 'undefined' &&
+      typeof window.confirm === 'function'
+    ) {
+      const ok = window.confirm(
+        `Prune ${stalePreviewCount} stale memor${stalePreviewCount === 1 ? 'y' : 'ies'} that may be biasing agent refusals? (Soft-delete, recoverable.)`,
+      );
+      if (!ok) return;
+    }
+    setPruneBusy(true);
+    setPruneMessage(null);
+    let total = 0;
+    for (const probe of BIASING_MEMORY_PROBES) {
+      try {
+        const r = await rageForget({ circleId, userId, query: probe });
+        total += r.deactivated.length;
+      } catch { /* next probe */ }
+    }
+    setPruneBusy(false);
+    setStalePreviewCount(0);
+    setPruneMessage(
+      total > 0
+        ? `Pruned ${total} memor${total === 1 ? 'y' : 'ies'}. Recoverable from the Memory tab.`
+        : 'No memories were deactivated.',
+    );
+  }, [circleId, userId, pruneBusy, stalePreviewCount]);
 
   const modePolicy = OPENSWAN_MODE_POLICIES[mode];
   const modeAccent = modePolicy?.color || accentColor;
@@ -113,6 +265,9 @@ export default function OpenSwanConsole({
   if (!visible) return null;
   if (Platform.OS !== 'web') return null;
 
+  const toolCount = toolPreview.length;
+  const modeFiltered = toolPreview.filter((t) => t.modes && t.modes.includes(mode)).length;
+
   return (
     <View
       style={styles.anchor}
@@ -133,11 +288,11 @@ export default function OpenSwanConsole({
               <Text style={[styles.headerGlyphText, { color: accentColor }]}>{'OS'}</Text>
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={styles.headerTitle}>OpenSwan</Text>
+              <Text style={styles.headerTitle}>OpenSwan Control Panel</Text>
               <Text style={styles.headerSub}>
-                Launch an OpenSwan turn with a response contract tuned to
-                the task. Currently: <Text style={{ color: modeAccent }}>
-                {modePolicy?.label?.toUpperCase() || mode.toUpperCase()}
+                Inspect the posture — tools, memory, subagents — before launching a turn. Currently:{' '}
+                <Text style={{ color: modeAccent }}>
+                  {modePolicy?.label?.toUpperCase() || mode.toUpperCase()}
                 </Text>.
               </Text>
             </View>
@@ -152,83 +307,177 @@ export default function OpenSwanConsole({
           </Pressable>
         </View>
 
-        {/* ── Task textarea ─────────────────────────────────────────── */}
-        <View style={styles.section}>
-          <Text style={styles.label}>TASK</Text>
-          <TextInput
-            value={task}
-            onChangeText={setTask}
-            placeholder="e.g. Audit the checkout flow — list blockers, prioritise the top 3."
-            placeholderTextColor={MUTED}
-            multiline
-            autoFocus
-            style={styles.input}
-          />
-          <View style={styles.inputFooter}>
-            <Text style={styles.inputHint}>
-              {trimmed.length === 0
-                ? `${modePolicy?.responseContract?.directive || modePolicy?.outcome || 'OpenSwan response contract will shape the output.'}`
-                : `${trimmed.length} chars · mode "${mode}" contract will apply`}
-            </Text>
+        <ScrollView style={{ maxHeight: 580 }} contentContainerStyle={{ gap: 14 }}>
+          {/* ── Task textarea ───────────────────────────────────────── */}
+          <View style={styles.section}>
+            <Text style={styles.label}>TASK</Text>
+            <TextInput
+              value={task}
+              onChangeText={setTask}
+              placeholder="e.g. Audit the checkout flow — list blockers, prioritise the top 3."
+              placeholderTextColor={MUTED}
+              multiline
+              autoFocus
+              style={styles.input}
+            />
+            <View style={styles.inputFooter}>
+              <Text style={styles.inputHint}>
+                {trimmed.length === 0
+                  ? `${modePolicy?.responseContract?.directive || modePolicy?.outcome || 'OpenSwan response contract will shape the output.'}`
+                  : `${trimmed.length} chars · mode "${mode}" contract will apply`}
+              </Text>
+            </View>
           </View>
-        </View>
 
-        {/* ── Mode selector ─────────────────────────────────────────── */}
-        <View style={styles.section}>
-          <Text style={styles.label}>MODE</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingVertical: 2 }}>
-            {modeDescriptors.map((policy) => {
-              const isActive = policy.key === mode;
-              const color = policy.color || accentColor;
-              return (
+          {/* ── Mode selector ───────────────────────────────────────── */}
+          <View style={styles.section}>
+            <Text style={styles.label}>MODE</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingVertical: 2 }}>
+              {modeDescriptors.map((policy) => {
+                const isActive = policy.key === mode;
+                const color = policy.color || accentColor;
+                return (
+                  <Pressable
+                    key={policy.key}
+                    onPress={() => setMode(policy.key as OpenSwanChatMode)}
+                    style={({ hovered }: any) => [
+                      styles.modeChip,
+                      {
+                        borderColor: isActive ? color : CARD_BORDER,
+                        backgroundColor: isActive ? `${color}18` : FIELD_BG,
+                      },
+                      hovered && !isActive && { borderColor: `${color}66`, backgroundColor: `${color}0a` } as any,
+                    ]}
+                  >
+                    <View style={[styles.modeDot, { backgroundColor: color }]} />
+                    <Text style={[styles.modeLabel, { color: isActive ? color : TEXT }]}>
+                      {policy.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+            <Text style={styles.modeDesc}>
+              {modePolicy?.description || 'Pick the response contract that best fits the task.'}
+            </Text>
+            {modePolicy?.responseContract ? (
+              <View style={{ gap: 3, marginTop: 2 }}>
+                <Text style={styles.contractLabel}>STRUCTURE</Text>
+                {modePolicy.responseContract.structure.slice(0, 3).map((s, i) => (
+                  <Text key={i} style={styles.contractLine}>• {s}</Text>
+                ))}
+              </View>
+            ) : null}
+          </View>
+
+          {/* ── Diagnostics ─────────────────────────────────────────── */}
+          <View style={styles.section}>
+            <Text style={styles.label}>POSTURE</Text>
+            <View style={styles.diagGrid}>
+              <DiagCard
+                title="Tools"
+                value={`${toolCount}`}
+                hint={
+                  modeFiltered > 0
+                    ? `${modeFiltered} mode-scoped`
+                    : 'all mode-agnostic'
+                }
+                color={accentColor}
+              />
+              <DiagCard
+                title="Memory"
+                value={memoryCount === null ? '—' : `${memoryCount}`}
+                hint="active entries in circle"
+                color="#38bdf8"
+              />
+              <DiagCard
+                title="Subagents"
+                value={subagentPlan.willSpawn ? `${subagentPlan.specs.length}` : '0'}
+                hint={
+                  subagentPlan.willSpawn
+                    ? subagentPlan.specs.map((s) => s.displayName).slice(0, 3).join(' · ')
+                    : 'solo turn'
+                }
+                color="#f59e0b"
+              />
+            </View>
+            {toolCount === 0 ? (
+              <Text style={[styles.inputHint, { color: DANGER, marginTop: 4 }]}>
+                ⚠ No tools exposed for this mode. Model will answer from knowledge alone.
+              </Text>
+            ) : null}
+          </View>
+
+          {/* ── Maintenance ─────────────────────────────────────────── */}
+          {circleId && userId ? (
+            <View style={styles.section}>
+              <Text style={styles.label}>MAINTENANCE</Text>
+              <View style={styles.maintRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.maintTitle}>Prune biasing memories</Text>
+                  <Text style={styles.maintDesc}>
+                    {stalePreviewCount === null
+                      ? 'Scanning for memories that bias refusals on UI-control tasks…'
+                      : stalePreviewCount === 0
+                        ? 'No biasing memories detected.'
+                        : `${stalePreviewCount} memor${stalePreviewCount === 1 ? 'y' : 'ies'} matching "lacks app_tools", "cannot control desktop", etc.`}
+                  </Text>
+                  {pruneMessage ? (
+                    <Text
+                      style={[
+                        styles.maintDesc,
+                        { color: pruneMessage.startsWith('Pruned') ? SUCCESS : TEXT_DIM, marginTop: 4 },
+                      ]}
+                    >
+                      {pruneMessage}
+                    </Text>
+                  ) : null}
+                </View>
                 <Pressable
-                  key={policy.key}
-                  onPress={() => setMode(policy.key as OpenSwanChatMode)}
-                  style={({ hovered }: any) => [
-                    styles.modeChip,
+                  onPress={handlePrune}
+                  disabled={pruneBusy || !stalePreviewCount}
+                  style={[
+                    styles.pruneBtn,
                     {
-                      borderColor: isActive ? color : CARD_BORDER,
-                      backgroundColor: isActive ? `${color}18` : FIELD_BG,
+                      borderColor:
+                        stalePreviewCount && !pruneBusy ? `${DANGER}88` : CARD_BORDER,
+                      backgroundColor:
+                        stalePreviewCount && !pruneBusy ? `${DANGER}15` : FIELD_BG,
+                      opacity: stalePreviewCount && !pruneBusy ? 1 : 0.55,
                     },
-                    hovered && !isActive && { borderColor: `${color}66`, backgroundColor: `${color}0a` } as any,
                   ]}
                 >
-                  <View style={[styles.modeDot, { backgroundColor: color }]} />
-                  <Text style={[styles.modeLabel, { color: isActive ? color : TEXT }]}>
-                    {policy.label}
-                  </Text>
+                  {pruneBusy ? (
+                    <ActivityIndicator size="small" color={DANGER} />
+                  ) : (
+                    <Text
+                      style={[
+                        styles.pruneBtnText,
+                        { color: stalePreviewCount ? DANGER : MUTED },
+                      ]}
+                    >
+                      PRUNE
+                    </Text>
+                  )}
                 </Pressable>
-              );
-            })}
-          </ScrollView>
-          <Text style={styles.modeDesc}>
-            {modePolicy?.description || 'Pick the response contract that best fits the task.'}
-          </Text>
-          {modePolicy?.responseContract ? (
-            <View style={{ gap: 3, marginTop: 2 }}>
-              <Text style={styles.contractLabel}>
-                STRUCTURE
-              </Text>
-              {modePolicy.responseContract.structure.slice(0, 3).map((s, i) => (
-                <Text key={i} style={styles.contractLine}>• {s}</Text>
-              ))}
+              </View>
             </View>
           ) : null}
-        </View>
 
-        {/* ── Model inherited ───────────────────────────────────────── */}
-        {currentModel ? (
-          <View style={styles.inlineRow}>
-            <Text style={styles.modelInherit}>
-              MODEL · {String(currentModel).toUpperCase()}
-            </Text>
-            <Text style={[styles.inputHint, { color: MUTED }]}>
-              Inherited from chat model picker
-            </Text>
-          </View>
-        ) : null}
+          {/* ── Model inherited ─────────────────────────────────────── */}
+          {currentModel ? (
+            <View style={styles.inlineRow}>
+              <Text style={styles.modelInherit}>
+                MODEL · {String(currentModel).toUpperCase()}
+              </Text>
+              <Text style={[styles.inputHint, { color: MUTED }]}>
+                Inherited from chat model picker
+              </Text>
+            </View>
+          ) : null}
+        </ScrollView>
 
-        {/* ── Footer ────────────────────────────────────────────────── */}
+        {/* ── Footer ──────────────────────────────────────────────── */}
         <View style={styles.footer}>
           <Pressable onPress={onClose} style={styles.ghostBtn}>
             <Text style={styles.ghostBtnText}>CANCEL</Text>
@@ -258,6 +507,27 @@ export default function OpenSwanConsole({
   );
 }
 
+// ── Small helper card for the diagnostics grid ──────────────────────────
+function DiagCard({
+  title,
+  value,
+  hint,
+  color,
+}: {
+  title: string;
+  value: string;
+  hint: string;
+  color: string;
+}) {
+  return (
+    <View style={[styles.diagCard, { borderColor: `${color}33` }]}>
+      <Text style={[styles.diagTitle, { color }]}>{title.toUpperCase()}</Text>
+      <Text style={styles.diagValue}>{value}</Text>
+      <Text style={styles.diagHint}>{hint}</Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   anchor: {
     ...(Platform.OS === 'web' ? { position: 'fixed' as any } : StyleSheet.absoluteFillObject),
@@ -280,7 +550,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 14,
     width: '100%' as any,
-    maxWidth: 640,
+    maxWidth: 680,
     maxHeight: '92vh' as any,
     padding: 18,
     gap: 14,
@@ -325,7 +595,7 @@ const styles = StyleSheet.create({
     color: TEXT_DIM,
     fontSize: 12,
     marginTop: 2,
-    maxWidth: 480,
+    maxWidth: 520,
   },
   closeBtn: {
     width: 30,
@@ -389,6 +659,70 @@ const styles = StyleSheet.create({
   contractLine: {
     color: TEXT_DIM,
     fontSize: 11,
+  },
+  diagGrid: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  diagCard: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 10,
+    backgroundColor: FIELD_BG,
+    minWidth: 110,
+  },
+  diagTitle: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    letterSpacing: 1.2,
+    fontWeight: '700',
+  },
+  diagValue: {
+    color: TEXT,
+    fontSize: 22,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  diagHint: {
+    color: TEXT_DIM,
+    fontSize: 10,
+    marginTop: 2,
+  },
+  maintRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    backgroundColor: FIELD_BG,
+  },
+  maintTitle: {
+    color: TEXT,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  maintDesc: {
+    color: TEXT_DIM,
+    fontSize: 11,
+    marginTop: 2,
+  },
+  pruneBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    minWidth: 68,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pruneBtnText: {
+    fontFamily: 'monospace',
+    fontSize: 11,
+    letterSpacing: 1.2,
+    fontWeight: '700',
   },
   inlineRow: {
     flexDirection: 'row',

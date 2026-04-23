@@ -642,7 +642,14 @@ const s = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-    ...(Platform.OS === 'web' ? { animation: 'uc-tab-dot-pulse 1.4s ease-in-out infinite' } as any : {}),
+    // Animation note: RN-Web 0.19+ rejects both `animation` shorthand
+    // AND `animationName` style properties (it only accepts
+    // `animationKeyframes`, which takes an object literal — not a
+    // global @keyframes name). To animate this dot on web, apply the
+    // `uc-tab-dot` class via `dataSet={{ className: 'uc-tab-dot' }}`
+    // on the View — the class is defined in the global CSS injected
+    // by CircleDetailScreen.tsx:50. Keeping the style block free of
+    // the invalid property so the console stays clean.
   },
   statusLabel: {
     fontSize: 10,

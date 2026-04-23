@@ -5966,6 +5966,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           accentColor={accentColor}
           currentMode={chatMode}
           currentModel={selectedModel === 'auto' ? null : selectedModel}
+          circleId={circleId}
+          userId={currentUserId}
+          surface="main_chat"
           onClose={() => setShowOpenSwanConsole(false)}
           onSubmit={({ task, mode, model: modelOverride }) => {
             setShowOpenSwanConsole(false);

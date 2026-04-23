@@ -685,12 +685,12 @@ const styles = StyleSheet.create({
     height: 7,
     borderRadius: 4,
     backgroundColor: '#22d3ee',
-    ...(Platform.OS === 'web' ? {
-      animationName: 'uc-tab-dot-pulse',
-      animationDuration: '1.2s',
-      animationTimingFunction: 'ease-in-out',
-      animationIterationCount: 'infinite',
-    } as any : {}),
+    // RN-Web 0.19+ rejects both `animation` + `animationName` in
+    // StyleSheet. The `uc-tab-dot` keyframe is applied at the app
+    // level via the global CSS injector (see line ~50 of this file);
+    // apply via `dataSet={{ className: 'uc-tab-dot' }}` on the View
+    // if you need the pulse back. Leaving the dot static on web
+    // keeps the validator quiet.
   },
   loadingPillText: {
     color: '#cbd5e1',

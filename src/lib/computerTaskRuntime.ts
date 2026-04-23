@@ -143,26 +143,58 @@ export async function executeComputerTaskWithAgent(args: {
       + 'Continue from there — use desktop.wait_for_app / desktop.read_a11y_tree / desktop.press_keys / desktop.type_text as needed. Do NOT re-launch.\n\n'
     : '';
   const prompt = `${execution.dispatchPrefix}\n${followUpPreamble}USER COMPUTER TASK\n${args.task}`;
-  const result = await executeAgentRun({
-    surface: 'main_chat',
-    circleId: args.circleId,
-    userId: args.userId,
-    userName: args.userName,
-    prompt,
-    model: args.model,
-    mode: execution.recommendedMode,
-    capabilityProfile: execution.capabilityProfile,
-    context: {
-      chatHistory: args.chatHistory,
-      sessionArchiveContext: args.sessionArchiveContext,
-      replyTo: args.replyTo,
-    },
-  });
+
+  // Belt-and-suspenders: if executeAgentRun throws (provider outage,
+  // v2 continuation cap, model returns null), we still need to surface
+  // SOMETHING to the user — otherwise the chat renders empty ("just
+  // refreshed the chat" bug). Capture + fall back to a message that
+  // at least confirms the bridge launch and names the error.
+  let result: AgentRunResult;
+  try {
+    result = await executeAgentRun({
+      surface: 'main_chat',
+      circleId: args.circleId,
+      userId: args.userId,
+      userName: args.userName,
+      prompt,
+      model: args.model,
+      mode: execution.recommendedMode,
+      capabilityProfile: execution.capabilityProfile,
+      context: {
+        chatHistory: args.chatHistory,
+        sessionArchiveContext: args.sessionArchiveContext,
+        replyTo: args.replyTo,
+      },
+    });
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    warnings.push(`agent follow-up failed: ${errMsg}`);
+    const fallback = appAdapterMessage
+      ? `${appAdapterMessage}\n\n**Agent follow-up failed:** ${errMsg}\n\nThe app opened, but I couldn't complete the rest of the task. Try again or break it into smaller steps.`
+      : `Agent follow-up failed: ${errMsg}`;
+    return {
+      adapterId: adapterIdForKind(execution.preview.kind),
+      execution,
+      response: fallback,
+      runId: null,
+      warnings,
+    };
+  }
+
+  // Another silent-failure gap: executeAgentRun can return an empty
+  // string when every provider tier punts. Keep the bridge-launch
+  // message visible so the user isn't looking at a blank bubble.
+  const agentResponse = String(result.response || '').trim();
+  const combinedResponse = agentResponse
+    ? (appAdapterMessage ? `${appAdapterMessage}\n\n${agentResponse}` : agentResponse)
+    : (appAdapterMessage
+        ? `${appAdapterMessage}\n\n_(Agent didn't return follow-up text. The app is open — say what to do next and I'll continue from there.)_`
+        : '(No response from the agent — try rephrasing.)');
 
   return {
     adapterId: adapterIdForKind(execution.preview.kind),
     execution,
-    response: result.response,
+    response: combinedResponse,
     runId: result.runId,
     modeOutcomeSummary: result.modeOutcomeSummary,
     observedEval: result.observedEval,
