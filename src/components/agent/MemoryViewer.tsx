@@ -815,6 +815,24 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
     await load();
   };
 
+  const handleContextRetrievalMode = async (
+    mem: MemoryEntry,
+    retrievalMode: 'startup' | 'on_demand' | 'manual_only',
+  ) => {
+    try {
+      const { editMemory } = await import('../../lib/agentMemory');
+      await editMemory(mem.id, { retrieval_mode: retrievalMode });
+      await recordMemoryFeedback({
+        memoryId: mem.id,
+        action: 'accepted',
+        note: `Set retrieval mode to ${retrievalMode} from memory context plan`,
+        userId,
+        source: 'memory_context_plan',
+      });
+      await load();
+    } catch {}
+  };
+
   const renderLibraryMemory = (mem: MemoryEntry) => {
     const kindColor = KIND_COLORS[mem.memory_kind] || '#888888';
     const isEditing = editingId === mem.id;
@@ -1056,6 +1074,48 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
                           style={({ hovered, pressed }: any) => [s.dangerBtn, hovered && webHoverDanger, pressed && webPressed]}
                         >
                           <Text style={s.dangerBtnText}>DOWNRANK</Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={() => handleContextRetrievalMode(mem, 'startup')}
+                          style={({ hovered, pressed }: any) => [
+                            s.ghostBtn,
+                            mem.retrieval_mode === 'startup' ? s.contextModeBtnActive : null,
+                            hovered && webHoverGhost,
+                            pressed && webPressed,
+                          ]}
+                        >
+                          <Text style={[
+                            s.ghostBtnText,
+                            mem.retrieval_mode === 'startup' ? s.contextModeBtnTextActive : null,
+                          ]}>STARTUP</Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={() => handleContextRetrievalMode(mem, 'on_demand')}
+                          style={({ hovered, pressed }: any) => [
+                            s.ghostBtn,
+                            (mem.retrieval_mode || 'on_demand') === 'on_demand' ? s.contextModeBtnActive : null,
+                            hovered && webHoverGhost,
+                            pressed && webPressed,
+                          ]}
+                        >
+                          <Text style={[
+                            s.ghostBtnText,
+                            (mem.retrieval_mode || 'on_demand') === 'on_demand' ? s.contextModeBtnTextActive : null,
+                          ]}>ON DEMAND</Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={() => handleContextRetrievalMode(mem, 'manual_only')}
+                          style={({ hovered, pressed }: any) => [
+                            s.ghostBtn,
+                            mem.retrieval_mode === 'manual_only' ? s.contextModeBtnActiveMuted : null,
+                            hovered && webHoverGhost,
+                            pressed && webPressed,
+                          ]}
+                        >
+                          <Text style={[
+                            s.ghostBtnText,
+                            mem.retrieval_mode === 'manual_only' ? s.contextModeBtnTextMuted : null,
+                          ]}>MANUAL ONLY</Text>
                         </Pressable>
                       </View>
                     );
@@ -1619,6 +1679,20 @@ const s = StyleSheet.create({
   contextPlanCardSelected: {
     borderColor: accent.blue,
     backgroundColor: bg.sidebar,
+  },
+  contextModeBtnActive: {
+    borderColor: accent.blue,
+    backgroundColor: `${accent.blue}18`,
+  },
+  contextModeBtnTextActive: {
+    color: accent.blue,
+  },
+  contextModeBtnActiveMuted: {
+    borderColor: text.muted,
+    backgroundColor: `${text.muted}18`,
+  },
+  contextModeBtnTextMuted: {
+    color: text.muted,
   },
   contextPlanTitle: {
     color: text.primary,

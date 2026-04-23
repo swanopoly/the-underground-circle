@@ -12,6 +12,12 @@ const CENTER_MIN_H = 480;
 const SIDE_MIN_W = 380;
 const SIDE_MAX_W = 720;
 const SIDE_DEFAULT_W = 480;
+// App header is 48px + 1px bottom border and sticks at top:0 with
+// zIndex 1000 (see `AppHeader.tsx`). The docked panel uses position:fixed
+// at top:0, so without this offset the header overlays the panel's top
+// strip (close button, tabs) and clips them. Matches the header's total
+// footprint including its border.
+const APP_HEADER_OFFSET = 49;
 const MODE_KEY = 'uc_agent_panel_mode_v1';
 const SIDE_W_KEY = 'uc_agent_panel_side_w_v1';
 
@@ -109,9 +115,9 @@ export function useAgentPanelLayout() {
     if (panelMode === 'side') {
       return {
         width: clampedSideWidth,
-        height: viewport.h,
+        height: Math.max(320, viewport.h - APP_HEADER_OFFSET),
         left: viewport.w - clampedSideWidth,
-        top: 0,
+        top: APP_HEADER_OFFSET,
       };
     }
 

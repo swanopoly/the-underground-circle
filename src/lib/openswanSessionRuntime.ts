@@ -5,7 +5,11 @@ import { buildOpenSwanMemoryRecommendations, captureOpenSwanOutcomeMemory, recor
 import { buildOpenSwanObservedEvalSummary } from './openswanObservedEvals';
 import { extractBrowserPlansFromToolActions, runOpenSwanRuntimeToolLoop } from './openswanRuntimeToolLoop';
 import { buildOpenSwanTaskPlan, type OpenSwanTaskPlan } from './openswanTaskPlanner';
-import { buildOpenSwanToolBrief } from './openswanToolRuntime';
+import {
+  buildOpenSwanToolBrief,
+  listToolsHiddenByMode,
+  previewOpenSwanToolsForSurface,
+} from './openswanToolRuntime';
 import { appendOpenSwanTranscriptEvent, buildOpenSwanTranscriptKey, upsertOpenSwanTranscriptHeader, type OpenSwanSessionTranscript } from './openswanTranscripts';
 import { executeOpenSwanVerificationPlan, type OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import { getSwanBotStructuredResponse, executeToolUseLoop, buildStreamableSystemPrompt, type SwanBotContext, type SwanBotStructuredArtifact, type SwanBotStructuredResponse } from './swanbot';
@@ -719,12 +723,32 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     },
   })) || transcript;
   if (run) {
+    // Posture snapshot — capture what the agent was given (mode, tools,
+    // memory, subagents) so a completed run can be audited later:
+    // "why did the agent refuse that" / "which tools did it see". The
+    // Control Panel shows the same shape live; this persists it.
+    const postureSurface: 'main_chat' | 'room_chat' | 'office' | 'task_run' =
+      opts.surface === 'main_chat' ? 'main_chat'
+      : opts.surface === 'room_chat' ? 'room_chat'
+      : opts.surface === 'feed_task' ? 'task_run'
+      : 'main_chat';
+    const exposedTools = previewOpenSwanToolsForSurface(postureSurface, opts.mode || null);
+    const hiddenTools = listToolsHiddenByMode(postureSurface, opts.mode || null);
     await mergeRunMetadata(run.id, {
       runtimePlanVersion: OPENSWAN_RUNTIME_PLAN_VERSION,
       memoryReferences: summarizeMemoryReferences(memoryBundle.references),
       memoriesUsed: memoryBundle.references.map((ref) => ref.title),
       memoryContextPreview: memoryBundle.combined.slice(0, 1200),
       spiritId: opts.context.spiritId || null,
+      posture: {
+        mode: opts.mode || null,
+        surface: postureSurface,
+        toolsExposed: exposedTools.length,
+        toolsHiddenByMode: hiddenTools.length,
+        hiddenToolNames: hiddenTools.map((t) => t.name),
+        subagentsPlanned: delegationSpecs.length,
+        subagentRoles: delegationSpecs.map((s) => s.subagent.role),
+      },
     });
   }
   const assistantResponseStepIndex = delegationSpecs.length > 0 ? 4 + delegationSpecs.length : 3;

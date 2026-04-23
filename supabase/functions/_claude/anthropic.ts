@@ -96,6 +96,33 @@ export interface CallClaudeOpts {
   betaHeaders?: string[];
   /** Abort signal for cancellation. */
   signal?: AbortSignal;
+  /**
+   * How many retries the transient-error loop should attempt on
+   * 429/529/5xx/network failures. Total attempts = 1 + maxRetries.
+   * Default 2 (so 3 attempts total, ~3.5s worst-case wall time with
+   * backoff + jitter). Set to 0 when the caller has its own retry
+   * strategy — cron workers that run per-minute don't need internal
+   * retry too. */
+  maxRetries?: number;
+}
+
+/**
+ * Exponential backoff with full jitter for retryable Anthropic errors.
+ * Attempt 0 → 0..500ms, attempt 1 → 0..1000ms, attempt 2 → 0..2000ms.
+ * Capped at 2s to keep the total wait within an edge function's
+ * budget even if we bump maxRetries higher in the future.
+ *
+ * Exported so tests can verify the shape without actually sleeping.
+ */
+export function backoffMs(attempt: number): number {
+  const base = 500 * Math.pow(2, Math.max(0, attempt));
+  const capped = Math.min(base, 2000);
+  return Math.floor(Math.random() * capped);
+}
+
+async function delayWithJitter(attempt: number): Promise<void> {
+  const ms = backoffMs(attempt);
+  if (ms > 0) await new Promise((r) => setTimeout(r, ms));
 }
 
 export interface CallClaudeResult {
@@ -139,17 +166,55 @@ export async function callClaude(opts: CallClaudeOpts): Promise<CallClaudeResult
   if (system) body.system = system;
   if (opts.tools && opts.tools.length) body.tools = opts.tools;
 
-  const res = await fetch(ANTHROPIC_API_URL, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-    signal: opts.signal,
-  });
+  // Resilience: retry on transient failures (529 Overloaded, 429 rate
+  // limit, 5xx gateway errors, network drops) with exponential backoff
+  // + jitter. Structural errors (4xx except 429) fail fast — same-
+  // input retry won't fix a malformed request.
+  //
+  // Retry budget: 3 attempts total, ~0.5s + ~1s + ~2s backoff (plus
+  // jitter). Total wall-time added on a genuine outage is ~3.5s before
+  // we give up — well inside the edge function's default 150s budget.
+  // Callers with their own retry strategy (automation-executor cron)
+  // can override via opts.maxRetries=0.
+  const maxRetries = opts.maxRetries ?? 2;
+  let attempt = 0;
+  let res: Response;
+  let lastError: unknown = null;
+  while (true) {
+    try {
+      res = await fetch(ANTHROPIC_API_URL, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: opts.signal,
+      });
+    } catch (fetchErr) {
+      // Network-level failure (ECONNRESET, DNS, abort, etc.). Retryable.
+      lastError = fetchErr;
+      if (attempt < maxRetries && !opts.signal?.aborted) {
+        await delayWithJitter(attempt);
+        attempt += 1;
+        continue;
+      }
+      throw fetchErr;
+    }
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(`Anthropic ${res.status}: ${errText.slice(0, 400)}`);
+    if (res.ok) break;
+
+    const isRetryable =
+      res.status === 429 ||
+      res.status === 529 ||
+      (res.status >= 500 && res.status <= 599);
+    if (!isRetryable || attempt >= maxRetries || opts.signal?.aborted) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`Anthropic ${res.status}: ${errText.slice(0, 400)}`);
+    }
+    // Drain the response body so the connection can be reused.
+    try { await res.text(); } catch {}
+    await delayWithJitter(attempt);
+    attempt += 1;
   }
+  void lastError; // unused after success; kept so the compiler sees the reference path
 
   const raw = await res.json();
   const u = raw.usage ?? {};

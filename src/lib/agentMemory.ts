@@ -388,7 +388,12 @@ export async function getUserMemories(
  */
 export async function editMemory(
   memoryId: string,
-  updates: { title?: string; content?: string; memory_kind?: MemoryKind },
+  updates: {
+    title?: string;
+    content?: string;
+    memory_kind?: MemoryKind;
+    retrieval_mode?: 'startup' | 'on_demand' | 'manual_only';
+  },
 ): Promise<boolean> {
   const { error } = await supabase
     .from('memory_entries')
