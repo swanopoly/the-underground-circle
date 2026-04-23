@@ -2320,12 +2320,19 @@ export async function executeToolUseLoop(opts: {
   activePluginIds?: string[];
   allowedToolNames?: string[];
   surface?: 'main_chat' | 'room_chat' | 'office' | 'task_run';
+  /**
+   * Chat mode ('plan' | 'build' | 'review' | etc). When provided, tools
+   * whose definition declares a `modes` allowlist are filtered to the
+   * ones that include this mode — letting modes enforce tool discipline
+   * (e.g. `review` mode hides write tools).
+   */
+  mode?: string | null;
 }): Promise<{ response: string; toolEvents: Array<{ tool: string; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }> }> {
   if (shouldBlockExternalAiProvider('anthropic')) {
     return { response: getStrictLocalAiModeMessage('anthropic'), toolEvents: [] };
   }
   const { MAX_TOOL_ROUNDS, getToolDefinitions, dispatchToolDetailed } = await import('./openswanTools/index');
-  const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat');
+  const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat', opts.mode);
   if (tools.length === 0) {
     return { response: '', toolEvents: [] };
   }

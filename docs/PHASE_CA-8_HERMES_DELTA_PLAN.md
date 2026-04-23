@@ -71,7 +71,7 @@ Each sub-phase names its exact code paths, SQL impact, smoke-test file, and road
 - **Contract.** `createFallbackProvider({ providers, onFallback })` returns an `AgentProvider` indistinguishable to `AgentExecutionCore`. Classifies 429/529/5xx/408/timeout/network errors as retryable → advance to next provider; 400/401/403/404/422 bubble immediately. Observer fires once per chain advance with `{ attempted, nextLabel, error, errorMessage, statusCode }`. 55+ assertions pin the classifier + routing + observer semantics.
 - **Effort.** M. **SQL:** none.
 
-### CA-8g · Trace export + evals scaffolding · **task #81**
+### CA-8g · Trace export + evals scaffolding · **task #81 · SHIPPED 2026-04-23**
 
 - **Problem.** DSPy/GEPA needs trace JSONL + golden eval cases. We have neither exported yet.
 - **Files.** New `scripts/export-traces.ts` → `docs/traces/<date>.jsonl`. New `docs/evals/` seeded with 10 golden cases in the same shape `openswanBenchmarks.ts` already uses. New 1-page `docs/EVOLVABLE_SURFACES.md` naming exactly which surfaces the optimizer may touch (skill bodies, tool descriptions, prompt components) — and that `.ts` files are out of bounds.

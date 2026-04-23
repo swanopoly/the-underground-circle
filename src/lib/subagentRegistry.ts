@@ -250,6 +250,15 @@ export async function delegateToSubagent(opts: {
   model?: string;
   chatHistory?: string;
   roomId?: string;
+  /**
+   * Parent agent scope id. Passed down so the subagent sees agent-scoped
+   * memories the parent has (e.g. "BlackSwan prefers short bullet replies")
+   * instead of rebuilding context from scratch without that signal.
+   */
+  parentAgentId?: string;
+  /** Parent chat mode. If provided, overrides the role-derived mode so the
+   *  subagent respects the user's current mode discipline. */
+  parentMode?: string | null;
 }): Promise<DelegationResult> {
   // Create a child run for the delegation
   let runId: string | undefined;
@@ -282,7 +291,10 @@ export async function delegateToSubagent(opts: {
     userId: opts.userId,
     query: opts.message,
     roomId: opts.roomId,
-    agentId: undefined,
+    // Inherit parent's agent scope so subagents see agent-scoped memories
+    // (preferences, learned behavior) instead of working from a clean
+    // slate every delegation.
+    agentId: opts.parentAgentId,
     agentName: opts.subagent.displayName,
     spiritId: opts.subagent.spiritId || null,
     surface: opts.surface === 'main_chat' ? 'main_chat' : opts.surface === 'room_chat' ? 'room_chat' : 'task_run',
@@ -361,6 +373,12 @@ export async function delegateToSubagent(opts: {
       activePluginIds: [],
       allowedToolNames: opts.subagent.allowedTools?.length ? opts.subagent.allowedTools as string[] : undefined,
       surface: surfaceForTools,
+      // Respect the user's chosen mode when the parent turn had one —
+      // e.g. the parent selected `review` so subagents shouldn't have
+      // write tools either. Falls back to the role-derived mode so
+      // planner / builder delegations still work when the user picked
+      // `none` / `talk` at the top.
+      mode: opts.parentMode || modeKey,
     });
 
     const runtimeToolActions: SwanBotStructuredToolAction[] = toolLoopResult.toolEvents.map((evt) => {
@@ -558,6 +576,8 @@ export async function delegateToSubagents(opts: {
   model?: string;
   chatHistory?: string;
   roomId?: string;
+  parentAgentId?: string;
+  parentMode?: string | null;
 }): Promise<ParallelDelegationResult> {
   const settled = await Promise.allSettled(
     opts.specs.map((spec) =>
@@ -572,6 +592,8 @@ export async function delegateToSubagents(opts: {
         model: opts.model || spec.subagent.modelPreference,
         chatHistory: opts.chatHistory,
         roomId: opts.roomId,
+        parentAgentId: opts.parentAgentId,
+        parentMode: opts.parentMode,
       }),
     ),
   );

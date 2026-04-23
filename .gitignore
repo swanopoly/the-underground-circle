@@ -64,3 +64,7 @@ __pycache__/
 # Compiled Swift helpers — machine-specific; rebuilt on demand by the bridge.
 scripts/bin/uc-ax-helper
 scripts/bin/uc-ax-helper.dSYM/
+
+# Agent run traces — may contain PII; never commit
+docs/traces/
+

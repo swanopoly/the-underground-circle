@@ -105,6 +105,17 @@ export type OpenSwanToolDefinition = {
   surfaces: OpenSwanToolSurface[];
   description: string;
   inputSchema?: Record<string, unknown>;
+  /**
+   * Optional chat-mode allowlist. When present, the tool is only exposed
+   * to the model on turns running in one of these modes. When omitted,
+   * the tool is mode-agnostic (available in every mode) — which matches
+   * legacy behavior, so adding `modes` to a tool is purely additive.
+   *
+   * Mode keys come from `OPENSWAN_MODE_POLICIES` in
+   * `openswanModePolicy.ts`. Use this to enforce mode semantics —
+   * e.g. `review` mode should not hand the model write tools.
+   */
+  modes?: string[];
 };
 
 export type OpenSwanToolPolicyFamily =
@@ -1562,17 +1573,43 @@ export function listOpenSwanToolsForSurface(surface: OpenSwanToolSurface): OpenS
 export function listOpenSwanAnthropicToolsForSurface(
   surface: OpenSwanToolSurface,
   allowedToolNames?: OpenSwanRuntimeToolName[],
+  mode?: string | null,
 ): Array<{ name: string; description: string; input_schema: Record<string, unknown> }> {
   const allow = allowedToolNames?.length ? new Set(allowedToolNames) : null;
+  const modeKey = typeof mode === 'string' && mode ? mode : null;
   return TOOL_DEFINITIONS
     .filter((tool) => tool.surfaces.includes(surface))
     .filter((tool) => TOOL_LOOP_SAFE_NAMES.has(tool.name))
     .filter((tool) => !allow || allow.has(tool.name))
+    // Mode filter: tools without `modes` are mode-agnostic (pass). Tools
+    // with `modes` only appear if the current mode is in their list.
+    // When no mode is passed, skip this filter entirely (legacy callers).
+    .filter((tool) => !modeKey || !tool.modes || tool.modes.includes(modeKey))
     .map((tool) => ({
       name: tool.name,
       description: tool.description,
       input_schema: tool.inputSchema || { type: 'object', properties: {} },
     }));
+}
+
+/**
+ * Diagnostic / inspector helper — returns the same filtered list the model
+ * would see, but as full definitions (not Anthropic-schema form) so UI
+ * surfaces can render counts, labels, approval modes, and mode tags
+ * alongside the model-facing descriptions. Used by the OpenSwan Console.
+ */
+export function previewOpenSwanToolsForSurface(
+  surface: OpenSwanToolSurface,
+  mode?: string | null,
+  allowedToolNames?: OpenSwanRuntimeToolName[],
+): OpenSwanToolDefinition[] {
+  const allow = allowedToolNames?.length ? new Set(allowedToolNames) : null;
+  const modeKey = typeof mode === 'string' && mode ? mode : null;
+  return TOOL_DEFINITIONS
+    .filter((tool) => tool.surfaces.includes(surface))
+    .filter((tool) => TOOL_LOOP_SAFE_NAMES.has(tool.name))
+    .filter((tool) => !allow || allow.has(tool.name))
+    .filter((tool) => !modeKey || !tool.modes || tool.modes.includes(modeKey));
 }
 
 export function buildOpenSwanToolBrief(

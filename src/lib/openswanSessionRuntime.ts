@@ -590,6 +590,8 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       model: opts.context.model || undefined,
       chatHistory: opts.context.chatHistory,
       roomId: opts.roomId,
+      parentAgentId: (opts.context as any)?.agentId || undefined,
+      parentMode: opts.mode || null,
     });
 
     delegationSummary = delegated.results.map((result, index) => {
@@ -779,6 +781,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       activePluginIds: opts.activePluginIds,
       allowedToolNames: preferredToolNames,
       surface: surfaceForTools,
+      mode: opts.mode || null,
     });
 
     // Map tool events to the SwanBotStructuredToolAction shape expected downstream

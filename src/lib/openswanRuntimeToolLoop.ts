@@ -19,6 +19,8 @@ export type OpenSwanRuntimeToolLoopOptions = {
   taskKind?: OpenSwanTaskKind;
   surface?: OpenSwanToolSurface;
   preferredToolNames?: OpenSwanToolName[];
+  /** Chat mode — filters the tool set the model sees to mode-appropriate tools. */
+  mode?: string | null;
 };
 
 export type OpenSwanRuntimeToolLoopResult = {
@@ -134,6 +136,7 @@ export async function runOpenSwanRuntimeToolLoop(
     activePluginIds: opts.activePluginIds,
     allowedToolNames: requestedTools,
     surface: opts.surface || 'main_chat',
+    mode: opts.mode || null,
   });
 
   const toolActions = toToolActions(toolResult.toolEvents);

@@ -44,10 +44,12 @@ export type OpenSwanDispatchedToolResult = {
 export function getToolDefinitions(
   allowedToolNames?: string[],
   surface: OpenSwanToolSurface = 'main_chat',
+  mode?: string | null,
 ): OpenSwanToolDef[] {
   return listOpenSwanAnthropicToolsForSurface(
     surface,
     allowedToolNames as OpenSwanRuntimeToolName[] | undefined,
+    mode,
   );
 }
 
