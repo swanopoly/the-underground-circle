@@ -13,6 +13,8 @@ import {
   type SwanBotStructuredToolAction,
 } from './swanbot';
 import { createRun, addStep, mergeRunMetadata, updateRunStatus, type RunSurface } from './agentRunSystem';
+import { canDelegate } from './delegationGate';
+import { supabase } from './supabase';
 import type { PromptMemoryReference } from './memoryService';
 import type { OpenSwanExecutionContract } from './openswanExecution';
 import { buildOpenSwanObservedEvalSummary } from './openswanObservedEvals';
@@ -128,6 +130,14 @@ export interface DelegationResult {
     output_tokens?: number;
     total_tokens?: number;
   };
+  /** CA-8d: set when the delegation was blocked by the gate (depth
+   *  or concurrency cap). Absent on normal delegations. Parent agent
+   *  can read this to decide whether to retry in-line instead of
+   *  spawning another subagent. */
+  gateRejection?: {
+    reason: 'depth_exceeded' | 'concurrency_exceeded';
+    detail: string;
+  };
 }
 
 export interface SubagentTaskSpec {
@@ -239,6 +249,69 @@ export interface ParallelDelegationResult {
 /**
  * Execute a task via a specialist subagent with full tracking.
  */
+// ─── CA-8d helpers (delegation gate wiring) ───────────────────────────────
+//
+// Depth tracking rides in `agent_runs.metadata.delegationDepth`. Root
+// runs leave it absent (treated as 0). Each new child stamps its
+// parent's depth + 1. `canDelegate` reads that at spawn time.
+//
+// In-flight count: a single COUNT against agent_runs scoped to this
+// circle where parent_run_id IS NOT NULL AND status = 'running'. Not
+// perfectly racy-free (two delegations proposed in the same ms could
+// both see the same count) but good enough for a soft cap + an
+// observer hook later.
+
+async function readParentDelegationDepth(parentRunId: string | undefined): Promise<number> {
+  if (!parentRunId) return 0;
+  try {
+    const { data } = await supabase
+      .from('agent_runs')
+      .select('metadata')
+      .eq('id', parentRunId)
+      .maybeSingle();
+    const depth = (data?.metadata as any)?.delegationDepth;
+    if (typeof depth === 'number' && Number.isFinite(depth) && depth >= 0) return depth;
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function countInFlightDelegations(circleId: string): Promise<number> {
+  try {
+    const { count, error } = await supabase
+      .from('agent_runs')
+      .select('id', { count: 'exact', head: true })
+      .eq('circle_id', circleId)
+      .eq('status', 'running')
+      .not('parent_run_id', 'is', null);
+    if (error) return 0;
+    return count || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Build a rejection DelegationResult when the gate blocks a spawn.
+ * Parent sees this as a "no-op delegation" with `response` explaining
+ * the limit, so the parent can gracefully continue in-line instead of
+ * hitting an unhandled error.
+ */
+function rejectedDelegationResult(
+  subagent: SubagentProfile,
+  reason: 'depth_exceeded' | 'concurrency_exceeded',
+  detail: string,
+): DelegationResult {
+  return {
+    response: reason === 'depth_exceeded'
+      ? `Subagent delegation blocked — already at the recursion cap. Continuing in-line from the parent. (${detail})`
+      : `Subagent delegation blocked — too many parallel children. Continuing in-line from the parent. (${detail})`,
+    subagent,
+    gateRejection: { reason, detail },
+  };
+}
+
 export async function delegateToSubagent(opts: {
   circleId: string;
   userId: string;
@@ -260,7 +333,29 @@ export async function delegateToSubagent(opts: {
    *  subagent respects the user's current mode discipline. */
   parentMode?: string | null;
 }): Promise<DelegationResult> {
-  // Create a child run for the delegation
+  // CA-8d: gate-check BEFORE any DB writes so rejected delegations
+  // don't leave orphan agent_runs rows. Depth = parent's depth + 1;
+  // concurrency pulled from running delegation count on the circle.
+  const parentDepth = await readParentDelegationDepth(opts.parentRunId);
+  const proposedDepth = parentDepth + 1;
+  const inFlight = await countInFlightDelegations(opts.circleId);
+  const gate = canDelegate({
+    proposedDepth,
+    inFlight,
+    circleId: opts.circleId,
+    parentRunId: opts.parentRunId,
+  });
+  if (!gate.ok) {
+    if (gate.reason === 'depth_exceeded' || gate.reason === 'concurrency_exceeded') {
+      return rejectedDelegationResult(opts.subagent, gate.reason, gate.detail || '');
+    }
+    // invalid_input shouldn't happen from this call-site (we control
+    // both inputs) but surface it anyway rather than crashing.
+    return rejectedDelegationResult(opts.subagent, 'concurrency_exceeded', gate.detail || 'gate rejected');
+  }
+
+  // Create a child run for the delegation. Stamp `delegationDepth`
+  // so grandchildren see the right count when they call back in.
   let runId: string | undefined;
   try {
     const run = await createRun({
@@ -275,6 +370,7 @@ export async function delegateToSubagent(opts: {
       roomId: opts.roomId,
       metadata: {
         runtimePlanVersion: OPENSWAN_RUNTIME_PLAN_VERSION,
+        delegationDepth: proposedDepth,
       },
     });
     if (run) {
