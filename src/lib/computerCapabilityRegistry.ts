@@ -80,6 +80,29 @@ function hasCapability(capabilities: string[], capability: string): boolean {
   return new Set(capabilities).has(capability);
 }
 
+/**
+ * Probe the local desktop bridge with a short timeout. Returns true
+ * when /desktop/health responds with `supported: true` — i.e. we can
+ * actually launch / focus / type / read the AX tree on this machine.
+ * Any failure (timeout, DNS, network) returns false without throwing
+ * so the audit stays non-blocking.
+ */
+async function probeDesktopBridge(): Promise<boolean> {
+  if (typeof fetch === 'undefined') return false;
+  try {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 500) : null;
+    const res = await fetch('http://localhost:7778/desktop/health', {
+      cache: 'no-store',
+      signal: controller?.signal,
+    });
+    if (timer) clearTimeout(timer);
+    if (!res.ok) return false;
+    const json = (await res.json()) as { ok?: boolean; supported?: boolean };
+    return !!json?.supported;
+  } catch { return false; }
+}
+
 function summarizeSources(parts: Array<string | null | undefined>): string[] {
   const unique = new Set<string>();
   for (const part of parts) {
@@ -90,11 +113,18 @@ function summarizeSources(parts: Array<string | null | undefined>): string[] {
 }
 
 export async function auditComputerCapabilities(circleId: string): Promise<ComputerCapabilityAudit> {
-  const [connections, integrationProviders, integrationCapabilities, mcpServers] = await Promise.all([
+  // UC-5 follow-up: the local desktop bridge IS an app-control
+  // capability — the original audit only counted MCP tools +
+  // integrations, so the agent got told "missing: app_tools" even when
+  // /desktop/health was reporting launch/focus/type/keys/a11y_tree.
+  // Probing here (unauthenticated health endpoint) stays cheap and
+  // never blocks — a 500ms timeout falls through to "no bridge".
+  const [connections, integrationProviders, integrationCapabilities, mcpServers, bridgeAlive] = await Promise.all([
     loadConnections().catch(() => [] as AgentConnection[]),
     getInstalledIntegrationProviders(circleId).catch(() => [] as CircleIntegrationProvider[]),
     getCircleIntegrationCapabilities(circleId).catch(() => [] as string[]),
     listMcpServers(circleId).catch(() => []),
+    probeDesktopBridge().catch(() => false),
   ]);
 
   const mcpTools = mcpServers.length > 0
@@ -123,6 +153,7 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
     appTools.length > 0 ? `mcp tools: ${appTools.length} app/desktop tool${appTools.length === 1 ? '' : 's'}` : null,
     integrationProviders.length > 0 ? `integrations: ${integrationProviders.length}` : null,
     enabledConnections.length > 0 ? `bridges: ${enabledConnections.length}` : null,
+    bridgeAlive ? 'desktop bridge: launch/focus/type/keys/a11y_tree' : null,
   ]);
 
   const findings: ComputerCapabilityFinding[] = [
@@ -180,12 +211,19 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
     {
       id: 'app_tools',
       label: 'App tools',
-      status: appTools.length > 0 || integrationProviders.length > 0 ? 'ready' : enabledConnections.length > 0 ? 'partial' : 'missing',
-      detail: appTools.length > 0 || integrationProviders.length > 0
-        ? 'The circle has app-level capability sources through MCP tools and/or installed integrations.'
-        : enabledConnections.length > 0
-          ? 'Local or remote bridges exist, but app access is not normalized into a shared capability map yet.'
-          : 'No app-tool surface is currently visible.',
+      status:
+        bridgeAlive || appTools.length > 0 || integrationProviders.length > 0
+          ? 'ready'
+          : enabledConnections.length > 0
+            ? 'partial'
+            : 'missing',
+      detail: bridgeAlive
+        ? 'Desktop bridge is live on localhost:7778 — launch/focus/type/keys/a11y_tree/click_element are all available.'
+        : appTools.length > 0 || integrationProviders.length > 0
+          ? 'The circle has app-level capability sources through MCP tools and/or installed integrations.'
+          : enabledConnections.length > 0
+            ? 'Local or remote bridges exist, but app access is not normalized into a shared capability map yet.'
+            : 'No app-tool surface is currently visible.',
       sources: appSources,
     },
     {
@@ -200,10 +238,16 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
     {
       id: 'desktop_control',
       label: 'Desktop/native app control',
-      status: appTools.length > 0 && appTools.some((tool) => toolMatches(tool, ['desktop', 'window', 'computer'])) ? 'partial' : 'missing',
-      detail: appTools.length > 0 && appTools.some((tool) => toolMatches(tool, ['desktop', 'window', 'computer']))
-        ? 'There are early signals of desktop-oriented tools, but native app control is not yet a mature first-class runtime.'
-        : 'Native desktop control is not yet a real canonical capability in the app.',
+      status: bridgeAlive
+        ? 'ready'
+        : appTools.length > 0 && appTools.some((tool) => toolMatches(tool, ['desktop', 'window', 'computer']))
+          ? 'partial'
+          : 'missing',
+      detail: bridgeAlive
+        ? 'The local desktop bridge exposes native launch/focus/type/keys + AX tree reads and semantic clicks — first-class native control on this machine.'
+        : appTools.length > 0 && appTools.some((tool) => toolMatches(tool, ['desktop', 'window', 'computer']))
+          ? 'There are early signals of desktop-oriented tools, but native app control is not yet a mature first-class runtime.'
+          : 'Native desktop control is not yet a real canonical capability in the app.',
       sources: appSources,
     },
   ];

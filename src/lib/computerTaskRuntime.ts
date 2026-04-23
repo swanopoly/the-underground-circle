@@ -25,6 +25,28 @@ export interface ComputerTaskRuntimeResult {
   warnings: string[];
 }
 
+/**
+ * Detects whether an app-task utterance has follow-up work beyond the
+ * initial launch. "open Zoom" → false (we can short-circuit after
+ * launching). "open Notes and create a note" → true (the agent needs
+ * to keep going after launch). Conservative: any conjunction, any
+ * action verb beyond open/launch/start/switch, or any "and then" / "then"
+ * counts as follow-up.
+ *
+ * Exported for smoke tests — keeps the classifier pinned.
+ */
+export function hasFollowUpIntent(task: string): boolean {
+  const lower = String(task || '').trim().toLowerCase();
+  if (!lower) return false;
+  if (/\b(then|and then|after|next|also|,)\b/i.test(lower)) return true;
+  if (/\band\s+(?!(?:i|i'?m|the|a|an)\b)\w/i.test(lower)) return true;
+  // Action verbs that imply work INSIDE the app — not just launching it.
+  if (/\b(create|write|type|make|draft|send|post|compose|record|start a|new)\b/i.test(lower)) return true;
+  // "with" / "about" / "for" + object — usually describes follow-up content.
+  if (/\b(with|about|for)\s+\w+/i.test(lower) && lower.length > 25) return true;
+  return false;
+}
+
 function adapterIdForKind(kind: ComputerTaskExecutionEnvelope['preview']['kind']): ComputerTaskRuntimeAdapterId {
   switch (kind) {
     case 'file_task':
@@ -82,23 +104,45 @@ export async function executeComputerTaskWithAgent(args: {
     warnings.push(...fileResult.warnings);
   }
 
+  // UC-5 follow-up: "open Notes and create a note" was returning right
+  // after the bridge launch because appResult.ok short-circuited the
+  // runtime. That's correct for pure-launch intents ("open Zoom") but
+  // wrong for multi-verb requests where the user wants follow-up
+  // actions inside the app. Detect the difference and let multi-intent
+  // utterances fall through to the agent loop (which has desktop.*
+  // tools and can press Cmd+N / type / etc.).
+  let appAdapterMessage: string | null = null;
+  let appBridgeLaunched = false;
   if (execution.preview.kind === 'app_task') {
     const appResult = await executeComputerAppTask({
       circleId: args.circleId,
       task: args.task,
     });
-    if (appResult.ok) {
-      return {
-        adapterId: 'app_adapter',
-        execution,
-        response: appResult.message,
-        warnings: [...warnings, ...appResult.warnings],
-      };
-    }
     warnings.push(...appResult.warnings);
+    if (appResult.ok) {
+      const hasFollowUp = hasFollowUpIntent(args.task);
+      const wasBridgeLaunch = (appResult.data as any)?.kind === 'desktop_bridge_launch';
+      if (!hasFollowUp) {
+        // Pure launch — return the bridge result as-is, no agent needed.
+        return {
+          adapterId: 'app_adapter',
+          execution,
+          response: appResult.message,
+          warnings,
+        };
+      }
+      // Multi-intent: remember that the launch already happened (or at
+      // least tried to) so the agent prompt can skip re-launching.
+      appAdapterMessage = appResult.message;
+      appBridgeLaunched = wasBridgeLaunch;
+    }
   }
 
-  const prompt = `${execution.dispatchPrefix}\n\nUSER COMPUTER TASK\n${args.task}`;
+  const followUpPreamble = appAdapterMessage
+    ? `Bridge already ${appBridgeLaunched ? 'launched the target app' : 'attempted the app action'}: ${appAdapterMessage}\n`
+      + 'Continue from there — use desktop.wait_for_app / desktop.read_a11y_tree / desktop.press_keys / desktop.type_text as needed. Do NOT re-launch.\n\n'
+    : '';
+  const prompt = `${execution.dispatchPrefix}\n${followUpPreamble}USER COMPUTER TASK\n${args.task}`;
   const result = await executeAgentRun({
     surface: 'main_chat',
     circleId: args.circleId,
