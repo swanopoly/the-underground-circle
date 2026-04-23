@@ -110,7 +110,7 @@ upgrades App-Store credibility for the Mac-native UC app we're building toward.
 
 ## Phase plan — UC-1 through UC-5
 
-### Phase UC-1 — Accessibility tree endpoint (target: next sprint)
+### Phase UC-1 — Accessibility tree endpoint (SHIPPED 2026-04-23)
 
 - Swift helper compiled to universal binary, bundled with the bridge.
 - Bridge endpoint `GET /desktop/a11y_tree?app=<name>&max_depth=6` returning
@@ -138,7 +138,7 @@ upgrades App-Store credibility for the Mac-native UC app we're building toward.
   bundle is recommended path. Bundle and the script share the same
   `~/.uc-desktop-token` so pairing doesn't need redo.
 
-### Phase UC-3 — Browser automation via persistent Chrome profile
+### Phase UC-3 — Browser automation via persistent Chrome profile (SHIPPED 2026-04-23)
 
 - New `/browser/*` surface on the bridge backed by Playwright with
   `launchPersistentContext({ userDataDir: '~/Library/Application Support/UC/Chrome' })`.

@@ -697,6 +697,20 @@ async function dispatchOneClientTool(
       });
     }
 
+    // UC-3: browser automation via persistent Chrome profile
+    case 'browser.open_url':
+      return dispatchBrowserOpenUrl(input);
+    case 'browser.dom_snapshot':
+      return dispatchBrowserDomSnapshot(input);
+    case 'browser.click_role':
+      return dispatchBrowserClickRole(input);
+    case 'browser.fill_field':
+      return dispatchBrowserFillField(input);
+    case 'browser.press_key':
+      return dispatchBrowserPressKey(input);
+    case 'browser.screenshot':
+      return dispatchBrowserScreenshot(input);
+
     // ── M3c: workspace + verification ─────────────────────────────────
     case 'workspace.create_room':
       return dispatchWorkspaceCreateRoom(input);
@@ -922,6 +936,88 @@ async function dispatchWpCreateSlide(input: Record<string, any>): Promise<{ ok: 
   } catch (e: any) {
     return { ok: false, error: e?.message || String(e) };
   }
+}
+
+// ─── UC-3: browser dispatchers ─────────────────────────────────────────
+//
+// Separate module (`browserBridge.ts`) keeps the desktop AX types and
+// the DOM types cleanly isolated. Screenshot tool trims the base64
+// payload the same way the desktop screenshot tool does so the model
+// doesn't burn context on raw image bytes.
+
+async function dispatchBrowserOpenUrl(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const { openUrl } = await import('./browserBridge');
+  const r = await openUrl(String(input.url || ''), {
+    timeoutMs: typeof input.timeoutMs === 'number' ? input.timeoutMs : undefined,
+    waitUntil: ['load', 'domcontentloaded', 'networkidle'].includes(input.waitUntil) ? input.waitUntil : undefined,
+  });
+  if (!r.ok) return r;
+  return { ok: true, data: r.data };
+}
+
+async function dispatchBrowserDomSnapshot(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const { domSnapshot, renderBrowserTree } = await import('./browserBridge');
+  const r = await domSnapshot({
+    maxNodes: typeof input.maxNodes === 'number' ? input.maxNodes : undefined,
+    interestingOnly: input.interestingOnly === false ? false : undefined,
+  });
+  if (!r.ok || !r.data) return r;
+  const text = renderBrowserTree(r.data.tree).join('\n');
+  return {
+    ok: true,
+    data: {
+      url: r.data.url,
+      title: r.data.title,
+      nodeCount: r.data.nodeCount,
+      text: text.slice(0, 8192),
+      truncated: text.length > 8192,
+    },
+  };
+}
+
+async function dispatchBrowserClickRole(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const { clickRole } = await import('./browserBridge');
+  return clickRole({
+    role: String(input.role || ''),
+    name: typeof input.name === 'string' ? input.name : undefined,
+    exact: input.exact === true,
+    nth: typeof input.nth === 'number' ? input.nth : undefined,
+    timeoutMs: typeof input.timeoutMs === 'number' ? input.timeoutMs : undefined,
+  });
+}
+
+async function dispatchBrowserFillField(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const { fillField } = await import('./browserBridge');
+  return fillField({
+    role: String(input.role || 'textbox'),
+    name: typeof input.name === 'string' ? input.name : undefined,
+    text: String(input.text || ''),
+    submit: input.submit === true,
+    timeoutMs: typeof input.timeoutMs === 'number' ? input.timeoutMs : undefined,
+  });
+}
+
+async function dispatchBrowserPressKey(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const { pressKey } = await import('./browserBridge');
+  return pressKey(String(input.combo || ''));
+}
+
+async function dispatchBrowserScreenshot(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const { screenshot } = await import('./browserBridge');
+  const r = await screenshot({ fullPage: input.fullPage === true });
+  if (!r.ok || !r.data) return r;
+  // Cap base64 round-tripping into the model — same pattern as
+  // desktop.screenshot. The full image is still usable client-side
+  // (e.g. for UI display) via a separate fetch if needed.
+  const preview = r.data.base64.slice(0, 128) + '…';
+  return {
+    ok: true,
+    data: {
+      mimeType: r.data.mimeType,
+      sizeBytes: r.data.sizeBytes,
+      preview,
+    },
+  };
 }
 
 async function dispatchCredentialsGet(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {

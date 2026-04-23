@@ -1306,6 +1306,87 @@ const TOOLS: ToolDef[] = [
         required: ["pid", "path"],
       },
     },
+    // UC-3: browser automation via Playwright + persistent Chrome
+    // profile. Same trust model as desktop.* tools (local bridge,
+    // token-auth). Prefer these over opening a URL in the user's main
+    // browser when the agent needs to actually INTERACT with the page.
+    {
+      name: "browser.open_url",
+      description:
+        "Navigates the UC browser context to `url`. Opens a persistent Chrome profile on first call — logins in that profile persist across sessions. Use for research, form filling, SaaS automation. Returns the final URL (after redirects) and page title.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          url: { type: "string", description: "Absolute http(s) URL." },
+          waitUntil: { type: "string", enum: ["load", "domcontentloaded", "networkidle"] },
+          timeoutMs: { type: "integer", minimum: 1000, maximum: 60000 },
+        },
+        required: ["url"],
+      },
+    },
+    {
+      name: "browser.dom_snapshot",
+      description:
+        "Returns the accessibility tree of the current page — one line per addressable element with role, accessible name, and state flags. **Prefer this over `browser.screenshot`** for deciding what to click/fill — ~70% cheaper per step. Follow up with `browser.click_role` / `browser.fill_field` using the `role` + `name` you see.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          maxNodes: { type: "integer", minimum: 20, maximum: 400, description: "Default 150." },
+          interestingOnly: { type: "boolean", description: "Default true — prunes layout scaffolding." },
+        },
+      },
+    },
+    {
+      name: "browser.click_role",
+      description:
+        "Clicks an element by ARIA role + accessible name — Playwright's canonical `getByRole`. Example: { role: 'button', name: 'Sign in' }. Use this over raw CSS selectors; it survives design changes. Pair with `browser.dom_snapshot` to discover available roles/names.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          role: { type: "string", description: "ARIA role (button, link, textbox, combobox, menuitem, tab, etc.)." },
+          name: { type: "string", description: "Accessible name to match (case-insensitive substring by default)." },
+          exact: { type: "boolean" },
+          nth: { type: "integer", description: "0-indexed match to pick when multiple elements share the role+name." },
+          timeoutMs: { type: "integer" },
+        },
+        required: ["role"],
+      },
+    },
+    {
+      name: "browser.fill_field",
+      description:
+        "Fills a form field by ARIA role + accessible name, then optionally submits with Enter. Max 4000 chars per call.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          role: { type: "string", description: "Usually 'textbox', 'searchbox', or 'combobox'." },
+          name: { type: "string" },
+          text: { type: "string" },
+          submit: { type: "boolean", description: "Press Enter after filling." },
+          timeoutMs: { type: "integer" },
+        },
+        required: ["role", "text"],
+      },
+    },
+    {
+      name: "browser.press_key",
+      description:
+        "Presses a key or combo on the current page (Playwright format: 'Enter', 'Tab', 'Control+A', 'Shift+Tab').",
+      input_schema: {
+        type: "object" as const,
+        properties: { combo: { type: "string" } },
+        required: ["combo"],
+      },
+    },
+    {
+      name: "browser.screenshot",
+      description:
+        "Captures the current browser viewport (or full page with `fullPage: true`) as base64 PNG. Use sparingly — prefer `browser.dom_snapshot` for deciding what to click. Useful only to verify visual state after a mutation.",
+      input_schema: {
+        type: "object" as const,
+        properties: { fullPage: { type: "boolean" } },
+      },
+    },
   ].map((spec) => ({
     ...spec,
     clientOnly: true,

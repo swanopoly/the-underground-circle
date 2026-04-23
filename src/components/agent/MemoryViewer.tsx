@@ -155,6 +155,7 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
   const [archiveBoostedMemories, setArchiveBoostedMemories] = useState<MemoryEntry[]>([]);
   const [archiveSuppressedMemories, setArchiveSuppressedMemories] = useState<MemoryEntry[]>([]);
   const [archiveLearningEvents, setArchiveLearningEvents] = useState<ArchiveLearningEvent[]>([]);
+  const [selectedLearningMemoryId, setSelectedLearningMemoryId] = useState<string | null>(null);
 
   // ── Mount animation — same motion language as the chat-bottom
   // popups (fade + snap via spring). Backdrop has its own quick fade
@@ -285,6 +286,11 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
     if (activeTab === 'session') return memories.session;
     return allMemories;
   }, [searchResults, activeTab, inboxMemories, memories, allMemories]);
+
+  const selectedLearningMemory = useMemo(
+    () => allMemories.find((mem) => mem.id === selectedLearningMemoryId) || null,
+    [allMemories, selectedLearningMemoryId],
+  );
 
   const handleDelete = async (memoryId: string) => {
     if (!userId) return;
@@ -506,6 +512,48 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
       note: 'Dismissed from memory inbox',
       userId,
       source: 'memory_inbox',
+    });
+    await load();
+  };
+
+  const handleLearningJump = (memoryId: string) => {
+    setSelectedLearningMemoryId(memoryId);
+    setActiveTab('all');
+    setSearchResults(null);
+  };
+
+  const handleLearningPin = async (mem: MemoryEntry) => {
+    await pinMemory(mem.id);
+    await recordMemoryFeedback({
+      memoryId: mem.id,
+      action: 'pinned',
+      note: 'Pinned from archive learning view',
+      userId,
+      source: 'archive_learning_view',
+    });
+    await load();
+  };
+
+  const handleLearningPromote = async (mem: MemoryEntry) => {
+    await promoteMemory(mem.id);
+    await recordMemoryFeedback({
+      memoryId: mem.id,
+      action: 'promoted',
+      note: 'Promoted from archive learning view',
+      userId,
+      source: 'archive_learning_view',
+    });
+    await load();
+  };
+
+  const handleLearningDownrank = async (mem: MemoryEntry) => {
+    await decayMemoryImportance(mem.id);
+    await recordMemoryFeedback({
+      memoryId: mem.id,
+      action: 'not_helpful',
+      note: 'Downranked from archive learning view',
+      userId,
+      source: 'archive_learning_view',
     });
     await load();
   };
@@ -802,10 +850,10 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
             <View style={s.archiveColumn}>
               <Text style={s.archiveColumnTitle}>BOOSTED MEMORIES</Text>
               {archiveBoostedMemories.length > 0 ? archiveBoostedMemories.map((mem) => (
-                <View key={mem.id} style={s.archiveItem}>
+                <Pressable key={mem.id} onPress={() => handleLearningJump(mem.id)} style={({ hovered, pressed }: any) => [s.archiveItem, hovered && webHoverGhost, pressed && webPressed]}>
                   <Text style={s.archiveItemTitle}>{mem.title}</Text>
                   <Text style={s.archiveItemMeta}>{archiveLineageLabel(mem) || 'Archive-derived memory'}</Text>
-                </View>
+                </Pressable>
               )) : (
                 <View style={s.archiveItem}>
                   <Text style={s.archiveItemMeta}>No boosted archive memories yet.</Text>
@@ -815,10 +863,10 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
             <View style={s.archiveColumn}>
               <Text style={s.archiveColumnTitle}>SUPPRESSED MEMORIES</Text>
               {archiveSuppressedMemories.length > 0 ? archiveSuppressedMemories.map((mem) => (
-                <View key={mem.id} style={s.archiveItem}>
+                <Pressable key={mem.id} onPress={() => handleLearningJump(mem.id)} style={({ hovered, pressed }: any) => [s.archiveItem, hovered && webHoverGhost, pressed && webPressed]}>
                   <Text style={s.archiveItemTitle}>{mem.title}</Text>
                   <Text style={s.archiveItemMeta}>{archiveLineageLabel(mem) || 'Archive-derived memory'}</Text>
-                </View>
+                </Pressable>
               )) : (
                 <View style={s.archiveItem}>
                   <Text style={s.archiveItemMeta}>No suppressed archive memories right now.</Text>
@@ -843,6 +891,28 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
                 </View>
               )}
             </View>
+          </View>
+        </View>
+      ) : null}
+
+      {selectedLearningMemory ? (
+        <View style={s.archivePanel}>
+          <View style={s.archiveHeader}>
+            <Text style={s.sectionLabel}>LEARNING DETAIL</Text>
+            <Text style={s.archiveMeta}>{selectedLearningMemory.title}</Text>
+          </View>
+          <Text style={s.cardSubtext}>{archiveLineageLabel(selectedLearningMemory) || 'Archive-derived memory'}</Text>
+          <Text style={s.cardBody}>{selectedLearningMemory.content}</Text>
+          <View style={s.actionRow}>
+            <Pressable onPress={() => handleLearningPromote(selectedLearningMemory)} style={({ hovered, pressed }: any) => [s.primaryBtn, hovered && webHoverPrimary, pressed && webPressed]}>
+              <Text style={s.primaryBtnText}>PROMOTE</Text>
+            </Pressable>
+            <Pressable onPress={() => handleLearningPin(selectedLearningMemory)} style={({ hovered, pressed }: any) => [s.ghostBtn, hovered && webHoverGhost, pressed && webPressed]}>
+              <Text style={s.ghostBtnText}>PIN</Text>
+            </Pressable>
+            <Pressable onPress={() => handleLearningDownrank(selectedLearningMemory)} style={({ hovered, pressed }: any) => [s.dangerBtn, hovered && webHoverDanger, pressed && webPressed]}>
+              <Text style={s.dangerBtnText}>DOWNRANK</Text>
+            </Pressable>
           </View>
         </View>
       ) : null}

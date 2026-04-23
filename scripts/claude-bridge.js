@@ -12,6 +12,13 @@ const path = require('path');
 const os = require('os');
 const { exec, execSync, execFile, execFileSync } = require('child_process');
 
+// UC-3: Playwright-backed /browser/* surface. Lazy-loaded so the
+// bridge still boots on machines without playwright installed (we log
+// a warning and return 503 on /browser/* calls instead of crashing).
+let browserBridge = null;
+try { browserBridge = require('./browser-bridge'); }
+catch (e) { console.warn('[bridge] playwright unavailable — /browser/* will 503:', e.message); }
+
 const PORT = 7778;
 const CLAUDE_DIR = path.join(os.homedir(), '.claude', 'projects');
 // Also scan Windows-side Claude sessions when running in WSL
@@ -2195,8 +2202,51 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ─── UC-3: /browser/* — Playwright-backed persistent Chrome context ────
+  //
+  // Same auth + CORS story as /desktop/*. The browser context is lazy-
+  // launched on first non-health call and reused across requests so we
+  // don't pay Chrome's ~2s startup on every tool call.
+  if (url.startsWith('/browser/')) {
+    if (!browserBridge) {
+      res.writeHead(503, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Playwright not installed. Run `npm install playwright` then restart the bridge.' }));
+      return;
+    }
+    // /browser/health is unauthenticated (like /desktop/health) so clients
+    // can probe presence without pairing.
+    if (url === '/browser/health' && req.method === 'GET') {
+      return browserBridge.handleHealth(req, res, CORS);
+    }
+    // All other endpoints require the same desktop token.
+    const token = req.headers['x-uc-desktop-token'];
+    if (!token || token !== getOrCreateDesktopToken()) {
+      res.writeHead(401, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop token.' }));
+      return;
+    }
+    const parsedUrl = new URL(req.url, 'http://localhost');
+    const p = parsedUrl.pathname;
+    try {
+      if (p === '/browser/open_url' && req.method === 'POST') return browserBridge.handleOpenUrl(req, res, CORS);
+      if (p === '/browser/dom_snapshot' && req.method === 'GET') return browserBridge.handleDomSnapshot(req, res, CORS, parsedUrl);
+      if (p === '/browser/click_role' && req.method === 'POST') return browserBridge.handleClickRole(req, res, CORS);
+      if (p === '/browser/fill' && req.method === 'POST') return browserBridge.handleFill(req, res, CORS);
+      if (p === '/browser/press' && req.method === 'POST') return browserBridge.handlePress(req, res, CORS);
+      if (p === '/browser/screenshot' && req.method === 'POST') return browserBridge.handleScreenshot(req, res, CORS);
+      if (p === '/browser/close' && req.method === 'POST') return browserBridge.handleClose(req, res, CORS);
+    } catch (err) {
+      res.writeHead(500, CORS);
+      res.end(JSON.stringify({ ok: false, error: (err && err.message) || 'browser handler error' }));
+      return;
+    }
+    res.writeHead(404, CORS);
+    res.end(JSON.stringify({ ok: false, error: 'Unknown /browser endpoint. Try /browser/health.' }));
+    return;
+  }
+
   res.writeHead(404, CORS);
-  res.end(JSON.stringify({ error: 'Not found. Use /health, /sessions, /exec, /devices/*, /mcp, or /desktop/*' }));
+  res.end(JSON.stringify({ error: 'Not found. Use /health, /sessions, /exec, /devices/*, /mcp, /desktop/*, or /browser/*' }));
 });
 
 // ─── Desktop-automation helpers (only used by the /desktop/* routes) ──────
