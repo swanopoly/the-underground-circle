@@ -89,12 +89,12 @@ Each sub-phase names its exact code paths, SQL impact, smoke-test file, and road
 - **Files shipped.** `src/lib/agentTools/manageLibrarySkill.ts` (added `write_file` / `remove_file` actions) + `src/lib/skillLibraryWrite.ts` (applies the approved mutations to `circle_skill_files`) + `scripts/skill-subfile-smoketest.ts`.
 - **Contract.** Both actions require a safe `relpath` (no leading slash, no `..` segments, no null bytes, no Windows drive prefix, ≤200 chars, must contain at least one alphanumeric). `write_file` also requires non-empty `content`; MIME inferred from extension (.md→text/markdown, .json→application/json, .yml/.yaml, .sh, .ts/.tsx, .js/.jsx, else text/plain). Both file an `agent_approvals` row with `action_type: skill.write_file` / `skill.remove_file`; `applyApprovedSkillAction` re-verifies the parent skill still exists (guards against delete-between-propose-and-approve races), then upserts on `(skill_id, relpath)` or deletes by the same key. 40+ smoke assertions on the safe-relpath rejection matrix + MIME inference.
 
-### CA-8j · Session lineage columns · **task #84**
+### CA-8j · Session lineage columns · **task #84 · SHIPPED 2026-04-23**
 
-- **Problem.** When a chat thread gets compressed / split we lose the parent-pointer. Can't trace long-running tasks across forks in the Run Ledger.
-- **Files.** Migration `20260508_room_messages_lineage.sql` (add `parent_thread_id`, `lineage_root_id`, index).
-- **Schema.** `ALTER TABLE room_messages ADD COLUMN parent_thread_id uuid REFERENCES room_messages(id) ON DELETE SET NULL; ADD COLUMN lineage_root_id uuid; CREATE INDEX idx_room_messages_lineage ON room_messages(lineage_root_id, created_at);`
-- **Effort.** S. **SQL:** yes — one column pair + index.
+- **Problem.** When a chat thread gets compressed / split we lost the parent-pointer. Run Ledger couldn't trace long-running tasks across forks.
+- **Files shipped.** `supabase/migrations/20260508_chat_threads_lineage.sql` (targets `circle_chat_threads`, not the plan's original `room_messages` — that's the real table for UC chat threads), `src/lib/chatThreadLineage.ts` (pure read-side helpers), `scripts/chat-thread-lineage-smoketest.ts`, `docs/RUN_THIS_SQL.sql` updated with the CA-8j block.
+- **Schema.** `parent_thread_id uuid REFERENCES circle_chat_threads(id) ON DELETE SET NULL` + `lineage_root_id uuid` + partial indexes on both (WHERE NOT NULL — roots don't need the index rows) + `CHECK (parent_thread_id IS NULL OR parent_thread_id <> id)` self-reference guard.
+- **Helpers shipped.** `resolveLineageRoot(parent)` — pure: child inherits parent's root, or becomes `parent.id` on first fork, or null when no parent. `walkLineageAncestors(startId, fetchRow, maxSteps=20)` — walks parent chain with cycle guard + 20-step cap. `orderByLineage(rows)` — BFS from root candidate with most descendants; orphans/cycles preserved (never drops rows). 29 smoke assertions.
 
 ---
 

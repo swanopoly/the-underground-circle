@@ -691,3 +691,37 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON circle_skill_files TO authenticated;
 
 NOTIFY pgrst, 'reload schema';
 -- ═════════════════════════════════════════════════════════════════════════════
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- CA-8j — Chat-thread lineage columns (added 2026-04-23)
+-- ═════════════════════════════════════════════════════════════════════════════
+-- When a chat thread gets compressed (memory-bank summariser) or forked
+-- by a user, we want to trace the task across forks in the Run Ledger.
+-- parent_thread_id is the immediate ancestor; lineage_root_id is the
+-- denormalised oldest-ancestor id so "all threads in this lineage" is
+-- a single indexed lookup.
+--
+-- Safe to re-run. Both columns default NULL; existing threads are
+-- their own lineage root implicitly — application code treats a null
+-- lineage_root_id as "this is the root".
+
+alter table if exists circle_chat_threads
+  add column if not exists parent_thread_id uuid
+    references circle_chat_threads(id) on delete set null;
+
+alter table if exists circle_chat_threads
+  add column if not exists lineage_root_id uuid;
+
+create index if not exists idx_cct_lineage_root
+  on circle_chat_threads (lineage_root_id, last_message_at desc)
+  where lineage_root_id is not null;
+
+create index if not exists idx_cct_parent_thread
+  on circle_chat_threads (parent_thread_id)
+  where parent_thread_id is not null;
+
+alter table if exists circle_chat_threads
+  drop constraint if exists cct_parent_not_self;
+alter table if exists circle_chat_threads
+  add constraint cct_parent_not_self
+  check (parent_thread_id is null or parent_thread_id <> id);
