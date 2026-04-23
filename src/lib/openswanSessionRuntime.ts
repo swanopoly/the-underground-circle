@@ -598,12 +598,18 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       parentMode: opts.mode || null,
     });
 
+    // CA-8d summary-only contract: use each child's redacted `summary`
+    // (≤1200 chars) rather than the full `response`. The full response
+    // lives in the Run Ledger via addStep below — operators get the
+    // full trace, the parent LLM gets the digest. Without this cap a
+    // single verbose child could blow the 12000-char slice and starve
+    // the others.
     delegationSummary = delegated.results.map((result, index) => {
       const spec = delegated.specs[index];
       return [
         `### ${spec.subagent.displayName}`,
         `Reason: ${spec.reason}`,
-        result.response,
+        result.summary ?? result.response,
         ...summarizeDelegatedArtifacts(result.artifacts || []),
       ].join('\n');
     }).join('\n\n').slice(0, 12000);

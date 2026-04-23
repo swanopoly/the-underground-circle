@@ -201,6 +201,50 @@ function main() {
     assert(parsed.data.usage.output_tokens === null, 'serialize: missing output_tokens → null');
   }
 
+  // ─── DelegationResult composition (task #109) ───────────────────
+  // Mirrors the transcript construction in subagentRegistry's
+  // delegateToSubagent success path. If this smoke breaks, the
+  // parent LLM will start seeing full child transcripts again —
+  // exactly the regression CA-8d is supposed to prevent.
+  {
+    type ToolAction = { tool_name: string; status: 'completed' | 'failed' | 'blocked' | 'manual_required' };
+    const bigResponse = 'x'.repeat(3000);
+    const toolActions: ToolAction[] = [
+      { tool_name: 'fs.read', status: 'completed' },
+      { tool_name: 'fs.write', status: 'failed' },
+      { tool_name: 'shell', status: 'completed' },
+    ];
+    const transcript = {
+      finalText: bigResponse,
+      toolCalls: toolActions.map((action) => ({
+        name: action.tool_name,
+        input: undefined,
+        ok: action.status === 'completed',
+      })),
+      stopReason: 'end_turn' as const,
+    };
+    const payload = redactSubagentOutput(transcript);
+    assert(payload.summary.length <= 1200, 'delegation: long response truncated to ≤1200 chars');
+    assert(payload.summary.endsWith('...'), 'delegation: truncation adds "..." marker');
+    assert(payload.toolCallCount === 3, 'delegation: tool-call count preserved');
+    assert(payload.completed === true, 'delegation: end_turn → completed=true');
+  }
+
+  // Empty response path — parent sees "no output" marker instead
+  // of empty string (which would confuse the LLM).
+  {
+    const payload = redactSubagentOutput({ finalText: '', toolCalls: [], stopReason: 'end_turn' });
+    assert(payload.summary === 'Subagent returned no output.', 'delegation: empty response → no-output marker');
+    assert(payload.toolCallCount === 0, 'delegation: zero tool calls preserved');
+  }
+
+  // Max-tokens / hit cap → completed=false (parent can choose to
+  // retry or accept partial).
+  {
+    const payload = redactSubagentOutput({ finalText: 'partial', toolCalls: [], stopReason: 'max_tokens' });
+    assert(payload.completed === false, 'delegation: stopReason=max_tokens → completed=false');
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} delegation-gate smoke-test failure(s)`);
     process.exit(1);

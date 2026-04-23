@@ -13,7 +13,7 @@ import {
   type SwanBotStructuredToolAction,
 } from './swanbot';
 import { createRun, addStep, mergeRunMetadata, updateRunStatus, type RunSurface } from './agentRunSystem';
-import { canDelegate } from './delegationGate';
+import { canDelegate, redactSubagentOutput, type SubagentTranscript } from './delegationGate';
 import { supabase } from './supabase';
 import { logActivity } from '../services/agentActivityLogger';
 import type { PromptMemoryReference } from './memoryService';
@@ -118,7 +118,29 @@ export function detectSubagent(message: string): SubagentProfile | null {
 // ── Delegated Execution ─────────────────────────────────────────────────────
 
 export interface DelegationResult {
+  /** Full child response text. Persisted to the Run Ledger for ops
+   *  visibility (uncapped). Callers composing the PARENT's next turn
+   *  should use `summary` instead so the child's output doesn't blow
+   *  up the parent's context window. */
   response: string;
+  /**
+   * CA-8d summary-only contract: capped (~1200 chars) redacted digest
+   * of the child's output, suitable for inclusion in the parent's
+   * tool_result / digest. Derived via `redactSubagentOutput`. Falls
+   * back to the full `response` only when redaction produces empty
+   * output (e.g. child returned nothing — then the parent sees a
+   * "no output" marker).
+   */
+  summary: string;
+  /** Tool-call count + completion flag from the redaction payload.
+   *  Lets the parent decide whether to accept or retry without
+   *  seeing the full trace. */
+  summaryMeta: {
+    toolCallCount: number;
+    completed: boolean;
+    inputTokens?: number;
+    outputTokens?: number;
+  };
   subagent: SubagentProfile;
   runId?: string;
   artifacts?: SwanBotStructuredArtifact[];
@@ -304,10 +326,13 @@ function rejectedDelegationResult(
   reason: 'depth_exceeded' | 'concurrency_exceeded',
   detail: string,
 ): DelegationResult {
+  const response = reason === 'depth_exceeded'
+    ? `Subagent delegation blocked — already at the recursion cap. Continuing in-line from the parent. (${detail})`
+    : `Subagent delegation blocked — too many parallel children. Continuing in-line from the parent. (${detail})`;
   return {
-    response: reason === 'depth_exceeded'
-      ? `Subagent delegation blocked — already at the recursion cap. Continuing in-line from the parent. (${detail})`
-      : `Subagent delegation blocked — too many parallel children. Continuing in-line from the parent. (${detail})`,
+    response,
+    summary: response, // short enough to pass through verbatim
+    summaryMeta: { toolCallCount: 0, completed: false },
     subagent,
     gateRejection: { reason, detail },
   };
@@ -665,8 +690,30 @@ export async function delegateToSubagent(opts: {
       } catch {}
     }
 
+    // CA-8d summary-only contract: redact the child's output down to
+    // a ≤1200-char digest. Parent consumers (openswanSessionRuntime,
+    // edge-fn composers) inject this into the PARENT's tool_result,
+    // not the full response — the full response lives in the Run
+    // Ledger for ops. `toolActions` drives the tool_call count.
+    const transcript: SubagentTranscript = {
+      finalText: structured.response,
+      toolCalls: (structured.tool_actions || []).map((action) => ({
+        name: action.tool_name,
+        input: undefined,
+        ok: action.status === 'completed',
+      })),
+      stopReason: 'end_turn',
+    };
+    const summaryPayload = redactSubagentOutput(transcript);
     return {
       response: structured.response,
+      summary: summaryPayload.summary,
+      summaryMeta: {
+        toolCallCount: summaryPayload.toolCallCount,
+        completed: summaryPayload.completed,
+        inputTokens: summaryPayload.inputTokens,
+        outputTokens: summaryPayload.outputTokens,
+      },
       subagent: opts.subagent,
       runId,
       artifacts: structured.artifacts || [],
@@ -726,8 +773,11 @@ export async function delegateToSubagents(opts: {
       results.push(entry.value);
       continue;
     }
+    const failMsg = `Specialist failed: ${entry.reason?.message || String(entry.reason || 'unknown error')}`;
     results.push({
-      response: `Specialist failed: ${entry.reason?.message || String(entry.reason || 'unknown error')}`,
+      response: failMsg,
+      summary: failMsg, // already short; no redaction needed
+      summaryMeta: { toolCallCount: 0, completed: false },
       subagent: opts.specs[index].subagent,
     });
   }
