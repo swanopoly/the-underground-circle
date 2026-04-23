@@ -107,6 +107,7 @@ import ComputerUseConsole from '../../../components/computer-use/ComputerUseCons
 import ChatCostFooter from '../../../components/ChatCostFooter';
 import DesktopBridgeStatusChip from '../../../components/DesktopBridgeStatusChip';
 import RunApprovalBanner from '../../../components/RunApprovalBanner';
+import RecordingBadge from '../../../components/RecordingBadge';
 import OpenSwanConsole from '../../../components/openswan/OpenSwanConsole';
 import { useComputerUseTask } from '../../../lib/useComputerUseTask';
 import { resolveComputerUseConfirmation } from '../../../lib/computerUseConfirmations';
@@ -6081,6 +6082,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           showAttachButton={false}
         />
       )}
+
+      {/* Recording badge — visible only while `/record start <name>` is
+          actively capturing. Polls localStorage every 2s so state
+          reflects starts/stops from any tab. */}
+      <RecordingBadge />
 
       {/* HITL pending approvals — v2 M3d writes to agent_run_approvals
           from `approvals.request`; surface inline so users can
