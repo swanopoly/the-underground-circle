@@ -34,12 +34,34 @@ export interface KnownApp {
   webUrl: string;
   /** Short human note ("Mac: Cmd+Space → Zoom → Enter"). */
   keyboardHint?: Partial<Record<KnownAppPlatform, string>>;
+  /**
+   * Name `open -a` should use on macOS when it differs from
+   * `displayName`. Example: Zoom's bundle is `zoom.us.app`, so
+   * `open -a "Zoom"` fails but `open -a "zoom.us"` succeeds. Chat
+   * messages still use `displayName` for human readability — this
+   * field only affects the shell-out.
+   */
+  macLaunchName?: string;
+}
+
+/**
+ * Resolve the string passed to `open -a` on macOS. Prefers the
+ * explicit `macLaunchName` when present; otherwise falls back to the
+ * human display name. Centralised so every call site (bridge launch,
+ * auto-chain, diag probe) uses the same resolution.
+ */
+export function resolveMacLaunchName(app: KnownApp): string {
+  return app.macLaunchName || app.displayName;
 }
 
 export const KNOWN_APPS: KnownApp[] = [
   {
     id: 'zoom',
     displayName: 'Zoom',
+    // macOS installs Zoom as `zoom.us.app`, so `open -a Zoom` returns
+    // "Unable to find application named 'Zoom'". Use the real bundle
+    // display name when shelling out.
+    macLaunchName: 'zoom.us',
     category: 'meetings',
     aliases: ['zoom', 'zoom meeting', 'zoom call'],
     osUrlScheme: 'zoommtg://',

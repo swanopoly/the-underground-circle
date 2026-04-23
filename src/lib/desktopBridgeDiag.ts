@@ -8,7 +8,7 @@
  * No UI here — just the pure probe. `desktopBridgeDiagCommand.ts`
  * maps this into a chat message.
  */
-import { matchKnownApp } from './knownAppShortcuts';
+import { matchKnownApp, resolveMacLaunchName } from './knownAppShortcuts';
 import {
   BRIDGE_HEALTH_URL,
   ensureDesktopBridgePaired,
@@ -110,7 +110,7 @@ export async function runDesktopBridgeDiag(sampleAppTask?: string): Promise<{
         detail: `${candidate.displayName} (id: ${candidate.id})`,
       });
       // Attempt launch.
-      const launched = await launchApp(candidate.displayName);
+      const launched = await launchApp(resolveMacLaunchName(candidate));
       if (launched.ok) {
         steps.push({
           name: 'Launch round-trip',

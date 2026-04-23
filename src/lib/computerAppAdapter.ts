@@ -7,6 +7,7 @@ import {
 } from './circleIntegrations';
 import {
   matchKnownApp,
+  resolveMacLaunchName,
   renderAppShortcut,
   detectPlatform,
 } from './knownAppShortcuts';
@@ -144,9 +145,12 @@ async function runAutoChain(appId: string): Promise<AutoChainResult> {
       return { ok: true, steps, elapsedMs: Date.now() - started };
     }
     if (appId === 'zoom') {
-      const waited = await bridgeWaitForApp('Zoom', 8_000);
+      // macOS bundle display name is `zoom.us`, not `Zoom` — same
+      // reason the launch call needs resolveMacLaunchName().
+      const zoomName = 'zoom.us';
+      const waited = await bridgeWaitForApp(zoomName, 8_000);
       steps.push(waited.ok ? `wait for Zoom (${waited.data?.elapsedMs}ms)` : 'wait for Zoom timed out');
-      const focus = await bridgeFocusApp('Zoom');
+      const focus = await bridgeFocusApp(zoomName);
       steps.push(focus.ok ? 'focus Zoom' : `focus failed: ${focus.error}`);
       if (!focus.ok) return { ok: false, steps, error: focus.error };
       const press = await bridgePressKeys('Cmd+N');
@@ -193,7 +197,7 @@ export async function executeComputerAppTask(args: {
         // Auto-pair if needed — ensureDesktopBridgePaired is idempotent
         // and silent when already paired.
         await ensureDesktopBridgePaired().catch(() => null);
-        const r = await bridgeLaunchApp(bridgeCandidate.displayName);
+        const r = await bridgeLaunchApp(resolveMacLaunchName(bridgeCandidate));
         if (r.ok) {
           // For utterances with a built-in follow-up pattern we know
           // from the alias match (e.g. "open Claude Code" → launch
