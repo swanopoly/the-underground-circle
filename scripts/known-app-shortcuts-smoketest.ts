@@ -21,7 +21,82 @@ function assert(cond: unknown, name: string, detail?: string) {
 }
 
 // ─── Registry sanity ──────────────────────────────────────────────────
-assert(KNOWN_APPS.length >= 22, `registry has ≥22 apps (got ${KNOWN_APPS.length})`);
+assert(KNOWN_APPS.length >= 80, `registry has ≥80 apps (got ${KNOWN_APPS.length})`);
+
+// Built-in + third-party apps the user has installed — exercises
+// common utterances against the matcher so we pin the most-likely
+// misfires (the "open Notes" regression, the "app store" tokeniser
+// bug, the Music/Spotify conflict).
+{
+  const names: Array<[string, string]> = [
+    // Core Apple apps
+    ['open notes', 'apple-notes'],
+    ['open apple notes', 'apple-notes'],
+    ['launch notes app', 'apple-notes'],
+    ['open reminders', 'reminders'],
+    ['open messages', 'messages'],
+    ['open photos', 'photos'],
+    ['open maps', 'maps'],
+    ['open facetime', 'facetime'],
+    ['open music', 'music'],
+    ['open podcasts', 'podcasts'],
+    ['open app store', 'app-store'],
+    ['open find my', 'find-my'],
+    ['open system settings', 'system-settings'],
+    // Additional built-ins
+    ['open contacts', 'contacts'],
+    ['open weather', 'weather'],
+    ['open stocks', 'stocks'],
+    ['open books', 'books'],
+    ['open clock', 'clock'],
+    ['open shortcuts', 'shortcuts'],
+    ['open freeform', 'freeform'],
+    ['open passwords', 'passwords'],
+    ['open voice memos', 'voice-memos'],
+    ['open image capture', 'image-capture'],
+    ['open photo booth', 'photo-booth'],
+    ['open font book', 'font-book'],
+    ['open quicktime', 'quicktime'],
+    ['open dictionary', 'dictionary'],
+    ['launch magnifier', 'magnifier'],
+    ['open iphone mirroring', 'iphone-mirroring'],
+    ['open disk utility', 'disk-utility'],
+    ['open system information', 'system-info'],
+    ['open time machine', 'time-machine'],
+    // iWork
+    ['open pages', 'pages'],
+    ['open numbers', 'numbers'],
+    ['open keynote', 'keynote'],
+    ['open imovie', 'imovie'],
+    ['open garageband', 'garageband'],
+    // Third-party
+    ['open obsidian', 'obsidian'],
+    ['open chatgpt', 'chatgpt'],
+    ['open docker', 'docker'],
+    ['open comet', 'comet'],
+    ['open evernote', 'evernote'],
+    ['open onenote', 'onenote'],
+    ['open copilot', 'copilot'],
+    ['open ollama', 'ollama'],
+    ['open unity', 'unity-hub'],
+    // Google suite resolves to web fallback entries
+    ['open google docs', 'google-docs'],
+    ['open google sheets', 'google-sheets'],
+    ['open google slides', 'google-slides'],
+    ['open google drive', 'google-drive'],
+    // Adobe
+    ['open photoshop', 'adobe-photoshop'],
+    ['open illustrator', 'adobe-illustrator'],
+    ['open premiere', 'adobe-premiere'],
+    ['open after effects', 'adobe-after-effects'],
+    ['open indesign', 'adobe-indesign'],
+    ['open acrobat', 'adobe-acrobat'],
+  ];
+  for (const [utterance, expectedId] of names) {
+    const m = matchKnownApp(utterance);
+    assert(m?.id === expectedId, `match: "${utterance}" → ${expectedId} (got ${m?.id})`);
+  }
+}
 for (const app of KNOWN_APPS) {
   assert(typeof app.id === 'string' && app.id.length > 0, `app id non-empty: ${app.id}`);
   assert(typeof app.webUrl === 'string' && app.webUrl.startsWith('http'), `app ${app.id}: webUrl is http(s)`);

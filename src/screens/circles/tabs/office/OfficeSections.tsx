@@ -42,6 +42,21 @@ export function OfficeWorkspaceSection({
   FURNITURE_CATALOG,
 }: any) {
   const [showToolsMenu, setShowToolsMenu] = React.useState(false);
+  const menuButtonStyle = React.useCallback(
+    ({ hovered, pressed }: any, active?: boolean) => [
+      styles.toolbarBtn,
+      active && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' },
+      hovered && Platform.OS === 'web' && ({
+        backgroundColor: 'rgba(34, 211, 238, 0.12)',
+        borderColor: 'rgba(168, 85, 247, 0.65)',
+        boxShadow: '0 0 0 1px rgba(34, 211, 238, 0.18), 0 0 18px rgba(168, 85, 247, 0.20), inset 0 0 12px rgba(59, 130, 246, 0.08)',
+        transform: 'translateY(-1px)',
+      } as any),
+      pressed && Platform.OS === 'web' && ({ transform: 'translateY(0px) scale(0.99)' } as any),
+      Platform.OS === 'web' && { cursor: 'pointer' } as any,
+    ],
+    [accentColor, styles.toolbarBtn],
+  );
   if (viewMode !== 'office') return null;
 
   return (
@@ -125,10 +140,10 @@ export function OfficeWorkspaceSection({
                       setShowToolsMenu(false);
                       onReconnectAll();
                     }}
-                    style={[styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                    style={(state) => menuButtonStyle(state)}
                   >
                     <Text style={styles.toolbarBtnIcon}>🔌</Text>
-                    <Text style={[styles.toolbarBtnText, { color: '#6366f1' }]}>Reconnect</Text>
+                    <Text style={[styles.toolbarBtnText, { color: '#818cf8' }]}>Reconnect</Text>
                   </Pressable>
                 )}
                 <Pressable
@@ -136,7 +151,10 @@ export function OfficeWorkspaceSection({
                     setShowToolsMenu(false);
                     onToggleEditMode();
                   }}
-                  style={[editMode ? [styles.toolbarBtn, styles.toolbarBtnActiveGreen] : styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  style={(state) => [
+                    ...menuButtonStyle(state, false),
+                    editMode ? styles.toolbarBtnActiveGreen : null,
+                  ]}
                 >
                   {editMode ? (
                     <Text style={[styles.toolbarBtnText, { color: '#22c55e' }]}>✓ Done</Text>
@@ -147,15 +165,15 @@ export function OfficeWorkspaceSection({
                     </>
                   )}
                 </Pressable>
-                <Pressable onPress={() => { setShowToolsMenu(false); onShowRewards(); }} style={[styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                <Pressable onPress={() => { setShowToolsMenu(false); onShowRewards(); }} style={(state) => menuButtonStyle(state)}>
                   <Text style={styles.toolbarBtnIcon}>🏆</Text>
                   <Text style={styles.toolbarBtnText}>Achievements</Text>
                 </Pressable>
-                <Pressable onPress={() => { setShowToolsMenu(false); onShowConnectAgent(); }} style={[styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                <Pressable onPress={() => { setShowToolsMenu(false); onShowConnectAgent(); }} style={(state) => menuButtonStyle(state)}>
                   <Text style={styles.toolbarBtnIcon}>☁️</Text>
                   <Text style={styles.toolbarBtnText}>Connect Agent</Text>
                 </Pressable>
-                <Pressable onPress={() => { setShowToolsMenu(false); onShowCustomize(); }} style={[styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                <Pressable onPress={() => { setShowToolsMenu(false); onShowCustomize(); }} style={(state) => menuButtonStyle(state)}>
                   <Text style={styles.toolbarBtnIcon}>🔧</Text>
                   <Text style={styles.toolbarBtnText}>Customize</Text>
                 </Pressable>
@@ -165,11 +183,10 @@ export function OfficeWorkspaceSection({
                     onToggleSessionMemoryMode();
                   }}
                   disabled={savingSessionMemoryMode}
-                  style={[
-                    styles.toolbarBtn,
+                  style={(state) => [
+                    ...menuButtonStyle(state, sessionMemoryMode === 'shared'),
                     sessionMemoryMode === 'shared' && styles.toolbarBtnActiveMemory,
                     savingSessionMemoryMode && { opacity: 0.7 },
-                    Platform.OS === 'web' && { cursor: 'pointer' } as any,
                   ]}
                 >
                   <Text style={styles.toolbarBtnIcon}>{savingSessionMemoryMode ? '…' : '🧠'}</Text>
@@ -177,16 +194,16 @@ export function OfficeWorkspaceSection({
                     {sessionMemoryMode === 'shared' ? 'Memory Shared' : 'Memory Private'}
                   </Text>
                 </Pressable>
-                <Pressable onPress={() => { setShowToolsMenu(false); onToggleMcpHub(); }} style={[styles.toolbarBtn, showMcpHub && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                <Pressable onPress={() => { setShowToolsMenu(false); onToggleMcpHub(); }} style={(state) => menuButtonStyle(state, showMcpHub)}>
                   <Text style={styles.toolbarBtnIcon}>🔌</Text>
                   <Text style={styles.toolbarBtnText}>MCP</Text>
                 </Pressable>
-                <Pressable onPress={() => { setShowToolsMenu(false); onToggleGitHubFeed(); }} style={[styles.toolbarBtn, showGitHubFeed && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                <Pressable onPress={() => { setShowToolsMenu(false); onToggleGitHubFeed(); }} style={(state) => menuButtonStyle(state, showGitHubFeed)}>
                   <Text style={styles.toolbarBtnIcon}>{'{}'}</Text>
                   <Text style={styles.toolbarBtnText}>GitHub</Text>
                 </Pressable>
                 {Platform.OS === 'web' && (
-                  <Pressable onPress={() => { setShowToolsMenu(false); onToggleSoundMixer(); }} style={[styles.toolbarBtn, showSoundMixer && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                  <Pressable onPress={() => { setShowToolsMenu(false); onToggleSoundMixer(); }} style={(state) => menuButtonStyle(state, showSoundMixer)}>
                     <Text style={styles.toolbarBtnIcon}>{'(('}</Text>
                     <Text style={styles.toolbarBtnText}>Sound</Text>
                   </Pressable>

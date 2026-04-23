@@ -51,8 +51,35 @@ export function planComputerTaskPreview(task: string): ComputerTaskPlanPreview {
     'locate', 'search files', 'read this file', 'open this file', '.md', '.ts', '.tsx', '.json', '.csv', '.pdf',
   ]);
   const explicitAppName = includesAny(text, [
-    'slack', 'notion', 'figma', 'github', 'word', 'excel', 'calendar', 'email', 'mail',
-    'messages', 'discord', 'teams', 'zoom', 'spotify', 'finder', 'chrome', 'safari', 'terminal',
+    // Third-party dev
+    'slack', 'notion', 'figma', 'github', 'discord', 'teams', 'zoom', 'linear',
+    'chrome', 'cursor', 'vs code', 'vscode', 'iterm', 'xcode', 'docker',
+    'chatgpt', 'copilot', 'comet', 'codellm', 'codex', 'deepagent', 'ollama',
+    'obsidian', 'evernote', 'onenote', 'unity', 'epic games',
+    // Office / content
+    'word', 'excel', 'onedrive', 'onenote',
+    'pages', 'numbers', 'keynote', 'imovie', 'garageband',
+    'google docs', 'google sheets', 'google slides', 'google drive',
+    'photoshop', 'illustrator', 'indesign', 'premiere', 'after effects',
+    'acrobat', 'media encoder', 'creative cloud',
+    // Apple built-ins (core)
+    'safari', 'mail', 'calendar', 'messages', 'notes', 'reminders', 'photos',
+    'music', 'maps', 'facetime', 'podcasts', 'find my', 'app store',
+    'stocks', 'weather', 'home', 'books', 'tv', 'news', 'journal',
+    'contacts', 'clock', 'shortcuts', 'freeform', 'stickies', 'chess',
+    'voice memos', 'image capture', 'image playground', 'passwords',
+    'quicktime', 'photo booth', 'font book', 'dictionary', 'magnifier',
+    // Apple built-ins (utilities)
+    'finder', 'preview', 'calculator', 'system settings', 'activity monitor',
+    'terminal', 'textedit', 'console', 'disk utility', 'system information',
+    'time machine', 'audio midi', 'colorsync', 'color meter', 'airport',
+    'boot camp', 'migration assistant', 'voiceover', 'screen sharing',
+    'print center', 'screenshot', 'iphone mirroring', 'mission control',
+    'siri', 'automator', 'script editor', 'grapher',
+    // Media hubs
+    'spotify', 'insta360',
+    // Generic nouns that still imply a desktop app
+    'email',
   ]);
   const appControlVerb = matchesAny(text, [
     /\b(open|launch|start|switch to|use|check|review|update|send in|post in|message in)\b/i,
@@ -61,7 +88,16 @@ export function planComputerTaskPreview(task: string): ComputerTaskPlanPreview {
     /\bon my computer\b/i,
   ]);
   const app = (explicitAppName && appControlVerb) || matchesAny(text, [
-    /\bopen\b.*\b(slack|notion|figma|github|word|excel|calendar|email|mail|discord|teams|zoom|spotify|finder|chrome|safari|terminal)\b/i,
+    // Keep a focused regex for the "open X" form since it's the most common
+    // phrasing. The full app list is covered by `explicitAppName +
+    // appControlVerb` above; this regex is the fallback for bare "open X"
+    // where X is a single word without other verb cues. Grouped by type
+    // for readability; order doesn't matter to the regex engine.
+    /\bopen\b.*\b(slack|notion|figma|github|linear|discord|teams|zoom|spotify|chrome|safari|cursor|docker|chatgpt|copilot|ollama|obsidian|evernote|onenote|comet)\b/i,
+    /\bopen\b.*\b(mail|email|calendar|messages|notes|reminders|photos|music|maps|facetime|podcasts|stocks|weather|books|tv|news|contacts|clock|shortcuts|freeform|stickies|journal|passwords|home)\b/i,
+    /\bopen\b.*\b(finder|preview|calculator|terminal|iterm|textedit|console|xcode|screenshot|quicktime|automator|grapher|magnifier|dictionary)\b/i,
+    /\bopen\b.*\b(pages|numbers|keynote|imovie|garageband|photoshop|illustrator|indesign|premiere|acrobat)\b/i,
+    /\bopen\b.*\b(find my|app store|system settings|activity monitor|disk utility|time machine|image capture|photo booth|font book|script editor|voice memos|mission control|iphone mirroring|screen sharing|print center)\b/i,
     /\blaunch\b.*\bapp/i,
     /\bopen\b.*\bapplication\b/i,
   ]);

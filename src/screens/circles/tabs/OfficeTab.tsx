@@ -5766,9 +5766,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8, paddingVertical: 5,
     borderBottomWidth: 1, borderBottomColor: '#1a1a1a', backgroundColor: '#000000',
     gap: 8,
+    position: 'relative',
+    zIndex: 40,
+    overflow: 'visible',
   },
   floorList: { gap: 4, flexDirection: 'row', alignItems: 'center' },
-  barActions: { flexDirection: 'row', alignItems: 'center', gap: 5, flexShrink: 0 },
+  barActions: { flexDirection: 'row', alignItems: 'center', gap: 5, flexShrink: 0, zIndex: 50, overflow: 'visible' },
   officeDashboardPanels: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -5780,6 +5783,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#000000',
     borderBottomWidth: 1,
     borderBottomColor: '#111111',
+    zIndex: 1,
   },
   officeDashboardPanel: {
     minWidth: 220,
