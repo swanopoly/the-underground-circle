@@ -41,6 +41,7 @@ export function OfficeWorkspaceSection({
   styles,
   FURNITURE_CATALOG,
 }: any) {
+  const [showToolsMenu, setShowToolsMenu] = React.useState(false);
   if (viewMode !== 'office') return null;
 
   return (
@@ -86,66 +87,113 @@ export function OfficeWorkspaceSection({
         </ScrollView>
 
         <View style={styles.barActions}>
-          {connections.some((c: AgentConnection) => c.enabled && c.status !== 'connected' && c.status !== 'connecting') && (
-            <Pressable onPress={onReconnectAll} style={[styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-              <Text style={styles.toolbarBtnIcon}>🔌</Text>
-              <Text style={[styles.toolbarBtnText, { color: '#6366f1' }]}>Reconnect</Text>
+          <View style={{ position: 'relative' }}>
+            <Pressable
+              onPress={() => setShowToolsMenu((current) => !current)}
+              style={[
+                styles.toolbarBtn,
+                showToolsMenu && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' },
+                Platform.OS === 'web' && { cursor: 'pointer' } as any,
+              ]}
+            >
+              <Text style={styles.toolbarBtnIcon}>☰</Text>
+              <Text style={styles.toolbarBtnText}>Office Tools</Text>
+              <Text style={[styles.toolbarBtnText, { color: '#9ca3af' }]}>{showToolsMenu ? '▴' : '▾'}</Text>
             </Pressable>
-          )}
-          <Pressable
-            onPress={onToggleEditMode}
-            style={[editMode ? [styles.toolbarBtn, styles.toolbarBtnActiveGreen] : styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-          >
-            {editMode ? (
-              <Text style={[styles.toolbarBtnText, { color: '#22c55e' }]}>✓ Done</Text>
-            ) : (
-              <>
-                <Text style={styles.toolbarBtnIcon}>🪑</Text>
-                <Text style={styles.toolbarBtnText}>Add Items</Text>
-              </>
-            )}
-          </Pressable>
-          <Pressable onPress={onShowRewards} style={[styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-            <Text style={styles.toolbarBtnIcon}>🏆</Text>
-            <Text style={styles.toolbarBtnText}>Achievements</Text>
-          </Pressable>
-          <Pressable onPress={onShowConnectAgent} style={[styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-            <Text style={styles.toolbarBtnIcon}>☁️</Text>
-            <Text style={styles.toolbarBtnText}>Connect Agent</Text>
-          </Pressable>
-          <Pressable onPress={onShowCustomize} style={[styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-            <Text style={styles.toolbarBtnIcon}>🔧</Text>
-            <Text style={styles.toolbarBtnText}>Customize</Text>
-          </Pressable>
-          <Pressable
-            onPress={onToggleSessionMemoryMode}
-            disabled={savingSessionMemoryMode}
-            style={[
-              styles.toolbarBtn,
-              sessionMemoryMode === 'shared' && styles.toolbarBtnActiveMemory,
-              savingSessionMemoryMode && { opacity: 0.7 },
-              Platform.OS === 'web' && { cursor: 'pointer' } as any,
-            ]}
-          >
-            <Text style={styles.toolbarBtnIcon}>{savingSessionMemoryMode ? '…' : '🧠'}</Text>
-            <Text style={[styles.toolbarBtnText, sessionMemoryMode === 'shared' && styles.toolbarBtnTextActiveMemory]}>
-              {sessionMemoryMode === 'shared' ? 'Memory Shared' : 'Memory Private'}
-            </Text>
-          </Pressable>
-          <Pressable onPress={onToggleMcpHub} style={[styles.toolbarBtn, showMcpHub && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-            <Text style={styles.toolbarBtnIcon}>🔌</Text>
-            <Text style={styles.toolbarBtnText}>MCP</Text>
-          </Pressable>
-          <Pressable onPress={onToggleGitHubFeed} style={[styles.toolbarBtn, showGitHubFeed && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-            <Text style={styles.toolbarBtnIcon}>{'{}'}</Text>
-            <Text style={styles.toolbarBtnText}>GitHub</Text>
-          </Pressable>
-          {Platform.OS === 'web' && (
-            <Pressable onPress={onToggleSoundMixer} style={[styles.toolbarBtn, showSoundMixer && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-              <Text style={styles.toolbarBtnIcon}>{'(('}</Text>
-              <Text style={styles.toolbarBtnText}>Sound</Text>
-            </Pressable>
-          )}
+
+            {showToolsMenu ? (
+              <View
+                style={{
+                  position: 'absolute',
+                  top: '100%',
+                  right: 0,
+                  marginTop: 8,
+                  minWidth: 220,
+                  padding: 8,
+                  gap: 6,
+                  backgroundColor: '#111827',
+                  borderWidth: 1,
+                  borderColor: '#ffffff18',
+                  borderRadius: 12,
+                  zIndex: 20,
+                  ...(Platform.OS === 'web' ? ({ boxShadow: '0 12px 30px rgba(0,0,0,0.28)' } as any) : {}),
+                }}
+              >
+                {connections.some((c: AgentConnection) => c.enabled && c.status !== 'connected' && c.status !== 'connecting') && (
+                  <Pressable
+                    onPress={() => {
+                      setShowToolsMenu(false);
+                      onReconnectAll();
+                    }}
+                    style={[styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  >
+                    <Text style={styles.toolbarBtnIcon}>🔌</Text>
+                    <Text style={[styles.toolbarBtnText, { color: '#6366f1' }]}>Reconnect</Text>
+                  </Pressable>
+                )}
+                <Pressable
+                  onPress={() => {
+                    setShowToolsMenu(false);
+                    onToggleEditMode();
+                  }}
+                  style={[editMode ? [styles.toolbarBtn, styles.toolbarBtnActiveGreen] : styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
+                  {editMode ? (
+                    <Text style={[styles.toolbarBtnText, { color: '#22c55e' }]}>✓ Done</Text>
+                  ) : (
+                    <>
+                      <Text style={styles.toolbarBtnIcon}>🪑</Text>
+                      <Text style={styles.toolbarBtnText}>Add Items</Text>
+                    </>
+                  )}
+                </Pressable>
+                <Pressable onPress={() => { setShowToolsMenu(false); onShowRewards(); }} style={[styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                  <Text style={styles.toolbarBtnIcon}>🏆</Text>
+                  <Text style={styles.toolbarBtnText}>Achievements</Text>
+                </Pressable>
+                <Pressable onPress={() => { setShowToolsMenu(false); onShowConnectAgent(); }} style={[styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                  <Text style={styles.toolbarBtnIcon}>☁️</Text>
+                  <Text style={styles.toolbarBtnText}>Connect Agent</Text>
+                </Pressable>
+                <Pressable onPress={() => { setShowToolsMenu(false); onShowCustomize(); }} style={[styles.toolbarBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                  <Text style={styles.toolbarBtnIcon}>🔧</Text>
+                  <Text style={styles.toolbarBtnText}>Customize</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    setShowToolsMenu(false);
+                    onToggleSessionMemoryMode();
+                  }}
+                  disabled={savingSessionMemoryMode}
+                  style={[
+                    styles.toolbarBtn,
+                    sessionMemoryMode === 'shared' && styles.toolbarBtnActiveMemory,
+                    savingSessionMemoryMode && { opacity: 0.7 },
+                    Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                  ]}
+                >
+                  <Text style={styles.toolbarBtnIcon}>{savingSessionMemoryMode ? '…' : '🧠'}</Text>
+                  <Text style={[styles.toolbarBtnText, sessionMemoryMode === 'shared' && styles.toolbarBtnTextActiveMemory]}>
+                    {sessionMemoryMode === 'shared' ? 'Memory Shared' : 'Memory Private'}
+                  </Text>
+                </Pressable>
+                <Pressable onPress={() => { setShowToolsMenu(false); onToggleMcpHub(); }} style={[styles.toolbarBtn, showMcpHub && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                  <Text style={styles.toolbarBtnIcon}>🔌</Text>
+                  <Text style={styles.toolbarBtnText}>MCP</Text>
+                </Pressable>
+                <Pressable onPress={() => { setShowToolsMenu(false); onToggleGitHubFeed(); }} style={[styles.toolbarBtn, showGitHubFeed && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                  <Text style={styles.toolbarBtnIcon}>{'{}'}</Text>
+                  <Text style={styles.toolbarBtnText}>GitHub</Text>
+                </Pressable>
+                {Platform.OS === 'web' && (
+                  <Pressable onPress={() => { setShowToolsMenu(false); onToggleSoundMixer(); }} style={[styles.toolbarBtn, showSoundMixer && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                    <Text style={styles.toolbarBtnIcon}>{'(('}</Text>
+                    <Text style={styles.toolbarBtnText}>Sound</Text>
+                  </Pressable>
+                )}
+              </View>
+            ) : null}
+          </View>
         </View>
       </View>
 

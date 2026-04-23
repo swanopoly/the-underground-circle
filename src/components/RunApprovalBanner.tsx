@@ -14,6 +14,7 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, ScrollView } from 'react-native';
 import { useAgentRunApprovals, resolveRunApproval, type AgentRunApproval, type ApprovalKind } from '../services/runApprovalsService';
+import { renderApprovalAction } from '../lib/approvalPayloadRenderer';
 
 const KIND_ACCENTS: Record<ApprovalKind, { fg: string; bg: string; border: string; label: string }> = {
   publish:             { fg: '#fbbf24', bg: '#422006', border: '#92400e', label: 'PUBLISH' },
@@ -54,6 +55,20 @@ function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; use
     return `${Math.floor(sec / 3600)}h ago`;
   }, [item.requested_at]);
 
+  // UC-1b: when the approval payload includes semantic info (tool +
+  // label/url/text), render "Click **Send** in Safari" instead of the
+  // generic title. Falls back to raw title when payload is missing.
+  const action = useMemo(
+    () => renderApprovalAction(item.payload as any, item.title),
+    [item.payload, item.title],
+  );
+
+  // Strip Markdown bold markers for the numberOfLines-capped Text
+  // render since RN Text doesn't parse Markdown; we keep the **bold**
+  // markers in the source string only so external renderers (docs,
+  // chat replays) still see structure.
+  const headlineDisplay = useMemo(() => action.headline.replace(/\*\*/g, ''), [action.headline]);
+
   return (
     <View style={[styles.card, { borderColor: accent.border }]} nativeID={`approval-card-${item.id.slice(0, 8)}`}>
       <View style={styles.cardHeader}>
@@ -62,8 +77,11 @@ function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; use
         </View>
         <Text style={styles.ageText}>{ageLabel}</Text>
       </View>
-      <Text style={styles.titleText} numberOfLines={2}>{item.title}</Text>
-      {item.description ? (
+      <Text style={styles.titleText} numberOfLines={2}>{headlineDisplay}</Text>
+      {action.detail ? (
+        <Text style={styles.detailText} numberOfLines={1}>{action.detail}</Text>
+      ) : null}
+      {item.description && item.description !== action.headline ? (
         <Text style={styles.descriptionText} numberOfLines={3}>{item.description}</Text>
       ) : null}
       <View style={styles.buttonRow}>
@@ -196,6 +214,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     marginBottom: 4,
+  },
+  detailText: {
+    color: '#64748b',
+    fontSize: 11,
+    fontStyle: 'italic',
+    marginBottom: 6,
   },
   descriptionText: {
     color: '#94a3b8',

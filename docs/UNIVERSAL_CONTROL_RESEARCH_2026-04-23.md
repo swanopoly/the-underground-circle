@@ -152,7 +152,7 @@ upgrades App-Store credibility for the Mac-native UC app we're building toward.
   Scrapybara): we already own the better surface (user's own authenticated
   browser). Revisit if we ship a "UC Cloud" tier.
 
-### Phase UC-4 — Record + replay (teach-by-demo)
+### Phase UC-4 — Record + replay (teach-by-demo) (SHIPPED 2026-04-23)
 
 - Chat command `/record` starts a recording session that captures every
   `desktop.*` + `browser.*` tool call made in the current chat turn AND

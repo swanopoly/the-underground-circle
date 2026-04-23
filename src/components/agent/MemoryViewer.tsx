@@ -131,6 +131,10 @@ function archiveLineageLabel(mem: MemoryEntry): string | null {
   return null;
 }
 
+function formatArchiveLearningAction(action: string): string {
+  return action.replace(/_/g, ' ').toUpperCase();
+}
+
 function isArchiveDerivedMemory(mem: MemoryEntry): boolean {
   const source = String(mem.metadata?.source || '');
   return source === 'thread_archive_match' || source === 'thread_archive_recommendation';
@@ -290,6 +294,10 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
   const selectedLearningMemory = useMemo(
     () => allMemories.find((mem) => mem.id === selectedLearningMemoryId) || null,
     [allMemories, selectedLearningMemoryId],
+  );
+  const selectedLearningEvents = useMemo(
+    () => archiveLearningEvents.filter((event) => event.memoryId === selectedLearningMemoryId).slice(0, 6),
+    [archiveLearningEvents, selectedLearningMemoryId],
   );
 
   const handleDelete = async (memoryId: string) => {
@@ -913,6 +921,24 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
             <Pressable onPress={() => handleLearningDownrank(selectedLearningMemory)} style={({ hovered, pressed }: any) => [s.dangerBtn, hovered && webHoverDanger, pressed && webPressed]}>
               <Text style={s.dangerBtnText}>DOWNRANK</Text>
             </Pressable>
+          </View>
+          <View style={s.archiveColumn}>
+            <Text style={s.archiveColumnTitle}>RECENT SIGNALS</Text>
+            {selectedLearningEvents.length > 0 ? selectedLearningEvents.map((event) => (
+              <View key={`${event.memoryId}:${event.createdAt}:${event.action}`} style={s.archiveItem}>
+                <Text style={s.archiveItemTitle}>{formatArchiveLearningAction(event.action)}</Text>
+                <Text style={s.archiveItemMeta}>
+                  {event.score != null ? `${Math.round(event.score * 100)}%` : 'unscored'} · {new Date(event.createdAt).toLocaleString()}
+                </Text>
+                {event.note ? (
+                  <Text style={s.archiveItemBody}>{event.note}</Text>
+                ) : null}
+              </View>
+            )) : (
+              <View style={s.archiveItem}>
+                <Text style={s.archiveItemMeta}>No recent passive signals for this memory yet.</Text>
+              </View>
+            )}
           </View>
         </View>
       ) : null}
