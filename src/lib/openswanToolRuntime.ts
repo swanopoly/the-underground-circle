@@ -1492,6 +1492,84 @@ export function getOpenSwanToolPolicy(
   return override ? { ...base, approvalMode: override } : base;
 }
 
+/**
+ * Mode-scoping map for write-heavy tools. Keeping this centralized instead
+ * of sprinkling `modes: [...]` across 20 tool definitions makes it one
+ * place to audit "which modes can do what" — e.g. the rule that review
+ * and research modes never mutate.
+ *
+ * A tool NOT listed here is mode-agnostic (available in every mode). The
+ * default is intentional: most read tools work everywhere. Only add a
+ * tool here when the modes it belongs in are genuinely narrower.
+ *
+ * Modes used:
+ *   build   — implementation work (create files, tasks, missions)
+ *   execute — immediate action (mutate anything the user asks)
+ *   plan    — architecture & sequencing (propose + create placeholders)
+ *   design  — UI/UX + appearance (theme, agent looks)
+ *   review  — critical audit (read-only + record findings → never listed)
+ *   research — investigation (read-only → never listed)
+ *   talk    — conversation (read-only → never listed)
+ *   support — troubleshoot & recovery (read-only + memory hygiene)
+ */
+const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
+  // Code generation — not in review (audit mode), research, talk, or support.
+  'code.generate': ['build', 'execute', 'plan', 'design'],
+  // Circle-wide settings — only when user explicitly wants to change them.
+  'circle.update_settings':     ['execute', 'build'],
+  'circle.update_budget_caps':  ['execute'],
+  'circle.update_office_theme': ['execute', 'design'],
+  'circle.toggle_public':       ['execute'],
+  // Agent identity / appearance mutations.
+  'agent.update_appearance': ['execute', 'design'],
+  'agent.rename':            ['execute'],
+  'agent.set_spirit':        ['execute'],
+  // Room structure writes.
+  'rooms.rename':    ['execute', 'build'],
+  'rooms.archive':   ['execute', 'build'],
+  'rooms.unarchive': ['execute', 'build'],
+  'rooms.create':    ['execute', 'build', 'plan'],
+  // Mission structure writes.
+  'missions.create':          ['execute', 'build', 'plan'],
+  'missions.assign_agent':    ['execute', 'build', 'plan'],
+  'missions.unassign_agent':  ['execute', 'build'],
+  'missions.update_status':   ['execute', 'build'],
+  'missions.remove_task':     ['execute', 'build'],
+  'missions.update_task':     ['execute', 'build', 'plan'],
+  // Destructive memory op — explicit intent only. Support mode can use
+  // it during troubleshooting ("forget this stale bias").
+  'memory.forget': ['execute', 'support'],
+  // Automation toggle — only when user is actively executing changes.
+  'automations.toggle_enabled': ['execute'],
+};
+
+/** Returns the mode list for a tool (inline def wins over the central map). */
+function getToolModes(tool: OpenSwanToolDefinition): string[] | null {
+  if (tool.modes && tool.modes.length > 0) return tool.modes;
+  const tagged = TOOL_MODE_TAGS[tool.name];
+  return tagged && tagged.length > 0 ? tagged : null;
+}
+
+/**
+ * Returns the mode tags the current tool set exposes. Useful for UI that
+ * wants to show "this mode hides X tools" — the Control Panel uses it.
+ */
+export function listToolsHiddenByMode(
+  surface: OpenSwanToolSurface,
+  mode: string | null | undefined,
+): OpenSwanToolDefinition[] {
+  // Matches the filter rule: `none` / `talk` mean no mode discipline,
+  // so no tools are hidden.
+  if (!mode || mode === 'none' || mode === 'talk') return [];
+  return TOOL_DEFINITIONS
+    .filter((tool) => tool.surfaces.includes(surface))
+    .filter((tool) => TOOL_LOOP_SAFE_NAMES.has(tool.name))
+    .filter((tool) => {
+      const modes = getToolModes(tool);
+      return modes && !modes.includes(mode);
+    });
+}
+
 const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'code.inspect',
   'browser.plan_task',
@@ -1581,10 +1659,18 @@ export function listOpenSwanAnthropicToolsForSurface(
     .filter((tool) => tool.surfaces.includes(surface))
     .filter((tool) => TOOL_LOOP_SAFE_NAMES.has(tool.name))
     .filter((tool) => !allow || allow.has(tool.name))
-    // Mode filter: tools without `modes` are mode-agnostic (pass). Tools
-    // with `modes` only appear if the current mode is in their list.
-    // When no mode is passed, skip this filter entirely (legacy callers).
-    .filter((tool) => !modeKey || !tool.modes || tool.modes.includes(modeKey))
+    // Mode filter: tools without a mode tag are mode-agnostic. Tagged
+    // tools only appear if the current mode is in their list. When no
+    // mode is passed, skip this filter entirely (legacy callers).
+    .filter((tool) => {
+      // `none` and `talk` = user hasn't opted into mode discipline —
+      // treat as mode-agnostic so casual chat still has action tools
+      // when an action intent is detected (e.g. "create a room" from
+      // the default chat mode).
+      if (!modeKey || modeKey === 'none' || modeKey === 'talk') return true;
+      const modes = getToolModes(tool);
+      return !modes || modes.includes(modeKey);
+    })
     .map((tool) => ({
       name: tool.name,
       description: tool.description,
@@ -1609,7 +1695,15 @@ export function previewOpenSwanToolsForSurface(
     .filter((tool) => tool.surfaces.includes(surface))
     .filter((tool) => TOOL_LOOP_SAFE_NAMES.has(tool.name))
     .filter((tool) => !allow || allow.has(tool.name))
-    .filter((tool) => !modeKey || !tool.modes || tool.modes.includes(modeKey));
+    .filter((tool) => {
+      // `none` and `talk` = user hasn't opted into mode discipline —
+      // treat as mode-agnostic so casual chat still has action tools
+      // when an action intent is detected (e.g. "create a room" from
+      // the default chat mode).
+      if (!modeKey || modeKey === 'none' || modeKey === 'talk') return true;
+      const modes = getToolModes(tool);
+      return !modes || modes.includes(modeKey);
+    });
 }
 
 export function buildOpenSwanToolBrief(

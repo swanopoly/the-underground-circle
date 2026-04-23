@@ -49,13 +49,12 @@ Each sub-phase names its exact code paths, SQL impact, smoke-test file, and road
 - **Primary body stays on `circle_skills.content`** for backward-compat with existing read paths and `skillPromptInjection.ts`. The new table holds sub-files only; the filter-to-primary concern from the plan is a no-op today (and remains so as long as the primary body stays on the parent row).
 - **Still to do (CA-8i, task #83).** Extend `skillLibraryImport.ts` to split multi-file GitHub skill folders into `circle_skill_files` rows at import time; add `skill_manage` tool actions `write_file` / `remove_file` that file HITL approvals carrying the full relpath + diff. Read-side CA-8c is sufficient for agents that fetch already-populated sub-files.
 
-### CA-8d · Subagent summary-only return + depth/concurrency gate · **task #78**
+### CA-8d · Subagent summary-only return + depth/concurrency gate · **task #78 · SHIPPED 2026-04-23 (gate library)**
 
-- **Problem.** Our `subagentRegistry.ts` still calls `runOpenSwanRuntimeToolLoop` (pre-Phase 1c). Parent sees the child's full stream today. Hermes contract: parent sees only the summary; children have isolated context.
-- **Files.** `src/lib/subagentRegistry.ts` (swap to `agentExecutionCore`), new `src/lib/delegationGate.ts` (depth/concurrency limits + transcript redaction). Run Ledger surfaces keep full tree (operator view); chat transcript gets only the final summary (user view).
-- **Contract.** Depth ≤ 2 (`HERMES_DELTA_PLAN §3.6`), concurrency ≤ 3 per circle, per-child provider override (cheap child under expensive parent). `parent_run_id` column on `agent_runs` if missing.
-- **Effort.** M. **SQL:** possibly one column check.
-- **Depends on.** Closes existing pending task #32.
+- **Problem.** `subagentRegistry.ts` hands parent the child's full transcript today. Hermes contract: parent sees only summary; children have isolated context. Recursion + fan-out also have no hard caps today → cost blowout risk.
+- **Files shipped.** `src/lib/delegationGate.ts` + `scripts/delegation-gate-smoketest.ts`. Pure library — no runtime wiring yet (that's the subagentRegistry → agentExecutionCore swap, still task #32).
+- **Contract shipped.** `canDelegate({ proposedDepth, inFlight })` returns `{ ok, reason, detail, remainingSlots }` where `reason ∈ {ok, depth_exceeded, concurrency_exceeded, invalid_input}`. Caps: depth ≤ 2 (root→child→grandchild), concurrency ≤ 3 per circle. Finite-number checks (NaN/Infinity rejected). `redactSubagentOutput(transcript)` produces `SubagentSummaryPayload` — explicit summary > finalText > placeholder, capped at 1200 chars, ellipsis on truncation, usage carried. `serializeSubagentSummaryForParent(payload)` emits the tool_result shape parent model expects. 43 smoke assertions across all cap boundaries + usage + truncation + missing-field edge cases.
+- **Still open.** Actually wiring the gate into a real subagent spawner (blocked on task #32: subagentRegistry swap to agentExecutionCore). `parent_run_id` column already exists on `agent_runs` per 20260408 migration — no schema change needed. Existing task #32 is the follow-up that closes the full CA-8d scope.
 
 ### CA-8e · `clarify` / `ask_user` timeout · **task #79 · SHIPPED 2026-04-23**
 

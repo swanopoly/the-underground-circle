@@ -34,7 +34,10 @@ import {
   OPENSWAN_MODE_POLICIES,
   type OpenSwanChatMode,
 } from '../../lib/openswanModePolicy';
-import { previewOpenSwanToolsForSurface } from '../../lib/openswanToolRuntime';
+import {
+  listToolsHiddenByMode,
+  previewOpenSwanToolsForSurface,
+} from '../../lib/openswanToolRuntime';
 import { buildOpenSwanTaskPlan } from '../../lib/openswanTaskPlanner';
 import {
   planSubagentDelegation,
@@ -121,9 +124,11 @@ export default function OpenSwanConsole({
       : 'plan',
   );
   const [memoryCount, setMemoryCount] = useState<number | null>(null);
+  const [memoryPreview, setMemoryPreview] = useState<Array<{ title: string; scope: string }>>([]);
   const [stalePreviewCount, setStalePreviewCount] = useState<number | null>(null);
   const [pruneBusy, setPruneBusy] = useState(false);
   const [pruneMessage, setPruneMessage] = useState<string | null>(null);
+  const [showHiddenTools, setShowHiddenTools] = useState(false);
 
   useEffect(() => {
     if (!visible) return;
@@ -138,6 +143,11 @@ export default function OpenSwanConsole({
 
   const toolPreview = useMemo(
     () => previewOpenSwanToolsForSurface(surface as any, mode),
+    [surface, mode],
+  );
+
+  const hiddenByMode = useMemo(
+    () => listToolsHiddenByMode(surface as any, mode),
     [surface, mode],
   );
 
@@ -169,21 +179,39 @@ export default function OpenSwanConsole({
   useEffect(() => {
     if (!visible || !circleId) {
       setMemoryCount(null);
+      setMemoryPreview([]);
       return;
     }
     const token = ++memoryProbeRef.current;
     (async () => {
       try {
-        const { count } = await supabase
-          .from('memory_entries')
-          .select('id', { count: 'exact', head: true })
-          .eq('circle_id', circleId)
-          .eq('is_active', true);
+        const [countRes, previewRes] = await Promise.all([
+          supabase
+            .from('memory_entries')
+            .select('id', { count: 'exact', head: true })
+            .eq('circle_id', circleId)
+            .eq('is_active', true),
+          // Top 5 most-recently updated active memories in this circle.
+          // Gives the user a concrete sense of *what* the agent will
+          // see, not just "there are 132 of them".
+          supabase
+            .from('memory_entries')
+            .select('title, scope')
+            .eq('circle_id', circleId)
+            .eq('is_active', true)
+            .order('updated_at', { ascending: false })
+            .limit(5),
+        ]);
         if (memoryProbeRef.current === token) {
-          setMemoryCount(typeof count === 'number' ? count : null);
+          setMemoryCount(typeof countRes.count === 'number' ? countRes.count : null);
+          const rows = (previewRes.data || []) as Array<{ title: string; scope: string }>;
+          setMemoryPreview(rows);
         }
       } catch {
-        if (memoryProbeRef.current === token) setMemoryCount(null);
+        if (memoryProbeRef.current === token) {
+          setMemoryCount(null);
+          setMemoryPreview([]);
+        }
       }
     })();
   }, [visible, circleId]);
@@ -266,7 +294,7 @@ export default function OpenSwanConsole({
   if (Platform.OS !== 'web') return null;
 
   const toolCount = toolPreview.length;
-  const modeFiltered = toolPreview.filter((t) => t.modes && t.modes.includes(mode)).length;
+  const hiddenCount = hiddenByMode.length;
 
   return (
     <View
@@ -378,9 +406,9 @@ export default function OpenSwanConsole({
                 title="Tools"
                 value={`${toolCount}`}
                 hint={
-                  modeFiltered > 0
-                    ? `${modeFiltered} mode-scoped`
-                    : 'all mode-agnostic'
+                  hiddenCount > 0
+                    ? `${hiddenCount} hidden by mode`
+                    : 'all available'
                 }
                 color={accentColor}
               />
@@ -405,6 +433,46 @@ export default function OpenSwanConsole({
               <Text style={[styles.inputHint, { color: DANGER, marginTop: 4 }]}>
                 ⚠ No tools exposed for this mode. Model will answer from knowledge alone.
               </Text>
+            ) : null}
+
+            {/* Hidden-by-mode drawer — only shows if mode actually filters tools */}
+            {hiddenCount > 0 ? (
+              <View style={styles.hiddenDrawer}>
+                <Pressable
+                  onPress={() => setShowHiddenTools((v) => !v)}
+                  style={styles.hiddenHeader}
+                  accessibilityLabel={`${showHiddenTools ? 'Hide' : 'Show'} tools hidden by ${mode} mode`}
+                >
+                  <Text style={styles.hiddenHeaderText}>
+                    {showHiddenTools ? '▾' : '▸'} {hiddenCount} TOOL{hiddenCount === 1 ? '' : 'S'} HIDDEN BY {mode.toUpperCase()} MODE
+                  </Text>
+                  <Text style={styles.hiddenHint}>
+                    {showHiddenTools ? 'tap to collapse' : 'tap to see which'}
+                  </Text>
+                </Pressable>
+                {showHiddenTools ? (
+                  <View style={styles.hiddenList}>
+                    {hiddenByMode.map((t) => (
+                      <Text key={t.name} style={styles.hiddenItem}>
+                        • {t.label}{' '}
+                        <Text style={styles.hiddenItemCode}>({t.name})</Text>
+                      </Text>
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
+
+            {/* Memory preview — real titles so the user sees what the agent scans */}
+            {memoryPreview.length > 0 ? (
+              <View style={styles.memPreview}>
+                <Text style={styles.memPreviewLabel}>RECENT MEMORY</Text>
+                {memoryPreview.slice(0, 4).map((m, i) => (
+                  <Text key={`${m.title}-${i}`} style={styles.memPreviewItem} numberOfLines={1}>
+                    <Text style={styles.memScope}>[{m.scope}]</Text> {m.title}
+                  </Text>
+                ))}
+              </View>
             ) : null}
           </View>
 
@@ -723,6 +791,75 @@ const styles = StyleSheet.create({
     fontSize: 11,
     letterSpacing: 1.2,
     fontWeight: '700',
+  },
+  hiddenDrawer: {
+    marginTop: 6,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  hiddenHeader: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: FIELD_BG,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  hiddenHeaderText: {
+    color: TEXT_DIM,
+    fontFamily: 'monospace',
+    fontSize: 10,
+    letterSpacing: 1.1,
+    fontWeight: '700',
+  },
+  hiddenHint: {
+    color: MUTED,
+    fontSize: 9,
+    fontFamily: 'monospace',
+    letterSpacing: 0.5,
+  },
+  hiddenList: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    gap: 3,
+    backgroundColor: '#060a14',
+  },
+  hiddenItem: {
+    color: TEXT_DIM,
+    fontSize: 11,
+  },
+  hiddenItemCode: {
+    color: MUTED,
+    fontSize: 10,
+    fontFamily: 'monospace',
+  },
+  memPreview: {
+    marginTop: 6,
+    padding: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    backgroundColor: FIELD_BG,
+    gap: 3,
+  },
+  memPreviewLabel: {
+    color: MUTED,
+    fontFamily: 'monospace',
+    fontSize: 9,
+    letterSpacing: 1.2,
+    fontWeight: '700',
+  },
+  memPreviewItem: {
+    color: TEXT_DIM,
+    fontSize: 11,
+  },
+  memScope: {
+    color: '#38bdf8',
+    fontFamily: 'monospace',
+    fontSize: 10,
   },
   inlineRow: {
     flexDirection: 'row',

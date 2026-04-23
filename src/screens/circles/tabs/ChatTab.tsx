@@ -6099,6 +6099,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         hasBuilderWork={canOpenBuilder}
         showWorkbenchSidecar={showWorkbenchSidecar}
         onToggleBuilder={openBuilderStudio}
+        onOpenControlPanel={() => setShowOpenSwanConsole(true)}
         onResetMind={async () => {
           const { resetAgentMind } = await import('../../../lib/swanbot');
           const { cleared } = await resetAgentMind(circleId);
@@ -7426,6 +7427,7 @@ function EnhancedInput({
   showWorkbenchSidecar,
   onToggleBuilder,
   onResetMind,
+  onOpenControlPanel,
   onLocalBotMessage,
   openswanSessionCount,
   memoryCount,
@@ -7915,6 +7917,54 @@ function EnhancedInput({
                   <Text style={styles.controlCenterStatLabel}>builds</Text>
                 </View>
               </View>
+              {/* Full Control Panel — top-level action. Shows the posture
+                  (tools / memory / subagents) the current mode will use
+                  before launching a turn, plus the prune-biasing-memories
+                  maintenance action. Distinct from the 2×2 grid below
+                  because it's the primary "show me what's going to
+                  happen" surface, not a single feature. */}
+              {onOpenControlPanel ? (
+                <Pressable
+                  onPress={() => { onOpenControlPanel(); setShowModePicker(false); }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open OpenSwan Control Panel"
+                  style={({ hovered, pressed }: any) => [
+                    {
+                      marginBottom: 8,
+                      paddingVertical: 10,
+                      paddingHorizontal: 12,
+                      borderRadius: 10,
+                      borderWidth: 1,
+                      borderColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '60',
+                      backgroundColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '14',
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 10,
+                    },
+                    hovered && {
+                      borderColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor),
+                      backgroundColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '22',
+                    },
+                    pressed && { transform: [{ scale: 0.985 }] },
+                    Platform.OS === 'web' && { cursor: 'pointer', transition: 'all 0.15s ease' } as any,
+                  ]}
+                >
+                  <View style={[styles.dropdownItemIcon, { backgroundColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '30' }]}>
+                    <Text style={[styles.dropdownItemIconText, { color: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) }]}>
+                      ⌘
+                    </Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.dropdownItemLabel, { color: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) }]}>
+                      Control Panel
+                    </Text>
+                    <Text style={styles.dropdownItemDesc}>
+                      Inspect tools, memory, subagents — prune biasing memories
+                    </Text>
+                  </View>
+                  <Text style={[styles.modelChevron, { marginLeft: 'auto' }]}>›</Text>
+                </Pressable>
+              ) : null}
               <View style={styles.controlCenterGrid}>
                 <Pressable
                   onPress={() => { onOpenPlugins?.(); setShowModePicker(false); }}

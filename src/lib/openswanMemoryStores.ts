@@ -41,6 +41,13 @@ function formatUserProfile(memories: MemoryEntry[]): string {
   }`;
 }
 
+// Session-scope memories older than this are demoted — a cron is meant
+// to strip `retrieval_mode='startup'` off 14-day-old sessions, but if the
+// cron misses we still don't want month-old session chatter leaking into
+// the context. Startup memories of any age bypass this (explicitly kept
+// fresh) and non-session scopes are unaffected.
+const SESSION_MEMORY_MAX_AGE_DAYS = 30;
+
 async function formatRuntimeMemory(args: {
   circleId: string;
   userId: string;
@@ -50,6 +57,8 @@ async function formatRuntimeMemory(args: {
   const scopes = args.agentId
     ? ['circle', 'room', 'session', 'agent'] as const
     : ['circle', 'room', 'session'] as const;
+  const now = Date.now();
+  const sessionCutoff = now - SESSION_MEMORY_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
   const memories = rankMemories(await loadMemories({
     circleId: args.circleId,
     userId: args.userId,
@@ -58,7 +67,16 @@ async function formatRuntimeMemory(args: {
     scopes: [...scopes],
     limit: 24,
   }))
-    .filter((memory) => memory.retrieval_mode !== 'manual_only');
+    .filter((memory) => memory.retrieval_mode !== 'manual_only')
+    .filter((memory) => {
+      // Age filter applies to session-scope only. Circle/room/agent
+      // memories are assumed durable; session memories are fire-and-
+      // forget and shouldn't resurface weeks later.
+      if (memory.scope !== 'session') return true;
+      if (memory.retrieval_mode === 'startup') return true;
+      const updated = new Date(memory.updated_at || memory.created_at).getTime();
+      return Number.isFinite(updated) && updated >= sessionCutoff;
+    });
 
   const sections: string[] = [];
 
