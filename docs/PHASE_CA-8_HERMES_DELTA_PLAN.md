@@ -65,11 +65,11 @@ Each sub-phase names its exact code paths, SQL impact, smoke-test file, and road
 - **Effort.** S. **SQL:** none.
 - **Depends on.** Nothing.
 
-### CA-8f · Provider fallback chain · **task #80**
+### CA-8f · Provider fallback chain · **task #80 · SHIPPED 2026-04-23**
 
 - **Problem.** Single-provider (Anthropic direct). Outage = downtime.
-- **Files.** New `src/lib/agentProviders/fallbackChain.ts` wrapping existing `anthropic.ts`. Config-driven: primary `anthropic.direct`, fallback `openrouter.anthropic/*` on 529 / overload / 5xx.
-- **Contract.** `createFallbackProvider([primary, fallback1, fallback2])` returns an `AgentProvider`. Per-call retry then next-provider.
+- **Files.** `src/lib/agentProviders/fallbackChain.ts` + `scripts/fallback-chain-smoketest.ts`.
+- **Contract.** `createFallbackProvider({ providers, onFallback })` returns an `AgentProvider` indistinguishable to `AgentExecutionCore`. Classifies 429/529/5xx/408/timeout/network errors as retryable → advance to next provider; 400/401/403/404/422 bubble immediately. Observer fires once per chain advance with `{ attempted, nextLabel, error, errorMessage, statusCode }`. 55+ assertions pin the classifier + routing + observer semantics.
 - **Effort.** M. **SQL:** none.
 
 ### CA-8g · Trace export + evals scaffolding · **task #81**
