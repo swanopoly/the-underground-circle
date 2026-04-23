@@ -43,6 +43,8 @@ export type PromptMemoryReference = {
   taskFit?: 'core' | 'supporting' | 'background' | null;
   matchReason?: string | null;
   helpfulness?: number | null;
+  archivePassiveScore?: number | null;
+  archiveBias?: 'boosted' | 'suppressed' | 'neutral' | null;
   memoryState?: 'startup' | 'retrieved' | 'supporting' | 'distilled' | null;
   metadata?: Record<string, unknown> | null;
 };
@@ -730,6 +732,8 @@ export interface RetrievedMemory {
   reason?: string | null;
   pinned?: boolean;
   helpfulness?: number | null;
+  archivePassiveScore?: number | null;
+  archiveBias?: 'boosted' | 'suppressed' | 'neutral' | null;
   metadata: Record<string, unknown>;
 }
 
@@ -955,6 +959,8 @@ export async function retrieveForTurn(opts: {
       score: Number.isFinite(finalScore) ? finalScore : c.similarity,
       pinned: !!(c as any).pinned,
       helpfulness,
+      archivePassiveScore: archivePassive,
+      archiveBias: archivePassive == null ? null : archivePassive >= 0.65 ? 'boosted' : archivePassive <= 0.35 ? 'suppressed' : 'neutral',
       soul_role: soulRole,
       task_fit: taskAffinity.fit,
       reason: buildRetrievedMemoryReason({
@@ -1168,6 +1174,8 @@ export async function buildPromptMemoryBundle(opts: {
       taskFit: mem.task_fit || null,
       matchReason: mem.reason || null,
       helpfulness: mem.helpfulness,
+      archivePassiveScore: mem.archivePassiveScore ?? null,
+      archiveBias: mem.archiveBias ?? null,
       memoryState: (mem as any).retrieval_mode === 'startup' ? 'startup' : 'retrieved',
       metadata: mem.metadata || null,
     });
@@ -1193,6 +1201,8 @@ export async function buildPromptMemoryBundle(opts: {
       taskFit: isSoulMemory ? 'supporting' : 'background',
       matchReason: isSoulMemory ? 'active soul memory' : 'agent private memory',
       helpfulness: null,
+      archivePassiveScore: null,
+      archiveBias: null,
       memoryState: mem.retrieval_mode === 'startup' ? 'startup' : 'supporting',
       metadata: mem.metadata || null,
     });
@@ -1316,6 +1326,8 @@ async function buildExternalAgentKnowledgeBundle(opts: {
     confidence: null,
     score,
     helpfulness: null,
+    archivePassiveScore: null,
+    archiveBias: null,
     taskFit: taskAffinity.fit === 'background' ? 'supporting' : taskAffinity.fit,
     matchReason: `${providerLabel} session knowledge${taskAffinity.reason ? ` + ${taskAffinity.reason}` : ''}`,
     memoryState: 'distilled',

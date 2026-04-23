@@ -414,6 +414,13 @@ function formatMemoryTrustLabel(ref: PromptMemoryReference): string {
   return 'mixed';
 }
 
+function formatArchiveBiasLabel(ref: PromptMemoryReference): string | null {
+  if (ref.archiveBias === 'boosted') return 'archive boosted';
+  if (ref.archiveBias === 'suppressed') return 'archive suppressed';
+  if (ref.archiveBias === 'neutral' && ref.archivePassiveScore != null) return 'archive neutral';
+  return null;
+}
+
 function formatMemorySourceLabel(ref: PromptMemoryReference): string | null {
   switch (ref.sourceSurface) {
     case 'claude_code_bridge': return 'Claude Code';
@@ -4677,12 +4684,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                         >
                           <Text style={styles.memoryInfluenceTitle}>{ref.title}</Text>
                           <Text style={styles.messageSourceMeta}>
-                            {getMemoryFamilyLabel(ref).toUpperCase()} • {formatMemoryStateLabel(ref).toUpperCase()} • {String(ref.scope).toUpperCase()} • {String(ref.memoryKind).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryTrustLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}{formatMemorySourceLabel(ref) ? ` • ${formatMemorySourceLabel(ref)!.toUpperCase()}` : ''}
+                            {getMemoryFamilyLabel(ref).toUpperCase()} • {formatMemoryStateLabel(ref).toUpperCase()} • {String(ref.scope).toUpperCase()} • {String(ref.memoryKind).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryTrustLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}{formatMemorySourceLabel(ref) ? ` • ${formatMemorySourceLabel(ref)!.toUpperCase()}` : ''}{formatArchiveBiasLabel(ref) ? ` • ${formatArchiveBiasLabel(ref)!.toUpperCase()}` : ''}
                           </Text>
                           <Text style={styles.messageSourceSubtitle}>
                             {ref.matchReason ? `${ref.matchReason}. ` : ''}
                             {ref.retrievalMode === 'startup' ? 'Always-on startup memory.' : 'Retrieved dynamically for this response.'}
                             {ref.helpfulness != null ? ` Prior feedback: ${formatMemoryTrustLabel(ref)}.` : ''}
+                            {formatArchiveBiasLabel(ref) ? ` Archive evidence: ${formatArchiveBiasLabel(ref)}${ref.archivePassiveScore != null ? ` (${Math.round(ref.archivePassiveScore * 100)}%).` : '.'}` : ''}
                             {ref.soulKey ? ` Bound to ${ref.soulKey.replace(/^soul:/, '').toUpperCase()}.` : ''}
                             {ref.taskFit ? ` ${ref.taskFit === 'core' ? 'Core' : ref.taskFit === 'supporting' ? 'Supporting' : 'Background'} for this task.` : ''}
                           </Text>

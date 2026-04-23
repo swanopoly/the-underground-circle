@@ -667,6 +667,36 @@ async function dispatchOneClientTool(
     case 'desktop.click_at':   return bridge.clickAt(Number(input.x), Number(input.y));
     case 'desktop.screen_size':return bridge.getScreenSize();
 
+    // UC-1: a11y tree grounding (prefer this over screenshot + click_at)
+    case 'desktop.read_a11y_tree': {
+      const r = await bridge.readA11yTree({
+        appName: typeof input.appName === 'string' ? input.appName : undefined,
+        maxDepth: typeof input.maxDepth === 'number' ? input.maxDepth : undefined,
+        maxNodes: typeof input.maxNodes === 'number' ? input.maxNodes : undefined,
+      });
+      if (!r.ok || !r.data) return r;
+      // Compact the tree into text + keep the raw structure under `tree`
+      // so the model can render it and also see exact IDs. Cap the text
+      // render at 8KB so even a 400-node tree stays context-safe.
+      const rendered = bridge.renderA11yTree(r.data.tree).join('\n');
+      return {
+        ok: true,
+        data: {
+          app: r.data.app,
+          pid: r.data.pid,
+          nodeCount: r.data.budget_used,
+          text: rendered.slice(0, 8192),
+          truncated: rendered.length > 8192,
+        },
+      };
+    }
+    case 'desktop.click_element': {
+      return bridge.clickElement({
+        pid: Number(input.pid),
+        path: String(input.path || ''),
+      });
+    }
+
     // ── M3c: workspace + verification ─────────────────────────────────
     case 'workspace.create_room':
       return dispatchWorkspaceCreateRoom(input);

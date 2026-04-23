@@ -60,3 +60,7 @@ assets/models/
 # Python
 __pycache__/
 *.pyc
+
+# Compiled Swift helpers — machine-specific; rebuilt on demand by the bridge.
+scripts/bin/uc-ax-helper
+scripts/bin/uc-ax-helper.dSYM/

@@ -66,6 +66,16 @@ type MemoryBuckets = {
 
 type ViewerTab = 'inbox' | 'all' | 'circle' | 'user' | 'session';
 
+type ArchiveLearningEvent = {
+  memoryId: string;
+  title: string;
+  action: string;
+  score: number | null;
+  createdAt: string;
+  source: string;
+  note: string | null;
+};
+
 function providerLabel(mem: MemoryEntry): string | null {
   switch (mem.source_surface) {
     case 'claude_code_bridge': return 'Claude Code';
@@ -121,6 +131,11 @@ function archiveLineageLabel(mem: MemoryEntry): string | null {
   return null;
 }
 
+function isArchiveDerivedMemory(mem: MemoryEntry): boolean {
+  const source = String(mem.metadata?.source || '');
+  return source === 'thread_archive_match' || source === 'thread_archive_recommendation';
+}
+
 export default function MemoryViewer({ circleId, threadId, userId, accentColor = '#22d3ee', onClose }: Props) {
   const [memories, setMemories] = useState<MemoryBuckets>({ circle: [], user: [], session: [], total: 0 });
   const [loading, setLoading] = useState(true);
@@ -137,6 +152,9 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
   const [sessionArchive, setSessionArchive] = useState<ChatSessionArchiveRecord | null>(null);
   const [archiveMatches, setArchiveMatches] = useState<ChatSessionArchiveSearchMatch[]>([]);
   const [archiveRecommendations, setArchiveRecommendations] = useState<ChatSessionArchiveRecommendation[]>([]);
+  const [archiveBoostedMemories, setArchiveBoostedMemories] = useState<MemoryEntry[]>([]);
+  const [archiveSuppressedMemories, setArchiveSuppressedMemories] = useState<MemoryEntry[]>([]);
+  const [archiveLearningEvents, setArchiveLearningEvents] = useState<ArchiveLearningEvent[]>([]);
 
   // ── Mount animation — same motion language as the chat-bottom
   // popups (fade + snap via spring). Backdrop has its own quick fade
@@ -172,9 +190,74 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
       const { getUserMemories } = await import('../../lib/agentMemory');
       const data = await getUserMemories(circleId, userId);
       setMemories(data);
+      const allLoadedMemories = [...data.circle, ...data.user, ...data.session];
       const archive = await loadChatSessionArchive(circleId, threadId).catch(() => null);
       setSessionArchive(archive);
       setArchiveRecommendations(deriveChatSessionArchiveRecommendations(archive, 6));
+      const archiveDerivedMemories = allLoadedMemories.filter(isArchiveDerivedMemory);
+      if (archiveDerivedMemories.length > 0) {
+        try {
+          const passiveCutoff = new Date(Date.now() - (14 * 24 * 60 * 60 * 1000)).toISOString();
+          const { data: evalRows } = await supabase
+            .from('memory_evaluations')
+            .select('memory_id, score, feedback, created_at, metadata')
+            .in('memory_id', archiveDerivedMemories.map((mem) => mem.id))
+            .eq('evaluation_kind', 'manual_review')
+            .gte('created_at', passiveCutoff)
+            .order('created_at', { ascending: false });
+
+          const passiveByMemoryId = new Map<string, number[]>();
+          const recentPassiveEvents: ArchiveLearningEvent[] = [];
+          for (const row of (evalRows || []) as any[]) {
+            const action = typeof row?.metadata?.action === 'string' ? row.metadata.action : '';
+            const source = typeof row?.metadata?.source === 'string' ? row.metadata.source : '';
+            if (!source.includes('passive')) continue;
+            if (action !== 'confirmed_helpful' && action !== 'weak_signal') continue;
+            if (typeof row.memory_id === 'string' && typeof row.score === 'number') {
+              const arr = passiveByMemoryId.get(row.memory_id) || [];
+              arr.push(row.score);
+              passiveByMemoryId.set(row.memory_id, arr);
+            }
+            const mem = archiveDerivedMemories.find((entry) => entry.id === row.memory_id);
+            if (mem && recentPassiveEvents.length < 10) {
+              recentPassiveEvents.push({
+                memoryId: mem.id,
+                title: mem.title,
+                action,
+                score: typeof row.score === 'number' ? row.score : null,
+                createdAt: row.created_at,
+                source,
+                note: typeof row.feedback === 'string' ? row.feedback : null,
+              });
+            }
+          }
+
+          const boosted = archiveDerivedMemories.filter((mem) => {
+            const scores = passiveByMemoryId.get(mem.id) || [];
+            if (!scores.length) return false;
+            const avg = scores.reduce((sum, value) => sum + value, 0) / scores.length;
+            return avg >= 0.65;
+          });
+          const suppressed = archiveDerivedMemories.filter((mem) => {
+            const scores = passiveByMemoryId.get(mem.id) || [];
+            if (!scores.length) return false;
+            const avg = scores.reduce((sum, value) => sum + value, 0) / scores.length;
+            return avg <= 0.35;
+          });
+
+          setArchiveBoostedMemories(boosted.slice(0, 6));
+          setArchiveSuppressedMemories(suppressed.slice(0, 6));
+          setArchiveLearningEvents(recentPassiveEvents);
+        } catch {
+          setArchiveBoostedMemories([]);
+          setArchiveSuppressedMemories([]);
+          setArchiveLearningEvents([]);
+        }
+      } else {
+        setArchiveBoostedMemories([]);
+        setArchiveSuppressedMemories([]);
+        setArchiveLearningEvents([]);
+      }
       try {
         const { getMemoryHealthReport } = await import('../../lib/memoryConsolidation');
         setHealthReport(await getMemoryHealthReport(circleId));
@@ -703,6 +786,63 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
                 </View>
               </View>
             ))}
+          </View>
+        </View>
+      ) : null}
+
+      {(archiveBoostedMemories.length > 0 || archiveSuppressedMemories.length > 0 || archiveLearningEvents.length > 0) ? (
+        <View style={s.archivePanel}>
+          <View style={s.archiveHeader}>
+            <Text style={s.sectionLabel}>ARCHIVE LEARNING</Text>
+            <Text style={s.archiveMeta}>
+              {archiveBoostedMemories.length} boosted · {archiveSuppressedMemories.length} suppressed · {archiveLearningEvents.length} recent signals
+            </Text>
+          </View>
+          <View style={s.archiveColumns}>
+            <View style={s.archiveColumn}>
+              <Text style={s.archiveColumnTitle}>BOOSTED MEMORIES</Text>
+              {archiveBoostedMemories.length > 0 ? archiveBoostedMemories.map((mem) => (
+                <View key={mem.id} style={s.archiveItem}>
+                  <Text style={s.archiveItemTitle}>{mem.title}</Text>
+                  <Text style={s.archiveItemMeta}>{archiveLineageLabel(mem) || 'Archive-derived memory'}</Text>
+                </View>
+              )) : (
+                <View style={s.archiveItem}>
+                  <Text style={s.archiveItemMeta}>No boosted archive memories yet.</Text>
+                </View>
+              )}
+            </View>
+            <View style={s.archiveColumn}>
+              <Text style={s.archiveColumnTitle}>SUPPRESSED MEMORIES</Text>
+              {archiveSuppressedMemories.length > 0 ? archiveSuppressedMemories.map((mem) => (
+                <View key={mem.id} style={s.archiveItem}>
+                  <Text style={s.archiveItemTitle}>{mem.title}</Text>
+                  <Text style={s.archiveItemMeta}>{archiveLineageLabel(mem) || 'Archive-derived memory'}</Text>
+                </View>
+              )) : (
+                <View style={s.archiveItem}>
+                  <Text style={s.archiveItemMeta}>No suppressed archive memories right now.</Text>
+                </View>
+              )}
+            </View>
+            <View style={s.archiveColumn}>
+              <Text style={s.archiveColumnTitle}>RECENT PASSIVE FEEDBACK</Text>
+              {archiveLearningEvents.length > 0 ? archiveLearningEvents.map((event) => (
+                <View key={`${event.memoryId}:${event.createdAt}:${event.action}`} style={s.archiveItem}>
+                  <Text style={s.archiveItemTitle}>{event.title}</Text>
+                  <Text style={s.archiveItemMeta}>
+                    {event.action.replace(/_/g, ' ').toUpperCase()} · {event.score != null ? `${Math.round(event.score * 100)}%` : 'unscored'} · {new Date(event.createdAt).toLocaleString()}
+                  </Text>
+                  {event.note ? (
+                    <Text style={s.archiveItemBody}>{event.note}</Text>
+                  ) : null}
+                </View>
+              )) : (
+                <View style={s.archiveItem}>
+                  <Text style={s.archiveItemMeta}>No passive archive feedback yet.</Text>
+                </View>
+              )}
+            </View>
           </View>
         </View>
       ) : null}

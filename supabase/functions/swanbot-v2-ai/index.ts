@@ -1280,6 +1280,32 @@ const TOOLS: ToolDef[] = [
       description: "Returns { width, height } of the primary display in pixels.",
       input_schema: { type: "object" as const, properties: {} },
     },
+    {
+      name: "desktop.read_a11y_tree",
+      description:
+        "Returns the accessibility tree (role, label, value, bbox) for the named app (or the frontmost app when `appName` is omitted). **Prefer this over `desktop.screenshot` + `desktop.click_at`** — the tree is ~75% cheaper per step and gives stable semantic selectors. Follow up with `desktop.click_element` using the `id` and `pid` from the response. Returns a pruned JSON tree capped at ~150 nodes.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          appName: { type: "string", description: "Exact macOS app name (e.g. 'Safari', 'zoom.us'). Omit to use the frontmost app." },
+          maxDepth: { type: "integer", minimum: 1, maximum: 10, description: "Default 6." },
+          maxNodes: { type: "integer", minimum: 20, maximum: 400, description: "Default 150." },
+        },
+      },
+    },
+    {
+      name: "desktop.click_element",
+      description:
+        "Clicks an accessibility-tree element by its `id` (dotted path) and `pid` from the prior `desktop.read_a11y_tree` call. Tries AXPress first (native accessibility click); falls back to synthesised click at bbox centre. Use this instead of `desktop.click_at` whenever the a11y tree is available — it survives window resize and theme changes that break pixel coordinates.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          pid: { type: "integer", description: "Process id from the read_a11y_tree response." },
+          path: { type: "string", description: 'Dotted integer path from read_a11y_tree (e.g. "0.2.1").' },
+        },
+        required: ["pid", "path"],
+      },
+    },
   ].map((spec) => ({
     ...spec,
     clientOnly: true,

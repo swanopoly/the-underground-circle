@@ -17,6 +17,10 @@ export type DesktopBridgeError =
   | 'platform_unsupported'
   | 'invalid_input'
   | 'timeout'
+  // UC-1: returned when the Swift AX helper binary isn't compiled yet.
+  // Callers should either prompt the user to rebuild (npm run bridge)
+  // or fall back to vision-grounded tools (screenshot + click_at).
+  | 'helper_missing'
   | 'unknown';
 
 export interface DesktopHealth {

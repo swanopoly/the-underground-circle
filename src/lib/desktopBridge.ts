@@ -277,6 +277,117 @@ export async function getScreenSize(): Promise<DesktopResult<{ width: number; he
   return { ok: true, data: { width: Number(d?.width || 0), height: Number(d?.height || 0) } };
 }
 
+// ─── UC-1: accessibility tree ────────────────────────────────────────────
+//
+// A11y-tree-grounded automation is ~75% cheaper per step than
+// screenshot-grounded because a pruned tree fits in ~400 tokens vs
+// ~1,500 for an XGA screenshot, and selectors ("role=button
+// label='Send'") survive window resizes / theme changes / retina mixes
+// that break pixel coordinates. Backed by the Swift helper at
+// scripts/bin/uc-ax-helper which walks AXUIElement.
+
+export interface A11yNode {
+  id: string;                     // dotted path from root, e.g. "0.2.1"
+  role: string;                   // AX role, e.g. "AXButton"
+  label?: string;                 // title / description / identifier
+  value?: string;                 // state (text-field contents etc.)
+  bbox?: [number, number, number, number]; // [x, y, w, h] in screen coords
+  children?: A11yNode[];
+}
+
+export interface A11yTreeResult {
+  app: string;                    // frontmost app name or requested appName
+  pid: number;                    // used for click_element path resolution
+  budget_used: number;            // nodes walked before the maxNodes cap
+  tree: A11yNode;
+}
+
+/**
+ * Read the accessibility tree for a named app (or the frontmost app
+ * when `appName` is omitted). The returned tree is pruned: layout
+ * scaffolding without labels is elided, deeply-nested unaddressable
+ * leaves are dropped, and a node budget keeps the payload under ~400
+ * tokens for typical app windows.
+ *
+ * Returns `helper_missing` when the Swift helper binary isn't compiled
+ * yet — callers should fall back to the vision path.
+ */
+export async function readA11yTree(args: {
+  appName?: string;
+  maxDepth?: number;
+  maxNodes?: number;
+} = {}): Promise<DesktopResult<A11yTreeResult>> {
+  const params = new URLSearchParams();
+  if (args.appName) params.set('app', args.appName);
+  if (typeof args.maxDepth === 'number') params.set('max_depth', String(args.maxDepth));
+  if (typeof args.maxNodes === 'number') params.set('max_nodes', String(args.maxNodes));
+  const qs = params.toString();
+  const r = await callBridge('GET', `/desktop/a11y_tree${qs ? `?${qs}` : ''}`);
+  if (!r.ok) {
+    // The bridge returns 503 when the helper binary isn't compiled
+    // yet. Normalise that into a specific error code so callers can
+    // fall back to screenshot grounding without guessing from text.
+    const looksMissing = /not compiled|xcode-select/i.test(r.error || '');
+    return {
+      ok: false,
+      error: r.error || 'a11y tree unavailable',
+      errorCode: looksMissing ? 'helper_missing' : (r.errorCode || 'unknown'),
+    } as DesktopResult<A11yTreeResult>;
+  }
+  const d = r.data as any;
+  if (!d?.tree) {
+    return { ok: false, error: 'bridge returned empty a11y payload', errorCode: 'unknown' };
+  }
+  return {
+    ok: true,
+    data: {
+      app: String(d.app || args.appName || ''),
+      pid: Number(d.pid || 0),
+      budget_used: Number(d.budget_used || 0),
+      tree: d.tree as A11yNode,
+    },
+  };
+}
+
+/**
+ * Click an element by its dotted path (as returned from readA11yTree).
+ * `pid` must match the PID the tree was fetched from — element paths
+ * are only meaningful within their source process. The helper tries
+ * AXPress first (native accessibility click) and falls back to a
+ * synthesised CGEvent at the bbox centre for elements that don't
+ * implement Press.
+ */
+export async function clickElement(args: { pid: number; path: string }): Promise<DesktopResult<{ method: string }>> {
+  if (!args.pid || args.pid <= 0) {
+    return { ok: false, error: 'pid required', errorCode: 'invalid_input' };
+  }
+  if (!args.path || !/^[0-9]+(\.[0-9]+)*$/.test(args.path)) {
+    return { ok: false, error: 'path must be a dotted integer sequence', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/click_element', { pid: args.pid, path: args.path });
+  if (!r.ok) return r as DesktopResult<{ method: string }>;
+  const d = r.data as any;
+  return { ok: true, data: { method: String(d?.method || 'unknown') } };
+}
+
+/**
+ * Flatten a pruned tree into a list of addressable nodes + a compact
+ * rendering suitable for LLM consumption (one line per node, indented
+ * by depth). Kept as a pure helper so both the client dispatcher and
+ * smoke tests can format the same way.
+ */
+export function renderA11yTree(node: A11yNode, depth = 0, out: string[] = []): string[] {
+  const indent = '  '.repeat(depth);
+  const parts = [`${indent}[${node.id}]`, node.role];
+  if (node.label) parts.push(`"${node.label.replace(/"/g, '\\"').slice(0, 120)}"`);
+  if (node.value && node.value !== node.label) parts.push(`= "${node.value.replace(/"/g, '\\"').slice(0, 80)}"`);
+  out.push(parts.join(' '));
+  for (const child of node.children || []) {
+    renderA11yTree(child, depth + 1, out);
+  }
+  return out;
+}
+
 export async function pressKeys(combo: string): Promise<DesktopResult<{ combo: string }>> {
   const parsed = parseKeyCombo(combo);
   if (!parsed.ok) {

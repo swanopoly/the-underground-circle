@@ -10,7 +10,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { exec, execSync } = require('child_process');
+const { exec, execSync, execFile, execFileSync } = require('child_process');
 
 const PORT = 7778;
 const CLAUDE_DIR = path.join(os.homedir(), '.claude', 'projects');
@@ -1752,12 +1752,14 @@ const server = http.createServer((req, res) => {
       platform: process.platform,
       supported: process.platform === 'darwin',
       tools: process.platform === 'darwin'
-        ? ['launch', 'focus', 'type', 'keys', 'running_apps', 'screenshot', 'wait_for_app', 'open_url', 'open_path', 'click_at', 'screen_size']
+        ? ['launch', 'focus', 'type', 'keys', 'running_apps', 'screenshot', 'wait_for_app', 'open_url', 'open_path', 'click_at', 'screen_size',
+           ...(fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper')) ? ['a11y_tree', 'click_element'] : [])]
         : [],
       // Surface whether the more-reliable click backend is available
       // so clients can decide whether to attempt `click_at` at all.
       optional: {
         cliclick: desktopToolsHas('cliclick'),
+        ax_helper: fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper')),
       },
     }));
     return;
@@ -2110,6 +2112,84 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    // `/desktop/a11y_tree` — walks the AXUIElement tree of a named app
+    // (or the frontmost app when `app` omitted) via the Swift helper at
+    // scripts/bin/uc-ax-helper. Returns a pruned, LLM-friendly JSON tree.
+    //
+    // Implementation note: the helper binary is compiled on demand at
+    // bridge startup (see ensureAxHelper). Accessibility trust is
+    // required for the helper binary specifically — granting `node` AX
+    // is NOT enough because TCC identifies by code-signed executable.
+    if (url === '/desktop/a11y_tree' && req.method === 'GET') {
+      const parsed = new URL(req.url, 'http://localhost');
+      const appName = parsed.searchParams.get('app') || '';
+      const maxDepth = Math.max(1, Math.min(10, Number(parsed.searchParams.get('max_depth') || 6)));
+      const maxNodes = Math.max(20, Math.min(400, Number(parsed.searchParams.get('max_nodes') || 150)));
+      const helperPath = path.join(__dirname, 'bin', 'uc-ax-helper');
+      if (!fs.existsSync(helperPath)) {
+        res.writeHead(503, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'uc-ax-helper not compiled. Run `npm run build:ax-helper` or restart the bridge.' }));
+        return;
+      }
+      const args = [
+        'tree',
+        ...(appName ? ['--app', appName] : ['--frontmost']),
+        '--max-depth', String(maxDepth),
+        '--max-nodes', String(maxNodes),
+      ];
+      execFile(helperPath, args, { timeout: 8000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err && !stdout) {
+          res.writeHead(500, CORS);
+          res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'helper failed').toString().slice(0, 500) }));
+          return;
+        }
+        // Helper emits a single JSON line on stdout; forward verbatim.
+        res.writeHead(200, CORS);
+        res.end(stdout.toString().trim());
+      });
+      return;
+    }
+
+    // `/desktop/click_element` — clicks an element by the dotted path
+    // returned from `/desktop/a11y_tree`. Tries AXPress first (native
+    // accessibility click); falls back to a synthesised CGEvent at bbox
+    // centre for elements that don't implement Press. PID is required
+    // because AX element paths are only valid under their source app.
+    if (url === '/desktop/click_element' && req.method === 'POST') {
+      readJsonBody(req, 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const pid = Number(parsed?.pid || 0);
+        const pathStr = String(parsed?.path || '');
+        if (!pid || !pathStr) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'pid (number) and path (string) required' }));
+          return;
+        }
+        // Light validation so we don't pass arbitrary shell fragments.
+        if (!/^[0-9]+(\.[0-9]+)*$/.test(pathStr)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'path must be a dotted integer sequence like "0.2.1"' }));
+          return;
+        }
+        const helperPath = path.join(__dirname, 'bin', 'uc-ax-helper');
+        if (!fs.existsSync(helperPath)) {
+          res.writeHead(503, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'uc-ax-helper not compiled.' }));
+          return;
+        }
+        execFile(helperPath, ['click', '--pid', String(pid), '--path', pathStr], { timeout: 5000 }, (err, stdout, stderr) => {
+          if (err && !stdout) {
+            res.writeHead(500, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'click failed').toString().slice(0, 300) }));
+            return;
+          }
+          res.writeHead(200, CORS);
+          res.end(stdout.toString().trim());
+        });
+      });
+      return;
+    }
+
     res.writeHead(404, CORS);
     res.end(JSON.stringify({ ok: false, error: 'Unknown /desktop endpoint. Try /desktop/health.' }));
     return;
@@ -2268,6 +2348,39 @@ server.on('error', (err) => {
 });
 
 process.on('uncaughtException', (err) => console.error('[bridge] Uncaught:', err.message));
+
+/**
+ * Auto-compile the Swift AX helper if we're on macOS, the source file
+ * exists, and the binary is missing or older than the source. Silent
+ * pass-through on other platforms; we log but don't fail boot so the
+ * bridge still serves the non-AX endpoints.
+ *
+ * Why compile at boot: the binary is gitignored (machine-specific
+ * arch) and npm users shouldn't need a separate build step. First
+ * `npm run bridge` after a pull does the work once.
+ */
+function ensureAxHelper() {
+  if (process.platform !== 'darwin') return;
+  const src = path.join(__dirname, 'bin', 'uc-ax-helper.swift');
+  const bin = path.join(__dirname, 'bin', 'uc-ax-helper');
+  if (!fs.existsSync(src)) return;
+  try {
+    const srcStat = fs.statSync(src);
+    const binStat = fs.existsSync(bin) ? fs.statSync(bin) : null;
+    if (binStat && binStat.mtimeMs >= srcStat.mtimeMs) return; // up to date
+  } catch {}
+  try {
+    console.log('[bridge] Compiling uc-ax-helper (one-time, ~2s)…');
+    execFileSync('swiftc', ['-O', '-o', bin, src], { stdio: 'pipe', timeout: 30_000 });
+    fs.chmodSync(bin, 0o755);
+    console.log('[bridge] ✓ uc-ax-helper ready at', bin);
+  } catch (err) {
+    console.warn('[bridge] Could not compile uc-ax-helper:', err.message);
+    console.warn('[bridge] /desktop/a11y_tree will return 503 until the helper is built.');
+    console.warn('[bridge] Install Xcode command-line tools: xcode-select --install');
+  }
+}
+ensureAxHelper();
 
 server.listen(PORT, () => {
   console.log(`\n  Claude Code Bridge`);

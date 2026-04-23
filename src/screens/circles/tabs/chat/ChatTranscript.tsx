@@ -58,6 +58,13 @@ function formatMemoryTrustLabel(ref: PromptMemoryReference): string {
   return 'mixed';
 }
 
+function formatArchiveBiasLabel(ref: PromptMemoryReference): string | null {
+  if (ref.archiveBias === 'boosted') return 'archive boosted';
+  if (ref.archiveBias === 'suppressed') return 'archive suppressed';
+  if (ref.archiveBias === 'neutral' && ref.archivePassiveScore != null) return 'archive neutral';
+  return null;
+}
+
 function formatMemorySourceLabel(ref: PromptMemoryReference): string | null {
   switch (ref.sourceSurface) {
     case 'claude_code_bridge': return 'Claude Code';
@@ -156,12 +163,13 @@ function AssistantBubble({ entry, accentColor }: { entry: ChatEntry; accentColor
               <View key={ref.id} style={styles.memoryRefCard}>
                 <Text style={styles.memoryRefTitle}>{ref.title}</Text>
                 <Text style={styles.memoryRefMeta}>
-                  {formatMemoryStateLabel(ref).toUpperCase()} • {String(ref.scope).toUpperCase()} • {String(ref.memoryKind).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryTrustLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}{formatMemorySourceLabel(ref) ? ` • ${formatMemorySourceLabel(ref)!.toUpperCase()}` : ''}{ref.soulKey ? ` • ${ref.soulKey.replace(/^soul:/, '').toUpperCase()}` : ''}
+                  {formatMemoryStateLabel(ref).toUpperCase()} • {String(ref.scope).toUpperCase()} • {String(ref.memoryKind).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryTrustLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}{formatMemorySourceLabel(ref) ? ` • ${formatMemorySourceLabel(ref)!.toUpperCase()}` : ''}{formatArchiveBiasLabel(ref) ? ` • ${formatArchiveBiasLabel(ref)!.toUpperCase()}` : ''}{ref.soulKey ? ` • ${ref.soulKey.replace(/^soul:/, '').toUpperCase()}` : ''}
                 </Text>
                 {ref.matchReason || ref.helpfulness != null ? (
                   <Text style={styles.wikiRefSubtitle}>
                     {ref.matchReason || ''}
                     {ref.helpfulness != null ? `${ref.matchReason ? ' · ' : ''}prior feedback: ${formatMemoryTrustLabel(ref)}` : ''}
+                    {formatArchiveBiasLabel(ref) ? `${ref.matchReason || ref.helpfulness != null ? ' · ' : ''}archive evidence: ${formatArchiveBiasLabel(ref)}${ref.archivePassiveScore != null ? ` (${Math.round(ref.archivePassiveScore * 100)}%)` : ''}` : ''}
                   </Text>
                 ) : null}
               </View>
