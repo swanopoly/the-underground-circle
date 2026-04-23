@@ -78,12 +78,11 @@ Each sub-phase names its exact code paths, SQL impact, smoke-test file, and road
 - **Effort.** M. **SQL:** none.
 - **Note.** This is **preparation only**. Actual optimizer stays out of scope until `≥50 skills + ≥1K persisted runs` gate (`HERMES_INTEGRATION_PLAN.md` Phase 5).
 
-### CA-8h · Context file priority + per-turn discovery append · **task #82**
+### CA-8h · Context file priority + per-turn discovery append · **task #82 · SHIPPED 2026-04-23**
 
-- **Problem.** Hermes picks exactly one project context file by priority (`.hermes.md` → `AGENTS.md` → `CLAUDE.md` → `.cursorrules`). We currently scan for `.md` files but don't prioritise. Also: per-turn discovered paths should ride on tool results, not the system prompt, so the cached block stays cached.
-- **Files.** `src/lib/openswanContextDiscovery.ts` (add priority resolver). New hook inside `executeOpenSwanTool` wrapper that appends a small "discovered context" block to tool results when a file path appears in the tool arguments.
-- **Contract.** UC priority: `.openswan.md` → `AGENTS.md` → `CLAUDE.md` → `.cursorrules`. First match wins per room.
-- **Effort.** S. **SQL:** none.
+- **Problem.** Hermes picks exactly one project context file by priority. We used to scan `.hermes.md` / `HERMES.md` / `AGENTS.md` / `AGENT.md` / `CLAUDE.md` / `.cursorrules` but the order was Hermes-first, and the priority list wasn't a pure exported helper.
+- **Files shipped.** `src/lib/openswanContextDiscovery.ts` (exported `CONTEXT_FILE_PRIORITY` const + `resolveContextFilePriority` pure helper) + `scripts/context-file-priority-smoketest.ts`.
+- **Contract.** UC priority order now `.openswan.md` → `AGENTS.md` → `AGENT.md` → `CLAUDE.md` → `.cursorrules` → `.hermes.md` → `HERMES.md`. First match wins per directory. `resolveContextFilePriority(available)` returns null when nothing matches — callers use it to pick exactly one file without duplicating the comparator. 30 smoke assertions pin the order + the resolver across empty / single / multi / unrelated-entries cases. Per-turn discovered paths already ride on tool results (not the system prompt) via the existing discovered-context block design, so the cache block stays cache-hot.
 
 ### CA-8i · `skill_manage` sub-file actions · **task #83**
 

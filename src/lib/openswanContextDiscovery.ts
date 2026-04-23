@@ -8,7 +8,43 @@ type ContextDiscoveryResult = {
 
 const DISCOVERY_CACHE_PREFIX = 'openswan_context_discovery::';
 const DISCOVERY_TTL_MS = 10 * 60 * 1000;
-const ROOT_CANDIDATES = ['.hermes.md', 'HERMES.md', 'AGENTS.md', 'AGENT.md', 'CLAUDE.md', '.cursorrules'];
+
+/**
+ * CA-8h: explicit priority order for project context files. UC prefers
+ * `.openswan.md` (a UC-specific manifest lets teams override everything
+ * else) → `AGENTS.md` (our canonical plan file per CLAUDE.md/AGENTS.md
+ * conventions) → `CLAUDE.md` (project instructions Claude Code reads) →
+ * `.cursorrules` (Cursor's convention, still widely used). Legacy
+ * Hermes filenames kept at the back so pre-existing projects don't
+ * silently lose their context file, but they yield to the UC-first
+ * list. First match wins per directory.
+ */
+export const CONTEXT_FILE_PRIORITY: readonly string[] = [
+  '.openswan.md',
+  'AGENTS.md',
+  'AGENT.md',
+  'CLAUDE.md',
+  '.cursorrules',
+  '.hermes.md',
+  'HERMES.md',
+];
+
+const ROOT_CANDIDATES = CONTEXT_FILE_PRIORITY;
+
+/**
+ * Pure resolver — given the list of context filenames a directory
+ * actually contains (case-sensitive), return the highest-priority one
+ * per the CONTEXT_FILE_PRIORITY order. Returns null when nothing
+ * matches. Exported so smoke tests + any future server-side scanner
+ * share one source of truth.
+ */
+export function resolveContextFilePriority(available: readonly string[]): string | null {
+  const set = new Set(available);
+  for (const name of CONTEXT_FILE_PRIORITY) {
+    if (set.has(name)) return name;
+  }
+  return null;
+}
 
 function normalizeDirectory(input: string): string {
   return input

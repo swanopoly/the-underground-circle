@@ -10,7 +10,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { View, Text, Pressable, ScrollView, TextInput, StyleSheet, Platform, ActivityIndicator, Animated } from 'react-native';
 import type { MemoryEntry } from '../../lib/agentRunSystem';
-import { supabase } from '../../lib/supabase';
+import { getCircleSessionMemoryMode } from '../../lib/agentRunSystem';
 import {
   decayMemoryImportance,
   markMemoryReviewState,
@@ -29,6 +29,7 @@ import {
   type ChatSessionArchiveRecord,
   type ChatSessionArchiveSearchMatch,
 } from '../../lib/chatSessionArchive';
+import { supabase } from '../../lib/supabase';
 // VS Code Dark+ tokens — this surface is the IDE-feel "developer
 // console" flavor, not the default rounded-dark UC style. All colors
 // flow through `vsCodeTheme.ts` so a theme swap (Monokai, etc.) only
@@ -74,6 +75,19 @@ type ArchiveLearningEvent = {
   createdAt: string;
   source: string;
   note: string | null;
+};
+
+type MemoryContextPlanLayer = {
+  id: 'user_notes' | 'user_profile' | 'runtime' | 'working' | 'archive';
+  label: string;
+  summary: string;
+  state: 'ready' | 'partial' | 'empty';
+  entries: Array<{ id: string; title: string; body: string; meta?: string | null }>;
+};
+
+type MemoryContextPlanSummary = {
+  sessionMode: 'private' | 'shared';
+  layers: MemoryContextPlanLayer[];
 };
 
 function providerLabel(mem: MemoryEntry): string | null {
@@ -160,6 +174,8 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
   const [archiveSuppressedMemories, setArchiveSuppressedMemories] = useState<MemoryEntry[]>([]);
   const [archiveLearningEvents, setArchiveLearningEvents] = useState<ArchiveLearningEvent[]>([]);
   const [selectedLearningMemoryId, setSelectedLearningMemoryId] = useState<string | null>(null);
+  const [contextPlan, setContextPlan] = useState<MemoryContextPlanSummary | null>(null);
+  const [selectedContextLayerId, setSelectedContextLayerId] = useState<MemoryContextPlanLayer['id'] | null>(null);
 
   // ── Mount animation — same motion language as the chat-bottom
   // popups (fade + snap via spring). Backdrop has its own quick fade
@@ -199,6 +215,189 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
       const archive = await loadChatSessionArchive(circleId, threadId).catch(() => null);
       setSessionArchive(archive);
       setArchiveRecommendations(deriveChatSessionArchiveRecommendations(archive, 6));
+      try {
+        const [{ loadUserMemory }, { loadStartupMemory }] = await Promise.all([
+          import('../../lib/userMemory'),
+          import('../../lib/memoryService'),
+        ]);
+        const [userMemoryContent, startupMemory, sessionMode, sharedDocResult] = await Promise.all([
+          userId ? loadUserMemory(userId, circleId) : Promise.resolve({ combined: '', global: '', circle: '' }),
+          userId ? loadStartupMemory({ circleId, userId, roomId: threadId || undefined }) : Promise.resolve(''),
+          getCircleSessionMemoryMode(circleId).catch(() => 'private' as const),
+          supabase.from('circle_memory').select('content').eq('circle_id', circleId).maybeSingle(),
+        ]);
+
+        const circleRuntimeCount = data.circle.filter((mem) => mem.retrieval_mode !== 'manual_only').length;
+        const userProfileCount = data.user.filter((mem) => mem.retrieval_mode !== 'manual_only').length;
+        const sessionRuntimeCount = data.session.filter((mem) => mem.retrieval_mode !== 'manual_only').length;
+        const startupLines = startupMemory
+          ? startupMemory.split('\n').map((line: string) => line.trim()).filter(Boolean).length
+          : 0;
+        const archiveSignals = archive
+          ? archive.messages.length + archive.events.length + archive.touched.length
+          : 0;
+        const sharedDocChars = typeof sharedDocResult?.data?.content === 'string'
+          ? sharedDocResult.data.content.trim().length
+          : 0;
+        const userNotesChars = userMemoryContent?.combined?.trim().length || 0;
+        const runtimePieces = [
+          circleRuntimeCount ? `${circleRuntimeCount} circle` : null,
+          sessionRuntimeCount ? `${sessionRuntimeCount} session` : null,
+          startupLines ? `${startupLines} startup lines` : null,
+          sharedDocChars ? 'shared circle doc' : null,
+        ].filter(Boolean);
+        const userNoteEntries = [
+          userMemoryContent?.global?.trim()
+            ? {
+                id: 'user-notes-global',
+                title: 'Global User Notes',
+                body: userMemoryContent.global.trim().slice(0, 280),
+                meta: 'global',
+              }
+            : null,
+          userMemoryContent?.circle?.trim()
+            ? {
+                id: 'user-notes-circle',
+                title: 'Circle User Notes',
+                body: userMemoryContent.circle.trim().slice(0, 280),
+                meta: 'circle scoped',
+              }
+            : null,
+        ].filter(Boolean) as MemoryContextPlanLayer['entries'];
+        const userProfileEntries = data.user
+          .filter((mem) => mem.retrieval_mode !== 'manual_only')
+          .slice(0, 6)
+          .map((mem) => ({
+            id: mem.id,
+            title: mem.title,
+            body: mem.content.slice(0, 220),
+            meta: `${mem.memory_kind} · ${mem.scope}`,
+          }));
+        const runtimeEntries = [
+          ...(typeof sharedDocResult?.data?.content === 'string' && sharedDocResult.data.content.trim()
+            ? [{
+                id: 'runtime-circle-doc',
+                title: 'Circle Operating Memory',
+                body: sharedDocResult.data.content.trim().slice(0, 260),
+                meta: 'shared circle doc',
+              }]
+            : []),
+          ...data.circle
+            .filter((mem) => mem.retrieval_mode !== 'manual_only')
+            .slice(0, 4)
+            .map((mem) => ({
+              id: mem.id,
+              title: mem.title,
+              body: mem.content.slice(0, 180),
+              meta: `${mem.memory_kind} · circle`,
+            })),
+          ...data.session
+            .filter((mem) => mem.retrieval_mode !== 'manual_only')
+            .slice(0, 3)
+            .map((mem) => ({
+              id: mem.id,
+              title: mem.title,
+              body: mem.content.slice(0, 180),
+              meta: `${mem.memory_kind} · session`,
+            })),
+          ...(startupMemory
+            ? startupMemory
+                .split('\n')
+                .map((line: string) => line.trim())
+                .filter(Boolean)
+                .slice(0, 4)
+                .map((line: string, index: number) => ({
+                  id: `runtime-startup-${index}`,
+                  title: `Startup Memory ${index + 1}`,
+                  body: line.slice(0, 220),
+                  meta: 'startup bundle',
+                }))
+            : []),
+        ];
+        const workingEntries = allLoadedMemories
+          .slice()
+          .sort((a, b) => (b.importance || 0) - (a.importance || 0))
+          .slice(0, 8)
+          .map((mem) => ({
+            id: mem.id,
+            title: mem.title,
+            body: mem.content.slice(0, 220),
+            meta: `${mem.memory_kind} · ${mem.scope} · ${mem.retrieval_mode || 'on_demand'}`,
+          }));
+        const archiveEntries = archive ? [
+          ...archive.events.slice(-4).reverse().map((event) => ({
+            id: event.id,
+            title: `[${event.kind}] ${event.summary}`.slice(0, 100),
+            body: event.detail || event.summary,
+            meta: 'event',
+          })),
+          ...archive.messages.slice(-3).reverse().map((message) => ({
+            id: message.messageId,
+            title: `${message.role === 'assistant' ? (message.userName || 'SwanBot') : (message.userName || 'User')}`.slice(0, 100),
+            body: message.content.slice(0, 220),
+            meta: 'message',
+          })),
+          ...archive.touched.slice(-4).reverse().map((touch, index) => ({
+            id: `touch-${index}-${touch}`,
+            title: touch,
+            body: touch,
+            meta: 'surface',
+          })),
+        ] : [];
+
+        setContextPlan({
+          sessionMode,
+          layers: [
+            {
+              id: 'user_notes',
+              label: 'User Notes',
+              summary: userNotesChars
+                ? `${userNotesChars} chars of explicit user-authored notes load first.`
+                : 'No user-authored notes saved yet.',
+              state: userNotesChars ? 'ready' : 'empty',
+              entries: userNoteEntries,
+            },
+            {
+              id: 'user_profile',
+              label: 'User Profile',
+              summary: userProfileCount
+                ? `${userProfileCount} user memories are available for profile context.`
+                : 'No inferred user-profile memories available yet.',
+              state: userProfileCount ? 'ready' : 'empty',
+              entries: userProfileEntries,
+            },
+            {
+              id: 'runtime',
+              label: 'Runtime Memory',
+              summary: runtimePieces.length
+                ? `${runtimePieces.join(' · ')}. Session mode is ${sessionMode}.`
+                : `No runtime memory loaded yet. Session mode is ${sessionMode}.`,
+              state: runtimePieces.length ? 'ready' : 'empty',
+              entries: runtimeEntries,
+            },
+            {
+              id: 'working',
+              label: 'Working Memory',
+              summary: allLoadedMemories.length
+                ? `${allLoadedMemories.length} total memory entries are available for retrieval and query-time ranking.`
+                : 'No working-memory candidates available for retrieval yet.',
+              state: allLoadedMemories.length ? 'partial' : 'empty',
+              entries: workingEntries,
+            },
+            {
+              id: 'archive',
+              label: 'Thread Archive',
+              summary: archiveSignals
+                ? `${archiveSignals} archive signals captured across transcript, events, and touched surfaces.`
+                : 'No thread archive signals captured for this thread yet.',
+              state: archiveSignals ? 'ready' : 'empty',
+              entries: archiveEntries,
+            },
+          ],
+        });
+      } catch {
+        setContextPlan(null);
+      }
       const archiveDerivedMemories = allLoadedMemories.filter(isArchiveDerivedMemory);
       if (archiveDerivedMemories.length > 0) {
         try {
@@ -298,6 +497,10 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
   const selectedLearningEvents = useMemo(
     () => archiveLearningEvents.filter((event) => event.memoryId === selectedLearningMemoryId).slice(0, 6),
     [archiveLearningEvents, selectedLearningMemoryId],
+  );
+  const selectedContextLayer = useMemo(
+    () => contextPlan?.layers.find((layer) => layer.id === selectedContextLayerId) || null,
+    [contextPlan, selectedContextLayerId],
   );
 
   const handleDelete = async (memoryId: string) => {
@@ -727,6 +930,68 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
           </Text>
         </View>
       </View>
+
+      {contextPlan ? (
+        <View style={s.archivePanel}>
+          <View style={s.archiveHeader}>
+            <Text style={s.sectionLabel}>MEMORY CONTEXT PLAN</Text>
+            <Text style={s.archiveMeta}>session mode: {contextPlan.sessionMode.toUpperCase()}</Text>
+          </View>
+          <Text style={s.archiveTouched}>
+            Injection order stays stable: user notes → user profile → runtime memory → working memory → thread archive.
+          </Text>
+          <View style={s.contextPlanGrid}>
+            {contextPlan.layers.map((layer) => (
+              <Pressable
+                key={layer.id}
+                onPress={() => setSelectedContextLayerId((current) => current === layer.id ? null : layer.id)}
+                style={({ hovered, pressed }: any) => [
+                  s.contextPlanCard,
+                  layer.state === 'ready' ? s.contextPlanCardReady : null,
+                  layer.state === 'partial' ? s.contextPlanCardPartial : null,
+                  selectedContextLayerId === layer.id ? s.contextPlanCardSelected : null,
+                  hovered && Platform.OS === 'web' ? webHoverGhost : null,
+                  pressed && webPressed,
+                ]}
+              >
+                <View style={s.cardTopRow}>
+                  <Text style={s.contextPlanTitle}>{layer.label}</Text>
+                  <View style={s.metaBadge}>
+                    <Text style={s.metaBadgeText}>{layer.state.toUpperCase()}</Text>
+                  </View>
+                </View>
+                <Text style={s.archiveItemBody}>{layer.summary}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      ) : null}
+
+      {selectedContextLayer ? (
+        <View style={s.archivePanel}>
+          <View style={s.archiveHeader}>
+            <Text style={s.sectionLabel}>{selectedContextLayer.label.toUpperCase()} DETAIL</Text>
+            <Text style={s.archiveMeta}>{selectedContextLayer.entries.length} entries</Text>
+          </View>
+          {selectedContextLayer.entries.length > 0 ? (
+            <View style={s.archiveColumn}>
+              {selectedContextLayer.entries.map((entry) => (
+                <View key={entry.id} style={s.archiveItem}>
+                  <Text style={s.archiveItemTitle}>{entry.title}</Text>
+                  {entry.meta ? (
+                    <Text style={s.archiveItemMeta}>{entry.meta}</Text>
+                  ) : null}
+                  <Text style={s.archiveItemBody}>{entry.body}</Text>
+                </View>
+              ))}
+            </View>
+          ) : (
+            <View style={s.archiveItem}>
+              <Text style={s.archiveItemMeta}>This layer does not have any active entries yet.</Text>
+            </View>
+          )}
+        </View>
+      ) : null}
 
       {threadId && sessionArchive ? (
         <View style={s.archivePanel}>
@@ -1251,6 +1516,38 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 12,
+  },
+  contextPlanGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  contextPlanCard: {
+    flexGrow: 1,
+    minWidth: 220,
+    backgroundColor: bg.editor,
+    borderWidth: 1,
+    borderColor: border.default,
+    borderRadius: radius.subtle,
+    padding: 10,
+    gap: 6,
+  },
+  contextPlanCardReady: {
+    borderColor: `${accent.green}55`,
+  },
+  contextPlanCardPartial: {
+    borderColor: `${accent.yellow}55`,
+  },
+  contextPlanCardSelected: {
+    borderColor: accent.blue,
+    backgroundColor: bg.sidebar,
+  },
+  contextPlanTitle: {
+    color: text.primary,
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.7,
+    fontFamily: MONO,
   },
   archiveColumn: {
     flexGrow: 1,

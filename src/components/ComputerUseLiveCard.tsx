@@ -11,6 +11,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Image, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import MorphingDots from './MorphingDots';
+import { planClarifyTimeout, formatCountdown } from '../lib/clarifyTimeout';
 
 export type LiveAction = { tool: string; input: any; at: number };
 export type LiveScreenshot = { b64: string; url?: string; at: number };
@@ -56,6 +57,11 @@ export interface ComputerUseLiveCardProps {
     options: string[];
     context: string | null;
     timeoutSec: number;
+    /** CA-8e: ISO timestamp of when the confirmation row was created.
+     *  When present, the card renders a live countdown + urgent state
+     *  via planClarifyTimeout. Optional because existing callers may
+     *  not thread it yet — without it the card behaves as before. */
+    createdAtIso?: string;
   } | null;
   /** Called with the picked option when the user decides. Caller writes
    *  it to the DB (`resolveComputerUseConfirmation`). */
@@ -156,6 +162,34 @@ function formatAction(a: LiveAction): string {
     case 'wait': return `Waiting ${inp.duration ?? 1}s`;
     default: return action ? `Running ${action}` : `Using ${a.tool}`;
   }
+}
+
+/**
+ * Countdown text for the pending-confirmation header. Ticks once a
+ * second via a 1Hz setInterval, renders via `planClarifyTimeout`
+ * + `formatCountdown` from `lib/clarifyTimeout.ts` so the math stays
+ * in one place. No-op when `createdAtIso` isn't threaded — older
+ * callers still render without a countdown.
+ */
+function ConfirmCountdown(props: { createdAtIso?: string; timeoutSec: number }): React.ReactElement | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!props.createdAtIso) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [props.createdAtIso]);
+
+  if (!props.createdAtIso) return null;
+  const plan = planClarifyTimeout({
+    createdAt: props.createdAtIso,
+    timeoutMs: Math.max(15_000, (props.timeoutSec || 120) * 1000),
+    now,
+  });
+  return (
+    <Text style={[s.confirmCountdown, plan.urgent && s.confirmCountdownUrgent]}>
+      {formatCountdown(plan.msUntilExpiry)}
+    </Text>
+  );
 }
 
 export default function ComputerUseLiveCard(props: ComputerUseLiveCardProps) {
@@ -302,7 +336,13 @@ export default function ComputerUseLiveCard(props: ComputerUseLiveCardProps) {
           picks an option (or the server times out at 2 minutes). */}
       {props.pendingConfirmation ? (
         <View style={s.confirmBox}>
-          <Text style={s.confirmLabel}>APPROVAL REQUIRED</Text>
+          <View style={s.confirmHeaderRow}>
+            <Text style={s.confirmLabel}>APPROVAL REQUIRED</Text>
+            <ConfirmCountdown
+              createdAtIso={props.pendingConfirmation.createdAtIso}
+              timeoutSec={props.pendingConfirmation.timeoutSec}
+            />
+          </View>
           <Text style={s.confirmQuestion}>{props.pendingConfirmation.question}</Text>
           {props.pendingConfirmation.context ? (
             <Text style={s.confirmContext}>{props.pendingConfirmation.context}</Text>
@@ -810,6 +850,22 @@ const s = StyleSheet.create({
     fontWeight: '900',
     letterSpacing: 1,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  confirmHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  confirmCountdown: {
+    color: '#f59e0b',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    opacity: 0.85,
+  },
+  confirmCountdownUrgent: {
+    color: '#ef4444',
+    opacity: 1,
   },
   confirmQuestion: {
     color: '#fef3c7',
