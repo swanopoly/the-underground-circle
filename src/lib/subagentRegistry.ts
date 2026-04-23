@@ -15,6 +15,7 @@ import {
 import { createRun, addStep, mergeRunMetadata, updateRunStatus, type RunSurface } from './agentRunSystem';
 import { canDelegate } from './delegationGate';
 import { supabase } from './supabase';
+import { logActivity } from '../services/agentActivityLogger';
 import type { PromptMemoryReference } from './memoryService';
 import type { OpenSwanExecutionContract } from './openswanExecution';
 import { buildOpenSwanObservedEvalSummary } from './openswanObservedEvals';
@@ -346,6 +347,30 @@ export async function delegateToSubagent(opts: {
     parentRunId: opts.parentRunId,
   });
   if (!gate.ok) {
+    // Ops trail: gate rejections were previously invisible to the
+    // Activity feed — ops couldn't see when the circle hit its cap.
+    // Fire-and-forget so we never block the parent on a telemetry
+    // write.
+    const reason = gate.reason === 'depth_exceeded' || gate.reason === 'concurrency_exceeded'
+      ? gate.reason
+      : 'concurrency_exceeded';
+    void logActivity({
+      circle_id: opts.circleId,
+      agent_name: opts.subagent.displayName,
+      source: 'system',
+      source_detail: 'delegation_gate',
+      activity_type: 'task_failed',
+      title: `Delegation blocked — ${reason === 'depth_exceeded' ? 'recursion cap' : 'concurrency cap'}`,
+      body: gate.detail || '',
+      status: 'failed',
+      metadata: {
+        gateReason: reason,
+        proposedDepth,
+        inFlight,
+        parentRunId: opts.parentRunId || null,
+        subagentRole: opts.subagent.role,
+      },
+    }).catch(() => {});
     if (gate.reason === 'depth_exceeded' || gate.reason === 'concurrency_exceeded') {
       return rejectedDelegationResult(opts.subagent, gate.reason, gate.detail || '');
     }
