@@ -57,13 +57,12 @@ Each sub-phase names its exact code paths, SQL impact, smoke-test file, and road
 - **Effort.** M. **SQL:** possibly one column check.
 - **Depends on.** Closes existing pending task #32.
 
-### CA-8e · `clarify` / `ask_user` timeout · **task #79**
+### CA-8e · `clarify` / `ask_user` timeout · **task #79 · SHIPPED 2026-04-23**
 
-- **Problem.** `ask_user` blocks indefinitely today. Hermes ships `clarify.timeout: 120` — agent gets a structured timeout and proceeds with a safe default.
-- **Files.** `src/lib/computerUseAgent.ts` (or wherever `ask_user` lives today), `src/components/HitlApprovalBanner.tsx` (countdown + "auto-continuing" message).
-- **Contract.** `timeoutMs` (default 120_000). On timeout: record `{ choice: '__timeout__', fallback: true }`, resume agent with default.
+- **Problem.** `ask_user` blocks indefinitely today. Agent hangs when user wanders off.
+- **Files.** `src/lib/clarifyTimeout.ts` + `scripts/clarify-timeout-smoketest.ts`.
+- **Contract shipped.** `planClarifyTimeout({ createdAt, timeoutMs, now })` returns `{ expiresAtMs, msUntilExpiry, expired, urgent, elapsedFraction }` as a pure computation (client renders countdown, edge fn decides auto-resolve). Default 120_000ms; clamped to [15_000, 3_600_000]. `autoResolveOnTimeout(id, { supabase, defaultChoice })` updates the row with `choice: '__timeout__'` only when `resolved_at IS NULL` so user-won races return `{ ok: true, alreadyResolved: true }`. `formatCountdown(ms)` renders "1m 30s" / "59s" / "auto-continuing…". 41 smoke assertions. UI wiring (HitlApprovalBanner countdown) is the next follow-up — banner can consume `planClarifyTimeout` directly.
 - **Effort.** S. **SQL:** none.
-- **Depends on.** Nothing.
 
 ### CA-8f · Provider fallback chain · **task #80 · SHIPPED 2026-04-23**
 
