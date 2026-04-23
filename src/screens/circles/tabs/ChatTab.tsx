@@ -213,6 +213,7 @@ function looksLikeActionRequest(message: string): boolean {
 import { runOpenSwanSessionTurn, type OpenSwanDelegatedAgentDescriptor } from '../../../lib/openswanSessionRuntime';
 import type { OpenSwanTaskPlan } from '../../../lib/openswanTaskPlanner';
 import type { OpenSwanToolEvent } from '../../../lib/openswanToolRuntime';
+import { getSelectableChatModes } from '../../../lib/openswanModePolicy';
 import {
   executeOpenSwanVerificationCheck,
   type OpenSwanVerificationResult,
@@ -7153,17 +7154,19 @@ function EnhancedReplyBar({ replyTo, accentColor, onClose }: any) {
   );
 }
 
-// ─── Model selector data ─────────────────────────────────────────────────────
-const CHAT_MODE_CONFIG = [
-  { key: 'none', label: 'Off', desc: 'No agent mode — direct AI responses', icon: '--', color: '#606075' },
-  { key: 'talk', label: 'Talk', desc: 'General conversation', icon: '..', color: '#a855f7' },
-  { key: 'plan', label: 'Plan', desc: 'Create implementation plans', icon: 'P', color: '#6366f1' },
-  { key: 'execute', label: 'Execute', desc: 'Do the work, ship code', icon: '!', color: '#f59e0b' },
-  { key: 'review', label: 'Review', desc: 'Review code and work', icon: '?', color: '#22d3ee' },
-  { key: 'research', label: 'Research', desc: 'Deep dive into a topic', icon: 'R', color: '#a855f7' },
-  { key: 'support', label: 'Support', desc: 'Help and troubleshoot', icon: 'S', color: '#3b82f6' },
-  { key: 'design', label: 'Design', desc: 'UI/UX design work', icon: 'D', color: '#ec4899' },
-];
+// ─── Chat mode picker data ───────────────────────────────────────────────────
+// Single source of truth is `OPENSWAN_MODE_POLICIES` in openswanModePolicy.ts.
+// The picker derives its entries so the mode list here can never drift from
+// the policy table. Previously this was a hand-maintained array that missed
+// the `build` mode entirely and had slightly different descriptions for
+// every other mode.
+const CHAT_MODE_CONFIG = getSelectableChatModes().map((policy) => ({
+  key: policy.key,
+  label: policy.key === 'none' ? 'Off' : policy.label,
+  desc:  policy.description,
+  icon:  policy.icon,
+  color: policy.color,
+}));
 
 const CHAT_MODELS = [
   // ── Smart Pick ──

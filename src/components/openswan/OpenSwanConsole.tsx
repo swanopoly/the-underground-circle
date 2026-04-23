@@ -32,6 +32,8 @@ import {
 } from 'react-native';
 import {
   OPENSWAN_MODE_POLICIES,
+  SELECTABLE_CHAT_MODES,
+  getSelectableChatModes,
   type OpenSwanChatMode,
 } from '../../lib/openswanModePolicy';
 import {
@@ -95,16 +97,12 @@ const BIASING_MEMORY_PROBES = [
   'lacks permission to modify',
 ];
 
-const MODE_KEYS: OpenSwanChatMode[] = [
-  'talk',
-  'build',
-  'plan',
-  'execute',
-  'review',
-  'research',
-  'support',
-  'design',
-];
+// Exclude `none` — the Control Panel is for launching an OpenSwan turn,
+// so the "no OpenSwan" option doesn't make sense here. Everything else
+// comes from the shared selectable list.
+const MODE_KEYS: OpenSwanChatMode[] = SELECTABLE_CHAT_MODES.filter(
+  (key) => key !== 'none',
+);
 
 export default function OpenSwanConsole({
   visible,
@@ -319,7 +317,7 @@ export default function OpenSwanConsole({
   }, [canSubmit, onSubmit, trimmed, mode, currentModel]);
 
   const modeDescriptors = useMemo(
-    () => MODE_KEYS.map((k) => OPENSWAN_MODE_POLICIES[k]),
+    () => getSelectableChatModes().filter((p) => p.key !== 'none'),
     [],
   );
 

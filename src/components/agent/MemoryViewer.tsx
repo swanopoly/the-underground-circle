@@ -82,7 +82,7 @@ type MemoryContextPlanLayer = {
   label: string;
   summary: string;
   state: 'ready' | 'partial' | 'empty';
-  entries: Array<{ id: string; title: string; body: string; meta?: string | null }>;
+  entries: Array<{ id: string; title: string; body: string; meta?: string | null; memoryId?: string | null }>;
 };
 
 type MemoryContextPlanSummary = {
@@ -272,6 +272,7 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
             title: mem.title,
             body: mem.content.slice(0, 220),
             meta: `${mem.memory_kind} · ${mem.scope}`,
+            memoryId: mem.id,
           }));
         const runtimeEntries = [
           ...(typeof sharedDocResult?.data?.content === 'string' && sharedDocResult.data.content.trim()
@@ -290,6 +291,7 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
               title: mem.title,
               body: mem.content.slice(0, 180),
               meta: `${mem.memory_kind} · circle`,
+              memoryId: mem.id,
             })),
           ...data.session
             .filter((mem) => mem.retrieval_mode !== 'manual_only')
@@ -299,6 +301,7 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
               title: mem.title,
               body: mem.content.slice(0, 180),
               meta: `${mem.memory_kind} · session`,
+              memoryId: mem.id,
             })),
           ...(startupMemory
             ? startupMemory
@@ -323,6 +326,7 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
             title: mem.title,
             body: mem.content.slice(0, 220),
             meta: `${mem.memory_kind} · ${mem.scope} · ${mem.retrieval_mode || 'on_demand'}`,
+            memoryId: mem.id,
           }));
         const archiveEntries = archive ? [
           ...archive.events.slice(-4).reverse().map((event) => ({
@@ -769,6 +773,48 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
     await load();
   };
 
+  const handleContextJump = (memoryId: string) => {
+    setSelectedLearningMemoryId(memoryId);
+    setActiveTab('all');
+    setSearchResults(null);
+  };
+
+  const handleContextPin = async (mem: MemoryEntry) => {
+    await pinMemory(mem.id);
+    await recordMemoryFeedback({
+      memoryId: mem.id,
+      action: 'pinned',
+      note: 'Pinned from memory context plan',
+      userId,
+      source: 'memory_context_plan',
+    });
+    await load();
+  };
+
+  const handleContextPromote = async (mem: MemoryEntry) => {
+    await promoteMemory(mem.id);
+    await recordMemoryFeedback({
+      memoryId: mem.id,
+      action: 'promoted',
+      note: 'Promoted from memory context plan',
+      userId,
+      source: 'memory_context_plan',
+    });
+    await load();
+  };
+
+  const handleContextDownrank = async (mem: MemoryEntry) => {
+    await decayMemoryImportance(mem.id);
+    await recordMemoryFeedback({
+      memoryId: mem.id,
+      action: 'not_helpful',
+      note: 'Downranked from memory context plan',
+      userId,
+      source: 'memory_context_plan',
+    });
+    await load();
+  };
+
   const renderLibraryMemory = (mem: MemoryEntry) => {
     const kindColor = KIND_COLORS[mem.memory_kind] || '#888888';
     const isEditing = editingId === mem.id;
@@ -982,6 +1028,38 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
                     <Text style={s.archiveItemMeta}>{entry.meta}</Text>
                   ) : null}
                   <Text style={s.archiveItemBody}>{entry.body}</Text>
+                  {entry.memoryId ? (() => {
+                    const mem = allMemories.find((item) => item.id === entry.memoryId);
+                    if (!mem) return null;
+                    return (
+                      <View style={s.actionRow}>
+                        <Pressable
+                          onPress={() => handleContextJump(mem.id)}
+                          style={({ hovered, pressed }: any) => [s.ghostBtn, hovered && webHoverGhost, pressed && webPressed]}
+                        >
+                          <Text style={s.ghostBtnText}>OPEN</Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={() => handleContextPin(mem)}
+                          style={({ hovered, pressed }: any) => [s.ghostBtn, hovered && webHoverGhost, pressed && webPressed]}
+                        >
+                          <Text style={s.ghostBtnText}>PIN</Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={() => handleContextPromote(mem)}
+                          style={({ hovered, pressed }: any) => [s.primaryBtn, hovered && webHoverPrimary, pressed && webPressed]}
+                        >
+                          <Text style={s.primaryBtnText}>PROMOTE</Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={() => handleContextDownrank(mem)}
+                          style={({ hovered, pressed }: any) => [s.dangerBtn, hovered && webHoverDanger, pressed && webPressed]}
+                        >
+                          <Text style={s.dangerBtnText}>DOWNRANK</Text>
+                        </Pressable>
+                      </View>
+                    );
+                  })() : null}
                 </View>
               ))}
             </View>

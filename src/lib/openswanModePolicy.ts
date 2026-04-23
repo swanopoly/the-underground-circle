@@ -173,6 +173,31 @@ export function getOpenSwanModePolicy(mode: OpenSwanChatMode | string | null | u
   return OPENSWAN_MODE_POLICIES[(mode || 'none') as OpenSwanChatMode] || OPENSWAN_MODE_POLICIES.none;
 }
 
+/**
+ * Canonical list of user-selectable chat modes. Use this anywhere the UI
+ * renders a mode picker — ChatTab composer, OpenSwan Console, RoomsTab.
+ * Keeps the picker in lock-step with `OPENSWAN_MODE_POLICIES` so adding
+ * a mode (e.g. a future "explain" mode) automatically shows up in every
+ * picker instead of requiring per-surface updates. Order matches the
+ * user's usual flow: off → casual → structured → audit → research →
+ * recover → design.
+ */
+export const SELECTABLE_CHAT_MODES: OpenSwanChatMode[] = [
+  'none',
+  'talk',
+  'plan',
+  'build',
+  'execute',
+  'review',
+  'research',
+  'support',
+  'design',
+];
+
+export function getSelectableChatModes(): OpenSwanModePolicy[] {
+  return SELECTABLE_CHAT_MODES.map((key) => OPENSWAN_MODE_POLICIES[key]);
+}
+
 export function getOpenSwanSelectedProfileForMode(
   mode: OpenSwanChatMode | string | null | undefined,
 ): OpenSwanExecutionProfile {

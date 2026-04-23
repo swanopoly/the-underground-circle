@@ -1655,27 +1655,42 @@ export function listOpenSwanAnthropicToolsForSurface(
 ): Array<{ name: string; description: string; input_schema: Record<string, unknown> }> {
   const allow = allowedToolNames?.length ? new Set(allowedToolNames) : null;
   const modeKey = typeof mode === 'string' && mode ? mode : null;
-  return TOOL_DEFINITIONS
+  const surfaceCandidates = TOOL_DEFINITIONS
     .filter((tool) => tool.surfaces.includes(surface))
     .filter((tool) => TOOL_LOOP_SAFE_NAMES.has(tool.name))
-    .filter((tool) => !allow || allow.has(tool.name))
-    // Mode filter: tools without a mode tag are mode-agnostic. Tagged
-    // tools only appear if the current mode is in their list. When no
-    // mode is passed, skip this filter entirely (legacy callers).
-    .filter((tool) => {
-      // `none` and `talk` = user hasn't opted into mode discipline —
-      // treat as mode-agnostic so casual chat still has action tools
-      // when an action intent is detected (e.g. "create a room" from
-      // the default chat mode).
-      if (!modeKey || modeKey === 'none' || modeKey === 'talk') return true;
-      const modes = getToolModes(tool);
-      return !modes || modes.includes(modeKey);
-    })
-    .map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      input_schema: tool.inputSchema || { type: 'object', properties: {} },
-    }));
+    .filter((tool) => !allow || allow.has(tool.name));
+  // Mode filter: tools without a mode tag are mode-agnostic. Tagged
+  // tools only appear if the current mode is in their list. `none` and
+  // `talk` = user hasn't opted into mode discipline → pass-through so
+  // casual chat still has action tools when an action intent fires.
+  const result = surfaceCandidates.filter((tool) => {
+    if (!modeKey || modeKey === 'none' || modeKey === 'talk') return true;
+    const modes = getToolModes(tool);
+    return !modes || modes.includes(modeKey);
+  });
+  // Dev-only observability — log when mode gating actually filters tools
+  // so engineers can see why a tool wasn't exposed instead of wondering
+  // silently. Production suppresses this; the Control Panel shows the
+  // same info in UI for end-users.
+  try {
+    // @ts-ignore __DEV__ is a React Native global
+    const isDev = typeof __DEV__ !== 'undefined' && __DEV__;
+    if (isDev && modeKey && modeKey !== 'none' && modeKey !== 'talk' && result.length < surfaceCandidates.length) {
+      const hidden = surfaceCandidates
+        .filter((t) => !result.includes(t))
+        .map((t) => t.name);
+      // eslint-disable-next-line no-console
+      console.debug(
+        `[openswan] mode '${modeKey}' on surface '${surface}' hid ${hidden.length} tool(s):`,
+        hidden,
+      );
+    }
+  } catch { /* never throw from observability */ }
+  return result.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.inputSchema || { type: 'object', properties: {} },
+  }));
 }
 
 /**

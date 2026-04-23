@@ -725,3 +725,39 @@ alter table if exists circle_chat_threads
 alter table if exists circle_chat_threads
   add constraint cct_parent_not_self
   check (parent_thread_id is null or parent_thread_id <> id);
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- CA-8e server completion — sweep stale computer_use_confirmations (2026-04-23)
+-- ═════════════════════════════════════════════════════════════════════════════
+-- In-run poller handles the live 120s timeout. If a run dies mid-poll,
+-- this sweeper reaps the orphan rows every 5 min. Marks `__expired__`
+-- (distinct from `__timeout__`) so telemetry can tell "user ignored"
+-- from "run crashed".
+
+create extension if not exists pg_cron;
+
+create or replace function sweep_stale_computer_use_confirmations()
+returns void language plpgsql security definer as $$
+begin
+  update computer_use_confirmations
+  set
+    choice = '__expired__',
+    resolved_at = now()
+  where
+    resolved_at is null
+    and created_at < now() - interval '15 minutes';
+end;
+$$;
+
+select cron.schedule(
+  'sweep-stale-computer-use-confirmations',
+  '*/5 * * * *',
+  $$select sweep_stale_computer_use_confirmations()$$
+);
+
+grant execute on function sweep_stale_computer_use_confirmations() to postgres;
+grant execute on function sweep_stale_computer_use_confirmations() to service_role;
+
+create index if not exists idx_computer_use_confirmations_unresolved_old
+  on computer_use_confirmations (created_at)
+  where resolved_at is null;
