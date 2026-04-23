@@ -615,6 +615,32 @@ async function executeClientToolCalls(
   for (const call of calls) {
     try {
       const result = await dispatchOneClientTool(bridge, call);
+      // UC-4: cache the last-read a11y tree so an immediately-following
+      // `desktop.click_element` can be tagged with the element's role +
+      // label at record time. Scoped to globalThis so the standalone
+      // `fireClientTool` path can do the same thing.
+      if (call.name === 'desktop.read_a11y_tree' && result.ok) {
+        const d = result.data as any;
+        (globalThis as any).__uc_last_a11y_tree = {
+          app: d?.app,
+          lines: typeof d?.text === 'string' ? d.text.split('\n') : [],
+        };
+      }
+      // Observe tool calls for recording. Lazy-import so v1 users never
+      // pay the module-graph cost. Failures here never affect the real
+      // tool flow — recording is a best-effort observer.
+      try {
+        const rec = await import('./chatRecording');
+        if (rec.isRecordable(call.name) && rec.getActiveSession()) {
+          const target = extractA11yTarget(call, result);
+          rec.appendStep(rec.buildStep({
+            tool: call.name,
+            input: (call.input || {}) as Record<string, unknown>,
+            result: { ok: result.ok, data: result.data, error: result.error },
+            a11yTarget: target,
+          }));
+        }
+      } catch { /* observer failures must never break tool flow */ }
       out.push({
         tool_use_id: call.id,
         content: JSON.stringify(result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error || 'failed' }),
@@ -739,6 +765,66 @@ async function dispatchOneClientTool(
 
     default:
       return { ok: false, error: `Unknown client tool "${call.name}"` };
+  }
+}
+
+// ─── UC-4 recording helpers ─────────────────────────────────────────────
+//
+// `extractA11yTarget` converts a completed `desktop.click_element` (or
+// similar) call into a semantic target the recorder can use for replay.
+// Keeping it a pure function avoids coupling the dispatcher to the
+// recording module — the dispatcher just hands it the call + result.
+
+function extractA11yTarget(
+  call: { name: string; input: unknown },
+  result: { ok: boolean; data?: unknown },
+): { role?: string; label?: string; app?: string } | undefined {
+  if (call.name !== 'desktop.click_element') return undefined;
+  const input = (call.input || {}) as Record<string, any>;
+  // When the click happens inside a recording session, the preceding
+  // `desktop.read_a11y_tree` call leaves its last-rendered text on
+  // window for us to scan. We keep it as a best-effort lookup — if
+  // the info's missing we just record the path without a target.
+  const lastTree = typeof globalThis !== 'undefined' ? (globalThis as any).__uc_last_a11y_tree : null;
+  if (!lastTree || !Array.isArray(lastTree.lines)) return { app: lastTree?.app };
+  const prefix = `[${input.path}]`;
+  for (const line of lastTree.lines as string[]) {
+    if (!line.includes(prefix)) continue;
+    const m = line.match(/\[[0-9.]+\]\s+(\w+)(?:\s+"([^"]*)")?/);
+    if (!m) continue;
+    return { role: m[1], label: m[2] || undefined, app: lastTree.app };
+  }
+  return { app: lastTree?.app };
+}
+
+/**
+ * Public single-tool dispatcher used by /replay and potentially other
+ * callers that need to fire the same client tool path without going
+ * through the Anthropic continuation loop.
+ */
+export async function fireClientTool(
+  call: { tool: string; input: Record<string, unknown> },
+): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const bridge = await import('./desktopBridge');
+  try {
+    const result = await dispatchOneClientTool(bridge, {
+      id: `replay_${Date.now()}`,
+      name: call.tool,
+      input: call.input,
+    });
+    // Stash the last tree so the recorder can find the semantic target
+    // on the *next* click_element call. Scoped to globalThis to avoid
+    // threading through every dispatch signature.
+    if (call.tool === 'desktop.read_a11y_tree' && result.ok) {
+      const d = result.data as any;
+      (globalThis as any).__uc_last_a11y_tree = {
+        app: d?.app,
+        lines: typeof d?.text === 'string' ? d.text.split('\n') : [],
+      };
+    }
+    return result;
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'dispatch threw' };
   }
 }
 

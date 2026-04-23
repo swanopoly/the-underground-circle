@@ -3167,6 +3167,28 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         return;
       }
     }
+    // UC-4: /record + /replay — capture a workflow once, fire it later.
+    // Runs before the planner so the recording observer isn't racing.
+    if (content.startsWith('/record') || content.startsWith('/replay')) {
+      try {
+        const { isRecordingCommand, executeRecordingCommand } = await import('../../../lib/recordingChatCommands');
+        if (isRecordingCommand(content)) {
+          const { fireClientTool } = await import('../../../lib/swanbot');
+          const outcome = await executeRecordingCommand(content, {
+            circleId,
+            userId: currentUserId || 'anonymous',
+            fireTool: fireClientTool,
+          });
+          if (outcome) {
+            addBotMessage(outcome.message, undefined, { localOnly: true });
+            return;
+          }
+        }
+      } catch (err: any) {
+        addBotMessage(`Recording command failed: ${err?.message || 'unknown'}`, undefined, { localOnly: true });
+        return;
+      }
+    }
     // /desktop diag — full bridge health checklist so users can tell
     // WHICH layer is broken when "open zoom" misbehaves. Runs a real
     // launch against a sample app name if they pass one.
