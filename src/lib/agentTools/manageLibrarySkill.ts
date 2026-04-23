@@ -35,7 +35,7 @@ import { supabase } from '../supabase';
 import { parseSkillFrontmatter } from '../skillLibrary';
 import { registerTool } from './registry';
 
-type Action = 'create' | 'patch' | 'delete';
+type Action = 'create' | 'patch' | 'delete' | 'write_file' | 'remove_file';
 
 type Input = {
   action: Action;
@@ -50,6 +50,14 @@ type Input = {
   version?: string;
   /** Optional tags override. Defaults to frontmatter tags. */
   tags?: string[];
+  /** CA-8i: sub-file relative path under the skill's folder, e.g.
+   *  'references/api.md', 'templates/pr.md', 'scripts/run.sh'. Required
+   *  for write_file + remove_file. Must be a forward-slash path with
+   *  no `..` segments and no leading slash. */
+  relpath?: string;
+  /** Optional MIME hint for write_file. Defaults to 'text/markdown' when
+   *  relpath ends in .md, 'text/plain' otherwise. */
+  mimeType?: string;
   /** Free-text justification the agent provides for the human reviewer. */
   rationale?: string;
 };
@@ -57,11 +65,41 @@ type Input = {
 function isInput(value: unknown): value is Input {
   if (!value || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
+  const a = v.action;
   return (
-    (v.action === 'create' || v.action === 'patch' || v.action === 'delete') &&
+    (a === 'create' || a === 'patch' || a === 'delete' || a === 'write_file' || a === 'remove_file') &&
     typeof v.circleId === 'string' && v.circleId.length > 0 &&
     typeof v.name     === 'string' && v.name.length > 0
   );
+}
+
+/**
+ * Relpath validator — same rules the checked-in skillRelPath module
+ * uses when importing multi-file skills. No leading slash, no `..`,
+ * no absolute paths, must contain at least one ASCII alphanumeric
+ * before the final extension. Exported for smoke tests.
+ */
+export function isSafeSkillRelpath(raw: string | undefined): boolean {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > 200) return false;
+  if (raw.startsWith('/') || raw.startsWith('\\')) return false;
+  if (raw.includes('..')) return false;
+  if (raw.includes('\0')) return false;
+  // At least one slash OR at least one alphanumeric character.
+  if (!/[a-zA-Z0-9]/.test(raw)) return false;
+  // Reject Windows drive prefixes.
+  if (/^[a-zA-Z]:/.test(raw)) return false;
+  return true;
+}
+
+function inferMimeType(relpath: string): string {
+  const lower = relpath.toLowerCase();
+  if (lower.endsWith('.md')) return 'text/markdown';
+  if (lower.endsWith('.json')) return 'application/json';
+  if (lower.endsWith('.yml') || lower.endsWith('.yaml')) return 'application/yaml';
+  if (lower.endsWith('.sh')) return 'text/x-shellscript';
+  if (lower.endsWith('.ts') || lower.endsWith('.tsx')) return 'application/typescript';
+  if (lower.endsWith('.js') || lower.endsWith('.jsx')) return 'application/javascript';
+  return 'text/plain';
 }
 
 registerTool({
@@ -76,13 +114,16 @@ registerTool({
   input_schema: {
     type: 'object',
     properties: {
-      action:      { type: 'string', enum: ['create', 'patch', 'delete'] },
+      action: { type: 'string', enum: ['create', 'patch', 'delete', 'write_file', 'remove_file'],
+        description: 'create/patch/delete = full SKILL.md body. write_file/remove_file = sub-file under the skill folder (references/, templates/, scripts/).' },
       circleId:    { type: 'string' },
       name:        { type: 'string', description: 'Skill name, lowercase kebab-case.' },
-      content:     { type: 'string', description: 'Full SKILL.md (YAML frontmatter + markdown body). Required for create.' },
+      content:     { type: 'string', description: 'For create: full SKILL.md body. For write_file: sub-file body.' },
       description: { type: 'string' },
       version:     { type: 'string' },
       tags:        { type: 'array', items: { type: 'string' } },
+      relpath:     { type: 'string', description: 'Required for write_file/remove_file. Relative to skill folder, e.g. "references/api.md". No leading slash, no ".." segments.' },
+      mimeType:    { type: 'string', description: 'Optional MIME hint for write_file (defaults by extension).' },
       rationale:   { type: 'string', description: 'One-paragraph justification for the reviewer.' },
     },
     required: ['action', 'circleId', 'name'],
@@ -92,7 +133,30 @@ registerTool({
     if (!isInput(input)) {
       return { ok: false, error: 'manageLibrarySkill: expected { action, circleId, name, ... }.' };
     }
-    const { action, circleId, name, content, description, version, tags, rationale } = input;
+    const { action, circleId, name, content, description, version, tags, rationale, relpath, mimeType } = input;
+
+    // CA-8i: sub-file actions require a safe relpath + resolve the
+    // target skill's id so the approval row doesn't carry ambiguous
+    // lookup state. write_file also needs content.
+    let subFileSkillId: string | null = null;
+    if (action === 'write_file' || action === 'remove_file') {
+      if (!isSafeSkillRelpath(relpath)) {
+        return { ok: false, error: `${action}: relpath "${relpath ?? ''}" is not safe (no leading slash, no ".." segments, no null bytes, ≤200 chars).` };
+      }
+      if (action === 'write_file' && (!content || content.length === 0)) {
+        return { ok: false, error: 'write_file: content required (empty file not allowed — delete via remove_file instead).' };
+      }
+      // The skill itself must exist — sub-files hang off circle_skills.id.
+      const { data: existing, error: lookupErr } = await supabase
+        .from('circle_skills')
+        .select('id')
+        .eq('circle_id', circleId)
+        .eq('name', name)
+        .maybeSingle();
+      if (lookupErr) return { ok: false, error: `lookup failed: ${lookupErr.message}` };
+      if (!existing) return { ok: false, error: `${action}: no skill named "${name}" in this circle.` };
+      subFileSkillId = existing.id;
+    }
 
     // Create requires a full SKILL.md body. Parse the frontmatter so the
     // approval row carries the structured metadata the reviewer will want.
@@ -115,10 +179,11 @@ registerTool({
       return { ok: false, error: 'patch: specify at least one of content / description / version / tags.' };
     }
 
-    // Sanity check: the target skill must exist for patch/delete, and must
-    // NOT exist for create. Catching this at proposal time saves the
-    // reviewer from approving something that will fail at apply-time.
-    if (action !== 'create') {
+    // Sanity check: the target skill must exist for patch/delete (the
+    // sub-file actions already resolved skill_id above). For create,
+    // the target must NOT exist. Catching this at proposal time saves
+    // the reviewer from approving something that will fail at apply-time.
+    if (action === 'patch' || action === 'delete') {
       const { data: existing, error: existingError } = await supabase
         .from('circle_skills')
         .select('id, name')
@@ -131,7 +196,7 @@ registerTool({
       if (!existing) {
         return { ok: false, error: `${action}: no skill named "${name}" in this circle.` };
       }
-    } else {
+    } else if (action === 'create') {
       const { data: existing } = await supabase
         .from('circle_skills')
         .select('id')
@@ -142,6 +207,8 @@ registerTool({
         return { ok: false, error: `create: a skill named "${name}" already exists. Use action='patch' to edit it.` };
       }
     }
+    // write_file + remove_file skip the existence/non-existence check —
+    // the earlier block already resolved subFileSkillId.
 
     // Agent identity context — the approval row pairs this with the caller.
     // ctx.session carries sessionKey / agentName when the loop runs under a
@@ -149,7 +216,7 @@ registerTool({
     const sessionKey = String(ctx.session.sessionKey || 'default::blackswan');
     const agentName  = String(ctx.session.agentName  || 'BlackSwan');
 
-    const payload = {
+    const payload: Record<string, unknown> = {
       action,
       circleId,
       name,
@@ -161,11 +228,18 @@ registerTool({
       parsed:      parsed ? { name: parsed.name, description: parsed.description, version: parsed.version, tags: parsed.tags } : null,
       iteration:   ctx.iteration,
     };
+    if (action === 'write_file' || action === 'remove_file') {
+      payload.relpath = relpath;
+      payload.skillId = subFileSkillId;
+      if (action === 'write_file') payload.mimeType = mimeType || inferMimeType(relpath!);
+    }
 
     const humanDescription =
-      action === 'create' ? `Create new SKILL.md "${name}"`
-      : action === 'patch' ? `Patch SKILL.md "${name}"`
-      : `Delete SKILL.md "${name}"`;
+      action === 'create'     ? `Create new SKILL.md "${name}"`
+      : action === 'patch'    ? `Patch SKILL.md "${name}"`
+      : action === 'delete'   ? `Delete SKILL.md "${name}"`
+      : action === 'write_file' ? `Write sub-file "${relpath}" under skill "${name}"`
+      : `Remove sub-file "${relpath}" under skill "${name}"`;
 
     const { data, error } = await supabase
       .from('agent_approvals')

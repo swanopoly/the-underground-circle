@@ -722,6 +722,26 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // the user selects OpenSwan's plan mode, the dispatcher refuses
   // destructive execution kinds (see chatAutomationPlanner helpers).
   const planActMode: 'plan' | 'act' = chatMode === 'plan' ? 'plan' : 'act';
+
+  // Per-thread chat mode persistence. Users pick "plan" or "execute" for
+  // a given thread and expect it to stick when they come back. Without
+  // this, every thread reset to 'none' and lost the user's posture.
+  // localStorage keeps it cheap — no migration, no RPC. Scope by thread
+  // so different threads remember different modes.
+  const chatModeStorageKey = activeThreadId ? `uc_chat_mode:${activeThreadId}` : null;
+  useEffect(() => {
+    if (!chatModeStorageKey || typeof localStorage === 'undefined') return;
+    try {
+      const saved = localStorage.getItem(chatModeStorageKey);
+      if (saved && saved !== chatMode) setChatMode(saved);
+    } catch { /* private mode / disabled — not critical */ }
+    // Intentional: load once per thread change, not on every mode edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatModeStorageKey]);
+  useEffect(() => {
+    if (!chatModeStorageKey || typeof localStorage === 'undefined') return;
+    try { localStorage.setItem(chatModeStorageKey, chatMode); } catch { /* quota */ }
+  }, [chatModeStorageKey, chatMode]);
   const [agentName, setAgentNameState] = useState<string>(MAIN_CHAT_AGENT_NAME);
   const [editingAgentName, setEditingAgentName] = useState(false);
   const [agentNameDraft, setAgentNameDraft] = useState('');

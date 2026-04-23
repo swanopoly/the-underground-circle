@@ -29,13 +29,28 @@ function rankMemories(memories: MemoryEntry[]): MemoryEntry[] {
   });
 }
 
-function formatUserProfile(memories: MemoryEntry[]): string {
+function formatUserProfile(memories: MemoryEntry[], dedupAgainst?: string): string {
   const ranked = rankMemories(memories)
     .filter((memory) => memory.retrieval_mode !== 'manual_only')
     .slice(0, 8);
   if (ranked.length === 0) return '';
+  // Strip any profile entry whose first ~40 content chars already appear
+  // verbatim in the user-authored notes block. Two sources writing the
+  // same fact (user notes + inferred profile) burns tokens and risks the
+  // model treating near-duplicates as separate signals.
+  const normalizedDedup = dedupAgainst
+    ? dedupAgainst.toLowerCase().replace(/\s+/g, ' ')
+    : null;
+  const deduped = normalizedDedup
+    ? ranked.filter((memory) => {
+        const needle = memory.content.slice(0, 40).toLowerCase().replace(/\s+/g, ' ').trim();
+        if (needle.length < 12) return true; // too short to be a reliable dedup match
+        return !normalizedDedup.includes(needle);
+      })
+    : ranked;
+  if (deduped.length === 0) return '';
   return `## User Profile\n${
-    ranked
+    deduped
       .map((memory) => `- [${memory.memory_kind}] ${memory.title}: ${memory.content.slice(0, 180)}`)
       .join('\n')
   }`;
@@ -186,7 +201,10 @@ export async function buildOpenSwanMemoryStores(args: {
   const userNotes = userMemoryContent.combined
     ? `## User Notes\n${userMemoryContent.combined}`
     : '';
-  const userProfile = formatUserProfile(userMemories);
+  // Dedup profile against notes — user-authored notes are the higher-
+  // signal source, so we suppress system-inferred profile rows that
+  // already appear there.
+  const userProfile = formatUserProfile(userMemories, userMemoryContent.combined || undefined);
   const workingMemory = promptBundle.memoryContext;
   // Order: user-authored notes first (highest signal — user told us directly),
   // then system-inferred user profile, then runtime memory, then working

@@ -46,6 +46,7 @@ import {
 import { analyzeMessageRouting } from '../../lib/messageRouting';
 import { rageForget } from '../../lib/memoryActions';
 import { supabase } from '../../lib/supabase';
+import { useClaudeSpendBreakdown } from '../../lib/circleCostTelemetry';
 
 type ToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
 
@@ -129,6 +130,12 @@ export default function OpenSwanConsole({
   const [pruneBusy, setPruneBusy] = useState(false);
   const [pruneMessage, setPruneMessage] = useState<string | null>(null);
   const [showHiddenTools, setShowHiddenTools] = useState(false);
+  const [budgetCap, setBudgetCap] = useState<number | null>(null);
+
+  // Live 24h Claude spend for this circle — the umbrella cap across
+  // every agent. Control Panel shows this so the user knows whether a
+  // new turn will push them past the ceiling before they launch.
+  const spend = useClaudeSpendBreakdown(visible ? circleId || null : null, 24);
 
   useEffect(() => {
     if (!visible) return;
@@ -212,6 +219,32 @@ export default function OpenSwanConsole({
           setMemoryCount(null);
           setMemoryPreview([]);
         }
+      }
+    })();
+  }, [visible, circleId]);
+
+  // Budget cap probe — read the circle's umbrella 24h Claude cap from
+  // circles.settings. Default $10 when unset. Runs once per open.
+  const budgetProbeRef = useRef(0);
+  useEffect(() => {
+    if (!visible || !circleId) {
+      setBudgetCap(null);
+      return;
+    }
+    const token = ++budgetProbeRef.current;
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from('circles')
+          .select('settings')
+          .eq('circle_id', circleId)
+          .single();
+        const cap = (data?.settings as any)?.claude_total_max_cost_usd;
+        if (budgetProbeRef.current === token) {
+          setBudgetCap(typeof cap === 'number' && cap > 0 ? cap : 10);
+        }
+      } catch {
+        if (budgetProbeRef.current === token) setBudgetCap(10);
       }
     })();
   }, [visible, circleId]);
@@ -463,6 +496,13 @@ export default function OpenSwanConsole({
               </View>
             ) : null}
 
+            {/* Budget strip — live 24h Claude spend vs the umbrella cap.
+                Shows before launch so the user can decide whether to
+                push past their ceiling or bump it in Settings. */}
+            {circleId && budgetCap !== null ? (
+              <BudgetStrip spent={spend.totalCost} cap={budgetCap} loading={spend.loading} />
+            ) : null}
+
             {/* Memory preview — real titles so the user sees what the agent scans */}
             {memoryPreview.length > 0 ? (
               <View style={styles.memPreview}>
@@ -571,6 +611,48 @@ export default function OpenSwanConsole({
           </Pressable>
         </View>
       </View>
+    </View>
+  );
+}
+
+// ── Budget strip ─────────────────────────────────────────────────────────
+// Compact horizontal bar: "SPEND · $0.42 / $10.00 (4%)" with a colored
+// fill bar. Colors shift from green → amber → red as spend climbs.
+function BudgetStrip({
+  spent,
+  cap,
+  loading,
+}: {
+  spent: number;
+  cap: number;
+  loading: boolean;
+}) {
+  const pct = cap > 0 ? Math.min(100, (spent / cap) * 100) : 0;
+  // Green ≤60%, amber 60-85%, red >85%. Gives a predictable visual
+  // signal that matches a three-stage "safe/warn/stop" mental model.
+  const barColor = pct > 85 ? '#ef4444' : pct > 60 ? '#f59e0b' : '#22c55e';
+  return (
+    <View style={styles.budgetStrip}>
+      <View style={styles.budgetStripHeader}>
+        <Text style={styles.budgetStripLabel}>SPEND · 24H</Text>
+        <Text style={[styles.budgetStripValue, { color: barColor }]}>
+          {loading ? '…' : `$${spent.toFixed(2)} / $${cap.toFixed(2)}`}
+          <Text style={styles.budgetStripPct}> ({Math.round(pct)}%)</Text>
+        </Text>
+      </View>
+      <View style={styles.budgetBarTrack}>
+        <View
+          style={[
+            styles.budgetBarFill,
+            { width: `${pct}%` as any, backgroundColor: barColor },
+          ]}
+        />
+      </View>
+      {pct > 85 ? (
+        <Text style={[styles.inputHint, { color: '#ef4444', marginTop: 3 }]}>
+          ⚠ Over 85% of umbrella cap. Next turn may be blocked.
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -860,6 +942,45 @@ const styles = StyleSheet.create({
     color: '#38bdf8',
     fontFamily: 'monospace',
     fontSize: 10,
+  },
+  budgetStrip: {
+    marginTop: 6,
+    padding: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    backgroundColor: FIELD_BG,
+    gap: 5,
+  },
+  budgetStripHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  budgetStripLabel: {
+    color: MUTED,
+    fontFamily: 'monospace',
+    fontSize: 9,
+    letterSpacing: 1.2,
+    fontWeight: '700',
+  },
+  budgetStripValue: {
+    fontFamily: 'monospace',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  budgetStripPct: {
+    color: TEXT_DIM,
+    fontWeight: '600',
+  },
+  budgetBarTrack: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#1a202c',
+    overflow: 'hidden',
+  },
+  budgetBarFill: {
+    height: 4,
   },
   inlineRow: {
     flexDirection: 'row',

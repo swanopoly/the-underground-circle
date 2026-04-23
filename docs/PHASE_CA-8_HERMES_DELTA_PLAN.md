@@ -83,12 +83,11 @@ Each sub-phase names its exact code paths, SQL impact, smoke-test file, and road
 - **Files shipped.** `src/lib/openswanContextDiscovery.ts` (exported `CONTEXT_FILE_PRIORITY` const + `resolveContextFilePriority` pure helper) + `scripts/context-file-priority-smoketest.ts`.
 - **Contract.** UC priority order now `.openswan.md` → `AGENTS.md` → `AGENT.md` → `CLAUDE.md` → `.cursorrules` → `.hermes.md` → `HERMES.md`. First match wins per directory. `resolveContextFilePriority(available)` returns null when nothing matches — callers use it to pick exactly one file without duplicating the comparator. 30 smoke assertions pin the order + the resolver across empty / single / multi / unrelated-entries cases. Per-turn discovered paths already ride on tool results (not the system prompt) via the existing discovered-context block design, so the cache block stays cache-hot.
 
-### CA-8i · `skill_manage` sub-file actions · **task #83**
+### CA-8i · `skill_manage` sub-file actions · **task #83 · SHIPPED 2026-04-23**
 
-- **Problem.** Sub-file writes (`references/api.md`, etc.) have no tool action today.
-- **Files.** `src/lib/agentTools/manageLibrarySkill.ts` (add `write_file` / `remove_file` actions, HITL-gated).
-- **Effort.** S (after CA-8c). **SQL:** none — rides CA-8c's table.
-- **Depends on.** CA-8c.
+- **Problem.** Sub-file writes (`references/api.md`, etc.) had no tool action — agents could only touch the primary SKILL.md body, not the supporting files CA-8c made addressable.
+- **Files shipped.** `src/lib/agentTools/manageLibrarySkill.ts` (added `write_file` / `remove_file` actions) + `src/lib/skillLibraryWrite.ts` (applies the approved mutations to `circle_skill_files`) + `scripts/skill-subfile-smoketest.ts`.
+- **Contract.** Both actions require a safe `relpath` (no leading slash, no `..` segments, no null bytes, no Windows drive prefix, ≤200 chars, must contain at least one alphanumeric). `write_file` also requires non-empty `content`; MIME inferred from extension (.md→text/markdown, .json→application/json, .yml/.yaml, .sh, .ts/.tsx, .js/.jsx, else text/plain). Both file an `agent_approvals` row with `action_type: skill.write_file` / `skill.remove_file`; `applyApprovedSkillAction` re-verifies the parent skill still exists (guards against delete-between-propose-and-approve races), then upserts on `(skill_id, relpath)` or deletes by the same key. 40+ smoke assertions on the safe-relpath rejection matrix + MIME inference.
 
 ### CA-8j · Session lineage columns · **task #84**
 

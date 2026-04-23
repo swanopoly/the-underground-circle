@@ -48,7 +48,7 @@ export async function applyApprovedSkillAction(approvalId: string): Promise<Appl
   }
 
   const payload = approval.payload || {};
-  const action = payload.action as 'create' | 'patch' | 'delete' | undefined;
+  const action = payload.action as 'create' | 'patch' | 'delete' | 'write_file' | 'remove_file' | undefined;
   const circleId = payload.circleId as string | undefined;
   const name = payload.name as string | undefined;
   if (!action || !circleId || !name) {
@@ -100,8 +100,7 @@ export async function applyApprovedSkillAction(approvalId: string): Promise<Appl
       if (error) return { ok: false, error: `update failed: ${error.message}` };
       if (!data)  return { ok: false, error: `patch: no skill named "${name}" in circle ${circleId}` };
       skillId = data.id;
-    } else {
-      // delete
+    } else if (action === 'delete') {
       const { data, error } = await supabase
         .from('circle_skills')
         .delete()
@@ -112,6 +111,57 @@ export async function applyApprovedSkillAction(approvalId: string): Promise<Appl
       if (error) return { ok: false, error: `delete failed: ${error.message}` };
       if (!data)  return { ok: true, applied: false, reason: `no skill named "${name}" to delete` };
       skillId = data.id;
+    } else if (action === 'write_file' || action === 'remove_file') {
+      // CA-8i: sub-file mutations against `circle_skill_files`. The
+      // manageLibrarySkill tool already resolved skillId at proposal
+      // time; re-verify here since the skill could have been deleted
+      // between proposal and approval (rare race — fail loudly rather
+      // than write to a ghost skill_id).
+      const relpath = payload.relpath as string | undefined;
+      if (!relpath) return { ok: false, error: `${action}: payload missing relpath` };
+      const { data: skill, error: lookupErr } = await supabase
+        .from('circle_skills')
+        .select('id')
+        .eq('circle_id', circleId)
+        .eq('name', name)
+        .maybeSingle();
+      if (lookupErr) return { ok: false, error: `${action}: skill lookup failed: ${lookupErr.message}` };
+      if (!skill) return { ok: false, error: `${action}: skill "${name}" no longer exists (deleted between proposal and approval).` };
+      skillId = skill.id;
+
+      if (action === 'write_file') {
+        const content = payload.content as string | undefined;
+        if (typeof content !== 'string' || content.length === 0) {
+          return { ok: false, error: 'write_file: content required and must be non-empty' };
+        }
+        const mimeType = typeof payload.mimeType === 'string' ? payload.mimeType : 'text/plain';
+        // upsert keyed by (skill_id, relpath) — matches the unique index
+        // in the 20260507_circle_skill_files migration.
+        const { error: writeErr } = await supabase
+          .from('circle_skill_files')
+          .upsert({
+            skill_id: skill.id,
+            relpath,
+            content,
+            mime_type: mimeType,
+            size_bytes: content.length,
+            created_by: authorId ?? null,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'skill_id,relpath' });
+        if (writeErr) return { ok: false, error: `write_file failed: ${writeErr.message}` };
+      } else {
+        const { data: removed, error: removeErr } = await supabase
+          .from('circle_skill_files')
+          .delete()
+          .eq('skill_id', skill.id)
+          .eq('relpath', relpath)
+          .select('id')
+          .maybeSingle();
+        if (removeErr) return { ok: false, error: `remove_file failed: ${removeErr.message}` };
+        if (!removed) return { ok: true, applied: false, reason: `no file at "${relpath}" to remove` };
+      }
+    } else {
+      return { ok: false, error: `unknown action: ${String(action)}` };
     }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
