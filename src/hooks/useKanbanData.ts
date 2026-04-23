@@ -9,6 +9,8 @@ import { supabase } from '../lib/supabase';
 import { awardXP, getXPForAction } from '../lib/gamification';
 import { invokeDirect } from '../lib/agentInvocation';
 import { wakeAndAssignTask } from '../lib/bridgeTaskDispatcher';
+import { runOpenSwanSessionTurn, type OpenSwanToolEvent } from '../lib/openswanSessionRuntime';
+import { resolveSessionCodingProfile } from '../lib/chatSessionProfile';
 import { inferTaskCapabilityProfile, getTaskCapabilityProfile } from '../lib/taskCapabilityProfiles';
 import {
   createInitialTaskRunSteps, appendTaskRunStep, createTaskRunArtifact,
@@ -35,6 +37,8 @@ import {
   TaskRunStatus,
   TaskOwnershipStatus,
 } from '../types/kanban';
+import type { OpenSwanVerificationResult } from '../lib/openswanVerificationRuntime';
+import type { SwanBotStructuredArtifact } from '../lib/swanbot';
 
 export interface KanbanMember {
   id: string;
@@ -319,6 +323,7 @@ function normalizeTaskRun(run: any): TaskRun {
   const outputPayload = run?.output_payload && typeof run.output_payload === 'object' ? run.output_payload : {};
   return {
     ...run,
+    openswan_run_id: typeof run?.openswan_run_id === 'string' ? run.openswan_run_id : null,
     run_kind: run?.run_kind || 'execute',
     status: (run?.status || 'running') as TaskRunStatus,
     input_payload: run?.input_payload && typeof run.input_payload === 'object' ? run.input_payload : {},
@@ -409,6 +414,125 @@ function extractCodeAttachments(text: string): TaskAttachment[] {
     attachments.push({ url: '', name: `code.${lang}`, type: 'code', language: lang });
   }
   return attachments;
+}
+
+function mapOpenSwanArtifactsToTaskAttachments(artifacts: SwanBotStructuredArtifact[]): TaskAttachment[] {
+  const attachments: TaskAttachment[] = [];
+  for (const artifact of artifacts) {
+    if (artifact.kind === 'code') {
+      const language = typeof artifact.metadata?.language === 'string' ? artifact.metadata.language : undefined;
+      attachments.push({
+        url: artifact.url || '',
+        name: artifact.title || `artifact.${language || 'txt'}`,
+        type: 'code' as const,
+        language,
+      });
+      continue;
+    }
+    if (artifact.kind === 'image') {
+      attachments.push({
+        url: artifact.url || '',
+        name: artifact.title || 'image',
+        type: 'image' as const,
+      });
+      continue;
+    }
+    if (artifact.url) {
+      attachments.push({
+        url: artifact.url,
+        name: artifact.title || artifact.kind,
+        type: 'file' as const,
+      });
+    }
+  }
+  return attachments;
+}
+
+function mapOpenSwanArtifactsToTaskRunArtifacts(artifacts: SwanBotStructuredArtifact[]): Array<{
+  artifactKind: string;
+  label: string;
+  content?: string;
+  url?: string;
+  filePath?: string;
+  metadata?: Record<string, unknown>;
+}> {
+  return artifacts.map((artifact) => ({
+    artifactKind:
+      artifact.kind === 'code'
+        ? 'code_patch'
+        : artifact.kind === 'image'
+          ? 'image'
+          : artifact.kind === 'webpage'
+            ? 'design_spec'
+            : 'report',
+    label: artifact.title || artifact.kind,
+    content: artifact.content || undefined,
+    url: artifact.url || undefined,
+    metadata: artifact.metadata || {},
+  }));
+}
+
+function buildOpenSwanTaskRunOutput(opts: {
+  response: string;
+  mode: AgentMode;
+  artifacts: SwanBotStructuredArtifact[];
+  verificationResults: OpenSwanVerificationResult[];
+  toolEvents: OpenSwanToolEvent[];
+}): TaskRunOutput {
+  const summary = opts.response.split('\n').map(line => line.trim()).find(Boolean)?.slice(0, 240) || 'OpenSwan task run';
+  const blockers = extractRuntimeBlockers(opts.response, opts.toolEvents, opts.verificationResults);
+  const markComplete = opts.mode === 'execute' && blockers.length === 0;
+  const needsReview = opts.verificationResults.some((result) => !result.ok);
+  return {
+    summary,
+    deliverable: opts.response,
+    blockers,
+    next_actions: [],
+    proposed_status: markComplete ? null : 'in_progress',
+    mark_complete: markComplete,
+    needs_review: needsReview,
+    artifacts: opts.artifacts.map((artifact) => ({
+      name: artifact.title || artifact.kind,
+      type: artifact.kind === 'image' ? 'image' : artifact.kind === 'code' ? 'code' : artifact.url ? 'link' : 'other',
+      url: artifact.url || undefined,
+      language: typeof artifact.metadata?.language === 'string' ? artifact.metadata.language : undefined,
+    })),
+  };
+}
+
+function extractRuntimeBlockers(
+  response: string,
+  toolEvents: OpenSwanToolEvent[],
+  verificationResults: OpenSwanVerificationResult[],
+): string[] {
+  const blockers: string[] = [];
+  for (const event of toolEvents) {
+    if (event.status === 'failed' || event.status === 'blocked' || event.status === 'manual_required') {
+      blockers.push(event.summary);
+    }
+  }
+  for (const result of verificationResults) {
+    if (!result.ok || result.status === 'manual_required' || result.status === 'blocked') {
+      blockers.push(result.summary);
+    }
+  }
+  const lower = response.toLowerCase();
+  const phrases = [
+    'need more information',
+    'need more info',
+    'need access',
+    'need approval',
+    'waiting on',
+    'blocked',
+    'cannot complete',
+    "can't complete",
+    'missing context',
+    'please provide',
+  ];
+  if (phrases.some((phrase) => lower.includes(phrase))) {
+    blockers.push('OpenSwan requested more context or access before completion.');
+  }
+  return Array.from(new Set(blockers)).slice(0, 6);
 }
 
 function resolveCompletionPolicy(task: Pick<KanbanTask, 'completion_policy' | 'assigned_agent_ids' | 'assigned_agent_id'>): TaskCompletionPolicy {
@@ -1447,15 +1571,74 @@ export function useKanbanData(circleId: string): KanbanData {
     }
 
     try {
-      const result = await invokeDirect({
-        messageId: crypto.randomUUID(),
-        circleId,
-        command: message,
-        senderId: currentUserId,
-        targetAgentId,
-        targetAgentName,
-        model: modelWithThinking || null,
-      }, targetAgent, targetAgent.gatewayUrl);
+      const useOpenSwanRuntime = targetAgent.provider === 'blackswan' || targetAgent.id === 'blackswan-default';
+      const result = useOpenSwanRuntime
+        ? await (async () => {
+            const sessionProfile = resolveSessionCodingProfile('auto', message, 'main_chat');
+            const structured = await runOpenSwanSessionTurn({
+              message,
+              context: {
+                userId: currentUserId,
+                circleId,
+                userName: targetAgentName,
+                agentId: targetAgentId,
+                agentName: targetAgentName,
+                model: modelWithThinking || null,
+              },
+              surface: 'main_chat',
+              runSurface: 'feed_task',
+              taskId: task.id,
+              mode: mode === 'plan' ? 'task_plan' : 'task_execute',
+              title: `Task: ${task.title}`.slice(0, 100),
+              goal: task.description?.slice(0, 500) || task.title.slice(0, 500),
+              sessionProfile,
+              metadata: {
+                taskRunId,
+                triggerSource: options?.triggerSource || 'manual',
+                launchedFrom: 'useKanbanData.runAgentOnTask',
+                targetAgentId,
+                targetAgentName,
+                taskCapabilityProfile: profileKey,
+                ownership_status: ownershipPayload?.ownership_status || null,
+              },
+              autoExecuteVerification: mode === 'execute',
+            });
+
+            const output = buildOpenSwanTaskRunOutput({
+              response: structured.response,
+              mode,
+              artifacts: structured.artifacts || [],
+              verificationResults: structured.verificationResults || [],
+              toolEvents: structured.toolEvents || [],
+            });
+            const openSwanAttachments = mapOpenSwanArtifactsToTaskAttachments(structured.artifacts || []);
+            const fallbackCodeAttachments = extractCodeAttachments(structured.response);
+            const attachments = [...openSwanAttachments, ...fallbackCodeAttachments];
+            return {
+              success: true,
+              responseText: structured.response,
+              tokenCount: (structured.usage?.input_tokens || 0) + (structured.usage?.output_tokens || 0),
+              latencyMs: 0,
+              model: structured.usage?.model || modelWithThinking || 'openswan',
+              _openswan: {
+                runId: structured.runId || null,
+                output,
+                attachments,
+                artifacts: structured.artifacts || [],
+                verificationResults: structured.verificationResults || [],
+                toolEvents: structured.toolEvents || [],
+              },
+            } as const;
+          })()
+        : await invokeDirect({
+            messageId: crypto.randomUUID(),
+            circleId,
+            command: message,
+            senderId: currentUserId,
+            targetAgentId,
+            targetAgentName,
+            model: modelWithThinking || null,
+          }, targetAgent, targetAgent.gatewayUrl);
 
       if (!result.success) {
         await updateTaskRunRecord(taskRunId || '', {
@@ -1483,9 +1666,12 @@ export function useKanbanData(circleId: string): KanbanData {
       }
 
       const response = result.responseText || 'Agent completed task (no output)';
-      const parsed = parseTaskRunEnvelope(response);
+      const openSwanPayload = '_openswan' in result ? result._openswan : null;
+      const parsed = openSwanPayload
+        ? { deliverable: openSwanPayload.output.deliverable || response, output: openSwanPayload.output }
+        : parseTaskRunEnvelope(response);
       const deliverable = parsed.deliverable || response;
-      const attachments = extractCodeAttachments(deliverable);
+      const attachments = openSwanPayload?.attachments || extractCodeAttachments(deliverable);
       const tokenCount = result.tokenCount || 0;
       const durationMs = result.latencyMs || 0;
       const cost = estimateRunCost(tokenCount);
@@ -1497,7 +1683,22 @@ export function useKanbanData(circleId: string): KanbanData {
       await applyTaskRunMetrics(taskId, cost, tokenCount, durationMs, nextStatus);
       await updateTaskRunRecord(taskRunId || '', {
         status: 'completed',
-        output_payload: { ...parsed.output, deliverable },
+        output_payload: {
+          ...parsed.output,
+          deliverable,
+          openswan_run_id: openSwanPayload?.runId || null,
+          verification_results: openSwanPayload?.verificationResults.map(result => ({
+            label: result.check.label,
+            status: result.status,
+            ok: result.ok,
+            summary: result.summary,
+          })) || [],
+          tool_events: openSwanPayload?.toolEvents.map(event => ({
+            tool: event.tool,
+            status: event.status,
+            summary: event.summary,
+          })) || [],
+        },
         summary: parsed.output.summary || deliverable.slice(0, 240),
         artifact_refs: attachments.map(att => ({ name: att.name, type: att.type, url: att.url, language: att.language })),
         token_count: tokenCount,
@@ -1568,6 +1769,50 @@ export function useKanbanData(circleId: string): KanbanData {
         for (const att of attachments) {
           const kind = att.language ? 'code_patch' : att.url ? 'link' : 'file';
           createTaskRunArtifact(taskRunId, task.id, task.circle_id, kind, att.name || 'output', undefined, att.url, att.name).catch(() => {});
+        }
+        for (const artifact of openSwanPayload?.artifacts || []) {
+          const mapped = mapOpenSwanArtifactsToTaskRunArtifacts([artifact])[0];
+          if (!mapped) continue;
+          createTaskRunArtifact(
+            taskRunId,
+            task.id,
+            task.circle_id,
+            mapped.artifactKind,
+            mapped.label,
+            mapped.content,
+            mapped.url,
+            mapped.filePath,
+            mapped.metadata,
+          ).catch(() => {});
+        }
+        for (const verification of openSwanPayload?.verificationResults || []) {
+          createTaskRunArtifact(
+            taskRunId,
+            task.id,
+            task.circle_id,
+            'test_result',
+            verification.check.label,
+            verification.summary,
+            undefined,
+            undefined,
+            { passed: verification.ok, status: verification.status },
+          ).catch(() => {});
+        }
+        if (openSwanPayload) {
+          appendTaskRunStep(taskRunId, task.id, task.circle_id, 'execution', 'OpenSwan runtime metadata', undefined, {
+            openswan_run_id: openSwanPayload.runId,
+            verification_results: openSwanPayload.verificationResults.map(result => ({
+              label: result.check.label,
+              status: result.status,
+              ok: result.ok,
+              summary: result.summary,
+            })),
+            tool_events: openSwanPayload.toolEvents.map(event => ({
+              tool: event.tool,
+              status: event.status,
+              summary: event.summary,
+            })),
+          }).catch(() => {});
         }
 
         // Evaluate acceptance checks

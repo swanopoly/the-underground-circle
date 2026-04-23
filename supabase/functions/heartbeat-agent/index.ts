@@ -11,6 +11,14 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
+import {
+  addUsage,
+  checkCircleClaudeBudget,
+  logClaudeUsage,
+  type UsageBreakdown,
+} from "../_claude/anthropic.ts";
+
+const HEARTBEAT_MODEL = "claude-haiku-4-5";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -360,9 +368,22 @@ ${ctx.memories.length > 0 ? ctx.memories.map((m: any) => `- [${m.category}] ${m.
 
 What needs attention? Take action if needed, or say "All clear." if everything is fine.`;
 
-  // Call Claude with tools
+  // Umbrella circle cap — heartbeat runs on a cron across every circle,
+  // so a surprise Claude-cost spike in one circle shouldn't block others.
+  // Each circle's cap is checked independently here. Skip-and-log if
+  // over, so the cron keeps running but this circle sits out the cycle.
+  const capCheck = await checkCircleClaudeBudget(supabase, circleId);
+  if (!capCheck.allowed) {
+    console.warn(`[heartbeat] skipping circle ${circleId} — over cap ($${capCheck.spent24h.toFixed(2)} ≥ $${capCheck.cap.toFixed(2)})`);
+    return { circleId, skipped: true, reason: capCheck.reason, spent24h: capCheck.spent24h, cap: capCheck.cap };
+  }
+
+  // Call Claude with tools. Accumulate usage across all 3 iterations so the
+  // cost dashboard reflects the full heartbeat cycle (previously zero
+  // telemetry despite the loop running up to 3 Haiku calls per cycle).
   const messages: any[] = [{ role: "user", content: userMessage }];
   const actions: any[] = [];
+  let totalUsage: UsageBreakdown = { uncachedIn: 0, cacheCreate: 0, cacheRead: 0, output: 0 };
 
   for (let iteration = 0; iteration < 3; iteration++) {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -373,7 +394,7 @@ What needs attention? Take action if needed, or say "All clear." if everything i
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
+        model: HEARTBEAT_MODEL,
         max_tokens: 1024,
         system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
         messages,
@@ -388,6 +409,13 @@ What needs attention? Take action if needed, or say "All clear." if everything i
     }
 
     const data = await response.json();
+    const u = data.usage ?? {};
+    totalUsage = addUsage(totalUsage, {
+      uncachedIn:  u.input_tokens                ?? 0,
+      cacheCreate: u.cache_creation_input_tokens ?? 0,
+      cacheRead:   u.cache_read_input_tokens     ?? 0,
+      output:      u.output_tokens               ?? 0,
+    });
     const toolUseBlocks = (data.content || []).filter((b: any) => b.type === "tool_use");
 
     if (toolUseBlocks.length === 0 || data.stop_reason !== "tool_use") {
@@ -409,6 +437,16 @@ What needs attention? Take action if needed, or say "All clear." if everything i
 
     messages.push({ role: "user", content: toolResults });
   }
+
+  // Fire-and-forget usage log — total across all iterations for this cycle.
+  logClaudeUsage(supabase, {
+    circleId,
+    userId: ownerId || null,
+    source: "heartbeat-agent",
+    model: HEARTBEAT_MODEL,
+    usage: totalUsage,
+    metadata: { iterations: actions.length, members: ctx.totalMembers },
+  });
 
   // Log the heartbeat run
   try {

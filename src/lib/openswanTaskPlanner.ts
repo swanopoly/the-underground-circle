@@ -85,7 +85,7 @@ const RESEARCH_RE = /\b(research|compare|investigate|deep dive|tradeoff|best pra
 const AUTOMATION_RE = /\b(automate|workflow|task|pipeline|schedule|agent|orchestrate|runbook)\b/i;
 const PREVIEW_RE = /\b(html|css|landing page|webpage|preview|ui|screen|room|sandbox)\b/i;
 const BROWSER_RE = /\b(browser|website|web site|webpage|site|login|dashboard|click|fill|form|navigate|open url|browserbase|stagehand|computer[- ]use)\b/i;
-const TEST_RE = /\b(test|spec|coverage|assert|jest|vitest|playwright|cypress)\b/i;
+const TEST_RE = /\b(tests?|specs?|coverage|assert|jest|vitest|playwright|cypress)\b/i;
 const LINT_RE = /\b(lint|eslint|format|prettier)\b/i;
 const SECURITY_RE = /\b(security|vulnerab|secret|auth|xss|injection|owasp)\b/i;
 const PERF_RE = /\b(performance|slow|fast|latency|render|bundle|memory)\b/i;
@@ -105,6 +105,10 @@ function inferTaskKind(message: string, profile: AgenticCodingProfile): OpenSwan
   if (profile === 'review') return 'review';
   if (profile === 'debug') return 'debug';
   if (profile === 'architect') return 'architect';
+  if (profile === 'research') return 'research';
+  if (profile === 'design') return PREVIEW_RE.test(message) ? 'build' : 'architect';
+  if (profile === 'support') return DEBUG_RE.test(message) ? 'debug' : 'general';
+  if (profile === 'senior' && BUILD_RE.test(message)) return 'build';
   if (REVIEW_RE.test(message)) return 'review';
   if (DEBUG_RE.test(message)) return 'debug';
   if (ARCH_RE.test(message)) return 'architect';
@@ -114,7 +118,11 @@ function inferTaskKind(message: string, profile: AgenticCodingProfile): OpenSwan
   return 'general';
 }
 
-function buildVerification(kind: OpenSwanTaskKind, message: string): OpenSwanVerificationCheck[] {
+function buildVerification(
+  kind: OpenSwanTaskKind,
+  message: string,
+  entities?: import('./messageEntityExtractor').MessageEntities,
+): OpenSwanVerificationCheck[] {
   const checks: OpenSwanVerificationCheck[] = [];
 
   if (kind === 'build') {
@@ -141,10 +149,18 @@ function buildVerification(kind: OpenSwanTaskKind, message: string): OpenSwanVer
   if (kind === 'debug') {
     checks.push({ id: 'root-cause', label: 'Identify likely root cause', kind: 'integration_review', required: true, reason: 'Debugging should not stop at symptom-level patches.' });
     checks.push({ id: 'tests', label: 'Define regression check', kind: 'tests', required: true, reason: 'Fixes should include a way to prove the issue stays fixed.' });
+    if (entities?.stackTraces.length) {
+      checks.push({ id: 'typecheck', label: 'Typecheck the likely fix path', kind: 'typecheck', required: true, reason: 'Stack traces usually imply code-path changes that should compile cleanly after the fix.' });
+    }
   }
 
   if (kind === 'architect') {
     checks.push({ id: 'architecture', label: 'Review module boundaries and coupling', kind: 'integration_review', required: true, reason: 'Architecture work must evaluate long-term integration quality.' });
+  }
+
+  if (kind === 'research') {
+    checks.push({ id: 'evidence', label: 'Ground conclusions in evidence', kind: 'manual_review', required: true, reason: 'Research work should distinguish findings from unsupported opinion.' });
+    checks.push({ id: 'tradeoffs', label: 'State tradeoffs and recommendation', kind: 'integration_review', required: true, reason: 'Research should end in a decision-ready recommendation.' });
   }
 
   if (SECURITY_RE.test(message)) {
@@ -159,10 +175,14 @@ function buildVerification(kind: OpenSwanTaskKind, message: string): OpenSwanVer
     checks.push({ id: 'manual', label: 'Manual quality review', kind: 'manual_review', required: false, reason: 'General requests still benefit from a final quality pass.' });
   }
 
-  return checks;
+  const deduped = new Map<string, OpenSwanVerificationCheck>();
+  for (const check of checks) {
+    if (!deduped.has(check.kind)) deduped.set(check.kind, check);
+  }
+  return Array.from(deduped.values());
 }
 
-function buildRecommendedTools(kind: OpenSwanTaskKind, message: string): OpenSwanToolPlanItem[] {
+function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities?: import('./messageEntityExtractor').MessageEntities): OpenSwanToolPlanItem[] {
   const tools: OpenSwanToolPlanItem[] = [
     { tool: 'code.inspect', reason: 'Inspect surrounding code and current context before acting.', priority: 'high' },
   ];
@@ -172,6 +192,13 @@ function buildRecommendedTools(kind: OpenSwanTaskKind, message: string): OpenSwa
   }
   if (kind === 'review') {
     tools.push({ tool: 'code.review', reason: 'Structure findings and quality analysis like a senior code reviewer.', priority: 'high' });
+  }
+  if (kind === 'research') {
+    tools.push(
+      { tool: 'research.search', reason: 'Search the research corpus for prior findings and synthesized knowledge.', priority: 'high' },
+      { tool: 'fetch_url', reason: 'Pull in external pages or documentation when the question needs current evidence.', priority: 'high' },
+      { tool: 'research.save', reason: 'Save durable findings when the research produces reusable knowledge.', priority: 'medium' },
+    );
   }
   if (PREVIEW_RE.test(message)) {
     tools.push(
@@ -279,6 +306,29 @@ function buildRecommendedTools(kind: OpenSwanTaskKind, message: string): OpenSwa
     tools.push({ tool: 'schedule_action', reason: 'Queue a follow-up action when the request includes reminder or automation intent.', priority: 'medium' });
   }
 
+  // ── Entity-aware tool recommendations ─────────────────────────────────
+  // If the caller extracted structured entities from the message, auto-add
+  // relevant tools that the regex patterns above may have missed.
+  if (entities) {
+    if (entities.filePaths.length > 0) {
+      tools.push({ tool: 'code.inspect', reason: `Message references ${entities.filePaths.length} file path(s) — inspect before acting.`, priority: 'high' });
+    }
+    if (entities.githubRefs.length > 0) {
+      tools.push({ tool: 'github.read_file', reason: `Message references ${entities.githubRefs.length} GitHub ref(s) — load context.`, priority: 'high' });
+      tools.push({ tool: 'github.list_repos', reason: 'Load repository context for GitHub references.', priority: 'medium' });
+    }
+    if (entities.urls.length > 0) {
+      tools.push({ tool: 'fetch_url', reason: `Message includes ${entities.urls.length} URL(s) — fetch for context.`, priority: 'high' });
+    }
+    if (entities.stackTraces.length > 0) {
+      tools.push({ tool: 'verification.typecheck', reason: 'Stack trace detected — verify code compiles after fix.', priority: 'high' });
+      tools.push({ tool: 'verification.tests', reason: 'Stack trace detected — run tests to verify fix.', priority: 'high' });
+    }
+    if (entities.codeBlocks.length > 0) {
+      tools.push({ tool: 'code.review', reason: `${entities.codeBlocks.length} code block(s) pasted — review and analyze.`, priority: 'high' });
+    }
+  }
+
   const deduped = new Map<OpenSwanToolName, OpenSwanToolPlanItem>();
   for (const item of tools) {
     if (!deduped.has(item.tool)) deduped.set(item.tool, item);
@@ -286,13 +336,17 @@ function buildRecommendedTools(kind: OpenSwanTaskKind, message: string): OpenSwa
   return Array.from(deduped.values());
 }
 
-export function buildOpenSwanTaskPlan(message: string, profile: AgenticCodingProfile): OpenSwanTaskPlan {
+export function buildOpenSwanTaskPlan(
+  message: string,
+  profile: AgenticCodingProfile,
+  entities?: import('./messageEntityExtractor').MessageEntities,
+): OpenSwanTaskPlan {
   const kind = inferTaskKind(message, profile);
   return {
     kind,
     profile,
     summary: `${kind.toUpperCase()} task in ${profile.toUpperCase()} mode`,
-    verification: buildVerification(kind, message),
-    recommendedTools: buildRecommendedTools(kind, message),
+    verification: buildVerification(kind, message, entities),
+    recommendedTools: buildRecommendedTools(kind, message, entities),
   };
 }

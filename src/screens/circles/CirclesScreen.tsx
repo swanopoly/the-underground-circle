@@ -264,6 +264,43 @@ function CreateJoinCard({ onCreate, onJoin, onDiscover }: { onCreate: () => void
   );
 }
 
+// ─── Loading Skeleton ──────────────────────────────────────────────────────
+// Shown during the very first fetch on machines with no cache hit. Replaces
+// the "void awaits" empty state that used to flash for ~1.3s while the
+// circles RPC was in flight — which read to users as "my circle disappeared."
+function CirclesLoadingSkeleton({ isDesktop }: { isDesktop: boolean }) {
+  const placeholders = [0, 1, 2];
+  return (
+    <View style={[s.grid, isDesktop && { flexDirection: 'row', flexWrap: 'wrap' }]}>
+      {placeholders.map((i) => (
+        <View key={i} style={[s.gridItem, isDesktop && { width: '48%' }]}>
+          <View style={{
+            height: 140,
+            borderRadius: 16,
+            borderWidth: 1,
+            borderColor: '#1f2937',
+            backgroundColor: '#0f172a',
+            padding: 16,
+            gap: 10,
+            ...(Platform.OS === 'web' ? {
+              backgroundImage: 'linear-gradient(90deg, #0f172a 0%, #1a2234 40%, #0f172a 80%)',
+              backgroundSize: '200% 100%',
+              animationName: 'uc-shimmer',
+              animationDuration: '1.6s',
+              animationTimingFunction: 'linear',
+              animationIterationCount: 'infinite',
+            } as any : {}),
+          }}>
+            <View style={{ height: 14, width: '40%', backgroundColor: '#1f2937', borderRadius: 4 }} />
+            <View style={{ height: 10, width: '70%', backgroundColor: '#1f2937', borderRadius: 4 }} />
+            <View style={{ height: 10, width: '55%', backgroundColor: '#1f2937', borderRadius: 4 }} />
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 // ─── Empty State ───────────────────────────────────────────────────────────
 function EmptyState({ onCreate, onJoin }: { onCreate: () => void; onJoin: () => void }) {
   const pulseAnim = useRef(new Animated.Value(0)).current;
@@ -311,9 +348,39 @@ function EmptyState({ onCreate, onJoin }: { onCreate: () => void; onJoin: () => 
 }
 
 // ─── Main Screen ───────────────────────────────────────────────────────────
+// localStorage cache key for the stale-while-revalidate render. Scoped per
+// user so signing out / switching accounts doesn't leak the prior user's
+// circles onto the new session's screen.
+const CIRCLES_CACHE_KEY_PREFIX = 'uc_circles_cache_v1:';
+
+function readCircleCache(userId: string): Circle[] | null {
+  if (Platform.OS !== 'web' || typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(`${CIRCLES_CACHE_KEY_PREFIX}${userId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed?.circles) ? parsed.circles : null;
+  } catch { return null; }
+}
+
+function writeCircleCache(userId: string, circles: Circle[]): void {
+  if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      `${CIRCLES_CACHE_KEY_PREFIX}${userId}`,
+      JSON.stringify({ circles, savedAt: Date.now() }),
+    );
+  } catch {}
+}
+
 export default function CirclesScreen({ navigation }: any) {
   const [circles, setCircles] = useState<Circle[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  // `hasLoadedOnce` distinguishes "still doing the first fetch" from "fetch
+  // returned zero results". Without this, the empty state ("the void awaits")
+  // flashes for the 1+ second that the circles RPC takes, and the user reads
+  // that as "my circle disappeared." Starting true if we find a cache hit.
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const { width } = useWindowDimensions();
   const isDesktop = width >= 768;
 
@@ -325,21 +392,48 @@ export default function CirclesScreen({ navigation }: any) {
   const fetchCircles = useCallback(async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
-      if (!user) { setCircles([]); return; }
+      if (!user) { setCircles([]); setHasLoadedOnce(true); return; }
 
-      const { data: optimizedData, error: funcError } = await supabase.rpc('get_user_circles', { user_uuid: user.id });
-      if (!funcError && optimizedData) {
-        setCircles(optimizedData.map((c: any) => ({
+      // Fast path: projected RPC with joined counts. Drops ~70% of bytes vs
+      // the old `get_user_circles` which returned SETOF circles (all cols
+      // including JSONB settings). Falls through to the legacy RPC if this
+      // migration hasn't been run yet on the target database.
+      const fast = await supabase.rpc('get_user_circles_fast', { user_uuid: user.id });
+      if (!fast.error && fast.data) {
+        const mapped = (fast.data as any[]).map((c) => ({
           id: c.id, name: c.name, description: c.description, invite_code: c.invite_code,
           max_members: c.max_members, created_by: c.created_by, created_at: c.created_at,
           member_count: Number(c.member_count) || 0, user_role: c.user_role,
           icon: c.icon, accent_color: c.accent_color, circle_image_url: c.circle_image_url,
-        })));
+          active_missions: Number(c.active_missions) || 0,
+        }));
+        setCircles(mapped);
+        writeCircleCache(user.id, mapped);
+        setHasLoadedOnce(true);
+        return;
+      }
+
+      const { data: optimizedData, error: funcError } = await supabase.rpc('get_user_circles', { user_uuid: user.id });
+      if (!funcError && optimizedData) {
+        const mapped = optimizedData.map((c: any) => ({
+          id: c.id, name: c.name, description: c.description, invite_code: c.invite_code,
+          max_members: c.max_members, created_by: c.created_by, created_at: c.created_at,
+          member_count: Number(c.member_count) || 0, user_role: c.user_role,
+          icon: c.icon, accent_color: c.accent_color, circle_image_url: c.circle_image_url,
+        }));
+        setCircles(mapped);
+        writeCircleCache(user.id, mapped);
+        setHasLoadedOnce(true);
         return;
       }
 
       const { data: memberships } = await supabase.from('circle_members').select('circle_id').eq('user_id', user.id).limit(50);
-      if (!memberships?.length) { setCircles([]); return; }
+      if (!memberships?.length) {
+        setCircles([]);
+        writeCircleCache(user.id, []);
+        setHasLoadedOnce(true);
+        return;
+      }
       const circleIds = memberships.map(m => m.circle_id);
       const [circlesResult, missionsResult] = await Promise.allSettled([
         supabase.from('circles').select('*, circle_members!inner(count)').in('id', circleIds).limit(50),
@@ -350,8 +444,31 @@ export default function CirclesScreen({ navigation }: any) {
       // Count active missions per circle
       const missionMap: Record<string, number> = {};
       (missionCounts || []).forEach((m: any) => { missionMap[m.circle_id] = (missionMap[m.circle_id] || 0) + 1; });
-      setCircles((data || []).map((c: any) => ({ ...c, member_count: c.circle_members?.[0]?.count || 0, active_missions: missionMap[c.id] || 0 })));
-    } catch (err) { console.error('CirclesScreen fetch error:', err); }
+      const mapped = (data || []).map((c: any) => ({ ...c, member_count: c.circle_members?.[0]?.count || 0, active_missions: missionMap[c.id] || 0 }));
+      setCircles(mapped);
+      writeCircleCache(user.id, mapped);
+      setHasLoadedOnce(true);
+    } catch (err) {
+      console.error('CirclesScreen fetch error:', err);
+      setHasLoadedOnce(true);
+    }
+  }, []);
+
+  // Stale-while-revalidate: on mount, synchronously paint whatever we cached
+  // last session so the user sees their circles instantly. The real fetch
+  // runs in parallel and overwrites the list when it returns.
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+        if (!user) return;
+        const cached = readCircleCache(user.id);
+        if (cached && cached.length > 0) {
+          setCircles(cached);
+          setHasLoadedOnce(true);
+        }
+      } catch {}
+    })();
   }, []);
 
   useEffect(() => {
@@ -380,7 +497,9 @@ export default function CirclesScreen({ navigation }: any) {
         </Animated.View>
 
         {/* Content */}
-        {circles.length === 0 ? (
+        {!hasLoadedOnce && circles.length === 0 ? (
+          <CirclesLoadingSkeleton isDesktop={isDesktop} />
+        ) : circles.length === 0 ? (
           <EmptyState
             onCreate={() => navigation.navigate('CreateCircle')}
             onJoin={() => navigation.navigate('JoinCircle')}

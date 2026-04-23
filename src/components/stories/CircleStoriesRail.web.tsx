@@ -1,9 +1,9 @@
 /**
  * CircleStoriesRail — Horizontal rail of tappable story circles (web only).
  *
- * Loads recent circle activity from Supabase (check-ins, agent activity,
- * completed tasks from the last 24 hours) and presents them as Instagram-style
- * stories using react-insta-stories.
+ * Loads recent circle activity from Supabase (check-ins, agent activity
+ * from the last 24 hours) and presents them as Instagram-style stories
+ * using react-insta-stories.
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
@@ -88,7 +88,7 @@ export default function CircleStoriesRail({ circleId, accentColor }: Props) {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
     async function load() {
-      const [checkIns, agentActs, tasks] = await Promise.all([
+      const [checkIns, agentActs] = await Promise.all([
         supabase
           .from('check_ins')
           .select('id, user_id, content, created_at, profiles(display_name, username)')
@@ -103,14 +103,6 @@ export default function CircleStoriesRail({ circleId, accentColor }: Props) {
           .gte('created_at', since)
           .order('created_at', { ascending: false })
           .limit(30),
-        supabase
-          .from('tasks')
-          .select('id, title, completed_at')
-          .eq('circle_id', circleId)
-          .eq('status', 'done')
-          .gte('completed_at', since)
-          .order('completed_at', { ascending: false })
-          .limit(20),
       ]);
 
       if (cancelled) return;
@@ -174,34 +166,6 @@ export default function CircleStoriesRail({ circleId, accentColor }: Props) {
         });
       }
 
-      // -- Completed tasks --
-      for (const row of (tasks.data ?? [])) {
-        const name = 'Completed Work';
-        const key = `task-${name}`;
-        if (!map.has(key)) {
-          map.set(key, {
-            id: key,
-            name,
-            avatarLetter: name.charAt(0).toUpperCase(),
-            color: pickColor(name),
-            hasNew: true,
-            stories: [],
-          });
-        }
-        map.get(key)!.stories.push({
-          duration: 5000,
-          content: ({ action, isPaused }) => (
-            <StoryContent
-              heading={name}
-              subheading="Task Completed"
-              body={row.title || '(untitled task)'}
-              accentColor="#22c55e"
-              timestamp={(row as any).completed_at || new Date().toISOString()}
-            />
-          ),
-        });
-      }
-
       setGroups(Array.from(map.values()));
     }
 
@@ -255,11 +219,11 @@ export default function CircleStoriesRail({ circleId, accentColor }: Props) {
           animationType="fade"
           onRequestClose={() => setActiveGroup(null)}
         >
-          <View style={rs.overlay}>
+          <Pressable style={rs.overlay} onPress={() => setActiveGroup(null)}>
             <Pressable style={rs.closeBtn} onPress={() => setActiveGroup(null)}>
               <Text style={rs.closeBtnText}>X</Text>
             </Pressable>
-            <View style={rs.viewerWrap}>
+            <Pressable style={rs.viewerWrap} onPress={(e) => e.stopPropagation()}>
               <Stories
                 stories={activeGroup.stories}
                 defaultInterval={5000}
@@ -269,8 +233,8 @@ export default function CircleStoriesRail({ circleId, accentColor }: Props) {
                 keyboardNavigation
                 onAllStoriesEnd={() => setActiveGroup(null)}
               />
-            </View>
-          </View>
+            </Pressable>
+          </Pressable>
         </Modal>
       )}
     </>

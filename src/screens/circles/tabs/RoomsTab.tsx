@@ -14,7 +14,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   View, Text, StyleSheet, ScrollView, Pressable, TextInput,
   Modal, Platform, useWindowDimensions, ActivityIndicator,
-  Image, Alert,
+  Image, Alert, FlatList,
 } from 'react-native';
 import { LoadingScreen } from '../../../components/LoadingWave';
 import { supabase } from '../../../lib/supabase';
@@ -41,6 +41,7 @@ import {
   upsertOpenSwanVerificationResult,
 } from '../../../lib/openswanVerificationRuntime';
 import { appendRunToolEvent, mergeRunMetadata } from '../../../lib/agentRunSystem';
+import { buildRunMetadataSummaryProps, readRunBrowserPlanEvents } from '../../../lib/runMetadataSummary';
 import RoomFileTree from '../../../components/rooms/RoomFileTree.web';
 import type { RoomFileEntry } from '../../../components/rooms/roomTreeAdapter';
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -2225,7 +2226,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   const [assigning, setAssigning]  = useState(false);
   const [agentConnections, setAgentConnections] = useState<any[]>([]);
   const [sessionProfile, setSessionProfile] = useState<SessionCodingProfile>('auto');
-  const scrollRef = useRef<ScrollView>(null);
+  // Virtualized message list — previously a ScrollView + messages.map() which
+  // rendered the whole history into state and slowed rooms once past ~200
+  // messages. FlatList + keyExtractor drops inactive rows out of the view
+  // hierarchy; `scrollToEnd` keeps the auto-pin-to-bottom behavior.
+  const scrollRef = useRef<FlatList<RoomMessage>>(null);
   const codingWorkbenchStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Load agent connections from local storage (user's own OpenSwan instances)
@@ -2885,11 +2890,22 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         </View>
       )}
 
-      <ScrollView ref={scrollRef} style={s.msgList} contentContainerStyle={{ padding: 10, gap: 6 }}>
-        {messages.length === 0 && <Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginTop: 20, fontStyle: 'italic' }}>No messages yet</Text>}
-        {messages.map(m => (
+      <FlatList
+        ref={scrollRef}
+        style={s.msgList}
+        contentContainerStyle={{ padding: 10 }}
+        data={messages}
+        keyExtractor={(m) => m.id}
+        ItemSeparatorComponent={() => <View style={{ height: 6 }} />}
+        // 20 messages off-screen is plenty of scroll buffer; beyond that the
+        // row is unmounted and its subtree memory reclaimed. 200 is the
+        // initial page so first render stays snappy.
+        initialNumToRender={40}
+        windowSize={10}
+        maxToRenderPerBatch={20}
+        removeClippedSubviews
+        renderItem={({ item: m }) => (
           <MsgBubble
-            key={m.id}
             msg={m}
             accentColor={accentColor}
             circleId={circleId || ''}
@@ -2900,8 +2916,9 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             retryingCheckId={retryingLedgerCheck?.messageId === m.id ? retryingLedgerCheck.checkId : null}
             onDelete={handleDeleteMessage}
           />
-        ))}
-      </ScrollView>
+        )}
+        ListEmptyComponent={<Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginTop: 20, fontStyle: 'italic' }}>No messages yet</Text>}
+      />
 
       {/* Active file chip */}
       {activeFile && (
@@ -3137,7 +3154,8 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
     const taskPlan = msg.metadata?.task_plan;
     const toolEvents = Array.isArray(msg.metadata?.tool_events) ? msg.metadata.tool_events : [];
     const verificationResults = Array.isArray(msg.metadata?.verification_results) ? msg.metadata.verification_results : [];
-    const delegatedSubagents = Array.isArray(msg.metadata?.delegated_subagents) ? msg.metadata.delegated_subagents : [];
+    const runMetadataSummary = buildRunMetadataSummaryProps(msg.metadata);
+    const browserPlanEvents = readRunBrowserPlanEvents(msg.metadata);
     return (
       <View style={{borderLeftWidth:3,borderLeftColor:isTask?'#6366f1':'#3b82f6',paddingLeft:10,paddingVertical:7,backgroundColor:isTask?'#6366f108':'#3b82f608',borderRadius:12}}>
         <View style={{flexDirection:'row',gap:8,marginBottom:3,flexWrap:'wrap',alignItems:'center'}}>
@@ -3157,15 +3175,6 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
           <Text style={{color:'#444',fontSize:10}}>{time}</Text>
           {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ marginLeft: 'auto' as any, opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
         </View>
-        {delegatedSubagents.length > 0 ? (
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}>
-            {delegatedSubagents.map((name: string) => (
-              <View key={name} style={{ backgroundColor: '#0ea5e915', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 999, borderWidth: 1, borderColor: '#0ea5e940' }}>
-                <Text style={{ color: '#67e8f9', fontSize: 8, fontWeight: '800', fontFamily: MONO }}>{String(name).toUpperCase()}</Text>
-              </View>
-            ))}
-          </View>
-        ) : null}
         <Text style={{color:'#ccc',fontSize:12,lineHeight:18}}>{isTask ? msg.metadata?.prompt || msg.content : msg.content}</Text>
         {artifacts.length > 0 && (
           <ChatArtifacts
@@ -3182,10 +3191,11 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
           />
         )}
         <RunExecutionCard
+          {...runMetadataSummary}
           taskPlan={taskPlan}
           toolEvents={toolEvents}
           verificationResults={verificationResults}
-          delegatedSubagents={delegatedSubagents}
+          browserPlanEvents={browserPlanEvents}
           accentColor={accentColor}
           onRetryCheck={onRetryCheck ? (checkId) => onRetryCheck(msg.id, checkId) : undefined}
           retryingCheckId={retryingCheckId}

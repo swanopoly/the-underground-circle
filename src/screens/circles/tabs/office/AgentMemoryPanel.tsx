@@ -122,7 +122,10 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentName,
       }, () => { void load(); })
       .subscribe();
 
-    const intervalId = setInterval(() => { void load(); }, 15000);
+    // Realtime subscriptions above already fire `load` on INSERT/UPDATE. This
+    // polling is a belt-and-suspenders refresh for missed realtime events;
+    // 30s is plenty given the realtime channel is the primary path.
+    const intervalId = setInterval(() => { void load(); }, 30000);
     return () => {
       clearInterval(intervalId);
       void supabase.removeChannel(channel);

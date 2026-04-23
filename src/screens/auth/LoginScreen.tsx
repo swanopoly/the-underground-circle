@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import {
   View,
   Text,
@@ -14,7 +14,12 @@ import {
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { signInWithSSO } from '../../lib/sso';
-import LoginBackground3D from '../../components/LoginBackground3D';
+import { signInWithGoogle } from '../../lib/googleCreds';
+
+// LoginBackground3D pulls in three, @react-three/fiber, @react-three/postprocessing
+// (~1-2MB of JS). It only renders on the web login screen, so code-split it out
+// of the initial bundle — authenticated users never pay the cost.
+const LoginBackground3D = lazy(() => import('../../components/LoginBackground3D'));
 
 const ACCENT = '#b8ff61';
 const ACCENT_STRONG = '#9be234';
@@ -22,7 +27,7 @@ const CARD_BG = 'rgba(11, 15, 12, 0.45)';
 const CARD_BORDER = 'rgba(184, 255, 97, 0.18)';
 
 type FocusField = 'email' | 'password' | 'sso' | null;
-type HoverAction = 'login' | 'showSso' | 'submitSso' | 'backToEmail' | 'signup' | null;
+type HoverAction = 'login' | 'showSso' | 'submitSso' | 'backToEmail' | 'signup' | 'googleSignin' | null;
 
 // Inject global CSS for focus ring removal + button hover effects (web only, once)
 let _loginCssInjected = false;
@@ -274,8 +279,14 @@ export default function LoginScreen({ navigation }: any) {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <View style={styles.container}>
-        {/* Three.js background — web only, renders behind everything */}
-        <LoginBackground3D />
+        {/* Three.js background — web only, renders behind everything.
+            Suspense fallback is an empty View so the login form paints
+            immediately while three/postprocessing stream in. */}
+        {Platform.OS === 'web' && (
+          <Suspense fallback={null}>
+            <LoginBackground3D />
+          </Suspense>
+        )}
 
         {/* Portal overlay — fades to black */}
         {portalTransition && Platform.OS === 'web' && (
@@ -453,6 +464,31 @@ export default function LoginScreen({ navigation }: any) {
                         }} />
                       )}
                       <Text style={styles.secondaryButtonText}>Use company SSO</Text>
+                    </Pressable>
+
+                    {/* Sign in with Google — hands identity over to
+                        Supabase Auth's built-in provider. We ask for the
+                        full Google Workspace scope set so users who pick
+                        this path land fully wired for Gmail / Calendar
+                        / Drive tools right after their first sign-in. */}
+                    <Pressable
+                      style={[styles.secondaryButton, hoveredAction === 'googleSignin' && styles.secondaryButtonHovered]}
+                      onHoverIn={() => setHoveredAction('googleSignin')}
+                      onHoverOut={() => setHoveredAction((current) => (current === 'googleSignin' ? null : current))}
+                      onPress={async () => {
+                        const { ok, reason } = await signInWithGoogle({ withWorkspaceScopes: true });
+                        if (!ok && reason) setError(reason);
+                      }}
+                    >
+                      {Platform.OS === 'web' && hoveredAction === 'googleSignin' && (
+                        <div style={{
+                          position: 'absolute', top: 0, left: '-100%', width: '50%', height: '100%',
+                          background: 'linear-gradient(90deg, transparent, rgba(66,133,244,0.12), transparent)',
+                          animation: 'uc-shimmer 1.5s ease-in-out infinite',
+                          pointerEvents: 'none',
+                        }} />
+                      )}
+                      <Text style={styles.secondaryButtonText}>Sign in with Google</Text>
                     </Pressable>
                   </>
                 )}

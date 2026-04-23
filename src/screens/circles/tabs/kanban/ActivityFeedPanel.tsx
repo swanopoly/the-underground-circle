@@ -7,7 +7,12 @@ import {
   View, Text, ScrollView, StyleSheet, Platform,
 } from 'react-native';
 import { supabase } from '../../../../lib/supabase';
+import RunMetadataSummary from '../../../../components/chat/RunMetadataSummary';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
+import {
+  buildRunMetadataSummaryProps,
+  fetchTaskRunMetadataByOpenSwanRunId,
+} from '../../../../lib/taskRunMetadata';
 
 interface Props {
   circleId: string;
@@ -52,6 +57,7 @@ interface TaskRunFeedItem {
   id: string;
   task_id: string;
   agent_id: string;
+  openswan_run_id?: string | null;
   run_kind: string;
   status: string;
   summary: string | null;
@@ -74,6 +80,7 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
   const [items, setItems] = useState<ActivityItem[]>([]);
   const [runs, setRuns] = useState<AutomationRun[]>([]);
   const [taskRuns, setTaskRuns] = useState<TaskRunFeedItem[]>([]);
+  const [taskRunMetadataByRunId, setTaskRunMetadataByRunId] = useState<Record<string, Record<string, any>>>({});
   const [proofItems, setProofItems] = useState<ProofItem[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -114,7 +121,7 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
       if (taskRunsSupportedRef.current) {
         const taskRunRes = await supabase
           .from('task_runs')
-          .select('id, task_id, agent_id, run_kind, status, summary, model_used, token_count, duration_ms, started_at')
+          .select('id, task_id, agent_id, openswan_run_id, run_kind, status, summary, model_used, token_count, duration_ms, started_at')
           .eq('circle_id', circleId)
           .in('status', ['completed', 'failed'])
           .order('started_at', { ascending: false })
@@ -126,6 +133,11 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
           console.warn('[ActivityFeedPanel] task_runs unavailable:', taskRunRes.error.message);
         } else if (taskRunRes.data) {
           setTaskRuns(taskRunRes.data);
+          const openSwanRunIds = taskRunRes.data
+            .map((run) => run.openswan_run_id)
+            .filter((value): value is string => typeof value === 'string' && value.length > 0);
+          const nextMetadata = await fetchTaskRunMetadataByOpenSwanRunId(openSwanRunIds);
+          setTaskRunMetadataByRunId(nextMetadata);
         }
       }
 
@@ -206,6 +218,7 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
         {taskRuns.map(run => {
           const agent = agents.find(a => a.id === run.agent_id);
           const color = run.status === 'failed' ? '#ef4444' : (agent?.color || '#22c55e');
+          const runMetadata = run.openswan_run_id ? taskRunMetadataByRunId[run.openswan_run_id] : null;
           return (
             <View key={`task-run-${run.id}`} style={[s.item, { borderLeftWidth: 3, borderLeftColor: color }]}> 
               <View style={s.itemRow}>
@@ -223,6 +236,15 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
                     {run.duration_ms ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{(run.duration_ms / 1000).toFixed(1)}s</Text> : null}
                     {run.token_count ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{run.token_count} tok</Text> : null}
                   </View>
+                  {runMetadata ? (
+                    <View style={{ marginTop: 6 }}>
+                      <RunMetadataSummary
+                        {...buildRunMetadataSummaryProps(runMetadata)}
+                        variant="compact"
+                        accentColor="#38bdf8"
+                      />
+                    </View>
+                  ) : null}
                   <Text style={s.timestamp}>{timeAgo(run.started_at)}</Text>
                 </View>
               </View>

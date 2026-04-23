@@ -4,13 +4,20 @@
  */
 import { supabase } from './supabase';
 import { updateMissionTask, addProofOfWork } from './missions';
-import { getSwanBotResponse } from './swanbot';
-import type { SwanBotContext } from './swanbot';
+import { runOpenSwanSessionTurn, type OpenSwanToolEvent } from './openswanSessionRuntime';
+import { resolveSessionCodingProfile } from './chatSessionProfile';
+import type { OpenSwanVerificationResult } from './openswanVerificationRuntime';
+import type { SwanBotStructuredArtifact, SwanBotContext } from './swanbot';
 
 interface DispatchResult {
   success: boolean;
   response: string;
   error?: string;
+  runId?: string | null;
+  completed?: boolean;
+  artifacts?: SwanBotStructuredArtifact[];
+  verificationResults?: OpenSwanVerificationResult[];
+  toolEvents?: OpenSwanToolEvent[];
 }
 
 /**
@@ -48,10 +55,35 @@ export async function dispatchTaskToAgent(opts: {
       userName: 'Mission System',
     };
 
-    const responseText = await getSwanBotResponse(prompt, context);
+    const sessionProfile = resolveSessionCodingProfile('auto', prompt, 'main_chat');
+    const structured = await runOpenSwanSessionTurn({
+      message: prompt,
+      context,
+      surface: 'main_chat',
+      runSurface: 'feed_task',
+      taskId,
+      mode: 'mission_task',
+      title: `Mission: ${taskTitle}`.slice(0, 100),
+      goal: `${missionTitle}: ${taskTitle}`.slice(0, 500),
+      sessionProfile,
+      metadata: {
+        missionId,
+        missionTitle,
+        missionTaskId: taskId,
+        missionTaskTitle: taskTitle,
+        launchedFrom: 'missionAgentDispatch',
+        agentName,
+      },
+    });
+    const responseText = structured.response;
+    const completed = shouldMarkMissionTaskComplete({
+      response: responseText,
+      artifacts: structured.artifacts || [],
+      verificationResults: structured.verificationResults || [],
+      toolEvents: structured.toolEvents || [],
+    });
 
-    // Mark task as done
-    await updateMissionTask(taskId, { status: 'done' });
+    await updateMissionTask(taskId, { status: completed ? 'done' : 'in_progress' });
 
     // Create proof-of-work entry
     await addProofOfWork({
@@ -60,16 +92,32 @@ export async function dispatchTaskToAgent(opts: {
       user_id: user?.id,
       agent_name: agentName,
       pow_type: 'agent_run',
-      title: `${agentName} completed: ${taskTitle}`,
+      title: completed ? `${agentName} completed: ${taskTitle}` : `${agentName} updated: ${taskTitle}`,
       detail: {
         mission: missionTitle,
         task_id: taskId,
         task_title: taskTitle,
+        run_id: structured.runId || null,
+        completed,
+        task_kind: structured.taskPlan.kind,
+        profile: structured.taskPlan.profile,
+        artifact_count: structured.artifacts?.length || 0,
+        artifacts: summarizeArtifacts(structured.artifacts || []),
+        verification: summarizeVerification(structured.verificationResults || []),
+        tool_events: summarizeToolEvents(structured.toolEvents || []),
         response_preview: responseText.substring(0, 500),
       },
     });
 
-    return { success: true, response: responseText };
+    return {
+      success: true,
+      response: responseText,
+      runId: structured.runId || null,
+      completed,
+      artifacts: structured.artifacts || [],
+      verificationResults: structured.verificationResults || [],
+      toolEvents: structured.toolEvents || [],
+    };
   } catch (err: any) {
     // Mark task back to pending on failure
     await updateMissionTask(taskId, { status: 'pending' });
@@ -83,6 +131,43 @@ function buildTaskPrompt(taskTitle: string, taskDescription: string | undefined,
   if (taskDescription) {
     prompt += `**Details:** ${taskDescription}\n`;
   }
-  prompt += `\nComplete this task to the best of your ability. Be concise and actionable in your response. If you need more information to complete the task, say what you need.`;
+  prompt += '\nWork like OpenSwan running a tracked mission task.';
+  prompt += '\nPrefer concrete deliverables, structured artifacts, and explicit blockers over vague summaries.';
+  prompt += '\nIf the task needs follow-up, missing context, approval, or external access, say that directly.';
   return prompt;
+}
+
+function shouldMarkMissionTaskComplete(opts: {
+  response: string;
+  artifacts: SwanBotStructuredArtifact[];
+  verificationResults: OpenSwanVerificationResult[];
+  toolEvents: OpenSwanToolEvent[];
+}): boolean {
+  const failedTools = opts.toolEvents.some((event) => event.status === 'failed' || event.status === 'blocked' || event.status === 'manual_required');
+  if (failedTools) return false;
+
+  const failedVerification = opts.verificationResults.some((result) => !result.ok || result.status === 'manual_required' || result.status === 'blocked');
+  if (failedVerification) return false;
+
+  if (/\b(need more information|need more info|need access|need approval|waiting on|blocked|cannot complete|can't complete|missing context|please provide)\b/i.test(opts.response)) {
+    return false;
+  }
+
+  return true;
+}
+
+function summarizeArtifacts(artifacts: SwanBotStructuredArtifact[]): Array<{ kind: string; title: string }> {
+  return artifacts.map((artifact) => ({ kind: artifact.kind, title: artifact.title }));
+}
+
+function summarizeVerification(results: OpenSwanVerificationResult[]): Array<{ ok: boolean; summary: string }> {
+  return results.map((result) => ({ ok: result.ok, summary: result.summary }));
+}
+
+function summarizeToolEvents(events: OpenSwanToolEvent[]): Array<{ tool: string; status: string; summary: string }> {
+  return events.map((event) => ({
+    tool: event.tool,
+    status: event.status,
+    summary: event.summary,
+  }));
 }

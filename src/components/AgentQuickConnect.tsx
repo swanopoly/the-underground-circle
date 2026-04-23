@@ -121,7 +121,7 @@ export default function AgentQuickConnect({ circleId, onOpenWizard, compact }: P
           <Text style={{ fontSize: 48, marginBottom: 12 }}>&#x26A1;</Text>
           <Text style={s.title}>Connect your AI agent</Text>
           <Text style={s.subtitle}>
-            Run one command and your agent auto-connects to the circle — forever.
+            Run one command and your agent auto-connects to the circle. For custom agents on a Pi or another box, use Manual setup.
           </Text>
 
           <View style={s.stepCard}>
@@ -147,7 +147,7 @@ export default function AgentQuickConnect({ circleId, onOpenWizard, compact }: P
             </View>
             <Text style={s.stepDesc}>
               The CLI detects Claude Code, Codex, Gemini CLI, and Cursor on your machine
-              and configures them to report activity to your circle. No bridges to run.
+              and configures them to report activity to your circle. For anything custom, use the manual bridge path.
             </Text>
           </View>
 

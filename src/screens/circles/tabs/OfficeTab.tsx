@@ -26,6 +26,7 @@ import {
   generateRandomAppearance, OWNER_EMAIL, isInteractiveFurniture,
 } from '../../../lib/officeConfig';
 import { validateOfficeLayout } from '../../../lib/officeValidation';
+import { getBridgeUrl, getBridgeEnvironment } from '../../../lib/bridgeEnvironment';
 import { useCustomThemes, customThemeToOfficeTheme, CUSTOM_THEME_PREFIX, CustomThemeRecord } from '../../../services/customThemes';
 import { enrichAgentsWithCache, enrichSessionsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
 import { restoreAllAgents, recordAgentActivity, renameAgent as renameAgentIdentity, updateAgentIdentity, getAgentIdentityByAgent, getAgentIdentityKey, applyIdentityToAgent } from '../../../lib/agentIdentity';
@@ -35,7 +36,7 @@ import {
 } from '../../../lib/telegramService';
 import {
   OpenSwanConfig, OpenSwanPoller, OpenSwanSession, OpenSwanUpdate,
-  testConnection, listAgents, listCronJobs, supportsOpenSwanToolRpcEndpoint, CronJob,
+  getOpenSwanEndpointNotice, testConnection, listAgents, listCronJobs, supportsOpenSwanToolRpcEndpoint, CronJob,
 } from '../../../lib/openswanService';
 import {
   openOAuthPopup, checkOAuthStatus, disconnectOAuth, fetchCalendarEvents, fetchEmails,
@@ -45,6 +46,7 @@ import {
   AgentConnection, ProviderType, loadConnections, saveConnections, PROVIDER_META,
   autoDiscoverLocalAgents, probeEndpointHealth, getOpenSwanEndpoint,
 } from '../../../lib/connectionManager';
+import { supportsOpenSwanRpc, testAgentBridgeConnection } from '../../../lib/agentBridgeSupport';
 import {
   ClaudeCodePoller, bridgeSessionsToAgents, detectClaudeCodeBridge,
   publishClaudeCodeAgent, updateClaudeCodeAgentStatus, markClaudeCodeAgentOffline,
@@ -158,6 +160,7 @@ const STORAGE_KEY_FLOORS_TS = '@office_floors_updated_at';
 const STORAGE_KEY_CURRENT_FLOOR = '@office_current_floor';
 const STORAGE_KEY_APPEARANCES = '@office_appearances';
 const STORAGE_KEY_WHITEBOARD_NOTES = '@office_whiteboard_notes';
+const publishCtaDismissedKey = (circleId: string) => `@office_publish_cta_dismissed_${circleId}`;
 
 // Track whether Supabase profile columns exist (migrations may not be run yet)
 // Reset each mount — a transient error shouldn't permanently disable sync
@@ -188,6 +191,23 @@ interface Props {
 type WhiteboardModule = typeof import('./office/Whiteboard');
 type ServerRackModule = typeof import('./office/ServerRack');
 type OfficeTerminalModule = typeof import('../../../components/OfficeTerminal');
+
+function runWhenIdle(task: () => void, timeoutMs = 250): () => void {
+  if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof (window as any).requestIdleCallback === 'function') {
+    const id = (window as any).requestIdleCallback(task, { timeout: timeoutMs });
+    return () => {
+      try { (window as any).cancelIdleCallback?.(id); } catch {}
+    };
+  }
+  const timeoutId = setTimeout(task, Math.min(timeoutMs, 32));
+  return () => clearTimeout(timeoutId);
+}
+
+function isDocumentVisible(): boolean {
+  if (Platform.OS !== 'web') return true;
+  if (typeof document === 'undefined') return true;
+  return document.visibilityState === 'visible';
+}
 
 export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady }: Props) {
   const surfaceState = useOfficeSurfaceState();
@@ -229,7 +249,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     };
     const port = bridgePorts[selectedAgent.providerType || ''];
     if (!port) return { ok: false, stdout: '', stderr: 'No bridge for this provider' };
-    const bridgeUrl = `http://localhost:${port}`;
+    const bridgeUrl = getBridgeUrl(port);
+    if (!bridgeUrl) {
+      return {
+        ok: false,
+        stdout: '',
+        stderr: 'Agent bridges are only reachable from the local dev machine. Run `npm run dev` or set EXPO_PUBLIC_BRIDGE_HOST to a public bridge URL.',
+      };
+    }
 
     try {
       const controller = new AbortController();
@@ -520,25 +547,99 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   // ─── Circle Office (shared agents from all members) ──────────────────────
   const [circleOfficeAgents, setCircleOfficeAgents] = useState<CircleOfficeAgent[]>([]);
+  const [publishCtaDismissed, setPublishCtaDismissed] = useState(false);
   const [publishingToCircle, setPublishingToCircle] = useState(false);
   const readyFired = useRef(false);
+  const circleOfficeLoadInFlightRef = useRef<Promise<void> | null>(null);
+  const pendingCircleOfficeRefreshRef = useRef(false);
+  const scheduledCircleOfficeRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const markOfficeReady = useCallback(() => {
+    if (!readyFired.current && onReadyRef.current) {
+      readyFired.current = true;
+      onReadyRef.current();
+    }
+  }, []);
 
   const loadCircleOffice = useCallback(async () => {
-    const { agents } = await loadCircleOfficeAgents(circleId);
-    setCircleOfficeAgents(agents);
-    // Signal ready after first successful load
-    if (!readyFired.current && onReady) {
-      readyFired.current = true;
-      onReady();
+    if (circleOfficeLoadInFlightRef.current) {
+      pendingCircleOfficeRefreshRef.current = true;
+      return circleOfficeLoadInFlightRef.current;
     }
-  }, [circleId, onReady]);
+    const run = (async () => {
+      try {
+        const { agents } = await loadCircleOfficeAgents(circleId);
+        setCircleOfficeAgents(agents);
+      } catch (error) {
+        console.warn('[OfficeTab] loadCircleOffice failed:', error);
+      } finally {
+        // Shared office agents should not block the shell from rendering.
+        markOfficeReady();
+        circleOfficeLoadInFlightRef.current = null;
+      }
+    })();
+    circleOfficeLoadInFlightRef.current = run;
+    await run;
+    if (pendingCircleOfficeRefreshRef.current) {
+      pendingCircleOfficeRefreshRef.current = false;
+      void loadCircleOffice();
+    }
+  }, [circleId, markOfficeReady]);
+
+  const scheduleCircleOfficeRefresh = useCallback((delayMs = 0) => {
+    if (scheduledCircleOfficeRefreshRef.current) {
+      clearTimeout(scheduledCircleOfficeRefreshRef.current);
+      scheduledCircleOfficeRefreshRef.current = null;
+    }
+    scheduledCircleOfficeRefreshRef.current = setTimeout(() => {
+      scheduledCircleOfficeRefreshRef.current = null;
+      void loadCircleOffice();
+    }, delayMs);
+  }, [loadCircleOffice]);
+
+  // Keep a ref to the latest onReady so loadCircleOffice doesn't need it in
+  // its useCallback deps. When onReady identity changes on the parent, we
+  // don't want to recreate loadCircleOffice — that was causing the
+  // subscribe/unsubscribe thrash that tanked circle-load performance (the
+  // WebSocket connection failures flooding the console were a symptom).
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
 
   useEffect(() => {
     setAutoConnectCircleId(circleId);
-    loadCircleOffice();
+    void loadCircleOffice();
     const unsub = subscribeToCircleOffice(circleId, loadCircleOffice);
-    return unsub;
-  }, [circleId, loadCircleOffice]);
+    return () => {
+      if (scheduledCircleOfficeRefreshRef.current) {
+        clearTimeout(scheduledCircleOfficeRefreshRef.current);
+        scheduledCircleOfficeRefreshRef.current = null;
+      }
+      unsub();
+    };
+    // Intentionally omit loadCircleOffice from deps — it only needs circleId
+    // to change to re-fire. Including it caused the subscribe churn above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [circleId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    storage.getItem(publishCtaDismissedKey(circleId)).then((raw) => {
+      if (cancelled) return;
+      setPublishCtaDismissed(raw === '1');
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [circleId]);
+
+  useEffect(() => {
+    if (currentUserId && circleOfficeAgents.some((agent) => agent.ownerId === currentUserId) && publishCtaDismissed) {
+      setPublishCtaDismissed(false);
+      storage.removeItem(publishCtaDismissedKey(circleId)).catch(() => {});
+    }
+  }, [circleId, circleOfficeAgents, currentUserId, publishCtaDismissed]);
+
+  const dismissPublishCta = useCallback(() => {
+    setPublishCtaDismissed(true);
+    storage.setItem(publishCtaDismissedKey(circleId), '1').catch(() => {});
+  }, [circleId]);
 
   // Live presence state — userId → isOnline flag from Supabase Realtime
   const [liveUserIds, setLiveUserIds] = useState<Set<string>>(new Set());
@@ -559,7 +660,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
     if (connectedConns.length > 0) {
       // DB heartbeat layer
-      startHeartbeat(circleId, connectedConns).then(() => loadCircleOffice());
+      startHeartbeat(circleId, connectedConns).then(() => scheduleCircleOfficeRefresh());
 
       // Build live agent states from connections
       const myAgents: AgentLiveState[] = connectedConns.map(conn => ({
@@ -580,7 +681,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         },
         onJoin: (userId) => {
           setLiveUserIds(prev => new Set([...prev, userId]));
-          loadCircleOffice();
+          scheduleCircleOfficeRefresh(150);
         },
         onLeave: (userId) => {
           setLiveUserIds(prev => {
@@ -588,7 +689,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             next.delete(userId);
             return next;
           });
-          setTimeout(() => loadCircleOffice(), 3000);
+          scheduleCircleOfficeRefresh(3000);
         },
         onConnectionStatus: (status) => {
           setCircleConnectionStatus(status);
@@ -602,7 +703,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       stopIdleScheduler(circleId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps — identity signature, not count
-  }, [circleId, connections.filter(c => c.status === 'connected').map(c => c.id).join(',')]);
+  }, [circleId, connections.filter(c => c.status === 'connected').map(c => c.id).join(','), scheduleCircleOfficeRefresh]);
 
   // ─── Direct invocation handler (called by OfficeTerminal after send) ─────
   const handleCommandSent = useCallback((params: {
@@ -792,6 +893,26 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [publishName, setPublishName] = useState('');
   const [publishProvider, setPublishProvider] = useState('openswan');
 
+  const handleActionResult = useCallback((message: string) => {
+    setActionResult(message);
+    setShowActionResult(true);
+    // Auto-hide after 5 seconds
+    setTimeout(() => {
+      setShowActionResult(false);
+    }, 5000);
+  }, []);
+
+  const openPublishAgentModal = useCallback((conn?: AgentConnection) => {
+    if (conn) {
+      setPublishName(conn.name || '');
+      setPublishProvider(conn.provider || 'openswan');
+    } else {
+      setPublishName(prev => prev || 'My Agent');
+      setPublishProvider(prev => prev || 'openswan');
+    }
+    setShowPublishModal(true);
+  }, [setShowPublishModal]);
+
   const handlePublishToCircle = useCallback(async (
     overrideName?: string,
     overrideProvider?: string
@@ -809,19 +930,27 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
     setPublishingToCircle(true);
     try {
-      await publishAgentToCircle({
+      const result = await publishAgentToCircle({
         circleId,
         provider: agentProvider,
         name: agentName,
         color: agentColor,
         toolIcon: display.icon,
       });
-      await loadCircleOffice();
+      if (result.error) {
+        const message = result.error === 'agent_hidden'
+          ? 'This agent is hidden from the Circle Office right now. Reconnect or rename it before publishing again.'
+          : `Could not add your agent to the Circle Office: ${result.error}`;
+        handleActionResult(message);
+        return;
+      }
+      scheduleCircleOfficeRefresh(150);
+      handleActionResult(`${agentName} is now visible in the Circle Office.`);
       setShowPublishModal(false);
     } finally {
       setPublishingToCircle(false);
     }
-  }, [circleId, connections, publishingToCircle, loadCircleOffice, publishName, publishProvider]);
+  }, [circleId, connections, handleActionResult, publishingToCircle, publishName, publishProvider, scheduleCircleOfficeRefresh]);
 
   // Auto-publish when a connection becomes connected for the first time
   const autoPublishedRef = useRef<Set<string>>(new Set());
@@ -837,11 +966,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           name: conn.name,
           color: conn.color || display.color,
           toolIcon: display.icon,
-        }).then(() => loadCircleOffice());
+        }).then(() => scheduleCircleOfficeRefresh(150));
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps — identity signature, not count
-  }, [circleId, connections.filter(c => c.status === 'connected').map(c => c.id).join(','), loadCircleOffice]);
+  }, [circleId, connections.filter(c => c.status === 'connected').map(c => c.id).join(','), scheduleCircleOfficeRefresh]);
 
   // ─── Telegram state ──────────────────────────────
   const [telegramConfig, setTelegramConfig] = useState<TelegramConfig>({ botToken: '', chatId: '' });
@@ -852,10 +981,27 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [telegramError, setTelegramError] = useState<string | null>(null);
   const [telegramMessages, setTelegramMessages] = useState<TelegramMessage[]>([]);
   const tgPollerRef = useRef<TelegramPoller | null>(null);
+  const shouldSkipOpenSwanConnectionAttempt = useCallback((conn: AgentConnection) => {
+    if (conn.provider !== 'openswan') return false;
+    const notice = getOpenSwanEndpointNotice(conn.endpoint, conn.token);
+    return !!notice && /authentication failed|wrong or missing token/i.test(notice);
+  }, []);
 
   // ─── Connection helpers ──────────────────────────────
 
   const connectOne = useCallback(async (conn: AgentConnection) => {
+    if (shouldSkipOpenSwanConnectionAttempt(conn)) {
+      setConnections(prev => {
+        const updated = prev.map(c => c.id === conn.id ? {
+          ...c,
+          status: 'error' as const,
+          error: 'Authentication failed — wrong or missing token',
+        } : c);
+        updateAutoConnectConnections(updated);
+        return updated;
+      });
+      return;
+    }
     // Update status to connecting (local + singleton)
     setConnections(prev => {
       const updated = prev.map(c => c.id === conn.id ? { ...c, status: 'connecting' as const, error: undefined } : c);
@@ -863,8 +1009,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       return updated;
     });
 
-    const config: OpenSwanConfig = { endpoint: conn.endpoint, token: conn.token };
-    const result = await testConnection(config);
+    const result = await testAgentBridgeConnection({
+      provider: conn.provider,
+      endpoint: conn.endpoint,
+      token: conn.token,
+    });
 
     if (!result.ok) {
       setConnections(prev => {
@@ -875,7 +1024,25 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       return;
     }
 
-    // Store initial sessions
+    if (!supportsOpenSwanRpc(conn.provider)) {
+      setConnections(prev => {
+        const updated = prev.map(c => c.id === conn.id ? {
+          ...c,
+          status: 'connected' as const,
+          error: undefined,
+          sessionCount: undefined,
+          agentIds: [],
+          lastConnected: new Date().toISOString(),
+        } : c);
+        updateAutoConnectConnections(updated);
+        return updated;
+      });
+      return;
+    }
+
+    const config: OpenSwanConfig = { endpoint: conn.endpoint, token: conn.token };
+
+    // Store initial sessions from the successful rich-bridge test result
     sessionsRef.current.set(conn.id, result.sessions || []);
 
     // Fetch agent ids
@@ -885,14 +1052,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
     // Update connection status (local + singleton)
     setConnections(prev => {
-      const updated = prev.map(c => c.id === conn.id ? {
-        ...c,
-        status: 'connected' as const,
-        error: undefined,
-        sessionCount: (result.sessions || []).length,
-        agentIds,
-        lastConnected: new Date().toISOString(),
-      } : c);
+        const updated = prev.map(c => c.id === conn.id ? {
+          ...c,
+          status: 'connected' as const,
+          error: undefined,
+          sessionCount: (result.sessions || []).length,
+          agentIds,
+          lastConnected: new Date().toISOString(),
+        } : c);
       updateAutoConnectConnections(updated);
       return updated;
     });
@@ -926,7 +1093,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     pollersRef.current.set(conn.id, poller);
 
     setSessionsTick(t => t + 1);
-  }, []);
+  }, [shouldSkipOpenSwanConnectionAttempt]);
 
   const disconnectOne = useCallback((connId: string) => {
     const poller = pollersRef.current.get(connId);
@@ -1134,7 +1301,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         }
         setConnections(conns);
         for (const conn of conns) {
-          if (conn.enabled) connectOne(conn);
+          if (conn.enabled && !shouldSkipOpenSwanConnectionAttempt(conn)) connectOne(conn);
         }
 
         // Legacy CC detection
@@ -1146,7 +1313,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               if (!ccPublishedRef.current && circleId) {
                 ccPublishedRef.current = true;
                 publishClaudeCodeAgent(circleId, sessions.length)
-                  .then(() => loadCircleOffice())
+                  .then(() => scheduleCircleOfficeRefresh(150))
                   .catch(err => console.error('[OfficeTab] Failed to publish Claude Code agent:', err));
               }
               if (ccPublishedRef.current && circleId) {
@@ -1225,6 +1392,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       // Parse local appearances
       const localAppearances = appearancesRaw ? (() => { try { return JSON.parse(appearancesRaw); } catch { return {}; } })() : {};
 
+      // Apply local state immediately so the Office shell can paint from the
+      // fast path while remote profile merges continue in the background.
+      setAppearances(localAppearances);
+      appearancesLoadedRef.current = true;
+      prefsLoadedRef.current = true;
+      if (localFloors.length > 0) setFloors(localFloors);
+      if (localCurrentFloorId) setCurrentFloorId(localCurrentFloorId);
+      floorsInitializedRef.current = true;
+      markOfficeReady();
+
       // ── Single getUser() call + parallel Supabase profile queries ──
       let bestFloors = localFloors;
       let bestFloorId = localCurrentFloorId;
@@ -1270,7 +1447,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           // auto-assignment logic can populate missing agents
           if (appearanceRes.error) {
             _profileHasAgentAppearance = false;
-            setAppearances(localAppearances);
           } else {
             const remoteApp = appearanceRes.data?.agent_appearance || {};
             setAppearances({ ...localAppearances, ...remoteApp });
@@ -1302,38 +1478,39 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               setWhiteboardNotes(remote.whiteboardNotes);
             }
           }
-        } else {
-          setAppearances(localAppearances);
         }
-      } catch {
-        setAppearances(localAppearances);
-      }
-      appearancesLoadedRef.current = true;
-      prefsLoadedRef.current = true;
+      } catch {}
 
       // Apply floors
       if (bestFloors.length > 0) setFloors(bestFloors);
       if (bestFloorId) setCurrentFloorId(bestFloorId);
-      floorsInitializedRef.current = true;
 
-      // ── Fire remaining async loads in parallel (non-blocking) ──
-      Promise.all([
-        loadSessionTags(),
-        loadCachedTags()
-      ]).then(([primaryTags, cachedTags]) => {
-        const merged = new Map(cachedTags);
-        primaryTags.forEach((tags, key) => { merged.set(key, tags); });
-        setSessionTags(merged);
-      });
+      // ── Fire remaining async loads after first paint / idle time ──
+      const cancelDeferredEnrichment = runWhenIdle(() => {
+        Promise.all([
+          loadSessionTags(),
+          loadCachedTags(),
+        ]).then(([primaryTags, cachedTags]) => {
+          const merged = new Map(cachedTags);
+          primaryTags.forEach((tags, key) => { merged.set(key, tags); });
+          setSessionTags(merged);
+        }).catch(() => {});
 
-      loadBudgetConfig().then(setBudgetConfig);
-      loadIdleConfig().then(cfg => { setIdleConfig(cfg); idleConfigRef.current = cfg; });
+        loadBudgetConfig().then(setBudgetConfig).catch(() => {});
+        loadIdleConfig().then(cfg => {
+          setIdleConfig(cfg);
+          idleConfigRef.current = cfg;
+        }).catch(() => {});
+      }, 350);
+
+      (initRef as any)._cancelDeferredEnrichment = cancelDeferredEnrichment;
     })();
 
     return () => {
+      (initRef as any)._cancelDeferredEnrichment?.();
       (initRef as any)._unsub?.();
     };
-  }, [connectOne, circleId]);
+  }, [connectOne, circleId, markOfficeReady]);
 
   // Cleanup pollers on unmount
   useEffect(() => {
@@ -1792,35 +1969,39 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   // Enrich agents with cached data + restore identity
   useEffect(() => {
-    const doEnrich = async () => {
-      if (allAgents.length === 0) {
-        setEnrichedAgents([]);
-        return;
-      }
-      
-      try {
-        // Steps 1+2: Enrich with cache and restore identity in parallel
-        const [cacheEnriched] = await Promise.all([
-          enrichAgentsWithCache(allAgents),
-        ]);
-        const fullyEnriched = await restoreAllAgents(cacheEnriched);
-        const identities = await loadAgentIdentities();
-        setAgentIdentities(identities);
+    let cancelled = false;
+    const cancelDeferred = runWhenIdle(() => {
+      const doEnrich = async () => {
+        if (allAgents.length === 0) {
+          if (!cancelled) setEnrichedAgents([]);
+          return;
+        }
 
-        // Unblock render immediately
-        setEnrichedAgents(fullyEnriched);
+        try {
+          const cacheEnriched = await enrichAgentsWithCache(allAgents);
+          if (cancelled) return;
+          const fullyEnriched = await restoreAllAgents(cacheEnriched);
+          if (cancelled) return;
+          const identities = await loadAgentIdentities();
+          if (cancelled) return;
+          setAgentIdentities(identities);
+          setEnrichedAgents(fullyEnriched);
 
-        // Steps 3+4: Fire-and-forget — record activity and snapshot don't block display
-        Promise.all([
-          ...fullyEnriched.map(agent => recordAgentActivity(agent)),
-          takeSnapshot(fullyEnriched, sessionTags),
-        ]).catch(() => {});
-      } catch (error) {
-        console.error('Failed to enrich agents:', error);
-        setEnrichedAgents(allAgents);
-      }
+          Promise.all([
+            ...fullyEnriched.map(agent => recordAgentActivity(agent)),
+            takeSnapshot(fullyEnriched, sessionTags),
+          ]).catch(() => {});
+        } catch (error) {
+          console.error('Failed to enrich agents:', error);
+          if (!cancelled) setEnrichedAgents(allAgents);
+        }
+      };
+      void doEnrich();
+    }, 250);
+    return () => {
+      cancelled = true;
+      cancelDeferred();
     };
-    doEnrich();
   }, [sessionsTick, agentNames, sessionTags]);
 
   useEffect(() => {
@@ -1865,12 +2046,19 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       return;
     }
 
-    enrichSessionsWithCache(normalizedSessions).then(enriched => {
-      setEnrichedSessions(enriched);
-    }).catch(err => {
-      console.error('Failed to enrich sessions:', err);
-      setEnrichedSessions(normalizedSessions); // Fallback to raw sessions
-    });
+    let cancelled = false;
+    const cancelDeferred = runWhenIdle(() => {
+      enrichSessionsWithCache(normalizedSessions).then(enriched => {
+        if (!cancelled) setEnrichedSessions(enriched);
+      }).catch(err => {
+        console.error('Failed to enrich sessions:', err);
+        if (!cancelled) setEnrichedSessions(normalizedSessions); // Fallback to raw sessions
+      });
+    }, 250);
+    return () => {
+      cancelled = true;
+      cancelDeferred();
+    };
   }, [sessionsTick]); // Only re-run when sessions actually update
 
   // Combined 30-second sync: snapshot + DB token sync (single interval instead of two)
@@ -1878,6 +2066,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     if (userAgents.length === 0 || !circleId) return;
 
     const syncAll = async () => {
+      if (!isDocumentVisible()) return;
       try {
         // 1. Save local snapshot
         await takeSnapshot(enrichedAgentsRef.current, sessionTagsRef.current).catch(() => {});
@@ -1896,7 +2085,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     };
     syncAll();
     const interval = setInterval(syncAll, 30000);
-    return () => clearInterval(interval);
+    let removeVisibilityListener: (() => void) | null = null;
+    if (Platform.OS === 'web' && typeof document !== 'undefined') {
+      const onVisible = () => {
+        if (document.visibilityState === 'visible') void syncAll();
+      };
+      document.addEventListener('visibilitychange', onVisible);
+      removeVisibilityListener = () => document.removeEventListener('visibilitychange', onVisible);
+    }
+    return () => {
+      clearInterval(interval);
+      removeVisibilityListener?.();
+    };
   }, [userAgents.length > 0, circleId]);
 
   // Push agent stats to parent using the merged live + cached view
@@ -1944,6 +2144,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // Fetch cron jobs from all connected OpenSwan instances
   const connectedCount = connections.filter(c => c.status === 'connected').length;
   useEffect(() => {
+    if (!isDesktop || !whiteboardModule) return;
     if (connectedCount === 0) return;
     const fetchCron = async () => {
       const openswanConns = connections.filter(c => c.status === 'connected' && c.provider === 'openswan');
@@ -1962,7 +2163,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     fetchCron();
     const interval = setInterval(fetchCron, 300_000); // 5 min — cron data changes rarely
     return () => clearInterval(interval);
-  }, [connectedCount]);
+  }, [connectedCount, isDesktop, whiteboardModule]);
 
   // Scale
   const availableW = winW - 24;
@@ -1986,7 +2187,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   const handleOpenAutomate = useCallback(() => {
     setTerminalInitialTab('automations');
-    setTerminalSize('full');
+    setTerminalSize('half');
   }, []);
 
   const handleRemovePublishedAgent = useCallback(async (agent: OfficeAgent) => {
@@ -3293,15 +3494,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   // ─── Action panel handlers ──────────────────────────────
 
-  const handleActionResult = useCallback((message: string) => {
-    setActionResult(message);
-    setShowActionResult(true);
-    // Auto-hide after 5 seconds
-    setTimeout(() => {
-      setShowActionResult(false);
-    }, 5000);
-  }, []);
-
   // ─── Budget handlers ──────────────────────────────
 
   const handleBudgetConfigChange = useCallback(async (config: BudgetConfig) => {
@@ -3340,6 +3532,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           onConfigure={() => setShowCustomize(true)}
         />
       )}
+
+      <BridgeUnavailableBanner />
 
       {/* Marquee ticker removed — too noisy for the Office view */}
 
@@ -3410,33 +3604,49 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             )}
 
             {/* Publish to Circle CTA — always show if user hasn't published yet */}
-            {!mergedCircleAgents.some(a => a.isOwn) && (
-              <Pressable
-                onPress={() => {
-                  const conn = connections.find(c => c.enabled);
-                  if (conn) {
-                    // Has a connection — publish directly
-                    handlePublishToCircle(conn.name, conn.provider);
-                  } else {
-                    // No connection — open manual form
-                    setShowPublishModal(true);
-                  }
-                }}
-                disabled={publishingToCircle}
-                style={[coStyles.publishBtn, { borderColor: accentColor + '44', opacity: publishingToCircle ? 0.6 : 1 }]}
-              >
-                <Text style={coStyles.publishBtnIcon}>🏢</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={[coStyles.publishBtnTitle, { color: accentColor }]}>
-                    {publishingToCircle ? 'Publishing...' : 'Add your agent to the Circle Office'}
-                  </Text>
-                  <Text style={coStyles.publishBtnSub}>
-                    {connections.some(c => c.enabled)
-                      ? 'Let your circle see your agent and what it\'s building'
-                      : 'Register your agent manually — no gateway required'}
-                  </Text>
-                </View>
-              </Pressable>
+            {!mergedCircleAgents.some(a => a.isOwn) && !publishCtaDismissed && (
+              <View style={{ position: 'relative' }}>
+                <Pressable
+                  onPress={() => {
+                    const conn = connections.find(c => c.enabled);
+                    openPublishAgentModal(conn);
+                  }}
+                  disabled={publishingToCircle}
+                  style={[coStyles.publishBtn, { borderColor: accentColor + '44', opacity: publishingToCircle ? 0.6 : 1 }]}
+                >
+                  <Text style={coStyles.publishBtnIcon}>🏢</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[coStyles.publishBtnTitle, { color: accentColor }]}>
+                      {publishingToCircle ? 'Publishing...' : 'Add your agent to the Circle Office'}
+                    </Text>
+                    <Text style={coStyles.publishBtnSub}>
+                      {connections.some(c => c.enabled)
+                        ? 'Let your circle see your agent and what it\'s building'
+                        : 'Register your agent manually — no gateway required'}
+                    </Text>
+                  </View>
+                </Pressable>
+                <Pressable
+                  onPress={dismissPublishCta}
+                  hitSlop={10}
+                  style={({ pressed }: any) => [
+                    {
+                      position: 'absolute',
+                      top: 10,
+                      right: 10,
+                      width: 24,
+                      height: 24,
+                      borderRadius: 12,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      backgroundColor: pressed ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.06)',
+                    },
+                    Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                  ]}
+                >
+                  <Text style={{ color: '#cbd5e1', fontSize: 14, fontWeight: '700' }}>×</Text>
+                </Pressable>
+              </View>
             )}
             {/* ── Agent filter chips ───────────────────────────────────── */}
             <View style={officeFilterChipStyles.row}>
@@ -3753,31 +3963,49 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             {!editMode && (
               <>
                 {/* Desktop publish CTA — always show if not yet published */}
-                {!mergedCircleAgents.some(a => a.isOwn) && (
-                  <Pressable
-                    onPress={() => {
-                      const conn = connections.find(c => c.enabled);
-                      if (conn) {
-                        handlePublishToCircle(conn.name, conn.provider);
-                      } else {
-                        setShowPublishModal(true);
-                      }
-                    }}
-                    disabled={publishingToCircle}
-                    style={[coStyles.publishBtn, { borderColor: accentColor + '44', opacity: publishingToCircle ? 0.6 : 1, marginHorizontal: 8, marginTop: 4 }]}
-                  >
-                    <Text style={coStyles.publishBtnIcon}>🏢</Text>
-                    <View style={{ flex: 1 }}>
-                      <Text style={[coStyles.publishBtnTitle, { color: accentColor }]}>
-                        {publishingToCircle ? 'Publishing...' : 'Add your agent to the Circle Office'}
-                      </Text>
-                      <Text style={coStyles.publishBtnSub}>
-                        {connections.some(c => c.enabled)
-                          ? 'Let your circle see your agent and what it\'s building'
-                          : 'Register your agent — no gateway required'}
-                      </Text>
-                    </View>
-                  </Pressable>
+                {!mergedCircleAgents.some(a => a.isOwn) && !publishCtaDismissed && (
+                  <View style={{ position: 'relative' }}>
+                    <Pressable
+                      onPress={() => {
+                        const conn = connections.find(c => c.enabled);
+                        openPublishAgentModal(conn);
+                      }}
+                      disabled={publishingToCircle}
+                      style={[coStyles.publishBtn, { borderColor: accentColor + '44', opacity: publishingToCircle ? 0.6 : 1, marginHorizontal: 8, marginTop: 4 }]}
+                    >
+                      <Text style={coStyles.publishBtnIcon}>🏢</Text>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[coStyles.publishBtnTitle, { color: accentColor }]}>
+                          {publishingToCircle ? 'Publishing...' : 'Add your agent to the Circle Office'}
+                        </Text>
+                        <Text style={coStyles.publishBtnSub}>
+                          {connections.some(c => c.enabled)
+                            ? 'Let your circle see your agent and what it\'s building'
+                            : 'Register your agent — no gateway required'}
+                        </Text>
+                      </View>
+                    </Pressable>
+                    <Pressable
+                      onPress={dismissPublishCta}
+                      hitSlop={10}
+                      style={({ pressed }: any) => [
+                        {
+                          position: 'absolute',
+                          top: 14,
+                          right: 18,
+                          width: 24,
+                          height: 24,
+                          borderRadius: 12,
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          backgroundColor: pressed ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.06)',
+                        },
+                        Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                      ]}
+                    >
+                      <Text style={{ color: '#cbd5e1', fontSize: 14, fontWeight: '700' }}>×</Text>
+                    </Pressable>
+                  </View>
                 )}
               </>
             )}
@@ -4009,14 +4237,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       {/* MCP Hub Panel */}
       {showMcpHub && (
         <Modal visible={showMcpHub} animationType="fade" transparent onRequestClose={() => setShowMcpHub(false)}>
-          <McpPanel circleId={circleId} onClose={() => setShowMcpHub(false)} />
+          <Pressable style={nftStyles.overlay} onPress={() => setShowMcpHub(false)}>
+            <Pressable onPress={(e) => e.stopPropagation()}>
+              <McpPanel circleId={circleId} onClose={() => setShowMcpHub(false)} />
+            </Pressable>
+          </Pressable>
         </Modal>
       )}
 
       {/* Image / NFT Picker Modal */}
-      <Modal visible={nftPickerVisible} animationType="fade" transparent>
-        <View style={nftStyles.overlay}>
-          <View style={nftStyles.card}>
+      <Modal visible={nftPickerVisible} animationType="fade" transparent onRequestClose={() => { setNftPickerVisible(false); setNftPickerTargetId(null); }}>
+        <Pressable style={nftStyles.overlay} onPress={() => { setNftPickerVisible(false); setNftPickerTargetId(null); }}>
+          <Pressable style={nftStyles.card} onPress={(e) => e.stopPropagation()}>
             <View style={nftStyles.header}>
               <Text style={nftStyles.headerText}>SET IMAGE</Text>
               <Pressable onPress={() => { setNftPickerVisible(false); setNftPickerTargetId(null); }} style={nftStyles.closeBtn}>
@@ -4110,14 +4342,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               );
               return null;
             })()}
-          </View>
-        </View>
+          </Pressable>
+        </Pressable>
       </Modal>
 
       {/* ── Sticky Note Editor Modal ────────────────────────────────────── */}
-      <Modal visible={stickyEditorVisible} animationType="fade" transparent>
-        <View style={nftStyles.overlay}>
-          <View style={[nftStyles.card, { maxWidth: 420, maxHeight: 520 }]}>
+      <Modal visible={stickyEditorVisible} animationType="fade" transparent onRequestClose={() => { setStickyEditorVisible(false); setStickyEditorTargetId(null); }}>
+        <Pressable style={nftStyles.overlay} onPress={() => { setStickyEditorVisible(false); setStickyEditorTargetId(null); }}>
+          <Pressable style={[nftStyles.card, { maxWidth: 420, maxHeight: 520 }]} onPress={(e) => e.stopPropagation()}>
             <View style={nftStyles.header}>
               <Text style={nftStyles.headerText}>STICKY NOTE</Text>
               <Pressable onPress={() => { setStickyEditorVisible(false); setStickyEditorTargetId(null); }} style={nftStyles.closeBtn}>
@@ -4221,8 +4453,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             <Pressable onPress={handleStickyNoteSave} style={[stickyStyles.saveBtn, Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}]}>
               <Text style={stickyStyles.saveBtnText}>SAVE NOTE</Text>
             </Pressable>
-          </View>
-        </View>
+          </Pressable>
+        </Pressable>
       </Modal>
 
       {/* ─── Retro Emulator Modal (lazy) ──────────────────────────────── */}
@@ -4317,9 +4549,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       )}
 
       {/* ─── Service Connector Modal ──────────────────────────────────────── */}
-      <Modal visible={serviceModalVisible} animationType="fade" transparent>
-        <View style={nftStyles.overlay}>
-          <View style={[nftStyles.card, { maxHeight: 600 }]}>
+      <Modal visible={serviceModalVisible} animationType="fade" transparent onRequestClose={() => { setServiceModalVisible(false); setServiceModalTargetId(null); }}>
+        <Pressable style={nftStyles.overlay} onPress={() => { setServiceModalVisible(false); setServiceModalTargetId(null); }}>
+          <Pressable style={[nftStyles.card, { maxHeight: 600 }]} onPress={(e) => e.stopPropagation()}>
             <View style={nftStyles.header}>
               <Text style={nftStyles.headerText}>
                 {serviceModalType === 'smart_tv' ? '📺 CONNECT TV' :
@@ -4761,8 +4993,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             <Pressable onPress={handleServiceSave} style={[svcStyles.saveBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
               <Text style={svcStyles.saveBtnText}>SAVE & CONNECT</Text>
             </Pressable>
-          </View>
-        </View>
+          </Pressable>
+        </Pressable>
       </Modal>
 
       {/* Hidden file input for web image upload */}
@@ -4790,6 +5022,55 @@ const CONNECTION_STATUS_UI = {
   reconnecting: { label: 'Reconnecting…', color: '#f59e0b', dot: '🟡' },
   offline:      { label: 'Offline',       color: '#666',    dot: '⚫' },
 } as const;
+
+// Shown on production web where localhost bridges (Claude Code, Codex, Gemini,
+// Cursor, OpenSwan) can't be reached. Explains *why* the agent list is empty
+// instead of leaving the user staring at an unhelpful blank panel.
+function BridgeUnavailableBanner() {
+  const env = getBridgeEnvironment();
+  const [dismissed, setDismissed] = useState(false);
+  if (env.available || dismissed) return null;
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'flex-start',
+        gap: 12,
+        backgroundColor: '#161b22',
+        borderWidth: 1,
+        borderColor: '#30363d',
+        borderLeftWidth: 3,
+        borderLeftColor: '#6366f1',
+        borderRadius: 6,
+        padding: 12,
+        marginHorizontal: 16,
+        marginTop: 8,
+      }}
+      nativeID="section-office-bridge-unavailable"
+    >
+      <View style={{ flex: 1 }}>
+        <Text style={{ color: '#e6edf3', fontSize: 13, fontWeight: '600', marginBottom: 4 }}>
+          Agent bridges can run locally or on any reachable machine
+        </Text>
+        <Text style={{ color: '#8b949e', fontSize: 12, lineHeight: 18 }}>
+          The Office can show local bridges, public bridges, and custom agents running on a Pi,
+          VPS, or another machine. On the hosted web app, raw localhost ports are not reachable,
+          so purely local bridges will stay empty unless you run the app locally or expose a public bridge URL. Start the UC dev server locally
+          (<Text style={{ fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string, color: '#c9d1d9' }}>npm run dev</Text>)
+          to see your local agents, or set <Text style={{ fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string, color: '#c9d1d9' }}>EXPO_PUBLIC_BRIDGE_HOST</Text> or a custom public endpoint to reach agents elsewhere.
+        </Text>
+      </View>
+      <Pressable
+        onPress={() => setDismissed(true)}
+        style={{ padding: 4 }}
+        accessibilityRole="button"
+        accessibilityLabel="Dismiss bridge notice"
+      >
+        <Text style={{ color: '#8b949e', fontSize: 14 }}>×</Text>
+      </Pressable>
+    </View>
+  );
+}
 
 function CircleOfficePanel({
   agents,

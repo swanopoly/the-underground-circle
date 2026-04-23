@@ -266,8 +266,8 @@ export async function addProofOfWork(entry: {
   pow_type: PowType;
   title: string;
   detail?: Record<string, any>;
-}): Promise<{ error: string | null }> {
-  const { error } = await supabase
+}): Promise<{ error: string | null; data: { id: string } | null }> {
+  const { data, error } = await supabase
     .from('proof_of_work')
     .insert({
       circle_id: entry.circle_id,
@@ -277,9 +277,66 @@ export async function addProofOfWork(entry: {
       pow_type: entry.pow_type,
       title: entry.title,
       detail: entry.detail || {},
-    });
+    })
+    .select('id')
+    .single();
 
-  return { error: error?.message || null };
+  return { error: error?.message || null, data: (data as any) || null };
+}
+
+// ─── Favorites (per-user mission pins) ───────────────────────────────────────
+// Small per-user bookmark so the mission list can float the user's most
+// important 1–2 missions to the top. Backed by `mission_favorites`.
+
+export async function getFavoriteMissionIds(): Promise<Set<string>> {
+  const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+  if (!user) return new Set();
+  const { data } = await supabase
+    .from('mission_favorites')
+    .select('mission_id')
+    .eq('user_id', user.id);
+  return new Set((data || []).map((r: any) => r.mission_id));
+}
+
+export async function setMissionFavorite(missionId: string, favorite: boolean): Promise<void> {
+  const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+  if (!user) return;
+  if (favorite) {
+    // ON CONFLICT DO NOTHING equivalent — primary key (user_id, mission_id)
+    // makes the second insert a no-op if the user already pinned it.
+    await supabase
+      .from('mission_favorites')
+      .upsert({ user_id: user.id, mission_id: missionId }, { onConflict: 'user_id,mission_id' });
+  } else {
+    await supabase
+      .from('mission_favorites')
+      .delete()
+      .eq('user_id', user.id)
+      .eq('mission_id', missionId);
+  }
+}
+
+export function useFavoriteMissions(): { favorites: Set<string>; toggle: (missionId: string) => void; refresh: () => void } {
+  const [favorites, setFavorites] = useState<Set<string>>(new Set());
+  const refresh = useCallback(() => {
+    getFavoriteMissionIds().then(setFavorites).catch(() => {});
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+  const toggle = useCallback((missionId: string) => {
+    // Optimistic update — the DB call races in the background.
+    setFavorites((prev) => {
+      const next = new Set(prev);
+      const isFav = next.has(missionId);
+      if (isFav) next.delete(missionId);
+      else next.add(missionId);
+      setMissionFavorite(missionId, !isFav).catch(() => {
+        // Roll back if the server rejected (RLS, etc.)
+        refresh();
+      });
+      return next;
+    });
+  }, [refresh]);
+  return { favorites, toggle, refresh };
 }
 
 // ─── Realtime subscriptions ──────────────────────────────────────────────────

@@ -80,6 +80,23 @@ export type CircleOfficeAgent = {
   isOwn?: boolean;
 };
 
+const forbiddenPublishCooldowns = new Map<string, number>();
+const FORBIDDEN_PUBLISH_COOLDOWN_MS = 60_000;
+
+function buildPublishCooldownKey(circleId: string, ownerId: string, name: string): string {
+  return `${circleId}::${ownerId}::${name.toLowerCase()}`;
+}
+
+function hasForbiddenPublishCooldown(key: string): boolean {
+  const expiresAt = forbiddenPublishCooldowns.get(key);
+  if (!expiresAt) return false;
+  if (expiresAt <= Date.now()) {
+    forbiddenPublishCooldowns.delete(key);
+    return false;
+  }
+  return true;
+}
+
 export type PublishAgentInput = {
   circleId: string;
   provider: string;
@@ -278,6 +295,10 @@ export async function publishAgentToCircle(input: PublishAgentInput): Promise<{
     }
     const user = await getCurrentUser();
     if (!user) return { error: 'Not authenticated' };
+    const cooldownKey = buildPublishCooldownKey(input.circleId, user.id, input.name);
+    if (hasForbiddenPublishCooldown(cooldownKey)) {
+      return { error: 'publish_forbidden_cooldown' };
+    }
 
     const { data, error } = await supabase
       .from('circle_office_agents')
@@ -300,7 +321,18 @@ export async function publishAgentToCircle(input: PublishAgentInput): Promise<{
       .select()
       .single();
 
-    if (error) return { error: error.message };
+    if (error) {
+      const statusCode = (error as any)?.code;
+      const message = String(error.message || '');
+      if (
+        statusCode === '403'
+        || /forbidden|permission denied|row-level security/i.test(message)
+      ) {
+        forbiddenPublishCooldowns.set(cooldownKey, Date.now() + FORBIDDEN_PUBLISH_COOLDOWN_MS);
+      }
+      return { error: error.message };
+    }
+    forbiddenPublishCooldowns.delete(cooldownKey);
     return { agent: fromRow(data, user.id) };
   } catch (e: any) {
     return { error: e.message };

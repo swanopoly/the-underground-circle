@@ -2,6 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, Pressable, Animated, ScrollView, Platform } from 'react-native';
 import { AgentApproval, resolveApproval } from '../services/hitlService';
 import { supabase } from '../lib/supabase';
+import {
+  AUTO_APPROVE_CATEGORY_LABELS,
+  planCategory,
+  writeUserAutoApprove,
+  type AutoApproveCategory,
+} from '../lib/chatAutoApproveSettings';
 
 interface Props {
   approvals: AgentApproval[];
@@ -40,8 +46,28 @@ function CountdownTimer({
   );
 }
 
+function deriveCategory(ap: AgentApproval): AutoApproveCategory | null {
+  const plan = (ap.payload as any)?.plan;
+  if (!plan) return null;
+  const fake: any = {
+    source: plan.source || 'slash',
+    intent: { kind: 'slash_command', routeId: plan.routeId, commandText: plan.commandText || '' },
+    execution: {
+      kind: plan.executionKind,
+      routeId: plan.routeId ?? null,
+      commandText: plan.commandText ?? null,
+    },
+    risk: plan.risk || 'review',
+    approval: { required: true, reason: '' },
+    confidence: plan.confidence ?? 0,
+    notes: plan.notes || [],
+  };
+  try { return planCategory(fake); } catch { return null; }
+}
+
 export default function HitlApprovalBanner({ approvals, circleId }: Props) {
   const [expanded, setExpanded] = useState(false);
+  const [rememberPerApproval, setRememberPerApproval] = useState<Record<string, boolean>>({});
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
@@ -74,6 +100,20 @@ export default function HitlApprovalBanner({ approvals, circleId }: Props) {
       } = await supabase.auth.getUser();
       if (!user) return;
       await resolveApproval(approvalId, status, user.id);
+      // "Remember this" — if the user ticked the checkbox on the card,
+      // and this was an approve, persist the category as auto-approved
+      // for future plans. Reject + remember is not offered (Cline pattern:
+      // never auto-deny by default; users can toggle via settings).
+      if (status === 'approved' && rememberPerApproval[approvalId]) {
+        const ap = approvals.find((x) => x.id === approvalId);
+        const cat = ap ? deriveCategory(ap) : null;
+        if (cat) await writeUserAutoApprove(user.id, cat, 'auto').catch(() => {});
+      }
+      setRememberPerApproval((prev) => {
+        const next = { ...prev };
+        delete next[approvalId];
+        return next;
+      });
     } catch (e) {
       console.error(e);
     }
@@ -120,6 +160,27 @@ export default function HitlApprovalBanner({ approvals, circleId }: Props) {
                   {JSON.stringify(ap.payload, null, 2).slice(0, 180)}
                 </Text>
               )}
+              {(() => {
+                const cat = deriveCategory(ap);
+                if (!cat) return null;
+                const checked = !!rememberPerApproval[ap.id];
+                return (
+                  <Pressable
+                    onPress={() =>
+                      setRememberPerApproval((prev) => ({ ...prev, [ap.id]: !prev[ap.id] }))
+                    }
+                    style={styles.rememberRow}
+                    accessibilityRole="button"
+                  >
+                    <View style={[styles.rememberBox, checked && styles.rememberBoxChecked]}>
+                      {checked ? <Text style={styles.rememberCheck}>{'✓'}</Text> : null}
+                    </View>
+                    <Text style={styles.rememberLabel}>
+                      Remember: auto-approve {AUTO_APPROVE_CATEGORY_LABELS[cat].toLowerCase()}
+                    </Text>
+                  </Pressable>
+                );
+              })()}
               <View style={styles.actions}>
                 <Pressable
                   style={styles.rejectBtn}
@@ -255,4 +316,33 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   approveText: { color: '#22c55e', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' },
+  rememberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 2,
+    marginBottom: 8,
+    paddingVertical: 4,
+  },
+  rememberBox: {
+    width: 14,
+    height: 14,
+    borderRadius: 3,
+    borderWidth: 1,
+    borderColor: '#475569',
+    backgroundColor: '#0a0f1c',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rememberBoxChecked: {
+    borderColor: '#22c55e',
+    backgroundColor: '#22c55e22',
+  },
+  rememberCheck: { color: '#22c55e', fontSize: 10, fontWeight: '800', lineHeight: 12 },
+  rememberLabel: {
+    color: '#94a3b8',
+    fontSize: 10,
+    fontFamily: 'monospace',
+    letterSpacing: 0.3,
+  },
 });

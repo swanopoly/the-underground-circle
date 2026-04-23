@@ -13,6 +13,12 @@ import {
   isServiceRoleRequest,
   jsonResponse,
 } from "../_shared/edge.ts";
+import {
+  computeCostUsd,
+  checkCircleClaudeBudget,
+  logClaudeUsage as sharedLogClaudeUsage,
+  type UsageBreakdown,
+} from "../_claude/anthropic.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -20,38 +26,71 @@ const corsHeaders = {
 };
 
 // ─── Model routing ───────────────────────────────────────────────────────────
+// Automations run on a cron every minute and can fan out across every active
+// circle, so their model default matters a LOT for Anthropic spend. We pin
+// the default at Haiku 4.5 (~$1/$5 per 1M tokens) and only allow callers to
+// opt up if they pass an explicit sonnet/opus key AND set
+// `allow_premium_model = true` on the automation row. Anything else — bad
+// env, missing key, typo — falls back to Haiku.
 
 const CLAUDE_MODEL_MAP: Record<string, string> = {
-  "claude-haiku":  "claude-haiku-4-5-20251001",
-  "claude-sonnet": "claude-sonnet-4-6",
-  "claude-opus":   "claude-opus-4-6",
+  // Canonical short IDs (no date suffix) per Anthropic docs.
+  "claude-haiku":   "claude-haiku-4-5",
+  "claude-haiku-4-5": "claude-haiku-4-5",
+  "claude-sonnet":  "claude-sonnet-4-6",
+  "claude-sonnet-4-6": "claude-sonnet-4-6",
+  "claude-opus":    "claude-opus-4-7",
+  "claude-opus-4-7": "claude-opus-4-7",
+  "claude-opus-4-6": "claude-opus-4-6",
 };
+
+// Hard default for any automation that omits `model` or passes an unknown
+// key. Haiku-class pricing (~$1/$5 per 1M). Centralized so there is a single
+// place to flip if we ever change the policy.
+const DEFAULT_MODEL_KEY = "claude-haiku";
+const DEFAULT_MODEL_ID = CLAUDE_MODEL_MAP[DEFAULT_MODEL_KEY];
+
+// Premium models require an explicit opt-in flag on the automation row. If
+// a caller tries to use one without the flag, we silently downgrade to
+// Haiku so a typo in the automation config can't nuke the spend budget.
+const PREMIUM_MODEL_IDS = new Set(["claude-sonnet-4-6", "claude-opus-4-6", "claude-opus-4-7"]);
 
 interface AIResult {
   text: string;
   model: string;
   inputTokens: number;
   outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
   totalTokens: number;
   estimatedCost: number;
 }
 
-// Rough cost per 1M tokens (input, output)
-const MODEL_COSTS: Record<string, [number, number]> = {
-  "claude-haiku-4-5-20251001": [0.80, 4.00],
-  "claude-sonnet-4-6":        [3.00, 15.00],
-  "claude-opus-4-6":          [15.00, 75.00],
-};
+// Pricing now lives in `_claude/anthropic.ts` (per Rule #11). This function
+// keeps its local retry loop because cron-triggered automations need more
+// aggressive retry than user-triggered calls, but the cost math itself goes
+// through the shared `computeCostUsd()`.
 
-async function callClaude(systemPrompt: string, userMessage: string, modelKey: string): Promise<AIResult> {
+async function callClaude(frozenPrompt: string, volatilePrompt: string, userMessage: string, modelKey: string): Promise<AIResult> {
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
 
-  const modelId = CLAUDE_MODEL_MAP[modelKey] || CLAUDE_MODEL_MAP["claude-haiku"];
+  const modelId = CLAUDE_MODEL_MAP[modelKey] || DEFAULT_MODEL_ID;
+
+  // System prompt is split into two blocks: the frozen header gets a
+  // cache_control breakpoint so repeated automation runs within 5 minutes
+  // (and other automations that share the same preamble) read from cache at
+  // ~10% the input cost. Circle-state context is a second, uncached block.
+  const systemContent: any[] = [
+    { type: "text", text: frozenPrompt, cache_control: { type: "ephemeral" } },
+  ];
+  if (volatilePrompt && volatilePrompt.trim().length > 0) {
+    systemContent.push({ type: "text", text: volatilePrompt });
+  }
 
   // Retry with exponential backoff for transient errors (429, 503, network)
   const MAX_RETRIES = 3;
-  const FALLBACK_MODELS = ["claude-haiku-4-5-20251001"]; // Fallback to cheaper model on persistent failure
+  const FALLBACK_MODELS = [DEFAULT_MODEL_ID]; // Final-retry fallback: always Haiku
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -68,7 +107,7 @@ async function callClaude(systemPrompt: string, userMessage: string, modelKey: s
         body: JSON.stringify({
           model: useModel,
           max_tokens: 1024,
-          system: systemPrompt,
+          system: systemContent,
           messages: [{ role: "user", content: userMessage }],
         }),
       });
@@ -92,19 +131,23 @@ async function callClaude(systemPrompt: string, userMessage: string, modelKey: s
       }
 
       const data = await res.json();
-      const usage = data.usage || {};
-      const inputTokens = usage.input_tokens || 0;
-      const outputTokens = usage.output_tokens || 0;
-      const costs = MODEL_COSTS[useModel] || [0.80, 4.00];
-      const estimatedCost = (inputTokens * costs[0] + outputTokens * costs[1]) / 1_000_000;
+      const u = data.usage || {};
+      const usage: UsageBreakdown = {
+        uncachedIn:  u.input_tokens                ?? 0,
+        cacheCreate: u.cache_creation_input_tokens ?? 0,
+        cacheRead:   u.cache_read_input_tokens     ?? 0,
+        output:      u.output_tokens               ?? 0,
+      };
 
       return {
         text: data.content?.[0]?.text || "No response generated.",
         model: useModel,
-        inputTokens,
-        outputTokens,
-        totalTokens: inputTokens + outputTokens,
-        estimatedCost,
+        inputTokens:         usage.uncachedIn,
+        outputTokens:        usage.output,
+        cacheCreationTokens: usage.cacheCreate,
+        cacheReadTokens:     usage.cacheRead,
+        totalTokens:         usage.uncachedIn + usage.cacheCreate + usage.cacheRead + usage.output,
+        estimatedCost:       computeCostUsd(useModel, usage),
       };
     } catch (e: any) {
       lastError = e;
@@ -118,6 +161,33 @@ async function callClaude(systemPrompt: string, userMessage: string, modelKey: s
   }
 
   throw lastError || new Error("callClaude: all retries exhausted");
+}
+
+// Thin wrapper so the call sites don't have to rebuild a UsageBreakdown
+// from our local AIResult shape.
+function logClaudeUsage(
+  supabase: any,
+  args: {
+    circleId: string | null;
+    userId: string | null;
+    source: string;
+    aiResult: AIResult;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<void> {
+  return sharedLogClaudeUsage(supabase, {
+    circleId: args.circleId,
+    userId:   args.userId,
+    source:   args.source,
+    model:    args.aiResult.model,
+    usage: {
+      uncachedIn:  args.aiResult.inputTokens,
+      cacheCreate: args.aiResult.cacheCreationTokens,
+      cacheRead:   args.aiResult.cacheReadTokens,
+      output:      args.aiResult.outputTokens,
+    },
+    metadata: args.metadata,
+  });
 }
 
 // ─── Context gathering (lighter version of swanbot-ai) ───────────────────────
@@ -372,11 +442,12 @@ async function gatherContext(supabase: any, circleId: string, flags: ContextFlag
 // ─── Build prompt context string ─────────────────────────────────────────────
 
 function buildContextString(ctx: any): string {
-  const now = new Date();
-  const dateStr = now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "America/New_York" });
-  const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" });
+  // Day-level date is enough — minute-level timestamps would invalidate the
+  // prompt cache on every automation tick. If a specific automation needs the
+  // current time, it can inject it into the user message via template vars.
+  const dateStr = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "America/New_York" });
 
-  let s = `Circle: ${ctx.circle?.name || "Unknown"}\nDate: ${dateStr} at ${timeStr} ET\nMembers: ${ctx.memberCount}\nChecked in today: ${ctx.checkedInCount}/${ctx.memberCount}`;
+  let s = `Circle: ${ctx.circle?.name || "Unknown"}\nDate: ${dateStr} ET\nMembers: ${ctx.memberCount}\nChecked in today: ${ctx.checkedInCount}/${ctx.memberCount}`;
 
   if (ctx.members?.length > 0) {
     s += `\n\nMembers:\n${ctx.members.map((m: any) =>
@@ -1533,20 +1604,92 @@ Rules:
 `;
       }
 
-      const systemPrompt = `${spiritPrefix}You are BlackSwan 🦢 — an AI assistant for "${context.circle?.name || "Unknown"}" circle.
+      // Split into frozen (stable preamble, cacheable) + volatile (per-run
+      // circle state). The frozen block is shared across same-circle /
+      // same-automation runs and other automations with overlapping
+      // preambles, so it reads from the ephemeral cache at ~10% cost.
+      const frozenSystem = `${spiritPrefix}You are BlackSwan 🦢 — an AI assistant for "${context.circle?.name || "Unknown"}" circle.
 You are running an automated task: "${automation.name}".
 Be concise, direct, and actionable. Use real data from the context below.
-Always prefix your response with 🦢.${memorySection}${roomFileInstructions}
+Always prefix your response with 🦢.${memorySection}${roomFileInstructions}`;
 
-## Circle Context
+      const volatileSystem = `## Circle Context
 ${contextString}`;
 
-      // 6. Call AI
-      const modelKey = automation.model || "claude-haiku";
-      const modelId = CLAUDE_MODEL_MAP[modelKey] || CLAUDE_MODEL_MAP["claude-haiku"];
+      // Keep a concatenated copy for logging/reporting (the split above is
+      // purely for cache_control placement).
+      const systemPrompt = `${frozenSystem}\n\n${volatileSystem}`;
+
+      // 6. Call AI — resolve model with a Haiku guardrail. Premium models
+      // (Sonnet / Opus) only run when the automation row sets
+      // `allow_premium_model = true`; otherwise we silently downgrade so a
+      // typo or stale config can't push the spend budget onto Opus.
+      const rawModelKey = automation.model || DEFAULT_MODEL_KEY;
+      const resolvedId = CLAUDE_MODEL_MAP[rawModelKey] || DEFAULT_MODEL_ID;
+      const allowPremium = automation.allow_premium_model === true;
+      const usingPremium = PREMIUM_MODEL_IDS.has(resolvedId);
+      const modelKey = usingPremium && !allowPremium ? DEFAULT_MODEL_KEY : rawModelKey;
+      const modelId = CLAUDE_MODEL_MAP[modelKey] || DEFAULT_MODEL_ID;
+      if (usingPremium && !allowPremium) {
+        await logStep(`⚠ Premium model '${rawModelKey}' requested without allow_premium_model=true — downgrading to ${modelId}`);
+      }
+      // Umbrella claude_total cap — trips first if set tighter than the
+      // per-source automation cap. Belt-and-suspenders: a low umbrella
+      // shouldn't be bypassed just because automation has its own budget.
+      {
+        const umbrella = await checkCircleClaudeBudget(supabase, circleId);
+        if (!umbrella.allowed) {
+          await logStep(`⛔ Umbrella Claude cap: $${umbrella.spent24h.toFixed(4)} ≥ $${umbrella.cap.toFixed(2)}. Skipping run until the 24h window rolls or the cap is raised.`);
+          throw new Error(`automation_umbrella_cap_exceeded:${umbrella.spent24h.toFixed(4)}:${umbrella.cap.toFixed(2)}`);
+        }
+      }
+
+      // Per-circle daily spend cap — the real blast-radius guard for
+      // cron-triggered automations. A runaway template (infinite loop,
+      // stuck condition, bug) is the #1 way to rack up unintended spend.
+      // Sum automation-executor cost for this circle in the last 24h and
+      // compare to the cap from `circles.settings.automation_max_cost_usd`
+      // (default $1.00/day — Haiku automations are cents each, so $1 gives
+      // headroom for ~1000 normal runs but stops a runaway cold).
+      try {
+        const capRow = await supabase
+          .from("circles")
+          .select("settings")
+          .eq("id", circleId)
+          .maybeSingle();
+        const configured = (capRow?.data?.settings as any)?.automation_max_cost_usd;
+        const capUsd = typeof configured === "number" && configured > 0 ? configured : 1.0;
+        const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const { data: recent } = await supabase
+          .from("claude_api_usage")
+          .select("estimated_cost")
+          .eq("circle_id", circleId)
+          .eq("source", "automation-executor")
+          .gte("created_at", since);
+        const spent24h = (recent || []).reduce((s: number, r: any) => s + Number(r.estimated_cost || 0), 0);
+        if (spent24h >= capUsd) {
+          await logStep(`⛔ Daily cap reached: $${spent24h.toFixed(4)} ≥ $${capUsd.toFixed(2)}. Raise 'automation_max_cost_usd' in circle settings or wait for the 24h window to roll.`);
+          throw new Error(`automation_daily_cap_exceeded:${spent24h.toFixed(4)}:${capUsd.toFixed(2)}`);
+        }
+      } catch (capErr: any) {
+        const msg = String(capErr?.message || capErr);
+        if (msg.startsWith("automation_daily_cap_exceeded:")) throw capErr;
+        // Telemetry lookup failure shouldn't block a run; log and proceed.
+        await logStep(`⚠ Cap check skipped: ${msg.slice(0, 120)}`);
+      }
+
       await logStep(`⏳ Calling ${modelId}...`);
-      const aiResult = await callClaude(systemPrompt, resolvedPrompt, modelKey);
-      await logStep(`✓ AI responded — ${aiResult.totalTokens} tokens (${aiResult.inputTokens} in / ${aiResult.outputTokens} out) · $${aiResult.estimatedCost.toFixed(4)}`);
+      const aiResult = await callClaude(frozenSystem, volatileSystem, resolvedPrompt, modelKey);
+      await logStep(`✓ AI responded — ${aiResult.totalTokens} tokens (${aiResult.inputTokens} in / ${aiResult.outputTokens} out · cache ${aiResult.cacheReadTokens}r/${aiResult.cacheCreationTokens}w) · $${aiResult.estimatedCost.toFixed(4)}`);
+
+      // Fire-and-forget usage log for cost / cache-hit visibility
+      logClaudeUsage(supabase, {
+        circleId,
+        userId: automation.created_by || null,
+        source: "automation-executor",
+        aiResult,
+        metadata: { automation_id: automation.id, automation_name: automation.name, trigger_type: automation.trigger_type },
+      });
 
       // 6a-gh. Mark GitHub events as processed (if github_summary)
       if (isGitHubSummary && (context as any)._githubEventIds?.length > 0 && !dryRun) {

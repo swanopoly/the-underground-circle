@@ -1,10 +1,19 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { getRunArtifacts, getRunSteps, listChatSessionRuns, listRuns, subscribeToRun, subscribeToRunSteps, type AgentRun, type RunArtifact, type RunStep } from '../../lib/agentRunSystem';
+import { getRunArtifacts, getRunSteps, listChatSessionRuns, listChildRuns, listRuns, subscribeToRun, subscribeToRunSteps, type AgentRun, type RunArtifact, type RunStep } from '../../lib/agentRunSystem';
 import type { BrowserPlanCardData, BrowserPlanEvent } from '../../lib/computerUse';
 import { applyOpenSwanMemoryRecommendation, type OpenSwanMemoryRecommendation, type PromptMemoryReference } from '../../lib/memoryService';
 import { getOpenSwanExecutionStatusColor, getOpenSwanExecutionStatusLabel, type OpenSwanExecutionContract } from '../../lib/openswanExecution';
 import { decayMemoryImportance, pinMemory, promoteMemory, recordMemoryFeedback, softDeleteMemory } from '../../lib/memoryActions';
+import {
+  buildRunMetadataSummaryProps,
+  readRunBrowserPlanEvents,
+  readRunExecutionStream,
+} from '../../lib/runMetadataSummary';
+import { buildOpenSwanObservedEvalAggregate, buildOpenSwanObservedEvalDashboard } from '../../lib/openswanObservedEvals';
+import OpenSwanQualityAggregate from './OpenSwanQualityAggregate';
+import OpenSwanQualityDashboard from './OpenSwanQualityDashboard';
+import RunMetadataSummary from './RunMetadataSummary';
 
 type Props = {
   visible: boolean;
@@ -15,6 +24,29 @@ type Props = {
   roomId?: string | null;
   onClose: () => void;
 };
+
+function getChildQualityTone(outcome?: string | null): { border: string; bg: string; text: string } {
+  switch (outcome) {
+    case 'strong':
+      return { border: '#22c55e40', bg: '#052e16', text: '#86efac' };
+    case 'blocked':
+      return { border: '#f59e0b40', bg: '#1f1605', text: '#fbbf24' };
+    case 'failed':
+      return { border: '#ef444440', bg: '#2a0b0b', text: '#fca5a5' };
+    default:
+      return { border: '#38bdf840', bg: '#082f49', text: '#7dd3fc' };
+  }
+}
+
+function getWeakestSignalLabel(observedEval: any): string | null {
+  const signals = [
+    ...(Array.isArray(observedEval?.skillSignals) ? observedEval.skillSignals : []),
+    ...(Array.isArray(observedEval?.modeSignals) ? observedEval.modeSignals : []),
+  ].filter((signal: any) => signal && typeof signal.score === 'number');
+  if (signals.length === 0) return null;
+  const weakest = signals.slice().sort((left: any, right: any) => left.score - right.score)[0];
+  return weakest?.label || null;
+}
 
 function formatMemoryRecencyLabel(ref: PromptMemoryReference): string {
   const timestamp = ref.lastAccessedAt || ref.updatedAt;
@@ -73,10 +105,12 @@ export default function RunHistoryDrawer({
   roomId = null,
   onClose,
 }: Props) {
+  const [qualityWindow, setQualityWindow] = useState<'all' | 'recent'>('all');
   const [runs, setRuns] = useState<AgentRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [steps, setSteps] = useState<RunStep[]>([]);
   const [artifacts, setArtifacts] = useState<RunArtifact[]>([]);
+  const [childRuns, setChildRuns] = useState<AgentRun[]>([]);
   const [memoryActionTick, setMemoryActionTick] = useState(0);
 
   useEffect(() => {
@@ -98,19 +132,22 @@ export default function RunHistoryDrawer({
     if (!visible || !selectedRunId) {
       setSteps([]);
       setArtifacts([]);
+      setChildRuns([]);
       return;
     }
     let cancelled = false;
-    Promise.all([getRunSteps(selectedRunId), getRunArtifacts(selectedRunId)])
-      .then(([nextSteps, nextArtifacts]) => {
+    Promise.all([getRunSteps(selectedRunId), getRunArtifacts(selectedRunId), listChildRuns(selectedRunId)])
+      .then(([nextSteps, nextArtifacts, nextChildRuns]) => {
         if (cancelled) return;
         setSteps(nextSteps);
         setArtifacts(nextArtifacts);
+        setChildRuns(nextChildRuns);
       })
       .catch(() => {
         if (cancelled) return;
         setSteps([]);
         setArtifacts([]);
+        setChildRuns([]);
       });
     return () => { cancelled = true; };
   }, [visible, selectedRunId, memoryActionTick]);
@@ -137,6 +174,10 @@ export default function RunHistoryDrawer({
     () => runs.find((run) => run.id === selectedRunId) || null,
     [runs, selectedRunId],
   );
+  const parentRun = useMemo(
+    () => (selectedRun?.parent_run_id ? runs.find((run) => run.id === selectedRun.parent_run_id) || null : null),
+    [runs, selectedRun],
+  );
   const selectedRunMemoryRefs = useMemo(() => {
     const raw = selectedRun?.metadata?.memoryReferences;
     return Array.isArray(raw) ? raw as PromptMemoryReference[] : [];
@@ -149,18 +190,35 @@ export default function RunHistoryDrawer({
     const raw = selectedRun?.metadata?.memoryRecommendations;
     return Array.isArray(raw) ? raw as OpenSwanMemoryRecommendation[] : [];
   }, [selectedRun]);
-  const selectedExecutionStream = useMemo(() => {
-    const raw = selectedRun?.metadata?.execution_stream;
-    return Array.isArray(raw) ? raw as OpenSwanExecutionContract[] : [];
-  }, [selectedRun]);
-  const selectedBrowserPlans = useMemo(() => {
-    const raw = selectedRun?.metadata?.browserPlans;
-    return Array.isArray(raw) ? raw as BrowserPlanCardData[] : [];
-  }, [selectedRun]);
-  const selectedBrowserPlanEvents = useMemo(() => {
-    const raw = selectedRun?.metadata?.browserPlanEvents;
-    return Array.isArray(raw) ? raw as BrowserPlanEvent[] : [];
-  }, [selectedRun]);
+  const selectedExecutionStream = useMemo(
+    () => readRunExecutionStream(selectedRun?.metadata) as OpenSwanExecutionContract[],
+    [selectedRun],
+  );
+  const selectedMetadataSummary = useMemo(
+    () => buildRunMetadataSummaryProps(selectedRun?.metadata),
+    [selectedRun],
+  );
+  const runQualityAggregate = useMemo(
+    () => buildOpenSwanObservedEvalAggregate(
+      runs
+        .map((run) => buildRunMetadataSummaryProps(run.metadata).observedEval)
+        .filter(Boolean),
+    ),
+    [runs],
+  );
+  const qualityRuns = useMemo(
+    () => qualityWindow === 'recent' ? runs.slice(0, 10) : runs,
+    [qualityWindow, runs],
+  );
+  const runQualityDashboard = useMemo(
+    () => buildOpenSwanObservedEvalDashboard(qualityRuns),
+    [qualityRuns],
+  );
+  const selectedBrowserPlans = selectedMetadataSummary.browserPlans as BrowserPlanCardData[];
+  const selectedBrowserPlanEvents = useMemo(
+    () => readRunBrowserPlanEvents(selectedRun?.metadata) as BrowserPlanEvent[],
+    [selectedRun],
+  );
 
   const handlePromote = async (ref: PromptMemoryReference) => {
     const ok = await promoteMemory(ref.id);
@@ -258,11 +316,55 @@ export default function RunHistoryDrawer({
             <View style={styles.detail}>
               {selectedRun ? (
                 <ScrollView>
+                  <View style={styles.qualityHeaderRow}>
+                    <Text style={styles.sectionTitle}>QUALITY VIEW</Text>
+                    <View style={styles.qualityToggleRow}>
+                      {[
+                        { key: 'all' as const, label: 'ALL' },
+                        { key: 'recent' as const, label: 'RECENT 10' },
+                      ].map((option) => {
+                        const active = qualityWindow === option.key;
+                        return (
+                          <Pressable
+                            key={option.key}
+                            onPress={() => setQualityWindow(option.key)}
+                            style={[styles.qualityToggleChip, active && styles.qualityToggleChipActive]}
+                          >
+                            <Text style={[styles.qualityToggleChipText, active && styles.qualityToggleChipTextActive]}>
+                              {option.label}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  </View>
+                  <OpenSwanQualityAggregate
+                    aggregate={qualityWindow === 'recent' ? runQualityDashboard.aggregate : runQualityAggregate}
+                    title="RUN QUALITY"
+                    accentColor="#38bdf8"
+                  />
+                  <OpenSwanQualityDashboard
+                    dashboard={runQualityDashboard}
+                    title={qualityWindow === 'recent' ? 'RECENT QUALITY DASHBOARD' : 'QUALITY DASHBOARD'}
+                    accentColor="#38bdf8"
+                  />
                   <Text style={styles.sectionTitle}>SUMMARY</Text>
                   <View style={styles.summaryCard}>
                     <Text style={styles.summaryTitle}>{selectedRun.title}</Text>
                     <Text style={styles.summaryMeta}>{selectedRun.status.toUpperCase()} · {selectedRun.mode}</Text>
+                    {parentRun ? (
+                      <Pressable onPress={() => setSelectedRunId(parentRun.id)} style={styles.parentRunLink}>
+                        <Text style={styles.parentRunLinkText}>↑ BACK TO PARENT RUN</Text>
+                      </Pressable>
+                    ) : null}
                     {selectedRun.goal ? <Text style={styles.summaryText}>{selectedRun.goal}</Text> : null}
+                    <View style={{ marginTop: 10 }}>
+                      <RunMetadataSummary
+                        {...selectedMetadataSummary}
+                        variant="detailed"
+                        accentColor="#38bdf8"
+                      />
+                    </View>
                   </View>
 
                   {(selectedRunMemoryRefs.length > 0 || selectedRunMemoriesUsed.length > 0) ? (
@@ -420,6 +522,60 @@ export default function RunHistoryDrawer({
                     </>
                   ) : null}
 
+                  {childRuns.length > 0 ? (
+                    <>
+                      <Text style={styles.sectionTitle}>DELEGATED SPECIALISTS</Text>
+                      <View style={styles.summaryCard}>
+                        {childRuns.map((childRun) => {
+                          const childSummary = buildRunMetadataSummaryProps(childRun.metadata);
+                          const childObservedEval = childSummary.observedEval;
+                          const childQualityTone = getChildQualityTone(childObservedEval?.outcome);
+                          const weakestSignalLabel = getWeakestSignalLabel(childObservedEval);
+                          return (
+                            <Pressable
+                              key={childRun.id}
+                              onPress={() => setSelectedRunId(childRun.id)}
+                              style={styles.childRunCard}
+                            >
+                              <View style={styles.childRunHeader}>
+                                <Text style={styles.childRunTitle}>
+                                  {childRun.delegated_to ? `${childRun.delegated_to.toUpperCase()} · ` : ''}{childRun.title || childRun.mode}
+                                </Text>
+                                <Text style={styles.childRunMeta}>
+                                  {childRun.status.toUpperCase()} · {new Date(childRun.created_at).toLocaleString()}
+                                </Text>
+                              </View>
+                              {childObservedEval ? (
+                                <View style={styles.childRunQualityRow}>
+                                  <View style={[styles.childRunQualityChip, {
+                                    borderColor: childQualityTone.border,
+                                    backgroundColor: childQualityTone.bg,
+                                  }]}>
+                                    <Text style={[styles.childRunQualityChipText, { color: childQualityTone.text }]}>
+                                      {String(childObservedEval.outcome || 'partial').toUpperCase()} {childObservedEval.score}
+                                    </Text>
+                                  </View>
+                                  {weakestSignalLabel ? (
+                                    <View style={styles.childRunWeakestChip}>
+                                      <Text style={styles.childRunWeakestChipText}>
+                                        WEAKEST {weakestSignalLabel.toUpperCase()}
+                                      </Text>
+                                    </View>
+                                  ) : null}
+                                </View>
+                              ) : null}
+                              <RunMetadataSummary
+                                {...childSummary}
+                                variant="compact"
+                                accentColor="#a855f7"
+                              />
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    </>
+                  ) : null}
+
                   <Text style={styles.sectionTitle}>STEPS</Text>
                   {steps.length === 0 ? (
                     <Text style={styles.empty}>No recorded steps.</Text>
@@ -502,6 +658,39 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   detail: { flex: 1, padding: 12 },
+  qualityHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    marginBottom: 8,
+  },
+  qualityToggleRow: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  qualityToggleChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    backgroundColor: '#0b1220',
+  },
+  qualityToggleChipActive: {
+    borderColor: '#38bdf8',
+    backgroundColor: '#082f49',
+  },
+  qualityToggleChipText: {
+    color: '#94a3b8',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+    fontFamily: 'monospace',
+  },
+  qualityToggleChipTextActive: {
+    color: '#7dd3fc',
+  },
   sectionTitle: {
     color: '#64748b',
     fontSize: 10,
@@ -533,7 +722,76 @@ const styles = StyleSheet.create({
   },
   summaryTitle: { color: '#f8fafc', fontSize: 14, fontWeight: '800' },
   summaryMeta: { color: '#22d3ee', fontSize: 10, fontWeight: '900', marginTop: 4 },
+  parentRunLink: {
+    alignSelf: 'flex-start',
+    marginTop: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: '#111827',
+  },
+  parentRunLinkText: {
+    color: '#cbd5e1',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    fontFamily: 'monospace',
+  },
   summaryText: { color: '#cbd5e1', fontSize: 12, marginTop: 8, lineHeight: 18 },
+  childRunCard: {
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#312e81',
+    backgroundColor: '#0a1022',
+    marginBottom: 8,
+  },
+  childRunHeader: {
+    marginBottom: 8,
+  },
+  childRunTitle: {
+    color: '#e9d5ff',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  childRunMeta: {
+    color: '#94a3b8',
+    fontSize: 10,
+    marginTop: 3,
+  },
+  childRunQualityRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginBottom: 8,
+  },
+  childRunQualityChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  childRunQualityChipText: {
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+  },
+  childRunWeakestChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#3f3f5a',
+    backgroundColor: '#121226',
+  },
+  childRunWeakestChipText: {
+    color: '#c4b5fd',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
   stepCard: {
     padding: 10,
     borderRadius: 10,

@@ -80,13 +80,14 @@ const IMAGE_PATTERNS = [
   /\b(generate|create|make|draw|paint|render)\b.*\b(best|cool|beautiful|stunning|epic|amazing)/i,
 ];
 
-const WEBPAGE_PATTERNS = [
-  /\b(build|create|make|generate|design)\b.*(web ?page|website|landing page|html|page|site|dashboard|ui|interface|form|layout)/i,
-  /\b(html|css|webpage|landing page|web design)\b/i,
-  /\bbuild.*(page|site|app)\b/i,
-  /\bfigma\b.*\b(build|code|html|page|site|website|landing)\b/i,
-  /\b(build|code|turn|convert)\b.*\bfigma\b/i,
-];
+// WEBPAGE_PATTERNS is intentionally empty. This detector used to auto-fire
+// `generateWebpage` on any natural-language "build a landing page" message,
+// which short-circuited the conversational build orchestrator (see
+// src/lib/conversationalBuild.ts) before it ever got a chance to run.
+// Build intent now lives in ONE place: the orchestrator. Explicit slash
+// commands (/build-page, /build, /code) still fire directly via their
+// dedicated handlers in ChatTab.tsx.
+const WEBPAGE_PATTERNS: RegExp[] = [];
 
 const CODE_PATTERNS = [
   /\b(write|create|build|generate|make)\b.*(function|class|component|script|code|api|endpoint|module|utility|hook|test)/i,

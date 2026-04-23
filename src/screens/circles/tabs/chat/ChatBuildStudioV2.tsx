@@ -31,6 +31,7 @@ import type { FigmaReference } from '../../../../lib/figmaBuilder';
 
 type BuildStudioView = 'code' | 'preview';
 type DeviceFrame = 'desktop' | 'tablet' | 'mobile';
+const SANDBOXED_PREVIEW_PERMISSIONS = 'allow-scripts';
 
 const DEVICE_PRESETS: Record<DeviceFrame, { label: string; width: number; symbol: string }> = {
   desktop: { label: 'Desktop', width: 1280, symbol: '▭' },
@@ -805,7 +806,7 @@ export default function ChatBuildStudioV2({
                 ref={r => { iframeRef.current = r as HTMLIFrameElement | null; }}
                 srcDoc={injectedPreview}
                 style={{ width: '100%', height: '100%', border: 'none', backgroundColor: '#ffffff' } as any}
-                sandbox="allow-scripts allow-same-origin"
+                sandbox={SANDBOXED_PREVIEW_PERMISSIONS}
                 title={artifact!.title || 'OpenSwan Preview'}
               />
               {iframeError && (

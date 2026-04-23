@@ -20,18 +20,8 @@ import {
 } from '../../../types/kanban';
 import type { GoalWithCount } from '../../../hooks/useGoals';
 import type { CircleOfficeAgent, AgentStatus } from '../../../lib/circleOffice';
-import { PROVIDER_DISPLAY, subscribeToCircleOffice } from '../../../lib/circleOffice';
-import {
-  subscribeAutoConnect,
-  getAutoConnectConnections,
-  getAutoConnectSessions,
-  setAutoConnectCircleId,
-} from '../../../lib/agentAutoConnect';
-import type { OfficeAgent } from '../../../lib/officeAgents';
-import { sessionsToAgents } from '../../../lib/officeAgents';
-import type { OpenSwanSession } from '../../../lib/openswanService';
-import { loadAgentIdentities, type AgentIdentity } from '../../../lib/agentIdentity';
-import { storage } from '../../../lib/storage';
+import { subscribeToCircleOffice } from '../../../lib/circleOffice';
+import { useAutoConnectLiveAgents, mergeDbAndLiveCircleAgents } from '../../../hooks/useAutoConnectLiveAgents';
 import { getAdaptiveFeedDefaults, loadAdaptiveWorkspaceSettings, loadCircleWorkspaceProfile, recordFeedActivity } from '../../../lib/workspaceAdaptation';
 import { useCircleAutomations, useDashboardStats } from '../../../services/automationService';
 import { useProjectRooms } from '../../../services/projectRooms';
@@ -46,6 +36,9 @@ import ActivityFeedPanel from './kanban/ActivityFeedPanel';
 import KanbanBoard from './kanban/KanbanBoard';
 import TaskDetailModal from './kanban/TaskDetailModal';
 import GoalDetailModal from './kanban/GoalDetailModal';
+import TaskCalendar from '../../../components/TaskCalendar';
+import TaskTable from '../../../components/TaskTable';
+import MemberCardModal from '../../../components/MemberCardModal';
 
 // ─── Loading Animation (uses shared circle loader) ──────────────────────
 
@@ -734,111 +727,109 @@ export default function FeedTab({
   const [editGoal, setEditGoal] = useState<GoalWithCount | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [createInColumn, setCreateInColumn] = useState<TaskStatus>('todo');
+  // Pre-fill title for CreateTaskModal, seeded by `/task new <title>` in chat
+  // or other deeplink flows. Cleared on modal close.
+  const [createPrefillTitle, setCreatePrefillTitle] = useState('');
   const [mobileTab, setMobileTab] = useState<MobileTab>('missions');
   const [desktopLowerTab, setDesktopLowerTab] = useState<DesktopLowerTab>('activity');
+  // Notion-style view toggle for the task pane: board (kanban) / calendar
+  // (month grid keyed on tasks.due_date) / table (sortable rows + group-by).
+  // Same underlying task data, three projections.
+  const [kanbanViewMode, setKanbanViewMode] = useState<'board' | 'calendar' | 'table'>('board');
+
+  // Member card popup — driven by the user deeplink consumer below. When
+  // an @user chip is clicked, the corresponding localStorage key gets set,
+  // and we resolve it here into a modal showing the member's profile card.
+  const [memberCardUserId, setMemberCardUserId] = useState<string | null>(null);
+
+  // ── Deeplink consumption ──────────────────────────────────────────────────
+  // Mention chips (in chat, missions, proofs, the inbox, etc.) write these
+  // localStorage keys when clicked. Here we resolve them to the in-tab
+  // modals so the target opens without a separate route change. Consumed
+  // once and cleared so a refresh doesn't re-trigger.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    if (kanban.loading) return;
+
+    let pendingTask: string | null = null;
+    let pendingGoal: string | null = null;
+    let pendingUser: string | null = null;
+    try { pendingTask = window.localStorage.getItem('uc_pending_task_deeplink'); } catch {}
+    try { pendingGoal = window.localStorage.getItem('uc_pending_goal_deeplink'); } catch {}
+    try { pendingUser = window.localStorage.getItem('uc_pending_user_deeplink'); } catch {}
+
+    if (pendingTask) {
+      const t = kanban.tasks.find((x) => x.id === pendingTask);
+      if (t) {
+        setDetailTask(t);
+        try { window.localStorage.removeItem('uc_pending_task_deeplink'); } catch {}
+      }
+    }
+    if (pendingGoal) {
+      const g = goalsHook.goals.find((x) => x.id === pendingGoal);
+      if (g) {
+        setEditGoal(g);
+        try { window.localStorage.removeItem('uc_pending_goal_deeplink'); } catch {}
+      }
+    }
+    if (pendingUser) {
+      // User deeplinks don't need to wait on the kanban data — pop the
+      // member card immediately and clear the key so refreshes don't
+      // re-trigger it.
+      setMemberCardUserId(pendingUser);
+      try { window.localStorage.removeItem('uc_pending_user_deeplink'); } catch {}
+    }
+  }, [kanban.loading, kanban.tasks, goalsHook.goals]);
+
+  // `/task new <title>` from chat opens CreateTaskModal pre-filled with the
+  // title. Matches the /mission create pattern.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    const onOpen = (e: any) => {
+      const title = (e?.detail?.title ?? '').toString();
+      setCreatePrefillTitle(title);
+      setCreateInColumn('todo');
+      setShowCreate(true);
+      try { window.localStorage.removeItem('uc_pending_task_create'); } catch {}
+    };
+    try {
+      const pending = window.localStorage.getItem('uc_pending_task_create');
+      if (pending !== null) {
+        setCreatePrefillTitle(pending);
+        setCreateInColumn('todo');
+        setShowCreate(true);
+        window.localStorage.removeItem('uc_pending_task_create');
+      }
+    } catch {}
+    window.addEventListener('uc:open-task-create', onOpen as any);
+    return () => window.removeEventListener('uc:open-task-create', onOpen as any);
+  }, []);
   const { width } = useWindowDimensions();
   const isMobile = width < MOBILE_BREAKPOINT;
   const searchInputRef = useRef<TextInput>(null);
 
   // ─── Live agent subscription (auto-connect + DB realtime) ────
-  const [liveAgentTick, setLiveAgentTick] = useState(0);
-  const [agentIdentities, setAgentIdentities] = useState<Map<string, AgentIdentity>>(new Map());
-  const [legacyNames, setLegacyNames] = useState<Record<string, string>>({});
-
+  // DB-side refresh: when the `circle_office_agents` table updates, re-fetch
+  // the kanban view. Auto-connect live-session updates are handled by
+  // `useAutoConnectLiveAgents` below.
   useEffect(() => {
-    setAutoConnectCircleId(circleId);
-    const unsubAuto = subscribeAutoConnect(() => setLiveAgentTick(t => t + 1));
     const unsubDb = subscribeToCircleOffice(circleId, () => {
       kanban.refresh();
-      setLiveAgentTick(t => t + 1);
     });
-    // Load persistent agent identities (custom names, etc.)
-    loadAgentIdentities().then(setAgentIdentities).catch(() => {});
-    // Legacy: reads custom agent names from old Office storage key (@office_agent_names).
-    // TODO: migrate to agentIdentity system (loadAgentIdentities) which stores names under @agent_identity_store.
-    storage.getItem('@office_agent_names').then(raw => {
-      if (raw) setLegacyNames(JSON.parse(raw));
-    }).catch(() => {});
-    return () => { unsubAuto(); unsubDb(); };
+    return () => { unsubDb(); };
+  // kanban.refresh is a stable closure; re-subscribing on every render would
+  // tear down the realtime channel needlessly.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [circleId]);
 
-  // Build the live agent list from auto-connect sessions only
-  const liveAgents = useMemo(() => {
-    const connections = getAutoConnectConnections();
-    const sessionsMap = getAutoConnectSessions();
+  const { liveCircleAgents: liveAgents } = useAutoConnectLiveAgents({ circleId });
 
-    // Convert live sessions to OfficeAgent[] (same pattern as OfficeTab)
-    const liveOfficeAgents: OfficeAgent[] = [];
-    for (const [connId, sessions] of sessionsMap) {
-      if (connId === 'claude-code-auto') {
-        const ccAgents = sessions as unknown as OfficeAgent[];
-        if (ccAgents?.length) liveOfficeAgents.push(...ccAgents);
-      } else {
-        const conn = connections.find(c => c.id === connId);
-        if (conn && sessions?.length) {
-          const converted = sessionsToAgents(
-            sessions as OpenSwanSession[],
-            connId,
-            conn.name,
-            conn.provider as any,
-          );
-          liveOfficeAgents.push(...converted);
-        }
-      }
-    }
-
-    const resolvedAgents = liveOfficeAgents.map(oa => {
-      const sessionKey = oa.id.includes('::') ? oa.id.split('::')[1] : oa.id;
-      const identity = agentIdentities.get(sessionKey);
-      const legacyName = legacyNames[oa.id];
-      return {
-        ...oa,
-        name: identity?.customName || legacyName || oa.name,
-        color: identity?.customColor || oa.color,
-      };
-    });
-
-    return resolvedAgents.map(oa => {
-      const providerInfo = PROVIDER_DISPLAY[oa.providerType] || PROVIDER_DISPLAY['generic-agent'];
-      return {
-        id: oa.id,
-        circleId,
-        ownerId: '',
-        ownerDisplayName: '',
-        ownerUsername: '',
-        provider: oa.providerType || 'generic-agent',
-        name: oa.name,
-        color: oa.color || providerInfo?.color || '#e8e8e8',
-        toolIcon: providerInfo?.icon || 'AI',
-        status: (oa.status || 'idle') as AgentStatus,
-        currentTask: undefined,
-        isPublished: true,
-        createdAt: '',
-        updatedAt: '',
-      } as CircleOfficeAgent;
-    });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveAgentTick, circleId, agentIdentities, legacyNames]);
-
-  // Merge DB agents with the live session list so task assignment can still see the full roster
-  const agents = useMemo(() => {
-    const dbAgents = kanban.agents;
-    const merged = dbAgents.map(a => {
-      const live = liveAgents.find(l =>
-        l.name.toLowerCase() === a.name.toLowerCase() || l.id === a.id,
-      );
-      return live ? { ...a, status: live.status } as CircleOfficeAgent : a;
-    });
-    const existingNames = new Set(merged.map(a => a.name.toLowerCase()));
-    for (const live of liveAgents) {
-      if (!existingNames.has(live.name.toLowerCase())) {
-        existingNames.add(live.name.toLowerCase());
-        merged.push(live);
-      }
-    }
-
-    return merged;
-  }, [kanban.agents, liveAgents]);
+  // Merge DB agents with the live session list so task assignment still sees
+  // the full roster. Shared across FeedTab and future consumers.
+  const agents = useMemo(
+    () => mergeDbAndLiveCircleAgents(kanban.agents, liveAgents),
+    [kanban.agents, liveAgents],
+  );
 
   // The ORCHESTRA strip above the board should reflect live connected sessions only
   const orchestraAgents = useMemo(() =>
@@ -863,6 +854,16 @@ export default function FeedTab({
   const [filterPriority, setFilterPriority] = useState<TaskPriority | null>(null);
   const [filterAssignee, setFilterAssignee] = useState<string | null>(null);
   const [filterRoom, setFilterRoom] = useState<string | null>(null);
+  // Derived: is any filter active? TaskTable + TaskCalendar consume this
+  // to distinguish filtered-to-zero from genuinely empty circles.
+  const hasActiveFilters = !!(searchText.trim() || filterPriority || filterAssignee || filterRoom || filteredGoalId);
+  const clearAllTaskFilters = useCallback(() => {
+    setSearchText('');
+    setFilterPriority(null);
+    setFilterAssignee(null);
+    setFilterRoom(null);
+    setFilteredGoalId(null);
+  }, []);
   const [searchExpanded, setSearchExpanded] = useState(false);
   const [activityExpanded, setActivityExpanded] = useState(false);
   const { rooms: projectRooms } = useProjectRooms(circleId);
@@ -1139,11 +1140,39 @@ export default function FeedTab({
           )}
           {/* Plans integrated into GoalsPanel via sidebar tab */}
           {mobileTab === 'board' && (
+            <>
+              <KanbanViewToggle mode={kanbanViewMode} onChange={setKanbanViewMode} />
+              {kanbanViewMode === 'calendar' ? (
+                <TaskCalendar
+                  tasks={Object.values(visibleTasksByColumn).flat()}
+                  accentColor={accentColor || '#6366f1'}
+                  isFiltered={hasActiveFilters}
+                  onClearFilters={clearAllTaskFilters}
+                  onSelectTask={(id) => {
+                    const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
+                    if (t) setDetailTask(t);
+                  }}
+                />
+              ) : kanbanViewMode === 'table' ? (
+                <TaskTable
+                  tasks={Object.values(visibleTasksByColumn).flat()}
+                  accentColor={accentColor || '#6366f1'}
+                  isFiltered={hasActiveFilters}
+                  onClearFilters={clearAllTaskFilters}
+                  onSelectTask={(id) => {
+                    const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
+                    if (t) setDetailTask(t);
+                  }}
+                  onStatusChange={(taskId, nextStatus) => kanban.moveTask(taskId, nextStatus)}
+                />
+              ) : (
             <KanbanBoard
               columns={COLUMNS}
               tasksByColumn={visibleTasksByColumn}
               agents={agents}
               goals={goalsHook.goals}
+              isFiltered={hasActiveFilters}
+              onClearFilters={clearAllTaskFilters}
               onCardPress={setDetailTask}
               onMoveTask={kanban.moveTask}
               onQuickAdd={(status, title) => kanban.createTask({
@@ -1158,6 +1187,8 @@ export default function FeedTab({
               roomOptions={roomOptions}
               onArchiveDone={handleArchiveDone}
             />
+              )}
+            </>
           )}
         </View>
 
@@ -1222,10 +1253,12 @@ export default function FeedTab({
             missions={allMissions}
             initialGoalId={filteredGoalId}
             initialRoomId={filterRoom}
-            onClose={() => setShowCreate(false)}
+            prefillTitle={createPrefillTitle}
+            onClose={() => { setShowCreate(false); setCreatePrefillTitle(''); }}
             onCreate={async (fields) => {
               await kanban.createTask(fields);
               setShowCreate(false);
+              setCreatePrefillTitle('');
             }}
           />
         )}
@@ -1298,25 +1331,55 @@ export default function FeedTab({
           <MissionsTab circleId={circleId} accentColor={accentColor || '#6366f1'} />
         </View>
 
-        <KanbanBoard
-          columns={COLUMNS}
-          tasksByColumn={visibleTasksByColumn}
-          agents={agents}
-          goals={goalsHook.goals}
-          onCardPress={setDetailTask}
-          onMoveTask={kanban.moveTask}
-          onQuickAdd={(status, title) => kanban.createTask({
-            title,
-            status,
-            goal_id: filteredGoalId || undefined,
-            room_id: filterRoom || undefined,
-          })}
-          onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
-          onBatchMove={handleBatchMove}
-          onBatchAssignRoom={handleBatchAssignRoom}
-          roomOptions={roomOptions}
-          onArchiveDone={handleArchiveDone}
-        />
+        <View style={{ flex: 1, flexDirection: 'column', minWidth: 0 }}>
+          <KanbanViewToggle mode={kanbanViewMode} onChange={setKanbanViewMode} />
+          {kanbanViewMode === 'calendar' ? (
+            <TaskCalendar
+              tasks={Object.values(visibleTasksByColumn).flat()}
+              accentColor={accentColor || '#6366f1'}
+              isFiltered={hasActiveFilters}
+              onClearFilters={clearAllTaskFilters}
+              onSelectTask={(id) => {
+                const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
+                if (t) setDetailTask(t);
+              }}
+            />
+          ) : kanbanViewMode === 'table' ? (
+            <TaskTable
+              tasks={Object.values(visibleTasksByColumn).flat()}
+              accentColor={accentColor || '#6366f1'}
+              isFiltered={hasActiveFilters}
+              onClearFilters={clearAllTaskFilters}
+              onSelectTask={(id) => {
+                const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
+                if (t) setDetailTask(t);
+              }}
+              onStatusChange={(taskId, nextStatus) => kanban.moveTask(taskId, nextStatus)}
+            />
+          ) : (
+            <KanbanBoard
+              columns={COLUMNS}
+              tasksByColumn={visibleTasksByColumn}
+              agents={agents}
+              goals={goalsHook.goals}
+              isFiltered={hasActiveFilters}
+              onClearFilters={clearAllTaskFilters}
+              onCardPress={setDetailTask}
+              onMoveTask={kanban.moveTask}
+              onQuickAdd={(status, title) => kanban.createTask({
+                title,
+                status,
+                goal_id: filteredGoalId || undefined,
+                room_id: filterRoom || undefined,
+              })}
+              onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
+              onBatchMove={handleBatchMove}
+              onBatchAssignRoom={handleBatchAssignRoom}
+              roomOptions={roomOptions}
+              onArchiveDone={handleArchiveDone}
+            />
+          )}
+        </View>
       </View>
 
       {/* Collapsible Activity strip at bottom */}
@@ -1428,6 +1491,12 @@ export default function FeedTab({
         />
       )}
 
+      {/* Member-card modal — driven by the @user deeplink consumer above. */}
+      <MemberCardModal
+        userId={memberCardUserId}
+        onClose={() => setMemberCardUserId(null)}
+      />
+
       {showCreate && (
         <CreateTaskModal
           circleId={circleId}
@@ -1438,10 +1507,12 @@ export default function FeedTab({
           missions={allMissions}
           initialGoalId={filteredGoalId}
           initialRoomId={filterRoom}
-          onClose={() => setShowCreate(false)}
+          prefillTitle={createPrefillTitle}
+          onClose={() => { setShowCreate(false); setCreatePrefillTitle(''); }}
           onCreate={async (fields) => {
             await kanban.createTask(fields);
             setShowCreate(false);
+            setCreatePrefillTitle('');
           }}
         />
       )}
@@ -1460,6 +1531,7 @@ interface CreateModalProps {
   missions?: Mission[];
   initialGoalId?: string | null;
   initialRoomId?: string | null;
+  prefillTitle?: string;
   onClose: () => void;
   onCreate: (fields: {
     title: string;
@@ -1487,12 +1559,13 @@ function CreateTaskModal({
   missions,
   initialGoalId,
   initialRoomId,
+  prefillTitle,
   onClose,
   onCreate,
 }: CreateModalProps) {
   const { rooms } = useProjectRooms(circleId);
   const hasInitialRoom = !!initialRoomId;
-  const [title, setTitle] = useState('');
+  const [title, setTitle] = useState(prefillTitle?.trim() || '');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('normal');
   const [assignedTo, setAssignedTo] = useState<string | null>(null);
@@ -2511,3 +2584,65 @@ const m = StyleSheet.create({
     fontWeight: '500',
   },
 });
+
+// ─── Kanban/Calendar view toggle ───────────────────────────────────────────
+// Small pill-row that sits above both KanbanBoard render sites (mobile +
+// desktop). Keeps the chrome minimal so it doesn't compete with the
+// KanbanBoard's own filter bar.
+function KanbanViewToggle({
+  mode,
+  onChange,
+}: {
+  mode: 'board' | 'calendar' | 'table';
+  onChange: (m: 'board' | 'calendar' | 'table') => void;
+}) {
+  const LABELS: Record<'board' | 'calendar' | 'table', string> = {
+    board: 'Board',
+    calendar: 'Calendar',
+    table: 'Table',
+  };
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        gap: 4,
+        paddingHorizontal: 8,
+        paddingVertical: 8,
+        borderBottomWidth: 1,
+        borderBottomColor: '#151515',
+        backgroundColor: '#000',
+      }}
+      nativeID="section-kanban-view-toggle"
+    >
+      {(['board', 'calendar', 'table'] as const).map((m) => {
+        const active = mode === m;
+        return (
+          <Pressable
+            key={m}
+            onPress={() => onChange(m)}
+            style={({ hovered, pressed }: any) => ({
+              paddingHorizontal: 12,
+              paddingVertical: 6,
+              borderWidth: 1,
+              borderColor: active ? '#4f46e5' : '#273244',
+              backgroundColor: active ? '#312e81' : hovered ? '#121a26' : '#0c131d',
+              borderRadius: 12,
+              opacity: pressed ? 0.92 : 1,
+              ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
+            })}
+          >
+            <Text
+              style={{
+                color: active ? '#eef2ff' : '#94a3b8',
+                fontSize: 11,
+                fontWeight: '700',
+              }}
+            >
+              {LABELS[m]}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}

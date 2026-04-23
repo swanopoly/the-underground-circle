@@ -17,6 +17,25 @@ import { LoadingScreen } from '../../components/LoadingWave';
 import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../../lib/supabase';
+import { safeGetUser } from '../../lib/authSession';
+import { showConfirm } from '../../lib/alert';
+import {
+  useCircleCostTelemetry,
+  useClaudeSpendBreakdown,
+  formatBudgetUsd,
+  capUsageTone,
+  relativeSince,
+  sourceLabel,
+  sourceAccent,
+} from '../../lib/circleCostTelemetry';
+import {
+  useGoogleAuthStatus,
+  startGoogleWorkspaceOAuth,
+  revokeGoogleWorkspace,
+  scopesToServices,
+  GOOGLE_SERVICE_LABELS,
+  type GoogleService,
+} from '../../lib/googleCreds';
 import { Circle, CheckInFormat } from '../../types';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -74,11 +93,22 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   const [expandedEmoji, setExpandedEmoji] = useState<string | null>('POPULAR');
   const [circleImageUrl, setCircleImageUrl] = useState<string | undefined>(undefined);
   const [uploadingImage, setUploadingImage] = useState(false);
-  const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [copiedInvite, setCopiedInvite] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
   const [showSaved, setShowSaved] = useState(false);
   const [sessionMemoryMode, setSessionMemoryMode] = useState<'private' | 'shared'>('private');
+  const [computerUseMaxCostUsd, setComputerUseMaxCostUsd] = useState<string>('2.00');
+  const [automationMaxCostUsd, setAutomationMaxCostUsd] = useState<string>('1.00');
+  const [claudeTotalMaxCostUsd, setClaudeTotalMaxCostUsd] = useState<string>('10.00');
+  const cost = useCircleCostTelemetry(circleId);
+  const spendBreakdown = useClaudeSpendBreakdown(circleId, 24);
+  const googleAuth = useGoogleAuthStatus();
+  // Default service checkboxes for the "not yet connected" state. The
+  // user can uncheck any before clicking Connect — the edge function
+  // narrows Google's consent screen to just these scopes.
+  const [googleServicesToRequest, setGoogleServicesToRequest] = useState<GoogleService[]>([
+    'email', 'calendar', 'drive', 'sheets', 'docs', 'contacts',
+  ]);
   const saveButtonAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -94,7 +124,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   }, [circleId]);
 
   const loadData = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
+    const { value: user } = await safeGetUser();
     if (user) setCurrentUserId(user.id);
 
     const { data } = await supabase.from('circles').select('*').eq('id', circleId).single();
@@ -111,6 +141,22 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
       setRules(data.rules || []);
       setCircleImageUrl(data.circle_image_url || undefined);
       setSessionMemoryMode(data.settings?.sessionMemoryMode === 'shared' ? 'shared' : 'private');
+      const existingCap = data.settings?.computer_use_max_cost_usd;
+      setComputerUseMaxCostUsd(
+        typeof existingCap === 'number' && existingCap > 0 ? existingCap.toFixed(2) : '2.00'
+      );
+      const existingAutomationCap = data.settings?.automation_max_cost_usd;
+      setAutomationMaxCostUsd(
+        typeof existingAutomationCap === 'number' && existingAutomationCap > 0
+          ? existingAutomationCap.toFixed(2)
+          : '1.00'
+      );
+      const existingClaudeTotalCap = data.settings?.claude_total_max_cost_usd;
+      setClaudeTotalMaxCostUsd(
+        typeof existingClaudeTotalCap === 'number' && existingClaudeTotalCap > 0
+          ? existingClaudeTotalCap.toFixed(2)
+          : '10.00'
+      );
       setIsCreator(user?.id === data.created_by);
     }
     setLoading(false);
@@ -129,6 +175,9 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
         settings: {
           ...(circle?.settings || {}),
           sessionMemoryMode,
+          computer_use_max_cost_usd: parseFloat(computerUseMaxCostUsd) || 2,
+          automation_max_cost_usd:   parseFloat(automationMaxCostUsd)   || 1,
+          claude_total_max_cost_usd: parseFloat(claudeTotalMaxCostUsd)  || 10,
         },
       };
       const { error } = await supabase.from('circles').update(fields).eq('id', circleId);
@@ -210,7 +259,14 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   };
 
   const handleDeleteCircle = async () => {
-    if (!deleteConfirm) { setDeleteConfirm(true); return; }
+    const ok = await showConfirm({
+      title: 'Delete this circle?',
+      message: `This removes every member, all chat history, missions, tasks, agents, and GitHub wiring. ${circle?.name ? `"${circle.name}"` : 'The circle'} cannot be recovered.`,
+      confirmLabel: 'Delete circle',
+      cancelLabel: 'Keep it',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       const { error: membersError } = await supabase.from('circle_members').delete().eq('circle_id', circleId);
       if (membersError) {
@@ -232,16 +288,21 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
     }
   };
 
-  const [leaveConfirm, setLeaveConfirm] = useState(false);
   const handleLeaveCircle = async () => {
-    if (!leaveConfirm) { setLeaveConfirm(true); return; }
     if (!currentUserId) return;
+    const ok = await showConfirm({
+      title: 'Leave this circle?',
+      message: `You'll lose access to the chat, missions, rooms, and shared agents. ${isCreator ? 'As the founder you probably want Delete Circle instead.' : 'You can be re-invited if you change your mind.'}`,
+      confirmLabel: 'Leave circle',
+      cancelLabel: 'Stay',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await supabase.from('circle_members').delete().eq('circle_id', circleId).eq('user_id', currentUserId);
       navigation.navigate('CirclesList');
     } catch (e) {
       console.error('Error leaving circle:', e);
-      setLeaveConfirm(false);
     }
   };
 
@@ -571,6 +632,13 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
                   settings: {
                     ...(circle?.settings || {}),
                     sessionMemoryMode: nextMode,
+                    // Carry budget caps explicitly — keeps this write
+                    // path symmetric with the COMPUTER USE / AUTOMATION
+                    // sections so rapid toggling can't clobber caps via
+                    // stale `circle?.settings`.
+                    computer_use_max_cost_usd: parseFloat(computerUseMaxCostUsd) || 2,
+                    automation_max_cost_usd:   parseFloat(automationMaxCostUsd)   || 1,
+                    claude_total_max_cost_usd: parseFloat(claudeTotalMaxCostUsd)  || 10,
                   },
                 });
               }}
@@ -578,6 +646,469 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
               trackColor={{ false: '#27272a', true: accentColor + '44' }}
               thumbColor={sessionMemoryMode === 'shared' ? accentColor : '#52525b'}
             />
+          </View>
+        </Section>
+
+        {/* ─── AI Spend Last 24h — unified view across every agent ─── */}
+        <Section title="AI SPEND LAST 24H" accentColor={accentColor}>
+          <Text style={styles.memoryModeDesc}>
+            Every Claude-powered agent in this circle reports here — Computer Use, Automations, BlackSwan, Boss, and more. Use this to see where your AI spend goes and which agents drive the bill.
+          </Text>
+          {(() => {
+            const total = spendBreakdown.totalCost;
+            const rows = spendBreakdown.rows;
+            if (spendBreakdown.loading && rows.length === 0) {
+              return (
+                <Text style={[styles.memoryModeDesc, { marginTop: 10, color: '#475569', fontStyle: 'italic' }]}>
+                  Loading…
+                </Text>
+              );
+            }
+            if (rows.length === 0) {
+              return (
+                <Text style={[styles.memoryModeDesc, { marginTop: 10, color: '#475569' }]}>
+                  No AI activity in the last 24h.
+                </Text>
+              );
+            }
+            return (
+              <View style={{ marginTop: 10, gap: 8 }}>
+                {/* Headline row — total + request count + cache hit */}
+                <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+                  <Text style={{ color: '#e2e8f0', fontSize: 18, fontWeight: '900', fontFamily: Platform.OS === 'web' ? 'monospace' : undefined }}>
+                    {formatBudgetUsd(total)}
+                  </Text>
+                  <Text style={[styles.fieldLabel, { color: '#64748b' }]}>
+                    {spendBreakdown.totalRequests} CALL{spendBreakdown.totalRequests === 1 ? '' : 'S'}
+                  </Text>
+                  {spendBreakdown.cacheHitPct > 0 ? (
+                    <Text style={[styles.fieldLabel, { color: '#22c55e' }]}>
+                      {spendBreakdown.cacheHitPct}%↻ CACHED
+                    </Text>
+                  ) : null}
+                </View>
+
+                {/* Stacked proportion bar — one segment per source, widths
+                    proportional to cost. Hovering on web shows tooltip via
+                    accessibilityLabel. Lets users see at a glance which
+                    agent is eating the budget. */}
+                {total > 0 ? (
+                  <View style={styles.spendBarTrack}>
+                    {rows.map((row) => {
+                      const w = Math.max(1, Math.round((row.cost / total) * 100));
+                      return (
+                        <View
+                          key={row.source}
+                          style={[styles.spendBarSeg, {
+                            flex: w,
+                            backgroundColor: sourceAccent(row.source),
+                          }]}
+                          accessibilityLabel={`${sourceLabel(row.source)}: ${formatBudgetUsd(row.cost)} (${w}%)`}
+                        />
+                      );
+                    })}
+                  </View>
+                ) : null}
+
+                {/* Per-source rows */}
+                <View style={{ gap: 4, marginTop: 2 }}>
+                  {rows.map((row) => {
+                    const accent = sourceAccent(row.source);
+                    const pct = total > 0 ? Math.round((row.cost / total) * 100) : 0;
+                    return (
+                      <View key={row.source} style={styles.spendRow}>
+                        <View style={[styles.spendRowDot, { backgroundColor: accent }]} />
+                        <Text style={styles.spendRowLabel} numberOfLines={1}>
+                          {sourceLabel(row.source)}
+                        </Text>
+                        <Text style={styles.spendRowCount}>
+                          {row.count}×
+                        </Text>
+                        <Text style={[styles.spendRowCost, { color: accent }]}>
+                          {formatBudgetUsd(row.cost)}
+                        </Text>
+                        <Text style={styles.spendRowPct}>
+                          {pct}%
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              </View>
+            );
+          })()}
+        </Section>
+
+        {/* ─── Google Workspace integration ─── */}
+        <Section title="GOOGLE WORKSPACE" accentColor={accentColor}>
+          <Text style={styles.memoryModeDesc}>
+            Connect Gmail, Calendar, Drive, Sheets, Docs, and Contacts. Agents can search your inbox, read messages, draft + send emails (with approval), create calendar events, and work with spreadsheets — all scoped to what you grant below. Per user, not per circle — each member connects their own Google account.
+          </Text>
+          {googleAuth.loading ? (
+            <Text style={[styles.memoryModeDesc, { marginTop: 10, color: '#475569', fontStyle: 'italic' }]}>
+              Loading…
+            </Text>
+          ) : googleAuth.connected ? (
+            <View style={{ marginTop: 10, gap: 6 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#22c55e' }} />
+                <Text style={[styles.fieldLabel, { color: '#22c55e' }]}>CONNECTED</Text>
+                <Text style={{ color: '#cbd5e1', fontSize: 13, fontWeight: '600' }}>{googleAuth.email}</Text>
+              </View>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                {scopesToServices(googleAuth.scopes).map((svc) => (
+                  <View key={svc} style={[styles.typeChip, { backgroundColor: accentColor + '20', borderColor: accentColor + '66' }]}>
+                    <Text style={[styles.typeChipText, { color: accentColor }]}>{GOOGLE_SERVICE_LABELS[svc].toUpperCase()}</Text>
+                  </View>
+                ))}
+              </View>
+              <Pressable
+                onPress={async () => {
+                  const ok = await showConfirm({
+                    title: 'Disconnect Google?',
+                    message: 'Agents will lose access to your Gmail, Calendar, Drive, and Sheets. You can reconnect anytime.',
+                    confirmLabel: 'Disconnect',
+                    cancelLabel: 'Keep connected',
+                    destructive: true,
+                  });
+                  if (ok) {
+                    await revokeGoogleWorkspace();
+                    googleAuth.refresh();
+                  }
+                }}
+                style={[styles.dangerBtn, { marginTop: 10 }]}
+              >
+                <Text style={styles.dangerBtnText}>DISCONNECT GOOGLE</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View style={{ marginTop: 10, gap: 8 }}>
+              <Text style={styles.fieldLabel}>SERVICES TO GRANT</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                {(['email', 'calendar', 'drive', 'sheets', 'docs', 'contacts'] as GoogleService[]).map((svc) => {
+                  const active = googleServicesToRequest.includes(svc);
+                  return (
+                    <Pressable
+                      key={svc}
+                      onPress={() => {
+                        setGoogleServicesToRequest((prev) =>
+                          prev.includes(svc) ? prev.filter((s) => s !== svc) : [...prev, svc]
+                        );
+                      }}
+                      style={[
+                        styles.typeChip,
+                        active && { backgroundColor: accentColor + '25', borderColor: accentColor },
+                      ]}
+                    >
+                      <Text style={[styles.typeChipText, active && { color: accentColor }]}>
+                        {active ? '✓ ' : ''}{GOOGLE_SERVICE_LABELS[svc].toUpperCase()}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <Pressable
+                disabled={googleServicesToRequest.length === 0}
+                onPress={async () => {
+                  const result = await startGoogleWorkspaceOAuth(googleServicesToRequest);
+                  if (!result.opened && result.reason) {
+                    Alert.alert('Google sign-in', result.reason);
+                  }
+                  // On success the whole tab navigates to Google — no further handler needed.
+                }}
+                style={[
+                  styles.smallBtn,
+                  { backgroundColor: accentColor, marginTop: 8, opacity: googleServicesToRequest.length === 0 ? 0.5 : 1 },
+                ]}
+              >
+                <Text style={styles.smallBtnText}>CONNECT GOOGLE WORKSPACE →</Text>
+              </Pressable>
+              <Text style={[styles.memoryModeDesc, { fontSize: 11, color: '#64748b' }]}>
+                Google will show a consent screen listing only the services you checked. You can reconnect later to add more services.
+              </Text>
+            </View>
+          )}
+        </Section>
+
+        {/* ─── Claude Total 24h Cap — umbrella safety net ─── */}
+        <Section title="CLAUDE TOTAL 24H CAP" accentColor={accentColor}>
+          <Text style={styles.memoryModeDesc}>
+            The umbrella safety net across EVERY Claude agent in this circle (Computer Use, Automations, BlackSwan, Boss, Room Tasks, Page Builder, Heartbeat). When the rolling 24h total hits this cap, all agents pause until the window rolls. Default $10.00 — tuned loose so normal use never trips it, but tight enough to stop a runaway.
+          </Text>
+          {(() => {
+            const cap = parseFloat(claudeTotalMaxCostUsd) || 10;
+            const used = spendBreakdown.totalCost;
+            const pct = cap > 0 ? Math.min(100, Math.round((used / cap) * 100)) : 0;
+            const tone = capUsageTone(used, cap);
+            return (
+              <View style={{ marginTop: 10, gap: 4 }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <Text style={[styles.fieldLabel, { color: tone }]}>
+                    24H TOTAL · {formatBudgetUsd(used)} of {formatBudgetUsd(cap)}
+                  </Text>
+                  <Text style={[styles.fieldLabel, { color: '#475569' }]}>
+                    {pct}%
+                  </Text>
+                </View>
+                <View style={styles.meterTrack}>
+                  <View style={[styles.meterFill, { width: `${pct}%`, backgroundColor: tone }]} />
+                </View>
+                {used >= cap && cap > 0 ? (
+                  <Text style={[styles.memoryModeDesc, { color: '#ef4444', fontSize: 11 }]}>
+                    Cap reached — all Claude agents are paused until the 24h window rolls. Raise the cap or wait.
+                  </Text>
+                ) : null}
+              </View>
+            );
+          })()}
+          <View style={[styles.hexRow, { marginTop: 10 }]}>
+            <Text style={styles.hexLabel}>USD</Text>
+            <TextInput
+              style={[styles.hexInput, { flex: 1 }]}
+              value={claudeTotalMaxCostUsd}
+              onChangeText={(v) => {
+                if (readOnly) return;
+                setClaudeTotalMaxCostUsd(v.replace(/[^0-9.]/g, ''));
+                markChanged();
+              }}
+              editable={!readOnly}
+              placeholder="10.00"
+              placeholderTextColor="#333"
+              keyboardType="decimal-pad"
+              onBlur={() => {
+                const parsed = parseFloat(claudeTotalMaxCostUsd);
+                const clean = isFinite(parsed) && parsed > 0 ? parsed : 10;
+                setClaudeTotalMaxCostUsd(clean.toFixed(2));
+                save({
+                  settings: {
+                    ...(circle?.settings || {}),
+                    sessionMemoryMode,
+                    computer_use_max_cost_usd: parseFloat(computerUseMaxCostUsd) || 2,
+                    automation_max_cost_usd:   parseFloat(automationMaxCostUsd)   || 1,
+                    claude_total_max_cost_usd: clean,
+                  },
+                });
+              }}
+            />
+          </View>
+          <View style={{ flexDirection: 'row', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+            {['5.00', '10.00', '25.00', '50.00', '100.00'].map((preset) => (
+              <Pressable
+                key={preset}
+                onPress={() => {
+                  if (readOnly) return;
+                  setClaudeTotalMaxCostUsd(preset);
+                  save({
+                    settings: {
+                      ...(circle?.settings || {}),
+                      sessionMemoryMode,
+                      computer_use_max_cost_usd: parseFloat(computerUseMaxCostUsd) || 2,
+                      automation_max_cost_usd:   parseFloat(automationMaxCostUsd)   || 1,
+                      claude_total_max_cost_usd: parseFloat(preset),
+                    },
+                  });
+                }}
+                style={[
+                  styles.typeChip,
+                  claudeTotalMaxCostUsd === preset && { backgroundColor: accentColor + '25', borderColor: accentColor },
+                ]}
+              >
+                <Text style={[styles.typeChipText, claudeTotalMaxCostUsd === preset && { color: accentColor }]}>
+                  ${preset}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </Section>
+
+        {/* ─── Computer Use Budget ─── */}
+        <Section title="COMPUTER USE BUDGET" accentColor={accentColor}>
+          <Text style={styles.memoryModeDesc}>
+            Max spend (USD) for a single autonomous browser task in this circle. The agent halts the run when it reaches this cap. Default $2.00. Higher caps let longer research tasks complete; lower caps keep costs predictable.
+          </Text>
+          {(() => {
+            const cap = parseFloat(computerUseMaxCostUsd) || 2;
+            const lastCost = cost.computerUseLastRunCost;
+            if (lastCost == null) {
+              return (
+                <Text style={[styles.memoryModeDesc, { marginTop: 8, color: '#475569' }]}>
+                  No runs in the last 24h.
+                </Text>
+              );
+            }
+            const pct = Math.min(100, Math.round((lastCost / cap) * 100));
+            const tone = capUsageTone(lastCost, cap);
+            return (
+              <View style={{ marginTop: 10, gap: 4 }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <Text style={[styles.fieldLabel, { color: tone }]}>
+                    LAST RUN · {formatBudgetUsd(lastCost)} of {formatBudgetUsd(cap)}
+                  </Text>
+                  <Text style={[styles.fieldLabel, { color: '#475569' }]}>
+                    {relativeSince(cost.computerUseLastRunAt)}
+                  </Text>
+                </View>
+                <View style={styles.meterTrack}>
+                  <View style={[styles.meterFill, { width: `${pct}%`, backgroundColor: tone }]} />
+                </View>
+                <Text style={[styles.memoryModeDesc, { color: '#475569', fontSize: 11 }]}>
+                  24h total: {formatBudgetUsd(cost.computerUse24hCost)}
+                </Text>
+              </View>
+            );
+          })()}
+          <View style={[styles.hexRow, { marginTop: 10 }]}>
+            <Text style={styles.hexLabel}>USD</Text>
+            <TextInput
+              style={[styles.hexInput, { flex: 1 }]}
+              value={computerUseMaxCostUsd}
+              onChangeText={(v) => {
+                if (readOnly) return;
+                setComputerUseMaxCostUsd(v.replace(/[^0-9.]/g, ''));
+                markChanged();
+              }}
+              editable={!readOnly}
+              placeholder="2.00"
+              placeholderTextColor="#333"
+              keyboardType="decimal-pad"
+              onBlur={() => {
+                const parsed = parseFloat(computerUseMaxCostUsd);
+                const clean = isFinite(parsed) && parsed > 0 ? parsed : 2;
+                const normalized = clean.toFixed(2);
+                setComputerUseMaxCostUsd(normalized);
+                // Always write BOTH caps from current state so rapid chip
+                // clicks across the two sections don't clobber each other
+                // via stale `circle?.settings` references.
+                save({
+                  settings: {
+                    ...(circle?.settings || {}),
+                    sessionMemoryMode,
+                    computer_use_max_cost_usd: clean,
+                    automation_max_cost_usd:   parseFloat(automationMaxCostUsd) || 1,
+                    claude_total_max_cost_usd: parseFloat(claudeTotalMaxCostUsd) || 10,
+                  },
+                });
+              }}
+            />
+          </View>
+          <View style={{ flexDirection: 'row', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+            {['1.00', '2.00', '5.00', '10.00', '25.00'].map((preset) => (
+              <Pressable
+                key={preset}
+                onPress={() => {
+                  if (readOnly) return;
+                  setComputerUseMaxCostUsd(preset);
+                  save({
+                    settings: {
+                      ...(circle?.settings || {}),
+                      sessionMemoryMode,
+                      computer_use_max_cost_usd: parseFloat(preset),
+                      automation_max_cost_usd:   parseFloat(automationMaxCostUsd) || 1,
+                      claude_total_max_cost_usd: parseFloat(claudeTotalMaxCostUsd) || 10,
+                    },
+                  });
+                }}
+                style={[
+                  styles.typeChip,
+                  computerUseMaxCostUsd === preset && { backgroundColor: accentColor + '25', borderColor: accentColor },
+                ]}
+              >
+                <Text style={[styles.typeChipText, computerUseMaxCostUsd === preset && { color: accentColor }]}>
+                  ${preset}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </Section>
+
+        {/* ─── Automation Daily Cap ─── */}
+        <Section title="AUTOMATION DAILY CAP" accentColor={accentColor}>
+          <Text style={styles.memoryModeDesc}>
+            Max total spend (USD) for this circle's automations across any rolling 24h window. Halts further automation runs for 24h when reached — the guard against a runaway template. Default $1.00 (≈1000 Haiku calls).
+          </Text>
+          {(() => {
+            const cap = parseFloat(automationMaxCostUsd) || 1;
+            const used = cost.automation24hCost;
+            const pct = cap > 0 ? Math.min(100, Math.round((used / cap) * 100)) : 0;
+            const tone = capUsageTone(used, cap);
+            return (
+              <View style={{ marginTop: 10, gap: 4 }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <Text style={[styles.fieldLabel, { color: tone }]}>
+                    24H USED · {formatBudgetUsd(used)} of {formatBudgetUsd(cap)}
+                  </Text>
+                  <Text style={[styles.fieldLabel, { color: '#475569' }]}>
+                    {pct}%
+                  </Text>
+                </View>
+                <View style={styles.meterTrack}>
+                  <View style={[styles.meterFill, { width: `${pct}%`, backgroundColor: tone }]} />
+                </View>
+                {used >= cap && cap > 0 ? (
+                  <Text style={[styles.memoryModeDesc, { color: '#ef4444', fontSize: 11 }]}>
+                    Cap reached — automations paused until the 24h window rolls. Raise the cap or wait.
+                  </Text>
+                ) : null}
+              </View>
+            );
+          })()}
+          <View style={[styles.hexRow, { marginTop: 10 }]}>
+            <Text style={styles.hexLabel}>USD</Text>
+            <TextInput
+              style={[styles.hexInput, { flex: 1 }]}
+              value={automationMaxCostUsd}
+              onChangeText={(v) => {
+                if (readOnly) return;
+                setAutomationMaxCostUsd(v.replace(/[^0-9.]/g, ''));
+                markChanged();
+              }}
+              editable={!readOnly}
+              placeholder="1.00"
+              placeholderTextColor="#333"
+              keyboardType="decimal-pad"
+              onBlur={() => {
+                const parsed = parseFloat(automationMaxCostUsd);
+                const clean = isFinite(parsed) && parsed > 0 ? parsed : 1;
+                setAutomationMaxCostUsd(clean.toFixed(2));
+                save({
+                  settings: {
+                    ...(circle?.settings || {}),
+                    sessionMemoryMode,
+                    computer_use_max_cost_usd: parseFloat(computerUseMaxCostUsd) || 2,
+                    automation_max_cost_usd: clean,
+                    claude_total_max_cost_usd: parseFloat(claudeTotalMaxCostUsd) || 10,
+                  },
+                });
+              }}
+            />
+          </View>
+          <View style={{ flexDirection: 'row', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+            {['0.25', '1.00', '2.50', '5.00', '20.00'].map((preset) => (
+              <Pressable
+                key={preset}
+                onPress={() => {
+                  if (readOnly) return;
+                  setAutomationMaxCostUsd(preset);
+                  save({
+                    settings: {
+                      ...(circle?.settings || {}),
+                      sessionMemoryMode,
+                      computer_use_max_cost_usd: parseFloat(computerUseMaxCostUsd) || 2,
+                      automation_max_cost_usd: parseFloat(preset),
+                      claude_total_max_cost_usd: parseFloat(claudeTotalMaxCostUsd) || 10,
+                    },
+                  });
+                }}
+                style={[
+                  styles.typeChip,
+                  automationMaxCostUsd === preset && { backgroundColor: accentColor + '25', borderColor: accentColor },
+                ]}
+              >
+                <Text style={[styles.typeChipText, automationMaxCostUsd === preset && { color: accentColor }]}>
+                  ${preset}
+                </Text>
+              </Pressable>
+            ))}
           </View>
         </Section>
 
@@ -668,15 +1199,13 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
 
         {/* ─── Danger Zone ─── */}
         <Section title="DANGER ZONE" accentColor="#ef4444">
-          <Pressable onPress={handleLeaveCircle} style={[styles.dangerBtn, leaveConfirm && { backgroundColor: '#ef444415', borderColor: '#ef4444' }]}>
-            <Text style={[styles.dangerBtnText, leaveConfirm && { color: '#ef4444' }]}>
-              {leaveConfirm ? 'TAP AGAIN TO CONFIRM LEAVE' : 'LEAVE CIRCLE'}
-            </Text>
+          <Pressable onPress={handleLeaveCircle} style={styles.dangerBtn}>
+            <Text style={styles.dangerBtnText}>LEAVE CIRCLE</Text>
           </Pressable>
           {isCreator && (
             <Pressable onPress={handleDeleteCircle} style={[styles.dangerBtn, { backgroundColor: '#ef444415', borderColor: '#ef4444' }]}>
               <Text style={[styles.dangerBtnText, { color: '#ef4444' }]}>
-                {deleteConfirm ? 'TAP AGAIN TO CONFIRM DELETE' : 'DELETE CIRCLE'}
+                DELETE CIRCLE
               </Text>
             </Pressable>
           )}
@@ -828,6 +1357,69 @@ const styles = StyleSheet.create({
   memoryModeHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   memoryModeTitle: { color: '#fff', fontSize: 13, fontWeight: '700', marginBottom: 4 },
   memoryModeDesc: { color: '#888', fontSize: 12, lineHeight: 18 },
+  meterTrack: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#1e293b',
+    overflow: 'hidden',
+    ...(Platform.OS === 'web' ? { transition: 'all 0.3s ease' } : {}),
+  } as any,
+  meterFill: {
+    height: 4,
+    borderRadius: 2,
+    ...(Platform.OS === 'web' ? { transition: 'width 0.3s ease, background-color 0.3s ease' } : {}),
+  } as any,
+  // AI Spend — stacked proportion bar + per-source rows
+  spendBarTrack: {
+    flexDirection: 'row',
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#1e293b',
+    overflow: 'hidden',
+  },
+  spendBarSeg: {
+    height: 6,
+  },
+  spendRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 3,
+  },
+  spendRowDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 2,
+  },
+  spendRowLabel: {
+    color: '#cbd5e1',
+    fontSize: 12,
+    fontWeight: '600',
+    flex: 1,
+  },
+  spendRowCount: {
+    color: '#64748b',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+    minWidth: 32,
+    textAlign: 'right',
+  },
+  spendRowCost: {
+    fontSize: 11,
+    fontWeight: '800',
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+    minWidth: 60,
+    textAlign: 'right',
+  },
+  spendRowPct: {
+    color: '#475569',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+    minWidth: 32,
+    textAlign: 'right',
+  },
 
   // Rules
   ruleRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },

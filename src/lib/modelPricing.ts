@@ -7,7 +7,13 @@
  * Pricing per 1M tokens (input / output / cached-input).
  * Cached input tokens are billed at 10% of full input rate.
  *
- * Updated: Feb 2026
+ * Published Anthropic rates (as of 2026-04):
+ *   Opus 4.7 / 4.6: $5 / $25
+ *   Sonnet 4.6:     $3 / $15
+ *   Haiku 4.5:      $1 / $5
+ *
+ * Updated: 2026-04 — corrected Opus 4.6 from $20/$100 (which was ~4x
+ * reality, not 25% over) and added Opus 4.7 at published rate + 25%.
  */
 
 export interface ModelRate {
@@ -19,14 +25,18 @@ export interface ModelRate {
 
 export const MODEL_PRICING: Record<string, ModelRate> = {
   // ── Claude Opus ───────────────────────────────────────────────────────────
-  'claude-opus-4-6':  { inPer1M: 20,    outPer1M: 100,   cachedInPer1M: 2.0,   label: 'Claude Opus 4.6'  },
-  'claude-opus-4-5':  { inPer1M: 18,    outPer1M: 90,    cachedInPer1M: 1.8,   label: 'Claude Opus 4.5'  },
-  'claude-opus-4':    { inPer1M: 18,    outPer1M: 90,    cachedInPer1M: 1.8,   label: 'Claude Opus 4'    },
-  'claude-opus-3-7':  { inPer1M: 18,    outPer1M: 90,    cachedInPer1M: 1.8,   label: 'Claude Opus 3.7'  },
-  'claude-opus-3-5':  { inPer1M: 18,    outPer1M: 90,    cachedInPer1M: 1.8,   label: 'Claude Opus 3.5'  },
-  'claude-opus':      { inPer1M: 18,    outPer1M: 90,    cachedInPer1M: 1.8,   label: 'Claude Opus'      },
+  // Published: $5 / $25 for 4.6+; older Opus generations were pricier.
+  // Values below = published + 25% buffer.
+  'claude-opus-4-7':  { inPer1M: 6.25,  outPer1M: 31.25, cachedInPer1M: 0.625, label: 'Claude Opus 4.7'  },
+  'claude-opus-4-6':  { inPer1M: 6.25,  outPer1M: 31.25, cachedInPer1M: 0.625, label: 'Claude Opus 4.6'  },
+  'claude-opus-4-5':  { inPer1M: 18.75, outPer1M: 93.75, cachedInPer1M: 1.875, label: 'Claude Opus 4.5'  },
+  'claude-opus-4':    { inPer1M: 18.75, outPer1M: 93.75, cachedInPer1M: 1.875, label: 'Claude Opus 4'    },
+  'claude-opus-3-7':  { inPer1M: 18.75, outPer1M: 93.75, cachedInPer1M: 1.875, label: 'Claude Opus 3.7'  },
+  'claude-opus-3-5':  { inPer1M: 18.75, outPer1M: 93.75, cachedInPer1M: 1.875, label: 'Claude Opus 3.5'  },
+  'claude-opus':      { inPer1M: 18.75, outPer1M: 93.75, cachedInPer1M: 1.875, label: 'Claude Opus'      },
   // ── Claude Sonnet ─────────────────────────────────────────────────────────
-  'claude-sonnet-4-6':{ inPer1M: 4,     outPer1M: 20,    cachedInPer1M: 0.4,   label: 'Claude Sonnet 4.6'},
+  // Published: $3 / $15 for 4.x. Below = published + 25% buffer.
+  'claude-sonnet-4-6':{ inPer1M: 3.75,  outPer1M: 18.75, cachedInPer1M: 0.375, label: 'Claude Sonnet 4.6'},
   'claude-sonnet-4-5':{ inPer1M: 4,     outPer1M: 20,    cachedInPer1M: 0.4,   label: 'Claude Sonnet 4.5'},
   'claude-sonnet-4':  { inPer1M: 4,     outPer1M: 20,    cachedInPer1M: 0.4,   label: 'Claude Sonnet 4'  },
   'claude-sonnet-3-7':{ inPer1M: 4,     outPer1M: 20,    cachedInPer1M: 0.4,   label: 'Claude Sonnet 3.7'},

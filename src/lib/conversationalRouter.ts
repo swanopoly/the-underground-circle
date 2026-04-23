@@ -14,6 +14,7 @@
  */
 
 import { supabase } from './supabase';
+import type { ChatCommandDecision } from './chatCommandRegistry';
 
 // ── Intent types ────────────────────────────────────────────────────────────
 
@@ -100,11 +101,13 @@ const IMAGE_GEN_PATTERNS = [
   /\b(image|picture|photo)\b.*\bof\b/i,
 ];
 
-const WEBPAGE_PATTERNS = [
-  /\b(build|create|make|generate)\b.*\b(web ?page|website|landing page|html page|site)\b/i,
-  /\bfigma\b.*\b(build|code|html|page|site|website|landing)\b/i,
-  /\b(build|code|convert|turn)\b.*\bfigma\b/i,
-];
+// WEBPAGE_PATTERNS used to auto-detect "build a page/site" and set the
+// intent to build_webpage — but executeConversationalIntent never had a
+// handler for that case, so it was wasted work that also short-circuited
+// the orchestrator in some paths. The build flow now lives entirely in
+// src/lib/conversationalBuild.ts. Figma-attachment paths stay as hints
+// only; they do NOT auto-execute.
+const WEBPAGE_PATTERNS: RegExp[] = [];
 
 // ── Detect intent ───────────────────────────────────────────────────────────
 
@@ -221,6 +224,7 @@ export async function executeConversationalIntent(
     userName?: string;
     fullMessage: string;
     attachments?: Array<{ uri: string; type: string; id: string }>;
+    commandDecisions?: ChatCommandDecision[];
   },
 ): Promise<{ handled: boolean; message: string; artifacts?: any[] } | null> {
   switch (intent.type) {
@@ -318,6 +322,7 @@ export async function executeConversationalIntent(
             goal: context.fullMessage,
             mode: 'execute',
             provider,
+            metadata: context.commandDecisions?.length ? { command_route_decisions: context.commandDecisions } : undefined,
           });
           if (run) {
             await addStep({ runId: run.id, circleId: context.circleId, stepIndex: 0, stepKind: 'tool_call', title: 'Published office agent', body: `${intent.agentName} (${modelName})` });
@@ -371,6 +376,7 @@ export async function executeConversationalIntent(
           const run = await createRun({
             circleId: context.circleId, userId: context.userId, surface: 'main_chat',
             title: `WordPress: ${title}`, mode: 'execute', provider: 'wordpress',
+            metadata: context.commandDecisions?.length ? { command_route_decisions: context.commandDecisions } : undefined,
           });
           if (run) {
             await addStep({ runId: run.id, circleId: context.circleId, stepIndex: 0, stepKind: 'tool_call', title: 'Generated blog content', toolName: 'ai_write', body: `${aiContent.length} chars` });
@@ -415,6 +421,7 @@ ${status === 'draft' ? `Say "publish it" or use \`/wp publish ${result.postId}\`
         const run = await createRun({
           circleId: context.circleId, userId: context.userId, surface: 'main_chat',
           title: intent.title, goal: context.fullMessage, mode: 'execute',
+          metadata: context.commandDecisions?.length ? { command_route_decisions: context.commandDecisions } : undefined,
         });
         if (run) {
           await addStep({ runId: run.id, circleId: context.circleId, stepIndex: 0, stepKind: 'plan', title: 'Task created', body: intent.title });

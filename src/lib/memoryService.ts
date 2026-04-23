@@ -44,6 +44,7 @@ export type PromptMemoryReference = {
   matchReason?: string | null;
   helpfulness?: number | null;
   memoryState?: 'startup' | 'retrieved' | 'supporting' | 'distilled' | null;
+  metadata?: Record<string, unknown> | null;
 };
 
 export type OpenSwanMemoryRecommendation = {
@@ -62,6 +63,194 @@ export type OpenSwanMemoryRecommendation = {
   importance?: number;
   retrievalMode?: 'startup' | 'on_demand' | 'manual_only';
 };
+
+export function isArchiveDerivedMemoryReference(ref: PromptMemoryReference | null | undefined): boolean {
+  const source = typeof ref?.metadata?.source === 'string' ? ref.metadata.source : '';
+  return source === 'thread_archive_match' || source === 'thread_archive_recommendation';
+}
+
+const ARCHIVE_PASSIVE_FEEDBACK_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+
+async function filterArchivePassiveFeedbackEligible(opts: {
+  memoryIds: string[];
+  action: 'confirmed_helpful' | 'weak_signal';
+  source: string;
+}): Promise<Set<string>> {
+  const ids = Array.from(new Set(opts.memoryIds.filter(Boolean)));
+  if (!ids.length) return new Set();
+
+  const cutoffIso = new Date(Date.now() - ARCHIVE_PASSIVE_FEEDBACK_COOLDOWN_MS).toISOString();
+  try {
+    const { data, error } = await supabase
+      .from('memory_evaluations')
+      .select('memory_id, metadata, created_at')
+      .in('memory_id', ids)
+      .eq('evaluation_kind', 'manual_review')
+      .gte('created_at', cutoffIso);
+    if (error || !data) return new Set(ids);
+
+    const blocked = new Set<string>();
+    for (const row of data as any[]) {
+      const metaAction = typeof row?.metadata?.action === 'string' ? row.metadata.action : '';
+      const metaSource = typeof row?.metadata?.source === 'string' ? row.metadata.source : '';
+      if (metaAction === opts.action && metaSource === opts.source && typeof row.memory_id === 'string') {
+        blocked.add(row.memory_id);
+      }
+    }
+    return new Set(ids.filter((id) => !blocked.has(id)));
+  } catch {
+    return new Set(ids);
+  }
+}
+
+function clampUnitScore(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function computeArchivePassivePositiveScore(observedEval: {
+  score?: number | null;
+  verification?: { coverageRatio?: number | null } | null;
+  responseQuality?: { score?: number | null } | null;
+} | null | undefined): number {
+  const runScore = typeof observedEval?.score === 'number' ? observedEval.score / 100 : 0.8;
+  const verificationCoverage = typeof observedEval?.verification?.coverageRatio === 'number'
+    ? observedEval.verification.coverageRatio
+    : 0.5;
+  const responseQuality = typeof observedEval?.responseQuality?.score === 'number'
+    ? observedEval.responseQuality.score / 100
+    : 0.7;
+  return clampUnitScore((runScore * 0.45) + (verificationCoverage * 0.35) + (responseQuality * 0.20));
+}
+
+function computeArchivePassiveNegativeScore(observedEval: {
+  outcome?: string | null;
+  score?: number | null;
+  verification?: { coverageRatio?: number | null; failed?: number | null; blocked?: number | null } | null;
+  responseQuality?: { score?: number | null; missed?: string[] | null } | null;
+  blockers?: string[] | null;
+} | null | undefined): number {
+  const runScore = typeof observedEval?.score === 'number' ? observedEval.score / 100 : 0.4;
+  const verificationCoverage = typeof observedEval?.verification?.coverageRatio === 'number'
+    ? observedEval.verification.coverageRatio
+    : 0.4;
+  const responseQuality = typeof observedEval?.responseQuality?.score === 'number'
+    ? observedEval.responseQuality.score / 100
+    : 0.4;
+  const blockerPenalty = Math.min(
+    0.4,
+    ((observedEval?.blockers?.length || 0) * 0.08)
+      + (((observedEval?.verification?.failed || 0) + (observedEval?.verification?.blocked || 0)) * 0.05)
+      + (((observedEval?.responseQuality?.missed?.length || 0)) * 0.03),
+  );
+  const baseline = 0.45 - (runScore * 0.2) - (verificationCoverage * 0.15) - (responseQuality * 0.1) + blockerPenalty;
+  return clampUnitScore(baseline);
+}
+
+export async function recordArchiveDerivedMemorySuccess(opts: {
+  memoryReferences?: PromptMemoryReference[] | null;
+  observedEval?: {
+    outcome?: string | null;
+    score?: number | null;
+    verification?: { coverageRatio?: number | null } | null;
+    responseQuality?: { score?: number | null } | null;
+  } | null;
+  userId?: string;
+  source: string;
+  runId?: string | null;
+}): Promise<void> {
+  const outcome = opts.observedEval?.outcome || null;
+  const score = typeof opts.observedEval?.score === 'number' ? opts.observedEval.score : null;
+  if (outcome !== 'strong' && (score == null || score < 80)) return;
+
+  const archiveRefs = (opts.memoryReferences || [])
+    .filter((ref) => !!ref?.id && isArchiveDerivedMemoryReference(ref))
+    .sort((a, b) => (b.score ?? b.importance ?? 0) - (a.score ?? a.importance ?? 0))
+    .slice(0, 3);
+  if (!archiveRefs.length) return;
+  const eligible = await filterArchivePassiveFeedbackEligible({
+    memoryIds: archiveRefs.map((ref) => ref.id),
+    action: 'confirmed_helpful',
+    source: opts.source,
+  });
+  if (!eligible.size) return;
+  const weightedScore = computeArchivePassivePositiveScore(opts.observedEval);
+
+  const { recordMemoryFeedback } = await import('./memoryActions');
+  await Promise.all(
+    archiveRefs
+      .filter((ref) => eligible.has(ref.id))
+      .map((ref) => recordMemoryFeedback({
+        memoryId: ref.id,
+        action: 'confirmed_helpful',
+        note: `Archive-derived memory contributed to a strong run${opts.runId ? ` (${opts.runId})` : ''}.`,
+        userId: opts.userId,
+        source: opts.source,
+        scoreOverride: weightedScore,
+        metadata: {
+          passive: true,
+          weighting: 'evidence_depth',
+          run_score: opts.observedEval?.score ?? null,
+          verification_coverage: opts.observedEval?.verification?.coverageRatio ?? null,
+          response_quality: opts.observedEval?.responseQuality?.score ?? null,
+        },
+      })),
+  );
+}
+
+export async function recordArchiveDerivedMemoryWeakSignal(opts: {
+  memoryReferences?: PromptMemoryReference[] | null;
+  observedEval?: {
+    outcome?: string | null;
+    score?: number | null;
+    verification?: { coverageRatio?: number | null; failed?: number | null; blocked?: number | null } | null;
+    responseQuality?: { score?: number | null; missed?: string[] | null } | null;
+    blockers?: string[] | null;
+  } | null;
+  userId?: string;
+  source: string;
+  runId?: string | null;
+}): Promise<void> {
+  const outcome = opts.observedEval?.outcome || null;
+  const score = typeof opts.observedEval?.score === 'number' ? opts.observedEval.score : null;
+  const weakOutcome = outcome === 'blocked' || outcome === 'failed';
+  const weakScore = score != null && score < 55;
+  if (!weakOutcome && !weakScore) return;
+
+  const archiveRefs = (opts.memoryReferences || [])
+    .filter((ref) => !!ref?.id && isArchiveDerivedMemoryReference(ref))
+    .sort((a, b) => (b.score ?? b.importance ?? 0) - (a.score ?? a.importance ?? 0))
+    .slice(0, 2);
+  if (!archiveRefs.length) return;
+  const eligible = await filterArchivePassiveFeedbackEligible({
+    memoryIds: archiveRefs.map((ref) => ref.id),
+    action: 'weak_signal',
+    source: opts.source,
+  });
+  if (!eligible.size) return;
+  const weightedScore = computeArchivePassiveNegativeScore(opts.observedEval);
+
+  const { recordMemoryFeedback } = await import('./memoryActions');
+  await Promise.all(
+    archiveRefs
+      .filter((ref) => eligible.has(ref.id))
+      .map((ref) => recordMemoryFeedback({
+        memoryId: ref.id,
+        action: 'weak_signal',
+        note: `Archive-derived memory was present on a weak run${opts.runId ? ` (${opts.runId})` : ''}.`,
+        userId: opts.userId,
+        source: opts.source,
+        scoreOverride: weightedScore,
+        metadata: {
+          passive: true,
+          weighting: 'evidence_depth',
+          run_score: opts.observedEval?.score ?? null,
+          verification_coverage: opts.observedEval?.verification?.coverageRatio ?? null,
+          response_quality: opts.observedEval?.responseQuality?.score ?? null,
+          blocker_count: opts.observedEval?.blockers?.length || 0,
+        },
+      })),
+  );
+}
 
 // ── Startup Memory Bundle ───────────────────────────────────────────────────
 
@@ -556,6 +745,9 @@ const TURN_RETRIEVAL_DEFAULTS = {
   importanceBonus: 0.15,      // multiplier × importance (0..1)
 };
 
+const ARCHIVE_PASSIVE_RETRIEVAL_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+const ARCHIVE_PASSIVE_RETRIEVAL_BIAS = 0.18;
+
 const EXTERNAL_AGENT_MEMORY_SOURCES = new Set([
   'claude_code_bridge',
   'codex_bridge',
@@ -659,21 +851,27 @@ export async function retrieveForTurn(opts: {
   } catch { /* missing table just means no soul boost */ }
 
   const helpfulnessByMemoryId = new Map<string, number>();
+  const archivePassiveByMemoryId = new Map<string, number>();
   try {
     const { data: evaluationRows, error: evaluationErr } = await supabase
       .from('memory_evaluations')
-      .select('memory_id, score, passed, metadata')
+      .select('memory_id, score, passed, metadata, created_at')
       .in('memory_id', ids)
       .eq('evaluation_kind', 'manual_review');
     if (!evaluationErr && evaluationRows) {
       const grouped = new Map<string, number[]>();
+      const passiveGrouped = new Map<string, number[]>();
+      const passiveCutoff = Date.now() - ARCHIVE_PASSIVE_RETRIEVAL_WINDOW_MS;
       for (const row of evaluationRows as any[]) {
         const metaAction = row.metadata?.action;
+        const metaSource = typeof row.metadata?.source === 'string' ? row.metadata.source : '';
         const inferredScore =
           typeof row.score === 'number'
             ? row.score
-            : metaAction === 'accepted' || metaAction === 'promoted'
+            : metaAction === 'accepted' || metaAction === 'confirmed_helpful' || metaAction === 'promoted'
               ? 1
+              : metaAction === 'weak_signal'
+                ? 0.2
               : metaAction === 'dismissed' || metaAction === 'not_helpful'
                 ? 0
                 : row.passed === true
@@ -685,9 +883,22 @@ export async function retrieveForTurn(opts: {
         const arr = grouped.get(row.memory_id) || [];
         arr.push(inferredScore);
         grouped.set(row.memory_id, arr);
+
+        const createdAtMs = typeof row.created_at === 'string' ? new Date(row.created_at).getTime() : 0;
+        const isRecentPassive = createdAtMs >= passiveCutoff
+          && (metaAction === 'confirmed_helpful' || metaAction === 'weak_signal')
+          && metaSource.includes('passive');
+        if (isRecentPassive) {
+          const passiveArr = passiveGrouped.get(row.memory_id) || [];
+          passiveArr.push(inferredScore);
+          passiveGrouped.set(row.memory_id, passiveArr);
+        }
       }
       for (const [memoryId, scores] of grouped.entries()) {
         helpfulnessByMemoryId.set(memoryId, scores.reduce((sum, value) => sum + value, 0) / scores.length);
+      }
+      for (const [memoryId, scores] of passiveGrouped.entries()) {
+        archivePassiveByMemoryId.set(memoryId, scores.reduce((sum, value) => sum + value, 0) / scores.length);
       }
     }
   } catch { /* no eval rows just means neutral helpfulness */ }
@@ -725,8 +936,12 @@ export async function retrieveForTurn(opts: {
     const pinnedBoost = (c as any).pinned ? cfg.pinnedBoost : 0;
     const helpfulness = helpfulnessByMemoryId.get(c.id) ?? null;
     const helpfulnessAdjustment = helpfulness == null ? 0 : (helpfulness - 0.5) * 0.24;
+    const isArchiveDerived = typeof c.metadata?.source === 'string'
+      && (c.metadata.source === 'thread_archive_match' || c.metadata.source === 'thread_archive_recommendation');
+    const archivePassive = isArchiveDerived ? (archivePassiveByMemoryId.get(c.id) ?? null) : null;
+    const archivePassiveAdjustment = archivePassive == null ? 0 : (archivePassive - 0.5) * ARCHIVE_PASSIVE_RETRIEVAL_BIAS;
     const taskAffinity = scoreMemoryTaskAffinity(c, opts.taskKind, opts.profile);
-    const baseScore = c.similarity + soulBoost + pinnedBoost + importanceBonus + helpfulnessAdjustment + taskAffinity.score;
+    const baseScore = c.similarity + soulBoost + pinnedBoost + importanceBonus + helpfulnessAdjustment + archivePassiveAdjustment + taskAffinity.score;
     const finalScore = baseScore * (0.6 + 0.4 * recencyFactor);
 
     return {
@@ -954,6 +1169,7 @@ export async function buildPromptMemoryBundle(opts: {
       matchReason: mem.reason || null,
       helpfulness: mem.helpfulness,
       memoryState: (mem as any).retrieval_mode === 'startup' ? 'startup' : 'retrieved',
+      metadata: mem.metadata || null,
     });
   });
 
@@ -978,6 +1194,7 @@ export async function buildPromptMemoryBundle(opts: {
       matchReason: isSoulMemory ? 'active soul memory' : 'agent private memory',
       helpfulness: null,
       memoryState: mem.retrieval_mode === 'startup' ? 'startup' : 'supporting',
+      metadata: mem.metadata || null,
     });
   });
 
@@ -1102,6 +1319,7 @@ async function buildExternalAgentKnowledgeBundle(opts: {
     taskFit: taskAffinity.fit === 'background' ? 'supporting' : taskAffinity.fit,
     matchReason: `${providerLabel} session knowledge${taskAffinity.reason ? ` + ${taskAffinity.reason}` : ''}`,
     memoryState: 'distilled',
+    metadata: mem.metadata || null,
   }));
 
   return {

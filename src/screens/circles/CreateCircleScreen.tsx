@@ -12,6 +12,7 @@ import {
   Animated,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { safeGetUser } from '../../lib/authSession';
 import { showAlert } from '../../lib/alert';
 import Button from '../../components/Button';
 import Card from '../../components/Card';
@@ -249,7 +250,7 @@ export default function CreateCircleScreen({ route, navigation }: any) {
     }
 
     setLoading(true);
-    const { data: { user } } = await supabase.auth.getUser();
+    const { value: user } = await safeGetUser();
     if (!user) {
       setError('Not logged in');
       setLoading(false);

@@ -546,6 +546,10 @@ export interface GitHubOAuthStatus {
   github_username?: string;
   github_user_id?: number;
   connected_at?: string;
+  /** Set when we couldn't reach or parse the status endpoint. Callers can
+   *  distinguish a genuine "not connected" from a transient failure and
+   *  avoid flipping the UI to the reconnect screen on flakes. */
+  error?: string;
 }
 
 /** Start GitHub OAuth flow — opens GitHub authorization page */
@@ -562,16 +566,39 @@ export async function connectViaOAuth(circleId: string, userId: string): Promise
   }
 }
 
+/** Build auth headers for edge-function calls. We pass the user's access
+ *  token when available so these calls work even if the function's
+ *  verify_jwt flag ever flips back to true. The GitHub OAuth callback itself
+ *  (GitHub → our edge function) still can't send a JWT, so the function must
+ *  stay verify_jwt=false in config.toml — this is belt-and-suspenders. */
+async function getEdgeAuthHeaders(): Promise<Record<string, string>> {
+  try {
+    const { supabase } = await import('./supabase');
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    if (token) return { Authorization: `Bearer ${token}` };
+  } catch {}
+  return {};
+}
+
 /** Check if user has connected GitHub via OAuth */
 export async function getOAuthStatus(userId: string): Promise<GitHubOAuthStatus> {
   try {
     const res = await fetch(
       `${SUPABASE_FUNCTIONS_URL}/github-oauth?action=status&user_id=${userId}`,
+      { headers: await getEdgeAuthHeaders() },
     );
+    // If the edge function rejects the request (401/5xx/etc), don't treat the
+    // error payload as "connected=false" — signal that we couldn't determine
+    // status so callers can back off instead of flipping the UI to a stale
+    // "disconnected" state. Previously a transient 401 from the router would
+    // parse as {code:401,...}, fall through `connected ? ... : false`, and
+    // silently bounce the user back to the reconnect screen.
+    if (!res.ok) return { connected: false, error: `status_${res.status}` };
     const data = await res.json();
     return data;
   } catch {
-    return { connected: false };
+    return { connected: false, error: 'network' };
   }
 }
 
@@ -580,6 +607,7 @@ export async function getConnectedRepos(userId: string): Promise<{ repos: GitHub
   try {
     const res = await fetch(
       `${SUPABASE_FUNCTIONS_URL}/github-oauth?action=list_repos&user_id=${userId}`,
+      { headers: await getEdgeAuthHeaders() },
     );
     const data = await res.json();
     if (data.error) return { repos: [], error: data.error };

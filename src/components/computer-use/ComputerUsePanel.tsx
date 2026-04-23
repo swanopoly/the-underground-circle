@@ -122,6 +122,7 @@ export default function ComputerUsePanel({
   const isActive = session.status === 'executing' || session.status === 'awaiting_approval';
   const completedCount = session.actions.filter(a => a.status === 'completed').length;
   const totalCount = session.actions.length;
+  const blockedCount = session.actions.filter(a => !!a.blockedReason).length;
 
   return (
     <View style={styles.container} nativeID="section-computer-use-panel">
@@ -156,6 +157,14 @@ export default function ComputerUsePanel({
         <Text style={[styles.permissionValue, { color: accentColor }]}>
           {PERMISSION_LABELS[session.permission]}
         </Text>
+        {session.intent?.risk ? (
+          <>
+            <Text style={styles.permissionLabel}>  RISK:</Text>
+            <Text style={[styles.permissionValue, { color: session.intent.risk === 'high' ? '#ef4444' : session.intent.risk === 'medium' ? '#f59e0b' : '#22c55e' }]}>
+              {session.intent.risk.toUpperCase()}
+            </Text>
+          </>
+        ) : null}
         {!!session.backendLabel && (
           <>
             <Text style={styles.permissionLabel}>  BACKEND:</Text>
@@ -172,19 +181,46 @@ export default function ComputerUsePanel({
         )}
       </View>
 
+      {session.intent?.allowedDomains?.length ? (
+        <View style={styles.scopeBar}>
+          <Text style={styles.permissionLabel}>DOMAINS:</Text>
+          <Text style={styles.scopeText} numberOfLines={2}>{session.intent.allowedDomains.join(', ')}</Text>
+        </View>
+      ) : null}
+
+      {session.intent?.hasSideEffects || session.intent?.requiresLogin || blockedCount > 0 ? (
+        <View style={styles.warningStrip}>
+          <Text style={styles.warningStripText}>
+            {blockedCount > 0
+              ? `${blockedCount} step${blockedCount === 1 ? '' : 's'} blocked outside allowed scope.`
+              : session.intent?.hasSideEffects
+                ? 'High-impact submission steps require explicit approval.'
+                : 'Login-related steps require explicit approval.'}
+          </Text>
+        </View>
+      ) : null}
+
       {session.backendLiveUrl ? (
         <View style={styles.sessionLinkRow}>
-          <Text style={styles.permissionLabel}>SESSION:</Text>
+          <Text style={styles.permissionLabel}>{session.backend === 'browserbase_stagehand' ? 'WATCH:' : 'SESSION:'}</Text>
           <Pressable
             onPress={onOpenSession}
             accessibilityRole="button"
             accessibilityLabel="Open live browser session"
-            style={styles.sessionLinkButton}
+            style={[
+              styles.sessionLinkButton,
+              session.backend === 'browserbase_stagehand' && styles.watchLiveButton,
+            ]}
           >
             <Text style={styles.sessionLinkButtonText}>
-              {session.backendSessionId ? `OPEN ${session.backendSessionId}` : 'OPEN LIVE SESSION'}
+              {session.backend === 'browserbase_stagehand'
+                ? 'WATCH LIVE'
+                : session.backendSessionId ? `OPEN ${session.backendSessionId}` : 'OPEN LIVE SESSION'}
             </Text>
           </Pressable>
+          {session.backend !== 'browserbase_stagehand' ? (
+            <Text style={styles.localSessionNote}>Local browser, not streamable.</Text>
+          ) : null}
         </View>
       ) : null}
 
@@ -348,6 +384,16 @@ function ActionRow({
             {action.error}
           </Text>
         )}
+        {action.approvalReason ? (
+          <Text style={styles.actionApprovalNote} numberOfLines={2}>
+            APPROVAL: {action.approvalReason}
+          </Text>
+        ) : null}
+        {action.blockedReason ? (
+          <Text style={styles.actionBlockedNote} numberOfLines={2}>
+            BLOCKED: {action.blockedReason}
+          </Text>
+        ) : null}
       </View>
 
       {/* Screenshots thumbnails */}
@@ -507,6 +553,36 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginLeft: 4,
   },
+  scopeBar: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    gap: 6,
+    backgroundColor: '#07070c',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a2e',
+  },
+  scopeText: {
+    flex: 1,
+    fontFamily: 'monospace',
+    fontSize: 9,
+    color: '#8fa4b8',
+    lineHeight: 14,
+  },
+  warningStrip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#ef444412',
+    borderBottomWidth: 1,
+    borderBottomColor: '#ef444430',
+  },
+  warningStripText: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    color: '#fca5a5',
+    lineHeight: 14,
+  },
   urlText: {
     fontFamily: 'monospace',
     fontSize: 9,
@@ -538,6 +614,15 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#c4b5fd',
     letterSpacing: 0.5,
+  },
+  watchLiveButton: {
+    backgroundColor: '#ef444420',
+    borderColor: '#ef444460',
+  },
+  localSessionNote: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    color: '#64748b',
   },
   progressContainer: {
     flexDirection: 'row',
@@ -617,6 +702,16 @@ const styles = StyleSheet.create({
     color: '#6f6f6f',
   },
   actionError: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    color: '#ef4444',
+  },
+  actionApprovalNote: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    color: '#f59e0b',
+  },
+  actionBlockedNote: {
     fontFamily: 'monospace',
     fontSize: 9,
     color: '#ef4444',

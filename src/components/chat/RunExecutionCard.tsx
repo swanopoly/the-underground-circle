@@ -1,5 +1,6 @@
 import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import type { ChatCommandDecision } from '../../lib/chatCommandRegistry';
 import {
   buildOpenSwanExecutionStream,
   getOpenSwanExecutionStatusColor,
@@ -7,12 +8,33 @@ import {
   sortOpenSwanExecutionContracts,
   type OpenSwanExecutionContract,
 } from '../../lib/openswanExecution';
+import type { OpenSwanObservedEvalSummary } from '../../lib/openswanObservedEvals';
 import type { BrowserPlanCardData, BrowserPlanEvent, BrowserSessionRecord } from '../../lib/computerUse';
 import type { OpenSwanTaskPlan } from '../../lib/openswanTaskPlanner';
 import type { OpenSwanToolEvent } from '../../lib/openswanToolRuntime';
 import type { OpenSwanVerificationResult } from '../../lib/openswanVerificationRuntime';
+import RunMetadataSummary from './RunMetadataSummary';
 
 type Props = {
+  commandDecisions?: ChatCommandDecision[];
+  modeContext?: {
+    key: string | null;
+    label: string | null;
+    description: string | null;
+    outcome: string | null;
+  } | null;
+  modePresentation?: {
+    focusAreas: string[];
+    browserTitle: string;
+    executionTitle: string;
+    verificationTitle: string;
+  } | null;
+  modeOutcomeSummary?: {
+    headline: string;
+    bulletPoints: string[];
+    blockers: string[];
+  } | null;
+  observedEval?: OpenSwanObservedEvalSummary | null;
   taskPlan?: OpenSwanTaskPlan;
   toolEvents?: OpenSwanToolEvent[];
   verificationResults?: OpenSwanVerificationResult[];
@@ -30,6 +52,11 @@ type Props = {
 };
 
 export default function RunExecutionCard({
+  commandDecisions = [],
+  modeContext = null,
+  modePresentation = null,
+  modeOutcomeSummary = null,
+  observedEval = null,
   taskPlan,
   toolEvents = [],
   verificationResults = [],
@@ -45,11 +72,33 @@ export default function RunExecutionCard({
   onRetryCheck,
   retryingCheckId,
 }: Props) {
-  if (!taskPlan && verificationResults.length === 0 && toolEvents.length === 0 && delegatedSubagents.length === 0 && browserPlans.length === 0 && browserPlanEvents.length === 0 && browserSessions.length === 0) return null;
+  if (
+    !taskPlan
+    && !modeContext
+    && !modeOutcomeSummary
+    && !observedEval
+    && commandDecisions.length === 0
+    && verificationResults.length === 0
+    && toolEvents.length === 0
+    && delegatedSubagents.length === 0
+    && browserPlans.length === 0
+    && browserPlanEvents.length === 0
+    && browserSessions.length === 0
+  ) return null;
 
   const executionContracts = executionStream.length > 0
     ? sortOpenSwanExecutionContracts(executionStream)
     : buildOpenSwanExecutionStream({ toolEvents, verificationResults });
+  const rankExecutionStatus = (status: string) => status === 'failed' ? 0 : status === 'blocked' ? 1 : status === 'manual_required' ? 2 : status === 'running' ? 3 : 4;
+  const prioritizedExecutionContracts = modeContext?.key === 'support'
+    ? executionContracts.slice().sort((left, right) => rankExecutionStatus(left.status) - rankExecutionStatus(right.status))
+    : executionContracts;
+  const prioritizedVerificationResults = modeContext?.key === 'support'
+    ? verificationResults.slice().sort((left, right) => rankExecutionStatus(left.status) - rankExecutionStatus(right.status))
+    : verificationResults;
+  const blockerContracts = prioritizedExecutionContracts.filter((entry) => (
+    entry.status === 'failed' || entry.status === 'blocked' || entry.status === 'manual_required'
+  ));
   const executionCount = executionContracts.filter((entry) => entry.status !== 'planned').length;
   const executionGreenCount = executionContracts.filter((entry) => entry.status === 'passed').length;
 
@@ -62,19 +111,15 @@ export default function RunExecutionCard({
 
       {taskPlan ? (
         <>
-          {delegatedSubagents.length > 0 ? (
-            <>
-              <Text style={styles.sectionTitle}>SUB-AGENTS</Text>
-              <View style={styles.chipRow}>
-                {delegatedSubagents.map((name) => (
-                  <View key={name} style={styles.subagentChip}>
-                    <Text style={styles.subagentChipText}>{name.toUpperCase()}</Text>
-                  </View>
-                ))}
-              </View>
-            </>
-          ) : null}
-
+          <RunMetadataSummary
+            commandDecisions={commandDecisions}
+            modeContext={modeContext}
+            modePresentation={modePresentation}
+            observedEval={observedEval}
+            delegatedSubagents={delegatedSubagents}
+            browserPlans={browserPlans}
+            accentColor="#38bdf8"
+          />
           <Text style={styles.sectionTitle}>TOOLS</Text>
           <View style={styles.list}>
             {taskPlan.recommendedTools.map((tool) => (
@@ -107,16 +152,74 @@ export default function RunExecutionCard({
         </>
       ) : null}
 
+      {!taskPlan ? (
+        <RunMetadataSummary
+          commandDecisions={commandDecisions}
+          modeContext={modeContext}
+          modePresentation={modePresentation}
+          observedEval={observedEval}
+          delegatedSubagents={delegatedSubagents}
+          browserPlans={browserPlans}
+          accentColor="#38bdf8"
+        />
+      ) : null}
+
+      {modeOutcomeSummary?.headline ? (
+        <View style={styles.modeInsightCard}>
+          <Text style={styles.modeInsightTitle}>MODE SUMMARY</Text>
+          <Text style={styles.modeInsightText}>{modeOutcomeSummary.headline}</Text>
+          {modeOutcomeSummary.bulletPoints.slice(0, 3).map((item, index) => (
+            <Text key={`${item}-${index}`} style={styles.modeInsightText}>
+              {index + 1}. {item}
+            </Text>
+          ))}
+          {modeOutcomeSummary.blockers.slice(0, 2).map((item, index) => (
+            <Text key={`blocker-${item}-${index}`} style={[styles.modeInsightText, { color: '#fca5a5' }]}>
+              Blocker {index + 1}: {item}
+            </Text>
+          ))}
+        </View>
+      ) : null}
+
+      {modeContext?.key === 'research' ? (
+        <View style={styles.modeInsightCard}>
+          <Text style={styles.modeInsightTitle}>RESEARCH FOCUS</Text>
+          <Text style={styles.modeInsightText}>
+            Evidence trail: {verificationResults.length} check{verificationResults.length === 1 ? '' : 's'}, {browserPlans.length} browser plan{browserPlans.length === 1 ? '' : 's'}, {executionCount || prioritizedExecutionContracts.length} execution item{(executionCount || prioritizedExecutionContracts.length) === 1 ? '' : 's'}.
+          </Text>
+        </View>
+      ) : null}
+
+      {modeContext?.key === 'design' ? (
+        <View style={styles.modeInsightCard}>
+          <Text style={styles.modeInsightTitle}>DESIGN FOCUS</Text>
+          <Text style={styles.modeInsightText}>
+            Preview context: {browserPlans.length} browser plan{browserPlans.length === 1 ? '' : 's'} and {browserSessions.length} session{browserSessions.length === 1 ? '' : 's'} captured for layout, interaction, and UI validation.
+          </Text>
+        </View>
+      ) : null}
+
+      {modeContext?.key === 'support' && blockerContracts.length > 0 ? (
+        <View style={styles.modeInsightCard}>
+          <Text style={styles.modeInsightTitle}>FASTEST UNBLOCK PATH</Text>
+          {blockerContracts.slice(0, 3).map((entry, index) => (
+            <Text key={`${entry.summary}-${index}`} style={styles.modeInsightText}>
+              {index + 1}. {entry.summary}
+            </Text>
+          ))}
+        </View>
+      ) : null}
+
       {executionContracts.length > 0 ? (
         <>
           <View style={[styles.executionHeader, { marginTop: 10 }]}>
-            <Text style={styles.sectionTitle}>EXECUTION</Text>
+            <Text style={styles.sectionTitle}>{modePresentation?.executionTitle || 'EXECUTION'}</Text>
             <Text style={styles.executionMeta}>
               {executionGreenCount}/{executionCount || executionContracts.length} green
             </Text>
           </View>
           <View style={styles.list}>
-            {executionContracts.map((entry, index) => (
+            {prioritizedExecutionContracts.map((entry, index) => (
               <View key={`${entry.toolName || entry.checkId || entry.summary}-${index}`} style={styles.row}>
                 <Text style={[styles.priority, { color: getOpenSwanExecutionStatusColor(entry.status) }]}>
                   {getOpenSwanExecutionStatusLabel(entry.status)}
@@ -134,7 +237,7 @@ export default function RunExecutionCard({
 
       {browserPlans.length > 0 ? (
         <>
-          <Text style={[styles.sectionTitle, { marginTop: 10 }]}>BROWSER PLANS</Text>
+          <Text style={[styles.sectionTitle, { marginTop: 10 }]}>{modePresentation?.browserTitle || 'BROWSER PLANS'}</Text>
           <View style={styles.list}>
             {browserPlans.map((plan, index) => (
               <View key={plan.planId || `${plan.task}-${index}`} style={styles.browserPlanCard}>
@@ -142,6 +245,11 @@ export default function RunExecutionCard({
                 <Text style={styles.browserPlanMeta}>
                   {plan.backendLabel.toUpperCase()}{plan.backendDetails ? ` · ${plan.backendDetails.toUpperCase()}` : ''} · {String(plan.status || 'planned').toUpperCase()} · {plan.actions.length} ACTIONS · {plan.requiresApproval ? 'APPROVAL REQUIRED' : 'AUTO'}
                 </Text>
+                {plan.intent ? (
+                  <Text style={styles.browserPlanStep}>
+                    {plan.intent.mode.replace(/_/g, ' ').toUpperCase()} · {plan.intent.risk.toUpperCase()} RISK · {plan.intent.allowedDomains.length > 0 ? plan.intent.allowedDomains.join(', ') : 'NO DOMAIN YET'}
+                  </Text>
+                ) : null}
                 {plan.actions.slice(0, 5).map((action) => (
                   <Text key={action.id} style={styles.browserPlanStep}>
                     {action.type.toUpperCase()}{action.target ? ` ${action.target}` : ''} · {action.description}
@@ -206,6 +314,11 @@ export default function RunExecutionCard({
                 <Text style={styles.browserPlanMeta}>
                   {session.backendLabel.toUpperCase()} · {session.status.toUpperCase()} · {session.actions.length} ACTIONS
                 </Text>
+                {session.intent ? (
+                  <Text style={styles.browserPlanStep}>
+                    {session.intent.mode.replace(/_/g, ' ').toUpperCase()} · {session.intent.risk.toUpperCase()} RISK · {session.intent.allowedDomains.length > 0 ? session.intent.allowedDomains.join(', ') : 'NO DOMAIN YET'}
+                  </Text>
+                ) : null}
                 {session.currentUrl ? (
                   <Text style={styles.browserPlanStep} numberOfLines={1}>{session.currentUrl}</Text>
                 ) : null}
@@ -220,10 +333,12 @@ export default function RunExecutionCard({
                       onPress={() => onOpenBrowserSession({
                         planId: session.planId || session.id,
                         task: session.task,
+                        intent: session.intent,
                         backend: session.backend,
                         backendLabel: session.backendLabel,
                         backendDetails: session.backendDetails,
                         requiresApproval: false,
+                        recommendedPermission: session.recommendedPermission,
                         status: session.status === 'completed' ? 'completed' : session.status === 'failed' ? 'failed' : 'launched',
                         launchedAt: session.startedAt,
                         completedAt: session.completedAt,
@@ -236,6 +351,8 @@ export default function RunExecutionCard({
                           value: action.value,
                           description: action.description,
                           requiresApproval: action.requiresApproval,
+                          approvalReason: action.approvalReason,
+                          blockedReason: action.blockedReason,
                         })),
                       })}
                       style={styles.browserPlanOpenButton}
@@ -252,9 +369,9 @@ export default function RunExecutionCard({
 
       {verificationResults.length > 0 ? (
         <>
-          <Text style={[styles.sectionTitle, { marginTop: 10 }]}>RESULTS</Text>
+          <Text style={[styles.sectionTitle, { marginTop: 10 }]}>{modePresentation?.verificationTitle || 'RESULTS'}</Text>
           <View style={styles.list}>
-            {verificationResults.map((result) => (
+            {prioritizedVerificationResults.map((result) => (
               <View key={result.check.id} style={styles.row}>
                 <Text style={[styles.priority, { color: getOpenSwanExecutionStatusColor(result.status) }]}>
                   {getOpenSwanExecutionStatusLabel(result.status)}
@@ -332,28 +449,29 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: 'monospace',
   },
-  list: { gap: 8 },
-  chipRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    marginBottom: 8,
-  },
-  subagentChip: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
+  modeInsightCard: {
+    marginTop: 10,
     borderWidth: 1,
-    borderColor: '#22d3ee40',
-    backgroundColor: '#0ea5e915',
+    borderColor: '#f59e0b30',
+    borderRadius: 10,
+    backgroundColor: '#171107',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 4,
   },
-  subagentChipText: {
-    color: '#67e8f9',
-    fontSize: 9,
+  modeInsightTitle: {
+    color: '#fbbf24',
+    fontSize: 10,
     fontWeight: '900',
-    letterSpacing: 0.6,
+    letterSpacing: 0.8,
     fontFamily: 'monospace',
   },
+  modeInsightText: {
+    color: '#f8fafc',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  list: { gap: 8 },
   row: { flexDirection: 'row', gap: 10, alignItems: 'flex-start' },
   browserPlanCard: {
     borderWidth: 1,

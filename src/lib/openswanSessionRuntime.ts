@@ -1,16 +1,20 @@
 import { buildAgenticCodingPrompt, detectAgenticCodingProfile, type AgenticCodingProfile, type AgenticCodingSurface } from './agenticCodingProfile';
 import { addArtifact, addStep, createRun, mergeRunMetadata, type ArtifactKind, type RunSurface, updateRunStatus } from './agentRunSystem';
 import { buildOpenSwanExecutionStream, type OpenSwanExecutionContract } from './openswanExecution';
-import { buildOpenSwanMemoryRecommendations, buildPromptMemoryBundle, captureOpenSwanOutcomeMemory, type OpenSwanMemoryRecommendation, type PromptMemoryReference } from './memoryService';
+import { buildOpenSwanMemoryRecommendations, captureOpenSwanOutcomeMemory, recordArchiveDerivedMemorySuccess, recordArchiveDerivedMemoryWeakSignal, type OpenSwanMemoryRecommendation, type PromptMemoryReference } from './memoryService';
+import { buildOpenSwanObservedEvalSummary } from './openswanObservedEvals';
 import { extractBrowserPlansFromToolActions, runOpenSwanRuntimeToolLoop } from './openswanRuntimeToolLoop';
 import { buildOpenSwanTaskPlan, type OpenSwanTaskPlan } from './openswanTaskPlanner';
 import { buildOpenSwanToolBrief } from './openswanToolRuntime';
 import { appendOpenSwanTranscriptEvent, buildOpenSwanTranscriptKey, upsertOpenSwanTranscriptHeader, type OpenSwanSessionTranscript } from './openswanTranscripts';
 import { executeOpenSwanVerificationPlan, type OpenSwanVerificationResult } from './openswanVerificationRuntime';
-import { getSwanBotStructuredResponse, type SwanBotContext, type SwanBotStructuredArtifact, type SwanBotStructuredResponse } from './swanbot';
+import { getSwanBotStructuredResponse, executeToolUseLoop, buildStreamableSystemPrompt, type SwanBotContext, type SwanBotStructuredArtifact, type SwanBotStructuredResponse } from './swanbot';
 import { delegateToSubagents, planSubagentDelegation, shouldDelegateToSubagents } from './subagentRegistry';
-import type { SessionDelegationMode } from './chatSessionProfile';
+import { resolveEffectiveDelegationMode, type SessionDelegationMode } from './chatSessionProfile';
+import { buildOpenSwanModeResponseContract, getOpenSwanModePolicy } from './openswanModePolicy';
 import type { BrowserPlanCardData, BrowserPlanEvent } from './computerUse';
+import { buildOpenSwanMemoryStores } from './openswanMemoryStores';
+import { OPENSWAN_RUNTIME_PLAN_VERSION } from './openswanRuntimePlan';
 
 export type OpenSwanRunStage =
   | 'booting'
@@ -38,6 +42,7 @@ export type OpenSwanTurnOptions = {
   context: SwanBotContext;
   surface: AgenticCodingSurface;
   runSurface?: RunSurface;
+  taskId?: string;
   sessionProfile?: AgenticCodingProfile;
   delegationMode?: SessionDelegationMode;
   activePluginIds?: string[];
@@ -50,7 +55,13 @@ export type OpenSwanTurnOptions = {
   autoExecuteVerification?: boolean;
 } & OpenSwanRunCallbacks;
 
-export type OpenSwanToolEvent = { tool: string; input: unknown; result: string };
+export type OpenSwanToolEvent = {
+  tool: string;
+  input: unknown;
+  result: string;
+  status: 'completed' | 'failed' | 'manual_required' | 'blocked';
+  summary: string;
+};
 
 export type OpenSwanTurnResult = SwanBotStructuredResponse & {
   runId?: string | null;
@@ -65,6 +76,8 @@ export type OpenSwanTurnResult = SwanBotStructuredResponse & {
   toolEvents?: OpenSwanToolEvent[];
   browserPlans?: BrowserPlanCardData[];
   browserPlanEvents?: BrowserPlanEvent[];
+  modeOutcomeSummary?: OpenSwanModeOutcomeSummary | null;
+  observedEval?: import('./openswanObservedEvals').OpenSwanObservedEvalSummary | null;
 };
 
 function buildInitialBrowserPlanEvents(plans: BrowserPlanCardData[]): BrowserPlanEvent[] {
@@ -80,35 +93,50 @@ function buildInitialBrowserPlanEvents(plans: BrowserPlanCardData[]): BrowserPla
   }));
 }
 
-function getOpenSwanReasoningSettings(taskPlan: OpenSwanTaskPlan): {
+function getOpenSwanReasoningSettings(
+  taskPlan: OpenSwanTaskPlan,
+  complexity?: import('./agenticCodingProfile').MessageComplexity,
+): {
   thinkingLevel: 'fast' | 'balanced' | 'deep';
   maxTokens: number;
 } {
+  // Complexity-first: if smart routing detected complexity, use that as primary signal
+  if (complexity === 'trivial') return { thinkingLevel: 'fast', maxTokens: 1024 };
+  if (complexity === 'simple') return { thinkingLevel: 'fast', maxTokens: 2048 };
+
+  // For moderate+complex, refine by task kind
   if (taskPlan.kind === 'build') {
     const hasPreview = taskPlan.verification.some((check) => check.kind === 'preview');
     return {
-      thinkingLevel: 'deep',
-      maxTokens: hasPreview ? 12288 : 10240,
+      thinkingLevel: complexity === 'complex' ? 'deep' : 'balanced',
+      maxTokens: hasPreview ? 12288 : complexity === 'complex' ? 10240 : 6144,
     };
   }
 
-  if (taskPlan.kind === 'architect' || taskPlan.kind === 'debug' || taskPlan.kind === 'research') {
+  if (taskPlan.kind === 'architect' || taskPlan.kind === 'research') {
     return {
       thinkingLevel: 'deep',
-      maxTokens: 9216,
+      maxTokens: complexity === 'complex' ? 10240 : 8192,
+    };
+  }
+
+  if (taskPlan.kind === 'debug') {
+    return {
+      thinkingLevel: complexity === 'complex' ? 'deep' : 'balanced',
+      maxTokens: complexity === 'complex' ? 9216 : 6144,
     };
   }
 
   if (taskPlan.kind === 'review') {
     return {
-      thinkingLevel: 'deep',
-      maxTokens: 8192,
+      thinkingLevel: complexity === 'complex' ? 'deep' : 'balanced',
+      maxTokens: complexity === 'complex' ? 8192 : 6144,
     };
   }
 
   return {
-    thinkingLevel: 'balanced',
-    maxTokens: 6144,
+    thinkingLevel: complexity === 'complex' ? 'balanced' : 'fast',
+    maxTokens: complexity === 'complex' ? 6144 : 4096,
   };
 }
 
@@ -160,7 +188,150 @@ function summarizeMemoryReferences(references: PromptMemoryReference[]): Array<R
     score: ref.score ?? null,
     taskFit: ref.taskFit ?? null,
     matchReason: ref.matchReason ?? null,
+    source: typeof ref.metadata?.source === 'string' ? ref.metadata.source : null,
   }));
+}
+
+type OpenSwanModeOutcomeSummary = {
+  headline: string;
+  bulletPoints: string[];
+  blockers: string[];
+};
+
+function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(values.map((value) => (value || '').trim()).filter(Boolean)));
+}
+
+function buildModeOutcomeSummary(args: {
+  mode?: string | null;
+  taskKind: string;
+  response: string;
+  artifacts: SwanBotStructuredArtifact[];
+  verificationResults?: OpenSwanVerificationResult[];
+  browserPlans: BrowserPlanCardData[];
+  runtimeToolActions: Array<{ status?: string | null; title?: string | null; output_preview?: string | null }>;
+}): OpenSwanModeOutcomeSummary | null {
+  const mode = args.mode || null;
+  if (!mode || mode === 'talk' || mode === 'none') return null;
+
+  const verificationResults = args.verificationResults || [];
+  const failedChecks = verificationResults.filter((result) => (
+    !result.ok || result.status === 'manual_required' || result.status === 'blocked'
+  ));
+  const failedToolActions = args.runtimeToolActions.filter((action) => (
+    action.status === 'failed' || action.status === 'blocked' || action.status === 'manual_required'
+  ));
+  const blockers = uniqueNonEmpty([
+    ...failedChecks.map((result) => result.summary),
+    ...failedToolActions.map((action) => action.output_preview || action.title || ''),
+  ]).slice(0, 5);
+
+  if (mode === 'research') {
+    return {
+      headline: `Research run produced ${args.artifacts.length} artifact(s), ${verificationResults.length} verification result(s), and ${args.browserPlans.length} browser investigation plan(s).`,
+      bulletPoints: uniqueNonEmpty([
+        ...args.artifacts.map((artifact) => `${artifact.kind}: ${artifact.title}`),
+        ...verificationResults.map((result) => result.summary),
+        ...args.browserPlans.map((plan) => `Browser plan: ${plan.task}`),
+      ]).slice(0, 6),
+      blockers,
+    };
+  }
+
+  if (mode === 'design') {
+    return {
+      headline: `Design run captured ${args.artifacts.length} artifact(s) and ${args.browserPlans.length} preview/browser plan(s) for UI direction and handoff.`,
+      bulletPoints: uniqueNonEmpty([
+        ...args.artifacts.map((artifact) => `${artifact.kind}: ${artifact.title}`),
+        ...args.browserPlans.map((plan) => `Preview plan: ${plan.task}`),
+        ...verificationResults.map((result) => result.summary),
+      ]).slice(0, 6),
+      blockers,
+    };
+  }
+
+  if (mode === 'support') {
+    return {
+      headline: blockers.length > 0
+        ? `Support run identified ${blockers.length} blocker(s) and focused on the fastest recovery path.`
+        : `Support run completed with ${verificationResults.length} verification result(s) and no active blockers recorded.`,
+      bulletPoints: uniqueNonEmpty([
+        ...blockers,
+        ...verificationResults.map((result) => result.summary),
+        ...args.browserPlans.map((plan) => `Browser step: ${plan.task}`),
+      ]).slice(0, 6),
+      blockers,
+    };
+  }
+
+  if (mode === 'build') {
+    return {
+      headline: `Build run produced ${args.artifacts.length} artifact(s) with ${verificationResults.length} verification result(s).`,
+      bulletPoints: uniqueNonEmpty([
+        ...args.artifacts.map((artifact) => `${artifact.kind}: ${artifact.title}`),
+        ...verificationResults.map((result) => result.summary),
+      ]).slice(0, 6),
+      blockers,
+    };
+  }
+
+  return {
+    headline: `${mode} run completed for task kind ${args.taskKind}.`,
+    bulletPoints: uniqueNonEmpty([
+      ...args.artifacts.map((artifact) => `${artifact.kind}: ${artifact.title}`),
+      ...verificationResults.map((result) => result.summary),
+    ]).slice(0, 6),
+    blockers,
+  };
+}
+
+function buildModeSummaryArtifacts(args: {
+  mode?: string | null;
+  summary: OpenSwanModeOutcomeSummary | null;
+  response: string;
+  browserPlans: BrowserPlanCardData[];
+  verificationResults?: OpenSwanVerificationResult[];
+}): Array<{ artifactKind: ArtifactKind; title: string; content: string; metadata: Record<string, unknown> }> {
+  const mode = args.mode || null;
+  if (!mode || !args.summary) return [];
+
+  const sections = [
+    `Headline: ${args.summary.headline}`,
+    args.summary.bulletPoints.length ? ['', 'Highlights:', ...args.summary.bulletPoints.map((item) => `- ${item}`)] : [],
+    args.summary.blockers.length ? ['', 'Blockers:', ...args.summary.blockers.map((item) => `- ${item}`)] : [],
+    args.browserPlans.length ? ['', 'Browser plans:', ...args.browserPlans.map((plan) => `- ${plan.task}`)] : [],
+    args.verificationResults?.length ? ['', 'Verification:', ...args.verificationResults.map((result) => `- ${result.summary}`)] : [],
+    ['', 'Response excerpt:', args.response.slice(0, 1600)],
+  ].flat().filter(Boolean).join('\n');
+
+  if (mode === 'research') {
+    return [{
+      artifactKind: 'research_brief',
+      title: 'Research Brief',
+      content: sections,
+      metadata: { source: 'openswan_mode_summary', mode },
+    }];
+  }
+
+  if (mode === 'design') {
+    return [{
+      artifactKind: 'design_spec',
+      title: 'Design Handoff Summary',
+      content: sections,
+      metadata: { source: 'openswan_mode_summary', mode },
+    }];
+  }
+
+  if (mode === 'support') {
+    return [{
+      artifactKind: 'checklist',
+      title: 'Support Recovery Checklist',
+      content: sections,
+      metadata: { source: 'openswan_mode_summary', mode },
+    }];
+  }
+
+  return [];
 }
 
 async function appendTranscriptEvent(
@@ -177,20 +348,49 @@ async function appendTranscriptEvent(
 
 export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise<OpenSwanTurnResult> {
   const cleanMessage = opts.message.replace(/@(agent|blackswan|swanbot|swan)\s*/gi, '').trim() || opts.message;
+  const { analyzeMessageRouting } = await import('./messageRouting');
+  const { entities, route: runtimeRoute } = analyzeMessageRouting(
+    cleanMessage,
+    opts.surface === 'main_chat' ? 'main_chat' : 'room_chat',
+  );
   const profile = opts.sessionProfile || detectAgenticCodingProfile(cleanMessage, opts.surface);
-  const prompt = buildAgenticCodingPrompt(cleanMessage, { surface: opts.surface, profile });
+  const effectiveDelegationMode = resolveEffectiveDelegationMode(opts.delegationMode || 'auto', profile);
+  const modePolicy = getOpenSwanModePolicy(opts.mode || 'talk');
+  const modeResponseContract = buildOpenSwanModeResponseContract(opts.mode || 'talk');
+  const prompt = [
+    modeResponseContract,
+    buildAgenticCodingPrompt(cleanMessage, { surface: opts.surface, profile }),
+  ].filter(Boolean).join('\n\n');
   const runSurface = opts.runSurface || opts.surface;
-  const taskPlan = buildOpenSwanTaskPlan(cleanMessage, profile);
+  const taskPlan = buildOpenSwanTaskPlan(cleanMessage, profile, entities);
+  const { resolveModelForProfile } = await import('./serviceProfileSouls');
+  const resolvedModel = resolveModelForProfile(
+    profile as any,
+    opts.context.model,
+    runtimeRoute.intent,
+  );
   const toolBrief = buildOpenSwanToolBrief(
     opts.surface === 'main_chat' ? 'main_chat' : 'room_chat',
     taskPlan,
     opts.activePluginIds,
   );
-  const reasoningSettings = getOpenSwanReasoningSettings(taskPlan);
+  const reasoningSettings = getOpenSwanReasoningSettings(taskPlan, runtimeRoute.complexity);
+  const { soulKeyForProfile } = await import('./serviceProfileSouls');
+  const activeSoulKey = soulKeyForProfile(profile);
+  const { resolveOpenSwanSkills } = await import('./openswanSkills');
+  const skillResolution = await resolveOpenSwanSkills({
+    circleId: opts.context.circleId,
+    userId: opts.context.userId,
+    soulKey: activeSoulKey,
+    mode: opts.mode || 'talk',
+    taskKind: taskPlan.kind,
+    query: prompt,
+    maxSkills: taskPlan.kind === 'research' ? 8 : 6,
+  });
   const delegationSpecs =
-    opts.delegationMode === 'focused'
+    effectiveDelegationMode === 'focused'
       ? []
-      : opts.delegationMode === 'parallel'
+      : effectiveDelegationMode === 'parallel'
         ? planSubagentDelegation(cleanMessage, taskPlan, { activePluginIds: opts.activePluginIds })
         : shouldDelegateToSubagents(cleanMessage, taskPlan)
           ? planSubagentDelegation(cleanMessage, taskPlan, { activePluginIds: opts.activePluginIds })
@@ -211,17 +411,29 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         userId: opts.context.userId,
         surface: runSurface,
         roomId: opts.roomId,
+        taskId: opts.taskId,
         chatSessionId: opts.chatSessionId || undefined,
         title: opts.title || cleanMessage.slice(0, 100) || 'OpenSwan Session',
         goal: opts.goal || cleanMessage.slice(0, 500),
         mode: opts.mode || 'talk',
-        model: opts.context.model || undefined,
+        model: resolvedModel || undefined,
         provider: 'openswan',
         metadata: {
+          runtimePlanVersion: OPENSWAN_RUNTIME_PLAN_VERSION,
           surface: opts.surface,
           profile,
+          explicitMode: modePolicy.key,
+          modeLabel: modePolicy.label,
+          modeDescription: modePolicy.description,
+          modeOutcome: modePolicy.outcome,
+          modeResponseContract: modePolicy.responseContract || null,
           taskKind: taskPlan.kind,
-          delegationMode: opts.delegationMode || 'auto',
+          activeSkills: skillResolution.skills.map((skill) => ({
+            name: skill.name,
+            displayName: skill.displayName,
+            source: skill.source,
+          })),
+          delegationMode: effectiveDelegationMode,
           verificationPlan: taskPlan.verification,
           recommendedTools: taskPlan.recommendedTools,
           ...(opts.metadata || {}),
@@ -482,7 +694,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   }
 
   emitStage(opts, 'reasoning', 'Reasoning over the task');
-  const memoryBundle = await buildPromptMemoryBundle({
+  const memoryBundle = await buildOpenSwanMemoryStores({
     circleId: opts.context.circleId,
     userId: opts.context.userId,
     query: cleanMessage,
@@ -506,104 +718,162 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   })) || transcript;
   if (run) {
     await mergeRunMetadata(run.id, {
+      runtimePlanVersion: OPENSWAN_RUNTIME_PLAN_VERSION,
       memoryReferences: summarizeMemoryReferences(memoryBundle.references),
       memoriesUsed: memoryBundle.references.map((ref) => ref.title),
-      memoryContextPreview: memoryBundle.memoryContext.slice(0, 1200),
+      memoryContextPreview: memoryBundle.combined.slice(0, 1200),
       spiritId: opts.context.spiritId || null,
     });
   }
   const assistantResponseStepIndex = delegationSpecs.length > 0 ? 4 + delegationSpecs.length : 3;
-  const structured = await getSwanBotStructuredResponse(prompt, {
-    ...opts.context,
-    thinkingLevel: opts.context.thinkingLevel || reasoningSettings.thinkingLevel,
-    maxTokens: opts.context.maxTokens || reasoningSettings.maxTokens,
-    memoryContext: memoryBundle.memoryContext,
-    memoryRefs: memoryBundle.references,
-    chatHistory: [
-      opts.context.chatHistory || '',
-      delegationSummary ? `## Specialist Sub-Agent Results\n${delegationSummary}` : '',
-    ].filter(Boolean).join('\n\n'),
-  });
 
-  let runtimeToolActions = structured.tool_actions || [];
-  let browserPlans: BrowserPlanCardData[] = extractBrowserPlansFromToolActions(runtimeToolActions);
-  let browserPlanEvents: BrowserPlanEvent[] = buildInitialBrowserPlanEvents(browserPlans);
-  let executionStream = buildOpenSwanExecutionStream({
-    toolEvents: [],
-    verificationResults: [],
-  });
+  // ── Stage 4+5 merged: Authoritative tool-calling loop ──────────────
+  // Uses Anthropic native tool_use as the primary execution mechanism.
+  // The model decides which tools to call mid-turn; the client dispatches
+  // them locally via the 52+ tool registry in openswanToolRuntime.
+  const surfaceForTools: 'main_chat' | 'room_chat' = opts.surface === 'main_chat' ? 'main_chat' : 'room_chat';
+
+  let structured: SwanBotStructuredResponse;
+  let runtimeToolActions: SwanBotStructuredResponse['tool_actions'] & any[] = [];
+  let browserPlans: BrowserPlanCardData[] = [];
+  let browserPlanEvents: BrowserPlanEvent[] = [];
+  let executionStream = buildOpenSwanExecutionStream({ toolEvents: [], verificationResults: [] });
+
   try {
-    if (opts.context.circleId) {
-      emitStage(opts, 'using_tools', 'Using tools');
-      const { soulKeyForProfile } = await import('./serviceProfileSouls');
-      const toolResult = await runOpenSwanRuntimeToolLoop({
-        circleId: opts.context.circleId,
-        userId: opts.context.userId,
-        runId: run?.id,
-        message: prompt,
-        draftResponse: structured.response,
-        model: opts.context.model,
-        userName: opts.context.userName,
-        chatHistory: opts.context.chatHistory,
-        activeSoulKey: soulKeyForProfile(opts.sessionProfile || 'senior'),
-        activePluginIds: opts.activePluginIds,
-        taskKind: taskPlan.kind,
-        surface: opts.surface === 'main_chat' ? 'main_chat' : 'room_chat',
-        preferredToolNames: taskPlan.recommendedTools.map((tool) => tool.tool),
-      });
-      if (toolResult.toolActions.length > 0) {
-        runtimeToolActions = [...runtimeToolActions, ...toolResult.toolActions];
-        browserPlans = extractBrowserPlansFromToolActions(runtimeToolActions);
-        browserPlanEvents = buildInitialBrowserPlanEvents(browserPlans);
-        structured.tool_actions = runtimeToolActions;
-        structured.response = toolResult.response;
+    emitStage(opts, 'reasoning', 'Reasoning with tools');
+
+    // Build the full system prompt (Blocks A-E: SOUL, wisdom, memory, attachments, skills)
+    const systemPrompt = await buildStreamableSystemPrompt({
+      circleId: opts.context.circleId!,
+      userId: opts.context.userId,
+      currentMessage: prompt,
+      model: opts.context.model,
+      userName: opts.context.userName,
+      modeKey: opts.mode || 'talk',
+      taskKind: taskPlan.kind,
+      sessionProfile: taskPlan.profile,
+      resolvedSkills: skillResolution.skills,
+      resolvedSkillsPromptBlock: skillResolution.promptBlock,
+      chatHistory: [
+        opts.context.chatHistory || '',
+        delegationSummary ? `## Specialist Sub-Agent Results\n${delegationSummary}` : '',
+        memoryBundle.combined ? `## Memory Context\n${memoryBundle.combined}` : '',
+      ].filter(Boolean).join('\n\n'),
+    });
+
+    // Preferred tools from the task planner — pass as allowedToolNames to scope
+    // the tool set. If empty, all surface-appropriate tools are available.
+    const preferredToolNames = taskPlan.recommendedTools.length > 0
+      ? taskPlan.recommendedTools.map((t) => t.tool)
+      : undefined;
+
+    const toolLoopResult = await executeToolUseLoop({
+      systemPrompt,
+      userMessage: prompt,
+      model: resolvedModel || 'claude-sonnet-4-6',
+      circleId: opts.context.circleId!,
+      userId: opts.context.userId,
+      threadId: opts.chatSessionId || undefined,
+      runId: run?.id,
+      activeSoulKey,
+      activePluginIds: opts.activePluginIds,
+      allowedToolNames: preferredToolNames,
+      surface: surfaceForTools,
+    });
+
+    // Map tool events to the SwanBotStructuredToolAction shape expected downstream
+    runtimeToolActions = toolLoopResult.toolEvents.map((evt) => {
+      const status: 'completed' | 'failed' | 'manual_required' | 'blocked' =
+        evt.status === 'passed' ? 'completed' : evt.status === 'manual_required' ? 'manual_required' : evt.status === 'blocked' ? 'blocked' : 'failed';
+      return {
+        kind: 'tool' as const,
+        tool_name: evt.tool,
+        title: evt.tool.replace(/_/g, ' ').replace(/\./g, ' > '),
+        status,
+        input_preview: typeof evt.input === 'string' ? evt.input.slice(0, 500) : JSON.stringify(evt.input).slice(0, 500),
+        output_preview: typeof evt.result === 'string' ? evt.result.slice(0, 1200) : '',
+        metadata: evt.metadata || {},
+      };
+    });
+
+    browserPlans = extractBrowserPlansFromToolActions(runtimeToolActions);
+    browserPlanEvents = buildInitialBrowserPlanEvents(browserPlans);
+
+    structured = {
+      response: toolLoopResult.response,
+      tool_actions: runtimeToolActions,
+      artifacts: [],
+      usage: {},
+    };
+
+    // Log tool activity to transcript
+    if (runtimeToolActions.length > 0) {
+      transcript = (await appendTranscriptEvent(transcriptKey, {
+        kind: 'tool_activity',
+        title: 'Runtime tool activity',
+        summary: `${runtimeToolActions.length} tool action(s) executed via native tool_use`,
+        data: {
+          toolActions: runtimeToolActions.map((action) => ({
+            tool: action.tool_name,
+            status: action.status,
+            title: action.title,
+            outputPreview: action.output_preview || null,
+          })),
+        },
+      })) || transcript;
+      if (browserPlans.length > 0) {
         transcript = (await appendTranscriptEvent(transcriptKey, {
-          kind: 'tool_activity',
-          title: 'Runtime tool activity',
-          summary: `${toolResult.toolActions.length} tool action(s) executed`,
+          kind: 'browser_plans',
+          title: 'Browser plans prepared',
+          summary: `${browserPlans.length} browser plan(s) ready`,
           data: {
-            toolActions: toolResult.toolActions.map((action) => ({
-              tool: action.tool_name,
-              status: action.status,
-              title: action.title,
-              outputPreview: action.output_preview || null,
+            browserPlans: browserPlans.map((plan) => ({
+              planId: plan.planId,
+              task: plan.task,
+              backend: plan.backend,
+              backendLabel: plan.backendLabel,
             })),
           },
         })) || transcript;
-        if (browserPlans.length > 0) {
-          transcript = (await appendTranscriptEvent(transcriptKey, {
-            kind: 'browser_plans',
-            title: 'Browser plans prepared',
-            summary: `${browserPlans.length} browser plan(s) ready`,
-            data: {
-              browserPlans: browserPlans.map((plan) => ({
-                planId: plan.planId,
-                task: plan.task,
-                backend: plan.backend,
-                backendLabel: plan.backendLabel,
-              })),
-            },
-          })) || transcript;
-        }
-        executionStream = buildOpenSwanExecutionStream({
-          toolEvents: runtimeToolActions.map((action) => ({
-            tool: action.tool_name as any,
-            status:
-              action.status === 'completed'
-                ? 'passed'
-                : action.status === 'manual_required'
-                  ? 'manual_required'
-                  : action.status === 'blocked'
-                    ? 'blocked'
-                    : 'failed',
-            summary: action.output_preview || action.title,
-          })),
-          verificationResults: [],
-        });
       }
+      executionStream = buildOpenSwanExecutionStream({
+        toolEvents: runtimeToolActions.map((action) => ({
+          tool: action.tool_name as any,
+          status:
+            action.status === 'completed'
+              ? 'passed'
+              : action.status === 'manual_required'
+                ? 'manual_required'
+                : action.status === 'blocked'
+                  ? 'blocked'
+                  : 'failed',
+          summary: action.output_preview || action.title,
+        })),
+        verificationResults: [],
+      });
     }
   } catch (toolErr) {
-    console.warn('[OpenSwanRuntime] Runtime tool loop failed (non-fatal):', toolErr);
+    console.warn('[OpenSwanRuntime] Tool-use loop failed, falling back to text-only:', toolErr);
+    // Fallback: use the old text-only path if the tool loop fails
+    structured = await getSwanBotStructuredResponse(prompt, {
+      ...opts.context,
+      model: resolvedModel,
+      thinkingLevel: opts.context.thinkingLevel || reasoningSettings.thinkingLevel,
+      maxTokens: opts.context.maxTokens || reasoningSettings.maxTokens,
+      modeKey: opts.mode || 'talk',
+      taskKind: taskPlan.kind,
+      sessionProfile: taskPlan.profile,
+      resolvedSkills: skillResolution.skills,
+      resolvedSkillsPromptBlock: skillResolution.promptBlock,
+      memoryContext: memoryBundle.combined,
+      memoryStores: memoryBundle,
+      memoryRefs: memoryBundle.references,
+      chatHistory: [
+        opts.context.chatHistory || '',
+        delegationSummary ? `## Specialist Sub-Agent Results\n${delegationSummary}` : '',
+      ].filter(Boolean).join('\n\n'),
+    });
+    runtimeToolActions = structured.tool_actions || [];
   }
 
   const toolStepIndex = assistantResponseStepIndex;
@@ -725,6 +995,8 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   emitStage(opts, 'finalizing', 'Finalizing run');
   let verificationResults: OpenSwanVerificationResult[] | undefined;
   let memoryRecommendations: OpenSwanMemoryRecommendation[] = [];
+  let modeOutcomeSummary: OpenSwanModeOutcomeSummary | null = null;
+  let observedEval: import('./openswanObservedEvals').OpenSwanObservedEvalSummary | null = null;
   if (run) {
     if (opts.context.circleId) {
       const verificationStepIndex = actualAssistantResponseStepIndex + ((structured.artifacts || []).length > 0 ? 2 : 1);
@@ -798,6 +1070,15 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         verificationResults,
         artifacts: (structured.artifacts || []).map((artifact) => ({ kind: artifact.kind, title: artifact.title })),
       });
+      modeOutcomeSummary = buildModeOutcomeSummary({
+        mode: opts.mode || null,
+        taskKind: taskPlan.kind,
+        response: structured.response,
+        artifacts: structured.artifacts || [],
+        verificationResults,
+        browserPlans,
+        runtimeToolActions,
+      });
       transcript = (await appendTranscriptEvent(transcriptKey, {
         kind: 'memory_recommendations',
         title: 'Memory recommendations generated',
@@ -812,12 +1093,70 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         })) || transcript;
 
       const runtimeAgentId = opts.context.agentId || `openswan:${opts.surface}`;
+      const modeSummaryArtifacts = buildModeSummaryArtifacts({
+        mode: opts.mode || null,
+        summary: modeOutcomeSummary,
+        response: structured.response,
+        browserPlans,
+        verificationResults,
+      });
+      observedEval = buildOpenSwanObservedEvalSummary({
+        run: {
+          status: 'completed',
+          mode: opts.mode || 'talk',
+          provider: 'openswan',
+          metadata: {
+            explicitMode: opts.mode || null,
+            resolvedSessionProfile: taskPlan.profile,
+            routingIntent: runtimeRoute.intent,
+            taskKind: taskPlan.kind,
+            verificationPlan: taskPlan.verification,
+            modeOutcomeSummary,
+            runtimeToolActions,
+          },
+        },
+        artifacts: [...(structured.artifacts || []), ...modeSummaryArtifacts].map((artifact) => ({
+          artifact_kind: 'artifactKind' in artifact ? artifact.artifactKind : mapStructuredArtifactKind(artifact.kind),
+          title: artifact.title,
+        })),
+        verificationResults,
+        toolActions: runtimeToolActions,
+        responseText: structured.response,
+      });
+      void Promise.all([
+        recordArchiveDerivedMemorySuccess({
+          memoryReferences: memoryBundle.references,
+          observedEval,
+          userId: opts.context.userId,
+          source: 'openswan_runtime_passive_success',
+          runId: run.id,
+        }),
+        recordArchiveDerivedMemoryWeakSignal({
+          memoryReferences: memoryBundle.references,
+          observedEval,
+          userId: opts.context.userId,
+          source: 'openswan_runtime_passive_weak_signal',
+          runId: run.id,
+        }),
+      ]).catch(() => {});
+      for (const artifact of modeSummaryArtifacts) {
+        await addArtifact({
+          runId: run.id,
+          circleId: opts.context.circleId,
+          artifactKind: artifact.artifactKind,
+          title: artifact.title,
+          content: artifact.content,
+          metadata: artifact.metadata,
+        });
+      }
       await mergeRunMetadata(run.id, {
         execution_stream: executionStream,
         verification_results: verificationResults || [],
         browserPlans,
         browserPlanEvents,
         memoryRecommendations,
+        modeOutcomeSummary,
+        observedEval,
         openswanTranscriptKey: transcriptKey,
         openswanTranscriptEventCount: transcript.events.length,
         openswanTranscriptUpdatedAt: transcript.updatedAt,
@@ -850,6 +1189,17 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       artifacts: (structured.artifacts || []).map((artifact) => ({ kind: artifact.kind, title: artifact.title })),
     });
   }
+  if (!modeOutcomeSummary) {
+    modeOutcomeSummary = buildModeOutcomeSummary({
+      mode: opts.mode || null,
+      taskKind: taskPlan.kind,
+      response: structured.response,
+      artifacts: structured.artifacts || [],
+      verificationResults,
+      browserPlans,
+      runtimeToolActions,
+    });
+  }
   transcript = (await appendTranscriptEvent(transcriptKey, {
     kind: 'run_finalized',
     title: 'Run finalized',
@@ -859,6 +1209,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       browserPlanCount: browserPlans.length,
       verificationCount: verificationResults?.length || 0,
       executionStreamCount: executionStream.length,
+      modeOutcomeSummary,
     },
   })) || transcript;
   if (run) {
@@ -882,5 +1233,14 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     memoryRecommendations,
     browserPlans,
     browserPlanEvents,
+    modeOutcomeSummary,
+    observedEval,
+    toolEvents: runtimeToolActions.map((action) => ({
+      tool: action.tool_name,
+      input: action.input_preview || null,
+      result: action.output_preview || action.title || '',
+      status: action.status,
+      summary: action.output_preview || action.title || action.tool_name,
+    })),
   };
 }

@@ -56,7 +56,7 @@ const BRIDGE_PORTS: Record<string, number> = {
   'codex': 7779,
   'gemini': 7780,
   'cursor': 7781,
-  'openswan': 18790,
+  'openswan': 18789,
 };
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -106,7 +106,9 @@ export default function AgentControlCard({
   useEffect(() => {
     checkBridge();
     if (!hasBridge) return; // Don't poll for non-bridge providers
-    const interval = setInterval(checkBridge, 15000);
+    // 30s cadence — bridge transitions are rare and user sees immediate
+    // feedback if a command fails against a dead bridge.
+    const interval = setInterval(checkBridge, 30000);
     return () => clearInterval(interval);
   }, [checkBridge, hasBridge]);
 

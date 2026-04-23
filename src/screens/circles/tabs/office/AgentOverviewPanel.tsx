@@ -432,7 +432,9 @@ function useMemorySyncStatus(circleId: string | undefined, userId: string | null
       }
     };
     void tick();
-    const id = setInterval(tick, 15000);
+    // 30s — memory sync state changes slowly; tighter polling just hammers
+    // memory_entries for no UX benefit.
+    const id = setInterval(tick, 30000);
     return () => {
       cancelled = true;
       clearInterval(id);

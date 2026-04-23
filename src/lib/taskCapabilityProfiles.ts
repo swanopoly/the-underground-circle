@@ -14,6 +14,9 @@ export type TaskCapabilityProfileKey =
   | 'ui_design'
   | 'frontend_build'
   | 'browser_qa'
+  | 'computer_files'
+  | 'computer_apps'
+  | 'computer_hybrid'
   | 'room_curator';
 
 export interface TaskCapabilityProfile {
@@ -90,6 +93,21 @@ export const TASK_CAPABILITY_PROFILES: Record<TaskCapabilityProfileKey, TaskCapa
     capabilities: ['browser_open', 'browser_navigate', 'screenshot_capture'],
     defaults: { required_artifacts: ['screenshot'], approval_required: false, checks: ['browser_check'] },
   },
+  computer_files: {
+    key: 'computer_files', label: 'Computer File Access',
+    capabilities: ['file_search', 'file_read', 'search', 'comment'],
+    defaults: { required_artifacts: ['report'], approval_required: false, checks: ['access_review'] },
+  },
+  computer_apps: {
+    key: 'computer_apps', label: 'Computer App Access',
+    capabilities: ['app_connect', 'app_read', 'app_action', 'comment'],
+    defaults: { required_artifacts: ['report'], approval_required: true, checks: ['integration_review', 'access_review'] },
+  },
+  computer_hybrid: {
+    key: 'computer_hybrid', label: 'Computer Hybrid Workflow',
+    capabilities: ['file_search', 'file_read', 'app_connect', 'browser_open', 'browser_navigate', 'comment'],
+    defaults: { required_artifacts: ['report', 'checklist'], approval_required: true, checks: ['execution_plan_review', 'access_review'] },
+  },
   room_curator: {
     key: 'room_curator', label: 'Room Curator',
     capabilities: ['room_file_read', 'patch_propose'],
@@ -114,6 +132,9 @@ export function inferTaskCapabilityProfile(task: { title: string; description?: 
   if (/mock|redesign|visual|landing|figma|wireframe|ui.*design|design.*comp/i.test(text)) return 'ui_design';
   if (/bug|component|refactor|implement|screen|feature|build|code/i.test(text)) return 'frontend_build';
   if (/test|verify|responsive|regression|qa|browser|screenshot/i.test(text)) return 'browser_qa';
+  if (/file|folder|directory|document|downloads|desktop|documents|pdf|csv|json|markdown|search files|find on my computer/i.test(text)) return 'computer_files';
+  if (/slack|notion|figma|github|calendar|email|mail|discord|teams|app|application/i.test(text)) return 'computer_apps';
+  if (/computer task|hybrid|browser.*file|file.*browser|app.*file|file.*app/i.test(text)) return 'computer_hybrid';
   if (/research|analyze|audit|compare|investigate|explore/i.test(text)) return 'research_basic';
   if (/room|knowledge|doc|organize|curate|wiki/i.test(text)) return 'room_curator';
   if (domain === 'cancer_research') return 'scientific_research';

@@ -53,7 +53,8 @@ export default function SharedMemoryPanel({ circleId }: Props) {
   const openHistory = async () => {
     setShowHistory(true);
     setLoadingHistory(true);
-    const h = await getMemoryHistory(circleId, 15);
+    // Signature: (circleId, docKind, limit). Passes 'brief' kind with a 15-row cap.
+    const h = await getMemoryHistory(circleId, 'brief', 15);
     setHistory(h);
     setLoadingHistory(false);
   };
@@ -109,9 +110,9 @@ export default function SharedMemoryPanel({ circleId }: Props) {
       />
 
       {/* History Modal */}
-      <Modal visible={showHistory} transparent animationType="fade">
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalContent}>
+      <Modal visible={showHistory} transparent animationType="fade" onRequestClose={() => setShowHistory(false)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setShowHistory(false)}>
+          <Pressable style={styles.modalContent} onPress={(e) => e.stopPropagation()}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>MEMORY HISTORY</Text>
               <Pressable onPress={() => setShowHistory(false)}>
@@ -143,8 +144,8 @@ export default function SharedMemoryPanel({ circleId }: Props) {
                 ))}
               </ScrollView>
             )}
-          </View>
-        </View>
+          </Pressable>
+        </Pressable>
       </Modal>
     </View>
   );

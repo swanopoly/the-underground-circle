@@ -18,6 +18,7 @@
  */
 
 import { supabase } from './supabase';
+import { shouldBlockExternalAiProvider } from './privacyMode';
 
 export const EMBEDDING_MODEL = 'text-embedding-3-small';
 export const EMBEDDING_DIMS = 1536;
@@ -38,6 +39,7 @@ let lastFailureAt = 0;
 
 async function callEmbedProxy(inputs: string[]): Promise<EmbedResponse | null> {
   if (inputs.length === 0) return { embeddings: [], model: EMBEDDING_MODEL, dimensions: EMBEDDING_DIMS, input_tokens: 0 };
+  if (shouldBlockExternalAiProvider('openai')) return null;
 
   // Circuit breaker — if we've failed N times in a row, stop trying for 5 min
   if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES && Date.now() - lastFailureAt < BACKOFF_RESET_MS) {

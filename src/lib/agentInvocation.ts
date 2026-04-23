@@ -6,6 +6,7 @@
 import { supabase } from './supabase';
 import { CircleOfficeAgent, BLACKSWAN_AGENT_ID } from './circleOffice';
 import { loadBudgetConfig, checkHardLimit } from './budgetAlerts';
+import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './privacyMode';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -136,6 +137,9 @@ async function invokeBlackSwan(
   targetAgentName?: string,
 ): Promise<AgentInvocationResult> {
   const start = Date.now();
+  if (shouldBlockExternalAiProvider('anthropic')) {
+    return { success: false, error: getStrictLocalAiModeMessage('anthropic') };
+  }
 
   // Strip thinking level suffix from model (e.g. "claude-sonnet::deep")
   let cleanModel = model;
@@ -366,6 +370,9 @@ async function invokeBYOLLM(
 ): Promise<AgentInvocationResult> {
   const start = Date.now();
   const { provider, model: resolvedModel, thinkingLevel } = parseBYOModel(model, agentProvider);
+  if (shouldBlockExternalAiProvider(provider)) {
+    return { success: false, error: getStrictLocalAiModeMessage(provider) };
+  }
 
   try {
     const { data, error } = await supabase.functions.invoke('llm-proxy', {
@@ -493,18 +500,40 @@ export async function callOpenSwanAgent(
       };
     }
 
-    // Step 3: Poll sessions_history for a new assistant response
-    const POLL_INTERVAL = 2000;
-    const maxPolls = Math.ceil(timeoutMs / POLL_INTERVAL);
+    // Step 3: Poll sessions_history for a new assistant response.
+    // Adaptive interval: start at 400ms so fast responses return quickly, then
+    // ramp to 2s so we don't hammer the gateway for long-running agent turns.
+    // Old loop had a fixed 2s wait before the first check, which meant even
+    // instant completions felt sluggish — this shortens perceived latency by
+    // up to ~1.6s on the common case while keeping total load comparable.
+    const deadline = start + timeoutMs;
+    let pollDelay = 400;
+    const POLL_DELAY_MAX = 2000;
 
-    for (let i = 0; i < maxPolls; i++) {
-      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+    // Early-exit after N consecutive sessions_history failures. Previously
+    // poll errors were silently swallowed and the loop kept spinning to the
+    // full `timeoutMs` (default 60 s) — which blocks the UI for the full
+    // deadline when the gateway is dead. Hermes-style bounded retries: if
+    // three back-to-back polls fail, surface the error instead of waiting.
+    let consecutiveFailures = 0;
+    const MAX_CONSECUTIVE_POLL_FAILURES = 3;
+    let lastPollError: string | null = null;
+
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, pollDelay));
+      // Ramp interval toward the max so we aren't polling at 400ms forever.
+      pollDelay = Math.min(POLL_DELAY_MAX, Math.round(pollDelay * 1.5));
 
       try {
         const histAfter = await invokeGatewayTool('sessions_history', {
           sessionKey,
           limit: 3,
         });
+
+        // Reset the failure counter on any successful call — a transient
+        // hiccup shouldn't count against a gateway that just recovered.
+        consecutiveFailures = 0;
+        lastPollError = null;
 
         const msgs = histAfter?.result?.details?.messages || [];
 
@@ -537,8 +566,18 @@ export async function callOpenSwanAgent(
             };
           }
         }
-      } catch {
-        // Poll failed — keep trying
+      } catch (err: any) {
+        consecutiveFailures++;
+        lastPollError = err?.message || String(err);
+        if (consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
+          return {
+            success: false,
+            error:
+              `OpenSwan gateway unreachable — ${consecutiveFailures} consecutive ` +
+              `sessions_history failures. Last error: ${lastPollError || 'unknown'}`,
+          };
+        }
+        // Otherwise keep trying — transient network blips recover quickly.
       }
     }
 

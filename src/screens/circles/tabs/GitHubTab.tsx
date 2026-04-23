@@ -135,6 +135,18 @@ export default function GitHubTab({ circleId }: { circleId: string }) {
               setMode('repos');
               return;
             }
+            // OAuth says connected but we couldn't load repos — still show
+            // the connected user so the UI doesn't flip to "Not Connected".
+            setGhUser({ login: oauth.github_username || '', avatar_url: '', name: oauth.github_username || null });
+            setMode('repos');
+            return;
+          }
+          // If the status call failed transiently (network / 5xx), don't
+          // bounce the user into the setup flow — keep whatever PAT/state we
+          // have and let them retry. A true "not connected" returns
+          // {connected:false} with no `error` field.
+          if (oauth.error) {
+            setError(`GitHub status check failed (${oauth.error}) — retrying on next load. Your connection has not been removed.`);
           }
         }
 

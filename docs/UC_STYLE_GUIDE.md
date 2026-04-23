@@ -1,114 +1,146 @@
-# UC App Style Guide — Black & White Terminal Aesthetic
+# UC Style Guide — UC App Dark
 
-> The definitive visual language for The Underground Circle.
-> Combines the Spawn Agents modal (pure B&W, sharp, monospace) with the
-> Assign Agent panel (warm selection tints, status dots, agent identity).
-> All agents and contributors MUST follow this guide for new UI.
+> Clean product UI with depth, soft surfaces, and restrained accent color.
+> The app should feel modern and lived-in, not monochrome-terminal and not pixel-gimmick.
+> Indigo `#6366f1` remains the primary accent, with slate/blue surfaces doing most of the visual work.
 
 ---
 
 ## Core Principles
 
-1. **Black canvas, white structure.** Background is `#000`. Borders are white or gray. Color is reserved for MEANING — status, selection, agent identity.
-2. **Sharp, not rounded.** `borderRadius: 2` everywhere. No rounded corners (10px, 12px, 14px). Exception: status dots (fully round) and agent avatars (round).
-3. **Monospace is the voice.** `fontFamily: 'monospace'` on ALL text. Headers use heavy `letterSpacing: 2-3`. Labels use `letterSpacing: 1.5`.
-4. **Weight communicates hierarchy.** `fontWeight: '900'` for labels, headers, buttons. `'700'` for body text. Never use '400' or '500'.
-5. **Hover is mandatory on web.** Every Pressable gets `transition: all 0.15s ease`, a hover state (border brightens + subtle lift), and a press state (scale squeeze).
-6. **Color is functional, not decorative.** White = primary. Grays = secondary. Color appears ONLY for: status indicators, agent identity tints, active selection, success/error states.
+1. **App over terminal.** Default to polished product UI, not pure black-and-white command-line chrome.
+2. **GitHub dark palette.** Backgrounds are `#0d1117` (page) and `#161b22` (surface). Borders are `#30363d`. Text fades from `#e6edf3` to `#8b949e` to `#484f58`.
+3. **Soft corners.** `borderRadius: 8-16` on cards, buttons, inputs. `borderRadius: 999` on pills and badges. Full round on avatars and status dots.
+4. **System font.** `-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif`. Monospace only for code blocks and terminal output.
+5. **Subtle elevation.** Cards use a single soft shadow, not layered offset shadows. `boxShadow: '0 1px 3px rgba(0,0,0,0.3), 0 0 1px rgba(0,0,0,0.2)'`.
+6. **Hover is a background shift,** not a dramatic lift. `backgroundColor` changes, border may brighten, no `translateY`.
+7. **Indigo is the accent.** `#6366f1` for primary buttons, active states, progress bars, links. Used sparingly — most of the UI is neutral.
+8. **Do not default to all-black with white 2px borders.** That older modal language is now legacy. Use tinted dark surfaces, low-contrast borders, and colored active states.
 
 ---
 
 ## Color Palette
 
-### Neutrals (the 90%)
+### Backgrounds
 | Token | Value | Use |
 |---|---|---|
-| `bg-primary` | `#000000` | Card/modal/page backgrounds |
-| `bg-inset` | `#0a0a0a` | Input fields, nested containers |
-| `bg-surface` | `#111111` | Elevated surfaces, active states |
-| `border-subtle` | `#222222` | Dividers, inactive borders |
-| `border-default` | `#333333` | Input borders, section borders |
-| `border-strong` | `#ffffff` | Card outlines, active selection, CTA borders |
-| `text-primary` | `#ffffff` | Headers, labels, primary content |
-| `text-secondary` | `#888888` | Section labels, descriptions |
-| `text-muted` | `#555555` | Placeholders, disabled text, hints |
-| `text-ghost` | `#333333` | Divider text, footnotes |
+| `bg-canvas` | `#0d1117` | Page background, app shell |
+| `bg-surface` | `#161b22` | Cards, panels, elevated containers |
+| `bg-inset` | `#010409` | Input fields, code blocks, nested wells |
+| `bg-overlay` | `#1c2128` | Dropdowns, popovers, tooltips |
+| `bg-hover` | `#1c2128` | Hover state for list items and cards |
+| `bg-active` | `#6366f115` | Active/selected item background tint |
 
-### Functional colors (the 10%)
-| Token | Value | When |
+### Borders
+| Token | Value | Use |
 |---|---|---|
-| `status-active` | `#22c55e` | Online, success, completed |
-| `status-building` | `#6366f1` | In progress, processing |
-| `status-idle` | `#f59e0b` | Waiting, warning, amber |
-| `status-error` | `#ef4444` | Failed, offline, destructive |
-| `accent-cyan` | `#22d3ee` | Primary accent (links, active UI) |
-| `agent-color` | per-agent | Agent identity tint (used at 10-20% opacity for selection bg) |
+| `border-default` | `#30363d` | Card borders, input borders, dividers |
+| `border-muted` | `#21262d` | Subtle section dividers |
+| `border-accent` | `#6366f1` | Active selection, focused inputs |
+
+### Text
+| Token | Value | Use |
+|---|---|---|
+| `text-primary` | `#e6edf3` | Headlines, body text, primary labels |
+| `text-secondary` | `#8b949e` | Descriptions, secondary labels, meta |
+| `text-muted` | `#484f58` | Placeholders, disabled, timestamps |
+| `text-link` | `#6366f1` | Links, interactive text |
+
+### Accent (indigo — UC signature)
+| Token | Value | Use |
+|---|---|---|
+| `accent` | `#6366f1` | Primary buttons, active borders, progress bars |
+| `accent-hover` | `#818cf8` | Button hover, link hover |
+| `accent-muted` | `#6366f130` | Background tint for selected states |
+| `accent-subtle` | `#6366f115` | Very light hover fills |
+
+### Functional
+| Token | Value | Use |
+|---|---|---|
+| `success` | `#3fb950` | Online, completed, positive |
+| `warning` | `#d29922` | Idle, caution, pending |
+| `danger` | `#f85149` | Error, offline, destructive |
+| `info` | `#58a6ff` | Links, informational badges |
 
 ---
 
 ## Typography
 
 ```
-ALL TEXT: fontFamily: 'monospace'
+SYSTEM FONT (all UI text):
+  Web:     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif
+  iOS:     System
+  Android: Roboto
 
-Headers:    fontSize: 14-16, fontWeight: '900', letterSpacing: 3, color: #fff
-Labels:     fontSize: 10-11, fontWeight: '900', letterSpacing: 1.5-2, color: #888
-Body:       fontSize: 12-13, fontWeight: '700', color: #fff or #ccc
-Hints:      fontSize: 9-10, fontWeight: '700', color: #555
-Buttons:    fontSize: 11-12, fontWeight: '900', letterSpacing: 1-2, color: #000 (primary) or #888 (ghost)
+MONOSPACE (code only):
+  Web:     ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace
+
+Page title:  fontSize: 20, fontWeight: '600', color: text-primary
+Section:     fontSize: 16, fontWeight: '600', color: text-primary
+Body:        fontSize: 14, fontWeight: '400', color: text-primary
+Secondary:   fontSize: 14, fontWeight: '400', color: text-secondary
+Small:       fontSize: 12, fontWeight: '400', color: text-secondary
+Caption:     fontSize: 12, fontWeight: '500', color: text-muted
+Badge:       fontSize: 12, fontWeight: '500', monospace for counts
 ```
-
-No emojis in structural UI. Use text-glyph icons (`//`, `>_`, `+`, `x`, `ESC`) inside small bordered boxes instead.
 
 ---
 
 ## Borders & Corners
 
 ```
-borderRadius: 2           — EVERYWHERE. Cards, buttons, inputs, pills, toggles.
-borderWidth: 2            — Cards, CTAs, active selections, modal outlines.
-borderWidth: 1            — Inputs, secondary buttons, dividers, ghost elements.
+borderRadius: 6     — Cards, buttons, inputs, panels, modals
+borderRadius: 20    — Pills, badges, tags, chips
+borderRadius: 9999  — Avatars, status dots, round buttons
 
-Exception: status dots     — fully round (borderRadius: 999)
-Exception: agent avatars   — fully round
+borderWidth: 1      — Everything. GitHub uses 1px borders exclusively.
 ```
 
 ---
 
 ## Buttons
 
-### Primary CTA
+### Primary (indigo)
 ```
-backgroundColor: '#fff'
-borderColor: '#fff'
-borderWidth: 2
-borderRadius: 2
-color: '#000'
-fontWeight: '900'
-letterSpacing: 2
-— full width when possible
-— hover: backgroundColor '#e0e0e0', boxShadow '0 0 20px rgba(255,255,255,0.25)'
-— press: scale(0.98)
+backgroundColor: '#6366f1'
+borderWidth: 0
+borderRadius: 6
+color: '#ffffff'
+fontSize: 14
+fontWeight: '600'
+paddingVertical: 8
+paddingHorizontal: 16
+— hover: backgroundColor '#818cf8'
+— press: backgroundColor '#4f46e5'
+— disabled: opacity 0.5
 ```
 
-### Ghost / Secondary
+### Secondary (outline)
 ```
-backgroundColor: '#000'
-borderColor: '#333'
+backgroundColor: '#21262d'
 borderWidth: 1
-borderRadius: 2
-color: '#888'
-fontWeight: '900'
-letterSpacing: 1
-— hover: borderColor '#888', backgroundColor '#111'
-— press: scale(0.96)
+borderColor: '#30363d'
+borderRadius: 6
+color: '#e6edf3'
+fontSize: 14
+fontWeight: '600'
+— hover: backgroundColor '#30363d', borderColor '#8b949e'
+— press: backgroundColor '#161b22'
 ```
 
-### Destructive
+### Danger
 ```
-Same as ghost but:
-color: '#ef4444'
-— hover: borderColor '#ef4444', backgroundColor '#1a0a0a'
+Same as secondary but:
+color: '#f85149'
+— hover: backgroundColor '#f8514915', borderColor '#f85149', color '#ff7b72'
+```
+
+### Ghost / link
+```
+backgroundColor: transparent
+borderWidth: 0
+color: '#6366f1'
+— hover: color '#818cf8', textDecoration underline
 ```
 
 ---
@@ -116,189 +148,173 @@ color: '#ef4444'
 ## Inputs
 
 ```
-backgroundColor: '#0a0a0a'
-borderColor: '#333'
+backgroundColor: '#0d1117'
 borderWidth: 1
-borderRadius: 2
-color: '#fff'
-fontSize: 12-13
-fontFamily: 'monospace'
-paddingHorizontal: 14
-paddingVertical: 10-12
-placeholderTextColor: '#555'
-— web: outlineStyle: 'none'
-— focus: borderColor '#888' (subtle, not bright)
+borderColor: '#30363d'
+borderRadius: 6
+color: '#e6edf3'
+fontSize: 14
+paddingHorizontal: 12
+paddingVertical: 8
+placeholderTextColor: '#484f58'
+— focus: borderColor '#6366f1', boxShadow '0 0 0 3px rgba(99,102,241,0.3)'
+— web: outlineStyle 'none'
 ```
 
 ---
 
-## Selection States
+## Cards
 
-### Pill / chip selection (e.g., agent picker, count selector)
+### Standard card
 ```
-INACTIVE:
-  borderColor: '#222'
-  backgroundColor: '#000'
-  text color: '#666'
-
-ACTIVE:
-  borderColor: '#fff'
-  backgroundColor: '#fff'
-  text color: '#000'
-  — inverted: black text on white background
-
-HOVER (inactive only):
-  borderColor: '#888'
-  backgroundColor: '#1a1a1a'
-  transform: translateY(-1)
+backgroundColor: '#111827'
+borderWidth: 1
+borderColor: '#1f2937'
+borderRadius: 16
+padding: 16
+— web: boxShadow '0 1px 3px rgba(0,0,0,0.12)'
+— hover: borderColor '#8b949e'
 ```
 
-### Agent-tinted selection (e.g., assign agent, soul picker)
+### Featured card (profile hero, pinned items)
 ```
-INACTIVE: same as pill
-ACTIVE:
-  borderColor: agentColor + '70'   (e.g., '#22c55e70')
-  backgroundColor: agentColor + '15'
-  text color: agentColor
+backgroundColor: '#0f172a'
+borderWidth: 1
+borderColor: '#312e81'
+borderRadius: 16
+padding: 24
+— web: boxShadow '0 2px 8px rgba(0,0,0,0.2), 0 0 0 1px rgba(99,102,241,0.1)'
+```
+
+### Stat card
+```
+backgroundColor: '#161b22'
+borderWidth: 1
+borderColor: '#30363d'
+borderRadius: 6
+padding: 16
+— center aligned, compact
+— number: fontSize 24, fontWeight '600', color text-primary
+— label: fontSize 12, fontWeight '500', color text-secondary
+```
+
+### Modal
+```
+backgroundColor: '#111827'
+borderWidth: 1
+borderColor: '#1f2937'
+borderRadius: 12
+padding: 24
+— web: boxShadow '0 8px 24px rgba(0,0,0,0.4)'
+— scrim: backgroundColor 'rgba(0,0,0,0.5)'
 ```
 
 ---
 
-## Cards & Modals
+## Explicit Anti-Pattern
 
-### Modal card
+Do not ship new UI with this default treatment unless a surface is intentionally a terminal or code console:
+
 ```
 backgroundColor: '#000'
 borderWidth: 2
 borderColor: '#fff'
 borderRadius: 2
-padding: 24
-gap: 16
-— web: boxShadow '0 0 60px rgba(255,255,255,0.08), 0 0 0 1px rgba(255,255,255,0.15)'
+fontFamily: 'monospace' for all text
+primary buttons: white fill / black text
 ```
 
-### Scrim
-```
-backgroundColor: 'rgba(0,0,0,0.85)'
-```
-
-### Inline panel (e.g., assign agent in chat)
-```
-backgroundColor: '#000'
-borderWidth: 1
-borderColor: '#222'
-borderRadius: 2
-padding: 14-16
-```
-
-### Section divider
-```
-height: 1
-backgroundColor: '#222'
-```
+That style is too rigid for most app surfaces and makes dashboards, forms, and productivity views feel detached from the rest of the product.
 
 ---
 
-## Hover & Press (web)
+## Hover & Press
 
-ALL interactive elements must have:
+Interactive elements:
 ```tsx
 style={({ hovered, pressed }: any) => [
   baseStyle,
-  Platform.OS === 'web' && { transition: 'all 0.15s ease' },
-  hovered && { borderColor: '#888', backgroundColor: '#111', transform: [{ translateY: -1 }] },
-  pressed && { transform: [{ scale: 0.96 }] },
+  Platform.OS === 'web' && { transition: 'all 0.2s ease' },
+  hovered && { backgroundColor: '#1c2128' },
+  pressed && { backgroundColor: '#21262d' },
 ]}
 ```
 
-For primary CTAs:
+Cards:
 ```tsx
-hovered && { backgroundColor: '#e0e0e0', boxShadow: '0 0 20px rgba(255,255,255,0.25)' }
-pressed && { backgroundColor: '#ccc', transform: [{ scale: 0.98 }] }
+hovered && { borderColor: '#8b949e' }
+```
+
+Buttons:
+```tsx
+// Primary
+hovered && { backgroundColor: '#818cf8' }
+// Secondary
+hovered && { backgroundColor: '#30363d', borderColor: '#8b949e' }
 ```
 
 ---
 
-## Icon Blocks
+## Badges & Pills
 
-Replace emojis with monospace text in bordered boxes:
 ```
-width: 24-40
-height: 24-40
-borderRadius: 2
-borderWidth: 2
-borderColor: '#fff' or '#333'
-backgroundColor: '#000'
-alignItems: 'center'
-justifyContent: 'center'
+backgroundColor: '#6366f120'
+borderRadius: 20
+paddingHorizontal: 10
+paddingVertical: 3
+— text: fontSize 12, fontWeight '600', color '#6366f1'
+```
 
-Text inside: fontSize 11-16, fontWeight '900', color '#fff', fontFamily 'monospace'
-
-Examples: '//', '>_', '+', '#', '[]', 'N', 'x', 'ESC'
+Status badges use functional colors:
+```
+success: bg '#3fb95020', color '#3fb950'
+warning: bg '#d2992220', color '#d29922'
+danger:  bg '#f8514920', color '#f85149'
 ```
 
 ---
 
-## Status Indicators
+## Avatars
 
-Small colored dots:
 ```
-width: 6-8
-height: 6-8
-borderRadius: 999
-backgroundColor: status color
-```
-
-Status badge text:
-```
-fontSize: 9-10
-fontWeight: '900'
-letterSpacing: 0.5-1
-fontFamily: 'monospace'
-color: status color
+borderRadius: 9999 (fully round)
 borderWidth: 1
-borderColor: status color
-borderRadius: 2
-paddingHorizontal: 6
-paddingVertical: 2
+borderColor: '#30363d'
+```
+
+Sizes: 20 (inline), 32 (list), 48 (card), 80 (profile hero)
+
+---
+
+## Section Dividers
+
+```
+height: 1
+backgroundColor: '#21262d'
+marginVertical: 16
 ```
 
 ---
 
-## Result / Feedback Banners
+## Spacing
 
-### Success
-```
-borderWidth: 2
-borderColor: '#fff'
-backgroundColor: '#111'
-— icon: '//' in white
-```
-
-### Error
-```
-borderWidth: 2
-borderColor: '#666'
-backgroundColor: '#0a0a0a'
-— icon: '!!' in white
-```
-
-### Info text inside banners
-```
-Title: color '#fff', fontWeight '900', letterSpacing 2
-Message: color '#888', fontSize 11
-```
+Follow a 4px grid: 4, 8, 12, 16, 20, 24, 32, 40, 48.
+- Card padding: 16
+- Section gap: 16-24
+- List item padding: 12-16
+- Inline gap: 8-12
+- Page horizontal padding: 16-24 mobile, 32-48 desktop
 
 ---
 
 ## Don'ts
 
-- No `borderRadius` above 2 (except status dots and avatars)
-- No emojis in headers, labels, buttons, or section titles
-- No background colors other than #000, #0a0a0a, #111 for structural elements
-- No `fontFamily` other than `'monospace'`
-- No font weights below '700'
-- No inline styles without hover states on web Pressables
-- No colored borders for inactive/non-functional elements
-- No blur effects or gradients
-- No `opacity` below 0.3 for disabled states (use 0.3 flat)
+- No pixel-art offset shadows (`4px 4px 0px`) — use subtle CSS elevation only
+- No `borderRadius: 2` — minimum is 6 for containers, 20 for pills
+- No `letterSpacing` above 1 on body text (subtle on labels is fine)
+- No `fontWeight: '900'` — max is '700', prefer '600' for most UI
+- No colored backgrounds on structural cards — only `#161b22`
+- No indigo borders on inactive elements — only on active/selected/focused
+- No heavy glows or `perspective` transforms on standard cards
+- No monospace outside of code blocks, terminal, and agent session data
+- No emojis in structural UI (section headers, labels, buttons)

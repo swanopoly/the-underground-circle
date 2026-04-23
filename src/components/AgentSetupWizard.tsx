@@ -14,8 +14,8 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { AgentConnection, PROVIDER_META, ProviderType, generateId } from '../lib/connectionManager';
-import { testConnection } from '../lib/openswanService';
 import { DiagnosticResult, getTokenHint } from '../lib/connectionDiagnostics';
+import { supportsOpenSwanRpc, testAgentBridgeConnection } from '../lib/agentBridgeSupport';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -37,10 +37,10 @@ interface ProviderCard {
 }
 
 const PROVIDERS: ProviderCard[] = [
-  { type: 'openswan',      icon: '🐾', label: 'OpenSwan',    tagline: 'Recommended — full control',   color: '#6366f1', defaultEndpoint: 'http://localhost:18790' },
+  { type: 'openswan',      icon: '🐾', label: 'OpenSwan',    tagline: 'Recommended — full control',   color: '#6366f1', defaultEndpoint: 'http://localhost:18789' },
   { type: 'claude-code',   icon: '🤖', label: 'Claude Code', tagline: 'Anthropic\'s coding agent',     color: '#f97316', defaultEndpoint: 'http://localhost:8080'  },
   { type: 'codex',         icon: '🧠', label: 'Codex',       tagline: 'OpenAI\'s agent',               color: '#22c55e', defaultEndpoint: 'https://api.openai.com/v1' },
-  { type: 'generic-agent', icon: '⚡', label: 'Other',       tagline: 'Any OpenAI-compatible API',    color: '#a855f7', defaultEndpoint: 'https://' },
+  { type: 'generic-agent', icon: '⚡', label: 'Other',       tagline: 'Any custom bridge, Pi, or remote agent', color: '#a855f7', defaultEndpoint: 'https://' },
 ];
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -48,7 +48,7 @@ const PROVIDERS: ProviderCard[] = [
 export default function AgentSetupWizard({ visible, onClose, onComplete }: Props) {
   const [step, setStep]                   = useState<Step>(1);
   const [provider, setProvider]           = useState<ProviderCard>(PROVIDERS[0]);
-  const [endpoint, setEndpoint]           = useState('http://localhost:18790');
+  const [endpoint, setEndpoint]           = useState('http://localhost:18789');
   const [token, setToken]                 = useState('');
   const [agentName, setAgentName]         = useState('');
   const [testing, setTesting]             = useState(false);
@@ -60,7 +60,7 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
   const resetAndClose = useCallback(() => {
     setStep(1);
     setProvider(PROVIDERS[0]);
-    setEndpoint('http://localhost:18790');
+    setEndpoint('http://localhost:18789');
     setToken('');
     setAgentName('');
     setTesting(false);
@@ -81,15 +81,26 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
   const handleTest = useCallback(async () => {
     setTesting(true);
     setTestResult(null);
-    const result = await testConnection({ endpoint, token });
+    const result = await testAgentBridgeConnection({ provider: provider.type, endpoint, token });
     setTesting(false);
     if (result.ok) {
-      const count = result.sessions?.length ?? 0;
-      setTestResult({ ok: true, message: `Connected! Found ${count} session${count !== 1 ? 's' : ''}` });
+      setTestResult({ ok: true, message: result.message });
     } else {
-      setTestResult({ ok: false, message: result.error || 'Connection failed', diagnostic: result.diagnostic });
+      setTestResult({
+        ok: false,
+        message: result.error || 'Connection failed',
+        diagnostic: supportsOpenSwanRpc(provider.type)
+          ? undefined
+          : {
+              ok: false,
+              errorCode: 'unknown',
+              message: result.error || 'Connection failed',
+              fix: 'Expose a GET /health endpoint from your bridge, then try again.',
+              fixAction: 'none',
+            } satisfies DiagnosticResult,
+      });
     }
-  }, [endpoint, token]);
+  }, [endpoint, provider.type, token]);
 
   const handleCopy = useCallback(async (text: string, key: string) => {
     await Clipboard.setStringAsync(text);
@@ -134,7 +145,7 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
           {step === 1 && (
             <View>
               <Text style={s.title}>Connect your AI agent</Text>
-              <Text style={s.subtitle}>Choose what's running on your machine</Text>
+              <Text style={s.subtitle}>Choose what is running on your machine or on a remote box like a Pi</Text>
               <View style={s.providerGrid}>
                 {PROVIDERS.map(p => (
                   <Pressable key={p.type} style={s.providerCard} onPress={() => pickProvider(p)}>
@@ -159,7 +170,7 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
                 style={s.input}
                 value={endpoint}
                 onChangeText={t => { setEndpoint(t); setTestResult(null); }}
-                placeholder="http://localhost:18790"
+                placeholder="http://localhost:18789"
                 placeholderTextColor="#3e3e3e"
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -177,16 +188,25 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
                 autoCorrect={false}
               />
 
-              {/* Token hint */}
-              <View style={s.hintBox}>
-                <Text style={s.hintTitle}>📋 Where to find your token</Text>
-                <View style={s.hintCmd}>
-                  <Text style={s.hintCmdText}>{getTokenHint()}</Text>
-                  <Pressable style={s.copyBtn} onPress={() => handleCopy(getTokenHint(), 'token')}>
-                    <Text style={s.copyBtnTxt}>{copied === 'token' ? '✓ Copied' : 'Copy'}</Text>
-                  </Pressable>
+              {supportsOpenSwanRpc(provider.type) ? (
+                <View style={s.hintBox}>
+                  <Text style={s.hintTitle}>📋 Where to find your token</Text>
+                  <View style={s.hintCmd}>
+                    <Text style={s.hintCmdText}>{getTokenHint()}</Text>
+                    <Pressable style={s.copyBtn} onPress={() => handleCopy(getTokenHint(), 'token')}>
+                      <Text style={s.copyBtnTxt}>{copied === 'token' ? '✓ Copied' : 'Copy'}</Text>
+                    </Pressable>
+                  </View>
                 </View>
-              </View>
+              ) : (
+                <View style={s.hintBox}>
+                  <Text style={s.hintTitle}>🧩 Custom bridge contract</Text>
+                  <Text style={s.hintText}>
+                    Any agent can connect here if it exposes a reachable <Text style={s.inlineMono}>GET /health</Text> endpoint.
+                    If you also expose richer RPCs later, the Office can layer on more features.
+                  </Text>
+                </View>
+              )}
 
               {/* Test button */}
               <Pressable
@@ -278,7 +298,7 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
                 <Text style={s.modeIcon}>🌐</Text>
                 <View style={s.modeInfo}>
                   <Text style={s.modeTitle}>Public URL</Text>
-                  <Text style={s.modeSub}>Circle members can send you commands cross-machine</Text>
+                  <Text style={s.modeSub}>Use this for a Pi, VPS, or any bridge you want reachable cross-machine</Text>
                 </View>
                 <View style={[s.radio, isPublic && s.radioActive]} />
               </Pressable>
@@ -297,8 +317,8 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
                   <View style={s.hintBox}>
                     <Text style={s.hintTitle}>🔧 Quick tunnel setup</Text>
                     <View style={s.hintCmd}>
-                      <Text style={s.hintCmdText}>cloudflared tunnel --url http://localhost:18790</Text>
-                      <Pressable style={s.copyBtn} onPress={() => handleCopy('cloudflared tunnel --url http://localhost:18790', 'tunnel')}>
+                      <Text style={s.hintCmdText}>cloudflared tunnel --url http://localhost:18789</Text>
+                      <Pressable style={s.copyBtn} onPress={() => handleCopy('cloudflared tunnel --url http://localhost:18789', 'tunnel')}>
                         <Text style={s.copyBtnTxt}>{copied === 'tunnel' ? '✓ Copied' : 'Copy'}</Text>
                       </Pressable>
                     </View>
@@ -351,8 +371,10 @@ const s = StyleSheet.create({
   // Hint box
   hintBox:     { backgroundColor: '#161616', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 10, padding: 12, marginTop: 12 },
   hintTitle:   { color: '#9e9e9e', fontSize: 12, marginBottom: 8 },
+  hintText:    { color: '#b5b5b5', fontSize: 12, lineHeight: 18 },
   hintCmd:     { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#000000', borderRadius: 6, padding: 8 },
   hintCmdText: { color: '#e8e8e8', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', flex: 1 },
+  inlineMono:  { color: '#e8e8e8', fontSize: 12, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' },
   copyBtn:     { backgroundColor: '#252525', borderRadius: 5, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderColor: '#6366f130' },
   copyBtnTxt:  { color: '#b5b5b5', fontSize: 11, fontWeight: '600' },
 

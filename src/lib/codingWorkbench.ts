@@ -1,24 +1,69 @@
 import type { SessionCodingProfile } from './chatSessionProfile';
 import { resolveSessionCodingProfile } from './chatSessionProfile';
 
-export function isCodingGenerationRequest(content: string, sessionProfile: SessionCodingProfile): boolean {
+// Meta-conversational phrases that TALK ABOUT the agent rather than asking
+// it to produce code. "build you out", "make you better", "help me figure
+// out", "idk", "trying to" — these previously triggered the workbench
+// because they contained the bare word "build" / "make" / "create" and the
+// detector was too loose. Anything here short-circuits to false.
+const META_CONVERSATION_PATTERNS: RegExp[] = [
+  // Talking about the agent itself (very common false positive).
+  /\b(build|make|improve|upgrade|fix|teach|train|grow|level|help|work\s+on)\s+(you|him|her|it|them|this\s+agent|the\s+agent|blackswan|swanbot)\b/i,
+  /\byou\s+(out|better|smarter|stronger|more|less)\b/i,
+  /\bmake\s+you\s+better\b/i,
+  // Uncertainty / brainstorming openers.
+  /^\s*(idk|i\s+dunno|i\s+don'?t\s+know|not\s+sure|maybe|thinking\s+about|wondering|just\s+thinking|kinda|sorta|hmm)/i,
+  /\b(trying\s+to|want\s+to|wanna|gonna|thinking\s+of)\s+(figure|understand|learn|know|see|explore|explain|chat|talk|discuss)\b/i,
+  // "Allow X to do Y" is talking about capabilities, not requesting code.
+  /\ballow\s+(you|it|him|her|them|this|the\s+agent)\s+(to|access)\b/i,
+  /\bgive\s+(you|it|him|her|them)\s+(access|the\s+ability)\b/i,
+  // Questions (ends with ?) that aren't "fix this code" or "what do I put here"
+  // are overwhelmingly conversational.
+];
+
+function isMetaConversation(lower: string): boolean {
+  return META_CONVERSATION_PATTERNS.some((re) => re.test(lower));
+}
+
+// Codegen is STRICTLY opt-in via an explicit slash command. Natural-language
+// phrasing — even "build me a landing page" — will NOT trigger the workbench
+// anymore. The bot chats first, asks clarifying questions, and only scaffolds
+// code when the user types `/code`, `/build-page`, or `/build`.
+//
+// Rationale: every "whenever I say build it just starts building" complaint
+// traced back to a fuzzy natural-language match. Making the trigger explicit
+// removes every false positive and lets the model run a real discovery
+// conversation before committing to scaffold.
+const STRONG_BUILD_PATTERNS = [
+  // Slash commands — the only way to start codegen from the main chat.
+  /^\s*\/code(\s|$)/,
+  /^\s*\/build-page(\s|$)/,
+  /^\s*\/build(\s|$)/,
+  /(\s|^)\/code(\s|$)/,
+  /(\s|^)\/build-page(\s|$)/,
+  /(\s|^)\/build(\s|$)/,
+];
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function isCodingGenerationRequest(content: string, _sessionProfile: SessionCodingProfile): boolean {
   const lower = content.toLowerCase();
-  const resolvedProfile = resolveSessionCodingProfile(sessionProfile, content, 'main_chat');
+
+  // UI toggles for the workbench itself are never build requests.
   if (
     /\b(show|open|reopen|close|hide|toggle|dock|undock|resize|move)\b.*\b(builder|preview|workbench)\b/.test(lower) ||
     /\b(builder|preview|workbench)\b.*\b(show|open|reopen|close|hide|toggle|dock|undock|resize|move)\b/.test(lower)
   ) {
     return false;
   }
-  if (/\bfigma\b/.test(lower) && /\b(build|code|html|page|site|landing|convert)\b/.test(lower)) {
-    return true;
-  }
-  if (resolvedProfile === 'senior' || resolvedProfile === 'architect' || resolvedProfile === 'debug') {
-    if (/code|component|function|build|create|html|css|javascript|typescript|tsx|jsx|react|screen|page|fix|refactor|api|schema|sql|file/.test(lower)) {
-      return true;
-    }
-  }
-  return /\/code|\/build-page|generate code|write code|create a page|build a page|make a component|make a screen|fix this code|refactor this|html|tsx|jsx|typescript|javascript/.test(lower);
+
+  // Meta-conversation about the agent. Kept as a defense-in-depth layer
+  // even though the opt-in patterns below are narrow enough on their own.
+  if (isMetaConversation(lower)) return false;
+
+  // Only explicit opt-in patterns trigger codegen. No profile-based fuzzy
+  // fallback — that was the source of every "I just said build and it
+  // started building" complaint.
+  return STRONG_BUILD_PATTERNS.some((re) => re.test(lower));
 }
 
 export function inferCodingWorkbenchFileName(content: string): string {

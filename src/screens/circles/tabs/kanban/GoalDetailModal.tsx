@@ -12,6 +12,9 @@ import type { GoalWithCount } from '../../../../hooks/useGoals';
 import type { Goal } from '../../../../types/kanban';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
 import type { CreateTaskFields } from '../../../../hooks/useKanbanData';
+import MentionPicker, { detectMentionQuery, insertMention } from '../../../../components/MentionPicker';
+import { extractMentionRefs, persistMentions } from '../../../../lib/mentions';
+import { supabase } from '../../../../lib/supabase';
 
 interface Props {
   goal: GoalWithCount;
@@ -31,6 +34,9 @@ const GOAL_STATUS_COLORS: Record<string, string> = {
 export default function GoalDetailModal({ goal, agents, onClose, onUpdate, onDelete, onCreateTask }: Props) {
   const [name, setName] = useState(goal.name);
   const [description, setDescription] = useState(goal.description || '');
+  // Mention picker state for the description editor.
+  const [descMentionQuery, setDescMentionQuery] = useState<string | null>(null);
+  const [descCursorPos, setDescCursorPos] = useState(0);
   const [status, setStatus] = useState<'active' | 'paused' | 'completed'>(goal.status);
   const [selectedAgents, setSelectedAgents] = useState<string[]>(goal.assigned_agent_ids);
   const [taskCount, setTaskCount] = useState(String(goal.auto_task_count || 4));
@@ -54,6 +60,24 @@ export default function GoalDetailModal({ goal, agents, onClose, onUpdate, onDel
       auto_task_frequency: taskFrequency,
       ...(lastGenerated ? { last_auto_task_at: lastGenerated } : {}),
     });
+
+    // Persist @mentions in the description so targeted missions/tasks/users
+    // pick up this goal as an inbound reference in their backlinks panel.
+    const refs = extractMentionRefs(description);
+    if (refs.length > 0) {
+      supabase.auth.getUser()
+        .then(({ data: { user } }) => {
+          if (!user?.id) return;
+          return persistMentions({
+            circleId: goal.circle_id,
+            sourceType: 'goal',
+            sourceId: goal.id,
+            authorId: user.id,
+            refs,
+          });
+        })
+        .catch(() => {});
+    }
   };
 
   const handleGenerate = async () => {
@@ -146,12 +170,35 @@ export default function GoalDetailModal({ goal, agents, onClose, onUpdate, onDel
             <TextInput
               style={[s.input, s.textArea]}
               value={description}
-              onChangeText={setDescription}
+              onChangeText={(t) => {
+                setDescription(t);
+                setDescMentionQuery(detectMentionQuery(t, descCursorPos));
+              }}
+              onSelectionChange={(e) => {
+                const pos = e.nativeEvent.selection.end;
+                setDescCursorPos(pos);
+                setDescMentionQuery(detectMentionQuery(description, pos));
+              }}
               multiline
               maxLength={300}
-              placeholder="Description"
+              placeholder="Description. '@' to mention a mission, task, or teammate."
               placeholderTextColor="#333348"
             />
+            {descMentionQuery !== null && (
+              <View style={{ alignSelf: 'flex-start', marginTop: 4 }}>
+                <MentionPicker
+                  circleId={goal.circle_id}
+                  query={descMentionQuery}
+                  onSelect={(cand) => {
+                    const { text, cursor } = insertMention(description, descCursorPos, cand);
+                    setDescription(text);
+                    setDescCursorPos(cursor);
+                    setDescMentionQuery(null);
+                  }}
+                  onDismiss={() => setDescMentionQuery(null)}
+                />
+              </View>
+            )}
 
             {/* Status */}
             <Text style={s.label}>Status</Text>

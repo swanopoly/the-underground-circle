@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './privacyMode';
 
 export interface HfTool {
   id: string;
@@ -63,6 +64,9 @@ export async function listHfTools(circleId: string): Promise<HfTool[]> {
 
 /** Invoke a saved HF tool by ID */
 export async function invokeHfTool(toolId: string, inputs: any): Promise<any> {
+  if (shouldBlockExternalAiProvider('huggingface')) {
+    throw new Error(getStrictLocalAiModeMessage('huggingface'));
+  }
   const { data, error } = await supabase.functions.invoke('hf-proxy', {
     body: { toolId, inputs },
   });
@@ -76,6 +80,9 @@ export async function invokeHfInference(
   inputs: any,
   options?: { model?: string; max_tokens?: number; max_length?: number; src_lang?: string; tgt_lang?: string },
 ): Promise<any> {
+  if (shouldBlockExternalAiProvider('huggingface')) {
+    throw new Error(getStrictLocalAiModeMessage('huggingface'));
+  }
   const { data, error } = await supabase.functions.invoke('hf-proxy', {
     body: { task, inputs, model: options?.model, options },
   });

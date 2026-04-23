@@ -1,8 +1,10 @@
 import { storage } from './storage';
-import { detectAgenticCodingProfile, type AgenticCodingProfile, type AgenticCodingSurface } from './agenticCodingProfile';
+import { detectAgenticCodingProfile, detectAgenticCodingProfileWithConfidence, type AgenticCodingProfile, type AgenticCodingSurface } from './agenticCodingProfile';
+import type { OpenSwanChatMode } from './openswanModePolicy';
 
 export type SessionCodingProfile = AgenticCodingProfile | 'auto';
 export type SessionDelegationMode = 'auto' | 'parallel' | 'focused';
+export type ThreadChatMode = OpenSwanChatMode;
 
 // OpenSwan is framed as a service the user calls on — not a persona it
 // pretends to be. Each mode is a different kind of work the service does.
@@ -18,10 +20,14 @@ export const SESSION_PROFILE_OPTIONS: Array<{
   { id: 'review',    label: 'Review',    shortLabel: 'REVIEW', color: '#f59e0b', description: 'OpenSwan audits a diff or file — findings, risks, style, security.' },
   { id: 'debug',     label: 'Debug',     shortLabel: 'DEBUG',  color: '#ef4444', description: 'OpenSwan roots out a bug — reproduce, bisect, explain, propose a fix.' },
   { id: 'architect', label: 'Architect', shortLabel: 'ARCH',   color: '#38bdf8', description: 'OpenSwan designs — trade-offs, structure, boundaries, integrations; no code yet.' },
+  { id: 'research',  label: 'Research',  shortLabel: 'RES',    color: '#a855f7', description: 'OpenSwan investigates deeply — compares options, gathers evidence, recommends the best path.' },
+  { id: 'design',    label: 'Design',    shortLabel: 'DESIGN', color: '#ec4899', description: 'OpenSwan shapes UI and product experience — layout, interaction, accessibility, handoff.' },
+  { id: 'support',   label: 'Support',   shortLabel: 'HELP',   color: '#3b82f6', description: 'OpenSwan troubleshoots and guides — fastest path to unblock, configure, or recover.' },
 ];
 
 const DEFAULT_PROFILE: SessionCodingProfile = 'auto';
 const DEFAULT_DELEGATION_MODE: SessionDelegationMode = 'auto';
+const DEFAULT_CHAT_MODE: ThreadChatMode = 'none';
 
 export const SESSION_DELEGATION_MODE_OPTIONS: Array<{
   id: SessionDelegationMode;
@@ -38,7 +44,7 @@ export const SESSION_DELEGATION_MODE_OPTIONS: Array<{
 function normalizeProfile(value: string | null | undefined): SessionCodingProfile {
   if (!value) return DEFAULT_PROFILE;
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'auto' || normalized === 'review' || normalized === 'debug' || normalized === 'architect' || normalized === 'senior') {
+  if (normalized === 'auto' || normalized === 'review' || normalized === 'debug' || normalized === 'architect' || normalized === 'senior' || normalized === 'research' || normalized === 'design' || normalized === 'support') {
     return normalized;
   }
   return DEFAULT_PROFILE;
@@ -65,8 +71,31 @@ function threadDelegationModeKey(threadId: string): string {
   return `uc_chat_delegation_mode_${threadId}`;
 }
 
+function threadChatModeKey(threadId: string): string {
+  return `uc_chat_mode_${threadId}`;
+}
+
 function roomDelegationModeKey(roomId: string): string {
   return `uc_room_chat_delegation_mode_${roomId}`;
+}
+
+function normalizeChatMode(value: string | null | undefined): ThreadChatMode {
+  if (!value) return DEFAULT_CHAT_MODE;
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === 'none' ||
+    normalized === 'talk' ||
+    normalized === 'build' ||
+    normalized === 'plan' ||
+    normalized === 'execute' ||
+    normalized === 'review' ||
+    normalized === 'research' ||
+    normalized === 'support' ||
+    normalized === 'design'
+  ) {
+    return normalized as ThreadChatMode;
+  }
+  return DEFAULT_CHAT_MODE;
 }
 
 export async function loadThreadSessionProfile(threadId: string | null): Promise<SessionCodingProfile> {
@@ -97,6 +126,16 @@ export async function saveThreadDelegationMode(threadId: string | null, mode: Se
   await storage.setItem(threadDelegationModeKey(threadId), normalizeDelegationMode(mode));
 }
 
+export async function loadThreadChatMode(threadId: string | null): Promise<ThreadChatMode> {
+  if (!threadId) return DEFAULT_CHAT_MODE;
+  return normalizeChatMode(await storage.getItem(threadChatModeKey(threadId)));
+}
+
+export async function saveThreadChatMode(threadId: string | null, mode: ThreadChatMode): Promise<void> {
+  if (!threadId) return;
+  await storage.setItem(threadChatModeKey(threadId), normalizeChatMode(mode));
+}
+
 export async function loadRoomDelegationMode(roomId: string): Promise<SessionDelegationMode> {
   return normalizeDelegationMode(await storage.getItem(roomDelegationModeKey(roomId)));
 }
@@ -114,9 +153,57 @@ export function resolveSessionCodingProfile(
   message: string,
   surface: AgenticCodingSurface,
 ): AgenticCodingProfile {
-  return profile === 'auto' ? detectAgenticCodingProfile(message, surface) : profile;
+  if (profile === 'auto') return detectAgenticCodingProfile(message, surface);
+  if (profile === 'research') return 'research';
+  if (profile === 'design') return 'design';
+  if (profile === 'support') return 'support';
+  return profile;
+}
+
+/** Resolve the profile and return detection metadata for UI feedback */
+export function resolveSessionCodingProfileWithDetails(
+  profile: SessionCodingProfile,
+  message: string,
+  surface: AgenticCodingSurface,
+): { resolved: AgenticCodingProfile; autoDetected: boolean; confidence: 'high' | 'medium' | 'low'; label: string } {
+  if (profile !== 'auto') {
+    const meta = SESSION_PROFILE_OPTIONS.find(o => o.id === profile);
+    return { resolved: profile, autoDetected: false, confidence: 'high', label: meta?.shortLabel || profile.toUpperCase() };
+  }
+  const detection = detectAgenticCodingProfileWithConfidence(message, surface);
+  const meta = SESSION_PROFILE_OPTIONS.find(o => o.id === detection.profile);
+  return {
+    resolved: detection.profile,
+    autoDetected: true,
+    confidence: detection.confidence,
+    label: meta?.shortLabel || detection.profile.toUpperCase(),
+  };
 }
 
 export function getSessionDelegationModeMeta(mode: SessionDelegationMode) {
   return SESSION_DELEGATION_MODE_OPTIONS.find(option => option.id === mode) || SESSION_DELEGATION_MODE_OPTIONS[0];
+}
+
+export function getDefaultDelegationModeForProfile(profile: SessionCodingProfile): SessionDelegationMode {
+  switch (profile) {
+    case 'research':
+      return 'parallel';
+    case 'review':
+    case 'architect':
+    case 'design':
+    case 'support':
+      return 'focused';
+    case 'auto':
+    case 'debug':
+    case 'senior':
+    default:
+      return 'auto';
+  }
+}
+
+export function resolveEffectiveDelegationMode(
+  selectedMode: SessionDelegationMode,
+  profile: SessionCodingProfile,
+): SessionDelegationMode {
+  return selectedMode === 'auto' ? getDefaultDelegationModeForProfile(profile) : selectedMode;
 }

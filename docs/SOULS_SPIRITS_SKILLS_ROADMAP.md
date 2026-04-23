@@ -1,5 +1,7 @@
 # SOULs, Spirits & Skills — Roadmap
 
+_Supporting roadmap. Runtime execution order is now owned by `OPENSWAN_AGENT_IMPLEMENTATION_PLAN.md`._
+
 > Plan for evolving the three-layer agent composition system so agents
 > become smarter and close their own knowledge gaps over time.
 > Last updated: 2026-04-15
@@ -11,12 +13,12 @@
 | **SOULs** | `src/lib/soulTemplates.ts` | 867L / 11 templates | Markdown SOUL.md text. 3 categories (role / specialty / **personality**), only `personality` shown in UI. Flat — no tool binding, no metadata. |
 | **Spirits** | `src/lib/agentSpirits.ts` | 1686L / 27 spirits | Rich typed: `systemPromptPrefix`, `skillBundle` id, action/evidence/skepticism postures, `escalationTrigger`. |
 | **Career / Ops profiles** | `spiritCareerProfiles.ts` + `spiritOperationsProfiles.ts` | 556 + 278L | Extra metadata tiers. |
-| **Skills** | just `skillBundle: string` on Spirit | — | **Vaporware** — an ID label only. No prompts, no tool bindings, no evals. |
+| **Skills** | `skillRegistry.ts`, `openswanSkills.ts`, `openswanSkillResolution.ts`, `openswanSkillPlaybooks.ts` | — | **Partially real** — runtime selection, prompt injection, playbooks, and eval signals exist. Full typed/versioned skill model is not done yet. |
 | **Soul → Memory** | `agentSoulMemory.ts` | 262L | Scores Spirits against free-text; suggests one. |
 | **Subagents** | `subagentCapabilities.ts`, `subagentRegistry.ts` | — | Reference `skillBundleId`. |
 | **Knowledge** | `researchKnowledge.ts`, `agentMemory.ts` | 247 + 348L | Free-form memory entries. Not skill-aware. |
 
-**Key gap:** Skills are vaporware. Every improvement below flows from fixing that.
+**Key gap:** Skills now exist at runtime, but the long-term typed/versioned/evaluable skill system is still incomplete.
 
 ## Target architecture
 
@@ -68,6 +70,15 @@ Migration: `skills` table + `agent_skills` join (`enabled_at`, `last_used_at`, `
 
 Spirit change: `skillBundle: string` → `defaultSkills: string[]`.
 
+### Phase 1 status
+
+- partial runtime version is shipped:
+  - dynamic skill resolution
+  - active-skill prompt injection
+  - local skill playbooks
+  - skill execution signals in observed evals
+- the typed/versioned skill model below is still the next structural step
+
 ### Phase 2 — Seed 20 essentials (3–4 days)
 
 Five categories × four skills:
@@ -90,6 +101,12 @@ Collapse the 11 SOULs to ~6 voice archetypes: `precise | warm | playful | blunt 
 - Fallback: keyword + tag match
 - UI chip in Agent Console: "🧠 Using skills: web-research + blog-writer"
 - Log which skills contributed each turn
+
+### Phase 4 status
+
+- fallback-style dynamic composition is now shipped through the OpenSwan runtime
+- active skills are logged into run metadata and visible in shared run summaries
+- embedding-based routing is not built yet
 
 ### Phase 5 — Knowledge Gap Detection (2 days)
 
@@ -134,6 +151,14 @@ Collapse the 11 SOULs to ~6 voice archetypes: `precise | warm | playful | blunt 
 3. Seed 5 skills end-to-end: `web-research`, `wp-publisher`, `social-writer`, `bug-hunt`, `email-composer` (2 days)
 4. Skill picker in Agent Console Spirit tab (1 day)
 5. Runtime composition in swanbot-ai (1 day)
+
+## Updated next slice
+
+1. formalize the typed/versioned skill schema
+2. extend skill playbooks into richer examples and tool policies
+3. add per-skill eval hooks and success-rate tracking
+4. make subagents inherit the same skill contract
+5. add drilldowns for weak skill signals in dashboards
 
 ## Eval & iteration
 

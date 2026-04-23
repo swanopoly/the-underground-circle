@@ -1,0 +1,231 @@
+import { listMcpServers, fetchAllMcpTools, type McpTool } from './mcpClient';
+import { loadConnections, type AgentConnection } from './connectionManager';
+import {
+  getCircleIntegrationCapabilities,
+  getInstalledIntegrationProviders,
+  type CircleIntegrationProvider,
+} from './circleIntegrations';
+
+export type ComputerCapabilityId =
+  | 'browser_automation'
+  | 'browser_sessions'
+  | 'file_search'
+  | 'file_read'
+  | 'file_write'
+  | 'app_tools'
+  | 'agent_bridges'
+  | 'desktop_control';
+
+export type ComputerCapabilityStatus = 'ready' | 'partial' | 'missing';
+
+export interface ComputerCapabilityFinding {
+  id: ComputerCapabilityId;
+  label: string;
+  status: ComputerCapabilityStatus;
+  detail: string;
+  sources: string[];
+}
+
+export interface ComputerCapabilityAudit {
+  findings: ComputerCapabilityFinding[];
+  missing: ComputerCapabilityId[];
+  availableIntegrationProviders: CircleIntegrationProvider[];
+  availableIntegrationCapabilities: string[];
+  activeBridgeProviders: string[];
+  activeMcpServerCount: number;
+  activeMcpToolCount: number;
+}
+
+function normalizeText(value: string | null | undefined): string {
+  return String(value || '').trim().toLowerCase();
+}
+
+function toolMatches(tool: Pick<McpTool, 'name' | 'description'>, needles: string[]): boolean {
+  const haystack = `${normalizeText(tool.name)} ${normalizeText(tool.description)}`;
+  return needles.some((needle) => haystack.includes(needle));
+}
+
+function isFilesystemTool(tool: Pick<McpTool, 'name' | 'description'>): boolean {
+  return toolMatches(tool, [
+    'filesystem',
+    'file system',
+    'read file',
+    'write file',
+    'search files',
+    'list directory',
+    'glob',
+    'ripgrep',
+    'search path',
+    'find file',
+  ]);
+}
+
+function isDesktopOrAppTool(tool: Pick<McpTool, 'name' | 'description'>): boolean {
+  return toolMatches(tool, [
+    'desktop',
+    'application',
+    'window',
+    'slack',
+    'figma',
+    'notion',
+    'github',
+    'browser',
+    'playwright',
+    'computer',
+    'app',
+  ]);
+}
+
+function hasCapability(capabilities: string[], capability: string): boolean {
+  return new Set(capabilities).has(capability);
+}
+
+function summarizeSources(parts: Array<string | null | undefined>): string[] {
+  const unique = new Set<string>();
+  for (const part of parts) {
+    const text = String(part || '').trim();
+    if (text) unique.add(text);
+  }
+  return Array.from(unique);
+}
+
+export async function auditComputerCapabilities(circleId: string): Promise<ComputerCapabilityAudit> {
+  const [connections, integrationProviders, integrationCapabilities, mcpServers] = await Promise.all([
+    loadConnections().catch(() => [] as AgentConnection[]),
+    getInstalledIntegrationProviders(circleId).catch(() => [] as CircleIntegrationProvider[]),
+    getCircleIntegrationCapabilities(circleId).catch(() => [] as string[]),
+    listMcpServers(circleId).catch(() => []),
+  ]);
+
+  const mcpTools = mcpServers.length > 0
+    ? await fetchAllMcpTools(circleId).catch(() => [] as McpTool[])
+    : [];
+
+  const enabledConnections = connections.filter((conn) => conn.enabled);
+  const filesystemTools = mcpTools.filter(isFilesystemTool);
+  const appTools = mcpTools.filter(isDesktopOrAppTool);
+
+  const browserAvailable =
+    hasCapability(integrationCapabilities, 'web_automation') ||
+    hasCapability(integrationCapabilities, 'remote_browser_sessions');
+  const browserSources = summarizeSources([
+    browserAvailable ? 'circle integration: browser automation' : null,
+    integrationProviders.includes('browserbase') ? 'integration: Browserbase' : null,
+  ]);
+
+  const bridgeSources = enabledConnections.map((conn) => `bridge: ${conn.provider}`);
+  const fileSources = summarizeSources([
+    filesystemTools.length > 0 ? `mcp tools: ${filesystemTools.length} filesystem tool${filesystemTools.length === 1 ? '' : 's'}` : null,
+    enabledConnections.some((conn) => conn.provider === 'openswan') ? 'bridge: openswan' : null,
+  ]);
+
+  const appSources = summarizeSources([
+    appTools.length > 0 ? `mcp tools: ${appTools.length} app/desktop tool${appTools.length === 1 ? '' : 's'}` : null,
+    integrationProviders.length > 0 ? `integrations: ${integrationProviders.length}` : null,
+    enabledConnections.length > 0 ? `bridges: ${enabledConnections.length}` : null,
+  ]);
+
+  const findings: ComputerCapabilityFinding[] = [
+    {
+      id: 'browser_automation',
+      label: 'Browser automation',
+      status: browserAvailable ? 'ready' : 'missing',
+      detail: browserAvailable
+        ? 'The circle can launch browser/computer tasks through the existing computer-use flow.'
+        : 'No active browser automation integration is visible for this circle yet.',
+      sources: browserSources,
+    },
+    {
+      id: 'browser_sessions',
+      label: 'Remote browser sessions',
+      status: hasCapability(integrationCapabilities, 'remote_browser_sessions') ? 'ready' : browserAvailable ? 'partial' : 'missing',
+      detail: hasCapability(integrationCapabilities, 'remote_browser_sessions')
+        ? 'Remote browser session infrastructure is installed.'
+        : browserAvailable
+          ? 'Browser automation exists, but durable session capability is not clearly exposed in the capability map.'
+          : 'No remote browser session provider is configured.',
+      sources: browserSources,
+    },
+    {
+      id: 'file_search',
+      label: 'File search',
+      status: filesystemTools.length > 0 ? 'ready' : enabledConnections.length > 0 ? 'partial' : 'missing',
+      detail: filesystemTools.length > 0
+        ? 'Filesystem-oriented MCP tools are available for locating files/content.'
+        : enabledConnections.length > 0
+          ? 'Bridges exist, but no canonical filesystem toolset is visible yet.'
+          : 'No filesystem capability source is active yet.',
+      sources: fileSources,
+    },
+    {
+      id: 'file_read',
+      label: 'File read access',
+      status: filesystemTools.length > 0 ? 'ready' : enabledConnections.length > 0 ? 'partial' : 'missing',
+      detail: filesystemTools.length > 0
+        ? 'The circle can likely read granted files through MCP filesystem tools.'
+        : enabledConnections.length > 0
+          ? 'A bridge may support file access, but there is no canonical read contract yet.'
+          : 'No file-read surface is discoverable yet.',
+      sources: fileSources,
+    },
+    {
+      id: 'file_write',
+      label: 'File write access',
+      status: toolMatches({ name: filesystemTools.map((tool) => tool.name).join(' '), description: filesystemTools.map((tool) => tool.description || '').join(' ') }, ['write file', 'edit file', 'save file']) ? 'partial' : 'missing',
+      detail: toolMatches({ name: filesystemTools.map((tool) => tool.name).join(' '), description: filesystemTools.map((tool) => tool.description || '').join(' ') }, ['write file', 'edit file', 'save file'])
+        ? 'Some filesystem tooling suggests write/edit support, but write scopes are not normalized yet.'
+        : 'Write-capable file access is not yet modeled as a trusted computer capability.',
+      sources: fileSources,
+    },
+    {
+      id: 'app_tools',
+      label: 'App tools',
+      status: appTools.length > 0 || integrationProviders.length > 0 ? 'ready' : enabledConnections.length > 0 ? 'partial' : 'missing',
+      detail: appTools.length > 0 || integrationProviders.length > 0
+        ? 'The circle has app-level capability sources through MCP tools and/or installed integrations.'
+        : enabledConnections.length > 0
+          ? 'Local or remote bridges exist, but app access is not normalized into a shared capability map yet.'
+          : 'No app-tool surface is currently visible.',
+      sources: appSources,
+    },
+    {
+      id: 'agent_bridges',
+      label: 'Agent bridges',
+      status: enabledConnections.length > 0 ? 'ready' : 'missing',
+      detail: enabledConnections.length > 0
+        ? 'Local or remote agent bridges are enabled and can extend what the circle can do.'
+        : 'No enabled agent bridges are visible.',
+      sources: bridgeSources,
+    },
+    {
+      id: 'desktop_control',
+      label: 'Desktop/native app control',
+      status: appTools.length > 0 && appTools.some((tool) => toolMatches(tool, ['desktop', 'window', 'computer'])) ? 'partial' : 'missing',
+      detail: appTools.length > 0 && appTools.some((tool) => toolMatches(tool, ['desktop', 'window', 'computer']))
+        ? 'There are early signals of desktop-oriented tools, but native app control is not yet a mature first-class runtime.'
+        : 'Native desktop control is not yet a real canonical capability in the app.',
+      sources: appSources,
+    },
+  ];
+
+  return {
+    findings,
+    missing: findings.filter((finding) => finding.status === 'missing').map((finding) => finding.id),
+    availableIntegrationProviders: integrationProviders,
+    availableIntegrationCapabilities: integrationCapabilities,
+    activeBridgeProviders: enabledConnections.map((conn) => conn.provider),
+    activeMcpServerCount: mcpServers.length,
+    activeMcpToolCount: mcpTools.length,
+  };
+}
+
+export function summarizeComputerCapabilityAudit(audit: ComputerCapabilityAudit): string {
+  const ready = audit.findings.filter((finding) => finding.status === 'ready').length;
+  const partial = audit.findings.filter((finding) => finding.status === 'partial').length;
+  const missing = audit.findings.filter((finding) => finding.status === 'missing').length;
+
+  return [
+    `Computer capability audit: ${ready} ready, ${partial} partial, ${missing} missing.`,
+    audit.findings.map((finding) => `${finding.label}: ${finding.status.toUpperCase()} — ${finding.detail}`).join('\n'),
+  ].join('\n');
+}

@@ -9,7 +9,7 @@ const LEGACY_AGENT_HEADER = `x-${LEGACY_RUNTIME_PREFIX}-agent-id`;
 const LEGACY_SESSION_HEADER = `x-${LEGACY_RUNTIME_PREFIX}-session-key`;
 
 export interface OpenSwanConfig {
-  endpoint: string;  // e.g. http://localhost:18790 (CORS proxy)
+  endpoint: string;  // e.g. http://localhost:18789 (direct gateway)
   token: string;     // gateway auth token
 }
 
@@ -60,13 +60,69 @@ function isWebDirectLocalGateway(endpoint: string): boolean {
 
 const unsupportedToolCache = new Set<string>();
 const unsupportedToolEndpointCache = new Set<string>();
+const unavailableEndpointCache = new Map<string, number>();
+// Auth failures are time-boxed rather than permanently latched. The old
+// behavior (Set) meant a single stale token at app start disabled Office
+// for the rest of the session — even after the proxy or user fixed the
+// token. 30s cooldown lets us detect recovery without hammering.
+const authFailedEndpointCache = new Map<string, number>();
+
+const UNAVAILABLE_ENDPOINT_COOLDOWN_MS = 30_000;
+const AUTH_FAILED_COOLDOWN_MS = 30_000;
+
+function isAuthFailed(authKey: string): boolean {
+  const until = authFailedEndpointCache.get(authKey) || 0;
+  if (until <= Date.now()) {
+    if (until > 0) authFailedEndpointCache.delete(authKey);
+    return false;
+  }
+  return true;
+}
 
 function normalizeEndpoint(endpoint: string): string {
   return endpoint.replace(/\/$/, '');
 }
 
+function getEndpointAuthKey(endpoint: string, token?: string): string {
+  return `${normalizeEndpoint(endpoint)}::${token || ''}`;
+}
+
 export function supportsOpenSwanToolRpcEndpoint(endpoint: string): boolean {
-  return !unsupportedToolEndpointCache.has(normalizeEndpoint(endpoint));
+  const normalized = normalizeEndpoint(endpoint);
+  const unavailableUntil = unavailableEndpointCache.get(normalized) || 0;
+  if (unavailableUntil > Date.now()) return false;
+  if (unavailableUntil > 0) unavailableEndpointCache.delete(normalized);
+  return !unsupportedToolEndpointCache.has(normalized);
+}
+
+export function getOpenSwanEndpointNotice(endpoint: string, token?: string): string | null {
+  if (isWebDirectLocalGateway(endpoint)) {
+    return 'OpenSwan local gateway is not available from web localhost.';
+  }
+  const normalized = normalizeEndpoint(endpoint);
+  const authKey = getEndpointAuthKey(endpoint, token);
+  if (isAuthFailed(authKey)) {
+    return 'Authentication failed — wrong or missing token';
+  }
+  const unavailableUntil = unavailableEndpointCache.get(normalized) || 0;
+  if (unavailableUntil > Date.now()) {
+    return getUnavailableEndpointMessage(normalized);
+  }
+  if (unsupportedToolEndpointCache.has(normalized)) {
+    return 'Endpoint does not support OpenSwan tool RPCs.';
+  }
+  return null;
+}
+
+function getUnavailableEndpointMessage(endpoint: string): string {
+  const until = unavailableEndpointCache.get(endpoint) || 0;
+  const retryInMs = Math.max(0, until - Date.now());
+  const retryInSec = Math.max(1, Math.ceil(retryInMs / 1000));
+  return `Gateway unavailable — retrying in ${retryInSec}s`;
+}
+
+function markEndpointUnavailable(endpoint: string) {
+  unavailableEndpointCache.set(endpoint, Date.now() + UNAVAILABLE_ENDPOINT_COOLDOWN_MS);
 }
 
 // Per-tool timeouts. List-style calls should fail fast so a stalled
@@ -89,10 +145,25 @@ async function invokeToolRaw(
   }
 
   const endpointKey = normalizeEndpoint(config.endpoint);
+  const endpointAuthKey = getEndpointAuthKey(config.endpoint, config.token);
+  const unavailableUntil = unavailableEndpointCache.get(endpointKey) || 0;
+  if (unavailableUntil > Date.now()) {
+    return {
+      ok: false,
+      error: { type: 'unavailable', message: getUnavailableEndpointMessage(endpointKey) },
+    };
+  }
+  if (unavailableUntil > 0) unavailableEndpointCache.delete(endpointKey);
   if (unsupportedToolEndpointCache.has(endpointKey)) {
     return {
       ok: false,
       error: { type: 'unsupported', message: 'Endpoint does not support OpenSwan tool RPCs' },
+    };
+  }
+  if (isAuthFailed(endpointAuthKey)) {
+    return {
+      ok: false,
+      error: { type: 'auth', message: 'Authentication failed — wrong or missing token' },
     };
   }
 
@@ -125,6 +196,7 @@ async function invokeToolRaw(
     const message = aborted
       ? `Timeout after ${timeoutMs}ms — gateway unresponsive`
       : (typeof error?.message === 'string' ? error.message : 'Network request failed');
+    markEndpointUnavailable(endpointKey);
     return {
       ok: false,
       error: {
@@ -139,17 +211,22 @@ async function invokeToolRaw(
   if (res.status === 404 || res.status === 405) {
     unsupportedToolCache.add(toolKey);
     unsupportedToolEndpointCache.add(endpointKey);
+    unavailableEndpointCache.delete(endpointKey);
     return {
       ok: false,
       error: { type: 'unsupported', message: 'Endpoint does not support OpenSwan tool RPCs' },
     };
   }
   if (res.status === 401 || res.status === 403) {
+    authFailedEndpointCache.set(endpointAuthKey, Date.now() + AUTH_FAILED_COOLDOWN_MS);
+    unavailableEndpointCache.delete(endpointKey);
     return {
       ok: false,
       error: { type: 'auth', message: 'Authentication failed — wrong or missing token' },
     };
   }
+  authFailedEndpointCache.delete(endpointAuthKey);
+  unavailableEndpointCache.delete(endpointKey);
   return res.json();
 }
 async function chatCompletion(

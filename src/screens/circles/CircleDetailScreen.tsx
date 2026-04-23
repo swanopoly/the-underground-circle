@@ -29,12 +29,14 @@ import BackpackTab from './tabs/BackpackTab';
 import MissionsTab from './tabs/MissionsTab';
 import FloatingChat from '../../components/FloatingChat';
 import TutorialController from '../../components/onboarding/TutorialController';
+import SearchModal from '../../components/SearchModal';
 
 import { Circle } from '../../types';
 import ErrorBoundary from '../../components/ErrorBoundary';
 import { LoadingScreen } from '../../components/LoadingWave';
-import { getAdaptiveLandingTab, loadAdaptiveWorkspaceSettings, loadCircleWorkspaceProfile, recordWorkspaceTabVisit } from '../../lib/workspaceAdaptation';
+import { recordWorkspaceTabVisit } from '../../lib/workspaceAdaptation';
 import { ROOM_WORKSPACE_OPEN_EVENT } from '../../lib/roomWorkspaceLauncher';
+import { rememberLastProfileCircle } from '../../lib/profileNavigation';
 
 // ─── Inject CSS animation for tab dot pulse (web only) ───────────────────
 if (Platform.OS === 'web' && typeof document !== 'undefined' && !document.getElementById('uc-tab-dot-css')) {
@@ -79,31 +81,43 @@ type MarketplaceFocus = {
   ts: number;
 } | null;
 
-// Persist active tab per circle across refreshes
+// Persist active tab per circle across refreshes.
+//
+// The URL path is the single source of truth. `setActiveTab` rewrites it
+// on every tab change so a refresh always restores exactly where the user
+// was. We intentionally DO NOT fall back to localStorage when the URL has
+// no tab slug — that used to trap users on Profile indefinitely when a
+// stale localStorage entry outlived its session. A bare URL signals "just
+// entered this circle" and should land on CHAT.
+//
+// Native (no URL semantics) still uses AsyncStorage as the persistence
+// layer because there's no web URL to read from.
 const TAB_STORAGE_KEY = 'uc_active_tab';
 function loadSavedTab(circleId: string): Tab {
   try {
     if (Platform.OS === 'web') {
-      // 1. Check clean URL path: /circle/:id/:tab
+      // 1. Clean URL path /circle/:id/:tab — the sole source of truth.
       try {
         const parts = window.location.pathname.split('/');
-        // Expected: ['', 'circle', circleId, tabSlug]
         if (parts.length >= 4 && parts[1] === 'circle') {
-          const urlTab = parts[3].toUpperCase();
-          if (TABS.includes(urlTab)) return urlTab;
+          const urlTab = parts[3]?.toUpperCase();
+          if (urlTab && TABS.includes(urlTab)) return urlTab;
         }
       } catch {}
-      // 2. Legacy: check ?tab= query param
+      // 2. Legacy: ?tab= query param (older shared links).
       try {
         const urlTab = new URLSearchParams(window.location.search).get('tab')?.toUpperCase();
         if (urlTab && TABS.includes(urlTab)) return urlTab;
       } catch {}
-      // 3. Fall back to localStorage
-      const raw = localStorage.getItem(`${TAB_STORAGE_KEY}_${circleId}`);
-      if (raw && TABS.includes(raw)) return raw;
+      // Bare URL → fresh entry. Default to CHAT. Ignore localStorage here
+      // so a stale previous-session tab can't override the "just entered"
+      // signal the URL is giving us.
+      return 'CHAT';
     }
+    // Native fallback.
+    // Web never reaches this branch.
   } catch {}
-  return 'OFFICE';
+  return 'CHAT';
 }
 function saveTab(circleId: string, tab: Tab) {
   try {
@@ -144,11 +158,17 @@ function cacheCircle(circleId: string, circle: Circle, memberCount: number) {
 
 export default function CircleDetailScreen({ route, navigation }: any) {
   const { circleId, circleName, tab: routeTab } = route.params;
+  useEffect(() => {
+    rememberLastProfileCircle(circleId, circleName);
+  }, [circleId, circleName]);
   const [activeTab, setActiveTabRaw] = useState<Tab>(() => {
     // Route param takes priority (from CMD+K, deep links, programmatic navigation)
     if (routeTab && TABS.includes(routeTab.toUpperCase())) return routeTab.toUpperCase();
     return loadSavedTab(circleId);
   });
+  // Circle-scoped global search modal state. Effect hooks that depend on
+  // setActiveTab are declared below, after setActiveTab itself.
+  const [searchOpen, setSearchOpen] = useState(false);
   const setActiveTab = useCallback((tab: Tab) => {
     setActiveTabRaw(tab);
     saveTab(circleId, tab);
@@ -162,6 +182,54 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       } catch {}
     }
   }, [circleId, circleName]);
+
+  // On mount, immediately sync the URL to the resolved active tab. Without
+  // this, entering a circle via a bare URL (like `/circle/:id/?circleName=…`)
+  // would leave the URL bare even though the screen is showing a specific
+  // tab. On the next refresh the URL would still be bare, fall through to
+  // CHAT, and the user's session-state would be lost. Rewriting the URL at
+  // mount time makes the URL always reflect the current tab.
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    try {
+      const parts = window.location.pathname.split('/');
+      const urlTab = parts.length >= 4 && parts[1] === 'circle' ? parts[3]?.toUpperCase() : '';
+      if (urlTab !== activeTab) {
+        const cleanPath = `/circle/${circleId}/${activeTab.toLowerCase()}`;
+        document.title = `${activeTab.charAt(0) + activeTab.slice(1).toLowerCase()} - ${circleName || 'Circle'}`;
+        window.history.replaceState({}, '', cleanPath);
+      }
+    } catch {}
+    // Intentionally mount-only. Subsequent tab changes go through setActiveTab.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Global search + tab-switch listeners. Both need setActiveTab (declared
+  // above) so this effect lives after that callback.
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchOpen((v) => !v);
+      }
+    };
+    const onToggle = () => setSearchOpen((v) => !v);
+    // Chat commands (e.g. `/mission create`) dispatch uc:switch-tab so the
+    // correct tab is active before the target modal tries to render.
+    const onSwitchTab = (e: any) => {
+      const target = (e?.detail?.tab || '').toString().toUpperCase();
+      if (target && TABS.includes(target)) setActiveTab(target);
+    };
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('uc:toggle-search', onToggle as any);
+    window.addEventListener('uc:switch-tab', onSwitchTab as any);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('uc:toggle-search', onToggle as any);
+      window.removeEventListener('uc:switch-tab', onSwitchTab as any);
+    };
+  }, [setActiveTab]);
 
   // When route params change (CMD+K, deep link), switch to the requested tab
   const tabTs = route.params?._tabTs;
@@ -183,10 +251,14 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   const [chatMountKey, setChatMountKey] = useState(0);
   const [marketplaceFocus, setMarketplaceFocus] = useState<MarketplaceFocus>(null);
 
-  // Loading gate: show loading screen until circle data + Office tab are both ready
+  // Loading gate: show the screen as soon as circle data is ready. Do NOT
+  // block on OfficeTab — it runs ~18 queries + realtime subscriptions and
+  // was gating every circle load behind 2-5s of agent/presence setup even
+  // when the user was going to Chat, not Office. Office now mounts lazily
+  // like every other secondary tab and loads in the background on first
+  // visit.
   const [circleLoaded, setCircleLoaded] = useState(!!cached.circle);
-  const [officeReady, setOfficeReady] = useState(false);
-  const loading = !circleLoaded || !officeReady;
+  const loading = !circleLoaded;
 
   // Native: load saved tab asynchronously on mount
   useEffect(() => {
@@ -196,26 +268,6 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       }).catch(() => {});
     }
   }, [circleId]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (routeTab) return;
-    const hasSavedTab = Platform.OS === 'web'
-      ? !!localStorage.getItem(`${TAB_STORAGE_KEY}_${circleId}`)
-      : false;
-    if (hasSavedTab) return;
-    Promise.all([
-      loadCircleWorkspaceProfile(circleId),
-      loadAdaptiveWorkspaceSettings(circleId),
-    ]).then(([profile, settings]) => {
-      if (cancelled) return;
-      const recommended = getAdaptiveLandingTab(profile, settings);
-      if (recommended && recommended !== activeTab) {
-        setActiveTabRaw(recommended);
-      }
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [circleId, routeTab]);
 
   useEffect(() => {
     if (!activeTab || !TABS.includes(activeTab)) return;
@@ -291,9 +343,11 @@ export default function CircleDetailScreen({ route, navigation }: any) {
     gaming: 'GAMING', creative: 'CREATIVE', custom: 'CUSTOM',
   };
 
-  // Office is always mounted eagerly so it can load behind the loading screen.
-  // The onReady callback fires once Office has fetched its core data.
-  const handleOfficeReady = useCallback(() => setOfficeReady(true), []);
+  // Office used to eagerly mount; now lazy like every other tab so the
+  // circle screen paints in ~200ms instead of 2-5s. `handleOfficeReady` is
+  // kept as a no-op in case OfficeTab still passes it; the loading gate
+  // doesn't depend on it anymore.
+  const handleOfficeReady = useCallback(() => { /* no-op — loading gate no longer blocks on Office */ }, []);
   const openMarketplace = useCallback((focus?: { itemId?: string | null; groupKey?: CircleIntegrationGroupKey | null }) => {
     setMarketplaceFocus({
       itemId: focus?.itemId || null,
@@ -305,10 +359,16 @@ export default function CircleDetailScreen({ route, navigation }: any) {
 
   return (
     <View style={styles.container}>
-      {/* Loading overlay — covers everything until circle data + Office are ready */}
+      {/* Compact loading pill — shown only when circle data is still being
+          fetched AND there's no cache hit. Sits at the top of the screen,
+          doesn't block the app. Individual tabs handle their own loading
+          states below, so the user can start interacting immediately.
+          Previously this was a fullscreen opaque overlay that blocked every
+          circle refresh behind a 2-5s wait. */}
       {loading && (
-        <View style={styles.loadingOverlay}>
-          <LoadingScreen />
+        <View pointerEvents="none" style={styles.loadingPill}>
+          <View style={styles.loadingPillDot} />
+          <Text style={styles.loadingPillText}>LOADING CIRCLE…</Text>
         </View>
       )}
 
@@ -337,12 +397,14 @@ export default function CircleDetailScreen({ route, navigation }: any) {
         </Pressable>
       )}
 
-      {/* Office — always mounted (eager), loads behind loading screen */}
-      <View style={[styles.tabContent, activeTab !== 'OFFICE' && styles.hiddenTab]}>
-        <ErrorBoundary>
-          <OfficeTab circleId={circleId} accentColor={accentColor} onReady={handleOfficeReady} />
-        </ErrorBoundary>
-      </View>
+      {/* Office — now lazy-mounted like every other tab. Mounting was the
+          single biggest cause of slow circle load: ~18 Supabase queries +
+          realtime subscriptions + heartbeat setup were firing for every
+          user who opened ANY circle, even if they went straight to Chat.
+          Now it only loads when the user actually visits the Office tab. */}
+      <LazyTab tabKey="OFFICE" activeTab={activeTab}>
+        <OfficeTab circleId={circleId} accentColor={accentColor} onReady={handleOfficeReady} />
+      </LazyTab>
 
       {/* Other tabs — lazy mount on first visit, stay mounted after */}
       {!chatPopout && (
@@ -398,6 +460,14 @@ export default function CircleDetailScreen({ route, navigation }: any) {
 
       {/* Onboarding Tutorial — floating guide for new users */}
       <TutorialController circleId={circleId} />
+
+      {/* Global search (⌘K) — fires deeplinks that FeedTab / MissionsTab
+          consume on their next render. */}
+      <SearchModal
+        circleId={circleId}
+        visible={searchOpen}
+        onClose={() => setSearchOpen(false)}
+      />
     </View>
   );
 }
@@ -416,7 +486,7 @@ function LazyTab({ tabKey, activeTab, children }: { tabKey: string; activeTab: s
 
   return (
     <View style={[styles.tabContent, !isActive && styles.hiddenTab]}>
-      <ErrorBoundary>{children}</ErrorBoundary>
+      <ErrorBoundary scope={`${tabKey} tab`}>{children}</ErrorBoundary>
     </View>
   );
 }
@@ -593,6 +663,41 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     zIndex: 100,
     backgroundColor: '#000000',
+  },
+  loadingPill: {
+    position: 'absolute',
+    top: Platform.OS === 'web' ? 12 : 56,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(17, 24, 39, 0.92)',
+    borderWidth: 1,
+    borderColor: '#243041',
+    zIndex: 120,
+    ...(Platform.OS === 'web' ? { backdropFilter: 'blur(8px)' } as any : {}),
+  },
+  loadingPillDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#22d3ee',
+    ...(Platform.OS === 'web' ? {
+      animationName: 'uc-tab-dot-pulse',
+      animationDuration: '1.2s',
+      animationTimingFunction: 'ease-in-out',
+      animationIterationCount: 'infinite',
+    } as any : {}),
+  },
+  loadingPillText: {
+    color: '#cbd5e1',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    fontFamily: 'monospace',
   },
   loadingText: {
     color: '#888',

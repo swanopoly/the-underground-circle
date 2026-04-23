@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -7,8 +7,20 @@ import {
   Platform,
   Pressable,
   RefreshControl,
+  ActivityIndicator,
 } from 'react-native';
 import { supabase } from '../../../lib/supabase';
+import { safeGetUser } from '../../../lib/authSession';
+import { usePaginated } from '../../../hooks/usePaginated';
+
+// Supabase's generated types return the `user:profiles(...)` join as an array
+// even though the relationship is one-to-one; loose-typing matches the original
+// fetch logic rather than fighting the generator.
+type MemberRow = {
+  role: string;
+  joined_at: string;
+  user: any;
+};
 
 type Member = {
   id: string;
@@ -22,70 +34,77 @@ type Member = {
   checkedInToday?: boolean;
 };
 
+const PAGE_SIZE = 25;
+
 export default function MembersTab({ circleId }: { circleId: string }) {
-  const [members, setMembers] = useState<Member[]>([]);
-  const [refreshing, setRefreshing] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [checkedInIds, setCheckedInIds] = useState<Set<string>>(new Set());
 
-  const fetchMembers = useCallback(async () => {
-    try {
-      const { data: { user }, error: userError } = await supabase.auth.getUser();
-      if (userError) {
-        console.error('Error getting user:', userError);
-        return;
-      }
-      if (user) setCurrentUserId(user.id);
+  // Who is the current user? One-shot — session doesn't change inside this tab.
+  useEffect(() => {
+    let cancelled = false;
+    safeGetUser().then(({ value }) => {
+      if (!cancelled && value) setCurrentUserId(value.id);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
+  // Today's check-ins — separate query so it doesn't slow first paint of the
+  // members list. Refreshed whenever members refresh.
+  const loadCheckIns = async () => {
+    const today = new Date().toISOString().split('T')[0];
+    const { data, error } = await supabase
+      .from('check_ins')
+      .select('user_id')
+      .eq('circle_id', circleId)
+      .gte('created_at', today);
+    if (error) {
+      console.error('Error fetching check-ins:', error);
+      return;
+    }
+    setCheckedInIds(new Set((data || []).map((c: any) => c.user_id)));
+  };
+
+  const page = usePaginated<MemberRow>({
+    key: ['members', circleId],
+    pageSize: PAGE_SIZE,
+    fetchPage: async (from, to) => {
       const { data, error } = await supabase
         .from('circle_members')
         .select('role, joined_at, user:profiles(id, username, display_name, current_streak, longest_streak, bio)')
         .eq('circle_id', circleId)
-        .limit(50);
+        .range(from, to);
+      return { rows: (data as MemberRow[]) || [], error: error || undefined };
+    },
+  });
 
-      if (error) {
-        console.error('Error fetching members:', error);
-        return;
-      }
+  // Refresh check-ins in parallel with the first page.
+  useEffect(() => { void loadCheckIns(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, [circleId]);
 
-      // Check today's check-ins
-      const today = new Date().toISOString().split('T')[0];
-      const { data: checkIns, error: checkInError } = await supabase
-        .from('check_ins')
-        .select('user_id')
-        .eq('circle_id', circleId)
-        .gte('created_at', today)
-        .limit(50);
-
-      if (checkInError) {
-        console.error('Error fetching check-ins:', checkInError);
-      }
-
-      const checkedInIds = new Set((checkIns || []).map((c: any) => c.user_id));
-
-      const memberList = (data || [])
-        .map((d: any) => ({
-          ...d.user,
-          role: d.role,
-          joined_at: d.joined_at,
-          checkedInToday: checkedInIds.has(d.user?.id),
-        }))
-        .filter(Boolean)
-        .sort((a: any, b: any) => (b.current_streak || 0) - (a.current_streak || 0));
-
-      setMembers(memberList);
-    } catch (err) {
-      console.error('Unexpected error in fetchMembers:', err);
+  const members: Member[] = useMemo(() => {
+    const out: Member[] = [];
+    for (const row of page.rows) {
+      // `user` can arrive as an object or a one-element array depending on the
+      // PostgREST response; handle both.
+      const rawUser = Array.isArray(row.user) ? row.user[0] : row.user;
+      if (!rawUser?.id) continue;
+      out.push({
+        id: rawUser.id,
+        username: rawUser.username,
+        display_name: rawUser.display_name,
+        current_streak: rawUser.current_streak || 0,
+        longest_streak: rawUser.longest_streak || 0,
+        bio: rawUser.bio,
+        role: row.role,
+        joined_at: row.joined_at,
+        checkedInToday: checkedInIds.has(rawUser.id),
+      });
     }
-  }, [circleId]);
-
-  useEffect(() => {
-    fetchMembers();
-  }, [fetchMembers]);
+    return out.sort((a, b) => (b.current_streak || 0) - (a.current_streak || 0));
+  }, [page.rows, checkedInIds]);
 
   const onRefresh = async () => {
-    setRefreshing(true);
-    await fetchMembers();
-    setRefreshing(false);
+    await Promise.all([page.refresh(), loadCheckIns()]);
   };
 
   const checkedIn = members.filter((m) => m.checkedInToday).length;
@@ -95,12 +114,12 @@ export default function MembersTab({ circleId }: { circleId: string }) {
       {/* Stats */}
       <View style={styles.statsBar}>
         <View style={styles.stat}>
-          <Text style={styles.statNum}>{members.length}</Text>
+          <Text style={styles.statNum}>{members.length}{page.hasMore ? '+' : ''}</Text>
           <Text style={styles.statLabel}>MEMBERS</Text>
         </View>
         <View style={styles.statDivider} />
         <View style={styles.stat}>
-          <Text style={[styles.statNum, { color: checkedIn === members.length ? '#4ade80' : '#e89b3e' }]}>
+          <Text style={[styles.statNum, { color: checkedIn === members.length && members.length > 0 ? '#4ade80' : '#e89b3e' }]}>
             {checkedIn}/{members.length}
           </Text>
           <Text style={styles.statLabel}>CHECKED IN</Text>
@@ -119,12 +138,27 @@ export default function MembersTab({ circleId }: { circleId: string }) {
         )}
         contentContainerStyle={styles.list}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#fff" />
+          <RefreshControl refreshing={page.loading} onRefresh={onRefresh} tintColor="#fff" />
+        }
+        onEndReachedThreshold={0.5}
+        onEndReached={() => { void page.loadMore(); }}
+        ListFooterComponent={
+          page.loadingMore ? (
+            <View style={styles.footerLoading}>
+              <ActivityIndicator color="#6366f1" />
+            </View>
+          ) : null
         }
         ListEmptyComponent={
-          <View style={styles.empty}>
-            <Text style={styles.emptyText}>No members yet</Text>
-          </View>
+          page.loading ? (
+            <View style={styles.empty}>
+              <ActivityIndicator color="#6366f1" />
+            </View>
+          ) : (
+            <View style={styles.empty}>
+              <Text style={styles.emptyText}>No members yet</Text>
+            </View>
+          )
         }
       />
     </View>
@@ -270,4 +304,5 @@ const styles = StyleSheet.create({
   missingText: { color: '#333', fontSize: 14 },
   empty: { alignItems: 'center', paddingTop: 60 },
   emptyText: { color: '#555', fontSize: 14 },
+  footerLoading: { paddingVertical: 20, alignItems: 'center' },
 });

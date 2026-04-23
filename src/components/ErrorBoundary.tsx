@@ -1,9 +1,10 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, Pressable, ScrollView, Platform } from 'react-native';
 
 interface Props {
   children: ReactNode;
   fallback?: ReactNode;
+  scope?: string;
 }
 
 interface State {
@@ -24,11 +25,20 @@ export default class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error('ErrorBoundary caught an error:', error, errorInfo);
-    this.setState({
-      error,
-      errorInfo,
-    });
+    const scope = this.props.scope ? `[${this.props.scope}] ` : '';
+    console.error(`ErrorBoundary ${scope}caught:`, error, errorInfo);
+    this.setState({ error, errorInfo });
+    if (Platform.OS === 'web') {
+      try {
+        (window as any).__uc_last_boundary_error = {
+          scope: this.props.scope || null,
+          message: error?.message,
+          stack: error?.stack,
+          componentStack: errorInfo?.componentStack,
+          at: new Date().toISOString(),
+        };
+      } catch {}
+    }
   }
 
   handleReset = () => {
@@ -40,153 +50,166 @@ export default class ErrorBoundary extends Component<Props, State> {
   };
 
   render() {
-    if (this.state.hasError) {
-      if (this.props.fallback) {
-        return this.props.fallback;
-      }
+    if (!this.state.hasError) return this.props.children;
+    if (this.props.fallback) return this.props.fallback;
 
-      return (
-        <View style={styles.container}>
-          <View style={styles.errorCard}>
-            <View style={styles.iconContainer}>
-              <Text style={styles.icon}>⚠️</Text>
-            </View>
-            <Text style={styles.title}>Something went wrong</Text>
-            <Text style={styles.subtitle}>
-              An unexpected error occurred. The app has been recovered.
-            </Text>
+    const scopeLabel = this.props.scope ? `in ${this.props.scope}` : 'in this surface';
+
+    return (
+      <View style={styles.container}>
+        <View style={styles.card}>
+          <View style={styles.dangerDot} />
+          <Text style={styles.title}>Something went wrong {scopeLabel}</Text>
+          <Text style={styles.subtitle}>
+            The rest of the app is still running. You can retry, or open details to copy the stack trace.
+          </Text>
+
+          <View style={styles.row}>
+            <Pressable onPress={this.handleReset} style={({ hovered, pressed }: any) => [
+              styles.primaryBtn,
+              hovered && styles.primaryBtnHover,
+              pressed && styles.primaryBtnPressed,
+            ]}>
+              <Text style={styles.primaryBtnText}>Retry</Text>
+            </Pressable>
             {this.state.error && (
-              <TouchableOpacity 
-                style={styles.detailsToggle} 
-                onPress={this.toggleDetails}
-              >
-                <Text style={styles.detailsToggleText}>
-                  {this.state.showDetails ? '▼' : '▶'} Error Details
+              <Pressable onPress={this.toggleDetails} style={({ hovered }: any) => [
+                styles.secondaryBtn,
+                hovered && styles.secondaryBtnHover,
+              ]}>
+                <Text style={styles.secondaryBtnText}>
+                  {this.state.showDetails ? 'Hide details' : 'Show details'}
                 </Text>
-              </TouchableOpacity>
+              </Pressable>
             )}
-            {this.state.showDetails && this.state.error && (
-              <View style={styles.debugContainer}>
-                <Text style={styles.debugTitle}>Error Stack:</Text>
-                <Text style={styles.debugText}>
-                  {this.state.error.toString()}
-                  {'\n\n'}
-                  {this.state.error.stack}
-                </Text>
-                {this.state.errorInfo && (
-                  <>
-                    <Text style={styles.debugTitle}>Component Stack:</Text>
-                    <Text style={styles.debugText}>
-                      {this.state.errorInfo.componentStack}
-                    </Text>
-                  </>
-                )}
-              </View>
-            )}
-            <TouchableOpacity style={styles.button} onPress={this.handleReset}>
-              <Text style={styles.buttonText}>TRY AGAIN</Text>
-            </TouchableOpacity>
           </View>
-        </View>
-      );
-    }
 
-    return this.props.children;
+          {this.state.showDetails && this.state.error && (
+            <ScrollView style={styles.debugBox} contentContainerStyle={{ padding: 12 }}>
+              <Text style={styles.debugLabel}>Error</Text>
+              <Text style={styles.debugText} selectable>
+                {this.state.error.toString()}
+              </Text>
+              {this.state.error.stack && (
+                <>
+                  <Text style={[styles.debugLabel, { marginTop: 12 }]}>Stack</Text>
+                  <Text style={styles.debugText} selectable>
+                    {this.state.error.stack}
+                  </Text>
+                </>
+              )}
+              {this.state.errorInfo?.componentStack && (
+                <>
+                  <Text style={[styles.debugLabel, { marginTop: 12 }]}>Component stack</Text>
+                  <Text style={styles.debugText} selectable>
+                    {this.state.errorInfo.componentStack}
+                  </Text>
+                </>
+              )}
+            </ScrollView>
+          )}
+        </View>
+      </View>
+    );
   }
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000000',
+    backgroundColor: '#0d1117',
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 20,
+    padding: 20,
   },
-  errorCard: {
-    backgroundColor: '#111',
-    borderRadius: 16,
-    padding: 32,
-    maxWidth: 400,
-    width: '100%',
+  card: {
+    backgroundColor: '#161b22',
+    borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#222',
-    alignItems: 'center',
+    borderColor: '#30363d',
+    padding: 24,
+    maxWidth: 520,
+    width: '100%',
   },
-  iconContainer: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: '#2a1a15',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  icon: {
-    fontSize: 28,
+  dangerDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 9999,
+    backgroundColor: '#f85149',
+    marginBottom: 14,
   },
   title: {
-    color: '#fff',
-    fontSize: 22,
-    fontWeight: '700',
-    textAlign: 'center',
-    marginBottom: 8,
+    color: '#e6edf3',
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: 6,
   },
   subtitle: {
-    color: '#666',
+    color: '#8b949e',
     fontSize: 14,
-    textAlign: 'center',
     lineHeight: 20,
-    marginBottom: 24,
+    marginBottom: 18,
   },
-  detailsToggle: {
+  row: {
+    flexDirection: 'row',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  primaryBtn: {
+    backgroundColor: '#6366f1',
+    borderRadius: 6,
     paddingVertical: 8,
-    paddingHorizontal: 12,
-    marginBottom: 16,
-    backgroundColor: '#000000',
+    paddingHorizontal: 16,
+  },
+  primaryBtnHover: {
+    backgroundColor: '#818cf8',
+  },
+  primaryBtnPressed: {
+    backgroundColor: '#4f46e5',
+  },
+  primaryBtnText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  secondaryBtn: {
+    backgroundColor: '#21262d',
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#30363d',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
   },
-  detailsToggleText: {
-    color: '#888',
-    fontSize: 12,
-    fontWeight: '600',
-    fontFamily: 'monospace',
-    textAlign: 'center',
+  secondaryBtnHover: {
+    backgroundColor: '#1c2128',
+    borderColor: '#484f58',
   },
-  debugContainer: {
-    backgroundColor: '#000000',
-    borderRadius: 8,
-    padding: 12,
-    width: '100%',
-    marginBottom: 24,
-    maxHeight: 200,
+  secondaryBtnText: {
+    color: '#e6edf3',
+    fontSize: 14,
+    fontWeight: '500',
   },
-  debugTitle: {
-    color: '#ff6666',
+  debugBox: {
+    marginTop: 14,
+    backgroundColor: '#010409',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#30363d',
+    maxHeight: 240,
+  },
+  debugLabel: {
+    color: '#8b949e',
     fontSize: 11,
-    fontWeight: '700',
-    marginBottom: 6,
-    marginTop: 8,
-    fontFamily: 'monospace',
+    fontWeight: '600',
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', default: 'monospace' }) as string,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 4,
   },
   debugText: {
-    color: '#999',
-    fontSize: 10,
-    fontFamily: 'monospace',
-    lineHeight: 14,
-  },
-  button: {
-    backgroundColor: '#fff',
-    borderRadius: 10,
-    paddingVertical: 14,
-    paddingHorizontal: 32,
-  },
-  buttonText: {
-    color: '#0a0a0a',
-    fontSize: 14,
-    fontWeight: '800',
-    letterSpacing: 1,
+    color: '#c9d1d9',
+    fontSize: 11,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', default: 'monospace' }) as string,
+    lineHeight: 16,
   },
 });

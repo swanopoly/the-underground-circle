@@ -16,6 +16,8 @@ interface Props {
   goals?: GoalWithCount[];
   isFullWidth?: boolean;
   isDragOver?: boolean;
+  isFiltered?: boolean;
+  onClearFilters?: () => void;
   onCardPress: (task: KanbanTask) => void;
   onMoveTask: (taskId: string, newStatus: TaskStatus) => void;
   onQuickAdd: (title: string) => void;
@@ -32,7 +34,7 @@ interface Props {
 }
 
 export default function KanbanColumn({
-  column, tasks, agents, goals, isFullWidth, isDragOver,
+  column, tasks, agents, goals, isFullWidth, isDragOver, isFiltered, onClearFilters,
   onCardPress, onMoveTask, onQuickAdd, onAddTask,
   onDragStart, onDragEnd, onDragEnter, onDragLeave, onDrop,
   onBatchMove, onBatchAssignRoom, roomOptions, onArchiveDone,
@@ -262,7 +264,18 @@ export default function KanbanColumn({
           !isDragOver ? (
             <View style={s.empty}>
               <Text style={s.emptyIcon}>{column.icon}</Text>
-              <Text style={s.emptyText}>No tasks</Text>
+              {isFiltered ? (
+                <>
+                  <Text style={s.emptyText}>No matches</Text>
+                  {onClearFilters && (
+                    <Pressable onPress={onClearFilters} style={s.emptyClearBtn} hitSlop={6}>
+                      <Text style={s.emptyClearText}>Clear filters</Text>
+                    </Pressable>
+                  )}
+                </>
+              ) : (
+                <Text style={s.emptyText}>No tasks</Text>
+              )}
             </View>
           ) : null
         }
@@ -549,6 +562,20 @@ const s = StyleSheet.create({
     color: '#3e3e3e',
     fontSize: 12,
     fontWeight: '500',
+  },
+  emptyClearBtn: {
+    marginTop: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+    backgroundColor: '#1a1a1a',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  emptyClearText: {
+    color: '#9e9e9e',
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 0.3,
   },
   quickAdd: {
     flexDirection: 'row',

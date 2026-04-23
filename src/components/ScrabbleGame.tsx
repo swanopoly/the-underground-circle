@@ -325,9 +325,9 @@ export default function ScrabbleGame({ visible, onClose, vsComputer = true, onSt
 
   if (Platform.OS !== 'web') {
     return (
-      <Modal visible={visible} transparent animationType="fade">
-        <View style={s.overlay}>
-          <View style={s.container}>
+      <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+        <Pressable style={s.overlay} onPress={onClose}>
+          <View style={s.container} onStartShouldSetResponder={() => true}>
             <Text style={s.headerTitle}>Scrabble</Text>
             <Text style={{ color: '#6f6f6f', fontFamily: 'monospace', textAlign: 'center', margin: 16 }}>
               Only available on web
@@ -336,7 +336,7 @@ export default function ScrabbleGame({ visible, onClose, vsComputer = true, onSt
               <Text style={s.newGameBtnText}>Close</Text>
             </Pressable>
           </View>
-        </View>
+        </Pressable>
       </Modal>
     );
   }
@@ -355,9 +355,9 @@ export default function ScrabbleGame({ visible, onClose, vsComputer = true, onSt
   })();
 
   return (
-    <Modal visible={visible} transparent animationType="fade">
-      <View style={s.overlay}>
-        <View style={s.container}>
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={handleClose}>
+      <Pressable style={s.overlay} onPress={handleClose}>
+        <View style={s.container} onStartShouldSetResponder={() => true}>
           {/* Header */}
           <View style={s.header}>
             <View style={s.headerLeft}>
@@ -514,7 +514,7 @@ export default function ScrabbleGame({ visible, onClose, vsComputer = true, onSt
             </View>
           )}
         </View>
-      </View>
+      </Pressable>
     </Modal>
   );
 }

@@ -1,7 +1,11 @@
 # CLAUDE.md — The Underground Circle
 
 > Comprehensive project context for AI agents (Claude Code, OpenSwan, Codex, etc.)
-> Last updated: 2026-04-11 (Missions system, memory overhaul, discovery, notifications)
+> Last updated: 2026-04-21
+
+> **Agent plan:** the canonical execution plan every contributing agent follows is
+> [`docs/AGENTS_ROADMAP.md`](./docs/AGENTS_ROADMAP.md). Read it at session start.
+> The entry point is [`AGENTS.md`](./AGENTS.md) at the repo root.
 
 ### Circle Missions — The Core Accountability Loop
 Missions live inside the Feed tab as a center panel sub-tab. See `docs/NEXT_LEVEL_PLAN.md` for the full plan.
@@ -11,7 +15,7 @@ Missions live inside the Feed tab as a center panel sub-tab. See `docs/NEXT_LEVE
 - `src/lib/missions.ts` — Full CRUD, realtime subscriptions, React hooks, helpers
 - `src/lib/missionTemplates.ts` — 8 pre-built templates (Dev Sprint, Bug Hunt, Content Push, etc.)
 - `src/lib/missionChatCommands.ts` — /mission, /summary, /help slash commands
-- `src/lib/missionAgentDispatch.ts` — Send tasks to BlackSwan for execution
+- `src/lib/missionAgentDispatch.ts` — Send mission tasks through the shared OpenSwan runtime (`feed_task` surface) and log proof-of-work from run metadata
 - `src/lib/missionStreaks.ts` — Daily task completion streaks with milestones + bonus XP
 - `src/lib/proofOfWork.ts` — Auto-generate feed entries from GitHub events + agent runs
 - `src/screens/circles/tabs/MissionsTab.tsx` — Full mission UI inside Feed center panel
@@ -953,21 +957,20 @@ ollama run blackswan:latest "Deep analysis"  # full power
 
 ---
 
-## Design System — Black & White Terminal Aesthetic
+## Design System — UC App Dark
 
 > **THE DEFINITIVE STYLE GUIDE: `docs/UC_STYLE_GUIDE.md`**
-> All new UI MUST follow this guide. It combines the Spawn Agents modal (pure B&W, sharp, monospace) with the Assign Agent panel (agent color tints, status dots). Read the full spec in the doc.
+> All new UI MUST follow this guide. The default app style is now a softer, product-oriented dark UI with slate surfaces, restrained borders, and accent-driven active states.
 
 ### Core Rules
-1. **Black canvas** — Background `#000`. Insets `#0a0a0a`. Surfaces `#111`. No other background colors.
-2. **Sharp edges** — `borderRadius: 2` max. NO rounded corners. Exception: status dots + avatars (fully round).
-3. **2px borders** — Cards and CTAs use `borderWidth: 2, borderColor: '#fff'`. Inputs use `borderWidth: 1, borderColor: '#333'`.
-4. **Monospace everywhere** — `fontFamily: 'monospace'` for ALL text. Labels: `fontWeight: '900', letterSpacing: 1.5-3`. Body: `fontWeight: '700'`.
-5. **White CTA** — Primary buttons: `backgroundColor: '#fff', color: '#000'`. Ghost: `backgroundColor: '#000', borderColor: '#333', color: '#888'`.
-6. **Color is functional** — White = primary. Grays = secondary. Color ONLY for: status (green/amber/indigo/red), agent identity tints at 10-20% opacity, active selection accent.
-7. **Hover mandatory on web** — Every Pressable: `transition: all 0.15s ease` + hover (border brightens, translateY: -1) + press (scale: 0.96).
-8. **Text-glyph icons** — `//`, `>_`, `+`, `x`, `ESC`, `#`, `N` inside 2px-bordered boxes. No emojis in structural UI.
-9. **White glow** — Modal cards: `boxShadow: '0 0 60px rgba(255,255,255,0.08)'`.
+1. **Default to app surfaces, not terminal chrome.** Use layered dark blues/slates like `#0f172a`, `#111827`, `#161b22` instead of flat pure black.
+2. **Rounded, not rigid.** Cards/buttons/inputs should usually live in the `8-16` radius range. Pills stay fully rounded.
+3. **1px borders by default.** Borders should support hierarchy, not dominate it. Avoid the old white 2px outline treatment outside intentional terminal/code surfaces.
+4. **System font for UI.** Monospace is for code, terminals, counts, and narrow metadata only.
+5. **Accent-colored active states.** Active chips/buttons should look like `All / Active / Completed` style filters: tinted fill, matching border, readable text.
+6. **Color can shape the interface.** Indigo/slate/cyan/emerald tints are allowed when they clarify structure or state. Avoid black/white-only UI unless the surface explicitly calls for it.
+7. **Hover should feel soft.** Background shift and subtle border brightening; no harsh lift or heavy flash.
+8. **Do not reintroduce the old B&W modal language by default.** The Spawn/Assign modal aesthetic is no longer the universal UI baseline.
 
 ### Design System Files
 - `docs/UC_STYLE_GUIDE.md` — The full specification with every token, pattern, and "don't" rule

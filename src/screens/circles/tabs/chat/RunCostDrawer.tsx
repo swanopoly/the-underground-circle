@@ -29,6 +29,14 @@ interface Props {
 let userAiUsageMissing = false;
 let userAiUsageAvailabilityChecked = false;
 let userAiUsageAvailabilityPromise: Promise<boolean> | null = null;
+const USER_AI_USAGE_MISSING_CACHE_KEY = 'openswan:user_ai_usage_missing';
+
+try {
+  if (typeof localStorage !== 'undefined' && localStorage.getItem(USER_AI_USAGE_MISSING_CACHE_KEY) === '1') {
+    userAiUsageMissing = true;
+    userAiUsageAvailabilityChecked = true;
+  }
+} catch {}
 
 function isMissingRelationError(error: any, relation: string): boolean {
   if (!error) return false;
@@ -50,6 +58,16 @@ function formatTokens(n: number): string {
   return `${(n / 1000).toFixed(1)}k`;
 }
 
+function rememberMissingUserAiUsage() {
+  userAiUsageMissing = true;
+  userAiUsageAvailabilityChecked = true;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(USER_AI_USAGE_MISSING_CACHE_KEY, '1');
+    }
+  } catch {}
+}
+
 async function ensureUserAiUsageAvailable(): Promise<boolean> {
   if (userAiUsageMissing) return false;
   if (userAiUsageAvailabilityChecked) return true;
@@ -63,7 +81,7 @@ async function ensureUserAiUsageAvailable(): Promise<boolean> {
         .limit(1);
       if (error) {
         if (isMissingRelationError(error, 'user_ai_usage')) {
-          userAiUsageMissing = true;
+          rememberMissingUserAiUsage();
           return false;
         }
         return true;
@@ -104,7 +122,7 @@ export default function RunCostDrawer({ userId, messageTimestamp, nextMessageTim
         .limit(10);
       if (error) {
         if (isMissingRelationError(error, 'user_ai_usage')) {
-          userAiUsageMissing = true;
+          rememberMissingUserAiUsage();
           return;
         }
         return;

@@ -15,8 +15,12 @@ import type { KanbanData, KanbanMember, ThinkingLevel, AgentModel, AgentMode } f
 import type { GoalWithCount } from '../../../../hooks/useGoals';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
 import { supabase } from '../../../../lib/supabase';
+import MentionPicker, { detectMentionQuery, insertMention } from '../../../../components/MentionPicker';
+import MentionText from '../../../../components/MentionText';
+import { extractMentionRefs, persistMentions } from '../../../../lib/mentions';
 import { dispatchBridgeTask } from '../../../../lib/bridgeTaskDispatcher';
 import SpawnAgentPanel from '../../../../components/SpawnAgentPanel';
+import RunMetadataSummary from '../../../../components/chat/RunMetadataSummary';
 import FocusChainPanel from './FocusChainPanel';
 import TaskRunTimeline from './TaskRunTimeline';
 import TaskArtifactsPanel from './TaskArtifactsPanel';
@@ -26,6 +30,10 @@ import { useProjectRooms } from '../../../../services/projectRooms';
 import { listCircleIntegrations } from '../../../../lib/circleIntegrations';
 import { getInstalledProviderSet, recommendMarketplaceItemsForWork } from '../../../../lib/marketplaceRecommendations';
 import type { CircleIntegrationGroupKey } from '../../../../lib/circleIntegrationCatalog';
+import {
+  buildRunMetadataSummaryProps,
+  fetchTaskRunMetadataByOpenSwanRunId,
+} from '../../../../lib/taskRunMetadata';
 
 // ─── Automation Report Section Parser ────────────────────────────────────────
 
@@ -345,6 +353,10 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState(task.description || '');
+  // Mention picker state for the description editor. Matches the pattern
+  // used in CheckInScreen and ChatTab so @ triggers are consistent.
+  const [descriptionMentionQuery, setDescriptionMentionQuery] = useState<string | null>(null);
+  const [descriptionCursorPos, setDescriptionCursorPos] = useState(0);
   const [priority, setPriority] = useState<TaskPriority>(task.priority);
   const [assignedTo, setAssignedTo] = useState<string | null>(task.assigned_to);
   const [assignedAgentIds, setAssignedAgentIds] = useState<string[]>(task.assigned_agent_ids || (task.assigned_agent_id ? [task.assigned_agent_id] : []));
@@ -355,6 +367,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
 
   const [comments, setComments] = useState<TaskComment[]>([]);
   const [taskRuns, setTaskRuns] = useState<TaskRun[]>(task.recent_runs || []);
+  const [taskRunMetadataByRunId, setTaskRunMetadataByRunId] = useState<Record<string, Record<string, any>>>({});
   const [commentText, setCommentText] = useState('');
   const [showDelete, setShowDelete] = useState(false);
   const [showAssignees, setShowAssignees] = useState(false);
@@ -424,6 +437,22 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
 
   useEffect(() => { loadComments(); }, [loadComments]);
   useEffect(() => { loadTaskRuns(); }, [loadTaskRuns]);
+  useEffect(() => {
+    let cancelled = false;
+    const openSwanRunIds = taskRuns
+      .map((run) => run.openswan_run_id)
+      .filter((value): value is string => typeof value === 'string' && value.length > 0);
+    if (openSwanRunIds.length === 0) {
+      setTaskRunMetadataByRunId({});
+      return;
+    }
+    (async () => {
+      const nextMetadata = await fetchTaskRunMetadataByOpenSwanRunId(openSwanRunIds);
+      if (cancelled) return;
+      setTaskRunMetadataByRunId(nextMetadata);
+    })();
+    return () => { cancelled = true; };
+  }, [taskRuns]);
 
   const availableAgents = useMemo(
     () => sortAgentsForAssignment(agents.length > 0 ? agents : kanban.agents),
@@ -472,6 +501,23 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
       baseFields.assigned_agent_ids = assignedAgentIds;
     }
     await kanban.updateTask(task.id, baseFields as any);
+
+    // Persist any @mentions in the description so the target's backlinks
+    // panel picks up this task as a reference. Sent as source_type
+    // 'mission_task' (the mentions CHECK allows it) using the task id.
+    const refs = extractMentionRefs(description);
+    if (refs.length > 0) {
+      const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+      if (user?.id) {
+        persistMentions({
+          circleId,
+          sourceType: 'mission_task',
+          sourceId: task.id,
+          authorId: user.id,
+          refs,
+        }).catch(() => {});
+      }
+    }
     setEditing(false);
   };
 
@@ -846,21 +892,46 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
             {/* Description */}
             <Text style={s.sectionLabel}>Description</Text>
             {editing ? (
-              <TextInput
-                style={[s.input, s.textArea]}
-                value={description}
-                onChangeText={setDescription}
-                multiline
-                maxLength={isAutoReport ? 50000 : 2000}
-                placeholder="Add details..."
-                placeholderTextColor="#3e3e3e"
-              />
+              <View>
+                <TextInput
+                  style={[s.input, s.textArea]}
+                  value={description}
+                  onChangeText={(t) => {
+                    setDescription(t);
+                    setDescriptionMentionQuery(detectMentionQuery(t, descriptionCursorPos));
+                  }}
+                  onSelectionChange={(e) => {
+                    const pos = e.nativeEvent.selection.end;
+                    setDescriptionCursorPos(pos);
+                    setDescriptionMentionQuery(detectMentionQuery(description, pos));
+                  }}
+                  multiline
+                  maxLength={isAutoReport ? 50000 : 2000}
+                  placeholder="Add details. '@' to mention a mission, task, or teammate."
+                  placeholderTextColor="#3e3e3e"
+                />
+                {descriptionMentionQuery !== null && (
+                  <View style={{ marginTop: 6, alignSelf: 'flex-start' }}>
+                    <MentionPicker
+                      circleId={circleId}
+                      query={descriptionMentionQuery}
+                      onSelect={(cand) => {
+                        const { text, cursor } = insertMention(description, descriptionCursorPos, cand);
+                        setDescription(text);
+                        setDescriptionCursorPos(cursor);
+                        setDescriptionMentionQuery(null);
+                      }}
+                      onDismiss={() => setDescriptionMentionQuery(null)}
+                    />
+                  </View>
+                )}
+              </View>
             ) : isAutoReport ? (
               <AutomationReportView description={task.description || ''} />
             ) : (
-              <Text style={[s.fieldValue, !task.description && s.fieldEmpty]}>
-                {task.description || 'No description'}
-              </Text>
+              task.description
+                ? <MentionText content={task.description} style={s.fieldValue} />
+                : <Text style={[s.fieldValue, s.fieldEmpty]}>No description</Text>
             )}
 
             <Text style={s.sectionLabel}>Project Room</Text>
@@ -1519,6 +1590,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                   {taskRuns.slice(0, 5).map(run => {
                     const runAgent = kanban.agents.find(a => a.id === run.agent_id);
                     const runColor = run.status === 'completed' ? '#22c55e' : run.status === 'failed' ? '#ef4444' : '#f59e0b';
+                    const runMetadata = run.openswan_run_id ? taskRunMetadataByRunId[run.openswan_run_id] : null;
                     return (
                       <View key={run.id} style={{ borderWidth: 1, borderColor: '#1f1f1f', borderRadius: 10, padding: 10, backgroundColor: '#0a0a0a' }}>
                         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
@@ -1534,6 +1606,15 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                           {run.duration_ms ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{(run.duration_ms / 1000).toFixed(1)}s</Text> : null}
                           {run.token_count ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{run.token_count} tok</Text> : null}
                         </View>
+                        {runMetadata ? (
+                          <View style={{ marginTop: 8 }}>
+                            <RunMetadataSummary
+                              {...buildRunMetadataSummaryProps(runMetadata)}
+                              variant="compact"
+                              accentColor="#38bdf8"
+                            />
+                          </View>
+                        ) : null}
                       </View>
                     );
                   })}

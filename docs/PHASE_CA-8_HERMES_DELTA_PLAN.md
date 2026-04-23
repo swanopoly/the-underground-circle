@@ -1,0 +1,124 @@
+# Phase CA-8 — Hermes Delta Rollout
+
+**Canonical rollout of the top-10 items from [`HERMES_DELTA_PLAN_2026-04-22.md`](./HERMES_DELTA_PLAN_2026-04-22.md).** Every agent touching UC should read this before starting Hermes-adjacent work so we don't build parallel stacks.
+
+Cross-referenced from: [`AGENTS_ROADMAP.md`](./AGENTS_ROADMAP.md) · [`HERMES_INTEGRATION_PLAN.md`](./HERMES_INTEGRATION_PLAN.md) · [`CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md`](./CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md) · [`CLINE_RESEARCH_AND_MAPPING_2026-04-22.md`](./CLINE_RESEARCH_AND_MAPPING_2026-04-22.md).
+
+**Last synced:** 2026-04-22
+
+---
+
+## Non-goals — DO NOT ship these
+
+These have been researched and explicitly rejected. If a future agent re-proposes one, point them at this section.
+
+- **`execute_code` (Hermes §2.8).** Model writes Python/TS that calls tools via sandboxed RPC. Not worth the blast radius (prompt-injected loops, cost explosions) for our audience. Defer indefinitely.
+- **Darwinian Evolver mutating `.ts` files (Hermes evolution-repo §2.4).** Conflicts with UC's no-autonomous-code-edits policy. If we ever adopt DSPy/GEPA, **cap evolvable surfaces to skill bodies + tool descriptions + prompt components.** Never source files.
+- **Pluggable terminal backends (Docker/SSH/Modal/etc.).** We already ship `room-task-executor` + computer-use + Claude Code bridge. Adding Modal/Daytona/Singularity is a separate power-user surface, not a Hermes delta.
+- **Skill marketplace / `/skill publish` (Hermes §3.15).** Blocked on 10+ user-authored skills. Not before.
+- **Memory self-consolidation for shared `circle_memory`.** Hermes' "agent gets an error and rewrites the doc" model is unsafe across multiple users editing the same facts. Keep HITL compaction for shared memory; self-consolidate only on `user_memory`.
+
+---
+
+## Sub-phase list (ordered by impact ÷ effort)
+
+Each sub-phase names its exact code paths, SQL impact, smoke-test file, and roadmap link so any agent can pick one up without additional discovery. Dependencies are called out.
+
+### CA-8a · Agent-side context compression · **task #75 · SHIPPED 2026-04-22**
+
+- **Problem.** Long BlackSwan threads balloon past 50K tokens, and every turn re-pays for all of it. Biggest cost / latency lever we have.
+- **Files shipped.** `src/lib/agentContextCompression.ts` (pure core + `estimateMessagesTokens`), `scripts/agent-context-compression-smoketest.ts` (6 cases, 20 assertions). `npm run smoke:agent-context-compression` wired into `smoke:all`.
+- **Contract shipped.** `compressContextIfOversized(messages, opts)` returns `{ compressed, messages, summary?, droppedCount, tokensBefore, tokensAfter }` with `opts = { thresholdRatio, maxContextTokens, preserveLast, summariser, countTokens? }`. Defaults: 0.50 threshold, 200K max context, preserve last 20. Summariser is injected (caller wires Haiku).
+- **Safety properties.** Tail is always preserved verbatim. `tool_use` / `tool_result` pairs are never split (walks cut-index back to keep pairs together). Summariser throw → bails with original messages (never corrupts context). History shorter than `preserveLast + 4` → no-op.
+- **Still to do.** Wire into `agentExecutionCore.ts` pre-turn so every `runAgent(...)` call gets it for free. That's the actual integration — the library is pure so the wiring is a 5-line edit once we pick the exact hook point (likely `runAgent` before the provider.turn loop). Deliberately left as a separate merge so the pure library can ship and be re-used by `openswanSessionRuntime` / `swanbot-v2-ai` independently.
+
+### CA-8b · Memory bounded-char caps with self-consolidate envelope · **task #76 · SHIPPED 2026-04-22**
+
+- **Problem.** `user_memory` can grow unbounded; no back-pressure to the agent. Hermes caps at 2,200 + 1,375 chars and returns an error the agent can act on.
+- **Files shipped.** New pure `src/lib/userMemoryCaps.ts` (no Supabase import so smoke tests work offline) with `USER_MEMORY_SOFT_CAP` (2,200), `USER_MEMORY_HARD_CAP` (2,500), `USER_MEMORY_CAP_ERROR` ('memory_cap_exceeded'), `checkUserMemoryCap()`, `describeUserMemoryUsage()`. `src/lib/userMemory.ts` re-exports these and wires them into `appendUserMemory` + `replaceUserMemory`. Smoke: `scripts/user-memory-caps-smoketest.ts` — 6 cases / 23 assertions green.
+- **Contract shipped.** Writers return `{ ok:false, error:'memory_cap_exceeded', suggestion:'consolidate', currentChars, capChars, wouldBeChars }` when the proposed content would exceed HARD_CAP. When ok, returns `{ ok:true, currentChars, capChars }` — backward-compatible for all existing `if (!result.ok)` callers. Separator-aware (the cap math matches what `appendUserMemory` actually writes).
+- **Safety properties.** Whitespace-trimmed. `replaceUserMemory` also enforces the cap so the agent can't "consolidate past" the ceiling with a single overlong rewrite. Shared `circle_memory` compaction regime (4K-token / HITL) is deliberately unchanged — two regimes, two policies, per conflict-resolution §5 of this plan.
+- **Still to do.** Wire `describeUserMemoryUsage()` into the system prompt's memory block so the agent sees the cap status and can self-consolidate proactively (requires a ChatTab + swanbot-ai prompt-assembly touch). Deliberately left as a follow-up merge — the pure cap layer ships first so the tool-side and agent-side work can land independently.
+
+### CA-8c · Skill sub-file support · **task #77 · SHIPPED 2026-04-22**
+
+- **Problem.** A Claude Code skill with `references/` + `templates/` + `scripts/` flattens into one blob when imported. Hermes ships 3-level retrieval: list → full → sub-file.
+- **Schema shipped.** `circle_skill_files` — `(id, skill_id→circle_skills, relpath, content, is_primary, mime_type, size_bytes, created_by, created_at, updated_at)` with composite unique `(skill_id, relpath)` + two indexes + RLS mirroring `circle_skills` (JOIN `circle_members` on the parent skill's `circle_id`) + updated_at trigger. Migration: `supabase/migrations/20260507_circle_skill_files.sql`, mirrored into `docs/RUN_THIS_SQL.sql` §15.
+- **Read helpers shipped.** `src/lib/skillLibrary.ts` gained `listLibrarySkillFiles(circleId, name)` (manifest, no body) + `viewLibrarySkillFile(circleId, name, relpath)` (body). Both no-op on missing parent / RLS miss (never throw — matches the rest of the module's error posture).
+- **Pure path validator shipped.** `src/lib/skillRelPath.ts` with `parseSkillRelPath` + `isSafeSkillRelPath`. Rejects absolute paths, `..` traversal, Windows drive letters, control chars, dotfiles, dir-refs, and > 200 chars. Normalises `\\` → `/`, `./` prefix stripped, `//` runs collapsed. Re-exported from `skillLibrary.ts` so tool-layer and importer share one rule. Smoke: `scripts/skill-relpath-smoketest.ts` — 29 cases green (9 accepts × 14 rejects + aliases + non-string inputs).
+- **Primary body stays on `circle_skills.content`** for backward-compat with existing read paths and `skillPromptInjection.ts`. The new table holds sub-files only; the filter-to-primary concern from the plan is a no-op today (and remains so as long as the primary body stays on the parent row).
+- **Still to do (CA-8i, task #83).** Extend `skillLibraryImport.ts` to split multi-file GitHub skill folders into `circle_skill_files` rows at import time; add `skill_manage` tool actions `write_file` / `remove_file` that file HITL approvals carrying the full relpath + diff. Read-side CA-8c is sufficient for agents that fetch already-populated sub-files.
+
+### CA-8d · Subagent summary-only return + depth/concurrency gate · **task #78**
+
+- **Problem.** Our `subagentRegistry.ts` still calls `runOpenSwanRuntimeToolLoop` (pre-Phase 1c). Parent sees the child's full stream today. Hermes contract: parent sees only the summary; children have isolated context.
+- **Files.** `src/lib/subagentRegistry.ts` (swap to `agentExecutionCore`), new `src/lib/delegationGate.ts` (depth/concurrency limits + transcript redaction). Run Ledger surfaces keep full tree (operator view); chat transcript gets only the final summary (user view).
+- **Contract.** Depth ≤ 2 (`HERMES_DELTA_PLAN §3.6`), concurrency ≤ 3 per circle, per-child provider override (cheap child under expensive parent). `parent_run_id` column on `agent_runs` if missing.
+- **Effort.** M. **SQL:** possibly one column check.
+- **Depends on.** Closes existing pending task #32.
+
+### CA-8e · `clarify` / `ask_user` timeout · **task #79**
+
+- **Problem.** `ask_user` blocks indefinitely today. Hermes ships `clarify.timeout: 120` — agent gets a structured timeout and proceeds with a safe default.
+- **Files.** `src/lib/computerUseAgent.ts` (or wherever `ask_user` lives today), `src/components/HitlApprovalBanner.tsx` (countdown + "auto-continuing" message).
+- **Contract.** `timeoutMs` (default 120_000). On timeout: record `{ choice: '__timeout__', fallback: true }`, resume agent with default.
+- **Effort.** S. **SQL:** none.
+- **Depends on.** Nothing.
+
+### CA-8f · Provider fallback chain · **task #80**
+
+- **Problem.** Single-provider (Anthropic direct). Outage = downtime.
+- **Files.** New `src/lib/agentProviders/fallbackChain.ts` wrapping existing `anthropic.ts`. Config-driven: primary `anthropic.direct`, fallback `openrouter.anthropic/*` on 529 / overload / 5xx.
+- **Contract.** `createFallbackProvider([primary, fallback1, fallback2])` returns an `AgentProvider`. Per-call retry then next-provider.
+- **Effort.** M. **SQL:** none.
+
+### CA-8g · Trace export + evals scaffolding · **task #81**
+
+- **Problem.** DSPy/GEPA needs trace JSONL + golden eval cases. We have neither exported yet.
+- **Files.** New `scripts/export-traces.ts` → `docs/traces/<date>.jsonl`. New `docs/evals/` seeded with 10 golden cases in the same shape `openswanBenchmarks.ts` already uses. New 1-page `docs/EVOLVABLE_SURFACES.md` naming exactly which surfaces the optimizer may touch (skill bodies, tool descriptions, prompt components) — and that `.ts` files are out of bounds.
+- **Effort.** M. **SQL:** none.
+- **Note.** This is **preparation only**. Actual optimizer stays out of scope until `≥50 skills + ≥1K persisted runs` gate (`HERMES_INTEGRATION_PLAN.md` Phase 5).
+
+### CA-8h · Context file priority + per-turn discovery append · **task #82**
+
+- **Problem.** Hermes picks exactly one project context file by priority (`.hermes.md` → `AGENTS.md` → `CLAUDE.md` → `.cursorrules`). We currently scan for `.md` files but don't prioritise. Also: per-turn discovered paths should ride on tool results, not the system prompt, so the cached block stays cached.
+- **Files.** `src/lib/openswanContextDiscovery.ts` (add priority resolver). New hook inside `executeOpenSwanTool` wrapper that appends a small "discovered context" block to tool results when a file path appears in the tool arguments.
+- **Contract.** UC priority: `.openswan.md` → `AGENTS.md` → `CLAUDE.md` → `.cursorrules`. First match wins per room.
+- **Effort.** S. **SQL:** none.
+
+### CA-8i · `skill_manage` sub-file actions · **task #83**
+
+- **Problem.** Sub-file writes (`references/api.md`, etc.) have no tool action today.
+- **Files.** `src/lib/agentTools/manageLibrarySkill.ts` (add `write_file` / `remove_file` actions, HITL-gated).
+- **Effort.** S (after CA-8c). **SQL:** none — rides CA-8c's table.
+- **Depends on.** CA-8c.
+
+### CA-8j · Session lineage columns · **task #84**
+
+- **Problem.** When a chat thread gets compressed / split we lose the parent-pointer. Can't trace long-running tasks across forks in the Run Ledger.
+- **Files.** Migration `20260508_room_messages_lineage.sql` (add `parent_thread_id`, `lineage_root_id`, index).
+- **Schema.** `ALTER TABLE room_messages ADD COLUMN parent_thread_id uuid REFERENCES room_messages(id) ON DELETE SET NULL; ADD COLUMN lineage_root_id uuid; CREATE INDEX idx_room_messages_lineage ON room_messages(lineage_root_id, created_at);`
+- **Effort.** S. **SQL:** yes — one column pair + index.
+
+---
+
+## Conflicts resolved (locked)
+
+From [HERMES_DELTA_PLAN_2026-04-22.md §5](./HERMES_DELTA_PLAN_2026-04-22.md#part-5--conflicts-with-existing-plans). Agents MUST follow these rulings.
+
+1. **Two memory regimes.** Shared `circle_memory` keeps HITL compaction at 4K-token threshold. Per-user `user_memory` adopts Hermes caps (2,200 / 1,375 chars) and agent-self-consolidate error envelope.
+2. **Subagent visibility is split.** Chat transcript → summary only (Hermes contract). Run Ledger → full child event tree (operator debugging).
+3. **Evolvable surfaces are capped.** Skill bodies + tool descriptions + prompt components only. Never `.ts`/`.tsx`/`.sql` source.
+4. **Context file priority.** `.openswan.md` → `AGENTS.md` → `CLAUDE.md` → `.cursorrules`. First match wins. Don't merge them.
+5. **In-runtime evals stay ours.** `openswanBenchmarks.ts` / `openswanEvals.ts` / `openswanObservedEvals.ts` are ahead of the hermes-agent runtime. Don't re-pitch a "hermes eval" CLI.
+
+---
+
+## Definition of done for Phase CA-8
+
+- All 10 sub-phases shipped OR explicitly deferred with a reason.
+- Smoke tests added for each sub-phase that has pure logic (context compression, delegation gate, memory caps, fallback chain). Hooked into `npm run smoke:all`.
+- `AGENTS_ROADMAP.md` Phase CA table updated with shipped dates.
+- This plan doc updated with status checkmarks and shipped-date stamps.
+- `RUN_THIS_SQL.sql` updated with CA-8c + CA-8j migrations.
+- Codex + Gemini can work on any sub-phase without reading an extra doc — this one + the delta plan is enough.

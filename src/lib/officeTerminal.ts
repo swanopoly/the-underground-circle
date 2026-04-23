@@ -18,6 +18,9 @@
 import { supabase } from './supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
+const TERMINAL_HISTORY_CACHE_TTL_MS = 15_000;
+const TERMINAL_RESPONSES_CACHE_TTL_MS = 15_000;
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type TerminalMessageStatus = 'pending' | 'invoked' | 'streaming' | 'done' | 'error' | 'deleted';
@@ -109,6 +112,10 @@ function fromRow(row: Record<string, unknown>): TerminalMessage {
 
 const commandChannels  = new Map<string, RealtimeChannel>();
 const responseChannels = new Map<string, RealtimeChannel>();
+const terminalHistoryCache = new Map<string, { at: number; messages: TerminalMessage[] }>();
+const terminalHistoryInflight = new Map<string, Promise<{ messages: TerminalMessage[]; error?: string }>>();
+const terminalResponsesCache = new Map<string, { at: number; responses: TerminalResponse[] }>();
+const terminalResponsesInflight = new Map<string, Promise<TerminalResponse[]>>();
 
 // ─── Send a command ───────────────────────────────────────────────────────────
 
@@ -303,27 +310,44 @@ export async function loadResponsesForMessages(
   messageIds: string[]
 ): Promise<TerminalResponse[]> {
   if (messageIds.length === 0) return [];
+  const cacheKey = [...messageIds].sort().join(',');
+  const cached = terminalResponsesCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < TERMINAL_RESPONSES_CACHE_TTL_MS) {
+    return cached.responses;
+  }
+  const inflight = terminalResponsesInflight.get(cacheKey);
+  if (inflight) return inflight;
 
-  const { data, error } = await supabase
-    .from('office_terminal_responses')
-    .select('*')
-    .in('message_id', messageIds);
+  const run = (async (): Promise<TerminalResponse[]> => {
+    try {
+      const { data, error } = await supabase
+        .from('office_terminal_responses')
+        .select('*')
+        .in('message_id', messageIds);
 
-  if (error || !data) return [];
+      if (error || !data) return [];
 
-  return (data as Record<string, unknown>[]).map(row => ({
-    id:           row.id as string,
-    messageId:    row.message_id as string,
-    agentId:      row.agent_id as string,
-    agentName:    row.agent_name as string,
-    responseText: row.response_text as string,
-    status:       row.status as TerminalResponse['status'],
-    tokenCount:   (row.token_count as number) || 0,
-    latencyMs:    row.latency_ms as number | undefined,
-    errorMessage: row.error_message as string | undefined,
-    createdAt:    row.created_at as string,
-    updatedAt:    row.updated_at as string,
-  }));
+      const responses = (data as Record<string, unknown>[]).map(row => ({
+        id:           row.id as string,
+        messageId:    row.message_id as string,
+        agentId:      row.agent_id as string,
+        agentName:    row.agent_name as string,
+        responseText: row.response_text as string,
+        status:       row.status as TerminalResponse['status'],
+        tokenCount:   (row.token_count as number) || 0,
+        latencyMs:    row.latency_ms as number | undefined,
+        errorMessage: row.error_message as string | undefined,
+        createdAt:    row.created_at as string,
+        updatedAt:    row.updated_at as string,
+      }));
+      terminalResponsesCache.set(cacheKey, { at: Date.now(), responses });
+      return responses;
+    } finally {
+      terminalResponsesInflight.delete(cacheKey);
+    }
+  })();
+  terminalResponsesInflight.set(cacheKey, run);
+  return run;
 }
 
 // ─── Load history ─────────────────────────────────────────────────────────────
@@ -332,21 +356,37 @@ export async function loadTerminalHistory(
   circleId: string,
   limit = 50
 ): Promise<{ messages: TerminalMessage[]; error?: string }> {
-  const { data, error } = await supabase
-    .from('office_terminal_messages')
-    .select('*')
-    .eq('circle_id', circleId)
-    .order('created_at', { ascending: false })
-    .limit(limit);
+  const cacheKey = `${circleId}:${limit}`;
+  const cached = terminalHistoryCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < TERMINAL_HISTORY_CACHE_TTL_MS) {
+    return { messages: cached.messages };
+  }
+  const inflight = terminalHistoryInflight.get(cacheKey);
+  if (inflight) return inflight;
 
-  if (error) return { messages: [], error: error.message };
+  const run = (async (): Promise<{ messages: TerminalMessage[]; error?: string }> => {
+    try {
+      const { data, error } = await supabase
+        .from('office_terminal_messages')
+        .select('*')
+        .eq('circle_id', circleId)
+        .order('created_at', { ascending: false })
+        .limit(limit);
 
-  // Reverse so oldest is first
-  const messages = ((data as Record<string, unknown>[]) || [])
-    .map(fromRow)
-    .reverse();
+      if (error) return { messages: [], error: error.message };
 
-  return { messages };
+      // Reverse so oldest is first
+      const messages = ((data as Record<string, unknown>[]) || [])
+        .map(fromRow)
+        .reverse();
+      terminalHistoryCache.set(cacheKey, { at: Date.now(), messages });
+      return { messages };
+    } finally {
+      terminalHistoryInflight.delete(cacheKey);
+    }
+  })();
+  terminalHistoryInflight.set(cacheKey, run);
+  return run;
 }
 
 // ─── Subscribe to Realtime DB changes on terminal messages ────────────────────

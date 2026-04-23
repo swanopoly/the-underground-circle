@@ -23,6 +23,8 @@ type ChatArtifactsProps = {
   };
 };
 
+const SANDBOXED_PREVIEW_PERMISSIONS = 'allow-scripts';
+
 function summarizeVerificationResults(results: OpenSwanVerificationResult[]): string {
   return results
     .map((result) => `${getOpenSwanExecutionStatusLabel(result.status)} ${result.check.label}: ${result.summary}`)
@@ -274,7 +276,7 @@ export default function ChatArtifacts({ artifacts, accentColor, circleId, sessio
                 <iframe
                   srcDoc={artifact.content}
                   style={{ width: '100%', height: '100%', border: 'none', backgroundColor: '#0a0a10' } as any}
-                  sandbox="allow-scripts allow-same-origin"
+                  sandbox={SANDBOXED_PREVIEW_PERMISSIONS}
                   title={artifact.title}
                 />
               </View>

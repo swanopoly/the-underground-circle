@@ -8,6 +8,7 @@ import DiscoverScreen from '../screens/circles/DiscoverScreen';
 import JoinCircleScreen from '../screens/circles/JoinCircleScreen';
 import CircleSettingsScreen from '../screens/circles/CircleSettingsScreen';
 import ProfileScreen from '../screens/profile/ProfileScreen';
+import EditProfileScreen from '../screens/profile/EditProfileScreen';
 import FriendsScreen from '../screens/friends/FriendsScreen';
 import DMScreen from '../screens/friends/DMScreen';
 // AgentsScreenLive is the rebuilt multi-source fleet view (pinned defaults +
@@ -56,7 +57,7 @@ export default function MainNavigator() {
       <Stack.Screen name="CircleSettings" component={CircleSettingsScreen} />
       {/* Profile sub-screens */}
       <Stack.Screen name="Profile" component={ProfileScreen} />
-      <Stack.Screen name="EditProfile" component={ProfileScreen} />
+      <Stack.Screen name="EditProfile" component={EditProfileScreen} />
       <Stack.Screen name="Friends" component={FriendsScreen} />
       <Stack.Screen name="DMScreen" component={DMScreen} />
       <Stack.Screen name="Agents" component={AgentsScreen} />

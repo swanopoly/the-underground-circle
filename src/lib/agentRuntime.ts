@@ -17,6 +17,16 @@ import {
 } from './taskCapabilityProfiles';
 import { buildImpactDomainGuidance } from './impactDomains';
 import { buildTaskOwnershipClaim } from './circleIntegrations';
+import {
+  buildOpenSwanModeResponseContract,
+  getOpenSwanModePolicy,
+  resolveOpenSwanProfileForMode,
+} from './openswanModePolicy';
+import { buildOpenSwanObservedEvalSummary } from './openswanObservedEvals';
+import type { OpenSwanObservedEvalSummary } from './openswanObservedEvals';
+import { soulKeyForProfile } from './serviceProfileSouls';
+import { OPENSWAN_RUNTIME_PLAN_VERSION } from './openswanRuntimePlan';
+import type { PromptMemoryReference } from './memoryService';
 
 // ─── Unified Types ──────────────────────────────────────────────────────────
 
@@ -41,10 +51,12 @@ export type ArtifactKind =
   | 'image'
   | 'screenshot'
   | 'report'
+  | 'research_brief'
   | 'citation_bundle'
   | 'design_spec'
   | 'diff'
   | 'link'
+  | 'checklist'
   | 'classification'
   | 'translation'
   | 'test_result'
@@ -59,12 +71,14 @@ export interface AgentRunRequest {
   agentId?: string;
   agentName?: string;
   model?: string;
-  mode?: 'talk' | 'plan' | 'execute' | 'review' | 'research' | 'support' | 'design';
+  mode?: 'talk' | 'build' | 'plan' | 'execute' | 'review' | 'research' | 'support' | 'design';
   capabilityProfile?: string;
   context?: {
     fileContent?: string;
     fileName?: string;
     chatHistory?: string;
+    sessionArchiveContext?: string;
+    memoryRefs?: PromptMemoryReference[];
     taskId?: string;
     roomId?: string;
     replyTo?: string;
@@ -74,9 +88,16 @@ export interface AgentRunRequest {
 export interface AgentRunResult {
   success: boolean;
   response: string;
+  runId?: string | null;
   artifacts?: { kind: ArtifactKind; title: string; content?: string; url?: string }[];
   steps?: { kind: string; title: string; summary?: string }[];
   handoffSuggestion?: HandoffSuggestion | null;
+  modeOutcomeSummary?: {
+    headline: string;
+    bulletPoints: string[];
+    blockers: string[];
+  } | null;
+  observedEval?: OpenSwanObservedEvalSummary | null;
 }
 
 export interface HandoffSuggestion {
@@ -85,39 +106,6 @@ export interface HandoffSuggestion {
   description: string;
   targetSurface: AgentSurface;
   payload: Record<string, unknown>;
-}
-
-// ─── Mode Prompt Prefixes ───────────────────────────────────────────────────
-
-const MODE_PREFIXES: Record<string, string> = {
-  talk: '', // no prefix — natural conversation
-  plan:
-    '[PLAN MODE] Break down the request into clear phases with milestones. ' +
-    'Consider tradeoffs and dependencies. Output a structured plan with estimated effort.',
-  execute:
-    '[EXECUTE MODE] You are in execution mode. Provide concrete code, commands, ' +
-    'or step-by-step instructions that can be acted on immediately. Be precise.',
-  review:
-    '[REVIEW MODE] Review the provided work critically. Check for correctness, ' +
-    'edge cases, performance, and style. Be honest and constructive.',
-  research:
-    '[RESEARCH MODE] You are in RESEARCH MODE. Cite sources, compare options, ' +
-    'and produce a structured report. Include pros/cons tables where appropriate. ' +
-    'End with a clear recommendation.',
-  support:
-    '[SUPPORT MODE] You are in SUPPORT MODE. Answer the question clearly and directly. ' +
-    'If you cannot resolve it, suggest escalating to an admin or creating a task for follow-up.',
-  design:
-    '[DESIGN MODE] You are in DESIGN MODE. Describe the visual approach in detail. ' +
-    'List required assets. Propose a mockup structure with layout, colors, and typography. ' +
-    'Reference real tools (Figma, Tailwind, etc.) when relevant.',
-};
-
-/**
- * Returns the mode-specific system instruction prefix.
- */
-export function getModePromptPrefix(mode: string): string {
-  return MODE_PREFIXES[mode] || '';
 }
 
 // ─── Artifact Extraction ────────────────────────────────────────────────────
@@ -168,6 +156,66 @@ export function extractArtifacts(
   }
 
   return artifacts.length > 0 ? artifacts : undefined;
+}
+
+function buildModeOutcomeSummary(
+  mode: string,
+  response: string,
+  artifacts?: AgentRunResult['artifacts'],
+): AgentRunResult['modeOutcomeSummary'] {
+  if (!mode || mode === 'talk') return null;
+  const text = response || '';
+  const blockers = Array.from(new Set([
+    ...(text.match(/(?:blocked|failed|error|manual required|missing [^.:\n]+)/gi) || []).map((value) => value.trim()),
+  ])).slice(0, 4);
+  const artifactLabels = (artifacts || []).map((artifact) => `${artifact.kind}: ${artifact.title}`);
+
+  if (mode === 'research') {
+    return {
+      headline: `Research run produced ${(artifacts || []).length} artifact(s) and a recommendation-oriented response.`,
+      bulletPoints: artifactLabels.slice(0, 4),
+      blockers,
+    };
+  }
+  if (mode === 'design') {
+    return {
+      headline: `Design run focused on handoff-ready direction and previewable output.`,
+      bulletPoints: artifactLabels.slice(0, 4),
+      blockers,
+    };
+  }
+  if (mode === 'support') {
+    return {
+      headline: blockers.length > 0
+        ? `Support run identified ${blockers.length} blocker(s) and recovery guidance.`
+        : 'Support run produced an unblock-oriented response with no active blocker detected.',
+      bulletPoints: artifactLabels.slice(0, 4),
+      blockers,
+    };
+  }
+  return {
+    headline: `${mode} run completed with ${(artifacts || []).length} artifact(s).`,
+    bulletPoints: artifactLabels.slice(0, 4),
+    blockers,
+  };
+}
+
+function buildModeSummaryArtifacts(
+  mode: string,
+  summary: AgentRunResult['modeOutcomeSummary'],
+  response: string,
+): AgentRunResult['artifacts'] {
+  if (!summary || !mode) return undefined;
+  const content = [
+    `Headline: ${summary.headline}`,
+    summary.bulletPoints.length ? ['', 'Highlights:', ...summary.bulletPoints.map((item) => `- ${item}`)] : [],
+    summary.blockers.length ? ['', 'Blockers:', ...summary.blockers.map((item) => `- ${item}`)] : [],
+    ['', 'Response excerpt:', response.slice(0, 1600)],
+  ].flat().filter(Boolean).join('\n');
+  if (mode === 'research') return [{ kind: 'research_brief', title: 'Research Brief', content }];
+  if (mode === 'design') return [{ kind: 'design_spec', title: 'Design Handoff Summary', content }];
+  if (mode === 'support') return [{ kind: 'checklist', title: 'Support Recovery Checklist', content }];
+  return undefined;
 }
 
 // ─── Handoff Detection ──────────────────────────────────────────────────────
@@ -274,6 +322,30 @@ export async function executeAgentRun(
     mode = 'talk',
     context,
   } = request;
+  const modePolicy = getOpenSwanModePolicy(mode);
+  const routingSurface = surface === 'room_chat' ? 'room_chat' : 'main_chat';
+  const { analyzeMessageRouting } = await import('./messageRouting');
+  const routeAnalysis = analyzeMessageRouting(prompt, routingSurface);
+  const profileResolution = resolveOpenSwanProfileForMode(mode || 'talk', prompt, routingSurface);
+  const { resolveModelForProfile } = await import('./serviceProfileSouls');
+  const resolvedModel = resolveModelForProfile(
+    profileResolution.resolvedProfile,
+    model,
+    routeAnalysis.route.intent,
+  );
+  const activeTaskKind =
+    modePolicy.key === 'build' || modePolicy.key === 'execute'
+      ? 'build'
+      : modePolicy.key === 'review'
+        ? 'review'
+        : modePolicy.key === 'research'
+          ? 'research'
+          : modePolicy.key === 'support'
+            ? 'debug'
+            : modePolicy.key === 'design' || modePolicy.key === 'plan'
+              ? 'architect'
+              : null;
+  const activeSoulKey = soulKeyForProfile(profileResolution.resolvedProfile);
 
   // Track the run in the unified system (non-blocking — don't fail if DB is unavailable)
   let runId: string | null = null;
@@ -281,14 +353,26 @@ export async function executeAgentRun(
     const { createRun, updateRunStatus, addStep, addArtifact, buildMemoryContext } = await import('./agentRunSystem');
     const run = await createRun({
       circleId, userId, surface: surface as any, title: prompt.slice(0, 100),
-      goal: prompt.slice(0, 500), mode, model, roomId: context?.roomId, taskId: context?.taskId,
+      goal: prompt.slice(0, 500), mode, model: resolvedModel, roomId: context?.roomId, taskId: context?.taskId,
+      metadata: {
+        runtimePlanVersion: OPENSWAN_RUNTIME_PLAN_VERSION,
+        explicitMode: modePolicy.key,
+        modeLabel: modePolicy.label,
+        modeDescription: modePolicy.description,
+        modeOutcome: modePolicy.outcome,
+        selectedSessionProfile: profileResolution.selectedProfile,
+        resolvedSessionProfile: profileResolution.resolvedProfile,
+        autoDetectedSessionProfile: profileResolution.autoDetected,
+        routingIntent: routeAnalysis.route.intent,
+        routingComplexity: routeAnalysis.route.complexity,
+      },
     });
     if (run) runId = run.id;
   } catch {}
 
   try {
     // 1. Build the augmented prompt with memory context
-    const modePrefix = getModePromptPrefix(mode);
+    const modeContract = buildOpenSwanModeResponseContract(mode);
     const contextParts: string[] = [];
     let integrationPreflightSummary: string | null = null;
 
@@ -299,7 +383,7 @@ export async function executeAgentRun(
       if (memCtx) contextParts.push(memCtx);
     } catch {}
 
-    const inferredProfileKey = request.capabilityProfile || inferTaskCapabilityProfile({
+    const inferredProfileKey = request.capabilityProfile || modePolicy.preferredCapabilityProfile || inferTaskCapabilityProfile({
       title: prompt.slice(0, 160),
       description: context?.replyTo || context?.chatHistory || context?.fileName || '',
     });
@@ -368,12 +452,23 @@ export async function executeAgentRun(
     }
 
     const fullPrompt = [
-      modePrefix,
+      modeContract,
       ...contextParts,
       prompt,
     ]
       .filter(Boolean)
       .join('\n\n');
+
+    const { resolveOpenSwanSkills } = await import('./openswanSkills');
+    const skillResolution = await resolveOpenSwanSkills({
+      circleId,
+      userId,
+      soulKey: activeSoulKey,
+      mode: modePolicy.key,
+      taskKind: activeTaskKind,
+      query: fullPrompt,
+      maxSkills: modePolicy.key === 'research' ? 8 : 6,
+    });
 
     // 2. Build SwanBot context
     const swanContext: SwanBotContext = {
@@ -382,8 +477,14 @@ export async function executeAgentRun(
       userName,
       agentId: request.agentId,
       agentName: request.agentName,
-      model: model || undefined,
+      model: resolvedModel || undefined,
       chatHistory: context?.chatHistory,
+      sessionArchiveContext: context?.sessionArchiveContext,
+      modeKey: modePolicy.key,
+      taskKind: activeTaskKind,
+      sessionProfile: profileResolution.resolvedProfile,
+      resolvedSkills: skillResolution.skills,
+      resolvedSkillsPromptBlock: skillResolution.promptBlock,
     };
 
     // Mark run as running
@@ -396,6 +497,45 @@ export async function executeAgentRun(
 
     // 4. Extract artifacts from the response
     const artifacts = extractArtifacts(response);
+    const modeOutcomeSummary = buildModeOutcomeSummary(mode, response, artifacts);
+    const modeSummaryArtifacts = buildModeSummaryArtifacts(mode, modeOutcomeSummary, response) || [];
+    const persistedArtifacts = [...(artifacts || []), ...modeSummaryArtifacts];
+    const observedEval = buildOpenSwanObservedEvalSummary({
+      run: {
+        status: 'completed',
+        mode: mode || 'talk',
+        provider: 'openswan',
+        metadata: {
+          explicitMode: modePolicy.key,
+          resolvedSessionProfile: profileResolution.resolvedProfile,
+          routingIntent: routeAnalysis.route.intent,
+          modeOutcomeSummary,
+        },
+      },
+      artifacts: persistedArtifacts.map((artifact) => ({
+        artifact_kind: artifact.kind,
+        title: artifact.title,
+      })),
+      responseText: response,
+    });
+    void import('./memoryService')
+      .then(({ recordArchiveDerivedMemorySuccess, recordArchiveDerivedMemoryWeakSignal }) => Promise.all([
+        recordArchiveDerivedMemorySuccess({
+          memoryReferences: context?.memoryRefs || [],
+          observedEval,
+          userId,
+          source: 'agent_runtime_passive_success',
+          runId,
+        }),
+        recordArchiveDerivedMemoryWeakSignal({
+          memoryReferences: context?.memoryRefs || [],
+          observedEval,
+          userId,
+          source: 'agent_runtime_passive_weak_signal',
+          runId,
+        }),
+      ]))
+      .catch(() => {});
 
     // 5. Detect handoff signals
     const handoffSuggestion = detectHandoff(response, surface);
@@ -410,11 +550,11 @@ export async function executeAgentRun(
       }] : []),
       { kind: 'inference', title: 'AI response received', summary: `${response.length} chars` },
     ];
-    if (artifacts && artifacts.length > 0) {
+    if (persistedArtifacts.length > 0) {
       steps.push({
         kind: 'extract',
         title: 'Artifacts extracted',
-        summary: `${artifacts.length} artifact(s): ${artifacts.map(a => a.kind).join(', ')}`,
+        summary: `${persistedArtifacts.length} artifact(s): ${persistedArtifacts.map(a => a.kind).join(', ')}`,
       });
     }
     if (handoffSuggestion) {
@@ -428,23 +568,50 @@ export async function executeAgentRun(
     // 7. Record to unified run system
     if (runId) {
       try {
-        const { updateRunStatus, addStep: addRunStep, addArtifact: addRunArtifact } = await import('./agentRunSystem');
+        const { updateRunStatus, addStep: addRunStep, addArtifact: addRunArtifact, mergeRunMetadata } = await import('./agentRunSystem');
         await addRunStep({ runId, circleId, stepIndex: 0, stepKind: 'message', title: 'Response', body: response.slice(0, 5000) });
-        if (artifacts) {
-          for (const art of artifacts) {
+        if (persistedArtifacts.length > 0) {
+          for (const art of persistedArtifacts) {
             await addRunArtifact({ runId, circleId, artifactKind: art.kind as any, title: art.title, content: art.content, url: art.url });
           }
         }
+        await mergeRunMetadata(runId, {
+          runtimePlanVersion: OPENSWAN_RUNTIME_PLAN_VERSION,
+          capabilityProfile: inferredProfileKey,
+          impactDomain: inferredProfile?.impactDomain || null,
+          ownershipClaim,
+          integrationPreflightSummary,
+          explicitMode: modePolicy.key,
+          modeLabel: modePolicy.label,
+          modeDescription: modePolicy.description,
+        modeOutcome: modePolicy.outcome,
+        modeResponseContract: modePolicy.responseContract || null,
+        selectedSessionProfile: profileResolution.selectedProfile,
+          resolvedSessionProfile: profileResolution.resolvedProfile,
+          autoDetectedSessionProfile: profileResolution.autoDetected,
+          routingIntent: routeAnalysis.route.intent,
+          routingComplexity: routeAnalysis.route.complexity,
+          activeSkills: skillResolution.skills.map((skill) => ({
+            name: skill.name,
+            displayName: skill.displayName,
+            source: skill.source,
+          })),
+          modeOutcomeSummary,
+          observedEval,
+        });
         await updateRunStatus(runId, 'completed');
       } catch {}
     }
 
     return {
       success: true,
+      runId,
       response,
-      artifacts,
+      artifacts: persistedArtifacts,
       steps,
       handoffSuggestion,
+      modeOutcomeSummary,
+      observedEval,
     };
   } catch (err: any) {
     console.error('[AgentRuntime] executeAgentRun failed:', err);
@@ -453,8 +620,11 @@ export async function executeAgentRun(
     }
     return {
       success: false,
+      runId,
       response: `Something went wrong: ${err?.message || 'Unknown error'}`,
       handoffSuggestion: null,
+      modeOutcomeSummary: null,
+      observedEval: null,
     };
   }
 }

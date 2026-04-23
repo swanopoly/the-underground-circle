@@ -7,6 +7,7 @@
 // Deploy: npx supabase functions deploy llm-proxy
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
+import { computeCostUsd, type UsageBreakdown } from "../_claude/anthropic.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -113,9 +114,11 @@ const MODEL_COSTS: Record<string, [number, number]> = {
   "gemini-2.5-pro": [1.25, 10.00],
   "gemini-2.5-flash": [0.15, 0.60],
   // Anthropic
-  "claude-opus-4-6": [15.00, 75.00],
+  "claude-opus-4-7": [5.00, 25.00],
+  "claude-opus-4-6": [5.00, 25.00],
   "claude-sonnet-4-6": [3.00, 15.00],
-  "claude-haiku-4-5-20251001": [0.80, 4.00],
+  "claude-haiku-4-5": [1.00, 5.00],
+  "claude-haiku-4-5-20251001": [1.00, 5.00],
   // Groq (free tier / very cheap)
   "llama-3.3-70b-versatile": [0.59, 0.79],
   "mixtral-8x7b-32768": [0.24, 0.24],
@@ -310,14 +313,16 @@ async function callAnthropic(
   const chatMessages = messages.filter((m) => m.role !== "system");
   const systemPrompt = systemMessages.map((m) => m.content).join("\n\n");
 
-  // Map model shortcuts to full IDs
+  // Map model shortcuts to full IDs. Canonical short form (no date suffixes)
+  // per Anthropic. `claude-opus` follows the latest opus — currently 4.7.
   const MODEL_MAP: Record<string, string> = {
+    "claude-opus-4-7": "claude-opus-4-7",
     "claude-opus-4-6": "claude-opus-4-6",
     "claude-sonnet-4-6": "claude-sonnet-4-6",
-    "claude-haiku-4-5": "claude-haiku-4-5-20251001",
-    "claude-haiku": "claude-haiku-4-5-20251001",
+    "claude-haiku-4-5": "claude-haiku-4-5",
+    "claude-haiku": "claude-haiku-4-5",
     "claude-sonnet": "claude-sonnet-4-6",
-    "claude-opus": "claude-opus-4-6",
+    "claude-opus": "claude-opus-4-7",
   };
   const resolvedModel = MODEL_MAP[model] || model;
 
@@ -331,7 +336,11 @@ async function callAnthropic(
   };
 
   if (systemPrompt) {
-    body.system = systemPrompt;
+    // cache_control so BYO-proxy callers with stable system prompts get
+    // ephemeral cache reads on repeat calls.
+    body.system = [
+      { type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } },
+    ];
   }
 
   // Only set temperature for non-thinking models
@@ -356,23 +365,29 @@ async function callAnthropic(
   }
 
   const data = await res.json();
-  const usage = data.usage || {};
-  const inputTokens = usage.input_tokens || 0;
-  const outputTokens = usage.output_tokens || 0;
-  const cacheCreation = usage.cache_creation_input_tokens || 0;
-  const cacheRead = usage.cache_read_input_tokens || 0;
+  const u = data.usage || {};
+  const usage: UsageBreakdown = {
+    uncachedIn:  u.input_tokens                ?? 0,
+    cacheCreate: u.cache_creation_input_tokens ?? 0,
+    cacheRead:   u.cache_read_input_tokens     ?? 0,
+    output:      u.output_tokens               ?? 0,
+  };
 
   return {
     response: data.content?.[0]?.text || "No response generated.",
     usage: {
       model: resolvedModel,
       provider: "anthropic",
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-      cache_creation_tokens: cacheCreation,
-      cache_read_tokens: cacheRead,
-      total_tokens: inputTokens + outputTokens,
-      estimated_cost: estimateCost(resolvedModel, inputTokens, outputTokens),
+      // `input_tokens` stays the uncached count for backwards-compat with
+      // BYO-key dashboards that sum `input_tokens + output_tokens`.
+      input_tokens:          usage.uncachedIn,
+      output_tokens:         usage.output,
+      cache_creation_tokens: usage.cacheCreate,
+      cache_read_tokens:     usage.cacheRead,
+      total_tokens:          usage.uncachedIn + usage.cacheCreate + usage.cacheRead + usage.output,
+      // Cache-aware cost via the shared pricing table. Replaces the old
+      // `estimateCost(...)` call that ignored cache tokens entirely.
+      estimated_cost:        computeCostUsd(resolvedModel, usage),
     },
   };
 }

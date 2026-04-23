@@ -10,6 +10,7 @@ import {
   Platform,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { safeGetUser } from '../../lib/authSession';
 import { User, Achievement } from '../../types';
 import Card from '../../components/Card';
 import Button from '../../components/Button';
@@ -45,7 +46,7 @@ export default function EditProfileScreen({ navigation }: any) {
   }, []);
 
   const loadProfile = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
+    const { value: user } = await safeGetUser();
     if (!user) return;
 
     const { data: profileData } = await supabase
@@ -65,7 +66,7 @@ export default function EditProfileScreen({ navigation }: any) {
   };
 
   const loadAchievements = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
+    const { value: user } = await safeGetUser();
     if (!user) return;
 
     const [allAchievements, userAchs] = await Promise.all([

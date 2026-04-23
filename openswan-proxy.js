@@ -54,13 +54,15 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Build forwarded headers, injecting auth token if missing or empty
+  // Build forwarded headers, injecting auth token.
+  // When the local config token is loaded we always overwrite — the gateway
+  // is a trusted local process and stale client tokens (from prior installs
+  // or from the browser's cached OpenSwanConfig) otherwise survive the hop
+  // and produce 401s that `authFailedEndpointCache` then latches on the
+  // client side, disabling sessions_list for the rest of the session.
   const fwdHeaders = { ...req.headers, host: `${GATEWAY_HOST}:${GATEWAY_PORT}` };
   if (GATEWAY_TOKEN) {
-    const auth = fwdHeaders['authorization'] || '';
-    if (!auth || auth === 'Bearer' || auth === 'Bearer ') {
-      fwdHeaders['authorization'] = `Bearer ${GATEWAY_TOKEN}`;
-    }
+    fwdHeaders['authorization'] = `Bearer ${GATEWAY_TOKEN}`;
   }
 
   const options = {
@@ -96,8 +98,18 @@ wss.on('connection', (clientWs, req) => {
   const targetUrl = `ws://${GATEWAY_HOST}:${GATEWAY_PORT}${req.url}`;
   console.log(`[proxy] WS connect → ${targetUrl}`);
 
+  // Same token-injection behavior as the HTTP path. Without this, the WS
+  // upgrade lands on the gateway with whatever stale/empty token the client
+  // sent, and the gateway either rejects the upgrade or silently 403s on
+  // the first message — the user just sees "connection closed" with no
+  // auth error to act on.
+  const wsHeaders = { ...req.headers, host: `${GATEWAY_HOST}:${GATEWAY_PORT}` };
+  if (GATEWAY_TOKEN) {
+    wsHeaders['authorization'] = `Bearer ${GATEWAY_TOKEN}`;
+  }
+
   const gatewayWs = new WebSocket(targetUrl, {
-    headers: { ...req.headers, host: `${GATEWAY_HOST}:${GATEWAY_PORT}` },
+    headers: wsHeaders,
   });
 
   // Forward client → gateway

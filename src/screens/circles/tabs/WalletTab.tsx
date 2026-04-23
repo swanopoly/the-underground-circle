@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, Platform } from 'react-native';
 import { supabase } from '../../../lib/supabase';
+import { safeGetUser } from '../../../lib/authSession';
+import { showConfirm } from '../../../lib/alert';
 import ConnectWalletScreen from '../../wallet/ConnectWalletScreen';
 import WalletDashboard from '../../wallet/WalletDashboard';
 
@@ -22,7 +24,7 @@ export default function WalletTab({ circleId }: Props) {
   const checkWallet = async () => {
     setForceDisconnected(false);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { value: user } = await safeGetUser();
       if (!user) { setLoading(false); return; }
       const { data } = await supabase
         .from('profiles')
@@ -44,6 +46,14 @@ export default function WalletTab({ circleId }: Props) {
   };
 
   const handleDisconnect = async () => {
+    const ok = await showConfirm({
+      title: 'Disconnect wallet?',
+      message: 'You\'ll lose access to any wallet-gated features in this circle until you reconnect. Any signed keys stay in your browser extension until you revoke them there.',
+      confirmLabel: 'Disconnect',
+      cancelLabel: 'Stay connected',
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       // 1. Disconnect browser wallet extensions first
       if (Platform.OS === 'web') {
@@ -63,7 +73,7 @@ export default function WalletTab({ circleId }: Props) {
       }
 
       // 2. Clear Supabase
-      const { data: { user } } = await supabase.auth.getUser();
+      const { value: user } = await safeGetUser();
       if (user) {
         await supabase.from('profiles').update({
           wallet_address: null,

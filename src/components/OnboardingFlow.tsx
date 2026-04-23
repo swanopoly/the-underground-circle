@@ -42,9 +42,9 @@ export default function OnboardingFlow({ userId, circleId, onComplete }: Props) 
   const totalSteps = 3;
 
   return (
-    <Modal transparent animationType="fade" visible>
-      <View style={styles.overlay}>
-        <View style={styles.modal}>
+    <Modal transparent animationType="fade" visible onRequestClose={handleFinish}>
+      <Pressable style={styles.overlay} onPress={handleFinish}>
+        <Pressable style={styles.modal} onPress={(e) => e.stopPropagation()}>
           <View style={styles.stepRow}>
             {Array.from({ length: totalSteps }).map((_, i) => (
               <View
@@ -93,8 +93,8 @@ export default function OnboardingFlow({ userId, circleId, onComplete }: Props) 
             </View>
           )}
 
-        </View>
-      </View>
+        </Pressable>
+      </Pressable>
     </Modal>
   );
 }

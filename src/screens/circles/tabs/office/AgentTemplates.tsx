@@ -160,9 +160,9 @@ export default function AgentTemplates({ circleId, onClose, onDeployed }: Props)
       </ScrollView>
 
       {/* Deploy Modal */}
-      <Modal visible={!!selected} transparent animationType="fade">
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalContent}>
+      <Modal visible={!!selected} transparent animationType="fade" onRequestClose={() => setSelected(null)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setSelected(null)}>
+          <Pressable style={styles.modalContent} onPress={(e) => e.stopPropagation()}>
             {success ? (
               <View style={styles.successView}>
                 <Text style={styles.successIcon}>✓</Text>
@@ -240,8 +240,8 @@ export default function AgentTemplates({ circleId, onClose, onDeployed }: Props)
                 </View>
               </>
             )}
-          </View>
-        </View>
+          </Pressable>
+        </Pressable>
       </Modal>
     </View>
   );

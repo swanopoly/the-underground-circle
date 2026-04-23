@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -10,6 +10,8 @@ import {
   RefreshControl,
 } from 'react-native';
 import { supabase } from '../../../lib/supabase';
+import { safeGetUser } from '../../../lib/authSession';
+import { usePaginated } from '../../../hooks/usePaginated';
 import { showAlert } from '../../../lib/alert';
 import Button from '../../../components/Button';
 import Card from '../../../components/Card';
@@ -40,52 +42,59 @@ function daysRemaining(endDate: string): number {
   return Math.max(0, Math.ceil((end.getTime() - now.getTime()) / 86400000));
 }
 
+const CHALLENGES_PAGE_SIZE = 25;
+
 export default function ChallengesTab({ circleId }: { circleId: string }) {
-  const [challenges, setChallenges] = useState<any[]>([]);
   const [participants, setParticipants] = useState<Record<string, ChallengeParticipant[]>>({});
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
 
-  const fetchChallenges = useCallback(async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) setCurrentUserId(user.id);
+  useEffect(() => {
+    let cancelled = false;
+    safeGetUser().then(({ value }) => {
+      if (!cancelled && value) setCurrentUserId(value.id);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
-    const { data, error } = await supabase
-      .from('challenges')
-      .select('*')
-      .eq('circle_id', circleId)
-      .order('created_at', { ascending: false })
-      .limit(50);
+  const page = usePaginated<any>({
+    key: ['challenges', circleId],
+    pageSize: CHALLENGES_PAGE_SIZE,
+    fetchPage: async (from, to) => {
+      const { data, error } = await supabase
+        .from('challenges')
+        .select('*')
+        .eq('circle_id', circleId)
+        .order('created_at', { ascending: false })
+        .range(from, to);
+      return { rows: data || [], error: error || undefined };
+    },
+  });
 
-    if (error) {
-      console.error('Error fetching challenges:', error);
-      return;
-    }
+  const challenges = page.rows;
 
-    setChallenges(data || []);
-
-    // Fetch participants for all challenges
-    const ids = (data || []).map((c: any) => c.id);
-    if (ids.length > 0) {
+  // Refresh participants whenever the challenge list changes. Keep this
+  // separate from pagination — we always want participants for every visible
+  // challenge, not just the latest page.
+  useEffect(() => {
+    const ids = challenges.map((c: any) => c.id);
+    if (ids.length === 0) { setParticipants({}); return; }
+    let cancelled = false;
+    (async () => {
       const { data: parts } = await supabase
         .from('challenge_participants')
         .select('*, user:profiles(username, display_name)')
-        .in('challenge_id', ids)
-        .limit(50);
-
+        .in('challenge_id', ids);
+      if (cancelled) return;
       const grouped: Record<string, ChallengeParticipant[]> = {};
       for (const p of parts || []) {
         if (!grouped[p.challenge_id]) grouped[p.challenge_id] = [];
         grouped[p.challenge_id].push(p);
       }
       setParticipants(grouped);
-    }
-  }, [circleId]);
-
-  useEffect(() => {
-    fetchChallenges();
-  }, [fetchChallenges]);
+    })();
+    return () => { cancelled = true; };
+  }, [challenges]);
 
   const joinChallenge = async (challengeId: string) => {
     if (!currentUserId) return;
@@ -101,17 +110,15 @@ export default function ChallengesTab({ circleId }: { circleId: string }) {
       }
       return;
     }
-    fetchChallenges();
+    await page.refresh();
   };
 
   const onRefresh = async () => {
-    setRefreshing(true);
-    await fetchChallenges();
-    setRefreshing(false);
+    await page.refresh();
   };
 
-  const active = challenges.filter((c) => c.status === 'active');
-  const completed = challenges.filter((c) => c.status === 'completed');
+  const active = challenges.filter((c: any) => c.status === 'active');
+  const completed = challenges.filter((c: any) => c.status === 'completed');
 
   const isJoined = (challengeId: string) => {
     return (participants[challengeId] || []).some((p) => p.user_id === currentUserId);
@@ -128,7 +135,7 @@ export default function ChallengesTab({ circleId }: { circleId: string }) {
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.list}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#fff" />
+          <RefreshControl refreshing={page.loading} onRefresh={onRefresh} tintColor="#fff" />
         }
         ListHeaderComponent={
           <View>
@@ -246,7 +253,7 @@ export default function ChallengesTab({ circleId }: { circleId: string }) {
           circleId={circleId}
           currentUserId={currentUserId}
           onClose={() => setShowCreate(false)}
-          onCreated={() => { setShowCreate(false); fetchChallenges(); }}
+          onCreated={() => { setShowCreate(false); void page.refresh(); }}
         />
       )}
     </View>

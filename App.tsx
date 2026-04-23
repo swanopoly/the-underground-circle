@@ -1,4 +1,7 @@
 import './src/lib/animationPatch'; // Must be first — patches Animated.loop for web
+import './src/lib/pixelDesign'; // Side effect: injects the global system font stack + :root CSS vars on web
+import { installErrorReporter } from './src/lib/errorReporter';
+installErrorReporter(); // Register global unhandled-rejection / error handlers
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { StatusBar, View, Text, StyleSheet, Animated, Platform } from 'react-native';
 import { NavigationContainer, useNavigation, LinkingOptions } from '@react-navigation/native';
@@ -365,7 +368,7 @@ export default function App() {
     ? initialNavState as any : undefined;
 
   return (
-    <ErrorBoundary>
+    <ErrorBoundary scope="app">
       <ToastProvider>
         <NavigationContainer
           linking={linking}

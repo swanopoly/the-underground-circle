@@ -7,8 +7,8 @@
  * - search, edit, prune, and consolidation
  * - approve/pin/promote/forget actions on learned memory
  */
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { View, Text, Pressable, ScrollView, TextInput, StyleSheet, Platform, ActivityIndicator } from 'react-native';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { View, Text, Pressable, ScrollView, TextInput, StyleSheet, Platform, ActivityIndicator, Animated } from 'react-native';
 import type { MemoryEntry } from '../../lib/agentRunSystem';
 import { supabase } from '../../lib/supabase';
 import {
@@ -20,21 +20,38 @@ import {
   softDeleteMemory,
 } from '../../lib/memoryActions';
 import { routeExistingMemoryToSoulKnowledge } from '../../lib/memoryService';
+import {
+  deriveChatSessionArchiveRecommendations,
+  loadChatSessionArchive,
+  searchChatSessionArchive,
+  setChatSessionArchiveRecommendationState,
+  type ChatSessionArchiveRecommendation,
+  type ChatSessionArchiveRecord,
+  type ChatSessionArchiveSearchMatch,
+} from '../../lib/chatSessionArchive';
+// VS Code Dark+ tokens — this surface is the IDE-feel "developer
+// console" flavor, not the default rounded-dark UC style. All colors
+// flow through `vsCodeTheme.ts` so a theme swap (Monokai, etc.) only
+// touches one file.
+import { bg, border, text, accent, radius, font, shadow, kindAccent } from '../../lib/vsCodeTheme';
 
-const MONO = 'monospace';
+const MONO = font.mono;
 
+// Legacy kind-color map kept for existing callers that import it as a
+// raw table. New code should prefer `kindAccent()` from vsCodeTheme.
 const KIND_COLORS: Record<string, string> = {
-  preference: '#a855f7',
-  fact: '#22d3ee',
-  decision: '#f59e0b',
-  finding: '#22c55e',
-  instruction: '#ec4899',
-  policy: '#3b82f6',
-  context: '#888888',
+  preference:  accent.purple,
+  fact:        accent.cyan,
+  decision:    accent.yellow,
+  finding:     accent.green,
+  instruction: accent.purple,
+  policy:      accent.blue,
+  context:     text.muted,
 };
 
 interface Props {
   circleId: string;
+  threadId?: string | null;
   userId?: string;
   accentColor?: string;
   onClose: () => void;
@@ -89,7 +106,22 @@ function getAllMemories(memories: MemoryBuckets): MemoryEntry[] {
   return [...memories.circle, ...memories.user, ...memories.session];
 }
 
-export default function MemoryViewer({ circleId, userId, accentColor = '#22d3ee', onClose }: Props) {
+function formatArchiveEventTime(timestamp: number): string {
+  try {
+    return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+}
+
+function archiveLineageLabel(mem: MemoryEntry): string | null {
+  const source = String(mem.metadata?.source || '');
+  if (source === 'thread_archive_match') return 'From thread archive match';
+  if (source === 'thread_archive_recommendation') return 'From archive suggestion';
+  return null;
+}
+
+export default function MemoryViewer({ circleId, threadId, userId, accentColor = '#22d3ee', onClose }: Props) {
   const [memories, setMemories] = useState<MemoryBuckets>({ circle: [], user: [], session: [], total: 0 });
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<ViewerTab>('inbox');
@@ -102,6 +134,37 @@ export default function MemoryViewer({ circleId, userId, accentColor = '#22d3ee'
   const [newMemoryTitle, setNewMemoryTitle] = useState('');
   const [newMemoryContent, setNewMemoryContent] = useState('');
   const [savingNote, setSavingNote] = useState(false);
+  const [sessionArchive, setSessionArchive] = useState<ChatSessionArchiveRecord | null>(null);
+  const [archiveMatches, setArchiveMatches] = useState<ChatSessionArchiveSearchMatch[]>([]);
+  const [archiveRecommendations, setArchiveRecommendations] = useState<ChatSessionArchiveRecommendation[]>([]);
+
+  // ── Mount animation — same motion language as the chat-bottom
+  // popups (fade + snap via spring). Backdrop has its own quick fade
+  // so the scrim appears BEFORE the console to anchor the eye.
+  const backdropOpacity = useRef(new Animated.Value(0)).current;
+  const consoleOpacity = useRef(new Animated.Value(0)).current;
+  const consoleScale = useRef(new Animated.Value(0.97)).current;
+  const consoleTranslateY = useRef(new Animated.Value(8)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(backdropOpacity, { toValue: 1, duration: 120, useNativeDriver: false }),
+      Animated.timing(consoleOpacity,  { toValue: 1, duration: 160, useNativeDriver: false }),
+      Animated.spring(consoleScale,     { toValue: 1, tension: 170, friction: 14, useNativeDriver: false }),
+      Animated.spring(consoleTranslateY,{ toValue: 0, tension: 170, friction: 14, useNativeDriver: false }),
+    ]).start();
+    // Only on mount; closing unmounts us so no exit animation needed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Escape-to-close on web — matches VS Code's modal / command palette
+  // dismissal pattern. No-op on native (no DOM).
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    const onKey = (ev: KeyboardEvent) => { if (ev.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -109,13 +172,16 @@ export default function MemoryViewer({ circleId, userId, accentColor = '#22d3ee'
       const { getUserMemories } = await import('../../lib/agentMemory');
       const data = await getUserMemories(circleId, userId);
       setMemories(data);
+      const archive = await loadChatSessionArchive(circleId, threadId).catch(() => null);
+      setSessionArchive(archive);
+      setArchiveRecommendations(deriveChatSessionArchiveRecommendations(archive, 6));
       try {
         const { getMemoryHealthReport } = await import('../../lib/memoryConsolidation');
         setHealthReport(await getMemoryHealthReport(circleId));
       } catch {}
     } catch {}
     setLoading(false);
-  }, [circleId, userId]);
+  }, [circleId, threadId, userId]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -154,11 +220,16 @@ export default function MemoryViewer({ circleId, userId, accentColor = '#22d3ee'
   };
 
   const handleSearch = async () => {
-    if (!searchQuery.trim()) { setSearchResults(null); return; }
+    if (!searchQuery.trim()) {
+      setSearchResults(null);
+      setArchiveMatches([]);
+      return;
+    }
     try {
       const { searchMemories } = await import('../../lib/agentMemory');
       const results = await searchMemories(circleId, searchQuery.trim());
       setSearchResults(results);
+      setArchiveMatches(searchChatSessionArchive(sessionArchive, searchQuery.trim(), 10));
     } catch {}
   };
 
@@ -184,6 +255,110 @@ export default function MemoryViewer({ circleId, userId, accentColor = '#22d3ee'
       await load();
     } catch {}
     setSavingNote(false);
+  };
+
+  const handleArchivePromote = async (match: ChatSessionArchiveSearchMatch, scope: 'circle' | 'user') => {
+    setSavingNote(true);
+    try {
+      const { saveMemory } = await import('../../lib/agentRunSystem');
+      const saved = await saveMemory({
+        scope,
+        circleId,
+        userId,
+        memoryKind: match.kind === 'event' ? 'finding' : match.kind === 'touch' ? 'context' : 'fact',
+        title: `Archive: ${match.title.replace(/\s+/g, ' ').trim().slice(0, 80) || 'Thread archive match'}`,
+        content: [
+          `Archive match kind: ${match.kind}`,
+          `Source thread: ${threadId || 'main'}`,
+          `Summary: ${match.title.replace(/\s+/g, ' ').trim().slice(0, 80) || 'Thread archive match'}`,
+          `Excerpt: ${match.excerpt}`,
+        ].join('\n'),
+        visibility: scope === 'circle' ? 'circle_shared' : 'private',
+        importance: 0.68,
+        retrievalMode: 'on_demand',
+        sourceSurface: 'main_chat',
+        metadata: {
+          source: 'thread_archive_match',
+          archiveMatchKind: match.kind,
+          archiveMatchId: match.id,
+          archiveThreadId: threadId || 'main',
+          archiveTimestamp: match.timestamp || null,
+        },
+      } as any);
+      if (saved) {
+        await recordMemoryFeedback({
+          memoryId: saved.id,
+          action: 'accepted',
+          note: `Accepted archive ${match.kind} match from thread ${threadId || 'main'}`,
+          userId,
+          source: 'thread_archive_match',
+        });
+      }
+      await load();
+    } catch {}
+    setSavingNote(false);
+  };
+
+  const handleArchiveRecommendationPromote = async (
+    recommendation: ChatSessionArchiveRecommendation,
+    scope: 'circle' | 'user',
+  ) => {
+    setSavingNote(true);
+    try {
+      const { saveMemory } = await import('../../lib/agentRunSystem');
+      const saved = await saveMemory({
+        scope,
+        circleId,
+        userId,
+        memoryKind: recommendation.kind === 'failure_pattern' ? 'finding' : 'instruction',
+        title: `Archive pattern: ${recommendation.title}`.slice(0, 120),
+        content: recommendation.content,
+        visibility: scope === 'circle' ? 'circle_shared' : 'private',
+        importance: recommendation.confidence === 'high' ? 0.8 : 0.72,
+        retrievalMode: 'on_demand',
+        sourceSurface: 'main_chat',
+        metadata: {
+          source: 'thread_archive_recommendation',
+          archiveRecommendationId: recommendation.id,
+          archiveRecommendationKind: recommendation.kind,
+          archiveRecommendationConfidence: recommendation.confidence,
+          archiveThreadId: threadId || 'main',
+          archiveRecommendationSources: recommendation.sources.slice(0, 6),
+        },
+      } as any);
+      if (saved) {
+        await recordMemoryFeedback({
+          memoryId: saved.id,
+          action: 'accepted',
+          note: `Accepted archive recommendation: ${recommendation.title}`,
+          userId,
+          source: 'thread_archive_recommendation',
+        });
+      }
+      await setChatSessionArchiveRecommendationState({
+        circleId,
+        threadId,
+        recommendationId: recommendation.id,
+        status: scope === 'circle' ? 'saved_shared' : 'saved_private',
+        memoryId: saved?.id || null,
+      });
+      setArchiveRecommendations((prev) => prev.filter((entry) => entry.id !== recommendation.id));
+      await load();
+    } catch {}
+    setSavingNote(false);
+  };
+
+  const handleArchiveRecommendationDismiss = async (recommendation: ChatSessionArchiveRecommendation) => {
+    try {
+      await setChatSessionArchiveRecommendationState({
+        circleId,
+        threadId,
+        recommendationId: recommendation.id,
+        status: 'dismissed',
+      });
+      setArchiveRecommendations((prev) => prev.filter((entry) => entry.id !== recommendation.id));
+      await load();
+    } catch {}
   };
 
   const handleInboxAccept = async (mem: MemoryEntry) => {
@@ -272,6 +447,9 @@ export default function MemoryViewer({ circleId, userId, accentColor = '#22d3ee'
           <Text style={s.cardDate}>{new Date(mem.updated_at || mem.created_at).toLocaleDateString()}</Text>
         </View>
         <Text style={s.cardTitle}>{mem.title}</Text>
+        {archiveLineageLabel(mem) ? (
+          <Text style={s.cardSubtext}>{archiveLineageLabel(mem)}</Text>
+        ) : null}
         {String(mem.metadata?.latestTask || '').trim() ? (
           <Text style={s.cardSubtext}>Focus: {String(mem.metadata?.latestTask)}</Text>
         ) : null}
@@ -354,7 +532,27 @@ export default function MemoryViewer({ circleId, userId, accentColor = '#22d3ee'
   };
 
   return (
-    <View style={s.container}>
+    // Pop-up console — fixed-position backdrop + centered console. Covers
+    // most of the viewport so the scroll area is big enough to work in.
+    // Click backdrop to dismiss, or press Escape (web). The backdrop +
+    // console have independent Animated values so the scrim appears just
+    // before the console snaps into place.
+    <View style={s.backdrop}>
+      <Animated.View style={[StyleSheet.absoluteFillObject, { opacity: backdropOpacity }]}>
+        <Pressable
+          onPress={onClose}
+          accessibilityLabel="Dismiss memory console"
+          style={s.backdropHit}
+        />
+      </Animated.View>
+      <Animated.View style={[
+        s.container,
+        Platform.OS === 'web' ? ({ transformOrigin: 'center center' } as any) : null,
+        {
+          opacity: consoleOpacity,
+          transform: [{ scale: consoleScale }, { translateY: consoleTranslateY }],
+        },
+      ]}>
       <View style={s.header}>
         <View style={s.headerCopy}>
           <Text style={s.headerLabel}>OPENSWAN MEMORY</Text>
@@ -391,6 +589,124 @@ export default function MemoryViewer({ circleId, userId, accentColor = '#22d3ee'
         </View>
       </View>
 
+      {threadId && sessionArchive ? (
+        <View style={s.archivePanel}>
+          <View style={s.archiveHeader}>
+            <Text style={s.sectionLabel}>THREAD ARCHIVE</Text>
+            <Text style={s.archiveMeta}>
+              {sessionArchive.messages.length} msgs · {sessionArchive.events.length} events · {sessionArchive.touched.length} touches
+            </Text>
+          </View>
+          {sessionArchive.touched.length > 0 ? (
+            <Text style={s.archiveTouched}>
+              {sessionArchive.touched.slice(-12).join(' · ')}
+            </Text>
+          ) : null}
+          <View style={s.archiveColumns}>
+            <View style={s.archiveColumn}>
+              <Text style={s.archiveColumnTitle}>RECENT EVENTS</Text>
+              {sessionArchive.events.slice(-4).reverse().map((event) => (
+                <View key={event.id} style={s.archiveItem}>
+                  <Text style={s.archiveItemTitle}>
+                    [{event.kind}] {event.summary}
+                  </Text>
+                  <Text style={s.archiveItemMeta}>{formatArchiveEventTime(event.timestamp)}</Text>
+                </View>
+              ))}
+            </View>
+            <View style={s.archiveColumn}>
+              <Text style={s.archiveColumnTitle}>RECENT TRANSCRIPT</Text>
+              {sessionArchive.messages.slice(-3).reverse().map((message) => (
+                <View key={message.messageId} style={s.archiveItem}>
+                  <Text style={s.archiveItemTitle}>
+                    {(message.role === 'assistant' ? (message.userName || 'SwanBot') : (message.userName || 'User')).toUpperCase()}
+                  </Text>
+                  <Text style={s.archiveItemBody}>{message.content.slice(0, 160)}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+        </View>
+      ) : null}
+
+      {archiveRecommendations.length > 0 ? (
+        <View style={s.archivePanel}>
+          <View style={s.archiveHeader}>
+            <Text style={s.sectionLabel}>ARCHIVE SUGGESTIONS</Text>
+            <Text style={s.archiveMeta}>{archiveRecommendations.length} candidates</Text>
+          </View>
+          <View style={s.archiveColumn}>
+            {archiveRecommendations.map((recommendation) => (
+              <View key={recommendation.id} style={s.archiveItem}>
+                <Text style={s.archiveItemTitle}>{recommendation.title}</Text>
+                <Text style={s.archiveItemBody}>{recommendation.summary}</Text>
+                <Text style={s.archiveItemMeta}>
+                  {recommendation.confidence.toUpperCase()} · {recommendation.kind.replace(/_/g, ' ')}
+                </Text>
+                <View style={s.actionRow}>
+                  <Pressable
+                    onPress={() => handleArchiveRecommendationPromote(recommendation, 'circle')}
+                    style={({ hovered, pressed }: any) => [s.primaryBtn, hovered && webHoverPrimary, pressed && webPressed]}
+                  >
+                    <Text style={s.primaryBtnText}>{savingNote ? 'SAVING...' : 'SAVE SHARED'}</Text>
+                  </Pressable>
+                  {userId ? (
+                    <Pressable
+                      onPress={() => handleArchiveRecommendationPromote(recommendation, 'user')}
+                      style={({ hovered, pressed }: any) => [s.ghostBtn, hovered && webHoverGhost, pressed && webPressed]}
+                      >
+                        <Text style={s.ghostBtnText}>{savingNote ? 'SAVING...' : 'SAVE PRIVATE'}</Text>
+                      </Pressable>
+                    ) : null}
+                  <Pressable
+                    onPress={() => handleArchiveRecommendationDismiss(recommendation)}
+                    style={({ hovered, pressed }: any) => [s.dangerBtn, hovered && webHoverDanger, pressed && webPressed]}
+                  >
+                    <Text style={s.dangerBtnText}>DISMISS</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ))}
+          </View>
+        </View>
+      ) : null}
+
+      {archiveMatches.length > 0 ? (
+        <View style={s.archivePanel}>
+          <View style={s.archiveHeader}>
+            <Text style={s.sectionLabel}>ARCHIVE MATCHES</Text>
+            <Text style={s.archiveMeta}>{archiveMatches.length} results</Text>
+          </View>
+          <View style={s.archiveColumn}>
+            {archiveMatches.map((match) => (
+              <View key={`${match.kind}:${match.id}`} style={s.archiveItem}>
+                <Text style={s.archiveItemTitle}>{match.title}</Text>
+                <Text style={s.archiveItemBody}>{match.excerpt}</Text>
+                {match.timestamp ? (
+                  <Text style={s.archiveItemMeta}>{formatArchiveEventTime(match.timestamp)}</Text>
+                ) : null}
+                <View style={s.actionRow}>
+                  <Pressable
+                    onPress={() => handleArchivePromote(match, 'circle')}
+                    style={({ hovered, pressed }: any) => [s.primaryBtn, hovered && webHoverPrimary, pressed && webPressed]}
+                  >
+                    <Text style={s.primaryBtnText}>{savingNote ? 'SAVING...' : 'SAVE SHARED'}</Text>
+                  </Pressable>
+                  {userId ? (
+                    <Pressable
+                      onPress={() => handleArchivePromote(match, 'user')}
+                      style={({ hovered, pressed }: any) => [s.ghostBtn, hovered && webHoverGhost, pressed && webPressed]}
+                    >
+                      <Text style={s.ghostBtnText}>{savingNote ? 'SAVING...' : 'SAVE PRIVATE'}</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              </View>
+            ))}
+          </View>
+        </View>
+      ) : null}
+
       <View style={s.utilityRow}>
         <View style={s.searchWrap}>
           <TextInput
@@ -403,7 +719,7 @@ export default function MemoryViewer({ circleId, userId, accentColor = '#22d3ee'
             returnKeyType="search"
           />
           {searchResults ? (
-            <Pressable onPress={() => { setSearchQuery(''); setSearchResults(null); }} style={({ hovered, pressed }: any) => [s.ghostBtn, hovered && webHoverGhost, pressed && webPressed]}>
+            <Pressable onPress={() => { setSearchQuery(''); setSearchResults(null); setArchiveMatches([]); }} style={({ hovered, pressed }: any) => [s.ghostBtn, hovered && webHoverGhost, pressed && webPressed]}>
               <Text style={s.ghostBtnText}>CLEAR</Text>
             </Pressable>
           ) : null}
@@ -492,265 +808,509 @@ export default function MemoryViewer({ circleId, userId, accentColor = '#22d3ee'
           displayMemories.map((mem) => activeTab === 'inbox' ? renderInboxMemory(mem) : renderLibraryMemory(mem))
         )}
       </ScrollView>
+
+      {/* VS Code-style status bar — persistent bottom strip with quick
+          counts. Mirrors the blue bar in VS Code's main window. */}
+      <View style={s.statusBar}>
+        <View style={s.statusBarSegment}>
+          <Text style={s.statusBarText}>
+            {activeTab === 'inbox' ? '⊚' : '●'} {activeTab.toUpperCase()}
+          </Text>
+        </View>
+        <View style={s.statusBarDivider} />
+        <View style={s.statusBarSegment}>
+          <Text style={s.statusBarText}>
+            {displayMemories.length}/{memories.total} entries
+          </Text>
+        </View>
+        {searchResults ? (
+          <>
+            <View style={s.statusBarDivider} />
+            <View style={s.statusBarSegment}>
+              <Text style={s.statusBarText}>
+                filter: “{searchQuery.slice(0, 24)}{searchQuery.length > 24 ? '…' : ''}”
+              </Text>
+            </View>
+          </>
+        ) : null}
+        <View style={{ flex: 1 }} />
+        <View style={s.statusBarSegment}>
+          <Text style={s.statusBarText}>OpenSwan memory · UTF-8 · mono</Text>
+        </View>
+      </View>
+      </Animated.View>
     </View>
   );
 }
 
+// ── Web hover constants — tuned for the VS Code Dark+ surface. ─────
+// The "primary" style is the VS Code blue button hover (10% lighter).
 const webHoverPrimary = Platform.OS === 'web' ? ({
-  backgroundColor: '#e0e0e0',
-  boxShadow: '0 0 20px rgba(255,255,255,0.25)',
-  transform: [{ translateY: -1 }],
+  backgroundColor: '#1e8ad6', // accent.blue + 10% lighter
+  boxShadow: '0 0 0 1px rgba(0, 122, 204, 0.5)',
 } as any) : null;
 
 const webHoverGhost = Platform.OS === 'web' ? ({
-  borderColor: '#888888',
-  backgroundColor: '#111111',
-  transform: [{ translateY: -1 }],
+  // VS Code's universal row-hover: subtle 2–3% lighter bg, no lift.
+  backgroundColor: bg.hover,
+  borderColor: text.muted,
 } as any) : null;
 
 const webHoverDanger = Platform.OS === 'web' ? ({
-  borderColor: '#ef4444',
-  backgroundColor: '#1a0a0a',
-  transform: [{ translateY: -1 }],
+  borderColor: accent.red,
+  backgroundColor: 'rgba(244, 135, 113, 0.08)',
 } as any) : null;
 
 const webPressed = Platform.OS === 'web' ? ({ transform: [{ scale: 0.98 }] } as any) : null;
 
+// ── StyleSheet — VS Code Dark+ skin ────────────────────────────────
+// Hierarchy: editor bg (darkest) → sidebar bg → tab strip → hover.
+// Sharp 2px corners (VS Code signature). Monospace throughout.
+// Blue underline on active tab (not inverted fill).
 const s = StyleSheet.create({
-  container: {
-    width: '100%',
-    maxHeight: 780,
-    backgroundColor: '#000000',
-    borderWidth: 2,
-    borderColor: '#ffffff',
-    borderRadius: 2,
-    overflow: 'hidden',
-    ...(Platform.OS === 'web' ? { boxShadow: '0 0 60px rgba(255,255,255,0.08), 0 0 0 1px rgba(255,255,255,0.15)' } as any : {}),
+  // ── Backdrop — fixed overlay covering the whole viewport so the
+  // console feels like a proper pop-up, not inline content.
+  backdrop: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0, bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 9999,
+    ...(Platform.OS === 'web' ? ({ position: 'fixed' as any, backdropFilter: 'blur(2px)' } as any) : {}),
   },
+  backdropHit: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: shadow.modalScrim,
+    ...(Platform.OS === 'web' ? ({ cursor: 'pointer' } as any) : {}),
+  },
+  // ── Container — 92vw × 90vh on web, reasonable native defaults.
+  // Uses flex column so the inner ScrollView can flex-1 into the
+  // remaining space after the header / stats / tabs / status bar take
+  // their natural heights.
+  container: {
+    width: Platform.OS === 'web' ? ('92vw' as any) : '94%',
+    height: Platform.OS === 'web' ? ('90vh' as any) : '92%',
+    maxWidth: 1400,
+    maxHeight: Platform.OS === 'web' ? undefined : 900,
+    flexDirection: 'column',
+    backgroundColor: bg.editor,
+    borderWidth: 1,
+    borderColor: border.default,
+    borderRadius: radius.subtle,
+    overflow: 'hidden',
+    ...(Platform.OS === 'web' ? { boxShadow: shadow.modalLift } as any : {}),
+  },
+  // VS Code title bar feel — slightly lighter than the editor, thin
+  // 1px bottom separator.
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
     gap: 12,
-    padding: 20,
+    padding: 16,
+    backgroundColor: bg.tabStrip,
     borderBottomWidth: 1,
-    borderBottomColor: '#222222',
+    borderBottomColor: border.default,
   },
   headerCopy: { flex: 1, gap: 6 },
   headerLabel: {
-    color: '#888888',
+    color: text.muted,
     fontSize: 10,
-    fontWeight: '900',
-    letterSpacing: 2,
+    fontWeight: '700',
+    letterSpacing: 1.6,
     fontFamily: MONO,
   },
   headerTitle: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '900',
-    letterSpacing: 2,
+    color: text.primary,
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: 1.2,
     fontFamily: MONO,
   },
   headerHint: {
-    color: '#888888',
+    color: text.muted,
+    fontSize: 11,
+    fontWeight: '500',
+    lineHeight: 16,
+    fontFamily: MONO,
+  },
+  // Close button styled like VS Code's titlebar × — transparent, hover
+  // tints to red (matching the "close window" affordance).
+  closeBtn: {
+    borderWidth: 0,
+    backgroundColor: 'transparent',
+    borderRadius: radius.subtle,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    ...(Platform.OS === 'web' ? { transition: 'all 0.15s ease', cursor: 'pointer' } as any : {}),
+  },
+  closeBtnText: { color: text.muted, fontSize: 11, fontWeight: '700', letterSpacing: 1, fontFamily: MONO },
+  topGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 12,
+  },
+  // Stat cards read like VS Code's "chip" surfaces in the status bar
+  // area — slightly lifted sidebar-bg, thin 1px border.
+  statCard: {
+    flexGrow: 1,
+    minWidth: 140,
+    backgroundColor: bg.sidebar,
+    borderWidth: 1,
+    borderColor: border.default,
+    borderRadius: radius.subtle,
+    padding: 12,
+    gap: 4,
+  },
+  statLabel: {
+    color: text.muted,
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 1.2,
+    fontFamily: MONO,
+    textTransform: 'uppercase' as const,
+  },
+  statValue: { color: text.primary, fontSize: 18, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO },
+  utilityRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+  },
+  archivePanel: {
+    marginHorizontal: 16,
+    marginBottom: 12,
+    padding: 14,
+    gap: 10,
+    backgroundColor: bg.sidebar,
+    borderWidth: 1,
+    borderColor: border.default,
+    borderRadius: radius.subtle,
+  },
+  archiveHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  archiveMeta: {
+    color: text.muted,
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+    fontFamily: MONO,
+  },
+  archiveTouched: {
+    color: text.secondary,
+    fontSize: 10,
+    lineHeight: 15,
+    fontFamily: MONO,
+  },
+  archiveColumns: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  archiveColumn: {
+    flexGrow: 1,
+    minWidth: 260,
+    gap: 8,
+  },
+  archiveColumnTitle: {
+    color: text.muted,
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1.1,
+    fontFamily: MONO,
+  },
+  archiveItem: {
+    backgroundColor: bg.editor,
+    borderWidth: 1,
+    borderColor: border.default,
+    borderRadius: radius.subtle,
+    padding: 10,
+    gap: 4,
+  },
+  archiveItemTitle: {
+    color: text.primary,
     fontSize: 11,
     fontWeight: '700',
     lineHeight: 16,
     fontFamily: MONO,
   },
-  closeBtn: {
-    borderWidth: 1,
-    borderColor: '#333333',
-    backgroundColor: '#000000',
-    borderRadius: 2,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    ...(Platform.OS === 'web' ? { transition: 'all 0.15s ease', cursor: 'pointer' } as any : {}),
+  archiveItemMeta: {
+    color: text.faint,
+    fontSize: 10,
+    fontWeight: '500',
+    fontFamily: MONO,
   },
-  closeBtnText: { color: '#888888', fontSize: 11, fontWeight: '900', letterSpacing: 1.5, fontFamily: MONO },
-  topGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-    paddingHorizontal: 20,
-    paddingBottom: 16,
+  archiveItemBody: {
+    color: text.secondary,
+    fontSize: 11,
+    lineHeight: 16,
+    fontFamily: MONO,
   },
-  statCard: {
-    flexGrow: 1,
-    minWidth: 140,
-    backgroundColor: '#0a0a0a',
-    borderWidth: 1,
-    borderColor: '#222222',
-    borderRadius: 2,
-    padding: 14,
-    gap: 6,
-  },
-  statLabel: { color: '#555555', fontSize: 9, fontWeight: '900', letterSpacing: 1.5, fontFamily: MONO },
-  statValue: { color: '#ffffff', fontSize: 18, fontWeight: '900', letterSpacing: 1, fontFamily: MONO },
-  utilityRow: {
-    flexDirection: 'row',
-    alignItems: 'stretch',
-    gap: 10,
-    paddingHorizontal: 20,
-    paddingBottom: 16,
-  },
-  searchWrap: { flex: 1, flexDirection: 'row', gap: 10, alignItems: 'stretch' },
+  searchWrap: { flex: 1, flexDirection: 'row', gap: 8, alignItems: 'stretch' },
+  // Inputs use VS Code's input bg (#3c3c3c) with a thin 1px border.
+  // Focus transitions to accent blue via web CSS in-place.
   searchInput: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: bg.input,
     borderWidth: 1,
-    borderColor: '#333333',
-    borderRadius: 2,
-    color: '#ffffff',
+    borderColor: border.default,
+    borderRadius: radius.subtle,
+    color: text.primary,
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '500',
     fontFamily: MONO,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none', transition: 'border-color 0.15s ease' } as any : {}),
   },
   quickSavePanel: {
-    marginHorizontal: 20,
-    marginBottom: 16,
-    padding: 16,
+    marginHorizontal: 16,
+    marginBottom: 12,
+    padding: 14,
     gap: 10,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: bg.sidebar,
     borderWidth: 1,
-    borderColor: '#222222',
-    borderRadius: 2,
+    borderColor: border.default,
+    borderRadius: radius.subtle,
   },
-  sectionLabel: { color: '#888888', fontSize: 10, fontWeight: '900', letterSpacing: 2, fontFamily: MONO },
-  textInput: {
-    backgroundColor: '#000000',
-    borderWidth: 1,
-    borderColor: '#333333',
-    borderRadius: 2,
-    color: '#ffffff',
-    fontSize: 12,
+  sectionLabel: {
+    color: text.muted,
+    fontSize: 10,
     fontWeight: '700',
+    letterSpacing: 1.4,
     fontFamily: MONO,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+    textTransform: 'uppercase' as const,
+  },
+  textInput: {
+    backgroundColor: bg.input,
+    borderWidth: 1,
+    borderColor: border.default,
+    borderRadius: radius.subtle,
+    color: text.primary,
+    fontSize: 12,
+    fontWeight: '500',
+    fontFamily: MONO,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none', transition: 'border-color 0.15s ease' } as any : {}),
   },
   textArea: { minHeight: 88, textAlignVertical: 'top' },
+  // Tab strip styled like VS Code editor tabs — sit atop the tab-strip
+  // background, active tab gets an accent-blue bottom border (not
+  // inverted fill). Keeps the content area visually unified with the
+  // active tab.
   tabRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 8,
-    paddingHorizontal: 20,
-    paddingBottom: 16,
+    gap: 0,
+    paddingHorizontal: 8,
+    paddingTop: 4,
+    backgroundColor: bg.tabStrip,
+    borderBottomWidth: 1,
+    borderBottomColor: border.default,
   },
   tab: {
-    borderWidth: 1,
-    borderColor: '#333333',
-    backgroundColor: '#000000',
-    borderRadius: 2,
-    paddingHorizontal: 12,
+    borderWidth: 0,
+    borderBottomWidth: 2,
+    borderBottomColor: 'transparent',
+    backgroundColor: 'transparent',
+    borderRadius: 0,
+    paddingHorizontal: 14,
     paddingVertical: 10,
     ...(Platform.OS === 'web' ? { transition: 'all 0.15s ease', cursor: 'pointer' } as any : {}),
   },
   tabActive: {
-    borderColor: '#ffffff',
-    backgroundColor: '#ffffff',
+    // Blue underline + slightly brighter text. No bg flip.
+    borderBottomColor: accent.blue,
+    backgroundColor: bg.editor,
   },
-  tabText: { color: '#888888', fontSize: 10, fontWeight: '900', letterSpacing: 1.5, fontFamily: MONO },
-  tabTextActive: { color: '#000000' },
-  list: { flex: 1, borderTopWidth: 1, borderTopColor: '#222222' },
-  listContent: { padding: 20, gap: 12 },
+  tabText: { color: text.muted, fontSize: 11, fontWeight: '500', letterSpacing: 0.6, fontFamily: MONO },
+  tabTextActive: { color: text.primary, fontWeight: '600' },
+  // `flex: 1` makes the ScrollView eat the remaining vertical space
+  // between the tab strip and the status bar. `minHeight: 0` is the
+  // usual fix for a flex child that refuses to shrink below its
+  // content (so the inner list DOES get to scroll internally rather
+  // than pushing the status bar off-screen).
+  list: {
+    flex: 1,
+    minHeight: 0,
+    backgroundColor: bg.editor,
+  },
+  listContent: { padding: 16, gap: 10, paddingBottom: 32 },
   emptyCard: {
     borderWidth: 1,
-    borderColor: '#222222',
-    backgroundColor: '#0a0a0a',
-    borderRadius: 2,
-    padding: 20,
+    borderColor: border.default,
+    backgroundColor: bg.sidebar,
+    borderRadius: radius.subtle,
+    padding: 18,
     gap: 8,
   },
-  emptyTitle: { color: '#ffffff', fontSize: 12, fontWeight: '900', letterSpacing: 2, fontFamily: MONO },
-  emptyText: { color: '#888888', fontSize: 11, fontWeight: '700', lineHeight: 16, fontFamily: MONO },
+  emptyTitle: {
+    color: text.primary,
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 1.4,
+    fontFamily: MONO,
+    textTransform: 'uppercase' as const,
+  },
+  emptyText: { color: text.muted, fontSize: 11, fontWeight: '500', lineHeight: 16, fontFamily: MONO },
+  // Inbox memories are "new / needs review" — mark with a left-edge
+  // accent border (matches VS Code's "modified file" left-strip).
   inboxCard: {
     width: '100%',
-    borderWidth: 2,
-    borderColor: '#22d3ee',
-    backgroundColor: '#040607',
-    borderRadius: 2,
-    padding: 16,
-    gap: 10,
+    borderWidth: 1,
+    borderLeftWidth: 3,
+    borderColor: border.default,
+    borderLeftColor: accent.cyan,
+    backgroundColor: bg.sidebar,
+    borderRadius: radius.subtle,
+    padding: 14,
+    gap: 8,
   },
   memoryCard: {
     width: '100%',
     borderWidth: 1,
-    borderColor: '#333333',
-    backgroundColor: '#0a0a0a',
-    borderRadius: 2,
-    padding: 16,
-    gap: 10,
+    borderColor: border.default,
+    backgroundColor: bg.sidebar,
+    borderRadius: radius.subtle,
+    padding: 14,
+    gap: 8,
   },
-  cardTopRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
+  cardTopRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6 },
   kindBadge: {
     borderWidth: 1,
-    borderRadius: 2,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    borderRadius: radius.subtle,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
   },
-  kindBadgeText: { fontSize: 9, fontWeight: '900', letterSpacing: 1.2, fontFamily: MONO },
+  kindBadgeText: {
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 1,
+    fontFamily: MONO,
+    textTransform: 'uppercase' as const,
+  },
   metaBadge: {
     borderWidth: 1,
-    borderColor: '#333333',
-    backgroundColor: '#000000',
-    borderRadius: 2,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    borderColor: border.default,
+    backgroundColor: bg.editor,
+    borderRadius: radius.subtle,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
   },
-  metaBadgeText: { color: '#888888', fontSize: 9, fontWeight: '900', letterSpacing: 1.2, fontFamily: MONO },
-  cardDate: { marginLeft: 'auto', color: '#555555', fontSize: 10, fontWeight: '700', fontFamily: MONO },
-  cardTitle: { color: '#ffffff', fontSize: 14, fontWeight: '900', letterSpacing: 1, fontFamily: MONO },
-  cardSubtext: { color: '#888888', fontSize: 11, fontWeight: '700', fontFamily: MONO },
-  cardBody: { color: '#dddddd', fontSize: 12, fontWeight: '700', lineHeight: 18, fontFamily: MONO },
-  editWrap: { gap: 10 },
+  metaBadgeText: {
+    color: text.muted,
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 1,
+    fontFamily: MONO,
+    textTransform: 'uppercase' as const,
+  },
+  cardDate: { marginLeft: 'auto', color: text.faint, fontSize: 10, fontWeight: '500', fontFamily: MONO },
+  cardTitle: { color: text.primary, fontSize: 13, fontWeight: '700', letterSpacing: 0.4, fontFamily: MONO },
+  cardSubtext: { color: text.muted, fontSize: 11, fontWeight: '500', fontFamily: MONO },
+  cardBody: { color: text.secondary, fontSize: 12, fontWeight: '500', lineHeight: 18, fontFamily: MONO },
+  editWrap: { gap: 8 },
   editInput: {
     minHeight: 90,
-    backgroundColor: '#000000',
+    backgroundColor: bg.input,
     borderWidth: 1,
-    borderColor: '#333333',
-    borderRadius: 2,
-    color: '#ffffff',
+    borderColor: border.default,
+    borderRadius: radius.subtle,
+    color: text.primary,
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '500',
     fontFamily: MONO,
-    padding: 12,
+    padding: 10,
     textAlignVertical: 'top',
-    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none', transition: 'border-color 0.15s ease' } as any : {}),
   },
-  actionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  actionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  // Primary = VS Code blue filled button (Command Palette "Go" style).
   primaryBtn: {
-    borderWidth: 2,
-    borderColor: '#ffffff',
-    backgroundColor: '#ffffff',
-    borderRadius: 2,
+    borderWidth: 1,
+    borderColor: accent.blue,
+    backgroundColor: accent.blue,
+    borderRadius: radius.subtle,
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingVertical: 8,
     ...(Platform.OS === 'web' ? { transition: 'all 0.15s ease', cursor: 'pointer' } as any : {}),
   },
-  primaryBtnText: { color: '#000000', fontSize: 11, fontWeight: '900', letterSpacing: 1.5, fontFamily: MONO },
+  primaryBtnText: {
+    color: text.onAccent,
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.8,
+    fontFamily: MONO,
+  },
   ghostBtn: {
     borderWidth: 1,
-    borderColor: '#333333',
-    backgroundColor: '#000000',
-    borderRadius: 2,
+    borderColor: border.default,
+    backgroundColor: bg.sidebar,
+    borderRadius: radius.subtle,
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingVertical: 8,
     ...(Platform.OS === 'web' ? { transition: 'all 0.15s ease', cursor: 'pointer' } as any : {}),
   },
-  ghostBtnText: { color: '#888888', fontSize: 11, fontWeight: '900', letterSpacing: 1.2, fontFamily: MONO },
+  ghostBtnText: {
+    color: text.secondary,
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.6,
+    fontFamily: MONO,
+  },
   dangerBtn: {
     borderWidth: 1,
-    borderColor: '#333333',
-    backgroundColor: '#000000',
-    borderRadius: 2,
+    borderColor: border.default,
+    backgroundColor: bg.sidebar,
+    borderRadius: radius.subtle,
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingVertical: 8,
     ...(Platform.OS === 'web' ? { transition: 'all 0.15s ease', cursor: 'pointer' } as any : {}),
   },
-  dangerBtnText: { color: '#ef4444', fontSize: 11, fontWeight: '900', letterSpacing: 1.2, fontFamily: MONO },
+  dangerBtnText: {
+    color: accent.red,
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.6,
+    fontFamily: MONO,
+  },
+  // ── VS Code status bar — bottom strip like the blue bar in VS Code's
+  // main window. Shows the total memory count + current tab filter.
+  statusBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    backgroundColor: bg.statusBar,
+    borderTopWidth: 1,
+    borderTopColor: border.default,
+  },
+  statusBarSegment: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  statusBarText: {
+    color: text.onAccent,
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+    fontFamily: MONO,
+  },
+  statusBarDivider: {
+    width: 1,
+    height: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+  },
 });

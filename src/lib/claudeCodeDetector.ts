@@ -76,7 +76,11 @@ function taskLabelForStatus(
     }
     return `Working on ${project}${sub}`;
   }
-  if (status === 'building') return `Building on ${project}${sub}`;
+  // `building` used to produce "Building on <project>" — a transient
+  // label that flashed and disappeared after every chat message as the
+  // Claude Code bridge polled session state. Returning empty string
+  // here suppresses the popup wherever `current_task` is rendered.
+  if (status === 'building') return '';
   if (status === 'idle') return `Open on ${project}${sub}`;
   return `Session ended on ${project}`;
 }

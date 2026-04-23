@@ -397,13 +397,75 @@ enabled = true
 verify_jwt = false
 entrypoint = "./functions/automation-executor/index.ts"
 
-[functions.swanbot-ai]
+[functions.computer-use-agent]
+# computer-use-agent is the Anthropic Computer Use agent runner. Streams
+# SSE back to the client while Claude drives a Browserbase session. Same
+# reasoning as the other streaming functions — we skip the platform JWT
+# check because ES256 JWTs get rejected at the router; the function
+# validates caller identity via the Browserbase credentials it requires.
 enabled = true
-verify_jwt = true
+verify_jwt = false
+entrypoint = "./functions/computer-use-agent/index.ts"
+
+[functions.build-stream]
+# build-stream is the /build-page code-streaming proxy. It doesn't run any
+# sensitive mutations itself — just forwards a brief to Claude and streams
+# tokens back — so we skip the platform's JWT verifier. Without this flag,
+# Supabase rejects the client's ES256 JWT at the router with
+# "Unsupported JWT algorithm ES256" and the stream never starts.
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/build-stream/index.ts"
+
+[functions.chat-stream]
+# chat-stream is the streaming variant of swanbot for long responses. It
+# reads its own Authorization header when present; the platform's strict
+# ES256 check isn't needed here.
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/chat-stream/index.ts"
+
+[functions.github-oauth]
+# verify_jwt must be false: the OAuth callback from GitHub has no JWT, and the
+# status/authorize/list_repos actions are called with plain fetch() from the
+# client. Auth/identity is verified via `state` (CSRF token bound to user_id
+# in github_oauth_states) and via `user_id` query params that map to rows with
+# RLS enabled. Without this flag, every client status probe returns 401 and
+# the UI renders as "disconnected" even when OAuth is healthy.
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/github-oauth/index.ts"
+
+[functions.github-webhook]
+# GitHub webhook POSTs never carry a JWT — the integrity check uses the shared
+# HMAC secret on the X-Hub-Signature-256 header instead.
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/github-webhook/index.ts"
+
+[functions.swanbot-ai]
+# verify_jwt = false because the Supabase router rejects ES256 JWTs with
+# "Unsupported JWT algorithm ES256" before the function runs — same class
+# of bug we already fixed on build-stream and github-oauth. The function
+# has its own auth via getAuthenticatedUser(req) (circle membership check
+# included), so router-level verification is redundant anyway.
+enabled = true
+verify_jwt = false
 import_map = "./functions/swanbot-ai/deno.json"
 # Uncomment to specify a custom file path to the entrypoint.
 # Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
 entrypoint = "./functions/swanbot-ai/index.ts"
+
+[functions.llm-proxy]
+# verify_jwt = false for the same ES256 reason as swanbot-ai. The function
+# itself resolves and verifies the user JWT at index.ts:462-478 using the
+# anon client + auth.getUser(), so router-level verification is redundant.
+# Without this flag, every embedding request (memoryEmbeddings.ts) returns
+# 401 before the function code ever runs, which silently disables semantic
+# memory search.
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/llm-proxy/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/swanbot-ai/*.html" ]

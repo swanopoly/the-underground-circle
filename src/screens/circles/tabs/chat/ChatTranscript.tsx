@@ -5,6 +5,13 @@ import type { PromptMemoryReference } from '../../../../lib/memoryService';
 import type { ResearchDocumentReference } from '../../../../lib/researchControl';
 import type { WikiArticleReference } from '../../../../lib/wikiData';
 import type { SwanBotStructuredArtifact } from '../../../../lib/swanbot';
+import {
+  readMessageArtifacts,
+  readMessageMemoriesUsed,
+  readMessageMemoryRefs,
+  readMessageResearchRefs,
+  readMessageWikiRefs,
+} from '../../../../lib/messageMetadataReaders';
 
 interface Props {
   entries: ChatEntry[];
@@ -79,15 +86,11 @@ function UserBubble({ entry, accentColor }: { entry: ChatEntry; accentColor: str
 }
 
 function AssistantBubble({ entry, accentColor }: { entry: ChatEntry; accentColor: string }) {
-  const wikiRefs = (entry.metadata?.wikiRefs as WikiArticleReference[] | undefined) || [];
-  const researchRefs = (entry.metadata?.researchRefs as ResearchDocumentReference[] | undefined) || [];
-  const memoryRefs = (entry.metadata?.memoryRefs as PromptMemoryReference[] | undefined)
-    || (entry.metadata?.memory_references as PromptMemoryReference[] | undefined)
-    || [];
-  const memoriesUsed = (entry.metadata?.memoriesUsed as string[] | undefined)
-    || (entry.metadata?.memories_used as string[] | undefined)
-    || [];
-  const artifacts = (entry.metadata?.artifacts as SwanBotStructuredArtifact[] | undefined) || [];
+  const wikiRefs = readMessageWikiRefs(entry.metadata) as WikiArticleReference[];
+  const researchRefs = readMessageResearchRefs(entry.metadata) as ResearchDocumentReference[];
+  const memoryRefs = readMessageMemoryRefs(entry.metadata) as PromptMemoryReference[];
+  const memoriesUsed = readMessageMemoriesUsed(entry.metadata);
+  const artifacts = readMessageArtifacts(entry.metadata) as SwanBotStructuredArtifact[];
 
   return (
     <View style={styles.assistantRow}>

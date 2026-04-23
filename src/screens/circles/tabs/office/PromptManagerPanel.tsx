@@ -171,9 +171,9 @@ export default function PromptManagerPanel({ circleId, userId, accentColor = '#6
       )}
 
       {/* Create Modal */}
-      <Modal visible={showCreate} transparent animationType="fade">
-        <View style={s.modalOverlay}>
-          <View style={s.modalCard}>
+      <Modal visible={showCreate} transparent animationType="fade" onRequestClose={() => setShowCreate(false)}>
+        <Pressable style={s.modalOverlay} onPress={() => setShowCreate(false)}>
+          <Pressable style={s.modalCard} onPress={(e) => e.stopPropagation()}>
             <Text style={s.modalTitle}>NEW PROMPT</Text>
 
             <Text style={s.fieldLabel}>NAME</Text>
@@ -238,8 +238,8 @@ export default function PromptManagerPanel({ circleId, userId, accentColor = '#6
                 <Text style={s.modalSaveText}>{creating ? 'CREATING...' : 'CREATE'}</Text>
               </Pressable>
             </View>
-          </View>
-        </View>
+          </Pressable>
+        </Pressable>
       </Modal>
     </View>
   );

@@ -38,6 +38,24 @@ const MAIN_CHAT_ACTIONS: Record<SessionCodingProfile, SessionPromptAction[]> = {
     { id: 'integration-plan', label: 'Integration', prompt: 'Make sure this integrates the best way possible with the current architecture.', color: '#60a5fa' },
     { id: 'control-plane', label: 'Control Plane', prompt: 'Turn this into a more session-first, artifact-first control surface instead of generic chat.', color: '#22d3ee' },
   ],
+  research: [
+    { id: 'research-landscape', label: 'Landscape', prompt: 'Map the landscape, compare the strongest options, and recommend the best path with reasons.', color: '#a855f7' },
+    { id: 'research-tradeoffs', label: 'Tradeoffs', prompt: 'Do a research-grade tradeoff analysis with evidence, risks, and a final recommendation.', color: '#9333ea' },
+    { id: 'research-sources', label: 'Source Pack', prompt: 'Investigate this and return a structured findings report with citations and source-backed conclusions.', color: '#c084fc' },
+    { id: 'research-brief', label: 'Exec Brief', prompt: 'Research this deeply and compress it into an executive brief with the decision I should make next.', color: '#7c3aed' },
+  ],
+  design: [
+    { id: 'design-direction', label: 'Direction', prompt: 'Define the strongest UI/UX direction for this with layout, hierarchy, interaction, and handoff detail.', color: '#ec4899' },
+    { id: 'design-polish', label: 'Polish UX', prompt: 'Audit the user experience and improve flow, clarity, hierarchy, motion, and accessibility.', color: '#db2777' },
+    { id: 'design-system', label: 'Design System', prompt: 'Turn this into a cleaner design system direction with reusable components, tokens, and interaction patterns.', color: '#f472b6' },
+    { id: 'design-preview', label: 'Previewable', prompt: 'Produce a design-led solution that is concrete enough to preview or hand off directly.', color: '#fb7185' },
+  ],
+  support: [
+    { id: 'support-unblock', label: 'Unblock Me', prompt: 'Troubleshoot this and give me the fastest correct path to get unblocked.', color: '#3b82f6' },
+    { id: 'support-diagnose', label: 'Diagnose', prompt: 'Diagnose the issue, isolate the likely causes, and tell me exactly what to check next.', color: '#2563eb' },
+    { id: 'support-setup', label: 'Setup Help', prompt: 'Walk me through setup or configuration in the right order and call out missing prerequisites.', color: '#60a5fa' },
+    { id: 'support-recover', label: 'Recovery', prompt: 'Help me recover from this failure safely, including the quickest rollback or workaround if needed.', color: '#1d4ed8' },
+  ],
 };
 
 const ROOM_CHAT_ACTIONS: Record<SessionCodingProfile, SessionPromptAction[]> = {
@@ -70,6 +88,24 @@ const ROOM_CHAT_ACTIONS: Record<SessionCodingProfile, SessionPromptAction[]> = {
     { id: 'refactor-room', label: 'Refactor', prompt: '[REFACTOR MODE] Suggest and implement the highest-leverage structural refactor in this room.', color: '#0ea5e9' },
     { id: 'split-room', label: 'Split Files', prompt: '[ARCHITECTURE REVIEW MODE] Decompose this room into better modules and create the new files.', color: '#60a5fa' },
     { id: 'integrate-room', label: 'Integrate', prompt: '[ARCHITECTURE REVIEW MODE] Tighten the integration boundaries and state/data flow in this room.', color: '#22d3ee' },
+  ],
+  research: [
+    { id: 'research-room', label: 'Investigate', prompt: '[DEEP RESEARCH MODE] Investigate this room deeply and compare the strongest solution paths.', color: '#a855f7' },
+    { id: 'research-room-risks', label: 'Risks', prompt: '[DEEP RESEARCH MODE] Research the hidden risks, edge cases, and tradeoffs in this room before changes are made.', color: '#9333ea' },
+    { id: 'research-room-brief', label: 'Brief', prompt: '[DEEP RESEARCH MODE] Produce a room-specific brief with findings, options, and the best next move.', color: '#c084fc' },
+    { id: 'research-room-sources', label: 'Evidence', prompt: '[DEEP RESEARCH MODE] Gather evidence from the room context and produce a cited recommendation.', color: '#7c3aed' },
+  ],
+  design: [
+    { id: 'design-room-ui', label: 'UI Direction', prompt: '[DESIGN MODE] Improve the UI/UX direction of this room with layout, hierarchy, and interaction specifics.', color: '#ec4899' },
+    { id: 'design-room-preview', label: 'Preview Design', prompt: '[DESIGN MODE] Produce a previewable design-forward solution for this room.', color: '#db2777' },
+    { id: 'design-room-system', label: 'Systemize', prompt: '[DESIGN MODE] Turn this room into a more consistent design system with stronger reuse and accessibility.', color: '#f472b6' },
+    { id: 'design-room-polish', label: 'Polish', prompt: '[DESIGN MODE] Audit the room experience and tighten the roughest UX edges first.', color: '#fb7185' },
+  ],
+  support: [
+    { id: 'support-room-unblock', label: 'Unblock', prompt: '[SUPPORT MODE] Help me get unblocked in this room with the shortest correct troubleshooting path.', color: '#3b82f6' },
+    { id: 'support-room-diagnose', label: 'Diagnose', prompt: '[SUPPORT MODE] Diagnose the room issue and tell me the exact next checks to run.', color: '#2563eb' },
+    { id: 'support-room-setup', label: 'Setup', prompt: '[SUPPORT MODE] Walk through the setup or integration prerequisites for this room.', color: '#60a5fa' },
+    { id: 'support-room-recover', label: 'Recover', prompt: '[SUPPORT MODE] Give me the safest recovery path for this room, including workarounds and rollback options.', color: '#1d4ed8' },
   ],
 };
 

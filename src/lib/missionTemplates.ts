@@ -180,3 +180,28 @@ export const TEMPLATE_CATEGORIES = [
   { key: 'learning', label: 'Learning' },
   { key: 'general', label: 'General' },
 ] as const;
+
+/** Build a richer brief_blocks seed from a template. Mission creation calls
+ *  this to pre-populate the block editor with a structured starting brief:
+ *  - Heading with template name
+ *  - Paragraph with the template description
+ *  - "Tasks" heading
+ *  - One checkbox per default task
+ *
+ *  Block IDs are generated inline; the shape mirrors components/BlockBriefEditor.Block.
+ */
+export function templateToBlocks(template: MissionTemplate): Array<Record<string, any>> {
+  const newId = () => Math.random().toString(36).slice(2, 10);
+  const blocks: Array<Record<string, any>> = [
+    { id: newId(), type: 'heading', level: 1, text: template.name },
+    { id: newId(), type: 'paragraph', text: template.description },
+  ];
+  if (template.defaultTasks.length > 0) {
+    blocks.push({ id: newId(), type: 'heading', level: 2, text: 'Tasks' });
+    for (const t of template.defaultTasks) {
+      const text = t.agentName ? `${t.title} — ${t.agentName}` : t.title;
+      blocks.push({ id: newId(), type: 'checkbox', checked: false, text });
+    }
+  }
+  return blocks;
+}

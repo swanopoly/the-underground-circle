@@ -27,7 +27,7 @@ export interface AgentConnection {
 
 export const PROVIDER_META: Record<ProviderType, { icon: string; label: string; color: string; defaultEndpoint: string; isLLM?: boolean }> = {
   // ── Local agents / bridges ──
-  'openswan':       { icon: '🐾', label: 'OpenSwan',       color: '#6366f1', defaultEndpoint: 'http://localhost:18790' },
+  'openswan':       { icon: '🐾', label: 'OpenSwan',       color: '#6366f1', defaultEndpoint: 'http://localhost:18789' },
   'claude-code':    { icon: '🤖', label: 'Claude Code',    color: '#f59e0b', defaultEndpoint: 'http://localhost:8080' },
   'generic-agent':  { icon: '⚡', label: 'Generic Agent',  color: '#10b981', defaultEndpoint: 'https://' },
   'cursor':         { icon: '🎯', label: 'Cursor',         color: '#8b5cf6', defaultEndpoint: 'http://localhost:2087' },
@@ -317,7 +317,6 @@ export async function saveConnections(connections: AgentConnection[]): Promise<v
 // ─── Auto-Discovery ──────────────────────────────
 
 const LOCAL_OPENCLAW_ENDPOINTS = [
-  'http://localhost:18790', // CORS proxy (preferred)
   'http://localhost:18789', // Direct gateway
 ];
 

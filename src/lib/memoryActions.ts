@@ -11,8 +11,10 @@ import { semanticSearchMemories } from './memoryEmbeddings';
 
 export type MemoryFeedbackAction =
   | 'accepted'
+  | 'confirmed_helpful'
   | 'dismissed'
   | 'not_helpful'
+  | 'weak_signal'
   | 'promoted'
   | 'pinned';
 
@@ -46,26 +48,38 @@ export async function recordMemoryFeedback(opts: {
   note?: string;
   userId?: string;
   source?: string;
+  scoreOverride?: number;
+  passedOverride?: boolean | null;
+  metadata?: Record<string, unknown>;
 }): Promise<boolean> {
-  const score =
-    opts.action === 'accepted' || opts.action === 'promoted' || opts.action === 'pinned'
+  const baseScore =
+    opts.action === 'accepted' || opts.action === 'confirmed_helpful' || opts.action === 'promoted' || opts.action === 'pinned'
       ? 1
+      : opts.action === 'weak_signal'
+        ? 0.2
       : opts.action === 'dismissed' || opts.action === 'not_helpful'
         ? 0
         : null;
+  const score = typeof opts.scoreOverride === 'number'
+    ? Math.max(0, Math.min(1, opts.scoreOverride))
+    : baseScore;
+  const passed = opts.passedOverride !== undefined
+    ? opts.passedOverride
+    : score == null ? null : score >= 0.5;
   const { error } = await supabase
     .from('memory_evaluations')
     .insert({
       memory_id: opts.memoryId,
       evaluation_kind: 'manual_review',
       evaluator: 'user',
-      passed: score == null ? null : score >= 0.5,
+      passed,
       score,
       feedback: opts.note || null,
       metadata: {
         action: opts.action,
         source: opts.source || 'chat_ui',
         user_id: opts.userId || null,
+        ...(opts.metadata || {}),
       },
     });
   return !error;

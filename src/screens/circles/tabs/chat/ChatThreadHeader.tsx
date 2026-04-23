@@ -24,11 +24,20 @@ import { supabase } from '../../../../lib/supabase';
 import OpenSwanServiceMenu from './OpenSwanServiceMenu';
 import SkillAdminPanel from './SkillAdminPanel';
 import { soulKeyForProfile } from '../../../../lib/serviceProfileSouls';
+import { copyToClipboard } from '../../../../lib/dataExport';
 
 interface Props {
   threadId: string | null;
   circleId: string;
   currentUserId: string | null;
+  openswanGatewayNotice?: {
+    message: string;
+    kind: 'offline' | 'auth' | 'proxy' | 'endpoint' | 'cooldown' | 'info';
+    fixLabel?: string | null;
+    fixCommand?: string | null;
+  } | null;
+  onDisableOpenSwanGateway?: (() => void | Promise<void>) | undefined;
+  onRetryOpenSwanGateway?: (() => void | Promise<void>) | undefined;
   refreshToken?: number;
   onThreadUpdated?: () => void;
   selectedModel?: string;
@@ -49,6 +58,9 @@ export default function ChatThreadHeader({
   threadId,
   circleId,
   currentUserId,
+  openswanGatewayNotice = null,
+  onDisableOpenSwanGateway,
+  onRetryOpenSwanGateway,
   refreshToken = 0,
   onThreadUpdated,
   selectedModel = 'auto',
@@ -65,6 +77,9 @@ export default function ChatThreadHeader({
   const [showInvite, setShowInvite] = useState(false);
   const [showServiceMenu, setShowServiceMenu] = useState(false);
   const [showSkills, setShowSkills] = useState(false);
+  const [disablingGateway, setDisablingGateway] = useState(false);
+  const [retryingGateway, setRetryingGateway] = useState(false);
+  const [copiedGatewayCmd, setCopiedGatewayCmd] = useState(false);
 
   useEffect(() => {
     if (!threadId) { setThread(null); setMembers([]); return; }
@@ -84,7 +99,7 @@ export default function ChatThreadHeader({
   const isOwner = !!currentUserId && thread.created_by === currentUserId;
   const isCircleThread = thread.visibility === 'circle';
   const visibilityLabel =
-    thread.visibility === 'circle' ? 'OpenSwan'
+    thread.visibility === 'circle' ? 'CIRCLE'
     : thread.visibility === 'shared' ? `SHARED · ${members.length}`
     : 'PRIVATE';
   const visibilityTone =
@@ -133,6 +148,58 @@ export default function ChatThreadHeader({
         )}
         <View style={styles.metaRow}>
           <Text style={[styles.badge, { color: visibilityTone, borderColor: visibilityTone }]}>{visibilityLabel}</Text>
+          {openswanGatewayNotice ? (
+            <View style={styles.gatewayNoticeWrap}>
+              <Text style={styles.gatewayNotice} numberOfLines={1}>
+                {openswanGatewayNotice.message}
+              </Text>
+              <Pressable onPress={() => setShowServiceMenu(true)} style={styles.gatewayActionBtn}>
+                <Text style={styles.gatewayActionText}>SERVICE</Text>
+              </Pressable>
+              <Pressable
+                onPress={async () => {
+                  const ok = await copyToClipboard(openswanGatewayNotice.fixCommand || 'openswan gateway start');
+                  setCopiedGatewayCmd(ok);
+                  if (ok) setTimeout(() => setCopiedGatewayCmd(false), 1800);
+                }}
+                style={styles.gatewayActionBtn}
+              >
+                <Text style={styles.gatewayActionText}>{copiedGatewayCmd ? 'COPIED' : (openswanGatewayNotice.fixLabel || 'COPY FIX')}</Text>
+              </Pressable>
+              {onRetryOpenSwanGateway ? (
+                <Pressable
+                  disabled={retryingGateway}
+                  onPress={async () => {
+                    try {
+                      setRetryingGateway(true);
+                      await onRetryOpenSwanGateway();
+                    } finally {
+                      setRetryingGateway(false);
+                    }
+                  }}
+                  style={[styles.gatewayActionBtn, retryingGateway && styles.gatewayActionBtnDisabled]}
+                >
+                  <Text style={styles.gatewayActionText}>{retryingGateway ? 'RETRYING…' : 'RETRY LOCAL'}</Text>
+                </Pressable>
+              ) : null}
+              {onDisableOpenSwanGateway ? (
+                <Pressable
+                  disabled={disablingGateway}
+                  onPress={async () => {
+                    try {
+                      setDisablingGateway(true);
+                      await onDisableOpenSwanGateway();
+                    } finally {
+                      setDisablingGateway(false);
+                    }
+                  }}
+                  style={[styles.gatewayActionBtn, disablingGateway && styles.gatewayActionBtnDisabled]}
+                >
+                  <Text style={styles.gatewayActionText}>{disablingGateway ? 'DISABLING…' : 'DISABLE LOCAL'}</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
           {(onSessionProfileChange || onDelegationModeChange) && (
             <Pressable onPress={() => setShowServiceMenu(true)} style={styles.serviceBtn}>
               {isAllAuto ? (
@@ -372,6 +439,36 @@ const styles = StyleSheet.create({
     fontSize: 9, fontWeight: '900', letterSpacing: 0.6,
     paddingHorizontal: 5, paddingVertical: 2,
     borderRadius: 4, borderWidth: 1,
+  },
+  gatewayNoticeWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexShrink: 1,
+  },
+  gatewayNotice: {
+    maxWidth: 280,
+    color: '#f59e0b',
+    fontSize: 10,
+    fontWeight: '700',
+    flexShrink: 1,
+  },
+  gatewayActionBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderWidth: 1,
+    borderColor: '#f59e0b55',
+    borderRadius: 5,
+    backgroundColor: '#f59e0b12',
+  },
+  gatewayActionBtnDisabled: {
+    opacity: 0.5,
+  },
+  gatewayActionText: {
+    color: '#f59e0b',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.5,
   },
   metaModel: { color: '#64748b', fontSize: 10, fontWeight: '700' },
   metaModelMuted: { color: '#475569', fontSize: 10, fontWeight: '700' },

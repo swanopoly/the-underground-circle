@@ -9,22 +9,22 @@
 // Deploy: npx supabase functions deploy boss-agent
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
+import { callClaude as callClaudeShared, logClaudeUsage, checkCircleClaudeBudget } from "../_claude/anthropic.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type",
 };
-
-const CLAUDE_API = "https://api.anthropic.com/v1/messages";
 const TELEGRAM_API = "https://api.telegram.org/bot";
 
 // ─── Model Orchestra Routing ─────────────────────────────────────────────────
 
 const MODEL_MAP: Record<string, string> = {
-  "claude-haiku": "claude-haiku-4-5-20251001",
+  "claude-haiku":  "claude-haiku-4-5",
   "claude-sonnet": "claude-sonnet-4-6",
-  "claude-opus": "claude-opus-4-6",
+  // Opus points at the latest (4.7) per Rule #3 on canonical model IDs.
+  "claude-opus":   "claude-opus-4-7",
 };
 
 interface AgentModelConfig {
@@ -63,30 +63,49 @@ function getSupabase() {
   return createClient(url, key);
 }
 
+/**
+ * Thin wrapper around the shared `callClaude()`. Returns just the text (legacy
+ * call shape) so existing call sites don't need to change, but ALSO fires a
+ * `claude_api_usage` log so boss-agent spend is visible in the cost dashboard.
+ *
+ * Boss-agent is called from automation-executor (cron) so its spend adds up
+ * across circles — telemetry here is load-bearing for the Phase 1d audit.
+ */
 async function callClaude(
   system: string,
   user: string,
-  model = "claude-haiku-4-5-20251001"
+  model = "claude-haiku-4-5",
+  ctx?: { circleId?: string; source?: string; metadata?: Record<string, unknown>; supabase?: any },
 ): Promise<string> {
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
-  const res = await fetch(CLAUDE_API, {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 1024,
-      system,
-      messages: [{ role: "user", content: user }],
-    }),
+  // Umbrella circle cap — every agent shares the same 24h spend ceiling.
+  // Throws (rejects the call) when the circle is over budget so the
+  // caller can surface a clean error to the user / log the denial.
+  const supabase = ctx?.supabase ?? getSupabase();
+  if (ctx?.circleId) {
+    const cap = await checkCircleClaudeBudget(supabase, ctx.circleId);
+    if (!cap.allowed) throw new Error(cap.reason || "circle_claude_budget_exceeded");
+  }
+  const result = await callClaudeShared({
+    apiKey,
+    model,
+    maxTokens: 1024,
+    system,
+    messages: [{ role: "user", content: user }],
   });
-  if (!res.ok) throw new Error(`Claude ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  return data.content?.[0]?.text || "";
+  const text = result.content?.[0]?.text || "";
+  // Fire-and-forget telemetry — reuses the supabase client resolved
+  // above for the budget check.
+  logClaudeUsage(supabase, {
+    circleId: ctx?.circleId ?? null,
+    userId: null,
+    source: ctx?.source ?? "boss-agent",
+    model,
+    usage: result.usage,
+    metadata: ctx?.metadata,
+  });
+  return text;
 }
 
 async function sendTelegram(
@@ -273,7 +292,8 @@ Assign tasks round-robin to the available agents. Match task complexity to the a
       const result = await callClaude(
         "You generate tasks as JSON arrays. Output ONLY valid JSON, no markdown.",
         aiPrompt,
-        "claude-sonnet-4-6"
+        "claude-sonnet-4-6",
+        { supabase, circleId, source: "boss-agent.generate_tasks", metadata: { goal_id: goal.id } },
       );
 
       // Parse JSON from response
@@ -434,7 +454,10 @@ async function modelCouncil(supabase: any, circleId: string, taskId: string) {
       const userPrompt = `Review this task:\nTitle: ${task.title}\nDescription: ${task.description || "No description"}\n\nProvide your review as ${agentConfig.name} (${agentConfig.role}).`;
 
       try {
-        const review = await callClaude(systemPrompt, userPrompt, model);
+        const review = await callClaude(systemPrompt, userPrompt, model, {
+          supabase, circleId, source: "boss-agent.model_council",
+          metadata: { agent_id: agentId, task_id: task.id },
+        });
         return { agentId, agentName: agentConfig.name, model: agentConfig.preferredModel, review };
       } catch (err) {
         console.error(`Council review failed for ${agentConfig.name}:`, err);

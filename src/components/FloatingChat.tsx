@@ -16,6 +16,10 @@ import {
   getMatchingChatSlashCommands,
   type ChatSlashCommand,
 } from '../lib/chatSlashCommands';
+import {
+  getSelectedChatSlashCommand,
+} from '../lib/chatComposerController';
+import { useChatComposerController } from '../lib/useChatComposerController';
 import ChatBotIdentityRow from './chat/ChatBotIdentityRow';
 import ChatInlineRichText from './chat/ChatInlineRichText';
 import ChatSlashCommandPalette from './chat/ChatSlashCommandPalette';
@@ -73,7 +77,6 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
   const [agentName, setAgentName] = useState<string>(MAIN_CHAT_AGENT_NAME);
   const [agentAvatarUri, setAgentAvatarUri] = useState<string | null>(null);
   const [focused, setFocused] = useState(false);
-  const [highlightedSlashIndex, setHighlightedSlashIndex] = useState(0);
 
   // Position and size (web dragging/resizing)
   const [posX, setPosX] = useState(DEFAULT_RIGHT);
@@ -140,13 +143,6 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
   }, [agentName]);
 
   const agentAvatarSource = getChatAgentAvatarSource(agentAvatarUri);
-  const slashCommands = useMemo(() => getMatchingChatSlashCommands(input), [input]);
-  const slashToken = input.trimStart().split(/\s+/, 1)[0] || '';
-  const showSlashCommands = focused && /^\/[^\s]*$/.test(slashToken) && slashCommands.length > 0;
-
-  useEffect(() => {
-    setHighlightedSlashIndex(0);
-  }, [slashToken, slashCommands.length]);
 
   const initUser = async () => {
     try {
@@ -362,16 +358,6 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
 
   // ─── Send Message ───────────────────────────────────────────────────────
 
-  const applySlashCommand = useCallback((command: ChatSlashCommand) => {
-    if (blurTimeoutRef.current) {
-      clearTimeout(blurTimeoutRef.current);
-      blurTimeoutRef.current = null;
-    }
-    setInput(command.insertText);
-    setHighlightedSlashIndex(0);
-    requestAnimationFrame(() => inputRef.current?.focus());
-  }, []);
-
   const sendMessage = useCallback(async () => {
     if (sendLockRef.current) return;
     const content = input.trim();
@@ -503,6 +489,29 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
       setBotTyping(false);
     }
   }, [input, currentUserId, currentUserName, circleId, messages, agentName]);
+
+  const applySlashCommand = useCallback((command: ChatSlashCommand) => {
+    if (blurTimeoutRef.current) {
+      clearTimeout(blurTimeoutRef.current);
+      blurTimeoutRef.current = null;
+    }
+    setInput(command.insertText);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
+  const {
+    highlightedSlashIndex,
+    setHighlightedSlashIndex,
+    slashCommands,
+    showSlashCommands,
+    handleComposerInputChange,
+    handleComposerKeyPress,
+  } = useChatComposerController({
+    input,
+    focused,
+    onInputChange: setInput,
+    onSend: () => { void sendMessage(); },
+    onApplySlashCommand: applySlashCommand,
+  });
 
   // ─── Render ─────────────────────────────────────────────────────────────
 
@@ -673,39 +682,22 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
             ref={inputRef}
             style={[styles.input, Platform.OS === 'web' ? { outlineWidth: 0, outlineStyle: 'none' } as any : {}]}
             value={input}
-            onChangeText={setInput}
+            onChangeText={handleComposerInputChange}
             placeholder={`Ask ${agentName}...`}
             placeholderTextColor="#606075"
-          onSubmitEditing={() => {
-            if (Platform.OS === 'web') return;
-            if (showSlashCommands) {
-              const selected = slashCommands[highlightedSlashIndex] || slashCommands[0];
-              if (selected) {
-                applySlashCommand(selected);
-                return;
-                }
-              }
-              sendMessage();
-            }}
-            onKeyPress={(e: any) => {
-              if (Platform.OS === 'web' && showSlashCommands) {
-                if (e.nativeEvent?.key === 'ArrowDown') {
-                  e.preventDefault?.();
-                  setHighlightedSlashIndex((prev: number) => (prev + 1) % slashCommands.length);
+            onSubmitEditing={() => {
+              if (Platform.OS === 'web') return;
+              if (showSlashCommands) {
+                const selected = getSelectedChatSlashCommand(slashCommands, highlightedSlashIndex);
+                if (selected) {
+                  applySlashCommand(selected);
                   return;
                 }
-                if (e.nativeEvent?.key === 'ArrowUp') {
-                  e.preventDefault?.();
-                  setHighlightedSlashIndex((prev: number) => (prev - 1 + slashCommands.length) % slashCommands.length);
-                  return;
-                }
-                if ((e.nativeEvent?.key === 'Enter' || e.nativeEvent?.key === 'Tab') && !e.nativeEvent?.shiftKey) {
-                  e.preventDefault?.();
-                  const selected = slashCommands[highlightedSlashIndex] || slashCommands[0];
-                  if (selected) applySlashCommand(selected);
-                }
               }
+              void sendMessage();
             }}
+            onKeyPress={Platform.OS === 'web' ? undefined : handleComposerKeyPress}
+            {...(Platform.OS === 'web' ? { onKeyDown: handleComposerKeyPress as any } : {})}
             onFocus={() => {
               if (blurTimeoutRef.current) {
                 clearTimeout(blurTimeoutRef.current);

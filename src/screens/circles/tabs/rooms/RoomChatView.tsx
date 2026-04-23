@@ -8,12 +8,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, ScrollView, Pressable, TextInput, StyleSheet, Platform,
-  ActivityIndicator, Animated,
+  ActivityIndicator, Animated, FlatList,
 } from 'react-native';
 import { ROOM_CHAT_PRESETS, type ChatPreset, type RoomMessage } from './roomTypes';
 import { useRoomMessages } from './roomHooks';
 import { supabase } from '../../../../lib/supabase';
 import ChatArtifacts from '../../../../components/chat/ChatArtifacts';
+import { readMessageArtifacts, readMessageMemoriesUsed } from '../../../../lib/messageMetadataReaders';
 import { sendRoomStructuredChatMessage } from '../../../../lib/roomChatService';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -47,7 +48,7 @@ function RoomChatView({ roomId, circleId, accentColor, activeFile }: Props) {
   const { messages } = useRoomMessages(roomId);
   const [input, setInput] = useState('');
   const [botTyping, setBotTyping] = useState(false);
-  const scrollRef = useRef<ScrollView>(null);
+  const scrollRef = useRef<FlatList<RoomMessage>>(null);
   const typingAnim = useRef(new Animated.Value(0)).current;
 
   // ── Auto-scroll to bottom on new messages ──
@@ -176,13 +177,29 @@ function RoomChatView({ roomId, circleId, accentColor, activeFile }: Props) {
       </View>
 
       {/* ── SECTION: Messages Area ── */}
-      <ScrollView
+      {/* Virtualized so chat history stays fast past a few hundred messages.
+          Previously this was a ScrollView + `messages.map()` which kept every
+          bubble mounted. */}
+      <FlatList
         ref={scrollRef}
         style={styles.messagesArea}
         contentContainerStyle={styles.messagesContent}
         nativeID="section-room-chat-messages"
-      >
-        {messages.length === 0 && (
+        data={messages}
+        keyExtractor={(m) => m.id}
+        initialNumToRender={40}
+        windowSize={10}
+        maxToRenderPerBatch={20}
+        removeClippedSubviews
+        renderItem={({ item: msg }) => (
+          <RenderRoomChatMessage
+            msg={msg}
+            accentColor={accentColor}
+            circleId={circleId}
+            roomId={roomId}
+          />
+        )}
+        ListEmptyComponent={
           <View style={styles.emptyState}>
             <Text style={styles.emptyIcon}>{'>_'}</Text>
             <Text style={styles.emptyText}>No messages yet</Text>
@@ -190,87 +207,18 @@ function RoomChatView({ roomId, circleId, accentColor, activeFile }: Props) {
               Send a message or tap a preset to get started
             </Text>
           </View>
-        )}
-
-        {messages.map((msg) => {
-          const isAgent = msg.messageType === 'agent_output';
-          const isSystem = msg.messageType === 'system';
-          const isUser = !isAgent && !isSystem;
-
-          if (isSystem) {
-            return (
-              <View key={msg.id} style={styles.systemMsg}>
-                <Text style={styles.systemText}>{msg.content}</Text>
-              </View>
-            );
-          }
-
-          if (isAgent) {
-            const artifacts = Array.isArray(msg.metadata?.artifacts) ? msg.metadata.artifacts : [];
-            const memoriesUsed = Array.isArray(msg.metadata?.memories_used) ? msg.metadata.memories_used : [];
-            return (
-              <View key={msg.id} style={styles.agentMsg}>
-                <View style={[styles.agentAccent, { backgroundColor: '#22c55e' }]} />
-                <View style={styles.agentBubble}>
-                  <View style={styles.msgMeta}>
-                    <Text style={styles.agentName}>
-                      {msg.agentName || 'Agent'}
-                    </Text>
-                    <Text style={styles.msgTime}>{timeAgo(msg.createdAt)}</Text>
-                  </View>
-                  <Text style={styles.agentText} selectable>{msg.content}</Text>
-                  {artifacts.length > 0 && (
-                    <ChatArtifacts
-                      artifacts={artifacts as any}
-                      accentColor={accentColor}
-                      circleId={circleId}
-                      roomContext={{ roomId }}
-                    />
-                  )}
-                  {memoriesUsed.length > 0 && (
-                    <View style={styles.memoryChipRow}>
-                      {memoriesUsed.slice(0, 5).map((memory, index) => (
-                        <View key={`${String(memory)}-${index}`} style={styles.memoryChip}>
-                          <Text style={styles.memoryChipText}>{String(memory)}</Text>
-                        </View>
-                      ))}
-                    </View>
-                  )}
-                </View>
-              </View>
-            );
-          }
-
-          // User message
-          return (
-            <View key={msg.id} style={styles.userMsg}>
-              <View style={styles.userBubble}>
-                <View style={styles.msgMeta}>
-                  <Text style={styles.msgTime}>{timeAgo(msg.createdAt)}</Text>
-                </View>
-                <Text style={styles.userText} selectable>{msg.content}</Text>
-                {msg.metadata?.attached_file ? (
-                  <View style={styles.attachedChip}>
-                    <Text style={styles.attachedText}>
-                      {'[]'} {String(msg.metadata.attached_file)}
-                    </Text>
-                  </View>
-                ) : null}
-              </View>
+        }
+        ListFooterComponent={
+          botTyping ? (
+            <View style={styles.agentMsg}>
+              <View style={[styles.agentAccent, { backgroundColor: '#f59e0b' }]} />
+              <Animated.View style={[styles.typingBubble, { opacity: typingOpacity }]}>
+                <Text style={styles.typingText}>BlackSwan is thinking...</Text>
+              </Animated.View>
             </View>
-          );
-        })}
-
-        {/* Typing indicator */}
-        {botTyping && (
-          <View style={styles.agentMsg}>
-            <View style={[styles.agentAccent, { backgroundColor: '#f59e0b' }]} />
-            <Animated.View style={[styles.typingBubble, { opacity: typingOpacity }]}>
-              <Text style={styles.typingText}>BlackSwan is thinking...</Text>
-            </Animated.View>
-          </View>
-        )}
-      </ScrollView>
+          ) : null
+        }
+      />
 
       {/* ── SECTION: Active File Chip ── */}
       {activeFile && (
@@ -316,6 +264,87 @@ function RoomChatView({ roomId, circleId, accentColor, activeFile }: Props) {
     </View>
   );
 }
+
+// ─── Message row renderer ───────────────────────────────────────────────────
+// Split out of the main component so React can memoize it per-row.
+// Virtualized via FlatList above; each row only re-renders when its
+// specific `msg` prop changes.
+
+const RenderRoomChatMessage = React.memo(function RenderRoomChatMessage({
+  msg,
+  accentColor,
+  circleId,
+  roomId,
+}: {
+  msg: RoomMessage;
+  accentColor: string;
+  circleId: string;
+  roomId: string;
+}) {
+  const isAgent = msg.messageType === 'agent_output';
+  const isSystem = msg.messageType === 'system';
+
+  if (isSystem) {
+    return (
+      <View style={styles.systemMsg}>
+        <Text style={styles.systemText}>{msg.content}</Text>
+      </View>
+    );
+  }
+
+  if (isAgent) {
+    const artifacts = readMessageArtifacts(msg.metadata);
+    const memoriesUsed = readMessageMemoriesUsed(msg.metadata);
+    return (
+      <View style={styles.agentMsg}>
+        <View style={[styles.agentAccent, { backgroundColor: '#22c55e' }]} />
+        <View style={styles.agentBubble}>
+          <View style={styles.msgMeta}>
+            <Text style={styles.agentName}>{msg.agentName || 'Agent'}</Text>
+            <Text style={styles.msgTime}>{timeAgo(msg.createdAt)}</Text>
+          </View>
+          <Text style={styles.agentText} selectable>{msg.content}</Text>
+          {artifacts.length > 0 && (
+            <ChatArtifacts
+              artifacts={artifacts as any}
+              accentColor={accentColor}
+              circleId={circleId}
+              roomContext={{ roomId }}
+            />
+          )}
+          {memoriesUsed.length > 0 && (
+            <View style={styles.memoryChipRow}>
+              {memoriesUsed.slice(0, 5).map((memory, index) => (
+                <View key={`${String(memory)}-${index}`} style={styles.memoryChip}>
+                  <Text style={styles.memoryChipText}>{String(memory)}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+        </View>
+      </View>
+    );
+  }
+
+  // User message
+  return (
+    <View style={styles.userMsg}>
+      <View style={styles.userBubble}>
+        <View style={styles.msgMeta}>
+          <Text style={styles.msgTime}>{timeAgo(msg.createdAt)}</Text>
+        </View>
+        <Text style={styles.userText} selectable>{msg.content}</Text>
+        {msg.metadata?.attached_file ? (
+          <View style={styles.attachedChip}>
+            <Text style={styles.attachedText}>
+              {'[]'} {String(msg.metadata.attached_file)}
+            </Text>
+          </View>
+        ) : null}
+      </View>
+    </View>
+  );
+});
 
 // ─── Styles ─────────────────────────────────────────────────────────────────
 

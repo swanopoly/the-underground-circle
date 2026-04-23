@@ -13,6 +13,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { safeGetUser } from '../../lib/authSession';
 import { User, Achievement, UserAchievement, XPEvent, Integration, AgentBot, Friend } from '../../types';
 import Card from '../../components/Card';
 import Button from '../../components/Button';
@@ -27,6 +28,8 @@ import {
 } from '../../lib/gamification';
 import { getUserIntegrations, platformConnections, getFriends } from '../../lib/integrations';
 import { getUserAgents } from '../../lib/agents';
+import MentionsInbox from '../../components/MentionsInbox';
+import { getLastProfileCircle, navigateToUnifiedProfile } from '../../lib/profileNavigation';
 
 const fmt = (n: number) => n.toLocaleString();
 
@@ -147,7 +150,7 @@ function getEventLabel(type: string): string {
   return map[type] || type;
 }
 
-export default function ProfileScreen({ navigation }: any) {
+export default function ProfileScreen({ navigation, route }: any) {
   const [profile, setProfile] = useState<User | null>(null);
   const [grindKarma, setGrindKarma] = useState(0);
   const [socialKarma, setSocialKarma] = useState(0);
@@ -180,6 +183,45 @@ export default function ProfileScreen({ navigation }: any) {
   }, []);
 
   useEffect(() => {
+    if (!route?.name) return;
+    if (route.name !== 'Profile') return;
+    const lastCircle = getLastProfileCircle();
+    if (lastCircle?.circleId) {
+      navigation.replace?.('CircleDetail', {
+        circleId: lastCircle.circleId,
+        circleName: lastCircle.circleName || undefined,
+      });
+      return;
+    }
+    if (navigateToUnifiedProfile(navigation, { replace: true })) return;
+    navigation.replace?.('CirclesList');
+  }, [navigation, route?.name]);
+
+  // If AppHeader set the focus flag (unread mentions badge tap), scroll to
+  // the MentionsInbox once it has mounted. Poll a few frames because the
+  // inbox renders below other async data. Uses scrollIntoView via the DOM id
+  // mirrored from nativeID="section-mentions-inbox" on web.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined' || typeof document === 'undefined') return;
+    let flag: string | null = null;
+    try { flag = window.localStorage.getItem('uc_focus_mentions_inbox'); } catch {}
+    if (!flag) return;
+    let tries = 0;
+    let raf: any;
+    const tryScroll = () => {
+      const el = document.getElementById('section-mentions-inbox');
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        try { window.localStorage.removeItem('uc_focus_mentions_inbox'); } catch {}
+        return;
+      }
+      if (tries++ < 60) raf = requestAnimationFrame(tryScroll);
+    };
+    raf = requestAnimationFrame(tryScroll);
+    return () => { if (raf) cancelAnimationFrame(raf); };
+  }, []);
+
+  useEffect(() => {
     Animated.timing(xpAnim, {
       toValue: levelInfo.progress,
       duration: 1000,
@@ -188,7 +230,7 @@ export default function ProfileScreen({ navigation }: any) {
   }, [levelInfo.progress]);
 
   const loadAll = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
+    const { value: user } = await safeGetUser();
     if (!user) return;
 
     const { data: profileData } = await supabase
@@ -329,10 +371,18 @@ export default function ProfileScreen({ navigation }: any) {
   return (
     <View style={styles.container}>
       <View style={[styles.header, isDesktop && styles.headerDesktop]}>
-        <Text style={styles.headerTitle}>PROFILE</Text>
-        <Pressable onPress={() => navigation.navigate('EditProfile')}>
-          <Text style={styles.editButton}>EDIT</Text>
-        </Pressable>
+        <View>
+          <Text style={styles.headerEyebrow}>PROFILE</Text>
+          <Text style={styles.headerTitle}>Your Command Center</Text>
+        </View>
+        <View style={styles.headerActions}>
+          <Pressable onPress={() => navigation.navigate('EditProfile')} style={styles.headerActionBtn}>
+            <Text style={styles.headerActionText}>EDIT</Text>
+          </Pressable>
+          <Pressable onPress={handleSignOut} style={styles.headerDangerBtn}>
+            <Text style={styles.headerDangerText}>LOG OUT</Text>
+          </Pressable>
+        </View>
       </View>
 
       <ScrollView contentContainerStyle={styles.scrollContent}>
@@ -369,7 +419,8 @@ export default function ProfileScreen({ navigation }: any) {
               style={styles.heroAuraInner}
             >
               <Card style={styles.heroCard}>
-                <View style={styles.heroSection}>
+                <View style={[styles.heroCardLayout, isDesktop && styles.heroCardLayoutDesktop]}>
+                  <View style={[styles.heroSection, isDesktop && styles.heroSectionDesktop]}>
                   <Pressable onPress={() => navigation.navigate('EditProfile')}>
                     <View style={[styles.avatarRing, { borderColor: themeColor }]}>
                       <View style={styles.avatar}>
@@ -426,6 +477,8 @@ export default function ProfileScreen({ navigation }: any) {
                   <Text style={styles.memberSince}>
                     Member since {profile?.created_at ? new Date(profile.created_at).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '...'}
                   </Text>
+                  </View>
+
                 </View>
               </Card>
             </View>
@@ -444,6 +497,40 @@ export default function ProfileScreen({ navigation }: any) {
             </View>
             <Text style={styles.xpTotal}>{fmt(xp)} TOTAL XP</Text>
           </Card>
+
+          {/* Activity + Rank near the top */}
+          <View style={isDesktop ? styles.activityRankRow : undefined}>
+            {rank !== null && (
+              <View style={isDesktop ? { width: 180, flexShrink: 0 } : undefined}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>RANK</Text>
+                </View>
+                <Card style={styles.rankCard}>
+                  <Text style={styles.rankLabel}>YOUR RANK</Text>
+                  <Text style={styles.rankNumber}>#{rank}</Text>
+                  <Text style={styles.rankOf}>of {totalUsers} users</Text>
+                </Card>
+              </View>
+            )}
+
+            {recentActivity.length > 0 && (
+              <View style={isDesktop ? styles.activityRankCol : undefined}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>RECENT ACTIVITY</Text>
+                </View>
+                <Card style={styles.activityCard}>
+                  {recentActivity.map((event, i) => (
+                    <View key={event.id} style={[styles.activityItem, i > 0 && styles.activityBorder]}>
+                      <Text style={styles.activityText}>
+                        {getEventEmoji(event.event_type)} +{event.xp_amount} XP — {getEventLabel(event.event_type)}
+                      </Text>
+                      <Text style={styles.activityTime}>{getTimeAgo(event.created_at)}</Text>
+                    </View>
+                  ))}
+                </Card>
+              </View>
+            )}
+          </View>
 
           {/* Karma + Stats combined on desktop */}
           {isDesktop ? (
@@ -746,40 +833,6 @@ export default function ProfileScreen({ navigation }: any) {
             })}
           </ScrollView>
 
-          {/* Activity + Rank side-by-side on desktop */}
-          <View style={isDesktop ? styles.activityRankRow : undefined}>
-            {/* Recent Activity */}
-            {recentActivity.length > 0 && (
-              <View style={isDesktop ? styles.activityRankCol : undefined}>
-                <View style={styles.sectionHeader}>
-                  <Text style={styles.sectionTitle}>RECENT ACTIVITY</Text>
-                </View>
-                <Card style={styles.activityCard}>
-                  {recentActivity.map((event, i) => (
-                    <View key={event.id} style={[styles.activityItem, i > 0 && styles.activityBorder]}>
-                      <Text style={styles.activityText}>
-                        {getEventEmoji(event.event_type)} +{event.xp_amount} XP — {getEventLabel(event.event_type)}
-                      </Text>
-                      <Text style={styles.activityTime}>{getTimeAgo(event.created_at)}</Text>
-                    </View>
-                  ))}
-                </Card>
-              </View>
-            )}
-
-            {/* Leaderboard Preview */}
-            {rank !== null && (
-              <View style={isDesktop ? { width: 160, flexShrink: 0 } : undefined}>
-                {isDesktop && <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>RANK</Text></View>}
-                <Card style={styles.rankCard}>
-                  <Text style={styles.rankLabel}>YOUR RANK</Text>
-                  <Text style={styles.rankNumber}>#{rank}</Text>
-                  <Text style={styles.rankOf}>of {totalUsers} users</Text>
-                </Card>
-              </View>
-            )}
-          </View>
-
           {/* Bio Section */}
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>BIO</Text>
@@ -807,12 +860,22 @@ export default function ProfileScreen({ navigation }: any) {
           )}
 
           <View style={{ height: 20 }} />
-          <Button
-            title="SIGN OUT"
-            variant="ghost"
-            onPress={handleSignOut}
-            style={styles.signOutButton}
-          />
+          <View style={styles.accountActionsCard}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.accountActionsTitle}>Account Actions</Text>
+              <Text style={styles.accountActionsDesc}>
+                Update your profile, manage connected services, or sign out of this workspace.
+              </Text>
+            </View>
+            <Pressable onPress={handleSignOut} style={styles.signOutButton}>
+              <Text style={styles.signOutButtonText}>LOG OUT</Text>
+            </Pressable>
+          </View>
+          {/* Unified mentions inbox — every @ of the current user across
+              every circle they're in. Opening this view also marks their
+              mentions as seen (bumps profiles.mentions_seen_at). */}
+          <MentionsInbox />
+
           <View style={{ height: 40 }} />
         </View>
       </ScrollView>
@@ -841,262 +904,400 @@ export default function ProfileScreen({ navigation }: any) {
   );
 }
 
+// ── Design tokens (GitHub dark mode + UC indigo) ────────────────────────────
+const FONT = Platform.OS === 'web'
+  ? '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
+  : Platform.OS === 'ios' ? 'System' : 'Roboto';
+
+const C = {
+  canvas: '#0d1117',
+  surface: '#161b22',
+  inset: '#010409',
+  overlay: '#1c2128',
+  border: '#30363d',
+  borderMuted: '#21262d',
+  borderAccent: '#6366f1',
+  text: '#e6edf3',
+  textSec: '#8b949e',
+  textMuted: '#484f58',
+  accent: '#6366f1',
+  accentHover: '#818cf8',
+  success: '#3fb950',
+  warning: '#d29922',
+  danger: '#f85149',
+};
+
+const cardShadow = Platform.OS === 'web' ? { boxShadow: '0 1px 3px rgba(0,0,0,0.12)' } as any : {};
+const featuredShadow = Platform.OS === 'web' ? { boxShadow: '0 2px 8px rgba(0,0,0,0.2), 0 0 0 1px rgba(99,102,241,0.1)' } as any : {};
+const modalShadow = Platform.OS === 'web' ? { boxShadow: '0 8px 24px rgba(0,0,0,0.4)' } as any : {};
+const transition = Platform.OS === 'web' ? { transition: 'all 0.2s ease' } as any : {};
+
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000000' },
+  container: { flex: 1, backgroundColor: C.canvas },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: 60, paddingBottom: 20, paddingHorizontal: 32,
-    borderBottomWidth: 1, borderBottomColor: '#222',
+    paddingTop: 60, paddingBottom: 16, paddingHorizontal: 32,
+    borderBottomWidth: 1, borderBottomColor: C.borderMuted,
     width: '100%',
   },
-  // Desktop header keeps full width — no narrow gutter on big screens
   headerDesktop: { paddingHorizontal: 48 },
-  headerTitle: { color: '#fff', fontSize: 22, fontWeight: '900', letterSpacing: 3 },
-  editButton: { color: '#6366f1', fontSize: 14, fontWeight: '700', letterSpacing: 1 },
+  headerEyebrow: { color: C.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 1.4, fontFamily: FONT, marginBottom: 2 },
+  headerTitle: { color: C.text, fontSize: 22, fontWeight: '700', fontFamily: FONT },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  headerActionBtn: {
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 10,
+    backgroundColor: C.surface,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  headerActionText: { color: C.accent, fontSize: 12, fontWeight: '700', fontFamily: FONT, letterSpacing: 0.5 },
+  headerDangerBtn: {
+    borderWidth: 1,
+    borderColor: '#4b2222',
+    borderRadius: 10,
+    backgroundColor: '#251214',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  headerDangerText: { color: '#fca5a5', fontSize: 12, fontWeight: '700', fontFamily: FONT, letterSpacing: 0.5 },
   scrollContent: { flexGrow: 1 },
-  // Page body is full width with a generous max — same pattern as AgentsScreen.
-  // Old narrow 480/640 cap was a phone-first design that wasted half the
-  // screen on desktop.
   inner: {
     width: '100%',
-    maxWidth: 1600,
+    maxWidth: 1000,
     alignSelf: 'center' as const,
     paddingHorizontal: 24,
-    paddingTop: 28,
+    paddingTop: 24,
     paddingBottom: 60,
   },
-  innerDesktop: { paddingHorizontal: 40 },
+  innerDesktop: { paddingHorizontal: 32 },
 
-  // Hero aura wrapper — shape only (the visual is in the injected CSS class
-  // .uc-profile-hero-aura on web). Native pass-through.
+  // Hero aura wrapper
   heroAuraWrapper: {
     marginTop: 8,
-    marginBottom: 18,
-    borderRadius: 22,
+    marginBottom: 16,
+    borderRadius: 6,
   },
   heroAuraInner: {
-    borderRadius: 20,
+    borderRadius: 6,
     overflow: 'hidden' as any,
   },
 
-  // Hero
-  heroCard: { alignItems: 'center', padding: 28, marginBottom: 12 },
+  // Hero card
+  heroCard: {
+    alignItems: 'center', padding: 32, marginBottom: 16,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 6,
+    ...featuredShadow,
+  },
+  heroCardLayout: { width: '100%' },
+  heroCardLayoutDesktop: { width: '100%' },
   heroSection: { alignItems: 'center' },
-  avatarRing: { width: 88, height: 88, borderRadius: 44, borderWidth: 3, justifyContent: 'center', alignItems: 'center', marginBottom: 14 },
-  avatar: { width: 78, height: 78, borderRadius: 39, backgroundColor: '#2a2a2a', justifyContent: 'center', alignItems: 'center' },
-  avatarText: { color: '#fff', fontSize: 32, fontWeight: '900' },
-  displayName: { color: '#fff', fontSize: 22, fontWeight: '700' },
-  username: { color: '#666', fontSize: 14, marginTop: 2 },
-  titleBadge: { borderWidth: 1, borderRadius: 8, paddingVertical: 4, paddingHorizontal: 12, marginTop: 10 },
-  titleText: { fontSize: 11, fontWeight: '800', letterSpacing: 2 },
-  memberSince: { color: '#444', fontSize: 11, marginTop: 8 },
+  heroSectionDesktop: { alignItems: 'center' },
+  avatarRing: { width: 84, height: 84, borderRadius: 42, borderWidth: 2, borderColor: C.accent, justifyContent: 'center', alignItems: 'center', marginBottom: 16 },
+  avatar: { width: 76, height: 76, borderRadius: 38, backgroundColor: C.overlay, justifyContent: 'center', alignItems: 'center' },
+  avatarText: { color: C.text, fontSize: 28, fontWeight: '600', fontFamily: FONT },
+  displayName: { color: C.text, fontSize: 22, fontWeight: '600', fontFamily: FONT },
+  username: { color: C.textSec, fontSize: 14, marginTop: 2, fontFamily: FONT, fontWeight: '400' },
+  titleBadge: { borderWidth: 1, borderRadius: 20, borderColor: C.accent + '40', paddingVertical: 4, paddingHorizontal: 14, marginTop: 12, backgroundColor: C.accent + '15' },
+  titleText: { fontSize: 12, fontWeight: '600', color: C.accent, fontFamily: FONT },
+  memberSince: { color: C.textMuted, fontSize: 12, marginTop: 10, fontFamily: FONT, fontWeight: '400' },
 
   // XP Bar
-  xpCard: { marginBottom: 12, padding: 18 },
-  xpLevel: { color: '#fff', fontSize: 13, fontWeight: '800', letterSpacing: 2 },
-  xpNumbers: { color: '#888', fontSize: 12, fontWeight: '600' },
-  xpBarBg: { height: 8, backgroundColor: '#000000', borderRadius: 4, overflow: 'hidden' },
+  xpCard: {
+    marginBottom: 16, padding: 16,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 6,
+    ...cardShadow,
+  },
+  xpLevel: { color: C.text, fontSize: 14, fontWeight: '600', fontFamily: FONT },
+  xpNumbers: { color: C.textSec, fontSize: 13, fontWeight: '400', fontFamily: FONT },
+  xpBarBg: { height: 8, backgroundColor: C.borderMuted, borderRadius: 4, overflow: 'hidden' },
   xpBarFill: {
     height: '100%', borderRadius: 4,
-    backgroundColor: '#6366f1',
-    ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(90deg, #6366f1, #a855f7)' } as any : {}),
+    backgroundColor: C.accent,
+    ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(90deg, #6366f1, #818cf8)' } as any : {}),
   },
-  xpTotal: { color: '#555', fontSize: 10, letterSpacing: 2, fontWeight: '700', marginTop: 8, textAlign: 'center' },
+  xpTotal: { color: C.textMuted, fontSize: 12, fontWeight: '400', marginTop: 8, textAlign: 'center', fontFamily: FONT },
 
   // Karma
-  karmaRow: { flexDirection: 'row', gap: 12, marginBottom: 12 },
-  karmaCard: { flex: 1, alignItems: 'center', padding: 18 },
-  karmaEmoji: { fontSize: 24, marginBottom: 6 },
-  karmaNumber: { color: '#fff', fontSize: 28, fontWeight: '900' },
-  karmaLabel: { color: '#666', fontSize: 9, letterSpacing: 1.5, fontWeight: '700', marginTop: 4 },
+  karmaRow: { flexDirection: 'row', gap: 12, marginBottom: 16 },
+  karmaCard: {
+    flex: 1, alignItems: 'center', padding: 16,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 6,
+    ...cardShadow,
+  },
+  karmaEmoji: { fontSize: 16, marginBottom: 6, color: C.accent, fontFamily: FONT },
+  karmaNumber: { color: C.text, fontSize: 24, fontWeight: '600', fontFamily: FONT },
+  karmaLabel: { color: C.textSec, fontSize: 12, fontWeight: '500', marginTop: 4, fontFamily: FONT },
 
   // Stats Grid
   statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginBottom: 16 },
-  statCard: { width: '47%', alignItems: 'center', padding: 16 },
-  statNumber: { color: '#fff', fontSize: 26, fontWeight: '900', marginBottom: 4 },
-  statLabel: { color: '#666', fontSize: 9, letterSpacing: 1, fontWeight: '700', textAlign: 'center' },
+  statCard: {
+    width: '47%', alignItems: 'center', padding: 16,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 6,
+    ...cardShadow,
+  },
+  statNumber: { color: C.text, fontSize: 24, fontWeight: '600', marginBottom: 4, fontFamily: FONT },
+  statLabel: { color: C.textSec, fontSize: 12, fontWeight: '500', textAlign: 'center', fontFamily: FONT },
 
-  // Desktop combined karma + stats row
-  karmaStatsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 16 },
-  statCardInline: { flex: 1, alignItems: 'center', padding: 14, minWidth: 80 },
+  karmaStatsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginBottom: 16 },
+  statCardInline: {
+    flex: 1, alignItems: 'center', padding: 16, minWidth: 100,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 6,
+    ...cardShadow,
+  },
 
-  // Desktop activity + rank side-by-side
   activityRankRow: { flexDirection: 'row', gap: 16 },
   activityRankCol: { flex: 1 },
 
   // Sections
-  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, marginTop: 8 },
-  sectionTitle: { color: '#fff', fontSize: 14, fontWeight: '800', letterSpacing: 2 },
-  sectionCount: { color: '#666', fontSize: 12, fontWeight: '700' },
+  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, marginTop: 16 },
+  sectionTitle: { color: C.text, fontSize: 16, fontWeight: '600', fontFamily: FONT },
+  sectionCount: { color: C.textMuted, fontSize: 13, fontWeight: '400', fontFamily: FONT },
 
   // Badges
   badgeScroll: { marginBottom: 16 },
   badgeItem: { alignItems: 'center', marginRight: 16, width: 70 },
-  badgeLocked: { opacity: 0.35 },
+  badgeLocked: { opacity: 0.3 },
   badgeIcon: { fontSize: 32, marginBottom: 4 },
   badgeIconLocked: {},
-  badgeName: { color: '#ccc', fontSize: 10, fontWeight: '600', textAlign: 'center' },
-  badgeNameLocked: { color: '#555' },
+  badgeName: { color: C.textSec, fontSize: 11, fontWeight: '500', textAlign: 'center', fontFamily: FONT },
+  badgeNameLocked: { color: C.textMuted },
 
   // Activity
-  activityCard: { marginBottom: 16, padding: 0 },
-  activityItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 14 },
-  activityBorder: { borderTopWidth: 1, borderTopColor: '#000000' },
-  activityText: { color: '#ccc', fontSize: 13, flex: 1 },
-  activityTime: { color: '#444', fontSize: 11, marginLeft: 8 },
+  activityCard: {
+    marginBottom: 16, padding: 0,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 6,
+    overflow: 'hidden',
+    ...cardShadow,
+  },
+  activityItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 16 },
+  activityBorder: { borderTopWidth: 1, borderTopColor: C.borderMuted },
+  activityText: { color: C.text, fontSize: 13, flex: 1, fontFamily: FONT, fontWeight: '400' },
+  activityTime: { color: C.textMuted, fontSize: 12, marginLeft: 8, fontFamily: FONT, fontWeight: '400' },
 
   // Rank
-  rankCard: { alignItems: 'center', padding: 20, marginBottom: 16, marginTop: 8 },
-  rankLabel: { color: '#666', fontSize: 10, letterSpacing: 2, fontWeight: '700' },
-  rankNumber: { color: '#fff', fontSize: 40, fontWeight: '900', marginVertical: 4 },
-  rankOf: { color: '#555', fontSize: 12 },
+  rankCard: {
+    alignItems: 'center', padding: 24, marginBottom: 16, marginTop: 8,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 6,
+    ...featuredShadow,
+  },
+  rankLabel: { color: C.textSec, fontSize: 12, fontWeight: '500', fontFamily: FONT },
+  rankNumber: { color: C.accent, fontSize: 40, fontWeight: '600', marginVertical: 4, fontFamily: FONT },
+  rankOf: { color: C.textMuted, fontSize: 13, fontFamily: FONT, fontWeight: '400' },
 
   // Bio
-  editLink: { color: '#6366f1', fontSize: 11, fontWeight: '700', letterSpacing: 1 },
-  bioCard: { marginBottom: 16 },
-  bioText: { color: '#999', fontSize: 14, lineHeight: 20 },
-  bioEditCard: { marginBottom: 16, gap: 12 },
-  bioInput: { backgroundColor: '#000000', borderWidth: 1, borderColor: '#222', borderRadius: 10, padding: 14, color: '#fff', fontSize: 14, minHeight: 80, textAlignVertical: 'top' },
+  editLink: { color: C.accent, fontSize: 13, fontWeight: '600', fontFamily: FONT },
+  bioCard: { marginBottom: 16, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border, borderRadius: 6, ...cardShadow },
+  bioText: { color: C.textSec, fontSize: 14, lineHeight: 22, fontFamily: FONT, fontWeight: '400' },
+  bioEditCard: { marginBottom: 16, gap: 12, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border, borderRadius: 6, ...cardShadow },
+  bioInput: { backgroundColor: C.canvas, borderWidth: 1, borderColor: C.border, borderRadius: 6, padding: 12, color: C.text, fontSize: 14, minHeight: 80, textAlignVertical: 'top', fontFamily: FONT },
 
-  signOutButton: { borderWidth: 1, borderColor: '#222' },
+  accountActionsCard: {
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 12,
+    backgroundColor: C.surface,
+    padding: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    ...cardShadow,
+  },
+  accountActionsTitle: { color: C.text, fontSize: 15, fontWeight: '700', fontFamily: FONT, marginBottom: 4 },
+  accountActionsDesc: { color: C.textSec, fontSize: 13, lineHeight: 18, fontFamily: FONT, fontWeight: '400' },
+  signOutButton: {
+    borderWidth: 1,
+    borderColor: '#4b2222',
+    borderRadius: 10,
+    backgroundColor: '#251214',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  signOutButtonText: { color: '#fca5a5', fontSize: 12, fontWeight: '700', fontFamily: FONT, letterSpacing: 0.6 },
 
   // Modal
-  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center' },
-  modalCard: { backgroundColor: '#111', borderRadius: 16, padding: 32, borderWidth: 1, borderColor: '#222', alignItems: 'center', width: '80%', maxWidth: 300 },
-  modalIcon: { fontSize: 48, marginBottom: 12 },
-  modalBadgeName: { color: '#fff', fontSize: 18, fontWeight: '800', marginBottom: 6 },
-  modalDesc: { color: '#888', fontSize: 13, textAlign: 'center', marginBottom: 10 },
-  modalXP: { color: '#fbbf24', fontSize: 14, fontWeight: '700', marginBottom: 8 },
-  modalUnlocked: { color: '#22c55e', fontSize: 12 },
-  modalLocked: { color: '#666', fontSize: 12 },
-
-  // New customizable styles
-  bannerContainer: { marginBottom: -24, height: 140, marginHorizontal: 0, borderRadius: 14, overflow: 'hidden', zIndex: 0 },
-  bannerPlaceholder: { 
-    flex: 1, 
-    backgroundColor: '#000000', 
-    justifyContent: 'center', 
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: '#333',
-    borderStyle: 'dashed',
-    borderRadius: 12,
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
+  modalCard: {
+    backgroundColor: C.surface, borderRadius: 12, padding: 32, borderWidth: 1, borderColor: C.border,
+    alignItems: 'center', width: '80%', maxWidth: 320,
+    ...modalShadow,
   },
-  bannerPlaceholderText: { color: '#666', fontSize: 12, fontWeight: '700', letterSpacing: 1 },
-  
-  statusMessage: { 
-    color: '#888', 
-    fontSize: 14, 
-    fontStyle: 'italic', 
+  modalIcon: { fontSize: 48, marginBottom: 12 },
+  modalBadgeName: { color: C.text, fontSize: 18, fontWeight: '600', marginBottom: 6, fontFamily: FONT },
+  modalDesc: { color: C.textSec, fontSize: 13, textAlign: 'center', marginBottom: 10, fontFamily: FONT, fontWeight: '400' },
+  modalXP: { color: C.accent, fontSize: 14, fontWeight: '600', marginBottom: 8, fontFamily: FONT },
+  modalUnlocked: { color: C.success, fontSize: 12, fontFamily: FONT, fontWeight: '500' },
+  modalLocked: { color: C.textMuted, fontSize: 12, fontFamily: FONT, fontWeight: '400' },
+
+  // Banner
+  bannerContainer: { marginBottom: -20, height: 140, marginHorizontal: 0, borderRadius: 6, overflow: 'hidden', zIndex: 0 },
+  bannerPlaceholder: {
+    flex: 1,
+    backgroundColor: C.surface,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: C.border,
+    borderStyle: 'dashed',
+    borderRadius: 6,
+  },
+  bannerPlaceholderText: { color: C.textMuted, fontSize: 13, fontWeight: '500', fontFamily: FONT },
+
+  statusMessage: {
+    color: C.textSec,
+    fontSize: 14,
+    fontStyle: 'italic',
     marginVertical: 8,
     textAlign: 'center',
+    fontFamily: FONT,
+    fontWeight: '400',
   },
 
   // Pinned achievements
   pinnedScroll: { marginBottom: 16 },
-  pinnedBadgeItem: { 
-    alignItems: 'center', 
-    marginRight: 16, 
+  pinnedBadgeItem: {
+    alignItems: 'center',
+    marginRight: 16,
     width: 80,
     position: 'relative',
   },
   pinnedBadgeIcon: { fontSize: 36, marginBottom: 6 },
-  pinnedBadgeName: { 
-    color: '#fff', 
-    fontSize: 11, 
-    fontWeight: '700', 
+  pinnedBadgeName: {
+    color: C.text,
+    fontSize: 11,
+    fontWeight: '500',
     textAlign: 'center',
     marginBottom: 4,
+    fontFamily: FONT,
   },
   pinnedIndicator: {
-    paddingHorizontal: 6,
+    paddingHorizontal: 8,
     paddingVertical: 2,
-    borderRadius: 4,
+    borderRadius: 20,
     position: 'absolute',
     bottom: -8,
+    backgroundColor: C.accent,
   },
   pinnedText: {
     color: '#fff',
-    fontSize: 8,
-    fontWeight: '800',
-    letterSpacing: 1,
+    fontSize: 9,
+    fontWeight: '600',
+    fontFamily: FONT,
   },
-  emptyPinnedCard: { 
-    alignItems: 'center', 
+  emptyPinnedCard: {
+    alignItems: 'center',
     padding: 24,
-    backgroundColor: '#0f0f0f',
-    borderColor: '#000000',
+    backgroundColor: C.surface,
+    borderColor: C.border,
+    borderWidth: 1,
+    borderRadius: 6,
+    ...cardShadow,
   },
-  emptyPinnedText: { color: '#666', fontSize: 14, fontWeight: '600' },
-  emptyPinnedDesc: { color: '#444', fontSize: 12, textAlign: 'center', marginTop: 4, lineHeight: 16 },
+  emptyPinnedText: { color: C.textSec, fontSize: 14, fontWeight: '500', fontFamily: FONT },
+  emptyPinnedDesc: { color: C.textMuted, fontSize: 13, textAlign: 'center', marginTop: 4, lineHeight: 20, fontFamily: FONT, fontWeight: '400' },
 
   // Connected platforms
   platformsScroll: { marginBottom: 16 },
-  platformCard: { 
-    alignItems: 'center', 
-    marginRight: 12, 
+  platformCard: {
+    alignItems: 'center',
+    marginRight: 12,
     minWidth: 80,
-    padding: 12,
+    padding: 14,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 6,
+    ...cardShadow,
   },
-  platformIcon: { fontSize: 24, marginBottom: 6 },
-  platformName: { color: '#fff', fontSize: 10, fontWeight: '700', marginBottom: 2 },
-  platformUsername: { color: '#666', fontSize: 9 },
+  platformIcon: { fontSize: 20, marginBottom: 6 },
+  platformName: { color: C.text, fontSize: 12, fontWeight: '600', marginBottom: 2, fontFamily: FONT },
+  platformUsername: { color: C.textMuted, fontSize: 11, fontFamily: FONT, fontWeight: '400' },
   addPlatformCard: {
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 12,
     minWidth: 80,
     backgroundColor: 'transparent',
-    borderWidth: 2,
-    borderColor: '#333',
+    borderWidth: 1,
+    borderColor: C.border,
     borderStyle: 'dashed',
-    borderRadius: 14,
-    padding: 12,
+    borderRadius: 6,
+    padding: 14,
   },
-  addPlatformIcon: { color: '#666', fontSize: 20, marginBottom: 4 },
-  addPlatformText: { color: '#666', fontSize: 9, fontWeight: '700', letterSpacing: 1 },
-  emptyPlatformsCard: { 
-    alignItems: 'center', 
+  addPlatformIcon: { color: C.textMuted, fontSize: 18, marginBottom: 4, fontFamily: FONT },
+  addPlatformText: { color: C.textMuted, fontSize: 11, fontWeight: '500', fontFamily: FONT },
+  emptyPlatformsCard: {
+    alignItems: 'center',
     padding: 24,
-    backgroundColor: '#0f0f0f',
-    borderColor: '#000000',
+    backgroundColor: C.surface,
+    borderColor: C.border,
+    borderWidth: 1,
+    borderRadius: 6,
+    ...cardShadow,
   },
-  emptyPlatformsText: { color: '#666', fontSize: 14, fontWeight: '600' },
-  emptyPlatformsDesc: { color: '#444', fontSize: 12, textAlign: 'center', marginTop: 4, lineHeight: 16 },
+  emptyPlatformsText: { color: C.textSec, fontSize: 14, fontWeight: '500', fontFamily: FONT },
+  emptyPlatformsDesc: { color: C.textMuted, fontSize: 13, textAlign: 'center', marginTop: 4, lineHeight: 20, fontFamily: FONT, fontWeight: '400' },
 
   // Agents
   agentsScroll: { marginBottom: 16 },
-  agentCard: { 
-    alignItems: 'center', 
-    marginRight: 12, 
+  agentCard: {
+    alignItems: 'center',
+    marginRight: 12,
     minWidth: 90,
-    padding: 12,
+    padding: 14,
     position: 'relative',
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 6,
+    ...cardShadow,
   },
-  agentIcon: { fontSize: 24, marginBottom: 6 },
-  agentName: { color: '#fff', fontSize: 11, fontWeight: '700', marginBottom: 2, textAlign: 'center' },
-  agentType: { color: '#666', fontSize: 8, letterSpacing: 1, marginBottom: 4 },
+  agentIcon: { fontSize: 20, marginBottom: 6 },
+  agentName: { color: C.text, fontSize: 12, fontWeight: '600', marginBottom: 2, textAlign: 'center', fontFamily: FONT },
+  agentType: { color: C.textMuted, fontSize: 11, marginBottom: 4, fontFamily: FONT, fontWeight: '400' },
   agentStatus: { flexDirection: 'row', alignItems: 'center' },
   agentStatusDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: '#22c55e',
+    backgroundColor: C.success,
     marginRight: 4,
   },
-  agentStatusText: { color: '#22c55e', fontSize: 8, fontWeight: '700' },
+  agentStatusText: { color: C.success, fontSize: 11, fontWeight: '500', fontFamily: FONT },
   addAgentCard: {
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 12,
     minWidth: 90,
     backgroundColor: 'transparent',
-    borderWidth: 2,
-    borderColor: '#333',
+    borderWidth: 1,
+    borderColor: C.border,
     borderStyle: 'dashed',
-    borderRadius: 14,
+    borderRadius: 6,
     padding: 12,
   },
   addAgentIcon: { color: '#666', fontSize: 20, marginBottom: 4 },
@@ -1104,63 +1305,71 @@ const styles = StyleSheet.create({
   emptyAgentsCard: { 
     alignItems: 'center', 
     padding: 24,
-    backgroundColor: '#0f0f0f',
-    borderColor: '#000000',
+    backgroundColor: C.surface,
+    borderColor: C.border,
+    borderWidth: 1,
+    borderRadius: 12,
+    ...cardShadow,
   },
-  emptyAgentsText: { color: '#666', fontSize: 14, fontWeight: '600' },
-  emptyAgentsDesc: { color: '#444', fontSize: 12, textAlign: 'center', marginTop: 4, lineHeight: 16 },
+  emptyAgentsText: { color: C.textSec, fontSize: 14, fontWeight: '600', fontFamily: FONT },
+  emptyAgentsDesc: { color: C.textMuted, fontSize: 12, textAlign: 'center', marginTop: 4, lineHeight: 16, fontFamily: FONT },
 
   // Friends
   friendsPreview: { 
     flexDirection: 'row', 
     alignItems: 'center', 
-    backgroundColor: '#111',
-    borderRadius: 14,
+    backgroundColor: C.surface,
+    borderRadius: 12,
     padding: 16,
     marginBottom: 16,
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: C.border,
+    ...cardShadow,
   },
   friendsStats: { marginRight: 16 },
-  friendsCount: { color: '#fff', fontSize: 24, fontWeight: '900' },
-  friendsLabel: { color: '#666', fontSize: 10, letterSpacing: 1, fontWeight: '700' },
+  friendsCount: { color: C.text, fontSize: 24, fontWeight: '900', fontFamily: FONT },
+  friendsLabel: { color: C.textMuted, fontSize: 10, letterSpacing: 1, fontWeight: '700', fontFamily: FONT },
   friendsAvatars: { flexDirection: 'row', flex: 1 },
   friendAvatar: { 
     width: 32, 
     height: 32, 
     borderRadius: 16, 
-    backgroundColor: '#2a2a2a',
+    backgroundColor: C.overlay,
     justifyContent: 'center',
     alignItems: 'center',
     marginLeft: -8,
     borderWidth: 2,
-    borderColor: '#111',
+    borderColor: C.surface,
   },
-  friendAvatarText: { color: '#fff', fontSize: 12, fontWeight: '900' },
-  friendAvatarMore: { backgroundColor: '#333' },
+  friendAvatarText: { color: C.text, fontSize: 12, fontWeight: '900', fontFamily: FONT },
+  friendAvatarMore: { backgroundColor: C.borderMuted },
   emptyFriendsCard: { 
     alignItems: 'center', 
     padding: 24,
-    backgroundColor: '#0f0f0f',
-    borderColor: '#000000',
+    backgroundColor: C.surface,
+    borderColor: C.border,
+    borderWidth: 1,
+    borderRadius: 12,
+    ...cardShadow,
   },
-  emptyFriendsText: { color: '#666', fontSize: 14, fontWeight: '600' },
-  emptyFriendsDesc: { color: '#444', fontSize: 12, textAlign: 'center', marginTop: 4, lineHeight: 16 },
+  emptyFriendsText: { color: C.textSec, fontSize: 14, fontWeight: '600', fontFamily: FONT },
+  emptyFriendsDesc: { color: C.textMuted, fontSize: 12, textAlign: 'center', marginTop: 4, lineHeight: 16, fontFamily: FONT },
 
   // Theme
   themePreview: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#111',
+    backgroundColor: C.surface,
     borderRadius: 12,
     padding: 16,
     marginBottom: 16,
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: C.border,
+    ...cardShadow,
   },
   themeColorDot: { width: 24, height: 24, borderRadius: 12, marginRight: 12 },
-  themeColorName: { color: '#fff', fontSize: 14, fontWeight: '700' },
-  themeSelector: { marginBottom: 16, padding: 16 },
+  themeColorName: { color: C.text, fontSize: 14, fontWeight: '700', fontFamily: FONT },
+  themeSelector: { marginBottom: 16, padding: 16, borderRadius: 12, borderWidth: 1, borderColor: C.border, backgroundColor: C.surface, ...cardShadow },
   themeColors: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
   themeColorOption: { 
     width: 32, 
@@ -1169,29 +1378,34 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: 'transparent',
   },
-  themeColorSelected: { borderColor: '#fff' },
+  themeColorSelected: { borderColor: C.text },
 
   // Invite
   inviteCard: { 
     alignItems: 'center', 
     padding: 24,
     marginBottom: 16,
-    backgroundColor: '#0f0f0f',
-    borderColor: '#000000',
+    backgroundColor: C.surface,
+    borderColor: C.border,
+    borderWidth: 1,
+    borderRadius: 12,
+    ...cardShadow,
   },
   inviteTitle: { 
-    color: '#fff', 
+    color: C.text, 
     fontSize: 16, 
     fontWeight: '800', 
     letterSpacing: 2, 
     marginBottom: 8,
+    fontFamily: FONT,
   },
   inviteDesc: { 
-    color: '#666', 
+    color: C.textSec, 
     fontSize: 13, 
     textAlign: 'center', 
     lineHeight: 18,
     marginBottom: 16,
+    fontFamily: FONT,
   },
   inviteButton: { minHeight: 40, paddingHorizontal: 20 },
 
@@ -1224,7 +1438,7 @@ const styles = StyleSheet.create({
   progressBarBg: {
     flex: 1,
     height: 8,
-    backgroundColor: '#000000',
+    backgroundColor: C.inset,
     borderRadius: 4,
     overflow: 'hidden',
     marginRight: 12,
@@ -1238,16 +1452,18 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
   },
   progressPercent: {
-    color: '#666',
+    color: C.textMuted,
     fontSize: 10,
     fontWeight: '700',
     minWidth: 32,
     textAlign: 'right',
+    fontFamily: FONT,
   },
   nextLevelText: {
-    color: '#555',
+    color: C.textMuted,
     fontSize: 11,
     textAlign: 'center',
     fontWeight: '500',
+    fontFamily: FONT,
   },
 });

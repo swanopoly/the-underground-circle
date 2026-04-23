@@ -79,20 +79,26 @@ export async function loadCircleChatMembers(circleId: string): Promise<CircleCha
 export async function loadThreadMessages(
   circleId: string,
   threadId?: string | null,
-  limit = 100,
+  limit = 50,
 ): Promise<{ rows: PersistedChatMessageRow[]; usedFallback: boolean }> {
+  // Fetch the NEWEST `limit` rows (was previously ORDER BY ASC — which returned
+  // the OLDEST 100 for any thread exceeding the limit, hiding recent chat
+  // from the user). We order DESC on the DB side for the index win, then
+  // reverse to ASC client-side so the consumer can append without flipping
+  // a flag.
   let query = supabase
     .from('messages')
     .select(MESSAGE_SELECT)
     .eq('circle_id', circleId)
-    .order('created_at', { ascending: true })
+    .order('created_at', { ascending: false })
     .limit(limit);
 
   if (threadId) query = query.eq('thread_id', threadId);
   const { data, error } = await query;
 
   if (!error) {
-    return { rows: (data || []) as PersistedChatMessageRow[], usedFallback: false };
+    const rows = (data || []) as PersistedChatMessageRow[];
+    return { rows: rows.reverse(), usedFallback: false };
   }
 
   if (!isColumnMissingError(error)) throw error;
@@ -101,13 +107,96 @@ export async function loadThreadMessages(
     .from('messages')
     .select(FALLBACK_MESSAGE_SELECT)
     .eq('circle_id', circleId)
-    .order('created_at', { ascending: true })
+    .order('created_at', { ascending: false })
     .limit(limit);
 
   if (threadId) fallbackQuery = fallbackQuery.eq('thread_id', threadId);
   const { data: fallback, error: fallbackError } = await fallbackQuery;
   if (fallbackError) throw fallbackError;
-  return { rows: (fallback || []) as PersistedChatMessageRow[], usedFallback: true };
+  const rows = (fallback || []) as PersistedChatMessageRow[];
+  return { rows: rows.reverse(), usedFallback: true };
+}
+
+/**
+ * Load messages strictly older than a cursor timestamp. Used for
+ * scroll-to-top pagination — the caller passes the `created_at` of the
+ * oldest row currently in state, and gets back the next older `limit`
+ * messages in ASC order.
+ */
+export async function loadOlderThreadMessages(
+  circleId: string,
+  threadId: string | null | undefined,
+  olderThan: string,
+  limit = 50,
+): Promise<{ rows: PersistedChatMessageRow[]; hasMore: boolean }> {
+  let query = supabase
+    .from('messages')
+    .select(MESSAGE_SELECT)
+    .eq('circle_id', circleId)
+    .lt('created_at', olderThan)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (threadId) query = query.eq('thread_id', threadId);
+  const { data, error } = await query;
+  if (error) {
+    // One-shot fallback for pre-migration schemas.
+    if (!isColumnMissingError(error)) throw error;
+    let fb = supabase
+      .from('messages')
+      .select(FALLBACK_MESSAGE_SELECT)
+      .eq('circle_id', circleId)
+      .lt('created_at', olderThan)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (threadId) fb = fb.eq('thread_id', threadId);
+    const { data: fbData, error: fbErr } = await fb;
+    if (fbErr) throw fbErr;
+    const rows = (fbData || []) as PersistedChatMessageRow[];
+    return { rows: rows.reverse(), hasMore: rows.length >= limit };
+  }
+  const rows = (data || []) as PersistedChatMessageRow[];
+  return { rows: rows.reverse(), hasMore: rows.length >= limit };
+}
+
+/**
+ * Mirror of `loadOlderThreadMessages` for the forward direction — returns
+ * messages strictly NEWER than a cursor timestamp. Used by the ChatTab
+ * realtime-fallback polling loop: when Supabase Realtime drops (tab
+ * throttled, proxy hiccup, network blip), we poll with the newest known
+ * message's `created_at` so users don't silently miss incoming messages.
+ */
+export async function loadNewerThreadMessages(
+  circleId: string,
+  threadId: string | null | undefined,
+  newerThan: string,
+  limit = 50,
+): Promise<{ rows: PersistedChatMessageRow[] }> {
+  let query = supabase
+    .from('messages')
+    .select(MESSAGE_SELECT)
+    .eq('circle_id', circleId)
+    .gt('created_at', newerThan)
+    .order('created_at', { ascending: true })
+    .limit(limit);
+
+  if (threadId) query = query.eq('thread_id', threadId);
+  const { data, error } = await query;
+  if (error) {
+    if (!isColumnMissingError(error)) throw error;
+    let fb = supabase
+      .from('messages')
+      .select(FALLBACK_MESSAGE_SELECT)
+      .eq('circle_id', circleId)
+      .gt('created_at', newerThan)
+      .order('created_at', { ascending: true })
+      .limit(limit);
+    if (threadId) fb = fb.eq('thread_id', threadId);
+    const { data: fbData, error: fbErr } = await fb;
+    if (fbErr) throw fbErr;
+    return { rows: (fbData || []) as PersistedChatMessageRow[] };
+  }
+  return { rows: (data || []) as PersistedChatMessageRow[] };
 }
 
 export async function persistChatMessage(input: PersistChatMessageInput): Promise<string | null> {

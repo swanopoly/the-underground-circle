@@ -473,8 +473,8 @@ export default function PokerGame({ visible, onClose, agents, circleId, currentU
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <View style={s.overlay}>
-        <View style={[s.container, { maxWidth: 820, maxHeight: dim.height - 20 }]}>
+      <Pressable style={s.overlay} onPress={onClose}>
+        <View style={[s.container, { maxWidth: 820, maxHeight: dim.height - 20 }]} onStartShouldSetResponder={() => true}>
           {/* Header */}
           <View style={s.header}>
             <View style={s.headerLeft}>
@@ -717,7 +717,7 @@ export default function PokerGame({ visible, onClose, agents, circleId, currentU
             </View>
           )}
         </View>
-      </View>
+      </Pressable>
     </Modal>
   );
 }

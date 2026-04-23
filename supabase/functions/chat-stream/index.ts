@@ -14,10 +14,12 @@
 // Deploy: npx supabase functions deploy chat-stream
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
+import { computeCostUsd, checkCircleClaudeBudget, type UsageBreakdown } from "../_claude/anthropic.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
 
 interface ChatStreamRequest {
@@ -76,14 +78,34 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  // Model resolution: default Haiku, respect caller's pick
+  // Umbrella circle cap — chat-stream is the highest-volume streaming
+  // surface so the 24h total-spend ceiling matters here. Skip when
+  // caller didn't pass a circleId (e.g. prompt playground previews).
+  if (circleId) {
+    try {
+      const svc = createClient(supabaseUrl, serviceKey);
+      const cap = await checkCircleClaudeBudget(svc, circleId);
+      if (!cap.allowed) {
+        return new Response(JSON.stringify({
+          error: "circle_claude_budget_exceeded",
+          detail: cap.reason,
+          spent24h: cap.spent24h,
+          cap: cap.cap,
+        }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+    } catch { /* fail-open by design */ }
+  }
+
+  // Model resolution: default Haiku, respect caller's pick.
+  // Canonical short IDs per Anthropic — no date suffixes. Opus points at 4.7
+  // (latest); callers who need 4.6 can pass `claude-opus-4-6` directly.
   const MODEL_MAP: Record<string, string> = {
-    "claude-haiku": "claude-haiku-4-5-20251001",
-    "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+    "claude-haiku": "claude-haiku-4-5",
+    "claude-haiku-4-5": "claude-haiku-4-5",
     "claude-sonnet": "claude-sonnet-4-6",
-    "claude-opus": "claude-opus-4-6",
+    "claude-opus": "claude-opus-4-7",
   };
-  const rawModel = body.model || "claude-haiku-4-5-20251001";
+  const rawModel = body.model || "claude-haiku-4-5";
   const model = MODEL_MAP[rawModel] || rawModel;
 
   // Build Anthropic request with streaming enabled
@@ -98,7 +120,15 @@ Deno.serve(async (req: Request) => {
     max_tokens: max_tokens || 2048,
     stream: true,
   };
-  if (systemPrompt) anthropicBody.system = systemPrompt;
+  // Wrap the system prompt in a cache_control block so repeated calls with
+  // the same system prefix hit the ephemeral cache (~10% of input cost).
+  // Caller-supplied system prompts should be kept stable byte-for-byte across
+  // requests for this to pay off.
+  if (systemPrompt) {
+    anthropicBody.system = [
+      { type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } },
+    ];
+  }
   if (temperature !== undefined && !model.includes("opus")) {
     anthropicBody.temperature = temperature;
   }
@@ -138,8 +168,12 @@ Deno.serve(async (req: Request) => {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buf = "";
-        let totalInputTokens = 0;
-        let totalOutputTokens = 0;
+        // Track usage in the shared UsageBreakdown shape so cost math uses
+        // the single pricing table. Anthropic's streaming protocol puts
+        // usage in two places: `message_start.message.usage` has initial
+        // input + cache fields; `message_delta.usage` has the final
+        // output_tokens (and may restate cache read/create).
+        const usage: UsageBreakdown = { uncachedIn: 0, cacheCreate: 0, cacheRead: 0, output: 0 };
 
         while (true) {
           const { done, value } = await reader.read();
@@ -164,11 +198,17 @@ Deno.serve(async (req: Request) => {
                   emit({ type: "delta", text: delta.text });
                 }
               } else if (eventType === "message_start") {
-                const usage = event.message?.usage;
-                if (usage?.input_tokens) totalInputTokens = usage.input_tokens;
+                const u = event.message?.usage;
+                if (u) {
+                  usage.uncachedIn  = u.input_tokens                ?? 0;
+                  usage.cacheCreate = u.cache_creation_input_tokens ?? 0;
+                  usage.cacheRead   = u.cache_read_input_tokens     ?? 0;
+                  // output_tokens on message_start may exist but is
+                  // preliminary; trust message_delta's value at the end.
+                }
               } else if (eventType === "message_delta") {
-                const usage = event.usage;
-                if (usage?.output_tokens) totalOutputTokens = usage.output_tokens;
+                const u = event.usage;
+                if (u?.output_tokens !== undefined) usage.output = u.output_tokens;
               }
             } catch {
               // skip unparseable lines
@@ -176,18 +216,27 @@ Deno.serve(async (req: Request) => {
           }
         }
 
-        // Final usage event
+        const totalInputSide = usage.uncachedIn + usage.cacheCreate + usage.cacheRead;
+        const estimatedCost = computeCostUsd(model, usage);
+
+        // Final usage event — cache-aware. Keeps `input_tokens` as the
+        // total input-side count for backwards compat with clients that
+        // sum input+output.
         emit({
           type: "usage",
           usage: {
             model,
-            input_tokens: totalInputTokens,
-            output_tokens: totalOutputTokens,
-            total_tokens: totalInputTokens + totalOutputTokens,
+            input_tokens: totalInputSide,
+            output_tokens: usage.output,
+            total_tokens: totalInputSide + usage.output,
+            cache_creation_tokens: usage.cacheCreate,
+            cache_read_tokens: usage.cacheRead,
+            estimated_cost: estimatedCost,
           },
         });
 
-        // Track usage in DB (fire-and-forget)
+        // Track usage in DB (fire-and-forget). Writes to user_ai_usage
+        // (per-user, chat-specific) rather than claude_api_usage.
         try {
           const supabase = createClient(supabaseUrl, serviceKey);
           await supabase.from("user_ai_usage").insert({
@@ -195,11 +244,11 @@ Deno.serve(async (req: Request) => {
             circle_id: circleId || null,
             model,
             provider: "anthropic",
-            input_tokens: totalInputTokens,
-            output_tokens: totalOutputTokens,
-            cache_creation_tokens: 0,
-            cache_read_tokens: 0,
-            estimated_cost: (totalInputTokens * 0.8 + totalOutputTokens * 4.0) / 1_000_000,
+            input_tokens: usage.uncachedIn,
+            output_tokens: usage.output,
+            cache_creation_tokens: usage.cacheCreate,
+            cache_read_tokens: usage.cacheRead,
+            estimated_cost: estimatedCost,
             source: "chat-stream",
           });
         } catch { /* non-critical */ }

@@ -18,11 +18,11 @@ import {
 } from 'react-native';
 import {
   createSession,
-  planActions,
-  executePlan,
+  describeComputerUsePlan,
   type ComputerUseSession,
   type ComputerUsePermission,
   type BrowserAction,
+  type BrowserPlanCardData,
 } from '../../lib/computerUse';
 import ComputerUsePermissionDialog from './ComputerUsePermissionDialog';
 
@@ -51,6 +51,7 @@ export default function ComputerUseButton({
   const [showPermission, setShowPermission] = useState(false);
   const [plannedActions, setPlannedActions] = useState<BrowserAction[]>([]);
   const [pendingTask, setPendingTask] = useState('');
+  const [pendingPlan, setPendingPlan] = useState<BrowserPlanCardData | null>(null);
 
   // Web-only guard
   if (Platform.OS !== 'web') {
@@ -73,8 +74,29 @@ export default function ComputerUseButton({
     setPendingTask(taskText.trim());
 
     try {
-      const actions = await planActions(taskText.trim());
-      setPlannedActions(actions);
+      const plan = await describeComputerUsePlan({ task: taskText.trim(), circleId, agentName });
+      setPendingPlan({
+        planId: `browser-plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        task: plan.task,
+        intent: plan.intent,
+        backend: plan.backend,
+        backendLabel: plan.backendLabel,
+        backendDetails: plan.backendDetails,
+        requiresApproval: plan.requiresApproval,
+        recommendedPermission: plan.recommendedPermission,
+        status: 'planned',
+        actions: plan.actions.map((action) => ({
+          id: action.id,
+          type: action.type,
+          target: action.target,
+          value: action.value,
+          description: action.description,
+          requiresApproval: action.requiresApproval,
+          approvalReason: action.approvalReason,
+          blockedReason: action.blockedReason,
+        })),
+      });
+      setPlannedActions(plan.actions);
       setShowPermission(true);
       setShowTaskInput(false);
     } catch (err: any) {
@@ -90,6 +112,7 @@ export default function ComputerUseButton({
           status: 'pending',
         },
       ]);
+      setPendingPlan(null);
       setShowPermission(true);
       setShowTaskInput(false);
     } finally {
@@ -100,7 +123,11 @@ export default function ComputerUseButton({
   const handleAllow = useCallback(async (permission: ComputerUsePermission) => {
     setShowPermission(false);
 
-    const session = await createSession(agentName, pendingTask, permission, { circleId });
+    const session = await createSession(agentName, pendingTask, permission, {
+      circleId,
+      intent: pendingPlan?.intent,
+      recommendedPermission: pendingPlan?.recommendedPermission,
+    });
     session.actions = plannedActions.map(a => ({
       ...a,
       status: permission === 'trusted' ? 'approved' as const : 'pending' as const,
@@ -113,12 +140,14 @@ export default function ComputerUseButton({
     setPlannedActions([]);
     setPendingTask('');
     setTaskInput('');
-  }, [agentName, pendingTask, plannedActions, onSessionStart, circleId]);
+    setPendingPlan(null);
+  }, [agentName, pendingTask, plannedActions, onSessionStart, circleId, pendingPlan]);
 
   const handleDeny = useCallback(() => {
     setShowPermission(false);
     setPlannedActions([]);
     setPendingTask('');
+    setPendingPlan(null);
   }, []);
 
   return (
@@ -127,9 +156,9 @@ export default function ComputerUseButton({
       {showTaskInput && (
         <View style={styles.taskInputOverlay} nativeID="section-computer-use-task-input">
           <View style={styles.taskInputDialog}>
-            <Text style={styles.taskInputTitle}>BROWSER TASK</Text>
+            <Text style={styles.taskInputTitle}>COMPUTER TASK</Text>
             <Text style={styles.taskInputDesc}>
-              What should the agent do in the browser?
+              What should the agent do on the computer?
             </Text>
             <TextInput
               style={styles.taskInputField}
@@ -169,6 +198,8 @@ export default function ComputerUseButton({
           task={pendingTask}
           agentName={agentName}
           actions={plannedActions}
+          intent={pendingPlan?.intent}
+          recommendedPermission={pendingPlan?.recommendedPermission}
           onAllow={handleAllow}
           onDeny={handleDeny}
         />
@@ -179,14 +210,14 @@ export default function ComputerUseButton({
         onPress={handlePress}
         disabled={loading}
         accessibilityRole="button"
-        accessibilityLabel="Use Browser"
+        accessibilityLabel="Use Computer"
         style={[styles.button, { borderColor: accentColor + '40' }]}
       >
         <View style={[styles.buttonIcon, { backgroundColor: accentColor + '15', borderColor: accentColor + '30' }]}>
           <Text style={[styles.buttonIconText, { color: accentColor }]}>{'[_]'}</Text>
         </View>
         <Text style={[styles.buttonLabel, { color: loading ? '#6f6f6f' : '#e8e8e8' }]}>
-          {loading ? 'Planning...' : 'Use Browser'}
+          {loading ? 'Planning...' : 'Use Computer'}
         </Text>
       </Pressable>
     </>

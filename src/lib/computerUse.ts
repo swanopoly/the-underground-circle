@@ -9,6 +9,7 @@
 
 import { getCircleIntegration, getCircleIntegrationSecretValues } from './circleIntegrations';
 import { getSwanBotResponse as getAIResponse } from './swanbot';
+import { analyzeBrowserTask, type BrowserTaskIntent } from './browserTaskIntent';
 
 export type ComputerUsePermission = 'none' | 'ask_every_time' | 'ask_for_new_sites' | 'trusted';
 export type ComputerUseBackend = 'playwright_bridge' | 'browserbase_stagehand';
@@ -20,6 +21,8 @@ export interface BrowserAction {
   value?: string;
   description: string;
   requiresApproval: boolean;
+  approvalReason?: string;
+  blockedReason?: string;
   status: 'pending' | 'approved' | 'rejected' | 'executing' | 'completed' | 'failed';
   screenshotBefore?: string;
   screenshotAfter?: string;
@@ -31,6 +34,7 @@ export interface ComputerUseSession {
   id: string;
   agentName: string;
   task: string;
+  intent?: BrowserTaskIntent;
   permission: ComputerUsePermission;
   actions: BrowserAction[];
   status: 'planning' | 'awaiting_approval' | 'executing' | 'paused' | 'completed' | 'failed';
@@ -46,6 +50,7 @@ export interface ComputerUseSession {
   sourceMessageId?: string;
   sourceRunId?: string | null;
   sourcePlanId?: string;
+  recommendedPermission?: ComputerUsePermission;
 }
 
 export interface ComputerUseResult {
@@ -61,27 +66,31 @@ export interface ComputerUseResult {
 export interface ComputerUsePlanSummary {
   ok: boolean;
   task: string;
+  intent: BrowserTaskIntent;
   backend: ComputerUseBackend;
   backendLabel: string;
   backendDetails?: string;
   actions: BrowserAction[];
   requiresApproval: boolean;
   summaryText: string;
+  recommendedPermission: ComputerUsePermission;
 }
 
 export interface BrowserPlanCardData {
   planId: string;
   task: string;
+  intent?: BrowserTaskIntent;
   backend: ComputerUseBackend;
   backendLabel: string;
   backendDetails?: string;
   requiresApproval: boolean;
+  recommendedPermission?: ComputerUsePermission;
   status: 'planned' | 'approval_requested' | 'launched' | 'completed' | 'failed';
   launchedAt?: string;
   completedAt?: string;
   backendSessionId?: string;
   backendLiveUrl?: string;
-  actions: Array<Pick<BrowserAction, 'id' | 'type' | 'target' | 'value' | 'description' | 'requiresApproval'>>;
+  actions: Array<Pick<BrowserAction, 'id' | 'type' | 'target' | 'value' | 'description' | 'requiresApproval' | 'approvalReason' | 'blockedReason'>>;
 }
 
 export type BrowserPlanEventKind =
@@ -109,6 +118,7 @@ export interface BrowserSessionRecord {
   id: string;
   planId?: string;
   task: string;
+  intent?: BrowserTaskIntent;
   backend: ComputerUseBackend;
   backendLabel: string;
   backendDetails?: string;
@@ -118,6 +128,7 @@ export interface BrowserSessionRecord {
   currentUrl?: string;
   backendSessionId?: string;
   backendLiveUrl?: string;
+  recommendedPermission?: ComputerUsePermission;
   actions: BrowserAction[];
 }
 
@@ -149,6 +160,12 @@ interface StagehandRunnerResponse {
   screenshot?: string | null;
 }
 
+type BrowserActionSafetyAssessment = {
+  requiresApproval: boolean;
+  approvalReason?: string;
+  blockedReason?: string;
+};
+
 const BRIDGE_URL = 'http://localhost:7778';
 const BRIDGE_TIMEOUT = 15000;
 const STAGEHAND_TIMEOUT = 120000;
@@ -164,6 +181,52 @@ function extractDomain(url: string): string {
   } catch {
     return url;
   }
+}
+
+function isSubmissionLikeAction(action: Pick<BrowserAction, 'type' | 'description' | 'target' | 'value'>): boolean {
+  const haystack = `${action.description || ''} ${action.target || ''} ${action.value || ''}`.toLowerCase();
+  return /\b(submit|confirm|place order|checkout|purchase|pay|send|publish|post|delete|remove|save changes|book|reserve|transfer|wire|invite|create account)\b/.test(haystack);
+}
+
+function assessBrowserActionSafety(
+  intent: BrowserTaskIntent | undefined,
+  action: Pick<BrowserAction, 'type' | 'description' | 'target' | 'value'>,
+): BrowserActionSafetyAssessment {
+  const targetDomain = action.target && /^https?:\/\//i.test(action.target) ? extractDomain(action.target) : null;
+  if (intent?.allowedDomains?.length && targetDomain && !intent.allowedDomains.includes(targetDomain)) {
+    return {
+      requiresApproval: false,
+      blockedReason: `Navigation outside approved domains is blocked (${targetDomain})`,
+    };
+  }
+
+  const explicitApproval = action.type === 'navigate' || action.type === 'fill';
+  if (!intent) {
+    return { requiresApproval: explicitApproval };
+  }
+
+  if (intent.requiresLogin && (action.type === 'fill' || action.type === 'press_key')) {
+    return {
+      requiresApproval: true,
+      approvalReason: 'This step may enter credentials or interact with an authenticated session.',
+    };
+  }
+
+  if (intent.hasSideEffects && isSubmissionLikeAction(action)) {
+    return {
+      requiresApproval: true,
+      approvalReason: 'This step appears to submit or change external state.',
+    };
+  }
+
+  if (intent.risk === 'high' && (action.type === 'click' || action.type === 'select')) {
+    return {
+      requiresApproval: true,
+      approvalReason: 'High-risk workflow step requires explicit approval.',
+    };
+  }
+
+  return { requiresApproval: explicitApproval };
 }
 
 function encodeBase64(value: string): string {
@@ -261,22 +324,24 @@ export async function createSession(
   agentName: string,
   task: string,
   permission: ComputerUsePermission,
-  opts?: { circleId?: string }
+  opts?: { circleId?: string; intent?: BrowserTaskIntent; recommendedPermission?: ComputerUsePermission }
 ): Promise<ComputerUseSession> {
   const backend = await resolveComputerUseBackend(opts?.circleId);
   return {
     id: generateId(),
     agentName,
     task,
+    intent: opts?.intent || analyzeBrowserTask(task),
     permission,
     actions: [],
     status: 'planning',
     startedAt: new Date().toISOString(),
-    approvedDomains: [],
+    approvedDomains: opts?.intent?.allowedDomains ? [...opts.intent.allowedDomains] : [],
     circleId: opts?.circleId,
     backend: backend.backend,
     backendLabel: backend.label,
     backendDetails: backend.details,
+    recommendedPermission: opts?.recommendedPermission,
   };
 }
 
@@ -286,39 +351,77 @@ export async function createSessionFromBrowserPlan(
   plan: BrowserPlanCardData,
   opts?: { circleId?: string; sourceMessageId?: string; sourceRunId?: string | null },
 ): Promise<ComputerUseSession> {
-  const session = await createSession(agentName, plan.task, permission, opts);
+  const session = await createSession(agentName, plan.task, permission, {
+    circleId: opts?.circleId,
+    intent: plan.intent,
+    recommendedPermission: plan.recommendedPermission,
+  });
   session.backend = plan.backend;
   session.backendLabel = plan.backendLabel;
   session.backendDetails = plan.backendDetails;
-  session.actions = plan.actions.map((action) => ({
-    id: action.id,
-    type: action.type,
-    target: action.target,
-    value: action.value,
-    description: action.description,
-    requiresApproval: action.requiresApproval,
-    status: permission === 'trusted' ? 'approved' : 'pending',
-  }));
-  session.status = permission === 'trusted' ? 'executing' : 'awaiting_approval';
+  session.actions = plan.actions.map((action) => {
+    const safety = assessBrowserActionSafety(plan.intent, action);
+    const status =
+      safety.blockedReason
+        ? 'rejected'
+        : permission === 'trusted' && !safety.requiresApproval
+          ? 'approved'
+          : 'pending';
+    return {
+      id: action.id,
+      type: action.type,
+      target: action.target,
+      value: action.value,
+      description: action.description,
+      requiresApproval: safety.requiresApproval,
+      approvalReason: safety.approvalReason || action.approvalReason,
+      blockedReason: safety.blockedReason || action.blockedReason,
+      status,
+    };
+  });
+  session.status = session.actions.some((action) => action.status === 'pending')
+    ? 'awaiting_approval'
+    : permission === 'trusted'
+      ? 'executing'
+      : 'awaiting_approval';
   session.sourceMessageId = opts?.sourceMessageId;
   session.sourceRunId = opts?.sourceRunId || null;
   session.sourcePlanId = plan.planId;
+  session.recommendedPermission = plan.recommendedPermission;
   return session;
 }
 
 export async function planActions(
   task: string,
-  context?: string
+  context?: string,
+  intent?: BrowserTaskIntent,
 ): Promise<BrowserAction[]> {
+  const analyzedIntent = intent || analyzeBrowserTask(task);
   const planPrompt = `You are a browser automation planner. You need to complete this task using a web browser.
 
 TASK: ${task}
 ${context ? `\nCONTEXT: ${context}` : ''}
+INTENT:
+${JSON.stringify({
+  mode: analyzedIntent.mode,
+  risk: analyzedIntent.risk,
+  requiresLogin: analyzedIntent.requiresLogin,
+  hasSideEffects: analyzedIntent.hasSideEffects,
+  allowedDomains: analyzedIntent.allowedDomains,
+  startUrls: analyzedIntent.startUrls,
+  completionCriteria: analyzedIntent.completionCriteria,
+}, null, 2)}
 
 Break this into specific browser actions. Return ONLY a JSON array (no markdown, no explanation).
 Each action has: type, target, value (optional), description.
 
 Valid types: navigate, click, fill, screenshot, select, press_key, wait, scroll
+
+Rules:
+- Prefer the explicit start URL when one is present.
+- Keep actions inside the allowed domains unless the task clearly requires otherwise.
+- If the task appears transactional or login-related, stop before final submission and add a screenshot step near the end.
+- If the task is read-only or extract-focused, end with a screenshot after reaching the requested result.
 
 Example:
 [
@@ -345,28 +448,72 @@ Return ONLY the JSON array:`;
       try {
         parsed = JSON.parse(jsonMatch[0]);
       } catch {
-        parsed = [
-          { type: 'navigate', target: task, description: `Navigate to: ${task}` },
-          { type: 'screenshot', description: 'Capture the page' },
-        ];
+        parsed = [];
       }
     } else {
-      parsed = [
-        { type: 'navigate', target: task, description: `Navigate to: ${task}` },
-        { type: 'screenshot', description: 'Capture the page' },
-      ];
+      parsed = [];
     }
   }
 
-  return parsed.map((item: any, index: number) => ({
-    id: `action_${Date.now()}_${index}`,
-    type: item.type || 'navigate',
-    target: item.target || undefined,
-    value: item.value || undefined,
-    description: item.description || `Step ${index + 1}`,
-    requiresApproval: item.type === 'navigate' || item.type === 'fill',
-    status: 'pending' as const,
-  }));
+  const normalized = parsed
+    .filter(Boolean)
+    .map((item: any, index: number) => {
+      const base = {
+        id: `action_${Date.now()}_${index}`,
+        type: item.type || 'navigate',
+        target: item.target || undefined,
+        value: item.value || undefined,
+        description: item.description || `Step ${index + 1}`,
+      };
+      const safety = assessBrowserActionSafety(analyzedIntent, base);
+      return {
+        ...base,
+        requiresApproval: safety.requiresApproval,
+        approvalReason: safety.approvalReason,
+        blockedReason: safety.blockedReason,
+        status: safety.blockedReason ? 'rejected' as const : 'pending' as const,
+      };
+    });
+
+  if (normalized.length > 0) return normalized;
+
+  const fallbackTarget = analyzedIntent.startUrls[0]
+    || (analyzedIntent.allowedDomains[0] ? `https://${analyzedIntent.allowedDomains[0]}` : '')
+    || task;
+  const fallback: BrowserAction[] = [
+    {
+      id: `action_${Date.now()}_0`,
+      type: 'navigate',
+      target: fallbackTarget,
+      description: analyzedIntent.startUrls[0]
+        ? `Open ${analyzedIntent.startUrls[0]}`
+        : `Open the browser target for: ${task}`,
+      requiresApproval: true,
+      approvalReason: analyzedIntent.allowedDomains.length > 0 ? `Keep execution scoped to ${analyzedIntent.allowedDomains.join(', ')}` : undefined,
+      status: 'pending',
+    },
+  ];
+  if (analyzedIntent.requiresLogin) {
+    fallback.push({
+      id: `action_${Date.now()}_1`,
+      type: 'wait',
+      value: '1500',
+      description: 'Pause for login or account review before continuing',
+      requiresApproval: true,
+      approvalReason: 'Explicit review before interacting with authenticated state.',
+      status: 'pending',
+    });
+  }
+  fallback.push({
+    id: `action_${Date.now()}_${fallback.length}`,
+    type: 'screenshot',
+    description: analyzedIntent.mode === 'extract'
+      ? 'Capture the page that contains the requested information'
+      : 'Capture the browser state for review',
+    requiresApproval: false,
+    status: 'pending',
+  });
+  return fallback;
 }
 
 export async function callPlaywrightMCP(
@@ -402,22 +549,22 @@ export async function callPlaywrightMCP(
     // Fall through to /exec fallback
   }
 
-  let command = '';
-  switch (toolName) {
-    case 'mcp__playwright__browser_navigate':
-      command = `npx playwright open "${params.url || ''}" 2>&1 || true`;
-      break;
-    case 'mcp__playwright__browser_click':
-      command = `echo "click ${params.selector || params.element || ''}" | npx playwright 2>&1 || true`;
-      break;
-    case 'mcp__playwright__browser_take_screenshot':
-      command = `screencapture -x /tmp/cu_screenshot_${Date.now()}.png 2>&1 && base64 /tmp/cu_screenshot_${Date.now()}.png`;
-      break;
-    default:
-      command = `echo "Unsupported MCP tool: ${toolName}"`;
+  // The exec fallback can only meaningfully emulate screenshot via
+  // `screencapture`. For navigate/click/fill/select/press_key there is no
+  // real shell equivalent — `npx playwright open` just opens codegen, it
+  // doesn't drive our session. Previously these commands returned a resolved
+  // promise with empty stdout, which the caller treated as success and the
+  // UI showed "COMPLETED" for actions that never ran.
+  if (toolName === 'mcp__playwright__browser_take_screenshot') {
+    const ts = Date.now();
+    const path = `/tmp/cu_screenshot_${ts}.png`;
+    const command = `screencapture -x ${path} && base64 ${path} && rm ${path}`;
+    return callBridgeExec(command);
   }
 
-  return callBridgeExec(command);
+  throw new Error(
+    `Playwright MCP not available at ${BRIDGE_URL}/mcp. Install @playwright/mcp and wire it into the bridge, or enable Browserbase Stagehand for this circle.`,
+  );
 }
 
 async function callStagehandRunner(payload: StagehandRunnerPayload): Promise<StagehandRunnerResponse> {
@@ -531,7 +678,15 @@ export async function executeAction(
       switch (action.type) {
         case 'screenshot': {
           const shot = await takeScreenshot(session);
-          if (shot) updated.screenshotAfter = shot;
+          if (!shot) {
+            // Previously we unconditionally marked screenshot actions
+            // "completed" even when every capture path failed, which hid the
+            // real error and made the UI lie about what happened.
+            updated.status = 'failed';
+            updated.error = 'Could not capture screenshot via Stagehand or bridge';
+            return updated;
+          }
+          updated.screenshotAfter = shot;
           updated.status = 'completed';
           return updated;
         }
@@ -565,7 +720,14 @@ export async function executeAction(
           break;
         case 'screenshot': {
           const shot = await takeScreenshot(session);
-          if (shot) updated.screenshotAfter = shot;
+          if (!shot) {
+            // Same bug as the Stagehand branch above — a screenshot step
+            // that captured nothing was being reported as completed.
+            updated.status = 'failed';
+            updated.error = 'Could not capture screenshot via Playwright MCP or bridge';
+            return updated;
+          }
+          updated.screenshotAfter = shot;
           updated.status = 'completed';
           return updated;
         }
@@ -610,6 +772,8 @@ export function checkPermission(
   session: ComputerUseSession,
   action: BrowserAction
 ): boolean {
+  if (action.blockedReason) return false;
+  if (action.requiresApproval) return action.status === 'approved';
   switch (session.permission) {
     case 'none':
       return false;
@@ -639,11 +803,22 @@ export async function executePlan(
 
     if (action.status === 'rejected' || action.status === 'completed') {
       results.push(action);
+      if (action.blockedReason) {
+        return {
+          success: false,
+          message: action.blockedReason,
+          screenshotUrl: lastScreenshot ? `data:image/png;base64,${lastScreenshot}` : undefined,
+          actions: results,
+          currentUrl: session.currentUrl,
+          backendSessionId: session.backendSessionId,
+          backendLiveUrl: session.backendLiveUrl,
+        };
+      }
       continue;
     }
 
     if (action.status !== 'approved' && !checkPermission(session, action)) {
-      results.push({ ...action, status: 'pending' });
+      results.push({ ...action, status: action.blockedReason ? 'rejected' : 'pending' });
       continue;
     }
 
@@ -697,33 +872,41 @@ export async function describeComputerUsePlan(opts: {
   agentName?: string;
 }): Promise<ComputerUsePlanSummary> {
   const task = opts.task.trim();
+  const intent = analyzeBrowserTask(task);
   const session = await createSession(
     opts.agentName || 'OpenSwan',
     task,
-    'ask_every_time',
-    { circleId: opts.circleId },
+    intent.suggestedPermission,
+    { circleId: opts.circleId, intent, recommendedPermission: intent.suggestedPermission },
   );
-  const actions = await planActions(task);
+  const actions = await planActions(task, undefined, intent);
   session.actions = actions;
 
   const summaryText = [
     `Browser backend: ${session.backendLabel}${session.backendDetails ? ` (${session.backendDetails})` : ''}`,
+    `Mode: ${intent.mode.replace(/_/g, ' ')} · Risk: ${intent.risk.toUpperCase()} · Recommended permission: ${intent.suggestedPermission.replace(/_/g, ' ')}`,
+    intent.allowedDomains.length > 0 ? `Domains: ${intent.allowedDomains.join(', ')}` : 'Domains: not specified',
+    intent.requiresLogin ? 'Requires login or account access' : 'No login signals detected',
+    intent.hasSideEffects ? 'This plan may change external state' : 'This plan is read-oriented',
     `Planned actions: ${actions.length}`,
     ...actions.slice(0, 8).map((action, index) =>
       `${index + 1}. ${action.type.toUpperCase()}${action.target ? ` ${action.target}` : ''} — ${action.description}`),
     actions.length > 8 ? `...and ${actions.length - 8} more action(s)` : '',
+    `Completion: ${intent.completionCriteria.join(' | ')}`,
     'This plan requires user approval before live browser execution.',
   ].filter(Boolean).join('\n');
 
   return {
     ok: true,
     task,
+    intent,
     backend: session.backend,
     backendLabel: session.backendLabel,
     backendDetails: session.backendDetails,
     actions,
     requiresApproval: true,
     summaryText,
+    recommendedPermission: intent.suggestedPermission,
   };
 }
 
@@ -736,6 +919,7 @@ export function toBrowserSessionRecord(
     id: session.backendSessionId || session.id,
     planId: session.sourcePlanId,
     task: session.task,
+    intent: session.intent,
     backend: session.backend,
     backendLabel: session.backendLabel,
     backendDetails: session.backendDetails,
@@ -747,6 +931,7 @@ export function toBrowserSessionRecord(
     currentUrl: session.currentUrl,
     backendSessionId: session.backendSessionId,
     backendLiveUrl: session.backendLiveUrl,
+    recommendedPermission: session.recommendedPermission,
     actions: session.actions,
   };
 }
@@ -755,10 +940,12 @@ export function toBrowserPlanCardData(plan: ComputerUsePlanSummary): BrowserPlan
   return {
     planId: `browser-plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     task: plan.task,
+    intent: plan.intent,
     backend: plan.backend,
     backendLabel: plan.backendLabel,
     backendDetails: plan.backendDetails,
     requiresApproval: plan.requiresApproval,
+    recommendedPermission: plan.recommendedPermission,
     status: 'planned',
     actions: plan.actions.map((action) => ({
       id: action.id,
@@ -767,6 +954,8 @@ export function toBrowserPlanCardData(plan: ComputerUsePlanSummary): BrowserPlan
       value: action.value,
       description: action.description,
       requiresApproval: action.requiresApproval,
+      approvalReason: action.approvalReason,
+      blockedReason: action.blockedReason,
     })),
   };
 }

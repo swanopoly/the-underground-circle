@@ -14,6 +14,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { supabase } from '../../../lib/supabase';
+import { showConfirm } from '../../../lib/alert';
 import {
   useMissions,
   useMissionDetail,
@@ -28,6 +29,7 @@ import {
   formatDeadline,
   powIcon,
   getMissionAnalytics,
+  useFavoriteMissions,
   Mission,
   MissionTask,
   MissionStatus,
@@ -39,6 +41,7 @@ import {
   TEMPLATE_CATEGORIES,
   MissionTemplate,
   suggestedDeadline,
+  templateToBlocks,
 } from '../../../lib/missionTemplates';
 import { backfillGitHubProof } from '../../../lib/proofOfWork';
 import { addProofOfWork } from '../../../lib/missions';
@@ -48,6 +51,11 @@ import { useMissionStreak } from '../../../lib/missionStreaks';
 import { notifyMissionComplete, notifyStreakMilestone } from '../../../lib/notifications';
 import { suggestBestAgent } from '../../../lib/agentRouting';
 import MissionCelebration from '../../../components/MissionCelebration';
+import MissionTimeline from '../../../components/MissionTimeline';
+import MissionHistoryPanel from '../../../components/MissionHistoryPanel';
+import BlockBriefEditor, { blocksFromText, blocksToPlainText, extractAllMentionsFromBlocks, type Block } from '../../../components/BlockBriefEditor';
+import MentionText from '../../../components/MentionText';
+import { persistMentions } from '../../../lib/mentions';
 
 interface Props {
   circleId: string;
@@ -56,25 +64,137 @@ interface Props {
 
 // ─── Proof Quick Add ─────────────────────────────────────────────────────────
 
+// ─── Markdown export ─────────────────────────────────────────────────────────
+// Converts a mission + its tasks into a paste-ready markdown doc. Used by
+// the MD export button on the mission detail. Keeps the format predictable
+// so the output can be piped into a PR body, Slack, or Notion.
+function missionToMarkdown(mission: Mission, tasks: MissionTask[]): string {
+  const lines: string[] = [];
+  lines.push(`# ${mission.title}`);
+  lines.push('');
+  const meta: string[] = [];
+  meta.push(`**Status:** ${mission.status}`);
+  if (mission.deadline) {
+    meta.push(`**Deadline:** ${new Date(mission.deadline).toISOString().slice(0, 10)}`);
+  }
+  meta.push(`**Progress:** ${tasks.filter(t => t.status === 'done').length}/${tasks.length} tasks`);
+  lines.push(meta.join(' · '));
+  lines.push('');
+
+  // Prefer structured brief_blocks when present; fall back to the legacy
+  // plain description. Keeps compatibility with both old and new missions.
+  const blocks = (mission as any).brief_blocks as Array<any> | undefined;
+  if (Array.isArray(blocks) && blocks.length > 0) {
+    lines.push('## Brief');
+    for (const b of blocks) {
+      const text = b.text || '';
+      switch (b.type) {
+        case 'heading':  lines.push(`${'#'.repeat(Math.min(b.level || 2, 6))} ${text}`); break;
+        case 'bullet':   lines.push(`- ${text}`); break;
+        case 'checkbox': lines.push(`- ${b.checked ? '[x]' : '[ ]'} ${text}`); break;
+        case 'callout':  lines.push(`> ${b.icon || '!'} ${text}`); break;
+        case 'code':     lines.push('```' + (b.language || '')); lines.push(text); lines.push('```'); break;
+        case 'divider':  lines.push('---'); break;
+        default:         lines.push(text);
+      }
+      lines.push('');
+    }
+  } else if (mission.description) {
+    lines.push('## Brief');
+    lines.push(mission.description);
+    lines.push('');
+  }
+
+  if (tasks.length > 0) {
+    lines.push('## Tasks');
+    for (const t of tasks) {
+      const box = t.status === 'done' ? '[x]' : '[ ]';
+      const suffix = t.agent_name ? ` — ${t.agent_name}` : '';
+      lines.push(`- ${box} ${t.title}${suffix}`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n').trimEnd() + '\n';
+}
+
 function ProofQuickAdd({ circleId, accentColor }: { circleId: string; accentColor: string }) {
   const [text, setText] = useState('');
   const [saving, setSaving] = useState(false);
+  // Expand into full block editor for multi-step proofs (screenshots,
+  // bullets, callouts, code). Blocks get stored in proof_of_work.detail.
+  const [expanded, setExpanded] = useState(false);
+  const [blocks, setBlocks] = useState<Block[]>([]);
 
   const handleSubmit = async () => {
-    if (!text.trim() || saving) return;
+    if (saving) return;
+    const title = text.trim();
+    const hasBlockContent = blocks.length > 0 && blocks.some((b) => (b.text || '').trim().length > 0);
+    if (!title && !hasBlockContent) return;
     setSaving(true);
     try {
       const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
-      await addProofOfWork({
+      // Derive a title from the first block if the user only wrote block content.
+      const derivedTitle = title || (blocks.find((b) => (b.text || '').trim())?.text || 'Proof').slice(0, 120);
+      const refs = extractAllMentionsFromBlocks(blocks);
+      const { data: row } = await addProofOfWork({
         circle_id: circleId,
         user_id: user?.id,
         pow_type: 'manual',
-        title: text.trim(),
+        title: derivedTitle,
+        detail: hasBlockContent ? { brief_blocks: blocks } : {},
       });
+      // Persist @mentions so the referenced target's BacklinksPanel picks
+      // this proof up as an inbound reference.
+      if (refs.length > 0 && user?.id && row?.id) {
+        persistMentions({
+          circleId,
+          sourceType: 'proof',
+          sourceId: row.id,
+          authorId: user.id,
+          refs,
+        }).catch(() => {});
+      }
       setText('');
+      setBlocks([]);
+      setExpanded(false);
     } catch {}
     setSaving(false);
   };
+
+  if (expanded) {
+    return (
+      <View style={[styles.proofQuickAdd, { flexDirection: 'column', alignItems: 'stretch', gap: GRID.sm }]}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: GRID.sm }}>
+          <TextInput
+            style={[styles.proofQuickInput, { flex: 1 }]}
+            placeholder="Title (optional — first line used if blank)"
+            placeholderTextColor={PIXEL_COLORS.text3}
+            value={text}
+            onChangeText={setText}
+            maxLength={200}
+          />
+          <Pressable onPress={() => setExpanded(false)} style={styles.cancelBtn}>
+            <Text style={styles.cancelBtnText}>—</Text>
+          </Pressable>
+        </View>
+        <View style={{ borderWidth: 1, borderColor: PIXEL_COLORS.bg3, borderRadius: 2, padding: 8, backgroundColor: PIXEL_COLORS.bg1 }}>
+          <BlockBriefEditor
+            blocks={blocks}
+            onChange={setBlocks}
+            circleId={circleId}
+            placeholder="Describe the ship. '/' for blocks, '@' to mention, '/ai' for help."
+          />
+        </View>
+        <Pressable
+          style={[styles.proofQuickBtn, { alignSelf: 'flex-end', paddingHorizontal: 16, backgroundColor: accentColor }]}
+          onPress={handleSubmit}
+          disabled={saving}
+        >
+          <Text style={styles.proofQuickBtnText}>{saving ? '..' : 'LOG SHIP'}</Text>
+        </Pressable>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.proofQuickAdd}>
@@ -88,6 +208,12 @@ function ProofQuickAdd({ circleId, accentColor }: { circleId: string; accentColo
         returnKeyType="send"
         maxLength={200}
       />
+      <Pressable
+        onPress={() => setExpanded(true)}
+        style={[styles.proofQuickBtn, { backgroundColor: PIXEL_COLORS.bg2, marginRight: 4 }]}
+      >
+        <Text style={[styles.proofQuickBtnText, { color: PIXEL_COLORS.text2 }]}>+</Text>
+      </Pressable>
       <Pressable
         style={[styles.proofQuickBtn, { backgroundColor: text.trim() ? accentColor : PIXEL_COLORS.bg3 }]}
         onPress={handleSubmit}
@@ -234,13 +360,21 @@ const TASK_STATUS_COLORS: Record<TaskStatus, string> = {
 
 export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indigo }: Props) {
   const { missions, loading } = useMissions(circleId);
+  // Per-user mission pins. Pinned missions float to the top of the list.
+  const { favorites, toggle: toggleFavorite } = useFavoriteMissions();
   const { entries: proofEntries, loading: proofLoading } = useProofOfWork(circleId);
   const [mainUserId, setMainUserId] = useState<string | null>(null);
   const { streak: mainStreak } = useMissionStreak(mainUserId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
-  const [filter, setFilter] = useState<'all' | 'active' | 'completed'>('all');
+  // Pre-fill title seeded from `/mission create <title>` in chat or from
+  // other deeplink flows. Cleared on modal close.
+  const [createPrefillTitle, setCreatePrefillTitle] = useState('');
+  const [filter, setFilter] = useState<'all' | 'active' | 'completed' | 'archived'>('all');
+  const [searchText, setSearchText] = useState('');
   const [showProof, setShowProof] = useState(false);
+  // Notion-style view toggle for the mission pane: list vs timeline (gantt).
+  const [missionView, setMissionView] = useState<'list' | 'timeline'>('list');
 
   const [analytics, setAnalytics] = useState<{ completionRate: number; completedTasks: number; totalTasks: number; overdueCount: number } | null>(null);
 
@@ -269,10 +403,55 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
     try { localStorage.removeItem('uc_pending_mission_deeplink'); } catch {}
   }, [loading, missions]);
 
-  const filtered = missions.filter(m => {
-    if (filter === 'active') return m.status === 'active';
-    if (filter === 'completed') return m.status === 'completed';
+  // "/mission create <title>" from chat opens this modal with the title
+  // pre-filled so the user can add description, deadline, template, and
+  // tasks before saving — not a one-shot create + navigate.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    const onOpen = (e: any) => {
+      const title = (e?.detail?.title ?? '').toString();
+      setCreatePrefillTitle(title);
+      setShowCreate(true);
+      try { window.localStorage.removeItem('uc_pending_mission_create'); } catch {}
+    };
+    // Also read the localStorage fallback in case the event fired before
+    // this tab was mounted (e.g. command issued from another tab).
+    try {
+      const pending = window.localStorage.getItem('uc_pending_mission_create');
+      if (pending !== null) {
+        setCreatePrefillTitle(pending);
+        setShowCreate(true);
+        window.localStorage.removeItem('uc_pending_mission_create');
+      }
+    } catch {}
+    window.addEventListener('uc:open-mission-create', onOpen as any);
+    return () => window.removeEventListener('uc:open-mission-create', onOpen as any);
+  }, []);
+
+  const filteredRaw = missions.filter(m => {
+    if (filter === 'active' && m.status !== 'active') return false;
+    if (filter === 'completed' && m.status !== 'completed') return false;
+    if (filter === 'archived' && m.status !== 'archived') return false;
+    // 'all' hides archived by default — archived missions are intentionally
+    // out-of-sight and get their own pill so they stay retrievable.
+    if (filter === 'all' && m.status === 'archived') return false;
+
+    // Text search: case-insensitive substring match on title + description.
+    // Empty/whitespace input is a no-op so existing behavior is unchanged.
+    const q = searchText.trim().toLowerCase();
+    if (q) {
+      const hay = `${m.title || ''} ${m.description || ''}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
     return true;
+  });
+  // Pinned missions float to the top, preserving the original relative
+  // order within each group. Stable sort via index comparison.
+  const filtered = [...filteredRaw].sort((a, b) => {
+    const aFav = favorites.has(a.id) ? 0 : 1;
+    const bFav = favorites.has(b.id) ? 0 : 1;
+    if (aFav !== bFav) return aFav - bFav;
+    return filteredRaw.indexOf(a) - filteredRaw.indexOf(b);
   });
 
   if (selectedId) {
@@ -282,6 +461,9 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
         circleId={circleId}
         accentColor={accentColor}
         onBack={() => setSelectedId(null)}
+        onOpenMission={(id) => setSelectedId(id)}
+        favorites={favorites}
+        onToggleFavorite={toggleFavorite}
       />
     );
   }
@@ -338,9 +520,31 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
         </View>
       )}
 
-      {/* Filters */}
+      {/* Search — matches on title + description, case-insensitive. */}
+      <View style={{ marginHorizontal: GRID.md, marginBottom: GRID.sm }}>
+        <TextInput
+          style={{
+            backgroundColor: PIXEL_COLORS.bg1,
+            borderWidth: 1,
+            borderColor: searchText ? accentColor + '60' : PIXEL_COLORS.bg3,
+            borderRadius: 8,
+            paddingHorizontal: 12,
+            paddingVertical: 8,
+            color: PIXEL_COLORS.text0,
+            fontSize: 13,
+          }}
+          placeholder="Search missions by title or description…"
+          placeholderTextColor={PIXEL_COLORS.text3}
+          value={searchText}
+          onChangeText={setSearchText}
+          returnKeyType="search"
+          nativeID="input-mission-search"
+        />
+      </View>
+
+      {/* Filters + view toggle */}
       <View style={styles.filterRow}>
-        {(['all', 'active', 'completed'] as const).map(f => (
+        {(['all', 'active', 'completed', 'archived'] as const).map(f => (
           <Pressable
             key={f}
             style={[styles.filterPill, filter === f && { backgroundColor: accentColor + '20', borderColor: accentColor + '50' }]}
@@ -351,9 +555,34 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
             </Text>
           </Pressable>
         ))}
+        <View style={{ flex: 1 }} />
+        {(['list', 'timeline'] as const).map((v) => (
+          <Pressable
+            key={v}
+            style={[styles.filterPill, missionView === v && { backgroundColor: accentColor + '20', borderColor: accentColor + '50' }]}
+            onPress={() => setMissionView(v)}
+            nativeID={`btn-mission-view-${v}`}
+          >
+            <Text style={[styles.filterText, missionView === v && { color: accentColor }]}>
+              {v === 'list' ? '☰ LIST' : '▭ TIMELINE'}
+            </Text>
+          </Pressable>
+        ))}
       </View>
 
-      {/* Mission list */}
+      {/* Timeline view */}
+      {missionView === 'timeline' && !loading && (
+        <View style={{ marginHorizontal: 0, marginBottom: GRID.md }}>
+          <MissionTimeline
+            missions={filtered}
+            accentColor={accentColor}
+            onSelectMission={setSelectedId}
+          />
+        </View>
+      )}
+
+      {/* Mission list (hidden when timeline view is active) */}
+      {missionView === 'timeline' ? null : (
       <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
         {loading && (
           <View style={styles.loadingBox}>
@@ -361,24 +590,61 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
           </View>
         )}
 
-        {!loading && filtered.length === 0 && (
-          <View style={styles.emptyState} nativeID="section-missions-empty">
-            <View style={[iconBoxStyle(accentColor, 48)]}>
-              <Text style={{ color: accentColor, fontSize: 20, fontWeight: '700', fontFamily: 'monospace' }}>!</Text>
+        {!loading && filtered.length === 0 && (() => {
+          // Distinguish true empty (no missions exist) from "search / filter
+          // hides everything". Showing the same onboarding copy for both is
+          // confusing — the user who searched "xyz" doesn't need a
+          // CREATE YOUR FIRST MISSION pitch.
+          const isFiltered = missions.length > 0 && (filter !== 'all' || searchText.trim().length > 0);
+          if (isFiltered) {
+            return (
+              <View style={styles.emptyState} nativeID="section-missions-empty-filtered">
+                <Text style={styles.emptyTitle}>No missions match</Text>
+                <Text style={styles.emptySubtext}>
+                  {searchText.trim()
+                    ? `Nothing contains "${searchText.trim()}" in the ${filter === 'all' ? '' : filter + ' '}missions.`
+                    : `No missions in the ${filter} filter.`}
+                </Text>
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: GRID.md }}>
+                  {filter !== 'all' && (
+                    <Pressable
+                      style={[styles.filterPill, { borderColor: accentColor + '50' }]}
+                      onPress={() => setFilter('all')}
+                    >
+                      <Text style={[styles.filterText, { color: accentColor }]}>SHOW ALL</Text>
+                    </Pressable>
+                  )}
+                  {searchText.trim() && (
+                    <Pressable
+                      style={[styles.filterPill, { borderColor: accentColor + '50' }]}
+                      onPress={() => setSearchText('')}
+                    >
+                      <Text style={[styles.filterText, { color: accentColor }]}>CLEAR SEARCH</Text>
+                    </Pressable>
+                  )}
+                </View>
+              </View>
+            );
+          }
+          return (
+            <View style={styles.emptyState} nativeID="section-missions-empty">
+              <View style={[iconBoxStyle(accentColor, 48)]}>
+                <Text style={{ color: accentColor, fontSize: 20, fontWeight: '700', fontFamily: 'monospace' }}>!</Text>
+              </View>
+              <Text style={styles.emptyTitle}>No missions yet</Text>
+              <Text style={styles.emptySubtext}>
+                Create a mission to set a goal for your circle.{'\n'}
+                Assign tasks to members and agents, track progress, ship together.
+              </Text>
+              <Pressable
+                style={[styles.createBtn, { backgroundColor: accentColor, marginTop: GRID.lg }]}
+                onPress={() => setShowCreate(true)}
+              >
+                <Text style={styles.createBtnText}>CREATE YOUR FIRST MISSION</Text>
+              </Pressable>
             </View>
-            <Text style={styles.emptyTitle}>No missions yet</Text>
-            <Text style={styles.emptySubtext}>
-              Create a mission to set a goal for your circle.{'\n'}
-              Assign tasks to members and agents, track progress, ship together.
-            </Text>
-            <Pressable
-              style={[styles.createBtn, { backgroundColor: accentColor, marginTop: GRID.lg }]}
-              onPress={() => setShowCreate(true)}
-            >
-              <Text style={styles.createBtnText}>CREATE YOUR FIRST MISSION</Text>
-            </Pressable>
-          </View>
-        )}
+          );
+        })()}
 
         {filtered.map(mission => (
           <MissionCard
@@ -435,21 +701,36 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
                   </Text>
                 </View>
                 <View style={styles.proofContent}>
-                  <Text style={styles.proofTitle} numberOfLines={2}>{entry.title}</Text>
+                  <MentionText content={entry.title} style={styles.proofTitle} />
                   <Text style={styles.proofTime}>{timeAgo(entry.created_at)}</Text>
+                  {/* Render structured blocks (from the expanded proof
+                      editor) as a read-only preview directly below the
+                      title, if present in detail.brief_blocks. */}
+                  {(entry.detail as any)?.brief_blocks && Array.isArray((entry.detail as any).brief_blocks) && (entry.detail as any).brief_blocks.length > 0 && (
+                    <View style={{ marginTop: 6, paddingLeft: 0 }}>
+                      <BlockBriefEditor
+                        blocks={(entry.detail as any).brief_blocks as Block[]}
+                        onChange={() => {}}
+                        circleId={circleId}
+                        readOnly
+                      />
+                    </View>
+                  )}
                 </View>
               </View>
             ))}
           </View>
         )}
       </ScrollView>
+      )}
 
       {/* Create modal */}
       {showCreate && (
         <CreateMissionModal
           circleId={circleId}
           accentColor={accentColor}
-          onClose={() => setShowCreate(false)}
+          prefillTitle={createPrefillTitle}
+          onClose={() => { setShowCreate(false); setCreatePrefillTitle(''); }}
         />
       )}
     </View>
@@ -528,9 +809,13 @@ interface CircleMember {
   username: string;
 }
 
-function MissionDetail({ missionId, circleId, accentColor, onBack }: {
+function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission, favorites, onToggleFavorite }: {
   missionId: string; circleId: string; accentColor: string; onBack: () => void;
+  onOpenMission?: (id: string) => void;
+  favorites: Set<string>;
+  onToggleFavorite: (missionId: string) => void;
 }) {
+  const toggleFavorite = onToggleFavorite;
   const { mission, tasks, agents, loading, refresh } = useMissionDetail(missionId);
   const { show: showToast } = useToast();
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -548,9 +833,14 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
   const [editTitle, setEditTitle] = useState('');
   const [editDesc, setEditDesc] = useState('');
   const [editDeadline, setEditDeadline] = useState('');
+  // Block editor draft; seeded from mission.brief_blocks or migrated from the
+  // legacy `description` text when the user opens the editor.
+  const [editBlocks, setEditBlocks] = useState<Block[]>([]);
   const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
   const [agentResult, setAgentResult] = useState<{ taskId: string; text: string } | null>(null);
   const [celebrating, setCelebrating] = useState(false);
+  // Notion page-history equivalent: show the mission_revisions log inline.
+  const [showHistory, setShowHistory] = useState(false);
 
   // Load circle members for assignment
   useEffect(() => {
@@ -635,6 +925,14 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
   };
 
   const handleDeleteTask = async (taskId: string) => {
+    const ok = await showConfirm({
+      title: 'Delete this task?',
+      message: 'Any proof-of-work entries linked to it stay, but the task itself disappears from the mission.',
+      confirmLabel: 'Delete task',
+      cancelLabel: 'Keep it',
+      destructive: true,
+    });
+    if (!ok) return;
     await deleteMissionTask(taskId);
     refresh();
   };
@@ -692,6 +990,63 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
         }} style={styles.shareBtn}>
           <Text style={styles.shareBtnText}>↗ Share</Text>
         </Pressable>
+        <Pressable onPress={() => setShowHistory(v => !v)} style={styles.shareBtn} nativeID="btn-mission-history">
+          <Text style={styles.shareBtnText}>~ History</Text>
+        </Pressable>
+        {/* Archive / unarchive toggle. Archived missions drop out of the
+            default list view but stay retrievable via the ARCHIVED pill
+            on the list. Updates flow through updateMission so the
+            mission_revisions trigger records the status change. */}
+        <Pressable
+          onPress={async () => {
+            const nextStatus = mission.status === 'archived' ? 'active' : 'archived';
+            await updateMission(missionId, { status: nextStatus });
+            refresh();
+            // Return to the list after archiving so the detail doesn't
+            // linger on a mission the user just hid.
+            if (nextStatus === 'archived') onBack();
+          }}
+          style={styles.shareBtn}
+          nativeID="btn-mission-archive"
+        >
+          <Text style={styles.shareBtnText}>
+            {mission.status === 'archived' ? '↺ Unarchive' : '⎘ Archive'}
+          </Text>
+        </Pressable>
+        {/* Pin / unpin. Favorites sort to the top of the mission list. */}
+        <Pressable
+          onPress={() => toggleFavorite(missionId)}
+          style={styles.shareBtn}
+          nativeID="btn-mission-pin"
+        >
+          <Text style={styles.shareBtnText}>
+            {favorites.has(missionId) ? '★ Pinned' : '☆ Pin'}
+          </Text>
+        </Pressable>
+        {/* Export as markdown. Copies title, metadata, tasks, and any
+            structured brief_blocks to the clipboard for pasting outside
+            the app (Slack, GitHub PR body, etc.). */}
+        <Pressable
+          onPress={() => {
+            const md = missionToMarkdown(mission, tasks);
+            if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.clipboard) {
+              navigator.clipboard.writeText(md).then(
+                () => showToast('Copied mission as markdown', 'success'),
+                () => showToast('Copy failed — permission denied', 'error'),
+              );
+            } else {
+              // Native platforms: log to console + show the first 120 chars
+              // so the user at least sees it worked. Proper share-sheet
+              // would need @react-native-clipboard/clipboard.
+              console.log(md);
+              showToast('Mission markdown logged to console', 'info');
+            }
+          }}
+          style={styles.shareBtn}
+          nativeID="btn-mission-export"
+        >
+          <Text style={styles.shareBtnText}>↧ MD</Text>
+        </Pressable>
         <View style={[styles.statusBadge, {
           backgroundColor: STATUS_COLORS[mission.status] + '20',
           borderColor: STATUS_COLORS[mission.status] + '40',
@@ -712,14 +1067,16 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
               onChangeText={setEditTitle}
               autoFocus
             />
-            <TextInput
-              style={[styles.input, styles.inputMultiline, { fontSize: 14 }]}
-              value={editDesc}
-              onChangeText={setEditDesc}
-              multiline
-              placeholder="Description"
-              placeholderTextColor={PIXEL_COLORS.text3}
-            />
+            {/* Block editor for the brief — supports headings, checkboxes,
+                bullets, callouts, code, /ai, and @mentions. */}
+            <View style={{ borderWidth: 1, borderColor: PIXEL_COLORS.bg3, borderRadius: 2, padding: 8, backgroundColor: PIXEL_COLORS.bg1 }}>
+              <BlockBriefEditor
+                blocks={editBlocks}
+                onChange={setEditBlocks}
+                circleId={circleId}
+                placeholder="Write the brief. '/' for blocks, '@' to mention, '/ai <prompt>' to run Claude."
+              />
+            </View>
             <TextInput
               style={styles.input}
               value={editDeadline}
@@ -731,11 +1088,28 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
               <Pressable
                 style={[styles.createBtn, { backgroundColor: accentColor }]}
                 onPress={async () => {
+                  const plainDesc = blocksToPlainText(editBlocks).trim();
                   await updateMission(missionId, {
                     title: editTitle.trim() || mission.title,
-                    description: editDesc.trim() || null,
+                    description: plainDesc || null,
+                    // Persist the structured blocks alongside the plain text.
+                    // Cast because updateMission's typed interface predates
+                    // this column; the column exists and the client will
+                    // forward it to PostgREST regardless.
+                    ...(editBlocks.length > 0 ? { brief_blocks: editBlocks } : {}),
                     deadline: editDeadline || null,
-                  });
+                  } as any);
+                  // Log any @mentions so backlink queries work.
+                  const refs = extractAllMentionsFromBlocks(editBlocks);
+                  if (refs.length > 0 && currentUserId) {
+                    persistMentions({
+                      circleId,
+                      sourceType: 'mission',
+                      sourceId: missionId,
+                      authorId: currentUserId,
+                      refs,
+                    }).catch(() => {});
+                  }
                   setEditing(false);
                   refresh();
                 }}
@@ -752,13 +1126,45 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
             setEditTitle(mission.title);
             setEditDesc(mission.description || '');
             setEditDeadline(mission.deadline?.split('T')[0] || '');
+            const existing = (mission as any).brief_blocks as Block[] | undefined;
+            setEditBlocks(Array.isArray(existing) && existing.length > 0
+              ? existing
+              : blocksFromText(mission.description));
             setEditing(true);
           }}>
             <Text style={styles.detailTitle}>{mission.title}</Text>
-            {mission.description && (
-              <Text style={styles.detailDesc}>{mission.description}</Text>
-            )}
+            {(() => {
+              // Prefer structured blocks (with mention chips, formatting) when
+              // present; fall back to the plain description for old missions
+              // or any description text not yet migrated to blocks.
+              const blocks = (mission as any).brief_blocks as Block[] | undefined;
+              if (Array.isArray(blocks) && blocks.length > 0) {
+                return (
+                  <View style={{ marginTop: 8 }}>
+                    <BlockBriefEditor
+                      blocks={blocks}
+                      onChange={() => {}}
+                      circleId={circleId}
+                      readOnly
+                    />
+                  </View>
+                );
+              }
+              if (mission.description) {
+                return <MentionText content={mission.description} style={styles.detailDesc} />;
+              }
+              return null;
+            })()}
           </Pressable>
+        )}
+
+        {/* Notion-style page history */}
+        {showHistory && (
+          <MissionHistoryPanel
+            missionId={missionId}
+            accentColor={accentColor}
+            onClose={() => setShowHistory(false)}
+          />
         )}
 
         {/* Meta row */}
@@ -779,6 +1185,10 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
               setEditTitle(mission.title);
               setEditDesc(mission.description || '');
               setEditDeadline(mission.deadline?.split('T')[0] || '');
+              const existing2 = (mission as any).brief_blocks as Block[] | undefined;
+              setEditBlocks(Array.isArray(existing2) && existing2.length > 0
+                ? existing2
+                : blocksFromText(mission.description));
               setEditing(true);
             }}>
               <Text style={[styles.metaItem, { color: accentColor }]}>Edit</Text>
@@ -1040,13 +1450,19 @@ function MissionDetail({ missionId, circleId, accentColor, onBack }: {
 
 // ─── Create Mission Modal (with template picker) ────────────────────────────
 
-function CreateMissionModal({ circleId, accentColor, onClose }: {
+function CreateMissionModal({ circleId, accentColor, onClose, prefillTitle }: {
   circleId: string; accentColor: string; onClose: () => void;
+  prefillTitle?: string;
 }) {
-  const [step, setStep] = useState<'templates' | 'form'>('templates');
+  // When a prefill title is passed in (e.g. from `/mission create Ship X`
+  // in chat), skip the template picker and jump straight to the form so
+  // the user can add the remaining details (description, deadline, template,
+  // tasks) without retyping the title.
+  const hasPrefill = !!prefillTitle && prefillTitle.trim().length > 0;
+  const [step, setStep] = useState<'templates' | 'form'>(hasPrefill ? 'form' : 'templates');
   const [selectedTemplate, setSelectedTemplate] = useState<MissionTemplate | null>(null);
   const [templateFilter, setTemplateFilter] = useState('all');
-  const [title, setTitle] = useState('');
+  const [title, setTitle] = useState(hasPrefill ? prefillTitle!.trim() : '');
   const [description, setDescription] = useState('');
   const [deadline, setDeadline] = useState('');
   const [saving, setSaving] = useState(false);
@@ -1092,6 +1508,10 @@ function CreateMissionModal({ circleId, accentColor, onClose }: {
       for (const t of selectedTemplate.defaultTasks) {
         await createMissionTask(mission.id, t.title, { agentName: t.agentName });
       }
+      // Seed a structured brief so the block editor shows a real starting
+      // page (heading + description + tasks-as-checkboxes) instead of empty.
+      const seedBlocks = templateToBlocks(selectedTemplate);
+      await updateMission(mission.id, { brief_blocks: seedBlocks } as any).catch(() => {});
     }
 
     onClose();
@@ -1454,6 +1874,7 @@ const styles = StyleSheet.create({
   detailHeader: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
     paddingHorizontal: GRID.lg,
     paddingTop: GRID.lg,
     gap: GRID.md,
@@ -1506,7 +1927,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: GRID.sm,
     paddingVertical: 5,
     borderRadius: 6,
-    marginRight: 'auto',
   },
   shareBtnText: {
     color: PIXEL_COLORS.green,

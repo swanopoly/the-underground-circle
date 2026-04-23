@@ -231,16 +231,16 @@ export default function RetroEmulator({ visible, onClose, initialSystem }: Retro
 
   if (Platform.OS !== 'web') {
     return (
-      <Modal visible={visible} transparent animationType="fade">
-        <View style={styles.overlay}>
-          <View style={styles.container}>
+      <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+        <Pressable style={styles.overlay} onPress={onClose}>
+          <View style={styles.container} onStartShouldSetResponder={() => true}>
             <Text style={styles.title}>Retro Emulator</Text>
             <Text style={styles.subtitle}>Only available on web</Text>
             <Pressable onPress={onClose} style={styles.closeBtn}>
               <Text style={styles.closeBtnText}>Close</Text>
             </Pressable>
           </View>
-        </View>
+        </Pressable>
       </Modal>
     );
   }
@@ -248,9 +248,9 @@ export default function RetroEmulator({ visible, onClose, initialSystem }: Retro
   const systemGames = selectedSystem ? getGamesForSystem(selectedSystem.id) : [];
 
   return (
-    <Modal visible={visible} transparent animationType="fade">
-      <View style={styles.overlay}>
-        <View style={[styles.container, romLoaded && styles.containerExpanded]}>
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={handleClose}>
+      <Pressable style={styles.overlay} onPress={handleClose}>
+        <View style={[styles.container, romLoaded && styles.containerExpanded]} onStartShouldSetResponder={() => true}>
           {/* Header */}
           <View style={styles.header}>
             {romLoaded && (
@@ -403,7 +403,7 @@ export default function RetroEmulator({ visible, onClose, initialSystem }: Retro
             </ScrollView>
           )}
         </View>
-      </View>
+      </Pressable>
     </Modal>
   );
 }

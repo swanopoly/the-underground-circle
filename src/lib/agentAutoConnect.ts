@@ -5,7 +5,7 @@
  *
  * Resilience features:
  *  - Exponential backoff retry (5s → 10s → 20s → 30s cap)
- *  - Tries both CORS proxy (:18790) and direct gateway (:18789) for OpenSwan
+ *  - Connects to OpenSwan gateway directly (:18789)
  *  - Visibility-change listener: instantly retries when user switches back to tab
  *  - Poller error detection: marks connection as error after 3 consecutive failures
  *  - Singleton — safe to call start() multiple times.
@@ -63,7 +63,10 @@ import {
   testConnection,
 } from './openswanService';
 import { OfficeAgent } from './officeAgents';
+import { areBridgesAvailable } from './bridgeEnvironment';
 import { Platform } from 'react-native';
+import { devLog } from './devLog';
+import { safeGetUserId } from './authSession';
 
 // ── Singleton state ──────────────────────────────────────────────────────────
 
@@ -87,16 +90,54 @@ let _ocPollers = new Map<string, OpenSwanPoller>();
 let _lastMemorySave: Record<string, number> = {};
 const MEMORY_SAVE_THROTTLE_MS = 30_000;
 
+// Cached user id. Previously each of the 4 bridge pollers fired its own
+// `supabase.auth.getUser()` every time it considered a memory save — that's
+// up to 4 auth fetches per 30s window even though the identity doesn't
+// change within a session. Cache for 60s, refresh on miss.
+let _cachedUserId: string | null = null;
+let _cachedUserIdAt = 0;
+const USER_ID_CACHE_MS = 60_000;
+
 async function _getUserId(): Promise<string | null> {
-  try {
-    const { data } = await supabase.auth.getUser();
-    const uid = data.user?.id || null;
-    if (!uid) console.warn('[agentAutoConnect] _getUserId: no user authenticated');
-    return uid;
-  } catch (err) {
-    console.warn('[agentAutoConnect] _getUserId failed:', err);
-    return null;
+  if (_cachedUserId && Date.now() - _cachedUserIdAt < USER_ID_CACHE_MS) {
+    return _cachedUserId;
   }
+  const uid = await safeGetUserId();
+  if (uid) {
+    _cachedUserId = uid;
+    _cachedUserIdAt = Date.now();
+  } else {
+    console.warn('[agentAutoConnect] _getUserId: no user authenticated');
+  }
+  return uid;
+}
+
+/**
+ * Shared throttled memory-save path. Before this, each of the 4 bridges
+ * (CC, Codex, Gemini, Cursor) had an identical 10-line inline block with
+ * its own provider key and save function — drift-prone and redundant.
+ * Now they all funnel through here, so:
+ *   - throttle policy changes in exactly one place
+ *   - warn-on-failure logging is uniform across providers
+ *   - `_getUserId` is only called when the throttle allows a save, not on
+ *     every poll tick
+ */
+function _maybeSaveBridgeMemory<S>(
+  provider: 'cc' | 'codex' | 'gemini' | 'cursor',
+  sessions: S[],
+  saveFn: (circleId: string, userId: string, sessions: S[]) => Promise<unknown>,
+): void {
+  if (!_circleId) return;
+  const now = Date.now();
+  if (now - (_lastMemorySave[provider] || 0) <= MEMORY_SAVE_THROTTLE_MS) return;
+  _lastMemorySave[provider] = now;
+
+  void _getUserId().then((uid) => {
+    if (!uid || !_circleId) return;
+    Promise.resolve(saveFn(_circleId, uid, sessions)).catch((err) => {
+      console.warn(`[agentAutoConnect] Memory save failed for ${provider}:`, err);
+    });
+  });
 }
 let _retryTimer: ReturnType<typeof setInterval> | null = null;
 let _ocReconnectTimer: ReturnType<typeof setInterval> | null = null;
@@ -104,6 +145,13 @@ let _circleId: string | null = null;
 let _visibilityHandler: (() => void) | null = null;
 let _visibilityDebounce = false; // Prevents duplicate reconnect attempts
 let _retryAttempt = 0; // for exponential backoff
+// Consecutive reconnect-cycle failures (resets on any success). Separate
+// from `_retryAttempt` (which caps at 4 to bound the backoff ceiling) so we
+// can detect "this has been failing for real time" independently of the
+// exponential cap.
+let _consecutiveReconnectFailures = 0;
+let _hasWarnedPersistentReconnectFailure = false;
+const PERSISTENT_RECONNECT_WARN_AFTER = 20; // ~10 min at the 30 s cap
 
 // Listeners that want to know when sessions/connections change
 type Listener = () => void;
@@ -115,16 +163,16 @@ const RETRY_BASE_MS = 5000;      // Initial retry interval
 const RETRY_MAX_MS = 30000;      // Max retry interval
 const CC_DETECT_INTERVAL = 20000; // Claude Code bridge detection interval (20s)
 const OC_RECONNECT_INTERVAL = 20000; // OpenSwan reconnect check interval (20s)
+// Cadence for each local-CLI bridge poller (Claude Code, Codex, Gemini, Cursor).
+// These are localhost HTTP fetches that re-scan JSONL session files on disk —
+// 10s is frequent enough to feel live when a user opens a new terminal
+// session and cuts request volume in half vs the old 5s default.
+const BRIDGE_POLL_INTERVAL_MS = 10000;
 
-// Alternate OpenSwan endpoints to try (CORS proxy first, then direct gateway)
-const OPENCLAW_FALLBACK_ENDPOINTS = Platform.OS === 'web'
-  ? [
-      'http://localhost:18790', // Web can only use the proxy safely
-    ]
-  : [
-      'http://localhost:18790', // CORS proxy (preferred)
-      'http://localhost:18789', // Direct gateway (may work if CORS is configured)
-    ];
+// OpenSwan endpoints to try (direct gateway — CORS proxy removed)
+const OPENCLAW_FALLBACK_ENDPOINTS = [
+  'http://localhost:18789', // Direct gateway
+];
 
 function hasAuthFailure(conn: AgentConnection): boolean {
   return typeof conn.error === 'string' && /authentication failed|wrong or missing token/i.test(conn.error);
@@ -163,7 +211,16 @@ export function setAutoConnectCircleId(circleId: string) {
 
 /** Allow OfficeTab to update connections (e.g. user adds/removes) */
 export function updateAutoConnectConnections(conns: AgentConnection[]) {
+  for (const [connId, poller] of _ocPollers.entries()) {
+    const nextConn = conns.find((conn) => conn.id === connId);
+    if (!nextConn || nextConn.provider !== 'openswan' || nextConn.enabled === false || nextConn.status === 'disconnected') {
+      poller.stop();
+      _ocPollers.delete(connId);
+      _sessionsMap.delete(connId);
+    }
+  }
   _connections = conns;
+  _notify();
 }
 // ── Manual reconnect (triggered by UI) ───────────────────────────────────────
 
@@ -256,6 +313,17 @@ export async function startAgentAutoConnect() {
   if (Platform.OS === 'web') {
     await new Promise(resolve => setTimeout(resolve, 1000));
     if (!_running) return;
+  }
+
+  // Skip all localhost probing on production web where bridges can't be
+  // reached. Users running a dev setup (or who opted in via localStorage)
+  // still get the full auto-connect flow; everyone else avoids 20s of
+  // failed requests per retry cycle plus noisy console warnings.
+  if (!areBridgesAvailable()) {
+    console.log('[agentAutoConnect] Bridges unavailable in this environment — skipping probe. Run locally or set EXPO_PUBLIC_BRIDGE_HOST to enable.');
+    _connections = await loadConnections();
+    _notify();
+    return;
   }
 
   // 1. Load saved connections
@@ -498,6 +566,7 @@ function _startRetryLoop() {
 
       if (failedConns.length === 0) {
         _retryAttempt = 0;
+        _consecutiveReconnectFailures = 0;
         return;
       }
 
@@ -518,9 +587,30 @@ function _startRetryLoop() {
 
       if (anySuccess) {
         _retryAttempt = 0; // Reset backoff on success
+        _consecutiveReconnectFailures = 0;
+        _hasWarnedPersistentReconnectFailure = false;
         scheduleOcReconnect(); // Reschedule with faster interval
       } else {
         _retryAttempt = Math.min(_retryAttempt + 1, 4); // Increase backoff (cap at 4 = 30s)
+        _consecutiveReconnectFailures++;
+        // Surface once when auto-reconnect has been failing for ~10 minutes
+        // of real time (20 cycles × cap 30 s). Previously this loop spun
+        // forever in silence and there was no signal to check the gateway.
+        // We keep retrying after the warning — auto-recovery should still
+        // work when the user comes back online — but at least the state is
+        // visible to anyone looking at the console.
+        if (
+          !_hasWarnedPersistentReconnectFailure &&
+          _consecutiveReconnectFailures >= PERSISTENT_RECONNECT_WARN_AFTER
+        ) {
+          _hasWarnedPersistentReconnectFailure = true;
+          console.warn(
+            `[agentAutoConnect] OpenSwan gateway still unreachable after ` +
+            `${_consecutiveReconnectFailures} retry cycles (~${PERSISTENT_RECONNECT_WARN_AFTER * 30}s). ` +
+            `Will keep trying in the background; check that the gateway is ` +
+            `running and the token in ~/.openswan/openswan.json is current.`
+          );
+        }
         const newInterval = _getRetryInterval();
         if (newInterval !== interval) {
           scheduleOcReconnect(); // Reschedule with new interval
@@ -534,19 +624,48 @@ function _startRetryLoop() {
 
 // ── Internal: Visibility change listener ────────────────────────────────────
 
+/**
+ * Stops every active bridge + OpenSwan poller and nulls the refs. Used
+ * when the tab goes hidden — leaving pollers running on an invisible tab
+ * wastes battery on mobile and API quota across the board. When the tab
+ * comes back, the visible branch re-detects bridges and restarts pollers
+ * cleanly (same code path as the original "tab focus" reconnect).
+ */
+function _stopAllBridgePollersForBackground() {
+  try { _ccPoller?.stop(); } catch {} _ccPoller = null; _ccStarting = false;
+  try { _codexPoller?.stop(); } catch {} _codexPoller = null; _codexStarting = false;
+  try { _geminiPoller?.stop(); } catch {} _geminiPoller = null; _geminiStarting = false;
+  try { _cursorPoller?.stop(); } catch {} _cursorPoller = null; _cursorStarting = false;
+  for (const [, poller] of _ocPollers) {
+    try { poller.stop(); } catch {}
+  }
+  _ocPollers.clear();
+}
+
 function _startVisibilityListener() {
   if (Platform.OS !== 'web') return;
   if (_visibilityHandler) return;
 
   _visibilityHandler = () => {
-    if (document.visibilityState !== 'visible') return;
     if (!_running) return;
+
+    // Tab went to background: stop pollers so we don't burn battery /
+    // API quota polling for a user who can't see the result. Pollers
+    // keep no important state — when the tab comes back, the visible
+    // branch detects bridges and restarts fresh.
+    if (document.visibilityState === 'hidden') {
+      devLog.trace('[agentAutoConnect] Tab hidden — pausing pollers');
+      _stopAllBridgePollersForBackground();
+      return;
+    }
+
+    if (document.visibilityState !== 'visible') return;
     // Debounce: prevent duplicate reconnect attempts if visibility fires rapidly
     if (_visibilityDebounce) return;
     _visibilityDebounce = true;
     setTimeout(() => { _visibilityDebounce = false; }, 2000);
 
-    console.log('[agentAutoConnect] Tab became visible — checking connections...');
+    devLog.trace('[agentAutoConnect] Tab became visible — checking connections...');
     _retryAttempt = 0;
 
     // Check all bridges in parallel
@@ -616,19 +735,9 @@ function _startCCPoller() {
     if (_ccPublished && _circleId) {
       updateClaudeCodeAgentStatus(_circleId, sessions).catch(() => {});
     }
-    // Auto-save session context to memory (throttled)
-    if (_circleId && Date.now() - (_lastMemorySave['cc'] || 0) > MEMORY_SAVE_THROTTLE_MS) {
-      _lastMemorySave['cc'] = Date.now();
-      _getUserId().then(uid => {
-        if (uid && _circleId) {
-          saveCCSessionsToMemory(_circleId, uid, sessions).catch(err => {
-            console.warn('[agentAutoConnect] Memory save failed for CC:', err);
-          });
-        }
-      });
-    }
+    _maybeSaveBridgeMemory('cc', sessions, saveCCSessionsToMemory);
   });
-  _ccPoller.start(5000);
+  _ccPoller.start(BRIDGE_POLL_INTERVAL_MS);
   _ccStarting = false;
 }
 
@@ -653,19 +762,9 @@ function _startCodexPoller() {
     if (_codexPublished && _circleId) {
       updateCodexAgentStatus(_circleId, sessions).catch(() => {});
     }
-    // Auto-save session context to memory (throttled)
-    if (_circleId && Date.now() - (_lastMemorySave['codex'] || 0) > MEMORY_SAVE_THROTTLE_MS) {
-      _lastMemorySave['codex'] = Date.now();
-      _getUserId().then(uid => {
-        if (uid && _circleId) {
-          saveCodexSessionsToMemory(_circleId, uid, sessions).catch(err => {
-            console.warn('[agentAutoConnect] Memory save failed for Codex:', err);
-          });
-        }
-      });
-    }
+    _maybeSaveBridgeMemory('codex', sessions, saveCodexSessionsToMemory);
   });
-  _codexPoller.start(5000);
+  _codexPoller.start(BRIDGE_POLL_INTERVAL_MS);
   _codexStarting = false;
 }
 
@@ -688,19 +787,9 @@ function _startGeminiPoller() {
     if (_geminiPublished && _circleId) {
       updateGeminiCliAgentStatus(_circleId, sessions).catch(() => {});
     }
-    // Auto-save session context to memory (throttled)
-    if (_circleId && Date.now() - (_lastMemorySave['gemini'] || 0) > MEMORY_SAVE_THROTTLE_MS) {
-      _lastMemorySave['gemini'] = Date.now();
-      _getUserId().then(uid => {
-        if (uid && _circleId) {
-          saveGeminiSessionsToMemory(_circleId, uid, sessions).catch(err => {
-            console.warn('[agentAutoConnect] Memory save failed for Gemini:', err);
-          });
-        }
-      });
-    }
+    _maybeSaveBridgeMemory('gemini', sessions, saveGeminiSessionsToMemory);
   });
-  _geminiPoller.start(5000);
+  _geminiPoller.start(BRIDGE_POLL_INTERVAL_MS);
   _geminiStarting = false;
 }
 
@@ -722,19 +811,9 @@ function _startCursorPoller() {
     if (_cursorPublished && _circleId) {
       updateCursorAgentStatus(_circleId, sessions).catch(() => {});
     }
-    // Auto-save session context to memory (throttled)
-    if (_circleId && Date.now() - (_lastMemorySave['cursor'] || 0) > MEMORY_SAVE_THROTTLE_MS) {
-      _lastMemorySave['cursor'] = Date.now();
-      _getUserId().then(uid => {
-        if (uid && _circleId) {
-          saveCursorSessionsToMemory(_circleId, uid, sessions).catch(err => {
-            console.warn('[agentAutoConnect] Memory save failed for Cursor:', err);
-          });
-        }
-      });
-    }
+    _maybeSaveBridgeMemory('cursor', sessions, saveCursorSessionsToMemory);
   });
-  _cursorPoller.start(5000);
+  _cursorPoller.start(BRIDGE_POLL_INTERVAL_MS);
   _cursorStarting = false;
 }
 

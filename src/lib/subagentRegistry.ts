@@ -6,15 +6,19 @@
  */
 
 import {
-  getSwanBotStructuredResponse,
+  executeToolUseLoop,
+  buildStreamableSystemPrompt,
   type SwanBotContext,
   type SwanBotStructuredArtifact,
   type SwanBotStructuredToolAction,
 } from './swanbot';
 import { createRun, addStep, mergeRunMetadata, updateRunStatus, type RunSurface } from './agentRunSystem';
-import { buildPromptMemoryBundle, type PromptMemoryReference } from './memoryService';
+import type { PromptMemoryReference } from './memoryService';
 import type { OpenSwanExecutionContract } from './openswanExecution';
-import { runOpenSwanRuntimeToolLoop } from './openswanRuntimeToolLoop';
+import { buildOpenSwanObservedEvalSummary } from './openswanObservedEvals';
+import { OPENSWAN_RUNTIME_PLAN_VERSION } from './openswanRuntimePlan';
+import { buildOpenSwanMemoryStores } from './openswanMemoryStores';
+import { resolveOpenSwanSkills } from './openswanSkills';
 import type { OpenSwanTaskPlan, OpenSwanToolName } from './openswanTaskPlanner';
 import {
   detectSubagentCapability,
@@ -73,6 +77,30 @@ function capabilityToProfile(capability: SubagentCapabilityProfile): SubagentPro
 
 export const SUBAGENTS: SubagentProfile[] = listSubagentCapabilities().map(capabilityToProfile);
 
+const SUBAGENT_SKILL_MAP: Partial<Record<string, string[]>> = {
+  'planning.execution': ['summarize_thread'],
+  'research.synthesis': ['research_topic', 'summarize_thread'],
+  'writing.delivery': ['summarize_thread'],
+  'coding.implementation': ['refactor', 'code_explain'],
+  'coding.review': ['critique_pr'],
+  'coding.architecture': ['refactor', 'code_explain'],
+  'coding.debug': ['bug_hunt'],
+  'qa.verification': ['test_writer'],
+  'support.triage': ['bug_hunt', 'summarize_thread'],
+};
+
+function getPreferredSkillNamesForSubagent(subagent: SubagentProfile): string[] {
+  return Array.from(new Set((subagent.skills || []).flatMap((skillId) => SUBAGENT_SKILL_MAP[skillId] || [])));
+}
+
+function getSubagentModeKey(role: SubagentRole): 'build' | 'review' | 'research' | 'support' | 'plan' {
+  if (role === 'reviewer') return 'review';
+  if (role === 'researcher') return 'research';
+  if (role === 'support') return 'support';
+  if (role === 'architect' || role === 'planner' || role === 'designer') return 'plan';
+  return 'build';
+}
+
 // ── Intent Detection & Routing ──────────────────────────────────────────────
 
 /**
@@ -93,6 +121,7 @@ export interface DelegationResult {
   artifacts?: SwanBotStructuredArtifact[];
   toolActions?: SwanBotStructuredToolAction[];
   memoryReferences?: PromptMemoryReference[];
+  observedEval?: import('./openswanObservedEvals').OpenSwanObservedEvalSummary | null;
   usage?: {
     model?: string;
     input_tokens?: number;
@@ -235,6 +264,9 @@ export async function delegateToSubagent(opts: {
       parentRunId: opts.parentRunId,
       delegatedTo: opts.subagent.role,
       roomId: opts.roomId,
+      metadata: {
+        runtimePlanVersion: OPENSWAN_RUNTIME_PLAN_VERSION,
+      },
     });
     if (run) {
       runId = run.id;
@@ -242,17 +274,32 @@ export async function delegateToSubagent(opts: {
     }
   } catch {}
 
-  const memoryBundle = await buildPromptMemoryBundle({
+  const preferredSkillNames = getPreferredSkillNamesForSubagent(opts.subagent);
+  const activeSoulKey = opts.subagent.spiritId ? `soul:${opts.subagent.spiritId}` : null;
+  const modeKey = getSubagentModeKey(opts.subagent.role);
+  const memoryBundle = await buildOpenSwanMemoryStores({
     circleId: opts.circleId,
     userId: opts.userId,
     query: opts.message,
     roomId: opts.roomId,
+    agentId: undefined,
+    agentName: opts.subagent.displayName,
     spiritId: opts.subagent.spiritId || null,
     surface: opts.surface === 'main_chat' ? 'main_chat' : opts.surface === 'room_chat' ? 'room_chat' : 'task_run',
     taskKind: opts.subagent.role,
     profile: opts.subagent.role,
     runId,
     limit: 6,
+  });
+  const skillResolution = await resolveOpenSwanSkills({
+    circleId: opts.circleId,
+    userId: opts.userId,
+    soulKey: activeSoulKey,
+    mode: modeKey,
+    taskKind: opts.subagent.role,
+    query: opts.message,
+    maxSkills: 6,
+    preferredSkillNames,
   });
 
   // Build the specialist prompt
@@ -269,36 +316,115 @@ export async function delegateToSubagent(opts: {
     userName: opts.userName,
     model: opts.model || opts.subagent.modelPreference,
     chatHistory: opts.chatHistory,
-    memoryContext: memoryBundle.memoryContext,
+    memoryContext: memoryBundle.combined,
+    memoryStores: memoryBundle,
     memoryRefs: memoryBundle.references,
+    taskKind: opts.subagent.role,
+    sessionProfile: opts.subagent.role,
+    resolvedSkills: skillResolution.skills,
+    resolvedSkillsPromptBlock: skillResolution.promptBlock,
     spiritId: opts.subagent.spiritId || null,
   };
 
   try {
-    const structured = await getSwanBotStructuredResponse(fullPrompt, context);
-    let runtimeToolActions = structured.tool_actions || [];
+    // Build system prompt for this specialist
+    const subagentSystemPrompt = await buildStreamableSystemPrompt({
+      circleId: opts.circleId,
+      userId: opts.userId,
+      currentMessage: opts.message,
+      model: opts.model || opts.subagent.modelPreference,
+      userName: opts.userName,
+      modeKey,
+      taskKind: opts.subagent.role,
+      sessionProfile: opts.subagent.role,
+      resolvedSkills: skillResolution.skills,
+      resolvedSkillsPromptBlock: skillResolution.promptBlock,
+      chatHistory: [
+        opts.subagent.systemPrompt,
+        opts.chatHistory ? `\n## Recent Conversation\n${opts.chatHistory}` : '',
+        memoryBundle.combined ? `\n## Memory Context\n${memoryBundle.combined}` : '',
+      ].filter(Boolean).join('\n\n'),
+    });
 
-    try {
-      const toolResult = await runOpenSwanRuntimeToolLoop({
-        circleId: opts.circleId,
-        userId: opts.userId,
-        runId,
-        message: opts.message,
-        draftResponse: structured.response,
-        model: opts.model || opts.subagent.modelPreference,
-        userName: opts.userName,
-        chatHistory: opts.chatHistory,
-        activeSoulKey: opts.subagent.spiritId ? `soul:${opts.subagent.spiritId}` : undefined,
-        activePluginIds: [],
-        surface: opts.surface === 'main_chat' ? 'main_chat' : opts.surface === 'room_chat' ? 'room_chat' : 'task_run',
-        preferredToolNames: (opts.subagent.allowedTools || []) as OpenSwanToolName[],
-      });
-      if (toolResult.toolActions.length > 0) {
-        runtimeToolActions = [...runtimeToolActions, ...toolResult.toolActions];
-        structured.tool_actions = runtimeToolActions;
-        structured.response = toolResult.response;
-      }
-    } catch {}
+    const surfaceForTools: 'main_chat' | 'room_chat' | 'office' | 'task_run' =
+      opts.surface === 'main_chat' ? 'main_chat' : opts.surface === 'room_chat' ? 'room_chat' : 'task_run';
+
+    // Use native tool_use loop — same as parent runtime
+    const toolLoopResult = await executeToolUseLoop({
+      systemPrompt: subagentSystemPrompt,
+      userMessage: fullPrompt,
+      model: opts.model || opts.subagent.modelPreference || 'claude-sonnet-4-6',
+      circleId: opts.circleId,
+      userId: opts.userId,
+      runId,
+      activeSoulKey: activeSoulKey || undefined,
+      activePluginIds: [],
+      allowedToolNames: opts.subagent.allowedTools?.length ? opts.subagent.allowedTools as string[] : undefined,
+      surface: surfaceForTools,
+    });
+
+    const runtimeToolActions: SwanBotStructuredToolAction[] = toolLoopResult.toolEvents.map((evt) => {
+      const status: 'completed' | 'failed' | 'manual_required' | 'blocked' =
+        evt.status === 'passed' ? 'completed' : evt.status === 'manual_required' ? 'manual_required' : evt.status === 'blocked' ? 'blocked' : 'failed';
+      return {
+        kind: 'tool' as const,
+        tool_name: evt.tool,
+        title: evt.tool.replace(/_/g, ' ').replace(/\./g, ' > '),
+        status,
+        input_preview: typeof evt.input === 'string' ? evt.input.slice(0, 500) : JSON.stringify(evt.input).slice(0, 500),
+        output_preview: typeof evt.result === 'string' ? evt.result.slice(0, 1200) : '',
+        metadata: evt.metadata || {},
+      };
+    });
+
+    const structured = {
+      response: toolLoopResult.response,
+      tool_actions: runtimeToolActions,
+      artifacts: [] as SwanBotStructuredArtifact[],
+      usage: {},
+    };
+    const observedEval = buildOpenSwanObservedEvalSummary({
+      run: {
+        status: 'completed',
+        mode: modeKey,
+        provider: 'openswan',
+        metadata: {
+          explicitMode: modeKey,
+          resolvedSessionProfile: opts.subagent.role,
+          taskKind: opts.subagent.role,
+          runtimeToolActions: runtimeToolActions,
+          activeSkills: skillResolution.skills.map((skill) => ({
+            name: skill.name,
+            displayName: skill.displayName,
+            source: skill.source,
+          })),
+        },
+      },
+      artifacts: structured.artifacts.map((artifact) => ({
+        artifact_kind: artifact.kind,
+        title: artifact.title,
+      })),
+      toolActions: runtimeToolActions,
+      responseText: structured.response,
+    });
+    void import('./memoryService')
+      .then(({ recordArchiveDerivedMemorySuccess, recordArchiveDerivedMemoryWeakSignal }) => Promise.all([
+        recordArchiveDerivedMemorySuccess({
+          memoryReferences: memoryBundle.references,
+          observedEval,
+          userId: opts.userId,
+          source: 'subagent_runtime_passive_success',
+          runId,
+        }),
+        recordArchiveDerivedMemoryWeakSignal({
+          memoryReferences: memoryBundle.references,
+          observedEval,
+          userId: opts.userId,
+          source: 'subagent_runtime_passive_weak_signal',
+          runId,
+        }),
+      ]))
+      .catch(() => {});
 
     // Record step
     if (runId) {
@@ -307,6 +433,12 @@ export async function delegateToSubagent(opts: {
           memoryReferences: memoryBundle.references,
           memoriesUsed: memoryBundle.references.map((ref) => ref.title),
           spiritId: opts.subagent.spiritId || null,
+          activeSkills: skillResolution.skills.map((skill) => ({
+            name: skill.name,
+            displayName: skill.displayName,
+            source: skill.source,
+          })),
+          observedEval,
           runtimeToolActions: runtimeToolActions.map((action) => ({
             tool: action.tool_name,
             title: action.title,
@@ -401,6 +533,7 @@ export async function delegateToSubagent(opts: {
       artifacts: structured.artifacts || [],
       toolActions: structured.tool_actions || [],
       memoryReferences: memoryBundle.references,
+      observedEval,
       usage: structured.usage,
     };
   } catch (err: any) {

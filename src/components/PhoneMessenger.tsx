@@ -215,9 +215,9 @@ export default function PhoneMessenger({ visible, onClose, onUnreadCount }: Prop
   });
 
   return (
-    <Modal visible={visible} transparent animationType="fade">
-      <View style={s.overlay}>
-        <Animated.View style={[s.phone, { borderColor: borderGlow }]}>
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={s.overlay} onPress={onClose}>
+        <Animated.View style={[s.phone, { borderColor: borderGlow }]} onStartShouldSetResponder={() => true}>
           {/* Notch */}
           <View style={s.notch}>
             <View style={s.notchCamera} />
@@ -558,7 +558,7 @@ export default function PhoneMessenger({ visible, onClose, onUnreadCount }: Prop
             <View style={s.homeBar} />
           </View>
         </Animated.View>
-      </View>
+      </Pressable>
     </Modal>
   );
 }

@@ -28,6 +28,8 @@ interface Props {
   externalFilterPriority?: TaskPriority | null;
   externalFilterAssignee?: string | null;
   externalFilterRoom?: string | null;
+  isFiltered?: boolean;
+  onClearFilters?: () => void;
 }
 
 const MOBILE_BREAKPOINT = 768;
@@ -37,6 +39,7 @@ export default function KanbanBoard({
   onCardPress, onMoveTask, onQuickAdd, onAddTask,
   onBatchMove, onBatchAssignRoom, roomOptions, onArchiveDone,
   externalSearchText, externalFilterPriority, externalFilterAssignee, externalFilterRoom,
+  isFiltered, onClearFilters,
 }: Props) {
   const { width } = useWindowDimensions();
   const isMobile = width < MOBILE_BREAKPOINT;
@@ -129,6 +132,8 @@ export default function KanbanBoard({
           agents={agents}
           goals={goals}
           isFullWidth
+          isFiltered={isFiltered}
+          onClearFilters={onClearFilters}
           onCardPress={onCardPress}
           onMoveTask={onMoveTask}
           onQuickAdd={(title) => onQuickAdd(col.key, title)}
@@ -161,6 +166,8 @@ export default function KanbanBoard({
             agents={agents}
             goals={goals}
             isDragOver={dragOverColumn === col.key && draggingTask?.status !== col.key}
+            isFiltered={isFiltered}
+            onClearFilters={onClearFilters}
             onCardPress={onCardPress}
             onMoveTask={onMoveTask}
             onQuickAdd={(title) => onQuickAdd(col.key, title)}

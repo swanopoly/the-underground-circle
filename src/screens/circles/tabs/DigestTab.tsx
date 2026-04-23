@@ -8,6 +8,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { supabase } from '../../../lib/supabase';
+import { safeGetUser } from '../../../lib/authSession';
 import Card from '../../../components/Card';
 import { generateNudge, getProgressInsight, getOnThisDay } from '../../../lib/coach';
 
@@ -35,7 +36,7 @@ export default function DigestTab({ circleId }: DigestTabProps) {
   const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
 
   const fetchData = useCallback(async () => {
-    const { data: { user } } = await supabase.auth.getUser();
+    const { value: user } = await safeGetUser();
     if (!user) return;
 
     // Today's check-ins

@@ -1,7 +1,9 @@
 import { formatPersistedChatBotMessage } from './chatAgentIdentity';
+import type { ChatCommandDecision } from './chatCommandRegistry';
 import type { BrowserPlanCardData, BrowserPlanEvent, BrowserSessionRecord } from './computerUse';
 import type { OpenSwanMemoryRecommendation, PromptMemoryReference } from './memoryService';
 import type { OpenSwanExecutionContract } from './openswanExecution';
+import type { OpenSwanObservedEvalSummary } from './openswanObservedEvals';
 import { persistChatMessage, updateChatMessageContent } from './chatService';
 import type { ResearchDocumentReference } from './researchControl';
 import { getResearchDocumentReferences } from './researchControl';
@@ -41,6 +43,8 @@ export function persistMainChatBotMessageWithRetry(params: {
   agentName: string;
   content: string;
   threadId: string;
+  localMessageId?: string;
+  commandDecisions?: ChatCommandDecision[];
   artifacts?: SwanBotStructuredArtifact[];
   wikiRefs?: WikiArticleReference[];
   researchRefs?: ResearchDocumentReference[];
@@ -51,6 +55,12 @@ export function persistMainChatBotMessageWithRetry(params: {
   browserPlans?: BrowserPlanCardData[];
   browserPlanEvents?: BrowserPlanEvent[];
   browserSessions?: BrowserSessionRecord[];
+  modeOutcomeSummary?: {
+    headline: string;
+    bulletPoints?: string[];
+    blockers?: string[];
+  };
+  observedEval?: OpenSwanObservedEvalSummary | null;
   maxAttempts?: number;
   onError?: (error: unknown) => void;
   onPersisted?: (messageId: string) => void;
@@ -61,6 +71,8 @@ export function persistMainChatBotMessageWithRetry(params: {
     agentName,
     content,
     threadId,
+    localMessageId,
+    commandDecisions,
     artifacts,
     wikiRefs,
     researchRefs,
@@ -71,6 +83,8 @@ export function persistMainChatBotMessageWithRetry(params: {
     browserPlans,
     browserPlanEvents,
     browserSessions,
+    modeOutcomeSummary,
+    observedEval,
     maxAttempts = 3,
     onError,
     onPersisted,
@@ -82,6 +96,8 @@ export function persistMainChatBotMessageWithRetry(params: {
         circleId,
         userId,
         content: formatPersistedChatBotMessage(agentName, content, {
+          localMessageId,
+          commandDecisions,
           artifacts,
           wikiRefs,
           researchRefs,
@@ -92,6 +108,8 @@ export function persistMainChatBotMessageWithRetry(params: {
           browserPlans,
           browserPlanEvents,
           browserSessions,
+          modeOutcomeSummary,
+          observedEval,
         }),
         threadId,
         isBot: true,
@@ -115,6 +133,8 @@ export function updateMainChatBotMessageWithRetry(params: {
   messageId: string;
   agentName: string;
   content: string;
+  localMessageId?: string;
+  commandDecisions?: ChatCommandDecision[];
   artifacts?: SwanBotStructuredArtifact[];
   wikiRefs?: WikiArticleReference[];
   researchRefs?: ResearchDocumentReference[];
@@ -125,6 +145,12 @@ export function updateMainChatBotMessageWithRetry(params: {
   browserPlans?: BrowserPlanCardData[];
   browserPlanEvents?: BrowserPlanEvent[];
   browserSessions?: BrowserSessionRecord[];
+  modeOutcomeSummary?: {
+    headline: string;
+    bulletPoints?: string[];
+    blockers?: string[];
+  };
+  observedEval?: OpenSwanObservedEvalSummary | null;
   maxAttempts?: number;
   onError?: (error: unknown) => void;
 }): void {
@@ -132,6 +158,8 @@ export function updateMainChatBotMessageWithRetry(params: {
     messageId,
     agentName,
     content,
+    localMessageId,
+    commandDecisions,
     artifacts,
     wikiRefs,
     researchRefs,
@@ -142,6 +170,8 @@ export function updateMainChatBotMessageWithRetry(params: {
     browserPlans,
     browserPlanEvents,
     browserSessions,
+    modeOutcomeSummary,
+    observedEval,
     maxAttempts = 3,
     onError,
   } = params;
@@ -149,6 +179,8 @@ export function updateMainChatBotMessageWithRetry(params: {
   const persistAttempt = async (attempt = 0) => {
     try {
       await updateChatMessageContent(messageId, formatPersistedChatBotMessage(agentName, content, {
+        localMessageId,
+        commandDecisions,
         artifacts,
         wikiRefs,
         researchRefs,
@@ -159,6 +191,8 @@ export function updateMainChatBotMessageWithRetry(params: {
         browserPlans,
         browserPlanEvents,
         browserSessions,
+        modeOutcomeSummary,
+        observedEval,
       }));
     } catch (error) {
       onError?.(error);

@@ -119,10 +119,40 @@ export async function executeMissionCommand(
     return missionStatusReport(ctx);
   }
 
-  // /mission create <title> — create a new mission
-  if (cmd.startsWith('create ')) {
-    const title = args.slice(7).trim();
-    if (!title) return { message: 'Usage: `/mission create <title>`', success: false };
+  // /mission create <title> — opens the mission create modal with the title
+  // pre-filled so the user can add description, deadline, template choice,
+  // and tasks before saving. Previously this created immediately with just a
+  // title and dropped the user on the Missions tab to fill in the rest,
+  // which was confusing.
+  if (cmd.startsWith('create ') || cmd === 'create' || cmd.startsWith('new ') || cmd === 'new') {
+    const stripped = cmd.startsWith('create ')
+      ? args.slice(7)
+      : cmd === 'create'
+        ? ''
+        : cmd.startsWith('new ')
+          ? args.slice(4)
+          : '';
+    const title = stripped.trim();
+    if (typeof window !== 'undefined') {
+      try { window.localStorage.setItem('uc_pending_mission_create', title); } catch {}
+      try { window.dispatchEvent(new CustomEvent('uc:open-mission-create', { detail: { title } })); } catch {}
+      // Bring the user to the tab that hosts the Missions surface so the
+      // modal (which is View-based, not a portal) actually renders.
+      try { window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab: 'FEED' } })); } catch {}
+    }
+    return {
+      message: title
+        ? `Opening the mission creation form with **${title}** pre-filled. Add description, deadline, and tasks before you save.`
+        : 'Opening the mission creation form. Pick a template or start blank.',
+      success: true,
+    };
+  }
+
+  // Legacy /mission quickcreate <title> — bypasses the modal and creates
+  // immediately. Preserved for scripting + agents that want a one-shot call.
+  if (cmd.startsWith('quickcreate ')) {
+    const title = args.slice(12).trim();
+    if (!title) return { message: 'Usage: `/mission quickcreate <title>`', success: false };
     const { mission, error } = await createMission(ctx.circleId, ctx.userId, title);
     if (error) return { message: `Failed to create mission: ${error}`, success: false };
     return { message: `Mission created: **${mission!.title}**\nOpen the Missions tab to add tasks and set a deadline.`, success: true };

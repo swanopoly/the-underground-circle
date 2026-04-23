@@ -6,11 +6,16 @@
  */
 
 import { supabase } from './supabase';
-import { buildPromptMemoryBundle, type PromptMemoryReference } from './memoryService';
+import { getFreshAccessToken } from './authSession';
+import type { PromptMemoryReference } from './memoryService';
 import { buildSpiritWikiKnowledgeBundle, buildWikiKnowledgeBundle, buildWikiSearchResponse } from './wikiData';
 import { buildResearchKnowledgeBundle, buildResearchSearchResponse, buildSpiritResearchKnowledgeBundle } from './researchKnowledge';
 import { getAgentIdentityKey, loadAgentIdentities } from './agentIdentity';
 import type { OpenSwanExecutionStatus } from './openswanExecution';
+import { getStrictLocalAiModeMessage, isStrictLocalAiModeEnabled, shouldBlockExternalAiProvider } from './privacyMode';
+import type { OpenSwanMemoryStores } from './openswanMemoryStores';
+import type { OpenSwanChatMode } from './openswanModePolicy';
+import type { OpenSwanResolvedSkill } from './openswanSkillResolution';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -26,11 +31,19 @@ export type SwanBotContext = {
   thinkingLevel?: 'fast' | 'balanced' | 'deep';
   maxTokens?: number;
   chatHistory?: string;
+  conversationMessages?: Array<{ role: 'user' | 'assistant' | 'model'; content: string }>;
   wikiContext?: string;
   memoryContext?: string;
+  memoryStores?: OpenSwanMemoryStores;
   memoryRefs?: PromptMemoryReference[];
+  modeKey?: OpenSwanChatMode | string | null;
+  taskKind?: string | null;
+  sessionProfile?: string | null;
+  resolvedSkills?: OpenSwanResolvedSkill[];
+  resolvedSkillsPromptBlock?: string | null;
   spiritId?: string | null;
   attachmentContext?: string;
+  sessionArchiveContext?: string;
 };
 
 async function resolveContextSpiritId(context: SwanBotContext): Promise<string | null> {
@@ -465,8 +478,9 @@ async function callLlmProxy(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   circleId?: string,
 ): Promise<string | null> {
-  const { data: { session } } = await supabase.auth.getSession();
-  if (!session?.access_token) return null;
+  if (shouldBlockExternalAiProvider(provider)) return null;
+  const accessToken = await getFreshAccessToken();
+  if (!accessToken) return null;
   const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
   if (!supabaseUrl) return null;
   const url = `${supabaseUrl}/functions/v1/llm-proxy`;
@@ -474,7 +488,7 @@ async function callLlmProxy(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${session.access_token}`,
+      'Authorization': `Bearer ${accessToken}`,
     },
     body: JSON.stringify({ provider, model, messages, circleId }),
   });
@@ -489,6 +503,451 @@ async function callLlmProxy(
 
 // ─── AI Edge Function Call ───────────────────────────────────────────────────
 
+/**
+ * Invokes the v2 edge function (`swanbot-v2-ai`). Mirrors
+ * `callSwanBotAI`'s signature so the call-site switch is transparent.
+ *
+ * M2 round-trip pattern: when the edge fn returns
+ * `{ pending: true, clientToolCalls, continuationRunId }`, we execute
+ * the client-side tools (desktop bridge, etc.) and POST the results
+ * back with `{ continuationRunId, toolResults }`. Loop until terminal
+ * or 6-continuation cap.
+ *
+ * Returns `null` on failure so the caller can fall back to v1.
+ * See `docs/SWANBOT_V2_MIGRATION_PLAN.md` for rollout boundaries.
+ */
+async function callSwanBotV2(
+  message: string,
+  circleId: string,
+  userId: string,
+  _discordContext?: string,
+  model?: string | null,
+  _wikiContext?: string,
+  conversationMessages?: Array<{ role: string; content: string }>,
+  thinkingLevel: 'fast' | 'balanced' | 'deep' = 'deep',
+  _maxTokens = 6144,
+  systemDirective?: string,
+): Promise<string | null> {
+  if (shouldBlockExternalAiProvider('anthropic')) return null;
+  const MAX_CONTINUATIONS = 6;
+  try {
+    const accessToken = await getFreshAccessToken();
+    if (!accessToken) return null;
+
+    // ── First call — initial message. ─────────────────────────────────
+    let response = await invokeSwanbotV2(accessToken, {
+      message,
+      circleId,
+      userId,
+      mode: thinkingLevel === 'fast' ? 'talk' : 'build',
+      model: model || undefined,
+      systemDirective,
+      legacy: { conversationMessages },
+    });
+    if (!response) return null;
+
+    // ── Continuation loop for clientOnly tool calls. ──────────────────
+    for (let i = 0; i < MAX_CONTINUATIONS; i++) {
+      if (!response.pending) break;
+      const toolResults = await executeClientToolCalls(response.clientToolCalls || []);
+      response = await invokeSwanbotV2(accessToken, {
+        circleId,
+        userId,
+        continuationRunId: response.continuationRunId,
+        toolResults,
+      });
+      if (!response) return null;
+    }
+
+    if (response.pending) {
+      console.warn('[SwanBot/v2] hit continuation cap — returning partial.');
+      return null;
+    }
+    return response.text || response.response || null;
+  } catch (err: any) {
+    console.warn('[SwanBot/v2] call failed:', err?.message || err);
+    return null;
+  }
+}
+
+type V2Response =
+  | {
+      pending: true;
+      clientToolCalls: Array<{ id: string; name: string; input: unknown }>;
+      continuationRunId: string;
+      text?: string;
+      response?: string;
+    }
+  | {
+      pending?: false;
+      text?: string;
+      response?: string;
+    };
+
+async function invokeSwanbotV2(
+  accessToken: string,
+  body: Record<string, unknown>,
+): Promise<V2Response | null> {
+  const { data, error } = await supabase.functions.invoke('swanbot-v2-ai', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    body,
+  });
+  if (error) {
+    console.warn('[SwanBot/v2] invoke error:', error?.message || String(error));
+    return null;
+  }
+  if (data?.error) {
+    console.warn('[SwanBot/v2] edge returned error:', data.error);
+    return null;
+  }
+  return (data || null) as V2Response | null;
+}
+
+// Dispatch client-delegated tool calls against the local bridge. Every
+// returned `{ tool_use_id, content, is_error? }` gets forwarded to the
+// edge fn as the next `tool_result` content block.
+async function executeClientToolCalls(
+  calls: Array<{ id: string; name: string; input: unknown }>,
+): Promise<Array<{ tool_use_id: string; content: string; is_error?: boolean }>> {
+  if (calls.length === 0) return [];
+  const bridge = await import('./desktopBridge');
+  const out: Array<{ tool_use_id: string; content: string; is_error?: boolean }> = [];
+  for (const call of calls) {
+    try {
+      const result = await dispatchOneClientTool(bridge, call);
+      out.push({
+        tool_use_id: call.id,
+        content: JSON.stringify(result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error || 'failed' }),
+        is_error: !result.ok,
+      });
+    } catch (err: any) {
+      out.push({
+        tool_use_id: call.id,
+        content: JSON.stringify({ ok: false, error: err?.message || 'client tool dispatch threw' }),
+        is_error: true,
+      });
+    }
+  }
+  return out;
+}
+
+async function dispatchOneClientTool(
+  bridge: typeof import('./desktopBridge'),
+  call: { id: string; name: string; input: unknown },
+): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const input = (call.input || {}) as Record<string, any>;
+  switch (call.name) {
+    case 'desktop.launch_app':        return bridge.launchApp(String(input.appName || ''));
+    case 'desktop.focus_app':         return bridge.focusApp(String(input.appName || ''));
+    case 'desktop.type_text':         return bridge.typeText(String(input.text || ''));
+    case 'desktop.press_keys':        return bridge.pressKeys(String(input.combo || ''));
+    case 'desktop.list_running_apps': {
+      const r = await bridge.listRunningApps();
+      return r.ok ? { ok: true, data: { apps: r.data || [] } } : r;
+    }
+    case 'desktop.wait_for_app':
+      return bridge.waitForApp(String(input.appName || ''), typeof input.timeoutMs === 'number' ? input.timeoutMs : undefined);
+    case 'desktop.screenshot': {
+      const r = await bridge.takeScreenshot();
+      if (!r.ok) return r;
+      // Don't round-trip full base64 through the model — it blows the
+      // context budget. Return size + a short preview so the model
+      // knows the screenshot happened; the UI surfaces the full image.
+      return {
+        ok: true,
+        data: {
+          sizeBytes: r.data?.sizeBytes ?? 0,
+          mimeType: r.data?.mimeType || 'image/png',
+          preview: (r.data?.base64 || '').slice(0, 128) + '…',
+        },
+      };
+    }
+    case 'desktop.open_url':   return bridge.openUrl(String(input.url || ''));
+    case 'desktop.open_path':  return bridge.openPath(String(input.path || ''));
+    case 'desktop.click_at':   return bridge.clickAt(Number(input.x), Number(input.y));
+    case 'desktop.screen_size':return bridge.getScreenSize();
+
+    // ── M3c: workspace + verification ─────────────────────────────────
+    case 'workspace.create_room':
+      return dispatchWorkspaceCreateRoom(input);
+    case 'workspace.apply_artifacts':
+      return dispatchWorkspaceApplyArtifacts(input);
+    case 'workspace.open_preview':
+      return dispatchWorkspaceOpenPreview(input);
+    case 'verification.typecheck':
+    case 'verification.tests':
+    case 'verification.lint':
+      return dispatchVerification(call.name, input);
+
+    // ── M3d: credentials (1Password via local bridge) ─────────────────
+    case 'credentials.get':
+      return dispatchCredentialsGet(input);
+
+    // ── M3e: WordPress publishing (external side-effect) ──────────────
+    case 'wp.discover_types':
+      return dispatchWpDiscoverTypes(input);
+    case 'wp.list_posts':
+      return dispatchWpListPosts(input);
+    case 'wp.upload_media':
+      return dispatchWpUploadMedia(input);
+    case 'wp.create_slide':
+      return dispatchWpCreateSlide(input);
+
+    default:
+      return { ok: false, error: `Unknown client tool "${call.name}"` };
+  }
+}
+
+// ─── M3c dispatchers ──────────────────────────────────────────────────────
+//
+// Lazy imports keep the module graph light when v2 isn't in use — v1
+// users never pay the cost of loading chatWorkspace.ts, roomWorkspaceLauncher.ts,
+// or claudeCodeDetector.ts unless the model actually invokes one of
+// these tools through the v2 round-trip.
+
+function normalizeArtifact(raw: unknown): {
+  kind: 'summary' | 'image' | 'translation' | 'classification' | 'vision' | 'audio' | 'code' | 'webpage';
+  title: string;
+  content?: string | null;
+  url?: string | null;
+  metadata?: Record<string, unknown>;
+} | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const a = raw as any;
+  const kind = String(a.kind || '');
+  const allowed = ['summary', 'image', 'translation', 'classification', 'vision', 'audio', 'code', 'webpage'];
+  if (!allowed.includes(kind)) return null;
+  const title = String(a.title || '').slice(0, 200);
+  if (!title) return null;
+  return {
+    kind: kind as any,
+    title,
+    content: typeof a.content === 'string' ? a.content : null,
+    url: typeof a.url === 'string' ? a.url : null,
+    metadata: (a.metadata && typeof a.metadata === 'object') ? a.metadata : undefined,
+  };
+}
+
+async function dispatchWorkspaceCreateRoom(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const artifact = normalizeArtifact(input.artifact);
+  if (!artifact) return { ok: false, error: 'artifact required with valid { kind, title }' };
+  const circleId = String(input.circleId || '').trim();
+  if (!circleId) return { ok: false, error: 'circleId required' };
+  try {
+    const { createWorkspaceFromArtifact } = await import('./chatWorkspace');
+    const result = await createWorkspaceFromArtifact(circleId, artifact);
+    if (!result.roomId) return { ok: false, error: 'workspace creation returned no roomId' };
+    return { ok: true, data: result };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+async function dispatchWorkspaceApplyArtifacts(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const roomId = String(input.roomId || '').trim();
+  if (!roomId) return { ok: false, error: 'roomId required' };
+  const artifact = normalizeArtifact(input.artifact);
+  if (!artifact) return { ok: false, error: 'artifact required with valid { kind, title }' };
+  try {
+    const { createFilesInRoomFromArtifact } = await import('./chatWorkspace');
+    const result = await createFilesInRoomFromArtifact(roomId, artifact);
+    return { ok: true, data: result };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+async function dispatchWorkspaceOpenPreview(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const roomId = String(input.roomId || '').trim();
+  if (!roomId) return { ok: false, error: 'roomId required' };
+  const preferredPanel: 'chat' | 'playground' = input.preferredPanel === 'chat' ? 'chat' : 'playground';
+  try {
+    const { primeRoomWorkspaceLaunch, focusRoomWorkspaceFile } = await import('./roomWorkspaceLauncher');
+    if (input.circleId) {
+      primeRoomWorkspaceLaunch({
+        circleId: String(input.circleId),
+        roomId,
+        primaryFileId: input.primaryFileId ? String(input.primaryFileId) : null,
+        preferredPanel,
+      });
+    } else {
+      focusRoomWorkspaceFile({
+        roomId,
+        primaryFileId: input.primaryFileId ? String(input.primaryFileId) : null,
+        preferredPanel,
+      });
+    }
+    return { ok: true, data: { roomId, preferredPanel } };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+const DEFAULT_VERIFICATION_COMMANDS: Record<'verification.typecheck' | 'verification.tests' | 'verification.lint', string> = {
+  'verification.typecheck': 'npm run typecheck:app',
+  'verification.tests': 'npm test',
+  'verification.lint': 'npm run lint',
+};
+
+// ─── M3e: WordPress dispatchers ────────────────────────────────────────
+//
+// Each tool validates siteUrl shape (must be http/https) + the
+// required onePasswordItem reference before touching the wpAdmin
+// module. Summaries are trimmed to keep tool_result payloads small —
+// the full WP response is available via another round-trip if the
+// model actually needs the raw data.
+
+function validateWpSite(input: Record<string, any>): { ok: true; site: { siteUrl: string; onePasswordItem: string; onePasswordVault?: string } } | { ok: false; error: string } {
+  const siteUrl = String(input?.siteUrl || '').trim();
+  if (!/^https?:\/\//i.test(siteUrl)) return { ok: false, error: 'siteUrl must start with http(s)://' };
+  const onePasswordItem = String(input?.onePasswordItem || '').trim();
+  if (!onePasswordItem) return { ok: false, error: 'onePasswordItem required' };
+  const onePasswordVault = typeof input?.vault === 'string' && input.vault.trim() ? input.vault.trim() : undefined;
+  return { ok: true, site: { siteUrl, onePasswordItem, onePasswordVault } };
+}
+
+async function dispatchWpDiscoverTypes(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const v = validateWpSite(input);
+  if (!v.ok) return v;
+  try {
+    const { discoverPostTypes } = await import('./wpAdmin');
+    const types = await discoverPostTypes(v.site);
+    const slim = Object.entries(types).slice(0, 40).map(([slug, t]: [string, any]) => ({
+      slug,
+      name: t?.name || slug,
+      rest_base: t?.rest_base || slug,
+    }));
+    return { ok: true, data: { siteUrl: v.site.siteUrl, count: slim.length, types: slim } };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+async function dispatchWpListPosts(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const v = validateWpSite(input);
+  if (!v.ok) return v;
+  const postType = typeof input?.postType === 'string' ? input.postType : undefined;
+  const perPage = typeof input?.perPage === 'number' ? Math.max(1, Math.min(50, input.perPage)) : 20;
+  const status = typeof input?.status === 'string' ? input.status : undefined;
+  try {
+    const { listPosts } = await import('./wpAdmin');
+    const posts = await listPosts(v.site, { postType, perPage, status });
+    const slim = posts.slice(0, perPage).map((p) => ({
+      id: p.id,
+      title: typeof p.title === 'string' ? p.title : p.title?.rendered,
+      status: p.status,
+      link: p.link,
+    }));
+    return { ok: true, data: { count: slim.length, posts: slim } };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+async function dispatchWpUploadMedia(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const v = validateWpSite(input);
+  if (!v.ok) return v;
+  const storagePath = String(input?.storagePath || '').trim();
+  const fileName = String(input?.fileName || '').trim();
+  if (!storagePath || !fileName) return { ok: false, error: 'storagePath and fileName required' };
+  const mimeType = typeof input?.mimeType === 'string' && input.mimeType.trim() ? input.mimeType.trim() : 'application/octet-stream';
+  try {
+    const { uploadMediaFromStorage } = await import('./wpAdmin');
+    const media = await uploadMediaFromStorage(v.site, storagePath, fileName, mimeType);
+    return { ok: true, data: { id: media.id, source_url: media.source_url, fileName } };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+async function dispatchWpCreateSlide(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const v = validateWpSite(input);
+  if (!v.ok) return v;
+  const storagePath = String(input?.storagePath || '').trim();
+  const fileName = String(input?.fileName || '').trim();
+  if (!storagePath || !fileName) return { ok: false, error: 'storagePath and fileName required' };
+  const mimeType = typeof input?.mimeType === 'string' && input.mimeType.trim() ? input.mimeType.trim() : 'image/jpeg';
+  const status: 'draft' | 'publish' = input?.status === 'draft' ? 'draft' : 'publish';
+  const title = typeof input?.title === 'string' ? input.title : undefined;
+  const slideType = typeof input?.slideType === 'string' && input.slideType.trim() ? input.slideType.trim() : undefined;
+  try {
+    const { uploadImageAndCreateSlide } = await import('./wpAdmin');
+    const result = await uploadImageAndCreateSlide(
+      v.site,
+      { storagePath, fileName, mimeType },
+      { title, status, slideType },
+    );
+    return {
+      ok: true,
+      data: {
+        media: { id: result.media.id, source_url: result.media.source_url },
+        slide: {
+          id: result.slide.id,
+          link: result.slide.link,
+          status: result.slide.status,
+          title: typeof result.slide.title === 'string' ? result.slide.title : result.slide.title?.rendered,
+        },
+      },
+    };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+async function dispatchCredentialsGet(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const item = String(input?.item || '').trim();
+  if (!item) return { ok: false, error: 'item required' };
+  const vault = typeof input?.vault === 'string' ? input.vault.trim() : undefined;
+  const fields = Array.isArray(input?.fields)
+    ? (input.fields as unknown[]).map((f) => String(f)).filter(Boolean)
+    : undefined;
+  try {
+    const { getCredentials } = await import('./credentialService');
+    const r = await getCredentials({ item, vault, fields });
+    if (!r.ok) return { ok: false, error: r.error || 'credential fetch failed' };
+    // Return the fields map verbatim. The caller is responsible for not
+    // echoing these to chat / other tools. The tool description warns
+    // the model; we don't strip or mask here because callers like
+    // `wp.create_slide` legitimately need the raw values.
+    return { ok: true, data: { item, vault: vault || null, fields: r.fields } };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+async function dispatchVerification(
+  name: 'verification.typecheck' | 'verification.tests' | 'verification.lint',
+  input: Record<string, any>,
+): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const command = typeof input.command === 'string' && input.command.trim()
+    ? input.command.trim()
+    : DEFAULT_VERIFICATION_COMMANDS[name];
+  try {
+    const { detectClaudeCodeBridge, execBridgeCommand } = await import('./claudeCodeDetector');
+    const alive = await detectClaudeCodeBridge();
+    if (!alive) {
+      return { ok: false, error: 'Local coding bridge unavailable — start it with `npm run bridge`.' };
+    }
+    const result = await execBridgeCommand(command);
+    // Cap stdout/stderr at ~8KB each so long test output doesn't blow
+    // the context budget on the next Anthropic turn.
+    const clip = (s?: string) => (s ? s.slice(0, 8192) : '');
+    return {
+      ok: !!result.ok,
+      data: {
+        command,
+        ok: !!result.ok,
+        stdout: clip(result.stdout),
+        stderr: clip(result.stderr),
+        truncated: (result.stdout && result.stdout.length > 8192) || (result.stderr && result.stderr.length > 8192),
+      },
+      error: result.ok ? undefined : (result.error || 'verification failed'),
+    };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
 async function callSwanBotAI(
   message: string,
   circleId: string,
@@ -496,28 +955,52 @@ async function callSwanBotAI(
   discordContext?: string,
   model?: string | null,
   wikiContext?: string,
+  conversationMessages?: Array<{ role: string; content: string }>,
   thinkingLevel: 'fast' | 'balanced' | 'deep' = 'deep',
   maxTokens = 6144,
+  systemDirective?: string,
 ): Promise<string | null> {
+  // Phase M1 router: if the user opted into v2, try v2 first. On any
+  // v2 failure we fall through to v1 so a flaky v2 deploy never breaks
+  // chat. See `docs/SWANBOT_V2_MIGRATION_PLAN.md`.
   try {
-    const { data: authData } = await supabase.auth.getSession();
-    const accessToken = authData.session?.access_token;
+    const { isSwanbotV2Enabled } = await import('./swanbotRouting');
+    if (isSwanbotV2Enabled()) {
+      const v2 = await callSwanBotV2(
+        message, circleId, userId, discordContext, model, wikiContext,
+        conversationMessages, thinkingLevel, maxTokens, systemDirective,
+      );
+      if (v2) return v2;
+      console.log('[SwanBot] v2 returned null — falling back to v1.');
+    }
+  } catch (err) {
+    console.warn('[SwanBot] routing check failed — using v1:', err);
+  }
+  if (shouldBlockExternalAiProvider('anthropic')) {
+    console.warn('[SwanBot] Strict local AI mode blocked swanbot-ai');
+    return null;
+  }
+  try {
+    const accessToken = await getFreshAccessToken();
     if (!accessToken) {
       return null;
     }
     const { data, error } = await supabase.functions.invoke('swanbot-ai', {
-      ...(accessToken
-        ? { headers: { Authorization: `Bearer ${accessToken}` } }
-        : {}),
+      headers: { Authorization: `Bearer ${accessToken}` },
       body: {
         message,
         circleId,
         userId,
         discordContext,
         wikiContext,
+        conversationMessages,
         model: model || 'claude-sonnet-4-6',
         maxTokens,
         thinkingLevel,
+        // High-priority behavior directive prepended to the frozen system
+        // prompt on the server. Used by the conversational build
+        // orchestrator to enforce the ask-questions-first protocol.
+        ...(systemDirective ? { systemDirective } : {}),
       },
     });
     if (error) {
@@ -545,22 +1028,26 @@ async function callSwanBotAIStructured(
   discordContext?: string,
   model?: string | null,
   wikiContext?: string,
+  conversationMessages?: Array<{ role: string; content: string }>,
   thinkingLevel: 'fast' | 'balanced' | 'deep' = 'deep',
   maxTokens = 6144,
 ): Promise<SwanBotStructuredResponse | null> {
+  if (shouldBlockExternalAiProvider('anthropic')) {
+    console.warn('[SwanBot] Strict local AI mode blocked structured swanbot-ai');
+    return null;
+  }
   try {
-    const { data: authData } = await supabase.auth.getSession();
-    const accessToken = authData.session?.access_token;
+    const accessToken = await getFreshAccessToken();
+    if (!accessToken) return null;
     const { data, error } = await supabase.functions.invoke('swanbot-ai', {
-      ...(accessToken
-        ? { headers: { Authorization: `Bearer ${accessToken}` } }
-        : {}),
+      headers: { Authorization: `Bearer ${accessToken}` },
       body: {
         message,
         circleId,
         userId,
         discordContext,
         wikiContext,
+        conversationMessages,
         model: model || 'claude-sonnet-4-6',
         maxTokens,
         thinkingLevel,
@@ -591,6 +1078,7 @@ async function callGemini(
   context: SwanBotContext,
   circleData: CircleContextData
 ): Promise<string | null> {
+  if (shouldBlockExternalAiProvider('gemini')) return null;
   try {
     // Try DB-driven prompt first (Langfuse-style), fall back to hard-coded
     let systemPrompt: string;
@@ -678,30 +1166,67 @@ async function buildSystemPromptAsync(
   data: CircleContextData,
   currentMessage?: string,
 ): Promise<string> {
-  const base = buildSystemPrompt(context, data);
+  // ── Adaptive context loading ──────────────────────────────────────────
+  // Determine how much context to load based on message complexity.
+  // Simple messages get a lean prompt (fast, cheap). Complex tasks get
+  // the full context stack (memory, wisdom, skills, wiki, missions).
+  const { analyzeMessageRouting } = await import('./messageRouting');
+  const route = currentMessage
+    ? analyzeMessageRouting(currentMessage, 'main_chat').route
+    : null;
+  const complexity = route?.complexity || 'moderate';
+  const responseIntent = route?.intent || 'question';
+  const base = buildSystemPrompt(context, data, responseIntent);
   const extras: string[] = [];
 
-  // Load user profile for personalization
-  // Shared timeout for async extras — if embedding infra or memory service
-  // is slow, we don't block the entire chat turn waiting.
+  // Context tiers:
+  //   trivial  → profile only (greeting, thanks, yes/no)
+  //   simple   → profile + memory startup bundle
+  //   moderate → + SOUL wisdom + turn retrieval + missions
+  //   complex  → + skills + attachments + full retrieval budget
+  const loadProfile  = true;
+  const loadMemory   = complexity !== 'trivial';
+  const loadWisdom   = complexity === 'moderate' || complexity === 'complex';
+  const loadRetrieval = complexity === 'moderate' || complexity === 'complex';
+  const loadMissions = complexity === 'moderate' || complexity === 'complex';
+  const loadSkills   = complexity === 'complex';
+  const retrievalBudget = complexity === 'complex' ? 2500 : complexity === 'moderate' ? 1200 : 600;
+  const retrievalCount  = complexity === 'complex' ? 12 : complexity === 'moderate' ? 6 : 3;
+
+  // Shared timeout for async extras
   const withTimeout = <T>(p: Promise<T>, ms = 3000): Promise<T | null> =>
     Promise.race([p, new Promise<null>(r => setTimeout(() => r(null), ms))]);
 
-  try {
-    const { loadUserProfile, generateProfileContext } = await import('./userChatProfile');
-    const profile = await withTimeout(loadUserProfile());
-    const profileCtx = profile ? generateProfileContext(profile) : null;
-    if (profileCtx) extras.push(profileCtx);
-  } catch (e) { console.warn('[SwanBot] Profile load failed:', e); }
+  if (loadProfile) {
+    try {
+      const { loadUserProfile, generateProfileContext } = await import('./userChatProfile');
+      const profile = await withTimeout(loadUserProfile());
+      const profileCtx = profile ? generateProfileContext(profile) : null;
+      if (profileCtx) extras.push(profileCtx);
+    } catch (e) { console.warn('[SwanBot] Profile load failed:', e); }
+  }
 
   // Load memory hierarchy for this circle (Phase 0/Phase 1 startup bundle)
-  try {
-    const { buildMemoryContext } = await import('./agentRunSystem');
-    if (context.circleId) {
-      const memCtx = await withTimeout(buildMemoryContext(context.circleId, undefined, context.userId, context.agentId, context.agentName));
-      if (memCtx) extras.push(memCtx);
-    }
-  } catch (e) { console.warn('[SwanBot] Memory context failed:', e); }
+  if (loadMemory) {
+    try {
+      if (context.circleId) {
+        const contextSpiritId = await resolveContextSpiritId(context);
+        const stores = context.memoryStores || await withTimeout(import('./openswanMemoryStores').then(({ buildOpenSwanMemoryStores }) => buildOpenSwanMemoryStores({
+          circleId: context.circleId,
+          userId: context.userId,
+          query: currentMessage || '',
+          agentId: context.agentId,
+          agentName: context.agentName,
+          spiritId: contextSpiritId,
+          surface: 'main_chat',
+          limit: 8,
+        })));
+        if (stores?.userProfile) extras.push(stores.userProfile);
+        if (stores?.runtimeMemory) extras.push(stores.runtimeMemory);
+        if (stores?.workingMemory) extras.push(`## Working Memory\n${stores.workingMemory}`);
+      }
+    } catch (e) { console.warn('[SwanBot] Memory context failed:', e); }
+  }
 
   // Phase 2/3 — resolve the active SOUL once, use it for both blocks.
   let activeSoulKey: string | null = null;
@@ -710,66 +1235,88 @@ async function buildSystemPromptAsync(
     activeSoulKey = spiritId ? `soul:${spiritId}` : null;
   } catch (e) { console.warn('[SwanBot] Soul resolution failed:', e); }
 
-  // Phase 3 — Block B: pre-distilled SOUL wisdom for this circle. Weekly
-  // synthesized by the `distil-soul-wisdom` edge fn. Persistent guidance
-  // that sits BEFORE the turn-specific retrieval so the model reads the
-  // general "what has this SOUL learned" rules first, then the specific
-  // memory matches for this message.
-  try {
-    if (context.circleId && activeSoulKey) {
-      const { loadSoulWisdomWithFallback, formatSoulWisdomBlock } = await import('./memoryService');
-      const wisdom = await withTimeout(loadSoulWisdomWithFallback({
-        circleId: context.circleId,
-        soulKey: activeSoulKey,
-        userId: context.userId,
-        agentId: context.agentId,
-        queryText: currentMessage,
-      }));
-      const wisdomBlock = formatSoulWisdomBlock(wisdom);
-      if (wisdomBlock) extras.push(wisdomBlock);
-    }
-  } catch (e) { console.warn('[SwanBot] Soul wisdom load failed:', e); }
-
-  // Phase 2 — Block C: turn-time semantic retrieval. Uses the current user
-  // message as the query vector, scored with soul-affinity + recency +
-  // importance. Fire-and-forget on failure so a cold embedding infra never
-  // blocks chat.
-  try {
-    if (context.circleId && currentMessage?.trim()) {
-      const { retrieveForTurn } = await import('./memoryService');
-      const retrieval = await withTimeout(
-        retrieveForTurn({
-          queryText: currentMessage,
+  // Phase 3 — Block B: pre-distilled SOUL wisdom
+  if (loadWisdom) {
+    try {
+      if (context.circleId && activeSoulKey) {
+        const { loadSoulWisdomWithFallback, formatSoulWisdomBlock } = await import('./memoryService');
+        const wisdom = await withTimeout(loadSoulWisdomWithFallback({
           circleId: context.circleId,
+          soulKey: activeSoulKey,
           userId: context.userId,
-          activeSoulKey,
-          surface: 'main_chat',
-          budgetChars: 1500,
-          finalCount: 12,
-        }),
-      );
-      if (retrieval?.formatted) extras.push(retrieval.formatted);
-    }
-  } catch (e) { console.warn('[SwanBot] Turn retrieval failed:', e); }
+          agentId: context.agentId,
+          queryText: currentMessage,
+        }));
+        const wisdomBlock = formatSoulWisdomBlock(wisdom);
+        if (wisdomBlock) extras.push(wisdomBlock);
+      }
+    } catch (e) { console.warn('[SwanBot] Soul wisdom load failed:', e); }
+  }
 
-  // Phase C1 — Block D: attachment context. When the caller has passed a
-  // pre-built attachment summary (from `buildAttachmentContext` in
-  // chatAttachments.ts), inject it here. Text files are inlined, images
-  // get OCR alt-text, binaries show filename + mime for reference.
+  // Phase 2 — Block C: turn-time semantic retrieval
+  if (loadRetrieval) {
+    try {
+      if (context.circleId && currentMessage?.trim()) {
+        const { retrieveForTurn } = await import('./memoryService');
+        const retrieval = await withTimeout(
+          retrieveForTurn({
+            queryText: currentMessage,
+            circleId: context.circleId,
+            userId: context.userId,
+            activeSoulKey,
+            surface: 'main_chat',
+            budgetChars: retrievalBudget,
+            finalCount: retrievalCount,
+          }),
+        );
+        if (retrieval?.formatted) extras.push(retrieval.formatted);
+      }
+    } catch (e) { console.warn('[SwanBot] Turn retrieval failed:', e); }
+  }
+
+  // Wiki / knowledge base — only load for moderate+ complexity and when
+  // the message touches knowledge topics. Keeps simple chat lean.
+  if (loadWisdom && context.wikiContext) {
+    extras.push(`## Internal Knowledge Base\nUse this as trusted internal reference knowledge.\n${context.wikiContext}`);
+  }
+
+  // Phase C1 — Block D: attachment context
   if ((context as any).attachmentContext) {
     extras.push((context as any).attachmentContext);
   }
 
-  // Phase C5 — Block E: skills prompt fragment. Loads enabled skills for
-  // the active SOUL in this circle and injects their prompt fragments so
-  // the model knows what tools/workflows it has access to.
+  // Progressive project context discovery — load root context eagerly and
+  // only inject deeper directory guidance when those paths actually show up
+  // in the active conversation.
   try {
-    if (context.circleId && activeSoulKey) {
-      const { buildSkillsPromptBlock } = await import('./skillRegistry');
-      const skillsBlock = await withTimeout(buildSkillsPromptBlock(context.circleId, activeSoulKey, context.userId));
-      if (skillsBlock) extras.push(skillsBlock);
+    const discovery = await withTimeout(import('./openswanContextDiscovery').then(({ discoverOpenSwanProjectContext }) => discoverOpenSwanProjectContext({
+      currentMessage,
+      chatHistory: context.chatHistory,
+      conversationMessages: context.conversationMessages,
+    })));
+    if (discovery?.block) {
+      extras.push(discovery.block);
     }
-  } catch (e) { console.warn('[SwanBot] Skills block failed:', e); }
+  } catch (e) { console.warn('[SwanBot] Project context discovery failed:', e); }
+
+  // Phase C5 — Block E: skills prompt fragment
+  if (loadSkills) {
+    try {
+      if (context.circleId && activeSoulKey) {
+        const skillsBlock = context.resolvedSkillsPromptBlock
+          || await withTimeout(import('./openswanSkills').then(({ resolveOpenSwanSkills }) => resolveOpenSwanSkills({
+            circleId: context.circleId,
+            userId: context.userId,
+            soulKey: activeSoulKey,
+            mode: context.modeKey,
+            taskKind: context.taskKind,
+            query: currentMessage || context.chatHistory || '',
+            maxSkills: context.modeKey === 'research' || context.taskKind === 'research' ? 8 : 6,
+          }).then((resolution) => resolution.promptBlock)));
+        if (skillsBlock) extras.push(skillsBlock);
+      }
+    } catch (e) { console.warn('[SwanBot] Skills block failed:', e); }
+  }
 
   // Load stable agent identity context so Office-saved spirit/soul settings
   // survive session churn and provider-main restoration.
@@ -810,32 +1357,34 @@ async function buildSystemPromptAsync(
   });
   if (runtimeBundle) extras.unshift(runtimeBundle);
 
-  // Load active missions for this circle
-  try {
-    if (context.circleId) {
-      const { getMissions, getMissionTasks, missionProgress, formatDeadline, isOverdue } = await import('./missions');
-      const missions = await getMissions(context.circleId);
-      const activeMissions = missions.filter(m => m.status === 'active');
-      if (activeMissions.length > 0) {
-        const missionLines: string[] = ['## Active Missions'];
-        for (const m of activeMissions.slice(0, 5)) {
-          const tasks = await getMissionTasks(m.id);
-          const progress = missionProgress(tasks);
-          const done = tasks.filter(t => t.status === 'done').length;
-          const overdue = isOverdue(m);
-          const deadline = formatDeadline(m.deadline);
-          missionLines.push(`- **${m.title}** — ${progress}% (${done}/${tasks.length} tasks) — ${deadline}${overdue ? ' ⚠️ OVERDUE' : ''}`);
-          const blocked = tasks.filter(t => t.status === 'blocked');
-          if (blocked.length > 0) {
-            missionLines.push(`  Blocked: ${blocked.map(t => t.title).join(', ')}`);
+  // Load active missions for this circle (skip for trivial/simple messages)
+  if (loadMissions) {
+    try {
+      if (context.circleId) {
+        const { getMissions, getMissionTasks, missionProgress, formatDeadline, isOverdue } = await import('./missions');
+        const missions = await getMissions(context.circleId);
+        const activeMissions = missions.filter(m => m.status === 'active');
+        if (activeMissions.length > 0) {
+          const missionLines: string[] = ['## Active Missions'];
+          for (const m of activeMissions.slice(0, 5)) {
+            const tasks = await getMissionTasks(m.id);
+            const progress = missionProgress(tasks);
+            const done = tasks.filter(t => t.status === 'done').length;
+            const overdue = isOverdue(m);
+            const deadline = formatDeadline(m.deadline);
+            missionLines.push(`- **${m.title}** — ${progress}% (${done}/${tasks.length} tasks) — ${deadline}${overdue ? ' ⚠️ OVERDUE' : ''}`);
+            const blocked = tasks.filter(t => t.status === 'blocked');
+            if (blocked.length > 0) {
+              missionLines.push(`  Blocked: ${blocked.map(t => t.title).join(', ')}`);
+            }
           }
+          missionLines.push('');
+          missionLines.push('When users ask about missions or progress, reference this data. Nudge on overdue missions. Celebrate completed ones.');
+          extras.push(missionLines.join('\n'));
         }
-        missionLines.push('');
-        missionLines.push('When users ask about missions or progress, reference this data. Nudge on overdue missions. Celebrate completed ones.');
-        extras.push(missionLines.join('\n'));
       }
-    }
-  } catch (e) { console.warn('[SwanBot] Mission loading failed:', e); }
+    } catch (e) { console.warn('[SwanBot] Mission loading failed:', e); }
+  }
 
   // Load last session context so agent can continue where it left off
   try {
@@ -854,7 +1403,8 @@ async function buildSystemPromptAsync(
   // the stable prefix and only re-process the dynamic tail.
   const CACHE_BOUNDARY = '\n\n---\n<!-- dynamic context below — changes per turn -->\n';
 
-  const MAX_EXTRAS_CHARS = 6800;
+  // Adaptive extras budget — trivial messages get a tiny prompt, complex ones get the full budget
+  const MAX_EXTRAS_CHARS = complexity === 'trivial' ? 1200 : complexity === 'simple' ? 3000 : complexity === 'moderate' ? 5500 : 8000;
   let combined = extras.join('\n\n');
   if (combined.length > MAX_EXTRAS_CHARS) {
     combined = combined.slice(0, MAX_EXTRAS_CHARS);
@@ -867,7 +1417,83 @@ async function buildSystemPromptAsync(
   return base + CACHE_BOUNDARY + combined;
 }
 
-function buildSystemPrompt(context: SwanBotContext, data: CircleContextData): string {
+// ── Adaptive response directives per intent ─────────────────────────────────
+// Instead of one static "How to Respond" block, generate directives matched
+// to the detected intent. This controls length, tone, structure, and depth.
+
+type ResponseIntent = import('./agenticCodingProfile').MessageIntent;
+
+const RESPONSE_DIRECTIVES: Record<ResponseIntent, string> = {
+  casual: `- Keep it short — 1-3 sentences max. Match the user's energy. A follow-up question or observation is fine, not a paragraph.
+- Warm but not performative. Be a person, not a bot.`,
+
+  question: `- Answer clearly and directly. Lead with the answer, then explain the why.
+- Keep it under 200 words unless the question is genuinely complex. Use a list or code block if it helps.
+- If you don't know, say so cleanly.`,
+
+  status: `- Lead with data: numbers, streaks, progress, who shipped. Commentary second.
+- Be factual and concise. Under 150 words.
+- If data is missing, say what you'd need to look it up.`,
+
+  social: `- Be fun and playful. Match the social energy.
+- Keep it under 100 words. Games, polls, and banter should feel lightweight.`,
+
+  memory: `- Confirm the action briefly: "Noted.", "Saved.", "Here's what I know about that:"
+- Under 100 words unless showing a list of memories.`,
+
+  support: `- Be helpful and step-by-step. Number your steps.
+- Under 300 words. If you can't resolve it, suggest creating a task or escalating.
+- Link to docs or specific settings when possible.`,
+
+  creative: `- Write the actual content — don't describe what you'd write. Be the writer.
+- Match the requested voice/tone. Explore 2-3 angles if the brief is open.
+- Under 500 words for a first draft. Offer to iterate.`,
+
+  task_mgmt: `- Be action-oriented. Confirm what you did, then suggest next steps.
+- Under 150 words. Use tool calls to actually create/update tasks, don't just describe the action.`,
+
+  build: `- Ship implementation-ready code. Use code blocks and structured artifacts.
+- Explain key decisions briefly (1-2 lines), not the entire reasoning chain.
+- Under 800 words. Emit artifacts the app can preview or apply.
+- When given a task, DO IT — generate the code, don't describe what you would do.`,
+
+  debug: `- Lead with root cause, not symptoms. Structure: root cause > fix > verification.
+- Under 600 words. Include a code fix when possible.
+- Be explicit about what's known vs inferred vs needs verification.`,
+
+  review: `- Lead with findings ranked by severity: critical > high > medium > low.
+- Be constructive. Each finding should have: what's wrong, why it matters, how to fix.
+- Under 600 words. Use bullet lists for findings.`,
+
+  architect: `- Lead with tradeoffs, then recommendation. Structure: options > analysis > pick.
+- Under 800 words. Include diagrams (ASCII or markdown) when they help.
+- Consider integration boundaries, failure modes, and scaling implications.`,
+
+  design: `- Describe the visual approach: layout, colors, typography, spacing.
+- Under 500 words. Emit HTML/CSS artifacts when practical.
+- Reference real tools (Figma, Tailwind). Explain aesthetic reasoning.`,
+
+  research: `- Go deep. Cover the landscape, compare options, cite specific tools/projects.
+- Up to 1000 words. Use tables for comparisons. End with a clear recommendation.
+- Distinguish facts from opinions. Link sources when available.`,
+
+  browser: `- Describe the plan before executing: what pages, what actions, what to extract.
+- Under 200 words for the plan. Use tool calls to execute.
+- Be procedural and precise about selectors and actions.`,
+};
+
+function getResponseDirective(intent: ResponseIntent = 'question'): string {
+  const directive = RESPONSE_DIRECTIVES[intent] || RESPONSE_DIRECTIVES.question;
+  return `${directive}
+- Use code blocks for code. Use bold for key terms. Use tables for comparisons.
+- Match the user's energy without losing your composure. Be action-oriented.`;
+}
+
+function buildSystemPrompt(
+  context: SwanBotContext,
+  data: CircleContextData,
+  responseIntent: ResponseIntent = 'question',
+): string {
   const name = context.userName || 'fam';
   const streakInfo = data.userProfile
     ? `${name}'s current streak: ${data.userProfile.current_streak || 0} days (longest: ${data.userProfile.longest_streak || 0})`
@@ -930,25 +1556,7 @@ ${context.discordContext ? `- Discord: ${context.discordContext}` : ''}
 - If the user resets your mind, start completely fresh with no references to past sessions.
 
 ## How to Respond
-- Default to thorough, well-structured answers. Use headings, bullet points, and numbered steps when it helps clarity.
-- For technical questions: explain the why, not just the what. Show your reasoning. Give code examples that actually work.
-- For planning questions: break it into phases, consider tradeoffs, and give a concrete recommendation with timeline.
-- For creative questions: explore 2-3 options, explain your taste, and suggest a direction with reasoning.
-- For research questions: go deep. Cover the landscape, compare approaches, cite specific tools/projects, and give your opinion on what's best.
-- For casual chat: you can be briefer, but still substantive — add a thought, a follow-up question, or a useful observation.
-- Minimum response: 2-3 sentences. For anything beyond small talk, aim for a full paragraph or structured breakdown.
-- If someone asks a complex question, give it the full depth it deserves. Long, detailed answers are good when the question warrants it.
-- Use code blocks for code. Use bullet points for lists. Use bold for key terms. Use tables for comparisons.
-- Start responses with 🤖 occasionally (about 10% of the time) — not as a habit.
-- Match the user's energy without losing your composure.
-- If someone asks about data, give real numbers. If you don't have it: "I don't have that pulled up right now."
-- Be a real conversationalist — ask a follow-up when it makes sense, share a perspective, hold the thread.
-- If someone seems down or stuck, be genuinely present — practical empathy, not cheerleading.
-- Never lecture. But do go deep when depth is warranted.
-- When given a task, DO IT — don't describe what you would do. Generate the code, write the plan, create the content. Be action-oriented.
-- When you use the internal AI Wiki for an answer, mention the most relevant article titles naturally at the end under **Sources from the AI Wiki** when that would help the user.
-${context.memoryContext ? `\n## Persistent Memory\nUse this as remembered context from prior work, explicit user preferences, agent-private memory, and SOUL-specific operating memory. Treat high-confidence memory as durable guidance unless the user overrides it.\n${context.memoryContext}` : ''}
-${context.wikiContext ? `\n## Internal Knowledge Base\nUse this as trusted internal reference knowledge from the app's knowledge base. It may include AI Wiki material, curated research corpus entries, and domain guidance. Prefer it when answering questions about AI systems, scientific research, medical-imaging support, disease-identification workflows, materials, renewable energy, and related human-impact topics.\n${context.wikiContext}` : ''}
+${getResponseDirective(responseIntent)}
 ${context.chatHistory ? `\n## Recent Chat Context\nHere are the last few messages in this conversation — use them to stay in context:\n${context.chatHistory}` : ''}`;
 }
 
@@ -1024,6 +1632,25 @@ type CmdHandler = {
   match: RegExp;
   handler: (ctx: SwanBotContext, match: RegExpMatchArray) => Promise<string>;
 };
+
+function isModelStatusQuestion(message: string): boolean {
+  const normalized = message.trim().toLowerCase().replace(/\s+/g, ' ');
+  return [
+    /^(what|which|wht) model (are you|r u|is this|is it|are u) (using|on|running)( to respond( with)?)?\s*[?!]?$/,
+    /^(what|which|wht) model are you using to respond( with)?\s*[?!]?$/,
+    /^(what|which|wht) model is this\s*[?!]?$/,
+    /^(what|which|wht) model are you on\s*[?!]?$/,
+    /^what model\s*[?!]?$/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function buildModelStatusResponse(ctx: SwanBotContext): string {
+  const selectedModel = (ctx.model || '').trim();
+  if (!selectedModel || selectedModel === 'auto') {
+    return 'You are on **Auto** right now, so the effective model is chosen at send time based on the request.';
+  }
+  return `Right now I’m set to **${selectedModel}**.`;
+}
 
 const localCommands: CmdHandler[] = [
   {
@@ -1130,6 +1757,11 @@ export async function tryHandleLocalSwanBotCommand(
 ): Promise<string | null> {
   const cleaned = message.replace(/@(agent|blackswan|swanbot|swan)\b/gi, '').trim();
   if (!cleaned) return null;
+  if (isModelStatusQuestion(cleaned)) {
+    const response = buildModelStatusResponse(context);
+    if (context.circleId) addToHistory(context.circleId, 'model', response);
+    return response;
+  }
   for (const cmd of localCommands) {
     const match = cleaned.match(cmd.match);
     if (!match) continue;
@@ -1166,9 +1798,41 @@ export async function getSwanBotResponse(
   }
 
   const spiritId = await resolveContextSpiritId(context);
-  const knowledgeBundle = context.wikiContext || await buildCombinedKnowledgeBundle(cleaned, context.circleId, spiritId);
-  const memoryBundle = context.memoryContext || (context.circleId
-    ? (await buildPromptMemoryBundle({
+
+  // Adaptive context: only load heavy knowledge/memory for non-trivial messages
+  const { analyzeMessageRouting } = await import('./messageRouting');
+  const { route: msgRoute } = analyzeMessageRouting(cleaned, 'main_chat');
+  const { resolveModelForSoul } = await import('./serviceProfileSouls');
+  // Build-state markers let the resolver pick a latency-appropriate model:
+  // exploring -> Haiku (fast clarifying questions), converging -> Opus
+  // (reasoning to propose a brief). Without these hints the router would
+  // send "build" intent to Sonnet and every discovery turn would feel slow.
+  const buildConverging = (context as any).buildConverging === true;
+  const buildStateCtx = (context as any).buildState as
+    | import('./conversationalBuild').BuildConversationState
+    | undefined;
+  const buildExploring = buildStateCtx === 'exploring';
+  const effectiveModel = resolveModelForSoul(
+    spiritId,
+    context.model,
+    msgRoute.intent,
+    msgRoute.complexity,
+    buildConverging,
+    buildExploring,
+  );
+  // During a conversational build, the SYSTEM DIRECTIVE is the behavior —
+  // the LLM does NOT need wiki bundles, memory lookups, or personality
+  // context to ask "who's the audience?". Skipping those saves ~1-2s of
+  // DB round-trips per turn, which is the biggest latency knob we have.
+  const buildInProgress = buildExploring || buildConverging;
+  const needsKnowledge = !buildInProgress
+    && msgRoute.complexity !== 'trivial'
+    && msgRoute.complexity !== 'simple';
+  const knowledgeBundle = needsKnowledge
+    ? (context.wikiContext || await buildCombinedKnowledgeBundle(cleaned, context.circleId, spiritId))
+    : '';
+  const memoryStores = !buildInProgress && msgRoute.complexity !== 'trivial' && context.circleId
+    ? (context.memoryStores || await import('./openswanMemoryStores').then(({ buildOpenSwanMemoryStores }) => buildOpenSwanMemoryStores({
         circleId: context.circleId,
         userId: context.userId,
         query: cleaned,
@@ -1176,14 +1840,62 @@ export async function getSwanBotResponse(
         agentName: context.agentName,
         spiritId,
         surface: 'main_chat',
-      })).memoryContext
-    : '');
+        limit: 8,
+      })))
+    : null;
+  const memoryBundle = [
+    memoryStores?.combined || context.memoryContext || '',
+    context.sessionArchiveContext || '',
+  ].filter(Boolean).join('\n\n');
+  // When the ChatTab tells us a build conversation is active, compute the
+  // orchestrator protocol and ship it separately as a high-priority
+  // `systemDirective`. DO NOT stuff it into wikiContext — the edge function
+  // frames wikiContext as "reference knowledge" which the model ignores.
+  // systemDirective is prepended to the frozen system prompt with
+  // <DIRECTIVE> tags so the model treats it as a behavior rule.
+  const buildState = (context as any).buildState as
+    | import('./conversationalBuild').BuildConversationState
+    | undefined;
+  let buildDirective = '';
+  if (buildState && buildState !== 'idle') {
+    const { buildSystemAddendum } = await import('./conversationalBuild');
+    buildDirective = buildSystemAddendum(buildState);
+  }
+
   const enrichedContext: SwanBotContext = {
     ...context,
+    model: effectiveModel,
     wikiContext: knowledgeBundle,
     memoryContext: memoryBundle,
+    memoryStores: memoryStores || undefined,
     spiritId,
   };
+  if (buildDirective) {
+    (enrichedContext as any).systemDirective = buildDirective;
+  }
+
+  // Latency knobs for build conversations:
+  //
+  // * Exploring (asking ONE clarifying question): thinkingLevel='fast'
+  //   (no extended thinking, 1024 max_tokens). Clarifying questions are
+  //   2-3 sentences — no point burning budget on reasoning.
+  // * Converging (proposing a concrete brief): thinkingLevel='balanced'
+  //   (medium effort, 8192 max_tokens). The bot needs headroom to reason
+  //   about shape and emit the <BUILD_READY> marker, but not full deep
+  //   thinking — the brief is a single paragraph, not an essay.
+  // * Conversation-history trim: during builds, only send the last 6
+  //   turns instead of the full ~30. The directive + a few recent turns
+  //   are all the model needs; more is just token bloat.
+  if (buildExploring) {
+    enrichedContext.thinkingLevel = 'fast';
+    enrichedContext.maxTokens = 1024;
+  } else if (buildConverging) {
+    enrichedContext.thinkingLevel = 'balanced';
+    enrichedContext.maxTokens = 4096;
+  }
+  if (buildInProgress && Array.isArray(enrichedContext.conversationMessages)) {
+    enrichedContext.conversationMessages = enrichedContext.conversationMessages.slice(-6);
+  }
 
   // Tier 1: Try BlackSwan LLM (local, zero cost — only works when ollama is running)
   try {
@@ -1191,7 +1903,7 @@ export async function getSwanBotResponse(
     if (await isBlackSwanAvailable()) {
       console.log('[SwanBot] Tier 1: BlackSwan LLM available, calling...');
       const circleData = await getCircleContextData(enrichedContext);
-      const systemPrompt = await buildSystemPromptAsync(enrichedContext, circleData);
+      const systemPrompt = await buildSystemPromptAsync(enrichedContext, circleData, cleaned);
       const history = enrichedContext.circleId ? getHistory(enrichedContext.circleId) : [];
       const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
         { role: 'system', content: systemPrompt },
@@ -1218,10 +1930,10 @@ export async function getSwanBotResponse(
   // a MiniMax model, or another non-Anthropic model, route through llm-proxy
   // instead of going to swanbot-ai (which only knows Claude).
   const customModelProvider = pickProviderForModel(enrichedContext.model);
-  if (customModelProvider) {
+  if (customModelProvider && !shouldBlockExternalAiProvider(customModelProvider)) {
     try {
       const circleData = await getCircleContextData(enrichedContext);
-      const systemPrompt = await buildSystemPromptAsync(enrichedContext, circleData);
+      const systemPrompt = await buildSystemPromptAsync(enrichedContext, circleData, cleaned);
       const history = enrichedContext.circleId ? getHistory(enrichedContext.circleId) : [];
       const proxyMessages = [
         { role: 'system' as const, content: systemPrompt },
@@ -1243,7 +1955,7 @@ export async function getSwanBotResponse(
   }
 
   // Tier 2: Try AI Edge Function (Claude Haiku — primary for web)
-  if (enrichedContext.circleId) {
+  if (enrichedContext.circleId && !shouldBlockExternalAiProvider('anthropic')) {
     console.log('[SwanBot] Tier 2: Calling swanbot-ai edge function...');
     const aiResponse = await callSwanBotAI(
       cleaned,
@@ -1252,8 +1964,10 @@ export async function getSwanBotResponse(
       enrichedContext.discordContext,
       enrichedContext.model,
       enrichedContext.wikiContext,
+      enrichedContext.conversationMessages,
       enrichedContext.thinkingLevel || 'deep',
       enrichedContext.maxTokens || 6144,
+      (enrichedContext as any).systemDirective,
     );
     if (aiResponse) {
       console.log('[SwanBot] Tier 2: Got response from edge function');
@@ -1265,6 +1979,9 @@ export async function getSwanBotResponse(
 
   // Tier 3: Conversational AI via Gemini
   try {
+    if (shouldBlockExternalAiProvider('gemini')) {
+      throw new Error(getStrictLocalAiModeMessage('gemini'));
+    }
     console.log('[SwanBot] Tier 3: Trying Gemini fallback...');
     const circleData = await getCircleContextData(enrichedContext);
     const geminiResponse = await callGemini(cleaned, enrichedContext, circleData);
@@ -1281,6 +1998,11 @@ export async function getSwanBotResponse(
   // Ultimate fallback — actually useful when AI is completely unavailable
   const name = enrichedContext.userName || 'fam';
   console.error('[SwanBot] All AI tiers failed for message:', cleaned.slice(0, 50));
+  if (isStrictLocalAiModeEnabled()) {
+    const response = getStrictLocalAiModeMessage('external providers');
+    if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', response);
+    return response;
+  }
   const fallbacks = [
     `Hey ${name}, my AI connection is down right now. Try a command like "status", "my tasks", "streak", or "leaderboard" — those always work.`,
     `${name}, I can't reach my AI backend at the moment. You can still use commands: "help" to see what's available.`,
@@ -1301,11 +2023,23 @@ export async function getSwanBotStructuredResponse(
   if (!cleaned) {
     return { response: "What's good? 🦢" };
   }
+  if (isStrictLocalAiModeEnabled() && shouldBlockExternalAiProvider('anthropic')) {
+    return { response: getStrictLocalAiModeMessage('anthropic') };
+  }
 
   const spiritId = await resolveContextSpiritId(context);
-  const knowledgeBundle = context.wikiContext || await buildCombinedKnowledgeBundle(cleaned, context.circleId, spiritId);
-  const memoryBundle = context.memoryContext || (context.circleId
-    ? (await buildPromptMemoryBundle({
+
+  // Adaptive context for structured path — same logic as simple path
+  const { analyzeMessageRouting } = await import('./messageRouting');
+  const { route: structuredRoute } = analyzeMessageRouting(cleaned, 'main_chat');
+  const { resolveModelForSoul } = await import('./serviceProfileSouls');
+  const effectiveModel = resolveModelForSoul(spiritId, context.model, structuredRoute.intent);
+  const needsKnowledgeStructured = structuredRoute.complexity !== 'trivial' && structuredRoute.complexity !== 'simple';
+  const knowledgeBundle = needsKnowledgeStructured
+    ? (context.wikiContext || await buildCombinedKnowledgeBundle(cleaned, context.circleId, spiritId))
+    : '';
+  const memoryStores = structuredRoute.complexity !== 'trivial' && context.circleId
+    ? (context.memoryStores || await import('./openswanMemoryStores').then(({ buildOpenSwanMemoryStores }) => buildOpenSwanMemoryStores({
         circleId: context.circleId,
         userId: context.userId,
         query: cleaned,
@@ -1313,23 +2047,31 @@ export async function getSwanBotStructuredResponse(
         agentName: context.agentName,
         spiritId,
         surface: 'main_chat',
-      })).memoryContext
-    : '');
+        limit: 8,
+      })))
+    : null;
+  const memoryBundle = [
+    memoryStores?.combined || context.memoryContext || '',
+    context.sessionArchiveContext || '',
+  ].filter(Boolean).join('\n\n');
   const enrichedContext: SwanBotContext = {
     ...context,
+    model: effectiveModel,
     wikiContext: knowledgeBundle,
     memoryContext: memoryBundle,
+    memoryStores: memoryStores || undefined,
     spiritId,
   };
 
   const structured = enrichedContext.circleId
-    ? await callSwanBotAIStructured(
+      ? await callSwanBotAIStructured(
         cleaned,
         enrichedContext.circleId,
         enrichedContext.userId,
         enrichedContext.discordContext,
         enrichedContext.model,
         enrichedContext.wikiContext,
+        enrichedContext.conversationMessages,
         enrichedContext.thinkingLevel || 'deep',
         enrichedContext.maxTokens || 6144,
       )
@@ -1367,6 +2109,9 @@ export async function executeToolUseLoop(opts: {
   allowedToolNames?: string[];
   surface?: 'main_chat' | 'room_chat' | 'office' | 'task_run';
 }): Promise<{ response: string; toolEvents: Array<{ tool: string; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }> }> {
+  if (shouldBlockExternalAiProvider('anthropic')) {
+    return { response: getStrictLocalAiModeMessage('anthropic'), toolEvents: [] };
+  }
   const { MAX_TOOL_ROUNDS, getToolDefinitions, dispatchToolDetailed } = await import('./openswanTools/index');
   const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat');
   if (tools.length === 0) {
@@ -1396,8 +2141,11 @@ export async function executeToolUseLoop(opts: {
   const toolEvents: Array<{ tool: string; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }> = [];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    // Call supabase edge fn or direct API
+    // Call supabase edge fn or direct API. Refresh the JWT per-round so long
+    // tool-use loops don't starve across an expiry boundary.
+    const accessToken = await getFreshAccessToken();
     const { data, error } = await supabase.functions.invoke('swanbot-ai', {
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
       body: {
         message: opts.userMessage,
         circleId: opts.circleId,
@@ -1419,13 +2167,13 @@ export async function executeToolUseLoop(opts: {
       ? content.filter((b: any) => b.type === 'tool_use')
       : [];
 
-    if (toolUseBlocks.length === 0) {
-      // Model gave a final text response
-      const textBlock = Array.isArray(content)
-        ? content.find((b: any) => b.type === 'text')
-        : null;
+    if (toolUseBlocks.length === 0 || data.stop_reason !== 'tool_use') {
+      // Model gave a final text response (or stop_reason isn't tool_use)
+      const textParts = Array.isArray(content)
+        ? content.filter((b: any) => b.type === 'text').map((b: any) => b.text)
+        : [];
       return {
-        response: textBlock?.text || data.response || '',
+        response: textParts.join('') || data.response || '',
         toolEvents,
       };
     }
@@ -1447,7 +2195,12 @@ export async function executeToolUseLoop(opts: {
     messages.push({ role: 'user', content: toolResults });
   }
 
-  return { response: 'Tool-use limit reached.', toolEvents };
+  // Exhausted tool rounds — return whatever text we accumulated
+  const lastAssistant = messages.filter(m => m.role === 'assistant').pop();
+  const lastText = Array.isArray(lastAssistant?.content)
+    ? lastAssistant.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('')
+    : '';
+  return { response: lastText || 'Tool-use limit reached.', toolEvents };
 }
 
 /**
@@ -1469,6 +2222,12 @@ export async function buildStreamableSystemPrompt(opts: {
   agentId?: string;
   agentName?: string;
   chatHistory?: string;
+  sessionArchiveContext?: string;
+  modeKey?: OpenSwanChatMode | string | null;
+  taskKind?: string | null;
+  sessionProfile?: string | null;
+  resolvedSkills?: OpenSwanResolvedSkill[];
+  resolvedSkillsPromptBlock?: string | null;
 }): Promise<string> {
   const context: SwanBotContext = {
     userId: opts.userId,
@@ -1478,6 +2237,12 @@ export async function buildStreamableSystemPrompt(opts: {
     agentName: opts.agentName,
     model: opts.model,
     chatHistory: opts.chatHistory,
+    sessionArchiveContext: opts.sessionArchiveContext,
+    modeKey: opts.modeKey,
+    taskKind: opts.taskKind,
+    sessionProfile: opts.sessionProfile,
+    resolvedSkills: opts.resolvedSkills,
+    resolvedSkillsPromptBlock: opts.resolvedSkillsPromptBlock,
   };
   const circleData = opts.circleId
     ? await getCircleContextData(context)

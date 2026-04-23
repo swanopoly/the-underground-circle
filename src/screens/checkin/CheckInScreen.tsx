@@ -10,6 +10,10 @@ import {
   RefreshControl,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { safeGetUser } from '../../lib/authSession';
+import MentionPicker, { detectMentionQuery, insertMention } from '../../components/MentionPicker';
+import MentionText from '../../components/MentionText';
+import { extractMentionRefs, persistMentions, type MentionCandidate, type SourceType } from '../../lib/mentions';
 import { showAlert } from '../../lib/alert';
 import Button from '../../components/Button';
 import { awardXP, vote as castVote, getUserVotes, getXPForAction } from '../../lib/gamification';
@@ -120,6 +124,8 @@ function ProofDisplay({
   );
 }
 
+const CHECK_IN_MENTION_SOURCE_TYPE: SourceType = 'check_in';
+
 function CheckInCard({
   item,
   currentUserId,
@@ -179,7 +185,7 @@ function CheckInCard({
             </View>
             <Text style={styles.checkInTime}>{getTimeAgo(item.created_at)}</Text>
           </View>
-          <Text style={styles.checkInText}>{item.content}</Text>
+          <MentionText content={item.content} style={styles.checkInText} />
           {item.proof && (
             <View style={styles.proofBadgeRow}>
               <Text style={styles.proofBadge}>📎 Proof attached</Text>
@@ -201,6 +207,10 @@ export default function CheckInScreen({ route, navigation }: any) {
   const { circleId, circleName } = route.params;
   const [checkIns, setCheckIns] = useState<any[]>([]);
   const [content, setContent] = useState('');
+  // Mention picker state — lives next to the content input so the user can
+  // @ a mission, task, or teammate while describing the check-in.
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [cursorPos, setCursorPos] = useState(0);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [hasCheckedInToday, setHasCheckedInToday] = useState(false);
@@ -227,7 +237,7 @@ export default function CheckInScreen({ route, navigation }: any) {
 
       setCheckIns(data || []);
 
-      const { data: { user }, error: userError } = await supabase.auth.getUser();
+      const { value: user, error: userError } = await safeGetUser();
       if (userError) {
         console.error('Error getting user:', userError);
         return;
@@ -306,7 +316,7 @@ export default function CheckInScreen({ route, navigation }: any) {
 
     setLoading(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { value: user } = await safeGetUser();
       if (!user) {
         setLoading(false);
         showAlert('Error', 'You must be logged in to check in.');
@@ -317,13 +327,17 @@ export default function CheckInScreen({ route, navigation }: any) {
         ? { type: proofType, value: proofValue.trim() }
         : null;
 
-      const { error } = await supabase.from('check_ins').insert({
-        user_id: user.id,
-        circle_id: circleId,
-        content: sanitizedContent.slice(0, 500),
-        check_in_date: new Date().toISOString().split('T')[0],
-        proof,
-      });
+      const { data: insertedRow, error } = await supabase
+        .from('check_ins')
+        .insert({
+          user_id: user.id,
+          circle_id: circleId,
+          content: sanitizedContent.slice(0, 500),
+          check_in_date: new Date().toISOString().split('T')[0],
+          proof,
+        })
+        .select('id')
+        .single();
 
       setLoading(false);
       if (error) {
@@ -333,6 +347,19 @@ export default function CheckInScreen({ route, navigation }: any) {
           showAlert('Error', error.message);
         }
         return;
+      }
+
+      // Persist any @mentions in the content as a 'check_in' source so the
+      // target's BacklinksPanel surfaces this check-in as a reference.
+      const refs = extractMentionRefs(sanitizedContent);
+      if (refs.length > 0 && insertedRow?.id) {
+        persistMentions({
+          circleId,
+          sourceType: CHECK_IN_MENTION_SOURCE_TYPE,
+          sourceId: (insertedRow as any).id,
+          authorId: user.id,
+          refs,
+        }).catch(() => {});
       }
 
       // Award XP for check-in
@@ -367,23 +394,43 @@ export default function CheckInScreen({ route, navigation }: any) {
     if (!currentUserId) return;
 
     try {
-      // TODO: This is a placeholder — validation is NOT persisted to any table yet.
-      // The XP award below goes through but the validation result (isValid) is discarded.
-      // When a proof_validations table exists, persist the vote here and update the
-      // check-in's validation_score / validation_count so the UI reflects real data.
+      // Persist the vote. UNIQUE (check_in_id, validator_id) means a second
+      // attempt from the same user returns a 23505 conflict, which we map to
+      // a friendly "already voted" message. A trigger recomputes
+      // check_ins.proof.validation_score + validation_count automatically.
+      const { error: voteErr } = await supabase
+        .from('proof_validations')
+        .insert({
+          check_in_id: checkInId,
+          validator_id: currentUserId,
+          is_valid: isValid,
+        });
 
-      // Award XP for participating in validation
-      // NOTE: XP is awarded even though the validation itself is not stored.
+      if (voteErr) {
+        const code = (voteErr as any).code;
+        if (code === '23505') {
+          showAlert('Already Voted', "You've already validated this proof.");
+          return;
+        }
+        if (code === '42501' || code === '42P17' || /row-level security/i.test(voteErr.message || '')) {
+          showAlert('Not Allowed', "You can't vote on your own proof.");
+          return;
+        }
+        throw voteErr;
+      }
+
+      // Award XP only on a successful first vote. Refresh the list so the
+      // updated counts flow back into the UI.
       await awardXP(currentUserId, 5, 'proof_validation', {
         check_in_id: checkInId,
-        validation: isValid
+        validation: isValid,
       });
+      await fetchCheckIns();
 
       showAlert(
         'Validation Recorded',
-        `Thanks for helping maintain proof quality! You earned 5 XP.`
+        `Thanks for helping maintain proof quality! You earned 5 XP.`,
       );
-
     } catch (err) {
       console.error('Error validating proof:', err);
       showAlert('Error', 'Failed to record validation. Please try again.');
@@ -406,13 +453,37 @@ export default function CheckInScreen({ route, navigation }: any) {
         <View style={styles.checkInBox}>
           <TextInput
             style={styles.checkInInput}
-            placeholder="What did you ship / create / complete today?"
+            placeholder="What did you ship / create / complete today? '@' to mention."
             placeholderTextColor="#444"
             value={content}
-            onChangeText={setContent}
+            onChangeText={(t) => {
+              setContent(t);
+              setMentionQuery(detectMentionQuery(t, cursorPos));
+            }}
+            onSelectionChange={(e) => {
+              const pos = e.nativeEvent.selection.end;
+              setCursorPos(pos);
+              setMentionQuery(detectMentionQuery(content, pos));
+            }}
             multiline
             maxLength={500}
           />
+          {/* Mention picker slides below the input when @ is active. */}
+          {mentionQuery !== null && circleId && (
+            <View style={{ marginTop: 6, alignSelf: 'flex-start' }}>
+              <MentionPicker
+                circleId={circleId}
+                query={mentionQuery}
+                onSelect={(cand: MentionCandidate) => {
+                  const { text, cursor } = insertMention(content, cursorPos, cand);
+                  setContent(text);
+                  setCursorPos(cursor);
+                  setMentionQuery(null);
+                }}
+                onDismiss={() => setMentionQuery(null)}
+              />
+            </View>
+          )}
           <Pressable onPress={() => setShowProof(!showProof)} style={styles.proofToggleBtn}>
             <Text style={styles.proofToggleBtnText}>
               {proofValue.trim() ? '📎 Proof attached' : '+ ATTACH PROOF'}

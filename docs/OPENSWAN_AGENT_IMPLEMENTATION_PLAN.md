@@ -1,5 +1,9 @@
 # OpenSwan Agent Implementation Plan
 
+> **Canonical plan:** [`AGENTS_ROADMAP.md`](./AGENTS_ROADMAP.md) is the tie-breaker. This doc is the 8-section architectural breakdown (Session / Tool / Verification / Subagent / Workspace / Memory / Control Plane / Evaluation) Codex drafted before the unification; when anything here contradicts the roadmap, the roadmap wins and this doc needs updating.
+
+_Section-by-section execution plan as of 2026-04-21._
+
 ## Goal
 
 Make OpenSwan behave more like a serious coding and task agent: strong at planning, code generation, review, debugging, verification, artifact creation, and workspace handoff across both main chat and Rooms.
@@ -19,16 +23,35 @@ Strengths already in repo:
 - Rooms can turn artifacts into real files and sandboxable workspaces
 - Session soul modes exist (`senior`, `review`, `debug`, `architect`)
 - Run tracking primitives already exist in `agentRunSystem`
+- Explicit memory stores and progressive context discovery are now wired into Swanbot/OpenSwan
+- Runtime skill resolution exists and persists active skills into run metadata
+- Local skill playbooks exist with execution patterns, anti-patterns, and tool guidance
+- Observed evals now score both mode quality and skill-execution quality
 
 Gaps that block “Codex / Claude Code / SwanClaw quality”:
 
-- No authoritative typed tool runtime for OpenSwan turns
-- Weak closed-loop verification for coding tasks
-- No real subagent runtime with tool scopes and consistent delegation
+- Shell / external execution is still bounded and not yet a full controlled adapter layer
+- Child-run visibility exists only partially; delegated specialists are not yet easy to inspect end-to-end
 - Task/workspace isolation is partial, not systematic
-- Session memory is not yet coding-task aware enough
-- The UI shows work, but the runtime does not yet expose enough structured execution state
-- No eval harness measuring actual coding-task success
+- Session memory is stronger, but still not coding-task aware enough across repo/workspace state
+- Control-plane actions are still weak: limited resume / retry / stop semantics
+- Production quality steering needs a dedicated dashboard over real `agent_runs`
+- Subagents still do not inherit the full memory/skill/runtime contract as explicitly as main OpenSwan
+- Toolset-by-surface policy is only partial
+
+## Unified Execution Order
+
+Every agent surface should converge on this order:
+
+1. Intent / mode / profile resolution
+2. Memory stores + progressive context discovery
+3. Skill resolution + skill playbooks
+4. Task planning + tool planning + verification planning
+5. Execution / delegation / browser / artifacts
+6. Observed evals + mode/skill quality scoring
+7. Shared run summaries + aggregate dashboards
+
+That is the plan main chat, Rooms, Office, and delegated specialist runs should all follow.
 
 ## Overall Architecture
 
@@ -199,11 +222,16 @@ Make all OpenSwan execution flow through one runtime.
 ### Done in this slice
 
 - shared session runtime exists
+- task profiling, verification planning, and entity-aware tool planning are wired into the runtime
+- mode policy is centralized and persisted into run metadata
+- observed evals are persisted and surfaced in shared run summaries
+- explicit memory stores and progressive context discovery are live
+- runtime skill resolution and skill playbooks are live
 
 ### Next implementation
 
-- wire task planner and verification plan into runtime
-- attach tool recommendations to run metadata
+- make delegated specialists inherit the same runtime contract more explicitly
+- expand control-plane actions over runs
 
 ## Section B: Tool Runtime
 
@@ -229,6 +257,14 @@ Give OpenSwan typed, auditable tools rather than generic text-only reasoning.
 4. Start with safe internal app tools before shell/network tools.
 5. Later bridge shell/build/test tools through a controlled adapter.
 
+### Status
+
+- typed OpenSwan tool/runtime planning exists
+- tool events are persisted into run metadata and shared run surfaces
+- browser and internal app tool paths are integrated
+- full shell/build/test adapter remains future work
+- formal toolset-by-surface policy remains future work
+
 ## Section C: Verification Runtime
 
 ### Objective
@@ -242,6 +278,12 @@ Make coding output prove itself.
 3. Store verification plan in run metadata.
 4. Later execute verification automatically where possible.
 5. Surface verified / unverified / blocked state in UI.
+
+### Status
+
+- verification plans are inferred and stored
+- verification execution runtime exists and feeds observed run quality
+- verification coverage is surfaced in shared run summaries and quality aggregate views
 
 ### Verification examples
 
@@ -262,6 +304,13 @@ Break complex work into specialists.
 2. Add per-role tool permissions.
 3. Track child runs and delegation evidence.
 4. Add UI visibility for delegated work.
+
+### Status
+
+- typed subagent capability profiles exist and back `subagentRegistry.ts`
+- delegated child runs are created with lineage in `agent_runs`
+- parent summaries surface delegated specialist names
+- detailed child-run inspection remains the next control-plane slice
 
 ## Section E: Workspace Runtime
 
@@ -288,6 +337,12 @@ Store durable coding context, not just chat text.
 2. Persist current task, active files, recent failures, accepted decisions.
 3. Retrieve only the memory relevant to the current task profile.
 
+### Status
+
+- explicit OpenSwan memory stores now exist
+- memory is separated into user profile, runtime memory, and working memory
+- deeper repo/workspace state memory remains future work
+
 ## Section G: Control Plane UI
 
 ### Objective
@@ -302,6 +357,13 @@ Expose execution, not just transcript.
 4. Add artifact ledger with open/apply actions.
 5. Add stop/retry/resume controls.
 
+### Status
+
+- shared run metadata summaries now surface routing, browser context, delegated specialists, mode context, and observed quality
+- run history and office surfaces have quality aggregates
+- active skills are now visible in shared run summaries
+- stop / retry / resume controls remain mostly unbuilt
+
 ## Section H: Evaluation Layer
 
 ### Objective
@@ -315,23 +377,30 @@ Make OpenSwan objectively better over time.
 3. Score correctness, verification, latency, artifact usefulness.
 4. Use evals to guide prompt/tool/runtime work.
 
-## Recommended Build Order
+### Done in this slice
 
-1. Session runtime hardening
-2. Task planner + verification planner
-3. Tool runtime foundation
-4. UI run ledger and tool feed
-5. Workspace automation improvements
-6. Subagent runtime
-7. Evaluation system
+- `src/lib/openswanBenchmarks.ts` now defines representative OpenSwan benchmark cases across build, plan, debug, research, design, support, and browser-heavy requests
+- `src/lib/openswanEvals.ts` now evaluates routing, mode policy, profile resolution, task kind, verification, and tool planning against those benchmark cases
+- `scripts/check-openswan-evals.mjs` now runs the benchmark suite as a lightweight regression harness
+- `src/lib/openswanObservedEvals.ts` now normalizes observed run quality from persisted OpenSwan run metadata, verification results, tool outcomes, and artifacts
+- runtime completion paths now persist `observedEval` into `agent_runs.metadata` so future dashboards and audits can aggregate real OpenSwan outcomes without re-deriving them from raw fields
+- observed evals now include skill-execution signals and weak-skill clustering
+
+## Recommended Next Build Order
+
+1. Make subagents inherit the same memory/skill/runtime contract
+2. Add drilldowns from weak skills / weak modes into affected runs
+3. Controlled shell/build/test adapter for stronger verification
+4. Workspace/runtime isolation improvements + checkpoint/rollback safety
+5. Run control actions: retry, resume, abort
+6. Deeper coding-session memory for repo/workspace context
+7. Formal toolset-by-surface policy
 
 ## Current Implementation Slice
 
-This execution pass starts:
+This execution pass focuses on:
 
-1. task profiling
-2. verification planning
-3. tool recommendation planning
-4. runtime wiring into `openswanSessionRuntime`
+1. cleaning the plan so it matches shipped runtime + skills work
+2. keeping all agent surfaces on the same execution order
 
-That is the right first step because it strengthens the agent core without forcing premature shell/network execution decisions.
+That is the right next step because runtime capability has moved faster than the docs, and drift between plan docs makes it easier for different agent surfaces to evolve in inconsistent ways.

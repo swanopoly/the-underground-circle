@@ -10,6 +10,9 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.95.3';
 import { errResponse, getAuthenticatedUser, jsonResponse } from '../_shared/edge.ts';
+import { callClaude as callClaudeShared, logClaudeUsage, checkCircleClaudeBudget } from '../_claude/anthropic.ts';
+
+const ROOM_TASK_MODEL = 'claude-sonnet-4-6';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -28,32 +31,38 @@ const LANG_TO_EXT: Record<string, string> = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * Thin wrapper around the shared `callClaude()` — keeps the legacy 2-arg
+ * signature so the 10 call sites below stay unchanged. Internally routes
+ * through the central pricing/cache helper and fires a `claude_api_usage`
+ * log so room-task spend shows up in the cost dashboard (previously zero
+ * telemetry despite using expensive Sonnet).
+ *
+ * circleId in telemetry is null for now — pending a lookup via `project_rooms`
+ * to map room_id → circle_id. Roadmap Phase 1d note.
+ */
 async function callClaude(systemPrompt: string, userMessage: string): Promise<string> {
   const apiKey = Deno.env.get('ANTHROPIC_API_KEY');
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 4096,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userMessage }],
-    }),
+  const result = await callClaudeShared({
+    apiKey,
+    model: ROOM_TASK_MODEL,
+    maxTokens: 4096,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userMessage }],
   });
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Anthropic API ${res.status}: ${err}`);
-  }
+  // Fire-and-forget telemetry.
+  logClaudeUsage(createSupabaseClient(), {
+    circleId: null,
+    userId: null,
+    source: 'room-task-executor',
+    model: ROOM_TASK_MODEL,
+    usage: result.usage,
+  });
 
-  const data = await res.json();
-  return data.content?.[0]?.text || 'No response generated.';
+  return result.content?.[0]?.text || 'No response generated.';
 }
 
 function createSupabaseClient() {
@@ -348,6 +357,19 @@ Deno.serve(async (req: Request) => {
     if (!membership) {
       return errResponse(403, 'forbidden', 'Not authorized for this room.');
     }
+
+    // Umbrella Claude spend cap — one 24h budget across every agent in
+    // the circle. Room-task runs use Sonnet which can get pricey fast;
+    // gating here protects the shared cap.
+    const cap = await checkCircleClaudeBudget(supabase, room.circle_id);
+    if (!cap.allowed) {
+      await postSystemMessage(supabase, roomId, agentName || 'Agent', `🛑 Daily AI budget reached ($${cap.spent24h.toFixed(2)} of $${cap.cap.toFixed(2)}). Raise the cap in circle settings → AI SPEND, or wait for the 24h window to roll.`);
+      return new Response(
+        JSON.stringify({ error: 'circle_claude_budget_exceeded', detail: cap.reason, spent24h: cap.spent24h, cap: cap.cap }),
+        { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
+
     const { data: taskRow } = await supabase
       .from('room_tasks')
       .select('id, room_id')

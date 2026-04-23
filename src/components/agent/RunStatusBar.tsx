@@ -2,8 +2,11 @@
  * RunStatusBar — Shows active run status, current subagent, step progress.
  * Renders inline in the chat above the message input.
  */
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, Platform, ActivityIndicator, Animated, Easing } from 'react-native';
+import { pickThinkingVerb } from '../../lib/thinkingVerbs';
+import ThinkingDots from '../chat-animations/ThinkingDots';
+import ThinkingLabel from '../chat-animations/ThinkingLabel';
 
 const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 
@@ -23,82 +26,39 @@ interface Props {
 }
 
 export default function RunStatusBar({
-  status, subagentName, subagentIcon, subagentColor,
-  delegatedSubagents = [],
-  currentStep, stepCount, totalSteps, pluginName,
-  onPause, onCancel, accentColor = '#6366f1',
+  status, subagentColor,
+  currentStep,
+  accentColor = '#6366f1',
 }: Props) {
   if (status === 'idle') return null;
 
   const statusColor = status === 'running' ? '#22c55e' : status === 'delegated' ? subagentColor || '#a855f7' : '#f59e0b';
 
+  // Rotate the "noodling / pondering / …" verb every 1.5s so the
+  // single line that's left on this bar actually breathes.
+  const [verbIdx, setVerbIdx] = useState(0);
+  useEffect(() => {
+    setVerbIdx(0);
+    const t = setInterval(() => setVerbIdx((i) => i + 1), 1500);
+    return () => clearInterval(t);
+  }, [status]);
+
+  // Minimal design: just the animated colored dot + a single label.
+  // Explicit run-step labels still win (they're load-bearing context
+  // like "Awaiting approval"). Everything else — even "OpenSwan is" —
+  // is stripped. Just the verb.
+  const label = currentStep?.trim()
+    ? currentStep.trim()
+    : status === 'waiting_approval'
+      ? 'waiting for approval'
+      : pickThinkingVerb(verbIdx);
+
   return (
     <View style={s.bar}>
-      {/* Status indicator */}
-      <View style={s.statusSection}>
-        {status === 'running' || status === 'delegated' ? (
-          <ActivityDots colors={[statusColor, accentColor, '#22d3ee', '#f59e0b']} />
-        ) : (
-          <View style={[s.statusDot, { backgroundColor: statusColor }]} />
-        )}
-        <View style={{ flex: 1 }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-            {subagentName && (
-              <View style={[s.subagentBadge, { backgroundColor: (subagentColor || '#a855f7') + '20', borderColor: (subagentColor || '#a855f7') + '40' }]}>
-                <Text style={[s.subagentBadgeText, { color: subagentColor || '#a855f7' }]}>
-                  {subagentIcon || subagentName.charAt(0)}
-                </Text>
-              </View>
-            )}
-            <Text style={[s.statusText, { color: statusColor }]}>
-              {currentStep?.trim()
-                ? currentStep.trim()
-                : status === 'delegated'
-                  ? (subagentName || 'Delegating')
-                  : status === 'waiting_approval'
-                    ? 'Waiting for approval'
-                    : 'OpenSwan is working'}
-              {pluginName ? ` via ${pluginName}` : ''}
-            </Text>
-          </View>
-          {delegatedSubagents.length > 0 ? (
-            <View style={s.subagentRow}>
-              {delegatedSubagents.map((agent) => (
-                <SubagentLiveChip
-                  key={agent.name}
-                  name={agent.name}
-                  icon={agent.icon}
-                  color={agent.color || accentColor}
-                />
-              ))}
-            </View>
-          ) : null}
-        </View>
-      </View>
-
-      {/* Progress */}
-      {totalSteps && totalSteps > 0 && (
-        <View style={s.progressSection}>
-          <View style={s.progressBar}>
-            <View style={[s.progressFill, { width: `${Math.min(100, ((stepCount || 0) / totalSteps) * 100)}%`, backgroundColor: statusColor }]} />
-          </View>
-          <Text style={s.progressText}>{stepCount || 0}/{totalSteps}</Text>
-        </View>
-      )}
-
-      {/* Controls */}
-      <View style={s.controls}>
-        {onPause && (
-          <Pressable onPress={onPause} style={[s.controlBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-            <Text style={s.controlBtnText}>||</Text>
-          </Pressable>
-        )}
-        {onCancel && (
-          <Pressable onPress={onCancel} style={[s.controlBtn, s.cancelBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-            <Text style={[s.controlBtnText, { color: '#ef4444' }]}>X</Text>
-          </Pressable>
-        )}
-      </View>
+      {/* Same morphing 6-dot constellation as the Quick Actions
+          accordion header — circle → triangle → square → DNA → back. */}
+      <ThinkingDots scale={1} cycleDuration={5.5} glow />
+      <ThinkingLabel text={label} />
     </View>
   );
 }

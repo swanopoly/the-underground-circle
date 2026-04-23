@@ -1,4 +1,5 @@
 import { Action } from 'kbar';
+import { navigateToUnifiedProfile } from '../../lib/profileNavigation';
 
 export function buildAppActions(navigate: (screen: string, params?: any) => void, circleId?: string): Action[] {
   const actions: Action[] = [];
@@ -56,7 +57,11 @@ export function buildAppActions(navigate: (screen: string, params?: any) => void
   //  SOCIAL — Friends, Profile, Agents
   // ═══════════════════════════════════════════════════════════════════════════
   actions.push(
-    { id: 'social-profile',  name: 'Profile',    shortcut: ['g', 'p'], section: 'Social', perform: () => navigate('Profile'), keywords: 'profile edit settings avatar username display name' },
+    { id: 'social-profile',  name: 'Profile',    shortcut: ['g', 'p'], section: 'Social', perform: () => {
+      if (!navigateToUnifiedProfile({ navigate }, { circleId })) {
+        navigate('CirclesList');
+      }
+    }, keywords: 'profile edit settings avatar username display name' },
     { id: 'social-friends',  name: 'Friends',                               section: 'Social', perform: () => navigate('Friends'),     keywords: 'friends dm messages social chat direct' },
     { id: 'social-agents',   name: 'Agents',                                section: 'Social', perform: () => navigate('Agents'),      keywords: 'agents manage bots ai pixel office configure' },
     { id: 'social-standalone-integrations', name: 'Marketplace Hub',        section: 'Social', perform: () => navigate('Integrations'), keywords: 'marketplace integrations hub connections api keys global apps' },

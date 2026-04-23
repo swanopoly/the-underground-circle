@@ -159,6 +159,8 @@ export default function ChatThreadSidebar({
   circleId, activeThreadId, onSelectThread, onNewThread, onDeleteThread, refreshToken = 0, collapsed, onToggleCollapsed,
 }: Props) {
   const { threads, loading } = useThreads(circleId, refreshToken);
+  const widthAnim = useRef(new Animated.Value(collapsed ? 48 : 280)).current;
+  const fadeAnim = useRef(new Animated.Value(1)).current;
 
   const circleThread = threads.find(t => t.visibility === 'circle') || null;
   const userThreads = useMemo(
@@ -167,9 +169,43 @@ export default function ChatThreadSidebar({
   );
   const groups = useMemo(() => groupThreadsByDate(userThreads), [userThreads]);
 
+  useEffect(() => {
+    fadeAnim.setValue(0);
+    Animated.parallel([
+      Animated.timing(widthAnim, {
+        toValue: collapsed ? 48 : 280,
+        duration: 220,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: false,
+      }),
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 180,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [collapsed, fadeAnim, widthAnim]);
+
+  const shellAnimatedStyle = {
+    width: widthAnim,
+    opacity: fadeAnim.interpolate({
+      inputRange: [0, 1],
+      outputRange: [0.9, 1],
+    }),
+    transform: [
+      {
+        translateX: fadeAnim.interpolate({
+          inputRange: [0, 1],
+          outputRange: [-4, 0],
+        }),
+      },
+    ],
+  } as const;
+
   if (collapsed) {
     return (
-      <View style={styles.railCollapsed}>
+      <Animated.View style={[styles.railCollapsed, shellAnimatedStyle]}>
         <Pressable onPress={onToggleCollapsed} style={styles.iconBtn}>
           <Text style={styles.iconText}>›</Text>
         </Pressable>
@@ -193,12 +229,12 @@ export default function ChatThreadSidebar({
             <Text style={styles.iconDot}>•</Text>
           </Pressable>
         ))}
-      </View>
+      </Animated.View>
     );
   }
 
   return (
-    <View style={styles.rail}>
+    <Animated.View style={[styles.rail, shellAnimatedStyle]}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>CHATS</Text>
         <View style={styles.headerActions}>
@@ -244,7 +280,7 @@ export default function ChatThreadSidebar({
           ))
         )}
       </ScrollView>
-    </View>
+    </Animated.View>
   );
 }
 

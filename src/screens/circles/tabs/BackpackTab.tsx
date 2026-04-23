@@ -9,7 +9,7 @@
  * and Giza's dark depth aesthetic.
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import CompartmentErrorBoundary from '../../../components/CompartmentErrorBoundary';
 import {
   View,
@@ -29,21 +29,36 @@ import {
   iconBoxStyle,
 } from '../../../lib/pixelDesign';
 import { LoadingScreen } from '../../../components/LoadingWave';
+// Lightweight panels that are cheap to ship on the initial bundle.
 import CostDashboard from '../../../components/CostDashboard';
 import AgentPerformanceMetrics from '../../../components/AgentPerformanceMetrics';
 import FarmHealthDashboard from '../../../components/FarmHealthDashboard';
 import OfficeAnalyticsPanel from '../../../components/OfficeAnalyticsPanel';
-import PixelOfficeCanvas from '../../../components/PixelOfficeCanvas';
 import OfficeTerminal from '../../../components/OfficeTerminal';
 import SessionTagsDashboard from '../../../components/SessionTagsDashboard';
 import SharedMemoryPanel from '../../../components/SharedMemoryPanel';
 import ProjectRoomsPanel from '../../../components/ProjectRoomsPanel';
 import PromptManagerPanel from './office/PromptManagerPanel';
 import TraceViewer from '../../../components/TraceViewer';
-import LLMBenchmarkPanel from '../../../components/LLMBenchmarkPanel';
-import TradingBotPanel from '../../../components/TradingBotPanel';
 import DevicePanel from '../../../components/DevicePanel';
-import ModelLabPanel from '../../../components/ModelLabPanel';
+
+// Heavy / niche compartments — deferred. These panels (TradingBotPanel ~3.5K
+// lines with Solana deps, ModelLabPanel, LLMBenchmarkPanel, PixelOfficeCanvas)
+// are only rendered when the user taps their Backpack compartment. Code-split
+// them so they don't weigh down the initial bundle for users who never open
+// the Backpack — or who only use cost / terminal / traces.
+const TradingBotPanel = lazy(() => import('../../../components/TradingBotPanel'));
+const ModelLabPanel = lazy(() => import('../../../components/ModelLabPanel'));
+const LLMBenchmarkPanel = lazy(() => import('../../../components/LLMBenchmarkPanel'));
+const PixelOfficeCanvas = lazy(() => import('../../../components/PixelOfficeCanvas'));
+
+function CompartmentSuspenseFallback() {
+  return (
+    <View style={{ flex: 1, padding: 24 }}>
+      <LoadingScreen />
+    </View>
+  );
+}
 
 type Compartment = 'none' | 'cost' | 'terminal' | 'farm' | 'performance' | 'projects' | 'analytics' | 'canvas' | 'prompts' | 'traces' | 'llm-bench' | 'model-lab' | 'trading' | 'devices';
 
@@ -182,10 +197,12 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
             />
           )}
           {activeCompartment === 'canvas' && (
-            <PixelOfficeCanvas
-              agents={data.mergedCircleAgents}
-              currentUserId={data.currentUserId}
-            />
+            <Suspense fallback={<CompartmentSuspenseFallback />}>
+              <PixelOfficeCanvas
+                agents={data.mergedCircleAgents}
+                currentUserId={data.currentUserId}
+              />
+            </Suspense>
           )}
           {activeCompartment === 'prompts' && (
             <PromptManagerPanel
@@ -195,19 +212,25 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
             />
           )}
           {activeCompartment === 'llm-bench' && (
-            <LLMBenchmarkPanel
-              accentColor={accentColor}
-            />
+            <Suspense fallback={<CompartmentSuspenseFallback />}>
+              <LLMBenchmarkPanel
+                accentColor={accentColor}
+              />
+            </Suspense>
           )}
           {activeCompartment === 'model-lab' && (
-            <ModelLabPanel circleId={circleId} />
+            <Suspense fallback={<CompartmentSuspenseFallback />}>
+              <ModelLabPanel circleId={circleId} />
+            </Suspense>
           )}
           {activeCompartment === 'trading' && (
-            <TradingBotPanel
-              circleId={circleId}
-              userId={data.currentUserId}
-              accentColor={accentColor}
-            />
+            <Suspense fallback={<CompartmentSuspenseFallback />}>
+              <TradingBotPanel
+                circleId={circleId}
+                userId={data.currentUserId}
+                accentColor={accentColor}
+              />
+            </Suspense>
           )}
           {activeCompartment === 'devices' && (
             <DevicePanel

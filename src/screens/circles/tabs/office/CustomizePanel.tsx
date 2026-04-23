@@ -21,9 +21,12 @@ import {
   ProviderKey, LLMProvider, PROVIDER_MODELS, PROVIDER_HELP,
   storeApiKey, deleteApiKey, testApiKey, listApiKeys,
 } from '../../../../lib/llmProviders';
+import { isStrictLocalAiModeEnabled, setStrictLocalAiModeEnabled, subscribeStrictLocalAiMode } from '../../../../lib/privacyMode';
 import { BudgetConfig } from '../../../../lib/budgetAlerts';
 import { IDLE_BEHAVIORS, IdleBehaviorConfig, IdleBehaviorDef } from '../../../../lib/idleBehaviors';
 import { supabase } from '../../../../lib/supabase';
+import { safeGetUser } from '../../../../lib/authSession';
+import { showConfirm } from '../../../../lib/alert';
 import {
   CustomThemeRecord, saveCustomTheme, deleteCustomTheme,
   CUSTOM_THEME_PREFIX, customThemeToOfficeTheme,
@@ -220,6 +223,14 @@ export default function CustomizePanel({
   const [apiKeyTesting, setApiKeyTesting] = useState<Record<string, boolean>>({});
   const [apiKeySaving, setApiKeySaving] = useState<Record<string, boolean>>({});
   const [apiKeyStatus, setApiKeyStatus] = useState<Record<string, { ok: boolean; msg: string }>>({});
+  const [strictLocalAiMode, setStrictLocalAiMode] = useState<boolean>(isStrictLocalAiModeEnabled());
+
+  useEffect(() => {
+    setStrictLocalAiMode(isStrictLocalAiModeEnabled());
+    return subscribeStrictLocalAiMode((enabled) => {
+      setStrictLocalAiMode(enabled);
+    });
+  }, []);
 
   // Agent personality state
   const [personalityText, setPersonalityText] = useState('');
@@ -241,13 +252,13 @@ export default function CustomizePanel({
     const agentName = selectedAgent?.name;
     if (!agentName) return;
     (async () => {
-      const { data: auth } = await supabase.auth.getUser();
-      if (!auth.user) return;
+      const { value: user } = await safeGetUser();
+      if (!user) return;
       const { data } = await supabase
         .from('circle_office_agents')
         .select('id, spirit, spirit_emoji')
         .eq('circle_id', circleId)
-        .eq('owner_id', auth.user.id)
+        .eq('owner_id', user.id)
         .ilike('name', agentName)
         .maybeSingle();
       if (data) {
@@ -265,12 +276,12 @@ export default function CustomizePanel({
   useEffect(() => {
     if (tab !== 'agents' || personalityLoaded || !circleId) return;
     (async () => {
-      const { data: auth } = await supabase.auth.getUser();
-      if (!auth.user) return;
+      const { value: user } = await safeGetUser();
+      if (!user) return;
       const { data } = await supabase
         .from('agent_personalities')
         .select('personality')
-        .eq('user_id', auth.user.id)
+        .eq('user_id', user.id)
         .eq('circle_id', circleId)
         .maybeSingle();
       if (data?.personality) setPersonalityText(data.personality);
@@ -281,12 +292,12 @@ export default function CustomizePanel({
   const handleSavePersonality = async () => {
     if (!circleId) return;
     setPersonalitySaving(true);
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) { setPersonalitySaving(false); return; }
+    const { value: user } = await safeGetUser();
+    if (!user) { setPersonalitySaving(false); return; }
     const { error } = await supabase
       .from('agent_personalities')
       .upsert({
-        user_id: auth.user.id,
+        user_id: user.id,
         circle_id: circleId,
         agent_name: 'default',
         personality: personalityText.trim(),
@@ -300,12 +311,12 @@ export default function CustomizePanel({
   useEffect(() => {
     if (tab !== 'souls' || customSoulsLoaded || !circleId) return;
     (async () => {
-      const { data: auth } = await supabase.auth.getUser();
-      if (!auth.user) return;
+      const { value: user } = await safeGetUser();
+      if (!user) return;
       const { data } = await supabase
         .from('custom_souls')
         .select('*')
-        .eq('user_id', auth.user.id)
+        .eq('user_id', user.id)
         .order('created_at', { ascending: false });
       if (data) {
         setCustomSouls(data.map((d: any) => ({
@@ -354,11 +365,11 @@ export default function CustomizePanel({
 
   const handleSaveCustomSoul = async () => {
     if (!editingSoul || !circleId) return;
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) return;
+    const { value: user } = await safeGetUser();
+    if (!user) return;
 
     const payload = {
-      user_id: auth.user.id,
+      user_id: user.id,
       circle_id: circleId,
       name: editingSoul.name,
       emoji: editingSoul.emoji,
@@ -488,6 +499,14 @@ export default function CustomizePanel({
   };
 
   const handleDeleteCustomTheme = async (id: string) => {
+    const confirmed = await showConfirm({
+      title: 'Delete this theme?',
+      message: 'Anyone in your circle who was using this theme will fall back to the Underground default on their next reload.',
+      confirmLabel: 'Delete theme',
+      cancelLabel: 'Keep it',
+      destructive: true,
+    });
+    if (!confirmed) return;
     const ok = await deleteCustomTheme(id);
     if (ok) {
       onCustomThemesRefresh?.();
@@ -576,8 +595,8 @@ export default function CustomizePanel({
 
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={() => { onClose(); resetAddForm(); }}>
-      <View style={styles.overlay}>
-        <View style={styles.panel}>
+      <Pressable style={styles.overlay} onPress={() => { onClose(); resetAddForm(); }}>
+        <Pressable style={styles.panel} onPress={(e) => e.stopPropagation()}>
         {/* Header */}
         <View style={styles.header}>
           <Text style={styles.title}>⚙️ CUSTOMIZE OFFICE</Text>
@@ -1783,10 +1802,10 @@ export default function CustomizePanel({
                   {newProvider === 'openswan' && !editingConnectionId && (
                     <View style={styles.connectInfo}>
                       <Text style={styles.connectInfoTitle}>OpenSwan Setup</Text>
-                      <Text style={styles.connectInfoText}>1. Your gateway is on port 18789 (use proxy port 18790)</Text>
-                      <Text style={styles.connectInfoText}>2. No proxy needed - direct connection works</Text>
+                      <Text style={styles.connectInfoText}>1. Your gateway runs on port 18789</Text>
+                      <Text style={styles.connectInfoText}>2. No proxy needed - direct connection</Text>
                       <Text style={styles.connectInfoText}>3. Find token in ~/.openswan/openswan.json</Text>
-                      <Text style={styles.connectInfoText}>4. Use http://localhost:18790 as endpoint (CORS proxy)</Text>
+                      <Text style={styles.connectInfoText}>4. Use http://localhost:18789 as endpoint</Text>
                     </View>
                   )}
 
@@ -1969,6 +1988,74 @@ export default function CustomizePanel({
                 Add your own LLM API keys to use any model directly in the Terminal.
                 Keys are encrypted and stored securely.
               </Text>
+
+              <View style={styles.connCard}>
+                <View style={styles.connCardHeader}>
+                  <Text style={styles.connProviderIcon}>🛡️</Text>
+                  <View style={styles.connCardInfo}>
+                    <View style={styles.connCardNameRow}>
+                      <Text style={styles.connCardName}>Strict Local AI Mode</Text>
+                      <View style={[
+                        styles.autoConnectBadge,
+                        strictLocalAiMode
+                          ? { backgroundColor: '#f59e0b20', borderColor: '#f59e0b40' }
+                          : { backgroundColor: '#22c55e20', borderColor: '#22c55e40' },
+                      ]}>
+                        <Text style={[
+                          styles.autoConnectText,
+                          { color: strictLocalAiMode ? '#f59e0b' : '#22c55e' },
+                        ]}>
+                          {strictLocalAiMode ? 'LOCAL ONLY' : 'CLOUD AI ON'}
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={styles.connCardEndpoint}>
+                      Blocks outbound cloud AI providers when enabled. Turn this off to use Anthropic, OpenAI, Hugging Face, and other external model providers again.
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
+                  <Pressable
+                    onPress={() => {
+                      setStrictLocalAiModeEnabled(false);
+                      setStrictLocalAiMode(false);
+                    }}
+                    style={[
+                      styles.quickConnectBtn,
+                      !strictLocalAiMode
+                        ? { borderColor: '#22c55e40', backgroundColor: '#22c55e10' }
+                        : undefined,
+                    ]}
+                  >
+                    <Text style={[
+                      styles.quickConnectText,
+                      !strictLocalAiMode ? { color: '#22c55e' } : undefined,
+                    ]}>
+                      CLOUD AI ON
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => {
+                      setStrictLocalAiModeEnabled(true);
+                      setStrictLocalAiMode(true);
+                    }}
+                    style={[
+                      styles.quickConnectBtn,
+                      strictLocalAiMode
+                        ? { borderColor: '#f59e0b40', backgroundColor: '#f59e0b10' }
+                        : undefined,
+                    ]}
+                  >
+                    <Text style={[
+                      styles.quickConnectText,
+                      strictLocalAiMode ? { color: '#f59e0b' } : undefined,
+                    ]}>
+                      LOCAL ONLY
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
 
               {LLM_PROVIDERS.map(provider => {
                 const meta = PROVIDER_META[provider as keyof typeof PROVIDER_META];
@@ -2293,8 +2380,8 @@ export default function CustomizePanel({
             </View>
           )}
         </ScrollView>
-      </View>
-    </View>
+        </Pressable>
+      </Pressable>
     </Modal>
   );
 }

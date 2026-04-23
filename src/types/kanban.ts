@@ -68,6 +68,7 @@ export interface TaskRun {
   id: string;
   task_id: string;
   circle_id: string;
+  openswan_run_id?: string | null;
   assignment_id?: string | null;
   agent_id: string;
   parent_run_id?: string | null;

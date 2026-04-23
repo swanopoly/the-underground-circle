@@ -3,10 +3,12 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
 import { createServiceRoleClient, errResponse, getAuthenticatedUser } from "../_shared/edge.ts";
+import { checkCircleClaudeBudget } from "../_claude/anthropic.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -20,6 +22,15 @@ interface RequestBody {
   maxTokens?: number;
   targetAgentName?: string; // Name of the targeted agent (e.g. "MyBot") — defaults to "BlackSwan"
   wikiContext?: string;
+  // High-priority directive injected at the TOP of the system prompt. Used
+  // by the Conversational Build orchestrator (src/lib/conversationalBuild.ts)
+  // to instruct the model to ask clarifying questions and emit a
+  // <BUILD_READY> marker — NOT reference material like wikiContext.
+  systemDirective?: string;
+  // ── Relay mode fields (client-controlled tool loop) ──
+  tools?: Array<{ name: string; description: string; input_schema: Record<string, unknown> }>;
+  tool_messages?: Array<{ role: string; content: any }>;
+  system_override?: string;
 }
 
 // ─── Skills System (Progressive Disclosure) ─────────────────────────────────
@@ -382,12 +393,14 @@ async function gatherCircleContext(supabase: any, circleId: string, userId: stri
 
 // ─── Build System Prompt ─────────────────────────────────────────────────────
 
-function buildSystemPrompt(ctx: any, matchedSkills: string[] = [], memories: any[] = []) {
-  const now = new Date();
-  const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" });
-  const dateStr = now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "America/New_York" });
-
-  let prompt = `You are Agent 🦢 — an AI accountability partner embedded in "The Underground Circle," a productivity and accountability app. You live inside circle group chats.
+// Returns { frozen, volatile } so callClaude can cache the frozen prefix and
+// only re-send the per-request state. Frozen = personality/tools/instructions/
+// soul wisdom/guardrails — stable for a given circle+spirit. Volatile = all
+// per-request data (members, XP, tasks, GitHub, etc.). The minute-level
+// timestamp that used to live in frozen was the primary silent cache
+// invalidator — it is now removed.
+function buildSystemPrompt(ctx: any, matchedSkills: string[] = [], memories: any[] = []): { frozen: string; volatile: string } {
+  let frozen = `You are Agent 🦢 — an AI accountability partner embedded in "The Underground Circle," a productivity and accountability app. You live inside circle group chats.
 
 ## Your Personality
 - You carry yourself with quiet confidence — knowledgeable but never arrogant
@@ -420,10 +433,42 @@ Be proactive: if a user describes work that should be a task, create it. If they
 - Code & Technical: Architecture patterns, debugging, code review, performance, testing strategy. You know React, Node, Python, Supabase, TypeScript, and modern stacks deeply.
 - General Knowledge: Science, history, philosophy, business strategy, psychology, culture. You weave it in when relevant, never to show off.
 
-## Current Time
-${dateStr} at ${timeStr} ET
+## Instructions
+- You have FULL context of this circle (provided in the per-request state below). Use it intelligently — reference real names, real numbers, real situations.
+- If someone asks about the circle, give real data. If you don't have it, say "I don't have that right now" — no guessing.
+- If asked to create a task, direct them to the task board (you can't create tasks directly in this mode).
+- Keep responses under 300 words unless the user explicitly asks for more detail.
+- Always prefix your response with 🦢 (don't say "Agent:" — the UI handles that).
+- When calling out missed check-ins, be specific: name the people, don't generalize.
+- Acknowledge wins with weight, not hype. A short "That's a real streak. Don't break it." lands harder than five fire emojis.
+- When someone seems stuck or down, be present and practical — not a cheerleader.`;
 
-## Circle Info
+  // SOUL wisdom — stable per-circle-per-spirit, lives in frozen
+  if (ctx.soulWisdom?.length > 0 && ctx.spirit) {
+    const soulKey = `soul:${ctx.spirit}`;
+    const wisdom = ctx.soulWisdom.find((w: any) => w.soul_key === soulKey);
+    if (wisdom?.body) {
+      const soulName = ctx.spirit.replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase());
+      // NOTE: no timestamps in this block — it lives in the cache_control
+      // frozen prefix, and any date string invalidates the Anthropic prompt
+      // cache every 24h for no benefit. The generated_at is persisted in
+      // soul_wisdom and visible on admin surfaces if needed.
+      frozen += `\n\n## ${soulName} Wisdom in This Circle
+${wisdom.body}`;
+    }
+  }
+
+  // Guardrails — instruction-kind memories change rarely, lives in frozen
+  const instructions = memories.filter((m: any) =>
+    m.memory_kind === "instruction" || m.retrieval_mode === "startup" || m.category === "gotcha"
+  );
+  if (instructions.length > 0) {
+    frozen += `\n\n## Guardrails and Instructions
+${instructions.map((m: any) => `- ${m.title ? `${m.title}: ` : ""}${m.content || m.value || ""}`).join("\n")}`;
+  }
+
+  // ── Volatile state (per-request, not cached) ────────────────────────────
+  let volatile = `## Circle Info
 Name: ${ctx.circle?.name || "Unknown"}
 Description: ${ctx.circle?.description || "None"}
 Members: ${ctx.memberCount}
@@ -438,44 +483,37 @@ Streak: ${ctx.currentUser?.current_streak || 0} days
 Longest streak: ${ctx.currentUser?.longest_streak || 0} days
 Bio: ${ctx.currentUser?.bio || "None set"}`;
 
-  // XP & Level
   if (ctx.userXp) {
-    prompt += `\nXP: ${ctx.userXp.total_xp || 0} | Level ${ctx.userXp.level || 1} "${ctx.userXp.title || "Newcomer"}"`;
-    prompt += `\nGrind Karma: ${ctx.userXp.grind_karma || 0} | Social Karma: ${ctx.userXp.social_karma || 0}`;
+    volatile += `\nXP: ${ctx.userXp.total_xp || 0} | Level ${ctx.userXp.level || 1} "${ctx.userXp.title || "Newcomer"}"`;
+    volatile += `\nGrind Karma: ${ctx.userXp.grind_karma || 0} | Social Karma: ${ctx.userXp.social_karma || 0}`;
   }
 
-  // Member XP leaderboard
   if (ctx.memberXp && ctx.memberXp.length > 0) {
     const xpMap = new Map(ctx.memberXp.map((x: any) => [x.user_id, x]));
     const ranked = ctx.members
       .map((m: any) => ({ name: m.display_name || m.username, ...(xpMap.get(m.id) || { total_xp: 0, level: 1 }) }))
       .sort((a: any, b: any) => (b.total_xp || 0) - (a.total_xp || 0));
-    prompt += `\n\n## XP Leaderboard\n${ranked.map((r: any, i: number) => `${i + 1}. ${r.name} — ${r.total_xp || 0} XP (Lv${r.level || 1})`).join("\n")}`;
+    volatile += `\n\n## XP Leaderboard\n${ranked.map((r: any, i: number) => `${i + 1}. ${r.name} — ${r.total_xp || 0} XP (Lv${r.level || 1})`).join("\n")}`;
   }
 
-  // Recent achievements
   if (ctx.userAchievements && ctx.userAchievements.length > 0) {
-    prompt += `\n\n## User's Recent Achievements\n${ctx.userAchievements.map((a: any) => `- ${a.achievement?.icon || "🏅"} ${a.achievement?.name} — ${a.achievement?.description || ""} (+${a.achievement?.xp_reward || 0} XP)`).join("\n")}`;
+    volatile += `\n\n## User's Recent Achievements\n${ctx.userAchievements.map((a: any) => `- ${a.achievement?.icon || "🏅"} ${a.achievement?.name} — ${a.achievement?.description || ""} (+${a.achievement?.xp_reward || 0} XP)`).join("\n")}`;
   }
 
-  // Active challenges
   if (ctx.activeChallenges && ctx.activeChallenges.length > 0) {
-    prompt += `\n\n## Active Challenges\n${ctx.activeChallenges.map((c: any) => `- ${c.title} (${c.challenge_type}) — target: ${c.target_value}, ends ${c.end_date || "TBD"}, reward: ${c.xp_reward || 0} XP`).join("\n")}`;
+    volatile += `\n\n## Active Challenges\n${ctx.activeChallenges.map((c: any) => `- ${c.title} (${c.challenge_type}) — target: ${c.target_value}, ends ${c.end_date || "TBD"}, reward: ${c.xp_reward || 0} XP`).join("\n")}`;
   }
 
-  // User goals
   if (ctx.userGoals && ctx.userGoals.length > 0) {
-    prompt += `\n\n## User's Goals / North Star\n${ctx.userGoals.map((g: any) => `- "${g.content}"`).join("\n")}`;
+    volatile += `\n\n## User's Goals / North Star\n${ctx.userGoals.map((g: any) => `- "${g.content}"`).join("\n")}`;
   }
 
-  // Recent agent activity
   if (ctx.agentActivity && ctx.agentActivity.length > 0) {
-    prompt += `\n\n## Recent Agent Activity\n${ctx.agentActivity.slice(0, 5).map((a: any) => `- [${a.agent_name}] ${a.activity_type}: ${a.title || a.body?.slice(0, 80) || ""}`).join("\n")}`;
+    volatile += `\n\n## Recent Agent Activity\n${ctx.agentActivity.slice(0, 5).map((a: any) => `- [${a.agent_name}] ${a.activity_type}: ${a.title || a.body?.slice(0, 80) || ""}`).join("\n")}`;
   }
 
-  // Learned knowledge from past conversations
   if (ctx.knowledgeEntries && ctx.knowledgeEntries.length > 0) {
-    prompt += `\n\n## Learned Knowledge (from past conversations)
+    volatile += `\n\n## Learned Knowledge (from past conversations)
 Use these past exchanges to inform your tone, approach, and answers. If a similar question was asked before, build on your previous response rather than starting from scratch.
 ${ctx.knowledgeEntries.map((k: any) => {
       const summary = k.summary || k.user_message?.slice(0, 100);
@@ -484,57 +522,52 @@ ${ctx.knowledgeEntries.map((k: any) => {
     }).join("\n")}`;
   }
 
-  if (ctx.notCheckedIn.length > 0) {
-    prompt += `\n\n## Haven't Checked In Today\n${ctx.notCheckedIn.map((m: any) => `- ${m.display_name || m.username}`).join("\n")}`;
+  if (ctx.notCheckedIn?.length > 0) {
+    volatile += `\n\n## Haven't Checked In Today\n${ctx.notCheckedIn.map((m: any) => `- ${m.display_name || m.username}`).join("\n")}`;
   }
 
-  if (ctx.todayCheckIns.length > 0) {
-    prompt += `\n\n## Today's Check-ins\n${ctx.todayCheckIns.map((c: any) => `- ${c.user?.display_name || c.user?.username}: "${c.content}"`).join("\n")}`;
+  if (ctx.todayCheckIns?.length > 0) {
+    volatile += `\n\n## Today's Check-ins\n${ctx.todayCheckIns.map((c: any) => `- ${c.user?.display_name || c.user?.username}: "${c.content}"`).join("\n")}`;
   }
 
-  if (ctx.userTasks.length > 0) {
-    prompt += `\n\n## User's Open Tasks\n${ctx.userTasks.map((t: any) => `- [${t.status}] [${t.priority}] ${t.title}${t.due_date ? ` (due ${t.due_date})` : ""}`).join("\n")}`;
+  if (ctx.userTasks?.length > 0) {
+    volatile += `\n\n## User's Open Tasks\n${ctx.userTasks.map((t: any) => `- [${t.status}] [${t.priority}] ${t.title}${t.due_date ? ` (due ${t.due_date})` : ""}`).join("\n")}`;
   }
 
-  if (ctx.openTasks.length > 0) {
-    prompt += `\n\n## Circle's Open Tasks (${ctx.openTasks.length})\n${ctx.openTasks.slice(0, 10).map((t: any) => `- [${t.priority}] ${t.title} → ${t.assignee?.display_name || "Unassigned"} (${t.status})`).join("\n")}`;
+  if (ctx.openTasks?.length > 0) {
+    volatile += `\n\n## Circle's Open Tasks (${ctx.openTasks.length})\n${ctx.openTasks.slice(0, 10).map((t: any) => `- [${t.priority}] ${t.title} → ${t.assignee?.display_name || "Unassigned"} (${t.status})`).join("\n")}`;
   }
 
-  if (ctx.completedTasks.length > 0) {
-    prompt += `\n\n## Recently Completed (past 7 days)\n${ctx.completedTasks.map((t: any) => `- ✅ ${t.title} by ${t.assignee?.display_name || "someone"}`).join("\n")}`;
+  if (ctx.completedTasks?.length > 0) {
+    volatile += `\n\n## Recently Completed (past 7 days)\n${ctx.completedTasks.map((t: any) => `- ✅ ${t.title} by ${t.assignee?.display_name || "someone"}`).join("\n")}`;
   }
 
-  // Recent messages are sent as multi-turn conversation (not in system prompt) to save tokens
-
-  // GitHub context
-  if (ctx.githubRepos.length > 0) {
-    prompt += `\n\n## Connected GitHub Repos\n${ctx.githubRepos.map((r: any) => `- ${r.full_name} (${r.default_branch}) — ${r.event_count} events${r.last_event_at ? `, last activity ${new Date(r.last_event_at).toLocaleDateString()}` : ""}`).join("\n")}`;
+  if (ctx.githubRepos?.length > 0) {
+    volatile += `\n\n## Connected GitHub Repos\n${ctx.githubRepos.map((r: any) => `- ${r.full_name} (${r.default_branch}) — ${r.event_count} events${r.last_event_at ? `, last activity ${new Date(r.last_event_at).toLocaleDateString()}` : ""}`).join("\n")}`;
   }
 
-  if (ctx.githubEvents.length > 0) {
-    prompt += `\n\n## Recent GitHub Activity\n${ctx.githubEvents.slice(0, 8).map((e: any) => `- [${e.event_type}] ${e.title} by ${e.author || "unknown"}`).join("\n")}`;
+  if (ctx.githubEvents?.length > 0) {
+    volatile += `\n\n## Recent GitHub Activity\n${ctx.githubEvents.slice(0, 8).map((e: any) => `- [${e.event_type}] ${e.title} by ${e.author || "unknown"}`).join("\n")}`;
   }
 
-  // Project Rooms
   if (ctx.rooms && ctx.rooms.length > 0) {
-    prompt += `\n\n## Project Rooms (${ctx.rooms.length})`;
+    volatile += `\n\n## Project Rooms (${ctx.rooms.length})`;
     for (const room of ctx.rooms) {
       const files = (ctx.roomFiles || []).filter((f: any) => f.room_id === room.id);
       const msgs = (ctx.roomMessages || []).filter((m: any) => m.room_id === room.id);
-      prompt += `\n- **${room.name}** (${room.language || "general"}, ${files.length} files)`;
-      if (room.description) prompt += ` — ${room.description.slice(0, 80)}`;
+      volatile += `\n- **${room.name}** (${room.language || "general"}, ${files.length} files)`;
+      if (room.description) volatile += ` — ${room.description.slice(0, 80)}`;
       if (files.length > 0) {
-        prompt += `\n  Files: ${files.slice(0, 8).map((f: any) => `${f.name} [${f.file_type}]`).join(", ")}`;
+        volatile += `\n  Files: ${files.slice(0, 8).map((f: any) => `${f.name} [${f.file_type}]`).join(", ")}`;
       }
       if (msgs.length > 0) {
-        prompt += `\n  Recent: ${msgs.slice(0, 3).map((m: any) => `[${m.agent_name || "user"}] ${(m.content || "").slice(0, 80)}`).join("; ")}`;
+        volatile += `\n  Recent: ${msgs.slice(0, 3).map((m: any) => `[${m.agent_name || "user"}] ${(m.content || "").slice(0, 80)}`).join("; ")}`;
       }
     }
   }
 
-  // Active Automations
   if (ctx.automations && ctx.automations.length > 0) {
-    prompt += `\n\n## Active Automations (${ctx.automations.length})\n${ctx.automations.map((a: any) => {
+    volatile += `\n\n## Active Automations (${ctx.automations.length})\n${ctx.automations.map((a: any) => {
       let desc = `- **${a.name}** (${a.trigger_type}${a.schedule ? `, ${a.schedule}` : ""}) → ${a.agent || "BlackSwan"}`;
       if (a.spirit) desc += ` [${a.spirit}]`;
       if (a.last_error) desc += ` ⚠️ error`;
@@ -543,59 +576,39 @@ ${ctx.knowledgeEntries.map((k: any) => {
     }).join("\n")}`;
   }
 
-  prompt += `\n\n## Instructions
-- You have FULL context of this circle. Use it intelligently — reference real names, real numbers, real situations.
-- If someone asks about the circle, give real data. If you don't have it, say "I don't have that right now" — no guessing.
-- If asked to create a task, direct them to the task board (you can't create tasks directly in this mode).
-- Keep responses under 300 words unless the user explicitly asks for more detail.
-- Always prefix your response with 🦢 (don't say "Agent:" — the UI handles that).
-- When calling out missed check-ins, be specific: name the people, don't generalize.
-- Acknowledge wins with weight, not hype. A short "That's a real streak. Don't break it." lands harder than five fire emojis.
-- When someone seems stuck or down, be present and practical — not a cheerleader.`;
-
-  // ── Inject matched skills (progressive disclosure) ──
+  // Matched skills depend on the user message, so they vary per-request → volatile
   for (const skillPrompt of matchedSkills) {
-    prompt += "\n\n" + skillPrompt;
-  }
-
-  // ── Inject SOUL wisdom (Phase 3 — pre-distilled per-circle guidance) ──
-  if (ctx.soulWisdom?.length > 0 && ctx.spirit) {
-    const soulKey = `soul:${ctx.spirit}`;
-    const wisdom = ctx.soulWisdom.find((w: any) => w.soul_key === soulKey);
-    if (wisdom?.body) {
-      const soulName = ctx.spirit.replace(/-/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase());
-      prompt += `\n\n## ${soulName} Wisdom in This Circle${wisdom.generated_at ? ` (updated ${wisdom.generated_at.slice(0, 10)})` : ""}
-${wisdom.body}`;
-    }
-  }
-
-  // ── Inject persistent memories (Phase 0-4 memory_entries architecture) ──
-  // Handles both old format (blackswan_memory: m.category + m.value) and
-  // new format (memory_entries: m.memory_kind + m.content + m.title).
-  const instructions = memories.filter((m: any) =>
-    m.memory_kind === "instruction" || m.retrieval_mode === "startup" || m.category === "gotcha"
-  );
-  if (instructions.length > 0) {
-    prompt += `\n\n## Guardrails and Instructions
-${instructions.map((m: any) => `- ${m.title ? `${m.title}: ` : ""}${m.content || m.value || ""}`).join("\n")}`;
+    volatile += "\n\n" + skillPrompt;
   }
 
   const durableMemories = memories.filter((m: any) =>
     m.memory_kind !== "instruction" && m.retrieval_mode !== "startup" && m.category !== "gotcha"
   );
   if (durableMemories.length > 0) {
-    prompt += `\n\n## Things I Remember About This Circle
+    volatile += `\n\n## Things I Remember About This Circle
 Use these to personalize responses. Learned from past conversations.
 ${durableMemories.map((m: any) => `- [${m.memory_kind || m.category || "fact"}] ${m.title ? `${m.title}: ` : ""}${m.content || m.value || ""}`).join("\n")}`;
   }
 
   if (ctx.wikiContext) {
-    prompt += `\n\n## Internal AI Wiki Knowledge
+    volatile += `\n\n## Internal AI Wiki Knowledge
 Use this as trusted internal reference knowledge from the app's AI Wiki when the user asks about AI agents, MCP, models, design-to-code, retrieval, evals, browser automation, multimodal tooling, safety, or related topics.
 ${ctx.wikiContext}`;
   }
 
-  return prompt;
+  // Enforce the 4000-char cap on volatile context documented in CLAUDE.md.
+  // The volatile block is already ordered by priority (circle info & members
+  // first, wiki reference last), so a tail-truncation drops lowest-value
+  // content first. If we're dropping anything we log it — chronic overflow
+  // signals we need smarter per-section budgets.
+  const VOLATILE_CAP = 4000;
+  if (volatile.length > VOLATILE_CAP) {
+    const overflow = volatile.length - VOLATILE_CAP;
+    console.warn(`[swanbot-ai] volatile prompt exceeded ${VOLATILE_CAP} chars by ${overflow}; tail-truncating`);
+    volatile = volatile.slice(0, VOLATILE_CAP - 20).trimEnd() + "\n\n…[truncated]";
+  }
+
+  return { frozen, volatile };
 }
 
 // ─── Call BlackSwan LLM (local/self-hosted, zero cost) ───────────────────────
@@ -631,11 +644,16 @@ async function callBlackSwanLLM(systemPrompt: string, userMessage: string): Prom
 
 // ─── Call Claude ──────────────────────────────────────────────────────────────
 
-// Map terminal model keys to Anthropic model IDs
+// Map terminal model keys to Anthropic model IDs.
+// Per the Claude API skill: use the canonical short IDs (no date suffixes).
+// Opus points at 4.7 — latest generation, adaptive thinking only, supports
+// xhigh effort and the new task-budget beta. 4.7 removes sampling params
+// (`temperature`, `top_p`, `top_k`) and `budget_tokens` — any code path that
+// used those must pass `thinking: {type: "adaptive"}` instead.
 const CLAUDE_MODEL_MAP: Record<string, string> = {
-  "claude-haiku":  "claude-haiku-4-5-20251001",
+  "claude-haiku":  "claude-haiku-4-5",
   "claude-sonnet": "claude-sonnet-4-6",
-  "claude-opus":   "claude-opus-4-6",
+  "claude-opus":   "claude-opus-4-7",
 };
 
 interface ClaudeResult {
@@ -1708,7 +1726,7 @@ async function logHfActivity(
   } catch {} // Non-critical
 }
 
-async function callClaude(systemPrompt: string, userMessage: string, options: CallClaudeOptions = {}): Promise<ClaudeResult> {
+async function callClaude(frozenPrompt: string, volatilePrompt: string, userMessage: string, options: CallClaudeOptions = {}): Promise<ClaudeResult> {
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
   if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY not set");
@@ -1729,14 +1747,23 @@ async function callClaude(systemPrompt: string, userMessage: string, options: Ca
   }
   messages.push({ role: "user", content: userMessage });
 
-  // Use prompt caching — system prompt is stable per circle, cache it
-  const systemContent = [
+  // Prompt caching: the FROZEN prefix (personality, tools list, instructions,
+  // soul wisdom, guardrails) carries the only cache_control breakpoint so it
+  // gets read back on every subsequent request within the 5-min TTL. The
+  // VOLATILE block (per-request circle/user state) is a second system text
+  // block with NO cache_control — it's processed fresh every time but the
+  // frozen prefix is not re-billed. This is the standard "stable prefix,
+  // varying suffix" pattern.
+  const systemContent: any[] = [
     {
       type: "text",
-      text: systemPrompt,
+      text: frozenPrompt,
       cache_control: { type: "ephemeral" },
     },
   ];
+  if (volatilePrompt && volatilePrompt.trim().length > 0) {
+    systemContent.push({ type: "text", text: volatilePrompt });
+  }
 
   // Configure max tokens based on thinking level
   let maxTokens = 2048;
@@ -1760,12 +1787,14 @@ async function callClaude(systemPrompt: string, userMessage: string, options: Ca
     requestBody.tools = BLACKSWAN_TOOLS;
   }
 
-  // Extended thinking for deep + balanced on Sonnet/Opus
+  // Extended thinking for deep + balanced on Sonnet/Opus.
+  // budget_tokens is deprecated on Sonnet 4.6 / Opus 4.6 — use adaptive
+  // thinking + an effort hint instead. Adaptive lets Claude size each step
+  // dynamically, which is typically cheaper than a fixed 10K budget.
   if ((thinkingLevel === "deep" || thinkingLevel === "balanced") && (modelId.includes("sonnet") || modelId.includes("opus"))) {
-    const budget = thinkingLevel === "deep" ? 10000 : 4096;
-    requestBody.thinking = {
-      type: "enabled",
-      budget_tokens: budget,
+    requestBody.thinking = { type: "adaptive" };
+    requestBody.output_config = {
+      effort: thinkingLevel === "deep" ? "high" : "medium",
     };
     requestBody.max_tokens = Math.max(
       requestBody.max_tokens,
@@ -1878,6 +1907,30 @@ async function callClaude(systemPrompt: string, userMessage: string, options: Ca
     requestBody.messages = messages;
   }
 
+  // Fire-and-forget: log this call to claude_api_usage so cost / cache-hit
+  // visibility is available in the UI. Failures are swallowed to avoid
+  // taking down chat responses over a logging blip.
+  if (supabase) {
+    // Fire-and-forget but log — if this insert fails (RLS, quota, schema
+    // drift) we silently under-report spend and it becomes invisible tech
+    // debt. Warn loudly so ops can catch it.
+    Promise.resolve(
+      logClaudeUsage(supabase, {
+        circleId: circleId ?? null,
+        userId: userId ?? null,
+        source: "swanbot-ai",
+        model: modelId,
+        inputTokens: totalInput,
+        outputTokens: totalOutput,
+        cacheCreationTokens: totalCacheCreation,
+        cacheReadTokens: totalCacheRead,
+        metadata: toolActions.length > 0 ? { tool_count: toolActions.length, thinking: thinkingLevel } : { thinking: thinkingLevel },
+      })
+    ).catch((err) => {
+      console.warn("[swanbot-ai] logClaudeUsage failed:", err?.message || err);
+    });
+  }
+
   return {
     text: finalText || "Something went wrong. Try again.",
     model: modelId,
@@ -1887,6 +1940,68 @@ async function callClaude(systemPrompt: string, userMessage: string, options: Ca
     cacheReadTokens: totalCacheRead,
     toolActions: toolActions.length > 0 ? toolActions : undefined,
   };
+}
+
+// ─── Claude API usage logging ──────────────────────────────────────────────
+// Cost model: cache writes bill at 1.25x base input rate, cache reads at 0.1x,
+// output at the model's output rate. Used for estimated_cost on insert.
+
+const CLAUDE_USAGE_PRICES: Record<string, [number, number]> = {
+  // Haiku 4.5 base rate is $1/$5 per 1M tokens (official Anthropic pricing,
+  // cached 2026-04-15). The old $0.80/$4 entry was stale.
+  "claude-haiku-4-5-20251001": [1.00, 5.00],
+  "claude-haiku-4-5":          [1.00, 5.00],
+  "claude-sonnet-4-6":         [3.00, 15.00],
+  "claude-opus-4-6":           [5.00, 25.00],
+  "claude-opus-4-7":           [5.00, 25.00],
+};
+
+function costForModel(model: string): [number, number] {
+  const direct = CLAUDE_USAGE_PRICES[model];
+  if (direct) return direct;
+  for (const key of Object.keys(CLAUDE_USAGE_PRICES)) {
+    if (model.startsWith(key)) return CLAUDE_USAGE_PRICES[key];
+  }
+  // Fallback assumes Haiku-class pricing when we can't identify the model.
+  return [1.00, 5.00];
+}
+
+interface UsageLogEntry {
+  circleId: string | null;
+  userId: string | null;
+  source: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  metadata?: Record<string, unknown>;
+}
+
+async function logClaudeUsage(supabase: any, entry: UsageLogEntry): Promise<void> {
+  try {
+    const [inP, outP] = costForModel(entry.model);
+    const cost = (
+      entry.inputTokens * inP
+      + entry.cacheCreationTokens * inP * 1.25
+      + entry.cacheReadTokens * inP * 0.1
+      + entry.outputTokens * outP
+    ) / 1_000_000;
+    await supabase.from("claude_api_usage").insert({
+      circle_id:             entry.circleId,
+      user_id:               entry.userId,
+      source:                entry.source,
+      model:                 entry.model,
+      input_tokens:          entry.inputTokens,
+      output_tokens:         entry.outputTokens,
+      cache_creation_tokens: entry.cacheCreationTokens,
+      cache_read_tokens:     entry.cacheReadTokens,
+      estimated_cost:        cost,
+      metadata:              entry.metadata ?? null,
+    });
+  } catch (err) {
+    console.warn("[claude-usage] log insert failed:", (err as any)?.message || err);
+  }
 }
 
 // ─── Knowledge Storage ──────────────────────────────────────────────────
@@ -2091,7 +2206,8 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { message, circleId, userId: _ignoredUserId, model, thinkingLevel, maxTokens, targetAgentName, wikiContext }: RequestBody = await req.json();
+    const body: RequestBody = await req.json();
+    const { message, circleId, userId: _ignoredUserId, model, thinkingLevel, maxTokens, targetAgentName, wikiContext, systemDirective } = body;
     const user = await getAuthenticatedUser(req);
 
     if (!user) {
@@ -2105,7 +2221,104 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    // Umbrella budget cap — covers this uncapped surface (no per-source
+    // cap of its own) by falling back to the circle-wide 24h Claude spend
+    // limit set via `circles.settings.claude_total_max_cost_usd`. Default
+    // is $10/day — a loose safety net, not a primary guard. Fail-open if
+    // the check itself errors (telemetry drift should not brick chat).
+    // This is the one ≤ 15 LOC change to swanbot-ai that Phase 1c will
+    // replace end-to-end; deliberately surgical to avoid touching the
+    // 2904-line tool loop below.
+    try {
+      const svcForCap = createServiceRoleClient();
+      const cap = await checkCircleClaudeBudget(svcForCap, circleId);
+      if (!cap.allowed) {
+        return new Response(
+          JSON.stringify({
+            error: "circle_claude_budget_exceeded",
+            detail: cap.reason,
+            spent24h: cap.spent24h,
+            cap: cap.cap,
+            reply: `🛑 Daily AI budget reached ($${cap.spent24h.toFixed(2)} of $${cap.cap.toFixed(2)}). Raise the cap in circle settings → AI SPEND, or wait for the 24h window to roll.`,
+          }),
+          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+    } catch { /* fail-open by design */ }
+
     const userId = user.id;
+
+    // ─── Relay mode: client controls tools + system prompt ────────────
+    // When the client sends a `tools` array, we act as a transparent relay
+    // to the Anthropic API. The client builds the full system prompt and
+    // dispatches tool results locally. We just forward and return raw content.
+    if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) {
+      const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+      if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
+
+      const relayModel = (model && CLAUDE_MODEL_MAP[model]) || model || "claude-sonnet-4-6";
+      const relayMessages = body.tool_messages && body.tool_messages.length > 0
+        ? body.tool_messages
+        : [{ role: "user", content: message }];
+      const relaySystem = body.system_override || "You are OpenSwan, a helpful AI assistant.";
+      const relayMaxTokens = maxTokens || 4096;
+
+      const relayBody: Record<string, unknown> = {
+        model: relayModel,
+        max_tokens: relayMaxTokens,
+        system: [{ type: "text", text: relaySystem, cache_control: { type: "ephemeral" } }],
+        messages: relayMessages,
+        tools: body.tools,
+      };
+
+      // Extended thinking for Sonnet/Opus when requested.
+      // Opus 4.7 rejects `budget_tokens` — use adaptive thinking + effort.
+      // Adaptive also works on Sonnet 4.6 and is the recommended path going
+      // forward, so we use it uniformly instead of per-model branching.
+      if ((thinkingLevel === "deep" || thinkingLevel === "balanced") &&
+          (relayModel.includes("sonnet") || relayModel.includes("opus"))) {
+        relayBody.thinking = { type: "adaptive" };
+        relayBody.output_config = {
+          effort: thinkingLevel === "deep" ? "high" : "medium",
+        };
+        relayBody.max_tokens = Math.max(relayMaxTokens, thinkingLevel === "deep" ? 16000 : 8192);
+      }
+
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(relayBody),
+        signal: AbortSignal.timeout(90_000),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        return new Response(
+          JSON.stringify({ error: `Anthropic API error: ${res.status}`, detail: errText }),
+          { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+
+      const data = await res.json();
+      const textBlocks = (data.content || []).filter((b: any) => b.type === "text");
+      const responseText = textBlocks.map((b: any) => b.text).join("");
+
+      return new Response(
+        JSON.stringify({
+          content: data.content,
+          stop_reason: data.stop_reason,
+          response: responseText,
+          usage: data.usage || {},
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+    // ─── End relay mode ───────────────────────────────────────────────
+
     const supabase = createServiceRoleClient();
     const { data: membership } = await supabase
       .from("circle_members")
@@ -2125,12 +2338,27 @@ Deno.serve(async (req: Request) => {
     // Route skills — spirit-aware + context-gated
     const matchedSkills = routeSkills(message, context.spirit, context);
 
-    // Build the system prompt with matched skills + persistent memories
-    let systemPrompt = buildSystemPrompt(context, matchedSkills, context.memories || []);
+    // Build the system prompt with matched skills + persistent memories.
+    // `frozen` gets a cache_control breakpoint in callClaude; `volatile`
+    // re-renders per-request. Agent personality, spirit, and spawn config
+    // all prepend into `frozen` because they are stable for a given
+    // circle+spirit combination.
+    const built = buildSystemPrompt(context, matchedSkills, context.memories || []);
+    let frozenPrompt = built.frozen;
+    // A high-priority directive (from the client orchestrator) is prepended
+    // to the frozen system prompt so it's the first thing the model reads.
+    // Do NOT put it in `wikiContext` — that gets framed as reference-material
+    // and the model ignores the instructions. Wrapping with explicit
+    // "DIRECTIVE" tags signals to the model that this is a behavior rule,
+    // not background knowledge.
+    if (systemDirective && systemDirective.trim().length > 0) {
+      frozenPrompt = `<DIRECTIVE priority="high">\n${systemDirective.trim()}\n</DIRECTIVE>\n\n${frozenPrompt}`;
+    }
+    const volatilePrompt = built.volatile;
 
     // Prepend agent personality (SOUL) — already fetched in parallel context gathering
     if (context.agentPersonality) {
-      systemPrompt = context.agentPersonality + "\n\n" + systemPrompt;
+      frozenPrompt = context.agentPersonality + "\n\n" + frozenPrompt;
     }
 
     // Prepend agent spirit prompt — already fetched in parallel context gathering
@@ -2465,7 +2693,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         };
         const prefix = SPIRIT_PROMPTS[spiritId];
         if (prefix) {
-          systemPrompt = prefix + "\n\n" + systemPrompt;
+          frozenPrompt = prefix + "\n\n" + frozenPrompt;
         }
       }
     }
@@ -2490,7 +2718,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         spawnParts.push(`## Autonomy Level: ${sc.autonomy}`);
       }
       if (spawnParts.length > 0) {
-        systemPrompt = spawnParts.join("\n\n") + "\n\n" + systemPrompt;
+        frozenPrompt = spawnParts.join("\n\n") + "\n\n" + frozenPrompt;
       }
     }
 
@@ -2577,21 +2805,29 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       );
     }
 
+    // Non-Anthropic providers (HF, BlackSwan local) don't use Anthropic prompt
+    // caching, so they get the concatenated system prompt. The Claude path
+    // below receives `frozenPrompt` + `volatilePrompt` separately so only the
+    // frozen prefix gets a cache_control breakpoint.
+    const combinedSystemPrompt = volatilePrompt && volatilePrompt.trim().length > 0
+      ? frozenPrompt + "\n\n" + volatilePrompt
+      : frozenPrompt;
+
     // Route to HuggingFace if user selected an open model
     if (!aiResponse && hfModelId && !isClaudeModel) {
       const hfResult = await callHfProxy("chat", {
         messages: [
-          { role: "system", content: systemPrompt },
+          { role: "system", content: combinedSystemPrompt },
           { role: "user", content: message },
         ],
       }, hfModelId);
 
       if (!hfResult.error && hfResult.result) {
         aiResponse = hfResult.result?.choices?.[0]?.message?.content || JSON.stringify(hfResult.result);
-        const est = Math.ceil((systemPrompt.length + message.length + (aiResponse?.length || 0)) / 4);
+        const est = Math.ceil((combinedSystemPrompt.length + message.length + (aiResponse?.length || 0)) / 4);
         tokenBreakdown = {
           model: hfModelId,
-          input_tokens: Math.ceil((systemPrompt.length + message.length) / 4),
+          input_tokens: Math.ceil((combinedSystemPrompt.length + message.length) / 4),
           output_tokens: Math.ceil((aiResponse?.length || 0) / 4),
           cache_creation_tokens: 0,
           cache_read_tokens: 0,
@@ -2602,12 +2838,12 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
 
     if (!aiResponse && !isClaudeModel && !hfModelId) {
       // Try BlackSwan LLM first (zero cost)
-      aiResponse = await callBlackSwanLLM(systemPrompt, message);
+      aiResponse = await callBlackSwanLLM(combinedSystemPrompt, message);
       if (aiResponse) {
-        const est = Math.ceil((systemPrompt.length + message.length + aiResponse.length) / 4);
+        const est = Math.ceil((combinedSystemPrompt.length + message.length + aiResponse.length) / 4);
         tokenBreakdown = {
           model: "blackswan",
-          input_tokens: Math.ceil((systemPrompt.length + message.length) / 4),
+          input_tokens: Math.ceil((combinedSystemPrompt.length + message.length) / 4),
           output_tokens: Math.ceil(aiResponse.length / 4),
           cache_creation_tokens: 0,
           cache_read_tokens: 0,
@@ -2625,7 +2861,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
           : effectiveModel?.startsWith("claude-haiku")
             ? "claude-haiku"
             : null;
-      const result = await callClaude(systemPrompt, message, {
+      const result = await callClaude(frozenPrompt, volatilePrompt, message, {
         modelKey: claudeModelKey,
         conversationMessages,
         thinkingLevel: thinkingLevel || "balanced",
@@ -2671,12 +2907,21 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       tokenBreakdown.total_tokens,
       context.memberCount,
       context.currentUser?.current_streak || 0,
-    ).catch(() => {}); // Swallow — never block the response
+    ).catch((err) => {
+      // Fire-and-forget, but log — a silently-failing knowledge store
+      // degrades future responses and we never find out.
+      console.warn("[swanbot-ai] storeKnowledgeEntry failed:", err?.message || err);
+    });
 
     // Extract and store memories from this exchange (fire-and-forget)
     extractAndStoreMemories(
       supabase, circleId, userId, message, aiResponse,
-    ).catch(() => {});
+    ).catch((err) => {
+      // If memory extraction silently breaks (RLS, rate limits, provider
+      // outage), circle memory stops accumulating and BlackSwan's context
+      // gradually degrades. Always log.
+      console.warn("[swanbot-ai] extractAndStoreMemories failed:", err?.message || err);
+    });
 
     return new Response(
       JSON.stringify({

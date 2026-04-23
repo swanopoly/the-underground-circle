@@ -15,6 +15,7 @@ import {
   Platform,
 } from 'react-native';
 import type { BrowserAction, ComputerUsePermission } from '../../lib/computerUse';
+import type { BrowserTaskIntent } from '../../lib/browserTaskIntent';
 
 // ─── Props ──────────────────────────────────────────────────────────────────
 
@@ -22,6 +23,10 @@ interface ComputerUsePermissionDialogProps {
   task: string;
   agentName: string;
   actions: BrowserAction[];
+  intent?: BrowserTaskIntent;
+  recommendedPermission?: ComputerUsePermission;
+  grantSummary?: string | null;
+  approvalSummary?: string | null;
   onAllow: (permission: ComputerUsePermission) => void;
   onDeny: () => void;
 }
@@ -66,10 +71,14 @@ export default function ComputerUsePermissionDialog({
   task,
   agentName,
   actions,
+  intent: _intent,
+  recommendedPermission,
+  grantSummary,
+  approvalSummary,
   onAllow,
   onDeny,
 }: ComputerUsePermissionDialogProps) {
-  const [selectedPermission, setSelectedPermission] = useState<ComputerUsePermission>('ask_every_time');
+  const [selectedPermission, setSelectedPermission] = useState<ComputerUsePermission>(recommendedPermission || 'ask_every_time');
 
   return (
     <View style={styles.overlay} nativeID="section-computer-use-permission">
@@ -81,7 +90,7 @@ export default function ComputerUsePermissionDialog({
           </View>
           <View style={{ flex: 1 }}>
             <Text style={styles.title}>
-              {agentName} wants to use your browser
+              {agentName} wants to use the computer
             </Text>
             <Text style={styles.subtitle}>Computer-Use Permission Request</Text>
           </View>
@@ -92,6 +101,14 @@ export default function ComputerUsePermissionDialog({
           <Text style={styles.taskLabel}>TASK</Text>
           <Text style={styles.taskText}>{task}</Text>
         </View>
+
+        {(grantSummary || approvalSummary) && (
+          <View style={styles.accessBox}>
+            <Text style={styles.taskLabel}>ACCESS PLAN</Text>
+            {grantSummary ? <Text style={styles.accessText}>{grantSummary}</Text> : null}
+            {approvalSummary ? <Text style={styles.accessWarning}>{approvalSummary}</Text> : null}
+          </View>
+        )}
 
         {/* ── Planned Actions Preview ── */}
         <View style={styles.actionsPreview}>
@@ -169,7 +186,7 @@ export default function ComputerUsePermissionDialog({
           <Pressable
             onPress={onDeny}
             accessibilityRole="button"
-            accessibilityLabel="Deny browser access"
+            accessibilityLabel="Deny computer access"
             style={styles.denyButton}
           >
             <Text style={styles.denyButtonText}>DENY</Text>
@@ -177,7 +194,7 @@ export default function ComputerUsePermissionDialog({
           <Pressable
             onPress={() => onAllow(selectedPermission)}
             accessibilityRole="button"
-            accessibilityLabel="Allow browser access"
+            accessibilityLabel="Allow computer access"
             style={styles.allowButton}
           >
             <Text style={styles.allowButtonText}>ALLOW</Text>
@@ -273,6 +290,27 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#e8e8e8',
     lineHeight: 18,
+  },
+  accessBox: {
+    backgroundColor: '#050508',
+    borderWidth: 1,
+    borderColor: '#24243a',
+    borderRadius: 2,
+    padding: 12,
+    marginBottom: 16,
+  },
+  accessText: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    color: '#b6b6c8',
+    lineHeight: 16,
+  },
+  accessWarning: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    color: '#f59e0b',
+    lineHeight: 14,
+    marginTop: 6,
   },
   actionsPreview: {
     marginBottom: 16,

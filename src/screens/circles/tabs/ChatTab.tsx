@@ -84,6 +84,8 @@ import {
   createSessionFromBrowserPlan,
   planActions as planComputerUseActions,
   executePlan as executeComputerUsePlan,
+  describeComputerUsePlan,
+  toBrowserPlanCardData,
   type BrowserPlanCardData,
   type BrowserPlanEvent,
   type BrowserSessionRecord,
@@ -96,6 +98,18 @@ import ComputerUsePanel from '../../../components/computer-use/ComputerUsePanel'
 import BrowserSessionDrawer from '../../../components/computer-use/BrowserSessionDrawer';
 import ComputerUsePermissionDialog from '../../../components/computer-use/ComputerUsePermissionDialog';
 import ComputerUseButton from '../../../components/computer-use/ComputerUseButton';
+import ComputerUseLiveCard from '../../../components/ComputerUseLiveCard';
+import AnimatedPopup from '../../../components/chat-animations/AnimatedPopup';
+import ThinkingDots from '../../../components/chat-animations/ThinkingDots';
+import ThinkingLabel from '../../../components/chat-animations/ThinkingLabel';
+import { pickThinkingVerb } from '../../../lib/thinkingVerbs';
+import ComputerUseConsole from '../../../components/computer-use/ComputerUseConsole';
+import ChatCostFooter from '../../../components/ChatCostFooter';
+import DesktopBridgeStatusChip from '../../../components/DesktopBridgeStatusChip';
+import RunApprovalBanner from '../../../components/RunApprovalBanner';
+import OpenSwanConsole from '../../../components/openswan/OpenSwanConsole';
+import { useComputerUseTask } from '../../../lib/useComputerUseTask';
+import { resolveComputerUseConfirmation } from '../../../lib/computerUseConfirmations';
 import {
   getMatchingChatSlashCommands,
   type ChatSlashCommand,
@@ -130,6 +144,9 @@ import {
   persistMainChatBotMessageWithRetry,
   updateMainChatBotMessageWithRetry,
 } from '../../../lib/chatAgentService';
+import { buildChatAutomationPlan, type ChatAutomationPlan } from '../../../lib/chatAutomationPlanner';
+import { dispatchChatAutomationPlan } from '../../../lib/runChatAutomationPlan';
+import { attachPlanDecisionToRun } from '../../../lib/runChatAutomationPlanObserver';
 import { deriveChatActivityFlags, shapePersistedChatMessage } from '../../../lib/chatMessageShape';
 import {
   applyOpenSwanMemoryRecommendation,
@@ -174,6 +191,25 @@ import {
   type SessionDelegationMode,
 } from '../../../lib/chatSessionProfile';
 import { isCodingGenerationRequest } from '../../../lib/codingWorkbench';
+
+/**
+ * Loose detector for messages that probably need tool use.
+ *
+ * When the user says things like "create a room", "pause the automation",
+ * "update the circle theme", the chat flow needs to fall through to the
+ * `runOpenSwanSessionTurn` path (which enables the tool catalog). The
+ * streaming fast-path has NO tools — so without this detector, BlackSwan
+ * replies "I can't create rooms" even though it has the tool.
+ *
+ * Matches action-verb + app-noun pairs. False positives are cheap
+ * (they just forgo streaming for one turn). False negatives are bad
+ * (tools don't get called) so the regex is deliberately permissive.
+ */
+const ACTION_INTENT_RE = /\b(create|make|add|new|start|rename|archive|unarchive|update|change|edit|set|toggle|pause|resume|raise|lower|bump|assign|unassign|remove|delete|pin|unpin|forget|log|mark|complete|switch|connect|disconnect|list|show|post|send)\b[^\n]{0,60}?\b(room|rooms|circle|agent|agent'?s?|mission|missions|task|tasks|memory|memories|automation|automations|automations?|check[\s-]?in|check[\s-]?ins|budget|cap|caps|theme|setting|settings|name|description|icon|vibe|spirit|appearance|public|private|accent|schedule|integration|integrations)\b/i;
+
+function looksLikeActionRequest(message: string): boolean {
+  return ACTION_INTENT_RE.test(message);
+}
 import { runOpenSwanSessionTurn, type OpenSwanDelegatedAgentDescriptor } from '../../../lib/openswanSessionRuntime';
 import type { OpenSwanTaskPlan } from '../../../lib/openswanTaskPlanner';
 import type { OpenSwanToolEvent } from '../../../lib/openswanToolRuntime';
@@ -184,6 +220,19 @@ import {
 } from '../../../lib/openswanVerificationRuntime';
 import { addArtifact, appendRunBrowserPlanEvent, appendRunToolEvent, mergeRunMetadata } from '../../../lib/agentRunSystem';
 import { getMainChatSessionActions } from '../../../lib/sessionPromptCatalog';
+import { auditComputerCapabilities } from '../../../lib/computerCapabilityRegistry';
+import { prepareComputerTaskExecution } from '../../../lib/computerTaskExecution';
+import { executeComputerTaskWithAgent } from '../../../lib/computerTaskRuntime';
+import { deriveGrantedScopesFromBrowserPermission, grantComputerTaskScopes, loadComputerTaskGrantIds } from '../../../lib/computerTaskGrantMemory';
+import { buildComputerTaskStateSteps, clearComputerTaskState, loadComputerTaskState, saveComputerTaskState, type ComputerTaskStateRecord } from '../../../lib/computerTaskState';
+import {
+  appendChatSessionArchiveEvent,
+  clearChatSessionArchive,
+  formatChatSessionArchiveBlock,
+  loadChatSessionArchive,
+  upsertChatSessionArchiveMessage,
+} from '../../../lib/chatSessionArchive';
+import { clearPendingBotMessages } from '../../../lib/pendingBotMessages';
 
 const REACTIONS_LIST = ['🔥', '💪', '👊', '💯', '⚡', '🎯'];
 const BLACKSWAN_ID = 'blackswan';
@@ -316,10 +365,15 @@ function getFallbackSpiritIdForSessionProfile(profile: SessionCodingProfile): st
   }
 }
 
-function buildSessionThinkingLabel(agentName: string, selectedModel: string, currentRunStep: string): string {
+// Thinking-verb vocabulary lives in `src/lib/thinkingVerbs.ts` so the
+// RunStatusBar + any other thinking surface can share it. The label
+// below intentionally returns JUST the verb — no agent name, no model,
+// no prefix — matching the "adjectives + colored dot, nothing else"
+// design. Specific run-step text from the agent runtime still wins
+// because it's load-bearing context.
+function buildSessionThinkingLabel(currentRunStep: string, verbIndex: number): string {
   if (currentRunStep.trim()) return currentRunStep.trim();
-  const modelLabel = selectedModel === 'auto' ? 'auto route' : selectedModel;
-  return `${agentName} is reasoning in ${modelLabel}`;
+  return pickThinkingVerb(verbIndex);
 }
 
 function formatMemoryRecencyLabel(ref: PromptMemoryReference): string {
@@ -656,6 +710,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [builderModalOpen, setBuilderModalOpen] = useState(false);
   const [cachedBuildArtifact, setCachedBuildArtifact] = useState<SwanBotStructuredArtifact | null>(null);
   const [chatMode, setChatMode] = useState<string>('none');
+  // Cline-style Plan-mode gate (Cline research item 1) is derived from
+  // OpenSwan's existing `chatMode === 'plan'` — no separate toggle. When
+  // the user selects OpenSwan's plan mode, the dispatcher refuses
+  // destructive execution kinds (see chatAutomationPlanner helpers).
+  const planActMode: 'plan' | 'act' = chatMode === 'plan' ? 'plan' : 'act';
   const [agentName, setAgentNameState] = useState<string>(MAIN_CHAT_AGENT_NAME);
   const [editingAgentName, setEditingAgentName] = useState(false);
   const [agentNameDraft, setAgentNameDraft] = useState('');
@@ -695,7 +754,412 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [pendingComputerUseTask, setPendingComputerUseTask] = useState('');
   const [pendingComputerUseActions, setPendingComputerUseActions] = useState<BrowserAction[]>([]);
   const [pendingComputerUsePlan, setPendingComputerUsePlan] = useState<BrowserPlanCardData | null>(null);
+  const [pendingComputerUseGrantSummary, setPendingComputerUseGrantSummary] = useState('');
+  const [pendingComputerUseApprovalSummary, setPendingComputerUseApprovalSummary] = useState('');
+  const [pendingComputerUseGrantIds, setPendingComputerUseGrantIds] = useState<Array<'browser_navigation' | 'browser_side_effect' | 'file_read' | 'file_write' | 'app_read' | 'app_action' | 'mcp_tool' | 'bridge_tool'>>([]);
   const [pendingComputerUseOrigin, setPendingComputerUseOrigin] = useState<{ messageId: string; runId?: string | null; planId: string } | null>(null);
+  const [computerTaskState, setComputerTaskState] = useState<ComputerTaskStateRecord | null>(null);
+  // Real Computer Use agent (Opus 4.7 + Browserbase via edge function). The
+  // permission dialog's Allow handler hands a task to this hook, which
+  // streams reasoning/actions/screenshots into ComputerUseLiveCard below.
+  const computerUseTask = useComputerUseTask(circleId);
+  const computerUsePostedKeyRef = useRef<string | null>(null);
+  // Use Computer console — the pop-up that collects the task before
+  // planning. Opens from the Quick Actions "Use Computer" chip and from
+  // the __COMPUTER_USE__ slash action.
+  const [showComputerUseConsole, setShowComputerUseConsole] = useState(false);
+  // OpenSwan console — launches an OpenSwan turn with a chosen mode.
+  // Surface triggered by the Quick Actions "OS OpenSwan" chip.
+  const [showOpenSwanConsole, setShowOpenSwanConsole] = useState(false);
+
+  const persistComputerTaskState = useCallback(async (args: {
+    task: string;
+    taskKind: string;
+    taskLabel: string;
+    phase: 'planning' | 'awaiting_approval' | 'executing' | 'completed' | 'failed' | 'blocked';
+    adapterId?: string | null;
+    blockers?: string[];
+    nextSteps?: string[];
+    grantedAccess?: string[];
+    accessPlan?: string | null;
+    runId?: string | null;
+    sessionId?: string | null;
+    liveUrl?: string | null;
+  }) => {
+    const nextState: ComputerTaskStateRecord = {
+      id: `computer_task_${circleId}_${activeThreadId || 'main'}`,
+      circleId,
+      threadId: activeThreadId || null,
+      task: args.task,
+      taskKind: args.taskKind,
+      taskLabel: args.taskLabel,
+      adapterId: args.adapterId || null,
+      phase: args.phase,
+      currentStep:
+        args.phase === 'planning' ? 'Plan task'
+          : args.phase === 'awaiting_approval' ? 'Approve access'
+            : args.phase === 'executing' ? 'Execute task'
+              : args.phase === 'completed' ? 'Summarize result'
+                : args.phase === 'blocked' ? 'Resolve blocker'
+                  : 'Task failed',
+      steps: buildComputerTaskStateSteps({
+        taskKind: args.taskKind,
+        phase: args.phase,
+      }),
+      blockers: (args.blockers || []).filter(Boolean).slice(0, 5),
+      nextSteps: (args.nextSteps || []).filter(Boolean).slice(0, 5),
+      grantedAccess: (args.grantedAccess || []).filter(Boolean).slice(0, 8),
+      accessPlan: args.accessPlan || null,
+      runId: args.runId || null,
+      sessionId: args.sessionId || null,
+      liveUrl: args.liveUrl || null,
+      updatedAt: new Date().toISOString(),
+    };
+    setComputerTaskState(nextState);
+    await saveComputerTaskState(nextState);
+  }, [activeThreadId, circleId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const existing = await loadComputerTaskState(circleId, activeThreadId).catch(() => null);
+      if (!cancelled) setComputerTaskState(existing);
+    })();
+    return () => { cancelled = true; };
+  }, [activeThreadId, circleId]);
+
+  const syncSessionArchiveMessage = useCallback((message: ChatMessage | null | undefined) => {
+    if (!message || !circleId) return;
+    void upsertChatSessionArchiveMessage({
+      circleId,
+      threadId: activeThreadId || null,
+      messageId: message.id,
+      dbId: message.dbId || null,
+      role: message.isBot ? 'assistant' : 'user',
+      content: message.content,
+      timestamp: message.timestamp?.getTime?.() || Date.now(),
+      userName: message.userName || null,
+      replyTo: message.replyTo?.content || null,
+      runId: message.runId || null,
+      isPending: message.isPending === true,
+      memoriesUsed: message.memoriesUsed,
+      memoryRefs: message.memoryRefs,
+      memoryRecommendations: message.memoryRecommendations,
+      executionStream: message.executionStream,
+      toolEvents: message.toolEvents,
+      verificationResults: message.verificationResults,
+      browserPlans: message.browserPlans,
+      browserPlanEvents: message.browserPlanEvents,
+      browserSessions: message.browserSessions,
+    }).catch((error) => {
+      console.warn('[ChatTab] session archive sync failed:', error);
+    });
+  }, [activeThreadId, circleId]);
+
+  const recordSessionArchiveError = useCallback((summary: string, detail?: string | null, touched?: string[]) => {
+    if (!circleId) return;
+    void appendChatSessionArchiveEvent({
+      circleId,
+      threadId: activeThreadId || null,
+      kind: 'error',
+      summary,
+      detail: detail || null,
+      touched,
+    }).catch((error) => {
+      console.warn('[ChatTab] session archive error event failed:', error);
+    });
+  }, [activeThreadId, circleId]);
+
+  const recordSessionArchiveEvent = useCallback((opts: {
+    kind: 'tool' | 'verification' | 'browser_plan' | 'browser_session' | 'memory' | 'computer_task';
+    summary: string;
+    detail?: string | null;
+    touched?: string[];
+    metadata?: Record<string, unknown>;
+  }) => {
+    if (!circleId) return;
+    void appendChatSessionArchiveEvent({
+      circleId,
+      threadId: activeThreadId || null,
+      kind: opts.kind,
+      summary: opts.summary,
+      detail: opts.detail || null,
+      touched: opts.touched,
+      metadata: opts.metadata,
+    }).catch((error) => {
+      console.warn('[ChatTab] session archive event failed:', error);
+    });
+  }, [activeThreadId, circleId]);
+
+  const loadSessionArchiveContext = useCallback(async () => {
+    if (!circleId) return null;
+    const archive = await loadChatSessionArchive(circleId, activeThreadId).catch(() => null);
+    return formatChatSessionArchiveBlock(archive, {
+      maxMessages: 10,
+      maxEvents: 12,
+      maxTouched: 24,
+      maxChars: 3200,
+    });
+  }, [activeThreadId, circleId]);
+
+  const executeSharedComputerTask = useCallback(async (taskText: string, options?: { planPrefix?: string }) => {
+    const trimmed = taskText.trim();
+    if (!trimmed) return;
+    const audit = await auditComputerCapabilities(circleId).catch(() => null);
+    const grantedIds = await loadComputerTaskGrantIds(circleId).catch(() => []);
+    const execution = prepareComputerTaskExecution({ task: trimmed, audit, grantedIds });
+    await persistComputerTaskState({
+      task: trimmed,
+      taskKind: execution.preview.kind,
+      taskLabel: execution.preview.label,
+      phase: 'planning',
+      adapterId: execution.entrypoint === 'browser_runtime' ? 'browser_adapter' : null,
+      grantedAccess: execution.grants.granted,
+      accessPlan: execution.grants.summary,
+      blockers: execution.readiness.ready ? [] : [execution.readiness.summary],
+      nextSteps: execution.entrypoint === 'browser_runtime'
+        ? ['Review the access plan', 'Approve browser access if the task looks right']
+        : ['Run the best available computer surface', 'Review the result and blockers'],
+    });
+    recordSessionArchiveEvent({
+      kind: 'computer_task',
+      summary: `Computer task planned: ${trimmed}`,
+      touched: [
+        'surface:computer_use',
+        `computer_task:${trimmed}`,
+        execution.preview.kind,
+      ],
+      metadata: {
+        entrypoint: execution.entrypoint,
+        capabilityProfile: execution.capabilityProfile,
+        recommendedMode: execution.recommendedMode,
+      },
+    });
+
+    const builtPlan = buildChatAutomationPlan({
+      message: options?.planPrefix ? `${options.planPrefix}${trimmed}` : trimmed,
+      selectedMode: chatMode,
+    });
+    const computerPlan: ChatAutomationPlan = builtPlan.execution.kind === 'run_computer_task'
+      ? builtPlan
+      : {
+          source: 'plain_chat',
+          intent: { kind: 'direct_chat', message: trimmed },
+          execution: { kind: 'run_computer_task', routeId: 'browser', commandText: trimmed },
+          risk: 'safe',
+          approval: { required: false, reason: null },
+          confidence: 0.9,
+          notes: ['Forced into the shared computer-task runtime.'],
+        };
+
+    setBotTyping(true);
+    setRunStatus('running');
+    try {
+      const outcome = await dispatchChatAutomationPlan(computerPlan, {
+        ctx: {
+          circleId,
+          userId: currentUserId || 'anonymous',
+          threadId: activeThreadId || undefined,
+          model: selectedModel !== 'auto' ? selectedModel : null,
+          chatMode: planActMode,
+          extras: {
+            audit,
+          },
+        },
+        handlers: {
+          run_computer_task: async () => {
+            if (execution.entrypoint === 'browser_runtime') {
+              const plan = await describeComputerUsePlan({ task: trimmed, circleId, agentName });
+              const planCard = toBrowserPlanCardData(plan);
+              return {
+                executionKind: 'run_computer_task',
+                status: 'completed',
+                message: 'Browser-backed computer task planned and ready for approval.',
+                data: {
+                  adapterId: 'browser_adapter',
+                  taskKind: execution.preview.kind,
+                  taskLabel: execution.preview.label,
+                  readinessSummary: execution.readiness.summary,
+                  recommendedMode: execution.recommendedMode,
+                  capabilityProfile: execution.capabilityProfile,
+                  grantSummary: execution.grants.summary,
+                  approvalSummary: execution.grants.approvalSummary,
+                  grantIds: execution.grants.outstanding.map((grant) => grant.id),
+                  browserPlan: planCard,
+                  browserActions: plan.actions,
+                },
+              };
+            }
+
+            const result = await executeComputerTaskWithAgent({
+              task: trimmed,
+              circleId,
+              userId: currentUserId || 'anonymous',
+              userName: currentUserName,
+              model: selectedModel !== 'auto' ? selectedModel : undefined,
+              audit,
+              grantedIds,
+              chatHistory: messages.slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n'),
+              sessionArchiveContext: await loadSessionArchiveContext() || undefined,
+              replyTo: replyTo?.content,
+            });
+
+            return {
+              executionKind: 'run_computer_task',
+              status: 'completed',
+              message: result.response,
+              warnings: result.warnings,
+              runId: result.runId || null,
+              data: {
+                adapterId: result.adapterId,
+                taskKind: result.execution.preview.kind,
+                taskLabel: result.execution.preview.label,
+                readinessSummary: result.execution.readiness.summary,
+                recommendedMode: result.execution.recommendedMode,
+                capabilityProfile: result.execution.capabilityProfile,
+                grantSummary: result.execution.grants.summary,
+                approvalSummary: result.execution.grants.approvalSummary,
+                grantIds: result.execution.grants.outstanding.map((grant) => grant.id),
+                handoffSuggestion: result.handoffSuggestion || null,
+              },
+            };
+          },
+        },
+        onOutcome: attachPlanDecisionToRun,
+      });
+
+      const prefix = outcome.data?.taskLabel
+        ? `**Use Computer** routed as ${String(outcome.data.taskLabel).toLowerCase()}.\n\n`
+        : '**Use Computer**\n\n';
+      const grantSummary = typeof outcome.data?.grantSummary === 'string' ? outcome.data.grantSummary : '';
+      const approvalSummary = typeof outcome.data?.approvalSummary === 'string' ? outcome.data.approvalSummary : '';
+      const grantIds = Array.isArray(outcome.data?.grantIds)
+        ? outcome.data.grantIds as Array<'browser_navigation' | 'browser_side_effect' | 'file_read' | 'file_write' | 'app_read' | 'app_action' | 'mcp_tool' | 'bridge_tool'>
+        : [];
+      const browserPlan = outcome.data?.browserPlan as BrowserPlanCardData | undefined;
+      const browserActions = outcome.data?.browserActions as BrowserAction[] | undefined;
+      const handoff = outcome.data?.handoffSuggestion as HandoffSuggestion | undefined;
+      if (browserPlan && browserActions) {
+        setPendingComputerUseTask(trimmed);
+        setPendingComputerUsePlan(browserPlan);
+        setPendingComputerUseActions(browserActions);
+        setPendingComputerUseGrantSummary(grantSummary);
+        setPendingComputerUseApprovalSummary(approvalSummary);
+        setPendingComputerUseGrantIds(grantIds);
+        setPendingComputerUseOrigin(null);
+        setShowComputerUsePermission(true);
+        const accessBlock = grantSummary
+          ? `\n\n${grantSummary}${approvalSummary ? `\n${approvalSummary}` : ''}`
+          : '';
+        await persistComputerTaskState({
+          task: trimmed,
+          taskKind: String(outcome.data?.taskKind || execution.preview.kind),
+          taskLabel: String(outcome.data?.taskLabel || execution.preview.label),
+          phase: 'awaiting_approval',
+          adapterId: String(outcome.data?.adapterId || 'browser_adapter'),
+          grantedAccess: execution.grants.granted,
+          accessPlan: grantSummary || execution.grants.summary,
+          nextSteps: ['Approve the task to start browser execution'],
+          blockers: approvalSummary ? [approvalSummary] : [],
+        });
+        recordSessionArchiveEvent({
+          kind: 'computer_task',
+          summary: `Computer task awaiting approval: ${trimmed}`,
+          touched: ['surface:computer_use', 'surface:browser', `computer_task:${trimmed}`],
+          metadata: {
+            adapterId: String(outcome.data?.adapterId || 'browser_adapter'),
+            grantSummary: grantSummary || execution.grants.summary,
+            approvalSummary: approvalSummary || null,
+          },
+        });
+        addBotMessage(`${prefix}${outcome.message}${accessBlock}`, undefined, { runId: outcome.runId || null, browserPlans: [browserPlan] });
+      } else {
+        const accessBlock = grantSummary
+          ? `\n\n${grantSummary}${approvalSummary ? `\n${approvalSummary}` : ''}`
+          : '';
+        const warningBlock = outcome.warnings?.length
+          ? `\n\n${outcome.warnings.map((warning) => `- ${warning}`).join('\n')}`
+          : '';
+        await persistComputerTaskState({
+          task: trimmed,
+          taskKind: String(outcome.data?.taskKind || execution.preview.kind),
+          taskLabel: String(outcome.data?.taskLabel || execution.preview.label),
+          phase: outcome.warnings?.length ? 'blocked' : 'completed',
+          adapterId: typeof outcome.data?.adapterId === 'string' ? outcome.data.adapterId : null,
+          runId: outcome.runId || null,
+          grantedAccess: execution.grants.granted,
+          accessPlan: grantSummary || execution.grants.summary,
+          blockers: outcome.warnings || [],
+          nextSteps: handoff ? [handoff.title] : [],
+        });
+        recordSessionArchiveEvent({
+          kind: 'computer_task',
+          summary: outcome.warnings?.length
+            ? `Computer task blocked: ${trimmed}`
+            : `Computer task completed without browser runtime: ${trimmed}`,
+          touched: ['surface:computer_use', `computer_task:${trimmed}`],
+          metadata: {
+            adapterId: typeof outcome.data?.adapterId === 'string' ? outcome.data.adapterId : null,
+            warnings: outcome.warnings || [],
+            runId: outcome.runId || null,
+          },
+        });
+        addBotMessage(`${prefix}${outcome.message}${accessBlock}${warningBlock}`, undefined, { runId: outcome.runId || null });
+      }
+
+      if (handoff) {
+        setPendingHandoff(handoff);
+      }
+      return { handled: true as const, browser: !!browserPlan };
+    } catch (error: any) {
+      await persistComputerTaskState({
+        task: trimmed,
+        taskKind: execution.preview.kind,
+        taskLabel: execution.preview.label,
+        phase: 'failed',
+        adapterId: execution.entrypoint === 'browser_runtime' ? 'browser_adapter' : null,
+        grantedAccess: execution.grants.granted,
+        accessPlan: execution.grants.summary,
+        blockers: [error?.message || 'Unknown error'],
+      });
+      recordSessionArchiveError(
+        `Use Computer failed: ${error?.message || 'Unknown error'}`,
+        typeof error?.stack === 'string' ? error.stack : null,
+        ['surface:computer_use', `computer_task:${trimmed}`],
+      );
+      addBotMessage(`**Use Computer** failed: ${error?.message || 'Unknown error'}`);
+      return { handled: true as const, browser: false as const };
+    } finally {
+      setRunStatus('idle');
+      setBotTyping(false);
+    }
+  }, [
+    activeThreadId,
+    agentName,
+    chatMode,
+    circleId,
+    currentUserId,
+    currentUserName,
+    loadSessionArchiveContext,
+    messages,
+    planActMode,
+    recordSessionArchiveError,
+    recordSessionArchiveEvent,
+    replyTo,
+    selectedModel,
+    persistComputerTaskState,
+  ]);
+
+  // Called by the console when the user submits a drafted task. Kicks off
+  // plan generation; on completion we transfer to ComputerUsePermissionDialog
+  // (below) which in turn hands the task to `useComputerUseTask`.
+  const runComputerUseTaskFromConsole = useCallback(async (taskText: string) => {
+    const trimmed = taskText.trim();
+    if (!trimmed) return;
+    setShowComputerUseConsole(false);
+    const shared = await executeSharedComputerTask(trimmed, { planPrefix: 'Use computer: ' });
+    if (shared?.handled) return;
+  }, [agentName, circleId, executeSharedComputerTask]);
   const [selectedBrowserSession, setSelectedBrowserSession] = useState<BrowserSessionRecord | null>(null);
   const [showMemoryViewer, setShowMemoryViewer] = useState(false);
   const [showPluginPicker, setShowPluginPicker] = useState(false);
@@ -703,6 +1167,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [showRunHistory, setShowRunHistory] = useState(false);
   const [retryingLedgerCheck, setRetryingLedgerCheck] = useState<{ messageId: string; checkId: string } | null>(null);
   const [runStatus, setRunStatus] = useState<'idle' | 'running' | 'delegated' | 'waiting_approval'>('idle');
+  // Drives the rotating "is noodling / is pondering / is cooking …"
+  // verbs in the typing indicator. Ticks only while the bot is
+  // actually typing so the interval doesn't run forever in the
+  // background. Resets to 0 on each new thinking session so the user
+  // always sees the full rotation from the start.
+  const [thinkingVerbIndex, setThinkingVerbIndex] = useState(0);
+  useEffect(() => {
+    if (!botTyping || runStatus !== 'idle') {
+      setThinkingVerbIndex(0);
+      return;
+    }
+    const t = setInterval(() => setThinkingVerbIndex((i) => i + 1), 1500);
+    return () => clearInterval(t);
+  }, [botTyping, runStatus]);
   const [activeSubagent, setActiveSubagent] = useState<{ name: string; icon: string; color: string } | null>(null);
   const [activeDelegatedSubagents, setActiveDelegatedSubagents] = useState<OpenSwanDelegatedAgentDescriptor[]>([]);
   const [currentRunStep, setCurrentRunStep] = useState<string>('');
@@ -1956,6 +2434,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       persistMessage();
     }
 
+    syncSessionArchiveMessage(msg);
+
     return msg;
   };
 
@@ -2039,6 +2519,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       });
     }
 
+    syncSessionArchiveMessage(msg);
+
     return msg;
   };
 
@@ -2063,19 +2545,159 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return msg;
   };
 
+  const nukeCurrentThread = useCallback(async () => {
+    if (!circleId || !activeThreadId) {
+      addBotMessage('No active thread to clear.');
+      return;
+    }
+
+    const { error } = await supabase
+      .from('messages')
+      .delete()
+      .eq('circle_id', circleId)
+      .eq('thread_id', activeThreadId);
+
+    if (error) {
+      addBotMessage(`Could not clear this thread: ${error.message}`);
+      return;
+    }
+
+    await clearPendingBotMessages(activeThreadId).catch(() => {});
+    setMessages([]);
+    setCachedBuildArtifact(null);
+    setBuilderRevisions([]);
+    setBuilderImages([]);
+    setPendingComputerUseTask('');
+    setPendingComputerUseActions([]);
+    setPendingComputerUsePlan(null);
+    setPendingComputerUseGrantSummary('');
+    setPendingComputerUseApprovalSummary('');
+    setPendingComputerUseGrantIds([]);
+    setPendingComputerUseOrigin(null);
+    setComputerUseSession(null);
+    setComputerTaskState(null);
+    computerUseTask.reset();
+    await clearComputerTaskState(circleId, activeThreadId).catch(() => {});
+    await clearChatSessionArchive(circleId, activeThreadId).catch(() => {});
+  }, [activeThreadId, circleId, computerUseTask]);
+
+  // When the Computer Use agent completes (or errors out), post its result
+  // to chat once. Deduped via a ref keyed on runId so React StrictMode
+  // double-invocation doesn't double-post.
+  useEffect(() => {
+    const { status, result, errorMessage, runId, sessionId, task } = computerUseTask.state;
+    if (status === 'idle' || status === 'starting' || status === 'running') {
+      if ((status === 'starting' || status === 'running') && task) {
+        void persistComputerTaskState({
+          task,
+          taskKind: 'browser_task',
+          taskLabel: 'Browser task',
+          phase: 'executing',
+          adapterId: 'browser_adapter',
+          runId: runId || null,
+          sessionId: sessionId || null,
+          liveUrl: computerUseTask.state.liveUrl || null,
+          grantedAccess: pendingComputerUseGrantIds,
+          accessPlan: pendingComputerUseGrantSummary || null,
+          nextSteps: ['Wait for the browser run to finish', 'Review the summary and findings'],
+        });
+      }
+      if (status === 'idle') computerUsePostedKeyRef.current = null;
+      return;
+    }
+    if (status === 'done' && result) {
+      const key = `done::${runId || sessionId || task}`;
+      if (computerUsePostedKeyRef.current === key) return;
+      computerUsePostedKeyRef.current = key;
+      void persistComputerTaskState({
+        task,
+        taskKind: 'browser_task',
+        taskLabel: 'Browser task',
+        phase: 'completed',
+        adapterId: 'browser_adapter',
+        runId: runId || null,
+        sessionId: sessionId || null,
+        liveUrl: computerUseTask.state.liveUrl || null,
+        grantedAccess: pendingComputerUseGrantIds,
+        accessPlan: pendingComputerUseGrantSummary || null,
+        nextSteps: [],
+      });
+      recordSessionArchiveEvent({
+        kind: 'computer_task',
+        summary: `Computer task completed: ${task}`,
+        touched: [
+          'surface:computer_use',
+          'surface:browser',
+          task ? `computer_task:${task}` : '',
+          computerUseTask.state.liveUrl ? `url:${computerUseTask.state.liveUrl}` : '',
+        ].filter(Boolean),
+        metadata: {
+          runId: runId || null,
+          sessionId: sessionId || null,
+          iterations: result.iterations,
+          tokenTotal: (result.tokens?.input || 0) + (result.tokens?.output || 0),
+        },
+      });
+      const tokenTotal = (result.tokens?.input || 0) + (result.tokens?.output || 0);
+      const header = `**Computer Use** complete — ${result.iterations} step${result.iterations === 1 ? '' : 's'}, ${tokenTotal.toLocaleString()} tokens`;
+      const findings = result.findings && result.findings.length
+        ? '\n\n' + result.findings.map((f, i) => {
+            const parts = [`${i + 1}. **${f.title || 'Item'}**`];
+            if (f.price) parts.push(`— ${f.price}`);
+            if (f.rating) parts.push(`(${f.rating})`);
+            const line = parts.join(' ');
+            const extra = [
+              f.notes ? `   ${f.notes}` : '',
+              f.url ? `   ${f.url}` : '',
+            ].filter(Boolean).join('\n');
+            return extra ? `${line}\n${extra}` : line;
+          }).join('\n')
+        : '';
+      addBotMessage(`${header}\n\n${result.summary}${findings}`, undefined, { runId });
+    } else if (status === 'error' && errorMessage) {
+      const key = `err::${task}::${errorMessage.slice(0, 80)}`;
+      if (computerUsePostedKeyRef.current === key) return;
+      computerUsePostedKeyRef.current = key;
+      void persistComputerTaskState({
+        task,
+        taskKind: 'browser_task',
+        taskLabel: 'Browser task',
+        phase: 'failed',
+        adapterId: 'browser_adapter',
+        runId: runId || null,
+        sessionId: sessionId || null,
+        liveUrl: computerUseTask.state.liveUrl || null,
+        grantedAccess: pendingComputerUseGrantIds,
+        accessPlan: pendingComputerUseGrantSummary || null,
+        blockers: [errorMessage],
+      });
+      recordSessionArchiveError(
+        `Computer task failed: ${task}`,
+        errorMessage,
+        ['surface:computer_use', task ? `computer_task:${task}` : ''].filter(Boolean),
+      );
+      addBotMessage(`**Computer Use** failed: ${errorMessage}`);
+    }
+  // addBotMessage intentionally not in deps — it's recreated every render,
+  // and the ref-based dedupe above guarantees one post per terminal state.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [computerUseTask.state.status, computerUseTask.state.result, computerUseTask.state.errorMessage, computerUseTask.state.runId, computerUseTask.state.sessionId, computerUseTask.state.task, computerUseTask.state.liveUrl, pendingComputerUseGrantIds, pendingComputerUseGrantSummary, persistComputerTaskState, recordSessionArchiveError, recordSessionArchiveEvent]);
+
   const updateBotMessage = (
     messageId: string,
     patch: Partial<Pick<ChatMessage, 'content' | 'artifacts' | 'wikiRefs' | 'researchRefs' | 'runId' | 'taskPlan' | 'toolEvents' | 'verificationResults' | 'executionStream' | 'browserPlans' | 'browserPlanEvents' | 'browserSessions' | 'isPending' | 'memoriesUsed' | 'memoryRefs' | 'memoryRecommendations' | 'delegatedSubagents'>>,
   ) => {
-    setMessages(prev => prev.map((message) => (
-      message.id === messageId
-        ? {
-            ...message,
-            ...patch,
-            timestamp: patch.isPending === false ? new Date() : message.timestamp,
-          }
-        : message
-    )));
+    let nextMessageToPersist: ChatMessage | null = null;
+    setMessages(prev => prev.map((message) => {
+      if (message.id !== messageId) return message;
+      nextMessageToPersist = {
+        ...message,
+        ...patch,
+        timestamp: patch.isPending === false ? new Date() : message.timestamp,
+      };
+      return nextMessageToPersist;
+    }));
+    syncSessionArchiveMessage(nextMessageToPersist);
   };
 
   const syncPersistedBotMessage = useCallback((message: ChatMessage | null | undefined) => {
@@ -2118,8 +2740,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (runId && nextPlansToPersist) {
       void mergeRunMetadata(runId, { browserPlans: nextPlansToPersist });
     }
+    syncSessionArchiveMessage(nextMessageToPersist);
     syncPersistedBotMessage(nextMessageToPersist);
-  }, [syncPersistedBotMessage]);
+  }, [syncPersistedBotMessage, syncSessionArchiveMessage]);
 
   const appendBrowserPlanEvent = useCallback((
     messageId: string,
@@ -2139,8 +2762,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       void mergeRunMetadata(runId, { browserPlanEvents: nextEventsToPersist });
       void appendRunBrowserPlanEvent({ runId, circleId, event });
     }
+    recordSessionArchiveEvent({
+      kind: 'browser_plan',
+      summary: event.summary,
+      touched: [
+        'surface:browser',
+        event.kind ? `browser_event:${event.kind}` : '',
+        event.backend ? `browser_backend:${event.backend}` : '',
+      ].filter(Boolean),
+      metadata: {
+        planId: event.planId,
+        backendLabel: event.backendLabel || null,
+        backendLiveUrl: event.backendLiveUrl || null,
+      },
+    });
+    syncSessionArchiveMessage(nextMessageToPersist);
     syncPersistedBotMessage(nextMessageToPersist);
-  }, [circleId, syncPersistedBotMessage]);
+  }, [circleId, recordSessionArchiveEvent, syncPersistedBotMessage, syncSessionArchiveMessage]);
 
   const upsertBrowserSessionRecord = useCallback((
     messageId: string,
@@ -2162,8 +2800,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (runId && nextSessionsToPersist) {
       void mergeRunMetadata(runId, { browserSessions: nextSessionsToPersist });
     }
+    recordSessionArchiveEvent({
+      kind: 'browser_session',
+      summary: `${record.task} (${record.status}) via ${record.backendLabel}`,
+      touched: [
+        'surface:browser',
+        record.backend ? `browser_backend:${record.backend}` : '',
+        record.currentUrl ? `url:${record.currentUrl}` : '',
+      ].filter(Boolean),
+      metadata: {
+        sessionId: record.id,
+        status: record.status,
+        backendLiveUrl: record.backendLiveUrl || null,
+      },
+    });
+    syncSessionArchiveMessage(nextMessageToPersist);
     syncPersistedBotMessage(nextMessageToPersist);
-  }, [syncPersistedBotMessage]);
+  }, [recordSessionArchiveEvent, syncPersistedBotMessage, syncSessionArchiveMessage]);
 
   const upsertBrowserSessionArtifacts = useCallback((
     messageId: string,
@@ -2242,6 +2895,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     setPendingComputerUseTask(plan.task);
     const approvalPlan = { ...plan, status: 'approval_requested' as const };
     setPendingComputerUsePlan(approvalPlan);
+    setPendingComputerUseGrantSummary('');
+    setPendingComputerUseApprovalSummary('');
+    setPendingComputerUseGrantIds([]);
     setPendingComputerUseOrigin({ messageId: message.id, runId: message.runId, planId: plan.planId });
     setPendingComputerUseActions(plan.actions.map((action) => ({
       id: action.id,
@@ -2471,6 +3127,76 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       recordChatActivity(circleId, 'slash').catch(() => {});
     }
 
+    // ─── Slash intercepts (pure lib calls, no planner) ──────────────────────
+    // These run before the model / planner so users see instant feedback
+    // for read/write ops that don't need a full agent turn.
+    if (content.startsWith('/v2')) {
+      try {
+        const { parseSwanbotV2Command, applySwanbotV2Command } = await import('../../../lib/swanbotRouting');
+        const parsed = parseSwanbotV2Command(content);
+        if (parsed) {
+          const { message } = applySwanbotV2Command(parsed.action);
+          addBotMessage(message, undefined, { localOnly: true });
+          return;
+        }
+      } catch (err: any) {
+        addBotMessage(`SwanBot v2 router error: ${err?.message || 'unknown'}`, undefined, { localOnly: true });
+        return;
+      }
+    }
+    if (content.startsWith('/memory-bank') || content.startsWith('/mb')) {
+      try {
+        const { executeMemoryBankCommand } = await import('../../../lib/memoryBankChatCommands');
+        const outcome = await executeMemoryBankCommand(content, {
+          circleId,
+          userId: currentUserId || 'anonymous',
+        });
+        if (outcome) {
+          addBotMessage(outcome.message, undefined, { localOnly: true });
+          return;
+        }
+      } catch (err: any) {
+        addBotMessage(`Memory Bank error: ${err?.message || 'unknown error'}`, undefined, { localOnly: true });
+        return;
+      }
+    }
+    // /desktop diag — full bridge health checklist so users can tell
+    // WHICH layer is broken when "open zoom" misbehaves. Runs a real
+    // launch against a sample app name if they pass one.
+    if (content.startsWith('/desktop')) {
+      try {
+        const rest = content.replace(/^\/desktop\s*/i, '').trim();
+        const wantsDiag = /^diag(nose)?\b/i.test(rest) || rest === '' || rest === 'health';
+        if (wantsDiag) {
+          const sampleArg = rest.replace(/^diag(nose)?\s*/i, '').replace(/^health\s*/i, '').trim();
+          const { runDesktopBridgeDiag, renderDesktopBridgeDiag } = await import('../../../lib/desktopBridgeDiag');
+          const result = await runDesktopBridgeDiag(sampleArg || undefined);
+          addBotMessage(renderDesktopBridgeDiag(result), undefined, { localOnly: true });
+          return;
+        }
+      } catch (err: any) {
+        addBotMessage(`Desktop diag failed: ${err?.message || 'unknown'}`, undefined, { localOnly: true });
+        return;
+      }
+    }
+
+    if (content.startsWith('/automation') || content.startsWith('/automations')) {
+      try {
+        const { executeAutomationCommand } = await import('../../../lib/automationChatCommands');
+        const outcome = await executeAutomationCommand(content, {
+          circleId,
+          userId: currentUserId || 'anonymous',
+        });
+        if (outcome) {
+          addBotMessage(outcome.message, undefined, { localOnly: true });
+          return;
+        }
+      } catch (err: any) {
+        addBotMessage(`Automation command error: ${err?.message || 'unknown error'}`, undefined, { localOnly: true });
+        return;
+      }
+    }
+
     if (activeThreadId) {
       void (async () => {
         try {
@@ -2490,6 +3216,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // Catches "post this to WordPress", "create a task", "remember that...", etc.
     // Only fires for non-slash-command messages
     const lowerContent = content.toLowerCase().trim();
+    if (!lowerContent.startsWith('/')) {
+      const plan = buildChatAutomationPlan({
+        message: content,
+        attachments: currentAttachments.map((attachment) => ({
+          uri: attachment.uri,
+          type: attachment.type,
+          id: attachment.id,
+        })),
+        selectedMode: chatMode,
+      });
+      if (plan.execution.kind === 'run_computer_task') {
+        const shared = await executeSharedComputerTask(content);
+        if (shared?.handled && !shared.browser) {
+          return;
+        }
+      }
+    }
+
     if (!lowerContent.startsWith('/')) {
       try {
         const { detectConversationalIntent, executeConversationalIntent } = await import('../../../lib/conversationalRouter');
@@ -2991,11 +3735,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       startCodingWorkbench(workbenchPrompt);
       setBotTyping(true);
       try {
+        const sessionArchiveContext = await loadSessionArchiveContext();
         const context: SwanBotContext = {
           userId: currentUserId || 'anonymous',
           circleId,
           userName: currentUserName,
           model: selectedModel !== 'auto' ? selectedModel : undefined,
+          sessionArchiveContext: sessionArchiveContext || undefined,
         };
 
         // Inject recent chat context so the AI can reference prior messages
@@ -3026,6 +3772,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             mode: chatMode as any,
             context: {
               chatHistory,
+              sessionArchiveContext: sessionArchiveContext || undefined,
               replyTo: replyTo ? replyTo.content : undefined,
             },
           });
@@ -3057,9 +3804,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // mode) so 90% of normal chat turns get token-by-token output.
             // Falls through to the batch runOpenSwanSessionTurn for complex
             // runs (parallel delegation, coding generation, agent dispatch).
+            // Action-intent messages ("create a room", "pause the
+            // automation", "update circle theme", etc.) need the tool
+            // catalog, which ONLY the runOpenSwanSessionTurn batch path
+            // exposes. Forcing them off the streaming fast-path lets
+            // BlackSwan actually call rooms.create / circle.update_* /
+            // missions.* instead of replying "I can't do that."
             const canStream = sessionDelegationMode !== 'parallel'
               && !isFigmaBuildRequest
-              && !isCodingGenerationRequest(cleanContent, sessionProfile);
+              && !isCodingGenerationRequest(cleanContent, sessionProfile)
+              && !looksLikeActionRequest(cleanContent);
 
             if (canStream) {
               try {
@@ -3073,6 +3827,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   model: selectedModel !== 'auto' ? selectedModel : undefined,
                   userName: currentUserName,
                   chatHistory,
+                  sessionArchiveContext: sessionArchiveContext || undefined,
                 });
                 const streamModel = resolveModelForSoul(
                   spiritIdForProfile(resolvedSessionProfile),
@@ -3139,7 +3894,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             const pendingMessage = addPendingBotMessage(
               (isCodingGenerationRequest(cleanContent, sessionProfile) || isFigmaBuildRequest)
                 ? 'BUILDING...\nOpenSwan is writing the first draft and preparing files.'
-                : 'OpenSwan is working through this request...',
+                // Use a verb from the shared rotation so the pending
+                // stub matches the typing indicator's tone.
+                : `${pickThinkingVerb(Math.floor(Date.now() / 1500))}…`,
             );
             const structured = await runOpenSwanSessionTurn({
               message: augmentedPrompt,
@@ -3174,14 +3931,41 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               }
             },
           });
-            const botResponse = structured.response;
+            // Map the runtime's tool actions (rooms.create, circle.update_*,
+            // agent.update_appearance, etc) into the UI's toolEvent shape
+            // so the execution strip on the assistant message actually
+            // shows "rooms.create — Created room X" instead of looking
+            // like nothing happened. Previously hardcoded to [], which is
+            // why "ask it to add a room and the screen just refreshes"
+            // felt like a silent no-op.
+            const runtimeToolEvents: OpenSwanToolEvent[] = (structured.toolEvents || []).map((evt: any) => ({
+              tool: evt.tool,
+              status: evt.status === 'passed' || evt.status === 'completed'
+                ? 'passed'
+                : evt.status === 'manual_required' ? 'manual_required'
+                : evt.status === 'blocked' ? 'blocked'
+                : 'failed',
+              summary: evt.summary || evt.result || evt.tool,
+            }));
+            // When Claude ran tools but didn't type a natural-language
+            // reply, synthesize a friendly confirmation from the tool
+            // results so the user always sees SOMETHING in the message.
+            const successfulToolSummaries = runtimeToolEvents
+              .filter((e) => e.status === 'passed')
+              .map((e) => e.summary)
+              .filter(Boolean);
+            const botResponse = (structured.response && structured.response.trim())
+              ? structured.response
+              : (successfulToolSummaries.length > 0
+                  ? `Done:\n- ${successfulToolSummaries.join('\n- ')}`
+                  : '');
             const { wikiRefs, researchRefs } = await buildChatInfluenceReferences({
               prompt: cleanContent,
               response: botResponse,
               circleId,
             });
             const executionStream = buildOpenSwanExecutionStream({
-              toolEvents: [],
+              toolEvents: runtimeToolEvents,
               verificationResults: structured.verificationResults,
             });
             updateBotMessage(pendingMessage.id, {
@@ -3197,7 +3981,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               browserPlanEvents: structured.browserPlanEvents,
               runId: structured.runId,
               taskPlan: structured.taskPlan,
-              toolEvents: [],
+              toolEvents: runtimeToolEvents,
               verificationResults: structured.verificationResults,
               delegatedSubagents: structured.delegatedSubagents,
               isPending: false,
@@ -3240,13 +4024,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             setActiveSubagent(null);
             setActiveDelegatedSubagents([]);
             setCurrentRunStep('');
-          } catch {
+          } catch (batchErr) {
+            recordSessionArchiveError(
+              batchErr instanceof Error ? `OpenSwan session failed: ${batchErr.message}` : 'OpenSwan session failed',
+              batchErr instanceof Error ? batchErr.stack || null : null,
+              ['surface:main_chat', 'runtime:openswan'],
+            );
             setRunStatus('idle');
             setActiveSubagent(null);
             setActiveDelegatedSubagents([]);
           }
         }
       } catch (err) {
+        recordSessionArchiveError(
+          err instanceof Error ? `Chat execution failed: ${err.message}` : 'Chat execution failed',
+          err instanceof Error ? err.stack || null : null,
+          ['surface:main_chat'],
+        );
         const errorMessage = (isCodingGenerationRequest(cleanContent, sessionProfile) || isFigmaBuildRequest)
           ? "Build failed before OpenSwan could finish the draft. Try again."
           : "Something went wrong. Try again.";
@@ -3329,35 +4123,74 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
     if (actionText === '__COMPUTER_USE__') {
       if (Platform.OS !== 'web') return;
-      const taskText = window.prompt('What should the agent do in the browser?');
-      if (!taskText || !taskText.trim()) return;
-      setPendingComputerUseTask(taskText.trim());
-      setPendingComputerUsePlan(null);
-      setPendingComputerUseOrigin(null);
-      setBotTyping(true);
-      planComputerUseActions(taskText.trim()).then(actions => {
-        setBotTyping(false);
-        setPendingComputerUseActions(actions);
-        setShowComputerUsePermission(true);
-      }).catch(() => {
-        setBotTyping(false);
-        const fallback: BrowserAction[] = [{
-          id: `action_${Date.now()}_0`, type: 'navigate', target: taskText.trim(),
-          description: `Complete: ${taskText.trim()}`, requiresApproval: true, status: 'pending',
-        }];
-        setPendingComputerUseActions(fallback);
-        setShowComputerUsePermission(true);
-      });
+      // Opens the in-app console instead of window.prompt — nicer UX, and
+      // gives room for template chips + saved tasks. The console submits
+      // back via onSubmit → runComputerUseTaskFromConsole.
+      setShowComputerUseConsole(true);
+      return;
+    }
+    if (actionText === '__OPENSWAN__') {
+      if (Platform.OS !== 'web') return;
+      // Opens the OpenSwan console — user picks a mode + writes a task,
+      // onSubmit routes through the planner with `run_openswan` + selected
+      // mode so the dispatcher + response contract apply.
+      setShowOpenSwanConsole(true);
+      return;
+    }
+    if (actionText === '__PAIR_DESKTOP__') {
+      if (Platform.OS !== 'web') return;
+      (async () => {
+        const { getDesktopBridgeHealth, pairDesktopBridge } = await import('../../../lib/desktopBridge');
+        const health = await getDesktopBridgeHealth();
+        if (!health) {
+          addBotMessage(
+            "**Desktop bridge unreachable.**\n\n" +
+            "Start it in a terminal:\n\n```\nnode scripts/claude-bridge.js\n```\n\n" +
+            "Then tap **Pair Desktop Bridge** again.",
+            undefined,
+            { localOnly: true },
+          );
+          return;
+        }
+        if (!health.supported) {
+          addBotMessage(
+            `**Bridge is on \`${health.platform}\` — desktop automation is macOS-only in Phase 1.** ` +
+            'Windows/Linux support is on the roadmap (see `docs/DESKTOP_AUTOMATION_PHASE_1_PLAN.md`).',
+            undefined,
+            { localOnly: true },
+          );
+          return;
+        }
+        const pair = await pairDesktopBridge();
+        if (!pair.ok) {
+          addBotMessage(
+            `**Pairing failed:** ${pair.error || 'unknown error'}. ` +
+            'Check that the bridge has write access to `~/.uc-desktop-token` and try again.',
+            undefined,
+            { localOnly: true },
+          );
+          return;
+        }
+        addBotMessage(
+          "**Desktop Bridge paired.** The agent can now launch apps, type text, and send key combos on your Mac when you approve each action.\n\n" +
+          "Available tools: `desktop.launch_app`, `desktop.focus_app`, `desktop.type_text`, `desktop.press_keys`, `desktop.list_running_apps`.\n\n" +
+          "**First keystroke:** macOS will prompt for Accessibility permission for whichever Terminal/iTerm is running the bridge. Grant it in System Settings → Privacy & Security → Accessibility.",
+          undefined,
+          { localOnly: true },
+        );
+      })();
       return;
     }
     if (actionText === '__NUKE__') {
-      const msg = 'Delete ALL messages in this circle? This cannot be undone.';
-      const doNuke = async () => {
-        const { error } = await supabase.from('messages').delete().eq('circle_id', circleId);
-        if (!error) setMessages([]);
-      };
-      if (Platform.OS === 'web') { if (window.confirm(msg)) doNuke(); }
-      else { import('react-native').then(({ Alert }) => Alert.alert('Nuke Chat', msg, [{ text: 'Cancel' }, { text: 'Delete All', style: 'destructive', onPress: doNuke }])); }
+      const msg = 'Delete the current chat thread? This cannot be undone.';
+      if (Platform.OS === 'web') {
+        if (window.confirm(msg)) void nukeCurrentThread();
+      } else {
+        import('react-native').then(({ Alert }) => Alert.alert('Nuke Chat', msg, [
+          { text: 'Cancel' },
+          { text: 'Delete Thread', style: 'destructive', onPress: () => { void nukeCurrentThread(); } },
+        ]));
+      }
       return;
     }
 
@@ -3368,7 +4201,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
 
     sendMessage(actionText);
-  }, [circleId, sendMessage, wallet]);
+  }, [nukeCurrentThread, sendMessage, wallet]);
 
   // ─── Governance Handlers ─────────────────────────────────────────────────
 
@@ -3532,11 +4365,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             toolEvents: nextToolEvents,
             verificationResults: message.verificationResults || [],
           });
-          setMessages((prev) => prev.map((entry) => (
-            entry.id === message.id
-              ? { ...entry, toolEvents: nextToolEvents, executionStream: nextExecutionStream }
-              : entry
-          )));
+          let nextMessageToPersist: ChatMessage | null = null;
+          setMessages((prev) => prev.map((entry) => {
+            if (entry.id !== message.id) return entry;
+            nextMessageToPersist = { ...entry, toolEvents: nextToolEvents, executionStream: nextExecutionStream };
+            return nextMessageToPersist;
+          }));
+          syncSessionArchiveMessage(nextMessageToPersist);
           if (message.runId && circleId) {
             void appendRunToolEvent({ runId: message.runId, circleId, event });
             void mergeRunMetadata(message.runId, { tool_events: nextToolEvents, execution_stream: nextExecutionStream });
@@ -3553,16 +4388,32 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         verificationResults: nextVerificationResults,
       });
 
-      setMessages((prev) => prev.map((entry) => (
-        entry.id === message.id
-          ? {
-              ...entry,
-              toolEvents: nextToolEvents,
-              verificationResults: nextVerificationResults,
-              executionStream: nextExecutionStream,
-            }
-          : entry
-      )));
+      let nextMessageToPersist: ChatMessage | null = null;
+      setMessages((prev) => prev.map((entry) => {
+        if (entry.id !== message.id) return entry;
+        nextMessageToPersist = {
+          ...entry,
+          toolEvents: nextToolEvents,
+          verificationResults: nextVerificationResults,
+          executionStream: nextExecutionStream,
+        };
+        return nextMessageToPersist;
+      }));
+      syncSessionArchiveMessage(nextMessageToPersist);
+      recordSessionArchiveEvent({
+        kind: 'verification',
+        summary: result.summary,
+        touched: [
+          `check:${result.check.label}`,
+          result.command ? `command:${result.command}` : '',
+        ].filter(Boolean),
+        metadata: {
+          checkId: result.check.id,
+          status: result.status,
+          ok: result.ok,
+          executed: result.executed,
+        },
+      });
 
       if (message.runId) {
         void mergeRunMetadata(message.runId, {
@@ -3576,7 +4427,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         current?.messageId === message.id && current.checkId === checkId ? null : current
       ));
     }
-  }, [circleId]);
+  }, [circleId, recordSessionArchiveEvent, syncSessionArchiveMessage]);
 
   const handlePromoteMemoryRef = useCallback(async (ref: PromptMemoryReference) => {
     const ok = await promoteMemory(ref.id);
@@ -3699,13 +4550,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const renderContent = (item: ChatMessage) => {
     return (
       <View>
-        {item.isPending ? (
-          <View style={{ marginBottom: 6, alignSelf: 'flex-start', backgroundColor: '#22c55e14', borderColor: '#22c55e40', borderWidth: 1, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 4 }}>
-            <Text style={{ color: '#86efac', fontSize: 9, fontWeight: '900', letterSpacing: 0.8, fontFamily: 'monospace' }}>
-              BUILDING NOW
-            </Text>
-          </View>
-        ) : null}
+        {/* Pending "BUILDING NOW" chip removed — the rotating verb in
+            the typing strip above the composer already tells the user
+            the agent is working, and this green pill flashed on every
+            single message before disappearing when the answer arrived.
+            Redundant + jumpy; stripped per user request. */}
         {/* Subagent delegation badge */}
         {item.delegatedTo && (
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 4 }}>
@@ -4230,6 +5079,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           {showMemoryViewer && (
             <MemoryViewer
               circleId={circleId}
+              threadId={activeThreadId || null}
               userId={currentUserId || undefined}
               accentColor={accentColor}
               onClose={() => setShowMemoryViewer(false)}
@@ -4457,7 +5307,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         />
       )}
 
-      {/* Enhanced typing indicator */}
+      {/* Enhanced typing indicator — rotates a witty verb every ~1.5s
+          so the user feels the agent is actually doing something
+          instead of reading a static "is working" line. The dot pulses
+          via the shared `uc-tab-dot-pulse` keyframe used on tab dots
+          elsewhere (sibling of the Quick Actions button-dot pattern). */}
       {botTyping && runStatus === 'idle' && (
         <>
           {codingWorkbenchPrompt && !showWorkbenchSidecar && (
@@ -4469,9 +5323,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             />
           )}
           <View style={[styles.typingBar, { borderColor: accentColor + '20' }]}>
-            <View style={[styles.typingDot, { backgroundColor: accentColor }]} />
-            <Text style={styles.typingText}>{buildSessionThinkingLabel(agentName, selectedModel, currentRunStep)}</Text>
-            <TypingDots />
+            <ThinkingDots scale={1} cycleDuration={5.5} glow />
+            <ThinkingLabel
+              text={buildSessionThinkingLabel(currentRunStep, thinkingVerbIndex)}
+            />
           </View>
         </>
       )}
@@ -4495,45 +5350,121 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         />
       )}
 
-      {/* ── Agent Assign/Spawn Panels ── */}
+      {/* ── Agent Assign/Spawn Panels — elegant centered consoles ── */}
       {showSpawnPanel && (
-        <View style={{ marginHorizontal: 16, marginBottom: 8, borderWidth: 1, borderColor: '#22c55e30', borderRadius: 12, overflow: 'hidden', maxWidth: CHAT_SURFACE_MAX_WIDTH, alignSelf: 'center' as any, width: '100%' }}>
-          <SpawnAgentPanel
-            circleId={circleId}
-            onCreated={(_id: string, _name: string) => {
-              setShowSpawnPanel(false);
+        <View
+          pointerEvents="box-none"
+          style={{
+            ...(Platform.OS === 'web' ? ({ position: 'fixed' as any }) : StyleSheet.absoluteFillObject),
+            top: 0, left: 0, right: 0, bottom: 0,
+            zIndex: 1200, alignItems: 'center', justifyContent: 'center', padding: 20,
+          }}
+        >
+          <Pressable
+            onPress={() => setShowSpawnPanel(false)}
+            accessibilityRole="button"
+            accessibilityLabel="Close Spawn Agent console"
+            style={{
+              ...(Platform.OS === 'web' ? ({ position: 'fixed' as any }) : StyleSheet.absoluteFillObject),
+              top: 0, left: 0, right: 0, bottom: 0,
+              backgroundColor: '#22c55e08',
+              ...(Platform.OS === 'web' ? ({
+                backdropFilter: 'blur(14px) saturate(1.15)',
+                WebkitBackdropFilter: 'blur(14px) saturate(1.15)',
+              } as any) : {}),
             }}
-            onCancel={() => setShowSpawnPanel(false)}
           />
+          <View
+            style={{
+              width: '100%' as any,
+              maxWidth: 640,
+              maxHeight: '92vh' as any,
+              borderRadius: 14,
+              borderWidth: 1,
+              borderColor: '#22c55e66',
+              overflow: 'hidden',
+              backgroundColor: '#0f172af2',
+              ...(Platform.OS === 'web' ? ({
+                boxShadow:
+                  '0 24px 70px rgba(0,0,0,0.55), 0 0 40px rgba(34,197,94,0.18), 0 0 0 1px rgba(255,255,255,0.02) inset',
+              } as any) : {}),
+            }}
+          >
+            <SpawnAgentPanel
+              circleId={circleId}
+              onCreated={(_id: string, _name: string) => {
+                setShowSpawnPanel(false);
+              }}
+              onCancel={() => setShowSpawnPanel(false)}
+            />
+          </View>
         </View>
       )}
 
       {showAssignPanel && (
-        <View style={{ marginHorizontal: 16, marginBottom: 8, padding: 18, backgroundColor: '#0a0f1c', borderWidth: 1, borderColor: '#f59e0b25', borderRadius: 12, maxWidth: CHAT_SURFACE_MAX_WIDTH, alignSelf: 'center' as any, width: '100%', gap: 12, ...(Platform.OS === 'web' ? { boxShadow: '4px 4px 0px #f59e0b0c, 0 0 30px #f59e0b06' } as any : {}) }}>
+        <View
+          pointerEvents="box-none"
+          style={{
+            ...(Platform.OS === 'web' ? ({ position: 'fixed' as any }) : StyleSheet.absoluteFillObject),
+            top: 0, left: 0, right: 0, bottom: 0,
+            zIndex: 1200, alignItems: 'center', justifyContent: 'center', padding: 20,
+          }}
+        >
+          <Pressable
+            onPress={() => { setShowAssignPanel(false); setSelectedAgent(null); setTaskPrompt(''); }}
+            accessibilityRole="button"
+            accessibilityLabel="Close Assign Agent console"
+            style={{
+              ...(Platform.OS === 'web' ? ({ position: 'fixed' as any }) : StyleSheet.absoluteFillObject),
+              top: 0, left: 0, right: 0, bottom: 0,
+              backgroundColor: '#f59e0b08',
+              ...(Platform.OS === 'web' ? ({
+                backdropFilter: 'blur(14px) saturate(1.15)',
+                WebkitBackdropFilter: 'blur(14px) saturate(1.15)',
+              } as any) : {}),
+            }}
+          />
+          <View style={{
+            width: '100%' as any,
+            maxWidth: 620,
+            maxHeight: '92vh' as any,
+            padding: 20,
+            backgroundColor: '#0f172af2',
+            borderWidth: 1,
+            borderColor: '#f59e0b66',
+            borderRadius: 14,
+            gap: 14,
+            ...(Platform.OS === 'web' ? ({
+              boxShadow: '0 24px 70px rgba(0,0,0,0.55), 0 0 40px rgba(245,158,11,0.18), 0 0 0 1px rgba(255,255,255,0.02) inset',
+            } as any) : {}),
+          }}>
           {/* Header */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-            <View style={{ width: 32, height: 32, borderRadius: 10, borderWidth: 1, borderColor: '#f59e0b35', backgroundColor: '#f59e0b08', alignItems: 'center', justifyContent: 'center', ...(Platform.OS === 'web' ? { boxShadow: '2px 2px 0px #f59e0b0c' } as any : {}) }}>
-              <Text style={{ color: '#f59e0b', fontSize: 13, fontWeight: '900', fontFamily: 'monospace' }}>{'>_'}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 12 }}>
+            <View style={{
+              width: 38, height: 38, borderRadius: 10, borderWidth: 1,
+              borderColor: '#f59e0b66', backgroundColor: '#f59e0b18',
+              alignItems: 'center', justifyContent: 'center',
+            }}>
+              <Text style={{ color: '#f59e0b', fontSize: 14, fontWeight: '800', fontFamily: 'monospace' }}>{'>_'}</Text>
             </View>
-            <View>
-              <Text style={{ color: '#fff', fontSize: 14, fontWeight: '900', letterSpacing: 2.5, fontFamily: 'monospace' }}>ASSIGN AGENT</Text>
-              <Text style={{ color: '#f59e0b50', fontSize: 10, fontFamily: 'monospace' }}>Dispatch a task to a connected agent</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: '#f8fafc', fontSize: 16, fontWeight: '700', letterSpacing: 0.3 }}>Assign Agent</Text>
+              <Text style={{ color: '#f59e0baa', fontSize: 12, marginTop: 2 }}>Dispatch a task to a connected agent</Text>
             </View>
-            <View style={{ flex: 1 }} />
             <Pressable
               onPress={() => { setShowAssignPanel(false); setSelectedAgent(null); setTaskPrompt(''); }}
               style={({ hovered, pressed }: any) => [
-                { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, borderWidth: 1, borderColor: '#1e293b' },
-                Platform.OS === 'web' && { transition: 'all 0.15s ease' },
-                hovered && { borderColor: '#888', backgroundColor: '#111' },
-                pressed && { backgroundColor: '#222' },
+                { width: 30, height: 30, borderRadius: 8, borderWidth: 1, borderColor: '#1e293b', alignItems: 'center', justifyContent: 'center' },
+                Platform.OS === 'web' && { transitionProperty: 'all', transitionDuration: '150ms' },
+                hovered && { borderColor: '#f59e0b66', backgroundColor: '#f59e0b10' },
+                pressed && { transform: [{ scale: 0.95 }] },
               ]}
             >
-              <Text style={{ color: '#666', fontSize: 10, fontWeight: '900', letterSpacing: 1, fontFamily: 'monospace' }}>ESC</Text>
+              <Text style={{ color: '#94a3b8', fontSize: 18, fontWeight: '600', lineHeight: 20 }}>{'×'}</Text>
             </Pressable>
           </View>
 
-          <View style={{ height: 1, backgroundColor: '#1e293b' }} />
+          <View style={{ height: 1, backgroundColor: '#f59e0b22' }} />
 
           {/* Agent selector — only active/building/idle agents shown */}
           {(() => {
@@ -4762,6 +5693,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               </Text>
             </Pressable>
           </View>
+          </View>
         </View>
       )}
 
@@ -4937,77 +5869,128 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           task={pendingComputerUseTask}
           agentName={agentName}
           actions={pendingComputerUseActions}
+          intent={pendingComputerUsePlan?.intent}
+          recommendedPermission={pendingComputerUsePlan?.recommendedPermission}
+          grantSummary={pendingComputerUseGrantSummary || null}
+          approvalSummary={pendingComputerUseApprovalSummary || null}
           onAllow={async (permission: ComputerUsePermission) => {
             setShowComputerUsePermission(false);
-            const fallbackPlan: BrowserPlanCardData = {
-              planId: `browser-plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-              task: pendingComputerUseTask,
-              backend: 'playwright_bridge',
-              backendLabel: 'Planned Browser Session',
-              requiresApproval: true,
-              status: 'planned',
-              actions: pendingComputerUseActions.map((a) => ({
-                id: a.id,
-                type: a.type,
-                target: a.target,
-                value: a.value,
-                description: a.description,
-                requiresApproval: a.requiresApproval,
-              })),
-            };
-            const session = await createSessionFromBrowserPlan(agentName, permission, pendingComputerUsePlan || fallbackPlan, {
-              circleId,
-              sourceMessageId: pendingComputerUseOrigin?.messageId,
-              sourceRunId: pendingComputerUseOrigin?.runId,
+            const taskToRun = pendingComputerUseTask;
+            const grantIdsToPersist = deriveGrantedScopesFromBrowserPermission(permission, pendingComputerUseGrantIds);
+            await persistComputerTaskState({
+              task: taskToRun,
+              taskKind: 'browser_task',
+              taskLabel: 'Browser task',
+              phase: 'executing',
+              adapterId: 'browser_adapter',
+              grantedAccess: Array.from(new Set([...pendingComputerUseGrantIds, ...grantIdsToPersist])),
+              accessPlan: pendingComputerUseGrantSummary || null,
+              nextSteps: ['Run browser task', 'Summarize findings'],
             });
-            setComputerUseSession(session);
-            if (pendingComputerUseOrigin?.messageId) {
-              upsertBrowserSessionRecord(
-                pendingComputerUseOrigin.messageId,
-                toBrowserSessionRecord(session),
-                pendingComputerUseOrigin.runId,
-              );
-            }
-            finalizeBrowserPlanFromSession(session);
-            addBotMessage(`**Computer Use** session started via ${session.backendLabel}: ${session.task} (${session.actions.length} actions planned)`);
-            // Auto-execute if trusted
-            if (session.status === 'executing') {
-              executeComputerUsePlan(session, (completedAction, idx) => {
-                setComputerUseSession(s => {
-                  if (!s) return s;
-                  const newActions = [...s.actions];
-                  newActions[idx] = completedAction;
-                  return { ...s, actions: newActions };
-                });
-              }).then(result => {
-                setComputerUseSession(s => s ? {
-                  ...s,
-                  status: result.success ? 'completed' : 'failed',
-                  actions: result.actions,
-                  currentUrl: result.currentUrl || s.currentUrl,
-                  backendSessionId: result.backendSessionId || s.backendSessionId,
-                  backendLiveUrl: result.backendLiveUrl || s.backendLiveUrl,
-                } : s);
-                finalizeBrowserPlanFromSession(session, result);
-                addBotMessage(`**Computer Use** ${result.success ? 'completed' : 'failed'}: ${result.message}`);
-              }).catch(() => {
-                setComputerUseSession(s => s ? { ...s, status: 'failed' } : s);
-                finalizeBrowserPlanFromSession(session, { success: false });
-              });
-            }
+            // Snapshot + clear pending state before handing off to the
+            // agent runtime so re-clicks don't double-fire.
             setPendingComputerUseTask('');
             setPendingComputerUseActions([]);
             setPendingComputerUsePlan(null);
+            setPendingComputerUseGrantSummary('');
+            setPendingComputerUseApprovalSummary('');
+            setPendingComputerUseGrantIds([]);
             setPendingComputerUseOrigin(null);
+            computerUsePostedKeyRef.current = null;
+            await grantComputerTaskScopes(circleId, grantIdsToPersist).catch(() => {});
+            const started = await computerUseTask.run(taskToRun);
+            if (!started.started) {
+              addBotMessage(`**Computer Use** could not start: ${started.reason || 'unknown error'}`);
+              return;
+            }
+            addBotMessage(`**Computer Use** starting — ${taskToRun}`);
           }}
           onDeny={() => {
             setShowComputerUsePermission(false);
+            setComputerTaskState(null);
+            void clearComputerTaskState(circleId, activeThreadId).catch(() => {});
             setPendingComputerUseTask('');
             setPendingComputerUseActions([]);
             setPendingComputerUsePlan(null);
+            setPendingComputerUseGrantSummary('');
+            setPendingComputerUseApprovalSummary('');
+            setPendingComputerUseGrantIds([]);
             setPendingComputerUseOrigin(null);
           }}
         />
+      )}
+
+      {Platform.OS === 'web' && (
+        <ComputerUseConsole
+          visible={showComputerUseConsole}
+          accentColor={accentColor}
+          taskState={computerTaskState}
+          onClose={() => setShowComputerUseConsole(false)}
+          onSubmit={runComputerUseTaskFromConsole}
+        />
+      )}
+
+      {Platform.OS === 'web' && (
+        <OpenSwanConsole
+          visible={showOpenSwanConsole}
+          accentColor={accentColor}
+          currentMode={chatMode}
+          currentModel={selectedModel === 'auto' ? null : selectedModel}
+          onClose={() => setShowOpenSwanConsole(false)}
+          onSubmit={({ task, mode, model: modelOverride }) => {
+            setShowOpenSwanConsole(false);
+            // Sync the mode into the chat state so the rest of the turn
+            // renders with the right accent + response contract. The
+            // sendMessage path will see `chatMode === mode` and pass it
+            // into `buildChatAutomationPlan({ selectedMode })`.
+            setChatMode(mode);
+            if (modelOverride && modelOverride !== selectedModel) {
+              handleSessionModelChange(modelOverride);
+            }
+            // Fire the task through the normal send path so it goes
+            // through the planner + dispatcher + HITL gate.
+            setInput(task);
+            sendMessage(task);
+          }}
+        />
+      )}
+
+      {Platform.OS === 'web' && computerUseTask.state.status !== 'idle' && (
+        <View
+          // Floating, draggable-feeling card pinned bottom-right while the
+          // Computer Use agent works. Collapses to summary when done.
+          style={{
+            position: 'fixed' as any,
+            bottom: 20,
+            right: 20,
+            width: 460,
+            maxWidth: 'calc(100vw - 40px)' as any,
+            maxHeight: '80vh' as any,
+            zIndex: 950,
+          }}
+        >
+          <ComputerUseLiveCard
+            task={computerUseTask.state.task}
+            status={computerUseTask.state.status === 'starting' ? 'starting' : computerUseTask.state.status}
+            sessionId={computerUseTask.state.sessionId}
+            liveUrl={computerUseTask.state.liveUrl}
+            reasoning={computerUseTask.state.reasoning}
+            actions={computerUseTask.state.actions}
+            screenshots={computerUseTask.state.screenshots}
+            result={computerUseTask.state.result}
+            errorMessage={computerUseTask.state.errorMessage}
+            accentColor={accentColor}
+            usage={computerUseTask.state.usage}
+            pendingConfirmation={computerUseTask.state.pendingConfirmation}
+            onConfirmationPick={(id, choice) => {
+              if (!id) return;
+              resolveComputerUseConfirmation(id, choice).catch((err) => {
+                addBotMessage(`Confirmation could not be recorded: ${err?.message || 'unknown error'}`);
+              });
+            }}
+            onCancel={() => computerUseTask.cancel()}
+          />
+        </View>
       )}
 
       {/* Enhanced input with model selector + quick actions + mode selector */}
@@ -5045,7 +6028,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         />
       )}
 
+      {/* HITL pending approvals — v2 M3d writes to agent_run_approvals
+          from `approvals.request`; surface inline so users can
+          approve/reject without leaving chat. */}
+      {currentUserId ? (
+        <RunApprovalBanner circleId={circleId} userId={currentUserId} accentColor={accentColor} />
+      ) : null}
+
       <EnhancedInput
+        circleId={circleId}
         input={input}
         onInputChange={handleInputChange}
         onSend={sendMessage}
@@ -5081,6 +6072,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           setMessages([]);
           addBotMessage(`Mind reset. ${cleared > 0 ? `Cleared ${cleared} memories. ` : ''}Starting fresh.`);
         }}
+        onLocalBotMessage={(md: string) => addBotMessage(md, undefined, { localOnly: true })}
       />
       </KeyboardAvoidingView>
     </View>
@@ -6196,6 +7188,12 @@ const QA_CIRCLE_POINTS = [
   { x: 8.6, y: 16.3 },
   { x: 5.6, y: 8.2 },
 ];
+// Five distinct formations. The keyframe builder below emits an
+// explicit `100% { formation[0] }` frame that closes the loop with a
+// dna2 → circle morph, so there is no need for a duplicate "return"
+// formation — that used to produce a dead 16.7% hold at the end of
+// every cycle (dots arrived at circle early, then sat still until the
+// loop restarted, which read as a hitch before the loop).
 const qaFormations: Array<{ name: string; pos: Array<{ x: number; y: number }> }> = [
   // Circle
   { name: 'circle', pos: QA_CIRCLE_POINTS },
@@ -6231,8 +7229,6 @@ const qaFormations: Array<{ name: string; pos: Array<{ x: number; y: number }> }
     { x: 12.6, y: 14.9 },
     { x: 15.1, y: 6.6 },
   ]},
-  // Circle return — keeps hover loop aligned with the same 2-top / 2-bottom / side layout
-  { name: 'circle_return', pos: QA_CIRCLE_POINTS },
 ];
 
 function ensureQuickActionStyles() {
@@ -6265,34 +7261,38 @@ function ensureQuickActionStyles() {
 ${dotKeyframes}
 @keyframes uc-qa-glow { 0%,100% { opacity:.68; transform:scale(1); } 50% { opacity:1; transform:scale(1.16); } }
 @keyframes uc-qa-char-shimmer { 0%,100% { opacity:.82; } 50% { opacity:1; filter:brightness(1.18); } }
+/* Shape pulse aligned to the 5-formation morph beats (20% each), so
+ * every shape change lands on a formation change and the final
+ * tall-oval → circle morph gets the full 80% → 100% window instead
+ * of snapping in the last 7%. */
 @keyframes uc-qa-shape {
-  0%, 18% {
-    width: 3px;
-    height: 3px;
+  0% {
+    width: 3px; height: 3px;
     border-radius: 999px;
     transform: rotate(0deg);
   }
-  25%, 43% {
-    width: 3px;
-    height: 3px;
+  20% {
+    width: 3px; height: 3px;
+    border-radius: 999px;
+    transform: rotate(0deg);
+  }
+  40% {
+    width: 3px; height: 3px;
     border-radius: 1px;
     transform: rotate(45deg);
   }
-  50%, 68% {
-    width: 3px;
-    height: 3px;
+  60% {
+    width: 3px; height: 3px;
     border-radius: 1px;
     transform: rotate(0deg);
   }
-  75%, 93% {
-    width: 2px;
-    height: 4.2px;
+  80% {
+    width: 2px; height: 4.2px;
     border-radius: 999px;
     transform: rotate(24deg);
   }
   100% {
-    width: 3px;
-    height: 3px;
+    width: 3px; height: 3px;
     border-radius: 999px;
     transform: rotate(0deg);
   }
@@ -6368,6 +7368,7 @@ function QuickActionsHeader({ expanded, isHovered, onPress, onHoverIn, onHoverOu
 }
 
 function EnhancedInput({
+  circleId: composerCircleId,
   input,
   onInputChange,
   onSend,
@@ -6392,6 +7393,7 @@ function EnhancedInput({
   showWorkbenchSidecar,
   onToggleBuilder,
   onResetMind,
+  onLocalBotMessage,
   openswanSessionCount,
   memoryCount,
   builderRevisionCount,
@@ -6485,11 +7487,27 @@ function EnhancedInput({
         return;
       }
     }
+    // Tab toggles OpenSwan mode between `plan` (read-only by the
+    // dispatcher gate) and `execute` (act). Only fires when the slash
+    // palette is closed and the input is empty so it doesn't steal Tab
+    // from completion flows.
+    if (
+      Platform.OS === 'web' &&
+      e.nativeEvent?.key === 'Tab' &&
+      !e.nativeEvent?.shiftKey &&
+      !showSlashCommands &&
+      !input.trim() &&
+      onModeChange
+    ) {
+      e.preventDefault?.();
+      onModeChange(chatMode === 'plan' ? 'execute' : 'plan');
+      return;
+    }
     if (Platform.OS === 'web' && e.nativeEvent?.key === 'Enter' && !e.nativeEvent?.shiftKey) {
       e.preventDefault?.();
       if (input.trim()) onSend();
     }
-  }, [applySlashCommand, highlightedSlashIndex, input, onSend, showSlashCommands, slashCommands]);
+  }, [applySlashCommand, highlightedSlashIndex, input, onSend, showSlashCommands, slashCommands, chatMode, onModeChange]);
 
   const allModels = [...CHAT_MODELS, ...customModels];
   const currentModel = allModels.find(m => m.id === selectedModel) || CHAT_MODELS[0];
@@ -6543,7 +7561,7 @@ function EnhancedInput({
 
           {/* Model Dropdown */}
           {showModelPicker && !showAddModel && (
-            <View style={[styles.dropdownPanel, { maxHeight: 480, width: 300, left: 0, right: 'auto' }, ...(Platform.OS === 'web' ? [{ boxShadow: '4px 4px 0px rgba(99,102,241,0.05), 0 12px 40px rgba(0,0,0,0.6)', overflowY: 'auto' } as any] : [])]}>
+            <AnimatedPopup style={[styles.dropdownPanel, { maxHeight: 480, width: 300, left: 0, right: 'auto' }, ...(Platform.OS === 'web' ? [{ boxShadow: '4px 4px 0px rgba(99,102,241,0.05), 0 12px 40px rgba(0,0,0,0.6)', overflowY: 'auto' } as any] : [])]}>
               {MODEL_GROUPS.map(group => {
                 const groupModels = CHAT_MODELS.filter((m: any) => m.group === group.key);
                 if (groupModels.length === 0) return null;
@@ -6635,12 +7653,12 @@ function EnhancedInput({
                   <Text style={styles.dropdownItemDesc}>Add any model from HF Hub</Text>
                 </View>
               </Pressable>
-            </View>
+            </AnimatedPopup>
           )}
 
           {/* Add Model Panel */}
           {showModelPicker && showAddModel && (
-            <View style={[styles.dropdownPanel, styles.dropdownPanelWide, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)' } as any] : [])]}>
+            <AnimatedPopup style={[styles.dropdownPanel, styles.dropdownPanelWide, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)' } as any] : [])]}>
               <AddModelPanel
                 accentColor={accentColor}
                 onModelAdded={(model) => {
@@ -6651,7 +7669,7 @@ function EnhancedInput({
                 }}
                 onClose={() => setShowAddModel(false)}
               />
-            </View>
+            </AnimatedPopup>
           )}
         </View>
 
@@ -6676,7 +7694,7 @@ function EnhancedInput({
 
           {/* Quick Actions Dropdown */}
           {showQuickActions && (
-            <View
+            <AnimatedPopup
               {...(Platform.OS === 'web' ? { className: 'uc-actions-sysfont' } as any : {})}
               style={[styles.dropdownPanel, styles.dropdownPanelWide, ...(Platform.OS === 'web' ? [{ boxShadow: '4px 4px 0px rgba(99,102,241,0.05), 0 12px 40px rgba(0,0,0,0.6)' } as any] : [])]}
             >
@@ -6803,7 +7821,7 @@ function EnhancedInput({
                   </View>
                 ))}
               </ScrollView>
-            </View>
+            </AnimatedPopup>
           )}
         </View>
 
@@ -6837,7 +7855,7 @@ function EnhancedInput({
           </Pressable>
 
           {showModePicker && (
-            <View style={[styles.dropdownPanel, styles.dropdownPanelControlCenter, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)' } as any] : [])]}>
+            <AnimatedPopup style={[styles.dropdownPanel, styles.dropdownPanelControlCenter, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)' } as any] : [])]}>
               <Text style={styles.dropdownTitle}>OpenSwan Control Center</Text>
               <View style={styles.controlCenterStatusBand}>
                 <View style={styles.controlCenterStatusHeader}>
@@ -6974,9 +7992,17 @@ function EnhancedInput({
                   </Pressable>
                 );
               })}
-            </View>
+            </AnimatedPopup>
           )}
         </View>
+
+        {/* Cost footer + Desktop bridge status — right-aligned. */}
+        <View style={{ flex: 1 }} />
+        <DesktopBridgeStatusChip
+          accentColor={accentColor}
+          onMessage={(md) => onLocalBotMessage?.(md)}
+        />
+        <ChatCostFooter circleId={composerCircleId} accentColor={accentColor} />
       </View>
 
       {/* Attachment preview strip */}

@@ -18,6 +18,7 @@
  */
 
 import { supabase } from './supabase';
+import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './privacyMode';
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
 
@@ -50,6 +51,10 @@ export function streamChatResponse(opts: StreamChatOpts): StreamHandle {
   let coalesceTimer: ReturnType<typeof setTimeout> | null = null;
 
   const run = async () => {
+    if (shouldBlockExternalAiProvider('anthropic')) {
+      opts.onError(getStrictLocalAiModeMessage('anthropic'));
+      return;
+    }
     // Get current session token for auth
     const { data: { session } } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
     if (!session?.access_token) {

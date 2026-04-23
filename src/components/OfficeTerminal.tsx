@@ -25,6 +25,7 @@ import {
   deleteTerminalMessage,
 } from '../lib/officeTerminal';
 import { supabase } from '../lib/supabase';
+import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from '../lib/privacyMode';
 import { CircleOfficeAgent } from '../lib/circleOffice';
 import { awardPoints } from '../services/rewardService';
 import { getPointsForModel } from '../lib/badges';
@@ -874,11 +875,13 @@ function LocalShellPanel() {
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
 
-  // Check bridge connection on mount + periodically
+  // Check bridge connection on mount + periodically. 30s is fine — bridge
+  // up/down transitions are rare and the user gets immediate feedback from
+  // command failures if the bridge dies mid-session.
   useEffect(() => {
     const check = () => detectClaudeCodeBridge().then(setBridgeOk);
     check();
-    const interval = setInterval(check, 15000);
+    const interval = setInterval(check, 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -1617,6 +1620,9 @@ export default function OfficeTerminal({
       setHistoryIdx(-1);
       setSending(true);
       try {
+        if (shouldBlockExternalAiProvider('openai')) {
+          throw new Error(getStrictLocalAiModeMessage('openai'));
+        }
         const { data, error } = await supabase.functions.invoke('image-generate', {
           body: { provider: 'openai', prompt: imagePrompt, circleId },
         });

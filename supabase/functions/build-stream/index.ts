@@ -18,17 +18,28 @@
 // Deploy: npx supabase functions deploy build-stream
 // Secrets: ANTHROPIC_API_KEY required
 
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
+import { logClaudeUsage, type UsageBreakdown } from "../_claude/anthropic.ts";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Expose-Headers": "content-type",
 };
 
+// Canonical short IDs (no date suffix). `claude-opus` points at 4.7 (the
+// latest), matching the rest of the app — build-stream had been left on
+// 4.6 during the earlier sweep because it wasn't deployed yet.
 const CLAUDE_MODEL_MAP: Record<string, string> = {
-  "auto": "claude-haiku-4-5-20251001",
-  "claude-haiku": "claude-haiku-4-5-20251001",
+  "auto": "claude-haiku-4-5",
+  "claude-haiku": "claude-haiku-4-5",
+  "claude-haiku-4-5": "claude-haiku-4-5",
   "claude-sonnet": "claude-sonnet-4-6",
-  "claude-opus": "claude-opus-4-6",
+  "claude-sonnet-4-6": "claude-sonnet-4-6",
+  "claude-opus": "claude-opus-4-7",
+  "claude-opus-4-7": "claude-opus-4-7",
+  "claude-opus-4-6": "claude-opus-4-6",
 };
 
 const DEFAULT_SYSTEM = `You are OpenSwan's Web Page Builder, a senior frontend engineer who ships
@@ -105,7 +116,10 @@ Deno.serve(async (req) => {
     body: JSON.stringify({
       model,
       max_tokens: 4096,
-      system,
+      // cache_control on the system prompt — DEFAULT_SYSTEM is stable across
+      // all /build-stream calls and system_extra is typically short or
+      // reused, so this yields ephemeral cache reads on repeat builds.
+      system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
       stream: true,
       messages: [
         { role: "user", content: `Build a landing page for: ${body.brief}` },
@@ -132,6 +146,9 @@ Deno.serve(async (req) => {
       let fullText = "";
       let tokensOut = 0;
       let lastPhaseEmit = 0;
+      // Track full usage breakdown for cache-aware telemetry. message_start
+      // has the initial input + cache numbers; message_delta updates output.
+      const usage: UsageBreakdown = { uncachedIn: 0, cacheCreate: 0, cacheRead: 0, output: 0 };
 
       const emit = (event: string, data: Record<string, unknown>) => {
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
@@ -185,8 +202,16 @@ Deno.serve(async (req) => {
                 emit("delta", { text: delta.text });
                 emitPhaseIfDue();
               }
+            } else if (eventName === "message_start") {
+              const u = data?.message?.usage;
+              if (u) {
+                usage.uncachedIn  = u.input_tokens                ?? 0;
+                usage.cacheCreate = u.cache_creation_input_tokens ?? 0;
+                usage.cacheRead   = u.cache_read_input_tokens     ?? 0;
+              }
             } else if (eventName === "message_delta" && data?.usage?.output_tokens) {
               tokensOut = data.usage.output_tokens;
+              usage.output = data.usage.output_tokens;
             } else if (eventName === "error") {
               emit("error", { error: data?.error?.message || "upstream stream error" });
               controller.close();
@@ -196,6 +221,22 @@ Deno.serve(async (req) => {
         }
         emit("done", { text: fullText, tokens_out: tokensOut });
         controller.close();
+
+        // Fire-and-forget usage log. build-stream has no circle/user in the
+        // request body (BYO-page-builder) so we log model + usage only so
+        // the aggregate cost dashboard reflects real build spend.
+        const svcUrl = Deno.env.get("SUPABASE_URL");
+        const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+        if (svcUrl && svcKey) {
+          logClaudeUsage(createClient(svcUrl, svcKey), {
+            circleId: null,
+            userId: null,
+            source: "build-stream",
+            model,
+            usage,
+            metadata: { brief_length: body.brief.length },
+          });
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         emit("error", { error: msg });

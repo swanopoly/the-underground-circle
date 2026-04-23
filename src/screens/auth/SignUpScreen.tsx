@@ -11,6 +11,7 @@ import {
 import { supabase } from '../../lib/supabase';
 import { showAlert } from '../../lib/alert';
 import { validateUsername, validateEmail, validatePassword, sanitizeString, LENGTH_LIMITS } from '../../lib/validation';
+import { signInWithGoogle } from '../../lib/googleCreds';
 
 export default function SignUpScreen({ navigation }: any) {
   const [username, setUsername] = useState('');
@@ -122,6 +123,22 @@ export default function SignUpScreen({ navigation }: any) {
           </Text>
         </TouchableOpacity>
 
+        {/* Sign up with Google — identity via Supabase Auth + asks for
+            the full Workspace scope set so the user's agents can
+            immediately read their Gmail / Calendar / Drive. They can
+            still pick the email+password path above if they'd rather
+            connect Google later from Settings. */}
+        <TouchableOpacity
+          style={[styles.googleButton, loading && styles.buttonDisabled]}
+          disabled={loading}
+          onPress={async () => {
+            const { ok, reason } = await signInWithGoogle({ withWorkspaceScopes: true });
+            if (!ok && reason) setError(reason);
+          }}
+        >
+          <Text style={styles.googleButtonText}>Continue with Google</Text>
+        </TouchableOpacity>
+
         <TouchableOpacity onPress={() => navigation.navigate('Login')}>
           <Text style={styles.linkText}>
             Already in? <Text style={styles.linkBold}>Log in.</Text>
@@ -202,6 +219,22 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '800',
     letterSpacing: 2,
+  },
+  googleButton: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: '#3c3c3c',
+    borderRadius: 8,
+    padding: 14,
+    alignItems: 'center',
+    marginBottom: 16,
+    marginTop: -8,
+  },
+  googleButtonText: {
+    color: '#d4d4d4',
+    fontSize: 14,
+    fontWeight: '600',
+    letterSpacing: 1,
   },
   linkText: {
     color: '#666',

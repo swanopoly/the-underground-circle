@@ -13,6 +13,7 @@ import {
   getMemberEngagement,
 } from '../../../lib/analytics';
 import { CircleAnalytics, MemberEngagement } from '../../../types';
+import ClaudeUsagePanel from '../../../components/ClaudeUsagePanel';
 
 type DateRange = '7d' | '30d' | '90d';
 
@@ -163,6 +164,8 @@ export default function AnalyticsTab({ circleId }: { circleId: string }) {
           <Text style={styles.emptyTable}>No member data for this period.</Text>
         )}
       </View>
+
+      <ClaudeUsagePanel circleId={circleId} />
     </ScrollView>
   );
 }

@@ -87,15 +87,57 @@ export const PIXEL_ICONS: Record<string, PixelIcon> = {
   config:      { label: '*',  color: '#f59e0b', bgColor: '#161616' },
 } as const;
 
-// ─── Shared Styles ────────────────────────────────────────────────────────────
+// ─── Typography ───────────────────────────────────────────────────────────────
+// One canonical font stack for the whole app. On web we use the
+// native-OS-first stack Apple's HIG recommends — SF Pro on macOS/iOS,
+// Segoe UI on Windows, Roboto on Android/ChromeOS, Helvetica/Arial as
+// cross-platform fallbacks. On iOS native, `System` maps to SF Pro.
+// On Android native we can't negotiate a stack — just `sans-serif`.
+//
+// Imported by `vsCodeTheme.ts` and every component that sets fontFamily
+// explicitly. The `SYSTEM_FONT_STACK_WEB` string is also injected as a
+// document-level CSS rule below so any `<Text>` that DOESN'T set its
+// own fontFamily inherits this stack automatically.
+export const SYSTEM_FONT_STACK_WEB =
+  '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
 
-const SYSTEM_FONT = Platform.OS === 'ios'
+export const SYSTEM_FONT = Platform.OS === 'ios'
   ? 'System'
   : Platform.OS === 'web'
-    ? '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif'
+    ? SYSTEM_FONT_STACK_WEB
     : 'sans-serif';
 
-const MONO_FONT = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
+export const MONO_FONT = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
+
+// Web-only side effect: set the document's default font stack on <body>
+// so every `<Text>` (and every raw DOM node) inherits it unless a more
+// specific rule overrides it. Monospace surfaces (IDE console, code
+// blocks, budget pills) still get their own fontFamily inline.
+if (Platform.OS === 'web' && typeof document !== 'undefined') {
+  const STYLE_ID = 'uc-system-font-stack';
+  if (!document.getElementById(STYLE_ID)) {
+    const el = document.createElement('style');
+    el.id = STYLE_ID;
+    el.textContent = `
+      :root {
+        --uc-font-ui:   ${SYSTEM_FONT_STACK_WEB};
+        --uc-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      }
+      html, body, #root, #root > div, [data-reactroot] {
+        font-family: var(--uc-font-ui);
+      }
+      /* Let Text that doesn't set its own font inherit from body. RN Web
+         otherwise falls back to the platform UA font (Times on Safari,
+         Arial on Chrome Win). */
+      [class*="css-text-"], [class*="r-text-"] {
+        font-family: inherit;
+      }
+    `;
+    document.head.appendChild(el);
+  }
+}
+
+// ─── Shared Styles ────────────────────────────────────────────────────────────
 
 /** Clean card — rounded, subtle border */
 export const pixelCard: ViewStyle = {

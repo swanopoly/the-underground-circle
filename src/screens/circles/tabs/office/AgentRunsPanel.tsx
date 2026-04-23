@@ -1,6 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { MONO, formatTokens } from './AgentPanelShared';
+import OpenSwanQualityAggregate from '../../../../components/chat/OpenSwanQualityAggregate';
+import OpenSwanQualityDashboard from '../../../../components/chat/OpenSwanQualityDashboard';
+import RunMetadataSummary from '../../../../components/chat/RunMetadataSummary';
+import { buildOpenSwanObservedEvalAggregate, buildOpenSwanObservedEvalDashboard } from '../../../../lib/openswanObservedEvals';
+import { buildRunMetadataSummaryProps } from '../../../../lib/runMetadataSummary';
 
 type StatusFilter = 'all' | 'completed' | 'running' | 'failed';
 
@@ -27,6 +32,29 @@ const STEP_COLORS: Record<string, string> = {
   thinking: '#606075',
 };
 
+function getChildQualityTone(outcome?: string | null): { border: string; bg: string; text: string } {
+  switch (outcome) {
+    case 'strong':
+      return { border: '#22c55e40', bg: '#052e16', text: '#86efac' };
+    case 'blocked':
+      return { border: '#f59e0b40', bg: '#1f1605', text: '#fbbf24' };
+    case 'failed':
+      return { border: '#ef444440', bg: '#2a0b0b', text: '#fca5a5' };
+    default:
+      return { border: '#38bdf840', bg: '#082f49', text: '#7dd3fc' };
+  }
+}
+
+function getWeakestSignalLabel(observedEval: any): string | null {
+  const signals = [
+    ...(Array.isArray(observedEval?.skillSignals) ? observedEval.skillSignals : []),
+    ...(Array.isArray(observedEval?.modeSignals) ? observedEval.modeSignals : []),
+  ].filter((signal: any) => signal && typeof signal.score === 'number');
+  if (signals.length === 0) return null;
+  const weakest = signals.slice().sort((left: any, right: any) => left.score - right.score)[0];
+  return weakest?.label || null;
+}
+
 // Matches a run object to the active filter. `running` bucket covers any
 // "in progress" state users conceptually think of as "currently working".
 function matchesFilter(run: any, filter: StatusFilter): boolean {
@@ -48,6 +76,7 @@ export default function AgentRunsPanel({ circleId, agentId, agentName, accentCol
   const [loading, setLoading] = useState(true);
   const [expandedRun, setExpandedRun] = useState<string | null>(null);
   const [steps, setSteps] = useState<any[]>([]);
+  const [childRuns, setChildRuns] = useState<any[]>([]);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [pageSize, setPageSize] = useState(PAGE_SIZE);
   const [hasMore, setHasMore] = useState(false);
@@ -79,11 +108,16 @@ export default function AgentRunsPanel({ circleId, agentId, agentName, accentCol
 
   const loadSteps = async (runId: string) => {
     try {
-      const { getRunSteps } = await import('../../../../lib/agentRunSystem');
-      const data = await getRunSteps(runId);
-      setSteps(data);
+      const { getRunSteps, listChildRuns } = await import('../../../../lib/agentRunSystem');
+      const [stepData, childRunData] = await Promise.all([
+        getRunSteps(runId),
+        listChildRuns(runId, 12),
+      ]);
+      setSteps(stepData);
+      setChildRuns(childRunData);
     } catch (err) {
       console.warn('[AgentRunsPanel] Failed to load run steps:', err);
+      setChildRuns([]);
     }
   };
 
@@ -98,6 +132,18 @@ export default function AgentRunsPanel({ circleId, agentId, agentName, accentCol
     running: runs.filter(r => matchesFilter(r, 'running')).length,
     failed: runs.filter(r => matchesFilter(r, 'failed')).length,
   }), [runs]);
+  const qualityAggregate = useMemo(
+    () => buildOpenSwanObservedEvalAggregate(
+      runs
+        .map((run) => buildRunMetadataSummaryProps(run.metadata).observedEval)
+        .filter(Boolean),
+    ),
+    [runs],
+  );
+  const qualityDashboard = useMemo(
+    () => buildOpenSwanObservedEvalDashboard(runs),
+    [runs],
+  );
 
   const filters: Array<{ key: StatusFilter; label: string; color: string }> = [
     { key: 'all', label: 'ALL', color: '#a0a0b0' },
@@ -113,6 +159,18 @@ export default function AgentRunsPanel({ circleId, agentId, agentName, accentCol
         <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>({runs.length}{hasMore ? '+' : ''})</Text>
         <Text style={{ color: '#606075', fontSize: 11, fontFamily: MONO }} numberOfLines={1}>{agentName}</Text>
       </View>
+
+      <OpenSwanQualityAggregate
+        aggregate={qualityAggregate}
+        title="QUALITY SNAPSHOT"
+        accentColor={accentColor}
+      />
+
+      <OpenSwanQualityDashboard
+        dashboard={qualityDashboard}
+        title="QUALITY DASHBOARD"
+        accentColor={accentColor}
+      />
 
       {/* Filter pills — solid background when active, tint when idle. Disabled
           style (50% opacity) when the bucket is empty so users don't think
@@ -168,11 +226,20 @@ export default function AgentRunsPanel({ circleId, agentId, agentName, accentCol
               const costSummary = run.estimated_cost > 0
                 ? `$${run.estimated_cost.toFixed(run.estimated_cost < 0.01 ? 4 : 3)}`
                 : null;
+              const metadataSummary = buildRunMetadataSummaryProps(run.metadata);
 
               return (
                 <View key={run.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isExpanded ? sc + '40' : '#1a1a28', borderRadius: 2, marginBottom: 8, overflow: 'hidden' }}>
                   <Pressable
-                    onPress={() => { if (isExpanded) { setExpandedRun(null); } else { setExpandedRun(run.id); loadSteps(run.id); } }}
+                    onPress={() => {
+                      if (isExpanded) {
+                        setExpandedRun(null);
+                        setChildRuns([]);
+                      } else {
+                        setExpandedRun(run.id);
+                        loadSteps(run.id);
+                      }
+                    }}
                     style={[{ padding: 12 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                   >
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -184,6 +251,11 @@ export default function AgentRunsPanel({ circleId, agentId, agentName, accentCol
                       <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{run.surface}</Text>
                       {run.mode && run.mode !== 'talk' && <Text style={{ color: '#909098', fontSize: 11, fontFamily: MONO }}>{run.mode}</Text>}
                       {run.delegated_to && <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{run.delegated_to}</Text>}
+                      <RunMetadataSummary
+                        {...metadataSummary}
+                        variant="compact"
+                        accentColor="#38bdf8"
+                      />
                       {tokenSummary && <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{tokenSummary}</Text>}
                       {costSummary && <Text style={{ color: '#22c55e', fontSize: 11, fontFamily: MONO }}>{costSummary}</Text>}
                       <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, marginLeft: 'auto' }}>{new Date(run.created_at).toLocaleTimeString()}</Text>
@@ -192,6 +264,83 @@ export default function AgentRunsPanel({ circleId, agentId, agentName, accentCol
 
                   {isExpanded && (
                     <View style={{ paddingHorizontal: 8, paddingBottom: 8, borderTopWidth: 1, borderTopColor: '#1a1a28', paddingTop: 6 }}>
+                      {childRuns.length > 0 ? (
+                        <View style={{ marginBottom: 10, gap: 6 }}>
+                          <Text style={{ color: '#7c3aed', fontSize: 10, fontWeight: '800', letterSpacing: 1, fontFamily: MONO }}>
+                            DELEGATED SPECIALISTS
+                          </Text>
+                          {childRuns.map((childRun: any) => {
+                            const childSummary = buildRunMetadataSummaryProps(childRun.metadata);
+                            const childStatusColor = STATUS_COLORS[childRun.status] || '#606075';
+                            const childObservedEval = childSummary.observedEval;
+                            const childQualityTone = getChildQualityTone(childObservedEval?.outcome);
+                            const weakestSignalLabel = getWeakestSignalLabel(childObservedEval);
+                            return (
+                              <Pressable
+                                key={childRun.id}
+                                onPress={() => {
+                                  setExpandedRun(childRun.id);
+                                  loadSteps(childRun.id);
+                                }}
+                                style={{
+                                  borderWidth: 1,
+                                  borderColor: '#312e81',
+                                  backgroundColor: '#0a1022',
+                                  borderRadius: 2,
+                                  padding: 8,
+                                  gap: 5,
+                                  ...(Platform.OS === 'web' ? { cursor: 'pointer' as const } : null),
+                                }}
+                              >
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                  <View style={{ width: 7, height: 7, borderRadius: 999, backgroundColor: childStatusColor }} />
+                                  <Text style={{ color: '#e9d5ff', fontSize: 11, fontWeight: '700', fontFamily: MONO, flex: 1 }} numberOfLines={1}>
+                                    {childRun.delegated_to ? `${String(childRun.delegated_to).toUpperCase()} · ` : ''}{childRun.title || childRun.mode}
+                                  </Text>
+                                  <Text style={{ color: childStatusColor, fontSize: 10, fontWeight: '700', fontFamily: MONO }}>
+                                    {String(childRun.status).toUpperCase()}
+                                  </Text>
+                                </View>
+                                {childObservedEval ? (
+                                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                                    <View style={{
+                                      paddingHorizontal: 8,
+                                      paddingVertical: 4,
+                                      borderRadius: 999,
+                                      borderWidth: 1,
+                                      borderColor: childQualityTone.border,
+                                      backgroundColor: childQualityTone.bg,
+                                    }}>
+                                      <Text style={{ color: childQualityTone.text, fontSize: 10, fontWeight: '800', fontFamily: MONO }}>
+                                        {String(childObservedEval.outcome || 'partial').toUpperCase()} {childObservedEval.score}
+                                      </Text>
+                                    </View>
+                                    {weakestSignalLabel ? (
+                                      <View style={{
+                                        paddingHorizontal: 8,
+                                        paddingVertical: 4,
+                                        borderRadius: 999,
+                                        borderWidth: 1,
+                                        borderColor: '#3f3f5a',
+                                        backgroundColor: '#121226',
+                                      }}>
+                                        <Text style={{ color: '#c4b5fd', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>
+                                          WEAKEST {weakestSignalLabel.toUpperCase()}
+                                        </Text>
+                                      </View>
+                                    ) : null}
+                                  </View>
+                                ) : null}
+                                <RunMetadataSummary
+                                  {...childSummary}
+                                  variant="compact"
+                                  accentColor="#a855f7"
+                                />
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      ) : null}
                       {steps.length === 0 ? (
                         <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO, fontStyle: 'italic' }}>No steps recorded.</Text>
                       ) : (

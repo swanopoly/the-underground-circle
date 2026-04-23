@@ -9,6 +9,7 @@
 
 import { supabase } from './supabase';
 import type { BrowserPlanEvent } from './computerUse';
+import { devLog } from './devLog';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -490,6 +491,20 @@ export async function listRuns(
   return data.map(mapRun);
 }
 
+export async function listChildRuns(
+  parentRunId: string,
+  limit = 20,
+): Promise<AgentRun[]> {
+  const { data, error } = await supabase
+    .from('agent_runs')
+    .select('*')
+    .eq('parent_run_id', parentRunId)
+    .order('created_at', { ascending: true })
+    .limit(limit);
+  if (error || !data) return [];
+  return data.map(mapRun);
+}
+
 export async function listChatSessionRuns(
   circleId: string,
   chatSessionId: string,
@@ -595,7 +610,7 @@ export async function saveMemory(opts: {
     console.error('[AgentRunSystem] saveMemory params: scope=', opts.scope, 'circleId=', opts.circleId, 'userId=', opts.userId, 'kind=', opts.memoryKind);
     return null;
   }
-  console.log('[AgentRunSystem] saveMemory OK:', opts.title?.slice(0, 50));
+  devLog.trace('[AgentRunSystem] saveMemory OK:', opts.title?.slice(0, 50));
   return mapMemory(data);
 }
 

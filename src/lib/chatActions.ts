@@ -29,7 +29,9 @@ export type PromptCategory = {
 export const QUICK_PROMPTS: QuickActionItem[] = [
   { label: '>_ Assign Agent', text: '__ASSIGN_AGENT__', mode: 'special' },
   { label: '+ Spawn Agent', text: '__SPAWN_AGENT__', mode: 'special' },
-  { label: '>_ Use Browser', text: '__COMPUTER_USE__', mode: 'special' },
+  { label: 'OS OpenSwan', text: '__OPENSWAN__', mode: 'special' },
+  { label: '>_ Use Computer', text: '__COMPUTER_USE__', mode: 'special' },
+  { label: '⎇ Pair Desktop Bridge', text: '__PAIR_DESKTOP__', mode: 'special' },
   { label: '📋 My Tasks', text: 'my tasks', mode: 'send' },
   { label: '</> GitHub', text: '/gh help', mode: 'send' },
   { label: '[] Rooms', text: '/room help', mode: 'send' },
@@ -54,6 +56,7 @@ export const QUICK_PROMPTS: QuickActionItem[] = [
 ];
 
 export const FEATURED_QUICK_ACTIONS = QUICK_PROMPTS.slice(0, 7);
+export const ALL_QUICK_ACTIONS = QUICK_PROMPTS;
 
 export const FEATURED_TOOL_ACTIONS: FeaturedToolAction[] = [
   { label: 'Image', text: '/imagine ', color: '#f43f5e', flatIcon: 'designer', mode: 'prefill' },
@@ -63,6 +66,7 @@ export const FEATURED_TOOL_ACTIONS: FeaturedToolAction[] = [
   { label: 'Summarize', text: '/summarize ', color: '#f59e0b', flatIcon: 'writer', mode: 'prefill' },
   { label: 'Translate', text: '/translate ', color: '#8b5cf6', mode: 'prefill' },
   { label: 'Build page', text: '/build-page ', color: '#3b82f6', flatIcon: 'architect', mode: 'prefill' },
+  { label: 'Computer', text: '/browser plan ', color: '#14b8a6', mode: 'prefill' },
   { label: 'All tools', text: '/hf help', color: '#eab308', flatIcon: 'brain', mode: 'send' },
 ];
 
@@ -127,6 +131,8 @@ const QUICK_ACTION_OVERRIDES: Record<string, { mode: QuickActionMode; text: stri
   '__assign_agent__': { mode: 'special', text: '__ASSIGN_AGENT__' },
   '__spawn_agent__': { mode: 'special', text: '__SPAWN_AGENT__' },
   '__computer_use__': { mode: 'special', text: '__COMPUTER_USE__' },
+  '__openswan__': { mode: 'special', text: '__OPENSWAN__' },
+  '__pair_desktop__': { mode: 'special', text: '__PAIR_DESKTOP__' },
   '__nuke__': { mode: 'special', text: '__NUKE__' },
   'status': { mode: 'send', text: '/status' },
   'daily plan': {

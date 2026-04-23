@@ -39,6 +39,19 @@ export interface SpawnResult {
   message: string;
 }
 
+export interface SpawnedAgentStatus {
+  ok: boolean;
+  pid?: string | null;
+  logFile?: string | null;
+  isRunning: boolean;
+  completed: boolean;
+  hasOutput?: boolean;
+  output?: string;
+  lastUpdatedAt?: string | null;
+  byteLength?: number;
+  error?: string;
+}
+
 function isLegacyMissingTaskError(message: string): boolean {
   const lower = message.toLowerCase();
   return lower.includes('missing task');
@@ -192,5 +205,61 @@ export async function isBridgeAvailable(): Promise<boolean> {
     return res.ok;
   } catch {
     return false;
+  }
+}
+
+export async function fetchSpawnedAgentStatus(opts: {
+  pid?: string | null;
+  logFile?: string | null;
+  maxBytes?: number;
+}): Promise<SpawnedAgentStatus> {
+  try {
+    const res = await fetch(`${BRIDGE_URL}/spawn/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pid: opts.pid || undefined,
+        logFile: opts.logFile || undefined,
+        maxBytes: opts.maxBytes,
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    let payload: any = null;
+    try {
+      payload = await res.json();
+    } catch {
+      payload = null;
+    }
+    if (!res.ok) {
+      return {
+        ok: false,
+        pid: opts.pid || null,
+        logFile: opts.logFile || null,
+        isRunning: false,
+        completed: false,
+        error: payload?.error || `HTTP ${res.status}`,
+      };
+    }
+    return {
+      ok: payload?.ok === true,
+      pid: payload?.pid ?? opts.pid ?? null,
+      logFile: payload?.logFile ?? opts.logFile ?? null,
+      isRunning: !!payload?.isRunning,
+      completed: !!payload?.completed,
+      hasOutput: !!payload?.hasOutput,
+      output: typeof payload?.output === 'string' ? payload.output : '',
+      lastUpdatedAt: payload?.lastUpdatedAt ?? null,
+      byteLength: Number(payload?.byteLength || 0),
+      error: payload?.error,
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      pid: opts.pid || null,
+      logFile: opts.logFile || null,
+      isRunning: false,
+      completed: false,
+      error: err?.message || 'Failed to fetch spawn status',
+    };
   }
 }

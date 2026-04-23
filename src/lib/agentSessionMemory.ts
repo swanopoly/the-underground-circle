@@ -8,6 +8,7 @@
 
 import { supabase } from './supabase';
 import { promoteExternalAgentSessionKnowledge } from './memoryService';
+import { devLog } from './devLog';
 
 // ── Auth Helper ─────────────────────────────────────────────────────────────
 
@@ -251,7 +252,7 @@ export async function saveAgentSessionsToMemory(
         if (insertError) {
           // Duplicate key = race condition, another process saved first — update instead
           if (insertError.code === '23505') {
-            console.log(`[agentSessionMemory] Duplicate detected for ${projectKey}, updating instead`);
+            devLog.trace(`[agentSessionMemory] Duplicate detected for ${projectKey}, updating instead`);
           } else {
             throw insertError;
           }
@@ -309,7 +310,7 @@ export async function saveAgentSessionsToMemory(
   }
 
   if (saved > 0) {
-    console.log(`[agentSessionMemory] ${provider}: saved=${saved}, skipped=${skipped}`);
+    devLog.trace(`[agentSessionMemory] ${provider}: saved=${saved}, skipped=${skipped}`);
   }
   return { saved, skipped };
 }

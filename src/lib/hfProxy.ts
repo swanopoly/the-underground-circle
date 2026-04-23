@@ -15,6 +15,7 @@
  */
 
 import { supabase } from './supabase';
+import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './privacyMode';
 
 export type HfProxyErrorCode =
   | 'token_missing'        // HF_TOKEN env var not set on the edge function
@@ -58,6 +59,13 @@ export interface HfProxyRequest {
  * the caller doesn't have to wrap every call in try/catch.
  */
 export async function callHfProxy<T = unknown>(req: HfProxyRequest): Promise<HfProxyResult<T>> {
+  if (shouldBlockExternalAiProvider('huggingface')) {
+    return {
+      ok: false,
+      error: getStrictLocalAiModeMessage('huggingface'),
+      code: 'bad_request',
+    };
+  }
   try {
     const { data, error } = await supabase.functions.invoke('hf-proxy', {
       body: req,

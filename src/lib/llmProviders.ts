@@ -7,6 +7,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from './supabase';
+import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './privacyMode';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -167,6 +168,9 @@ export async function testApiKey(
   provider: LLMProvider,
   apiKey: string,
 ): Promise<{ success: boolean; error?: string }> {
+  if (shouldBlockExternalAiProvider(provider)) {
+    return { success: false, error: getStrictLocalAiModeMessage(provider) };
+  }
   try {
     const { data, error } = await supabase.functions.invoke('llm-proxy', {
       body: {
@@ -202,6 +206,9 @@ export async function invokeLLMProxy(params: {
   maxTokens?: number;
   thinkingLevel?: ThinkingLevel;
 }): Promise<LLMProxyResponse> {
+  if (shouldBlockExternalAiProvider(params.provider)) {
+    throw new Error(getStrictLocalAiModeMessage(params.provider));
+  }
   const { data, error } = await supabase.functions.invoke('llm-proxy', {
     body: {
       provider: params.provider,

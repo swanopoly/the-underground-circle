@@ -407,22 +407,47 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
 
 const R = 10; // shared border radius — matches chat theme
 const st = StyleSheet.create({
-  scrim: { flex: 1, backgroundColor: 'rgba(0,0,0,0.72)', alignItems: 'center', justifyContent: 'center', padding: 20 },
+  // Blurred glass backdrop matching ComputerUseConsole / AssignAgent /
+  // OpenSwanConsole. Very light emerald tint over the chat behind the
+  // card, then backdrop-filter blur so the chat reads as blurred glass
+  // instead of flat black.
+  scrim: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+    backgroundColor: '#22c55e08',
+    ...(Platform.OS === 'web' ? ({
+      backdropFilter: 'blur(14px) saturate(1.15)',
+      WebkitBackdropFilter: 'blur(14px) saturate(1.15)',
+    } as any) : {}),
+  },
   card: {
-    width: '100%', maxWidth: 680, borderRadius: R + 2, backgroundColor: '#0a0f1c',
-    borderWidth: 1, borderColor: '#f59e0b30', padding: 22, gap: 14,
-    ...(Platform.OS === 'web' ? { boxShadow: '4px 4px 0px #f59e0b0c, 0 0 30px #f59e0b06' } as any : {}),
+    width: '100%', maxWidth: 680,
+    borderRadius: 14,
+    // Semi-transparent slate so the backdrop blur is visible through
+    // the card edges (matches the other consoles' 95% alpha).
+    backgroundColor: '#0f172af2',
+    borderWidth: 1,
+    borderColor: '#22c55e66',
+    padding: 22,
+    gap: 14,
+    ...(Platform.OS === 'web' ? ({
+      maxHeight: '92vh',
+      overflow: 'auto',
+      boxShadow:
+        '0 24px 70px rgba(0,0,0,0.55), 0 0 40px rgba(34,197,94,0.18), 0 0 0 1px rgba(255,255,255,0.02) inset',
+    } as any) : {}),
   },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   headerIcon: {
-    width: 36, height: 36, borderRadius: R, borderWidth: 1, borderColor: '#f59e0b40', backgroundColor: '#f59e0b08',
+    width: 36, height: 36, borderRadius: R, borderWidth: 1, borderColor: '#22c55e66', backgroundColor: '#22c55e12',
     alignItems: 'center', justifyContent: 'center',
-    ...(Platform.OS === 'web' ? { boxShadow: '2px 2px 0px #f59e0b10' } as any : {}),
   },
-  headerIconText: { color: '#f59e0b', fontSize: 14, fontWeight: '900', fontFamily: 'monospace' },
+  headerIconText: { color: '#22c55e', fontSize: 14, fontWeight: '900', fontFamily: 'monospace' },
   title: { color: '#e2e8f0', fontSize: 15, fontWeight: '900', letterSpacing: 2, fontFamily: 'monospace' },
-  subtitle: { color: '#22c55e50', fontSize: 10, fontFamily: 'monospace', marginTop: 1 },
+  subtitle: { color: '#22c55eaa', fontSize: 10, fontFamily: 'monospace', marginTop: 1 },
   closeBtn: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: R, borderWidth: 1, borderColor: '#1e293b' },
   closeBtnText: { color: '#64748b', fontSize: 10, fontWeight: '800', letterSpacing: 1, fontFamily: 'monospace' },
   divider: { height: 1, backgroundColor: '#1e293b' },

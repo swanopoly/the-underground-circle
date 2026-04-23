@@ -3,6 +3,7 @@ import { runOpenSwanSessionTurn, type OpenSwanRunCallbacks } from './openswanSes
 import { loadFiles, sendAgentMessage, sendMessage } from '../screens/circles/tabs/rooms/roomRepository';
 import { type AgenticCodingProfile } from './agenticCodingProfile';
 import { resolveSessionCodingProfile, type SessionCodingProfile } from './chatSessionProfile';
+import { buildRoomAgentMessageMetadata } from './roomMessageMetadata';
 
 type RoomChatMessage = {
   content: string;
@@ -127,20 +128,7 @@ export async function sendRoomStructuredChatMessage({
   });
 
   const artifacts = structured.artifacts || [];
-  await sendAgentMessage(roomId, 'Agent', structured.response, {
-    bot: true,
-    bot_name: 'Agent',
-    model: structured.usage?.model || null,
-    artifacts,
-    artifact_count: artifacts.length,
-    run_id: structured.runId || null,
-    task_plan: structured.taskPlan,
-    tool_events: [],
-    verification_results: structured.verificationResults || [],
-    delegated_subagents: structured.delegatedSubagents || [],
-    memories_used: structured.memoriesUsed || [],
-    memory_references: structured.memoryReferences || [],
-  });
+  await sendAgentMessage(roomId, 'Agent', structured.response, buildRoomAgentMessageMetadata(structured, artifacts));
 
   return {
     response: structured.response,

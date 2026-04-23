@@ -4,6 +4,7 @@ import type { SwanBotStructuredArtifact } from '../../lib/swanbot';
 import { buildCodingWorkbenchLines, getCodingWorkbenchMetrics, getCodingWorkbenchPhase, inferCodingWorkbenchFileName } from '../../lib/codingWorkbench';
 
 type BuildStudioView = 'code' | 'preview';
+const SANDBOXED_PREVIEW_PERMISSIONS = 'allow-scripts';
 
 type ChatBuildStudioProps = {
   accentColor: string;
@@ -91,7 +92,7 @@ export default function ChatBuildStudio({
             <iframe
               srcDoc={artifact!.content || ''}
               style={{ width: '100%', height: '100%', border: 'none', backgroundColor: '#ffffff' } as any}
-              sandbox="allow-scripts allow-same-origin"
+              sandbox={SANDBOXED_PREVIEW_PERMISSIONS}
               title={artifact!.title || 'OpenSwan Preview'}
             />
           </View>
