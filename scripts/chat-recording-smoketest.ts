@@ -25,6 +25,7 @@ import {
   appendStep,
   buildStep,
   deleteRecording,
+  formatElapsedSec,
   getActiveSession,
   getRecording,
   isRecordable,
@@ -203,6 +204,23 @@ function main() {
     appendStep(buildStep({ tool: 'desktop.type_text', input: { text: 'x' }, result: { ok: true } }));
   }
   assert(getActiveSession()!.steps.length === 200, 'append: caps at 200 steps');
+
+  // ─── formatElapsedSec ──────────────────────────────────────────
+  assert(formatElapsedSec(0) === '0s', 'elapsed: zero');
+  assert(formatElapsedSec(1) === '1s', 'elapsed: 1s');
+  assert(formatElapsedSec(59) === '59s', 'elapsed: 59s boundary');
+  assert(formatElapsedSec(60) === '1m 0s', 'elapsed: 60 → 1m 0s');
+  assert(formatElapsedSec(61) === '1m 1s', 'elapsed: 61 → 1m 1s');
+  assert(formatElapsedSec(3599) === '59m 59s', 'elapsed: just under 1h');
+  assert(formatElapsedSec(3600) === '1h 0m', 'elapsed: exactly 1h');
+  assert(formatElapsedSec(3660) === '1h 1m', 'elapsed: 1h 1m');
+  assert(formatElapsedSec(7322) === '2h 2m', 'elapsed: 2h 2m (seconds dropped at h scale)');
+  // Safety: non-finite / negative → clamped to 0
+  assert(formatElapsedSec(-5) === '0s', 'elapsed: negative clamped to 0');
+  assert(formatElapsedSec(Number.NaN) === '0s', 'elapsed: NaN clamped to 0');
+  assert(formatElapsedSec(Infinity) === '0s', 'elapsed: Infinity clamped to 0');
+  // Fractional seconds floor correctly
+  assert(formatElapsedSec(12.9) === '12s', 'elapsed: fractional floored');
 
   if (failures > 0) {
     console.error(`\n${failures} chat-recording smoke-test failure(s)`);

@@ -65,6 +65,24 @@ export interface ActiveSession {
   steps: RecordedStep[];
 }
 
+/**
+ * Format an elapsed-seconds value for the RecordingBadge + similar
+ * read-outs. Pure — no locale / timezone / DateTime dependencies so
+ * it's safe to smoke-test. Contract:
+ *   <60s   → "Ns"
+ *   <1h    → "Mm Ss"
+ *   ≥1h    → "Hh Mm"
+ * Negative or NaN inputs are clamped to 0.
+ */
+export function formatElapsedSec(sec: number): string {
+  const safe = Number.isFinite(sec) && sec > 0 ? Math.floor(sec) : 0;
+  if (safe < 60) return `${safe}s`;
+  if (safe < 3600) return `${Math.floor(safe / 60)}m ${safe % 60}s`;
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
 // ─── LocalStorage helpers ───────────────────────────────────────────
 
 function readStore(): Record<string, Recording> {

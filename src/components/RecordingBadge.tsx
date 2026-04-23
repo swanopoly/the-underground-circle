@@ -12,7 +12,7 @@
  */
 import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, Platform } from 'react-native';
-import { getActiveSession, type ActiveSession } from '../lib/chatRecording';
+import { getActiveSession, formatElapsedSec, type ActiveSession } from '../lib/chatRecording';
 
 const POLL_MS = 2_000;
 
@@ -55,11 +55,18 @@ export default function RecordingBadge(): React.ReactElement | null {
   if (!session) return null;
 
   const elapsedSec = Math.max(0, Math.floor((Date.now() - session.startedAt) / 1000));
-  const elapsedLabel = formatElapsed(elapsedSec);
+  const elapsedLabel = formatElapsedSec(elapsedSec);
   const stepCount = session.steps.length;
 
   return (
-    <Pressable onPress={toggle} style={({ pressed }) => [styles.container, pressed && { opacity: 0.85 }]} nativeID="recording-badge">
+    <Pressable
+      onPress={toggle}
+      style={({ pressed }) => [styles.container, pressed && { opacity: 0.85 }]}
+      nativeID="recording-badge"
+      accessibilityRole="button"
+      accessibilityLabel={`Recording "${session.name}" — ${stepCount} step${stepCount === 1 ? '' : 's'} captured, ${elapsedLabel} elapsed. Tap for details.`}
+      accessibilityHint="Shows recording status with /record stop and /record abort hints."
+    >
       <View style={styles.dot} />
       <Text style={styles.label}>REC</Text>
       <Text style={styles.name} numberOfLines={1}>{session.name}</Text>
@@ -77,14 +84,6 @@ export default function RecordingBadge(): React.ReactElement | null {
       ) : null}
     </Pressable>
   );
-}
-
-function formatElapsed(sec: number): string {
-  if (sec < 60) return `${sec}s`;
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`;
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  return `${h}h ${m}m`;
 }
 
 const styles = StyleSheet.create({
