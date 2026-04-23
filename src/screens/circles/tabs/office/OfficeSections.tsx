@@ -2,6 +2,7 @@ import React from 'react';
 import { ActivityIndicator, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import type { OfficeFloor, OfficeTheme } from '../../../../lib/officeConfig';
 import type { AgentConnection } from '../../../../lib/connectionManager';
+import { getAudioState, initAudioManager, subscribe, toggleMasterMute } from '../../../../lib/audioManager';
 
 export function OfficeWorkspaceSection({
   viewMode,
@@ -42,10 +43,21 @@ export function OfficeWorkspaceSection({
   FURNITURE_CATALOG,
 }: any) {
   const [showToolsMenu, setShowToolsMenu] = React.useState(false);
+  const [soundMuted, setSoundMuted] = React.useState(() => {
+    initAudioManager();
+    return getAudioState().masterMuted;
+  });
+  React.useEffect(() => {
+    const unsub = subscribe((next) => {
+      setSoundMuted(next.masterMuted);
+    });
+    return unsub;
+  }, []);
   const menuButtonStyle = React.useCallback(
-    ({ hovered, pressed }: any, active?: boolean) => [
+    ({ hovered, pressed }: any, active?: boolean, disabled?: boolean) => [
       styles.toolbarBtn,
       active && { backgroundColor: accentColor + '18', borderColor: accentColor + '40' },
+      disabled && { opacity: 0.55, borderColor: '#2f2f2f', backgroundColor: '#131313' },
       hovered && Platform.OS === 'web' && ({
         backgroundColor: 'rgba(34, 211, 238, 0.12)',
         borderColor: 'rgba(168, 85, 247, 0.65)',
@@ -57,6 +69,63 @@ export function OfficeWorkspaceSection({
     ],
     [accentColor, styles.toolbarBtn],
   );
+  const renderMenuButton = React.useCallback(({
+    icon,
+    title,
+    description,
+    active = false,
+    disabled = false,
+    iconStyle,
+    titleStyle,
+    onPress,
+    trailing,
+  }: {
+    icon: string;
+    title: string;
+    description?: string;
+    active?: boolean;
+    disabled?: boolean;
+    iconStyle?: any;
+    titleStyle?: any;
+    onPress: () => void;
+    trailing?: React.ReactNode;
+  }) => (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      style={(state) => [
+        ...menuButtonStyle(state, active, disabled),
+        {
+          minHeight: 44,
+          alignItems: 'flex-start',
+          justifyContent: 'flex-start',
+          paddingVertical: 8,
+          gap: 8,
+        },
+      ]}
+    >
+      <Text style={[styles.toolbarBtnIcon, { marginTop: 1 }, iconStyle]}>{icon}</Text>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <Text style={[styles.toolbarBtnText, titleStyle]}>{title}</Text>
+          {trailing}
+        </View>
+        {description ? (
+          <Text
+            style={{
+              marginTop: 2,
+              fontSize: 9,
+              lineHeight: 12,
+              color: disabled ? '#6b7280' : '#8b95a7',
+              fontFamily: 'monospace',
+            }}
+          >
+            {description}
+          </Text>
+        ) : null}
+      </View>
+    </Pressable>
+  ), [menuButtonStyle, styles.toolbarBtnIcon, styles.toolbarBtnText]);
   if (viewMode !== 'office') return null;
 
   return (
@@ -72,7 +141,7 @@ export function OfficeWorkspaceSection({
                   onPress={() => onSwitchFloor(floor.id)}
                   style={[
                     styles.floorChip,
-                    editMode && floors.length > 1 && styles.floorChipWithDelete,
+                    floors.length > 1 && styles.floorChipWithDelete,
                     isActive && styles.floorChipActive,
                     Platform.OS === 'web' && { cursor: 'pointer' } as any,
                   ]}
@@ -85,10 +154,17 @@ export function OfficeWorkspaceSection({
                   )}
                   <View style={[styles.floorThemeDot, { backgroundColor: resolveTheme(floor.themeId).accentGlow }]} />
                 </Pressable>
-                {editMode && floors.length > 1 && (
+                {floors.length > 1 && (
                   <Pressable
-                    onPress={() => onDeleteFloor(floor.id)}
+                    onPress={() => {
+                      if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof window.confirm === 'function') {
+                        const ok = window.confirm(`Remove floor "${floor.name}"? Agents and furniture on this floor will be lost.`);
+                        if (!ok) return;
+                      }
+                      onDeleteFloor(floor.id);
+                    }}
                     style={[styles.floorDeleteBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                    accessibilityLabel={`Remove floor ${floor.name}`}
                   >
                     <Text style={styles.floorDeleteBtnText}>✕</Text>
                   </Pressable>
@@ -135,78 +211,95 @@ export function OfficeWorkspaceSection({
                 }}
               >
                 {connections.some((c: AgentConnection) => c.enabled && c.status !== 'connected' && c.status !== 'connecting') && (
-                  <Pressable
-                    onPress={() => {
+                  renderMenuButton({
+                    icon: '🔌',
+                    title: 'Reconnect',
+                    description: 'Retry enabled agent bridges that are offline or stale.',
+                    titleStyle: { color: '#818cf8' },
+                    onPress: () => {
                       setShowToolsMenu(false);
                       onReconnectAll();
-                    }}
-                    style={(state) => menuButtonStyle(state)}
-                  >
-                    <Text style={styles.toolbarBtnIcon}>🔌</Text>
-                    <Text style={[styles.toolbarBtnText, { color: '#818cf8' }]}>Reconnect</Text>
-                  </Pressable>
+                    },
+                  })
                 )}
-                <Pressable
-                  onPress={() => {
+                {renderMenuButton({
+                  icon: editMode ? '✓' : '🪑',
+                  title: editMode ? 'Done' : 'Add Items',
+                  description: editMode
+                    ? 'Exit placement mode and return to the normal office view.'
+                    : 'Place furniture, devices, and interactive items on the floor.',
+                  active: editMode,
+                  titleStyle: editMode ? { color: '#22c55e' } : undefined,
+                  onPress: () => {
                     setShowToolsMenu(false);
                     onToggleEditMode();
-                  }}
-                  style={(state) => [
-                    ...menuButtonStyle(state, false),
-                    editMode ? styles.toolbarBtnActiveGreen : null,
-                  ]}
-                >
-                  {editMode ? (
-                    <Text style={[styles.toolbarBtnText, { color: '#22c55e' }]}>✓ Done</Text>
-                  ) : (
-                    <>
-                      <Text style={styles.toolbarBtnIcon}>🪑</Text>
-                      <Text style={styles.toolbarBtnText}>Add Items</Text>
-                    </>
-                  )}
-                </Pressable>
-                <Pressable onPress={() => { setShowToolsMenu(false); onShowRewards(); }} style={(state) => menuButtonStyle(state)}>
-                  <Text style={styles.toolbarBtnIcon}>🏆</Text>
-                  <Text style={styles.toolbarBtnText}>Achievements</Text>
-                </Pressable>
-                <Pressable onPress={() => { setShowToolsMenu(false); onShowConnectAgent(); }} style={(state) => menuButtonStyle(state)}>
-                  <Text style={styles.toolbarBtnIcon}>☁️</Text>
-                  <Text style={styles.toolbarBtnText}>Connect Agent</Text>
-                </Pressable>
-                <Pressable onPress={() => { setShowToolsMenu(false); onShowCustomize(); }} style={(state) => menuButtonStyle(state)}>
-                  <Text style={styles.toolbarBtnIcon}>🔧</Text>
-                  <Text style={styles.toolbarBtnText}>Customize</Text>
-                </Pressable>
-                <Pressable
-                  onPress={() => {
+                  },
+                })}
+                {renderMenuButton({
+                  icon: '🏆',
+                  title: 'Achievements',
+                  description: 'Open the rewards surface and review circle milestones.',
+                  onPress: () => { setShowToolsMenu(false); onShowRewards(); },
+                })}
+                {renderMenuButton({
+                  icon: '☁️',
+                  title: 'Connect Agent',
+                  description: 'Link Claude Code, Codex, Gemini, Cursor, and other agents to this circle.',
+                  onPress: () => { setShowToolsMenu(false); onShowConnectAgent(); },
+                })}
+                {renderMenuButton({
+                  icon: '🔧',
+                  title: 'Customize',
+                  description: 'Adjust office theme, agent appearance, budgets, idle behavior, and connections.',
+                  onPress: () => { setShowToolsMenu(false); onShowCustomize(); },
+                })}
+                {renderMenuButton({
+                  icon: savingSessionMemoryMode ? '…' : '🧠',
+                  title: sessionMemoryMode === 'shared' ? 'Memory Shared' : 'Memory Private',
+                  description: sessionMemoryMode === 'shared'
+                    ? 'New session memory can be reused across the circle.'
+                    : 'New session memory stays scoped to your own agent context.',
+                  active: sessionMemoryMode === 'shared',
+                  disabled: savingSessionMemoryMode,
+                  titleStyle: sessionMemoryMode === 'shared' ? styles.toolbarBtnTextActiveMemory : undefined,
+                  trailing: savingSessionMemoryMode ? (
+                    <ActivityIndicator size="small" color="#22c55e" />
+                  ) : null,
+                  onPress: () => {
                     setShowToolsMenu(false);
                     onToggleSessionMemoryMode();
-                  }}
-                  disabled={savingSessionMemoryMode}
-                  style={(state) => [
-                    ...menuButtonStyle(state, sessionMemoryMode === 'shared'),
-                    sessionMemoryMode === 'shared' && styles.toolbarBtnActiveMemory,
-                    savingSessionMemoryMode && { opacity: 0.7 },
-                  ]}
-                >
-                  <Text style={styles.toolbarBtnIcon}>{savingSessionMemoryMode ? '…' : '🧠'}</Text>
-                  <Text style={[styles.toolbarBtnText, sessionMemoryMode === 'shared' && styles.toolbarBtnTextActiveMemory]}>
-                    {sessionMemoryMode === 'shared' ? 'Memory Shared' : 'Memory Private'}
-                  </Text>
-                </Pressable>
-                <Pressable onPress={() => { setShowToolsMenu(false); onToggleMcpHub(); }} style={(state) => menuButtonStyle(state, showMcpHub)}>
-                  <Text style={styles.toolbarBtnIcon}>🔌</Text>
-                  <Text style={styles.toolbarBtnText}>MCP</Text>
-                </Pressable>
-                <Pressable onPress={() => { setShowToolsMenu(false); onToggleGitHubFeed(); }} style={(state) => menuButtonStyle(state, showGitHubFeed)}>
-                  <Text style={styles.toolbarBtnIcon}>{'{}'}</Text>
-                  <Text style={styles.toolbarBtnText}>GitHub</Text>
-                </Pressable>
+                  },
+                })}
+                {renderMenuButton({
+                  icon: '🔌',
+                  title: 'MCP',
+                  description: 'Register external MCP servers and inspect the tools they expose.',
+                  active: showMcpHub,
+                  onPress: () => { setShowToolsMenu(false); onToggleMcpHub(); },
+                })}
+                {renderMenuButton({
+                  icon: '{}',
+                  title: 'GitHub',
+                  description: 'Show the live GitHub activity wall for connected repos and webhooks.',
+                  active: showGitHubFeed,
+                  onPress: () => { setShowToolsMenu(false); onToggleGitHubFeed(); },
+                })}
                 {Platform.OS === 'web' && (
-                  <Pressable onPress={() => { setShowToolsMenu(false); onToggleSoundMixer(); }} style={(state) => menuButtonStyle(state, showSoundMixer)}>
-                    <Text style={styles.toolbarBtnIcon}>{'(('}</Text>
-                    <Text style={styles.toolbarBtnText}>Sound</Text>
-                  </Pressable>
+                  renderMenuButton({
+                    icon: soundMuted ? 'X' : ')))',
+                    iconStyle: soundMuted ? { color: '#ef4444' } : undefined,
+                    title: soundMuted ? 'Sound Muted' : 'Sound On',
+                    description: soundMuted
+                      ? 'The current window is muted. Click to restore site audio.'
+                      : 'Mute the current window without opening any extra panel.',
+                    active: soundMuted,
+                    titleStyle: soundMuted ? { color: '#ef4444' } : undefined,
+                    onPress: () => {
+                      setShowToolsMenu(false);
+                      if (showSoundMixer) onToggleSoundMixer();
+                      toggleMasterMute();
+                    },
+                  })
                 )}
               </View>
             ) : null}

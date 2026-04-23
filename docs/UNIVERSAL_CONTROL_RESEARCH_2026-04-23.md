@@ -165,7 +165,19 @@ upgrades App-Store credibility for the Mac-native UC app we're building toward.
   vision fallback for pixel-only steps.
 - This is Project Mariner's "Teach & Repeat" without Google.
 
-### Phase UC-5 — Anthropic computer-use as fallback router
+### Phase UC-5 — Vision fallback guidance (SHIPPED 2026-04-23)
+
+v2 system prompt now documents the three-tier grounding precedence
+(semantic a11y/DOM → vision screenshot → approvals for risky writes).
+The model chooses its own fallback instead of needing an external
+router; it falls back to `desktop.screenshot` + `desktop.click_at`
+only when: (a) target missing from a11y tree after two reads,
+(b) the app is a canvas/image editor, or (c) `click_element` returns
+path-not-found. Documenting the order cut token spend + misclicks
+without needing a separate computer-use-agent orchestration layer.
+
+Original scope (separate computer-use-agent escape hatch with automatic
+routing) kept as a future option if prompt guidance proves insufficient.
 
 - Keep `computer-use-agent` edge fn.
 - New routing rule in `computerAppAdapter`: if a11y-tree-grounded attempt

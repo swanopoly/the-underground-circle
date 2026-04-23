@@ -1,5 +1,5 @@
 /**
- * SoundMixer.tsx — Compact ambient sound mixer panel for the Office toolbar
+ * SoundMixer.tsx — Compact site audio + ambient sound controls for the Office toolbar
  *
  * 4 layer toggles with volume sliders + master mute. Web-only.
  */
@@ -15,6 +15,7 @@ import {
   setLayerVolume,
   toggleMasterMute,
   initAudioManager,
+  hasConfiguredAmbientAudio,
   type AmbientLayer,
   type LayerConfig,
 } from '../../lib/audioManager';
@@ -90,6 +91,7 @@ export default function SoundMixer({ accentColor }: Props) {
 }
 
 function SoundMixerInner({ accentColor }: Props) {
+  const audioConfigured = hasConfiguredAmbientAudio();
   const [audioState, setAudioState] = useState(() => {
     initAudioManager();
     return getAudioState();
@@ -114,6 +116,33 @@ function SoundMixerInner({ accentColor }: Props) {
 
   const anyPlaying = audioState.layers.some(l => l.playing);
 
+  if (!audioConfigured) {
+    return (
+      <View nativeID="section-sound-mixer" style={styles.container}>
+        <View style={styles.header}>
+          <Pressable
+            onPress={handleMasterMute}
+            style={[styles.muteBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={[
+              styles.muteIcon,
+              audioState.masterMuted ? { color: '#ef4444' } : { color: accentColor },
+            ]}>
+              {audioState.masterMuted ? 'X' : ')))'}
+            </Text>
+          </Pressable>
+          <Text style={styles.headerText}>SITE AUDIO</Text>
+        </View>
+        <Text style={styles.unavailableText}>
+          {audioState.masterMuted ? 'The site is muted.' : 'Mute or unmute the entire site from here.'}
+        </Text>
+        <Text style={styles.unavailableHint}>
+          Ambient layers are not configured for this build yet, but the master toggle still controls page audio.
+        </Text>
+      </View>
+    );
+  }
+
   return (
     <View nativeID="section-sound-mixer" style={styles.container}>
       {/* Header */}
@@ -130,8 +159,12 @@ function SoundMixerInner({ accentColor }: Props) {
             {audioState.masterMuted ? 'X' : anyPlaying ? ')))' : '((' }
           </Text>
         </Pressable>
-        <Text style={styles.headerText}>AMBIENT</Text>
+        <Text style={styles.headerText}>SITE AUDIO</Text>
       </View>
+
+      <Text style={styles.unavailableHint}>
+        Master toggle mutes or unmutes the whole site. Layer controls below only affect ambient office audio.
+      </Text>
 
       {/* Layer controls */}
       <View style={styles.layerList}>
@@ -181,6 +214,19 @@ const styles = StyleSheet.create({
     padding: 6,
     gap: 4,
     minWidth: 140,
+  },
+  unavailableText: {
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    color: '#d1d5db',
+    lineHeight: 14,
+  },
+  unavailableHint: {
+    fontSize: 9,
+    fontFamily: 'monospace',
+    color: '#6b7280',
+    lineHeight: 13,
   },
   header: {
     flexDirection: 'row',

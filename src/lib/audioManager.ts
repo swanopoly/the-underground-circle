@@ -65,6 +65,16 @@ const DEFAULT_LAYERS: LayerConfig[] = [
   },
 ];
 
+function isConfiguredAudioUrl(url: string): boolean {
+  if (!url) return false;
+  return !/cdn\.example\.com/i.test(url);
+}
+
+export function hasConfiguredAmbientAudio(): boolean {
+  if (Platform.OS !== 'web') return false;
+  return DEFAULT_LAYERS.some(layer => isConfiguredAudioUrl(layer.url));
+}
+
 // ─── Module state ─────────────────────────────────────────────────────────────
 
 const audioElements = new Map<AmbientLayer, HTMLAudioElement>();
@@ -74,6 +84,18 @@ let state: AudioManagerState = {
   autoTyping: false,
 };
 let listeners: Array<(s: AudioManagerState) => void> = [];
+
+function syncDocumentMediaMute(): void {
+  if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+  const mediaNodes = Array.from(document.querySelectorAll('audio, video')) as Array<HTMLMediaElement>;
+  mediaNodes.forEach((node) => {
+    try {
+      node.muted = state.masterMuted;
+    } catch {
+      // Ignore individual element failures.
+    }
+  });
+}
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
 
@@ -120,6 +142,7 @@ function notifyListeners(): void {
 
 function getOrCreateAudio(layer: LayerConfig): HTMLAudioElement | null {
   if (Platform.OS !== 'web' || typeof Audio === 'undefined') return null;
+  if (!isConfiguredAudioUrl(layer.url)) return null;
 
   let el = audioElements.get(layer.id);
   if (!el) {
@@ -155,6 +178,7 @@ function syncAudioElement(layer: LayerConfig): void {
 
 export function initAudioManager(): void {
   loadState();
+  syncDocumentMediaMute();
   // Don't auto-play on init — wait for user interaction
 }
 
@@ -192,6 +216,7 @@ export function setLayerVolume(layerId: AmbientLayer, volume: number): void {
 
 export function toggleMasterMute(): void {
   state.masterMuted = !state.masterMuted;
+  syncDocumentMediaMute();
   state.layers.forEach(l => syncAudioElement(l));
   saveState();
   notifyListeners();
@@ -226,6 +251,7 @@ export function triggerAutoTyping(hasBuilding: boolean): void {
 
 export function stopAll(): void {
   state.layers = state.layers.map(l => ({ ...l, playing: false }));
+  syncDocumentMediaMute();
   state.layers.forEach(l => syncAudioElement(l));
   saveState();
   notifyListeners();
