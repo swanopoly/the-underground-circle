@@ -120,9 +120,63 @@ export function backoffMs(attempt: number): number {
   return Math.floor(Math.random() * capped);
 }
 
-async function delayWithJitter(attempt: number): Promise<void> {
-  const ms = backoffMs(attempt);
-  if (ms > 0) await new Promise((r) => setTimeout(r, ms));
+/**
+ * Parse RFC 7231 Retry-After header. Anthropic emits this on 429 / 529
+ * responses to tell us exactly how long to wait. Two accepted forms:
+ *   - Integer seconds: "5"  → 5000ms
+ *   - HTTP-date:       "Wed, 21 Oct 2026 07:28:00 GMT" → (date - now)ms
+ * Returns null if the header is missing, malformed, or resolves to a
+ * non-positive delta.
+ *
+ * Capped at 10s so a buggy / hostile server can't hang an edge
+ * function for the rest of its budget. Exported so the smoke test
+ * can exercise both forms.
+ */
+export function parseRetryAfterMs(header: string | null | undefined, nowMs = Date.now()): number | null {
+  if (!header) return null;
+  const trimmed = header.trim();
+  if (!trimmed) return null;
+  const HARD_CAP_MS = 10_000;
+  // Integer seconds form
+  if (/^\d+$/.test(trimmed)) {
+    const sec = Number(trimmed);
+    if (!Number.isFinite(sec) || sec <= 0) return null;
+    return Math.min(sec * 1000, HARD_CAP_MS);
+  }
+  // HTTP-date form
+  const parsed = Date.parse(trimmed);
+  if (!Number.isFinite(parsed)) return null;
+  const deltaMs = parsed - nowMs;
+  if (deltaMs <= 0) return null;
+  return Math.min(deltaMs, HARD_CAP_MS);
+}
+
+/** Sleep for `ms`, but wake early (and throw AbortError) if `signal` fires. */
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function delayWithJitter(attempt: number, retryAfterMs: number | null, signal?: AbortSignal): Promise<void> {
+  // When the server tells us how long to wait (Retry-After), honor it
+  // but clamp to our own upper bound so a hostile/buggy value can't eat
+  // the function's whole budget.
+  const ms = retryAfterMs != null ? retryAfterMs : backoffMs(attempt);
+  if (ms > 0) await sleepAbortable(ms, signal);
 }
 
 export interface CallClaudeResult {
@@ -179,7 +233,6 @@ export async function callClaude(opts: CallClaudeOpts): Promise<CallClaudeResult
   const maxRetries = opts.maxRetries ?? 2;
   let attempt = 0;
   let res: Response;
-  let lastError: unknown = null;
   while (true) {
     try {
       res = await fetch(ANTHROPIC_API_URL, {
@@ -190,9 +243,8 @@ export async function callClaude(opts: CallClaudeOpts): Promise<CallClaudeResult
       });
     } catch (fetchErr) {
       // Network-level failure (ECONNRESET, DNS, abort, etc.). Retryable.
-      lastError = fetchErr;
       if (attempt < maxRetries && !opts.signal?.aborted) {
-        await delayWithJitter(attempt);
+        await delayWithJitter(attempt, null, opts.signal);
         attempt += 1;
         continue;
       }
@@ -207,14 +259,17 @@ export async function callClaude(opts: CallClaudeOpts): Promise<CallClaudeResult
       (res.status >= 500 && res.status <= 599);
     if (!isRetryable || attempt >= maxRetries || opts.signal?.aborted) {
       const errText = await res.text().catch(() => "");
-      throw new Error(`Anthropic ${res.status}: ${errText.slice(0, 400)}`);
+      const suffix = attempt > 0 ? ` (after ${attempt} retr${attempt === 1 ? "y" : "ies"})` : "";
+      throw new Error(`Anthropic ${res.status}${suffix}: ${errText.slice(0, 400)}`);
     }
+    // Server hint: Retry-After (seconds or HTTP-date). If present, honor
+    // it; otherwise fall back to exponential backoff with jitter.
+    const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
     // Drain the response body so the connection can be reused.
     try { await res.text(); } catch {}
-    await delayWithJitter(attempt);
+    await delayWithJitter(attempt, retryAfterMs, opts.signal);
     attempt += 1;
   }
-  void lastError; // unused after success; kept so the compiler sees the reference path
 
   const raw = await res.json();
   const u = raw.usage ?? {};

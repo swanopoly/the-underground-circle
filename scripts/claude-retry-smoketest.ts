@@ -23,6 +23,23 @@ function backoffMs(attempt: number): number {
   return Math.floor(Math.random() * capped);
 }
 
+function parseRetryAfterMs(header: string | null | undefined, nowMs = Date.now()): number | null {
+  if (!header) return null;
+  const trimmed = header.trim();
+  if (!trimmed) return null;
+  const HARD_CAP_MS = 10_000;
+  if (/^\d+$/.test(trimmed)) {
+    const sec = Number(trimmed);
+    if (!Number.isFinite(sec) || sec <= 0) return null;
+    return Math.min(sec * 1000, HARD_CAP_MS);
+  }
+  const parsed = Date.parse(trimmed);
+  if (!Number.isFinite(parsed)) return null;
+  const deltaMs = parsed - nowMs;
+  if (deltaMs <= 0) return null;
+  return Math.min(deltaMs, HARD_CAP_MS);
+}
+
 // Simulate the retry loop with a fake fetch that yields a sequence of responses.
 async function runRetryLoop(
   responses: Array<{ status: number } | { throws: string }>,
@@ -148,6 +165,46 @@ async function main() {
     const r = await runRetryLoop([{ throws: 'ETIMEDOUT' }, { status: 529 }, { status: 200 }], 2);
     assert(r.result === 'ok', 'mixed: network + 529 recover');
     assert(r.attempts === 3, 'mixed: 3 attempts');
+  }
+
+  // ─── Retry-After parsing ────────────────────────────────────────
+  {
+    assert(parseRetryAfterMs(null) === null, 'retry-after: null header → null');
+    assert(parseRetryAfterMs(undefined) === null, 'retry-after: undefined → null');
+    assert(parseRetryAfterMs('') === null, 'retry-after: empty string → null');
+    assert(parseRetryAfterMs('   ') === null, 'retry-after: whitespace only → null');
+    assert(parseRetryAfterMs('5') === 5000, 'retry-after: "5" → 5000ms');
+    assert(parseRetryAfterMs('0') === null, 'retry-after: "0" → null (no positive delta)');
+    assert(parseRetryAfterMs('1') === 1000, 'retry-after: "1" → 1000ms');
+    // HARD_CAP_MS = 10_000 — anything larger must be clamped.
+    assert(parseRetryAfterMs('30') === 10000, 'retry-after: "30" clamps to 10000ms cap');
+    assert(parseRetryAfterMs('600') === 10000, 'retry-after: "600" clamps to cap');
+
+    // Malformed values should return null, NOT throw.
+    assert(parseRetryAfterMs('abc') === null, 'retry-after: garbage → null');
+    assert(parseRetryAfterMs('-5') === null, 'retry-after: negative → null');
+    assert(parseRetryAfterMs('5.5') === null, 'retry-after: decimal → null (spec: integer seconds only)');
+
+    // HTTP-date form: compute a target 3s in the future and verify we
+    // get a positive delta within tolerance. Note: `.toUTCString()`
+    // truncates to the second, so if `now` has an fractional ms near
+    // 999, the observed delta can be as low as ~2001ms. Bound widens
+    // accordingly to avoid flakes.
+    const now = Date.now();
+    const future = new Date(now + 3000).toUTCString();
+    const past = new Date(now - 5000).toUTCString();
+    const fromFuture = parseRetryAfterMs(future, now);
+    assert(fromFuture !== null, 'retry-after: future HTTP-date → non-null');
+    assert(fromFuture !== null && fromFuture >= 2000 && fromFuture <= 3500, `retry-after: future HTTP-date delta in [2000,3500]ms (got ${fromFuture})`);
+    assert(parseRetryAfterMs(past, now) === null, 'retry-after: past HTTP-date → null (non-positive delta)');
+
+    // HTTP-date way in the future must clamp to cap.
+    const farFuture = new Date(now + 60_000).toUTCString();
+    const farDelta = parseRetryAfterMs(farFuture, now);
+    assert(farDelta === 10000, `retry-after: far-future HTTP-date clamps to cap (got ${farDelta})`);
+
+    // Invalid HTTP-date → null
+    assert(parseRetryAfterMs('Not a valid date', now) === null, 'retry-after: invalid date string → null');
   }
 
   // ─── backoffMs envelope ─────────────────────────────────────────
