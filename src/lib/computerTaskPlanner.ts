@@ -43,9 +43,18 @@ export function planComputerTaskPreview(task: string): ComputerTaskPlanPreview {
   const browser = includesAny(text, [
     'website', 'site', 'browser', 'tab', 'visit ', 'navigate', 'search the web',
     'log in', 'login', 'sign in', 'fill out', 'form', 'checkout', 'page', 'url', 'docs',
+    // Common search-engine + look-up phrasings that imply web work but were
+    // previously missed (causing "find file in downloads AND google X" to
+    // classify as single-surface file_task instead of hybrid_task).
+    'google', 'duckduckgo', 'bing it', 'web search',
   ]) || matchesAny(text, [
     /\b(open|go to|visit|browse|check)\b.*\b(website|site|page|tab|url|link)\b/i,
     /\b(find|search|look up|research|compare|review|summarize|show me|list)\b.*\b(website|site|page|web|online|docs|documentation|pricing|reviews?)\b/i,
+    // Bare "look up X", "google X", "search for X online" — search verbs
+    // without an explicit web-noun. Excludes "search files/folder/disk/drive"
+    // so file-search phrasings stay classified as file_task.
+    /\b(look\s*up|google|bing)\s+\w/i,
+    /\bsearch\s+(?!files?\b|folders?\b|the\s+files?\b|disk\b|drive\b)\w+.*\b(online|on the (web|internet)|for)\b/i,
   ]) || appResearch;
 
   const file = includesAny(text, [
