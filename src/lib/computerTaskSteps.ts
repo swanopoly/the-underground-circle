@@ -127,7 +127,10 @@ export function useHybridSteps(runId: string | null): {
           setLoading(false);
         }
       })
-      .catch((err) => console.warn('[computerTaskSteps] initial fetch failed:', err?.message || err));
+      .catch((err) => {
+        console.warn('[computerTaskSteps] initial fetch failed:', err?.message || err);
+        if (!cancelled) setLoading(false);
+      });
 
     const channel = supabase
       .channel(`computer_task_steps:${runId}`)

@@ -186,42 +186,58 @@ export async function executeComputerTaskWithAgent(args: {
         // fall through to generic agent run
       } else {
         const runId = runRow.id;
-        const hybridResult = await executeHybridTask({
-          runId,
-          circleId: args.circleId,
-          plan,
-          // The orchestrator surfaces approvals via this callback. In v1
-          // we auto-approve at the runtime level — the per-action browser
-          // approval still fires inside the browser adapter. UI tasks
-          // upgrade this to a real inline approval card.
-          onApprovalRequired: async () => true,
-        });
+        try {
+          const hybridResult = await executeHybridTask({
+            runId,
+            circleId: args.circleId,
+            plan,
+            // The orchestrator surfaces approvals via this callback. In v1
+            // we auto-approve at the runtime level — the per-action browser
+            // approval still fires inside the browser adapter. UI tasks
+            // upgrade this to a real inline approval card.
+            onApprovalRequired: async () => true,
+          });
 
-        const summary = await synthesizeHybridSummary({
-          task: args.task,
-          stepRecords: hybridResult.stepRecords,
-        });
+          const summary = await synthesizeHybridSummary({
+            task: args.task,
+            stepRecords: hybridResult.stepRecords,
+          });
 
-        // Patch the run row to done with the synthesized summary.
-        const finalStatus = hybridResult.warnings.some((w) => w.includes('dispatch failed'))
-          ? 'error'
-          : 'done';
-        await supabase
-          .from('computer_use_runs')
-          .update({
-            status: finalStatus,
-            summary,
-            completed_at: new Date().toISOString(),
-          })
-          .eq('id', runId);
+          // Patch the run row to done with the synthesized summary.
+          const finalStatus = hybridResult.warnings.some((w) => w.includes('dispatch failed'))
+            ? 'error'
+            : 'done';
+          await supabase
+            .from('computer_use_runs')
+            .update({
+              status: finalStatus,
+              summary,
+              completed_at: new Date().toISOString(),
+            })
+            .eq('id', runId);
 
-        return {
-          adapterId: 'hybrid_adapter',
-          execution,
-          response: summary,
-          runId,
-          warnings: [...warnings, ...hybridResult.warnings],
-        };
+          return {
+            adapterId: 'hybrid_adapter',
+            execution,
+            response: summary,
+            runId,
+            warnings: [...warnings, ...hybridResult.warnings],
+          };
+        } catch (err: any) {
+          const errMsg = err?.message || String(err);
+          warnings.push(`hybrid run threw: ${errMsg}`);
+          // Mark the orphaned run as error so it doesn't show 'running' forever.
+          await supabase
+            .from('computer_use_runs')
+            .update({
+              status: 'error',
+              error_message: errMsg,
+              completed_at: new Date().toISOString(),
+            })
+            .eq('id', runId)
+            .then(() => {}, () => {}); // best-effort
+          // fall through to the generic agent run below
+        }
       }
     }
   }

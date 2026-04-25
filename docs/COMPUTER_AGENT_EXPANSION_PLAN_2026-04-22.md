@@ -2,6 +2,12 @@
 
 Date: 2026-04-22
 
+## Status snapshot (2026-04-23)
+
+Phase 1 (capability audit): **SHIPPED** · Phase 2 (file adapter): **PARTIAL** — durable grants shipped 2026-04-23 (`supabase/migrations/20260424_computer_task_grants.sql` + DB-first `src/lib/computerTaskGrantMemory.ts`), adapter execution still partial (MCP path shipped, richer file-browser UX pending) · Phase 3 (app adapter): **PARTIAL** — MCP/bridge inventory shipped, no per-app permission model · Phase 4 (planner): **SHIPPED 2026-04-25** — `run_computer_task` planner kind shipped, file/app/hybrid classification live, `hybrid_task` staged executor shipped (computerHybridRuntime.executeHybridTask + HybridFocusChain UI) · Phase 5 (permission/trust UX): **PARTIAL** — durable grant schema shipped 2026-04-23, but no centralized access-model panel yet.
+
+Rollup: 2 shipped · 3 partial · 0 pending.
+
 Related docs:
 - [AGENTS_ROADMAP.md](./AGENTS_ROADMAP.md)
 - [COMPUTER_USE_PLAN.md](./COMPUTER_USE_PLAN.md)
@@ -147,8 +153,8 @@ Status:
   - attempts a real MCP-backed file search / read / list operation
   - falls back to the shared agent runtime only when no suitable filesystem tool can be executed
 - remaining gap:
-  - no normalized path grants yet
-  - no durable file-scope approval model yet
+  - normalized path grants — **SHIPPED 2026-04-23** (`supabase/migrations/20260424_computer_task_grants.sql`)
+  - durable file-scope approval model — **SHIPPED 2026-04-23** (DB-first `src/lib/computerTaskGrantMemory.ts` with storage cache fallback)
   - result rendering is still generic MCP payload summarization, not a richer file browser UX
 
 ### Phase 3 — App connector model
@@ -183,13 +189,20 @@ Status:
 
 ### Phase 4 — Computer task planner
 
+> STATUS (2026-04-23): **PARTIAL** — `run_computer_task` execution kind shipped in `chatAutomationPlanner.ts`. `browser_task`, `file_task`, `app_task` classifications live. `hybrid_computer_task` staged executor **PENDING** (no orchestrator with visible step transitions yet).
+
 Extend chat planning so requests can resolve to:
 
 - `browser_task`
+  → **SHIPPED 2026-04-22** (`computerUseAgent.ts` + live card)
 - `file_search_task`
+  → **SHIPPED 2026-04-22** (`computerFileAdapter.ts`)
 - `file_read_task`
+  → **SHIPPED 2026-04-22** (same adapter)
 - `app_task`
+  → **SHIPPED 2026-04-22** (`computerAppAdapter.ts`)
 - `hybrid_computer_task`
+  → **SHIPPED 2026-04-25** (computerHybridRuntime.executeHybridTask + HybridFocusChain UI; planner edge fn at hybrid-task-planner)
 
 Outcome:
 - user asks naturally
@@ -198,12 +211,18 @@ Outcome:
 
 ### Phase 5 — Permission and trust UX
 
+> STATUS (2026-04-23): **PARTIAL** — durable grants now persist in DB (`computer_task_grants` migration + DB-first `computerTaskGrantMemory.ts`), and task-state surfaces an "access plan" inline; all four sub-surfaces exist but no centralized "what can the agent touch right now?" UI.
+
 Build a visible access model:
 
 - folders granted
+  → **PARTIAL** (`computer_task_grants` migration **SHIPPED 2026-04-23**; no granted-folder UI yet)
 - apps connected
+  → **PARTIAL** (Integrations/Bridges panels exist but no unified app-access view under Use Computer)
 - MCP servers active
+  → **PARTIAL** (`computerCapabilityRegistry.ts` audits MCP tools; no dedicated permission UI)
 - browser permissions and approval posture
+  → **PARTIAL** (`ComputerUsePermissionDialog.tsx` handles per-task; no sticky per-circle view)
 
 Outcome:
 - users can understand exactly what the agent can and cannot touch
@@ -211,9 +230,13 @@ Outcome:
 ## Near-term build order
 
 1. Complete the `run_computer_task` migration so browser and non-browser computer work both ride one dispatcher contract
+   → **SHIPPED 2026-04-22**
 2. Add filesystem-specific capability support
+   → **PARTIAL** (`computerFileAdapter.ts` MCP-backed path shipped; durable scopes now persisted, richer file-browser UX still pending)
 3. Add durable approval / grant scopes for files, apps, MCP, and bridges
+   → **SHIPPED 2026-04-23** (`supabase/migrations/20260424_computer_task_grants.sql` + audit table + RLS; `computerTaskGrantMemory.ts` rewritten DB-first with storage cache fallback)
 4. Expand `Use Computer` from web-only templates into browser/files/apps task families
+   → **SHIPPED 2026-04-22** (console supports all three families)
 
 ## Non-goals for this phase
 
