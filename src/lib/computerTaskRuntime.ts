@@ -6,6 +6,7 @@ import {
   type ComputerTaskExecutionEnvelope,
 } from './computerTaskExecution';
 import { executeComputerFileTask } from './computerFileAdapter';
+import type { NormalizedFileTaskResult } from './computerFileTaskResult';
 import { executeComputerAppTask } from './computerAppAdapter';
 
 export type ComputerTaskRuntimeAdapterId =
@@ -23,6 +24,13 @@ export interface ComputerTaskRuntimeResult {
   observedEval?: OpenSwanObservedEvalSummary | null;
   handoffSuggestion?: AgentRunResult['handoffSuggestion'];
   warnings: string[];
+  /** Structured file-task payload (search matches, listing, file content)
+   *  — only present for `file_adapter` results that produced a parseable
+   *  response. Consumers render this with `FileTaskResultExplorer` in
+   *  addition to (or instead of) the text `response`. */
+  fileTaskResult?: NormalizedFileTaskResult;
+  /** Tool that produced `fileTaskResult` — shown in the explorer header. */
+  fileTaskToolName?: string;
 }
 
 /**
@@ -99,6 +107,10 @@ export async function executeComputerTaskWithAgent(args: {
         execution,
         response: fileResult.message,
         warnings: [...warnings, ...fileResult.warnings],
+        fileTaskResult: fileResult.normalized,
+        fileTaskToolName: typeof fileResult.data?.toolName === 'string'
+          ? fileResult.data.toolName as string
+          : undefined,
       };
     }
     warnings.push(...fileResult.warnings);
@@ -135,6 +147,82 @@ export async function executeComputerTaskWithAgent(args: {
       // least tried to) so the agent prompt can skip re-launching.
       appAdapterMessage = appResult.message;
       appBridgeLaunched = wasBridgeLaunch;
+    }
+  }
+
+  if (execution.preview.kind === 'hybrid_task') {
+    const { decomposeHybridTask } = await import('./computerTaskPlanner');
+    const { executeHybridTask, synthesizeHybridSummary } = await import('./computerHybridRuntime');
+    const { supabase } = await import('./supabase');
+
+    let plan = null;
+    try {
+      plan = await decomposeHybridTask({
+        task: args.task,
+        circleId: args.circleId,
+        audit: args.audit,
+      });
+    } catch (err: any) {
+      warnings.push(`hybrid planner failed: ${err?.message || err}`);
+      // fall through to the generic agent run below
+    }
+
+    if (plan) {
+      // Open a parent run row in computer_use_runs so the steps have a
+      // FK target and the existing history panel picks the run up.
+      const { data: runRow, error: runErr } = await supabase
+        .from('computer_use_runs')
+        .insert({
+          circle_id: args.circleId,
+          user_id: args.userId,
+          task: args.task,
+          status: 'running',
+        })
+        .select('id')
+        .single();
+
+      if (runErr || !runRow) {
+        warnings.push(`could not open hybrid run row: ${runErr?.message || 'no row'}`);
+        // fall through to generic agent run
+      } else {
+        const runId = runRow.id;
+        const hybridResult = await executeHybridTask({
+          runId,
+          circleId: args.circleId,
+          plan,
+          // The orchestrator surfaces approvals via this callback. In v1
+          // we auto-approve at the runtime level — the per-action browser
+          // approval still fires inside the browser adapter. UI tasks
+          // upgrade this to a real inline approval card.
+          onApprovalRequired: async () => true,
+        });
+
+        const summary = await synthesizeHybridSummary({
+          task: args.task,
+          stepRecords: hybridResult.stepRecords,
+        });
+
+        // Patch the run row to done with the synthesized summary.
+        const finalStatus = hybridResult.warnings.some((w) => w.includes('dispatch failed'))
+          ? 'error'
+          : 'done';
+        await supabase
+          .from('computer_use_runs')
+          .update({
+            status: finalStatus,
+            summary,
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', runId);
+
+        return {
+          adapterId: 'hybrid_adapter',
+          execution,
+          response: summary,
+          runId,
+          warnings: [...warnings, ...hybridResult.warnings],
+        };
+      }
     }
   }
 
