@@ -32,6 +32,7 @@ import {
   type SavedTemplate,
 } from '../../lib/computerUseUserTemplates';
 import type { ComputerTaskStateRecord } from '../../lib/computerTaskState';
+import HybridFocusChain from './HybridFocusChain';
 
 interface Props {
   visible: boolean;
@@ -184,6 +185,9 @@ export default function ComputerUseConsole({
             ) : null}
           </View>
         )}
+
+        {/* ── HybridFocusChain — step timeline for the active run ────────── */}
+        <HybridFocusChain runId={taskState?.runId ?? null} variant="inline" />
 
         {/* ── Task textarea ─────────────────────────────────────────────── */}
         <View style={styles.section}>
