@@ -84,6 +84,105 @@ export async function approveStep(stepId: string): Promise<void> {
   if (error) console.warn('[computerTaskSteps] approve failed', error.message);
 }
 
+/**
+ * Wait for a step row to be approved (approved_at non-null) or declined
+ * (status='blocked'). Resolves true on approval, false on decline or
+ * timeout. Used by the hybrid orchestrator's onApprovalRequired callback.
+ *
+ * Uses a Realtime subscription with a polling backup so we don't hang
+ * forever if the channel drops.
+ */
+export async function awaitStepApproval(args: {
+  stepId: string;
+  runId: string;
+  timeoutMs?: number;
+}): Promise<boolean> {
+  const timeoutMs = args.timeoutMs ?? 5 * 60_000; // 5 min default
+
+  // First check: maybe the user already responded before we subscribed.
+  const initial = await readStepDecision(args.stepId);
+  if (initial !== 'pending') return initial === 'approved';
+
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const settle = (v: boolean) => {
+      if (settled) return;
+      settled = true;
+      try { supabase.removeChannel(channel); } catch { /* noop */ }
+      clearTimeout(timeoutHandle);
+      clearInterval(pollHandle);
+      resolve(v);
+    };
+
+    // Realtime subscription on the parent run's steps; check the specific
+    // step on every change.
+    const channel = supabase
+      .channel(`step_approval:${args.stepId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'computer_task_steps',
+          filter: `id=eq.${args.stepId}`,
+        },
+        () => {
+          readStepDecision(args.stepId)
+            .then((decision) => {
+              if (decision === 'approved') settle(true);
+              else if (decision === 'declined') settle(false);
+            })
+            .catch(() => { /* keep waiting */ });
+        },
+      )
+      .subscribe();
+
+    // Polling backup — every 3s, check the row directly. Realtime can drop;
+    // this keeps the wait correct even when the channel dies.
+    const pollHandle = setInterval(() => {
+      readStepDecision(args.stepId)
+        .then((decision) => {
+          if (decision === 'approved') settle(true);
+          else if (decision === 'declined') settle(false);
+        })
+        .catch(() => { /* keep waiting */ });
+    }, 3000);
+
+    // Hard timeout — if the user walks away, decline by inaction.
+    const timeoutHandle = setTimeout(() => settle(false), timeoutMs);
+  });
+}
+
+/** Read a single step's approval decision. */
+async function readStepDecision(stepId: string): Promise<'pending' | 'approved' | 'declined'> {
+  const { data, error } = await supabase
+    .from('computer_task_steps')
+    .select('approved_at, status')
+    .eq('id', stepId)
+    .single();
+  if (error || !data) return 'pending';
+  if (data.status === 'blocked') return 'declined';
+  if (data.approved_at) return 'approved';
+  return 'pending';
+}
+
+/**
+ * User declines a step — marks it blocked with reason. The orchestrator
+ * will see this via awaitStepApproval and continue with the cascade-skip
+ * path for dependents.
+ */
+export async function declineStep(stepId: string, reason: string = 'user_declined'): Promise<void> {
+  const { error } = await supabase
+    .from('computer_task_steps')
+    .update({
+      status: 'blocked',
+      error: reason,
+      completed_at: new Date().toISOString(),
+    })
+    .eq('id', stepId);
+  if (error) console.warn('[computerTaskSteps] decline failed', error.message);
+}
+
 /** One-shot fetch of all steps for a run, ordered by step_index. */
 export async function fetchHybridSteps(runId: string): Promise<HybridStepRecord[]> {
   const { data, error } = await supabase

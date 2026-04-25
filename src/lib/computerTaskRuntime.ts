@@ -191,11 +191,14 @@ export async function executeComputerTaskWithAgent(args: {
             runId,
             circleId: args.circleId,
             plan,
-            // The orchestrator surfaces approvals via this callback. In v1
-            // we auto-approve at the runtime level — the per-action browser
-            // approval still fires inside the browser adapter. UI tasks
-            // upgrade this to a real inline approval card.
-            onApprovalRequired: async () => true,
+            // The orchestrator surfaces approvals via this callback. Awaits
+            // real user input via Supabase Realtime + polling. The step row
+            // must already exist (inserted by executeHybridTask before this
+            // callback fires). Decline resolves false → cascade-skip path.
+            onApprovalRequired: async (step) => {
+              const { awaitStepApproval } = await import('./computerTaskSteps');
+              return awaitStepApproval({ stepId: step.id, runId });
+            },
           });
 
           const summary = await synthesizeHybridSummary({

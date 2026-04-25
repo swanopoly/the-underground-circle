@@ -6,7 +6,7 @@
 
 import React, { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { useHybridSteps } from '../../lib/computerTaskSteps';
+import { useHybridSteps, approveStep, declineStep } from '../../lib/computerTaskSteps';
 import type { HybridStepRecord, HybridStepStatus } from '../../lib/computerHybridTypes';
 
 interface Props {
@@ -61,6 +61,9 @@ function StepRow({ step, isLast }: { step: HybridStepRecord; isLast: boolean }) 
         <Text style={s.task} numberOfLines={3}>{step.task}</Text>
         {step.rationale ? <Text style={s.rationale}>{step.rationale}</Text> : null}
         {step.error ? <Text style={s.error}>error: {step.error}</Text> : null}
+        {step.needs_approval && step.status === 'pending' && !step.approved_at ? (
+          <ApprovalRow stepId={step.id} />
+        ) : null}
         {hasOutput ? (
           <Pressable onPress={() => setExpanded((e) => !e)} style={s.outputToggle}>
             <Text style={s.outputToggleText}>{expanded ? '▾ HIDE OUTPUT' : '▸ SHOW OUTPUT'}</Text>
@@ -73,6 +76,28 @@ function StepRow({ step, isLast }: { step: HybridStepRecord; isLast: boolean }) 
             </Text>
           </View>
         ) : null}
+      </View>
+    </View>
+  );
+}
+
+function ApprovalRow({ stepId }: { stepId: string }) {
+  return (
+    <View style={s.approvalContainer}>
+      <Text style={s.approvalHint}>REVIEW BEFORE EXECUTE</Text>
+      <View style={s.approvalButtons}>
+        <Pressable
+          style={[s.approvalBtn, s.approvalBtnApprove]}
+          onPress={() => approveStep(stepId)}
+        >
+          <Text style={[s.approvalBtnText, s.approvalBtnTextApprove]}>APPROVE</Text>
+        </Pressable>
+        <Pressable
+          style={[s.approvalBtn, s.approvalBtnDecline]}
+          onPress={() => declineStep(stepId)}
+        >
+          <Text style={[s.approvalBtnText, s.approvalBtnTextDecline]}>DECLINE</Text>
+        </Pressable>
       </View>
     </View>
   );
@@ -240,5 +265,43 @@ const s = StyleSheet.create({
     fontSize: 11,
     fontFamily: 'Menlo, Monaco, monospace',
     lineHeight: 15,
+  },
+  approvalContainer: {
+    gap: 6,
+    marginTop: 2,
+  },
+  approvalHint: {
+    color: '#94a3b8',
+    fontSize: 9,
+    fontFamily: 'Menlo, Monaco, monospace',
+    letterSpacing: 1,
+  },
+  approvalButtons: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  approvalBtn: {
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  approvalBtnApprove: {
+    borderColor: '#22c55e',
+  },
+  approvalBtnDecline: {
+    borderColor: '#ef4444',
+  },
+  approvalBtnText: {
+    fontSize: 10,
+    fontFamily: 'Menlo, Monaco, monospace',
+    letterSpacing: 1,
+    fontWeight: '700',
+  },
+  approvalBtnTextApprove: {
+    color: '#22c55e',
+  },
+  approvalBtnTextDecline: {
+    color: '#ef4444',
   },
 });
