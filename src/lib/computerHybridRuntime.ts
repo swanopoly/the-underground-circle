@@ -176,6 +176,7 @@ export async function executeHybridTask(args: {
     const record = recordById.get(step.id);
     if (!record) {
       warnings.push(`no DB record for plan step ${step.id} — skipping`);
+      blockedIds.add(step.id);
       continue;
     }
 
@@ -241,10 +242,15 @@ export async function executeHybridTask(args: {
     }
   }
 
+  // Refresh records so callers get final per-step state (status + output)
+  // even if they don't subscribe via useHybridSteps.
+  const { fetchHybridSteps } = await import('./computerTaskSteps');
+  const freshRecords = await fetchHybridSteps(args.runId);
+
   return {
     runId: args.runId,
     summary: '', // filled in by synthesizeHybridSummary in Task 5
-    stepRecords: records,
+    stepRecords: freshRecords.length === ordered.length ? freshRecords : records,
     warnings,
   };
 }
@@ -312,29 +318,56 @@ async function runBrowserStep(args: {
   }
   const { browserbase } = credsResult.creds;
 
-  return new Promise((resolve, reject) => {
-    const handle = startComputerUseAgent({
-      task: args.task,
-      circleId: args.circleId,
-      browserbase,
-      onResult: (info) => {
-        resolve({
-          output: {
-            summary: info.summary,
-            findings: info.findings ?? null,
-            sessionId: info.sessionId,
-            liveUrl: info.liveUrl,
-            runId: info.runId ?? null,
-          },
-          warnings: [],
-        });
-      },
-      onError: (message) => {
-        // Cancel the SSE stream before rejecting so we don't leak the
-        // underlying fetch/reader on error paths.
-        handle.cancel();
-        reject(new Error(message));
-      },
-    });
+  const BROWSER_STEP_TIMEOUT_MS = 5 * 60 * 1000; // 5 min
+
+  // Capture resolve/reject so both the step Promise and the timeout
+  // branch can settle the same Promise. These are assigned synchronously
+  // inside the Promise constructor below before startComputerUseAgent is
+  // called, so it is safe for onResult/onError to reference them.
+  let resolveStep!: (value: { output: unknown; warnings: string[] }) => void;
+  let rejectStep!: (reason: unknown) => void;
+
+  // Wire the callbacks before starting the agent so the closures are
+  // ready even if the agent resolves on the same tick.
+  const stepPromise = new Promise<{ output: unknown; warnings: string[] }>((res, rej) => {
+    resolveStep = res;
+    rejectStep = rej;
   });
+
+  // `handle` must be obtained synchronously before Promise.race so that
+  // the timeout branch can call handle.cancel() to stop the SSE stream.
+  const handle = startComputerUseAgent({
+    task: args.task,
+    circleId: args.circleId,
+    browserbase,
+    onResult: (info) => {
+      resolveStep({
+        output: {
+          summary: info.summary,
+          findings: info.findings ?? null,
+          sessionId: info.sessionId,
+          liveUrl: info.liveUrl,
+          runId: info.runId ?? null,
+        },
+        warnings: [],
+      });
+    },
+    onError: (message) => {
+      // Cancel the SSE stream before rejecting so we don't leak the
+      // underlying fetch/reader on error paths.
+      handle.cancel();
+      rejectStep(new Error(message));
+    },
+  });
+
+  const result = await Promise.race([
+    stepPromise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => {
+        try { handle.cancel?.(); } catch { /* best-effort */ }
+        reject(new Error('browser step timed out after 5 minutes'));
+      }, BROWSER_STEP_TIMEOUT_MS),
+    ),
+  ]);
+  return result;
 }
