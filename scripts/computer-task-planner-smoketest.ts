@@ -51,12 +51,17 @@ function classifyTask(task: string): ComputerTaskKind {
     // without an explicit web-noun. Excludes "search files/folder/disk/drive"
     // so file-search phrasings stay classified as file_task.
     /\b(look\s*up|google|bing)\s+\w/i,
-    /\bsearch\s+(?!files?\b|folders?\b|the\s+files?\b|disk\b|drive\b)\w+.*\b(online|on the (web|internet)|for)\b/i,
+    /\bsearch\s+(?!(files?|folders?|the\s+(files?|folder|disk|drive)|disk|drive|my\s+(files?|disk|drive))\b)\w+.*\b(online|on the (web|internet)|for)\b/i,
+    // Bare-domain URLs: 'stripe.com', 'github.io', 'app.slack.com' — common
+    // phrasings users drop into chat without an http:// prefix.
+    /\b\w[\w-]*\.(com|org|net|io|co|app|dev|ai|gov|edu|so|to|me)\b/i,
   ]) || appResearch;
 
   const file = includesAny(text, [
     'file', 'folder', 'directory', 'path', 'desktop', 'downloads', 'documents', 'find on my computer',
     'locate', 'search files', 'read this file', 'open this file', '.md', '.ts', '.tsx', '.json', '.csv', '.pdf',
+    '.txt', '.log', '.yaml', '.yml', '~/', '/users/',
+    'disk', 'drive',
   ]);
   const explicitAppName = includesAny(text, [
     // Third-party dev
@@ -105,8 +110,20 @@ function classifyTask(task: string): ComputerTaskKind {
     /\bopen\b.*\bapplication\b/i,
   ]);
 
+  // If multiple distinct app names appear with a conjunction, treat as
+  // hybrid even though both signals are 'app' — the work spans multiple
+  // surfaces and benefits from the planner's step decomposition.
+  const appNameMatches = ([
+    'slack', 'notion', 'figma', 'github', 'discord', 'teams', 'zoom', 'linear',
+    'chrome', 'cursor', 'vs code', 'vscode', 'iterm', 'xcode', 'docker', 'safari',
+    'mail', 'calendar', 'messages', 'notes', 'reminders', 'photos', 'music', 'maps',
+    'finder', 'preview', 'calculator', 'terminal', 'textedit',
+  ]).filter((name) => text.includes(name));
+  const hasConjunction = /\b(and|then|after|next)\b/.test(text);
+  const multiApp = appNameMatches.length >= 2 && hasConjunction;
+
   const activeKinds = [browser, file, app].filter(Boolean).length;
-  if (activeKinds > 1) return 'hybrid_task';
+  if (activeKinds > 1 || multiApp) return 'hybrid_task';
   if (file) return 'file_task';
   if (app) return 'app_task';
   if (browser) return 'browser_task';
