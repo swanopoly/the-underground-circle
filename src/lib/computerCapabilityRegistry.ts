@@ -113,10 +113,27 @@ async function probeDesktopBridge(): Promise<boolean> {
  * Uses a 1500ms hard timeout so the audit stays non-blocking.
  * All errors are swallowed — bridge absence is the common case for non-dev
  * users and should never surface a warning.
+ *
+ * Result is cached for 60 seconds so repeated auditComputerCapabilities
+ * calls in quick succession don't all eat the 1500ms unreachable-bridge
+ * timeout.
  */
+let bridgeProbeCache: { result: boolean; expiresAt: number } | null = null;
+const BRIDGE_PROBE_TTL_MS = 60_000;
+
 async function probeClaudeBridge(): Promise<boolean> {
-  if (Platform.OS !== 'web') return false;
-  if (typeof fetch === 'undefined') return false;
+  if (bridgeProbeCache && Date.now() < bridgeProbeCache.expiresAt) {
+    return bridgeProbeCache.result;
+  }
+  if (Platform.OS !== 'web') {
+    bridgeProbeCache = { result: false, expiresAt: Date.now() + BRIDGE_PROBE_TTL_MS };
+    return false;
+  }
+  if (typeof fetch === 'undefined') {
+    bridgeProbeCache = { result: false, expiresAt: Date.now() + BRIDGE_PROBE_TTL_MS };
+    return false;
+  }
+  let result = false;
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 1500);
@@ -125,12 +142,15 @@ async function probeClaudeBridge(): Promise<boolean> {
       signal: ctrl.signal,
     });
     clearTimeout(t);
-    if (!resp.ok) return false;
-    const data = await resp.json().catch(() => null) as { ok?: boolean } | null;
-    return Boolean(data?.ok);
+    if (resp.ok) {
+      const data = await resp.json().catch(() => null) as { ok?: boolean } | null;
+      result = Boolean(data?.ok);
+    }
   } catch {
-    return false;
+    result = false;
   }
+  bridgeProbeCache = { result, expiresAt: Date.now() + BRIDGE_PROBE_TTL_MS };
+  return result;
 }
 
 function summarizeSources(parts: Array<string | null | undefined>): string[] {

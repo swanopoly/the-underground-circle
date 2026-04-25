@@ -1,5 +1,6 @@
 import { fetchAllMcpTools, callMcpTool, type McpTool } from './mcpClient';
 import { loadConnections } from './connectionManager';
+import { callBridgeExec } from './computerFileAdapter';
 import {
   getInstalledIntegrationProviders,
   getCircleIntegrationCapabilities,
@@ -164,6 +165,144 @@ async function runAutoChain(appId: string): Promise<AutoChainResult> {
   } catch (err: any) {
     return { ok: false, steps, error: err?.message || 'auto-chain threw' };
   }
+}
+
+// ─── Claude-bridge osascript fallback ──────────────────────────────────────
+
+/**
+ * Well-known Mac app names the planner classifier recognises.
+ * Keep in sync with the planner's app-name vocabulary.
+ */
+const KNOWN_APP_NAMES: string[] = [
+  'Notes',
+  'Reminders',
+  'Calendar',
+  'Mail',
+  'Messages',
+  'FaceTime',
+  'Safari',
+  'Chrome',
+  'Google Chrome',
+  'Firefox',
+  'Slack',
+  'Zoom',
+  'Finder',
+  'Terminal',
+  'iTerm',
+  'iTerm2',
+  'Xcode',
+  'Visual Studio Code',
+  'Code',
+  'Spotify',
+  'Music',
+  'Photos',
+  'Preview',
+  'TextEdit',
+  'Pages',
+  'Numbers',
+  'Keynote',
+  'Word',
+  'Excel',
+  'PowerPoint',
+  'Notion',
+  'Figma',
+  'Discord',
+  'Teams',
+  'Microsoft Teams',
+  'Outlook',
+  'System Preferences',
+  'System Settings',
+  'Activity Monitor',
+];
+
+/** Allowed characters in a Mac app name used in an osascript command. */
+const APP_NAME_SAFE_RE = /^[A-Za-z0-9 \-_.&]+$/;
+
+/**
+ * Find the first known app name mentioned in `task` (case-insensitive).
+ * Returns the canonical cased name from KNOWN_APP_NAMES, or null.
+ */
+function inferAppNameFromTask(task: string): string | null {
+  const lower = task.toLowerCase();
+  // Sort by length descending so longer multi-word names (e.g. "Google Chrome")
+  // are tested before shorter substrings (e.g. "Chrome").
+  const sorted = [...KNOWN_APP_NAMES].sort((a, b) => b.length - a.length);
+  for (const name of sorted) {
+    if (lower.includes(name.toLowerCase())) return name;
+  }
+  return null;
+}
+
+type OsaVerb = 'activate' | 'quit';
+
+/**
+ * Infer whether the user wants to launch/activate or quit the app.
+ * Default is 'activate' (bring forward / open).
+ */
+function inferOsaVerb(task: string): OsaVerb {
+  const lower = task.toLowerCase();
+  if (/\b(quit|close|exit|kill|stop)\b/.test(lower)) return 'quit';
+  return 'activate'; // launch, open, start, switch to → activate
+}
+
+/**
+ * Sanitize an app name for safe inclusion in an osascript one-liner.
+ * Returns null if the name contains shell metacharacters.
+ */
+function sanitizeAppName(appName: string): string | null {
+  if (!APP_NAME_SAFE_RE.test(appName)) return null;
+  // Escape embedded single quotes (rare for Mac app names but defensive)
+  return appName.replace(/'/g, "'\\''");
+}
+
+/**
+ * Attempt to satisfy a Mac app launch / quit task via the local
+ * claude-bridge /exec endpoint using `osascript`. Returns null when
+ * the bridge is unreachable, the app name can't be inferred, or the
+ * name fails the safety check — letting the caller fall through to
+ * the existing no-surface response.
+ */
+async function tryBridgeAppFallback(task: string): Promise<ComputerAppAdapterResult | null> {
+  const appName = inferAppNameFromTask(task);
+  if (!appName) return null;
+
+  const safeAppName = sanitizeAppName(appName);
+  if (!safeAppName) return null;
+
+  const verb = inferOsaVerb(task);
+  const command = `osascript -e 'tell application "${safeAppName}" to ${verb}'`;
+
+  let bridgeResult: { ok: boolean; stdout: string; stderr: string; code?: number };
+  try {
+    const raw = await callBridgeExec(command);
+    // callBridgeExec does not return `code` — treat ok:true as code 0
+    bridgeResult = { ...raw, code: raw.ok ? 0 : 1 };
+  } catch {
+    return null;
+  }
+
+  // Bridge unreachable or command hard-failed
+  if (!bridgeResult.ok && !bridgeResult.stdout && !bridgeResult.stderr) {
+    return null;
+  }
+
+  const succeeded = bridgeResult.ok && (bridgeResult.code ?? 1) === 0;
+  const verbLabel = verb === 'quit' ? 'Quit' : 'Launched';
+
+  return {
+    ok: succeeded,
+    message: succeeded
+      ? `${verbLabel} **${appName}** via osascript (claude-bridge).`
+      : `osascript failed for **${appName}**: ${bridgeResult.stderr || 'unknown error'}`,
+    warnings: succeeded ? [] : [`osascript exit: ${bridgeResult.code ?? 'unknown'}`],
+    data: {
+      kind: 'desktop_bridge_launch',
+      toolName: 'claude-bridge:osascript',
+      appName,
+      verb,
+      command,
+    },
+  };
 }
 
 export async function executeComputerAppTask(args: {
@@ -400,6 +539,14 @@ export async function executeComputerAppTask(args: {
       },
     };
   }
+
+  // ─── Claude-bridge osascript fallback ────────────────────────────────────
+  // If no MCP app/desktop tools, no known-app URL shortcut matched (or it
+  // was reached without a match), try launching via osascript through the
+  // local claude-bridge /exec endpoint. Mirrors the filesystem fallback in
+  // computerFileAdapter.ts.
+  const bridgeFallback = await tryBridgeAppFallback(task);
+  if (bridgeFallback) return bridgeFallback;
 
   if (lines.length === 0) {
     return {

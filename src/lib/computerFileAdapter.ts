@@ -151,7 +151,7 @@ function sanitizePath(raw: string): string | null {
 }
 
 /** POST a command to the local claude-bridge /exec endpoint. */
-async function callBridgeExec(
+export async function callBridgeExec(
   command: string,
 ): Promise<{ stdout: string; stderr: string; ok: boolean }> {
   const controller = new AbortController();
