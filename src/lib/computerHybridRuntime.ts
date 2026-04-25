@@ -12,7 +12,7 @@
 //   - executeHybridTask (orchestrator) — added in later tasks
 //   - synthesizeHybridSummary (Claude call) — added in later tasks
 
-import type { HybridStep } from './computerHybridTypes';
+import type { HybridStep, HybridPlan, HybridStepRecord } from './computerHybridTypes';
 
 // ─── Token resolution ─────────────────────────────────────────────
 
@@ -101,4 +101,240 @@ export function orderHybridSteps(steps: HybridStep[]): HybridStep[] {
 
   for (const s of steps) visit(s.id);
   return result;
+}
+
+// ─── executeHybridTask ────────────────────────────────────────────
+
+/**
+ * Result of a fully-walked hybrid run, returned to the caller after
+ * synthesis. The unified `summary` is what the user sees in chat;
+ * stepRecords carry the per-step state for the Focus Chain UI to
+ * render even after the hook unsubscribes.
+ */
+export interface HybridRunResult {
+  runId: string;
+  summary: string;
+  stepRecords: HybridStepRecord[];
+  warnings: string[];
+}
+
+/**
+ * Walk a HybridPlan: persist steps, dispatch each to its adapter in
+ * dependency order, capture outputs, halt on errors.
+ *
+ * Idempotency: caller is responsible for ensuring `plan.steps` haven't
+ * already been persisted under `runId`. Re-runs of the same runId will
+ * insert duplicates because the table only has UNIQUE(run_id, step_index)
+ * — the caller checks before invoking on resume.
+ *
+ * Returns the ordered step records and any warnings collected from
+ * adapter calls. Final summary synthesis is a separate call
+ * (synthesizeHybridSummary) so callers can interleave UI updates.
+ */
+export async function executeHybridTask(args: {
+  runId: string;
+  circleId: string;
+  plan: HybridPlan;
+  /**
+   * Called when a step needs approval. Resolves with true to proceed
+   * or false to mark the step blocked (and halt dependents).
+   */
+  onApprovalRequired: (step: HybridStepRecord) => Promise<boolean>;
+}): Promise<HybridRunResult> {
+  const ordered = orderHybridSteps(args.plan.steps);
+  const warnings: string[] = [];
+
+  // Dynamic import so the smoke test (pure-function only) doesn't pull
+  // in Supabase / React Native at module-load time.
+  const { insertHybridSteps, updateStepStatus } = await import('./computerTaskSteps');
+
+  // Persist all steps as pending so the UI can render the chain
+  // immediately — even before the first dispatch.
+  const records = await insertHybridSteps({
+    runId: args.runId,
+    circleId: args.circleId,
+    steps: ordered,
+  });
+
+  if (records.length !== ordered.length) {
+    warnings.push('failed to persist all hybrid steps; UI may lag');
+  }
+
+  // Map plan-step id → DB record id for status updates.
+  const recordById = new Map<string, HybridStepRecord>();
+  records.forEach((rec, i) => {
+    const planStep = ordered[i];
+    if (planStep) recordById.set(planStep.id, rec);
+  });
+
+  // In-memory step outputs for token resolution (parallel to DB writes).
+  const outputs: Record<string, unknown> = {};
+  // Track which steps got blocked so we can cascade-skip dependents.
+  const blockedIds = new Set<string>();
+
+  for (const step of ordered) {
+    const record = recordById.get(step.id);
+    if (!record) {
+      warnings.push(`no DB record for plan step ${step.id} — skipping`);
+      continue;
+    }
+
+    // Cascade skip if any dependency was blocked.
+    const cascadeBlocked = step.dependsOn.some((d) => blockedIds.has(d));
+    if (cascadeBlocked) {
+      blockedIds.add(step.id);
+      await updateStepStatus({
+        stepId: record.id,
+        status: 'skipped',
+        error: `dependency blocked: ${step.dependsOn.find((d) => blockedIds.has(d))}`,
+      });
+      continue;
+    }
+
+    // Approval gate (if needed).
+    if (step.needsApproval) {
+      const approved = await args.onApprovalRequired(record);
+      if (!approved) {
+        blockedIds.add(step.id);
+        await updateStepStatus({
+          stepId: record.id,
+          status: 'blocked',
+          error: 'user_declined',
+        });
+        continue;
+      }
+    }
+
+    // Resolve {{step_N.output.X}} tokens against in-memory outputs.
+    const resolvedTask = step.consumes
+      ? `${step.task}\n\nContext:\n${resolveStepTokens(step.consumes, outputs)}`
+      : step.task;
+
+    // Mark active.
+    await updateStepStatus({ stepId: record.id, status: 'active' });
+
+    // Dispatch.
+    try {
+      const dispatchOutput = await dispatchHybridStep({
+        kind: step.kind,
+        circleId: args.circleId,
+        task: resolvedTask,
+      });
+      outputs[step.id] = dispatchOutput.output;
+      await updateStepStatus({
+        stepId: record.id,
+        status: 'completed',
+        output: dispatchOutput.output,
+      });
+      if (dispatchOutput.warnings.length > 0) {
+        warnings.push(...dispatchOutput.warnings.map((w) => `[${step.id}] ${w}`));
+      }
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      blockedIds.add(step.id);
+      await updateStepStatus({
+        stepId: record.id,
+        status: 'blocked',
+        error: msg,
+      });
+      warnings.push(`[${step.id}] dispatch failed: ${msg}`);
+    }
+  }
+
+  return {
+    runId: args.runId,
+    summary: '', // filled in by synthesizeHybridSummary in Task 5
+    stepRecords: records,
+    warnings,
+  };
+}
+
+/**
+ * Dispatch a single step through the matching adapter. Wraps the file
+ * and app adapters' { ok, message, data } shape into a generic
+ * { output, warnings } shape for the orchestrator. Browser steps go
+ * through the existing computer-use-agent edge function — same as the
+ * standalone browser_task path.
+ *
+ * Adapter imports are deferred (dynamic import()) so that the pure
+ * functions above — which the smoke test imports directly — do not
+ * transitively pull in React Native modules at module-load time.
+ */
+async function dispatchHybridStep(args: {
+  kind: 'file' | 'app' | 'browser';
+  circleId: string;
+  task: string;
+}): Promise<{ output: unknown; warnings: string[] }> {
+  if (args.kind === 'file') {
+    const { executeComputerFileTask } = await import('./computerFileAdapter');
+    const r = await executeComputerFileTask({ circleId: args.circleId, task: args.task });
+    if (!r.ok) throw new Error(r.message || 'file adapter failed');
+    return {
+      output: { message: r.message, data: r.data, normalized: r.normalized ?? null },
+      warnings: r.warnings,
+    };
+  }
+  if (args.kind === 'app') {
+    const { executeComputerAppTask } = await import('./computerAppAdapter');
+    const r = await executeComputerAppTask({ circleId: args.circleId, task: args.task });
+    if (!r.ok) throw new Error(r.message || 'app adapter failed');
+    return { output: { message: r.message, data: r.data }, warnings: r.warnings };
+  }
+  // browser
+  const r = await runBrowserStep({ circleId: args.circleId, task: args.task });
+  return { output: r.output, warnings: r.warnings };
+}
+
+/**
+ * Browser step shim — wraps `startComputerUseAgent` (SSE-streaming,
+ * callback-based) in a Promise. Resolves Browserbase credentials from
+ * the circle's integration config, then starts the agent and waits for
+ * `onResult` or `onError`. Captures summary + findings + session ids
+ * as the step's output.
+ *
+ * Uses dynamic import() for the same reason as dispatchHybridStep —
+ * computerUseAgent pulls in React Native and would break the Node-based
+ * smoke test if imported at the top level.
+ */
+async function runBrowserStep(args: {
+  circleId: string;
+  task: string;
+}): Promise<{ output: unknown; warnings: string[] }> {
+  const [{ resolveComputerUseCreds }, { startComputerUseAgent }] = await Promise.all([
+    import('./computerUseCreds'),
+    import('./computerUseAgent'),
+  ]);
+
+  // Resolve Browserbase credentials from the circle's integration config.
+  const credsResult = await resolveComputerUseCreds(args.circleId);
+  if (!credsResult.ok) {
+    throw new Error(`browser step cannot start: ${credsResult.reason}`);
+  }
+  const { browserbase } = credsResult.creds;
+
+  return new Promise((resolve, reject) => {
+    const handle = startComputerUseAgent({
+      task: args.task,
+      circleId: args.circleId,
+      browserbase,
+      onResult: (info) => {
+        resolve({
+          output: {
+            summary: info.summary,
+            findings: info.findings ?? null,
+            sessionId: info.sessionId,
+            liveUrl: info.liveUrl,
+            runId: info.runId ?? null,
+          },
+          warnings: [],
+        });
+      },
+      onError: (message) => {
+        // Cancel the SSE stream before rejecting so we don't leak the
+        // underlying fetch/reader on error paths.
+        handle.cancel();
+        reject(new Error(message));
+      },
+    });
+  });
 }
