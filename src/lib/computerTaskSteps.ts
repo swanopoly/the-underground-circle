@@ -120,12 +120,14 @@ export function useHybridSteps(runId: string | null): {
     let cancelled = false;
     setLoading(true);
 
-    fetchHybridSteps(runId).then((rows) => {
-      if (!cancelled) {
-        setSteps(rows);
-        setLoading(false);
-      }
-    });
+    fetchHybridSteps(runId)
+      .then((rows) => {
+        if (!cancelled) {
+          setSteps(rows);
+          setLoading(false);
+        }
+      })
+      .catch((err) => console.warn('[computerTaskSteps] initial fetch failed:', err?.message || err));
 
     const channel = supabase
       .channel(`computer_task_steps:${runId}`)
@@ -140,16 +142,18 @@ export function useHybridSteps(runId: string | null): {
         () => {
           // Re-sort on every change — list is small (≤ ~10 steps), simpler
           // than reconciling individual events.
-          fetchHybridSteps(runId).then((rows) => {
-            if (!cancelled) setSteps(rows);
-          });
+          fetchHybridSteps(runId)
+            .then((rows) => {
+              if (!cancelled) setSteps(rows);
+            })
+            .catch((err) => console.warn('[computerTaskSteps] realtime fetch failed:', err?.message || err));
         },
       )
       .subscribe();
 
     return () => {
       cancelled = true;
-      supabase.removeChannel(channel);
+      try { supabase.removeChannel(channel); } catch { /* best-effort cleanup */ }
     };
   }, [runId]);
 
