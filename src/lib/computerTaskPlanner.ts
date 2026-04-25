@@ -1,4 +1,6 @@
 import type { ComputerCapabilityId, ComputerCapabilityAudit } from './computerCapabilityRegistry';
+import { supabase } from './supabase';
+import type { HybridPlan } from './computerHybridTypes';
 
 export type ComputerTaskKind =
   | 'browser_task'
@@ -141,6 +143,33 @@ export function planComputerTaskPreview(task: string): ComputerTaskPlanPreview {
     detail: 'The task may need browser, file, or app access. The runtime should resolve the best surface after more detail.',
     requiredCapabilities: ['browser_automation', 'app_tools', 'file_search'],
   };
+}
+
+/**
+ * Fetch a HybridPlan from the hybrid-task-planner edge function.
+ * Throws on network/auth/empty-plan failure; caller surfaces a
+ * user-facing error.
+ */
+export async function decomposeHybridTask(args: {
+  task: string;
+  circleId: string;
+  audit: ComputerCapabilityAudit | null;
+}): Promise<HybridPlan> {
+  const { data, error } = await supabase.functions.invoke('hybrid-task-planner', {
+    body: {
+      task: args.task,
+      circleId: args.circleId,
+      audit: args.audit ? { findings: args.audit.findings } : undefined,
+    },
+  });
+
+  if (error) {
+    throw new Error(`hybrid-task-planner failed: ${error.message || error}`);
+  }
+  if (!data || !Array.isArray(data.steps) || data.steps.length === 0) {
+    throw new Error('planner returned empty plan');
+  }
+  return data as HybridPlan;
 }
 
 export function summarizeComputerTaskCapabilityReadiness(
