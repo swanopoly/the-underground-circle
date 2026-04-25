@@ -118,6 +118,85 @@ export interface HybridRunResult {
   warnings: string[];
 }
 
+// ─── synthesizeHybridSummary ──────────────────────────────────────
+
+/**
+ * One-shot summarization across completed step outputs. Returns the
+ * unified user-facing summary the orchestrator persists into
+ * computer_use_runs.summary. Uses Haiku 4.5 — synthesis is one-pass,
+ * relatively short context, and Haiku is the right cost tier here.
+ *
+ * If the call fails for any reason, returns a deterministic fallback
+ * summary built from the step records — better than throwing and
+ * leaving the run with `status='running'` forever.
+ */
+export async function synthesizeHybridSummary(args: {
+  task: string;
+  stepRecords: HybridStepRecord[];
+}): Promise<string> {
+  const completed = args.stepRecords.filter((s) => s.status === 'completed');
+
+  // Deterministic fallback used when synthesis fails or every step
+  // failed. Lists what worked and what didn't, no narrative.
+  const fallback = buildDeterministicSummary(args.task, args.stepRecords);
+
+  if (completed.length === 0) return fallback;
+
+  const stepBlocks = args.stepRecords
+    .map((s) => {
+      const out = s.output ? JSON.stringify(s.output).slice(0, 4000) : null;
+      const head = `Step ${s.step_index + 1} (${s.step_kind}): ${s.task}`;
+      const status = s.status === 'completed'
+        ? 'COMPLETED'
+        : `${s.status.toUpperCase()}${s.error ? `: ${s.error}` : ''}`;
+      return `${head}\n  status: ${status}${out ? `\n  output: ${out}` : ''}`;
+    })
+    .join('\n\n');
+
+  const system = [
+    'You synthesize the result of a multi-step computer task into one short, useful summary for the user.',
+    'Lead with the answer to their original request.',
+    'If a step was blocked or skipped, note it briefly — never invent results for skipped steps.',
+    'Keep it under ~200 words.',
+  ].join('\n');
+
+  const user = `Original request:\n${args.task}\n\nSteps and outputs:\n${stepBlocks}\n\nWrite the unified summary.`;
+
+  try {
+    // invokeLLMProxy routes through the llm-proxy edge function, which
+    // separates system-role messages into Anthropic's top-level `system`
+    // field automatically. Dynamic import keeps this file importable by
+    // the smoke test (pure-functions only, no React Native or Supabase).
+    const { invokeLLMProxy } = await import('./llmProviders');
+    const result = await invokeLLMProxy({
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5',
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      maxTokens: 600,
+    });
+    const text = String(result?.response || '').trim();
+    return text || fallback;
+  } catch (err: any) {
+    console.warn('[hybridRuntime] synthesis failed', err?.message);
+    return fallback;
+  }
+}
+
+function buildDeterministicSummary(task: string, records: HybridStepRecord[]): string {
+  const lines = [`Task: ${task}`, '', 'Steps:'];
+  for (const r of records) {
+    const tag = r.status === 'completed' ? '✓' :
+                r.status === 'blocked'   ? '✗' :
+                r.status === 'skipped'   ? '·' :
+                '?';
+    lines.push(`${tag} ${r.step_index + 1}. ${r.task}${r.error ? ` — ${r.error}` : ''}`);
+  }
+  return lines.join('\n');
+}
+
 /**
  * Walk a HybridPlan: persist steps, dispatch each to its adapter in
  * dependency order, capture outputs, halt on errors.
