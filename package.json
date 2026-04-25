@@ -64,6 +64,7 @@
     "smoke:claude-retry": "npx tsx scripts/claude-retry-smoketest.ts",
     "smoke:bridge-health-diag": "npx tsx scripts/bridge-health-diag-smoketest.ts",
     "check:bridges": "npx tsx scripts/check-bridges.ts",
+    "bridges:up": "npx tsx scripts/bridges-up.ts",
     "export:traces": "npx tsx scripts/export-traces.ts",
     "build:ax-helper": "swiftc -O -o scripts/bin/uc-ax-helper scripts/bin/uc-ax-helper.swift && chmod 755 scripts/bin/uc-ax-helper && echo '✓ uc-ax-helper built'",
     "smoke:hermes-helpers": "npx tsx scripts/hermes-helpers-smoketest.ts",
