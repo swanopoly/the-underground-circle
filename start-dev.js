@@ -77,17 +77,40 @@ class ServiceManager {
   }
 }
 
-// Services
+// Services. Bridges first, then proxy, then Expo — Expo is last so the
+// app sees every bridge alive on first poll. Adding Codex / Gemini /
+// Cursor here closed a 2026-04-23 gap where those bridges only ran if
+// you remembered to start them manually — Ctrl+C-ing the supervisor
+// killed Claude Code + Proxy + Expo, leaving the other three stranded
+// in stale state from days earlier.
 const services = [
   new ServiceManager('Claude Code Bridge', 'node', ['scripts/claude-bridge.js']),
-  new ServiceManager('CORS Proxy', 'node', ['openswan-proxy.js']),
-  new ServiceManager('Expo Dev Server', 'npx', ['expo', 'start', '--web']),
+  new ServiceManager('Codex Bridge',       'node', ['scripts/codex-bridge.js']),
+  new ServiceManager('Gemini CLI Bridge',  'node', ['scripts/gemini-bridge.js']),
+  new ServiceManager('Cursor Bridge',      'node', ['scripts/cursor-bridge.js']),
+  new ServiceManager('CORS Proxy',         'node', ['openswan-proxy.js']),
+  new ServiceManager('Expo Dev Server',    'npx',  ['expo', 'start', '--web']),
 ];
 
 // Start all services
 console.log('🦢 Underground Circle Dev Server');
 console.log('=================================\n');
 services.forEach(s => s.start());
+
+// Bridge health summary 6s after launch — gives every service time
+// to bind its port. Spawns the same CLI as `npm run check:bridges`
+// (subprocess so we don't need start-dev to know about tsx / TS).
+setTimeout(() => {
+  console.log('\n--- Bridge health (6s post-launch) ---');
+  const probe = spawn('npx', ['tsx', 'scripts/check-bridges.ts'], {
+    stdio: ['ignore', 'inherit', 'inherit'],
+    shell: true,
+    cwd: __dirname,
+  });
+  probe.on('exit', () => {
+    console.log('---------------------------------------\n');
+  });
+}, 6000);
 
 // Graceful shutdown
 const shutdown = () => {
