@@ -1,3 +1,4 @@
+import { Platform } from 'react-native';
 import { listMcpServers, fetchAllMcpTools, type McpTool } from './mcpClient';
 import { loadConnections, type AgentConnection } from './connectionManager';
 import {
@@ -103,6 +104,35 @@ async function probeDesktopBridge(): Promise<boolean> {
   } catch { return false; }
 }
 
+/**
+ * Probe the Claude bridge at localhost:7778/health. Returns true when the
+ * bridge responds with `{ ok: true }` — meaning filesystem ops via /exec
+ * are available on this machine.
+ *
+ * Only runs on web (where the audit runs). Native skips immediately.
+ * Uses a 1500ms hard timeout so the audit stays non-blocking.
+ * All errors are swallowed — bridge absence is the common case for non-dev
+ * users and should never surface a warning.
+ */
+async function probeClaudeBridge(): Promise<boolean> {
+  if (Platform.OS !== 'web') return false;
+  if (typeof fetch === 'undefined') return false;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 1500);
+    const resp = await fetch('http://localhost:7778/health', {
+      cache: 'no-store',
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    if (!resp.ok) return false;
+    const data = await resp.json().catch(() => null) as { ok?: boolean } | null;
+    return Boolean(data?.ok);
+  } catch {
+    return false;
+  }
+}
+
 function summarizeSources(parts: Array<string | null | undefined>): string[] {
   const unique = new Set<string>();
   for (const part of parts) {
@@ -119,12 +149,13 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
   // /desktop/health was reporting launch/focus/type/keys/a11y_tree.
   // Probing here (unauthenticated health endpoint) stays cheap and
   // never blocks — a 500ms timeout falls through to "no bridge".
-  const [connections, integrationProviders, integrationCapabilities, mcpServers, bridgeAlive] = await Promise.all([
+  const [connections, integrationProviders, integrationCapabilities, mcpServers, bridgeAlive, claudeBridgeAvailable] = await Promise.all([
     loadConnections().catch(() => [] as AgentConnection[]),
     getInstalledIntegrationProviders(circleId).catch(() => [] as CircleIntegrationProvider[]),
     getCircleIntegrationCapabilities(circleId).catch(() => [] as string[]),
     listMcpServers(circleId).catch(() => []),
     probeDesktopBridge().catch(() => false),
+    probeClaudeBridge().catch(() => false),
   ]);
 
   const mcpTools = mcpServers.length > 0
@@ -180,24 +211,42 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
     {
       id: 'file_search',
       label: 'File search',
-      status: filesystemTools.length > 0 ? 'ready' : enabledConnections.length > 0 ? 'partial' : 'missing',
+      status: filesystemTools.length > 0
+        ? 'ready'
+        : claudeBridgeAvailable || enabledConnections.length > 0
+          ? 'partial'
+          : 'missing',
       detail: filesystemTools.length > 0
         ? 'Filesystem-oriented MCP tools are available for locating files/content.'
-        : enabledConnections.length > 0
-          ? 'Bridges exist, but no canonical filesystem toolset is visible yet.'
-          : 'No filesystem capability source is active yet.',
-      sources: fileSources,
+        : claudeBridgeAvailable
+          ? 'Local Claude bridge available for filesystem ops via /exec.'
+          : enabledConnections.length > 0
+            ? 'Bridges exist, but no canonical filesystem toolset is visible yet.'
+            : 'No filesystem capability source is active yet.',
+      sources: summarizeSources([
+        ...fileSources,
+        claudeBridgeAvailable ? 'Claude bridge (localhost:7778)' : null,
+      ]),
     },
     {
       id: 'file_read',
       label: 'File read access',
-      status: filesystemTools.length > 0 ? 'ready' : enabledConnections.length > 0 ? 'partial' : 'missing',
+      status: filesystemTools.length > 0
+        ? 'ready'
+        : claudeBridgeAvailable || enabledConnections.length > 0
+          ? 'partial'
+          : 'missing',
       detail: filesystemTools.length > 0
         ? 'The circle can likely read granted files through MCP filesystem tools.'
-        : enabledConnections.length > 0
-          ? 'A bridge may support file access, but there is no canonical read contract yet.'
-          : 'No file-read surface is discoverable yet.',
-      sources: fileSources,
+        : claudeBridgeAvailable
+          ? 'Local Claude bridge available for filesystem ops via /exec.'
+          : enabledConnections.length > 0
+            ? 'A bridge may support file access, but there is no canonical read contract yet.'
+            : 'No file-read surface is discoverable yet.',
+      sources: summarizeSources([
+        ...fileSources,
+        claudeBridgeAvailable ? 'Claude bridge (localhost:7778)' : null,
+      ]),
     },
     {
       id: 'file_write',
