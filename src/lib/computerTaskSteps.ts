@@ -31,6 +31,8 @@ export async function insertHybridSteps(args: {
     rationale: step.rationale || null,
     needs_approval: step.needsApproval,
     status: 'pending' as HybridStepStatus,
+    depends_on: step.dependsOn || [],
+    consumes: step.consumes || null,
   }));
 
   const { data, error } = await supabase

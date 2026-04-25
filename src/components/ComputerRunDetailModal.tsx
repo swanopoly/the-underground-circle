@@ -125,6 +125,7 @@ export default function ComputerRunDetailModal({ runId, onClose, onRerun }: Prop
   const [loading, setLoading] = useState(false);
   const [copiedFlash, setCopiedFlash] = useState<'md' | 'summary' | null>(null);
   const [zoomSrc, setZoomSrc] = useState<string | null>(null);
+  const [resuming, setResuming] = useState(false);
 
   useEffect(() => {
     if (!copiedFlash) return;
@@ -146,6 +147,50 @@ export default function ComputerRunDetailModal({ runId, onClose, onRerun }: Prop
     return () => { cancelled = true; };
   }, [runId]);
 
+  async function handleResume() {
+    if (!runId || !row || resuming) return;
+    setResuming(true);
+    try {
+      const { resumeHybridTask, synthesizeHybridSummary } = await import('../lib/computerHybridRuntime');
+      const { awaitStepApproval } = await import('../lib/computerTaskSteps');
+      const { supabase } = await import('../lib/supabase');
+
+      const result = await resumeHybridTask({
+        runId,
+        circleId: row.circle_id,
+        onApprovalRequired: async (step) =>
+          awaitStepApproval({ stepId: step.id, runId }),
+      });
+
+      const summary = await synthesizeHybridSummary({
+        task: row.task,
+        stepRecords: result.stepRecords,
+      });
+
+      const finalStatus = result.warnings.some((w) => w.includes('dispatch failed'))
+        ? 'error'
+        : 'done';
+
+      await supabase
+        .from('computer_use_runs')
+        .update({
+          status: finalStatus,
+          summary,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', runId);
+
+      // Refresh the local row so the UI reflects the updated status.
+      const { getComputerUseRun } = await import('../lib/computerUseHistory');
+      const fresh = await getComputerUseRun(runId);
+      if (fresh) setRow(fresh);
+    } catch (err: any) {
+      console.warn('[ComputerRunDetailModal] resume failed', err?.message);
+    } finally {
+      setResuming(false);
+    }
+  }
+
   const isVisible = !!runId;
   const tone = row ? statusColor(row.status) : MAC.accent;
 
@@ -165,6 +210,7 @@ export default function ComputerRunDetailModal({ runId, onClose, onRerun }: Prop
             onClose={onClose}
             accessory={accessory}
             padding={0}
+            draggable
           >
             {loading && !row ? (
               <View style={s.loadingBox}>
@@ -318,6 +364,14 @@ export default function ComputerRunDetailModal({ runId, onClose, onRerun }: Prop
                       onRerun(row.task);
                       onClose();
                     }}
+                  />
+                ) : null}
+                {(row.status === 'running' || row.status === 'error') ? (
+                  <MacButton
+                    label={resuming ? 'RESUMING...' : 'RESUME'}
+                    primary={row.status === 'running'}
+                    onPress={handleResume}
+                    disabled={resuming}
                   />
                 ) : null}
                 {row.summary ? (

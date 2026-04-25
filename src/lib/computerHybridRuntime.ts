@@ -335,6 +335,155 @@ export async function executeHybridTask(args: {
 }
 
 /**
+ * Pick up a partially-completed hybrid run. Reconstructs the plan from
+ * persisted step records, fast-forwards through completed steps (reusing
+ * their stored output for token resolution), and walks remaining steps
+ * with the same executeHybridTask semantics.
+ *
+ * Caller is responsible for ensuring the run isn't currently being
+ * executed by another tab — there's no distributed lock. Calling resume
+ * twice in parallel will double-dispatch in-flight steps.
+ */
+export async function resumeHybridTask(args: {
+  runId: string;
+  circleId: string;
+  onApprovalRequired: (step: HybridStepRecord) => Promise<boolean>;
+}): Promise<HybridRunResult> {
+  const { fetchHybridSteps, updateStepStatus } = await import('./computerTaskSteps');
+  const records = await fetchHybridSteps(args.runId);
+
+  if (records.length === 0) {
+    throw new Error('cannot resume: no steps found for run');
+  }
+
+  // Reconstruct HybridStep[] from records. If depends_on / consumes
+  // columns are missing (older rows), default to empty / undefined —
+  // resume still works for steps with no dependency metadata, just won't
+  // be able to resolve {{step_N.output}} tokens.
+  const reconstructed: HybridStep[] = records.map((r) => ({
+    id: `step_${r.step_index + 1}`, // canonical id format
+    kind: r.step_kind,
+    task: r.task,
+    rationale: r.rationale || '',
+    needsApproval: r.needs_approval,
+    dependsOn: r.depends_on || [],
+    consumes: r.consumes || undefined,
+  }));
+
+  const ordered = orderHybridSteps(reconstructed);
+  const warnings: string[] = [];
+
+  // Map plan id → DB record. Built from step_index since records use the
+  // index as their canonical position.
+  const recordById = new Map<string, HybridStepRecord>();
+  ordered.forEach((step, i) => {
+    const rec = records.find((r) => r.step_index === i);
+    if (rec) recordById.set(step.id, rec);
+  });
+
+  // Seed in-memory outputs from already-completed steps so token
+  // resolution works for the remaining ones.
+  const outputs: Record<string, unknown> = {};
+  const blockedIds = new Set<string>();
+  for (const step of ordered) {
+    const rec = recordById.get(step.id);
+    if (!rec) continue;
+    if (rec.status === 'completed') {
+      outputs[step.id] = rec.output;
+    } else if (rec.status === 'blocked' || rec.status === 'skipped') {
+      blockedIds.add(step.id);
+    }
+  }
+
+  // Walk remaining steps. Skip already-completed ones; cascade-skip if a
+  // dependency was previously blocked.
+  for (const step of ordered) {
+    const record = recordById.get(step.id);
+    if (!record) {
+      warnings.push(`no DB record for plan step ${step.id} on resume`);
+      blockedIds.add(step.id);
+      continue;
+    }
+
+    // Already done.
+    if (record.status === 'completed') continue;
+    // Already blocked/skipped — leave as is.
+    if (record.status === 'blocked' || record.status === 'skipped') continue;
+
+    // Cascade-skip if any dependency was blocked before resume.
+    const cascadeBlocked = step.dependsOn.some((d) => blockedIds.has(d));
+    if (cascadeBlocked) {
+      blockedIds.add(step.id);
+      await updateStepStatus({
+        stepId: record.id,
+        status: 'skipped',
+        error: `dependency blocked: ${step.dependsOn.find((d) => blockedIds.has(d))}`,
+      });
+      continue;
+    }
+
+    // Approval gate.
+    if (step.needsApproval) {
+      // If approved_at is already set (user pre-approved before tab close),
+      // we don't need to re-prompt. Otherwise call the callback.
+      if (!record.approved_at) {
+        const approved = await args.onApprovalRequired(record);
+        if (!approved) {
+          blockedIds.add(step.id);
+          await updateStepStatus({
+            stepId: record.id,
+            status: 'blocked',
+            error: 'user_declined',
+          });
+          continue;
+        }
+      }
+    }
+
+    const resolvedTask = step.consumes
+      ? `${step.task}\n\nContext:\n${resolveStepTokens(step.consumes, outputs)}`
+      : step.task;
+
+    await updateStepStatus({ stepId: record.id, status: 'active' });
+
+    try {
+      const dispatchOutput = await dispatchHybridStep({
+        kind: step.kind,
+        circleId: args.circleId,
+        task: resolvedTask,
+      });
+      outputs[step.id] = dispatchOutput.output;
+      await updateStepStatus({
+        stepId: record.id,
+        status: 'completed',
+        output: dispatchOutput.output,
+      });
+      if (dispatchOutput.warnings.length > 0) {
+        warnings.push(...dispatchOutput.warnings.map((w) => `[${step.id}] ${w}`));
+      }
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      blockedIds.add(step.id);
+      await updateStepStatus({
+        stepId: record.id,
+        status: 'blocked',
+        error: msg,
+      });
+      warnings.push(`[${step.id}] dispatch failed: ${msg}`);
+    }
+  }
+
+  const freshRecords = await fetchHybridSteps(args.runId);
+
+  return {
+    runId: args.runId,
+    summary: '',
+    stepRecords: freshRecords.length === ordered.length ? freshRecords : records,
+    warnings,
+  };
+}
+
+/**
  * Dispatch a single step through the matching adapter. Wraps the file
  * and app adapters' { ok, message, data } shape into a generic
  * { output, warnings } shape for the orchestrator. Browser steps go

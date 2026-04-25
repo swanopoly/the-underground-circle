@@ -63,4 +63,6 @@ export interface HybridStepRecord {
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
+  depends_on: string[];
+  consumes: string | null;
 }
