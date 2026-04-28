@@ -44,6 +44,10 @@ export type SwanBotContext = {
   spiritId?: string | null;
   attachmentContext?: string;
   sessionArchiveContext?: string;
+  // ID of the user message that triggered this turn — passed through so
+  // memory_access_log rows can be linked to the assistant reply for the
+  // "Used N memories" citation pill.
+  triggerMessageId?: string;
 };
 
 async function resolveContextSpiritId(context: SwanBotContext): Promise<string | null> {
@@ -1475,6 +1479,7 @@ async function buildSystemPromptAsync(
             queryText: currentMessage,
             circleId: context.circleId,
             userId: context.userId,
+            messageId: context.triggerMessageId,
             activeSoulKey,
             surface: 'main_chat',
             budgetChars: retrievalBudget,
@@ -2447,6 +2452,7 @@ export async function buildStreamableSystemPrompt(opts: {
   sessionProfile?: string | null;
   resolvedSkills?: OpenSwanResolvedSkill[];
   resolvedSkillsPromptBlock?: string | null;
+  triggerMessageId?: string;
 }): Promise<string> {
   const context: SwanBotContext = {
     userId: opts.userId,
@@ -2462,6 +2468,7 @@ export async function buildStreamableSystemPrompt(opts: {
     sessionProfile: opts.sessionProfile,
     resolvedSkills: opts.resolvedSkills,
     resolvedSkillsPromptBlock: opts.resolvedSkillsPromptBlock,
+    triggerMessageId: opts.triggerMessageId,
   };
   const circleData = opts.circleId
     ? await getCircleContextData(context)

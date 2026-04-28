@@ -301,3 +301,34 @@ export async function loadCitationsForMessage(opts: {
     return [];
   }
 }
+
+// Newer, more reliable variant — keys off the persisted message_id rather
+// than a timestamp window. Used when we have the assistant message's
+// dbId; the migration 20260428_memory_inspect_control.sql backs it via
+// the get_memory_citations RPC.
+export async function loadCitationsByAssistantMessage(
+  assistantMessageId: string,
+): Promise<MemoryCitation[]> {
+  if (!assistantMessageId) return [];
+  try {
+    const { data, error } = await supabase.rpc('get_memory_citations', {
+      p_assistant_message_id: assistantMessageId,
+    });
+    if (error || !data) return [];
+    return (data as any[]).map(row => ({
+      memoryId: row.memory_id,
+      title: row.title || '',
+      content: row.content || '',
+      memoryKind: row.memory_kind || '',
+      scope: row.scope || '',
+      importance: row.importance || 0,
+      // soul_key isn't joined by the RPC yet; future enhancement.
+      soulKey: null,
+      reason: row.reason || 'retrieval',
+      surface: row.surface || '',
+      citedAt: row.accessed_at,
+    }));
+  } catch {
+    return [];
+  }
+}

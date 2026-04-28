@@ -31,13 +31,21 @@ spec turns it into a felt feature.
 | Access log written on every retrieval   | Shipped        | `src/lib/memoryService.ts:999`          |
 | `MemoryHealthCard` (full-featured)      | Built, unwired | `src/components/agent/MemoryHealthCard.tsx` |
 | `MemoryViewer` with pin/forget actions  | Shipped        | `src/components/agent/MemoryViewer.tsx` + `src/lib/memoryActions.ts` |
+| `memory_evaluations` table              | Shipped        | `supabase/migrations/20260408_memory_v2_retrieval_privacy.sql:102` |
+| `recordMemoryFeedback()` w/ confirmed_helpful, dismissed, etc. | Shipped | `src/lib/memoryActions.ts:45` |
+| Helpfulness boost in retrieval scoring  | Shipped        | `src/lib/memoryService.ts:861-908,941-942` (`helpfulnessAdjustment`) |
+| `pinned` boolean + retrieval boost      | Shipped        | `memoryActions.ts:pinMemory`, `memoryService.ts:940` |
 | `detectContradictions` helper           | Shipped        | `src/lib/memoryConsolidation.ts:97`     |
 | Daily contradiction cron                | Pending        | no edge fn `consolidate-memories`       |
 | Citation pill ("Used N memories")       | **Pending**    | —                                       |
-| Reinforcement counter                   | **Pending**    | no `reinforcement_count` column         |
 | `message_id` linkage on access log      | **Pending**    | only `run_id` recorded today            |
 
-The pending rows are the scope of this spec.
+**Reinforcement scoring is already implemented** — through `memory_evaluations` +
+`recordMemoryFeedback({ action: 'confirmed_helpful' \| 'not_helpful' })`, which
+the retrieval pipeline already consumes via `helpfulnessAdjustment`. The
+citation pill's reinforce/dispute buttons reuse this — no new column needed.
+
+The remaining pending rows are the scope of this spec.
 
 ---
 
@@ -45,34 +53,29 @@ The pending rows are the scope of this spec.
 
 ### 3.1 Schema deltas
 
+Reinforcement is already handled via `memory_evaluations`. The only schema
+change needed is per-message audit linkage:
+
 ```sql
 -- Migration: 20260428_memory_inspect_control.sql
 
--- Per-message audit linkage (current schema only has run_id)
+-- Per-message audit linkage (current schema only has run_id, which is
+-- not always populated for chat surfaces)
 alter table memory_access_log
-  add column message_id uuid references messages(id) on delete cascade;
+  add column message_id uuid references messages(id) on delete cascade,
+  add column assistant_message_id uuid references messages(id) on delete cascade;
+
 create index idx_memory_access_log_message
   on memory_access_log(message_id) where message_id is not null;
-
--- Reinforcement signal — increments when user accepts an answer that cited
--- this memory; decrements / contradicts when user disputes it.
-alter table memory_entries
-  add column reinforcement_count int not null default 0,
-  add column dispute_count int not null default 0,
-  add column last_reinforced_at timestamptz;
-create index idx_memory_entries_reinforcement
-  on memory_entries(reinforcement_count desc) where is_active;
-
--- Reasons we now write
-alter table memory_access_log
-  drop constraint memory_access_log_reason_check;
-alter table memory_access_log
-  add constraint memory_access_log_reason_check
-  check (reason in (
-    'startup','retrieval','session_resume','manual_pin','search',
-    'reinforce','dispute','forget'  -- new
-  ));
+create index idx_memory_access_log_assistant_message
+  on memory_access_log(assistant_message_id) where assistant_message_id is not null;
 ```
+
+We deliberately track *both* the user message that triggered retrieval
+(`message_id`) and the assistant reply that consumed the memories
+(`assistant_message_id`). The pill renders against the assistant reply;
+the trigger-side ID is kept for diagnostics ("which user message
+caused this memory to surface?").
 
 ### 3.2 Components
 
@@ -88,18 +91,11 @@ alter table memory_access_log
 - Joins `memory_entries` for title + score + scope + soul links.
 - Returns `{ count, memories, isLoading }`.
 
-**`reinforceMemory(id)` / `disputeMemory(id)` actions** (extend `memoryActions.ts`)
-- `reinforceMemory`: `reinforcement_count += 1`, `last_reinforced_at = now()`,
-  `importance = min(1.0, importance + 0.05)`. Write `reason='reinforce'`
-  to access log.
-- `disputeMemory`: `dispute_count += 1`, `importance = max(0.0, importance - 0.10)`.
-  If `dispute_count >= 3` and `dispute_count > reinforcement_count`, set
-  `is_active = false` (auto-quarantine). Log `reason='dispute'`.
-
-**Retrieval scoring update** (`memoryService.ts:retrieveForTurn`)
-- Add reinforcement boost to scoring step 3:
-  `+ 0.15 * tanh(reinforcement_count / 5)` (saturates ~0.15 at heavy use)
-  `- 0.20 * tanh(dispute_count / 3)` (saturates ~-0.20 at heavy dispute)
+**Reinforce / dispute** — reuse existing `recordMemoryFeedback`
+- Reinforce → `recordMemoryFeedback({ action: 'confirmed_helpful', source: 'citation_pill' })`
+- Dispute → `recordMemoryFeedback({ action: 'not_helpful', source: 'citation_pill' })`
+- Retrieval scoring already incorporates these via `helpfulnessAdjustment`
+  in `memoryService.ts:942` — no change needed.
 
 **`MemoryHealthCard` placement**
 Component is already built and unused. Place it in two locations:

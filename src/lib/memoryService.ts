@@ -812,6 +812,7 @@ export async function retrieveForTurn(opts: {
   circleId: string;
   userId?: string;
   runId?: string;
+  messageId?: string;              // user message that triggered retrieval
   activeSoulKey?: string | null;
   surface?: string;                // e.g. 'main_chat', 'room_chat'
   taskKind?: string;
@@ -993,6 +994,7 @@ export async function retrieveForTurn(opts: {
         memory_id: m.id,
         run_id: opts.runId || null,
         user_id: opts.userId || null,
+        message_id: opts.messageId || null,
         surface: opts.surface || 'main_chat',
         reason: 'retrieval' as const,
       }));
@@ -1069,6 +1071,7 @@ export async function buildPromptMemoryBundle(opts: {
   taskKind?: string;
   profile?: string;
   runId?: string;
+  messageId?: string;              // user message that triggered the bundle
   limit?: number;
 }): Promise<{ memoryContext: string; references: PromptMemoryReference[] }> {
   if (!opts.circleId) {
@@ -1114,6 +1117,7 @@ export async function buildPromptMemoryBundle(opts: {
       circleId: opts.circleId,
       userId: opts.userId,
       runId: opts.runId,
+      messageId: opts.messageId,
       queryText: opts.query,
       activeSoulKey: resolvedSoulKey,
       surface: opts.surface,
@@ -3236,4 +3240,62 @@ function logMemoryAccess(memories: MemoryEntry[], userId: string | undefined, re
     }));
     void supabase.from('memory_access_log').insert(rows).then(() => {});
   } catch {}
+}
+
+/**
+ * Once an assistant reply is persisted, backfill its message_id onto the
+ * access-log rows that produced its memory bundle. Keyed by the user
+ * message that triggered the retrieval (`triggerMessageId`).
+ *
+ * Idempotent: only updates rows where assistant_message_id IS NULL, so
+ * re-running on the same turn won't clobber a prior assignment.
+ */
+export async function attachAssistantMessageToMemoryAccess(opts: {
+  triggerMessageId: string;
+  assistantMessageId: string;
+}): Promise<void> {
+  if (!opts.triggerMessageId || !opts.assistantMessageId) return;
+  try {
+    await supabase
+      .from('memory_access_log')
+      .update({ assistant_message_id: opts.assistantMessageId })
+      .eq('message_id', opts.triggerMessageId)
+      .is('assistant_message_id', null);
+  } catch (err) {
+    console.warn('[memoryService] assistant message_id backfill failed:', err);
+  }
+}
+
+export interface MemoryCitation {
+  memory_id: string;
+  title: string;
+  content: string;
+  memory_kind: string;
+  scope: string;
+  importance: number | null;
+  pinned: boolean;
+  reason: string;
+  surface: string;
+  accessed_at: string;
+}
+
+/**
+ * Fetch the memories cited in a specific assistant message. Used by the
+ * "Used N memories" citation pill. Reads from get_memory_citations RPC
+ * which joins memory_access_log → memory_entries with RLS in force.
+ */
+export async function fetchMemoryCitations(assistantMessageId: string): Promise<MemoryCitation[]> {
+  if (!assistantMessageId) return [];
+  try {
+    const { data, error } = await supabase
+      .rpc('get_memory_citations', { p_assistant_message_id: assistantMessageId });
+    if (error) {
+      console.warn('[memoryService] fetchMemoryCitations failed:', error.message);
+      return [];
+    }
+    return (data || []) as MemoryCitation[];
+  } catch (err) {
+    console.warn('[memoryService] fetchMemoryCitations threw:', err);
+    return [];
+  }
 }
