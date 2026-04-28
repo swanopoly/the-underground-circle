@@ -5,6 +5,9 @@ import { deleteMemory, editMemory } from '../../lib/agentMemory';
 import { type MemoryEntry } from '../../lib/agentRunSystem';
 import { getSpiritById } from '../../lib/agentSpirits';
 import { getSpiritMemoryEntries } from '../../lib/memoryService';
+import { findRelatedMemories } from '../../lib/memoryEmbeddings';
+
+type RelatedMemory = Awaited<ReturnType<typeof findRelatedMemories>>[number];
 
 function formatRelativeDate(value?: string | null): string {
   if (!value) return 'unknown';
@@ -30,6 +33,9 @@ export default function SoulMemoryScreen() {
   const [memories, setMemories] = useState<MemoryEntry[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState('');
+  // Per-memory related-pane state. Keyed by memory id so multiple cards
+  // can be expanded independently. Lazy-loaded on first expand.
+  const [relatedById, setRelatedById] = useState<Record<string, RelatedMemory[] | 'loading'>>({});
 
   const load = useCallback(async () => {
     if (!circleId || !userId || !spiritId) {
@@ -75,6 +81,24 @@ export default function SoulMemoryScreen() {
     setEditContent('');
     await load();
   }, [editContent, editingId, load]);
+
+  const handleToggleRelated = useCallback(async (memoryId: string) => {
+    const current = relatedById[memoryId];
+    // Already loaded — collapse by removing the entry.
+    if (Array.isArray(current)) {
+      setRelatedById(prev => {
+        const next = { ...prev };
+        delete next[memoryId];
+        return next;
+      });
+      return;
+    }
+    // Already loading — ignore second tap.
+    if (current === 'loading') return;
+    setRelatedById(prev => ({ ...prev, [memoryId]: 'loading' }));
+    const neighbors = await findRelatedMemories({ memoryId, circleId, limit: 5 });
+    setRelatedById(prev => ({ ...prev, [memoryId]: neighbors }));
+  }, [relatedById, circleId]);
 
   return (
     <View style={styles.container}>
@@ -166,10 +190,38 @@ export default function SoulMemoryScreen() {
                     <Pressable onPress={() => { setEditingId(memory.id); setEditContent(memory.content); }} style={styles.secondaryAction}>
                       <Text style={styles.secondaryActionText}>EDIT</Text>
                     </Pressable>
+                    <Pressable onPress={() => { void handleToggleRelated(memory.id); }} style={styles.secondaryAction}>
+                      <Text style={styles.secondaryActionText}>
+                        {Array.isArray(relatedById[memory.id])
+                          ? 'HIDE RELATED'
+                          : relatedById[memory.id] === 'loading'
+                            ? 'LOADING…'
+                            : 'RELATED'}
+                      </Text>
+                    </Pressable>
                     <Pressable onPress={() => { void handleDelete(memory.id); }} style={styles.dangerAction}>
                       <Text style={styles.dangerActionText}>DELETE</Text>
                     </Pressable>
                   </View>
+                  {Array.isArray(relatedById[memory.id]) && (
+                    <View style={styles.relatedPane}>
+                      <Text style={styles.relatedHeader}>RELATED MEMORIES</Text>
+                      {(relatedById[memory.id] as RelatedMemory[]).length === 0 ? (
+                        <Text style={styles.relatedEmpty}>No semantically nearby memories yet.</Text>
+                      ) : (
+                        (relatedById[memory.id] as RelatedMemory[]).map((rel) => (
+                          <View key={rel.id} style={styles.relatedRow}>
+                            <View style={styles.relatedMeta}>
+                              <Text style={styles.relatedKind}>{(rel.memory_kind || 'finding').toUpperCase()}</Text>
+                              <Text style={styles.relatedSimilarity}>{Math.round((rel.similarity || 0) * 100)}% match</Text>
+                            </View>
+                            <Text style={styles.relatedTitle} numberOfLines={1}>{rel.title}</Text>
+                            <Text style={styles.relatedContent} numberOfLines={2}>{rel.content}</Text>
+                          </View>
+                        ))
+                      )}
+                    </View>
+                  )}
                 </>
               )}
             </View>
@@ -376,5 +428,60 @@ const styles = StyleSheet.create({
     color: '#fca5a5',
     fontSize: 11,
     fontWeight: '800',
+  },
+  relatedPane: {
+    marginTop: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    backgroundColor: '#0a0f1c',
+    padding: 10,
+    gap: 8,
+  },
+  relatedHeader: {
+    color: '#22d3ee',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 1.5,
+    fontFamily: 'monospace',
+  },
+  relatedEmpty: {
+    color: '#64748b',
+    fontSize: 11,
+    fontStyle: 'italic',
+  },
+  relatedRow: {
+    paddingVertical: 6,
+    borderTopWidth: 1,
+    borderTopColor: '#1e293b',
+    gap: 3,
+  },
+  relatedMeta: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+  },
+  relatedKind: {
+    color: '#94a3b8',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 1,
+    fontFamily: 'monospace',
+  },
+  relatedSimilarity: {
+    color: '#22d3ee',
+    fontSize: 9,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  relatedTitle: {
+    color: '#e2e8f0',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  relatedContent: {
+    color: '#94a3b8',
+    fontSize: 11,
+    lineHeight: 16,
   },
 });

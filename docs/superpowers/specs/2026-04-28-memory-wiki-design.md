@@ -152,17 +152,44 @@ want the Karpathy workflow on top of UC's substrate.
 
 ## 4. Phased rollout
 
-### Phase 0 — Audit existing wiki scaffolding (½ day)
-- Read `src/screens/wiki/SoulMemoryScreen.tsx`. Decide: extend or rewrite.
-- Verify `memory_versions` and `memory_links` don't already exist under
-  another name.
-- **Exit:** decision recorded in this spec; existing code understood.
+### Phase 0 — Audit existing wiki scaffolding (½ day) — **DONE 2026-04-28**
 
-### Phase 1 — Read-only wiki (1 day)
-- `WikiTab` + `MemoryNavTree` + `MemoryDocView` + `MemoryRelatedPane`.
-- No editing yet. Just browse.
-- Wire route `/circle/:id/wiki`.
-- **Exit:** user can navigate the memory store like a knowledge base.
+Findings:
+- `SoulMemoryScreen` exists at `src/screens/wiki/SoulMemoryScreen.tsx` —
+  already covers single-soul browse, search, edit, delete. Clean code.
+- `WikiScreen` is a separate articles knowledge-base, NOT memory. Don't
+  conflate.
+- `memory_versions` / `memory_links` tables don't exist.
+
+Decision: **extend SoulMemoryScreen rather than building a new top-level
+WikiTab.** Adding another circle tab amplifies feature sprawl (per stored
+user feedback) and SoulMemoryScreen is already the canonical surface.
+
+### Phase 1 — Related-pane on memory cards (½ day) — **SHIPPED 2026-04-28**
+
+Re-scoped from the original spec. The smallest change that delivers
+Mercury's hybrid principle (browse-like UX on top of structured store):
+
+- New `findRelatedMemories({ memoryId, circleId, limit })` helper in
+  `memoryEmbeddings.ts`. Reuses the source memory's stored embedding —
+  no re-embedding cost. RLS still gates results.
+- `SoulMemoryScreen` adds a per-memory expandable RELATED section.
+  Tapping shows the top 5 semantically nearest memories with kind,
+  similarity %, title, and content preview.
+- Lazy-loaded — only fetched on first expand. Keyed by memory id so
+  multiple cards can be open at once.
+
+**Exit:** users browsing a soul's memory can pivot to related content
+without leaving the screen — the substrate is now navigable, not just
+listable.
+
+### Phase 1b — Top-level browseable wiki tab — **DEFERRED**
+
+The original spec called for `/circle/:id/wiki` as a top-level tab with
+three-pane navigation. Deferred until usage data shows people want to
+browse all souls at once. The current per-soul view is the natural
+entry point and Phase 1's related-pane covers cross-soul discovery
+through similarity.
 
 ### Phase 2 — Inline editing + version history (1 day)
 - `memory_versions` migration.

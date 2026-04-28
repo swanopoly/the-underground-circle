@@ -252,6 +252,50 @@ export async function diagnoseEmbeddingPipeline(): Promise<Record<string, unknow
 }
 
 /**
+ * Find memories semantically related to a given memory. Reuses the
+ * source memory's stored embedding instead of re-embedding its content,
+ * so this is cheap (one indexed cosine query, no LLM call).
+ *
+ * Returns the source memory's neighbors, excluding the source itself.
+ * Empty array if the source memory has no embedding yet.
+ */
+export async function findRelatedMemories(opts: {
+  memoryId: string;
+  circleId?: string;
+  limit?: number;       // default 5
+}): Promise<Array<{
+  id: string;
+  title: string;
+  content: string;
+  memory_kind: string;
+  scope: string;
+  importance: number;
+  similarity: number;
+}>> {
+  if (!opts.memoryId) return [];
+  // Pull the source memory's embedding via a direct select. RLS still
+  // gates: we can only read embeddings on memories we'd be allowed to
+  // see anyway.
+  const { data: sourceRow, error: sourceErr } = await supabase
+    .from('memory_entries')
+    .select('embedding')
+    .eq('id', opts.memoryId)
+    .maybeSingle();
+  if (sourceErr || !sourceRow?.embedding) return [];
+
+  const { data, error } = await supabase.rpc('match_memories', {
+    p_query_embedding: sourceRow.embedding,
+    p_circle_id: opts.circleId ?? null,
+    p_match_threshold: 0,
+    p_match_count: (opts.limit ?? 5) + 1,   // +1 because the source itself will be the top match
+    p_soul_key: null,
+  });
+  if (error) return [];
+  // Drop the source memory from the result set.
+  return ((data || []) as any[]).filter(r => r.id !== opts.memoryId).slice(0, opts.limit ?? 5);
+}
+
+/**
  * Semantic memory search via the `match_memories` RPC. RLS is enforced at
  * the RPC level, so callers only ever see memories they could read through
  * the regular API.
