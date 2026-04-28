@@ -183,6 +183,7 @@ const linking: LinkingOptions<any> = {
       // Auth
       Login: 'login',
       SignUp: 'signup',
+      MemoryDeepDive: 'memory',
       // Main
       CirclesList: 'circles',
       CreateCircle: 'circles/create',

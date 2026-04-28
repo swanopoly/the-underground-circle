@@ -10,9 +10,10 @@ import {
 interface Props {
   onLogin: () => void;
   onSignUp: () => void;
+  onMemoryDeepDive?: () => void;
 }
 
-export default function LandingPage({ onLogin, onSignUp }: Props) {
+export default function LandingPage({ onLogin, onSignUp, onMemoryDeepDive }: Props) {
   const { width } = useWindowDimensions();
   const isMobile = width < 700;
 
@@ -79,6 +80,28 @@ export default function LandingPage({ onLogin, onSignUp }: Props) {
             desc="Every commit, PR, and completed task becomes visible proof-of-work. Your circle sees who shipped."
           />
         </View>
+      </View>
+
+      {/* Memory — the substrate that compounds */}
+      <View style={s.section}>
+        <Text style={[s.sectionTag, { color: '#22d3ee' }]}>MEMORY THAT COMPOUNDS</Text>
+        <Text style={s.sectionTitle}>Your circle's AI gets sharper with use</Text>
+        <Text style={[s.heroSub, { marginTop: -12, marginBottom: 28 }]}>
+          Most AI tools forget you between sessions. UC routes every conversation,
+          commit, and decision into a structured memory store — scored by relevance,
+          decayed when stale, and cited under every reply you can audit.
+        </Text>
+        <View style={[s.pillarsRow, isMobile && { flexDirection: 'column' }]}>
+          <PillarCard label="01" code="CAPTURE"  color="#6366f1" desc="Distill what was learned this turn into atomic memories — typed, scoped, and embedded." />
+          <PillarCard label="02" code="ROUTE"    color="#a855f7" desc="Decide who owns it: user, circle, soul, or shared. The right specialist gets sharper." />
+          <PillarCard label="03" code="RETRIEVE" color="#22d3ee" desc="Vector search ranks the most useful memories for the current message. Old ones decay." />
+          <PillarCard label="04" code="INJECT"   color="#22c55e" desc="Fits the budget, ranks by score, cites every memory you can audit, reinforce, or forget." />
+        </View>
+        {onMemoryDeepDive && (
+          <Pressable onPress={onMemoryDeepDive} style={s.deepDiveBtn}>
+            <Text style={s.deepDiveText}>Inside UC's memory engine →</Text>
+          </Pressable>
+        )}
       </View>
 
       {/* Features */}
@@ -159,6 +182,18 @@ function StatBlock({ value, label, color }: { value: string; label: string; colo
     <View style={s.statBlock}>
       <Text style={[s.statValue, { color }]}>{value}</Text>
       <Text style={s.statLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function PillarCard({ label, code, color, desc }: { label: string; code: string; color: string; desc: string }) {
+  return (
+    <View style={[s.pillarCard, { borderColor: color + '25' }]}>
+      <View style={s.pillarHeader}>
+        <Text style={[s.pillarLabel, { color }]}>{label}</Text>
+        <Text style={[s.pillarCode, { color }]}>{code}</Text>
+      </View>
+      <Text style={s.pillarDesc}>{desc}</Text>
     </View>
   );
 }
@@ -248,6 +283,30 @@ const s = StyleSheet.create({
   stepNumberText: { fontSize: 14, fontWeight: '800', fontFamily: 'monospace' },
   stepTitle: { color: '#f0f0f5', fontSize: 17, fontWeight: '700' },
   stepDesc: { color: '#888', fontSize: 13, lineHeight: 20 },
+
+  // Memory pillars
+  pillarsRow: { flexDirection: 'row', gap: 12, width: '100%', flexWrap: 'wrap', justifyContent: 'center' },
+  pillarCard: {
+    flex: 1, minWidth: 220, backgroundColor: '#0a0f1c',
+    borderWidth: 1, borderRadius: 12, padding: 18, gap: 10,
+  },
+  pillarHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  pillarLabel: {
+    fontSize: 10, fontWeight: '900', letterSpacing: 2,
+    fontFamily: 'monospace', opacity: 0.8,
+  },
+  pillarCode: {
+    fontSize: 13, fontWeight: '900', letterSpacing: 1.5,
+    fontFamily: 'monospace',
+  },
+  pillarDesc: { color: '#94a3b8', fontSize: 13, lineHeight: 19 },
+  deepDiveBtn: {
+    marginTop: 24, paddingVertical: 10, paddingHorizontal: 18,
+    borderRadius: 8, borderWidth: 1, borderColor: '#22d3ee40',
+    backgroundColor: '#22d3ee10',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  deepDiveText: { color: '#22d3ee', fontSize: 13, fontWeight: '700', letterSpacing: 0.4 },
 
   // Features
   featGrid: {
