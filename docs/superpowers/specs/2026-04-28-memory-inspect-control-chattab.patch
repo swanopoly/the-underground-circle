@@ -1,0 +1,131 @@
+diff --git a/src/screens/circles/tabs/ChatTab.tsx b/src/screens/circles/tabs/ChatTab.tsx
+index 194a482..cac56dd 100644
+--- a/src/screens/circles/tabs/ChatTab.tsx
++++ b/src/screens/circles/tabs/ChatTab.tsx
+@@ -2412,10 +2504,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+ 
+   // ─── Add Message (local-first) ───────────────────────────────────────────
+ 
+-  const addUserMessage = (content: string): ChatMessage => {
++  const addUserMessage = (content: string): { message: ChatMessage; dbIdPromise: Promise<string | null> } => {
+     const isCheckIn = content.toLowerCase().includes('check') || content.toLowerCase().includes('done');
+     const isAchievement = content.toLowerCase().includes('achievement') || content.toLowerCase().includes('unlocked');
+-    
++
+     const msg: ChatMessage = {
+       id: `user-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+       content,
+@@ -2437,9 +2529,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+       setTimeout(() => triggerParticleEffect(200, 300, isAchievement), 300);
+     }
+ 
+-    // Persist to Supabase with retry
++    // Persist to Supabase with retry. Surface the resolved dbId via the
++    // returned promise so the caller can use it as triggerMessageId for
++    // memory citation linkage.
++    let dbIdPromise: Promise<string | null> = Promise.resolve(null);
+     if (currentUserId) {
+-      const persistMessage = async (attempt = 0) => {
++      const persistMessage = async (attempt = 0): Promise<string | null> => {
+         try {
+           const dbId = await persistChatMessage({
+             circleId,
+@@ -2453,22 +2548,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+           if (dbId) {
+             setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, dbId } : m));
+           }
++          return dbId;
+         } catch (e) {
+           console.error('[ChatTab] Unexpected error persisting:', e);
+           if (attempt < 3) {
+-            setTimeout(() => persistMessage(attempt + 1), 1000 * (attempt + 1));
++            await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
++            return persistMessage(attempt + 1);
+           }
++          return null;
+         }
+       };
+-      persistMessage();
++      dbIdPromise = persistMessage();
+     }
+ 
+     syncSessionArchiveMessage(msg);
+ 
+-    return msg;
++    return { message: msg, dbIdPromise };
+   };
+ 
+-  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[] }) => {
++  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; fileTaskResult?: NormalizedFileTaskResult; fileTaskToolName?: string }) => {
+     const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+     const msg: ChatMessage = {
+       id: msgId,
+@@ -3139,8 +3239,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+     setBuilderFigmaRefs(resolvedFigmaRefs);
+     setSelectedBuilderFigmaRefId(nextSelectedFigmaRefId);
+ 
+-    // Add user message immediately
+-    addUserMessage(content);
++    // Add user message immediately. Hold onto the persistence promise —
++    // we use the resolved dbId as triggerMessageId so the citation pill
++    // can link memories to the assistant reply later.
++    const { dbIdPromise: triggerMessageIdPromise } = addUserMessage(content);
+     setInput('');
+     setAttachments([]);
+     setReplyTo(null);
+@@ -3871,6 +3973,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+                 const { buildStreamableSystemPrompt } = await import('../../../lib/swanbot');
+                 const { streamChatResponse } = await import('../../../lib/swanbotStream');
+                 const { resolveModelForSoul, spiritIdForProfile } = await import('../../../lib/serviceProfileSouls');
++                // Race the user-message persistence against a 750ms ceiling.
++                // If persistence wins, the access_log gets message_id linkage
++                // (citation pill works without timestamp matching). If the
++                // ceiling wins, we just skip the linkage gracefully.
++                const triggerMessageId = await Promise.race([
++                  triggerMessageIdPromise,
++                  new Promise<null>(resolve => setTimeout(() => resolve(null), 750)),
++                ]);
+                 const systemPrompt = await buildStreamableSystemPrompt({
+                   circleId,
+                   userId: currentUserId || 'anonymous',
+@@ -3879,6 +3989,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+                   userName: currentUserName,
+                   chatHistory,
+                   sessionArchiveContext: sessionArchiveContext || undefined,
++                  triggerMessageId: triggerMessageId || undefined,
+                 });
+                 const streamModel = resolveModelForSoul(
+                   spiritIdForProfile(resolvedSessionProfile),
+@@ -3927,6 +4038,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+                     content: accumulated,
+                     threadId: activeThreadId,
+                     onError: (error) => console.error('[ChatTab] persist streaming msg:', error),
++                    onPersisted: (botDbId) => {
++                      // Update local message with its dbId so MessageCitations
++                      // can use the new message_id linkage path.
++                      setMessages(prev => prev.map(m =>
++                        m.id === pendingMsg.id ? { ...m, dbId: botDbId } : m
++                      ));
++                      // Backfill assistant_message_id onto the access_log
++                      // rows from this turn so the citation pill keys
++                      // off message_id rather than timestamp window.
++                      if (triggerMessageId && botDbId) {
++                        void import('../../../lib/memoryService').then(mod =>
++                          mod.attachAssistantMessageToMemoryAccess({
++                            triggerMessageId,
++                            assistantMessageId: botDbId,
++                          })
++                        );
++                      }
++                    },
+                   });
+                 }
+                 setRunStatus('idle');
+@@ -4889,6 +5028,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+               userId={currentUserId}
+               messageTimestamp={item.timestamp.toISOString()}
+               nextMessageTimestamp={index > 0 ? invertedMessages[index - 1]?.timestamp?.toISOString() : undefined}
++              assistantMessageDbId={item.dbId}
+               accentColor={accentColor}
+             />
+             <RunCostDrawer
