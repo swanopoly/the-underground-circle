@@ -617,6 +617,116 @@ export async function revertMemoryToVersion(versionId: string, reason?: string):
   }
 }
 
+// ── Memory links — explicit user-curated relationships ─────────────────────
+
+export type MemoryLinkKind = 'relates' | 'contradicts' | 'supersedes' | 'example_of';
+
+export interface MemoryLink {
+  source_id: string;
+  target_id: string;
+  link_kind: MemoryLinkKind;
+  note: string | null;
+  created_by: string | null;
+  created_at: string;
+  // Joined fields when loaded with neighbor metadata.
+  target_title?: string;
+  target_kind?: string;
+}
+
+const LINK_KIND_LABELS: Record<MemoryLinkKind, string> = {
+  relates: 'relates to',
+  contradicts: 'contradicts',
+  supersedes: 'supersedes',
+  example_of: 'is an example of',
+};
+
+export function memoryLinkKindLabel(kind: MemoryLinkKind): string {
+  return LINK_KIND_LABELS[kind] || kind;
+}
+
+/**
+ * Create an explicit link between two memories. Idempotent — duplicates
+ * (same source + target + kind) just update the note via upsert.
+ */
+export async function createMemoryLink(opts: {
+  sourceId: string;
+  targetId: string;
+  kind: MemoryLinkKind;
+  note?: string;
+}): Promise<boolean> {
+  if (!opts.sourceId || !opts.targetId || opts.sourceId === opts.targetId) return false;
+  const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } } as any));
+  try {
+    const { error } = await supabase.from('memory_links').upsert({
+      source_id: opts.sourceId,
+      target_id: opts.targetId,
+      link_kind: opts.kind,
+      note: opts.note || null,
+      created_by: user?.id || null,
+    }, { onConflict: 'source_id,target_id,link_kind' });
+    if (error && (error as any).code === 'PGRST205') {
+      // Migration not applied — silently skip rather than crash the UI.
+      return false;
+    }
+    return !error;
+  } catch (err) {
+    console.warn('[createMemoryLink] failed:', err);
+    return false;
+  }
+}
+
+export async function deleteMemoryLink(opts: {
+  sourceId: string;
+  targetId: string;
+  kind: MemoryLinkKind;
+}): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('memory_links')
+      .delete()
+      .eq('source_id', opts.sourceId)
+      .eq('target_id', opts.targetId)
+      .eq('link_kind', opts.kind);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Load explicit links originating from a memory, joined with the target
+ * memory's title and kind so the UI can render "supersedes <title>".
+ */
+export async function loadMemoryLinks(sourceId: string): Promise<MemoryLink[]> {
+  if (!sourceId) return [];
+  try {
+    const { data, error } = await supabase
+      .from('memory_links')
+      .select('source_id, target_id, link_kind, note, created_by, created_at, target:memory_entries!memory_links_target_id_fkey(title, memory_kind)')
+      .eq('source_id', sourceId)
+      .order('created_at', { ascending: false });
+    if (error) {
+      if ((error as any).code !== 'PGRST205') {
+        console.warn('[loadMemoryLinks] failed:', error.message);
+      }
+      return [];
+    }
+    return ((data || []) as any[]).map(row => ({
+      source_id: row.source_id,
+      target_id: row.target_id,
+      link_kind: row.link_kind,
+      note: row.note,
+      created_by: row.created_by,
+      created_at: row.created_at,
+      target_title: row.target?.title || '',
+      target_kind: row.target?.memory_kind || '',
+    }));
+  } catch (err) {
+    console.warn('[loadMemoryLinks] threw:', err);
+    return [];
+  }
+}
+
 /**
  * Delete a memory (soft-delete by deactivating).
  */
