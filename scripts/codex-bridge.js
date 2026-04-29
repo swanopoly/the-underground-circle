@@ -16,6 +16,7 @@ const os = require('os');
 const { exec, spawn } = require('child_process');
 
 const PORT = 7779;
+const BRIDGE_STARTED_AT = new Date().toISOString();
 const SCAN_INTERVAL = 5000;
 const ACTIVE_THRESHOLD = 120_000;   // 2min → active
 const IDLE_THRESHOLD = 1800_000;    // 30min → idle (Codex writes less frequently than Claude)
@@ -238,7 +239,16 @@ const server = http.createServer(async (req, res) => {
 
   if (req.url === '/health') {
     res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: true, bridge: 'codex', version: '1.0.0' }));
+    res.end(JSON.stringify({
+      ok: true,
+      bridge: 'codex',
+      version: '1.0.0',
+      sessions: cachedSessions.length,
+      capabilities: ['sessions', 'exec/stream', 'register', 'update'],
+      auth: 'n/a',
+      uptime_s: Math.round(process.uptime()),
+      started_at: BRIDGE_STARTED_AT,
+    }));
     return;
   }
 

@@ -20,6 +20,7 @@ try { browserBridge = require('./browser-bridge'); }
 catch (e) { console.warn('[bridge] playwright unavailable — /browser/* will 503:', e.message); }
 
 const PORT = 7778;
+const BRIDGE_STARTED_AT = new Date().toISOString();
 const CLAUDE_DIR = path.join(os.homedir(), '.claude', 'projects');
 // Also scan Windows-side Claude sessions when running in WSL
 const CLAUDE_DIRS = [CLAUDE_DIR];
@@ -481,7 +482,16 @@ const server = http.createServer((req, res) => {
 
   if (url === '/health') {
     res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: true, version: '1.0.0', sessions: cachedSessions.length }));
+    res.end(JSON.stringify({
+      ok: true,
+      bridge: 'claude-code',
+      version: '1.0.0',
+      sessions: cachedSessions.length,
+      capabilities: ['sessions', 'exec', 'exec/stream', 'secrets', 'spawn', 'browser', 'desktop'],
+      auth: 'ok',
+      uptime_s: Math.round(process.uptime()),
+      started_at: BRIDGE_STARTED_AT,
+    }));
     return;
   }
 
@@ -1893,8 +1903,21 @@ const server = http.createServer((req, res) => {
       platform: process.platform,
       supported: process.platform === 'darwin',
       tools: process.platform === 'darwin'
-        ? ['launch', 'focus', 'type', 'keys', 'running_apps', 'screenshot', 'wait_for_app', 'open_url', 'open_path', 'click_at', 'screen_size',
-           ...(fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper')) ? ['a11y_tree', 'click_element'] : [])]
+        ? [
+            'launch',
+            'focus',
+            'type',
+            'keys',
+            'running_apps',
+            'installed_apps',
+            'screenshot',
+            'wait_for_app',
+            'open_url',
+            'open_path',
+            'click_at',
+            'screen_size',
+            ...(fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper')) ? ['a11y_tree', 'click_element'] : []),
+          ]
         : [],
       // Surface whether the more-reliable click backend is available
       // so clients can decide whether to attempt `click_at` at all.
@@ -1964,13 +1987,25 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    if (url === '/desktop/installed-apps' && req.method === 'GET') {
+      try {
+        const apps = collectInstalledApps();
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ok: true, apps }));
+      } catch (err) {
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ ok: false, error: err.message || 'failed to list installed apps' }));
+      }
+      return;
+    }
+
     if (url === '/desktop/launch' && req.method === 'POST') {
       readJsonBody(req, 2048, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
         const appName = String(parsed?.appName || '').trim();
-        if (!appName || !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+        if (!appName || !/^[A-Za-z0-9 .\-_()&]+$/.test(appName)) {
           res.writeHead(400, CORS);
-          res.end(JSON.stringify({ ok: false, error: 'Invalid appName. Letters, numbers, spaces, . - _ ( ) only.' }));
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName. Letters, numbers, spaces, . - _ ( ) & only.' }));
           return;
         }
         exec(`open -a ${shellSingleQuote(appName)}`, { timeout: 5000 }, (err) => {
@@ -1991,7 +2026,7 @@ const server = http.createServer((req, res) => {
       readJsonBody(req, 2048, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
         const appName = String(parsed?.appName || '').trim();
-        if (!appName || !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+        if (!appName || !/^[A-Za-z0-9 .\-_()&]+$/.test(appName)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
           return;
@@ -2411,6 +2446,52 @@ function readJsonBody(req, maxBytes, callback) {
 function shellSingleQuote(s) {
   // POSIX shell single-quote escape: close, escape quote, reopen.
   return `'${String(s).replace(/'/g, "'\\''")}'`;
+}
+
+function collectInstalledApps() {
+  const roots = [
+    '/Applications',
+    '/System/Applications',
+    '/System/Applications/Utilities',
+    path.join(os.homedir(), 'Applications'),
+  ];
+  const seenPaths = new Set();
+  const apps = [];
+  const MAX_APPS = 750;
+  const MAX_DEPTH = 4;
+
+  function walk(dir, depth) {
+    if (depth > MAX_DEPTH || apps.length >= MAX_APPS) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (apps.length >= MAX_APPS) return;
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory() && entry.name.endsWith('.app')) {
+        if (!seenPaths.has(fullPath)) {
+          seenPaths.add(fullPath);
+          apps.push({
+            name: entry.name.replace(/\.app$/i, ''),
+            path: fullPath,
+          });
+        }
+        continue;
+      }
+      // App vendors often nest .app bundles one or two levels deep
+      // inside folders such as Adobe, Setapp, or Xcode utilities.
+      if (entry.isDirectory() && !entry.name.startsWith('.') && depth < MAX_DEPTH) {
+        walk(fullPath, depth + 1);
+      }
+    }
+  }
+
+  for (const root of roots) walk(root, 0);
+  apps.sort((a, b) => a.name.localeCompare(b.name));
+  return apps;
 }
 
 // Keys supported in combos. Extend as needed; each map entry must be

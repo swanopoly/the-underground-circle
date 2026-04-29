@@ -3,6 +3,8 @@ import { ActivityIndicator, Platform, Pressable, ScrollView, Text, TextInput, Vi
 import { supabase } from '../../../../lib/supabase';
 import { getAgentSoulInfo, getMemorySoulKey } from './agentSoulMemory';
 import { MONO, formatMsgTime } from './AgentPanelShared';
+import MemoryHealthCard from '../../../../components/agent/MemoryHealthCard';
+import BridgeStatusPanel from '../chat/BridgeStatusPanel';
 
 function buildManualMemoryTitle(content: string, prefix: string): string {
   const compact = content.replace(/\s+/g, ' ').trim();
@@ -466,6 +468,14 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentName,
 
   return (
     <View style={{ gap: 8 }}>
+      {/* Bridge connectivity — surfaces "agents not loading" before users
+          have to wonder why. Mounted next to the memory diagnostic so this
+          surface owns "is everything connected?" */}
+      <BridgeStatusPanel accentColor={accentColor} />
+
+      {/* Memory health diagnostic card — coverage, trust, kind breakdown */}
+      <MemoryHealthCard circleId={circleId} accentColor={accentColor} />
+
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>AGENT MEMORY</Text>
         <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>({filteredCount}/{memories.length})</Text>

@@ -22,6 +22,7 @@ const os = require('os');
 const { execSync } = require('child_process');
 
 const PORT = 7781;
+const BRIDGE_STARTED_AT = new Date().toISOString();
 const ACTIVE_THRESHOLD = 300_000;   // 5min → active (Cursor sessions persist longer)
 const IDLE_THRESHOLD = 86_400_000;  // 24h → include sessions from today
 const SCAN_INTERVAL = 5000;
@@ -283,6 +284,10 @@ const server = http.createServer((req, res) => {
       version: '1.0.0',
       sessions: cachedSessions.length,
       cursorDir: CURSOR_DIR,
+      capabilities: ['sessions'],
+      auth: 'n/a',
+      uptime_s: Math.round(process.uptime()),
+      started_at: BRIDGE_STARTED_AT,
     }));
     return;
   }

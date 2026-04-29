@@ -18,6 +18,7 @@ const os = require('os');
 const { exec, execSync } = require('child_process');
 
 const PORT = 7780;
+const BRIDGE_STARTED_AT = new Date().toISOString();
 const ACTIVE_THRESHOLD = 60_000;    // 60s → active (Gemini sessions update less frequently)
 const IDLE_THRESHOLD = 86_400_000;  // 24h → show sessions from today
 const SCAN_INTERVAL = 5000;         // Scan every 5s
@@ -452,11 +453,15 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({
       ok: true,
       agent: 'gemini-cli',
+      bridge: 'gemini-cli',
       version: '1.0.0',
       sessions: cachedSessions.length,
-      auth: oauthCreds ? 'oauth' : 'none',
+      auth: oauthCreds ? 'ok' : 'none',
       email: userEmail,
       geminiDir: GEMINI_DIR,
+      capabilities: ['sessions'],
+      uptime_s: Math.round(process.uptime()),
+      started_at: BRIDGE_STARTED_AT,
     }));
     return;
   }

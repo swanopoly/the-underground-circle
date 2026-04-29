@@ -82,6 +82,16 @@ export const BRIDGE_CATALOG: readonly BridgeCatalogEntry[] = [
 
 export type BridgeStatus = 'healthy' | 'degraded' | 'offline';
 
+/**
+ * Capability tokens — see docs/superpowers/specs/2026-04-29-bridge-protocol-spec.md §3
+ * for the canonical list. Bridges declare what they support via the
+ * `capabilities` array on `/health`. Clients dispatch by capability
+ * rather than by bridge name.
+ */
+export type BridgeCapability =
+  | 'sessions' | 'exec' | 'exec/stream' | 'secrets' | 'spawn'
+  | 'browser' | 'desktop' | 'register' | 'update';
+
 export interface BridgeProbeResult {
   name: BridgeName;
   label: string;
@@ -96,6 +106,13 @@ export interface BridgeProbeResult {
    *  this as `degraded` not `offline` — the bridge is up, the user
    *  just needs to authenticate. */
   authMissing?: boolean;
+  /** Capability tokens declared by the bridge's /health response.
+   *  Empty array when the bridge predates the capability spec. */
+  capabilities?: BridgeCapability[];
+  /** Bridge process uptime in seconds (when supported). */
+  uptimeSeconds?: number;
+  /** Process start ISO timestamp (when supported). */
+  startedAt?: string;
   /** Suggestion the user should act on. */
   hint?: string;
   /** Raw JSON body the parser saw, for debug. */
@@ -140,6 +157,11 @@ export function parseBridgeHealth(
   const sessionCount = typeof body.sessions === 'number' ? body.sessions : undefined;
   const auth = typeof body.auth === 'string' ? body.auth : undefined;
   const email = typeof body.email === 'string' ? body.email : undefined;
+  const capabilities = Array.isArray(body.capabilities)
+    ? (body.capabilities as unknown[]).filter((c): c is BridgeCapability => typeof c === 'string') as BridgeCapability[]
+    : undefined;
+  const uptimeSeconds = typeof body.uptime_s === 'number' ? body.uptime_s : undefined;
+  const startedAt = typeof body.started_at === 'string' ? body.started_at : undefined;
 
   // Gemini reports `auth: 'none'` when the user hasn't logged in. The
   // bridge IS running but it can't expose anything until auth.
@@ -150,6 +172,9 @@ export function parseBridgeHealth(
       detail: `bridge up but not authenticated${auth ? ` (auth=${auth})` : ''}`,
       sessionCount: sessionCount ?? 0,
       authMissing: true,
+      capabilities,
+      uptimeSeconds,
+      startedAt,
       hint:
         entry.name === 'gemini-cli'
           ? 'Run `gemini auth login` in a terminal, then refresh.'
@@ -167,8 +192,38 @@ export function parseBridgeHealth(
     status: 'healthy',
     detail,
     sessionCount,
+    capabilities,
+    uptimeSeconds,
+    startedAt,
     raw,
   };
+}
+
+/**
+ * Capability-based dispatch helper. Returns the names of bridges that
+ * declare a given capability AND are currently healthy. Used by the
+ * chat client to decide which bridge to hit for /exec, /exec/stream,
+ * etc. — falls back gracefully when a bridge predates the capability
+ * spec by inferring from its name.
+ */
+export function bridgesWithCapability(
+  results: BridgeProbeResult[],
+  cap: BridgeCapability,
+): BridgeProbeResult[] {
+  // Pre-capability inference: claude-bridge has always supported these.
+  const PRE_CAP_INFERENCE: Record<BridgeName, BridgeCapability[]> = {
+    'claude-code': ['sessions', 'exec', 'exec/stream', 'secrets', 'spawn', 'browser', 'desktop'],
+    'codex':       ['sessions', 'exec/stream', 'register', 'update'],
+    'gemini-cli':  ['sessions'],
+    'cursor':      ['sessions'],
+    'openswan-proxy': [],
+  };
+  return results.filter(r => {
+    if (r.status !== 'healthy') return false;
+    const declared = r.capabilities;
+    if (declared && declared.length > 0) return declared.includes(cap);
+    return (PRE_CAP_INFERENCE[r.name] || []).includes(cap);
+  });
 }
 
 // ─── Async probe ──────────────────────────────────────────────────
