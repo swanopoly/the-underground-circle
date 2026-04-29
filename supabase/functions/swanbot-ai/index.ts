@@ -1216,6 +1216,18 @@ const BLACKSWAN_TOOLS = [
       required: ["content", "target_language"],
     },
   },
+  {
+    name: "run_shell",
+    description: "Request that the user run a shell command on their local machine. The command is NOT executed by the server — the user's chat client will surface a confirmation card; the user taps RUN to actually execute it via the local claude-bridge. Use when answering a question requires inspecting the user's environment (e.g. 'is the build green?', 'what node version are you on?', 'what's in this file?'). Always include a one-sentence reason so the user knows why you're asking. The user may decline; if they do, fall back to asking them directly.",
+    input_schema: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "The exact shell command to run (single line). Avoid destructive commands; the bridge blocks them anyway. Quote paths with spaces." },
+        reason: { type: "string", description: "One sentence: why you need to run this. The user sees this on the approval card." },
+      },
+      required: ["command", "reason"],
+    },
+  },
 ];
 
 async function executeToolCall(
@@ -1656,6 +1668,24 @@ async function executeToolCall(
         const fullTranslation = translated.join("\n");
         await logHfActivity(supabase, circleId, "gitbook_translate", `→ ${toolInput.target_language}`, { chunks: chunks.length, translated: translated.length });
         return JSON.stringify({ success: true, translated: fullTranslation, language: toolInput.target_language, chunks: chunks.length });
+      }
+
+      case "run_shell": {
+        // Server-side stub: the bridge runs on the user's localhost,
+        // not in this edge function. Return a structured "pending"
+        // sentinel so the model knows to ask the user via natural
+        // language. The client (ChatTab) will surface the command in
+        // a backtick block which MessageRunButtons picks up as a RUN
+        // button. After execution, the user can tap "Reply to chat"
+        // on TerminalOutputCard to feed the output back to BlackSwan.
+        const { command, reason } = toolInput as { command?: string; reason?: string };
+        if (!command) return JSON.stringify({ error: "run_shell: command required" });
+        return JSON.stringify({
+          status: "pending_user_approval",
+          message: `User must approve and execute this command on their local machine. In your reply, ask the user to run \`${command}\` (use this exact backtick syntax so the chat surfaces a RUN button). Briefly explain why: ${reason || "(no reason given)"}.`,
+          command,
+          reason: reason || null,
+        });
       }
 
       default:

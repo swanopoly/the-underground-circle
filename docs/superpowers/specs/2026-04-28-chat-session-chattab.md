@@ -21,20 +21,25 @@ commands. It supersedes `2026-04-28-memory-inspect-control-chattab.patch`.
 6. `MessageCitations` gets `assistantMessageDbId={item.dbId}` so it
    prefers the new `get_memory_citations` RPC over timestamp matching.
 
-### Terminal commands — `/run`, `/sh`, `/cd`, `/pwd`
+### Terminal commands — `/run`, `/sh`, `/cd`, `/pwd`, `/diag bridge`
 
 7. New imports: `TerminalOutputCard`, `MessageRunButtons`,
    `executeTerminalCommand`, `parseTerminalCommand`, `TerminalRunResult`.
 8. `ChatMessage` gains `terminalResult?: TerminalRunResult`.
 9. `addBotMessage` extra propagates `terminalResult`.
 10. New slash intercept early in `sendMessage`: detects /run /sh /cd
-    /pwd and routes through `executeTerminalCommand`. Output renders as
-    a local-only message — never persisted to Supabase.
+    /pwd /diag bridge and routes through `executeTerminalCommand` or
+    `executeTerminalCommandStream` (for /run). Output renders as a
+    local-only message — never persisted to Supabase. /run uses SSE
+    streaming so output appears as it arrives.
 11. `<TerminalOutputCard />` renders under bot messages whose
-    `terminalResult` is set.
+    `terminalResult` is set, with a `onReplyToChat` callback that
+    feeds the output back as a follow-up user message — closes the
+    agent loop.
 12. `<MessageRunButtons />` renders under bot replies that contain
     detected shell commands (fenced ```bash blocks or inline shelly
-    code). One-tap RUN per command, output stays local.
+    code). One-tap RUN per command. Each result card also surfaces
+    "↗ reply to chat" for agent-loop closure.
 
 ## How to apply
 

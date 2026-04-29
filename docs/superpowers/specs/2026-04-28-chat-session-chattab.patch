@@ -1,5 +1,5 @@
 diff --git a/src/screens/circles/tabs/ChatTab.tsx b/src/screens/circles/tabs/ChatTab.tsx
-index 194a482..b87bd5c 100644
+index 194a482..27a9be4 100644
 --- a/src/screens/circles/tabs/ChatTab.tsx
 +++ b/src/screens/circles/tabs/ChatTab.tsx
 @@ -57,6 +57,9 @@ import BuilderGithubSaveModal from './chat/BuilderGithubSaveModal';
@@ -108,26 +108,61 @@ index 194a482..b87bd5c 100644
      setInput('');
      setAttachments([]);
      setReplyTo(null);
-@@ -3159,6 +3267,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -3159,6 +3267,64 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
      // ─── Slash intercepts (pure lib calls, no planner) ──────────────────────
      // These run before the model / planner so users see instant feedback
      // for read/write ops that don't need a full agent turn.
 +
-+    // /run, /sh, /exec, /cd, /pwd — terminal access via the local bridge.
-+    // Output is local-only (never persisted) for privacy + payload size.
-+    if (parseTerminalCommand(content)) {
++    // /run, /sh, /exec, /cd, /pwd, /diag bridge — terminal access via the
++    // local bridge. Output is local-only (never persisted) for privacy +
++    // payload size. /run uses streaming (SSE) so users see output as it
++    // arrives; /cd /pwd /diag fall through to the buffered path inside
++    // executeTerminalCommandStream.
++    const terminalParsed = parseTerminalCommand(content);
++    if (terminalParsed) {
 +      try {
-+        const outcome = await executeTerminalCommand({ circleId, input: content });
-+        if (outcome.kind === 'run') {
-+          addBotMessage(
-+            outcome.result.error
-+              ? `Command failed: ${outcome.result.error}`
-+              : `\`$ ${outcome.result.command}\``,
++        if (terminalParsed.verb === 'run' && terminalParsed.rest) {
++          // Streaming path — render an updating card as chunks arrive.
++          const initialResult: TerminalRunResult = {
++            command: terminalParsed.rest,
++            effectiveCommand: terminalParsed.rest,
++            cwd: null,
++            ok: false,
++            stdout: '',
++            stderr: '',
++            code: null,
++            durationMs: 0,
++          };
++          const pending = addBotMessage(
++            `\`$ ${terminalParsed.rest}\``,
 +            undefined,
-+            { localOnly: true, terminalResult: outcome.result },
++            { localOnly: true, terminalResult: initialResult },
 +          );
++          const { executeTerminalCommandStream } = await import('../../../lib/terminalChatCommands');
++          const handle = executeTerminalCommandStream({
++            circleId,
++            input: content,
++            onProgress: (result) => {
++              setMessages(prev => prev.map(m =>
++                m.id === pending.id ? { ...m, terminalResult: result } : m
++              ));
++            },
++          });
++          await handle.promise;
 +        } else {
-+          addBotMessage(outcome.text, undefined, { localOnly: true });
++          // /cd /pwd /diag — buffered, returns a single text message.
++          const outcome = await executeTerminalCommand({ circleId, input: content });
++          if (outcome.kind === 'run') {
++            addBotMessage(
++              outcome.result.error
++                ? `Command failed: ${outcome.result.error}`
++                : `\`$ ${outcome.result.command}\``,
++              undefined,
++              { localOnly: true, terminalResult: outcome.result },
++            );
++          } else {
++            addBotMessage(outcome.text, undefined, { localOnly: true });
++          }
 +        }
 +      } catch (err: any) {
 +        addBotMessage(`Terminal error: ${err?.message || 'bridge unreachable'}`, undefined, { localOnly: true });
@@ -138,7 +173,7 @@ index 194a482..b87bd5c 100644
      if (content.startsWith('/v2')) {
        try {
          const { parseSwanbotV2Command, applySwanbotV2Command } = await import('../../../lib/swanbotRouting');
-@@ -3871,6 +4002,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -3871,6 +4037,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                  const { buildStreamableSystemPrompt } = await import('../../../lib/swanbot');
                  const { streamChatResponse } = await import('../../../lib/swanbotStream');
                  const { resolveModelForSoul, spiritIdForProfile } = await import('../../../lib/serviceProfileSouls');
@@ -153,7 +188,7 @@ index 194a482..b87bd5c 100644
                  const systemPrompt = await buildStreamableSystemPrompt({
                    circleId,
                    userId: currentUserId || 'anonymous',
-@@ -3879,6 +4018,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -3879,6 +4053,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                    userName: currentUserName,
                    chatHistory,
                    sessionArchiveContext: sessionArchiveContext || undefined,
@@ -161,7 +196,7 @@ index 194a482..b87bd5c 100644
                  });
                  const streamModel = resolveModelForSoul(
                    spiritIdForProfile(resolvedSessionProfile),
-@@ -3927,6 +4067,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -3927,6 +4102,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                      content: accumulated,
                      threadId: activeThreadId,
                      onError: (error) => console.error('[ChatTab] persist streaming msg:', error),
@@ -186,7 +221,7 @@ index 194a482..b87bd5c 100644
                    });
                  }
                  setRunStatus('idle');
-@@ -4706,6 +4864,26 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -4706,6 +4899,37 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
            onRetryCheck={(checkId) => handleRetryVerificationCheck(item, checkId)}
            retryingCheckId={retryingLedgerCheck?.messageId === item.id ? retryingLedgerCheck.checkId : null}
          />
@@ -200,20 +235,31 @@ index 194a482..b87bd5c 100644
 +            accentColor={accentColor}
 +          />
 +        ) : null}
-+        {/* /run output. Local-only — never persisted to Supabase. */}
++        {/* /run output. Local-only — never persisted to Supabase. The
++            "↗ reply to chat" button pipes the output back to the agent
++            so the loop closes naturally. */}
 +        {item.terminalResult ? (
-+          <TerminalOutputCard result={item.terminalResult} accentColor={accentColor} />
++          <TerminalOutputCard
++            result={item.terminalResult}
++            accentColor={accentColor}
++            onReplyToChat={(replyText) => sendMessage(replyText)}
++          />
 +        ) : null}
 +        {/* Detect shell commands in agent replies and offer one-tap RUN
 +            buttons. Only renders when at least one runnable command is
 +            found in the message body. Skipped on user-authored messages. */}
 +        {item.isBot && !item.terminalResult && item.content ? (
-+          <MessageRunButtons content={item.content} circleId={circleId} accentColor={accentColor} />
++          <MessageRunButtons
++            content={item.content}
++            circleId={circleId}
++            accentColor={accentColor}
++            onReplyToChat={(replyText) => sendMessage(replyText)}
++          />
 +        ) : null}
          {(item.memoryRefs && item.memoryRefs.length > 0) || (item.memoriesUsed && item.memoriesUsed.length > 0) ? (
            <View style={styles.messageSourceSection}>
              <Text style={styles.messageSourceLabel}>Memory Influence</Text>
-@@ -4889,6 +5067,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -4889,6 +5113,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                userId={currentUserId}
                messageTimestamp={item.timestamp.toISOString()}
                nextMessageTimestamp={index > 0 ? invertedMessages[index - 1]?.timestamp?.toISOString() : undefined}

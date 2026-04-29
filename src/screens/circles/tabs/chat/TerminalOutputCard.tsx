@@ -13,6 +13,11 @@ import type { TerminalRunResult } from '../../../../lib/terminalChatCommands';
 interface Props {
   result: TerminalRunResult;
   accentColor?: string;
+  /** When provided, surface a "Reply to chat" button that pipes the
+   *  command + output back to the agent as a follow-up user message.
+   *  Closes the agent loop: BlackSwan asks for npm test → user runs →
+   *  output gets fed back automatically. */
+  onReplyToChat?: (replyText: string) => void;
 }
 
 const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
@@ -30,9 +35,32 @@ function previewAndOverflow(text: string): { preview: string; overflow: number }
   return { preview: text.slice(0, PREVIEW_CHARS), overflow: text.length - PREVIEW_CHARS };
 }
 
-export default function TerminalOutputCard({ result, accentColor = '#22d3ee' }: Props) {
+export default function TerminalOutputCard({ result, accentColor = '#22d3ee', onReplyToChat }: Props) {
   const [stdoutExpanded, setStdoutExpanded] = useState(false);
   const [stderrExpanded, setStderrExpanded] = useState(false);
+  const [replied, setReplied] = useState(false);
+
+  const buildReplyText = (): string => {
+    const lines: string[] = [`Result of \`${result.command}\`:`];
+    if (result.error) lines.push(`error: ${result.error}`);
+    else lines.push(`exit code: ${result.code ?? '—'}`);
+    lines.push(`duration: ${formatDuration(result.durationMs)}`);
+    if (result.stdout) {
+      const out = result.stdout.length > 4000 ? result.stdout.slice(-4000) + '\n…(truncated)' : result.stdout;
+      lines.push('', '```stdout', out, '```');
+    }
+    if (result.stderr) {
+      const err = result.stderr.length > 2000 ? result.stderr.slice(-2000) + '\n…(truncated)' : result.stderr;
+      lines.push('', '```stderr', err, '```');
+    }
+    return lines.join('\n');
+  };
+
+  const handleReplyToChat = () => {
+    if (!onReplyToChat || replied) return;
+    onReplyToChat(buildReplyText());
+    setReplied(true);
+  };
 
   const stdoutPiece = useMemo(() => previewAndOverflow(result.stdout || ''), [result.stdout]);
   const stderrPiece = useMemo(() => previewAndOverflow(result.stderr || ''), [result.stderr]);
@@ -106,6 +134,19 @@ export default function TerminalOutputCard({ result, accentColor = '#22d3ee' }: 
         <Text style={s.empty}>(no output)</Text>
       ) : null}
 
+      {/* Reply to chat — closes the agent loop. Only shown when a
+          handler is wired (i.e. inside main chat, not in standalone
+          terminal panels). Tapping sends the command + output back to
+          the chat as a follow-up user message that BlackSwan can
+          continue from. */}
+      {onReplyToChat && (result.code != null || result.error) ? (
+        <Pressable onPress={handleReplyToChat} disabled={replied} style={[s.replyBtn, { borderColor: accentColor + '50', opacity: replied ? 0.5 : 1 }]}>
+          <Text style={[s.replyBtnText, { color: replied ? '#94a3b8' : accentColor }]}>
+            {replied ? 'sent to chat' : '↗ reply to chat with this output'}
+          </Text>
+        </Pressable>
+      ) : null}
+
       {/* Privacy footer */}
       <Text style={s.footer}>local — not saved to circle</Text>
     </View>
@@ -148,6 +189,13 @@ const s = StyleSheet.create({
   },
   expandText: { fontSize: 10, fontWeight: '700', fontFamily: MONO },
   empty: { color: '#475569', fontSize: 11, fontStyle: 'italic', fontFamily: MONO },
+  replyBtn: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 8, paddingVertical: 4,
+    borderRadius: 4, borderWidth: 1,
+    backgroundColor: '#0f172a',
+  },
+  replyBtnText: { fontSize: 10, fontWeight: '800', fontFamily: MONO, letterSpacing: 0.4 },
   footer: {
     color: '#475569', fontSize: 9, fontFamily: MONO,
     fontWeight: '700', letterSpacing: 0.6, textAlign: 'right',

@@ -112,8 +112,8 @@ export default function MemoryDeepDive({ onBack, onSignUp }: Props) {
         tag="05 · TRUST"
         title="Inspectable, editable, deletable"
         body={[
-          `Under every assistant reply, UC shows the memories that shaped it. Tap to expand, see the full content, mark it helpful, or mark it not helpful — the next retrieval reflects your call.`,
-          `If a memory is wrong, you can pin a corrected version, dispute it, or delete it outright. Every interaction lands in an audit log so you can answer "why did the agent say this?" without spelunking through a database.`,
+          `Under every assistant reply, UC shows the memories that shaped it. The "Used N memories" pill expands inline — you see the full content, mark it helpful, or mark it not helpful — and the next retrieval reflects your call within the same conversation.`,
+          `If a memory is wrong, you pin a corrected version, dispute it, or delete it outright. Every interaction lands in an audit log keyed to the assistant message that consumed it, so you can answer "why did the agent say this?" without spelunking through a database.`,
           `The whole point: the memory layer should serve you, not surprise you.`,
         ]}
         accent="#22c55e"

@@ -24,6 +24,9 @@ interface Props {
   content: string;
   circleId: string;
   accentColor?: string;
+  /** Optional — when wired, each result card shows "↗ reply to chat"
+   *  so the agent can see the output and continue reasoning. */
+  onReplyToChat?: (replyText: string) => void;
 }
 
 const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
@@ -96,7 +99,7 @@ function extractCommands(content: string): CommandHit[] {
   return hits.slice(0, 6);
 }
 
-export default function MessageRunButtons({ content, circleId, accentColor = '#22d3ee' }: Props) {
+export default function MessageRunButtons({ content, circleId, accentColor = '#22d3ee', onReplyToChat }: Props) {
   const commands = useMemo(() => extractCommands(content), [content]);
   const [running, setRunning] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, TerminalRunResult>>({});
@@ -151,7 +154,12 @@ export default function MessageRunButtons({ content, circleId, accentColor = '#2
       {Object.keys(results).length > 0 ? (
         <View style={s.resultsWrap}>
           {Object.entries(results).map(([cmd, res]) => (
-            <TerminalOutputCard key={cmd} result={res} accentColor={accentColor} />
+            <TerminalOutputCard
+              key={cmd}
+              result={res}
+              accentColor={accentColor}
+              onReplyToChat={onReplyToChat}
+            />
           ))}
         </View>
       ) : null}

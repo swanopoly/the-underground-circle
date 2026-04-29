@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
-import { deleteMemory, editMemory } from '../../lib/agentMemory';
+import { deleteMemory, editMemory, loadMemoryVersions, revertMemoryToVersion, type MemoryVersion } from '../../lib/agentMemory';
 import { type MemoryEntry } from '../../lib/agentRunSystem';
 import { getSpiritById } from '../../lib/agentSpirits';
 import { getSpiritMemoryEntries } from '../../lib/memoryService';
@@ -36,6 +36,8 @@ export default function SoulMemoryScreen() {
   // Per-memory related-pane state. Keyed by memory id so multiple cards
   // can be expanded independently. Lazy-loaded on first expand.
   const [relatedById, setRelatedById] = useState<Record<string, RelatedMemory[] | 'loading'>>({});
+  // Version history per memory. Loaded on demand when a card opens.
+  const [versionsById, setVersionsById] = useState<Record<string, MemoryVersion[] | 'loading'>>({});
 
   const load = useCallback(async () => {
     if (!circleId || !userId || !spiritId) {
@@ -81,6 +83,31 @@ export default function SoulMemoryScreen() {
     setEditContent('');
     await load();
   }, [editContent, editingId, load]);
+
+  const handleToggleVersions = useCallback(async (memoryId: string) => {
+    const current = versionsById[memoryId];
+    if (Array.isArray(current)) {
+      setVersionsById(prev => {
+        const next = { ...prev };
+        delete next[memoryId];
+        return next;
+      });
+      return;
+    }
+    if (current === 'loading') return;
+    setVersionsById(prev => ({ ...prev, [memoryId]: 'loading' }));
+    const versions = await loadMemoryVersions(memoryId, 10);
+    setVersionsById(prev => ({ ...prev, [memoryId]: versions }));
+  }, [versionsById]);
+
+  const handleRevert = useCallback(async (versionId: string) => {
+    const ok = await revertMemoryToVersion(versionId);
+    if (ok) {
+      // Reload memories and any open version panes.
+      await load();
+      setVersionsById({});
+    }
+  }, [load]);
 
   const handleToggleRelated = useCallback(async (memoryId: string) => {
     const current = relatedById[memoryId];
@@ -199,10 +226,41 @@ export default function SoulMemoryScreen() {
                             : 'RELATED'}
                       </Text>
                     </Pressable>
+                    <Pressable onPress={() => { void handleToggleVersions(memory.id); }} style={styles.secondaryAction}>
+                      <Text style={styles.secondaryActionText}>
+                        {Array.isArray(versionsById[memory.id])
+                          ? 'HIDE HISTORY'
+                          : versionsById[memory.id] === 'loading'
+                            ? 'LOADING…'
+                            : 'HISTORY'}
+                      </Text>
+                    </Pressable>
                     <Pressable onPress={() => { void handleDelete(memory.id); }} style={styles.dangerAction}>
                       <Text style={styles.dangerActionText}>DELETE</Text>
                     </Pressable>
                   </View>
+                  {Array.isArray(versionsById[memory.id]) && (
+                    <View style={styles.relatedPane}>
+                      <Text style={styles.relatedHeader}>EDIT HISTORY</Text>
+                      {(versionsById[memory.id] as MemoryVersion[]).length === 0 ? (
+                        <Text style={styles.relatedEmpty}>No prior versions — this memory has not been edited since capture.</Text>
+                      ) : (
+                        (versionsById[memory.id] as MemoryVersion[]).map((ver) => (
+                          <View key={ver.id} style={styles.relatedRow}>
+                            <View style={styles.relatedMeta}>
+                              <Text style={styles.relatedKind}>{formatRelativeDate(ver.edited_at)}</Text>
+                              {ver.edit_reason ? <Text style={styles.relatedSimilarity}>{ver.edit_reason}</Text> : null}
+                            </View>
+                            <Text style={styles.relatedTitle} numberOfLines={1}>{ver.title || 'untitled'}</Text>
+                            <Text style={styles.relatedContent} numberOfLines={3}>{ver.body}</Text>
+                            <Pressable onPress={() => { void handleRevert(ver.id); }} style={styles.secondaryAction}>
+                              <Text style={styles.secondaryActionText}>REVERT TO THIS</Text>
+                            </Pressable>
+                          </View>
+                        ))
+                      )}
+                    </View>
+                  )}
                   {Array.isArray(relatedById[memory.id]) && (
                     <View style={styles.relatedPane}>
                       <Text style={styles.relatedHeader}>RELATED MEMORIES</Text>

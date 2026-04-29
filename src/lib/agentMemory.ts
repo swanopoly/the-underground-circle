@@ -385,6 +385,15 @@ export async function getUserMemories(
 
 /**
  * Edit a memory's content.
+ *
+ * If `editReason` is provided OR the content actually changes, the
+ * `record_memory_edit` RPC is used to write a version-history row
+ * BEFORE updating, so the prior body is preserved. The RPC is atomic
+ * — a partial write can't leave version-and-memory state out of sync.
+ *
+ * Falls back to a direct UPDATE for kind/retrieval_mode-only changes
+ * (those don't need versioning) and when the migration hasn't been
+ * applied yet (PGRST202 = function not found).
  */
 export async function editMemory(
   memoryId: string,
@@ -393,13 +402,114 @@ export async function editMemory(
     content?: string;
     memory_kind?: MemoryKind;
     retrieval_mode?: 'startup' | 'on_demand' | 'manual_only';
+    editReason?: string;
   },
 ): Promise<boolean> {
+  const { editReason, ...rest } = updates;
+  const isContentChange = typeof rest.content === 'string';
+
+  // Versioned path — only when the content is actually being edited.
+  if (isContentChange) {
+    try {
+      const { error: rpcErr } = await supabase.rpc('record_memory_edit', {
+        p_memory_id: memoryId,
+        p_new_content: rest.content!,
+        p_new_title: rest.title ?? null,
+        p_edit_reason: editReason ?? null,
+      });
+      if (!rpcErr) {
+        // Pick up any non-versioned fields the RPC doesn't touch.
+        if (rest.memory_kind || rest.retrieval_mode) {
+          await supabase
+            .from('memory_entries')
+            .update({
+              ...(rest.memory_kind ? { memory_kind: rest.memory_kind } : {}),
+              ...(rest.retrieval_mode ? { retrieval_mode: rest.retrieval_mode } : {}),
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', memoryId);
+        }
+        return true;
+      }
+      // PGRST202 = RPC missing (migration not run yet) → fall through.
+      if ((rpcErr as any).code !== 'PGRST202') {
+        console.warn('[editMemory] record_memory_edit failed:', rpcErr.message);
+      }
+    } catch (err) {
+      console.warn('[editMemory] record_memory_edit threw:', err);
+    }
+  }
+
+  // Fallback / non-content edit path.
   const { error } = await supabase
     .from('memory_entries')
-    .update({ ...updates, updated_at: new Date().toISOString() })
+    .update({ ...rest, updated_at: new Date().toISOString() })
     .eq('id', memoryId);
   return !error;
+}
+
+export interface MemoryVersion {
+  id: string;
+  memory_id: string;
+  body: string;
+  title: string | null;
+  edited_by: string | null;
+  edited_at: string;
+  edit_reason: string | null;
+}
+
+/**
+ * Load the version history for a memory, newest first. Each row is
+ * the BEFORE state of an edit — so the most recent row in the list
+ * is what the memory said immediately prior to the latest edit.
+ */
+export async function loadMemoryVersions(memoryId: string, limit = 20): Promise<MemoryVersion[]> {
+  if (!memoryId) return [];
+  try {
+    const { data, error } = await supabase
+      .from('memory_versions')
+      .select('id, memory_id, body, title, edited_by, edited_at, edit_reason')
+      .eq('memory_id', memoryId)
+      .order('edited_at', { ascending: false })
+      .limit(limit);
+    if (error) {
+      // PGRST205 = relation not found → migration not run yet
+      if ((error as any).code !== 'PGRST205') {
+        console.warn('[loadMemoryVersions] failed:', error.message);
+      }
+      return [];
+    }
+    return (data || []) as MemoryVersion[];
+  } catch (err) {
+    console.warn('[loadMemoryVersions] threw:', err);
+    return [];
+  }
+}
+
+/**
+ * Restore a memory to a prior version. Implemented as another edit —
+ * writes a NEW version row containing whatever's there now, then sets
+ * content/title to the snapshot from `versionId`. Symmetric with
+ * record_memory_edit so revert history is also preserved.
+ */
+export async function revertMemoryToVersion(versionId: string, reason?: string): Promise<boolean> {
+  if (!versionId) return false;
+  try {
+    const { data: ver, error: verErr } = await supabase
+      .from('memory_versions')
+      .select('memory_id, body, title')
+      .eq('id', versionId)
+      .maybeSingle();
+    if (verErr || !ver) return false;
+    return await editMemory(ver.memory_id, {
+      content: ver.body,
+      title: ver.title || undefined,
+      editReason: reason || `Reverted to version ${versionId.slice(0, 8)}`,
+    });
+  } catch (err) {
+    console.warn('[revertMemoryToVersion] failed:', err);
+    return false;
+  }
 }
 
 /**
