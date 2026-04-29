@@ -7,7 +7,8 @@ export type ChatSlashCommandCategory =
   | 'wordpress'
   | 'ai_tools'
   | 'governance'
-  | 'knowledge';
+  | 'knowledge'
+  | 'terminal';
 
 export type ChatCommandRouteId =
   | 'help'
@@ -23,7 +24,8 @@ export type ChatCommandRouteId =
   | 'local_knowledge'
   | 'memory'
   | 'governance'
-  | 'search';
+  | 'search'
+  | 'terminal';
 
 export type ChatCommandDecisionSource =
   | 'slash'
@@ -68,6 +70,7 @@ const CATEGORY_LABELS: Record<ChatSlashCommandCategory, string> = {
   ai_tools: 'AI Tools',
   governance: 'Governance',
   knowledge: 'Knowledge',
+  terminal: 'Terminal',
 };
 
 const HELP_CATEGORY_ORDER: ChatSlashCommandCategory[] = [
@@ -80,6 +83,7 @@ const HELP_CATEGORY_ORDER: ChatSlashCommandCategory[] = [
   'wordpress',
   'ai_tools',
   'governance',
+  'terminal',
 ];
 
 export const CHAT_COMMAND_REGISTRY: ChatCommandDefinition[] = [
@@ -168,6 +172,10 @@ export const CHAT_COMMAND_REGISTRY: ChatCommandDefinition[] = [
   { id: 'pin', routeId: 'governance', command: '/pin', insertText: '/pin', title: 'Pin Message', description: 'Pin the latest eligible message.', category: 'governance', keywords: ['important'] },
   { id: 'pins', routeId: 'governance', command: '/pins', insertText: '/pins', title: 'Pinned Messages', description: 'Show pinned messages.', category: 'governance', aliases: ['/pinned'], keywords: ['important'] },
   { id: 'search', routeId: 'search', command: '/search', insertText: '/search ', title: 'Search Chat', description: 'Search chat history.', category: 'governance', keywords: ['messages', 'history'] },
+  { id: 'run', routeId: 'terminal', command: '/run', insertText: '/run ', title: 'Run Shell Command', description: 'Execute a command on your local machine via the bridge. Output stays local.', category: 'terminal', aliases: ['/sh', '/exec', '/$'], keywords: ['shell', 'bash', 'terminal', 'execute', 'cli'] },
+  { id: 'sh', routeId: 'terminal', command: '/sh', insertText: '/sh ', title: 'Shell Alias', description: 'Alias for /run.', category: 'terminal', aliases: ['/run'], keywords: ['shell', 'bash', 'execute'] },
+  { id: 'cd', routeId: 'terminal', command: '/cd', insertText: '/cd ', title: 'Set Working Directory', description: 'Set the sticky cwd for /run in this circle. Bare /cd clears it.', category: 'terminal', keywords: ['cwd', 'directory', 'pwd', 'path'] },
+  { id: 'pwd', routeId: 'terminal', command: '/pwd', insertText: '/pwd', title: 'Show Working Directory', description: 'Show the sticky cwd for /run in this circle.', category: 'terminal', keywords: ['cwd', 'directory', 'where'] },
 ];
 
 function commandMatchesInput(command: string, normalized: string): boolean {

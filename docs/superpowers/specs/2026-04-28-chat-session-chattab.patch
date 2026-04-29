@@ -1,8 +1,32 @@
 diff --git a/src/screens/circles/tabs/ChatTab.tsx b/src/screens/circles/tabs/ChatTab.tsx
-index 194a482..cac56dd 100644
+index 194a482..6210b8a 100644
 --- a/src/screens/circles/tabs/ChatTab.tsx
 +++ b/src/screens/circles/tabs/ChatTab.tsx
-@@ -2412,10 +2504,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -57,6 +57,8 @@ import BuilderGithubSaveModal from './chat/BuilderGithubSaveModal';
+ import BuilderNetlifyDeployModal from './chat/BuilderNetlifyDeployModal';
+ import ChatAttachmentStrip from './chat/ChatAttachmentStrip';
+ import MessageCitations from './chat/MessageCitations';
++import TerminalOutputCard from './chat/TerminalOutputCard';
++import { executeTerminalCommand, parseTerminalCommand, type TerminalRunResult } from '../../../lib/terminalChatCommands';
+ import RunCostDrawer from './chat/RunCostDrawer';
+ import SkillAdminPanel from './chat/SkillAdminPanel';
+ import SpawnAgentsModal from './chat/SpawnAgentsModal';
+@@ -501,6 +506,14 @@ type ChatMessage = {
+   browserPlans?: BrowserPlanCardData[];
+   browserPlanEvents?: BrowserPlanEvent[];
+   browserSessions?: BrowserSessionRecord[];
++  /** When a file_task completes, the adapter emits a normalized result
++   *  we render inline with `FileTaskResultExplorer` so users see a tree
++   *  of matches / listings / file content instead of generic JSON.
++   *  Ephemeral: not persisted — re-run the task for fresh data. */
++  fileTaskResult?: NormalizedFileTaskResult;
++  fileTaskToolName?: string;
++  /** /run / /sh result. Local-only — never persisted to Supabase. */
++  terminalResult?: TerminalRunResult;
+   delegatedTo?: string;       // subagent that handled this message
+   delegatedSubagents?: string[];
+   runId?: string | null;
+@@ -2412,10 +2508,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
  
    // ─── Add Message (local-first) ───────────────────────────────────────────
  
@@ -15,7 +39,7 @@ index 194a482..cac56dd 100644
      const msg: ChatMessage = {
        id: `user-${Date.now()}-${Math.random().toString(36).slice(2)}`,
        content,
-@@ -2437,9 +2529,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -2437,9 +2533,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
        setTimeout(() => triggerParticleEffect(200, 300, isAchievement), 300);
      }
  
@@ -30,7 +54,7 @@ index 194a482..cac56dd 100644
          try {
            const dbId = await persistChatMessage({
              circleId,
-@@ -2453,22 +2548,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -2453,22 +2552,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
            if (dbId) {
              setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, dbId } : m));
            }
@@ -56,11 +80,21 @@ index 194a482..cac56dd 100644
    };
  
 -  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[] }) => {
-+  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; fileTaskResult?: NormalizedFileTaskResult; fileTaskToolName?: string }) => {
++  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; fileTaskResult?: NormalizedFileTaskResult; fileTaskToolName?: string; terminalResult?: TerminalRunResult }) => {
      const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
      const msg: ChatMessage = {
        id: msgId,
-@@ -3139,8 +3239,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -2491,6 +2593,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+       browserPlans: extra?.browserPlans,
+       browserPlanEvents: extra?.browserPlanEvents,
+       browserSessions: extra?.browserSessions,
++      fileTaskResult: extra?.fileTaskResult,
++      fileTaskToolName: extra?.fileTaskToolName,
++      terminalResult: extra?.terminalResult,
+       taskPlan: extra?.taskPlan,
+       toolEvents: extra?.toolEvents,
+       verificationResults: extra?.verificationResults,
+@@ -3139,8 +3244,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
      setBuilderFigmaRefs(resolvedFigmaRefs);
      setSelectedBuilderFigmaRefId(nextSelectedFigmaRefId);
  
@@ -73,7 +107,37 @@ index 194a482..cac56dd 100644
      setInput('');
      setAttachments([]);
      setReplyTo(null);
-@@ -3871,6 +3973,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -3159,6 +3266,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+     // ─── Slash intercepts (pure lib calls, no planner) ──────────────────────
+     // These run before the model / planner so users see instant feedback
+     // for read/write ops that don't need a full agent turn.
++
++    // /run, /sh, /exec, /cd, /pwd — terminal access via the local bridge.
++    // Output is local-only (never persisted) for privacy + payload size.
++    if (parseTerminalCommand(content)) {
++      try {
++        const outcome = await executeTerminalCommand({ circleId, input: content });
++        if (outcome.kind === 'run') {
++          addBotMessage(
++            outcome.result.error
++              ? `Command failed: ${outcome.result.error}`
++              : `\`$ ${outcome.result.command}\``,
++            undefined,
++            { localOnly: true, terminalResult: outcome.result },
++          );
++        } else {
++          addBotMessage(outcome.text, undefined, { localOnly: true });
++        }
++      } catch (err: any) {
++        addBotMessage(`Terminal error: ${err?.message || 'bridge unreachable'}`, undefined, { localOnly: true });
++      }
++      return;
++    }
++
+     if (content.startsWith('/v2')) {
+       try {
+         const { parseSwanbotV2Command, applySwanbotV2Command } = await import('../../../lib/swanbotRouting');
+@@ -3871,6 +4001,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                  const { buildStreamableSystemPrompt } = await import('../../../lib/swanbot');
                  const { streamChatResponse } = await import('../../../lib/swanbotStream');
                  const { resolveModelForSoul, spiritIdForProfile } = await import('../../../lib/serviceProfileSouls');
@@ -88,7 +152,7 @@ index 194a482..cac56dd 100644
                  const systemPrompt = await buildStreamableSystemPrompt({
                    circleId,
                    userId: currentUserId || 'anonymous',
-@@ -3879,6 +3989,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -3879,6 +4017,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                    userName: currentUserName,
                    chatHistory,
                    sessionArchiveContext: sessionArchiveContext || undefined,
@@ -96,7 +160,7 @@ index 194a482..cac56dd 100644
                  });
                  const streamModel = resolveModelForSoul(
                    spiritIdForProfile(resolvedSessionProfile),
-@@ -3927,6 +4038,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -3927,6 +4066,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                      content: accumulated,
                      threadId: activeThreadId,
                      onError: (error) => console.error('[ChatTab] persist streaming msg:', error),
@@ -121,7 +185,28 @@ index 194a482..cac56dd 100644
                    });
                  }
                  setRunStatus('idle');
-@@ -4889,6 +5028,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -4706,6 +4863,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+           onRetryCheck={(checkId) => handleRetryVerificationCheck(item, checkId)}
+           retryingCheckId={retryingLedgerCheck?.messageId === item.id ? retryingLedgerCheck.checkId : null}
+         />
++        {/* File task result — rich explorer replaces the generic JSON
++            that used to live inside the text body. Present only when the
++            file_adapter emitted a parseable response. */}
++        {item.fileTaskResult ? (
++          <FileTaskResultExplorer
++            result={item.fileTaskResult}
++            toolName={item.fileTaskToolName || null}
++            accentColor={accentColor}
++          />
++        ) : null}
++        {/* /run output. Local-only — never persisted to Supabase. */}
++        {item.terminalResult ? (
++          <TerminalOutputCard result={item.terminalResult} accentColor={accentColor} />
++        ) : null}
+         {(item.memoryRefs && item.memoryRefs.length > 0) || (item.memoriesUsed && item.memoriesUsed.length > 0) ? (
+           <View style={styles.messageSourceSection}>
+             <Text style={styles.messageSourceLabel}>Memory Influence</Text>
+@@ -4889,6 +5060,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                userId={currentUserId}
                messageTimestamp={item.timestamp.toISOString()}
                nextMessageTimestamp={index > 0 ? invertedMessages[index - 1]?.timestamp?.toISOString() : undefined}
