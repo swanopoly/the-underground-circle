@@ -37,9 +37,18 @@ export function parseTerminalCommand(input: string): ParsedTerminalCommand | nul
   // /pwd
   if (lower === '/pwd') return { verb: 'pwd', rest: '' };
 
-  // /diag bridge — quick liveness probe for the local claude-bridge.
+  // /diag bridge — quick liveness probe for the local claude-bridge
+  // (kept as an alias for back-compat). /diag without args probes ALL
+  // bridges. /diag <name> drills into one (claude-code, codex,
+  // gemini-cli, cursor, openswan-proxy).
   if (lower === '/diag bridge' || lower === '/diag-bridge') {
     return { verb: 'diag', rest: 'bridge' };
+  }
+  if (lower === '/diag' || lower === '/diag all') {
+    return { verb: 'diag', rest: 'all' };
+  }
+  if (lower.startsWith('/diag ')) {
+    return { verb: 'diag', rest: trimmed.slice(6).trim() };
   }
 
   return null;

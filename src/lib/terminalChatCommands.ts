@@ -118,23 +118,74 @@ export async function executeTerminalCommand(opts: {
     };
   }
 
-  // /diag bridge — quick liveness check
+  // /diag — covers three modes:
+  //   /diag           or /diag all   → probe every bridge
+  //   /diag bridge                   → claude-bridge alias (back-compat)
+  //   /diag <name>                   → drill into a specific bridge
   if (parsed.verb === 'diag') {
-    const startedAt = Date.now();
-    const ok = await detectClaudeCodeBridge();
-    const duration = Date.now() - startedAt;
-    if (ok) {
+    const target = parsed.rest.trim().toLowerCase();
+
+    // back-compat: 'bridge' → claude-bridge specifically
+    if (target === 'bridge') {
+      const startedAt = Date.now();
+      const ok = await detectClaudeCodeBridge();
+      const duration = Date.now() - startedAt;
+      if (ok) {
+        return {
+          kind: 'message', tone: 'info',
+          text: `Claude bridge online. Health responded in ${duration}ms. \`/run\`, \`/sh\`, and code-block RUN buttons should work.`,
+        };
+      }
       return {
-        kind: 'message',
-        tone: 'info',
-        text: `Bridge online. Health responded in ${duration}ms. \`/run\`, \`/sh\`, and code-block RUN buttons should work.`,
+        kind: 'message', tone: 'error',
+        text: `Claude bridge offline (probe took ${duration}ms). Start it with \`npm run bridges:up\` or \`node scripts/claude-bridge.js\` from the project root. Run \`npm run bridges:doctor\` for deeper diagnosis.`,
       };
     }
-    return {
-      kind: 'message',
-      tone: 'error',
-      text: `Bridge offline (probe took ${duration}ms). Start it with \`npm run bridges:up\` or \`node scripts/claude-bridge.js\` from the project root.`,
-    };
+
+    // /diag all — probe every bridge
+    const { probeBridges, summarizeBridgeProbes, BRIDGE_CATALOG } = await import('./bridgeHealthDiag');
+    if (target === 'all' || target === '') {
+      const startedAt = Date.now();
+      const results = await probeBridges({ timeoutMs: 2500 });
+      const duration = Date.now() - startedAt;
+      const summary = summarizeBridgeProbes(results);
+      const broken = results.filter(r => r.status === 'offline').length;
+      const tone: 'info' | 'warn' | 'error' = broken > 0 ? 'error' : results.some(r => r.status === 'degraded') ? 'warn' : 'info';
+      const footer = broken > 0
+        ? `\n\nFor recovery commands, run \`npm run bridges:doctor\` in your shell.`
+        : '';
+      return {
+        kind: 'message', tone,
+        text: `\`\`\`\n${summary}\n\nProbed in ${duration}ms\n\`\`\`${footer}`,
+      };
+    }
+
+    // /diag <name> — single bridge
+    const entry = BRIDGE_CATALOG.find(e => e.name === target || e.label.toLowerCase() === target || e.label.toLowerCase().replace(/\s+/g, '-') === target);
+    if (!entry) {
+      return {
+        kind: 'message', tone: 'warn',
+        text: `Unknown bridge \`${target}\`. Try one of: ${BRIDGE_CATALOG.map(e => e.name).join(', ')}, or just \`/diag\` for all.`,
+      };
+    }
+    const startedAt = Date.now();
+    const results = await probeBridges({ timeoutMs: 2500 });
+    const duration = Date.now() - startedAt;
+    const result = results.find(r => r.name === entry.name);
+    if (!result) {
+      return { kind: 'message', tone: 'error', text: `Probe returned no result for ${entry.label}` };
+    }
+    const icon = result.status === 'healthy' ? '✓' : result.status === 'degraded' ? '⚠' : '✗';
+    const lines = [
+      `${icon} **${entry.label}** :${entry.port}`,
+      `Status: \`${result.status}\``,
+      `Detail: ${result.detail}`,
+    ];
+    if (typeof result.sessionCount === 'number') lines.push(`Sessions: ${result.sessionCount}`);
+    if (result.hint) lines.push(`Hint: ${result.hint}`);
+    lines.push(`Probed in ${duration}ms`);
+    const tone: 'info' | 'warn' | 'error' = result.status === 'offline' ? 'error' : result.status === 'degraded' ? 'warn' : 'info';
+    return { kind: 'message', tone, text: lines.join('\n') };
   }
 
   // /run <cmd>

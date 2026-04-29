@@ -50,8 +50,12 @@ eq(parseTerminalCommand('/cd ~/code'), { verb: 'cd', rest: '~/code' }, '/cd pres
 
 eq(parseTerminalCommand('/pwd'), { verb: 'pwd', rest: '' }, '/pwd parses');
 
-eq(parseTerminalCommand('/diag bridge'), { verb: 'diag', rest: 'bridge' }, '/diag bridge parses');
+eq(parseTerminalCommand('/diag bridge'), { verb: 'diag', rest: 'bridge' }, '/diag bridge parses (back-compat)');
 eq(parseTerminalCommand('/diag-bridge'), { verb: 'diag', rest: 'bridge' }, '/diag-bridge alias');
+eq(parseTerminalCommand('/diag'), { verb: 'diag', rest: 'all' }, 'bare /diag → all');
+eq(parseTerminalCommand('/diag all'), { verb: 'diag', rest: 'all' }, '/diag all explicit');
+eq(parseTerminalCommand('/diag claude-code'), { verb: 'diag', rest: 'claude-code' }, '/diag claude-code drills into one');
+eq(parseTerminalCommand('/diag openswan-proxy'), { verb: 'diag', rest: 'openswan-proxy' }, '/diag openswan-proxy single');
 
 // Negative cases
 eq(parseTerminalCommand('hello world'), null, 'plain text returns null');

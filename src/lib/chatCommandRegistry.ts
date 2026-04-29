@@ -176,7 +176,8 @@ export const CHAT_COMMAND_REGISTRY: ChatCommandDefinition[] = [
   { id: 'sh', routeId: 'terminal', command: '/sh', insertText: '/sh ', title: 'Shell Alias', description: 'Alias for /run.', category: 'terminal', aliases: ['/run'], keywords: ['shell', 'bash', 'execute'] },
   { id: 'cd', routeId: 'terminal', command: '/cd', insertText: '/cd ', title: 'Set Working Directory', description: 'Set the sticky cwd for /run in this circle. Bare /cd clears it.', category: 'terminal', keywords: ['cwd', 'directory', 'pwd', 'path'] },
   { id: 'pwd', routeId: 'terminal', command: '/pwd', insertText: '/pwd', title: 'Show Working Directory', description: 'Show the sticky cwd for /run in this circle.', category: 'terminal', keywords: ['cwd', 'directory', 'where'] },
-  { id: 'diag-bridge', routeId: 'terminal', command: '/diag bridge', insertText: '/diag bridge', title: 'Diagnose Bridge', description: 'Probe the local claude-bridge for liveness. Use when /run errors with "bridge unreachable".', category: 'terminal', aliases: ['/diag-bridge'], keywords: ['health', 'probe', 'check', 'bridge', 'diagnose'] },
+  { id: 'diag-bridge', routeId: 'terminal', command: '/diag bridge', insertText: '/diag bridge', title: 'Diagnose Claude Bridge', description: 'Probe the local claude-bridge for liveness. Alias kept for back-compat.', category: 'terminal', aliases: ['/diag-bridge'], keywords: ['health', 'probe', 'check', 'bridge', 'diagnose'] },
+  { id: 'diag', routeId: 'terminal', command: '/diag', insertText: '/diag', title: 'Diagnose All Bridges', description: 'Probe every local bridge (claude, codex, gemini, cursor, openswan-proxy) and report status inline.', category: 'terminal', aliases: ['/diag all'], keywords: ['health', 'probe', 'check', 'bridges', 'diagnose', 'all'] },
 ];
 
 function commandMatchesInput(command: string, normalized: string): boolean {

@@ -13,7 +13,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 
 const PORT = 7779;
 const SCAN_INTERVAL = 5000;
@@ -287,6 +287,133 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(400, CORS);
         res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
       }
+    });
+    return;
+  }
+
+  // ── POST /exec/stream — run a shell command, stream output as SSE ───────
+  // Mirrors the claude-bridge endpoint so the same chat UI streaming
+  // path works regardless of which bridge the user has running. Same
+  // security: localhost-only origin gate, blocked-pattern filter,
+  // 30s timeout, output caps.
+  if (req.url === '/exec/stream' && req.method === 'POST') {
+    const origin = req.headers['origin'] || req.headers['referer'] || '';
+    const isLocal = !origin || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('app.chrisswanson.xyz');
+    if (!isLocal) {
+      res.writeHead(403, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
+      return;
+    }
+
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 10240) {
+        res.writeHead(413, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Request body too large' }));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      let command;
+      try {
+        const parsed = JSON.parse(body);
+        command = parsed.command;
+      } catch {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON body' }));
+        return;
+      }
+      if (!command || typeof command !== 'string') {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Missing "command" field' }));
+        return;
+      }
+
+      // Same blocked-pattern filter as claude-bridge.
+      const BLOCKED = [
+        /\brm\s+(-[a-zA-Z]*\s+)*\//, /\brm\s+(-[a-zA-Z]*\s+)*~/,
+        /\brmdir\s+(-[a-zA-Z]*\s+)*\//, /\bmkfs\b/, /\bdd\s+.*of=/,
+        />\s*\/dev\/sd/, /\bcurl\b.*\|\s*(ba)?sh/, /\bwget\b.*\|\s*(ba)?sh/,
+        /\bchmod\s+777\b/, /\bpasswd\b/, /\buseradd\b/, /\buserdel\b/,
+        /\bsudo\b/, /\bsu\s+-?\s/, /\/etc\/shadow/, /\/etc\/passwd/,
+        /\benv\b.*SECRET|KEY|TOKEN|PASS/i, /\bcrontab\s+-[er]/,
+        /\bshutdown\b/, /\breboot\b/,
+      ];
+      if (BLOCKED.some(p => p.test(command))) {
+        res.writeHead(403, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Command blocked: contains restricted pattern' }));
+        return;
+      }
+
+      res.writeHead(200, {
+        ...CORS,
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+
+      const startedAt = Date.now();
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      const STDOUT_CAP = 256 * 1024;
+      const STDERR_CAP = 64 * 1024;
+      let killed = false;
+
+      const send = (event) => {
+        try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* socket closed */ }
+      };
+
+      const child = spawn('sh', ['-c', command], {
+        env: process.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      const timeout = setTimeout(() => {
+        killed = true;
+        child.kill('SIGTERM');
+        send({ type: 'error', error: 'Command timed out (30s)' });
+        try { res.end(); } catch {}
+      }, 30000);
+
+      child.stdout.on('data', (buf) => {
+        if (stdoutBytes >= STDOUT_CAP) return;
+        const remaining = STDOUT_CAP - stdoutBytes;
+        const chunk = buf.length > remaining ? buf.slice(0, remaining) : buf;
+        stdoutBytes += chunk.length;
+        send({ type: 'stdout', chunk: chunk.toString('utf8') });
+        if (stdoutBytes >= STDOUT_CAP) {
+          send({ type: 'stderr', chunk: '\n[stdout cap of 256KB reached — further output suppressed]\n' });
+        }
+      });
+
+      child.stderr.on('data', (buf) => {
+        if (stderrBytes >= STDERR_CAP) return;
+        const remaining = STDERR_CAP - stderrBytes;
+        const chunk = buf.length > remaining ? buf.slice(0, remaining) : buf;
+        stderrBytes += chunk.length;
+        send({ type: 'stderr', chunk: chunk.toString('utf8') });
+      });
+
+      child.on('error', (err) => {
+        clearTimeout(timeout);
+        if (killed) return;
+        send({ type: 'error', error: err.message || 'spawn failed' });
+        try { res.end(); } catch {}
+      });
+
+      child.on('close', (code) => {
+        clearTimeout(timeout);
+        if (killed) return;
+        send({ type: 'done', code: code ?? 0, durationMs: Date.now() - startedAt });
+        try { res.end(); } catch {}
+      });
+
+      req.on('close', () => {
+        if (!child.killed) { try { child.kill('SIGTERM'); } catch {} }
+        clearTimeout(timeout);
+      });
     });
     return;
   }
