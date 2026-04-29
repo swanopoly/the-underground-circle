@@ -38,6 +38,7 @@
     "smoke:skill-relpath": "npx tsx scripts/skill-relpath-smoketest.ts",
     "smoke:known-app-shortcuts": "npx tsx scripts/known-app-shortcuts-smoketest.ts",
     "smoke:desktop-bridge": "npx tsx scripts/desktop-bridge-smoketest.ts",
+    "smoke:terminal-commands": "npx tsx scripts/terminal-commands-smoketest.ts",
     "smoke:swanbot-routing": "npx tsx scripts/swanbot-routing-smoketest.ts",
     "smoke:swanbot-v2-delegation": "npx tsx scripts/swanbot-v2-delegation-smoketest.ts",
     "smoke:swanbot-v2-writers": "npx tsx scripts/swanbot-v2-writers-smoketest.ts",

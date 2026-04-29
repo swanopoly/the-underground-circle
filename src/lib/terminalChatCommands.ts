@@ -13,6 +13,11 @@
  */
 
 import { execBridgeCommand, detectClaudeCodeBridge, streamBridgeCommand, type StreamEvent } from './claudeCodeDetector';
+import { parseTerminalCommand, buildEffectiveCommand as buildEffectiveCommandCore } from './terminalCommandParser';
+// Re-export for callers (ChatTab) so they don't need to know about the
+// RN-free parser file.
+export { parseTerminalCommand };
+export type { ParsedTerminalCommand, TerminalVerb } from './terminalCommandParser';
 
 const CWD_STORAGE_PREFIX = 'uc_terminal_cwd_v1:';
 
@@ -58,56 +63,15 @@ export function setStoredCwd(circleId: string, cwd: string | null): void {
 
 // ── Command parsing ─────────────────────────────────────────────────────────
 
-/**
- * Detect whether the input is a terminal slash command. Returns the
- * normalized verb + remainder, or null if not a terminal command.
- */
-export function parseTerminalCommand(input: string): { verb: 'run' | 'cd' | 'pwd' | 'diag'; rest: string } | null {
-  const trimmed = input.trim();
-  if (!trimmed.startsWith('/')) return null;
-  const lower = trimmed.toLowerCase();
-
-  // /run <cmd>  or  /sh <cmd>
-  for (const prefix of ['/run ', '/sh ', '/exec ', '/$ ']) {
-    if (lower.startsWith(prefix)) {
-      const rest = trimmed.slice(prefix.length).trim();
-      return { verb: 'run', rest };
-    }
-  }
-  // Bare /run or /sh — show usage
-  if (lower === '/run' || lower === '/sh' || lower === '/exec' || lower === '/$') {
-    return { verb: 'run', rest: '' };
-  }
-
-  // /cd <path>  or  bare /cd  (clears)
-  if (lower === '/cd') return { verb: 'cd', rest: '' };
-  if (lower.startsWith('/cd ')) return { verb: 'cd', rest: trimmed.slice(4).trim() };
-
-  // /pwd
-  if (lower === '/pwd') return { verb: 'pwd', rest: '' };
-
-  // /diag bridge — quick liveness probe for the local claude-bridge.
-  // Useful when /run errors with "bridge unreachable" and the user
-  // wants to confirm whether it's the bridge or the network.
-  if (lower === '/diag bridge' || lower === '/diag-bridge') {
-    return { verb: 'diag', rest: 'bridge' };
-  }
-
-  return null;
-}
+// Parser implementation lives in terminalCommandParser.ts (no RN deps)
+// and is re-exported above. Keep this comment as the breadcrumb so
+// future readers don't go looking for it here.
 
 // ── Executor ────────────────────────────────────────────────────────────────
 
-/**
- * Wrap a user command with the sticky cwd if one is set.
- * Uses `&&` so a cd failure aborts before running the command.
- */
-function buildEffectiveCommand(rawCommand: string, cwd: string | null): string {
-  if (!cwd) return rawCommand;
-  // Single-quote escaping: terminate, escape, restart.
-  const escapedCwd = cwd.replace(/'/g, `'\\''`);
-  return `cd '${escapedCwd}' && ${rawCommand}`;
-}
+// buildEffectiveCommand lives in terminalCommandParser.ts so smoketests
+// can import it without RN deps; aliased here for the existing call sites.
+const buildEffectiveCommand = buildEffectiveCommandCore;
 
 export async function executeTerminalCommand(opts: {
   circleId: string;
