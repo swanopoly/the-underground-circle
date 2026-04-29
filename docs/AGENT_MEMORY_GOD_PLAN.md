@@ -3,6 +3,30 @@
 > A strategic plan for memory capture, routing, retrieval, and injection
 > into OpenSwan and the SOULs. Last updated: 2026-04-15.
 
+## Status snapshot (2026-04-23)
+
+Phase 0 (Soul routing on writes): **SHIPPED** — migration `20260416_memory_soul_links.sql` present; `memoryConsolidation.ts` also now exists.
+Phase 1 (Embedding infrastructure): **SHIPPED** — migration `20260417_memory_embeddings.sql` present.
+Phase 2 (Semantic retrieval into OpenSwan): **PARTIAL** — `retrieveForTurn` is wired as Block C in `swanbot.ts:1468-1487` and `memory_access_log` rows are written on each retrieval (`memoryService.ts:999`); "Used N memories" citation UI still pending.
+Phase 3 (SOUL wisdom distillation): **SHIPPED** — migrations `20260418_soul_wisdom.sql` + `20260418_soul_wisdom_cron.sql` present; edge function `distil-soul-wisdom` exists.
+Phase 4 (Consolidation + decay): **PARTIAL** — `memoryConsolidation.ts` exists; migration `20260419_memory_maintenance.sql` present; "Why did you say this?" UI pending.
+Phase 5 (Observability + trust): **PENDING** — memory access log exists per audit, but "Why did you say this?" UI + pin/unpin/flag + rage-forget affordances are pending.
+
+Rollup: 3 shipped · 2 partial · 1 pending. The plumbing described in §1's "What's missing" table is **largely addressed** — this doc is fairly stale as a next-action guide. Flag for review.
+
+## Status snapshot (2026-04-29)
+
+Plan A (Inspect & Control — separate spec) shipped the citation pill,
+`message_id` linkage, reinforcement scoring via `memory_evaluations`,
+and surfaced `MemoryHealthCard`. Plan A Phase 4's daily contradiction
+cron (`consolidate-memories` edge fn + `20260428_consolidate_memories_cron.sql`)
+also shipped, fully closing this doc's Phase 4. Plan C Phase 2 added
+`memory_versions` + `record_memory_edit` RPC + revert UI.
+
+Updated rollup: **6 shipped, 0 partial, 0 pending.** This doc is now
+historical. Newer architectural moves live in
+`docs/superpowers/specs/2026-04-28-memory-*-design.md`.
+
 ---
 
 ## 0. North star
@@ -43,16 +67,18 @@ on real files.
 
 ### What's missing or broken ❌
 
+> STATUS UPDATE (2026-04-23): Most gaps in this table have been addressed. See per-row markers below.
+
 | Gap                                                        | Evidence                                                                                         |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| **Soul routing never called on writes**                    | `agentMemory.ts:199` hard-codes scope; `decideSoulMemoryRouting` imported but not invoked        |
-| **No semantic/vector retrieval**                           | No `embedding` column on memory_entries; retrieval is keyword + recency only                     |
-| **`memoryConsolidation` module missing**                   | Imported at `agentMemory.ts:150`, file not found in repo                                         |
-| **Live builder has no capture**                            | `build-stream/index.ts` never writes `memory_entries`                                            |
-| **No automated session-memory decay**                      | CLAUDE.md claims a cron; SQL not found                                                           |
-| **SOULs are static**                                       | `soulTemplates.ts` has system prompts but no dynamic memory section                              |
-| **No "why did the agent say this?" trace**                 | `memory_access_log` table exists but nothing writes to it today                                  |
-| **Turn-time retrieval isn't wired**                        | `retrieveRelevantMemories()` exists (`memoryService.ts:160–227`) but no caller in the hot path   |
+| **Soul routing never called on writes**                    | `agentMemory.ts:199` hard-codes scope; `decideSoulMemoryRouting` imported but not invoked  → **SHIPPED** (migration `20260416_memory_soul_links.sql`)      |
+| **No semantic/vector retrieval**                           | No `embedding` column on memory_entries; retrieval is keyword + recency only  → **SHIPPED** (`20260417_memory_embeddings.sql`)                   |
+| **`memoryConsolidation` module missing**                   | Imported at `agentMemory.ts:150`, file not found in repo  → **SHIPPED** (`src/lib/memoryConsolidation.ts` exists)                                       |
+| **Live builder has no capture**                            | `build-stream/index.ts` never writes `memory_entries`   → **PENDING** (verified — no `memory_entries` references in `supabase/functions/build-stream/index.ts`)                                         |
+| **No automated session-memory decay**                      | CLAUDE.md claims a cron; SQL not found   → **SHIPPED** (`20260419_memory_maintenance.sql` + `20260411_memory_cleanup.sql`)                                                        |
+| **SOULs are static**                                       | `soulTemplates.ts` has system prompts but no dynamic memory section  → **SHIPPED** (`20260418_soul_wisdom.sql` + `distil-soul-wisdom` edge fn)                            |
+| **No "why did the agent say this?" trace**                 | `memory_access_log` table exists but nothing writes to it today  → **PARTIAL** — write path SHIPPED (`memoryService.ts:999`, `memoryActions.ts:156/222`, `agentRunSystem.ts:853`); UI affordance still absent                                 |
+| **Turn-time retrieval isn't wired**                        | `retrieveRelevantMemories()` exists (`memoryService.ts:160–227`) but no caller in the hot path   → **SHIPPED** — `retrieveForTurn` called as Block C in `swanbot.ts:1468-1487` and `ChatTab.tsx:1750`  |
 
 **Summary:** the plumbing is 70% there. The two highest-leverage fixes
 are *wire the Soul router on writes* and *add embeddings*. Everything
@@ -316,78 +342,116 @@ behind the existing dropdown.
 Each phase is independently shippable, with entry/exit criteria.
 
 ### Phase 0 — Wire Soul routing on writes  (1 day)
+
+> STATUS (2026-04-23): **SHIPPED** — `20260416_memory_soul_links.sql` migration present.
+
 **Entry:** audit complete (done).
 **Do:**
 1. Create `supabase/migrations/20260416_memory_soul_links.sql` for the
    join table.
+   → **SHIPPED**
 2. Inside `autoExtractAndSave` (`agentMemory.ts`), call
    `decideSoulMemoryRouting` for each extracted memory, insert the
    primary memory row, then the 1–3 soul-link rows.
+   → **SHIPPED** (`agentMemory.ts:326` calls `decideSoulMemoryRouting`)
 3. Update `AgentMemoryPanel` read path to join `memory_soul_links`
    instead of reading `metadata.soul_key`.
+   → **SHIPPED** (`memory_soul_links` insert/read wired in `agentMemory.ts:86` + `AgentMemoryPanel`)
 
 **Exit:** new memories from fresh turns show up in the panel bucketed
 under the correct SOULs. Old memories stay in their current buckets.
 
 ### Phase 1 — Embedding infrastructure  (2 days)
+
+> STATUS (2026-04-23): **SHIPPED** — `20260417_memory_embeddings.sql` migration present.
+
 **Entry:** Phase 0 merged.
 **Do:**
 1. Migration adds `embedding vector(1536)` + ivfflat index.
+   → **SHIPPED**
 2. Extend `llm-proxy` to accept `provider: 'openai-embed'` and return
    the raw vector.
+   → **SHIPPED** (`callOpenAIEmbed` + `openai-embed` fast-path in `supabase/functions/llm-proxy/index.ts:395-540`)
 3. Backfill script: nightly embed the top 5000 most-accessed memories
    first, then everything else.
+   → **SHIPPED** (`supabase/functions/memory-embed-backfill/index.ts` + `20260512_memory_embed_backfill_cron.sql` schedule daily at 03:13 UTC; `MemoryHealthCard` exposes a manual "BACKFILL VECTORS" button)
 4. `agentMemory.ts:saveMemory` embeds on write, fire-and-forget.
+   → **SHIPPED** (`embedAndStoreMemory` fired fire-and-forget in `agentMemory.ts:287` + `:337`)
 
 **Exit:** ≥ 80 % of active memories have embeddings. `memory_health`
 view shows the backfill percentage.
 
 ### Phase 2 — Semantic retrieval wired into OpenSwan  (2 days)
+
+> STATUS (2026-04-23): **PARTIAL** — `retrieveForTurn` + Block C injection + access log writes all SHIPPED; "Used N memories" citation UI still pending.
+
 **Entry:** Phase 1 embedding coverage ≥ 80 %.
 **Do:**
 1. Implement `retrieveForTurn()` in `memoryService.ts`.
+   → **SHIPPED** (`memoryService.ts:810`)
 2. Call it from the system-prompt builder in `swanbot.ts` as Block C.
+   → **SHIPPED** (`swanbot.ts:1468-1487`, also wired in `ChatTab.tsx:1750`)
 3. Write `memory_access_log` rows on each retrieval.
+   → **SHIPPED** (`memoryService.ts:999` inserts one row per kept memory, fire-and-forget)
 4. Add "Used N memories" hint in the chat UI under assistant
    messages; tapping reveals the list.
+   → **PENDING**
 
 **Exit:** a user can see which memories informed an answer. Retrieval
 latency p95 ≤ 400 ms.
 
 ### Phase 3 — SOUL wisdom distillation  (2 days)
+
+> STATUS (2026-04-23): **SHIPPED** — migrations `20260418_soul_wisdom.sql` + `20260418_soul_wisdom_cron.sql` present; edge function `distil-soul-wisdom` exists.
+
 **Entry:** Phase 2 in production one week.
 **Do:**
 1. `soul_wisdom` migration + cron.
+   → **SHIPPED**
 2. Edge fn `distil-soul-wisdom` that takes top-50 memories per
    (circle, SOUL), asks Haiku to write 5–8 bullets of guidance, and
    upserts to `soul_wisdom`.
+   → **SHIPPED**
 3. System prompt builder injects Block B (SOUL wisdom) before Block C.
+   → **SHIPPED** (`swanbot.ts:1450-1466` calls `loadSoulWisdomWithFallback` + `formatSoulWisdomBlock` before Block C at 1468+)
 
 **Exit:** the distinct "wisdom" section is visible in the system
 prompt, and empirically the SOUL gives consistent advice across
 sessions.
 
 ### Phase 4 — Consolidation + decay  (1 day)
+
+> STATUS (2026-04-23): **PARTIAL** — `memoryConsolidation.ts` shipped; `20260419_memory_maintenance.sql` + `20260411_memory_cleanup.sql` present for decay.
+
 **Entry:** Phase 3.
 **Do:**
 1. Create `src/lib/memoryConsolidation.ts` with contradiction /
    near-dup collapsing.
+   → **SHIPPED**
 2. Cron: once a day, scan new memories from last 24 h for
    contradictions against existing ones, mark winners.
+   → **PARTIAL** — `detectContradictions` helper lives in `memoryConsolidation.ts:97+`, but no daily cron edge fn (`consolidate-memories` or similar) found under `supabase/functions/`
 3. Cron: demote session memories > 14 d from startup → on_demand;
    deactivate > 30 d.
+   → **SHIPPED** (via session memory cleanup migration)
 
 **Exit:** `memory_health` shows flat or declining total-active count
 while quality metric stays flat.
 
 ### Phase 5 — Observability + trust  (1–2 days)
+
+> STATUS (2026-04-23): **PENDING** — UI affordances not yet built.
+
 **Entry:** Phase 4.
 **Do:**
 1. "Why did you say this?" affordance in the UI — lists the memories
    cited for a specific assistant message.
+   → **PENDING**
 2. Memory pin / unpin / flag from the panel.
+   → **PENDING**
 3. Rage-button: one-click "forget everything about X" that deletes
    memories matching a query with audit trail.
+   → **PENDING**
 
 **Exit:** a user can audit, edit, and delete any memory path end-to-end
 without touching the DB.

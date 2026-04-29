@@ -459,6 +459,111 @@ export interface MemoryVersion {
 }
 
 /**
+ * Render a soul's memories as a single Markdown document. Same format as
+ * `.agent-memory/context.md` so users can drop the file into an Obsidian
+ * vault, a Cursor workspace, or any tool that consumes plain Markdown.
+ *
+ * Memories are grouped by kind (decisions / policies / preferences /
+ * facts / findings / instructions / context), ordered by importance
+ * within each group, and tagged with relative date + importance score
+ * so a reader can scan top-of-mind state first.
+ */
+export function renderMemoriesAsMarkdown(opts: {
+  memories: Array<{
+    id?: string;
+    title: string;
+    content: string;
+    memory_kind?: string | null;
+    importance?: number | null;
+    updated_at?: string | null;
+    created_at?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }>;
+  soulName?: string | null;
+  circleName?: string | null;
+  exportedAt?: Date;
+}): string {
+  const exportedAt = opts.exportedAt || new Date();
+  const total = opts.memories.length;
+
+  const KIND_ORDER = ['decision', 'policy', 'instruction', 'preference', 'fact', 'finding', 'context'];
+  const KIND_LABELS: Record<string, string> = {
+    decision: 'Decisions',
+    policy: 'Policies',
+    instruction: 'Standing Instructions',
+    preference: 'Preferences',
+    fact: 'Facts',
+    finding: 'Findings',
+    context: 'Context',
+  };
+
+  const grouped = new Map<string, typeof opts.memories>();
+  for (const m of opts.memories) {
+    const kind = (m.memory_kind || 'context').toLowerCase();
+    const arr = grouped.get(kind) || [];
+    arr.push(m);
+    grouped.set(kind, arr);
+  }
+  // Sort each group by importance desc, then recency.
+  for (const arr of grouped.values()) {
+    arr.sort((a, b) => {
+      const impDiff = (b.importance || 0) - (a.importance || 0);
+      if (impDiff !== 0) return impDiff;
+      const at = a.updated_at || a.created_at || '';
+      const bt = b.updated_at || b.created_at || '';
+      return bt.localeCompare(at);
+    });
+  }
+
+  const lines: string[] = [];
+  const heading = opts.soulName ? `Soul Memory: ${opts.soulName}` : 'Memory Export';
+  lines.push(`# ${heading}`);
+  lines.push('');
+  lines.push('> Exported ' + exportedAt.toISOString().split('T')[0] + ' from The Underground Circle');
+  if (opts.circleName) lines.push(`> Circle: ${opts.circleName}`);
+  lines.push(`> Total memories: ${total}`);
+  lines.push('');
+
+  if (total === 0) {
+    lines.push('_No active memories for this soul yet._');
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  // Render in canonical order, then any unrecognized kinds at the end.
+  const seenKinds = new Set<string>();
+  const renderGroup = (kind: string) => {
+    const arr = grouped.get(kind);
+    if (!arr || arr.length === 0) return;
+    seenKinds.add(kind);
+    lines.push(`## ${KIND_LABELS[kind] || kind}`);
+    lines.push('');
+    for (const m of arr) {
+      const impPct = Math.round((m.importance || 0) * 100);
+      const ts = m.updated_at || m.created_at;
+      const rel = ts ? new Date(ts).toISOString().split('T')[0] : '';
+      lines.push(`### ${m.title || '_untitled_'}`);
+      lines.push(`*importance ${impPct}%${rel ? ` · captured ${rel}` : ''}*`);
+      lines.push('');
+      // Indent the content with no markdown processing — preserves the
+      // user's text faithfully even if it contains backticks or asterisks.
+      lines.push(m.content || '_(empty)_');
+      lines.push('');
+      lines.push('---');
+      lines.push('');
+    }
+  };
+
+  for (const kind of KIND_ORDER) renderGroup(kind);
+  // Catch anything unrecognized.
+  for (const kind of grouped.keys()) {
+    if (!seenKinds.has(kind)) renderGroup(kind);
+  }
+
+  return lines.join('\n');
+}
+
+/**
  * Load the version history for a memory, newest first. Each row is
  * the BEFORE state of an edit — so the most recent row in the list
  * is what the memory said immediately prior to the latest edit.

@@ -17,7 +17,7 @@
  */
 import React, { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View, Platform } from 'react-native';
-import { executeTerminalCommand, type TerminalRunResult } from '../../../../lib/terminalChatCommands';
+import { executeTerminalCommandStream, type TerminalRunResult } from '../../../../lib/terminalChatCommands';
 import TerminalOutputCard from './TerminalOutputCard';
 
 interface Props {
@@ -109,13 +109,16 @@ export default function MessageRunButtons({ content, circleId, accentColor = '#2
   const handleRun = async (command: string) => {
     setRunning(command);
     try {
-      const outcome = await executeTerminalCommand({
+      const handle = executeTerminalCommandStream({
         circleId,
         input: `/run ${command}`,
+        onProgress: (result) => {
+          // Update the in-flight result every chunk so the user sees
+          // stdout/stderr land as they arrive, same as /run does.
+          setResults(prev => ({ ...prev, [command]: result }));
+        },
       });
-      if (outcome.kind === 'run') {
-        setResults(prev => ({ ...prev, [command]: outcome.result }));
-      }
+      await handle.promise;
     } finally {
       setRunning(null);
     }

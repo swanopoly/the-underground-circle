@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
-import { deleteMemory, editMemory, loadMemoryVersions, revertMemoryToVersion, type MemoryVersion } from '../../lib/agentMemory';
+import { deleteMemory, editMemory, loadMemoryVersions, renderMemoriesAsMarkdown, revertMemoryToVersion, type MemoryVersion } from '../../lib/agentMemory';
 import { type MemoryEntry } from '../../lib/agentRunSystem';
 import { getSpiritById } from '../../lib/agentSpirits';
 import { getSpiritMemoryEntries } from '../../lib/memoryService';
@@ -100,6 +100,32 @@ export default function SoulMemoryScreen() {
     setVersionsById(prev => ({ ...prev, [memoryId]: versions }));
   }, [versionsById]);
 
+  const handleExportMarkdown = useCallback(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    const md = renderMemoriesAsMarkdown({
+      memories: memories.map(m => ({
+        id: m.id,
+        title: m.title,
+        content: m.content,
+        memory_kind: m.memory_kind,
+        importance: m.importance,
+        updated_at: m.updated_at,
+        created_at: m.created_at,
+        metadata: m.metadata,
+      })),
+      soulName: spirit?.name || spiritId || null,
+    });
+    const blob = new Blob([md], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const slug = (spirit?.name || spiritId || 'soul').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+    const date = new Date().toISOString().split('T')[0];
+    a.download = `${slug}-memory-${date}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [memories, spirit, spiritId]);
+
   const handleRevert = useCallback(async (versionId: string) => {
     const ok = await revertMemoryToVersion(versionId);
     if (ok) {
@@ -137,9 +163,16 @@ export default function SoulMemoryScreen() {
             Private memory aligned to this spirit. This is what OpenSwan can pull in when the active SOUL matches the task.
           </Text>
         </View>
-        <Pressable onPress={() => navigation.goBack()} style={styles.closeButton}>
-          <Text style={styles.closeButtonText}>CLOSE</Text>
-        </Pressable>
+        <View style={styles.headerActions}>
+          {Platform.OS === 'web' && memories.length > 0 ? (
+            <Pressable onPress={handleExportMarkdown} style={styles.closeButton}>
+              <Text style={styles.closeButtonText}>EXPORT .md</Text>
+            </Pressable>
+          ) : null}
+          <Pressable onPress={() => navigation.goBack()} style={styles.closeButton}>
+            <Text style={styles.closeButtonText}>CLOSE</Text>
+          </Pressable>
+        </View>
       </View>
 
       <View style={styles.statsRow}>
@@ -324,6 +357,10 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 20,
     maxWidth: 760,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    gap: 6,
   },
   closeButton: {
     borderRadius: 999,
