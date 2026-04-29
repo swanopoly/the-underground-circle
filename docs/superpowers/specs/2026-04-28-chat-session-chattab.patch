@@ -1,17 +1,18 @@
 diff --git a/src/screens/circles/tabs/ChatTab.tsx b/src/screens/circles/tabs/ChatTab.tsx
-index 194a482..6210b8a 100644
+index 194a482..b87bd5c 100644
 --- a/src/screens/circles/tabs/ChatTab.tsx
 +++ b/src/screens/circles/tabs/ChatTab.tsx
-@@ -57,6 +57,8 @@ import BuilderGithubSaveModal from './chat/BuilderGithubSaveModal';
+@@ -57,6 +57,9 @@ import BuilderGithubSaveModal from './chat/BuilderGithubSaveModal';
  import BuilderNetlifyDeployModal from './chat/BuilderNetlifyDeployModal';
  import ChatAttachmentStrip from './chat/ChatAttachmentStrip';
  import MessageCitations from './chat/MessageCitations';
 +import TerminalOutputCard from './chat/TerminalOutputCard';
++import MessageRunButtons from './chat/MessageRunButtons';
 +import { executeTerminalCommand, parseTerminalCommand, type TerminalRunResult } from '../../../lib/terminalChatCommands';
  import RunCostDrawer from './chat/RunCostDrawer';
  import SkillAdminPanel from './chat/SkillAdminPanel';
  import SpawnAgentsModal from './chat/SpawnAgentsModal';
-@@ -501,6 +506,14 @@ type ChatMessage = {
+@@ -501,6 +507,14 @@ type ChatMessage = {
    browserPlans?: BrowserPlanCardData[];
    browserPlanEvents?: BrowserPlanEvent[];
    browserSessions?: BrowserSessionRecord[];
@@ -26,7 +27,7 @@ index 194a482..6210b8a 100644
    delegatedTo?: string;       // subagent that handled this message
    delegatedSubagents?: string[];
    runId?: string | null;
-@@ -2412,10 +2508,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -2412,10 +2509,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
  
    // ─── Add Message (local-first) ───────────────────────────────────────────
  
@@ -39,7 +40,7 @@ index 194a482..6210b8a 100644
      const msg: ChatMessage = {
        id: `user-${Date.now()}-${Math.random().toString(36).slice(2)}`,
        content,
-@@ -2437,9 +2533,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -2437,9 +2534,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
        setTimeout(() => triggerParticleEffect(200, 300, isAchievement), 300);
      }
  
@@ -54,7 +55,7 @@ index 194a482..6210b8a 100644
          try {
            const dbId = await persistChatMessage({
              circleId,
-@@ -2453,22 +2552,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -2453,22 +2553,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
            if (dbId) {
              setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, dbId } : m));
            }
@@ -84,7 +85,7 @@ index 194a482..6210b8a 100644
      const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
      const msg: ChatMessage = {
        id: msgId,
-@@ -2491,6 +2593,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -2491,6 +2594,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
        browserPlans: extra?.browserPlans,
        browserPlanEvents: extra?.browserPlanEvents,
        browserSessions: extra?.browserSessions,
@@ -94,7 +95,7 @@ index 194a482..6210b8a 100644
        taskPlan: extra?.taskPlan,
        toolEvents: extra?.toolEvents,
        verificationResults: extra?.verificationResults,
-@@ -3139,8 +3244,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -3139,8 +3245,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
      setBuilderFigmaRefs(resolvedFigmaRefs);
      setSelectedBuilderFigmaRefId(nextSelectedFigmaRefId);
  
@@ -107,7 +108,7 @@ index 194a482..6210b8a 100644
      setInput('');
      setAttachments([]);
      setReplyTo(null);
-@@ -3159,6 +3266,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -3159,6 +3267,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
      // ─── Slash intercepts (pure lib calls, no planner) ──────────────────────
      // These run before the model / planner so users see instant feedback
      // for read/write ops that don't need a full agent turn.
@@ -137,7 +138,7 @@ index 194a482..6210b8a 100644
      if (content.startsWith('/v2')) {
        try {
          const { parseSwanbotV2Command, applySwanbotV2Command } = await import('../../../lib/swanbotRouting');
-@@ -3871,6 +4001,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -3871,6 +4002,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                  const { buildStreamableSystemPrompt } = await import('../../../lib/swanbot');
                  const { streamChatResponse } = await import('../../../lib/swanbotStream');
                  const { resolveModelForSoul, spiritIdForProfile } = await import('../../../lib/serviceProfileSouls');
@@ -152,7 +153,7 @@ index 194a482..6210b8a 100644
                  const systemPrompt = await buildStreamableSystemPrompt({
                    circleId,
                    userId: currentUserId || 'anonymous',
-@@ -3879,6 +4017,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -3879,6 +4018,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                    userName: currentUserName,
                    chatHistory,
                    sessionArchiveContext: sessionArchiveContext || undefined,
@@ -160,7 +161,7 @@ index 194a482..6210b8a 100644
                  });
                  const streamModel = resolveModelForSoul(
                    spiritIdForProfile(resolvedSessionProfile),
-@@ -3927,6 +4066,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -3927,6 +4067,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                      content: accumulated,
                      threadId: activeThreadId,
                      onError: (error) => console.error('[ChatTab] persist streaming msg:', error),
@@ -185,7 +186,7 @@ index 194a482..6210b8a 100644
                    });
                  }
                  setRunStatus('idle');
-@@ -4706,6 +4863,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -4706,6 +4864,26 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
            onRetryCheck={(checkId) => handleRetryVerificationCheck(item, checkId)}
            retryingCheckId={retryingLedgerCheck?.messageId === item.id ? retryingLedgerCheck.checkId : null}
          />
@@ -203,10 +204,16 @@ index 194a482..6210b8a 100644
 +        {item.terminalResult ? (
 +          <TerminalOutputCard result={item.terminalResult} accentColor={accentColor} />
 +        ) : null}
++        {/* Detect shell commands in agent replies and offer one-tap RUN
++            buttons. Only renders when at least one runnable command is
++            found in the message body. Skipped on user-authored messages. */}
++        {item.isBot && !item.terminalResult && item.content ? (
++          <MessageRunButtons content={item.content} circleId={circleId} accentColor={accentColor} />
++        ) : null}
          {(item.memoryRefs && item.memoryRefs.length > 0) || (item.memoriesUsed && item.memoriesUsed.length > 0) ? (
            <View style={styles.messageSourceSection}>
              <Text style={styles.messageSourceLabel}>Memory Influence</Text>
-@@ -4889,6 +5060,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
+@@ -4889,6 +5067,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                userId={currentUserId}
                messageTimestamp={item.timestamp.toISOString()}
                nextMessageTimestamp={index > 0 ? invertedMessages[index - 1]?.timestamp?.toISOString() : undefined}

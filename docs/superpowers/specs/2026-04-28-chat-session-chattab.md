@@ -23,8 +23,8 @@ commands. It supersedes `2026-04-28-memory-inspect-control-chattab.patch`.
 
 ### Terminal commands — `/run`, `/sh`, `/cd`, `/pwd`
 
-7. New imports: `TerminalOutputCard`, `executeTerminalCommand`,
-   `parseTerminalCommand`, `TerminalRunResult`.
+7. New imports: `TerminalOutputCard`, `MessageRunButtons`,
+   `executeTerminalCommand`, `parseTerminalCommand`, `TerminalRunResult`.
 8. `ChatMessage` gains `terminalResult?: TerminalRunResult`.
 9. `addBotMessage` extra propagates `terminalResult`.
 10. New slash intercept early in `sendMessage`: detects /run /sh /cd
@@ -32,6 +32,9 @@ commands. It supersedes `2026-04-28-memory-inspect-control-chattab.patch`.
     a local-only message — never persisted to Supabase.
 11. `<TerminalOutputCard />` renders under bot messages whose
     `terminalResult` is set.
+12. `<MessageRunButtons />` renders under bot replies that contain
+    detected shell commands (fenced ```bash blocks or inline shelly
+    code). One-tap RUN per command, output stays local.
 
 ## How to apply
 
