@@ -176,6 +176,7 @@ export const CHAT_COMMAND_REGISTRY: ChatCommandDefinition[] = [
   { id: 'sh', routeId: 'terminal', command: '/sh', insertText: '/sh ', title: 'Shell Alias', description: 'Alias for /run.', category: 'terminal', aliases: ['/run'], keywords: ['shell', 'bash', 'execute'] },
   { id: 'cd', routeId: 'terminal', command: '/cd', insertText: '/cd ', title: 'Set Working Directory', description: 'Set the sticky cwd for /run in this circle. Bare /cd clears it.', category: 'terminal', keywords: ['cwd', 'directory', 'pwd', 'path'] },
   { id: 'pwd', routeId: 'terminal', command: '/pwd', insertText: '/pwd', title: 'Show Working Directory', description: 'Show the sticky cwd for /run in this circle.', category: 'terminal', keywords: ['cwd', 'directory', 'where'] },
+  { id: 'diag-bridge', routeId: 'terminal', command: '/diag bridge', insertText: '/diag bridge', title: 'Diagnose Bridge', description: 'Probe the local claude-bridge for liveness. Use when /run errors with "bridge unreachable".', category: 'terminal', aliases: ['/diag-bridge'], keywords: ['health', 'probe', 'check', 'bridge', 'diagnose'] },
 ];
 
 function commandMatchesInput(command: string, normalized: string): boolean {

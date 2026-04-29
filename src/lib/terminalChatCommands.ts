@@ -12,7 +12,7 @@
  * env state, etc. It lives only in the local message timeline.
  */
 
-import { execBridgeCommand } from './claudeCodeDetector';
+import { execBridgeCommand, detectClaudeCodeBridge } from './claudeCodeDetector';
 
 const CWD_STORAGE_PREFIX = 'uc_terminal_cwd_v1:';
 
@@ -62,7 +62,7 @@ export function setStoredCwd(circleId: string, cwd: string | null): void {
  * Detect whether the input is a terminal slash command. Returns the
  * normalized verb + remainder, or null if not a terminal command.
  */
-export function parseTerminalCommand(input: string): { verb: 'run' | 'cd' | 'pwd'; rest: string } | null {
+export function parseTerminalCommand(input: string): { verb: 'run' | 'cd' | 'pwd' | 'diag'; rest: string } | null {
   const trimmed = input.trim();
   if (!trimmed.startsWith('/')) return null;
   const lower = trimmed.toLowerCase();
@@ -85,6 +85,13 @@ export function parseTerminalCommand(input: string): { verb: 'run' | 'cd' | 'pwd
 
   // /pwd
   if (lower === '/pwd') return { verb: 'pwd', rest: '' };
+
+  // /diag bridge — quick liveness probe for the local claude-bridge.
+  // Useful when /run errors with "bridge unreachable" and the user
+  // wants to confirm whether it's the bridge or the network.
+  if (lower === '/diag bridge' || lower === '/diag-bridge') {
+    return { verb: 'diag', rest: 'bridge' };
+  }
 
   return null;
 }
@@ -147,12 +154,31 @@ export async function executeTerminalCommand(opts: {
     };
   }
 
+  // /diag bridge — quick liveness check
+  if (parsed.verb === 'diag') {
+    const startedAt = Date.now();
+    const ok = await detectClaudeCodeBridge();
+    const duration = Date.now() - startedAt;
+    if (ok) {
+      return {
+        kind: 'message',
+        tone: 'info',
+        text: `Bridge online. Health responded in ${duration}ms. \`/run\`, \`/sh\`, and code-block RUN buttons should work.`,
+      };
+    }
+    return {
+      kind: 'message',
+      tone: 'error',
+      text: `Bridge offline (probe took ${duration}ms). Start it with \`npm run bridges:up\` or \`node scripts/claude-bridge.js\` from the project root.`,
+    };
+  }
+
   // /run <cmd>
   if (!parsed.rest) {
     return {
       kind: 'message',
       tone: 'info',
-      text: 'Usage: `/run <command>` — runs the command on your local machine via the claude-bridge. Set a working directory with `/cd <path>`. Aliases: `/sh`, `/exec`.',
+      text: 'Usage: `/run <command>` — runs the command on your local machine via the claude-bridge. Set a working directory with `/cd <path>`. Aliases: `/sh`, `/exec`. Diagnose with `/diag bridge`.',
     };
   }
 
