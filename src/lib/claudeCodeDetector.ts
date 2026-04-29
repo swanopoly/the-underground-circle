@@ -143,7 +143,7 @@ export class ClaudeCodePoller {
     }
   }
 
-  private async poll() {
+  async poll() {
     const sessions = await fetchClaudeCodeSessions();
     this.onUpdate(sessions);
   }
@@ -170,6 +170,86 @@ export async function execBridgeCommand(
     if (e.name === 'AbortError') return { ok: false, error: 'Command timed out' };
     return { ok: false, error: e.message || 'Bridge not reachable' };
   }
+}
+
+export type StreamEvent =
+  | { type: 'stdout'; chunk: string }
+  | { type: 'stderr'; chunk: string }
+  | { type: 'done'; code: number; durationMs: number }
+  | { type: 'error'; error: string };
+
+/**
+ * Stream a shell command's output via the bridge's /exec/stream SSE
+ * endpoint. Calls onEvent for each chunk; resolves when the server
+ * sends 'done' or 'error'. The returned cancel() aborts in flight.
+ *
+ * Falls back to the buffered execBridgeCommand if the streaming
+ * endpoint isn't available (older bridge versions return 404).
+ */
+export function streamBridgeCommand(
+  command: string,
+  onEvent: (ev: StreamEvent) => void,
+): { cancel: () => void; promise: Promise<void> } {
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+
+  const promise = (async () => {
+    try {
+      const res = await fetch(`${BRIDGE_URL}/exec/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+        body: JSON.stringify({ command }),
+        signal: controller.signal,
+      });
+      if (res.status === 404) {
+        // Older bridge — fall back to buffered exec.
+        const buffered = await execBridgeCommand(command);
+        if (buffered.stdout) onEvent({ type: 'stdout', chunk: buffered.stdout });
+        if (buffered.stderr) onEvent({ type: 'stderr', chunk: buffered.stderr });
+        if (buffered.error) onEvent({ type: 'error', error: buffered.error });
+        else onEvent({ type: 'done', code: buffered.code ?? 0, durationMs: 0 });
+        return;
+      }
+      if (!res.ok || !res.body) {
+        onEvent({ type: 'error', error: `HTTP ${res.status}` });
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE events are separated by blank lines. Each event has one or
+        // more `data:` prefixed lines we concatenate.
+        let sep: number;
+        while ((sep = buffer.indexOf('\n\n')) !== -1) {
+          const raw = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const dataLines = raw
+            .split('\n')
+            .filter(line => line.startsWith('data:'))
+            .map(line => line.slice(5).trim());
+          if (dataLines.length === 0) continue;
+          try {
+            const parsed = JSON.parse(dataLines.join('\n')) as StreamEvent;
+            onEvent(parsed);
+          } catch {
+            // Malformed event — ignore and keep streaming.
+          }
+        }
+      }
+    } catch (e: any) {
+      if (e.name === 'AbortError') {
+        onEvent({ type: 'error', error: 'Cancelled' });
+      } else {
+        onEvent({ type: 'error', error: e.message || 'Bridge not reachable' });
+      }
+    }
+  })();
+
+  return { cancel, promise };
 }
 
 // ── Convert bridge sessions to OfficeAgent[] ─────────────────────────────────

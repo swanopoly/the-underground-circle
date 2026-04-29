@@ -12,7 +12,7 @@
  * env state, etc. It lives only in the local message timeline.
  */
 
-import { execBridgeCommand, detectClaudeCodeBridge } from './claudeCodeDetector';
+import { execBridgeCommand, detectClaudeCodeBridge, streamBridgeCommand, type StreamEvent } from './claudeCodeDetector';
 
 const CWD_STORAGE_PREFIX = 'uc_terminal_cwd_v1:';
 
@@ -202,4 +202,76 @@ export async function executeTerminalCommand(opts: {
       error: bridge.error,
     },
   };
+}
+
+/**
+ * Streaming variant — same as executeTerminalCommand for /run, but
+ * stdout/stderr arrive as they're produced. The caller passes an
+ * onProgress callback that fires every time the result accumulates
+ * a new chunk, so they can re-render incrementally.
+ *
+ * Returns { cancel, promise } so the caller can abort mid-stream
+ * (e.g. user closes the chat or hits a "stop" button).
+ *
+ * For non-/run commands (/cd, /pwd, /diag), falls back to the
+ * non-streaming executeTerminalCommand and resolves immediately.
+ */
+export function executeTerminalCommandStream(opts: {
+  circleId: string;
+  input: string;
+  onProgress: (result: TerminalRunResult) => void;
+}): { cancel: () => void; promise: Promise<TerminalCommandOutcome> } {
+  const parsed = parseTerminalCommand(opts.input);
+  // /cd, /pwd, /diag — no streaming benefit, fall through to buffered path
+  if (!parsed || parsed.verb !== 'run' || !parsed.rest) {
+    let cancelled = false;
+    const promise = executeTerminalCommand({ circleId: opts.circleId, input: opts.input }).then(o => {
+      if (!cancelled && o.kind === 'run') opts.onProgress(o.result);
+      return o;
+    });
+    return { cancel: () => { cancelled = true; }, promise };
+  }
+
+  const cwd = getStoredCwd(opts.circleId);
+  const effectiveCommand = buildEffectiveCommand(parsed.rest, cwd);
+  const startedAt = Date.now();
+
+  const result: TerminalRunResult = {
+    command: parsed.rest,
+    effectiveCommand,
+    cwd,
+    ok: false,
+    stdout: '',
+    stderr: '',
+    code: null,
+    durationMs: 0,
+  };
+
+  let resolveOuter!: (v: TerminalCommandOutcome) => void;
+  const outerPromise = new Promise<TerminalCommandOutcome>(resolve => { resolveOuter = resolve; });
+
+  const handle = streamBridgeCommand(effectiveCommand, (ev: StreamEvent) => {
+    if (ev.type === 'stdout') {
+      result.stdout += ev.chunk;
+    } else if (ev.type === 'stderr') {
+      result.stderr += ev.chunk;
+    } else if (ev.type === 'done') {
+      result.code = ev.code;
+      result.ok = ev.code === 0;
+      result.durationMs = ev.durationMs || (Date.now() - startedAt);
+      opts.onProgress({ ...result });
+      resolveOuter({ kind: 'run', result: { ...result } });
+      return;
+    } else if (ev.type === 'error') {
+      result.error = ev.error;
+      result.durationMs = Date.now() - startedAt;
+      opts.onProgress({ ...result });
+      resolveOuter({ kind: 'run', result: { ...result } });
+      return;
+    }
+    result.durationMs = Date.now() - startedAt;
+    opts.onProgress({ ...result });
+  });
+
+  return { cancel: handle.cancel, promise: outerPromise };
 }

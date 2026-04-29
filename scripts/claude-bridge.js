@@ -10,7 +10,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { exec, execSync, execFile, execFileSync } = require('child_process');
+const { exec, execSync, execFile, execFileSync, spawn } = require('child_process');
 
 // UC-3: Playwright-backed /browser/* surface. Lazy-loaded so the
 // bridge still boots on machines without playwright installed (we log
@@ -709,6 +709,140 @@ const server = http.createServer((req, res) => {
             code: err ? err.code || 1 : 0,
           }));
         }
+      });
+    });
+    return;
+  }
+
+  // ── POST /exec/stream — same as /exec but streams stdout/stderr as SSE ──────
+  // Lets the chat UI render `npm test` output as it arrives instead of waiting
+  // 30s for completion. Same security as /exec (origin gate + blocked patterns
+  // + 30s timeout). Each event:
+  //   data: {"type":"stdout","chunk":"..."}\n\n
+  //   data: {"type":"stderr","chunk":"..."}\n\n
+  //   data: {"type":"done","code":0,"durationMs":1234}\n\n
+  //   data: {"type":"error","error":"..."}\n\n
+  if (url === '/exec/stream' && req.method === 'POST') {
+    const origin = req.headers['origin'] || req.headers['referer'] || '';
+    const isLocal = !origin || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('app.chrisswanson.xyz');
+    if (!isLocal) {
+      res.writeHead(403, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
+      return;
+    }
+
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 10240) {
+        res.writeHead(413, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Request body too large' }));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      let command;
+      try {
+        const parsed = JSON.parse(body);
+        command = parsed.command;
+      } catch {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON body. Expected { "command": "..." }' }));
+        return;
+      }
+      if (!command || typeof command !== 'string') {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Missing "command" field' }));
+        return;
+      }
+
+      // Same blocked-pattern filter as /exec
+      const BLOCKED_PATTERNS = [
+        /\brm\s+(-[a-zA-Z]*\s+)*\//, /\brm\s+(-[a-zA-Z]*\s+)*~/,
+        /\brmdir\s+(-[a-zA-Z]*\s+)*\//, /\bmkfs\b/, /\bdd\s+.*of=/,
+        />\s*\/dev\/sd/, /\bcurl\b.*\|\s*(ba)?sh/, /\bwget\b.*\|\s*(ba)?sh/,
+        /\bchmod\s+777\b/, /\bpasswd\b/, /\buseradd\b/, /\buserdel\b/,
+        /\bsudo\b/, /\bsu\s+-?\s/, /\/etc\/shadow/, /\/etc\/passwd/,
+        /\benv\b.*SECRET|KEY|TOKEN|PASS/i, /\bcrontab\s+-[er]/,
+        /\bshutdown\b/, /\breboot\b/,
+      ];
+      if (BLOCKED_PATTERNS.some(p => p.test(command))) {
+        res.writeHead(403, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Command blocked: contains restricted pattern' }));
+        return;
+      }
+
+      // SSE headers — disable buffering so chunks flush immediately.
+      res.writeHead(200, {
+        ...CORS,
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+
+      const startedAt = Date.now();
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      const STDOUT_CAP = 256 * 1024;  // 256KB stream cap
+      const STDERR_CAP = 64 * 1024;
+      let killed = false;
+
+      const send = (event) => {
+        try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* socket closed */ }
+      };
+
+      const child = spawn('sh', ['-c', command], {
+        env: process.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      const timeout = setTimeout(() => {
+        killed = true;
+        child.kill('SIGTERM');
+        send({ type: 'error', error: 'Command timed out (30s)' });
+        try { res.end(); } catch {}
+      }, 30000);
+
+      child.stdout.on('data', (buf) => {
+        if (stdoutBytes >= STDOUT_CAP) return;
+        const remaining = STDOUT_CAP - stdoutBytes;
+        const chunk = buf.length > remaining ? buf.slice(0, remaining) : buf;
+        stdoutBytes += chunk.length;
+        send({ type: 'stdout', chunk: chunk.toString('utf8') });
+        if (stdoutBytes >= STDOUT_CAP) {
+          send({ type: 'stderr', chunk: '\n[stdout cap of 256KB reached — further output suppressed]\n' });
+        }
+      });
+
+      child.stderr.on('data', (buf) => {
+        if (stderrBytes >= STDERR_CAP) return;
+        const remaining = STDERR_CAP - stderrBytes;
+        const chunk = buf.length > remaining ? buf.slice(0, remaining) : buf;
+        stderrBytes += chunk.length;
+        send({ type: 'stderr', chunk: chunk.toString('utf8') });
+      });
+
+      child.on('error', (err) => {
+        clearTimeout(timeout);
+        if (killed) return;
+        send({ type: 'error', error: err.message || 'spawn failed' });
+        try { res.end(); } catch {}
+      });
+
+      child.on('close', (code) => {
+        clearTimeout(timeout);
+        if (killed) return;
+        send({ type: 'done', code: code ?? 0, durationMs: Date.now() - startedAt });
+        try { res.end(); } catch {}
+      });
+
+      req.on('close', () => {
+        // Client hung up — kill the child to avoid orphans.
+        if (!child.killed) {
+          try { child.kill('SIGTERM'); } catch {}
+        }
+        clearTimeout(timeout);
       });
     });
     return;
@@ -2440,7 +2574,8 @@ server.listen(PORT, () => {
   console.log(`  Endpoints:`);
   console.log(`    GET  /health              — Bridge status`);
   console.log(`    GET  /sessions            — Active Claude Code sessions`);
-  console.log(`    POST /exec                — Run a shell command
+  console.log(`    POST /exec                — Run a shell command (buffered)
+    POST /exec/stream         — Run a shell command, stream stdout/stderr as SSE
     POST /spawn               — Spawn a new Claude Code session with a task`);
   console.log(`    GET  /devices             — Discover all connected devices`);
   console.log(`    GET  /devices/printers    — List printers with status`);
