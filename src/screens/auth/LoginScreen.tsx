@@ -120,6 +120,19 @@ function useCursorReveal() {
 export default function LoginScreen({ navigation }: any) {
   const { width } = useWindowDimensions();
   const isDesktop = width >= 980;
+  // Mobile hero font sizing — guarantees "UNDERGROUND" (11 chars, the
+  // longest word in the hero) fits on a single line on any phone width
+  // without wrapping. The 7.6 divisor is calibrated against the 900-weight
+  // uppercase rendering with letterSpacing 1; the 28/44 clamp keeps the
+  // hero readable on tiny screens and pixel-perfect on larger ones.
+  const horizontalPadding = isDesktop ? 96 : 48; // matches shell + heroPanel padding
+  const availableWidth = Math.max(240, width - horizontalPadding);
+  const heroTitleFontSize = isDesktop
+    ? 44
+    : Math.max(28, Math.min(44, Math.floor(availableWidth / 7.6)));
+  // Reduce letterSpacing proportionally on small phones so the kerning
+  // doesn't fight the auto-fit.
+  const heroTitleLetterSpacing = heroTitleFontSize >= 40 ? 1 : 0.5;
   // Inject CSS on mount
   useEffect(() => { injectLoginCSS(); }, []);
   const heroRevealRef = useCursorReveal();
@@ -323,10 +336,17 @@ export default function LoginScreen({ navigation }: any) {
         >
           <View style={[styles.shell, isDesktop && styles.shellDesktop]}>
             <View ref={heroRevealRef} style={[styles.heroPanel, isDesktop && styles.heroPanelDesktop]}>
-              <Text style={styles.heroEyebrow}>UNDERGROUND ACCESS</Text>
-              <Text style={styles.heroTitleTop}>The</Text>
-              <Text style={styles.heroTitle}>Underground</Text>
-              <Text style={styles.heroTitle}>Circle</Text>
+              <Text style={styles.heroEyebrow} numberOfLines={1} adjustsFontSizeToFit>UNDERGROUND ACCESS</Text>
+              <Text style={styles.heroTitleTop} numberOfLines={1}>The</Text>
+              <Text
+                style={[styles.heroTitle, { fontSize: heroTitleFontSize, lineHeight: heroTitleFontSize + 2, letterSpacing: heroTitleLetterSpacing }]}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+              >Underground</Text>
+              <Text
+                style={[styles.heroTitle, { fontSize: heroTitleFontSize, lineHeight: heroTitleFontSize + 2, letterSpacing: heroTitleLetterSpacing }]}
+                numberOfLines={1}
+              >Circle</Text>
               <Text style={styles.heroSubtitle}>
                 Deploy autonomous agents. Collaborate in private circles.{'\n'}
                 Ship faster than teams ten times your size.
