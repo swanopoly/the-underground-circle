@@ -120,19 +120,15 @@ function useCursorReveal() {
 export default function LoginScreen({ navigation }: any) {
   const { width } = useWindowDimensions();
   const isDesktop = width >= 980;
-  // Mobile hero font sizing — guarantees "UNDERGROUND" (11 chars, the
-  // longest word in the hero) fits on a single line on any phone width
-  // without wrapping. The 7.6 divisor is calibrated against the 900-weight
-  // uppercase rendering with letterSpacing 1; the 28/44 clamp keeps the
-  // hero readable on tiny screens and pixel-perfect on larger ones.
-  const horizontalPadding = isDesktop ? 96 : 48; // matches shell + heroPanel padding
-  const availableWidth = Math.max(240, width - horizontalPadding);
-  const heroTitleFontSize = isDesktop
-    ? 44
-    : Math.max(28, Math.min(44, Math.floor(availableWidth / 7.6)));
-  // Reduce letterSpacing proportionally on small phones so the kerning
-  // doesn't fight the auto-fit.
-  const heroTitleLetterSpacing = heroTitleFontSize >= 40 ? 1 : 0.5;
+  // Mobile hero font sizing — "UNDERGROUND" (11 chars at 900-weight bold)
+  // is wider than any single phone width allows at 44px. We were
+  // computing a width-aware size, but adjustsFontSizeToFit doesn't work
+  // on web/Android so even a slight miscalculation surfaced as `…`
+  // truncation. Switching to a flat 28px on anything below the desktop
+  // breakpoint — comfortably fits 320px viewports up through 768px iPad
+  // portrait without the dynamic-math fragility.
+  const heroTitleFontSize = isDesktop ? 44 : 28;
+  const heroTitleLetterSpacing = isDesktop ? 1 : 0.4;
   // Inject CSS on mount
   useEffect(() => { injectLoginCSS(); }, []);
   const heroRevealRef = useCursorReveal();
