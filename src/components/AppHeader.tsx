@@ -6,6 +6,7 @@ import {
 import { supabase } from '../lib/supabase';
 import { createLinkInvite } from '../lib/invites';
 import { reconnectAllBridges } from '../lib/agentAutoConnect';
+import { navigateToUnifiedProfile } from '../lib/profileNavigation';
 import FlatIcon from './FlatIcon';
 
 // Conditionally import useKBar on web (kbar is a web-only library)
@@ -354,7 +355,19 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
           </Pressable>
 
           <Pressable
-            onPress={() => navigation.navigate('Profile')}
+            onPress={() => {
+              // Prefer the unified profile (Circle Detail → Profile tab) when
+              // we have a circle context — that's the dashboard most users
+              // expect. If no circle context exists, fall back to the
+              // standalone Profile screen.
+              const navigated = navigateToUnifiedProfile(navigation, {
+                circleId: circleId || null,
+                circleName: circleName || null,
+              });
+              if (!navigated) {
+                navigation.navigate('Profile');
+              }
+            }}
             style={({ pressed }) => [styles.avatarButton, pressed && styles.pressed]}
           >
             {avatarUrl ? (
