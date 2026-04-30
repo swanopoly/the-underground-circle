@@ -10,7 +10,7 @@
 CREATE TABLE IF NOT EXISTS mission_streaks (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  circle_id uuid REFERENCES circles(circle_id) ON DELETE CASCADE,
+  circle_id uuid REFERENCES circles(id) ON DELETE CASCADE,
   current_streak int NOT NULL DEFAULT 0,
   longest_streak int NOT NULL DEFAULT 0,
   last_completion_date date,
