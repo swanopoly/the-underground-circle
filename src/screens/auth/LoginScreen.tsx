@@ -352,20 +352,26 @@ export default function LoginScreen({ navigation }: any) {
                 Ship faster than teams ten times your size.
               </Text>
 
-              <View style={[styles.statRow, isDesktop && styles.statRowDesktop]}>
-                <View style={styles.statChip}>
-                  <Text style={styles.statValue}>Private</Text>
-                  <Text style={styles.statLabel}>circles</Text>
+              {/* Stat chips ("Private circles" / "24/7 agents" / "Zero
+                  busywork") are desktop-only — on mobile they pushed
+                  the login form below the fold; cutting them lifts the
+                  form to the top of the viewport. */}
+              {isDesktop && (
+                <View style={[styles.statRow, styles.statRowDesktop]}>
+                  <View style={styles.statChip}>
+                    <Text style={styles.statValue}>Private</Text>
+                    <Text style={styles.statLabel}>circles</Text>
+                  </View>
+                  <View style={styles.statChip}>
+                    <Text style={styles.statValue}>24/7</Text>
+                    <Text style={styles.statLabel}>agents</Text>
+                  </View>
+                  <View style={styles.statChip}>
+                    <Text style={styles.statValue}>Zero</Text>
+                    <Text style={styles.statLabel}>busywork</Text>
+                  </View>
                 </View>
-                <View style={styles.statChip}>
-                  <Text style={styles.statValue}>24/7</Text>
-                  <Text style={styles.statLabel}>agents</Text>
-                </View>
-                <View style={styles.statChip}>
-                  <Text style={styles.statValue}>Zero</Text>
-                  <Text style={styles.statLabel}>busywork</Text>
-                </View>
-              </View>
+              )}
             </View>
 
             <View style={styles.formColumn}>
