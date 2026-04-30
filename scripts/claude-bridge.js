@@ -50,8 +50,49 @@ const CORS = {
   // died silently at the preflight layer. If you add another custom
   // request header on the client side, list it here too.
   'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token',
+  // Private Network Access (Chrome 116+) — required for the live HTTPS
+  // app at app.chrisswanson.xyz to talk to localhost without silent
+  // browser blocking.
+  'Access-Control-Allow-Private-Network': 'true',
   'Content-Type': 'application/json',
 };
+
+function requestOrigin(req) {
+  return String(req.headers.origin || req.headers.referer || '');
+}
+
+function isAllowedBridgeOrigin(req) {
+  const origin = requestOrigin(req);
+  if (!origin) return true;
+  try {
+    const parsed = new URL(origin);
+    const host = parsed.hostname;
+    return host === 'localhost'
+      || host === '127.0.0.1'
+      || host === 'app.chrisswanson.xyz';
+  } catch {
+    return false;
+  }
+}
+
+function isTokenExemptPath(url, method) {
+  if (method === 'OPTIONS') return true;
+  return url === '/health'
+    || url === '/pair'
+    || url === '/desktop/health'
+    || url === '/desktop/pair'
+    || url === '/browser/health';
+}
+
+function getBridgeTokenHeader(req) {
+  const value = req.headers['x-uc-desktop-token'];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function hasValidBridgeToken(req) {
+  const sentToken = getBridgeTokenHeader(req);
+  return !!sentToken && sentToken === getOrCreateDesktopToken();
+}
 
 let cachedSessions = [];
 let lastScanTime = '';
@@ -480,6 +521,12 @@ const server = http.createServer((req, res) => {
 
   const url = req.url.split('?')[0];
 
+  if (!isTokenExemptPath(url, req.method) && !hasValidBridgeToken(req)) {
+    res.writeHead(401, CORS);
+    res.end(JSON.stringify({ ok: false, error: 'Missing or invalid bridge token. Pair first via POST /pair.' }));
+    return;
+  }
+
   if (url === '/health') {
     res.writeHead(200, CORS);
     res.end(JSON.stringify({
@@ -492,6 +539,18 @@ const server = http.createServer((req, res) => {
       uptime_s: Math.round(process.uptime()),
       started_at: BRIDGE_STARTED_AT,
     }));
+    return;
+  }
+
+  if (url === '/pair' && req.method === 'POST') {
+    if (!isAllowedBridgeOrigin(req)) {
+      res.writeHead(403, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Pairing origin not allowlisted.' }));
+      return;
+    }
+    const token = getOrCreateDesktopToken();
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: true, token, tokenFile: '~/.uc-desktop-token' }));
     return;
   }
 
@@ -642,9 +701,7 @@ const server = http.createServer((req, res) => {
   // ── POST /exec — run a shell command (restricted) ──────────────────────────
   if (url === '/exec' && req.method === 'POST') {
     // Only allow requests from localhost origins
-    const origin = req.headers['origin'] || req.headers['referer'] || '';
-    const isLocal = !origin || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('app.chrisswanson.xyz');
-    if (!isLocal) {
+    if (!isAllowedBridgeOrigin(req)) {
       res.writeHead(403, CORS);
       res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
       return;
@@ -733,9 +790,7 @@ const server = http.createServer((req, res) => {
   //   data: {"type":"done","code":0,"durationMs":1234}\n\n
   //   data: {"type":"error","error":"..."}\n\n
   if (url === '/exec/stream' && req.method === 'POST') {
-    const origin = req.headers['origin'] || req.headers['referer'] || '';
-    const isLocal = !origin || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('app.chrisswanson.xyz');
-    if (!isLocal) {
+    if (!isAllowedBridgeOrigin(req)) {
       res.writeHead(403, CORS);
       res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
       return;
@@ -876,9 +931,29 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ ok: false, error: 'Missing item name or op:// URI' }));
         return;
       }
+      if (uri && (typeof uri !== 'string' || !uri.startsWith('op://') || uri.includes('\0'))) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid op:// URI' }));
+        return;
+      }
+      if (item && (typeof item !== 'string' || item.includes('\0'))) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid item name' }));
+        return;
+      }
+      if (vault && (typeof vault !== 'string' || vault.includes('\0'))) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid vault name' }));
+        return;
+      }
+      if (fields && (!Array.isArray(fields) || fields.length > 20 || fields.some((field) => typeof field !== 'string' || field.includes('\0')))) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid fields list' }));
+        return;
+      }
 
       // Check if op CLI is available
-      try { execSync('op --version', { timeout: 5000, stdio: 'pipe' }); } catch {
+      try { execFileSync('op', ['--version'], { timeout: 5000, stdio: 'pipe' }); } catch {
         res.writeHead(500, CORS);
         res.end(JSON.stringify({ ok: false, error: '1Password CLI (op) not found. Install: https://1password.com/downloads/command-line/' }));
         return;
@@ -888,14 +963,15 @@ const server = http.createServer((req, res) => {
         let result;
         if (uri) {
           // Direct op:// URI resolution: op read "op://vault/item/field"
-          const out = execSync(`op read "${uri}"`, { timeout: 10000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+          const out = execFileSync('op', ['read', String(uri)], { timeout: 10000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
           result = { value: out };
         } else {
           // Item get with specific fields
-          const vaultFlag = vault ? ` --vault "${vault}"` : '';
-          const fieldsFlag = fields?.length ? ` --fields "${fields.join(',')}"` : '';
-          const cmd = `op item get "${item}"${vaultFlag}${fieldsFlag} --format json`;
-          const out = execSync(cmd, { timeout: 10000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+          const args = ['item', 'get', String(item)];
+          if (vault) args.push('--vault', String(vault));
+          if (fields?.length) args.push('--fields', fields.map(String).join(','));
+          args.push('--format', 'json');
+          const out = execFileSync('op', args, { timeout: 10000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
           const data = JSON.parse(out);
           // Normalize: if fields were requested, data is an array of {id, value, label}
           if (Array.isArray(data)) {
@@ -1948,12 +2024,7 @@ const server = http.createServer((req, res) => {
       // stop random arbitrary-origin websites from issuing the pair
       // call in the background. Browsers send Origin on cross-origin
       // POSTs; CLI tools can send the header explicitly.
-      const origin = String(req.headers.origin || '');
-      const originAllowed = origin === ''
-        || origin.startsWith('http://localhost')
-        || origin.startsWith('http://127.0.0.1')
-        || origin === 'https://app.chrisswanson.xyz';
-      if (!originAllowed) {
+      if (!isAllowedBridgeOrigin(req)) {
         res.writeHead(403, CORS);
         res.end(JSON.stringify({ ok: false, error: 'Pairing origin not allowlisted.' }));
         return;

@@ -42,6 +42,9 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Origin':  '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-openswan-agent-id, x-openswan-session-key',
+  // Private Network Access — required for the live HTTPS site to talk
+  // to this localhost proxy without silent Chrome blocking.
+  'Access-Control-Allow-Private-Network': 'true',
 };
 
 // ─── HTTP server ───────────────────────────────────────────────────────────────
