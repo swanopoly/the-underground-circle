@@ -24,6 +24,10 @@ const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
+  // Private Network Access (Chrome 116+) — required for the live HTTPS
+  // app at app.chrisswanson.xyz to talk to localhost without silent
+  // browser blocking.
+  'Access-Control-Allow-Private-Network': 'true',
   'Content-Type': 'application/json',
 };
 

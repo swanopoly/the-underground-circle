@@ -49,6 +49,15 @@ const CORS = {
   // died silently at the preflight layer. If you add another custom
   // request header on the client side, list it here too.
   'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token',
+  // Private Network Access (Chrome 116+). When the page is at
+  // https://app.chrisswanson.xyz (a public-network origin) and tries
+  // to fetch http://localhost:7778 (a private-network address),
+  // Chrome sends a preflight with `Access-Control-Request-Private-
+  // Network: true` that we MUST acknowledge or the fetch is silently
+  // blocked. Without this header, bridges look "offline" on the live
+  // site even when they're running locally. Other browsers ignore it
+  // safely.
+  'Access-Control-Allow-Private-Network': 'true',
   'Content-Type': 'application/json',
 };
 
