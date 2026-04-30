@@ -29,6 +29,7 @@
     "typecheck:app": "tsc --noEmit --skipLibCheck -p tsconfig.json",
     "typecheck:functions": "node scripts/typecheck-functions.mjs",
     "smoke:agent-core": "npx tsx scripts/agent-core-smoketest.ts",
+    "smoke:automation-builder": "npx tsx scripts/automation-builder-smoketest.ts",
     "smoke:chat-planner": "npx tsx scripts/chat-planner-smoketest.ts",
     "smoke:chat-checkpoints": "npx tsx scripts/chat-checkpoints-smoketest.ts",
     "smoke:memory-bank": "npx tsx scripts/memory-bank-smoketest.ts",

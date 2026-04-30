@@ -57,6 +57,9 @@ import BuilderGithubSaveModal from './chat/BuilderGithubSaveModal';
 import BuilderNetlifyDeployModal from './chat/BuilderNetlifyDeployModal';
 import ChatAttachmentStrip from './chat/ChatAttachmentStrip';
 import MessageCitations from './chat/MessageCitations';
+import QuickActionDock from './chat/QuickActionDock';
+import AutomationProposalCard from './chat/AutomationProposalCard';
+import { parseAutomationRequest, type AutomationProposal } from '../../../lib/automationChatBuilder';
 import RunCostDrawer from './chat/RunCostDrawer';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
@@ -507,6 +510,10 @@ type ChatMessage = {
   taskPlan?: OpenSwanTaskPlan;
   toolEvents?: OpenSwanToolEvent[];
   verificationResults?: OpenSwanVerificationResult[];
+  /** Automation proposal parsed from a natural-language request like
+   *  "every Friday at 5pm post a weekly summary". When present, the
+   *  message renders an AutomationProposalCard with a CREATE button. */
+  automationProposal?: AutomationProposal;
   isPending?: boolean;
 };
 
@@ -2468,7 +2475,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return msg;
   };
 
-  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[] }) => {
+  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; automationProposal?: AutomationProposal }) => {
     const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const msg: ChatMessage = {
       id: msgId,
@@ -2494,6 +2501,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       taskPlan: extra?.taskPlan,
       toolEvents: extra?.toolEvents,
       verificationResults: extra?.verificationResults,
+      automationProposal: extra?.automationProposal,
       isPending: false,
     };
 
@@ -3154,6 +3162,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     recordChatActivity(circleId, 'message').catch(() => {});
     if (content.startsWith('/')) {
       recordChatActivity(circleId, 'slash').catch(() => {});
+    }
+
+    // ─── Automation builder intercept ──────────────────────────────────────
+    // Detect "every X at Y do Z" / "when X happens do Y" — present an
+    // AutomationProposalCard the user can confirm. Falls through to LLM
+    // when the parser doesn't recognize the input as an automation
+    // request, so normal chat is unaffected.
+    if (!content.startsWith('/')) {
+      const proposal = parseAutomationRequest(content);
+      if (proposal) {
+        addBotMessage(
+          `I think you want to set up an automation. Confirm and I'll create it.`,
+          undefined,
+          { localOnly: true, automationProposal: proposal },
+        );
+        return;
+      }
     }
 
     // ─── Slash intercepts (pure lib calls, no planner) ──────────────────────
@@ -4885,6 +4910,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         />
         {item.isBot && currentUserId && (
           <View style={{ paddingLeft: 44, gap: 2 }}>
+            {item.automationProposal ? (
+              <AutomationProposalCard
+                proposal={item.automationProposal}
+                circleId={circleId}
+                userId={currentUserId}
+                accentColor={accentColor}
+              />
+            ) : null}
             <MessageCitations
               userId={currentUserId}
               messageTimestamp={item.timestamp.toISOString()}
@@ -6094,6 +6127,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       {currentUserId ? (
         <RunApprovalBanner circleId={circleId} userId={currentUserId} accentColor={accentColor} />
       ) : null}
+
+      {/* Quick action dock — one-tap shortcuts above the composer.
+          Pills seed the composer with command text; user finishes the
+          argument and sends. Hidden when the user already has a long
+          message in flight (avoids visual noise). */}
+      <QuickActionDock
+        accentColor={accentColor}
+        hidden={(input || '').length > 80}
+        onInsert={(text) => {
+          setInput((prev) => {
+            // If the dock is invoked while the input has content, append
+            // with a space; otherwise just set the command.
+            if (!prev || !prev.trim()) return text;
+            return prev.endsWith(' ') ? prev + text : prev + ' ' + text;
+          });
+          inputRef.current?.focus();
+        }}
+      />
 
       <EnhancedInput
         circleId={circleId}
