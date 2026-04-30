@@ -1,7 +1,15 @@
 // Agent Identity System - Persistent agent data based on sessionKey
-// This ensures agents keep their identity even when connections change
+// This ensures agents keep their identity even when connections change.
+//
+// Dual-persisted (as of 2026-04-30): localStorage stays as the fast cache,
+// agent_identities table is the durable source of truth across browser
+// clears + devices. saveAgentIdentities writes to both. loadAgentIdentities
+// reads localStorage first then asynchronously refreshes from DB.
+//
+// See migration 20260430_agent_identities.sql.
 
 import { storage } from './storage';
+import { supabase } from './supabase';
 import { OfficeAgent } from './officeAgents';
 import { DEFAULT_APPEARANCE, type AgentAppearance } from './officeConfig';
 
@@ -112,11 +120,126 @@ export async function loadAgentIdentities(): Promise<Map<string, AgentIdentity>>
 }
 
 export async function saveAgentIdentities(identities: Map<string, AgentIdentity>): Promise<void> {
+  // 1. Local cache — always wins for read latency.
   try {
     const obj = Object.fromEntries(identities.entries());
     await storage.setItem(STORAGE_KEY_AGENT_IDENTITY, JSON.stringify(obj));
   } catch (error) {
-    console.error('Failed to save agent identities:', error);
+    console.error('Failed to save agent identities to localStorage:', error);
+  }
+
+  // 2. Durable Supabase upsert — fire-and-forget. Skips silently when
+  // the migration hasn't been applied yet (PGRST205) so the UI keeps
+  // working until the user runs the SQL.
+  void persistIdentitiesToServer(identities);
+}
+
+/**
+ * Refresh local identities from the agent_identities table. Returns the
+ * merged map (server entries win when both exist with different
+ * last_seen). Caller should call saveAgentIdentities-without-server-push
+ * to write the merge back to localStorage. Used on app boot / sign-in
+ * to backfill a fresh device or post-cache-clear browser.
+ */
+export async function syncAgentIdentitiesFromServer(): Promise<Map<string, AgentIdentity>> {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return new Map();
+    const { data, error } = await supabase
+      .from('agent_identities')
+      .select('*')
+      .eq('user_id', user.id);
+    if (error || !data) return new Map();
+    const merged = new Map<string, AgentIdentity>();
+    for (const row of data as any[]) {
+      merged.set(row.session_key, rowToIdentity(row));
+    }
+    return merged;
+  } catch {
+    return new Map();
+  }
+}
+
+function rowToIdentity(row: any): AgentIdentity {
+  return {
+    sessionKey: row.session_key,
+    customName: row.custom_name || undefined,
+    customColor: row.custom_color || undefined,
+    appearance: row.appearance && Object.keys(row.appearance).length > 0 ? row.appearance : undefined,
+    spiritId: row.spirit_id ?? null,
+    spiritEmoji: row.spirit_emoji ?? null,
+    soulPrompt: row.soul_prompt ?? null,
+    customProfileId: row.custom_profile_id ?? null,
+    customProfileName: row.custom_profile_name ?? null,
+    totalCostAllTime: Number(row.total_cost_all_time || 0),
+    totalTokensAllTime: Number(row.total_tokens_all_time || 0),
+    totalSessionsAllTime: Number(row.total_sessions_all_time || 0),
+    firstSeen: row.first_seen ? new Date(row.first_seen).getTime() : Date.now(),
+    lastSeen: row.last_seen ? new Date(row.last_seen).getTime() : Date.now(),
+    totalMessages: Number(row.total_messages || 0),
+    totalTurns: Number(row.total_turns || 0),
+    assignedFloorId: row.assigned_floor_id || undefined,
+    deskIndex: typeof row.desk_index === 'number' ? row.desk_index : undefined,
+    mostUsedModel: row.most_used_model || undefined,
+    tags: Array.isArray(row.tags) ? row.tags : undefined,
+    bondId: row.bond_id || undefined,
+    bondLevel: typeof row.bond_level === 'number' ? row.bond_level : undefined,
+    bondXP: typeof row.bond_xp === 'number' ? row.bond_xp : undefined,
+    isPrimary: !!row.is_primary,
+    isCustomized: !!row.is_customized,
+    boundAiProvider: row.bound_ai_provider || undefined,
+    boundModel: row.bound_model || undefined,
+  };
+}
+
+function identityToRow(userId: string, identity: AgentIdentity) {
+  return {
+    user_id: userId,
+    session_key: identity.sessionKey,
+    custom_name: identity.customName ?? null,
+    custom_color: identity.customColor ?? null,
+    spirit_id: identity.spiritId ?? null,
+    spirit_emoji: identity.spiritEmoji ?? null,
+    soul_prompt: identity.soulPrompt ?? null,
+    custom_profile_id: identity.customProfileId ?? null,
+    custom_profile_name: identity.customProfileName ?? null,
+    appearance: identity.appearance || {},
+    assigned_floor_id: identity.assignedFloorId ?? null,
+    desk_index: typeof identity.deskIndex === 'number' ? identity.deskIndex : null,
+    bond_id: identity.bondId ?? null,
+    bond_level: typeof identity.bondLevel === 'number' ? identity.bondLevel : null,
+    bond_xp: typeof identity.bondXP === 'number' ? identity.bondXP : null,
+    is_primary: !!identity.isPrimary,
+    is_customized: !!identity.isCustomized,
+    bound_ai_provider: identity.boundAiProvider ?? null,
+    bound_model: identity.boundModel ?? null,
+    most_used_model: identity.mostUsedModel ?? null,
+    tags: Array.isArray(identity.tags) ? identity.tags : [],
+    total_messages: identity.totalMessages || 0,
+    total_turns: identity.totalTurns || 0,
+    total_cost_all_time: identity.totalCostAllTime || 0,
+    total_tokens_all_time: identity.totalTokensAllTime || 0,
+    total_sessions_all_time: identity.totalSessionsAllTime || 0,
+    first_seen: new Date(identity.firstSeen).toISOString(),
+    last_seen: new Date(identity.lastSeen).toISOString(),
+  };
+}
+
+async function persistIdentitiesToServer(identities: Map<string, AgentIdentity>): Promise<void> {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    const rows = Array.from(identities.values()).map(id => identityToRow(user.id, id));
+    if (rows.length === 0) return;
+    // Batch upsert — single round-trip per save.
+    const { error } = await supabase
+      .from('agent_identities')
+      .upsert(rows, { onConflict: 'user_id,session_key' });
+    if (error && error.code !== 'PGRST205') {
+      console.warn('[agentIdentity] DB save failed:', error.message);
+    }
+  } catch (err) {
+    console.warn('[agentIdentity] persist threw:', err);
   }
 }
 

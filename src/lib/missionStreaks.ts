@@ -1,13 +1,22 @@
 /**
  * Mission Streaks — track daily mission task completion streaks
  * Connects to existing gamification system for bonus XP rewards.
- * See docs/NEXT_LEVEL_PLAN.md
+ *
+ * Dual-persisted: localStorage (fast read on page load) + mission_streaks
+ * table in Supabase (durable across browser clears + devices). On a fresh
+ * device with empty localStorage, the next save backfills from DB on the
+ * subsequent load via syncStreakFromServer().
+ *
+ * See docs/NEXT_LEVEL_PLAN.md and migration 20260430_mission_streaks.sql.
  */
 import { supabase } from './supabase';
 import { useState, useEffect, useCallback } from 'react';
 
 export interface MissionStreak {
   userId: string;
+  /** Optional circle scope. Streaks are per-circle since missions are
+   *  per-circle. Null/undefined = global (legacy / un-circled). */
+  circleId?: string | null;
   currentStreak: number;
   longestStreak: number;
   lastCompletionDate: string | null; // YYYY-MM-DD
@@ -16,10 +25,18 @@ export interface MissionStreak {
 
 const STREAK_KEY_PREFIX = 'uc_mission_streak_';
 
-/** Load streak data from localStorage (fast) with Supabase fallback */
-export function loadStreak(userId: string): MissionStreak {
+function localKey(userId: string, circleId?: string | null): string {
+  return circleId
+    ? `${STREAK_KEY_PREFIX}${userId}:${circleId}`
+    : `${STREAK_KEY_PREFIX}${userId}`;
+}
+
+/** Load streak data from localStorage (fast). Caller should also kick a
+ *  background syncStreakFromServer() to refresh from DB on first mount. */
+export function loadStreak(userId: string, circleId?: string | null): MissionStreak {
   const defaults: MissionStreak = {
     userId,
+    circleId: circleId ?? null,
     currentStreak: 0,
     longestStreak: 0,
     lastCompletionDate: null,
@@ -27,18 +44,70 @@ export function loadStreak(userId: string): MissionStreak {
   };
 
   try {
-    const raw = localStorage.getItem(`${STREAK_KEY_PREFIX}${userId}`);
+    const raw = localStorage.getItem(localKey(userId, circleId));
     if (raw) return { ...defaults, ...JSON.parse(raw) };
   } catch {}
 
   return defaults;
 }
 
-/** Save streak to localStorage */
+/** Save streak to localStorage AND fire-and-forget to Supabase. */
 function saveStreak(streak: MissionStreak) {
+  // 1. Local cache (synchronous, must succeed for UI)
   try {
-    localStorage.setItem(`${STREAK_KEY_PREFIX}${streak.userId}`, JSON.stringify(streak));
+    localStorage.setItem(localKey(streak.userId, streak.circleId), JSON.stringify(streak));
   } catch {}
+
+  // 2. Durable Supabase write (async, best-effort).
+  // PGRST205 = relation not in schema cache (migration not applied) —
+  // silently skip so the UI keeps working until the migration runs.
+  void supabase
+    .from('mission_streaks')
+    .upsert({
+      user_id: streak.userId,
+      circle_id: streak.circleId ?? null,
+      current_streak: streak.currentStreak,
+      longest_streak: streak.longestStreak,
+      last_completion_date: streak.lastCompletionDate,
+      total_tasks_completed: streak.totalTasksCompleted,
+    }, { onConflict: 'user_id,circle_id' })
+    .then(({ error }) => {
+      if (error && error.code !== 'PGRST205') {
+        console.warn('[missionStreaks] DB save failed:', error.message);
+      }
+    });
+}
+
+/**
+ * Fetch the user's streak from Supabase. Returns null if no row exists
+ * yet (caller should fall back to localStorage default). Used by
+ * useMissionStreak's useEffect to refresh after first mount so a fresh
+ * browser / new device gets the durable copy.
+ */
+export async function syncStreakFromServer(
+  userId: string,
+  circleId?: string | null,
+): Promise<MissionStreak | null> {
+  try {
+    const query = supabase
+      .from('mission_streaks')
+      .select('current_streak, longest_streak, last_completion_date, total_tasks_completed')
+      .eq('user_id', userId);
+    const { data, error } = circleId
+      ? await query.eq('circle_id', circleId).maybeSingle()
+      : await query.is('circle_id', null).maybeSingle();
+    if (error || !data) return null;
+    return {
+      userId,
+      circleId: circleId ?? null,
+      currentStreak: data.current_streak || 0,
+      longestStreak: data.longest_streak || 0,
+      lastCompletionDate: data.last_completion_date || null,
+      totalTasksCompleted: data.total_tasks_completed || 0,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** Get today's date as YYYY-MM-DD */
@@ -57,13 +126,13 @@ function yesterdayStr(): string {
  * Record a task completion and update the streak.
  * Returns the updated streak and any bonus XP earned.
  */
-export function recordTaskCompletion(userId: string): {
+export function recordTaskCompletion(userId: string, circleId?: string | null): {
   streak: MissionStreak;
   bonusXP: number;
   isNewDay: boolean;
   milestoneReached: string | null;
 } {
-  const streak = loadStreak(userId);
+  const streak = loadStreak(userId, circleId);
   const today = todayStr();
   const yesterday = yesterdayStr();
 
@@ -133,20 +202,40 @@ export function hasCompletedToday(streak: MissionStreak): boolean {
 
 // ─── React Hook ──────────────────────────────────────────────────────────────
 
-export function useMissionStreak(userId: string | null) {
+export function useMissionStreak(userId: string | null, circleId?: string | null) {
   const [streak, setStreak] = useState<MissionStreak | null>(null);
 
   useEffect(() => {
     if (!userId) return;
-    setStreak(loadStreak(userId));
-  }, [userId]);
+    // Load fast from localStorage first.
+    setStreak(loadStreak(userId, circleId));
+    // Then refresh from server. If the server has a higher-streak row
+    // (e.g. user moved devices), adopt it and re-cache locally so the
+    // next reload is fast and accurate.
+    void syncStreakFromServer(userId, circleId).then((server) => {
+      if (!server) return;
+      setStreak((local) => {
+        if (!local) return server;
+        const localScore = local.currentStreak + local.totalTasksCompleted * 0.01;
+        const serverScore = server.currentStreak + server.totalTasksCompleted * 0.01;
+        if (serverScore > localScore) {
+          // Server is ahead — backfill local cache.
+          try {
+            localStorage.setItem(localKey(userId, circleId), JSON.stringify(server));
+          } catch {}
+          return server;
+        }
+        return local;
+      });
+    });
+  }, [userId, circleId]);
 
   const recordCompletion = useCallback(() => {
     if (!userId) return null;
-    const result = recordTaskCompletion(userId);
+    const result = recordTaskCompletion(userId, circleId);
     setStreak(result.streak);
     return result;
-  }, [userId]);
+  }, [userId, circleId]);
 
   return { streak, recordCompletion };
 }
