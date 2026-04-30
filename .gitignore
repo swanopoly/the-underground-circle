@@ -68,3 +68,4 @@ scripts/bin/uc-ax-helper.dSYM/
 # Agent run traces — may contain PII; never commit
 docs/traces/
 
+.openswan-worktrees/
