@@ -57,6 +57,12 @@ import BuilderGithubSaveModal from './chat/BuilderGithubSaveModal';
 import BuilderNetlifyDeployModal from './chat/BuilderNetlifyDeployModal';
 import ChatAttachmentStrip from './chat/ChatAttachmentStrip';
 import MessageCitations from './chat/MessageCitations';
+import TerminalOutputCard from './chat/TerminalOutputCard';
+import MessageRunButtons from './chat/MessageRunButtons';
+import { executeTerminalCommand, parseTerminalCommand, type TerminalRunResult } from '../../../lib/terminalChatCommands';
+import { parseDispatchIntent } from '../../../lib/agentDispatchIntent';
+import { resolveSessions, dispatchToSession, type DispatchResult } from '../../../lib/agentDispatch';
+import AgentDispatchCard from './chat/AgentDispatchCard';
 import RunCostDrawer from './chat/RunCostDrawer';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
@@ -110,6 +116,7 @@ import RunApprovalBanner from '../../../components/RunApprovalBanner';
 import RecordingBadge from '../../../components/RecordingBadge';
 import OpenSwanConsole from '../../../components/openswan/OpenSwanConsole';
 import { useComputerUseTask } from '../../../lib/useComputerUseTask';
+import { useComputerBudgetToasts } from '../../../lib/useComputerBudgetToasts';
 import { resolveComputerUseConfirmation } from '../../../lib/computerUseConfirmations';
 import {
   getMatchingChatSlashCommands,
@@ -124,6 +131,8 @@ import ChatBotIdentityRow from '../../../components/chat/ChatBotIdentityRow';
 import CodingWorkbenchPreview from '../../../components/chat/CodingWorkbenchPreview';
 import ChatInlineRichText from '../../../components/chat/ChatInlineRichText';
 import RunExecutionCard from '../../../components/chat/RunExecutionCard';
+import FileTaskResultExplorer from '../../../components/computer-use/FileTaskResultExplorer';
+import type { NormalizedFileTaskResult } from '../../../lib/computerFileTaskResult';
 import RunHistoryDrawer from '../../../components/chat/RunHistoryDrawer';
 import ChatSlashCommandPalette from '../../../components/chat/ChatSlashCommandPalette';
 import { buildOpenSwanExecutionStream, type OpenSwanExecutionContract } from '../../../lib/openswanExecution';
@@ -225,7 +234,8 @@ import { getMainChatSessionActions } from '../../../lib/sessionPromptCatalog';
 import { auditComputerCapabilities } from '../../../lib/computerCapabilityRegistry';
 import { prepareComputerTaskExecution } from '../../../lib/computerTaskExecution';
 import { executeComputerTaskWithAgent } from '../../../lib/computerTaskRuntime';
-import { deriveGrantedScopesFromBrowserPermission, grantComputerTaskScopes, loadComputerTaskGrantIds } from '../../../lib/computerTaskGrantMemory';
+import { findReusableBrowserSession, rememberBrowserSession } from '../../../lib/computerBrowserSessions';
+import { deriveGrantedScopesFromBrowserPermission, derivePersistableComputerTaskGrantIds, grantComputerTaskScopes, loadComputerTaskGrantIds } from '../../../lib/computerTaskGrantMemory';
 import { buildComputerTaskStateSteps, clearComputerTaskState, loadComputerTaskState, saveComputerTaskState, type ComputerTaskStateRecord } from '../../../lib/computerTaskState';
 import {
   appendChatSessionArchiveEvent,
@@ -501,6 +511,17 @@ type ChatMessage = {
   browserPlans?: BrowserPlanCardData[];
   browserPlanEvents?: BrowserPlanEvent[];
   browserSessions?: BrowserSessionRecord[];
+  /** When a file_task completes, the adapter emits a normalized result
+   *  we render inline with `FileTaskResultExplorer` so users see a tree
+   *  of matches / listings / file content instead of generic JSON.
+   *  Ephemeral: not persisted — re-run the task for fresh data. */
+  fileTaskResult?: NormalizedFileTaskResult;
+  fileTaskToolName?: string;
+  /** /run / /sh result. Local-only — never persisted to Supabase. */
+  terminalResult?: TerminalRunResult;
+  /** /assign / /delegate dispatch result with display metadata.
+   *  Local-only — paths/PIDs may be machine-specific. */
+  dispatchPayload?: { dispatch: DispatchResult; sessionName: string; bridge: string; task: string };
   delegatedTo?: string;       // subagent that handled this message
   delegatedSubagents?: string[];
   runId?: string | null;
@@ -791,7 +812,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // Real Computer Use agent (Opus 4.7 + Browserbase via edge function). The
   // permission dialog's Allow handler hands a task to this hook, which
   // streams reasoning/actions/screenshots into ComputerUseLiveCard below.
-  const computerUseTask = useComputerUseTask(circleId);
+  const computerUseTask = useComputerUseTask(circleId, currentUserId || undefined);
+  // Fires a one-shot warning toast when CU spend crosses 80% (warning)
+  // or 95% (error) of the circle's configured cap. State per circle is
+  // persisted so reloads don't re-fire, but dropping below a threshold
+  // re-arms it.
+  useComputerBudgetToasts(circleId);
   const computerUsePostedKeyRef = useRef<string | null>(null);
   // Use Computer console — the pop-up that collects the task before
   // planning. Opens from the Quick Actions "Use Computer" chip and from
@@ -800,6 +826,63 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // OpenSwan console — launches an OpenSwan turn with a chosen mode.
   // Surface triggered by the Quick Actions "OS OpenSwan" chip.
   const [showOpenSwanConsole, setShowOpenSwanConsole] = useState(false);
+
+  // Computer tab / history re-run handoff. Two events drive this:
+  //
+  //   uc:open-computer-console — Computer tab's "NEW TASK" CTA. We just
+  //     flip the console visible so the user can compose or pick a
+  //     template. No auto-submit.
+  //
+  //   uc:run-computer-use + localStorage('uc_pending_computer_use_task')
+  //     — History / dashboard / detail-modal RE-RUN. We want the task
+  //     to fire immediately so the user doesn't have to retype. If the
+  //     hook is still initialising we fall back to seeding the console
+  //     with the task text so the user can hit submit themselves.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    // Toggle semantics — hitting ⌘. twice (or from a surface where the
+    // console is already open) closes it. Matches the system-search
+    // pattern users already know from Cmd+K.
+    const onOpenConsole = () => setShowComputerUseConsole((v) => !v);
+    const onRunTask = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as { task?: string } | undefined;
+      const task = (detail?.task || '').trim()
+        || (() => { try { return String(window.localStorage.getItem('uc_pending_computer_use_task') || '').trim(); } catch { return ''; } })();
+      if (!task) return;
+      try { window.localStorage.removeItem('uc_pending_computer_use_task'); } catch {}
+      // Fire the agent directly — re-run from history should skip the
+      // compose step. If the hook can't start (another task running),
+      // fall back to seeding the console so the user can resolve.
+      void (async () => {
+        try {
+          const res = await computerUseTask.run(task);
+          if (!res?.started) {
+            setInput(task);
+            setShowComputerUseConsole(true);
+          }
+        } catch {
+          setInput(task);
+          setShowComputerUseConsole(true);
+        }
+      })();
+    };
+    // Menu-bar Cancel handler — fires `cancel()` on the active task
+    // hook. No-op when nothing is running. The menu disables the item
+    // when the circle has no active runs, so this rarely fires
+    // unnecessarily.
+    const onCancel = () => {
+      try { computerUseTask.cancel(); } catch { /* ignore */ }
+    };
+    window.addEventListener('uc:open-computer-console', onOpenConsole as any);
+    window.addEventListener('uc:run-computer-use', onRunTask as any);
+    window.addEventListener('uc:cancel-computer-use', onCancel as any);
+    return () => {
+      window.removeEventListener('uc:open-computer-console', onOpenConsole as any);
+      window.removeEventListener('uc:run-computer-use', onRunTask as any);
+      window.removeEventListener('uc:cancel-computer-use', onCancel as any);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [computerUseTask.run]);
 
   const persistComputerTaskState = useCallback(async (args: {
     task: string;
@@ -1050,6 +1133,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 approvalSummary: result.execution.grants.approvalSummary,
                 grantIds: result.execution.grants.outstanding.map((grant) => grant.id),
                 handoffSuggestion: result.handoffSuggestion || null,
+                // Pass the normalized file-task payload through so the
+                // message render can swap in the rich explorer UI for
+                // file_adapter results.
+                fileTaskResult: result.fileTaskResult,
+                fileTaskToolName: result.fileTaskToolName,
               },
             };
           },
@@ -1109,6 +1197,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const warningBlock = outcome.warnings?.length
           ? `\n\n${outcome.warnings.map((warning) => `- ${warning}`).join('\n')}`
           : '';
+        if (!outcome.warnings?.length) {
+          const persistableGrantIds = derivePersistableComputerTaskGrantIds({
+            grants: execution.grants.grants,
+          });
+          if (persistableGrantIds.length > 0) {
+            await grantComputerTaskScopes(circleId, persistableGrantIds).catch(() => {});
+          }
+        }
         await persistComputerTaskState({
           task: trimmed,
           taskKind: String(outcome.data?.taskKind || execution.preview.kind),
@@ -1133,7 +1229,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             runId: outcome.runId || null,
           },
         });
-        addBotMessage(`${prefix}${outcome.message}${accessBlock}${warningBlock}`, undefined, { runId: outcome.runId || null });
+        const fileTaskResult = (outcome.data as any)?.fileTaskResult as NormalizedFileTaskResult | undefined;
+        const fileTaskToolName = typeof (outcome.data as any)?.fileTaskToolName === 'string'
+          ? (outcome.data as any).fileTaskToolName
+          : undefined;
+        addBotMessage(`${prefix}${outcome.message}${accessBlock}${warningBlock}`, undefined, {
+          runId: outcome.runId || null,
+          fileTaskResult,
+          fileTaskToolName,
+        });
       }
 
       if (handoff) {
@@ -2412,10 +2516,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   // ─── Add Message (local-first) ───────────────────────────────────────────
 
-  const addUserMessage = (content: string): ChatMessage => {
+  const addUserMessage = (content: string): { message: ChatMessage; dbIdPromise: Promise<string | null> } => {
     const isCheckIn = content.toLowerCase().includes('check') || content.toLowerCase().includes('done');
     const isAchievement = content.toLowerCase().includes('achievement') || content.toLowerCase().includes('unlocked');
-    
+
     const msg: ChatMessage = {
       id: `user-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       content,
@@ -2437,9 +2541,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       setTimeout(() => triggerParticleEffect(200, 300, isAchievement), 300);
     }
 
-    // Persist to Supabase with retry
+    // Persist to Supabase with retry. Surface the resolved dbId via the
+    // returned promise so the caller can use it as triggerMessageId for
+    // memory citation linkage.
+    let dbIdPromise: Promise<string | null> = Promise.resolve(null);
     if (currentUserId) {
-      const persistMessage = async (attempt = 0) => {
+      const persistMessage = async (attempt = 0): Promise<string | null> => {
         try {
           const dbId = await persistChatMessage({
             circleId,
@@ -2453,22 +2560,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           if (dbId) {
             setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, dbId } : m));
           }
+          return dbId;
         } catch (e) {
           console.error('[ChatTab] Unexpected error persisting:', e);
           if (attempt < 3) {
-            setTimeout(() => persistMessage(attempt + 1), 1000 * (attempt + 1));
+            await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+            return persistMessage(attempt + 1);
           }
+          return null;
         }
       };
-      persistMessage();
+      dbIdPromise = persistMessage();
     }
 
     syncSessionArchiveMessage(msg);
 
-    return msg;
+    return { message: msg, dbIdPromise };
   };
 
-  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[] }) => {
+  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; fileTaskResult?: NormalizedFileTaskResult; fileTaskToolName?: string; terminalResult?: TerminalRunResult; dispatchPayload?: { dispatch: DispatchResult; sessionName: string; bridge: string; task: string } }) => {
     const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const msg: ChatMessage = {
       id: msgId,
@@ -2491,6 +2601,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       browserPlans: extra?.browserPlans,
       browserPlanEvents: extra?.browserPlanEvents,
       browserSessions: extra?.browserSessions,
+      fileTaskResult: extra?.fileTaskResult,
+      fileTaskToolName: extra?.fileTaskToolName,
+      terminalResult: extra?.terminalResult,
+      dispatchPayload: extra?.dispatchPayload,
       taskPlan: extra?.taskPlan,
       toolEvents: extra?.toolEvents,
       verificationResults: extra?.verificationResults,
@@ -2651,6 +2765,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         accessPlan: pendingComputerUseGrantSummary || null,
         nextSteps: [],
       });
+      void rememberBrowserSession({
+        circleId,
+        task,
+        providerSessionId: sessionId,
+        liveUrl: computerUseTask.state.liveUrl || null,
+      });
       recordSessionArchiveEvent({
         kind: 'computer_task',
         summary: `Computer task completed: ${task}`,
@@ -2710,7 +2830,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // addBotMessage intentionally not in deps — it's recreated every render,
   // and the ref-based dedupe above guarantees one post per terminal state.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [computerUseTask.state.status, computerUseTask.state.result, computerUseTask.state.errorMessage, computerUseTask.state.runId, computerUseTask.state.sessionId, computerUseTask.state.task, computerUseTask.state.liveUrl, pendingComputerUseGrantIds, pendingComputerUseGrantSummary, persistComputerTaskState, recordSessionArchiveError, recordSessionArchiveEvent]);
+  }, [circleId, computerUseTask.state.status, computerUseTask.state.result, computerUseTask.state.errorMessage, computerUseTask.state.runId, computerUseTask.state.sessionId, computerUseTask.state.task, computerUseTask.state.liveUrl, pendingComputerUseGrantIds, pendingComputerUseGrantSummary, persistComputerTaskState, recordSessionArchiveError, recordSessionArchiveEvent]);
 
   const updateBotMessage = (
     messageId: string,
@@ -3139,8 +3259,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     setBuilderFigmaRefs(resolvedFigmaRefs);
     setSelectedBuilderFigmaRefId(nextSelectedFigmaRefId);
 
-    // Add user message immediately
-    addUserMessage(content);
+    // Add user message immediately. Hold onto the persistence promise —
+    // we use the resolved dbId as triggerMessageId so the citation pill
+    // can link memories to the assistant reply later.
+    const { dbIdPromise: triggerMessageIdPromise } = addUserMessage(content);
     setInput('');
     setAttachments([]);
     setReplyTo(null);
@@ -3159,6 +3281,148 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // ─── Slash intercepts (pure lib calls, no planner) ──────────────────────
     // These run before the model / planner so users see instant feedback
     // for read/write ops that don't need a full agent turn.
+
+    // /assign, /delegate, /spawn, /send, /queue + natural-language
+    // dispatch ("assign X to Y") — routes a task to a specific agent
+    // session. Resolved by name across every bridge + DB source. Output
+    // is local-only (paths + PIDs may be machine-specific).
+    const dispatchIntent = parseDispatchIntent(content);
+    if (dispatchIntent) {
+      try {
+        if (!dispatchIntent.target) {
+          addBotMessage(
+            'Usage: `/assign <agent-name> <task>` — e.g. `/assign whistling-taco run npm test`. Names are matched against live bridge sessions, circle agents, and BlackSwan/SwanBot aliases.',
+            undefined,
+            { localOnly: true },
+          );
+          return;
+        }
+        if (!dispatchIntent.task) {
+          addBotMessage(
+            `Got the target (\`${dispatchIntent.target}\`) but no task body. Try: "Assign <task> to ${dispatchIntent.target}" or \`/assign ${dispatchIntent.target} <task>\`.`,
+            undefined,
+            { localOnly: true },
+          );
+          return;
+        }
+        const matches = await resolveSessions({ query: dispatchIntent.target });
+        if (matches.length === 0) {
+          addBotMessage(
+            `No agent session matches \`${dispatchIntent.target}\`. Make sure the bridge is running (\`/diag\`) or use one of: \`blackswan\`, \`claude\`, \`codex\`, \`cursor\`, \`gemini\`, or a specific session name like \`whistling-taco\`.`,
+            undefined,
+            { localOnly: true },
+          );
+          return;
+        }
+        if (matches.length > 1) {
+          const list = matches.slice(0, 8).map(m => `• \`${m.sessionName}\` (${m.bridge}${m.projectDir ? ` — ${m.projectDir.split('/').pop()}` : ''})`).join('\n');
+          addBotMessage(
+            `Multiple sessions match \`${dispatchIntent.target}\`:\n${list}\n\nRe-run \`/assign\` with the exact session name from the list above.`,
+            undefined,
+            { localOnly: true },
+          );
+          return;
+        }
+        const session = matches[0];
+        const result = await dispatchToSession({
+          session,
+          task: dispatchIntent.task,
+          preferredVerb: dispatchIntent.verb,
+          circleId,
+          userId: currentUserId || undefined,
+        });
+        // Render the rich dispatch card under a localOnly bot message.
+        // The card polls /spawn/status for live log tail when applicable
+        // and exposes a "reply to chat" callback so the user can pipe
+        // the result back into the conversation.
+        addBotMessage(
+          result.ok
+            ? `Dispatched to \`${session.sessionName}\` (${session.bridge})`
+            : `Dispatch rejected: ${result.message}`,
+          undefined,
+          {
+            localOnly: true,
+            dispatchPayload: {
+              dispatch: result,
+              sessionName: session.sessionName,
+              bridge: String(session.bridge),
+              task: dispatchIntent.task,
+            },
+          },
+        );
+
+        // For BlackSwan dispatches, the dispatcher returns a redirect
+        // outcome — we drive the actual chat through the normal LLM
+        // path so existing memory + soul + retrieval all apply.
+        if (result.ok && session.bridge === 'blackswan' && result.kind === 'send') {
+          // Send the task as a regular message — recursive call but we've
+          // already cleared the dispatch intent, so it falls through to
+          // the AI path.
+          setTimeout(() => sendMessage(dispatchIntent.task), 100);
+        }
+      } catch (err: any) {
+        addBotMessage(`Dispatch failed: ${err?.message || 'unknown error'}`, undefined, { localOnly: true });
+      }
+      return;
+    }
+
+    // /run, /sh, /exec, /cd, /pwd, /diag bridge — terminal access via the
+    // local bridge. Output is local-only (never persisted) for privacy +
+    // payload size. /run uses streaming (SSE) so users see output as it
+    // arrives; /cd /pwd /diag fall through to the buffered path inside
+    // executeTerminalCommandStream.
+    const terminalParsed = parseTerminalCommand(content);
+    if (terminalParsed) {
+      try {
+        if (terminalParsed.verb === 'run' && terminalParsed.rest) {
+          // Streaming path — render an updating card as chunks arrive.
+          const initialResult: TerminalRunResult = {
+            command: terminalParsed.rest,
+            effectiveCommand: terminalParsed.rest,
+            cwd: null,
+            ok: false,
+            stdout: '',
+            stderr: '',
+            code: null,
+            durationMs: 0,
+          };
+          const pending = addBotMessage(
+            `\`$ ${terminalParsed.rest}\``,
+            undefined,
+            { localOnly: true, terminalResult: initialResult },
+          );
+          const { executeTerminalCommandStream } = await import('../../../lib/terminalChatCommands');
+          const handle = executeTerminalCommandStream({
+            circleId,
+            input: content,
+            onProgress: (result) => {
+              setMessages(prev => prev.map(m =>
+                m.id === pending.id ? { ...m, terminalResult: result } : m
+              ));
+            },
+          });
+          await handle.promise;
+        } else {
+          // /cd /pwd /diag — buffered, returns a single text message.
+          const outcome = await executeTerminalCommand({ circleId, input: content });
+          if (outcome.kind === 'run') {
+            addBotMessage(
+              outcome.result.error
+                ? `Command failed: ${outcome.result.error}`
+                : `\`$ ${outcome.result.command}\``,
+              undefined,
+              { localOnly: true, terminalResult: outcome.result },
+            );
+          } else {
+            addBotMessage(outcome.text, undefined, { localOnly: true });
+          }
+        }
+      } catch (err: any) {
+        addBotMessage(`Terminal error: ${err?.message || 'bridge unreachable'}`, undefined, { localOnly: true });
+      }
+      return;
+    }
+
     if (content.startsWith('/v2')) {
       try {
         const { parseSwanbotV2Command, applySwanbotV2Command } = await import('../../../lib/swanbotRouting');
@@ -3871,6 +4135,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 const { buildStreamableSystemPrompt } = await import('../../../lib/swanbot');
                 const { streamChatResponse } = await import('../../../lib/swanbotStream');
                 const { resolveModelForSoul, spiritIdForProfile } = await import('../../../lib/serviceProfileSouls');
+                // Race the user-message persistence against a 750ms ceiling.
+                // If persistence wins, the access_log gets message_id linkage
+                // (citation pill works without timestamp matching). If the
+                // ceiling wins, we just skip the linkage gracefully.
+                const triggerMessageId = await Promise.race([
+                  triggerMessageIdPromise,
+                  new Promise<null>(resolve => setTimeout(() => resolve(null), 750)),
+                ]);
                 const systemPrompt = await buildStreamableSystemPrompt({
                   circleId,
                   userId: currentUserId || 'anonymous',
@@ -3879,6 +4151,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   userName: currentUserName,
                   chatHistory,
                   sessionArchiveContext: sessionArchiveContext || undefined,
+                  triggerMessageId: triggerMessageId || undefined,
                 });
                 const streamModel = resolveModelForSoul(
                   spiritIdForProfile(resolvedSessionProfile),
@@ -3927,6 +4200,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     content: accumulated,
                     threadId: activeThreadId,
                     onError: (error) => console.error('[ChatTab] persist streaming msg:', error),
+                    onPersisted: (botDbId) => {
+                      // Update local message with its dbId so MessageCitations
+                      // can use the new message_id linkage path.
+                      setMessages(prev => prev.map(m =>
+                        m.id === pendingMsg.id ? { ...m, dbId: botDbId } : m
+                      ));
+                      // Backfill assistant_message_id onto the access_log
+                      // rows from this turn so the citation pill keys
+                      // off message_id rather than timestamp window.
+                      if (triggerMessageId && botDbId) {
+                        void import('../../../lib/memoryService').then(mod =>
+                          mod.attachAssistantMessageToMemoryAccess({
+                            triggerMessageId,
+                            assistantMessageId: botDbId,
+                          })
+                        );
+                      }
+                    },
                   });
                 }
                 setRunStatus('idle');
@@ -4706,6 +4997,49 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           onRetryCheck={(checkId) => handleRetryVerificationCheck(item, checkId)}
           retryingCheckId={retryingLedgerCheck?.messageId === item.id ? retryingLedgerCheck.checkId : null}
         />
+        {/* File task result — rich explorer replaces the generic JSON
+            that used to live inside the text body. Present only when the
+            file_adapter emitted a parseable response. */}
+        {item.fileTaskResult ? (
+          <FileTaskResultExplorer
+            result={item.fileTaskResult}
+            toolName={item.fileTaskToolName || null}
+            accentColor={accentColor}
+          />
+        ) : null}
+        {/* /run output. Local-only — never persisted to Supabase. The
+            "↗ reply to chat" button pipes the output back to the agent
+            so the loop closes naturally. */}
+        {item.terminalResult ? (
+          <TerminalOutputCard
+            result={item.terminalResult}
+            accentColor={accentColor}
+            onReplyToChat={(replyText) => sendMessage(replyText)}
+          />
+        ) : null}
+        {/* /assign / /delegate dispatch result with live /spawn/status
+            polling for spawned processes. Local-only. */}
+        {item.dispatchPayload ? (
+          <AgentDispatchCard
+            dispatch={item.dispatchPayload.dispatch}
+            sessionName={item.dispatchPayload.sessionName}
+            bridge={item.dispatchPayload.bridge}
+            task={item.dispatchPayload.task}
+            accentColor={accentColor}
+            onReplyToChat={(replyText) => sendMessage(replyText)}
+          />
+        ) : null}
+        {/* Detect shell commands in agent replies and offer one-tap RUN
+            buttons. Only renders when at least one runnable command is
+            found in the message body. Skipped on user-authored messages. */}
+        {item.isBot && !item.terminalResult && item.content ? (
+          <MessageRunButtons
+            content={item.content}
+            circleId={circleId}
+            accentColor={accentColor}
+            onReplyToChat={(replyText) => sendMessage(replyText)}
+          />
+        ) : null}
         {(item.memoryRefs && item.memoryRefs.length > 0) || (item.memoriesUsed && item.memoriesUsed.length > 0) ? (
           <View style={styles.messageSourceSection}>
             <Text style={styles.messageSourceLabel}>Memory Influence</Text>
@@ -4889,6 +5223,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               userId={currentUserId}
               messageTimestamp={item.timestamp.toISOString()}
               nextMessageTimestamp={index > 0 ? invertedMessages[index - 1]?.timestamp?.toISOString() : undefined}
+              assistantMessageDbId={item.dbId}
               accentColor={accentColor}
             />
             <RunCostDrawer
@@ -5950,12 +6285,19 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             setPendingComputerUseOrigin(null);
             computerUsePostedKeyRef.current = null;
             await grantComputerTaskScopes(circleId, grantIdsToPersist).catch(() => {});
-            const started = await computerUseTask.run(taskToRun);
+            const reusableSession = await findReusableBrowserSession({ circleId, task: taskToRun }).catch(() => null);
+            const started = await computerUseTask.run(taskToRun, {
+              sessionId: reusableSession?.provider_session_id,
+            });
             if (!started.started) {
               addBotMessage(`**Computer Use** could not start: ${started.reason || 'unknown error'}`);
               return;
             }
-            addBotMessage(`**Computer Use** starting — ${taskToRun}`);
+            addBotMessage(
+              reusableSession
+                ? `**Computer Use** starting with saved browser session for ${reusableSession.site_origin} - ${taskToRun}`
+                : `**Computer Use** starting - ${taskToRun}`,
+            );
           }}
           onDeny={() => {
             setShowComputerUsePermission(false);
@@ -6010,43 +6352,55 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         />
       )}
 
-      {Platform.OS === 'web' && computerUseTask.state.status !== 'idle' && (
-        <View
-          // Floating, draggable-feeling card pinned bottom-right while the
-          // Computer Use agent works. Collapses to summary when done.
-          style={{
-            position: 'fixed' as any,
-            bottom: 20,
-            right: 20,
-            width: 460,
-            maxWidth: 'calc(100vw - 40px)' as any,
-            maxHeight: '80vh' as any,
-            zIndex: 950,
-          }}
-        >
-          <ComputerUseLiveCard
-            task={computerUseTask.state.task}
-            status={computerUseTask.state.status === 'starting' ? 'starting' : computerUseTask.state.status}
-            sessionId={computerUseTask.state.sessionId}
-            liveUrl={computerUseTask.state.liveUrl}
-            reasoning={computerUseTask.state.reasoning}
-            actions={computerUseTask.state.actions}
-            screenshots={computerUseTask.state.screenshots}
-            result={computerUseTask.state.result}
-            errorMessage={computerUseTask.state.errorMessage}
-            accentColor={accentColor}
-            usage={computerUseTask.state.usage}
-            pendingConfirmation={computerUseTask.state.pendingConfirmation}
-            onConfirmationPick={(id, choice) => {
-              if (!id) return;
-              resolveComputerUseConfirmation(id, choice).catch((err) => {
-                addBotMessage(`Confirmation could not be recorded: ${err?.message || 'unknown error'}`);
-              });
-            }}
-            onCancel={() => computerUseTask.cancel()}
-          />
-        </View>
-      )}
+      {/* Floating LiveCard — portaled to document.body on web so it
+          persists across tab switches. ChatTab is lazy-mounted inside
+          CircleDetailScreen and hidden via `display:none` when the
+          active tab changes, which also hides any `position:fixed`
+          descendant. Portaling lifts the card out of the tab subtree
+          so users watching a long-running task can navigate freely
+          without losing the live view. Native (no display:none tab
+          framework) still gets the card via the inline render. */}
+      {Platform.OS === 'web' && computerUseTask.state.status !== 'idle' && typeof document !== 'undefined'
+        ? (require('react-dom').createPortal(
+            <View
+              style={{
+                position: 'fixed' as any,
+                bottom: 20,
+                right: 20,
+                width: 460,
+                maxWidth: 'calc(100vw - 40px)' as any,
+                maxHeight: '80vh' as any,
+                zIndex: 950,
+              }}
+            >
+              <ComputerUseLiveCard
+                task={computerUseTask.state.task}
+                status={computerUseTask.state.status === 'starting' ? 'starting' : computerUseTask.state.status}
+                sessionId={computerUseTask.state.sessionId}
+                liveUrl={computerUseTask.state.liveUrl}
+                reasoning={computerUseTask.state.reasoning}
+                actions={computerUseTask.state.actions}
+                screenshots={computerUseTask.state.screenshots}
+                result={computerUseTask.state.result}
+                errorMessage={computerUseTask.state.errorMessage}
+                accentColor={accentColor}
+                usage={computerUseTask.state.usage}
+                pendingConfirmation={computerUseTask.state.pendingConfirmation}
+                onConfirmationPick={(id, choice) => {
+                  if (!id) return;
+                  resolveComputerUseConfirmation(id, choice).catch((err) => {
+                    addBotMessage(`Confirmation could not be recorded: ${err?.message || 'unknown error'}`);
+                  });
+                }}
+                onCancel={() => computerUseTask.cancel()}
+                onOpenSettings={() => {
+                  try { navigation?.navigate?.('CircleSettings', { circleId }); } catch {}
+                }}
+              />
+            </View>,
+            document.body,
+          ))
+        : null}
 
       {/* Enhanced input with model selector + quick actions + mode selector */}
       {/* Memory Toast — non-blocking notification */}

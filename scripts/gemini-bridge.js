@@ -30,9 +30,40 @@ const GEMINI_CLI_CLIENT_ID = '681255809395-oo8ft2oprdrp9e3aqf6av3hmdib135j.apps.
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token',
   'Content-Type': 'application/json',
 };
+
+function getOrCreateBridgeToken() {
+  const tokenPath = path.join(os.homedir(), '.uc-desktop-token');
+  try {
+    if (fs.existsSync(tokenPath)) {
+      const existing = fs.readFileSync(tokenPath, 'utf-8').trim();
+      if (existing.length >= 32) return existing;
+    }
+  } catch {}
+  const crypto = require('crypto');
+  const token = crypto.randomBytes(24).toString('hex');
+  try { fs.writeFileSync(tokenPath, token + '\n', { mode: 0o600 }); } catch {}
+  return token;
+}
+
+function hasValidBridgeToken(req) {
+  const value = req.headers['x-uc-desktop-token'];
+  const sent = Array.isArray(value) ? value[0] : value;
+  return !!sent && sent === getOrCreateBridgeToken();
+}
+
+function isAllowedBridgeOrigin(req) {
+  const origin = String(req.headers.origin || req.headers.referer || '');
+  if (!origin) return true;
+  try {
+    const host = new URL(origin).hostname;
+    return host === 'localhost' || host === '127.0.0.1' || host === 'app.chrisswanson.xyz';
+  } catch {
+    return false;
+  }
+}
 
 let cachedSessions = [];
 let lastScanTime = '';
@@ -448,6 +479,12 @@ const server = http.createServer(async (req, res) => {
 
   const url = req.url.split('?')[0];
 
+  if (url !== '/health' && url !== '/pair' && !hasValidBridgeToken(req)) {
+    res.writeHead(401, CORS);
+    res.end(JSON.stringify({ ok: false, error: 'Missing or invalid bridge token.' }));
+    return;
+  }
+
   if (url === '/health') {
     res.writeHead(200, CORS);
     res.end(JSON.stringify({
@@ -459,9 +496,24 @@ const server = http.createServer(async (req, res) => {
       auth: oauthCreds ? 'ok' : 'none',
       email: userEmail,
       geminiDir: GEMINI_DIR,
-      capabilities: ['sessions'],
+      capabilities: ['sessions', 'send'],
       uptime_s: Math.round(process.uptime()),
       started_at: BRIDGE_STARTED_AT,
+    }));
+    return;
+  }
+
+  if (url === '/pair' && req.method === 'POST') {
+    if (!isAllowedBridgeOrigin(req)) {
+      res.writeHead(403, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
+      return;
+    }
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({
+      ok: true,
+      token: getOrCreateBridgeToken(),
+      tokenFile: '~/.uc-desktop-token',
     }));
     return;
   }
@@ -488,9 +540,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── POST /send — Send a message via Gemini API (using OAuth tokens) ────────
   if (url === '/send' && req.method === 'POST') {
-    const origin = req.headers['origin'] || req.headers['referer'] || '';
-    const isLocal = !origin || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('app.chrisswanson.xyz');
-    if (!isLocal) {
+    if (!isAllowedBridgeOrigin(req)) {
       res.writeHead(403, CORS);
       res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
       return;

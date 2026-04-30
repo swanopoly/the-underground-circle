@@ -111,15 +111,34 @@ The `capabilities` array uses the following standard tokens:
 | `exec`        | Implements `POST /exec` (buffered shell exec)                                               |
 | `exec/stream` | Implements `POST /exec/stream` (SSE streaming shell exec)                                   |
 | `secrets`     | Implements `POST /secrets` (1Password / vault lookup)                                       |
-| `spawn`       | Implements `POST /spawn` (start an agent session with a task)                               |
+| `spawn`       | **Dispatch verb.** `POST /spawn` starts a NEW agent session with a task.                    |
+| `send`        | **Dispatch verb.** `POST /send` sends a message to an EXISTING session.                     |
+| `update`      | **Dispatch verb.** `POST /update` queues a task on a session row (read-mostly bridges).     |
+| `register`    | Implements `POST /register` (third-party agents push session state in)                      |
 | `browser`     | Implements `/browser/*` (Playwright surface)                                                |
-| `register`    | Implements `POST /register` (third-party agents push their state in)                        |
-| `update`      | Implements `POST /update` (third-party agents update their state)                           |
+| `desktop`     | Implements `/desktop/*` (macOS accessibility / OS automation surface)                       |
 
 A new bridge's capabilities are declared by listing the tokens it
 supports. Clients SHOULD filter by capability before calling
 endpoints — e.g. only show RUN buttons when the active bridge has
 `exec/stream` in its capabilities (with `exec` as fallback).
+
+**Dispatch precedence** — `agentDispatch.dispatchToSession` picks an
+endpoint based on user intent + what the bridge declares:
+
+- `preferredVerb='auto'` → tries spawn, then send, then update (first
+  available wins)
+- `preferredVerb='spawn'` → spawn only; rejects with a clear message
+  if the bridge doesn't support it
+- `preferredVerb='send'` → send only
+- `preferredVerb='queue'` → update only
+
+The result is that adding a NEW agentic AI just requires writing a
+bridge that implements `/health` (with `capabilities`) plus whichever
+of `/spawn` / `/send` / `/update` make sense for that tool's
+interaction model. UC's chat surfaces (`/assign`, "assign X to Y"
+natural language) automatically work against it — no dispatcher
+patches required.
 
 ---
 

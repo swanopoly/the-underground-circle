@@ -31,9 +31,40 @@ const TAIL_BYTES = 32768;           // Read last 32KB of each transcript
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token',
   'Content-Type': 'application/json',
 };
+
+function getOrCreateBridgeToken() {
+  const tokenPath = path.join(os.homedir(), '.uc-desktop-token');
+  try {
+    if (fs.existsSync(tokenPath)) {
+      const existing = fs.readFileSync(tokenPath, 'utf-8').trim();
+      if (existing.length >= 32) return existing;
+    }
+  } catch {}
+  const crypto = require('crypto');
+  const token = crypto.randomBytes(24).toString('hex');
+  try { fs.writeFileSync(tokenPath, token + '\n', { mode: 0o600 }); } catch {}
+  return token;
+}
+
+function hasValidBridgeToken(req) {
+  const value = req.headers['x-uc-desktop-token'];
+  const sent = Array.isArray(value) ? value[0] : value;
+  return !!sent && sent === getOrCreateBridgeToken();
+}
+
+function isAllowedBridgeOrigin(req) {
+  const origin = String(req.headers.origin || req.headers.referer || '');
+  if (!origin) return true;
+  try {
+    const host = new URL(origin).hostname;
+    return host === 'localhost' || host === '127.0.0.1' || host === 'app.chrisswanson.xyz';
+  } catch {
+    return false;
+  }
+}
 
 let cachedSessions = [];
 let lastScanTime = '';
@@ -276,6 +307,12 @@ const server = http.createServer((req, res) => {
 
   const url = req.url.split('?')[0];
 
+  if (url !== '/health' && url !== '/pair' && !hasValidBridgeToken(req)) {
+    res.writeHead(401, CORS);
+    res.end(JSON.stringify({ ok: false, error: 'Missing or invalid bridge token.' }));
+    return;
+  }
+
   if (url === '/health') {
     res.writeHead(200, CORS);
     res.end(JSON.stringify({
@@ -284,10 +321,25 @@ const server = http.createServer((req, res) => {
       version: '1.0.0',
       sessions: cachedSessions.length,
       cursorDir: CURSOR_DIR,
-      capabilities: ['sessions'],
+      capabilities: ['sessions', 'update'],
       auth: 'n/a',
       uptime_s: Math.round(process.uptime()),
       started_at: BRIDGE_STARTED_AT,
+    }));
+    return;
+  }
+
+  if (url === '/pair' && req.method === 'POST') {
+    if (!isAllowedBridgeOrigin(req)) {
+      res.writeHead(403, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
+      return;
+    }
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({
+      ok: true,
+      token: getOrCreateBridgeToken(),
+      tokenFile: '~/.uc-desktop-token',
     }));
     return;
   }
@@ -301,8 +353,59 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ── POST /update — queue a task for an existing Cursor session ──────────
+  // Cursor's CLI runs interactively; we can't programmatically dispatch.
+  // What we CAN do is annotate the session row so the user sees the
+  // pending task next time they open the Cursor UI / next session refresh.
+  // Body: { sessionId, task } — both required.
+  if (url === '/update' && req.method === 'POST') {
+    if (!isAllowedBridgeOrigin(req)) {
+      res.writeHead(403, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
+      return;
+    }
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 8192) req.destroy(); });
+    req.on('end', () => {
+      let parsed;
+      try { parsed = JSON.parse(body || '{}'); } catch {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
+        return;
+      }
+      const sessionId = String(parsed.sessionId || '').trim();
+      const task = String(parsed.task || '').trim();
+      if (!sessionId || !task) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Missing sessionId or task' }));
+        return;
+      }
+      // Find the session in cache and annotate.
+      const idx = cachedSessions.findIndex(s => s.sessionId === sessionId);
+      if (idx === -1) {
+        res.writeHead(404, CORS);
+        res.end(JSON.stringify({ ok: false, error: `Session ${sessionId} not found. Available: ${cachedSessions.map(s => s.sessionId).join(', ') || '(none)'}` }));
+        return;
+      }
+      cachedSessions[idx] = {
+        ...cachedSessions[idx],
+        task,
+        queuedAt: new Date().toISOString(),
+        recentActions: [...(cachedSessions[idx].recentActions || []), 'queued_task'].slice(-5),
+      };
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify({
+        ok: true,
+        sessionId,
+        message: 'Task queued. Visible on next Cursor session refresh.',
+        session: cachedSessions[idx],
+      }));
+    });
+    return;
+  }
+
   res.writeHead(404, CORS);
-  res.end(JSON.stringify({ error: 'Not found. Use /health or /sessions' }));
+  res.end(JSON.stringify({ error: 'Not found. Use /health, /sessions, or /update' }));
 });
 
 server.on('error', (err) => {
