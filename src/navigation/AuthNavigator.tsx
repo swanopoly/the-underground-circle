@@ -28,9 +28,13 @@ function MemoryDeepDiveWrapper({ navigation }: any) {
 
 export default function AuthNavigator() {
   return (
-    <Stack.Navigator screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="Landing" component={LandingWrapper} />
+    // Initial route is Login so unauthenticated visitors land on the
+    // login form directly. Landing + MemoryDeepDive stay registered so
+    // anyone deep-linked to /landing or /memory still resolves; they're
+    // just no longer the default entry point.
+    <Stack.Navigator screenOptions={{ headerShown: false }} initialRouteName="Login">
       <Stack.Screen name="Login" component={LoginScreen} />
+      <Stack.Screen name="Landing" component={LandingWrapper} />
       <Stack.Screen name="SignUp" component={SignUpScreen} />
       <Stack.Screen name="MemoryDeepDive" component={MemoryDeepDiveWrapper} />
     </Stack.Navigator>
