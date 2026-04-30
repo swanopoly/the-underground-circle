@@ -8095,6 +8095,26 @@ function EnhancedInput({
                   <Text style={[styles.modelChevron, { marginLeft: 'auto' }]}>›</Text>
                 </Pressable>
               ) : null}
+              {/* Quick action shortcuts — same RUN/ASSIGN/MISSION/REMEMBER/
+                  MEMORIES/DIAG/SEARCH pills as the dock above the composer,
+                  surfaced here so the OpenSwan menu is the one place users
+                  go for command-palette ergonomics. Tapping a pill closes
+                  this menu, seeds the composer with the slash command,
+                  and refocuses the input. */}
+              <View style={{ marginBottom: 8, marginHorizontal: -4 }}>
+                <QuickActionDock
+                  accentColor={accentColor}
+                  onInsert={(text) => {
+                    setShowModePicker(false);
+                    const current = input || '';
+                    const next = current.trim()
+                      ? (current.endsWith(' ') ? current + text : current + ' ' + text)
+                      : text;
+                    onInputChange(next);
+                    setTimeout(() => inputRef.current?.focus(), 0);
+                  }}
+                />
+              </View>
               <View style={styles.controlCenterGrid}>
                 <Pressable
                   onPress={() => { onOpenPlugins?.(); setShowModePicker(false); }}
