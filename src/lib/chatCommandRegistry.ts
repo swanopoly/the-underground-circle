@@ -8,7 +8,8 @@ export type ChatSlashCommandCategory =
   | 'ai_tools'
   | 'governance'
   | 'knowledge'
-  | 'terminal';
+  | 'terminal'
+  | 'dispatch';
 
 export type ChatCommandRouteId =
   | 'help'
@@ -25,7 +26,8 @@ export type ChatCommandRouteId =
   | 'memory'
   | 'governance'
   | 'search'
-  | 'terminal';
+  | 'terminal'
+  | 'dispatch';
 
 export type ChatCommandDecisionSource =
   | 'slash'
@@ -71,6 +73,7 @@ const CATEGORY_LABELS: Record<ChatSlashCommandCategory, string> = {
   governance: 'Governance',
   knowledge: 'Knowledge',
   terminal: 'Terminal',
+  dispatch: 'Dispatch',
 };
 
 const HELP_CATEGORY_ORDER: ChatSlashCommandCategory[] = [
@@ -84,6 +87,7 @@ const HELP_CATEGORY_ORDER: ChatSlashCommandCategory[] = [
   'ai_tools',
   'governance',
   'terminal',
+  'dispatch',
 ];
 
 export const CHAT_COMMAND_REGISTRY: ChatCommandDefinition[] = [
@@ -178,6 +182,12 @@ export const CHAT_COMMAND_REGISTRY: ChatCommandDefinition[] = [
   { id: 'pwd', routeId: 'terminal', command: '/pwd', insertText: '/pwd', title: 'Show Working Directory', description: 'Show the sticky cwd for /run in this circle.', category: 'terminal', keywords: ['cwd', 'directory', 'where'] },
   { id: 'diag-bridge', routeId: 'terminal', command: '/diag bridge', insertText: '/diag bridge', title: 'Diagnose Claude Bridge', description: 'Probe the local claude-bridge for liveness. Alias kept for back-compat.', category: 'terminal', aliases: ['/diag-bridge'], keywords: ['health', 'probe', 'check', 'bridge', 'diagnose'] },
   { id: 'diag', routeId: 'terminal', command: '/diag', insertText: '/diag', title: 'Diagnose All Bridges', description: 'Probe every local bridge (claude, codex, gemini, cursor, openswan-proxy) and report status inline.', category: 'terminal', aliases: ['/diag all'], keywords: ['health', 'probe', 'check', 'bridges', 'diagnose', 'all'] },
+  // ── Agent dispatch — assign tasks to specific agent sessions by name.
+  { id: 'assign', routeId: 'dispatch', command: '/assign', insertText: '/assign ', title: 'Assign To Agent', description: 'Assign a task to a specific agent session by name (e.g. /assign whistling-taco run npm test). Auto-picks spawn / send / queue based on agent capability.', category: 'dispatch', aliases: ['/delegate'], keywords: ['delegate', 'dispatch', 'agent', 'session', 'spawn'] },
+  { id: 'delegate', routeId: 'dispatch', command: '/delegate', insertText: '/delegate ', title: 'Delegate To Agent', description: 'Alias for /assign — delegate a task to a named agent session.', category: 'dispatch', aliases: ['/assign'], keywords: ['assign', 'dispatch', 'agent'] },
+  { id: 'spawn-agent', routeId: 'dispatch', command: '/spawn', insertText: '/spawn ', title: 'Spawn Agent Task', description: 'Spawn a new agent session with a task (e.g. /spawn claude-code build me a landing page). Forces verb=spawn.', category: 'dispatch', keywords: ['new', 'session', 'spawn', 'claude', 'agent'] },
+  { id: 'send-agent', routeId: 'dispatch', command: '/send', insertText: '/send ', title: 'Send To Agent Session', description: 'Send a message to an existing agent session (e.g. /send blackswan summarize today).', category: 'dispatch', keywords: ['message', 'send', 'agent'] },
+  { id: 'queue-agent', routeId: 'dispatch', command: '/queue', insertText: '/queue ', title: 'Queue Task For Agent', description: 'Queue a task for a read-mostly agent (Codex, Cursor) so it shows next time you open the CLI.', category: 'dispatch', keywords: ['queue', 'codex', 'cursor', 'task'] },
 ];
 
 function commandMatchesInput(command: string, normalized: string): boolean {
