@@ -60,6 +60,7 @@ import MessageCitations from './chat/MessageCitations';
 import QuickActionDock from './chat/QuickActionDock';
 import AutomationProposalCard from './chat/AutomationProposalCard';
 import { parseAutomationRequest, type AutomationProposal } from '../../../lib/automationChatBuilder';
+import { parseMultiAgentRequest, makeAliasResolver, BLACKSWAN_ALIASES } from '../../../lib/multiAgentDispatch';
 import RunCostDrawer from './chat/RunCostDrawer';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
@@ -3178,6 +3179,55 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           { localOnly: true, automationProposal: proposal },
         );
         return;
+      }
+    }
+
+    // ─── Multi-agent dispatch intercept ────────────────────────────────────
+    // Detect "@a @b prompt" with 2+ distinct agents at the start of the
+    // message — fan out the prompt to each in parallel, then post each
+    // agent's reply as its own bot message. Single-agent and non-agent
+    // messages fall through to the normal flow unchanged.
+    if (!content.startsWith('/') && liveAgents.length > 0) {
+      const aliases: Record<string, string> = {};
+      for (const a of liveAgents) {
+        if (a.name) aliases[a.name.toLowerCase()] = a.name;
+      }
+      for (const alias of BLACKSWAN_ALIASES) {
+        if (!aliases[alias]) aliases[alias] = 'BlackSwan';
+      }
+      const multi = parseMultiAgentRequest(content, makeAliasResolver(aliases));
+      if (multi) {
+        const targets = multi.agents
+          .map(ref => liveAgents.find(a => a.name.toLowerCase() === ref.resolvedName.toLowerCase()))
+          .filter((a): a is AssignableAgent => !!a);
+        if (targets.length >= 2) {
+          addBotMessage(
+            `Dispatching to ${targets.length} agents in parallel: ${targets.map(t => '@' + t.name).join(' ')}`,
+            undefined,
+            { localOnly: true },
+          );
+          setBotTyping(true);
+          Promise.allSettled(
+            targets.map(async (agent) => {
+              try {
+                const reply = await dispatchAssignedAgentTask(agent, multi.cleanedPrompt);
+                return { agent, ok: true, reply };
+              } catch (err: any) {
+                return { agent, ok: false, reply: `**${agent.name}** error: ${err?.message || 'unknown'}` };
+              }
+            }),
+          ).then((settled) => {
+            setBotTyping(false);
+            for (const s of settled) {
+              if (s.status === 'fulfilled') {
+                addBotMessage(s.value.reply);
+              } else {
+                addBotMessage(`Multi-agent dispatch error: ${String(s.reason)}`, undefined, { localOnly: true });
+              }
+            }
+          });
+          return;
+        }
       }
     }
 
