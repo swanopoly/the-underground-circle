@@ -66,9 +66,34 @@ const currentPayloads = new Map<string, AgentPresencePayload>();
 const reconnectAttempts = new Map<string, number>();
 const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+// In-flight join promises so concurrent calls (rapid re-mount, double-fire
+// React StrictMode dev cycle) don't race and orphan a channel. Without this
+// guard, two parallel joinPresenceChannel(X) calls both pass through their
+// own leave → create → set, but the FIRST channel's untrack/removeChannel
+// is async — the second create happens BEFORE the first leave completes,
+// leaving a zombie subscribed channel that keeps broadcasting forever.
+const inflightJoins = new Map<string, Promise<() => void>>();
+
 // ─── Join a circle's presence channel ────────────────────────────────────────
 
 export async function joinPresenceChannel(
+  circleId: string,
+  myAgents: AgentLiveState[],
+  callbacks: PresenceCallbacks
+): Promise<() => void> {
+  // If a join for this circle is already in flight, await it instead of
+  // racing — second-caller still gets the same cleanup function.
+  const inflight = inflightJoins.get(circleId);
+  if (inflight) return inflight;
+
+  const promise = doJoin(circleId, myAgents, callbacks).finally(() => {
+    inflightJoins.delete(circleId);
+  });
+  inflightJoins.set(circleId, promise);
+  return promise;
+}
+
+async function doJoin(
   circleId: string,
   myAgents: AgentLiveState[],
   callbacks: PresenceCallbacks
@@ -87,7 +112,9 @@ export async function joinPresenceChannel(
 
   const channelName = `circle-presence-${circleId}`;
 
-  // Clean up any existing channel for this circle
+  // Clean up any existing channel for this circle (sync map mutation +
+  // async untrack). The inflight guard above ensures we never reach this
+  // line concurrently for the same circle.
   await leavePresenceChannel(circleId);
 
   const channel = supabase.channel(channelName, {

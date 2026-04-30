@@ -139,12 +139,17 @@ function _maybeSaveBridgeMemory<S>(
     });
   });
 }
-let _retryTimer: ReturnType<typeof setInterval> | null = null;
+let _retryTimer: ReturnType<typeof setTimeout> | null = null;
 let _ocReconnectTimer: ReturnType<typeof setInterval> | null = null;
 let _circleId: string | null = null;
 let _visibilityHandler: (() => void) | null = null;
 let _visibilityDebounce = false; // Prevents duplicate reconnect attempts
 let _retryAttempt = 0; // for exponential backoff
+// Tracks how many consecutive bridge-detection ticks found NOTHING. Used to
+// back off the retry cadence when a user is on the deployed site without
+// any local bridges running — no reason to fire 24 fetches/min into the
+// void. Resets the moment any bridge is detected.
+let _bridgeMissCount = 0;
 // Consecutive reconnect-cycle failures (resets on any success). Separate
 // from `_retryAttempt` (which caps at 4 to bound the backoff ceiling) so we
 // can detect "this has been failing for real time" independently of the
@@ -395,7 +400,7 @@ export function stopAgentAutoConnect() {
   if (!_running) return;
   _running = false;
 
-  if (_retryTimer) { clearInterval(_retryTimer); _retryTimer = null; }
+  if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
   if (_ocReconnectTimer) { clearInterval(_ocReconnectTimer); _ocReconnectTimer = null; }
   if (_ccPoller) { _ccPoller.stop(); _ccPoller = null; }
   if (_codexPoller) { _codexPoller.stop(); _codexPoller = null; }
@@ -427,11 +432,26 @@ export function stopAgentAutoConnect() {
 
 function _startRetryLoop() {
   // Clear any existing timers
-  if (_retryTimer) clearInterval(_retryTimer);
+  if (_retryTimer) clearTimeout(_retryTimer);
   if (_ocReconnectTimer) clearInterval(_ocReconnectTimer);
 
-  // Bridge detection — every 10s, all three in parallel
-  _retryTimer = setInterval(async () => {
+  // Bridge detection — self-rescheduling setTimeout with exponential
+  // backoff. When the user is on the deployed site without local bridges
+  // running, this prevents 24 fetches/min from hammering localhost
+  // forever. Cadence:
+  //   miss 0-2  → 10s   (initial discovery / brief offline period)
+  //   miss 3-5  → 30s
+  //   miss 6-10 → 60s
+  //   miss 11+  → 300s  (5-min ceiling — keeps recovery feel reasonable)
+  // Resets to 10s the moment ANY bridge is detected.
+  function nextBridgeProbeDelay(): number {
+    if (_bridgeMissCount <= 2)  return 10_000;
+    if (_bridgeMissCount <= 5)  return 30_000;
+    if (_bridgeMissCount <= 10) return 60_000;
+    return 300_000;
+  }
+
+  const tickBridgeProbe = async () => {
     if (!_running) return;
 
     // Detect all bridges in parallel instead of sequentially
@@ -441,6 +461,13 @@ function _startRetryLoop() {
       detectGeminiCliBridge().catch(() => false),
       detectCursorBridge().catch(() => false),
     ]);
+
+    // Track miss/hit for backoff. Reset on ANY hit.
+    if (ccDetected || codexDetected || geminiDetected || cursorDetected) {
+      _bridgeMissCount = 0;
+    } else {
+      _bridgeMissCount += 1;
+    }
 
     // Claude Code bridge
     if (ccDetected && !_ccPoller) {
@@ -549,7 +576,20 @@ function _startRetryLoop() {
       }
       console.log('[agentAutoConnect] Cursor bridge went offline');
     }
-  }, CC_DETECT_INTERVAL);
+
+    // Schedule the next probe with backoff-aware delay.
+    if (_running) {
+      _retryTimer = setTimeout(tickBridgeProbe, nextBridgeProbeDelay());
+    }
+  };
+
+  // Kick off the first probe immediately (no delay) — discovery feels
+  // instant. Subsequent ticks are scheduled at the end of each run.
+  _retryTimer = setTimeout(tickBridgeProbe, 0);
+  // CC_DETECT_INTERVAL is no longer the cadence (kept as a constant for
+  // any other consumers); the function nextBridgeProbeDelay() above owns
+  // pacing.
+  void CC_DETECT_INTERVAL;
 
   // OpenSwan reconnect — with backoff
   const scheduleOcReconnect = () => {
