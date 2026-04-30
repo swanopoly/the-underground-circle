@@ -94,7 +94,10 @@ export default function MentionPicker({ circleId, query, onSelect, onDismiss, st
     setLoading(true);
     const delay = query.length === 0 ? 0 : 120;
     const timer = setTimeout(() => {
-      searchMentionCandidates(circleId, query, 8)
+      // Bumped to 12 — with 7 categories, 8 was too restrictive; users
+      // typing a vague query frequently saw their target in the bottom
+      // of the truncated list.
+      searchMentionCandidates(circleId, query, 12)
         .then((rows) => {
           if (seq !== seqRef.current) return;
           setCandidates(rows);
@@ -162,15 +165,29 @@ export default function MentionPicker({ circleId, query, onSelect, onDismiss, st
 }
 
 function kindGlyph(kind: MentionKind): string {
-  if (kind === "user") return "@";
-  if (kind === "mission") return "#";
-  return ">";
+  switch (kind) {
+    case "user":         return "@";
+    case "mission":      return "#";
+    case "mission_task": return ">";
+    case "agent":        return "✦";   // distinct from @ to surface the dispatch lane
+    case "circle":       return "◎";
+    case "room":         return "▢";
+    case "slash":        return "/";
+    default:             return ">";
+  }
 }
 
 function kindBadgeColor(kind: MentionKind) {
-  if (kind === "user") return { borderColor: "#22d3ee" };
-  if (kind === "mission") return { borderColor: "#f59e0b" };
-  return { borderColor: "#a855f7" };
+  switch (kind) {
+    case "user":         return { borderColor: "#22d3ee" };
+    case "mission":      return { borderColor: "#f59e0b" };
+    case "mission_task": return { borderColor: "#a855f7" };
+    case "agent":        return { borderColor: "#22c55e" };
+    case "circle":       return { borderColor: "#6366f1" };
+    case "room":         return { borderColor: "#a855f7" };
+    case "slash":        return { borderColor: "#94a3b8" };
+    default:             return { borderColor: "#94a3b8" };
+  }
 }
 
 const s = StyleSheet.create({

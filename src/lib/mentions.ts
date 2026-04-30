@@ -18,7 +18,22 @@
 
 import { supabase } from "./supabase";
 
-export type MentionKind = "user" | "mission" | "mission_task";
+/**
+ * Universal mention categories. Original three (user / mission /
+ * mission_task) are server-backed by `search_mention_candidates` RPC;
+ * the four new kinds added 2026-04-30 are queried client-side from
+ * separate tables so we don't have to ship a migration to expand the
+ * picker. They unlock "navigate everything from chat" — type @ to
+ * reach any agent, circle, room, or slash command.
+ */
+export type MentionKind =
+  | "user"
+  | "mission"
+  | "mission_task"
+  | "agent"      // circle_office_agents + agent_identities (custom names)
+  | "circle"     // cross-circle reference
+  | "room"       // project_rooms within current circle
+  | "slash";     // CHAT_COMMAND_REGISTRY entry
 
 export interface MentionRef {
   kind: MentionKind;
@@ -40,7 +55,10 @@ export type MentionSegment =
   | { type: "text"; text: string }
   | { type: "mention"; ref: MentionRef };
 
-const TOKEN_RE = /@\[(user|mission|mission_task):([0-9a-fA-F-]{8,}):([^\]]+)\]/g;
+// Token IDs are usually UUIDs (8+ hex chars / dashes). Slash entries use
+// short stable string ids ("/run") so we allow the slash kind to match a
+// non-UUID id pattern. Rooms / agents / circles all use UUID ids.
+const TOKEN_RE = /@\[(user|mission|mission_task|agent|circle|room|slash):([^:]+):([^\]]+)\]/g;
 
 export function parseMentions(content: string): MentionSegment[] {
   if (!content) return [];
@@ -86,20 +104,231 @@ export function formatMentionToken(ref: MentionRef): string {
 export async function searchMentionCandidates(
   circleId: string,
   query: string,
-  limit: number = 8,
+  limit: number = 12,
 ): Promise<MentionCandidate[]> {
-  const { data, error } = await supabase.rpc("search_mention_candidates", {
-    p_circle_id: circleId,
-    p_query: query,
-    p_limit: limit,
-  });
-  if (error || !data) return [];
-  return (data as any[]).map((r) => ({
-    kind:     r.kind as MentionKind,
-    id:       r.id,
-    label:    r.label ?? "",
-    sublabel: r.sublabel ?? "",
-  }));
+  const q = (query || "").trim().toLowerCase();
+  // Run all sources in parallel. Each returns its slice of candidates
+  // already ranked; we merge with priority weighting at the end.
+  const [serverHits, agentHits, circleHits, roomHits, slashHits] = await Promise.all([
+    searchUserAndMissionCandidates(circleId, query, limit),
+    searchAgentCandidates(circleId, q, limit),
+    searchCircleCandidates(q, limit),
+    searchRoomCandidates(circleId, q, limit),
+    searchSlashCandidates(q, limit),
+  ]);
+
+  // Merge with kind priority — agents first because dispatch is the
+  // most common @-action. Then people/missions, then circles/rooms,
+  // then slash commands at the bottom.
+  const KIND_PRIORITY: Record<MentionKind, number> = {
+    agent: 0,
+    user: 1,
+    mission: 2,
+    mission_task: 3,
+    room: 4,
+    circle: 5,
+    slash: 6,
+  };
+
+  const merged = [...agentHits, ...serverHits, ...roomHits, ...circleHits, ...slashHits];
+  // Stable sort by (kind priority, source order).
+  merged.sort((a, b) => KIND_PRIORITY[a.kind] - KIND_PRIORITY[b.kind]);
+
+  // Dedupe by (kind, id) — one source might return what another already covered.
+  const seen = new Set<string>();
+  const out: MentionCandidate[] = [];
+  for (const c of merged) {
+    const k = `${c.kind}:${c.id}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(c);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+// ─── Per-source searches ────────────────────────────────────────────────────
+
+async function searchUserAndMissionCandidates(
+  circleId: string,
+  query: string,
+  limit: number,
+): Promise<MentionCandidate[]> {
+  try {
+    const { data, error } = await supabase.rpc("search_mention_candidates", {
+      p_circle_id: circleId,
+      p_query: query,
+      p_limit: limit,
+    });
+    if (error || !data) return [];
+    return (data as any[]).map((r) => ({
+      kind:     r.kind as MentionKind,
+      id:       r.id,
+      label:    r.label ?? "",
+      sublabel: r.sublabel ?? "",
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Agents = circle_office_agents in the current circle, plus the user's
+ * own agent_identities (custom-named agents). Match on display name,
+ * custom name, or session key.
+ */
+async function searchAgentCandidates(
+  circleId: string,
+  q: string,
+  limit: number,
+): Promise<MentionCandidate[]> {
+  if (!circleId) return [];
+  try {
+    // Circle-scoped office agents (visible to all members).
+    let officeQuery = supabase
+      .from("circle_office_agents")
+      .select("id, name, color, owner_display_name, status")
+      .eq("circle_id", circleId)
+      .eq("is_published", true)
+      .limit(limit);
+    if (q) officeQuery = officeQuery.ilike("name", `%${q}%`);
+
+    // Personal agent identities (custom-named CLI sessions etc).
+    const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } } as any));
+    let identitiesQuery = user
+      ? supabase
+          .from("agent_identities")
+          .select("session_key, custom_name, custom_color, bound_model")
+          .eq("user_id", user.id)
+          .limit(limit)
+      : null;
+    if (identitiesQuery && q) identitiesQuery = identitiesQuery.or(`custom_name.ilike.%${q}%,session_key.ilike.%${q}%`);
+
+    const [officeRes, identitiesRes] = await Promise.all([
+      officeQuery,
+      identitiesQuery ? identitiesQuery : Promise.resolve({ data: null }),
+    ]);
+
+    const officeRows = (officeRes.data || []) as any[];
+    const identityRows = (identitiesRes.data || []) as any[];
+
+    const out: MentionCandidate[] = [];
+    for (const a of officeRows) {
+      out.push({
+        kind: "agent",
+        id: String(a.id),
+        label: String(a.name || "agent"),
+        sublabel: a.owner_display_name ? `${a.status || "idle"} · ${a.owner_display_name}` : (a.status || "agent"),
+      });
+    }
+    for (const id of identityRows) {
+      // Skip if this agent is already in the office list (dedupe by name).
+      if (officeRows.some(o => String(o.name || "").toLowerCase() === String(id.custom_name || id.session_key || "").toLowerCase())) continue;
+      out.push({
+        kind: "agent",
+        id: String(id.session_key),
+        label: String(id.custom_name || id.session_key),
+        sublabel: id.bound_model ? `your custom · ${id.bound_model}` : "your custom agent",
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Circles the user belongs to. Useful for cross-circle references in
+ * messages: "@[circle:X:Other Crew] said the same thing".
+ */
+async function searchCircleCandidates(
+  q: string,
+  limit: number,
+): Promise<MentionCandidate[]> {
+  try {
+    const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } } as any));
+    if (!user) return [];
+    // First find which circles the user is in.
+    const { data: membership } = await supabase
+      .from("circle_members")
+      .select("circle_id")
+      .eq("user_id", user.id);
+    const ids = (membership || []).map((m: any) => m.circle_id);
+    if (ids.length === 0) return [];
+
+    let cQuery = supabase
+      .from("circles")
+      .select("id, name, type")
+      .in("id", ids)
+      .limit(limit);
+    if (q) cQuery = cQuery.ilike("name", `%${q}%`);
+    const { data, error } = await cQuery;
+    if (error || !data) return [];
+    return (data as any[]).map((c) => ({
+      kind: "circle" as const,
+      id: String(c.id),
+      label: String(c.name || "circle"),
+      sublabel: c.type ? String(c.type) : "circle",
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Project rooms within the current circle.
+ */
+async function searchRoomCandidates(
+  circleId: string,
+  q: string,
+  limit: number,
+): Promise<MentionCandidate[]> {
+  if (!circleId) return [];
+  try {
+    let rq = supabase
+      .from("project_rooms")
+      .select("id, name, description")
+      .eq("circle_id", circleId)
+      .limit(limit);
+    if (q) rq = rq.ilike("name", `%${q}%`);
+    const { data, error } = await rq;
+    if (error || !data) return [];
+    return (data as any[]).map((r) => ({
+      kind: "room" as const,
+      id: String(r.id),
+      label: String(r.name || "room"),
+      sublabel: r.description ? String(r.description).slice(0, 60) : "room",
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Slash commands matching the query. In-memory — no network.
+ */
+async function searchSlashCandidates(
+  q: string,
+  limit: number,
+): Promise<MentionCandidate[]> {
+  try {
+    const { CHAT_COMMAND_REGISTRY } = await import("./chatCommandRegistry");
+    const all = CHAT_COMMAND_REGISTRY;
+    const lower = q.toLowerCase();
+    const matches = all.filter(c => {
+      if (!lower) return false; // only show slash when user is actively typing
+      const hay = (c.command + " " + c.title + " " + (c.description || "") + " " + (c.keywords || []).join(" ")).toLowerCase();
+      return hay.includes(lower);
+    }).slice(0, limit);
+    return matches.map(c => ({
+      kind: "slash" as const,
+      id: c.id,
+      label: c.command,
+      sublabel: c.title,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 export async function persistMentions(args: {
