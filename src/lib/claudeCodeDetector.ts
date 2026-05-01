@@ -199,9 +199,10 @@ export function streamBridgeCommand(
 
   const promise = (async () => {
     try {
+      const token = await ensureBridgeToken();
       const res = await fetch(`${BRIDGE_URL}/exec/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream', ...bridgeAuthHeaders(token) },
         body: JSON.stringify({ command }),
         signal: controller.signal,
       });
