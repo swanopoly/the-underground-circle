@@ -15,7 +15,6 @@ import {
 import { supabase } from '../../lib/supabase';
 import { signInWithSSO } from '../../lib/sso';
 import { signInWithGoogle } from '../../lib/googleCreds';
-import LoginPhoenixHero from './LoginPhoenixHero';
 
 // LoginBackground3D pulls in three, @react-three/fiber, @react-three/postprocessing
 // (~1-2MB of JS). It only renders on the web login screen, so code-split it out
@@ -333,7 +332,6 @@ export default function LoginScreen({ navigation }: any) {
         >
           <View style={[styles.shell, isDesktop && styles.shellDesktop]}>
             <View ref={heroRevealRef} style={[styles.heroPanel, isDesktop && styles.heroPanelDesktop]}>
-              <LoginPhoenixHero />
               <Text style={styles.heroEyebrow} numberOfLines={1} adjustsFontSizeToFit>UNDERGROUND ACCESS</Text>
               <Text style={styles.heroTitleTop} numberOfLines={1}>The</Text>
               <Text

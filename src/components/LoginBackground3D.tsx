@@ -2103,6 +2103,131 @@ function UndergroundAgent() {
           </mesh>
         ))}
       </group>
+      {/* Phoenix — red voxel bird that loops around the swan head. */}
+      <PhoenixOrbit
+        center={[(-7) * s, (1 + 9) * s, 0]}
+        radius={s * 7}
+        voxelSize={s}
+      />
+    </group>
+  );
+}
+
+/**
+ * PhoenixOrbit — small voxel phoenix flying a figure-8 around a 3D
+ * point in scene-local space. Voxels match the swan/character scale
+ * so it reads as part of the same scene. Wings flap; tail embers
+ * pulse; orbit completes one loop every ~4 seconds.
+ */
+function PhoenixOrbit({
+  center,
+  radius,
+  voxelSize,
+}: {
+  center: [number, number, number];
+  radius: number;
+  voxelSize: number;
+}) {
+  const groupRef = useRef<THREE.Group>(null);
+  const wingRef = useRef<THREE.Group>(null);
+  const tStart = useRef(performance.now() / 1000);
+
+  // Phoenix palette — bright with high emissive so it glows in the
+  // dark chamber.
+  const RED  = useMemo(() => new THREE.Color('#ef4444'), []);
+  const ORG  = useMemo(() => new THREE.Color('#f97316'), []);
+  const YEL  = useMemo(() => new THREE.Color('#fbbf24'), []);
+  const DEEP = useMemo(() => new THREE.Color('#991b1b'), []);
+
+  const v = voxelSize;
+  const v92 = v * 0.92;
+
+  useFrame(() => {
+    const t = performance.now() / 1000 - tStart.current;
+    const theta = (t / 4.0) * Math.PI * 2;  // one loop per 4s
+    if (groupRef.current) {
+      // Figure-8: cos for x, sin(2θ)/2 for y, sin for z so the bird
+      // passes in front of and behind the swan over each cycle.
+      groupRef.current.position.set(
+        center[0] + Math.cos(theta) * radius,
+        center[1] + Math.sin(theta * 2) * (radius * 0.45),
+        center[2] + Math.sin(theta) * (radius * 0.6),
+      );
+      // Face the direction of travel — yaw around Y to point along
+      // the tangent of the orbit.
+      groupRef.current.rotation.y = Math.atan2(
+        Math.cos(theta),  // dz/dθ
+        -Math.sin(theta), // dx/dθ
+      );
+    }
+    if (wingRef.current) {
+      // Flap — sinusoidal scaleY between 0.5 and 1.2.
+      const flap = 0.85 + Math.sin(t * 14) * 0.35;
+      wingRef.current.scale.y = flap;
+    }
+  });
+
+  // Body voxel layout — small, bird-shaped. Coordinates are local to
+  // the orbit group, so the whole thing translates together.
+  const bodyVoxels: Array<{ pos: [number, number, number]; color: THREE.Color }> = [
+    // Core body row
+    { pos: [-v, 0, 0],     color: DEEP },
+    { pos: [0, 0, 0],      color: RED },
+    { pos: [v, 0, 0],      color: ORG },
+    // Belly
+    { pos: [-v, -v, 0],    color: RED },
+    { pos: [0, -v, 0],     color: ORG },
+    { pos: [v, -v, 0],     color: YEL },
+    // Head bump on top
+    { pos: [v, v, 0],      color: RED },
+    // Beak — small yellow tip in front
+    { pos: [v * 2, v, 0],  color: YEL },
+    // Tail flames trailing behind
+    { pos: [-v * 2, 0, 0], color: ORG },
+    { pos: [-v * 3, -v, 0],color: YEL },
+    { pos: [-v * 2, -v, 0],color: RED },
+  ];
+
+  // Wing voxels — drawn as a separate group so they can flap. Two
+  // wings (top + bottom) to suggest flapping motion.
+  const wingVoxels: Array<{ pos: [number, number, number]; color: THREE.Color }> = [
+    { pos: [-v, v, 0],     color: RED },
+    { pos: [0, v, 0],      color: ORG },
+    { pos: [v, v, 0],      color: YEL },
+    { pos: [-v, v * 2, 0], color: DEEP },
+    { pos: [0, v * 2, 0],  color: RED },
+  ];
+
+  return (
+    <group ref={groupRef} position={center}>
+      {/* Soft red glow point so it lights nearby voxels as it passes. */}
+      <pointLight color={'#ff5533'} intensity={0.9} distance={v * 8} decay={2} />
+      {bodyVoxels.map((bv, i) => (
+        <mesh key={`pb${i}`} position={bv.pos}>
+          <boxGeometry args={[v92, v92, v92]} />
+          <meshStandardMaterial
+            color={bv.color}
+            emissive={bv.color}
+            emissiveIntensity={1.6}
+            roughness={0.2}
+            metalness={0.0}
+          />
+        </mesh>
+      ))}
+      <group ref={wingRef}>
+        {wingVoxels.map((wv, i) => (
+          <mesh key={`pw${i}`} position={wv.pos}>
+            <boxGeometry args={[v92, v92, v92]} />
+            <meshStandardMaterial
+              color={wv.color}
+              emissive={wv.color}
+              emissiveIntensity={1.4}
+              roughness={0.2}
+              metalness={0.0}
+            />
+          </mesh>
+        ))}
+      </group>
     </group>
   );
 }
