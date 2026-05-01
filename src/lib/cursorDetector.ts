@@ -14,6 +14,8 @@ import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
 import { supabase } from './supabase';
 import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
 
+import { ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+
 const BRIDGE_URL = 'http://localhost:7781';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -47,7 +49,8 @@ export async function detectCursorBridge(): Promise<boolean> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(`${BRIDGE_URL}/sessions`, { signal: controller.signal });
+    const token = await ensureBridgeToken();
+    const res = await fetch(`${BRIDGE_URL}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
     clearTimeout(timeout);
     if (!res.ok) return false;
     const data = await res.json();
@@ -62,7 +65,8 @@ export async function fetchCursorSessions(): Promise<CursorSession[]> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch(`${BRIDGE_URL}/sessions`, { signal: controller.signal });
+    const token = await ensureBridgeToken();
+    const res = await fetch(`${BRIDGE_URL}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
     clearTimeout(timeout);
     if (!res.ok) return [];
     const data = await res.json();

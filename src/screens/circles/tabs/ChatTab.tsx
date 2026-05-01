@@ -72,6 +72,7 @@ import CommandsHelpCard from './chat/CommandsHelpCard';
 import AssignPickerCard, { type AssignPickerAgent } from './chat/AssignPickerCard';
 import BridgeDiagCard from './chat/BridgeDiagCard';
 import { probeBridges, type BridgeProbeResult } from '../../../lib/bridgeHealthDiag';
+import { ensureBridgeToken, bridgeAuthHeaders } from '../../../lib/bridgeAuth';
 import RunCostDrawer from './chat/RunCostDrawer';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
@@ -2067,7 +2068,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }));
 
         try {
-          const res = await fetch('http://localhost:7778/sessions', { signal: AbortSignal.timeout(3000) });
+          const bridgeToken = await ensureBridgeToken();
+          const res = await fetch('http://localhost:7778/sessions', {
+            signal: AbortSignal.timeout(3000),
+            headers: bridgeAuthHeaders(bridgeToken),
+          });
           if (res.ok) {
             const { sessions } = await res.json();
             for (const s of sessions || []) {
