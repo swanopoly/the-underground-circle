@@ -62,6 +62,7 @@ import AutomationProposalCard from './chat/AutomationProposalCard';
 import { parseAutomationRequest, type AutomationProposal } from '../../../lib/automationChatBuilder';
 import { parseMultiAgentRequest, makeAliasResolver, BLACKSWAN_ALIASES } from '../../../lib/multiAgentDispatch';
 import SearchResultsCard, { type SearchResultRow } from './chat/SearchResultsCard';
+import CommandsHelpCard from './chat/CommandsHelpCard';
 import RunCostDrawer from './chat/RunCostDrawer';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
@@ -519,6 +520,9 @@ type ChatMessage = {
   /** Search results from `/search <query>`. Renders as a clickable
    *  list with JUMP buttons per row. */
   searchResults?: { query: string; rows: SearchResultRow[] };
+  /** When true, render the structured `/help` panel under this
+   *  message — interactive, filterable, click-to-insert. */
+  commandsHelp?: boolean;
   isPending?: boolean;
 };
 
@@ -2480,7 +2484,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return msg;
   };
 
-  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; automationProposal?: AutomationProposal; searchResults?: { query: string; rows: SearchResultRow[] } }) => {
+  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; automationProposal?: AutomationProposal; searchResults?: { query: string; rows: SearchResultRow[] }; commandsHelp?: boolean }) => {
     const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const msg: ChatMessage = {
       id: msgId,
@@ -2508,6 +2512,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       verificationResults: extra?.verificationResults,
       automationProposal: extra?.automationProposal,
       searchResults: extra?.searchResults,
+      commandsHelp: extra?.commandsHelp,
       isPending: false,
     };
 
@@ -3658,12 +3663,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
 
-    // ─── Help command — list all slash commands ──────────────────────────────
+    // ─── Help command — open the interactive commands panel ─────────────────
+    // Old behavior dumped 80+ commands as plain text. The card is
+    // filterable + click-to-insert, so users can find a command they
+    // half-remember and seed it into the composer with one tap.
     if (lowerContent === '/help' || lowerContent === '/commands') {
-      (async () => {
-        const { executeHelpCommand } = await import('../../../lib/missionChatCommands');
-        addBotMessage(executeHelpCommand().message, undefined, { localOnly: true });
-      })();
+      addBotMessage('Available commands', undefined, { localOnly: true, commandsHelp: true });
       return;
     }
 
@@ -5039,6 +5044,18 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 results={item.searchResults.rows}
                 onJump={jumpToMessage}
                 accentColor={accentColor}
+              />
+            ) : null}
+            {item.commandsHelp ? (
+              <CommandsHelpCard
+                accentColor={accentColor}
+                onInsert={(text) => {
+                  setInput((prev) => {
+                    if (!prev || !prev.trim()) return text;
+                    return prev.endsWith(' ') ? prev + text : prev + ' ' + text;
+                  });
+                  inputRef.current?.focus();
+                }}
               />
             ) : null}
             <MessageCitations
