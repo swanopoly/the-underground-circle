@@ -69,6 +69,7 @@ import { parseAutomationRequest, type AutomationProposal } from '../../../lib/au
 import { parseMultiAgentRequest, makeAliasResolver, BLACKSWAN_ALIASES } from '../../../lib/multiAgentDispatch';
 import SearchResultsCard, { type SearchResultRow } from './chat/SearchResultsCard';
 import CommandsHelpCard from './chat/CommandsHelpCard';
+import AssignPickerCard, { type AssignPickerAgent } from './chat/AssignPickerCard';
 import RunCostDrawer from './chat/RunCostDrawer';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
@@ -544,6 +545,8 @@ type ChatMessage = {
   /** When true, render the structured `/help` panel under this
    *  message — interactive, filterable, click-to-insert. */
   commandsHelp?: boolean;
+  /** Live agents to render under a /assign picker. */
+  assignPickerAgents?: AssignPickerAgent[];
   isPending?: boolean;
 };
 
@@ -2594,7 +2597,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return { message: msg, dbIdPromise };
   };
 
-  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; fileTaskResult?: NormalizedFileTaskResult; fileTaskToolName?: string; terminalResult?: TerminalRunResult; dispatchPayload?: { dispatch: DispatchResult; sessionName: string; bridge: string; task: string }; automationProposal?: AutomationProposal; searchResults?: { query: string; rows: SearchResultRow[] }; commandsHelp?: boolean }) => {
+  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; fileTaskResult?: NormalizedFileTaskResult; fileTaskToolName?: string; terminalResult?: TerminalRunResult; dispatchPayload?: { dispatch: DispatchResult; sessionName: string; bridge: string; task: string }; automationProposal?: AutomationProposal; searchResults?: { query: string; rows: SearchResultRow[] }; commandsHelp?: boolean; assignPickerAgents?: AssignPickerAgent[] }) => {
     const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const msg: ChatMessage = {
       id: msgId,
@@ -2627,6 +2630,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       automationProposal: extra?.automationProposal,
       searchResults: extra?.searchResults,
       commandsHelp: extra?.commandsHelp,
+      assignPickerAgents: extra?.assignPickerAgents,
       isPending: false,
     };
 
@@ -3721,6 +3725,49 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // /pins — show pinned messages
     if (lowerContent === '/pins' || lowerContent === '/pinned') {
       setShowPinned(!showPinned);
+      return;
+    }
+
+    // /assign — single-target dispatch. With no arg, render the
+    // AssignPickerCard so the user can see all live agents and pick
+    // one. With `@<name> <task>`, parse + dispatch via the same
+    // helper the multi-agent intercept uses.
+    if (lowerContent === '/assign' || lowerContent.startsWith('/assign ')) {
+      const rest = content.slice(7).trim();
+      if (!rest) {
+        // Picker mode
+        const pickerAgents: AssignPickerAgent[] = liveAgents.map(a => ({
+          id: a.id,
+          name: a.name,
+          provider: a.provider,
+          status: a.status,
+          spirit: a.spirit,
+          color: a.color,
+        }));
+        addBotMessage('Pick an agent to assign:', undefined, {
+          localOnly: true,
+          assignPickerAgents: pickerAgents,
+        });
+        return;
+      }
+      // Inline mode: /assign @<name> <task>
+      const m = rest.match(/^@?([\w][\w-]*)\s+(.+)$/);
+      if (!m) {
+        addBotMessage('Usage: `/assign @<agent> <task description>`. Type `/assign` alone to see all agents.', undefined, { localOnly: true });
+        return;
+      }
+      const [, alias, task] = m;
+      const target = liveAgents.find(a => a.name.toLowerCase() === alias.toLowerCase());
+      if (!target) {
+        addBotMessage(`No agent named "@${alias}" in this circle. Type \`/assign\` alone to see all agents.`, undefined, { localOnly: true });
+        return;
+      }
+      addBotMessage(`Assigning to **${target.name}**…`, undefined, { localOnly: true });
+      setBotTyping(true);
+      dispatchAssignedAgentTask(target, task)
+        .then((reply) => addBotMessage(reply))
+        .catch((err: any) => addBotMessage(`**${target.name}** error: ${err?.message || 'unknown'}`, undefined, { localOnly: true }))
+        .finally(() => setBotTyping(false));
       return;
     }
 
@@ -5388,6 +5435,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     if (!prev || !prev.trim()) return text;
                     return prev.endsWith(' ') ? prev + text : prev + ' ' + text;
                   });
+                  inputRef.current?.focus();
+                }}
+              />
+            ) : null}
+            {item.assignPickerAgents ? (
+              <AssignPickerCard
+                agents={item.assignPickerAgents}
+                accentColor={accentColor}
+                onPick={(agent) => {
+                  setInput(`/assign @${agent.name} `);
                   inputRef.current?.focus();
                 }}
               />
