@@ -6532,24 +6532,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         <RunApprovalBanner circleId={circleId} userId={currentUserId} accentColor={accentColor} />
       ) : null}
 
-      {/* Quick action dock — one-tap shortcuts above the composer.
-          Pills seed the composer with command text; user finishes the
-          argument and sends. Hidden when the user already has a long
-          message in flight (avoids visual noise). */}
-      <QuickActionDock
-        accentColor={accentColor}
-        hidden={(input || '').length > 80}
-        onInsert={(text) => {
-          setInput((prev) => {
-            // If the dock is invoked while the input has content, append
-            // with a space; otherwise just set the command.
-            if (!prev || !prev.trim()) return text;
-            return prev.endsWith(' ') ? prev + text : prev + ' ' + text;
-          });
-          inputRef.current?.focus();
-        }}
-      />
-
       <EnhancedInput
         circleId={circleId}
         input={input}

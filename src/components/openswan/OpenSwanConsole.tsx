@@ -49,6 +49,7 @@ import { analyzeMessageRouting } from '../../lib/messageRouting';
 import { rageForget } from '../../lib/memoryActions';
 import { supabase } from '../../lib/supabase';
 import { useClaudeSpendBreakdown } from '../../lib/circleCostTelemetry';
+import QuickActionDock from '../../screens/circles/tabs/chat/QuickActionDock';
 
 type ToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
 
@@ -386,6 +387,20 @@ export default function OpenSwanConsole({
                   : `${trimmed.length} chars · mode "${mode}" contract will apply`}
               </Text>
             </View>
+            {/* Quick-action shortcuts — seed the task field with /run,
+                /assign, /mission, /remember, /memories, /diag, /search.
+                Same pills surfaced in the composer's OpenSwan dropdown,
+                also available here so the Control Panel is the single
+                place users go for command-palette ergonomics. */}
+            <QuickActionDock
+              accentColor={accentColor}
+              onInsert={(text) => {
+                const next = task.trim()
+                  ? (task.endsWith(' ') ? task + text : task + ' ' + text)
+                  : text;
+                setTask(next);
+              }}
+            />
           </View>
 
           {/* ── Mode selector ───────────────────────────────────────── */}
