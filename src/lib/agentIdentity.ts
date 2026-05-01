@@ -225,7 +225,17 @@ function identityToRow(userId: string, identity: AgentIdentity) {
   };
 }
 
+// Session-level kill switch. The first time the upsert fails because
+// the table or one of its columns is missing from the schema cache
+// (PGRST204 / PGRST205 / generic 404), we flip this and stop firing
+// further requests for the rest of the page session. localStorage
+// keeps working, so no data loss — just no spam in the network panel.
+//
+// Reset by reloading the page (after the migration is applied).
+let _identitiesPersistDisabled = false;
+
 async function persistIdentitiesToServer(identities: Map<string, AgentIdentity>): Promise<void> {
+  if (_identitiesPersistDisabled) return;
   try {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
@@ -235,7 +245,20 @@ async function persistIdentitiesToServer(identities: Map<string, AgentIdentity>)
     const { error } = await supabase
       .from('agent_identities')
       .upsert(rows, { onConflict: 'user_id,session_key' });
-    if (error && error.code !== 'PGRST205') {
+    if (error) {
+      // PGRST205 = table not in schema cache (migration not applied).
+      // PGRST204 = column not in schema cache (older migration version).
+      // 404      = generic schema/table miss from the REST gateway.
+      const code = (error as any).code;
+      const status = (error as any).status;
+      if (code === 'PGRST205' || code === 'PGRST204' || status === 404) {
+        _identitiesPersistDisabled = true;
+        console.warn(
+          '[agentIdentity] agent_identities table/column missing — falling back to localStorage only. ' +
+          'Apply migration `supabase/migrations/20260430_agent_identities.sql` and reload to re-enable durable persistence.',
+        );
+        return;
+      }
       console.warn('[agentIdentity] DB save failed:', error.message);
     }
   } catch (err) {

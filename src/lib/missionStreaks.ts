@@ -52,15 +52,20 @@ export function loadStreak(userId: string, circleId?: string | null): MissionStr
 }
 
 /** Save streak to localStorage AND fire-and-forget to Supabase. */
+// Same kill-switch pattern as agentIdentity — first migration miss
+// disables the persist for the rest of the session so we don't spam
+// the network panel with 404s on every streak update.
+let _streakPersistDisabled = false;
+
 function saveStreak(streak: MissionStreak) {
   // 1. Local cache (synchronous, must succeed for UI)
   try {
     localStorage.setItem(localKey(streak.userId, streak.circleId), JSON.stringify(streak));
   } catch {}
 
+  if (_streakPersistDisabled) return;
+
   // 2. Durable Supabase write (async, best-effort).
-  // PGRST205 = relation not in schema cache (migration not applied) —
-  // silently skip so the UI keeps working until the migration runs.
   void supabase
     .from('mission_streaks')
     .upsert({
@@ -72,9 +77,18 @@ function saveStreak(streak: MissionStreak) {
       total_tasks_completed: streak.totalTasksCompleted,
     }, { onConflict: 'user_id,circle_id' })
     .then(({ error }) => {
-      if (error && error.code !== 'PGRST205') {
-        console.warn('[missionStreaks] DB save failed:', error.message);
+      if (!error) return;
+      const code = (error as any).code;
+      const status = (error as any).status;
+      if (code === 'PGRST205' || code === 'PGRST204' || status === 404) {
+        _streakPersistDisabled = true;
+        console.warn(
+          '[missionStreaks] mission_streaks table/column missing — falling back to localStorage only. ' +
+          'Apply migration `supabase/migrations/20260430_mission_streaks.sql` and reload to re-enable durable persistence.',
+        );
+        return;
       }
+      console.warn('[missionStreaks] DB save failed:', error.message);
     });
 }
 
