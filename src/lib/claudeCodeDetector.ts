@@ -160,9 +160,10 @@ export async function execBridgeCommand(
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 35000);
+    const token = await ensureBridgeToken();
     const res = await fetch(`${BRIDGE_URL}/exec`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
       body: JSON.stringify({ command }),
       signal: controller.signal,
     });
@@ -571,7 +572,8 @@ export async function fetchCrossSessionContext(): Promise<CrossSessionContext | 
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch(`${BRIDGE_URL}/context`, { signal: controller.signal });
+    const token = await ensureBridgeToken();
+    const res = await fetch(`${BRIDGE_URL}/context`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
     clearTimeout(timeout);
     if (!res.ok) return null;
     return await res.json();

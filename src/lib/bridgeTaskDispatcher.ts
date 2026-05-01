@@ -4,6 +4,8 @@
  * are unreachable.
  */
 
+import { ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+
 const BRIDGE_PORTS: Record<string, number> = {
   'claude-code': 7778,
   'codex': 7778,    // Routes through Claude Code bridge
@@ -50,9 +52,10 @@ async function dispatchToClaudeCode(prompt: string, fileName?: string | null): P
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 120000);
+    const token = await ensureBridgeToken();
     const res = await fetch(`http://localhost:${port}/exec`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
       body: JSON.stringify({ command }),
       signal: controller.signal,
     });
@@ -82,9 +85,10 @@ async function dispatchToGemini(prompt: string, fileName?: string | null): Promi
     const fileCtx = fileName ? `\n\nContext file: ${fileName}` : '';
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 120000);
+    const token = await ensureBridgeToken();
     const res = await fetch(`http://localhost:${port}/send`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
       body: JSON.stringify({ command: prompt + fileCtx }),
       signal: controller.signal,
     });
@@ -121,9 +125,10 @@ async function dispatchToCodex(prompt: string, fileName?: string | null): Promis
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 120000);
+    const token = await ensureBridgeToken();
     const res = await fetch(`http://localhost:${port}/exec`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
       body: JSON.stringify({ command }),
       signal: controller.signal,
     });
@@ -160,9 +165,10 @@ async function dispatchToCursor(prompt: string, fileName?: string | null): Promi
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 120000);
+    const token = await ensureBridgeToken();
     const res = await fetch(`http://localhost:${port}/exec`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
       body: JSON.stringify({ command }),
       signal: controller.signal,
     });
@@ -272,9 +278,10 @@ export async function spawnNewCodexSession(task: string): Promise<BridgeTaskResu
     if (!online) return { ok: false, error: 'Bridge not reachable', dispatchedVia: 'none', provider: 'codex' };
     const escaped = task.replace(/'/g, "'\\''");
     const command = `nohup codex --quiet -p "${escaped}" > /tmp/codex-spawn-$$.log 2>&1 & echo $!`;
+    const token = await ensureBridgeToken();
     const res = await fetch(`http://localhost:${port}/exec`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
       body: JSON.stringify({ command }),
     });
     const data = await res.json();
