@@ -13,6 +13,8 @@ import { getCircleSessionMemoryMode } from './agentRunSystem';
 import { promoteExternalAgentSessionKnowledge } from './memoryService';
 import { deriveSessionStatus, clampToDbStatus, type AgentStatus } from './officeAgents';
 
+import { ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+
 const BRIDGE_URL = 'http://localhost:7778';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -111,7 +113,8 @@ export async function fetchClaudeCodeSessions(): Promise<ClaudeCodeSession[]> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch(`${BRIDGE_URL}/sessions`, { signal: controller.signal });
+    const token = await ensureBridgeToken();
+    const res = await fetch(`${BRIDGE_URL}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
     clearTimeout(timeout);
     if (!res.ok) return [];
     const data = await res.json();
