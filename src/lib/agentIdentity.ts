@@ -119,6 +119,41 @@ export async function loadAgentIdentities(): Promise<Map<string, AgentIdentity>>
   }
 }
 
+/**
+ * Seed-up: if the user has identities in localStorage but the server
+ * has no rows yet (e.g. the agent_identities table was just created
+ * via migration), push the local copies up so nothing's lost. Bounded
+ * to one upsert per call. Returns the number of rows seeded so the
+ * caller can show feedback.
+ *
+ * Idempotent: if the server already has any identity rows for this
+ * user, returns 0 without writing.
+ */
+export async function seedIdentitiesIfServerEmpty(): Promise<number> {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return 0;
+    // Probe the server count. head:true + count makes this a 1-row HEAD.
+    const { count, error: countErr } = await supabase
+      .from('agent_identities')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', user.id);
+    if (countErr) return 0;  // table likely missing — kill switch will fire on first save anyway
+    if ((count || 0) > 0) return 0;  // server already has data, nothing to seed
+    const local = await loadAgentIdentities();
+    if (local.size === 0) return 0;
+    const rows = Array.from(local.values()).map(id => identityToRow(user.id, id));
+    const { error } = await supabase
+      .from('agent_identities')
+      .upsert(rows, { onConflict: 'user_id,session_key' });
+    if (error) return 0;
+    console.log(`[agentIdentity] seeded ${rows.length} identities to server`);
+    return rows.length;
+  } catch {
+    return 0;
+  }
+}
+
 export async function saveAgentIdentities(identities: Map<string, AgentIdentity>): Promise<void> {
   // 1. Local cache — always wins for read latency.
   try {

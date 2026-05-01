@@ -31,7 +31,7 @@ import ConnectAllBridgesPanel, { isConnectPanelDismissed } from '../../../compon
 import { useCustomThemes, customThemeToOfficeTheme, CUSTOM_THEME_PREFIX, CustomThemeRecord } from '../../../services/customThemes';
 import { enrichAgentsWithCache, enrichSessionsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
 import { restoreAllAgents, recordAgentActivity, renameAgent as renameAgentIdentity, updateAgentIdentity, getAgentIdentityByAgent, getAgentIdentityKey, applyIdentityToAgent } from '../../../lib/agentIdentity';
-import { loadAgentIdentities, type AgentIdentity } from '../../../lib/agentIdentity';
+import { loadAgentIdentities, seedIdentitiesIfServerEmpty, type AgentIdentity } from '../../../lib/agentIdentity';
 import {
   verifyBot, getChat, TelegramPoller, TelegramMessage,
 } from '../../../lib/telegramService';
@@ -1535,6 +1535,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               .eq('id', authUser.id)
               .then(({ error }) => { if (error) _profileHasAgentAppearance = false; });
           }
+
+          // Seed agent_identities table from localStorage if the table
+          // was just created (migration just applied) and the user has
+          // local identity data. Single round-trip, idempotent.
+          seedIdentitiesIfServerEmpty().catch(() => {});
         }
       } catch {}
 
