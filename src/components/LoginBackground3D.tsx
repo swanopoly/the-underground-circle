@@ -2841,18 +2841,19 @@ function PortalPhoenix() {
   const groupRef = useRef<THREE.Group>(null);
   const wingRef = useRef<THREE.Group>(null);
   const tailRef = useRef<THREE.Group>(null);
+  const emberRef = useRef<THREE.Group>(null);
   const tStart = useRef(performance.now() / 1000);
 
-  // Phoenix is anchored above the planet (planet center is at (0,-2,0),
-  // swan king sits ~8.3 above that on the tilt axis). We orbit around
-  // a point slightly above and in front of the swan king.
-  const orbitCenter = useMemo(() => new THREE.Vector3(0, 6.5, 1.5), []);
-  const orbitRadiusX = 7.5;
-  const orbitRadiusZ = 6.0;
-  const orbitPeriod = 12.0; // seconds
+  // Phoenix flies a varied path AROUND the planet. Center is offset
+  // slightly forward (toward the camera) and above the swan king.
+  const orbitCenter = useMemo(() => new THREE.Vector3(0, 5.5, 1.0), []);
+  const orbitRadiusX = 9.0;
+  const orbitRadiusZ = 7.5;
+  const orbitPeriod = 14.0; // seconds — slow enough to read details
 
-  // Phoenix scale — comparable to the swan king at PX = 0.18.
-  const v = 0.16;
+  // Phoenix scale — slightly larger than before so the new tail
+  // and detail are visible at orbit distance.
+  const v = 0.18;
   const v92 = v * 0.92;
 
   // Color palette — wide gradient so the bird reads as flame, not flat.
@@ -2914,14 +2915,34 @@ function PortalPhoenix() {
     add(4.5, 2.3, 0, YELLOW);
     add(4.0, 2.0, 0, BRIGHT_YEL);
     add(4.5, 2.0, 0, ORANGE);
+    add(5.0, 2.3, 0, HOT_CORE);
 
-    // Crest feathers — three flames jutting up from the back of the head.
+    // Crest feathers — five flames jutting up from the back of the
+    // head, full plume.
     add(2.0, 4, 0, ORANGE);
     add(2.5, 4.5, 0, BRIGHT_YEL);
     add(2.0, 5, 0, YELLOW);
+    add(2.0, 5.5, 0.3, BRIGHT_YEL);
     add(3.0, 4.5, 0, ORANGE);
     add(3.0, 5, 0, BRIGHT_YEL);
+    add(3.5, 5.0, 0, ORANGE);
+    add(3.0, 5.5, -0.3, YELLOW);
     add(2.5, 5.5, 0, HOT_CORE);
+    add(2.5, 6, 0, YELLOW);
+    add(2.0, 6, 0.5, ORANGE);
+    add(3.0, 6, -0.5, ORANGE);
+
+    // Cheek flame ruff — soft glow around the lower head/jaw.
+    add(2.5, 1.5, -1.0, BRIGHT_RED);
+    add(2.5, 1.5,  1.0, BRIGHT_RED);
+    add(2.0, 1.5, -1.2, ORANGE);
+    add(2.0, 1.5,  1.2, ORANGE);
+
+    // Body shoulder highlights for depth.
+    add(0, 1.5, -0.8, BRIGHT_RED);
+    add(0, 1.5,  0.8, BRIGHT_RED);
+    add(1, 1.5, -0.8, ORANGE);
+    add(1, 1.5,  0.8, ORANGE);
 
     return list;
   }, [v, RED, BRIGHT_RED, ORANGE, BRIGHT_OR, YELLOW, BRIGHT_YEL, HOT_CORE, DEEP_RED, EYE_DARK]);
@@ -2933,94 +2954,234 @@ function PortalPhoenix() {
     const add = (x: number, y: number, z: number, c: THREE.Color) =>
       list.push({ pos: [x * v, y * v, z * v], color: c });
 
-    // Each wing fan: inner row is dark red attached to body, middle
-    // row is bright red, tips are orange/yellow flame feathers.
+    // Each wing fan: 5-row layered fan from shoulder to tip. Inner is
+    // dark red, mid bright red, leading-edge orange, tips yellow/hot.
     for (const sign of [1, -1]) {
-      // Inner shoulder
+      // Shoulder row (inner)
       add(-1, 2, sign * 1.0, DEEP_RED);
       add( 0, 2, sign * 1.0, RED);
       add( 1, 2, sign * 1.0, RED);
-      // Mid wing
+      add( 2, 2, sign * 1.0, BRIGHT_RED);
+      // Upper-shoulder darker row for depth
+      add(-1, 2.5, sign * 1.0, DEEP_RED);
+      add( 0, 2.5, sign * 1.0, RED);
+      add( 1, 2.5, sign * 1.2, BRIGHT_RED);
+      // Mid wing (second row out)
+      add(-2, 2.3, sign * 2.0, RED);
       add(-1, 2.5, sign * 2.0, BRIGHT_RED);
-      add( 0, 2.5, sign * 2.0, BRIGHT_RED);
-      add( 1, 2.5, sign * 2.0, ORANGE);
-      // Wing tips — feathers reaching outward + back
-      add(-2, 3, sign * 3.0, ORANGE);
-      add(-1, 3, sign * 3.0, BRIGHT_OR);
-      add( 0, 3, sign * 3.0, YELLOW);
-      add( 1, 3, sign * 3.0, BRIGHT_YEL);
-      // Tip flames extending further out
-      add(-2, 3.5, sign * 4.0, YELLOW);
-      add(-1, 3.5, sign * 4.0, BRIGHT_YEL);
-      add( 0, 3.5, sign * 4.0, HOT_CORE);
-      // Trailing feathers angled down/back
+      add( 0, 2.7, sign * 2.0, BRIGHT_RED);
+      add( 1, 2.8, sign * 2.0, ORANGE);
+      add( 2, 2.5, sign * 2.0, ORANGE);
+      // Outer wing (leading edge of feathers)
+      add(-2, 2.8, sign * 3.0, BRIGHT_RED);
+      add(-1, 3.0, sign * 3.0, ORANGE);
+      add( 0, 3.2, sign * 3.0, BRIGHT_OR);
+      add( 1, 3.3, sign * 3.0, YELLOW);
+      add( 2, 3.0, sign * 3.0, BRIGHT_YEL);
+      // Wing tips — long flame feathers
+      add(-3, 3.2, sign * 4.0, ORANGE);
+      add(-2, 3.5, sign * 4.0, BRIGHT_OR);
+      add(-1, 3.7, sign * 4.0, YELLOW);
+      add( 0, 3.9, sign * 4.0, BRIGHT_YEL);
+      add( 1, 3.7, sign * 4.0, HOT_CORE);
+      add( 2, 3.5, sign * 4.0, BRIGHT_YEL);
+      // Far tip flames extending further out and back
+      add(-3, 3.7, sign * 5.0, BRIGHT_YEL);
+      add(-2, 4.0, sign * 5.0, HOT_CORE);
+      add(-1, 4.2, sign * 5.0, BRIGHT_YEL);
+      add( 0, 4.0, sign * 5.0, YELLOW);
+      // Trailing back-edge feathers (smaller, behind the wing)
       add(-3, 2, sign * 2.0, BRIGHT_RED);
       add(-3, 2.5, sign * 3.0, ORANGE);
+      add(-4, 2.5, sign * 2.5, RED);
+      add(-4, 2.8, sign * 3.5, ORANGE);
     }
     return list;
   }, [v, DEEP_RED, RED, BRIGHT_RED, ORANGE, BRIGHT_OR, YELLOW, BRIGHT_YEL, HOT_CORE]);
 
-  // Tail voxels — long flowing feathers extending back from the body.
+  // Tail voxels — much longer + more flames. Five distinct streams of
+  // feathers (center + two upper + two lower) plus ember particles
+  // trailing behind the bird.
   const tailVoxels = useMemo<Array<{ pos: [number, number, number]; color: THREE.Color }>>(() => {
     const list: Array<{ pos: [number, number, number]; color: THREE.Color }> = [];
     const add = (x: number, y: number, z: number, c: THREE.Color) =>
       list.push({ pos: [x * v, y * v, z * v], color: c });
 
-    // Center tail (longest)
-    add(-2, 0, 0, BRIGHT_RED);
-    add(-3, 0.3, 0, RED);
-    add(-4, 0.5, 0, ORANGE);
-    add(-5, 0.7, 0, BRIGHT_OR);
-    add(-6, 0.9, 0, YELLOW);
-    add(-7, 1.1, 0, BRIGHT_YEL);
-    // Side tail feathers (left + right)
+    // Center spine — 14 voxels long, gradient red → hot core.
+    add(-2,  0.0, 0, BRIGHT_RED);
+    add(-3,  0.2, 0, RED);
+    add(-4,  0.4, 0, BRIGHT_RED);
+    add(-5,  0.5, 0, ORANGE);
+    add(-6,  0.7, 0, BRIGHT_OR);
+    add(-7,  0.9, 0, ORANGE);
+    add(-8,  1.0, 0, YELLOW);
+    add(-9,  1.2, 0, BRIGHT_YEL);
+    add(-10, 1.3, 0, YELLOW);
+    add(-11, 1.4, 0, BRIGHT_YEL);
+    add(-12, 1.5, 0, HOT_CORE);
+    add(-13, 1.6, 0, YELLOW);
+    add(-14, 1.5, 0, BRIGHT_YEL);
+    add(-15, 1.4, 0, ORANGE);
+
+    // Inner side feathers (close to spine)
     for (const sign of [1, -1]) {
-      add(-2, 0.2, sign * 0.5, RED);
-      add(-3, 0.4, sign * 0.7, ORANGE);
-      add(-4, 0.6, sign * 0.9, BRIGHT_OR);
-      add(-5, 0.8, sign * 1.1, YELLOW);
-      add(-6, 1.0, sign * 1.2, BRIGHT_YEL);
+      add(-2,  0.1, sign * 0.5, RED);
+      add(-3,  0.3, sign * 0.6, BRIGHT_RED);
+      add(-4,  0.4, sign * 0.7, ORANGE);
+      add(-5,  0.6, sign * 0.8, BRIGHT_OR);
+      add(-6,  0.8, sign * 0.9, ORANGE);
+      add(-7,  0.9, sign * 1.0, YELLOW);
+      add(-8,  1.0, sign * 1.0, BRIGHT_YEL);
+      add(-9,  1.1, sign * 1.0, YELLOW);
+      add(-10, 1.2, sign * 0.9, BRIGHT_YEL);
+      add(-11, 1.3, sign * 0.8, HOT_CORE);
     }
-    // Outer wispy feather tips
+
+    // Mid side feathers (more spread)
     for (const sign of [1, -1]) {
-      add(-3, -0.2, sign * 1.0, BRIGHT_RED);
-      add(-4, 0.1, sign * 1.4, ORANGE);
-      add(-5, 0.3, sign * 1.6, YELLOW);
+      add(-3,  0.0, sign * 1.2, RED);
+      add(-4,  0.2, sign * 1.4, BRIGHT_RED);
+      add(-5,  0.4, sign * 1.6, ORANGE);
+      add(-6,  0.5, sign * 1.7, BRIGHT_OR);
+      add(-7,  0.7, sign * 1.7, YELLOW);
+      add(-8,  0.8, sign * 1.6, BRIGHT_YEL);
+      add(-9,  0.9, sign * 1.4, YELLOW);
+      add(-10, 1.0, sign * 1.2, ORANGE);
     }
+
+    // Outer side feathers (big spread, far back)
+    for (const sign of [1, -1]) {
+      add(-4, -0.1, sign * 2.0, RED);
+      add(-5,  0.1, sign * 2.2, ORANGE);
+      add(-6,  0.3, sign * 2.4, BRIGHT_OR);
+      add(-7,  0.5, sign * 2.4, YELLOW);
+      add(-8,  0.7, sign * 2.3, BRIGHT_YEL);
+      add(-9,  0.8, sign * 2.0, YELLOW);
+    }
+
+    // Lower drooping feathers (dive below the spine line)
+    for (const sign of [1, -1]) {
+      add(-3, -0.4, sign * 0.7, RED);
+      add(-4, -0.4, sign * 1.0, BRIGHT_RED);
+      add(-5, -0.3, sign * 1.2, ORANGE);
+      add(-6, -0.1, sign * 1.3, BRIGHT_OR);
+      add(-7,  0.1, sign * 1.3, YELLOW);
+      add(-8,  0.3, sign * 1.2, BRIGHT_YEL);
+    }
+
+    // Long trailing flame tips extending way back (beyond main tail)
+    for (const sign of [1, -1]) {
+      add(-10, 0.5, sign * 1.6, ORANGE);
+      add(-11, 0.7, sign * 1.4, BRIGHT_OR);
+      add(-12, 0.9, sign * 1.2, YELLOW);
+      add(-13, 1.0, sign * 1.0, BRIGHT_YEL);
+      add(-14, 1.1, sign * 0.7, HOT_CORE);
+    }
+
+    // Spiraling ember tail-streamers — voxels offset from the main
+    // path to suggest curling flames trailing behind.
+    add(-13, 1.8, 0.5, ORANGE);
+    add(-14, 1.9, -0.5, BRIGHT_YEL);
+    add(-15, 1.7, 0.3, YELLOW);
+    add(-12, 2.0, 0, BRIGHT_OR);
+    add(-13, 0.5, 0.8, RED);
+    add(-13, 0.4, -0.8, RED);
+    add(-14, 0.6, 0.4, ORANGE);
+    add(-14, 0.7, -0.4, ORANGE);
+
     return list;
-  }, [v, BRIGHT_RED, RED, ORANGE, BRIGHT_OR, YELLOW, BRIGHT_YEL]);
+  }, [v, BRIGHT_RED, RED, ORANGE, BRIGHT_OR, YELLOW, BRIGHT_YEL, HOT_CORE]);
+
+  // Detached ember particles — flicker behind the bird at random
+  // positions. Animated separately so they pulse and drift.
+  const emberSeeds = useMemo(() => {
+    return Array.from({ length: 18 }, (_, i) => ({
+      basePos: [
+        (-13 - Math.random() * 6),
+        (Math.random() * 2 - 0.3),
+        (Math.random() - 0.5) * 3,
+      ] as [number, number, number],
+      seed: Math.random() * Math.PI * 2,
+      speed: 6 + Math.random() * 6,
+      hue: i % 3,
+    }));
+  }, []);
+
+  // Compute position from theta — same formula used for current and
+  // next-tick to derive velocity for facing direction.
+  const pathPos = useMemo(() => (theta: number): [number, number, number] => {
+    // Combined harmonics — primary ellipse + secondary wobble at 2x
+    // frequency on different axes. Orbit varies each lap so the bird
+    // visits different airspace around the portal instead of tracing
+    // the same loop.
+    const x = orbitCenter.x
+            + Math.cos(theta) * orbitRadiusX
+            + Math.cos(theta * 2 + 1.7) * 1.6;
+    const z = orbitCenter.z
+            + Math.sin(theta * 1.15) * orbitRadiusZ
+            + Math.sin(theta * 2 + 0.5) * 1.6;
+    const y = orbitCenter.y
+            + Math.sin(theta * 1.5) * 1.4
+            + Math.cos(theta * 0.7) * 0.9;
+    return [x, y, z];
+  }, [orbitCenter, orbitRadiusX, orbitRadiusZ]);
 
   useFrame(() => {
     const t = performance.now() / 1000 - tStart.current;
     const theta = (t / orbitPeriod) * Math.PI * 2;
     if (groupRef.current) {
-      // Wide elliptical orbit in X/Z plane around the planet, with
-      // gentle Y undulation so the bird rises over the crown then
-      // drops behind.
-      const x = orbitCenter.x + Math.cos(theta) * orbitRadiusX;
-      const z = orbitCenter.z + Math.sin(theta) * orbitRadiusZ;
-      const y = orbitCenter.y + Math.sin(theta * 1.5) * 1.2;
+      const [x, y, z] = pathPos(theta);
       groupRef.current.position.set(x, y, z);
-      // Yaw to face the direction of travel (tangent to the orbit).
-      const tangentX = -Math.sin(theta) * orbitRadiusX;
-      const tangentZ =  Math.cos(theta) * orbitRadiusZ;
-      groupRef.current.rotation.y = Math.atan2(tangentX, tangentZ);
-      // Bank into the turn — roll on Z based on lateral velocity sign.
-      groupRef.current.rotation.z = Math.cos(theta) * 0.18;
-      // Slight pitch as it rises and falls.
-      groupRef.current.rotation.x = Math.cos(theta * 1.5) * 0.10;
+
+      // Velocity from finite differences against a small dθ ahead.
+      const [x2, y2, z2] = pathPos(theta + 0.01);
+      const vx = x2 - x;
+      const vy = y2 - y;
+      const vz = z2 - z;
+
+      // Yaw — bird's local +X is forward (head). For three.js Y
+      // rotation, world forward after yaw=θ_y is (cos, 0, -sin), so
+      // to face (vx, vz) we need atan2(-vz, vx).
+      groupRef.current.rotation.y = Math.atan2(-vz, vx);
+
+      // Pitch — climb/dive based on vertical velocity vs horizontal
+      // speed. Negative pitch when climbing (nose up).
+      const horiz = Math.sqrt(vx * vx + vz * vz);
+      groupRef.current.rotation.x = -Math.atan2(vy, Math.max(horiz, 0.0001)) * 0.7;
+
+      // Bank — roll into turns. Use change in yaw direction as a
+      // rough proxy for curvature; sign of cross product of velocity
+      // and acceleration tells us which way the path curves.
+      const [x3, , z3] = pathPos(theta + 0.02);
+      const ax = (x3 - x) - 2 * vx;
+      const az = (z3 - z) - 2 * vz;
+      const curvSign = vx * az - vz * ax;
+      groupRef.current.rotation.z = Math.tanh(curvSign * 4) * 0.32;
     }
     if (wingRef.current) {
-      // Flap: scale Y between 0.55 and 1.25, then a slow pitch dip
-      // on the downstroke for a more bird-like cycle.
-      const flap = 0.9 + Math.sin(t * 9) * 0.35;
+      // Flap: scale Y plus a slight rotation x dip for a more
+      // bird-like wing cycle.
+      const flap = 0.85 + Math.sin(t * 8) * 0.4;
       wingRef.current.scale.y = flap;
-      wingRef.current.rotation.x = Math.sin(t * 9) * 0.18;
+      wingRef.current.rotation.x = Math.sin(t * 8) * 0.22;
     }
     if (tailRef.current) {
       // Tail trails behind with a slight wave — feathers shimmer.
-      tailRef.current.rotation.z = Math.sin(t * 4) * 0.08;
-      tailRef.current.rotation.y = Math.sin(t * 2.3) * 0.05;
+      tailRef.current.rotation.z = Math.sin(t * 5) * 0.10;
+      tailRef.current.rotation.y = Math.sin(t * 2.6) * 0.07;
+      // Subtle pulse so the long flames feel alive.
+      const pulse = 0.95 + Math.sin(t * 7) * 0.05;
+      tailRef.current.scale.x = pulse;
+    }
+    // Embers — flicker via opacity-style scale. Each ember has its
+    // own seed so they don't pulse in lock-step.
+    if (emberRef.current) {
+      const children = emberRef.current.children;
+      for (let i = 0; i < children.length && i < emberSeeds.length; i++) {
+        const seed = emberSeeds[i];
+        const s = 0.7 + 0.5 * Math.sin(t * seed.speed + seed.seed);
+        children[i].scale.set(s, s, s);
+      }
     }
   });
 
@@ -3042,18 +3203,40 @@ function PortalPhoenix() {
     </mesh>
   );
 
+  // Pick ember color from index.
+  const emberColorFor = (hue: number): THREE.Color =>
+    hue === 0 ? RED : hue === 1 ? ORANGE : YELLOW;
+
   return (
     <group ref={groupRef} position={[orbitCenter.x, orbitCenter.y, orbitCenter.z]}>
       {/* Bright corona light tracking with the bird so it casts a
           visible red wash on whatever it passes. */}
-      <pointLight color={'#ff5533'} intensity={4.5} distance={6} decay={1.4} />
-      <pointLight color={'#ffaa44'} intensity={2.2} distance={3} decay={1.8} position={[v, v, 0]} />
+      <pointLight color={'#ff5533'} intensity={5.0} distance={7} decay={1.4} />
+      <pointLight color={'#ffaa44'} intensity={2.4} distance={3.5} decay={1.8} position={[v, v, 0]} />
+      {/* Trailing tail glow — picks up the long flames behind. */}
+      <pointLight color={'#ff7733'} intensity={2.8} distance={5} decay={1.6} position={[-v * 10, v * 1.5, 0]} />
       {bodyVoxels.map((bv, i) => renderMesh(bv, 'pb', i, 2.8))}
       <group ref={wingRef}>
         {wingVoxels.map((wv, i) => renderMesh(wv, 'pw', i, 2.5))}
       </group>
       <group ref={tailRef}>
         {tailVoxels.map((tv, i) => renderMesh(tv, 'pt', i, 2.6))}
+      </group>
+      {/* Detached ember particles — float behind the bird, flickering
+          on their own clocks for a more chaotic flame trail. */}
+      <group ref={emberRef}>
+        {emberSeeds.map((e, i) => (
+          <mesh key={`pe${i}`} position={[e.basePos[0] * v, e.basePos[1] * v, e.basePos[2] * v]}>
+            <boxGeometry args={[v92 * 0.7, v92 * 0.7, v92 * 0.7]} />
+            <meshStandardMaterial
+              color={emberColorFor(e.hue)}
+              emissive={emberColorFor(e.hue)}
+              emissiveIntensity={3.2}
+              roughness={0.2}
+              metalness={0.0}
+            />
+          </mesh>
+        ))}
       </group>
     </group>
   );
