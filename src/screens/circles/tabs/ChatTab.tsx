@@ -61,6 +61,7 @@ import QuickActionDock from './chat/QuickActionDock';
 import AutomationProposalCard from './chat/AutomationProposalCard';
 import { parseAutomationRequest, type AutomationProposal } from '../../../lib/automationChatBuilder';
 import { parseMultiAgentRequest, makeAliasResolver, BLACKSWAN_ALIASES } from '../../../lib/multiAgentDispatch';
+import SearchResultsCard, { type SearchResultRow } from './chat/SearchResultsCard';
 import RunCostDrawer from './chat/RunCostDrawer';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
@@ -515,6 +516,9 @@ type ChatMessage = {
    *  "every Friday at 5pm post a weekly summary". When present, the
    *  message renders an AutomationProposalCard with a CREATE button. */
   automationProposal?: AutomationProposal;
+  /** Search results from `/search <query>`. Renders as a clickable
+   *  list with JUMP buttons per row. */
+  searchResults?: { query: string; rows: SearchResultRow[] };
   isPending?: boolean;
 };
 
@@ -2476,7 +2480,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return msg;
   };
 
-  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; automationProposal?: AutomationProposal }) => {
+  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; automationProposal?: AutomationProposal; searchResults?: { query: string; rows: SearchResultRow[] } }) => {
     const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const msg: ChatMessage = {
       id: msgId,
@@ -2503,6 +2507,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       toolEvents: extra?.toolEvents,
       verificationResults: extra?.verificationResults,
       automationProposal: extra?.automationProposal,
+      searchResults: extra?.searchResults,
       isPending: false,
     };
 
@@ -3450,25 +3455,61 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
 
-    // /search query
+    // /search query — search both in-memory and DB messages, render
+    // results as clickable rows that jump to the message in chat.
     if (lowerContent.startsWith('/search ')) {
       const query = content.slice(8).trim();
-      if (!query) { addBotMessage('🔍 Usage: /search keyword'); return; }
-      const { data: results } = await supabase
-        .from('messages')
-        .select('content, created_at, user:profiles!user_id(display_name)')
-        .eq('circle_id', circleId)
-        .ilike('content', `%${query}%`)
-        .order('created_at', { ascending: false })
-        .limit(10);
-      if (results && results.length > 0) {
-        const lines = results.map((r: any) =>
-          `[${new Date(r.created_at).toLocaleDateString()}] ${(r.user as any)?.display_name || 'Unknown'}: ${r.content.slice(0, 80)}`
-        );
-        addBotMessage(`🔍 Found ${results.length} result${results.length > 1 ? 's' : ''} for "${query}":\n\n${lines.join('\n')}`);
-      } else {
-        addBotMessage(`🔍 No messages found for "${query}"`);
+      if (!query) { addBotMessage('Usage: /search <keyword>', undefined, { localOnly: true }); return; }
+      const q = query.toLowerCase();
+
+      // First pass: scan in-memory messages so we can return ids that
+      // map directly to the visible list. The id makes the JUMP button
+      // work without a round-trip.
+      const inMemoryMatches = messages
+        .filter(m => m.content && m.content.toLowerCase().includes(q))
+        .slice(-20)
+        .reverse();
+
+      const inMemoryIds = new Set(inMemoryMatches.map(m => m.dbId).filter(Boolean));
+      const rows: SearchResultRow[] = inMemoryMatches.map(m => ({
+        id: m.id,
+        authorName: m.isBot ? (agentName || 'Bot') : (m.userName || 'Member'),
+        isBot: !!m.isBot,
+        snippet: m.content.length > 160 ? m.content.slice(0, 157) + '…' : m.content,
+        timestamp: m.timestamp ? m.timestamp.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '',
+      }));
+
+      // Second pass: pull older matches from the DB. Skip any whose
+      // dbId is already in the in-memory set.
+      try {
+        const { data: dbResults } = await supabase
+          .from('messages')
+          .select('id, content, created_at, user:profiles!user_id(display_name)')
+          .eq('circle_id', circleId)
+          .ilike('content', `%${query}%`)
+          .order('created_at', { ascending: false })
+          .limit(15);
+        if (dbResults) {
+          for (const r of dbResults as any[]) {
+            if (inMemoryIds.has(r.id)) continue;
+            // No id → archived → no JUMP button (id field stays
+            // undefined so the card hides the button automatically).
+            rows.push({
+              authorName: r.user?.display_name || 'Member',
+              isBot: false,
+              snippet: r.content.length > 160 ? r.content.slice(0, 157) + '…' : r.content,
+              timestamp: new Date(r.created_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
+            });
+          }
+        }
+      } catch (err) {
+        console.warn('[/search] DB query failed:', err);
       }
+
+      addBotMessage(`Search results for "${query}"`, undefined, {
+        localOnly: true,
+        searchResults: { query, rows: rows.slice(0, 25) },
+      });
       return;
     }
 
@@ -4911,6 +4952,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // pins the latest message at the visual bottom with zero scroll mgmt.
   const invertedMessages = useMemo(() => [...messages].reverse(), [messages]);
 
+  // Briefly highlight a message after `/search` → JUMP. Cleared after
+  // 2.5s so the ring fades back to normal.
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const jumpToMessage = useCallback((messageId: string) => {
+    const index = invertedMessages.findIndex(m => m.id === messageId || m.dbId === messageId);
+    if (index < 0) return;
+    try {
+      flatListRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.3 });
+    } catch {}
+    setHighlightedMessageId(invertedMessages[index].id);
+    setTimeout(() => {
+      setHighlightedMessageId((curr) => (curr === invertedMessages[index].id ? null : curr));
+    }, 2500);
+  }, [invertedMessages]);
+
   // In the inverted array, the chronologically PREVIOUS message is at
   // index+1 (older = higher index).
   const isConsecutive = (index: number) => {
@@ -4927,20 +4983,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const consecutive = isConsecutive(index);
     const reactionEntries = Object.entries(item.reactions).filter(([, u]) => u.length > 0);
     const messageAnim = newMessageAnims.get(item.id) || new Animated.Value(1);
+    const isHighlighted = highlightedMessageId === item.id;
 
     return (
       <Animated.View
-        style={{
-          opacity: messageAnim,
-          transform: [
-            {
-              translateY: messageAnim.interpolate({
-                inputRange: [0, 1],
-                outputRange: [20, 0],
-              }),
-            },
-          ],
-        }}
+        style={[
+          {
+            opacity: messageAnim,
+            transform: [
+              {
+                translateY: messageAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [20, 0],
+                }),
+              },
+            ],
+          },
+          isHighlighted && {
+            backgroundColor: accentColor + '14',
+            borderRadius: 8,
+            paddingVertical: 4,
+            ...(Platform.OS === 'web' ? { boxShadow: `0 0 0 2px ${accentColor}55` } as any : {}),
+          },
+        ]}
       >
         <MessageRow
           item={item}
@@ -4965,6 +5030,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 proposal={item.automationProposal}
                 circleId={circleId}
                 userId={currentUserId}
+                accentColor={accentColor}
+              />
+            ) : null}
+            {item.searchResults ? (
+              <SearchResultsCard
+                query={item.searchResults.query}
+                results={item.searchResults.rows}
+                onJump={jumpToMessage}
                 accentColor={accentColor}
               />
             ) : null}
