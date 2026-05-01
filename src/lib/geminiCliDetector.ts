@@ -112,9 +112,10 @@ export async function execGeminiCliCommand(
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 35000);
+    const token = await ensureBridgeToken();
     const res = await fetch(`${BRIDGE_URL}/send`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
       body: JSON.stringify({ command, sessionId }),
       signal: controller.signal,
     });
