@@ -2103,11 +2103,14 @@ function UndergroundAgent() {
           </mesh>
         ))}
       </group>
-      {/* Phoenix — red voxel bird that loops around the swan head. */}
+      {/* Phoenix — red voxel bird that loops around the swan. Centered
+          above the swan head with a wide orbit so it's clearly visible
+          rather than hidden behind the body. Voxels are 2x scene size
+          so the bird reads instantly. */}
       <PhoenixOrbit
-        center={[(-7) * s, (1 + 9) * s, 0]}
-        radius={s * 7}
-        voxelSize={s}
+        center={[(-7) * s, (1 + 12) * s, 0]}
+        radius={s * 14}
+        voxelSize={s * 2}
       />
     </group>
   );
@@ -2144,7 +2147,7 @@ function PhoenixOrbit({
 
   useFrame(() => {
     const t = performance.now() / 1000 - tStart.current;
-    const theta = (t / 4.0) * Math.PI * 2;  // one loop per 4s
+    const theta = (t / 5.5) * Math.PI * 2;  // one loop per 5.5s — slow enough to read
     if (groupRef.current) {
       // Figure-8: cos for x, sin(2θ)/2 for y, sin for z so the bird
       // passes in front of and behind the swan over each cycle.
@@ -2200,15 +2203,16 @@ function PhoenixOrbit({
 
   return (
     <group ref={groupRef} position={center}>
-      {/* Soft red glow point so it lights nearby voxels as it passes. */}
-      <pointLight color={'#ff5533'} intensity={0.9} distance={v * 8} decay={2} />
+      {/* Bright red glow point so the bird casts visible light on
+          nearby geometry as it passes. */}
+      <pointLight color={'#ff5533'} intensity={3.5} distance={v * 14} decay={1.5} />
       {bodyVoxels.map((bv, i) => (
         <mesh key={`pb${i}`} position={bv.pos}>
           <boxGeometry args={[v92, v92, v92]} />
           <meshStandardMaterial
             color={bv.color}
             emissive={bv.color}
-            emissiveIntensity={1.6}
+            emissiveIntensity={2.8}
             roughness={0.2}
             metalness={0.0}
           />
@@ -2221,7 +2225,7 @@ function PhoenixOrbit({
             <meshStandardMaterial
               color={wv.color}
               emissive={wv.color}
-              emissiveIntensity={1.4}
+              emissiveIntensity={2.5}
               roughness={0.2}
               metalness={0.0}
             />
