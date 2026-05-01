@@ -3107,34 +3107,54 @@ function PortalPhoenix() {
     }));
   }, []);
 
-  // Compute position from theta — same formula used for current and
-  // next-tick to derive velocity for facing direction.
-  const pathPos = useMemo(() => (theta: number): [number, number, number] => {
+  // Slow distance cycle so the bird flies far away from the planet,
+  // comes back close, flies far again. Period is much longer than
+  // the orbit period so the user sees several close-passes per
+  // fly-out cycle.
+  const distPeriod = 22.0;
+
+  // Compute position from absolute time t — same formula used for
+  // current and next-tick to derive velocity for facing direction.
+  const pathAt = useMemo(() => (t: number): [number, number, number] => {
+    const theta = (t / orbitPeriod) * Math.PI * 2;
+    // Distance multiplier pulses 1.0 (close — flying around the
+    // portal) to ~3.0 (far — swooping out toward the camera/edge).
+    // Squared sin so the bird spends more time NEAR the portal
+    // and only briefly swoops far away, like a comet on a long
+    // elliptical orbit.
+    const distT = (t / distPeriod) * Math.PI * 2;
+    const distRaw = 0.5 + 0.5 * Math.sin(distT); // 0..1
+    const distMul = 1.0 + Math.pow(distRaw, 1.6) * 2.4; // ~1.0 to ~3.4
     // Combined harmonics — primary ellipse + secondary wobble at 2x
     // frequency on different axes. Orbit varies each lap so the bird
     // visits different airspace around the portal instead of tracing
     // the same loop.
     const x = orbitCenter.x
-            + Math.cos(theta) * orbitRadiusX
+            + Math.cos(theta) * orbitRadiusX * distMul
             + Math.cos(theta * 2 + 1.7) * 1.6;
     const z = orbitCenter.z
-            + Math.sin(theta * 1.15) * orbitRadiusZ
+            + Math.sin(theta * 1.15) * orbitRadiusZ * distMul
             + Math.sin(theta * 2 + 0.5) * 1.6;
+    // Rise as it flies away — gives the path more visual depth so
+    // it doesn't just shrink straight back, but climbs and dives.
     const y = orbitCenter.y
             + Math.sin(theta * 1.5) * 1.4
-            + Math.cos(theta * 0.7) * 0.9;
+            + Math.cos(theta * 0.7) * 0.9
+            + (distMul - 1) * 1.4;
     return [x, y, z];
-  }, [orbitCenter, orbitRadiusX, orbitRadiusZ]);
+  }, [orbitCenter, orbitRadiusX, orbitRadiusZ, orbitPeriod, distPeriod]);
 
   useFrame(() => {
     const t = performance.now() / 1000 - tStart.current;
-    const theta = (t / orbitPeriod) * Math.PI * 2;
     if (groupRef.current) {
-      const [x, y, z] = pathPos(theta);
+      const [x, y, z] = pathAt(t);
       groupRef.current.position.set(x, y, z);
 
-      // Velocity from finite differences against a small dθ ahead.
-      const [x2, y2, z2] = pathPos(theta + 0.01);
+      // Velocity from finite differences a small dt ahead. Both
+      // theta and the distance cycle advance together so this
+      // captures the true tangent of the curve.
+      const dt = 0.05;
+      const [x2, y2, z2] = pathAt(t + dt);
       const vx = x2 - x;
       const vy = y2 - y;
       const vz = z2 - z;
@@ -3152,7 +3172,7 @@ function PortalPhoenix() {
       // Bank — roll into turns. Use change in yaw direction as a
       // rough proxy for curvature; sign of cross product of velocity
       // and acceleration tells us which way the path curves.
-      const [x3, , z3] = pathPos(theta + 0.02);
+      const [x3, , z3] = pathAt(t + 2 * dt);
       const ax = (x3 - x) - 2 * vx;
       const az = (z3 - z) - 2 * vz;
       const curvSign = vx * az - vz * ax;
