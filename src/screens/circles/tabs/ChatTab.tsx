@@ -5733,10 +5733,47 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           {showPinned && pinnedMessages.length > 0 && (
             <View style={styles.pinnedList}>
               {pinnedMessages.map(pin => (
-                <View key={pin.id} style={styles.pinnedItem}>
-                  <Text style={styles.pinnedItemText} numberOfLines={2}>{pin.message_content || '(message)'}</Text>
-                  <Text style={styles.pinnedItemMeta}>pinned by {pin.pinned_by_name || 'member'}</Text>
-                </View>
+                <Pressable
+                  key={pin.id}
+                  onPress={() => jumpToMessage(pin.message_id)}
+                  style={({ pressed }: any) => [
+                    styles.pinnedItem,
+                    pressed && { backgroundColor: accentColor + '14' },
+                    Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                  ]}
+                  accessibilityLabel="Jump to pinned message"
+                >
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <Text style={styles.pinnedItemText} numberOfLines={2}>{pin.message_content || '(message)'}</Text>
+                    <Text style={styles.pinnedItemMeta}>pinned by {pin.pinned_by_name || 'member'} · tap to jump</Text>
+                  </View>
+                  <Pressable
+                    onPress={async (e: any) => {
+                      e?.stopPropagation?.();
+                      try {
+                        await unpinMessage(circleId, pin.message_id);
+                        const fresh = await getPinnedMessages(circleId);
+                        setPinnedMessages(fresh);
+                      } catch (err) {
+                        console.warn('[unpin] failed:', err);
+                      }
+                    }}
+                    style={({ pressed }: any) => [
+                      {
+                        paddingHorizontal: 8,
+                        paddingVertical: 4,
+                        borderRadius: 6,
+                        borderWidth: 1,
+                        borderColor: '#334155',
+                        marginLeft: 8,
+                      },
+                      pressed && { backgroundColor: '#ef444420', borderColor: '#ef4444' },
+                    ]}
+                    accessibilityLabel="Unpin this message"
+                  >
+                    <Text style={{ color: '#94a3b8', fontSize: 9, fontWeight: '900', letterSpacing: 1 }}>UNPIN</Text>
+                  </Pressable>
+                </Pressable>
               ))}
             </View>
           )}
@@ -9094,6 +9131,7 @@ const styles = StyleSheet.create({
   pinnedItem: {
     backgroundColor: '#222222', borderRadius: 12, padding: 10,
     borderLeftWidth: 3, borderLeftColor: '#f59e0b',
+    flexDirection: 'row', alignItems: 'center',
   },
   pinnedItemText: { fontSize: 13, color: '#ccc', lineHeight: 18 },
   pinnedItemMeta: { fontSize: 11, color: '#666', marginTop: 4 },
