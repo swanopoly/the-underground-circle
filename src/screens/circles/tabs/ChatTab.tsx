@@ -70,6 +70,8 @@ import { parseMultiAgentRequest, makeAliasResolver, BLACKSWAN_ALIASES } from '..
 import SearchResultsCard, { type SearchResultRow } from './chat/SearchResultsCard';
 import CommandsHelpCard from './chat/CommandsHelpCard';
 import AssignPickerCard, { type AssignPickerAgent } from './chat/AssignPickerCard';
+import BridgeDiagCard from './chat/BridgeDiagCard';
+import { probeBridges, type BridgeProbeResult } from '../../../lib/bridgeHealthDiag';
 import RunCostDrawer from './chat/RunCostDrawer';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
@@ -547,6 +549,8 @@ type ChatMessage = {
   commandsHelp?: boolean;
   /** Live agents to render under a /assign picker. */
   assignPickerAgents?: AssignPickerAgent[];
+  /** Bridge probe results to render under a /diag card. */
+  bridgeDiagResults?: BridgeProbeResult[];
   isPending?: boolean;
 };
 
@@ -2597,7 +2601,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return { message: msg, dbIdPromise };
   };
 
-  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; fileTaskResult?: NormalizedFileTaskResult; fileTaskToolName?: string; terminalResult?: TerminalRunResult; dispatchPayload?: { dispatch: DispatchResult; sessionName: string; bridge: string; task: string }; automationProposal?: AutomationProposal; searchResults?: { query: string; rows: SearchResultRow[] }; commandsHelp?: boolean; assignPickerAgents?: AssignPickerAgent[] }) => {
+  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; fileTaskResult?: NormalizedFileTaskResult; fileTaskToolName?: string; terminalResult?: TerminalRunResult; dispatchPayload?: { dispatch: DispatchResult; sessionName: string; bridge: string; task: string }; automationProposal?: AutomationProposal; searchResults?: { query: string; rows: SearchResultRow[] }; commandsHelp?: boolean; assignPickerAgents?: AssignPickerAgent[]; bridgeDiagResults?: BridgeProbeResult[] }) => {
     const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const msg: ChatMessage = {
       id: msgId,
@@ -2631,6 +2635,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       searchResults: extra?.searchResults,
       commandsHelp: extra?.commandsHelp,
       assignPickerAgents: extra?.assignPickerAgents,
+      bridgeDiagResults: extra?.bridgeDiagResults,
       isPending: false,
     };
 
@@ -3725,6 +3730,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // /pins — show pinned messages
     if (lowerContent === '/pins' || lowerContent === '/pinned') {
       setShowPinned(!showPinned);
+      return;
+    }
+
+    // /diag — probe every local bridge and render a status card with
+    // healthy/degraded/offline dots and copy-able restart commands.
+    // Brings `npm run bridges:doctor` into chat.
+    if (lowerContent === '/diag' || lowerContent === '/bridges') {
+      addBotMessage('Probing bridges…', undefined, { localOnly: true });
+      probeBridges()
+        .then((results) => {
+          addBotMessage(`${results.filter(r => r.status === 'healthy').length}/${results.length} bridges healthy`, undefined, {
+            localOnly: true,
+            bridgeDiagResults: results,
+          });
+        })
+        .catch((err) => addBotMessage(`Bridge probe failed: ${err?.message || 'unknown'}`, undefined, { localOnly: true }));
       return;
     }
 
@@ -5446,6 +5467,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 onPick={(agent) => {
                   setInput(`/assign @${agent.name} `);
                   inputRef.current?.focus();
+                }}
+              />
+            ) : null}
+            {item.bridgeDiagResults ? (
+              <BridgeDiagCard
+                results={item.bridgeDiagResults}
+                accentColor={accentColor}
+                onRefresh={async () => {
+                  const fresh = await probeBridges();
+                  setMessages(prev => prev.map(m => m.id === item.id ? { ...m, bridgeDiagResults: fresh } : m));
                 }}
               />
             ) : null}
