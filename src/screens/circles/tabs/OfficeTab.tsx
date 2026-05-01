@@ -313,6 +313,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [appearances, setAppearances] = useState<Record<string, AgentAppearance>>({});
   const appearancesLoadedRef = useRef(false);
   const prefsLoadedRef = useRef(false);
+  // Flipped true once budget/idle have been loaded from local + server,
+  // so the save useEffect doesn't fire on the initial load.
+  const budgetLoadedRef = useRef(false);
+  const idleLoadedRef = useRef(false);
   const [activeCatalogCat, setActiveCatalogCat] = useState<string>('connected');
   const catalogScrollRef = useRef<ScrollView>(null);
   const [whiteboardNotes, setWhiteboardNotes] = useState<string[]>([]);
@@ -1461,6 +1465,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               agentNames?: Record<string, string>;
               telegramConfig?: { botToken?: string; chatId?: string };
               whiteboardNotes?: string[];
+              budgetConfig?: BudgetConfig;
+              idleConfig?: IdleBehaviorConfig;
+              agentFilterMode?: AgentFilterMode;
             };
             // Remote agent names override local (more durable)
             if (remote.agentNames && Object.keys(remote.agentNames).length > 0) {
@@ -1477,6 +1484,26 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             // Remote whiteboard notes override local if non-empty
             if (remote.whiteboardNotes && remote.whiteboardNotes.length > 0) {
               setWhiteboardNotes(remote.whiteboardNotes);
+            }
+            // Remote budget config — overrides local. Set the loaded ref
+            // BEFORE setBudgetConfig so the save useEffect doesn't fire
+            // and re-write what we just loaded.
+            if (remote.budgetConfig && typeof remote.budgetConfig === 'object') {
+              budgetLoadedRef.current = true;
+              setBudgetConfig(remote.budgetConfig);
+            }
+            // Remote idle behavior config — same load-then-flag dance.
+            if (remote.idleConfig && typeof remote.idleConfig === 'object') {
+              idleLoadedRef.current = true;
+              setIdleConfig(remote.idleConfig);
+              idleConfigRef.current = remote.idleConfig;
+            }
+            // Agent filter mode (which subset of agents the user
+            // wants to see — mine / all / active / bonded).
+            if (remote.agentFilterMode &&
+                ['all', 'mine', 'active', 'bonded'].includes(remote.agentFilterMode)) {
+              setAgentFilterMode(remote.agentFilterMode);
+              try { window.localStorage?.setItem('uc_office_agent_filter_v1', remote.agentFilterMode); } catch {}
             }
           }
 
@@ -1526,11 +1553,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           setSessionTags(merged);
         }).catch(() => {});
 
-        loadBudgetConfig().then(setBudgetConfig).catch(() => {});
+        loadBudgetConfig().then(cfg => {
+          setBudgetConfig(cfg);
+          budgetLoadedRef.current = true;
+        }).catch(() => { budgetLoadedRef.current = true; });
         loadIdleConfig().then(cfg => {
           setIdleConfig(cfg);
           idleConfigRef.current = cfg;
-        }).catch(() => {});
+          idleLoadedRef.current = true;
+        }).catch(() => { idleLoadedRef.current = true; });
       }, 350);
 
       (initRef as any)._cancelDeferredEnrichment = cancelDeferredEnrichment;
@@ -2170,6 +2201,28 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     storage.setItem(STORAGE_KEY_WHITEBOARD_NOTES, JSON.stringify(whiteboardNotes)).catch(() => {});
     pushOfficePreferences({ whiteboardNotes });
   }, [whiteboardNotes]);
+
+  // Save budget config to office_preferences when it changes. Local
+  // copy is already maintained by handleBudgetConfigChange via
+  // saveBudgetConfig — this just adds the durable copy.
+  useEffect(() => {
+    if (!budgetLoadedRef.current) return;
+    pushOfficePreferences({ budgetConfig });
+  }, [budgetConfig, pushOfficePreferences]);
+
+  // Save idle config to office_preferences when it changes.
+  useEffect(() => {
+    if (!idleLoadedRef.current) return;
+    pushOfficePreferences({ idleConfig });
+  }, [idleConfig, pushOfficePreferences]);
+
+  // Save agent filter mode (mine / all / active / bonded) to
+  // office_preferences too so the user's preferred view persists
+  // across devices.
+  useEffect(() => {
+    if (!prefsLoadedRef.current) return;
+    pushOfficePreferences({ agentFilterMode });
+  }, [agentFilterMode, pushOfficePreferences]);
 
   // Fetch cron jobs from all connected OpenSwan instances
   const connectedCount = connections.filter(c => c.status === 'connected').length;
