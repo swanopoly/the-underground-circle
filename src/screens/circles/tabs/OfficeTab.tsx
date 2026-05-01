@@ -27,6 +27,7 @@ import {
 } from '../../../lib/officeConfig';
 import { validateOfficeLayout } from '../../../lib/officeValidation';
 import { getBridgeUrl, getBridgeEnvironment } from '../../../lib/bridgeEnvironment';
+import ConnectAllBridgesPanel, { isConnectPanelDismissed } from '../../../components/office/ConnectAllBridgesPanel';
 import { useCustomThemes, customThemeToOfficeTheme, CUSTOM_THEME_PREFIX, CustomThemeRecord } from '../../../services/customThemes';
 import { enrichAgentsWithCache, enrichSessionsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
 import { restoreAllAgents, recordAgentActivity, renameAgent as renameAgentIdentity, updateAgentIdentity, getAgentIdentityByAgent, getAgentIdentityKey, applyIdentityToAgent } from '../../../lib/agentIdentity';
@@ -1477,6 +1478,35 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             if (remote.whiteboardNotes && remote.whiteboardNotes.length > 0) {
               setWhiteboardNotes(remote.whiteboardNotes);
             }
+          }
+
+          // ── Seed-up: if the columns became available this session but
+          //    the server has no copy yet, push the local snapshot up so
+          //    the user doesn't have to touch anything to back up. Covers
+          //    the case where the user customized for weeks while the
+          //    migration was missing — first reload after applying it
+          //    now syncs without any further user action.
+          const serverLayout = layoutRes.data?.office_layout as { floors?: OfficeFloor[] } | null | undefined;
+          const serverHasNoLayout = _profileHasOfficeLayout &&
+            (!serverLayout || !serverLayout.floors || serverLayout.floors.length === 0);
+          if (serverHasNoLayout && bestFloors.length > 0) {
+            const seedLayout = { floors: bestFloors, currentFloorId: bestFloorId, updatedAt: Date.now() };
+            const validation = validateOfficeLayout(seedLayout);
+            if (validation.valid) {
+              supabase.from('profiles')
+                .update({ office_layout: validation.sanitizedLayout })
+                .eq('id', authUser.id)
+                .then(({ error }) => { if (error) _profileHasOfficeLayout = false; });
+            }
+          }
+          const serverApp = appearanceRes.data?.agent_appearance as Record<string, unknown> | null | undefined;
+          const serverHasNoAppearance = _profileHasAgentAppearance &&
+            (!serverApp || Object.keys(serverApp).length === 0);
+          if (serverHasNoAppearance && Object.keys(localAppearances).length > 0) {
+            supabase.from('profiles')
+              .update({ agent_appearance: localAppearances })
+              .eq('id', authUser.id)
+              .then(({ error }) => { if (error) _profileHasAgentAppearance = false; });
           }
         }
       } catch {}
@@ -3533,7 +3563,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         />
       )}
 
-      <BridgeUnavailableBanner />
+      <OfficeConnectBridgesSection circleId={circleId} />
 
       {/* Marquee ticker removed — too noisy for the Office view */}
 
@@ -5026,6 +5056,30 @@ const CONNECTION_STATUS_UI = {
 // Shown on production web where localhost bridges (Claude Code, Codex, Gemini,
 // Cursor, OpenSwan) can't be reached. Explains *why* the agent list is empty
 // instead of leaving the user staring at an unhelpful blank panel.
+/**
+ * OfficeConnectBridgesSection — wraps the new ConnectAllBridgesPanel
+ * with the per-circle dismiss flag and falls back to the legacy
+ * BridgeUnavailableBanner for environments where the bridges
+ * truly cannot be reached (e.g. native mobile users on a build that
+ * predates the panel).
+ */
+function OfficeConnectBridgesSection({ circleId }: { circleId: string }) {
+  const [dismissed, setDismissed] = useState<boolean>(() => isConnectPanelDismissed(circleId));
+
+  if (dismissed) {
+    // After explicit dismiss the legacy banner still surfaces the
+    // "no bridges reachable" message in case the env is unreachable.
+    return <BridgeUnavailableBanner />;
+  }
+
+  return (
+    <ConnectAllBridgesPanel
+      circleId={circleId}
+      onDismiss={() => setDismissed(true)}
+    />
+  );
+}
+
 function BridgeUnavailableBanner() {
   const env = getBridgeEnvironment();
   const [dismissed, setDismissed] = useState(false);
