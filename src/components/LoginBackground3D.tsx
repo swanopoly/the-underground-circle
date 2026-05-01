@@ -2103,135 +2103,6 @@ function UndergroundAgent() {
           </mesh>
         ))}
       </group>
-      {/* Phoenix — red voxel bird that loops around the swan. Centered
-          above the swan head with a wide orbit so it's clearly visible
-          rather than hidden behind the body. Voxels are 2x scene size
-          so the bird reads instantly. */}
-      <PhoenixOrbit
-        center={[(-7) * s, (1 + 12) * s, 0]}
-        radius={s * 14}
-        voxelSize={s * 2}
-      />
-    </group>
-  );
-}
-
-/**
- * PhoenixOrbit — small voxel phoenix flying a figure-8 around a 3D
- * point in scene-local space. Voxels match the swan/character scale
- * so it reads as part of the same scene. Wings flap; tail embers
- * pulse; orbit completes one loop every ~4 seconds.
- */
-function PhoenixOrbit({
-  center,
-  radius,
-  voxelSize,
-}: {
-  center: [number, number, number];
-  radius: number;
-  voxelSize: number;
-}) {
-  const groupRef = useRef<THREE.Group>(null);
-  const wingRef = useRef<THREE.Group>(null);
-  const tStart = useRef(performance.now() / 1000);
-
-  // Phoenix palette — bright with high emissive so it glows in the
-  // dark chamber.
-  const RED  = useMemo(() => new THREE.Color('#ef4444'), []);
-  const ORG  = useMemo(() => new THREE.Color('#f97316'), []);
-  const YEL  = useMemo(() => new THREE.Color('#fbbf24'), []);
-  const DEEP = useMemo(() => new THREE.Color('#991b1b'), []);
-
-  const v = voxelSize;
-  const v92 = v * 0.92;
-
-  useFrame(() => {
-    const t = performance.now() / 1000 - tStart.current;
-    const theta = (t / 5.5) * Math.PI * 2;  // one loop per 5.5s — slow enough to read
-    if (groupRef.current) {
-      // Figure-8: cos for x, sin(2θ)/2 for y, sin for z so the bird
-      // passes in front of and behind the swan over each cycle.
-      groupRef.current.position.set(
-        center[0] + Math.cos(theta) * radius,
-        center[1] + Math.sin(theta * 2) * (radius * 0.45),
-        center[2] + Math.sin(theta) * (radius * 0.6),
-      );
-      // Face the direction of travel — yaw around Y to point along
-      // the tangent of the orbit.
-      groupRef.current.rotation.y = Math.atan2(
-        Math.cos(theta),  // dz/dθ
-        -Math.sin(theta), // dx/dθ
-      );
-    }
-    if (wingRef.current) {
-      // Flap — sinusoidal scaleY between 0.5 and 1.2.
-      const flap = 0.85 + Math.sin(t * 14) * 0.35;
-      wingRef.current.scale.y = flap;
-    }
-  });
-
-  // Body voxel layout — small, bird-shaped. Coordinates are local to
-  // the orbit group, so the whole thing translates together.
-  const bodyVoxels: Array<{ pos: [number, number, number]; color: THREE.Color }> = [
-    // Core body row
-    { pos: [-v, 0, 0],     color: DEEP },
-    { pos: [0, 0, 0],      color: RED },
-    { pos: [v, 0, 0],      color: ORG },
-    // Belly
-    { pos: [-v, -v, 0],    color: RED },
-    { pos: [0, -v, 0],     color: ORG },
-    { pos: [v, -v, 0],     color: YEL },
-    // Head bump on top
-    { pos: [v, v, 0],      color: RED },
-    // Beak — small yellow tip in front
-    { pos: [v * 2, v, 0],  color: YEL },
-    // Tail flames trailing behind
-    { pos: [-v * 2, 0, 0], color: ORG },
-    { pos: [-v * 3, -v, 0],color: YEL },
-    { pos: [-v * 2, -v, 0],color: RED },
-  ];
-
-  // Wing voxels — drawn as a separate group so they can flap. Two
-  // wings (top + bottom) to suggest flapping motion.
-  const wingVoxels: Array<{ pos: [number, number, number]; color: THREE.Color }> = [
-    { pos: [-v, v, 0],     color: RED },
-    { pos: [0, v, 0],      color: ORG },
-    { pos: [v, v, 0],      color: YEL },
-    { pos: [-v, v * 2, 0], color: DEEP },
-    { pos: [0, v * 2, 0],  color: RED },
-  ];
-
-  return (
-    <group ref={groupRef} position={center}>
-      {/* Bright red glow point so the bird casts visible light on
-          nearby geometry as it passes. */}
-      <pointLight color={'#ff5533'} intensity={3.5} distance={v * 14} decay={1.5} />
-      {bodyVoxels.map((bv, i) => (
-        <mesh key={`pb${i}`} position={bv.pos}>
-          <boxGeometry args={[v92, v92, v92]} />
-          <meshStandardMaterial
-            color={bv.color}
-            emissive={bv.color}
-            emissiveIntensity={2.8}
-            roughness={0.2}
-            metalness={0.0}
-          />
-        </mesh>
-      ))}
-      <group ref={wingRef}>
-        {wingVoxels.map((wv, i) => (
-          <mesh key={`pw${i}`} position={wv.pos}>
-            <boxGeometry args={[v92, v92, v92]} />
-            <meshStandardMaterial
-              color={wv.color}
-              emissive={wv.color}
-              emissiveIntensity={2.5}
-              roughness={0.2}
-              metalness={0.0}
-            />
-          </mesh>
-        ))}
-      </group>
     </group>
   );
 }
@@ -2955,6 +2826,239 @@ function Spaceship() {
   );
 }
 
+// ─── Phoenix flying around the portal/planet ────────────────────────────────
+//
+// Independent of the agent group so the portal-dive transition doesn't
+// pull it in. Voxel-detailed sprite (~70 voxels): full body with chest
+// gradient, head with eye + beak, three-feather crest, layered wings
+// that flap, and a five-feather flowing tail.
+//
+// Flight: wide banking arc around the planet — elliptical orbit in
+// X/Z plane with gentle Y undulation, plus banking roll on Z based
+// on lateral velocity. One lap every ~12s so the eye can track it.
+
+function PortalPhoenix() {
+  const groupRef = useRef<THREE.Group>(null);
+  const wingRef = useRef<THREE.Group>(null);
+  const tailRef = useRef<THREE.Group>(null);
+  const tStart = useRef(performance.now() / 1000);
+
+  // Phoenix is anchored above the planet (planet center is at (0,-2,0),
+  // swan king sits ~8.3 above that on the tilt axis). We orbit around
+  // a point slightly above and in front of the swan king.
+  const orbitCenter = useMemo(() => new THREE.Vector3(0, 6.5, 1.5), []);
+  const orbitRadiusX = 7.5;
+  const orbitRadiusZ = 6.0;
+  const orbitPeriod = 12.0; // seconds
+
+  // Phoenix scale — comparable to the swan king at PX = 0.18.
+  const v = 0.16;
+  const v92 = v * 0.92;
+
+  // Color palette — wide gradient so the bird reads as flame, not flat.
+  const DEEP_RED   = useMemo(() => new THREE.Color('#7f1d1d'), []);
+  const RED        = useMemo(() => new THREE.Color('#dc2626'), []);
+  const BRIGHT_RED = useMemo(() => new THREE.Color('#ef4444'), []);
+  const ORANGE     = useMemo(() => new THREE.Color('#f97316'), []);
+  const BRIGHT_OR  = useMemo(() => new THREE.Color('#fb923c'), []);
+  const YELLOW     = useMemo(() => new THREE.Color('#fbbf24'), []);
+  const BRIGHT_YEL = useMemo(() => new THREE.Color('#fde047'), []);
+  const HOT_CORE   = useMemo(() => new THREE.Color('#fef3c7'), []);
+  const EYE_DARK   = useMemo(() => new THREE.Color('#1f1208'), []);
+
+  // Body voxels — coordinate convention: +x is forward (direction
+  // of flight), +y is up, ±z is wing-spread (lateral).
+  const bodyVoxels = useMemo<Array<{ pos: [number, number, number]; color: THREE.Color }>>(() => {
+    const list: Array<{ pos: [number, number, number]; color: THREE.Color }> = [];
+    const add = (x: number, y: number, z: number, c: THREE.Color) =>
+      list.push({ pos: [x * v, y * v, z * v], color: c });
+
+    // Core body — 4 long, 2 tall, 2 thick. Gradient bottom→top: deep
+    // red belly, bright red flanks, orange/yellow back.
+    for (let x = -1; x <= 2; x++) {
+      add(x, 0, -0.5, RED);
+      add(x, 0,  0.5, RED);
+      add(x, 1, -0.5, ORANGE);
+      add(x, 1,  0.5, ORANGE);
+    }
+    // Hot core in chest — single bright voxel that pulses.
+    add(0, 0,  0, BRIGHT_YEL);
+    add(1, 0,  0, HOT_CORE);
+    // Lower belly (drops one voxel below body).
+    for (let x = -1; x <= 1; x++) {
+      add(x, -1, -0.5, BRIGHT_RED);
+      add(x, -1,  0.5, BRIGHT_RED);
+    }
+    add(0, -1, 0, RED);
+
+    // Neck — bridges body to head, slight forward tilt.
+    add(2, 1,  0, BRIGHT_RED);
+    add(2, 2,  0, RED);
+
+    // Head — 2x2x2 cube up and forward of the neck.
+    add(2.5, 2, -0.5, BRIGHT_RED);
+    add(2.5, 2,  0.5, BRIGHT_RED);
+    add(2.5, 3, -0.5, ORANGE);
+    add(2.5, 3,  0.5, ORANGE);
+    add(3.5, 2, -0.5, BRIGHT_RED);
+    add(3.5, 2,  0.5, BRIGHT_RED);
+    add(3.5, 3, -0.5, ORANGE);
+    add(3.5, 3,  0.5, ORANGE);
+    // Eye — bright yellow with dark pupil on each side of the head.
+    add(3.0, 2.5, -1.0, BRIGHT_YEL);
+    add(3.0, 2.5,  1.0, BRIGHT_YEL);
+    add(3.2, 2.5, -1.0, EYE_DARK);
+    add(3.2, 2.5,  1.0, EYE_DARK);
+
+    // Beak — yellow tip pointing forward, with a darker shadow line.
+    add(4.5, 2.3, 0, YELLOW);
+    add(4.0, 2.0, 0, BRIGHT_YEL);
+    add(4.5, 2.0, 0, ORANGE);
+
+    // Crest feathers — three flames jutting up from the back of the head.
+    add(2.0, 4, 0, ORANGE);
+    add(2.5, 4.5, 0, BRIGHT_YEL);
+    add(2.0, 5, 0, YELLOW);
+    add(3.0, 4.5, 0, ORANGE);
+    add(3.0, 5, 0, BRIGHT_YEL);
+    add(2.5, 5.5, 0, HOT_CORE);
+
+    return list;
+  }, [v, RED, BRIGHT_RED, ORANGE, BRIGHT_OR, YELLOW, BRIGHT_YEL, HOT_CORE, DEEP_RED, EYE_DARK]);
+
+  // Wing voxels — drawn in a separate group that rotates around the
+  // wing-root axis to flap. Two wings (mirrored on z).
+  const wingVoxels = useMemo<Array<{ pos: [number, number, number]; color: THREE.Color }>>(() => {
+    const list: Array<{ pos: [number, number, number]; color: THREE.Color }> = [];
+    const add = (x: number, y: number, z: number, c: THREE.Color) =>
+      list.push({ pos: [x * v, y * v, z * v], color: c });
+
+    // Each wing fan: inner row is dark red attached to body, middle
+    // row is bright red, tips are orange/yellow flame feathers.
+    for (const sign of [1, -1]) {
+      // Inner shoulder
+      add(-1, 2, sign * 1.0, DEEP_RED);
+      add( 0, 2, sign * 1.0, RED);
+      add( 1, 2, sign * 1.0, RED);
+      // Mid wing
+      add(-1, 2.5, sign * 2.0, BRIGHT_RED);
+      add( 0, 2.5, sign * 2.0, BRIGHT_RED);
+      add( 1, 2.5, sign * 2.0, ORANGE);
+      // Wing tips — feathers reaching outward + back
+      add(-2, 3, sign * 3.0, ORANGE);
+      add(-1, 3, sign * 3.0, BRIGHT_OR);
+      add( 0, 3, sign * 3.0, YELLOW);
+      add( 1, 3, sign * 3.0, BRIGHT_YEL);
+      // Tip flames extending further out
+      add(-2, 3.5, sign * 4.0, YELLOW);
+      add(-1, 3.5, sign * 4.0, BRIGHT_YEL);
+      add( 0, 3.5, sign * 4.0, HOT_CORE);
+      // Trailing feathers angled down/back
+      add(-3, 2, sign * 2.0, BRIGHT_RED);
+      add(-3, 2.5, sign * 3.0, ORANGE);
+    }
+    return list;
+  }, [v, DEEP_RED, RED, BRIGHT_RED, ORANGE, BRIGHT_OR, YELLOW, BRIGHT_YEL, HOT_CORE]);
+
+  // Tail voxels — long flowing feathers extending back from the body.
+  const tailVoxels = useMemo<Array<{ pos: [number, number, number]; color: THREE.Color }>>(() => {
+    const list: Array<{ pos: [number, number, number]; color: THREE.Color }> = [];
+    const add = (x: number, y: number, z: number, c: THREE.Color) =>
+      list.push({ pos: [x * v, y * v, z * v], color: c });
+
+    // Center tail (longest)
+    add(-2, 0, 0, BRIGHT_RED);
+    add(-3, 0.3, 0, RED);
+    add(-4, 0.5, 0, ORANGE);
+    add(-5, 0.7, 0, BRIGHT_OR);
+    add(-6, 0.9, 0, YELLOW);
+    add(-7, 1.1, 0, BRIGHT_YEL);
+    // Side tail feathers (left + right)
+    for (const sign of [1, -1]) {
+      add(-2, 0.2, sign * 0.5, RED);
+      add(-3, 0.4, sign * 0.7, ORANGE);
+      add(-4, 0.6, sign * 0.9, BRIGHT_OR);
+      add(-5, 0.8, sign * 1.1, YELLOW);
+      add(-6, 1.0, sign * 1.2, BRIGHT_YEL);
+    }
+    // Outer wispy feather tips
+    for (const sign of [1, -1]) {
+      add(-3, -0.2, sign * 1.0, BRIGHT_RED);
+      add(-4, 0.1, sign * 1.4, ORANGE);
+      add(-5, 0.3, sign * 1.6, YELLOW);
+    }
+    return list;
+  }, [v, BRIGHT_RED, RED, ORANGE, BRIGHT_OR, YELLOW, BRIGHT_YEL]);
+
+  useFrame(() => {
+    const t = performance.now() / 1000 - tStart.current;
+    const theta = (t / orbitPeriod) * Math.PI * 2;
+    if (groupRef.current) {
+      // Wide elliptical orbit in X/Z plane around the planet, with
+      // gentle Y undulation so the bird rises over the crown then
+      // drops behind.
+      const x = orbitCenter.x + Math.cos(theta) * orbitRadiusX;
+      const z = orbitCenter.z + Math.sin(theta) * orbitRadiusZ;
+      const y = orbitCenter.y + Math.sin(theta * 1.5) * 1.2;
+      groupRef.current.position.set(x, y, z);
+      // Yaw to face the direction of travel (tangent to the orbit).
+      const tangentX = -Math.sin(theta) * orbitRadiusX;
+      const tangentZ =  Math.cos(theta) * orbitRadiusZ;
+      groupRef.current.rotation.y = Math.atan2(tangentX, tangentZ);
+      // Bank into the turn — roll on Z based on lateral velocity sign.
+      groupRef.current.rotation.z = Math.cos(theta) * 0.18;
+      // Slight pitch as it rises and falls.
+      groupRef.current.rotation.x = Math.cos(theta * 1.5) * 0.10;
+    }
+    if (wingRef.current) {
+      // Flap: scale Y between 0.55 and 1.25, then a slow pitch dip
+      // on the downstroke for a more bird-like cycle.
+      const flap = 0.9 + Math.sin(t * 9) * 0.35;
+      wingRef.current.scale.y = flap;
+      wingRef.current.rotation.x = Math.sin(t * 9) * 0.18;
+    }
+    if (tailRef.current) {
+      // Tail trails behind with a slight wave — feathers shimmer.
+      tailRef.current.rotation.z = Math.sin(t * 4) * 0.08;
+      tailRef.current.rotation.y = Math.sin(t * 2.3) * 0.05;
+    }
+  });
+
+  const renderMesh = (
+    bv: { pos: [number, number, number]; color: THREE.Color },
+    keyPrefix: string,
+    i: number,
+    intensity = 2.6,
+  ) => (
+    <mesh key={`${keyPrefix}${i}`} position={bv.pos}>
+      <boxGeometry args={[v92, v92, v92]} />
+      <meshStandardMaterial
+        color={bv.color}
+        emissive={bv.color}
+        emissiveIntensity={intensity}
+        roughness={0.25}
+        metalness={0.0}
+      />
+    </mesh>
+  );
+
+  return (
+    <group ref={groupRef} position={[orbitCenter.x, orbitCenter.y, orbitCenter.z]}>
+      {/* Bright corona light tracking with the bird so it casts a
+          visible red wash on whatever it passes. */}
+      <pointLight color={'#ff5533'} intensity={4.5} distance={6} decay={1.4} />
+      <pointLight color={'#ffaa44'} intensity={2.2} distance={3} decay={1.8} position={[v, v, 0]} />
+      {bodyVoxels.map((bv, i) => renderMesh(bv, 'pb', i, 2.8))}
+      <group ref={wingRef}>
+        {wingVoxels.map((wv, i) => renderMesh(wv, 'pw', i, 2.5))}
+      </group>
+      <group ref={tailRef}>
+        {tailVoxels.map((tv, i) => renderMesh(tv, 'pt', i, 2.6))}
+      </group>
+    </group>
+  );
+}
+
 // ─── Sand Tiger Guardian (deep inside the portal tunnel) ────────────────────
 
 function SandTigerGuardian() {
@@ -3161,6 +3265,9 @@ export default function LoginBackground3D() {
 
         {/* Black Swan with crown perched on top of the planet */}
         <BlackSwanKing />
+        {/* Phoenix flying around the planet — independent of the agent
+            group so it isn't pulled into the portal during dive. */}
+        <PortalPhoenix />
         <SandTigerGuardian />
         {/* Spotlight on the Black Swan from above-front */}
         <group>
