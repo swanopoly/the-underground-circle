@@ -3262,6 +3262,280 @@ function PortalPhoenix() {
   );
 }
 
+// ─── Alien Flying Saucer orbiting the portal ─────────────────────────────────
+//
+// A detailed voxel UFO with a classic gray alien visible inside the
+// glass dome. Orbits the portal at ~1.5x the phoenix's distance with
+// a different period and inclination so the two paths cross
+// occasionally. Slow Y rotation gives a hovering-disc feel; window
+// rim has a chase light that moves around it.
+
+function AlienSaucer() {
+  const groupRef = useRef<THREE.Group>(null);
+  const discRef = useRef<THREE.Group>(null);
+  const beamRef = useRef<THREE.Mesh>(null);
+  const tStart = useRef(performance.now() / 1000);
+
+  // Orbit center is the planet (slightly above so the saucer doesn't
+  // dive into it). Larger radii than the phoenix so it visibly stays
+  // farther out — viewer sees both at once with the saucer further.
+  const orbitCenter = useMemo(() => new THREE.Vector3(0, 4.0, 1.0), []);
+  const orbitRadiusX = 13.0;
+  const orbitRadiusZ = 11.0;
+  const orbitPeriod = 18.0;
+
+  const v = 0.18;
+  const v92 = v * 0.92;
+
+  // Color palette — metallic silver hull, glowing windows, alien
+  // green/cyan dome, classic gray alien.
+  const HULL       = useMemo(() => new THREE.Color('#b6bec8'), []);
+  const HULL_HI    = useMemo(() => new THREE.Color('#dfe6ed'), []);
+  const HULL_DK    = useMemo(() => new THREE.Color('#6c757e'), []);
+  const HULL_SHA   = useMemo(() => new THREE.Color('#3e464e'), []);
+  const RIM_GOLD   = useMemo(() => new THREE.Color('#fde047'), []);
+  const PANEL      = useMemo(() => new THREE.Color('#0f1418'), []);
+  const RIVET      = useMemo(() => new THREE.Color('#94a3b0'), []);
+  const DOME_GLASS = useMemo(() => new THREE.Color('#7dd3fc'), []);
+  const DOME_HI    = useMemo(() => new THREE.Color('#bae6fd'), []);
+  const DOME_DK    = useMemo(() => new THREE.Color('#22d3ee'), []);
+  const ALIEN_SKIN = useMemo(() => new THREE.Color('#9ad9a3'), []);
+  const ALIEN_DK   = useMemo(() => new THREE.Color('#5e8a66'), []);
+  const ALIEN_HI   = useMemo(() => new THREE.Color('#cdf0d2'), []);
+  const EYE_BLACK  = useMemo(() => new THREE.Color('#040508'), []);
+  const EYE_SHEEN  = useMemo(() => new THREE.Color('#3a4458'), []);
+  const ANTENNA    = useMemo(() => new THREE.Color('#2e7d4f'), []);
+  const BEAM_GREEN = useMemo(() => new THREE.Color('#22ff77'), []);
+
+  // Saucer hull voxels — rings + dome. Coordinate convention:
+  // +x is starboard (right), +y up, +z forward. Disc lies in x/z
+  // plane.
+  const hullVoxels = useMemo<Array<{ pos: [number, number, number]; size: [number, number, number]; color: THREE.Color }>>(() => {
+    const list: Array<{ pos: [number, number, number]; size: [number, number, number]; color: THREE.Color }> = [];
+    const add = (x: number, y: number, z: number, w: number, h: number, d: number, c: THREE.Color) =>
+      list.push({ pos: [x * v, y * v, z * v], size: [w * v92, h * v92, d * v92], color: c });
+
+    // Bottom keel — narrow column under the disc.
+    add(0, -1.5, 0, 1.6, 0.8, 1.6, HULL_DK);
+    add(0, -2.0, 0, 1.0, 0.5, 1.0, HULL_SHA);
+
+    // Lower disc taper — small underside that flares out.
+    add(0, -1.0, 0, 4.5, 0.7, 4.5, HULL_DK);
+    add(0, -0.7, 0, 6.0, 0.6, 6.0, HULL);
+
+    // Main disc ring (widest part).
+    add(0, -0.2, 0, 8.0, 0.8, 8.0, HULL);
+    add(0, -0.2, 0, 8.5, 0.5, 8.5, HULL_HI);
+    // Edge bevel
+    for (const sx of [-3.6, 3.6]) {
+      add(sx, -0.2, 0, 0.7, 0.7, 7.5, HULL_DK);
+    }
+    for (const sz of [-3.6, 3.6]) {
+      add(0, -0.2, sz, 7.5, 0.7, 0.7, HULL_DK);
+    }
+
+    // Window ring — 12 yellow lights around the rim.
+    for (let i = 0; i < 12; i++) {
+      const ang = (i / 12) * Math.PI * 2;
+      const wr = 3.8;
+      add(Math.cos(ang) * wr, 0.2, Math.sin(ang) * wr, 0.6, 0.6, 0.6, RIM_GOLD);
+    }
+
+    // Upper rim taper — narrows back in toward the dome base.
+    add(0, 0.6, 0, 6.5, 0.5, 6.5, HULL);
+    add(0, 0.9, 0, 5.0, 0.5, 5.0, HULL_HI);
+    add(0, 1.2, 0, 3.8, 0.5, 3.8, HULL_DK);
+
+    // Panel seams — dark stripes radiating out for sci-fi detail.
+    for (const ang of [0, Math.PI / 2, Math.PI, Math.PI * 1.5]) {
+      add(Math.cos(ang) * 2.0, 0.6, Math.sin(ang) * 2.0, 0.3, 0.4, 0.3, PANEL);
+      add(Math.cos(ang) * 3.2, 0.6, Math.sin(ang) * 3.2, 0.3, 0.4, 0.3, PANEL);
+    }
+    // Rivets around the upper rim
+    for (let i = 0; i < 16; i++) {
+      const ang = (i / 16) * Math.PI * 2;
+      add(Math.cos(ang) * 2.8, 1.05, Math.sin(ang) * 2.8, 0.18, 0.18, 0.18, RIVET);
+    }
+
+    return list;
+  }, [v, v92, HULL, HULL_HI, HULL_DK, HULL_SHA, RIM_GOLD, PANEL, RIVET]);
+
+  // Dome voxels — stepped hemisphere of cyan glass.
+  const domeVoxels = useMemo<Array<{ pos: [number, number, number]; size: [number, number, number]; color: THREE.Color }>>(() => {
+    const list: Array<{ pos: [number, number, number]; size: [number, number, number]; color: THREE.Color }> = [];
+    const add = (x: number, y: number, z: number, w: number, h: number, d: number, c: THREE.Color) =>
+      list.push({ pos: [x * v, y * v, z * v], size: [w * v92, h * v92, d * v92], color: c });
+    // Base ring of dome — wide, slightly transparent feel via slight
+    // size shrink (we don't actually use opacity to keep emissive
+    // glow visible).
+    add(0, 1.5, 0, 3.6, 0.5, 3.6, DOME_DK);
+    add(0, 1.8, 0, 3.4, 0.5, 3.4, DOME_GLASS);
+    // Mid dome
+    add(0, 2.2, 0, 3.0, 0.5, 3.0, DOME_GLASS);
+    add(0, 2.6, 0, 2.6, 0.5, 2.6, DOME_HI);
+    // Upper dome
+    add(0, 3.0, 0, 2.0, 0.5, 2.0, DOME_GLASS);
+    add(0, 3.4, 0, 1.4, 0.5, 1.4, DOME_HI);
+    // Apex
+    add(0, 3.7, 0, 0.7, 0.4, 0.7, DOME_HI);
+    return list;
+  }, [v, v92, DOME_GLASS, DOME_HI, DOME_DK]);
+
+  // Alien voxels — sits inside the dome, classic gray alien with
+  // bulbous head, big almond eyes, slim body.
+  const alienVoxels = useMemo<Array<{ pos: [number, number, number]; size: [number, number, number]; color: THREE.Color }>>(() => {
+    const list: Array<{ pos: [number, number, number]; size: [number, number, number]; color: THREE.Color }> = [];
+    const add = (x: number, y: number, z: number, w: number, h: number, d: number, c: THREE.Color) =>
+      list.push({ pos: [x * v, y * v, z * v], size: [w * v92, h * v92, d * v92], color: c });
+    // Body — small torso seated at saucer floor level.
+    add(0, 1.7, 0, 0.9, 0.6, 0.7, ALIEN_SKIN);
+    add(0, 1.5, 0, 1.0, 0.4, 0.8, ALIEN_DK);
+    // Shoulder ridges
+    add(-0.5, 1.9, 0, 0.3, 0.3, 0.3, ALIEN_SKIN);
+    add( 0.5, 1.9, 0, 0.3, 0.3, 0.3, ALIEN_SKIN);
+    // Slim arms reaching forward to the controls.
+    add(-0.55, 1.7, 0.4, 0.18, 0.5, 0.18, ALIEN_SKIN);
+    add( 0.55, 1.7, 0.4, 0.18, 0.5, 0.18, ALIEN_SKIN);
+    add(-0.55, 1.4, 0.55, 0.20, 0.18, 0.18, ALIEN_HI);
+    add( 0.55, 1.4, 0.55, 0.20, 0.18, 0.18, ALIEN_HI);
+    // Neck
+    add(0, 2.15, 0, 0.30, 0.30, 0.30, ALIEN_DK);
+    // Head — bulbous, larger than body.
+    add(0, 2.55, 0, 1.1, 0.7, 1.0, ALIEN_SKIN);
+    add(0, 2.85, 0, 0.9, 0.4, 0.9, ALIEN_HI);
+    // Lower jaw
+    add(0, 2.30, 0.05, 0.7, 0.30, 0.50, ALIEN_DK);
+    // Eye sockets
+    add(-0.30, 2.55, -0.55, 0.30, 0.55, 0.10, EYE_BLACK);
+    add( 0.30, 2.55, -0.55, 0.30, 0.55, 0.10, EYE_BLACK);
+    // Eye sheen highlights
+    add(-0.32, 2.70, -0.62, 0.10, 0.18, 0.04, EYE_SHEEN);
+    add( 0.28, 2.70, -0.62, 0.10, 0.18, 0.04, EYE_SHEEN);
+    // Tiny mouth slit
+    add(0, 2.30, -0.50, 0.25, 0.05, 0.06, EYE_BLACK);
+    // Nostril dots
+    add(-0.10, 2.45, -0.55, 0.06, 0.06, 0.04, EYE_BLACK);
+    add( 0.10, 2.45, -0.55, 0.06, 0.06, 0.04, EYE_BLACK);
+    // Antenna stubs (decorative)
+    add(-0.25, 3.10, 0, 0.10, 0.30, 0.10, ANTENNA);
+    add( 0.25, 3.10, 0, 0.10, 0.30, 0.10, ANTENNA);
+    add(-0.25, 3.30, 0, 0.18, 0.10, 0.18, RIM_GOLD);
+    add( 0.25, 3.30, 0, 0.18, 0.10, 0.18, RIM_GOLD);
+    return list;
+  }, [v, v92, ALIEN_SKIN, ALIEN_DK, ALIEN_HI, EYE_BLACK, EYE_SHEEN, ANTENNA, RIM_GOLD]);
+
+  // Compute saucer position from absolute time t.
+  const pathAt = useMemo(() => (t: number): [number, number, number] => {
+    const theta = (t / orbitPeriod) * Math.PI * 2;
+    // Mostly steady orbit (UFOs glide), but gentle altitude
+    // undulation so the path has depth.
+    const x = orbitCenter.x + Math.cos(theta) * orbitRadiusX;
+    const z = orbitCenter.z + Math.sin(theta) * orbitRadiusZ;
+    const y = orbitCenter.y + Math.sin(theta * 1.3) * 1.0 + Math.sin(theta * 0.4) * 0.8;
+    return [x, y, z];
+  }, [orbitCenter, orbitRadiusX, orbitRadiusZ, orbitPeriod]);
+
+  useFrame(() => {
+    const t = performance.now() / 1000 - tStart.current;
+    if (groupRef.current) {
+      const [x, y, z] = pathAt(t);
+      groupRef.current.position.set(x, y, z);
+
+      // Velocity → yaw to face direction of travel.
+      const dt = 0.05;
+      const [x2, y2, z2] = pathAt(t + dt);
+      const vx = x2 - x;
+      const vy = y2 - y;
+      const vz = z2 - z;
+      groupRef.current.rotation.y = Math.atan2(-vz, vx);
+
+      // Subtle pitch — UFOs angle slightly up/down with the path.
+      const horiz = Math.sqrt(vx * vx + vz * vz);
+      groupRef.current.rotation.x = -Math.atan2(vy, Math.max(horiz, 0.0001)) * 0.4;
+
+      // Hover bob independent of orbit.
+      groupRef.current.position.y += Math.sin(t * 1.7) * 0.15;
+    }
+    if (discRef.current) {
+      // Slow Y spin of the disc itself for a hovering-saucer feel.
+      // The hull voxels rotate; the alien stays still inside the
+      // dome (because alien sits in its own group).
+      discRef.current.rotation.y = t * 0.6;
+    }
+    if (beamRef.current) {
+      // Tractor beam pulse — scale Y up/down between 0.7 and 1.1
+      // and a tiny opacity pulse via emissive intensity.
+      const pulse = 0.85 + Math.sin(t * 3) * 0.15;
+      beamRef.current.scale.set(1, pulse, 1);
+      const mat = beamRef.current.material as THREE.MeshStandardMaterial;
+      if (mat) {
+        mat.emissiveIntensity = 1.4 + Math.sin(t * 4) * 0.4;
+        mat.opacity = 0.35 + Math.sin(t * 4) * 0.08;
+      }
+    }
+  });
+
+  const renderBoxMesh = (
+    bv: { pos: [number, number, number]; size: [number, number, number]; color: THREE.Color },
+    keyPrefix: string,
+    i: number,
+    intensity: number,
+  ) => (
+    <mesh key={`${keyPrefix}${i}`} position={bv.pos}>
+      <boxGeometry args={bv.size} />
+      <meshStandardMaterial
+        color={bv.color}
+        emissive={bv.color}
+        emissiveIntensity={intensity}
+        roughness={0.3}
+        metalness={0.55}
+      />
+    </mesh>
+  );
+
+  return (
+    <group ref={groupRef} position={[orbitCenter.x, orbitCenter.y, orbitCenter.z]}>
+      {/* Light from underneath — saucers always glow under their disc. */}
+      <pointLight color={'#22ff77'} intensity={3.0} distance={5} decay={1.6} position={[0, -v * 1.5, 0]} />
+      {/* Window rim glow */}
+      <pointLight color={'#fde047'} intensity={1.6} distance={3} decay={1.8} position={[0, 0, 0]} />
+
+      {/* Spinning hull (disc + windows + bottom keel) */}
+      <group ref={discRef}>
+        {hullVoxels.map((bv, i) => renderBoxMesh(
+          bv,
+          'sh',
+          i,
+          bv.color === RIM_GOLD ? 2.6 : 0.4,
+        ))}
+      </group>
+
+      {/* Dome — stays fixed (doesn't spin with the hull so the alien
+          inside reads correctly). */}
+      {domeVoxels.map((bv, i) => renderBoxMesh(bv, 'sd', i, 1.6))}
+
+      {/* Alien pilot inside the dome */}
+      {alienVoxels.map((bv, i) => renderBoxMesh(bv, 'sa', i, bv.color === EYE_BLACK ? 0 : 0.35))}
+
+      {/* Tractor beam — translucent green cone hanging below. */}
+      <mesh ref={beamRef} position={[0, -v * 4.5, 0]}>
+        <coneGeometry args={[v * 3.2, v * 6, 16, 1, true]} />
+        <meshStandardMaterial
+          color={BEAM_GREEN}
+          emissive={BEAM_GREEN}
+          emissiveIntensity={1.4}
+          transparent
+          opacity={0.4}
+          side={THREE.DoubleSide}
+          depthWrite={false}
+          roughness={0.0}
+          metalness={0.0}
+        />
+      </mesh>
+    </group>
+  );
+}
+
 // ─── Sand Tiger Guardian (deep inside the portal tunnel) ────────────────────
 
 function SandTigerGuardian() {
@@ -3471,6 +3745,9 @@ export default function LoginBackground3D() {
         {/* Phoenix flying around the planet — independent of the agent
             group so it isn't pulled into the portal during dive. */}
         <PortalPhoenix />
+        {/* Alien flying saucer orbiting the portal at greater distance
+            than the phoenix, on its own slower path. */}
+        <AlienSaucer />
         <SandTigerGuardian />
         {/* Spotlight on the Black Swan from above-front */}
         <group>
