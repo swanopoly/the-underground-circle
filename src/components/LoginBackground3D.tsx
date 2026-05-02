@@ -2844,16 +2844,16 @@ function PortalPhoenix() {
   const emberRef = useRef<THREE.Group>(null);
   const tStart = useRef(performance.now() / 1000);
 
-  // Phoenix flies a varied path AROUND the planet. Center is offset
-  // slightly forward (toward the camera) and above the swan king.
-  const orbitCenter = useMemo(() => new THREE.Vector3(0, 5.5, 1.0), []);
-  const orbitRadiusX = 9.0;
-  const orbitRadiusZ = 7.5;
-  const orbitPeriod = 14.0; // seconds — slow enough to read details
+  // Phoenix flies a varied path AROUND the planet, kept farther
+  // out so it's clearly orbiting rather than hugging the surface.
+  const orbitCenter = useMemo(() => new THREE.Vector3(0, 6.0, 1.0), []);
+  const orbitRadiusX = 14.0;
+  const orbitRadiusZ = 12.0;
+  const orbitPeriod = 16.0; // seconds — slightly slower for the bigger lap
 
-  // Phoenix scale — slightly larger than before so the new tail
-  // and detail are visible at orbit distance.
-  const v = 0.18;
+  // Phoenix scale — bumped so the bird stays readable at the new
+  // orbit distance.
+  const v = 0.26;
   const v92 = v * 0.92;
 
   // Color palette — wide gradient so the bird reads as flame, not flat.
@@ -3279,12 +3279,12 @@ function AlienSaucer() {
   // Orbit center is the planet (slightly above so the saucer doesn't
   // dive into it). Larger radii than the phoenix so it visibly stays
   // farther out — viewer sees both at once with the saucer further.
-  const orbitCenter = useMemo(() => new THREE.Vector3(0, 4.0, 1.0), []);
-  const orbitRadiusX = 13.0;
-  const orbitRadiusZ = 11.0;
-  const orbitPeriod = 18.0;
+  const orbitCenter = useMemo(() => new THREE.Vector3(0, 4.5, 1.0), []);
+  const orbitRadiusX = 19.0;
+  const orbitRadiusZ = 16.0;
+  const orbitPeriod = 22.0;
 
-  const v = 0.18;
+  const v = 0.28;
   const v92 = v * 0.92;
 
   // Color palette — metallic silver hull, glowing windows, alien
