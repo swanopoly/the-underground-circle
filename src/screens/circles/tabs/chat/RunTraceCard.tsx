@@ -17,6 +17,7 @@ import {
   getRun,
   getRunSteps,
   subscribeToRun,
+  updateRunStatus,
   type AgentRun,
   type RunStep,
 } from '../../../../lib/agentRunSystem';
@@ -64,6 +65,7 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
   const [steps, setSteps] = useState<RunStep[]>([]);
   const [expandedStepIds, setExpandedStepIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
+  const [cancelling, setCancelling] = useState(false);
 
   // Initial fetch + realtime wiring. Runs once per runId; cleanup
   // tears down both subscriptions on unmount.
@@ -241,19 +243,56 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
         )}
       </ScrollView>
 
-      {(isFailed || isDone) && onRunAgain ? (
-        <Pressable
-          onPress={() => onRunAgain(run)}
-          style={({ pressed }) => [
-            s.runAgainBtn,
-            { borderColor: accentColor + '60' },
-            pressed && { backgroundColor: accentColor + '15' },
-          ]}
-          accessibilityLabel="Re-run this task"
-        >
-          <Text style={[s.runAgainText, { color: accentColor }]}>↺ RUN AGAIN</Text>
-        </Pressable>
-      ) : null}
+      <View style={s.actionRow}>
+        {isLive ? (
+          <Pressable
+            onPress={async () => {
+              if (cancelling) return;
+              setCancelling(true);
+              // Optimistic local update so the UI flips immediately,
+              // even if the realtime UPDATE event takes a beat.
+              setRun((prev) => (prev ? { ...prev, status: 'cancelled' } : prev));
+              try {
+                await updateRunStatus(runId, 'cancelled', {
+                  metadata: {
+                    ...(run.metadata || {}),
+                    cancelled_by: 'user',
+                    cancelled_at: new Date().toISOString(),
+                  },
+                });
+              } catch {
+                // Revert if the write failed — the realtime sub will
+                // eventually correct us anyway, but this is faster.
+                setRun((prev) => (prev && prev.status === 'cancelled' ? { ...prev, status: 'running' } : prev));
+              } finally {
+                setCancelling(false);
+              }
+            }}
+            disabled={cancelling}
+            style={({ pressed }) => [
+              s.stopBtn,
+              pressed && { backgroundColor: '#ef444420' },
+              cancelling && { opacity: 0.5 },
+            ]}
+            accessibilityLabel="Stop this run"
+          >
+            <Text style={s.stopText}>{cancelling ? 'STOPPING…' : '■ STOP'}</Text>
+          </Pressable>
+        ) : null}
+        {(isFailed || isDone || run.status === 'cancelled') && onRunAgain ? (
+          <Pressable
+            onPress={() => onRunAgain(run)}
+            style={({ pressed }) => [
+              s.runAgainBtn,
+              { borderColor: accentColor + '60' },
+              pressed && { backgroundColor: accentColor + '15' },
+            ]}
+            accessibilityLabel="Re-run this task"
+          >
+            <Text style={[s.runAgainText, { color: accentColor }]}>↺ RUN AGAIN</Text>
+          </Pressable>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -361,13 +400,32 @@ const s = StyleSheet.create({
   stepBody: { color: '#94a3b8', fontSize: 10.5, lineHeight: 15, paddingLeft: 30, fontFamily: MONO },
   stepTool: { color: '#64748b', fontSize: 10, paddingLeft: 30 },
   stepToolName: { color: '#a78bfa', fontFamily: MONO },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 4,
+  },
   runAgainBtn: {
-    alignSelf: 'flex-start',
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 6,
     borderWidth: 1,
-    marginTop: 4,
   },
   runAgainText: { fontSize: 10, fontWeight: '900', letterSpacing: 1, fontFamily: MONO },
+  stopBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#ef444460',
+    backgroundColor: '#7f1d1d10',
+  },
+  stopText: {
+    color: '#fca5a5',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1,
+    fontFamily: MONO,
+  },
 });
