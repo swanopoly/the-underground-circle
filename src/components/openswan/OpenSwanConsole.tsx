@@ -178,16 +178,29 @@ export default function OpenSwanConsole({
     [surface, mode],
   );
 
-  const subagentPlan = useMemo(() => {
+  // Build the task plan once per (task, surface) and reuse it for
+  // both the subagent-delegation preview and the new PLAN PREVIEW
+  // section. Avoids analyzing the task twice on every keystroke.
+  const taskPlan = useMemo(() => {
     const trimmed = task.trim();
-    if (!trimmed) return { willSpawn: false, specs: [] as { role: string; displayName: string }[] };
+    if (!trimmed) return null;
     try {
       const routingSurface = surface === 'room_chat' ? 'room_chat' : 'main_chat';
       const analysis = analyzeMessageRouting(trimmed, routingSurface);
       const plan = buildOpenSwanTaskPlan(trimmed, analysis.route.profile, analysis.entities);
-      const willSpawn = shouldDelegateToSubagents(trimmed, plan);
+      return { plan, analysis };
+    } catch {
+      return null;
+    }
+  }, [task, surface]);
+
+  const subagentPlan = useMemo(() => {
+    const trimmed = task.trim();
+    if (!trimmed || !taskPlan) return { willSpawn: false, specs: [] as { role: string; displayName: string }[] };
+    try {
+      const willSpawn = shouldDelegateToSubagents(trimmed, taskPlan.plan);
       if (!willSpawn) return { willSpawn: false, specs: [] };
-      const specs = planSubagentDelegation(trimmed, plan).map((s) => ({
+      const specs = planSubagentDelegation(trimmed, taskPlan.plan).map((s) => ({
         role: s.subagent.role,
         displayName: s.subagent.displayName,
       }));
@@ -542,6 +555,56 @@ export default function OpenSwanConsole({
               ) : null}
               {!recentRunsExpanded ? (
                 <Text style={styles.recentRunsHint}>tap to see recent — re-run any with one tap</Text>
+              ) : null}
+            </View>
+          ) : null}
+
+          {/* ── Plan preview ────────────────────────────────────────── */}
+          {taskPlan ? (
+            <View style={styles.section}>
+              <View style={styles.planPreviewHeader}>
+                <Text style={styles.label}>PLAN PREVIEW</Text>
+                <View style={[styles.planKindChip, { borderColor: `${accentColor}55`, backgroundColor: `${accentColor}14` }]}>
+                  <Text style={[styles.planKindText, { color: accentColor }]}>{taskPlan.plan.kind.toUpperCase()}</Text>
+                </View>
+              </View>
+              <Text style={styles.planSummary} numberOfLines={3}>
+                {taskPlan.plan.summary}
+              </Text>
+              {taskPlan.plan.recommendedTools.length > 0 ? (
+                <View style={styles.planToolsBlock}>
+                  <Text style={styles.planSubLabel}>RECOMMENDED TOOLS</Text>
+                  {taskPlan.plan.recommendedTools.slice(0, 4).map((t) => {
+                    const priorityColor =
+                      t.priority === 'high'   ? '#22c55e' :
+                      t.priority === 'medium' ? '#fbbf24' :
+                      '#94a3b8';
+                    return (
+                      <View key={t.tool} style={styles.planToolRow}>
+                        <View style={[styles.planToolDot, { backgroundColor: priorityColor }]} />
+                        <Text style={styles.planToolName}>{t.tool}</Text>
+                        <Text style={styles.planToolReason} numberOfLines={1}>{t.reason}</Text>
+                      </View>
+                    );
+                  })}
+                  {taskPlan.plan.recommendedTools.length > 4 ? (
+                    <Text style={styles.planMoreHint}>
+                      + {taskPlan.plan.recommendedTools.length - 4} more
+                    </Text>
+                  ) : null}
+                </View>
+              ) : null}
+              {taskPlan.plan.verification.length > 0 ? (
+                <View style={styles.planToolsBlock}>
+                  <Text style={styles.planSubLabel}>WILL VERIFY</Text>
+                  {taskPlan.plan.verification.slice(0, 3).map((v) => (
+                    <View key={v.kind} style={styles.planToolRow}>
+                      <Text style={[styles.planToolDot, { backgroundColor: v.required ? '#fbbf24' : '#475569' }]} />
+                      <Text style={styles.planToolName}>{v.label}</Text>
+                      <Text style={styles.planToolReason} numberOfLines={1}>{v.reason}</Text>
+                    </View>
+                  ))}
+                </View>
               ) : null}
             </View>
           ) : null}
@@ -928,6 +991,62 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '900',
     paddingHorizontal: 4,
+  },
+  planPreviewHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  planKindChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  planKindText: {
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 1.2,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  planSummary: {
+    color: TEXT,
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 2,
+  },
+  planToolsBlock: { gap: 4, marginTop: 4 },
+  planSubLabel: {
+    color: MUTED,
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 1,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  planToolRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 1,
+  },
+  planToolDot: { width: 6, height: 6, borderRadius: 999 },
+  planToolName: {
+    color: TEXT_DIM,
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+    minWidth: 90,
+  },
+  planToolReason: {
+    color: MUTED,
+    fontSize: 11,
+    flex: 1,
+  },
+  planMoreHint: {
+    color: MUTED,
+    fontSize: 10,
+    fontStyle: 'italic',
+    marginTop: 2,
   },
   label: {
     color: TEXT_DIM,
