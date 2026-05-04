@@ -188,6 +188,7 @@ export const CHAT_COMMAND_REGISTRY: ChatCommandDefinition[] = [
   { id: 'spawn-agent', routeId: 'dispatch', command: '/spawn', insertText: '/spawn ', title: 'Spawn Agent Task', description: 'Spawn a new agent session with a task (e.g. /spawn claude-code build me a landing page). Forces verb=spawn.', category: 'dispatch', keywords: ['new', 'session', 'spawn', 'claude', 'agent'] },
   { id: 'send-agent', routeId: 'dispatch', command: '/send', insertText: '/send ', title: 'Send To Agent Session', description: 'Send a message to an existing agent session (e.g. /send blackswan summarize today).', category: 'dispatch', keywords: ['message', 'send', 'agent'] },
   { id: 'queue-agent', routeId: 'dispatch', command: '/queue', insertText: '/queue ', title: 'Queue Task For Agent', description: 'Queue a task for a read-mostly agent (Codex, Cursor) so it shows next time you open the CLI.', category: 'dispatch', keywords: ['queue', 'codex', 'cursor', 'task'] },
+  { id: 'trace', routeId: 'governance', command: '/trace', insertText: '/trace ', title: 'Run Trace', description: 'Render a live trace card for a run by id (steps, status, errors).', category: 'governance', keywords: ['run', 'debug', 'steps', 'agent'] },
 ];
 
 function commandMatchesInput(command: string, normalized: string): boolean {
