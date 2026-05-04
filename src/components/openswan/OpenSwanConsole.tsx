@@ -49,6 +49,7 @@ import { analyzeMessageRouting } from '../../lib/messageRouting';
 import { rageForget } from '../../lib/memoryActions';
 import { supabase } from '../../lib/supabase';
 import { useClaudeSpendBreakdown } from '../../lib/circleCostTelemetry';
+import { listRuns, type AgentRun } from '../../lib/agentRunSystem';
 import QuickActionDock from '../../screens/circles/tabs/chat/QuickActionDock';
 
 type ToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
@@ -130,6 +131,8 @@ export default function OpenSwanConsole({
   const [pruneMessage, setPruneMessage] = useState<string | null>(null);
   const [showHiddenTools, setShowHiddenTools] = useState(false);
   const [budgetCap, setBudgetCap] = useState<number | null>(null);
+  const [recentRuns, setRecentRuns] = useState<AgentRun[]>([]);
+  const [recentRunsExpanded, setRecentRunsExpanded] = useState(false);
 
   // Live 24h Claude spend for this circle — the umbrella cap across
   // every agent. Control Panel shows this so the user knows whether a
@@ -144,6 +147,24 @@ export default function OpenSwanConsole({
       setMode(currentMode as OpenSwanChatMode);
     }
   }, [visible, initialTask, currentMode]);
+
+  // Load the last few runs the user kicked off in this circle. Surfaced
+  // as a row of pills under the MODE selector so the user can re-launch
+  // a previous task without retyping it. Only loads when the panel is
+  // open — keeps the cold-path fast.
+  useEffect(() => {
+    if (!visible || !circleId || !userId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const runs = await listRuns(circleId, { userId, limit: 8 });
+        if (!cancelled) setRecentRuns(runs);
+      } catch {
+        if (!cancelled) setRecentRuns([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [visible, circleId, userId]);
 
   // ── Tool + subagent + memory previews (live on mode / task changes) ──
 
@@ -443,6 +464,87 @@ export default function OpenSwanConsole({
               </View>
             ) : null}
           </View>
+
+          {/* ── Recent runs ─────────────────────────────────────────── */}
+          {recentRuns.length > 0 ? (
+            <View style={styles.section}>
+              <Pressable
+                onPress={() => setRecentRunsExpanded((v) => !v)}
+                style={({ hovered }: any) => [
+                  styles.recentRunsHeader,
+                  hovered && { opacity: 0.85 },
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel={recentRunsExpanded ? 'Hide recent runs' : 'Show recent runs'}
+              >
+                <Text style={styles.label}>RECENT RUNS · {recentRuns.length}</Text>
+                <Text style={styles.recentRunsChevron}>{recentRunsExpanded ? '▾' : '▸'}</Text>
+              </Pressable>
+              {recentRunsExpanded ? (
+                <ScrollView
+                  style={{ maxHeight: 180 }}
+                  contentContainerStyle={{ gap: 6 }}
+                >
+                  {recentRuns.map((r) => {
+                    const dot =
+                      r.status === 'running'          ? '#a78bfa' :
+                      r.status === 'planning'         ? '#a78bfa' :
+                      r.status === 'completed'        ? '#22c55e' :
+                      r.status === 'failed'           ? '#ef4444' :
+                      r.status === 'cancelled'        ? '#94a3b8' :
+                      r.status === 'paused'           ? '#94a3b8' :
+                      r.status === 'waiting_approval' ? '#fbbf24' :
+                      '#f59e0b';
+                    const elapsedMs =
+                      r.completed_at && r.started_at
+                        ? new Date(r.completed_at).getTime() - new Date(r.started_at).getTime()
+                        : null;
+                    const elapsedLabel =
+                      elapsedMs === null ? '—' :
+                      elapsedMs < 1000 ? `${elapsedMs}ms` :
+                      elapsedMs < 60000 ? `${(elapsedMs / 1000).toFixed(1)}s` :
+                      `${Math.floor(elapsedMs / 60000)}m${Math.floor((elapsedMs % 60000) / 1000)}s`;
+                    return (
+                      <Pressable
+                        key={r.id}
+                        onPress={() => {
+                          setTask(r.goal || r.title);
+                          if ((MODE_KEYS as string[]).includes(r.mode)) {
+                            setMode(r.mode as OpenSwanChatMode);
+                          }
+                          setRecentRunsExpanded(false);
+                        }}
+                        style={({ hovered, pressed }: any) => [
+                          styles.recentRunRow,
+                          hovered && { borderColor: `${accentColor}55`, backgroundColor: `${accentColor}08` },
+                          pressed && { transform: [{ scale: 0.99 }] },
+                        ]}
+                        accessibilityLabel={`Reuse: ${r.title}`}
+                      >
+                        <View style={[styles.recentRunDot, { backgroundColor: dot }]} />
+                        <View style={{ flex: 1, gap: 2 }}>
+                          <View style={styles.recentRunTitleRow}>
+                            <Text style={styles.recentRunMode}>{r.mode}</Text>
+                            <Text style={styles.recentRunStatus}>{r.status.toUpperCase()}</Text>
+                          </View>
+                          <Text style={styles.recentRunTitle} numberOfLines={1}>{r.title || r.goal || '(untitled)'}</Text>
+                          <Text style={styles.recentRunMeta}>
+                            {elapsedLabel}
+                            {r.estimated_cost > 0 ? ` · $${r.estimated_cost.toFixed(3)}` : ''}
+                            {r.total_steps > 0 ? ` · ${r.total_steps} step${r.total_steps === 1 ? '' : 's'}` : ''}
+                          </Text>
+                        </View>
+                        <Text style={styles.recentRunArrow}>↺</Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+              ) : null}
+              {!recentRunsExpanded ? (
+                <Text style={styles.recentRunsHint}>tap to see recent — re-run any with one tap</Text>
+              ) : null}
+            </View>
+          ) : null}
 
           {/* ── Diagnostics ─────────────────────────────────────────── */}
           <View style={styles.section}>
@@ -771,6 +873,62 @@ const styles = StyleSheet.create({
   },
   closeText: { color: TEXT_DIM, fontSize: 18, fontWeight: '600' },
   section: { gap: 6 },
+  recentRunsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  recentRunsChevron: {
+    color: MUTED,
+    fontSize: 11,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  recentRunsHint: {
+    color: MUTED,
+    fontSize: 10,
+    fontStyle: 'italic',
+    marginTop: 2,
+  },
+  recentRunRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: FIELD_BG,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    borderRadius: 8,
+  },
+  recentRunDot: { width: 8, height: 8, borderRadius: 999 },
+  recentRunTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  recentRunMode: {
+    color: TEXT_DIM,
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 1,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+    textTransform: 'uppercase',
+  },
+  recentRunStatus: {
+    color: MUTED,
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  recentRunTitle: { color: TEXT, fontSize: 12, fontWeight: '600' },
+  recentRunMeta: {
+    color: MUTED,
+    fontSize: 10,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  recentRunArrow: {
+    color: TEXT_DIM,
+    fontSize: 14,
+    fontWeight: '900',
+    paddingHorizontal: 4,
+  },
   label: {
     color: TEXT_DIM,
     fontFamily: 'monospace',
