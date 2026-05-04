@@ -363,6 +363,67 @@ async function handleDomSnapshot(req, res, CORS, parsedUrl) {
   }
 }
 
+// ── Locator resolver ────────────────────────────────────────────────────────
+//
+// Plays nice with three planner output shapes seen in the wild:
+//
+//   1. {role, name}             — canonical accessible-name path
+//   2. {role, selector}         — explicit CSS selector
+//   3. {role, name: "input[name='email']"}  — model jammed a CSS
+//      selector into the `name` slot. Common failure mode: the
+//      planner sees `name="email"` in DOM and emits it as the
+//      accessibility name. We detect that pattern and route to
+//      page.locator() instead of getByRole(name=...).
+//
+// Also implements a semantic-name fallback: when the bad-shape `name`
+// happens to be input[name="x"] or similar, we extract `x` as a
+// candidate accessible name and try BOTH paths so the user gets one
+// success rather than two timeouts.
+
+function looksLikeCssSelector(s) {
+  if (!s || typeof s !== 'string') return false;
+  const t = s.trim();
+  if (!t) return false;
+  return (
+    /^[#.]/.test(t)                                      // .class or #id
+    || /\[[\w-]+\s*([~|^$*]?=|\])/.test(t)               // [attr=...] anywhere
+    || /:nth-(?:child|of-type|last-child)/.test(t)       // :nth-...
+    || /^[a-z][\w-]*\s*[>+~]/.test(t)                    // tag combinator
+    || /^[a-z][\w-]*\s*\[/.test(t)                       // tag[attr...
+    || /^[a-z][\w-]*\s*\.[\w-]/.test(t)                  // tag.class
+  );
+}
+
+// Extract a semantic name guess from common attribute-selector shapes.
+// "input[name='email']"  → "email"
+// "input[type='submit']" → null  (type isn't a label)
+// "[aria-label='Sign in']" → "Sign in"
+// "[placeholder='Email address']" → "Email address"
+function extractSemanticName(selector) {
+  const m1 = selector.match(/\[(name|aria-label|placeholder|title)\s*=\s*['"]?([^'"\]]+)['"]?\]/i);
+  if (m1) return m1[2];
+  return null;
+}
+
+// Build a Playwright Locator from any of the three input shapes.
+// Returns the locator without trying a fill/click yet — caller handles
+// the action so timeout/submit logic stays at the call site.
+function resolveLocator(page, role, body) {
+  // 1. Explicit selector
+  if (body.selector && typeof body.selector === 'string') {
+    return page.locator(body.selector);
+  }
+  // 2. `name` that's actually a CSS selector
+  if (body.name && looksLikeCssSelector(body.name)) {
+    return page.locator(body.name);
+  }
+  // 3. Canonical role + accessible name
+  const opts = {};
+  if (body.name) opts.name = String(body.name);
+  if (body.exact === true) opts.exact = true;
+  return page.getByRole(role, opts);
+}
+
 async function handleClickRole(req, res, CORS) {
   const { body, err } = await readJsonBody(req);
   if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
@@ -372,12 +433,25 @@ async function handleClickRole(req, res, CORS) {
   if (!launched.ok) { res.writeHead(503, CORS); res.end(JSON.stringify({ ok: false, error: launched.error })); return; }
   try {
     const timeout = Math.max(500, Math.min(30000, Number(body.timeoutMs) || 5000));
-    const opts = {};
-    if (body.name) opts.name = String(body.name);
-    if (body.exact === true) opts.exact = true;
-    let locator = launched.page.getByRole(role, opts);
+    let locator = resolveLocator(launched.page, role, body);
     if (typeof body.nth === 'number') locator = locator.nth(body.nth);
-    await locator.click({ timeout });
+    try {
+      await locator.click({ timeout });
+    } catch (firstErr) {
+      // Fallback: if `name` looked like a selector and direct locator
+      // failed, try extracting a semantic name and going through
+      // getByRole. Real selectors win; semantic name is a last-resort
+      // disambiguator.
+      const semantic = body.name && looksLikeCssSelector(body.name)
+        ? extractSemanticName(body.name)
+        : null;
+      if (!semantic) throw firstErr;
+      const opts = { name: semantic };
+      if (body.exact === true) opts.exact = true;
+      const fallback = launched.page.getByRole(role, opts);
+      const fb = typeof body.nth === 'number' ? fallback.nth(body.nth) : fallback;
+      await fb.click({ timeout });
+    }
     res.writeHead(200, CORS);
     res.end(JSON.stringify({ ok: true, role, name: body.name || null }));
   } catch (e) {
@@ -396,11 +470,22 @@ async function handleFill(req, res, CORS) {
   if (!launched.ok) { res.writeHead(503, CORS); res.end(JSON.stringify({ ok: false, error: launched.error })); return; }
   try {
     const timeout = Math.max(500, Math.min(30000, Number(body.timeoutMs) || 5000));
-    const opts = {};
-    if (body.name) opts.name = String(body.name);
-    if (body.exact === true) opts.exact = true;
-    const locator = launched.page.getByRole(role, opts);
-    await locator.fill(text, { timeout });
+    const locator = resolveLocator(launched.page, role, body);
+    try {
+      await locator.fill(text, { timeout });
+    } catch (firstErr) {
+      // Same semantic-name fallback as click — when planner stuffed a
+      // CSS selector into `name`, direct selector lookup might still
+      // fail (e.g. shadow DOM or iframe). Retry with extracted name
+      // through getByRole before giving up.
+      const semantic = body.name && looksLikeCssSelector(body.name)
+        ? extractSemanticName(body.name)
+        : null;
+      if (!semantic) throw firstErr;
+      const opts = { name: semantic };
+      if (body.exact === true) opts.exact = true;
+      await launched.page.getByRole(role, opts).fill(text, { timeout });
+    }
     if (body.submit) {
       await launched.page.keyboard.press('Enter');
     }

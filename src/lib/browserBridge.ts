@@ -143,11 +143,18 @@ export async function domSnapshot(opts?: { maxNodes?: number; interestingOnly?: 
 /**
  * Click an element by ARIA role + accessible name — Playwright's
  * canonical `getByRole(role, { name })` path. Prefer this over
- * raw CSS selectors because it survives design changes.
+ * raw CSS selectors because it survives design changes. When the
+ * page has no useful accessible name, pass `selector` instead and
+ * the bridge routes through `page.locator(selector)`.
  */
 export async function clickRole(args: {
   role: string;
   name?: string;
+  /** Explicit CSS selector — alternative to (role + name). The
+   *  bridge also auto-detects when `name` is a CSS selector and
+   *  routes to locator(), so passing a selector via either field
+   *  works. Explicit `selector` is preferred. */
+  selector?: string;
   exact?: boolean;
   nth?: number;
   timeoutMs?: number;
@@ -165,8 +172,12 @@ export async function clickRole(args: {
 export async function fillField(args: {
   role: string;
   name?: string;
+  /** Explicit CSS selector — alternative to (role + name). See
+   *  clickRole for the full story. */
+  selector?: string;
   text: string;
   submit?: boolean;
+  exact?: boolean;
   timeoutMs?: number;
 }): Promise<DesktopResult<{ chars: number }>> {
   if (typeof args.text !== 'string') {
