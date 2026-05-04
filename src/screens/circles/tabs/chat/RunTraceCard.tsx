@@ -17,7 +17,6 @@ import {
   getRun,
   getRunSteps,
   subscribeToRun,
-  subscribeToRunSteps,
   type AgentRun,
   type RunStep,
 } from '../../../../lib/agentRunSystem';
@@ -81,39 +80,34 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
     const runSub = subscribeToRun(runId, (next) => {
       if (!cancelled) setRun(next);
     });
-    // subscribeToRunSteps only catches INSERT — extend with our own
-    // `*` channel to also catch UPDATE (status flips from running →
-    // done/failed live).
-    const stepInsertSub = subscribeToRunSteps(runId, (step) => {
-      if (cancelled) return;
-      setSteps((prev) => {
-        if (prev.some((p) => p.id === step.id)) {
-          return prev.map((p) => (p.id === step.id ? step : p));
-        }
-        return [...prev, step].sort((a, b) => a.step_index - b.step_index);
-      });
-    });
-    const stepUpdateSub = supabase
-      .channel(`run-steps-update:${runId}`)
+    // Single * channel handles both INSERT (new step row) and UPDATE
+    // (status flip running → done/failed). Saves one subscription per
+    // mounted card vs the previous insert + update split.
+    const stepSub = supabase
+      .channel(`run-steps:${runId}`)
       .on('postgres_changes', {
-        event: 'UPDATE',
+        event: '*',
         schema: 'public',
         table: 'agent_run_steps',
         filter: `run_id=eq.${runId}`,
       }, (payload) => {
         if (cancelled) return;
-        const next = payload.new as any;
-        setSteps((prev) =>
-          prev.map((p) => (p.id === next.id ? mapStepRow(next) : p))
-        );
+        const row = payload.new as any;
+        if (!row) return;
+        const step = mapStepRow(row);
+        setSteps((prev) => {
+          if (prev.some((p) => p.id === step.id)) {
+            return prev.map((p) => (p.id === step.id ? step : p));
+          }
+          return [...prev, step].sort((a, b) => a.step_index - b.step_index);
+        });
       })
       .subscribe();
 
     return () => {
       cancelled = true;
       try { runSub.unsubscribe(); } catch {}
-      try { stepInsertSub.unsubscribe(); } catch {}
-      try { stepUpdateSub.unsubscribe(); } catch {}
+      try { stepSub.unsubscribe(); } catch {}
     };
   }, [runId]);
 
