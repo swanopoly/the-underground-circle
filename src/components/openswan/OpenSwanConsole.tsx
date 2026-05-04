@@ -53,9 +53,8 @@ import { listRuns, type AgentRun } from '../../lib/agentRunSystem';
 import { estimateCost, resolveModelRate } from '../../lib/modelPricing';
 import QuickActionDock from '../../screens/circles/tabs/chat/QuickActionDock';
 
-// Rough output-budget heuristic per mode. Used by the cost preview
-// to give the user a worst-case dollar estimate before LAUNCH. Talk
-// is short, plan is medium, build/research can stretch long.
+// Rough output-budget heuristic per mode. Used by the cost preview to give
+// the user a conservative preflight estimate before LAUNCH.
 const OUTPUT_TOKEN_BUDGET_BY_MODE: Record<string, number> = {
   talk:     400,
   plan:     1200,
@@ -67,10 +66,10 @@ const OUTPUT_TOKEN_BUDGET_BY_MODE: Record<string, number> = {
   design:   1500,
 };
 
-// System prompt + memory injection + chat history overhead. Real
-// usage varies, but this is a deliberate over-estimate so users
-// don't get surprised by a higher actual bill.
+// System prompt + memory injection + chat history overhead. Real usage
+// varies, but this deliberately leans high so users are less surprised.
 const BASE_INPUT_TOKENS = 4500;
+const AUTO_MODEL_COST_BASELINE = 'claude-sonnet-4-6';
 
 type ToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
 
@@ -153,6 +152,8 @@ export default function OpenSwanConsole({
   const [budgetCap, setBudgetCap] = useState<number | null>(null);
   const [recentRuns, setRecentRuns] = useState<AgentRun[]>([]);
   const [recentRunsExpanded, setRecentRunsExpanded] = useState(false);
+  const [showAvailableTools, setShowAvailableTools] = useState(false);
+  const [toolFilter, setToolFilter] = useState('');
 
   // Live 24h Claude spend for this circle — the umbrella cap across
   // every agent. Control Panel shows this so the user knows whether a
@@ -228,7 +229,28 @@ export default function OpenSwanConsole({
     } catch {
       return { willSpawn: false, specs: [] };
     }
-  }, [task, surface]);
+  }, [task, taskPlan]);
+
+  const planCostPreview = useMemo(() => {
+    if (!taskPlan) return null;
+    const isAutoModel = !currentModel || currentModel === 'auto';
+    const modelKey = isAutoModel ? AUTO_MODEL_COST_BASELINE : currentModel;
+    const inputTokens =
+      BASE_INPUT_TOKENS
+      + Math.ceil(task.length / 3)
+      + (taskPlan.plan.recommendedTools.length * 60)
+      + (subagentPlan.specs.length * 1500);
+    const outputTokens = OUTPUT_TOKEN_BUDGET_BY_MODE[mode] || 1200;
+    const cost = estimateCost(modelKey, inputTokens, outputTokens);
+    const rate = resolveModelRate(modelKey);
+    return {
+      cost,
+      inputTokens,
+      outputTokens,
+      modelLabel: isAutoModel ? `${rate.label} auto baseline` : rate.label,
+      overBudget: budgetCap !== null && cost > budgetCap,
+    };
+  }, [budgetCap, currentModel, mode, subagentPlan.specs.length, task.length, taskPlan]);
 
   // Memory count probe — counts active memory_entries for this circle so
   // the user sees how much context the agent will scan. Cheap query, runs
@@ -290,7 +312,7 @@ export default function OpenSwanConsole({
         const { data } = await supabase
           .from('circles')
           .select('settings')
-          .eq('circle_id', circleId)
+          .eq('id', circleId)
           .single();
         const cap = (data?.settings as any)?.claude_total_max_cost_usd;
         if (budgetProbeRef.current === token) {
@@ -626,42 +648,24 @@ export default function OpenSwanConsole({
                   ))}
                 </View>
               ) : null}
-              {(() => {
-                // Estimated cost — over-estimates by design so the
-                // actual bill is usually lower than the preview.
-                const modelKey = currentModel && currentModel !== 'auto'
-                  ? currentModel
-                  : 'claude-haiku-4-5';
-                const inputTokens =
-                  BASE_INPUT_TOKENS
-                  + Math.ceil(task.length / 3)                          // task text
-                  + (taskPlan.plan.recommendedTools.length * 60)        // tool catalog
-                  + (subagentPlan.specs.length * 1500);                 // subagent context fan-out
-                const outputTokens = OUTPUT_TOKEN_BUDGET_BY_MODE[mode] || 1200;
-                const cost = estimateCost(modelKey, inputTokens, outputTokens);
-                // resolveModelRate is read for forward-compat; pricing
-                // metadata may be surfaced here later.
-                resolveModelRate(modelKey);
-                const overBudget = budgetCap !== null && cost > budgetCap;
-                return (
-                  <View style={styles.planCostRow}>
-                    <Text style={styles.planSubLabel}>EST. COST</Text>
-                    <Text
-                      style={[
-                        styles.planCostValue,
-                        overBudget && { color: '#fca5a5' },
-                      ]}
-                    >
-                      ~${cost.toFixed(3)}
-                    </Text>
-                    <Text style={styles.planCostBreakdown} numberOfLines={1}>
-                      {(inputTokens / 1000).toFixed(1)}K in · {(outputTokens / 1000).toFixed(1)}K out
-                      {' · '}
-                      {modelKey.replace(/^.*\//, '')}
-                    </Text>
-                  </View>
-                );
-              })()}
+              {planCostPreview ? (
+                <View style={styles.planCostRow}>
+                  <Text style={styles.planSubLabel}>EST. COST</Text>
+                  <Text
+                    style={[
+                      styles.planCostValue,
+                      planCostPreview.overBudget && { color: '#fca5a5' },
+                    ]}
+                  >
+                    ~${planCostPreview.cost.toFixed(3)}
+                  </Text>
+                  <Text style={styles.planCostBreakdown} numberOfLines={1}>
+                    {(planCostPreview.inputTokens / 1000).toFixed(1)}K in · {(planCostPreview.outputTokens / 1000).toFixed(1)}K out
+                    {' · '}
+                    {planCostPreview.modelLabel}
+                  </Text>
+                </View>
+              ) : null}
             </View>
           ) : null}
 
@@ -700,6 +704,87 @@ export default function OpenSwanConsole({
               <Text style={[styles.inputHint, { color: DANGER, marginTop: 4 }]}>
                 ⚠ No tools exposed for this mode. Model will answer from knowledge alone.
               </Text>
+            ) : null}
+
+            {/* Available-tools drawer — every tool the agent will have
+                access to in this mode, with descriptions. Mirrors the
+                hidden-by-mode drawer below so the user can answer
+                "what CAN it do?" without leaving the panel. */}
+            {toolCount > 0 ? (
+              <View style={styles.hiddenDrawer}>
+                <Pressable
+                  onPress={() => setShowAvailableTools((v) => !v)}
+                  style={styles.hiddenHeader}
+                  accessibilityLabel={`${showAvailableTools ? 'Hide' : 'Show'} the ${toolCount} tools available in ${mode} mode`}
+                >
+                  <Text style={[styles.hiddenHeaderText, { color: accentColor }]}>
+                    {showAvailableTools ? '▾' : '▸'} {toolCount} TOOL{toolCount === 1 ? '' : 'S'} AVAILABLE IN {mode.toUpperCase()} MODE
+                  </Text>
+                  <Text style={styles.hiddenHint}>
+                    {showAvailableTools ? 'tap to collapse' : 'tap to browse'}
+                  </Text>
+                </Pressable>
+                {showAvailableTools ? (
+                  <View style={styles.toolCatalogBody}>
+                    <TextInput
+                      value={toolFilter}
+                      onChangeText={setToolFilter}
+                      placeholder="filter — name or what it does"
+                      placeholderTextColor={MUTED}
+                      style={styles.toolCatalogFilter}
+                    />
+                    <ScrollView style={{ maxHeight: 240 }} contentContainerStyle={{ gap: 6 }}>
+                      {(() => {
+                        const q = toolFilter.trim().toLowerCase();
+                        const matched = q
+                          ? toolPreview.filter((t) =>
+                              t.name.toLowerCase().includes(q)
+                              || t.label.toLowerCase().includes(q)
+                              || t.description.toLowerCase().includes(q),
+                            )
+                          : toolPreview;
+                        if (matched.length === 0) {
+                          return (
+                            <Text style={styles.toolCatalogEmpty}>
+                              No tools match "{toolFilter}".
+                            </Text>
+                          );
+                        }
+                        return matched.map((t) => {
+                          // Family color via a tiny key prefix lookup;
+                          // matches the conventional "module.action"
+                          // naming in the tool registry.
+                          const family = t.name.split('.')[0] || 'misc';
+                          const familyColor =
+                            family === 'browser'   ? '#22d3ee' :
+                            family === 'desktop'   ? '#a78bfa' :
+                            family === 'workspace' ? '#f59e0b' :
+                            family === 'rooms'     ? '#6366f1' :
+                            family === 'tasks'     ? '#22c55e' :
+                            family === 'memory'    ? '#a855f7' :
+                            family === 'github'    ? '#94a3b8' :
+                            family === 'mcp'       ? '#ec4899' :
+                            '#94a3b8';
+                          return (
+                            <View key={t.name} style={styles.toolCatalogRow}>
+                              <View style={[styles.toolCatalogFamilyDot, { backgroundColor: familyColor }]} />
+                              <View style={{ flex: 1, gap: 1 }}>
+                                <View style={styles.toolCatalogTitleRow}>
+                                  <Text style={styles.toolCatalogLabel}>{t.label}</Text>
+                                  <Text style={styles.toolCatalogName}>{t.name}</Text>
+                                </View>
+                                <Text style={styles.toolCatalogDesc} numberOfLines={2}>
+                                  {t.description}
+                                </Text>
+                              </View>
+                            </View>
+                          );
+                        });
+                      })()}
+                    </ScrollView>
+                  </View>
+                ) : null}
+              </View>
             ) : null}
 
             {/* Hidden-by-mode drawer — only shows if mode actually filters tools */}
@@ -1125,6 +1210,51 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
     flex: 1,
+  },
+  toolCatalogBody: {
+    gap: 6,
+    marginTop: 6,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: CARD_BORDER,
+  },
+  toolCatalogFilter: {
+    backgroundColor: FIELD_BG,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    color: TEXT,
+    fontSize: 11,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  toolCatalogRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: FIELD_BG,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    borderRadius: 6,
+  },
+  toolCatalogFamilyDot: { width: 6, height: 6, borderRadius: 999, marginTop: 6 },
+  toolCatalogTitleRow: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
+  toolCatalogLabel: { color: TEXT, fontSize: 11, fontWeight: '700' },
+  toolCatalogName: {
+    color: MUTED,
+    fontSize: 9,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  toolCatalogDesc: { color: TEXT_DIM, fontSize: 10.5, lineHeight: 14 },
+  toolCatalogEmpty: {
+    color: MUTED,
+    fontSize: 11,
+    fontStyle: 'italic',
+    textAlign: 'center',
+    paddingVertical: 10,
   },
   label: {
     color: TEXT_DIM,
