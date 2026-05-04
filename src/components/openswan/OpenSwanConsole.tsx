@@ -145,6 +145,16 @@ export default function OpenSwanConsole({
   );
   const [memoryCount, setMemoryCount] = useState<number | null>(null);
   const [memoryPreview, setMemoryPreview] = useState<Array<{ title: string; scope: string }>>([]);
+  const [memoryDrawerOpen, setMemoryDrawerOpen] = useState(false);
+  const [memoryFull, setMemoryFull] = useState<Array<{
+    id: string;
+    title: string;
+    scope: string;
+    content: string;
+    updated_at: string;
+  }>>([]);
+  const [memoryFilter, setMemoryFilter] = useState('');
+  const [memoryActioning, setMemoryActioning] = useState<string | null>(null);
   const [stalePreviewCount, setStalePreviewCount] = useState<number | null>(null);
   const [pruneBusy, setPruneBusy] = useState(false);
   const [pruneMessage, setPruneMessage] = useState<string | null>(null);
@@ -297,6 +307,32 @@ export default function OpenSwanConsole({
       }
     })();
   }, [visible, circleId]);
+
+  // Memory drawer probe — pulls a richer batch (id, title, scope,
+  // content, updated_at) when the drawer is open so the user can
+  // search and prune individual entries. Skips when the drawer is
+  // closed to keep the panel boot fast.
+  const memoryFullProbeRef = useRef(0);
+  useEffect(() => {
+    if (!visible || !memoryDrawerOpen || !circleId) return;
+    const token = ++memoryFullProbeRef.current;
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from('memory_entries')
+          .select('id, title, scope, content, updated_at')
+          .eq('circle_id', circleId)
+          .eq('is_active', true)
+          .order('updated_at', { ascending: false })
+          .limit(40);
+        if (memoryFullProbeRef.current !== token) return;
+        setMemoryFull((data || []) as any);
+      } catch {
+        if (memoryFullProbeRef.current !== token) return;
+        setMemoryFull([]);
+      }
+    })();
+  }, [visible, memoryDrawerOpen, circleId]);
 
   // Budget cap probe — read the circle's umbrella 24h Claude cap from
   // circles.settings. Default $10 when unset. Runs once per open.
@@ -683,12 +719,22 @@ export default function OpenSwanConsole({
                 }
                 color={accentColor}
               />
-              <DiagCard
-                title="Memory"
-                value={memoryCount === null ? '—' : `${memoryCount}`}
-                hint="active entries in circle"
-                color="#38bdf8"
-              />
+              <Pressable
+                onPress={() => setMemoryDrawerOpen((v) => !v)}
+                style={({ hovered, pressed }: any) => [
+                  { borderRadius: 8 },
+                  hovered && { opacity: 0.95 },
+                  pressed && { transform: [{ scale: 0.985 }] },
+                ]}
+                accessibilityLabel={memoryDrawerOpen ? 'Close memory inspector' : 'Open memory inspector'}
+              >
+                <DiagCard
+                  title={`Memory ${memoryDrawerOpen ? '▾' : '▸'}`}
+                  value={memoryCount === null ? '—' : `${memoryCount}`}
+                  hint="tap to inspect"
+                  color="#38bdf8"
+                />
+              </Pressable>
               <DiagCard
                 title="Subagents"
                 value={subagentPlan.willSpawn ? `${subagentPlan.specs.length}` : '0'}
@@ -823,7 +869,7 @@ export default function OpenSwanConsole({
             ) : null}
 
             {/* Memory preview — real titles so the user sees what the agent scans */}
-            {memoryPreview.length > 0 ? (
+            {!memoryDrawerOpen && memoryPreview.length > 0 ? (
               <View style={styles.memPreview}>
                 <Text style={styles.memPreviewLabel}>RECENT MEMORY</Text>
                 {memoryPreview.slice(0, 4).map((m, i) => (
@@ -831,6 +877,102 @@ export default function OpenSwanConsole({
                     <Text style={styles.memScope}>[{m.scope}]</Text> {m.title}
                   </Text>
                 ))}
+              </View>
+            ) : null}
+
+            {/* Memory inspector drawer — fuller list with search + per-row delete. */}
+            {memoryDrawerOpen ? (
+              <View style={styles.memInspectorBody}>
+                <TextInput
+                  value={memoryFilter}
+                  onChangeText={setMemoryFilter}
+                  placeholder="filter — by title, scope, or content"
+                  placeholderTextColor={MUTED}
+                  style={styles.toolCatalogFilter}
+                />
+                <ScrollView style={{ maxHeight: 320 }} contentContainerStyle={{ gap: 6 }}>
+                  {(() => {
+                    const q = memoryFilter.trim().toLowerCase();
+                    const filtered = q
+                      ? memoryFull.filter((m) =>
+                          m.title.toLowerCase().includes(q)
+                          || m.scope.toLowerCase().includes(q)
+                          || (m.content || '').toLowerCase().includes(q),
+                        )
+                      : memoryFull;
+                    if (memoryFull.length === 0) {
+                      return (
+                        <Text style={styles.toolCatalogEmpty}>
+                          No active memories in this circle yet.
+                        </Text>
+                      );
+                    }
+                    if (filtered.length === 0) {
+                      return (
+                        <Text style={styles.toolCatalogEmpty}>
+                          No memories match "{memoryFilter}".
+                        </Text>
+                      );
+                    }
+                    return filtered.map((m) => {
+                      const updatedTime = m.updated_at ? new Date(m.updated_at).getTime() : 0;
+                      const ageMs = Date.now() - updatedTime;
+                      const ageLabel =
+                        ageMs < 60_000 ? 'just now' :
+                        ageMs < 3_600_000 ? `${Math.floor(ageMs / 60_000)}m ago` :
+                        ageMs < 86_400_000 ? `${Math.floor(ageMs / 3_600_000)}h ago` :
+                        `${Math.floor(ageMs / 86_400_000)}d ago`;
+                      const isDeleting = memoryActioning === m.id;
+                      return (
+                        <View key={m.id} style={styles.memInspectorRow}>
+                          <View style={styles.memInspectorScopeChip}>
+                            <Text style={styles.memInspectorScopeText}>{m.scope || 'unscoped'}</Text>
+                          </View>
+                          <View style={{ flex: 1, gap: 2 }}>
+                            <View style={styles.memInspectorTitleRow}>
+                              <Text style={styles.memInspectorTitle} numberOfLines={1}>{m.title || '(untitled)'}</Text>
+                              <Text style={styles.memInspectorAge}>{ageLabel}</Text>
+                            </View>
+                            {m.content ? (
+                              <Text style={styles.memInspectorContent} numberOfLines={2}>
+                                {m.content.slice(0, 240)}
+                              </Text>
+                            ) : null}
+                          </View>
+                          <Pressable
+                            onPress={async () => {
+                              if (isDeleting) return;
+                              setMemoryActioning(m.id);
+                              try {
+                                await supabase
+                                  .from('memory_entries')
+                                  .update({ is_active: false, updated_at: new Date().toISOString() })
+                                  .eq('id', m.id);
+                                setMemoryFull((prev) => prev.filter((x) => x.id !== m.id));
+                                setMemoryCount((c) => (typeof c === 'number' ? Math.max(0, c - 1) : c));
+                              } catch {
+                                // No-op — soft-delete is best-effort.
+                              } finally {
+                                setMemoryActioning(null);
+                              }
+                            }}
+                            style={({ pressed }: any) => [
+                              styles.memInspectorDeleteBtn,
+                              pressed && { backgroundColor: '#ef444420', borderColor: '#ef4444' },
+                              isDeleting && { opacity: 0.5 },
+                            ]}
+                            accessibilityLabel={`Forget memory: ${m.title}`}
+                            disabled={isDeleting}
+                          >
+                            <Text style={styles.memInspectorDeleteText}>
+                              {isDeleting ? '…' : 'forget'}
+                            </Text>
+                          </Pressable>
+                        </View>
+                      );
+                    });
+                  })()}
+                </ScrollView>
               </View>
             ) : null}
           </View>
@@ -1255,6 +1397,68 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
     textAlign: 'center',
     paddingVertical: 10,
+  },
+  memInspectorBody: {
+    gap: 6,
+    marginTop: 6,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: CARD_BORDER,
+  },
+  memInspectorRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    backgroundColor: FIELD_BG,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    borderRadius: 6,
+  },
+  memInspectorScopeChip: {
+    backgroundColor: '#0c4a6e',
+    borderRadius: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    minWidth: 50,
+    alignItems: 'center',
+  },
+  memInspectorScopeText: {
+    color: '#7dd3fc',
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  memInspectorTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    gap: 6,
+  },
+  memInspectorTitle: { color: TEXT, fontSize: 11, fontWeight: '700', flex: 1 },
+  memInspectorAge: {
+    color: MUTED,
+    fontSize: 9,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  memInspectorContent: { color: TEXT_DIM, fontSize: 10.5, lineHeight: 14 },
+  memInspectorDeleteBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: '#0f172a',
+    alignSelf: 'center',
+  },
+  memInspectorDeleteText: {
+    color: '#94a3b8',
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
   },
   label: {
     color: TEXT_DIM,
