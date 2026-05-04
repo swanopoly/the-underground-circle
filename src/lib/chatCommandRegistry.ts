@@ -168,6 +168,7 @@ export const CHAT_COMMAND_REGISTRY: ChatCommandDefinition[] = [
   { id: 'pin', routeId: 'governance', command: '/pin', insertText: '/pin', title: 'Pin Message', description: 'Pin the latest eligible message.', category: 'governance', keywords: ['important'] },
   { id: 'pins', routeId: 'governance', command: '/pins', insertText: '/pins', title: 'Pinned Messages', description: 'Show pinned messages.', category: 'governance', aliases: ['/pinned'], keywords: ['important'] },
   { id: 'search', routeId: 'search', command: '/search', insertText: '/search ', title: 'Search Chat', description: 'Search chat history.', category: 'governance', keywords: ['messages', 'history'] },
+  { id: 'trace', routeId: 'governance', command: '/trace', insertText: '/trace ', title: 'Run Trace', description: 'Render a live trace card for a run by id (steps, status, errors).', category: 'governance', keywords: ['run', 'debug', 'steps', 'agent'] },
 ];
 
 function commandMatchesInput(command: string, normalized: string): boolean {

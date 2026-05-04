@@ -67,6 +67,7 @@ import AssignPickerCard, { type AssignPickerAgent } from './chat/AssignPickerCar
 import BridgeDiagCard from './chat/BridgeDiagCard';
 import { probeBridges, type BridgeProbeResult } from '../../../lib/bridgeHealthDiag';
 import { ensureBridgeToken, bridgeAuthHeaders } from '../../../lib/bridgeAuth';
+import RunTraceCard from './chat/RunTraceCard';
 import RunCostDrawer from './chat/RunCostDrawer';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
@@ -531,6 +532,9 @@ type ChatMessage = {
   assignPickerAgents?: AssignPickerAgent[];
   /** Bridge probe results to render under a /diag card. */
   bridgeDiagResults?: BridgeProbeResult[];
+  /** When true and runId is set, render a live RunTraceCard under
+   *  this message that subscribes to agent_run_steps in real time. */
+  showRunTrace?: boolean;
   isPending?: boolean;
 };
 
@@ -812,7 +816,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [pendingComputerUseGrantIds, setPendingComputerUseGrantIds] = useState<Array<'browser_navigation' | 'browser_side_effect' | 'file_read' | 'file_write' | 'app_read' | 'app_action' | 'mcp_tool' | 'bridge_tool'>>([]);
   const [pendingComputerUseOrigin, setPendingComputerUseOrigin] = useState<{ messageId: string; runId?: string | null; planId: string } | null>(null);
   const [computerTaskState, setComputerTaskState] = useState<ComputerTaskStateRecord | null>(null);
-  // Real Computer Use agent (Opus 4.7 + Browserbase via edge function). The
+  // Real Computer Use agent (cost-capped Claude + Browserbase via edge function). The
   // permission dialog's Allow handler hands a task to this hook, which
   // streams reasoning/actions/screenshots into ComputerUseLiveCard below.
   const computerUseTask = useComputerUseTask(circleId);
@@ -2496,7 +2500,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return msg;
   };
 
-  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; automationProposal?: AutomationProposal; searchResults?: { query: string; rows: SearchResultRow[] }; commandsHelp?: boolean; assignPickerAgents?: AssignPickerAgent[]; bridgeDiagResults?: BridgeProbeResult[] }) => {
+  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; automationProposal?: AutomationProposal; searchResults?: { query: string; rows: SearchResultRow[] }; commandsHelp?: boolean; assignPickerAgents?: AssignPickerAgent[]; bridgeDiagResults?: BridgeProbeResult[]; showRunTrace?: boolean }) => {
     const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const msg: ChatMessage = {
       id: msgId,
@@ -2527,6 +2531,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       commandsHelp: extra?.commandsHelp,
       assignPickerAgents: extra?.assignPickerAgents,
       bridgeDiagResults: extra?.bridgeDiagResults,
+      showRunTrace: extra?.showRunTrace,
       isPending: false,
     };
 
@@ -3055,6 +3060,65 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     );
   }, [appendBrowserPlanEvent, applyBrowserPlanPatch, upsertBrowserSessionArtifacts, upsertBrowserSessionRecord]);
 
+  const runLocalBrowserPlan = useCallback(async (
+    plan: BrowserPlanCardData,
+    permission: ComputerUsePermission,
+    origin: { messageId: string; runId?: string | null; planId: string } | null,
+  ) => {
+    const session = await createSessionFromBrowserPlan(agentName, permission, plan, {
+      circleId,
+      sourceMessageId: origin?.messageId,
+      sourceRunId: origin?.runId || null,
+    });
+
+    const autoRun = permission !== 'ask_every_time';
+    const runnable: ComputerUseSession = autoRun
+      ? {
+          ...session,
+          status: 'executing',
+          actions: session.actions.map((action) => action.blockedReason
+            ? action
+            : { ...action, status: 'approved' as const }),
+        }
+      : session;
+
+    setComputerUseSession(runnable);
+
+    if (!autoRun) {
+      addBotMessage('**Computer Use** staged locally. Approve each browser action in the Computer Use panel to run without launching the cloud agent.');
+      return;
+    }
+
+    finalizeBrowserPlanFromSession(runnable);
+    addBotMessage(`**Computer Use** running locally — ${plan.task}`);
+    try {
+      const result = await executeComputerUsePlan(runnable, (completedAction, idx) => {
+        setComputerUseSession((current) => {
+          if (!current) return current;
+          const nextActions = [...current.actions];
+          nextActions[idx] = completedAction;
+          return { ...current, actions: nextActions };
+        });
+      });
+      const completedSession: ComputerUseSession = {
+        ...runnable,
+        status: result.success ? 'completed' : 'failed',
+        actions: result.actions,
+        currentUrl: result.currentUrl || runnable.currentUrl,
+        backendSessionId: result.backendSessionId || runnable.backendSessionId,
+        backendLiveUrl: result.backendLiveUrl || runnable.backendLiveUrl,
+      };
+      setComputerUseSession(completedSession);
+      finalizeBrowserPlanFromSession(completedSession, result);
+      addBotMessage(`**Computer Use** ${result.success ? 'completed locally' : 'failed locally'}: ${result.message}`);
+    } catch (error: any) {
+      const failedSession: ComputerUseSession = { ...runnable, status: 'failed' };
+      setComputerUseSession(failedSession);
+      finalizeBrowserPlanFromSession(failedSession, { success: false });
+      addBotMessage(`**Computer Use** failed locally: ${error?.message || 'Unknown error'}`);
+    }
+  }, [addBotMessage, agentName, circleId, finalizeBrowserPlanFromSession]);
+
   // ─── Send Crypto ──────────────────────────────────────────────────────────
 
   const handleSendCrypto = async () => {
@@ -3471,6 +3535,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // /pins — show pinned messages
     if (lowerContent === '/pins' || lowerContent === '/pinned') {
       setShowPinned(!showPinned);
+      return;
+    }
+
+    // /trace <runId> — render a live RunTraceCard for any agent run
+    // by id. Useful for debugging — paste a run id from RECENT RUNS
+    // and watch the steps unfold.
+    if (lowerContent.startsWith('/trace ') || lowerContent === '/trace') {
+      const arg = content.slice(6).trim();
+      if (!arg) {
+        addBotMessage('Usage: `/trace <runId>` — paste a run id from RECENT RUNS to see its step-by-step trace.', undefined, { localOnly: true });
+        return;
+      }
+      addBotMessage(`Loading trace for ${arg.slice(0, 8)}…`, undefined, {
+        localOnly: true,
+        runId: arg,
+        showRunTrace: true,
+      });
       return;
     }
 
@@ -5151,6 +5232,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 }}
               />
             ) : null}
+            {item.showRunTrace && item.runId ? (
+              <RunTraceCard
+                runId={item.runId}
+                accentColor={accentColor}
+                onRunAgain={(run) => {
+                  setInput(run.goal || run.title || '');
+                  inputRef.current?.focus();
+                }}
+              />
+            ) : null}
             <MessageCitations
               userId={currentUserId}
               messageTimestamp={item.timestamp.toISOString()}
@@ -6231,6 +6322,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           onAllow={async (permission: ComputerUsePermission) => {
             setShowComputerUsePermission(false);
             const taskToRun = pendingComputerUseTask;
+            const planToRun = pendingComputerUsePlan;
+            const originToRun = pendingComputerUseOrigin;
             const grantIdsToPersist = deriveGrantedScopesFromBrowserPermission(permission, pendingComputerUseGrantIds);
             await persistComputerTaskState({
               task: taskToRun,
@@ -6253,6 +6346,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             setPendingComputerUseOrigin(null);
             computerUsePostedKeyRef.current = null;
             await grantComputerTaskScopes(circleId, grantIdsToPersist).catch(() => {});
+            if (planToRun?.backend === 'playwright_bridge') {
+              await runLocalBrowserPlan(planToRun, permission, originToRun);
+              return;
+            }
             const started = await computerUseTask.run(taskToRun);
             if (!started.started) {
               addBotMessage(`**Computer Use** could not start: ${started.reason || 'unknown error'}`);
