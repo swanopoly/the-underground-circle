@@ -50,7 +50,27 @@ import { rageForget } from '../../lib/memoryActions';
 import { supabase } from '../../lib/supabase';
 import { useClaudeSpendBreakdown } from '../../lib/circleCostTelemetry';
 import { listRuns, type AgentRun } from '../../lib/agentRunSystem';
+import { estimateCost, resolveModelRate } from '../../lib/modelPricing';
 import QuickActionDock from '../../screens/circles/tabs/chat/QuickActionDock';
+
+// Rough output-budget heuristic per mode. Used by the cost preview
+// to give the user a worst-case dollar estimate before LAUNCH. Talk
+// is short, plan is medium, build/research can stretch long.
+const OUTPUT_TOKEN_BUDGET_BY_MODE: Record<string, number> = {
+  talk:     400,
+  plan:     1200,
+  build:    2400,
+  execute:  1800,
+  review:   1500,
+  research: 1800,
+  support:  600,
+  design:   1500,
+};
+
+// System prompt + memory injection + chat history overhead. Real
+// usage varies, but this is a deliberate over-estimate so users
+// don't get surprised by a higher actual bill.
+const BASE_INPUT_TOKENS = 4500;
 
 type ToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
 
@@ -606,6 +626,42 @@ export default function OpenSwanConsole({
                   ))}
                 </View>
               ) : null}
+              {(() => {
+                // Estimated cost — over-estimates by design so the
+                // actual bill is usually lower than the preview.
+                const modelKey = currentModel && currentModel !== 'auto'
+                  ? currentModel
+                  : 'claude-haiku-4-5';
+                const inputTokens =
+                  BASE_INPUT_TOKENS
+                  + Math.ceil(task.length / 3)                          // task text
+                  + (taskPlan.plan.recommendedTools.length * 60)        // tool catalog
+                  + (subagentPlan.specs.length * 1500);                 // subagent context fan-out
+                const outputTokens = OUTPUT_TOKEN_BUDGET_BY_MODE[mode] || 1200;
+                const cost = estimateCost(modelKey, inputTokens, outputTokens);
+                // resolveModelRate is read for forward-compat; pricing
+                // metadata may be surfaced here later.
+                resolveModelRate(modelKey);
+                const overBudget = budgetCap !== null && cost > budgetCap;
+                return (
+                  <View style={styles.planCostRow}>
+                    <Text style={styles.planSubLabel}>EST. COST</Text>
+                    <Text
+                      style={[
+                        styles.planCostValue,
+                        overBudget && { color: '#fca5a5' },
+                      ]}
+                    >
+                      ~${cost.toFixed(3)}
+                    </Text>
+                    <Text style={styles.planCostBreakdown} numberOfLines={1}>
+                      {(inputTokens / 1000).toFixed(1)}K in · {(outputTokens / 1000).toFixed(1)}K out
+                      {' · '}
+                      {modelKey.replace(/^.*\//, '')}
+                    </Text>
+                  </View>
+                );
+              })()}
             </View>
           ) : null}
 
@@ -1047,6 +1103,28 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontStyle: 'italic',
     marginTop: 2,
+  },
+  planCostRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: CARD_BORDER,
+  },
+  planCostValue: {
+    color: SUCCESS,
+    fontSize: 13,
+    fontWeight: '900',
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+    minWidth: 70,
+  },
+  planCostBreakdown: {
+    color: MUTED,
+    fontSize: 10,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+    flex: 1,
   },
   label: {
     color: TEXT_DIM,
