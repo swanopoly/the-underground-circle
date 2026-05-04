@@ -5126,6 +5126,57 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }, 2500);
   }, [invertedMessages]);
 
+  /**
+   * After a launch from the OpenSwan Control Panel, watch agent_runs
+   * for a fresh row created by this user in this circle. As soon as
+   * one shows up, post a bot message containing a live RunTraceCard so
+   * the user sees step-by-step progress without typing /trace. Bounded
+   * to a 12-second window so we don't sit on a subscription forever
+   * if the run gets short-circuited (e.g. dispatch fails, talk mode).
+   */
+  const attachRunTraceWhenAvailable = useCallback((taskHint: string) => {
+    if (!currentUserId || !circleId) return;
+    const launchedAt = Date.now();
+    const launchIso = new Date(launchedAt - 1000).toISOString();
+    let resolved = false;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const channel = supabase
+      .channel(`run-launch-watch:${currentUserId}:${launchedAt}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'agent_runs',
+        filter: `circle_id=eq.${circleId}`,
+      }, (payload) => {
+        if (resolved) return;
+        const row = payload.new as any;
+        if (!row || row.user_id !== currentUserId) return;
+        const created = row.created_at ? new Date(row.created_at).getTime() : 0;
+        // Reject pre-launch rows that the realtime stream may flush
+        // before our subscription officially started.
+        if (created < launchedAt - 2000) return;
+        resolved = true;
+        if (timeoutId) clearTimeout(timeoutId);
+        try { channel.unsubscribe(); } catch {}
+        const taskLabel = taskHint.length > 60 ? taskHint.slice(0, 57) + '…' : taskHint;
+        addBotMessage(
+          `Launched · watching ${row.id.slice(0, 8)} — ${taskLabel}`,
+          undefined,
+          { localOnly: true, runId: row.id, showRunTrace: true },
+        );
+      })
+      .subscribe();
+    // 12s bound — if no run row appears, give up silently. The user's
+    // launch may have routed through a path that doesn't create an
+    // agent_runs row (e.g. swanbot direct, browser-only).
+    timeoutId = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      try { channel.unsubscribe(); } catch {}
+    }, 12_000);
+    void launchIso; // reserved for future fallback poll path
+  }, [currentUserId, circleId, addBotMessage]);
+
   // In the inverted array, the chronologically PREVIOUS message is at
   // index+1 (older = higher index).
   const isConsecutive = (index: number) => {
@@ -6406,6 +6457,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // through the planner + dispatcher + HITL gate.
             setInput(task);
             sendMessage(task);
+
+            // Auto-attach a live trace card to chat. Modes that bypass
+            // the run pipeline (talk / none) skip this since they
+            // never create an agent_runs row.
+            if (mode !== 'talk' && mode !== 'none' && currentUserId) {
+              attachRunTraceWhenAvailable(task);
+            }
           }}
         />
       )}
