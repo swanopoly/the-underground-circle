@@ -24,6 +24,8 @@ import {
   testStripeConnection,
   testGitHubConnection,
   testCloudflareConnection,
+  checkHaveIBeenPwned,
+  type HaveIBeenPwnedResult,
   type PlatformConnectionResult,
   updateSiteCredentialVaultControls,
 } from '../../lib/siteAutomation';
@@ -276,6 +278,7 @@ function automationReadiness(entry: SiteCredentialVaultEntry): { score: number; 
   const lastTestSuccess = entryMetadataBoolean(entry, 'lastTestSuccess');
   if (!lastTested) issues.push('Not tested');
   if (lastTested && lastTestSuccess === false) issues.push('Last test failed');
+  if (entryMetadataBoolean(entry, 'breachFound') === true) issues.push('Found in breach corpora');
 
   const score = Math.max(0, 100 - issues.length * 14);
   if (score >= 86) return { score, label: 'Ready', color: '#22c55e', issues };
@@ -317,6 +320,35 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     [revealed],
   );
   const secretStrength = useMemo(() => scoreSecretStrength(secret), [secret]);
+  const [breachState, setBreachState] = useState<{
+    status: 'idle' | 'checking' | 'safe' | 'breached' | 'error';
+    count: number;
+    error?: string;
+  }>({ status: 'idle', count: 0 });
+
+  useEffect(() => {
+    if (!secret || secret.length < 4) {
+      setBreachState({ status: 'idle', count: 0 });
+      return;
+    }
+    let cancelled = false;
+    setBreachState((prev) => ({ ...prev, status: 'checking' }));
+    const handle = setTimeout(async () => {
+      const result: HaveIBeenPwnedResult = await checkHaveIBeenPwned(secret);
+      if (cancelled) return;
+      if (result.error) {
+        setBreachState({ status: 'error', count: 0, error: result.error });
+      } else if (result.breached) {
+        setBreachState({ status: 'breached', count: result.count });
+      } else {
+        setBreachState({ status: 'safe', count: 0 });
+      }
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [secret]);
   const readinessStats = useMemo(() => {
     const ready = entries.filter((entry) => automationReadiness(entry).label === 'Ready').length;
     const needsTest = entries.filter((entry) => !entryMetadataString(entry, 'lastTestedAt') || entryMetadataBoolean(entry, 'lastTestSuccess') === false).length;
@@ -499,6 +531,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     setSaving(true);
     setStatus('');
     const resolvedLoginUrl = loginUrl.trim() || inferLoginUrl(platform, siteUrl);
+    const finalBreach = await checkHaveIBeenPwned(secret);
     const result = await storeSiteCredentialVault({
       circleId,
       platform,
@@ -519,6 +552,10 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
         savedAt: new Date().toISOString(),
         notes: notes.trim(),
         platformPreset: presetForPlatform(platform).key,
+        breachCheckedAt: new Date().toISOString(),
+        breachFound: finalBreach.error ? null : finalBreach.breached,
+        breachCount: finalBreach.error ? null : finalBreach.count,
+        breachCheckError: finalBreach.error || null,
       },
       rotationDueAt: dueDateFromCadence(rotationCadenceDays),
     });
@@ -528,7 +565,10 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     } else {
       resetForm();
       setExpandedId(result.entry?.id || null);
-      setStatus('Credential saved.');
+      const breachNote = finalBreach.breached
+        ? ` Warning: secret found in ${finalBreach.count.toLocaleString()} known breach record${finalBreach.count === 1 ? '' : 's'} — consider rotating.`
+        : '';
+      setStatus(`Credential saved.${breachNote}`);
       await loadVault();
       if (result.entry?.id) await loadAudit(result.entry.id);
     }
@@ -836,6 +876,22 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                     ))}
                     <Text style={[styles.strengthText, { color: secretStrength.color }]}>{secretStrength.label}</Text>
                   </View>
+                  {breachState.status === 'breached' ? (
+                    <View style={styles.breachBox}>
+                      <Text style={styles.breachTitle}>Found in known breaches</Text>
+                      <Text style={styles.breachBody}>
+                        This secret has appeared {breachState.count.toLocaleString()} time
+                        {breachState.count === 1 ? '' : 's'} in public breach corpora (HaveIBeenPwned).
+                        Use Generate to create a fresh one, or save anyway if this is a temporary placeholder.
+                      </Text>
+                    </View>
+                  ) : breachState.status === 'safe' ? (
+                    <Text style={styles.breachSafeText}>Not found in known breaches.</Text>
+                  ) : breachState.status === 'checking' ? (
+                    <Text style={styles.breachCheckText}>Checking against known breaches...</Text>
+                  ) : breachState.status === 'error' ? (
+                    <Text style={styles.breachCheckText}>Breach check unavailable ({breachState.error || 'network error'}).</Text>
+                  ) : null}
                 </View>
               </View>
 
@@ -1488,6 +1544,41 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '800',
     textAlign: 'right',
+  },
+  breachBox: {
+    marginTop: 8,
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#ef444455',
+    backgroundColor: '#ef444412',
+    gap: 4,
+  },
+  breachTitle: {
+    color: '#fca5a5',
+    fontSize: 11,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  breachBody: {
+    color: '#fecaca',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  breachSafeText: {
+    marginTop: 6,
+    color: '#22c55e',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  breachCheckText: {
+    marginTop: 6,
+    color: '#64748b',
+    fontSize: 10,
+    fontWeight: '600',
+    fontStyle: 'italic',
   },
   kindRow: {
     flexDirection: 'row',

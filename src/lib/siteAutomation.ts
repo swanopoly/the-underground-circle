@@ -1036,6 +1036,70 @@ export async function testCloudflareConnection(
   }
 }
 
+// ─── 4c. Have I Been Pwned breach check ───────────────────────────────────
+//
+// Uses the k-anonymity protocol so we never send the secret itself —
+// only the first 5 chars of its SHA-1 hash. The API returns every
+// breached hash starting with that prefix and we filter locally.
+// See: https://haveibeenpwned.com/API/v3#PwnedPasswords
+
+export interface HaveIBeenPwnedResult {
+  breached: boolean;
+  /** How many times the secret has appeared in known breach corpora. */
+  count: number;
+  /** Set when the lookup failed (network, CSP, runtime missing crypto). */
+  error?: string;
+}
+
+async function sha1Hex(text: string): Promise<string> {
+  if (typeof crypto === 'undefined' || !crypto.subtle?.digest) {
+    throw new Error('SHA-1 hashing unavailable in this runtime');
+  }
+  const encoder = new TextEncoder();
+  const buf = await crypto.subtle.digest('SHA-1', encoder.encode(text));
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+export async function checkHaveIBeenPwned(secret: string): Promise<HaveIBeenPwnedResult> {
+  // Don't waste a request on empty / trivially short input.
+  if (!secret || secret.length < 4) {
+    return { breached: false, count: 0 };
+  }
+  try {
+    const hash = await sha1Hex(secret);
+    const prefix = hash.slice(0, 5).toUpperCase();
+    const suffix = hash.slice(5).toUpperCase();
+    const res = await fetch(`https://api.pwnedpasswords.com/range/${prefix}`, {
+      method: 'GET',
+      // Add-Padding pads the response to a fixed length so an observer
+      // can't fingerprint which prefix you queried by response size.
+      headers: { 'Add-Padding': 'true' },
+    });
+    if (!res.ok) {
+      return { breached: false, count: 0, error: `HIBP returned HTTP ${res.status}` };
+    }
+    const body = await res.text();
+    for (const rawLine of body.split('\n')) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const sepIdx = line.indexOf(':');
+      if (sepIdx <= 0) continue;
+      const hashSuffix = line.slice(0, sepIdx).toUpperCase();
+      if (hashSuffix !== suffix) continue;
+      const count = Number.parseInt(line.slice(sepIdx + 1), 10);
+      if (Number.isFinite(count) && count > 0) {
+        return { breached: true, count };
+      }
+      return { breached: false, count: 0 };
+    }
+    return { breached: false, count: 0 };
+  } catch (err: any) {
+    return { breached: false, count: 0, error: networkErrorMessage(err) };
+  }
+}
+
 // ─── 5. Publish to WordPress ───────────────────────────────────────────────
 
 export async function publishToWordPress(
