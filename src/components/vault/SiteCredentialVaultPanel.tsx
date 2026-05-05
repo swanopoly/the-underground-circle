@@ -1196,19 +1196,39 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     >
       <View style={styles.header}>
         <View style={styles.headerText}>
-          <Text style={styles.kicker}>SITE VAULT</Text>
+          <View style={styles.kickerRow}>
+            <Text style={styles.kicker}>▣ SITE VAULT</Text>
+            <Text style={[styles.lockedPill, { color: accentColor, borderColor: accentColor + '55', backgroundColor: accentColor + '14' }]}>● LOCKED</Text>
+          </View>
           <Text style={styles.title}>Agent login vault</Text>
           <Text style={styles.subtitle}>
             Store website credentials, restrict what agents can do, and test readiness without putting passwords in prompts.
           </Text>
+          <View style={styles.statusRibbon}>
+            <View style={styles.statusPill}>
+              <View style={styles.statusDot} />
+              <Text style={styles.statusPillText}>ENCRYPTED · AT REST</Text>
+            </View>
+            <View style={styles.statusPill}>
+              <View style={styles.statusDot} />
+              <Text style={styles.statusPillText}>RLS · CIRCLE MEMBERS</Text>
+            </View>
+            <View style={styles.statusPill}>
+              <View style={styles.statusDot} />
+              <Text style={styles.statusPillText}>AUDIT · ALL ACCESS</Text>
+            </View>
+          </View>
         </View>
-        <Pressable
-          onPress={loadVault}
-          disabled={loading}
-          style={[styles.refreshBtn, { borderColor: accentColor + '55' }, webCursor(loading ? 'wait' : 'pointer')]}
-        >
-          {loading ? <ActivityIndicator size="small" color={accentColor} /> : <Text style={[styles.refreshText, { color: accentColor }]}>Refresh</Text>}
-        </Pressable>
+        <View style={styles.headerRight}>
+          <Pressable
+            onPress={loadVault}
+            disabled={loading}
+            style={[styles.refreshBtn, { borderColor: accentColor + '55' }, webCursor(loading ? 'wait' : 'pointer')]}
+          >
+            {loading ? <ActivityIndicator size="small" color={accentColor} /> : <Text style={[styles.refreshText, { color: accentColor }]}>↻ REFRESH</Text>}
+          </Pressable>
+          <Text style={styles.vaultSerial}>VAULT-{(circleId || '').replace(/-/g, '').slice(0, 8).toUpperCase() || '00000000'}</Text>
+        </View>
       </View>
 
       {status ? <Text style={[styles.status, { borderColor: accentColor + '33' }]}>{status}</Text> : null}
@@ -2031,9 +2051,16 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                     </View>
                   ) : null}
 
-                  <View style={styles.secretBox}>
-                    <Text style={styles.secretLabel}>{entry.secretKind === 'totp_seed' ? 'TOTP SEED' : 'SECRET'}</Text>
-                    <Text style={styles.secretValue}>{reveal ? reveal.secret : '••••••••••••••••'}</Text>
+                  <View style={[styles.secretBox, { borderColor: reveal ? accentColor + '88' : '#ffffff20' }]}>
+                    <View style={styles.secretHeadRow}>
+                      <Text style={styles.secretLabel}>{entry.secretKind === 'totp_seed' ? 'TOTP SEED' : 'SECRET'}</Text>
+                      <Text style={[styles.secretStatePill, reveal ? { color: accentColor, borderColor: accentColor + '55', backgroundColor: accentColor + '14' } : null]}>
+                        {reveal ? '◉ DECRYPTED' : '◌ ENCRYPTED'}
+                      </Text>
+                    </View>
+                    <Text style={[styles.secretValue, reveal && { color: accentColor }]}>
+                      {reveal ? reveal.secret : '••••••••••••••••'}
+                    </Text>
                     {reveal ? <Text style={styles.secretTimer}>Clears in {revealSeconds}s</Text> : null}
                   </View>
 
@@ -2109,10 +2136,15 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
 }
 
 function MetricCard({ label, value, color = '#cbd5e1' }: { label: string; value: string; color?: string }) {
+  // Pad single-digit counts so the readout grid aligns like a vault display.
+  const padded = /^\d+$/.test(value) && value.length < 3 ? value.padStart(3, '0') : value;
   return (
-    <View style={styles.metricCard}>
-      <Text style={[styles.metricValue, { color }]}>{value}</Text>
-      <Text style={styles.metricLabel}>{label}</Text>
+    <View style={[styles.metricCard, { borderColor: color + '22' }]}>
+      <View style={styles.metricTopRow}>
+        <View style={[styles.metricPip, { backgroundColor: color }]} />
+        <Text style={styles.metricLabel}>{label}</Text>
+      </View>
+      <Text style={[styles.metricValue, { color }]}>{padded}</Text>
     </View>
   );
 }
@@ -2134,6 +2166,14 @@ const styles = StyleSheet.create({
     borderColor: '#ffffff18',
     backgroundColor: '#080d14',
     overflow: 'hidden',
+    ...Platform.select({
+      web: {
+        backgroundImage:
+          'radial-gradient(circle at 1px 1px, rgba(148, 163, 184, 0.04) 1px, transparent 0)',
+        backgroundSize: '14px 14px',
+      },
+      default: {},
+    }) as any,
   },
   rootPanelHeight: {
     maxHeight: 560,
@@ -2153,11 +2193,73 @@ const styles = StyleSheet.create({
   headerText: {
     flex: 1,
   },
+  kickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
   kicker: {
     color: '#8b95a7',
     fontSize: 10,
     letterSpacing: 1.6,
-    fontFamily: 'monospace',
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  lockedPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+    borderWidth: 1,
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 1,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  statusRibbon: {
+    marginTop: 10,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  statusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#ffffff15',
+    backgroundColor: '#0c1422',
+  },
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: '#22c55e',
+    ...Platform.select({
+      web: {
+        boxShadow: '0 0 6px rgba(34, 197, 94, 0.7)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  statusPillText: {
+    color: '#cbd5e1',
+    fontSize: 9.5,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  headerRight: {
+    alignItems: 'flex-end',
+    gap: 6,
+  },
+  vaultSerial: {
+    color: '#64748b',
+    fontSize: 10,
+    letterSpacing: 1.4,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
   },
   title: {
     marginTop: 4,
@@ -2187,6 +2289,8 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
   },
   status: {
     margin: 12,
@@ -2224,18 +2328,31 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#ffffff12',
     backgroundColor: '#050914',
+    gap: 6,
+  },
+  metricTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  metricPip: {
+    width: 6,
+    height: 6,
+    borderRadius: 999,
   },
   metricValue: {
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: '900',
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+    letterSpacing: 1.5,
   },
   metricLabel: {
-    marginTop: 3,
     color: '#7c8798',
     fontSize: 10,
     fontWeight: '800',
     textTransform: 'uppercase',
     letterSpacing: 0.8,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
   },
   card: {
     borderRadius: 14,
@@ -2830,28 +2947,58 @@ const styles = StyleSheet.create({
   },
   secretBox: {
     marginTop: 4,
-    padding: 12,
+    padding: 14,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: '#ffffff14',
-    backgroundColor: '#050914',
+    backgroundColor: '#040711',
+    gap: 8,
+    ...Platform.select({
+      web: {
+        backgroundImage:
+          'linear-gradient(180deg, rgba(255,255,255,0.018) 0%, transparent 1px), linear-gradient(180deg, transparent 50%, rgba(255,255,255,0.012) 50%)',
+        backgroundSize: '100% 4px',
+        transition: 'border-color 0.2s ease',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  secretHeadRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   secretLabel: {
-    color: '#7c8798',
+    color: '#94a3b8',
     fontSize: 10,
+    letterSpacing: 1.4,
+    fontWeight: '900',
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  secretStatePill: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#ffffff18',
+    color: '#64748b',
+    fontSize: 9,
+    fontWeight: '900',
     letterSpacing: 1,
-    fontFamily: 'monospace',
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
   },
   secretValue: {
-    marginTop: 6,
     color: '#f8fafc',
-    fontSize: 14,
-    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+    fontSize: 15,
+    letterSpacing: 1.4,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
   },
   secretTimer: {
-    marginTop: 6,
     color: '#fbbf24',
-    fontSize: 11,
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
   },
   actionRow: {
     flexDirection: 'row',
