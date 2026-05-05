@@ -2321,6 +2321,10 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   const [slashQuery, setSlashQuery] = useState('');
   const inputRef = useRef<TextInput>(null);
   const inputSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
+  // Pasted image (web only). Held client-side until the next send, then
+  // persisted into room_messages.metadata.images so the team and any
+  // vision-capable model see it.
+  const [pastedImage, setPastedImage] = useState<string | null>(null);
 
   const handleSessionProfileSelect = useCallback(async (nextProfile: SessionCodingProfile) => {
     setSessionProfile(nextProfile);
@@ -2448,6 +2452,82 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     return getMatchingChatSlashCommands(slashQuery).slice(0, 8);
   }, [slashPaletteOpen, slashQuery]);
 
+  // Pasted image handler — RN Web's TextInput passes onPaste through to the
+  // underlying <textarea>. We capture only image clipboard items, convert to
+  // a data URL, and stash for the next send. preventDefault keeps the binary
+  // garbage out of the textarea.
+  const handleClipboardPaste = useCallback((e: any) => {
+    if (Platform.OS !== 'web') return;
+    const items = e?.clipboardData?.items as DataTransferItemList | undefined;
+    if (!items) return;
+    for (const item of Array.from(items)) {
+      if (item.type && item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        if (typeof e.preventDefault === 'function') e.preventDefault();
+        const reader = new FileReader();
+        reader.onload = () => setPastedImage(reader.result as string);
+        reader.readAsDataURL(file);
+        return;
+      }
+    }
+  }, []);
+
+  // Build a markdown export of the current chat. Web-only — uses Blob +
+  // anchor click to trigger a download.
+  const handleExportChat = useCallback(() => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+    const lines: string[] = [
+      `# Room Chat Export`,
+      `_${new Date().toISOString()}_`,
+      ``,
+    ];
+    for (const m of messages) {
+      const time = new Date(m.created_at).toLocaleString();
+      const isAgent = m.message_type === 'agent_output';
+      const author = isAgent ? `${m.agent_name || 'Agent'}` : `${m.agent_name || 'Member'}`;
+      lines.push(`### ${author} — ${time}`);
+      lines.push('');
+      lines.push(m.content || '');
+      const images = Array.isArray((m.metadata as any)?.images) ? (m.metadata as any).images as string[] : [];
+      if (images.length > 0) {
+        lines.push('');
+        for (const img of images) {
+          lines.push(`![image](${img.length > 200 ? '[inline image omitted from export]' : img})`);
+        }
+      }
+      if ((m.metadata as any)?.pinned) {
+        lines.push('');
+        lines.push('> ★ Pinned by team');
+      }
+      lines.push('');
+      lines.push('---');
+      lines.push('');
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `room-chat-${new Date().toISOString().slice(0, 10)}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [messages]);
+
+  // Toggle the pinned flag on a message. Optimistic update, reverts on error.
+  const handleTogglePin = useCallback(async (msgId: string) => {
+    const target = messages.find((m) => m.id === msgId);
+    if (!target) return;
+    const currentlyPinned = !!(target.metadata as any)?.pinned;
+    const nextMetadata = { ...((target.metadata as any) || {}), pinned: !currentlyPinned };
+    setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, metadata: nextMetadata } : m)));
+    const { error } = await supabase.from('room_messages').update({ metadata: nextMetadata }).eq('id', msgId);
+    if (error) {
+      setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, metadata: target.metadata } : m)));
+    }
+  }, [messages]);
+
   const send = async () => {
     if (!input.trim()) return;
     const { data: { user } } = await supabase.auth.getUser();
@@ -2512,13 +2592,19 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
 
     // ─── Smart command detection — special prompts that load extra context ──
     const isAtMentioningSomeoneElse = /^@(?!agent|blackswan|swanbot|swan\b)\w/i.test(content.trim());
+    const imagesPayload = pastedImage ? [pastedImage] : null;
+    if (imagesPayload) setPastedImage(null);
+
     if (isAtMentioningSomeoneElse) {
       await supabase.from('room_messages').insert({
         room_id: roomId,
         user_id: user?.id || null,
         content,
         message_type: 'chat',
-        metadata: activeFile ? { attached_file: activeFile.name } : {},
+        metadata: {
+          ...(activeFile ? { attached_file: activeFile.name } : {}),
+          ...(imagesPayload ? { images: imagesPayload } : {}),
+        },
       });
       return;
     }
@@ -2537,6 +2623,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           recentMessages: messages,
           availableFiles: roomFiles,
           profile: sessionProfile,
+          extraMetadata: imagesPayload ? { images: imagesPayload } : undefined,
           onStageChange: (_stage, label) => setCurrentRunStep(label),
         });
       } catch {
@@ -2809,6 +2896,12 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           style={[s.panelBtn, { backgroundColor: '#0f172a', borderColor: '#1f2937' }]}>
           <Text style={{ color: '#94a3b8', fontSize: 11, fontWeight: '700' }}>RUNS</Text>
         </Pressable>
+        {Platform.OS === 'web' && messages.length > 0 ? (
+          <Pressable onPress={handleExportChat}
+            style={[s.panelBtn, { backgroundColor: '#0f172a', borderColor: '#1f2937' }]}>
+            <Text style={{ color: '#94a3b8', fontSize: 11, fontWeight: '700' }}>EXPORT .md</Text>
+          </Pressable>
+        ) : null}
         <Pressable onPress={() => { setShowAssign(p => !p); if (showSpawnAgent) setShowSpawnAgent(false); }}
           style={[s.panelBtn, { backgroundColor: accentColor + '15', borderColor: accentColor + '40' }]}>
           <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }}>Assign</Text>
@@ -3008,6 +3101,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             onRetryCheck={handleRetryVerificationCheck}
             retryingCheckId={retryingLedgerCheck?.messageId === m.id ? retryingLedgerCheck.checkId : null}
             onDelete={handleDeleteMessage}
+            onTogglePin={handleTogglePin}
           />
         )}
         ListEmptyComponent={<Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginTop: 20, fontStyle: 'italic' }}>No messages yet</Text>}
@@ -3064,6 +3158,24 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           </View>
         )}
 
+        {pastedImage && (
+          <View style={s.pastedImageRow}>
+            <Image source={{ uri: pastedImage }} style={s.pastedImageThumb} resizeMode="cover" />
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={{ color: accentColor, fontSize: 10, fontFamily: MONO, letterSpacing: 1, fontWeight: '900' }}>
+                IMAGE ATTACHED
+              </Text>
+              <Text style={{ color: '#94a3b8', fontSize: 11 }}>
+                Sends with your next message. Pasted from clipboard.
+              </Text>
+            </View>
+            <Pressable onPress={() => setPastedImage(null)} hitSlop={6}
+              style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, backgroundColor: '#1f2937' }}>
+              <Text style={{ color: '#cbd5e1', fontSize: 11, fontWeight: '800' }}>Remove</Text>
+            </Pressable>
+          </View>
+        )}
+
         <View style={s.msgInputRow}>
           <TextInput
             ref={inputRef}
@@ -3077,13 +3189,14 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
               inputSelectionRef.current = e.nativeEvent.selection;
               detectPalettes(input, e.nativeEvent.selection.start);
             }}
-            placeholder={botTyping ? 'Streaming...' : 'Ask Agent anything — type @ for files, / for commands'}
+            placeholder={botTyping ? 'Streaming...' : 'Ask Agent anything — type @ for files, / for commands, paste images'}
             placeholderTextColor="#555"
             onSubmitEditing={send}
             returnKeyType="send"
             multiline
             maxLength={2000}
             editable={!botTyping}
+            {...(Platform.OS === 'web' ? ({ onPaste: handleClipboardPaste } as any) : {})}
           />
           {botTyping ? (
             <Pressable onPress={handleCancelStream} style={[s.sendBtn, { backgroundColor: '#ef4444' }]}>
@@ -3289,7 +3402,7 @@ function AgentThinkingLoader() {
   );
 }
 
-const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete }: {
+const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin }: {
   msg: RoomMessage;
   accentColor: string;
   circleId: string;
@@ -3299,9 +3412,14 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
   onRetryCheck?: (messageId: string, checkId: string) => void;
   retryingCheckId?: string | null;
   onDelete?: (id: string) => void;
+  onTogglePin?: (id: string) => void;
 }) {
   const time = new Date(msg.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
   const artifacts = Array.isArray(msg.metadata?.artifacts) ? msg.metadata.artifacts : [];
+  const images: string[] = Array.isArray((msg.metadata as any)?.images)
+    ? (msg.metadata as any).images.filter((src: any) => typeof src === 'string')
+    : [];
+  const pinned = !!(msg.metadata as any)?.pinned;
   if (msg.message_type==='edit_event')
     return <View style={{alignItems:'center',flexDirection:'row',justifyContent:'center',gap:6}}><Text style={{color:'#555',fontSize:11,fontStyle:'italic'}}>✏️ {msg.content} · {time}</Text>{onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{opacity:0.4}}><Text style={{color:'#f85149',fontSize:10}}>×</Text></Pressable>}</View>;
   if (msg.message_type==='system')
@@ -3317,12 +3435,20 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
     const runMetadataSummary = buildRunMetadataSummaryProps(msg.metadata);
     const browserPlanEvents = readRunBrowserPlanEvents(msg.metadata);
     return (
-      <View style={{borderLeftWidth:3,borderLeftColor:isTask?'#6366f1':'#3b82f6',paddingLeft:10,paddingVertical:7,backgroundColor:isTask?'#6366f108':'#3b82f608',borderRadius:12}}>
+      <View style={{
+        borderLeftWidth:3,
+        borderLeftColor: pinned ? accentColor : (isTask?'#6366f1':'#3b82f6'),
+        paddingLeft:10, paddingVertical:7,
+        backgroundColor: pinned ? accentColor + '10' : (isTask?'#6366f108':'#3b82f608'),
+        borderRadius:12,
+        ...(pinned ? { borderWidth: 1, borderColor: accentColor + '44' } : {}),
+      }}>
         <View style={{flexDirection:'row',gap:8,marginBottom:3,flexWrap:'wrap',alignItems:'center'}}>
           <Text style={{color:isTask?'#6366f1':'#3b82f6',fontSize:11,fontWeight:'700'}}>{msg.agent_name||'Agent'}</Text>
           {isTask && <View style={{backgroundColor:'#6366f115',paddingHorizontal:5,paddingVertical:2,borderRadius:12,borderWidth:1,borderColor:'#6366f130'}}>
             <Text style={{color:'#6366f1',fontSize:9,fontWeight:'800',letterSpacing:0.5}}>TASK</Text>
           </View>}
+          {pinned && <Text style={{color: accentColor, fontSize: 9, fontWeight: '900', letterSpacing: 0.7}}>★ PINNED</Text>}
           {targetFile && <Text style={{color:'#e8e8e8',fontSize:10,fontFamily:MONO}}>→ {targetFile}</Text>}
           {status && (
             <Text style={{
@@ -3333,9 +3459,22 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
             </Text>
           )}
           <Text style={{color:'#444',fontSize:10}}>{time}</Text>
-          {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ marginLeft: 'auto' as any, opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
+          {onTogglePin && (
+            <Pressable onPress={() => onTogglePin(msg.id)} hitSlop={6}
+              style={{ marginLeft: status ? 0 : 'auto' as any, opacity: pinned ? 1 : 0.5, paddingHorizontal: 4 } as any}>
+              <Text style={{color: pinned ? accentColor : '#94a3b8', fontSize: 12, fontWeight: '900'}}>{pinned ? '★' : '☆'}</Text>
+            </Pressable>
+          )}
+          {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
         </View>
         <Text style={{color:'#ccc',fontSize:12,lineHeight:18}}>{isTask ? msg.metadata?.prompt || msg.content : msg.content}</Text>
+        {images.length > 0 && (
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+            {images.map((src, idx) => (
+              <Image key={idx} source={{ uri: src }} style={{ width: 220, height: 160, borderRadius: 10, borderWidth: 1, borderColor: '#1f2937' }} resizeMode="cover" />
+            ))}
+          </View>
+        )}
         {artifacts.length > 0 && (
           <ChatArtifacts
             artifacts={artifacts}
@@ -3370,16 +3509,33 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
     );
   }
   return (
-    <View style={{paddingVertical:4}}>
+    <View style={[
+      { paddingVertical: 4, paddingHorizontal: 6, borderRadius: 10 },
+      pinned && { backgroundColor: accentColor + '10', borderWidth: 1, borderColor: accentColor + '44' },
+    ]}>
       <View style={{flexDirection:'row',gap:8,marginBottom:3,alignItems:'center'}}>
         <View style={{width:20,height:20,borderRadius:10,backgroundColor:accentColor+'30',alignItems:'center',justifyContent:'center'}}>
           <Text style={{fontSize:10}}>👤</Text>
         </View>
         <Text style={{color:'#ccc',fontSize:11,fontWeight:'700'}}>{msg.agent_name||'Member'}</Text>
+        {pinned && <Text style={{color: accentColor, fontSize: 9, fontWeight: '900', letterSpacing: 0.7}}>★ PINNED</Text>}
         <Text style={{color:'#444',fontSize:10}}>{time}</Text>
-        {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ marginLeft: 'auto' as any, opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
+        {onTogglePin && (
+          <Pressable onPress={() => onTogglePin(msg.id)} hitSlop={6}
+            style={{ marginLeft: 'auto' as any, opacity: pinned ? 1 : 0.5, paddingHorizontal: 4 } as any}>
+            <Text style={{color: pinned ? accentColor : '#94a3b8', fontSize: 12, fontWeight: '900'}}>{pinned ? '★' : '☆'}</Text>
+          </Pressable>
+        )}
+        {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
       </View>
       <Text style={{color:'#e6e6e6',fontSize:13,marginLeft:28,lineHeight:19}}>{msg.content}</Text>
+      {images.length > 0 && (
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8, marginLeft: 28 }}>
+          {images.map((src, idx) => (
+            <Image key={idx} source={{ uri: src }} style={{ width: 220, height: 160, borderRadius: 10, borderWidth: 1, borderColor: '#1f2937' }} resizeMode="cover" />
+          ))}
+        </View>
+      )}
     </View>
   );
 });
@@ -5584,6 +5740,24 @@ const s = StyleSheet.create({
     color: '#94a3b8',
     fontSize: 11,
     flexShrink: 1,
+  },
+  pastedImageRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#1a1a28',
+    backgroundColor: '#0a0e1a',
+  },
+  pastedImageThumb: {
+    width: 56,
+    height: 42,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1f2937',
+    backgroundColor: '#000',
   },
 
   // APIs

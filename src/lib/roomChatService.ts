@@ -26,6 +26,12 @@ type SendRoomChatArgs = {
   recentMessages: RoomChatMessage[];
   availableFiles?: Array<{ id: string; name: string }>;
   profile?: SessionCodingProfile;
+  /**
+   * Extra metadata merged into the user-message row that gets persisted
+   * before the AI run. ChatPanel uses this to attach pasted images so
+   * they land in room_messages alongside the prompt.
+   */
+  extraMetadata?: Record<string, unknown>;
 } & OpenSwanRunCallbacks;
 
 const REVIEW_RE = /review|audit|check.*files|look.*files|scan|analyze.*code|all.*files|code.*quality/i;
@@ -93,8 +99,12 @@ export async function sendRoomStructuredChatMessage({
   availableFiles = [],
   profile,
   onStageChange,
+  extraMetadata,
 }: SendRoomChatArgs): Promise<{ response: string; artifacts: SwanBotStructuredArtifact[] }> {
-  const attachedMetadata = activeFile ? { attached_file: activeFile.name } : {};
+  const attachedMetadata: Record<string, unknown> = {
+    ...(activeFile ? { attached_file: activeFile.name } : {}),
+    ...(extraMetadata || {}),
+  };
   await sendMessage(roomId, userId, content, 'chat', attachedMetadata);
 
   const cleanContent = content.replace(/@(agent|blackswan|swanbot|swan)\s*/gi, '').trim() || content;
