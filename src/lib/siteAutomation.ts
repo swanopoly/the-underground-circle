@@ -46,7 +46,8 @@ export type SiteCredentialSecretKind =
   | 'application_password'
   | 'api_token'
   | 'oauth_token'
-  | 'session_cookie';
+  | 'session_cookie'
+  | 'totp_seed';
 
 export interface SiteCredentialVaultEntry {
   id: string;

@@ -53,6 +53,7 @@ const SECRET_KINDS: Array<{ value: SiteCredentialSecretKind; label: string }> = 
   { value: 'api_token', label: 'API token' },
   { value: 'oauth_token', label: 'OAuth token' },
   { value: 'session_cookie', label: 'Session cookie' },
+  { value: 'totp_seed', label: 'TOTP seed' },
 ];
 
 const PLATFORM_PRESETS: PlatformPreset[] = [
@@ -480,6 +481,8 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   const [importSelected, setImportSelected] = useState<Set<number>>(() => new Set());
   const [importBusy, setImportBusy] = useState(false);
   const [importStatus, setImportStatus] = useState('');
+
+  const [totpCodes, setTotpCodes] = useState<Record<string, { code: string; remainingSeconds: number; period: number; error?: string }>>({});
   const toggleSelected = (id: string) => {
     setSelectedIds((current) => {
       const next = new Set(current);
@@ -533,6 +536,41 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     }, 1000);
     return () => clearInterval(timer);
   }, [activeRevealCount]);
+
+  useEffect(() => {
+    // Continually refresh TOTP codes for any revealed totp_seed entry until
+    // the reveal expires. Clears codes for entries whose seed is no longer
+    // in memory.
+    const totpEntries = entries.filter((entry) => entry.secretKind === 'totp_seed' && revealed[entry.id]);
+    if (totpEntries.length === 0) {
+      if (Object.keys(totpCodes).length > 0) setTotpCodes({});
+      return;
+    }
+    let cancelled = false;
+    const compute = async () => {
+      const { generateTotp } = await import('../../lib/totp');
+      const next: typeof totpCodes = {};
+      for (const entry of totpEntries) {
+        const seed = revealed[entry.id]?.secret;
+        if (!seed) continue;
+        try {
+          const result = await generateTotp(seed);
+          if (cancelled) return;
+          next[entry.id] = { code: result.code, remainingSeconds: result.remainingSeconds, period: result.period };
+        } catch (err: any) {
+          if (cancelled) return;
+          next[entry.id] = { code: '------', remainingSeconds: 0, period: 30, error: err?.message || 'TOTP error' };
+        }
+      }
+      if (!cancelled) setTotpCodes(next);
+    };
+    compute();
+    const ticker = setInterval(compute, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(ticker);
+    };
+  }, [entries, revealed]);
 
   const resetForm = () => {
     setPlatform('wordpress');
@@ -753,6 +791,13 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   const handleCopyRunbook = async (entry: SiteCredentialVaultEntry) => {
     const copied = await copyText(buildAgentRunbook(entry)).catch(() => false);
     setStatus(copied ? 'Agent runbook copied.' : 'Copy is only available in the web app.');
+  };
+
+  const handleCopyTotp = async (entry: SiteCredentialVaultEntry) => {
+    const code = totpCodes[entry.id]?.code;
+    if (!code) return;
+    const copied = await copyText(code).catch(() => false);
+    setStatus(copied ? 'TOTP code copied.' : 'Copy is only available in the web app.');
   };
 
   const handleOpenLogin = (entry: SiteCredentialVaultEntry) => {
@@ -1707,17 +1752,36 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                   </View>
 
                   <View style={styles.secretBox}>
-                    <Text style={styles.secretLabel}>SECRET</Text>
+                    <Text style={styles.secretLabel}>{entry.secretKind === 'totp_seed' ? 'TOTP SEED' : 'SECRET'}</Text>
                     <Text style={styles.secretValue}>{reveal ? reveal.secret : '••••••••••••••••'}</Text>
                     {reveal ? <Text style={styles.secretTimer}>Clears in {revealSeconds}s</Text> : null}
                   </View>
+
+                  {entry.secretKind === 'totp_seed' && totpCodes[entry.id] ? (
+                    <View style={[styles.totpBox, { borderColor: accentColor + '55' }]}>
+                      <Text style={styles.totpLabel}>CURRENT CODE</Text>
+                      {totpCodes[entry.id].error ? (
+                        <Text style={styles.helperText}>{totpCodes[entry.id].error}</Text>
+                      ) : (
+                        <>
+                          <Text style={[styles.totpCode, { color: accentColor }]}>{totpCodes[entry.id].code}</Text>
+                          <Text style={styles.totpTimer}>
+                            Refreshes in {totpCodes[entry.id].remainingSeconds}s
+                          </Text>
+                          <Pressable onPress={() => handleCopyTotp(entry)} style={[styles.secondaryBtn, webCursor()]}>
+                            <Text style={styles.secondaryText}>Copy code</Text>
+                          </Pressable>
+                        </>
+                      )}
+                    </View>
+                  ) : null}
 
                   <View style={styles.actionRow}>
                     <Pressable onPress={() => handleRotateFromEntry(entry)} style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, webCursor()]}>
                       <Text style={[styles.secondaryText, { color: accentColor }]}>Rotate</Text>
                     </Pressable>
                     <Pressable onPress={() => handleReveal(entry)} style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, webCursor()]}>
-                      <Text style={[styles.secondaryText, { color: accentColor }]}>Reveal</Text>
+                      <Text style={[styles.secondaryText, { color: accentColor }]}>{entry.secretKind === 'totp_seed' ? 'Show code' : 'Reveal'}</Text>
                     </Pressable>
                     <Pressable onPress={() => handleOpenLogin(entry)} style={[styles.secondaryBtn, webCursor()]}>
                       <Text style={styles.secondaryText}>Open login</Text>
@@ -2013,6 +2077,31 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
     fontSize: 11,
     lineHeight: 15,
+  },
+  totpBox: {
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    backgroundColor: '#070b13',
+    gap: 6,
+    alignItems: 'flex-start',
+  },
+  totpLabel: {
+    color: '#cbd5e1',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1.5,
+  },
+  totpCode: {
+    fontSize: 32,
+    fontWeight: '900',
+    letterSpacing: 6,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  totpTimer: {
+    color: '#7c8798',
+    fontSize: 11,
+    fontWeight: '700',
   },
   cardTitleRow: {
     flexDirection: 'row',
