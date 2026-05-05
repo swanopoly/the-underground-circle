@@ -483,6 +483,8 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   const [importStatus, setImportStatus] = useState('');
 
   const [totpCodes, setTotpCodes] = useState<Record<string, { code: string; remainingSeconds: number; period: number; error?: string }>>({});
+
+  const [confirmReveal, setConfirmReveal] = useState<{ entryId: string; input: string } | null>(null);
   const toggleSelected = (id: string) => {
     setSelectedIds((current) => {
       const next = new Set(current);
@@ -753,17 +755,19 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     setStatus(`Rotating ${entry.platform}/${entry.label}. Enter the new secret and save.`);
   };
 
-  const handleReveal = async (entry: SiteCredentialVaultEntry) => {
-    setStatus('');
+  const isHighTrust = (entry: SiteCredentialVaultEntry): boolean => {
+    return entryMetadataBoolean(entry, 'highTrust') === true;
+  };
+
+  const performReveal = async (entry: SiteCredentialVaultEntry, purpose: string) => {
     const duration = typeof entry.accessPolicy?.reveal_duration_seconds === 'number'
       ? Math.max(15, Math.min(300, entry.accessPolicy.reveal_duration_seconds))
       : 30;
-    const result = await revealSiteCredentialSecret(entry.id, 'office_vault_reveal');
+    const result = await revealSiteCredentialSecret(entry.id, purpose);
     if (result.error || !result.result) {
       setStatus(result.error || 'Could not reveal secret.');
       return;
     }
-
     setRevealed((current) => ({
       ...current,
       [entry.id]: {
@@ -773,6 +777,34 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     }));
     replaceEntry(result.result.entry);
     await loadAudit(entry.id);
+  };
+
+  const handleReveal = async (entry: SiteCredentialVaultEntry) => {
+    setStatus('');
+    if (isHighTrust(entry)) {
+      setConfirmReveal({ entryId: entry.id, input: '' });
+      return;
+    }
+    await performReveal(entry, 'office_vault_reveal');
+  };
+
+  const cancelConfirmReveal = () => setConfirmReveal(null);
+
+  const submitConfirmReveal = async () => {
+    if (!confirmReveal) return;
+    const entry = entries.find((item) => item.id === confirmReveal.entryId);
+    if (!entry) {
+      setConfirmReveal(null);
+      setStatus('Credential is no longer available.');
+      return;
+    }
+    const expected = `${entry.platform}/${entry.label}`.toLowerCase();
+    if (confirmReveal.input.trim().toLowerCase() !== expected) {
+      setStatus(`Confirmation did not match — type "${expected}" exactly to reveal.`);
+      return;
+    }
+    setConfirmReveal(null);
+    await performReveal(entry, 'office_vault_reveal_high_trust_confirmed');
   };
 
   const handleCopyUsername = async (entry: SiteCredentialVaultEntry) => {
@@ -1637,6 +1669,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                       <Text style={[styles.readinessBadge, { color: readiness.color, borderColor: readiness.color + '55' }]}>{readiness.label}</Text>
                       {rotationDue ? <Text style={styles.rotationBadge}>Rotation due</Text> : null}
                       {!entry.isActive ? <Text style={styles.inactiveBadge}>Inactive</Text> : null}
+                      {isHighTrust(entry) ? <Text style={styles.highTrustBadge}>HIGH-TRUST</Text> : null}
                       {entryTags(entry).slice(0, 4).map((tag) => (
                         <Text key={tag} style={[styles.tagBadge, { color: accentColor, borderColor: accentColor + '55' }]}>{tag}</Text>
                       ))}
@@ -1686,6 +1719,16 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                     >
                       <View style={[styles.checkbox, entry.accessPolicy?.require_approval !== false && { backgroundColor: accentColor, borderColor: accentColor }]} />
                       <Text style={styles.approvalText}>Require approval before use</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => updateEntryControls(entry, {
+                        metadata: { ...entry.metadata, highTrust: !isHighTrust(entry) },
+                      }, isHighTrust(entry) ? 'High-trust gate disabled.' : 'High-trust gate enabled.')}
+                      disabled={!!updating[entry.id]}
+                      style={[styles.approvalRow, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
+                    >
+                      <View style={[styles.checkbox, isHighTrust(entry) && { backgroundColor: '#f59e0b', borderColor: '#f59e0b' }]} />
+                      <Text style={styles.approvalText}>High-trust — require typed confirmation before reveal</Text>
                     </Pressable>
                     <View style={styles.kindRow}>
                       {ACTION_OPTIONS.map((action) => {
@@ -1750,6 +1793,34 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                     </View>
                     {entryMetadataString(entry, 'lastTestMessage') ? <Text style={styles.helperText}>{entryMetadataString(entry, 'lastTestMessage')}</Text> : null}
                   </View>
+
+                  {confirmReveal && confirmReveal.entryId === entry.id ? (
+                    <View style={styles.confirmRevealBox}>
+                      <Text style={styles.confirmRevealTitle}>Confirm reveal</Text>
+                      <Text style={styles.helperText}>
+                        This credential is marked high-trust. Type{' '}
+                        <Text style={styles.confirmRevealTarget}>{entry.platform}/{entry.label}</Text>{' '}
+                        to proceed.
+                      </Text>
+                      <TextInput
+                        style={styles.input}
+                        value={confirmReveal.input}
+                        onChangeText={(text) => setConfirmReveal({ entryId: entry.id, input: text })}
+                        autoCapitalize="none"
+                        autoFocus
+                        placeholder={`${entry.platform}/${entry.label}`}
+                        placeholderTextColor="#535b66"
+                      />
+                      <View style={styles.actionRow}>
+                        <Pressable onPress={submitConfirmReveal} style={[styles.primaryBtn, { backgroundColor: '#f59e0b' }, webCursor()]}>
+                          <Text style={styles.primaryText}>Confirm and reveal</Text>
+                        </Pressable>
+                        <Pressable onPress={cancelConfirmReveal} style={[styles.secondaryBtn, webCursor()]}>
+                          <Text style={styles.secondaryText}>Cancel</Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                  ) : null}
 
                   <View style={styles.secretBox}>
                     <Text style={styles.secretLabel}>{entry.secretKind === 'totp_seed' ? 'TOTP SEED' : 'SECRET'}</Text>
@@ -2102,6 +2173,39 @@ const styles = StyleSheet.create({
     color: '#7c8798',
     fontSize: 11,
     fontWeight: '700',
+  },
+  highTrustBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#f59e0b66',
+    color: '#f59e0b',
+    backgroundColor: '#f59e0b18',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  confirmRevealBox: {
+    padding: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#f59e0b55',
+    backgroundColor: '#7c2d1212',
+    gap: 8,
+  },
+  confirmRevealTitle: {
+    color: '#fcd34d',
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
+  confirmRevealTarget: {
+    color: '#fcd34d',
+    fontWeight: '900',
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
   },
   cardTitleRow: {
     flexDirection: 'row',
