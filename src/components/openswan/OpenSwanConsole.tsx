@@ -557,6 +557,39 @@ export default function OpenSwanConsole({
     onSubmit({ task: trimmed, mode, model: currentModel });
   }, [canSubmit, onSubmit, trimmed, mode, currentModel]);
 
+  // Keyboard shortcuts (web only) — power-user shortcuts so daily
+  // launches don't require leaving the keyboard for the mouse.
+  // Listens at window level so the shortcut works whether focus is
+  // in the task textarea, on a chip, or anywhere else inside the
+  // panel. Gated on `visible` so a closed panel doesn't intercept
+  // chat shortcuts.
+  useEffect(() => {
+    if (!visible || Platform.OS !== 'web') return;
+    const onKey = (e: KeyboardEvent) => {
+      const cmd = e.metaKey || e.ctrlKey;
+      // Cmd-Enter / Ctrl-Enter → LAUNCH (only when canSubmit)
+      if (cmd && e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        handleSubmit();
+        return;
+      }
+      // Cmd-Shift-S → save current task+mode as a template
+      if (cmd && e.shiftKey && (e.key === 'S' || e.key === 's')) {
+        e.preventDefault();
+        saveCurrentAsTemplate();
+        return;
+      }
+      // Esc → close the panel (matches the X button)
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+        return;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [visible, handleSubmit, saveCurrentAsTemplate, onClose]);
+
   const modeDescriptors = useMemo(
     () => getSelectableChatModes().filter((p) => p.key !== 'none'),
     [],
@@ -703,7 +736,7 @@ export default function OpenSwanConsole({
                 accessibilityLabel="Save current task and mode as a template"
               >
                 <Text style={[styles.templateSaveText, { color: accentColor }]}>
-                  + SAVE CURRENT
+                  + SAVE CURRENT{Platform.OS === 'web' ? '  ⌘⇧S' : ''}
                 </Text>
               </Pressable>
             </View>
@@ -1368,7 +1401,7 @@ export default function OpenSwanConsole({
               { backgroundColor: canSubmit ? modeAccent : '#1e293b' },
             ]}
             accessibilityRole="button"
-            accessibilityLabel="Launch OpenSwan turn"
+            accessibilityLabel="Launch OpenSwan turn (Cmd-Enter)"
           >
             <Text
               style={[
@@ -1378,6 +1411,11 @@ export default function OpenSwanConsole({
             >
               LAUNCH {modePolicy?.label?.toUpperCase() || mode.toUpperCase()}  ›
             </Text>
+            {Platform.OS === 'web' ? (
+              <Text style={[styles.primaryBtnKbd, { color: canSubmit ? '#02061799' : MUTED }]}>
+                ⌘↵
+              </Text>
+            ) : null}
           </Pressable>
         </View>
       </View>
@@ -2176,6 +2214,9 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   primaryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 10,
@@ -2185,5 +2226,11 @@ const styles = StyleSheet.create({
     fontSize: 11,
     letterSpacing: 1.4,
     fontWeight: '700',
+  },
+  primaryBtnKbd: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    fontWeight: '700',
+    opacity: 0.7,
   },
 });
