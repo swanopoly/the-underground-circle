@@ -245,6 +245,29 @@ function entryMetadataBoolean(entry: SiteCredentialVaultEntry, key: string): boo
   return typeof value === 'boolean' ? value : null;
 }
 
+function entryTags(entry: SiteCredentialVaultEntry): string[] {
+  const meta = (entry.metadata || {}) as Record<string, unknown>;
+  const raw = meta.tags;
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of raw) {
+    if (typeof value !== 'string') continue;
+    const cleaned = value.trim().toLowerCase();
+    if (!cleaned || seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    result.push(cleaned);
+  }
+  return result;
+}
+
+function parseTagInput(value: string): string[] {
+  return value
+    .split(/[,\n]/)
+    .map((part) => part.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, ''))
+    .filter(Boolean);
+}
+
 function entryAllowedActions(entry: SiteCredentialVaultEntry): string[] {
   const raw = entry.accessPolicy?.allowed_actions;
   if (!Array.isArray(raw)) return ['login'];
@@ -329,6 +352,9 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   const [notes, setNotes] = useState(PLATFORM_PRESETS[0].notes);
   const [revealDurationSeconds, setRevealDurationSeconds] = useState(30);
   const [rotationCadenceDays, setRotationCadenceDays] = useState<number | null>(90);
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState('');
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
 
   const activeRevealCount = useMemo(
     () => Object.values(revealed).filter((item) => item.expiresAt > Date.now()).length,
@@ -371,6 +397,17 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     const inactive = entries.filter((entry) => !entry.isActive).length;
     return { ready, needsTest, rotationDue, inactive };
   }, [entries]);
+  const allTags = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const entry of entries) {
+      for (const tag of entryTags(entry)) {
+        counts.set(tag, (counts.get(tag) || 0) + 1);
+      }
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  }, [entries]);
+
   const visibleEntries = useMemo(() => {
     const q = query.trim().toLowerCase();
     return entries.filter((entry) => {
@@ -380,6 +417,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
       if (riskFilter === 'needs_test' && entryMetadataString(entry, 'lastTestedAt') && entryMetadataBoolean(entry, 'lastTestSuccess') !== false) return false;
       if (riskFilter === 'rotation_due' && !isRotationDue(entry)) return false;
       if (riskFilter === 'inactive' && entry.isActive) return false;
+      if (tagFilter && !entryTags(entry).includes(tagFilter)) return false;
       if (!q) return true;
       return [
         entry.platform,
@@ -389,9 +427,10 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
         entry.username || '',
         entry.secretKind,
         entryAllowedActions(entry).join(' '),
+        entryTags(entry).join(' '),
       ].some((value) => value.toLowerCase().includes(q));
     });
-  }, [entries, query, riskFilter, rotationOnly]);
+  }, [entries, query, riskFilter, rotationOnly, tagFilter]);
 
   const loadVault = useCallback(async () => {
     setLoading(true);
@@ -502,6 +541,25 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     setNotes(PLATFORM_PRESETS[0].notes);
     setRevealDurationSeconds(30);
     setRotationCadenceDays(90);
+    setTags([]);
+    setTagInput('');
+  };
+
+  const addTag = (value: string) => {
+    const cleaned = parseTagInput(value);
+    if (cleaned.length === 0) return;
+    setTags((current) => {
+      const next = [...current];
+      for (const tag of cleaned) {
+        if (!next.includes(tag)) next.push(tag);
+      }
+      return next.slice(0, 8);
+    });
+    setTagInput('');
+  };
+
+  const removeTag = (tag: string) => {
+    setTags((current) => current.filter((value) => value !== tag));
   };
 
   const applyPreset = (preset: PlatformPreset) => {
@@ -612,6 +670,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
         breachFound: finalBreach.error ? null : finalBreach.breached,
         breachCount: finalBreach.error ? null : finalBreach.count,
         breachCheckError: finalBreach.error || null,
+        tags: tags.slice(0, 8),
       },
       rotationDueAt: dueDateFromCadence(rotationCadenceDays),
     });
@@ -644,6 +703,8 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     setRevealDurationSeconds(typeof entry.accessPolicy?.reveal_duration_seconds === 'number' ? entry.accessPolicy.reveal_duration_seconds : 30);
     setRotationCadenceDays(null);
     setNotes(entryMetadataString(entry, 'notes') || presetForPlatform(entry.platform).notes);
+    setTags(entryTags(entry));
+    setTagInput('');
     setExpandedId('new');
     setStatus(`Rotating ${entry.platform}/${entry.label}. Enter the new secret and save.`);
   };
@@ -1115,6 +1176,41 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                 />
               </View>
 
+              <View style={styles.field}>
+                <Text style={styles.label}>TAGS / FOLDER</Text>
+                <View style={styles.tagInputRow}>
+                  <TextInput
+                    style={[styles.input, styles.tagInput]}
+                    value={tagInput}
+                    onChangeText={setTagInput}
+                    onSubmitEditing={() => addTag(tagInput)}
+                    onBlur={() => { if (tagInput.trim()) addTag(tagInput); }}
+                    autoCapitalize="none"
+                    placeholder="client-acme, prod, billing (comma or enter to add)"
+                    placeholderTextColor="#535b66"
+                  />
+                  <Pressable onPress={() => addTag(tagInput)} style={[styles.generateBtn, { borderColor: accentColor + '55' }, webCursor()]}>
+                    <Text style={[styles.generateText, { color: accentColor }]}>Add</Text>
+                  </Pressable>
+                </View>
+                {tags.length > 0 ? (
+                  <View style={styles.kindRow}>
+                    {tags.map((tag) => (
+                      <Pressable
+                        key={tag}
+                        onPress={() => removeTag(tag)}
+                        style={[styles.tagChip, { borderColor: accentColor + '88', backgroundColor: accentColor + '18' }, webCursor()]}
+                      >
+                        <Text style={[styles.tagChipText, { color: accentColor }]}>{tag} ×</Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                ) : null}
+                <Text style={styles.helperText}>
+                  Group credentials by client, environment, or use-case. Up to 8 tags. Searchable from /vault find.
+                </Text>
+              </View>
+
               <Pressable onPress={() => setRequiresApproval((value) => !value)} style={[styles.approvalRow, webCursor()]}>
                 <View style={[styles.checkbox, requiresApproval && { backgroundColor: accentColor, borderColor: accentColor }]} />
                 <Text style={styles.approvalText}>Require human approval before agents use this credential</Text>
@@ -1175,6 +1271,36 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                 <Text style={[styles.filterToggleText, rotationOnly && { color: accentColor }]}>Only due</Text>
               </Pressable>
             </View>
+            {allTags.length > 0 ? (
+              <View style={styles.kindRow}>
+                <Pressable
+                  onPress={() => setTagFilter(null)}
+                  style={[
+                    styles.tagFilterChip,
+                    tagFilter === null && { borderColor: accentColor + '88', backgroundColor: accentColor + '14' },
+                    webCursor(),
+                  ]}
+                >
+                  <Text style={[styles.tagFilterText, tagFilter === null && { color: accentColor }]}>All tags</Text>
+                </Pressable>
+                {allTags.map(([tag, count]) => {
+                  const active = tagFilter === tag;
+                  return (
+                    <Pressable
+                      key={tag}
+                      onPress={() => setTagFilter(active ? null : tag)}
+                      style={[
+                        styles.tagFilterChip,
+                        active && { borderColor: accentColor + '88', backgroundColor: accentColor + '14' },
+                        webCursor(),
+                      ]}
+                    >
+                      <Text style={[styles.tagFilterText, active && { color: accentColor }]}>#{tag} ({count})</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ) : null}
           </View>
         ) : null}
 
@@ -1299,6 +1425,9 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                       <Text style={[styles.readinessBadge, { color: readiness.color, borderColor: readiness.color + '55' }]}>{readiness.label}</Text>
                       {rotationDue ? <Text style={styles.rotationBadge}>Rotation due</Text> : null}
                       {!entry.isActive ? <Text style={styles.inactiveBadge}>Inactive</Text> : null}
+                      {entryTags(entry).slice(0, 4).map((tag) => (
+                        <Text key={tag} style={[styles.tagBadge, { color: accentColor, borderColor: accentColor + '55' }]}>{tag}</Text>
+                      ))}
                     </View>
                     <Text style={styles.cardMeta}>{entry.siteUrl || 'No site URL'} {entry.username ? `- ${entry.username}` : ''}</Text>
                   </View>
@@ -1649,6 +1778,46 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
+  },
+  tagInputRow: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'stretch',
+  },
+  tagInput: {
+    flex: 1,
+  },
+  tagChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  tagChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  tagBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  tagFilterChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#ffffff18',
+    backgroundColor: '#050914',
+  },
+  tagFilterText: {
+    color: '#aab4c2',
+    fontSize: 11,
+    fontWeight: '700',
   },
   cardTitleRow: {
     flexDirection: 'row',

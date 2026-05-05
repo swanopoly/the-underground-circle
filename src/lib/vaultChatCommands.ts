@@ -139,22 +139,32 @@ async function vaultList(ctx: VaultCommandContext): Promise<VaultCommandResult> 
   return { message: lines.join('\n'), success: true };
 }
 
+function entryTagList(entry: SiteCredentialVaultEntry): string[] {
+  const meta = (entry.metadata || {}) as Record<string, unknown>;
+  const raw = meta.tags;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((value): value is string => typeof value === 'string').map((tag) => tag.toLowerCase());
+}
+
 async function vaultFind(query: string, ctx: VaultCommandContext): Promise<VaultCommandResult> {
   const trimmed = query.trim();
-  if (!trimmed) return { message: 'Usage: `/vault find <query>` — searches platform, label, username, URL.', success: false };
+  if (!trimmed) return { message: 'Usage: `/vault find <query>` — searches platform, label, username, URL, tags.', success: false };
   const { entries, error } = await loadEntries(ctx.circleId);
   if (error) return { message: error, success: false };
-  const q = trimmed.toLowerCase();
-  const matches = entries.filter((entry) =>
-    [
+  const isTagQuery = trimmed.startsWith('#');
+  const q = (isTagQuery ? trimmed.slice(1) : trimmed).toLowerCase();
+  const matches = entries.filter((entry) => {
+    if (isTagQuery) return entryTagList(entry).includes(q);
+    return [
       entry.platform,
       entry.label,
       entry.siteUrl || '',
       entry.loginUrl || '',
       entry.username || '',
       entry.secretKind,
-    ].some((value) => String(value).toLowerCase().includes(q)),
-  );
+      entryTagList(entry).join(' '),
+    ].some((value) => String(value).toLowerCase().includes(q));
+  });
   if (matches.length === 0) {
     return { message: `No credentials match \`${trimmed}\`. Try \`/vault list\` to see everything stored.`, success: true };
   }
