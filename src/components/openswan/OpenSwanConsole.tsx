@@ -22,6 +22,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   Platform,
   Pressable,
   ScrollView,
@@ -299,10 +300,10 @@ export default function OpenSwanConsole({
     }
   }, []);
 
-  // Load the last few runs the user kicked off in this circle. Surfaced
-  // as a row of pills under the MODE selector so the user can re-launch
-  // a previous task without retyping it. Only loads when the panel is
-  // open — keeps the cold-path fast.
+  // Load the last few runs the user kicked off in this circle, plus
+  // subscribe for realtime updates so the list reflects status flips
+  // (running → completed/failed) and brand-new runs without a refresh.
+  // Only fires when the panel is open — keeps the cold-path fast.
   useEffect(() => {
     if (!visible || !circleId || !userId) return;
     let cancelled = false;
@@ -314,8 +315,88 @@ export default function OpenSwanConsole({
         if (!cancelled) setRecentRuns([]);
       }
     })();
-    return () => { cancelled = true; };
+
+    // Realtime: agent_runs INSERT (new run) + UPDATE (status / progress
+    // change). Filter by circle, then dedupe by user_id in JS since
+    // Postgres realtime doesn't support compound filters.
+    const ch = supabase
+      .channel(`recent-runs:${circleId}:${userId}`)
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'agent_runs',
+        filter: `circle_id=eq.${circleId}`,
+      }, (payload) => {
+        if (cancelled) return;
+        const row = payload.new as any;
+        if (!row || row.user_id !== userId) return;
+        const next: AgentRun = {
+          id: row.id,
+          circle_id: row.circle_id,
+          user_id: row.user_id,
+          surface: row.surface,
+          room_id: row.room_id || undefined,
+          task_id: row.task_id || undefined,
+          chat_session_id: row.chat_session_id || undefined,
+          title: row.title || '',
+          goal: row.goal || undefined,
+          mode: row.mode || 'plan',
+          model: row.model || undefined,
+          provider: row.provider || undefined,
+          status: row.status,
+          plan_summary: row.plan_summary || undefined,
+          current_step_index: row.current_step_index || 0,
+          total_steps: row.total_steps || 0,
+          input_tokens: row.input_tokens || 0,
+          output_tokens: row.output_tokens || 0,
+          cached_tokens: row.cached_tokens || 0,
+          estimated_cost: Number(row.estimated_cost || 0),
+          started_at: row.started_at || undefined,
+          completed_at: row.completed_at || undefined,
+          created_at: row.created_at,
+          parent_run_id: row.parent_run_id || undefined,
+          delegated_to: row.delegated_to || undefined,
+          metadata: row.metadata || {},
+        };
+        setRecentRuns((prev) => {
+          const idx = prev.findIndex((r) => r.id === next.id);
+          if (idx >= 0) {
+            // UPDATE — replace in place, keep ordering.
+            const copy = prev.slice();
+            copy[idx] = next;
+            return copy;
+          }
+          // INSERT — prepend, cap at 8 (oldest drops off).
+          return [next, ...prev].slice(0, 8);
+        });
+      })
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      try { ch.unsubscribe(); } catch {}
+    };
   }, [visible, circleId, userId]);
+
+  // Pulsing dot animation for live runs. One Animated.Value drives all
+  // running-status dots so we don't fan out N animations.
+  const livePulse = useRef(new Animated.Value(0.4)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(livePulse, { toValue: 1, duration: 600, useNativeDriver: false }),
+        Animated.timing(livePulse, { toValue: 0.4, duration: 600, useNativeDriver: false }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [livePulse]);
+
+  const liveRunsCount = useMemo(() =>
+    recentRuns.filter((r) =>
+      r.status === 'running' || r.status === 'planning' || r.status === 'queued',
+    ).length,
+  [recentRuns]);
 
   // ── Tool + subagent + memory previews (live on mode / task changes) ──
 
@@ -835,7 +916,17 @@ export default function OpenSwanConsole({
                 accessibilityRole="button"
                 accessibilityLabel={recentRunsExpanded ? 'Hide recent runs' : 'Show recent runs'}
               >
-                <Text style={styles.label}>RECENT RUNS · {recentRuns.length}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 }}>
+                  <Text style={styles.label}>RECENT RUNS · {recentRuns.length}</Text>
+                  {liveRunsCount > 0 ? (
+                    <View style={styles.recentRunsLiveChip}>
+                      <Animated.View style={[styles.recentRunsLiveDot, { opacity: livePulse }]} />
+                      <Text style={styles.recentRunsLiveText}>
+                        {liveRunsCount} LIVE
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
                 <Text style={styles.recentRunsChevron}>{recentRunsExpanded ? '▾' : '▸'}</Text>
               </Pressable>
               {recentRunsExpanded ? (
@@ -862,6 +953,22 @@ export default function OpenSwanConsole({
                       elapsedMs < 1000 ? `${elapsedMs}ms` :
                       elapsedMs < 60000 ? `${(elapsedMs / 1000).toFixed(1)}s` :
                       `${Math.floor(elapsedMs / 60000)}m${Math.floor((elapsedMs % 60000) / 1000)}s`;
+                    const isLive =
+                      r.status === 'running' ||
+                      r.status === 'planning' ||
+                      r.status === 'queued';
+                    // For live runs, the elapsed clock keeps ticking
+                    // from started_at against now() so the user sees
+                    // the time grow in real time. Recomputed each
+                    // render — fine since the realtime UPDATE fires
+                    // a re-render every step or two anyway.
+                    const liveElapsedMs = isLive && r.started_at
+                      ? Date.now() - new Date(r.started_at).getTime()
+                      : null;
+                    const liveElapsedLabel = liveElapsedMs === null ? null
+                      : liveElapsedMs < 1000 ? `${liveElapsedMs}ms`
+                      : liveElapsedMs < 60000 ? `${(liveElapsedMs / 1000).toFixed(0)}s`
+                      : `${Math.floor(liveElapsedMs / 60000)}m${Math.floor((liveElapsedMs % 60000) / 1000)}s`;
                     return (
                       <Pressable
                         key={r.id}
@@ -874,12 +981,17 @@ export default function OpenSwanConsole({
                         }}
                         style={({ hovered, pressed }: any) => [
                           styles.recentRunRow,
+                          isLive && { borderColor: '#a78bfa55', backgroundColor: '#a78bfa08' },
                           hovered && { borderColor: `${accentColor}55`, backgroundColor: `${accentColor}08` },
                           pressed && { transform: [{ scale: 0.99 }] },
                         ]}
-                        accessibilityLabel={`Reuse: ${r.title}`}
+                        accessibilityLabel={isLive ? `Live: ${r.title}` : `Reuse: ${r.title}`}
                       >
-                        <View style={[styles.recentRunDot, { backgroundColor: dot }]} />
+                        {isLive ? (
+                          <Animated.View style={[styles.recentRunDot, { backgroundColor: dot, opacity: livePulse }]} />
+                        ) : (
+                          <View style={[styles.recentRunDot, { backgroundColor: dot }]} />
+                        )}
                         <View style={{ flex: 1, gap: 2 }}>
                           <View style={styles.recentRunTitleRow}>
                             <Text style={styles.recentRunMode}>{r.mode}</Text>
@@ -887,12 +999,16 @@ export default function OpenSwanConsole({
                           </View>
                           <Text style={styles.recentRunTitle} numberOfLines={1}>{r.title || r.goal || '(untitled)'}</Text>
                           <Text style={styles.recentRunMeta}>
-                            {elapsedLabel}
+                            {liveElapsedLabel || elapsedLabel}
                             {r.estimated_cost > 0 ? ` · $${r.estimated_cost.toFixed(3)}` : ''}
-                            {r.total_steps > 0 ? ` · ${r.total_steps} step${r.total_steps === 1 ? '' : 's'}` : ''}
+                            {r.total_steps > 0 ? (
+                              isLive && r.current_step_index > 0
+                                ? ` · step ${r.current_step_index}/${r.total_steps}`
+                                : ` · ${r.total_steps} step${r.total_steps === 1 ? '' : 's'}`
+                            ) : ''}
                           </Text>
                         </View>
-                        <Text style={styles.recentRunArrow}>↺</Text>
+                        <Text style={styles.recentRunArrow}>{isLive ? '◉' : '↺'}</Text>
                       </Pressable>
                     );
                   })}
@@ -1570,6 +1686,30 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+  },
+  recentRunsLiveChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 999,
+    backgroundColor: '#a78bfa18',
+    borderWidth: 1,
+    borderColor: '#a78bfa55',
+  },
+  recentRunsLiveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: '#a78bfa',
+  },
+  recentRunsLiveText: {
+    color: '#a78bfa',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
   },
   recentRunsChevron: {
     color: MUTED,
