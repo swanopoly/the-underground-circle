@@ -2369,6 +2369,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // File-peek overlay — when user taps an @filename in a past message,
   // we lazy-fetch its content and render in an inline overlay.
   const [peekFile, setPeekFile] = useState<{ name: string; content: string | null; loading: boolean } | null>(null);
+  // Voice input via Web Speech API. Toggles by tapping the mic button
+  // in the input row. Web only; native gets nothing.
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
+  const voiceFinalRef = useRef<string>('');
   // Rolling room_usage stats so the chat header surfaces token + USD
   // spend without the user needing to open the Usage panel.
   const [usageStats, setUsageStats] = useState<{ tokens: number; cost: number; runs: number }>({ tokens: 0, cost: 0, runs: 0 });
@@ -2646,6 +2651,54 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       console.warn('[room-chat] dropped file failed:', err?.message);
     }
   }, [roomFiles, roomId]);
+
+  const stopVoiceInput = useCallback(() => {
+    const r = recognitionRef.current;
+    if (r) {
+      try { r.stop(); } catch {}
+      recognitionRef.current = null;
+    }
+    setIsListening(false);
+  }, []);
+
+  const startVoiceInput = useCallback(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+    if (recognitionRef.current) {
+      stopVoiceInput();
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = (typeof navigator !== 'undefined' && (navigator as any).language) || 'en-US';
+    voiceFinalRef.current = input;
+    recognition.onresult = (e: any) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const result = e.results[i];
+        if (result.isFinal) {
+          voiceFinalRef.current += (voiceFinalRef.current && !voiceFinalRef.current.endsWith(' ') ? ' ' : '') + result[0].transcript;
+        } else {
+          interim += result[0].transcript;
+        }
+      }
+      setInput((voiceFinalRef.current + (interim ? (voiceFinalRef.current && !voiceFinalRef.current.endsWith(' ') ? ' ' : '') + interim : '')).trimStart());
+    };
+    recognition.onerror = () => stopVoiceInput();
+    recognition.onend = () => stopVoiceInput();
+    try {
+      recognition.start();
+      recognitionRef.current = recognition;
+      setIsListening(true);
+    } catch {
+      stopVoiceInput();
+    }
+  }, [input, stopVoiceInput]);
+
+  // Stop the voice listener when the panel unmounts so we don't leak it.
+  useEffect(() => () => stopVoiceInput(), [stopVoiceInput]);
 
   const handleClipboardPaste = useCallback((e: any) => {
     if (Platform.OS !== 'web') return;
@@ -3910,6 +3963,20 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             editable={!botTyping}
             {...(Platform.OS === 'web' ? ({ onPaste: handleClipboardPaste } as any) : {})}
           />
+          {Platform.OS === 'web' && !botTyping ? (
+            <Pressable
+              onPress={isListening ? stopVoiceInput : startVoiceInput}
+              style={[s.sendBtn, {
+                backgroundColor: isListening ? '#ef4444' : '#0d1320',
+                borderWidth: 1, borderColor: isListening ? '#ef4444' : '#1f2937',
+              }]}
+            >
+              <Text style={{
+                color: isListening ? '#fff' : '#94a3b8',
+                fontSize: 14, fontWeight: '900',
+              }}>{isListening ? '◉' : '◌'}</Text>
+            </Pressable>
+          ) : null}
           {botTyping ? (
             <Pressable onPress={handleCancelStream} style={[s.sendBtn, { backgroundColor: '#ef4444' }]}>
               <Text style={{ color: '#fff', fontSize: 10, fontWeight: '900', letterSpacing: 1 }}>STOP</Text>
