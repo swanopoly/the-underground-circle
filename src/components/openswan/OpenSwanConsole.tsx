@@ -70,6 +70,19 @@ const OUTPUT_TOKEN_BUDGET_BY_MODE: Record<string, number> = {
 // varies, but this deliberately leans high so users are less surprised.
 const BASE_INPUT_TOKENS = 4500;
 
+// Color rotation for the SPEND BY SOURCE stacked bar. Order is
+// stable so the same source gets the same color across renders.
+const SPEND_SOURCE_COLORS: ReadonlyArray<string> = [
+  '#a78bfa',  // violet — primary
+  '#22d3ee',  // cyan
+  '#22c55e',  // green
+  '#f59e0b',  // amber
+  '#ec4899',  // pink
+  '#6366f1',  // indigo
+  '#ef4444',  // red
+  '#94a3b8',  // slate (catch-all)
+];
+
 // Starter templates — shown only when the user's saved-template list
 // is empty so new users see usable shortcuts without polluting the
 // saved list. Tap → applies (task, mode) but doesn't auto-save; the
@@ -1081,6 +1094,65 @@ export default function OpenSwanConsole({
               <BudgetStrip spent={spend.totalCost} cap={budgetCap} loading={spend.loading} />
             ) : null}
 
+            {/* Spend rollup by source — see WHERE the 24h budget went.
+                Helps users diagnose runaway costs (e.g. "computer-use
+                burned 80% of today's spend"). Hidden when there's no
+                meaningful spend (< 1¢) so brand-new circles don't
+                see a "0%" slice of nothing. */}
+            {circleId && spend.totalCost >= 0.01 && spend.rows.length > 0 ? (
+              <View style={styles.spendRollup}>
+                <View style={styles.spendRollupHeader}>
+                  <Text style={styles.spendRollupLabel}>
+                    SPEND BY SOURCE · 24H · ${spend.totalCost.toFixed(3)}
+                  </Text>
+                </View>
+                {/* Horizontal stacked bar — one segment per source,
+                    width proportional to that source's cost share. */}
+                <View style={styles.spendBar}>
+                  {spend.rows
+                    .slice()
+                    .sort((a, b) => b.cost - a.cost)
+                    .map((row, idx) => {
+                      const pct = (row.cost / spend.totalCost) * 100;
+                      if (pct < 0.5) return null; // below visual noise floor
+                      return (
+                        <View
+                          key={row.source}
+                          style={{
+                            width: `${pct}%`,
+                            backgroundColor: SPEND_SOURCE_COLORS[idx % SPEND_SOURCE_COLORS.length],
+                          }}
+                        />
+                      );
+                    })}
+                </View>
+                {/* Top 3 sources with their share. */}
+                <View style={{ gap: 3 }}>
+                  {spend.rows
+                    .slice()
+                    .sort((a, b) => b.cost - a.cost)
+                    .slice(0, 3)
+                    .map((row, idx) => {
+                      const pct = (row.cost / spend.totalCost) * 100;
+                      return (
+                        <View key={row.source} style={styles.spendLegendRow}>
+                          <View style={[
+                            styles.spendLegendDot,
+                            { backgroundColor: SPEND_SOURCE_COLORS[idx % SPEND_SOURCE_COLORS.length] },
+                          ]} />
+                          <Text style={styles.spendLegendSource} numberOfLines={1}>
+                            {row.source}
+                          </Text>
+                          <Text style={styles.spendLegendCost}>
+                            ${row.cost.toFixed(3)} · {pct.toFixed(0)}%
+                          </Text>
+                        </View>
+                      );
+                    })}
+                </View>
+              </View>
+            ) : null}
+
             {/* Memory preview — real titles so the user sees what the agent scans */}
             {!memoryDrawerOpen && memoryPreview.length > 0 ? (
               <View style={styles.memPreview}>
@@ -1514,6 +1586,55 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRightWidth: 1,
     borderStyle: 'dashed',
+  },
+  spendRollup: {
+    gap: 6,
+    marginTop: 6,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: CARD_BORDER,
+  },
+  spendRollupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  spendRollupLabel: {
+    color: MUTED,
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 1,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  spendBar: {
+    flexDirection: 'row',
+    height: 10,
+    borderRadius: 5,
+    overflow: 'hidden',
+    backgroundColor: '#020617',
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+  },
+  spendLegendRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  spendLegendDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 999,
+  },
+  spendLegendSource: {
+    color: TEXT_DIM,
+    fontSize: 10.5,
+    flex: 1,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  spendLegendCost: {
+    color: MUTED,
+    fontSize: 10,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
   },
   recentRunRow: {
     flexDirection: 'row',
