@@ -13,17 +13,36 @@ import {
   deleteSiteCredentialVault,
   listSiteCredentialVaultAudit,
   listSiteCredentialVault,
+  recordSiteCredentialVaultTestResult,
   revealSiteCredentialSecret,
   SiteCredentialAuditEntry,
   SiteCredentialSecretKind,
   SiteCredentialVaultEntry,
   storeSiteCredentialVault,
+  testWordPressConnection,
+  testShopifyConnection,
+  testStripeConnection,
+  testGitHubConnection,
+  testCloudflareConnection,
+  type PlatformConnectionResult,
+  updateSiteCredentialVaultControls,
 } from '../../lib/siteAutomation';
 
 interface Props {
   circleId: string;
   accentColor: string;
   fullHeight?: boolean;
+}
+
+type RiskFilter = 'all' | 'ready' | 'needs_test' | 'rotation_due' | 'inactive';
+
+interface PlatformPreset {
+  key: string;
+  label: string;
+  loginPath: string;
+  secretKind: SiteCredentialSecretKind;
+  actions: string[];
+  notes: string;
 }
 
 const SECRET_KINDS: Array<{ value: SiteCredentialSecretKind; label: string }> = [
@@ -34,7 +53,80 @@ const SECRET_KINDS: Array<{ value: SiteCredentialSecretKind; label: string }> = 
   { value: 'session_cookie', label: 'Session cookie' },
 ];
 
+const PLATFORM_PRESETS: PlatformPreset[] = [
+  {
+    key: 'wordpress',
+    label: 'WordPress',
+    loginPath: '/wp-login.php',
+    secretKind: 'application_password',
+    actions: ['login', 'post', 'edit', 'upload'],
+    notes: 'Best path: WordPress application password for REST publishing, browser login only when admin UI edits are required.',
+  },
+  {
+    key: 'shopify',
+    label: 'Shopify',
+    loginPath: '/admin',
+    secretKind: 'password',
+    actions: ['login', 'post', 'edit'],
+    notes: 'Use a staff account with the minimum permissions needed for products, pages, or orders.',
+  },
+  {
+    key: 'webflow',
+    label: 'Webflow',
+    loginPath: 'https://webflow.com/dashboard',
+    secretKind: 'api_token',
+    actions: ['login', 'post', 'edit'],
+    notes: 'Prefer API tokens for CMS item work; browser login is only for designer/admin tasks.',
+  },
+  {
+    key: 'squarespace',
+    label: 'Squarespace',
+    loginPath: '/config',
+    secretKind: 'password',
+    actions: ['login', 'post', 'edit'],
+    notes: 'Use a dedicated contributor login so publishing actions are auditable.',
+  },
+  {
+    key: 'wix',
+    label: 'Wix',
+    loginPath: 'https://manage.wix.com',
+    secretKind: 'password',
+    actions: ['login', 'post', 'edit'],
+    notes: 'Keep 2FA recovery and manual approval enabled for site settings changes.',
+  },
+  {
+    key: 'custom',
+    label: 'Custom',
+    loginPath: '',
+    secretKind: 'password',
+    actions: ['login', 'edit'],
+    notes: 'Add the exact login URL and allowed origin before giving an agent access.',
+  },
+];
+
+const ACTION_OPTIONS = [
+  { key: 'login', label: 'Login' },
+  { key: 'post', label: 'Post' },
+  { key: 'edit', label: 'Edit' },
+  { key: 'upload', label: 'Upload' },
+  { key: 'settings', label: 'Settings' },
+  { key: 'billing', label: 'Billing' },
+];
+
+const REVEAL_OPTIONS = [15, 30, 60, 120];
+const ROTATION_OPTIONS: Array<{ label: string; days: number | null }> = [
+  { label: 'Off', days: null },
+  { label: '30d', days: 30 },
+  { label: '60d', days: 60 },
+  { label: '90d', days: 90 },
+  { label: '180d', days: 180 },
+];
+
 const PASSWORD_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*_-+=?';
+
+function webCursor(cursor: string = 'pointer') {
+  return Platform.OS === 'web' ? ({ cursor } as any) : null;
+}
 
 function formatDate(value?: string | null): string {
   if (!value) return 'Never';
@@ -87,21 +179,108 @@ function normalizeBaseUrl(value: string): string {
   }
 }
 
+function presetForPlatform(platform: string): PlatformPreset {
+  const normalized = platform.trim().toLowerCase();
+  return PLATFORM_PRESETS.find((preset) => preset.key === normalized) || PLATFORM_PRESETS[PLATFORM_PRESETS.length - 1];
+}
+
 function inferLoginUrl(platform: string, siteUrl: string): string {
+  const preset = presetForPlatform(platform);
+  const path = preset.loginPath;
+  if (/^https?:\/\//i.test(path)) return path;
   const base = normalizeBaseUrl(siteUrl);
   if (!base) return '';
-  const normalizedPlatform = platform.trim().toLowerCase();
-  if (normalizedPlatform === 'wordpress') return `${base}/wp-login.php`;
-  if (normalizedPlatform === 'shopify') return `${base}/admin`;
-  if (normalizedPlatform === 'webflow') return 'https://webflow.com/dashboard';
-  if (normalizedPlatform === 'squarespace') return `${base}/config`;
-  return base;
+  return path ? `${base}${path}` : base;
+}
+
+function hostnameFromUrl(value?: string | null): string | null {
+  if (!value) return null;
+  try {
+    const withProtocol = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+    return new URL(withProtocol).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function buildAllowedOrigins(siteUrl: string, loginUrl: string): string[] {
+  const origins = new Set<string>();
+  for (const value of [siteUrl, loginUrl]) {
+    const base = normalizeBaseUrl(value);
+    if (base) origins.add(base);
+  }
+  return Array.from(origins);
 }
 
 function isRotationDue(entry: SiteCredentialVaultEntry): boolean {
   if (!entry.rotationDueAt) return false;
   const due = new Date(entry.rotationDueAt).getTime();
   return Number.isFinite(due) && due <= Date.now();
+}
+
+function entryMetadataString(entry: SiteCredentialVaultEntry, key: string): string {
+  const value = entry.metadata?.[key];
+  return typeof value === 'string' ? value : '';
+}
+
+function entryMetadataBoolean(entry: SiteCredentialVaultEntry, key: string): boolean | null {
+  const value = entry.metadata?.[key];
+  return typeof value === 'boolean' ? value : null;
+}
+
+function entryAllowedActions(entry: SiteCredentialVaultEntry): string[] {
+  const raw = entry.accessPolicy?.allowed_actions;
+  if (!Array.isArray(raw)) return ['login'];
+  return raw.map(String).filter(Boolean);
+}
+
+function entryAllowedOrigins(entry: SiteCredentialVaultEntry): string[] {
+  const raw = entry.accessPolicy?.allowed_origins;
+  if (!Array.isArray(raw)) return buildAllowedOrigins(entry.siteUrl || '', entry.loginUrl || '');
+  return raw.map(String).filter(Boolean);
+}
+
+function dueDateFromCadence(days: number | null): string | null {
+  if (!days) return null;
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function siteUrlFromEntry(entry: SiteCredentialVaultEntry): string {
+  return entry.siteUrl || entry.loginUrl || '';
+}
+
+function buildAgentRunbook(entry: SiteCredentialVaultEntry): string {
+  const actions = entryAllowedActions(entry).join(', ') || 'login';
+  const origins = entryAllowedOrigins(entry).join(', ') || 'not set';
+  return [
+    `Credential: ${entry.platform}/${entry.label}`,
+    `Site: ${entry.siteUrl || 'not set'}`,
+    `Login: ${entry.loginUrl || entry.siteUrl || 'not set'}`,
+    `Username: ${entry.username || 'not set'}`,
+    `Allowed actions: ${actions}`,
+    `Allowed origins: ${origins}`,
+    `Approval required: ${entry.accessPolicy?.require_approval === false ? 'no' : 'yes'}`,
+    `Agent instruction: Use the saved vault credential only through the approved login tool. Never ask the user to paste the secret into chat.`,
+  ].join('\n');
+}
+
+function automationReadiness(entry: SiteCredentialVaultEntry): { score: number; label: string; color: string; issues: string[] } {
+  const issues: string[] = [];
+  if (!entry.isActive) issues.push('Inactive');
+  if (!entry.loginUrl && !entry.siteUrl) issues.push('Missing login URL');
+  if (!entry.username) issues.push('Missing username');
+  if (entryAllowedOrigins(entry).length === 0) issues.push('No allowed origin');
+  if (!entryAllowedActions(entry).includes('login')) issues.push('Login not allowed');
+  if (isRotationDue(entry)) issues.push('Rotation due');
+  const lastTested = entryMetadataString(entry, 'lastTestedAt');
+  const lastTestSuccess = entryMetadataBoolean(entry, 'lastTestSuccess');
+  if (!lastTested) issues.push('Not tested');
+  if (lastTested && lastTestSuccess === false) issues.push('Last test failed');
+
+  const score = Math.max(0, 100 - issues.length * 14);
+  if (score >= 86) return { score, label: 'Ready', color: '#22c55e', issues };
+  if (score >= 60) return { score, label: 'Needs review', color: '#f59e0b', issues };
+  return { score, label: 'Blocked', color: '#ef4444', issues };
 }
 
 export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHeight = false }: Props) {
@@ -114,8 +293,11 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   const [auditEntries, setAuditEntries] = useState<Record<string, SiteCredentialAuditEntry[]>>({});
   const [auditLoading, setAuditLoading] = useState<Record<string, boolean>>({});
   const [auditErrors, setAuditErrors] = useState<Record<string, string>>({});
+  const [updating, setUpdating] = useState<Record<string, boolean>>({});
+  const [testing, setTesting] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState('');
   const [rotationOnly, setRotationOnly] = useState(false);
+  const [riskFilter, setRiskFilter] = useState<RiskFilter>('all');
 
   const [platform, setPlatform] = useState('wordpress');
   const [label, setLabel] = useState('default');
@@ -125,16 +307,32 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   const [secret, setSecret] = useState('');
   const [secretKind, setSecretKind] = useState<SiteCredentialSecretKind>('application_password');
   const [requiresApproval, setRequiresApproval] = useState(true);
+  const [allowedActions, setAllowedActions] = useState<string[]>(['login', 'post', 'edit', 'upload']);
+  const [notes, setNotes] = useState(PLATFORM_PRESETS[0].notes);
+  const [revealDurationSeconds, setRevealDurationSeconds] = useState(30);
+  const [rotationCadenceDays, setRotationCadenceDays] = useState<number | null>(90);
 
   const activeRevealCount = useMemo(
     () => Object.values(revealed).filter((item) => item.expiresAt > Date.now()).length,
     [revealed],
   );
   const secretStrength = useMemo(() => scoreSecretStrength(secret), [secret]);
+  const readinessStats = useMemo(() => {
+    const ready = entries.filter((entry) => automationReadiness(entry).label === 'Ready').length;
+    const needsTest = entries.filter((entry) => !entryMetadataString(entry, 'lastTestedAt') || entryMetadataBoolean(entry, 'lastTestSuccess') === false).length;
+    const rotationDue = entries.filter(isRotationDue).length;
+    const inactive = entries.filter((entry) => !entry.isActive).length;
+    return { ready, needsTest, rotationDue, inactive };
+  }, [entries]);
   const visibleEntries = useMemo(() => {
     const q = query.trim().toLowerCase();
     return entries.filter((entry) => {
+      const readiness = automationReadiness(entry);
       if (rotationOnly && !isRotationDue(entry)) return false;
+      if (riskFilter === 'ready' && readiness.label !== 'Ready') return false;
+      if (riskFilter === 'needs_test' && entryMetadataString(entry, 'lastTestedAt') && entryMetadataBoolean(entry, 'lastTestSuccess') !== false) return false;
+      if (riskFilter === 'rotation_due' && !isRotationDue(entry)) return false;
+      if (riskFilter === 'inactive' && entry.isActive) return false;
       if (!q) return true;
       return [
         entry.platform,
@@ -143,13 +341,10 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
         entry.loginUrl || '',
         entry.username || '',
         entry.secretKind,
+        entryAllowedActions(entry).join(' '),
       ].some((value) => value.toLowerCase().includes(q));
     });
-  }, [entries, query, rotationOnly]);
-  const rotationDueCount = useMemo(
-    () => entries.filter(isRotationDue).length,
-    [entries],
-  );
+  }, [entries, query, riskFilter, rotationOnly]);
 
   const loadVault = useCallback(async () => {
     setLoading(true);
@@ -215,6 +410,20 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     setSecret('');
     setSecretKind('application_password');
     setRequiresApproval(true);
+    setAllowedActions(['login', 'post', 'edit', 'upload']);
+    setNotes(PLATFORM_PRESETS[0].notes);
+    setRevealDurationSeconds(30);
+    setRotationCadenceDays(90);
+  };
+
+  const applyPreset = (preset: PlatformPreset) => {
+    setPlatform(preset.key);
+    setSecretKind(preset.secretKind);
+    setAllowedActions(preset.actions);
+    setNotes(preset.notes);
+    if (siteUrl.trim() || /^https?:\/\//i.test(preset.loginPath)) {
+      setLoginUrl(inferLoginUrl(preset.key, siteUrl));
+    }
   };
 
   const handleGeneratePassword = () => {
@@ -236,36 +445,82 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     setLoginUrl(next);
   };
 
+  const toggleAllowedAction = (action: string) => {
+    setAllowedActions((current) => (
+      current.includes(action)
+        ? current.filter((item) => item !== action)
+        : [...current, action]
+    ));
+  };
+
+  const replaceEntry = (entry: SiteCredentialVaultEntry) => {
+    setEntries((current) => current.map((item) => item.id === entry.id ? entry : item));
+  };
+
+  const updateEntryControls = async (
+    entry: SiteCredentialVaultEntry,
+    patch: {
+      accessPolicy?: Record<string, unknown>;
+      metadata?: Record<string, unknown>;
+      rotationDueAt?: string | null;
+      isActive?: boolean;
+    },
+    successMessage: string,
+  ) => {
+    setUpdating((current) => ({ ...current, [entry.id]: true }));
+    setStatus('');
+    const result = await updateSiteCredentialVaultControls({
+      credentialId: entry.id,
+      accessPolicy: patch.accessPolicy,
+      metadata: patch.metadata,
+      rotationDueAt: patch.rotationDueAt,
+      isActive: patch.isActive,
+    });
+    if (result.error || !result.entry) {
+      setStatus(result.vaultMissing ? 'Vault controls migration is not deployed yet.' : result.error || 'Could not update vault controls.');
+    } else {
+      replaceEntry(result.entry);
+      setStatus(successMessage);
+      await loadAudit(entry.id);
+    }
+    setUpdating((current) => ({ ...current, [entry.id]: false }));
+  };
+
   const handleSave = async () => {
     if (!platform.trim() || !secret) {
       setStatus('Platform and secret are required.');
       return;
     }
+    if (!allowedActions.includes('login')) {
+      setStatus('Keep Login enabled so agents can authenticate safely.');
+      return;
+    }
 
     setSaving(true);
     setStatus('');
+    const resolvedLoginUrl = loginUrl.trim() || inferLoginUrl(platform, siteUrl);
     const result = await storeSiteCredentialVault({
       circleId,
       platform,
       siteUrl,
-      loginUrl,
+      loginUrl: resolvedLoginUrl,
       username,
       secret,
       label,
       secretKind,
       accessPolicy: {
         require_approval: requiresApproval,
-        allowed_origins: siteUrl.trim() ? [siteUrl.trim()] : [],
-        allowed_actions: ['login', 'post', 'edit'],
+        allowed_origins: buildAllowedOrigins(siteUrl, resolvedLoginUrl),
+        allowed_actions: allowedActions,
+        reveal_duration_seconds: revealDurationSeconds,
       },
       metadata: {
         source: 'office_vault',
         savedAt: new Date().toISOString(),
+        notes: notes.trim(),
+        platformPreset: presetForPlatform(platform).key,
       },
-      // Rotation date is opt-in — left unset so users aren't forced
-      // into a 90-day cadence they didn't ask for. The DB column
-      // stays available for any future "schedule rotation" workflow.
-      rotationDueAt: null,
+      rotationDueAt: dueDateFromCadence(rotationCadenceDays),
     });
 
     if (result.error) {
@@ -289,12 +544,19 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     setSecret('');
     setSecretKind(entry.secretKind);
     setRequiresApproval(entry.accessPolicy?.require_approval !== false);
+    setAllowedActions(entryAllowedActions(entry));
+    setRevealDurationSeconds(typeof entry.accessPolicy?.reveal_duration_seconds === 'number' ? entry.accessPolicy.reveal_duration_seconds : 30);
+    setRotationCadenceDays(null);
+    setNotes(entryMetadataString(entry, 'notes') || presetForPlatform(entry.platform).notes);
     setExpandedId('new');
     setStatus(`Rotating ${entry.platform}/${entry.label}. Enter the new secret and save.`);
   };
 
   const handleReveal = async (entry: SiteCredentialVaultEntry) => {
     setStatus('');
+    const duration = typeof entry.accessPolicy?.reveal_duration_seconds === 'number'
+      ? Math.max(15, Math.min(300, entry.accessPolicy.reveal_duration_seconds))
+      : 30;
     const result = await revealSiteCredentialSecret(entry.id, 'office_vault_reveal');
     if (result.error || !result.result) {
       setStatus(result.error || 'Could not reveal secret.');
@@ -305,10 +567,10 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
       ...current,
       [entry.id]: {
         secret: result.result!.secret,
-        expiresAt: Date.now() + 30_000,
+        expiresAt: Date.now() + duration * 1000,
       },
     }));
-    setEntries((current) => current.map((item) => item.id === entry.id ? result.result!.entry : item));
+    replaceEntry(result.result.entry);
     await loadAudit(entry.id);
   };
 
@@ -323,6 +585,99 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     if (!value) return;
     const copied = await copyText(value).catch(() => false);
     setStatus(copied ? 'Secret copied. It will clear from screen shortly.' : 'Copy is only available in the web app.');
+  };
+
+  const handleCopyRunbook = async (entry: SiteCredentialVaultEntry) => {
+    const copied = await copyText(buildAgentRunbook(entry)).catch(() => false);
+    setStatus(copied ? 'Agent runbook copied.' : 'Copy is only available in the web app.');
+  };
+
+  const handleOpenLogin = (entry: SiteCredentialVaultEntry) => {
+    const target = entry.loginUrl || entry.siteUrl;
+    if (!target) {
+      setStatus('No login URL saved.');
+      return;
+    }
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      window.open(target, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    setStatus(target);
+  };
+
+  const handleTest = async (entry: SiteCredentialVaultEntry) => {
+    // Per-platform probes — each platform has a cheap auth-only
+    // endpoint that confirms the credential works without taking any
+    // destructive action. WordPress, Shopify, Stripe, GitHub,
+    // Cloudflare have first-class probes; everything else records
+    // "needs manual test" so the readiness score still updates.
+    const platform = (entry.platform || '').toLowerCase();
+    const supportedPlatforms = ['wordpress', 'shopify', 'stripe', 'github', 'cloudflare'];
+    if (!supportedPlatforms.includes(platform)) {
+      await updateEntryControls(entry, {
+        metadata: {
+          lastTestedAt: new Date().toISOString(),
+          lastTestSuccess: false,
+          lastTestMessage: 'Automated test not yet wired for this platform — record a manual verification in your runbook.',
+        },
+      }, `Recorded that ${entry.platform} needs a manual test.`);
+      return;
+    }
+    if (platform === 'wordpress' && (!entry.username || !siteUrlFromEntry(entry))) {
+      setStatus('WordPress test needs a saved site URL and username.');
+      return;
+    }
+    if (platform === 'shopify' && !siteUrlFromEntry(entry)) {
+      setStatus('Shopify test needs a saved shop URL (e.g. mystore.myshopify.com).');
+      return;
+    }
+
+    setTesting((current) => ({ ...current, [entry.id]: true }));
+    setStatus('');
+    const secretResult = await revealSiteCredentialSecret(entry.id, 'vault_connection_test');
+    if (secretResult.error || !secretResult.result?.secret) {
+      setStatus(secretResult.error || 'Could not retrieve credential for test.');
+      setTesting((current) => ({ ...current, [entry.id]: false }));
+      return;
+    }
+
+    const secret = secretResult.result.secret;
+    const siteUrl = siteUrlFromEntry(entry);
+    let connection: PlatformConnectionResult & { siteName?: string };
+    if (platform === 'wordpress') {
+      const wp = await testWordPressConnection(siteUrl, entry.username || '', secret);
+      connection = { connected: wp.connected, identity: wp.siteName, error: wp.error, siteName: wp.siteName };
+    } else if (platform === 'shopify') {
+      connection = await testShopifyConnection(siteUrl, secret);
+    } else if (platform === 'stripe') {
+      connection = await testStripeConnection(secret);
+    } else if (platform === 'github') {
+      connection = await testGitHubConnection(secret);
+    } else {
+      // cloudflare
+      connection = await testCloudflareConnection(secret);
+    }
+
+    const platformLabel = entry.platform.charAt(0).toUpperCase() + entry.platform.slice(1);
+    const successMessage = connection.identity
+      ? `Connected to ${platformLabel}: ${connection.identity}`
+      : `${platformLabel} credential verified.`;
+    const record = await recordSiteCredentialVaultTestResult(
+      entry.id,
+      connection.connected,
+      connection.connected ? successMessage : connection.error || 'Connection failed.',
+      {
+        platform: entry.platform,
+        identity: connection.identity || null,
+        // Keep the legacy field for WordPress entries
+        siteName: (connection as any).siteName || null,
+        testedFrom: 'office_vault',
+      },
+    );
+    if (record.entry) replaceEntry(record.entry);
+    setStatus(connection.connected ? successMessage : connection.error || record.error || 'Connection test failed.');
+    await loadAudit(entry.id);
+    setTesting((current) => ({ ...current, [entry.id]: false }));
   };
 
   const handleDelete = async (entry: SiteCredentialVaultEntry) => {
@@ -365,17 +720,17 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
       nativeID="section-site-credential-vault"
     >
       <View style={styles.header}>
-        <View>
+        <View style={styles.headerText}>
           <Text style={styles.kicker}>SITE VAULT</Text>
           <Text style={styles.title}>Agent login vault</Text>
           <Text style={styles.subtitle}>
-            Store website credentials for approved automation without putting passwords in prompts.
+            Store website credentials, restrict what agents can do, and test readiness without putting passwords in prompts.
           </Text>
         </View>
         <Pressable
           onPress={loadVault}
           disabled={loading}
-          style={[styles.refreshBtn, { borderColor: accentColor + '55' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          style={[styles.refreshBtn, { borderColor: accentColor + '55' }, webCursor(loading ? 'wait' : 'pointer')]}
         >
           {loading ? <ActivityIndicator size="small" color={accentColor} /> : <Text style={[styles.refreshText, { color: accentColor }]}>Refresh</Text>}
         </Pressable>
@@ -388,13 +743,20 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
         contentContainerStyle={styles.scrollerContent}
         showsVerticalScrollIndicator
       >
+        <View style={styles.statsGrid}>
+          <MetricCard label="Credentials" value={String(entries.length)} />
+          <MetricCard label="Ready" value={String(readinessStats.ready)} color="#22c55e" />
+          <MetricCard label="Needs Test" value={String(readinessStats.needsTest)} color="#f59e0b" />
+          <MetricCard label="Rotation Due" value={String(readinessStats.rotationDue)} color="#f97316" />
+        </View>
+
         <View style={styles.card}>
           <Pressable
             onPress={() => setExpandedId(expandedId === 'new' ? null : 'new')}
-            style={[styles.cardHeader, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            style={[styles.cardHeader, webCursor()]}
           >
-            <View>
-              <Text style={styles.cardTitle}>Add or rotate credential</Text>
+            <View style={styles.cardHeaderText}>
+              <Text style={styles.cardTitle}>Add or Change Credentials</Text>
               <Text style={styles.cardMeta}>Encrypted at rest. Existing platform + label rotates the secret.</Text>
             </View>
             <Text style={[styles.chevron, { color: accentColor }]}>{expandedId === 'new' ? '-' : '+'}</Text>
@@ -402,6 +764,29 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
 
           {expandedId === 'new' ? (
             <View style={styles.form}>
+              <View style={styles.sectionBox}>
+                <Text style={styles.sectionTitle}>Platform preset</Text>
+                <View style={styles.kindRow}>
+                  {PLATFORM_PRESETS.map((preset) => {
+                    const active = platform.trim().toLowerCase() === preset.key;
+                    return (
+                      <Pressable
+                        key={preset.key}
+                        onPress={() => applyPreset(preset)}
+                        style={[
+                          styles.kindChip,
+                          active && { borderColor: accentColor + '88', backgroundColor: accentColor + '18' },
+                          webCursor(),
+                        ]}
+                      >
+                        <Text style={[styles.kindText, active && { color: accentColor }]}>{preset.label}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                <Text style={styles.helperText}>{presetForPlatform(platform).notes}</Text>
+              </View>
+
               <View style={styles.row}>
                 <View style={styles.field}>
                   <Text style={styles.label}>PLATFORM</Text>
@@ -421,10 +806,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
               <View style={styles.field}>
                 <Text style={styles.label}>LOGIN URL</Text>
                 <TextInput style={styles.input} value={loginUrl} onChangeText={setLoginUrl} autoCapitalize="none" placeholder="https://example.com/wp-login.php" placeholderTextColor="#535b66" />
-                <Pressable
-                  onPress={handleInferLoginUrl}
-                  style={[styles.inlineHelperBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                >
+                <Pressable onPress={handleInferLoginUrl} style={[styles.inlineHelperBtn, webCursor()]}>
                   <Text style={[styles.inlineHelperText, { color: accentColor }]}>Suggest login URL</Text>
                 </Pressable>
               </View>
@@ -438,10 +820,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                   <Text style={styles.label}>SECRET</Text>
                   <View style={styles.secretInputRow}>
                     <TextInput style={[styles.input, styles.secretInput]} value={secret} onChangeText={setSecret} secureTextEntry autoCapitalize="none" placeholder="password or token" placeholderTextColor="#535b66" />
-                    <Pressable
-                      onPress={handleGeneratePassword}
-                      style={[styles.generateBtn, { borderColor: accentColor + '55' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                    >
+                    <Pressable onPress={handleGeneratePassword} style={[styles.generateBtn, { borderColor: accentColor + '55' }, webCursor()]}>
                       <Text style={[styles.generateText, { color: accentColor }]}>Generate</Text>
                     </Pressable>
                   </View>
@@ -460,6 +839,29 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                 </View>
               </View>
 
+              <View style={styles.sectionBox}>
+                <Text style={styles.sectionTitle}>Allowed agent actions</Text>
+                <View style={styles.kindRow}>
+                  {ACTION_OPTIONS.map((action) => {
+                    const active = allowedActions.includes(action.key);
+                    return (
+                      <Pressable
+                        key={action.key}
+                        onPress={() => toggleAllowedAction(action.key)}
+                        style={[
+                          styles.kindChip,
+                          active && { borderColor: accentColor + '88', backgroundColor: accentColor + '18' },
+                          webCursor(),
+                        ]}
+                      >
+                        <Text style={[styles.kindText, active && { color: accentColor }]}>{action.label}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                <Text style={styles.helperText}>Agents are blocked from using this credential for actions not listed here.</Text>
+              </View>
+
               <View style={styles.kindRow}>
                 {SECRET_KINDS.map((kind) => {
                   const active = secretKind === kind.value;
@@ -470,7 +872,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                       style={[
                         styles.kindChip,
                         active && { borderColor: accentColor + '88', backgroundColor: accentColor + '18' },
-                        Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                        webCursor(),
                       ]}
                     >
                       <Text style={[styles.kindText, active && { color: accentColor }]}>{kind.label}</Text>
@@ -479,10 +881,64 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                 })}
               </View>
 
-              <Pressable
-                onPress={() => setRequiresApproval((value) => !value)}
-                style={[styles.approvalRow, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              >
+              <View style={styles.row}>
+                <View style={styles.field}>
+                  <Text style={styles.label}>REVEAL WINDOW</Text>
+                  <View style={styles.kindRow}>
+                    {REVEAL_OPTIONS.map((seconds) => {
+                      const active = revealDurationSeconds === seconds;
+                      return (
+                        <Pressable
+                          key={seconds}
+                          onPress={() => setRevealDurationSeconds(seconds)}
+                          style={[
+                            styles.kindChip,
+                            active && { borderColor: accentColor + '88', backgroundColor: accentColor + '18' },
+                            webCursor(),
+                          ]}
+                        >
+                          <Text style={[styles.kindText, active && { color: accentColor }]}>{seconds}s</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </View>
+                <View style={styles.field}>
+                  <Text style={styles.label}>ROTATION REMINDER</Text>
+                  <View style={styles.kindRow}>
+                    {ROTATION_OPTIONS.map((option) => {
+                      const active = rotationCadenceDays === option.days;
+                      return (
+                        <Pressable
+                          key={option.label}
+                          onPress={() => setRotationCadenceDays(option.days)}
+                          style={[
+                            styles.kindChip,
+                            active && { borderColor: accentColor + '88', backgroundColor: accentColor + '18' },
+                            webCursor(),
+                          ]}
+                        >
+                          <Text style={[styles.kindText, active && { color: accentColor }]}>{option.label}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </View>
+              </View>
+
+              <View style={styles.field}>
+                <Text style={styles.label}>AUTOMATION NOTES</Text>
+                <TextInput
+                  style={[styles.input, styles.notesInput]}
+                  value={notes}
+                  onChangeText={setNotes}
+                  multiline
+                  placeholder="When should agents use this credential? Any site-specific rules?"
+                  placeholderTextColor="#535b66"
+                />
+              </View>
+
+              <Pressable onPress={() => setRequiresApproval((value) => !value)} style={[styles.approvalRow, webCursor()]}>
                 <View style={[styles.checkbox, requiresApproval && { backgroundColor: accentColor, borderColor: accentColor }]} />
                 <Text style={styles.approvalText}>Require human approval before agents use this credential</Text>
               </Pressable>
@@ -490,7 +946,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
               <Pressable
                 onPress={handleSave}
                 disabled={saving}
-                style={[styles.primaryBtn, { backgroundColor: accentColor }, saving && styles.disabledBtn, Platform.OS === 'web' && { cursor: saving ? 'wait' : 'pointer' } as any]}
+                style={[styles.primaryBtn, { backgroundColor: accentColor }, saving && styles.disabledBtn, webCursor(saving ? 'wait' : 'pointer')]}
               >
                 {saving ? <ActivityIndicator size="small" color="#061018" /> : <Text style={styles.primaryText}>Save to Vault</Text>}
               </Pressable>
@@ -505,21 +961,43 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
               value={query}
               onChangeText={setQuery}
               autoCapitalize="none"
-              placeholder="Search by platform, site, user, or label"
+              placeholder="Search by platform, site, user, label, or action"
               placeholderTextColor="#535b66"
             />
-            <Pressable
-              onPress={() => setRotationOnly((value) => !value)}
-              style={[
-                styles.filterToggle,
-                rotationOnly && { borderColor: accentColor + '88', backgroundColor: accentColor + '14' },
-                Platform.OS === 'web' && { cursor: 'pointer' } as any,
-              ]}
-            >
-              <Text style={[styles.filterToggleText, rotationOnly && { color: accentColor }]}>
-                Rotation due ({rotationDueCount})
-              </Text>
-            </Pressable>
+            <View style={styles.kindRow}>
+              {[
+                { key: 'all', label: `All (${entries.length})` },
+                { key: 'ready', label: `Ready (${readinessStats.ready})` },
+                { key: 'needs_test', label: `Needs test (${readinessStats.needsTest})` },
+                { key: 'rotation_due', label: `Rotation due (${readinessStats.rotationDue})` },
+                { key: 'inactive', label: `Inactive (${readinessStats.inactive})` },
+              ].map((filter) => {
+                const active = riskFilter === filter.key;
+                return (
+                  <Pressable
+                    key={filter.key}
+                    onPress={() => setRiskFilter(filter.key as RiskFilter)}
+                    style={[
+                      styles.filterToggle,
+                      active && { borderColor: accentColor + '88', backgroundColor: accentColor + '14' },
+                      webCursor(),
+                    ]}
+                  >
+                    <Text style={[styles.filterToggleText, active && { color: accentColor }]}>{filter.label}</Text>
+                  </Pressable>
+                );
+              })}
+              <Pressable
+                onPress={() => setRotationOnly((value) => !value)}
+                style={[
+                  styles.filterToggle,
+                  rotationOnly && { borderColor: accentColor + '88', backgroundColor: accentColor + '14' },
+                  webCursor(),
+                ]}
+              >
+                <Text style={[styles.filterToggleText, rotationOnly && { color: accentColor }]}>Only due</Text>
+              </Pressable>
+            </View>
           </View>
         ) : null}
 
@@ -533,7 +1011,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
         {entries.length > 0 && visibleEntries.length === 0 ? (
           <View style={styles.emptyCard}>
             <Text style={styles.emptyTitle}>No matching credentials.</Text>
-            <Text style={styles.emptyText}>Clear search or turn off the rotation filter to see all saved credentials.</Text>
+            <Text style={styles.emptyText}>Clear search or change the readiness filters to see all saved credentials.</Text>
           </View>
         ) : null}
 
@@ -542,16 +1020,19 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           const reveal = revealed[entry.id];
           const revealSeconds = reveal ? Math.max(0, Math.ceil((reveal.expiresAt - Date.now()) / 1000)) : 0;
           const rotationDue = isRotationDue(entry);
+          const readiness = automationReadiness(entry);
+          const actions = entryAllowedActions(entry);
+          const origins = entryAllowedOrigins(entry);
+          const isBusy = !!updating[entry.id] || !!testing[entry.id];
           return (
             <View key={entry.id} style={styles.card}>
-              <Pressable
-                onPress={() => setExpandedId(expanded ? null : entry.id)}
-                style={[styles.cardHeader, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              >
-                <View style={{ flex: 1 }}>
+              <Pressable onPress={() => setExpandedId(expanded ? null : entry.id)} style={[styles.cardHeader, webCursor()]}>
+                <View style={styles.cardHeaderText}>
                   <View style={styles.cardTitleRow}>
                     <Text style={styles.cardTitle}>{entry.platform} / {entry.label}</Text>
+                    <Text style={[styles.readinessBadge, { color: readiness.color, borderColor: readiness.color + '55' }]}>{readiness.label}</Text>
                     {rotationDue ? <Text style={styles.rotationBadge}>Rotation due</Text> : null}
+                    {!entry.isActive ? <Text style={styles.inactiveBadge}>Inactive</Text> : null}
                   </View>
                   <Text style={styles.cardMeta}>{entry.siteUrl || 'No site URL'} {entry.username ? `- ${entry.username}` : ''}</Text>
                 </View>
@@ -560,52 +1041,134 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
 
               {expanded ? (
                 <View style={styles.entryBody}>
-                  <InfoLine label="Login URL" value={entry.loginUrl || entry.siteUrl || 'Not set'} />
-                  <InfoLine label="Secret type" value={entry.secretKind.replace(/_/g, ' ')} />
-                  <InfoLine label="Approval" value={entry.accessPolicy?.require_approval === false ? 'Not required' : 'Required'} />
-                  <InfoLine label="Updated" value={formatDate(entry.updatedAt)} />
-                  <InfoLine label="Last used" value={formatDate(entry.lastUsedAt)} />
-                  <InfoLine label="Rotation due" value={formatDate(entry.rotationDueAt)} />
+                  <View style={styles.readinessBox}>
+                    <View style={styles.readinessTop}>
+                      <Text style={[styles.readinessScore, { color: readiness.color }]}>{readiness.score}% automation ready</Text>
+                      {isBusy ? <ActivityIndicator size="small" color={accentColor} /> : null}
+                    </View>
+                    {readiness.issues.length > 0 ? (
+                      <Text style={styles.helperText}>{readiness.issues.join(' • ')}</Text>
+                    ) : (
+                      <Text style={styles.helperText}>Ready for approved login and website automation.</Text>
+                    )}
+                  </View>
+
+                  <View style={styles.sectionBox}>
+                    <Text style={styles.sectionTitle}>Service details</Text>
+                    <InfoLine label="Login URL" value={entry.loginUrl || entry.siteUrl || 'Not set'} />
+                    <InfoLine label="Secret type" value={entry.secretKind.replace(/_/g, ' ')} />
+                    <InfoLine label="Username" value={entry.username || 'Not set'} />
+                    <InfoLine label="Updated" value={formatDate(entry.updatedAt)} />
+                    <InfoLine label="Last used" value={formatDate(entry.lastUsedAt)} />
+                    <InfoLine label="Last tested" value={formatDate(entryMetadataString(entry, 'lastTestedAt'))} />
+                    <InfoLine label="Rotation due" value={formatDate(entry.rotationDueAt)} />
+                  </View>
+
+                  <View style={styles.sectionBox}>
+                    <Text style={styles.sectionTitle}>Security controls</Text>
+                    <Pressable
+                      onPress={() => updateEntryControls(entry, {
+                        accessPolicy: {
+                          ...entry.accessPolicy,
+                          require_approval: entry.accessPolicy?.require_approval === false,
+                        },
+                      }, 'Approval policy updated.')}
+                      disabled={!!updating[entry.id]}
+                      style={[styles.approvalRow, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
+                    >
+                      <View style={[styles.checkbox, entry.accessPolicy?.require_approval !== false && { backgroundColor: accentColor, borderColor: accentColor }]} />
+                      <Text style={styles.approvalText}>Require approval before use</Text>
+                    </Pressable>
+                    <View style={styles.kindRow}>
+                      {ACTION_OPTIONS.map((action) => {
+                        const active = actions.includes(action.key);
+                        const nextActions = active
+                          ? actions.filter((item) => item !== action.key)
+                          : [...actions, action.key];
+                        return (
+                          <Pressable
+                            key={action.key}
+                            onPress={() => updateEntryControls(entry, {
+                              accessPolicy: {
+                                ...entry.accessPolicy,
+                                allowed_actions: nextActions.includes('login') ? nextActions : ['login', ...nextActions],
+                                allowed_origins: origins,
+                              },
+                            }, 'Allowed actions updated.')}
+                            disabled={!!updating[entry.id]}
+                            style={[
+                              styles.kindChip,
+                              active && { borderColor: accentColor + '88', backgroundColor: accentColor + '18' },
+                              webCursor(updating[entry.id] ? 'wait' : 'pointer'),
+                            ]}
+                          >
+                            <Text style={[styles.kindText, active && { color: accentColor }]}>{action.label}</Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                    <Text style={styles.helperText}>Allowed origins: {origins.join(', ') || 'not set'}</Text>
+                  </View>
+
+                  <View style={styles.sectionBox}>
+                    <Text style={styles.sectionTitle}>Rotation and test</Text>
+                    <View style={styles.kindRow}>
+                      {ROTATION_OPTIONS.map((option) => (
+                        <Pressable
+                          key={option.label}
+                          onPress={() => updateEntryControls(entry, { rotationDueAt: dueDateFromCadence(option.days) }, 'Rotation reminder updated.')}
+                          disabled={!!updating[entry.id]}
+                          style={[styles.kindChip, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
+                        >
+                          <Text style={styles.kindText}>{option.label}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                    <View style={styles.actionRow}>
+                      <Pressable
+                        onPress={() => handleTest(entry)}
+                        disabled={!!testing[entry.id]}
+                        style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, webCursor(testing[entry.id] ? 'wait' : 'pointer')]}
+                      >
+                        <Text style={[styles.secondaryText, { color: accentColor }]}>{testing[entry.id] ? 'Testing...' : 'Test login'}</Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={() => updateEntryControls(entry, { isActive: !entry.isActive }, entry.isActive ? 'Credential disabled.' : 'Credential enabled.')}
+                        disabled={!!updating[entry.id]}
+                        style={[styles.secondaryBtn, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
+                      >
+                        <Text style={styles.secondaryText}>{entry.isActive ? 'Disable' : 'Enable'}</Text>
+                      </Pressable>
+                    </View>
+                    {entryMetadataString(entry, 'lastTestMessage') ? <Text style={styles.helperText}>{entryMetadataString(entry, 'lastTestMessage')}</Text> : null}
+                  </View>
 
                   <View style={styles.secretBox}>
                     <Text style={styles.secretLabel}>SECRET</Text>
-                    <Text style={styles.secretValue}>
-                      {reveal ? reveal.secret : '••••••••••••••••'}
-                    </Text>
+                    <Text style={styles.secretValue}>{reveal ? reveal.secret : '••••••••••••••••'}</Text>
                     {reveal ? <Text style={styles.secretTimer}>Clears in {revealSeconds}s</Text> : null}
                   </View>
 
                   <View style={styles.actionRow}>
-                    <Pressable
-                      onPress={() => handleRotateFromEntry(entry)}
-                      style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                    >
+                    <Pressable onPress={() => handleRotateFromEntry(entry)} style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, webCursor()]}>
                       <Text style={[styles.secondaryText, { color: accentColor }]}>Rotate</Text>
                     </Pressable>
-                    <Pressable
-                      onPress={() => handleReveal(entry)}
-                      style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                    >
-                      <Text style={[styles.secondaryText, { color: accentColor }]}>Reveal 30s</Text>
+                    <Pressable onPress={() => handleReveal(entry)} style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, webCursor()]}>
+                      <Text style={[styles.secondaryText, { color: accentColor }]}>Reveal</Text>
                     </Pressable>
-                    <Pressable
-                      onPress={() => handleCopyUsername(entry)}
-                      disabled={!entry.username}
-                      style={[styles.secondaryBtn, !entry.username && styles.disabledBtn, Platform.OS === 'web' && { cursor: entry.username ? 'pointer' : 'not-allowed' } as any]}
-                    >
+                    <Pressable onPress={() => handleOpenLogin(entry)} style={[styles.secondaryBtn, webCursor()]}>
+                      <Text style={styles.secondaryText}>Open login</Text>
+                    </Pressable>
+                    <Pressable onPress={() => handleCopyRunbook(entry)} style={[styles.secondaryBtn, webCursor()]}>
+                      <Text style={styles.secondaryText}>Copy runbook</Text>
+                    </Pressable>
+                    <Pressable onPress={() => handleCopyUsername(entry)} disabled={!entry.username} style={[styles.secondaryBtn, !entry.username && styles.disabledBtn, webCursor(entry.username ? 'pointer' : 'not-allowed')]}>
                       <Text style={styles.secondaryText}>Copy user</Text>
                     </Pressable>
-                    <Pressable
-                      onPress={() => handleCopySecret(entry)}
-                      disabled={!reveal}
-                      style={[styles.secondaryBtn, !reveal && styles.disabledBtn, Platform.OS === 'web' && { cursor: reveal ? 'pointer' : 'not-allowed' } as any]}
-                    >
-                      <Text style={styles.secondaryText}>Copy</Text>
+                    <Pressable onPress={() => handleCopySecret(entry)} disabled={!reveal} style={[styles.secondaryBtn, !reveal && styles.disabledBtn, webCursor(reveal ? 'pointer' : 'not-allowed')]}>
+                      <Text style={styles.secondaryText}>Copy secret</Text>
                     </Pressable>
-                    <Pressable
-                      onPress={() => handleDelete(entry)}
-                      style={[styles.dangerBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-                    >
+                    <Pressable onPress={() => handleDelete(entry)} style={[styles.dangerBtn, webCursor()]}>
                       <Text style={styles.dangerText}>Remove</Text>
                     </Pressable>
                   </View>
@@ -634,6 +1197,15 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           );
         })}
       </ScrollView>
+    </View>
+  );
+}
+
+function MetricCard({ label, value, color = '#cbd5e1' }: { label: string; value: string; color?: string }) {
+  return (
+    <View style={styles.metricCard}>
+      <Text style={[styles.metricValue, { color }]}>{value}</Text>
+      <Text style={styles.metricLabel}>{label}</Text>
     </View>
   );
 }
@@ -671,6 +1243,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 12,
   },
+  headerText: {
+    flex: 1,
+  },
   kicker: {
     color: '#8b95a7',
     fontSize: 10,
@@ -685,7 +1260,7 @@ const styles = StyleSheet.create({
   },
   subtitle: {
     marginTop: 4,
-    maxWidth: 620,
+    maxWidth: 720,
     color: '#9ca3af',
     fontSize: 12,
     lineHeight: 18,
@@ -729,6 +1304,32 @@ const styles = StyleSheet.create({
     padding: 12,
     gap: 12,
   },
+  statsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  metricCard: {
+    flex: 1,
+    minWidth: 130,
+    padding: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#ffffff12',
+    backgroundColor: '#050914',
+  },
+  metricValue: {
+    fontSize: 20,
+    fontWeight: '900',
+  },
+  metricLabel: {
+    marginTop: 3,
+    color: '#7c8798',
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
   card: {
     borderRadius: 14,
     borderWidth: 1,
@@ -745,6 +1346,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 12,
   },
+  cardHeaderText: {
+    flex: 1,
+  },
   cardTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -757,6 +1361,17 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     textTransform: 'capitalize',
   },
+  readinessBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    overflow: 'hidden',
+    borderWidth: 1,
+    fontSize: 9,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 0.7,
+  },
   rotationBadge: {
     paddingHorizontal: 8,
     paddingVertical: 3,
@@ -764,6 +1379,18 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     backgroundColor: '#451a03',
     color: '#fbbf24',
+    fontSize: 9,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 0.7,
+  },
+  inactiveBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    overflow: 'hidden',
+    backgroundColor: '#2b0b0b',
+    color: '#fecaca',
     fontSize: 9,
     fontWeight: '900',
     textTransform: 'uppercase',
@@ -809,6 +1436,11 @@ const styles = StyleSheet.create({
     color: '#f8fafc',
     paddingHorizontal: 12,
     fontSize: 13,
+  },
+  notesInput: {
+    minHeight: 78,
+    paddingTop: 10,
+    textAlignVertical: 'top',
   },
   inlineHelperBtn: {
     alignSelf: 'flex-start',
@@ -875,6 +1507,26 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
   },
+  sectionBox: {
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#ffffff12',
+    backgroundColor: '#070b13',
+    gap: 9,
+  },
+  sectionTitle: {
+    color: '#e2e8f0',
+    fontSize: 11,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  helperText: {
+    color: '#8b95a7',
+    fontSize: 11,
+    lineHeight: 16,
+  },
   approvalRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -917,7 +1569,6 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   filterToggle: {
-    alignSelf: 'flex-start',
     minHeight: 32,
     paddingHorizontal: 11,
     borderRadius: 999,
@@ -955,6 +1606,26 @@ const styles = StyleSheet.create({
     borderTopColor: '#ffffff10',
     padding: 14,
     gap: 10,
+  },
+  readinessBox: {
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#ffffff12',
+    backgroundColor: '#050914',
+    gap: 6,
+  },
+  readinessTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  readinessScore: {
+    fontSize: 13,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
   },
   infoLine: {
     flexDirection: 'row',

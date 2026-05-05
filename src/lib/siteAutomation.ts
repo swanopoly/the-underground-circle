@@ -896,6 +896,146 @@ export async function testWordPressConnection(
   }
 }
 
+// ─── 4b. Generic per-platform connection tests ────────────────────────────
+//
+// Each test sends one cheap auth-only probe to a platform's "who am I"
+// endpoint. 200 means the credential is valid; 401/403 means bad creds;
+// anything else (network error, CORS, 5xx) returns a useful error string.
+// Used by the Vault panel's "Test connection" button to give honest
+// readiness scoring beyond WordPress.
+
+export interface PlatformConnectionResult {
+  connected: boolean;
+  /** Display name pulled from the probe response when available. */
+  identity?: string;
+  /** Human-readable error when connected = false. */
+  error?: string;
+}
+
+function networkErrorMessage(err: any): string {
+  if (err?.message?.includes('NetworkError') || err?.message?.includes('Failed to fetch')) {
+    return 'Network error — the site may block cross-origin requests. A proxy may be required.';
+  }
+  return err?.message || 'Connection failed';
+}
+
+/**
+ * Shopify Admin API. The credential should be a private-app password
+ * or admin API access token. Probes /admin/api/2024-01/shop.json which
+ * requires only the read_shop_information scope.
+ */
+export async function testShopifyConnection(
+  shopUrl: string,
+  accessToken: string,
+): Promise<PlatformConnectionResult> {
+  try {
+    const base = normalizeSiteUrl(shopUrl);
+    // Shopify credentials use the X-Shopify-Access-Token header for
+    // admin API tokens; private-app credentials use Basic auth.
+    const looksLikeAdminToken = accessToken.startsWith('shpat_') || accessToken.startsWith('shpca_');
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (looksLikeAdminToken) {
+      headers['X-Shopify-Access-Token'] = accessToken;
+    } else {
+      // Fallback: assume it's a Basic-auth-style "key:password" pair.
+      headers['Authorization'] = `Basic ${typeof btoa === 'function' ? btoa(accessToken) : Buffer.from(accessToken).toString('base64')}`;
+    }
+    const res = await fetch(`${base}/admin/api/2024-01/shop.json`, { method: 'GET', headers });
+    if (res.status === 401) return { connected: false, error: 'Invalid Shopify access token' };
+    if (res.status === 403) return { connected: false, error: 'Access forbidden — token missing read_shop_information scope' };
+    if (res.status === 404) return { connected: false, error: 'Shopify Admin API not found — check the shop URL' };
+    if (!res.ok) return { connected: false, error: `HTTP ${res.status}` };
+    const data = await res.json().catch(() => ({}));
+    return { connected: true, identity: data?.shop?.name || data?.shop?.domain };
+  } catch (err: any) {
+    return { connected: false, error: networkErrorMessage(err) };
+  }
+}
+
+/**
+ * Stripe API. The credential is a secret key (sk_test_ / sk_live_ /
+ * rk_*). Probes /v1/balance which only requires the key to be valid;
+ * no charges or customer reads.
+ */
+export async function testStripeConnection(
+  secretKey: string,
+): Promise<PlatformConnectionResult> {
+  try {
+    const res = await fetch('https://api.stripe.com/v1/balance', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${secretKey}`,
+        Accept: 'application/json',
+      },
+    });
+    if (res.status === 401) return { connected: false, error: 'Invalid Stripe secret key' };
+    if (res.status === 403) return { connected: false, error: 'Access forbidden — restricted key may lack the required permission' };
+    if (!res.ok) return { connected: false, error: `HTTP ${res.status}` };
+    // The response includes the available balance — useful as identity
+    // confirmation. Live vs test mode is visible in the key prefix.
+    const mode = secretKey.startsWith('sk_live') ? 'live' : secretKey.startsWith('sk_test') ? 'test' : 'restricted';
+    return { connected: true, identity: `Stripe (${mode})` };
+  } catch (err: any) {
+    return { connected: false, error: networkErrorMessage(err) };
+  }
+}
+
+/**
+ * GitHub API. The credential is a personal access token (classic or
+ * fine-grained) or an OAuth token. Probes /user which the token
+ * always has access to.
+ */
+export async function testGitHubConnection(
+  token: string,
+): Promise<PlatformConnectionResult> {
+  try {
+    const res = await fetch('https://api.github.com/user', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+    if (res.status === 401) return { connected: false, error: 'Invalid GitHub token' };
+    if (res.status === 403) return { connected: false, error: 'Access forbidden — token may have hit the rate limit or lacks scope' };
+    if (!res.ok) return { connected: false, error: `HTTP ${res.status}` };
+    const data = await res.json().catch(() => ({}));
+    return { connected: true, identity: data?.login || data?.name };
+  } catch (err: any) {
+    return { connected: false, error: networkErrorMessage(err) };
+  }
+}
+
+/**
+ * Cloudflare API. The credential is a token created via "Create
+ * Token". Probes /user/tokens/verify which the token always has
+ * access to and which returns metadata about the token itself.
+ */
+export async function testCloudflareConnection(
+  token: string,
+): Promise<PlatformConnectionResult> {
+  try {
+    const res = await fetch('https://api.cloudflare.com/client/v4/user/tokens/verify', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+      },
+    });
+    if (res.status === 401) return { connected: false, error: 'Invalid Cloudflare token' };
+    if (!res.ok) return { connected: false, error: `HTTP ${res.status}` };
+    const data = await res.json().catch(() => ({}));
+    if (data?.success === false) {
+      const errs = (data?.errors || []).map((e: any) => e?.message).filter(Boolean);
+      return { connected: false, error: errs[0] || 'Token verify returned success=false' };
+    }
+    return { connected: true, identity: data?.result?.id ? `token ${String(data.result.id).slice(0, 10)}` : 'Cloudflare' };
+  } catch (err: any) {
+    return { connected: false, error: networkErrorMessage(err) };
+  }
+}
+
 // ─── 5. Publish to WordPress ───────────────────────────────────────────────
 
 export async function publishToWordPress(
