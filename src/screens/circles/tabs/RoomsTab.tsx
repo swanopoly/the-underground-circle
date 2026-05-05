@@ -42,7 +42,7 @@ import {
   type AiFileProposal,
   type DiffLine,
 } from '../../../lib/aiFileProposal';
-import { ROOM_WORKSPACE_FOCUS_FILE_EVENT, ROOM_WORKSPACE_OPEN_EVENT } from '../../../lib/roomWorkspaceLauncher';
+import { ROOM_WORKSPACE_FOCUS_FILE_EVENT, ROOM_WORKSPACE_OPEN_EVENT, focusRoomWorkspaceFile } from '../../../lib/roomWorkspaceLauncher';
 import { SESSION_PROFILE_OPTIONS, getSessionProfileMeta, loadRoomSessionProfile, saveRoomSessionProfile, type SessionCodingProfile } from '../../../lib/chatSessionProfile';
 import { isCodingGenerationRequest } from '../../../lib/codingWorkbench';
 import { getRoomChatSessionActions } from '../../../lib/sessionPromptCatalog';
@@ -4053,6 +4053,21 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
               <Text style={{ color: '#e2e8f0', fontSize: 13, fontWeight: '800', fontFamily: MONO, flex: 1 }} numberOfLines={1}>
                 {peekFile.name}
               </Text>
+              {(() => {
+                const target = roomFiles.find((f) => f.name === peekFile.name);
+                return target ? (
+                  <Pressable
+                    onPress={() => {
+                      try {
+                        focusRoomWorkspaceFile({ roomId, primaryFileId: target.id, preferredPanel: 'playground' });
+                      } catch {}
+                      setPeekFile(null);
+                    }}
+                    style={{ paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, backgroundColor: accentColor + '22', borderWidth: 1, borderColor: accentColor + '55' }}>
+                    <Text style={{ color: accentColor, fontSize: 10, fontWeight: '900', letterSpacing: 0.6 }}>OPEN IN EDITOR</Text>
+                  </Pressable>
+                ) : null;
+              })()}
               <Pressable
                 onPress={() => setPeekFile(null)}
                 style={{ paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, backgroundColor: '#1f2937' }}>
