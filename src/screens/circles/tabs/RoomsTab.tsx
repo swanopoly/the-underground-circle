@@ -2546,6 +2546,21 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     setPaletteIndex(0);
   }, [mentionPaletteOpen, slashPaletteOpen, mentionQuery, slashQuery]);
 
+  // Cmd/Ctrl+K — universal "open command palette" shortcut. Focuses the
+  // input and prefixes "/" so the slash palette opens immediately.
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.key !== 'k' && e.key !== 'K') return;
+      e.preventDefault();
+      try { inputRef.current?.focus(); } catch {}
+      setInput((prev) => (prev.startsWith('/') ? prev : `/${prev}`));
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
   // Keyboard nav for the palettes — Up/Down moves, Enter or Tab commits,
   // Esc closes. Web only; on native we just rely on tap.
   useEffect(() => {
@@ -3691,6 +3706,15 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           );
         }}
         ListEmptyComponent={<Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginTop: 20, fontStyle: 'italic' }}>No messages yet</Text>}
+        ListFooterComponent={botTyping && !codingWorkbenchPrompt ? (
+          <View style={{
+            paddingHorizontal: 10, paddingVertical: 12, marginTop: 6,
+            borderRadius: 12, borderLeftWidth: 3, borderLeftColor: accentColor,
+            backgroundColor: accentColor + '0a',
+          }}>
+            <AgentThinkingLoader />
+          </View>
+        ) : null}
       />
 
       {pendingNewMessages > 0 ? (
