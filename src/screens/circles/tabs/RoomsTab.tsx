@@ -3987,6 +3987,80 @@ function AgentThinkingLoader() {
   );
 }
 
+// Lightweight markdown segmenter — splits a chat message into prose runs
+// and fenced code blocks. The edit:filename proposals are already stripped
+// upstream (those render as ApplyProposalCards), so what's left is generic
+// ```lang\n…``` blocks the agent emits when explaining or pasting code.
+type ChatSegment = { type: 'text'; content: string } | { type: 'code'; content: string; lang?: string };
+function parseChatSegments(source: string): ChatSegment[] {
+  if (!source) return [];
+  const segments: ChatSegment[] = [];
+  const regex = /```([a-zA-Z0-9_+\-.]*)\n?([\s\S]*?)```/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(source)) !== null) {
+    if (m.index > last) {
+      const before = source.slice(last, m.index);
+      if (before.trim()) segments.push({ type: 'text', content: before });
+    }
+    segments.push({ type: 'code', content: m[2] || '', lang: m[1] || undefined });
+    last = m.index + m[0].length;
+  }
+  if (last < source.length) {
+    const tail = source.slice(last);
+    if (tail.trim()) segments.push({ type: 'text', content: tail });
+  }
+  if (segments.length === 0 && source) segments.push({ type: 'text', content: source });
+  return segments;
+}
+
+function ChatCodeBlock({ content, lang, accentColor }: { content: string; lang?: string; accentColor: string }) {
+  const [copied, setCopied] = useState(false);
+  const lineCount = content.split('\n').length;
+  return (
+    <View style={{
+      marginTop: 6, marginBottom: 4,
+      borderWidth: 1, borderColor: '#1f2937',
+      backgroundColor: '#020409', borderRadius: 10, overflow: 'hidden',
+    }}>
+      <View style={{
+        flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+        paddingHorizontal: 10, paddingVertical: 6,
+        borderBottomWidth: 1, borderBottomColor: '#101a2c',
+        backgroundColor: '#0a0e1a',
+      }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <Text style={{ color: '#64748b', fontSize: 9, fontFamily: MONO, letterSpacing: 1, fontWeight: '900' }}>
+            {(lang || 'code').toUpperCase()}
+          </Text>
+          <Text style={{ color: '#475569', fontSize: 9, fontFamily: MONO }}>
+            {lineCount} line{lineCount === 1 ? '' : 's'}
+          </Text>
+        </View>
+        {Platform.OS === 'web' ? (
+          <Pressable onPress={async () => {
+            try {
+              await (navigator as any).clipboard?.writeText(content);
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1200);
+            } catch {}
+          }}
+            style={{ paddingHorizontal: 7, paddingVertical: 3, borderRadius: 6, backgroundColor: copied ? '#22c55e22' : '#1f2937' }}>
+            <Text style={{ color: copied ? '#22c55e' : accentColor, fontSize: 9, fontWeight: '900', letterSpacing: 0.6 }}>
+              {copied ? 'COPIED' : 'COPY'}
+            </Text>
+          </Pressable>
+        ) : null}
+      </View>
+      <ScrollView horizontal contentContainerStyle={{ paddingHorizontal: 10, paddingVertical: 8 }}>
+        <Text selectable style={{ color: '#e2e8f0', fontSize: 11, fontFamily: MONO, lineHeight: 17 }}>
+          {content}
+        </Text>
+      </ScrollView>
+    </View>
+  );
+}
+
 function FileProposalCard({ proposal, lineCount, accentColor, applied, rejected, onApply, onReject }: {
   proposal: AiFileProposal;
   lineCount: number;
@@ -4170,7 +4244,15 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
           )}
           {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
         </View>
-        <Text style={{color:'#ccc',fontSize:12,lineHeight:18}}>{isTask ? msg.metadata?.prompt || msg.content : (visibleContent || msg.content)}</Text>
+        {isTask ? (
+          <Text style={{color:'#ccc',fontSize:12,lineHeight:18}}>{msg.metadata?.prompt || msg.content}</Text>
+        ) : (
+          parseChatSegments(visibleContent || msg.content).map((seg, idx) => (
+            seg.type === 'code'
+              ? <ChatCodeBlock key={`code-${idx}`} content={seg.content} lang={seg.lang} accentColor={accentColor} />
+              : <Text key={`text-${idx}`} style={{color:'#ccc',fontSize:12,lineHeight:18}}>{seg.content.trim()}</Text>
+          ))
+        )}
         {proposals.length > 0 && (
           <View style={{ marginTop: 10, gap: 8 }}>
             {proposals.map((p) => {
@@ -4300,7 +4382,13 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
         )}
         {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
       </View>
-      <Text style={{color:'#e6e6e6',fontSize:13,marginLeft:28,lineHeight:19}}>{msg.content}</Text>
+      <View style={{ marginLeft: 28 }}>
+        {parseChatSegments(msg.content || '').map((seg, idx) => (
+          seg.type === 'code'
+            ? <ChatCodeBlock key={`mc-${idx}`} content={seg.content} lang={seg.lang} accentColor={accentColor} />
+            : <Text key={`mt-${idx}`} style={{color:'#e6e6e6',fontSize:13,lineHeight:19}}>{seg.content.trim()}</Text>
+        ))}
+      </View>
       {images.length > 0 && (
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8, marginLeft: 28 }}>
           {images.map((src, idx) => (
