@@ -474,6 +474,12 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+
+  const [importOpen, setImportOpen] = useState(false);
+  const [importParseResult, setImportParseResult] = useState<import('../../lib/vaultImport').VaultImportParseResult | null>(null);
+  const [importSelected, setImportSelected] = useState<Set<number>>(() => new Set());
+  const [importBusy, setImportBusy] = useState(false);
+  const [importStatus, setImportStatus] = useState('');
   const toggleSelected = (id: string) => {
     setSelectedIds((current) => {
       const next = new Set(current);
@@ -933,6 +939,69 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     });
   };
 
+  const handleImportFile = async (file: File) => {
+    setImportStatus('');
+    setImportBusy(true);
+    try {
+      const text = await file.text();
+      const { parseVaultCsv } = await import('../../lib/vaultImport');
+      const parsed = parseVaultCsv(text);
+      setImportParseResult(parsed);
+      // Pre-select every complete row by default.
+      setImportSelected(new Set(parsed.rows.filter((r) => r.isComplete).map((r) => r.index)));
+      const formatLabel = parsed.format === 'unknown' ? 'unknown format' : parsed.format;
+      setImportStatus(
+        `Detected ${formatLabel} with ${parsed.rows.length} row${parsed.rows.length === 1 ? '' : 's'}. Review below and import.`,
+      );
+    } catch (err: any) {
+      setImportStatus(err?.message || 'Could not parse CSV file.');
+      setImportParseResult(null);
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const toggleImportSelected = (index: number) => {
+    setImportSelected((current) => {
+      const next = new Set(current);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  };
+
+  const runImport = async () => {
+    if (!importParseResult) return;
+    const targets = importParseResult.rows.filter((row) => importSelected.has(row.index) && row.isComplete);
+    if (targets.length === 0) {
+      setImportStatus('Select at least one complete row before importing.');
+      return;
+    }
+    setImportBusy(true);
+    setImportStatus(`Importing ${targets.length} credential${targets.length === 1 ? '' : 's'}...`);
+    const { buildVaultImportInput } = await import('../../lib/vaultImport');
+    let successes = 0;
+    const failures: string[] = [];
+    for (const row of targets) {
+      const input = buildVaultImportInput(row, circleId);
+      const result = await storeSiteCredentialVault(input);
+      if (result.error) {
+        failures.push(`${row.platform}/${row.label}: ${result.error}`);
+      } else {
+        successes++;
+      }
+    }
+    await loadVault();
+    setImportBusy(false);
+    if (failures.length === 0) {
+      setImportStatus(`Imported ${successes} credential${successes === 1 ? '' : 's'}.`);
+      setImportParseResult(null);
+      setImportSelected(new Set());
+    } else {
+      setImportStatus(`Imported ${successes}, ${failures.length} failed: ${failures.slice(0, 3).join('; ')}${failures.length > 3 ? '…' : ''}`);
+    }
+  };
+
   return (
     <View
       style={[
@@ -970,6 +1039,104 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           <MetricCard label="Ready" value={String(readinessStats.ready)} color="#22c55e" />
           <MetricCard label="Needs Test" value={String(readinessStats.needsTest)} color="#f59e0b" />
           <MetricCard label="Rotation Due" value={String(readinessStats.rotationDue)} color="#f97316" />
+        </View>
+
+        <View style={styles.card}>
+          <Pressable
+            onPress={() => setImportOpen((value) => !value)}
+            style={[styles.cardHeader, webCursor()]}
+          >
+            <View style={styles.cardHeaderText}>
+              <Text style={styles.cardTitle}>Import from CSV</Text>
+              <Text style={styles.cardMeta}>1Password, Bitwarden, or LastPass exports. Auto-detects format.</Text>
+            </View>
+            <Text style={[styles.chevron, { color: accentColor }]}>{importOpen ? '-' : '+'}</Text>
+          </Pressable>
+          {importOpen ? (
+            <View style={styles.form}>
+              {Platform.OS === 'web' ? (
+                <View style={styles.actionRow}>
+                  {/* @ts-ignore — RN Web exposes the underlying input */}
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={(e: any) => {
+                      const file: File | undefined = e?.target?.files?.[0];
+                      if (file) handleImportFile(file);
+                      // Reset so re-selecting the same file fires onChange again.
+                      e.target.value = '';
+                    }}
+                    style={{
+                      color: '#cbd5e1',
+                      fontSize: 12,
+                      padding: 6,
+                      borderRadius: 8,
+                      border: '1px solid #ffffff20',
+                      backgroundColor: '#050914',
+                    }}
+                  />
+                </View>
+              ) : (
+                <Text style={styles.helperText}>CSV import is web-only. Open the app on desktop to import a vault export.</Text>
+              )}
+              {importBusy && !importParseResult ? <ActivityIndicator size="small" color={accentColor} /> : null}
+              {importStatus ? <Text style={[styles.status, { borderColor: accentColor + '33' }]}>{importStatus}</Text> : null}
+              {importParseResult ? (
+                <View style={styles.sectionBox}>
+                  <Text style={styles.sectionTitle}>
+                    Preview ({importParseResult.format}) — {importParseResult.rows.length} row{importParseResult.rows.length === 1 ? '' : 's'}, {importSelected.size} selected
+                  </Text>
+                  {importParseResult.warnings.map((warning, idx) => (
+                    <Text key={idx} style={styles.helperText}>{warning}</Text>
+                  ))}
+                  <View style={styles.importPreviewList}>
+                    {importParseResult.rows.slice(0, 100).map((row) => {
+                      const checked = importSelected.has(row.index);
+                      return (
+                        <Pressable
+                          key={row.index}
+                          onPress={() => toggleImportSelected(row.index)}
+                          style={[styles.importPreviewRow, checked && { borderColor: accentColor + '88', backgroundColor: accentColor + '0c' }, webCursor()]}
+                        >
+                          <View style={[styles.bulkCheckbox, checked && { backgroundColor: accentColor, borderColor: accentColor }]} />
+                          <View style={styles.importPreviewBody}>
+                            <Text style={styles.importPreviewTitle}>
+                              {row.platform}/{row.label}
+                              {!row.isComplete ? ' · skipped (missing password)' : ''}
+                            </Text>
+                            <Text style={styles.importPreviewMeta}>
+                              {row.title || '—'}{row.url ? ` · ${row.url}` : ''}{row.username ? ` · ${row.username}` : ''}
+                            </Text>
+                            {row.tags.length > 0 ? (
+                              <Text style={styles.importPreviewMeta}>tags: {row.tags.join(', ')}</Text>
+                            ) : null}
+                          </View>
+                        </Pressable>
+                      );
+                    })}
+                    {importParseResult.rows.length > 100 ? (
+                      <Text style={styles.helperText}>+ {importParseResult.rows.length - 100} more rows hidden in preview but still imported if selected.</Text>
+                    ) : null}
+                  </View>
+                  <View style={styles.actionRow}>
+                    <Pressable
+                      disabled={importBusy}
+                      onPress={runImport}
+                      style={[styles.primaryBtn, { backgroundColor: accentColor }, importBusy && styles.disabledBtn, webCursor(importBusy ? 'wait' : 'pointer')]}
+                    >
+                      {importBusy ? <ActivityIndicator size="small" color="#061018" /> : <Text style={styles.primaryText}>Import {importSelected.size}</Text>}
+                    </Pressable>
+                    <Pressable
+                      onPress={() => { setImportParseResult(null); setImportSelected(new Set()); setImportStatus(''); }}
+                      style={[styles.secondaryBtn, webCursor()]}
+                    >
+                      <Text style={styles.secondaryText}>Cancel</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
         </View>
 
         <View style={styles.card}>
@@ -1818,6 +1985,34 @@ const styles = StyleSheet.create({
     color: '#aab4c2',
     fontSize: 11,
     fontWeight: '700',
+  },
+  importPreviewList: {
+    gap: 6,
+    maxHeight: 380,
+  },
+  importPreviewRow: {
+    flexDirection: 'row',
+    gap: 10,
+    padding: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#ffffff10',
+    backgroundColor: '#050914',
+    alignItems: 'flex-start',
+  },
+  importPreviewBody: {
+    flex: 1,
+    gap: 2,
+  },
+  importPreviewTitle: {
+    color: '#e2e8f0',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  importPreviewMeta: {
+    color: '#94a3b8',
+    fontSize: 11,
+    lineHeight: 15,
   },
   cardTitleRow: {
     flexDirection: 'row',
