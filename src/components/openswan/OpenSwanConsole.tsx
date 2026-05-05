@@ -69,6 +69,33 @@ const OUTPUT_TOKEN_BUDGET_BY_MODE: Record<string, number> = {
 // System prompt + memory injection + chat history overhead. Real usage
 // varies, but this deliberately leans high so users are less surprised.
 const BASE_INPUT_TOKENS = 4500;
+
+// Starter templates — shown only when the user's saved-template list
+// is empty so new users see usable shortcuts without polluting the
+// saved list. Tap → applies (task, mode) but doesn't auto-save; the
+// user has to opt in via SAVE CURRENT to keep it permanent.
+const STARTER_TEMPLATES: ReadonlyArray<{ label: string; task: string; mode: string }> = [
+  {
+    label: 'Plan today',
+    task: 'Plan today\'s work — list active missions, current blockers, and what to ship by end of day.',
+    mode: 'plan',
+  },
+  {
+    label: 'Code review',
+    task: 'Review the latest uncommitted changes for naming, error handling, missing tests, and obvious bugs.',
+    mode: 'review',
+  },
+  {
+    label: 'Ship audit',
+    task: 'Audit what\'s left before this branch can ship — uncommitted changes, missing tests, broken builds, gates not passing.',
+    mode: 'review',
+  },
+  {
+    label: 'Find tech debt',
+    task: 'Scan the codebase for duplicated logic that should be extracted into a shared utility — list candidates with file paths.',
+    mode: 'research',
+  },
+];
 const AUTO_MODEL_COST_BASELINE = 'claude-sonnet-4-6';
 
 type ToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
@@ -660,9 +687,45 @@ export default function OpenSwanConsole({
               </Pressable>
             </View>
             {templates.length === 0 ? (
-              <Text style={styles.recentRunsHint}>
-                Type a task above and tap SAVE CURRENT to keep it as a one-tap launcher.
-              </Text>
+              <View style={{ gap: 6 }}>
+                <Text style={styles.recentRunsHint}>
+                  Try a starter, or type your own and tap SAVE CURRENT.
+                </Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={{ gap: 6, paddingVertical: 2 }}
+                >
+                  {STARTER_TEMPLATES.map((starter) => (
+                    <Pressable
+                      key={starter.label}
+                      onPress={() => {
+                        setTask(starter.task);
+                        if ((MODE_KEYS as string[]).includes(starter.mode)) {
+                          setMode(starter.mode as OpenSwanChatMode);
+                        }
+                      }}
+                      style={({ hovered, pressed }: any) => [
+                        styles.templateChip,
+                        styles.starterChip,
+                        { borderColor: accentColor + '30' },
+                        hovered && { borderColor: accentColor + '60', backgroundColor: accentColor + '10' },
+                        pressed && { transform: [{ scale: 0.985 }] },
+                      ]}
+                      accessibilityLabel={`Apply starter: ${starter.label}`}
+                    >
+                      <View style={styles.templateChipMode}>
+                        <Text style={[styles.templateChipModeText, { color: accentColor }]}>
+                          {starter.mode.toUpperCase()}
+                        </Text>
+                      </View>
+                      <Text style={styles.templateChipLabel} numberOfLines={1}>
+                        {starter.label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </View>
             ) : (
               <ScrollView
                 horizontal
@@ -1444,6 +1507,13 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '900',
     lineHeight: 14,
+  },
+  starterChip: {
+    backgroundColor: FIELD_BG,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderRightWidth: 1,
+    borderStyle: 'dashed',
   },
   recentRunRow: {
     flexDirection: 'row',
