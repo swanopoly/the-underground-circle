@@ -2348,6 +2348,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // the chat as if it ended here". Messages after the cutoff are dimmed
   // and not sent to the AI as recent context.
   const [contextCutoffId, setContextCutoffId] = useState<string | null>(null);
+  // Search bar + pinned-only filter — lets users find past decisions and
+  // saved turns in long-running team chats without scrolling forever.
+  const [searchQuery, setSearchQuery] = useState('');
+  const [pinnedOnly, setPinnedOnly] = useState(false);
+  const [showFilterBar, setShowFilterBar] = useState(false);
 
   const handleSessionProfileSelect = useCallback(async (nextProfile: SessionCodingProfile) => {
     setSessionProfile(nextProfile);
@@ -2555,6 +2560,27 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     if (!contextCutoffId) return -1;
     return messages.findIndex((m) => m.id === contextCutoffId);
   }, [contextCutoffId, messages]);
+
+  const messageIndexById = useMemo(() => {
+    const map = new Map<string, number>();
+    messages.forEach((m, i) => map.set(m.id, i));
+    return map;
+  }, [messages]);
+
+  const visibleMessages = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q && !pinnedOnly) return messages;
+    return messages.filter((m) => {
+      if (pinnedOnly && !(m.metadata as any)?.pinned) return false;
+      if (!q) return true;
+      return [m.content || '', m.agent_name || ''].some((v) => v.toLowerCase().includes(q));
+    });
+  }, [messages, searchQuery, pinnedOnly]);
+
+  const pinnedCount = useMemo(
+    () => messages.filter((m) => !!(m.metadata as any)?.pinned).length,
+    [messages],
+  );
 
   // Toggle the pinned flag on a message. Optimistic update, reverts on error.
   const handleTogglePin = useCallback(async (msgId: string) => {
@@ -2951,6 +2977,15 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             <Text style={{ color: '#94a3b8', fontSize: 11, fontWeight: '700' }}>EXPORT .md</Text>
           </Pressable>
         ) : null}
+        <Pressable onPress={() => setShowFilterBar((v) => !v)}
+          style={[
+            s.panelBtn,
+            { backgroundColor: showFilterBar ? accentColor + '15' : '#0f172a', borderColor: showFilterBar ? accentColor + '40' : '#1f2937' },
+          ]}>
+          <Text style={{ color: showFilterBar ? accentColor : '#94a3b8', fontSize: 11, fontWeight: '700' }}>
+            FIND{pinnedOnly || searchQuery ? ' ●' : ''}
+          </Text>
+        </Pressable>
         <Pressable onPress={() => { setShowAssign(p => !p); if (showSpawnAgent) setShowSpawnAgent(false); }}
           style={[s.panelBtn, { backgroundColor: accentColor + '15', borderColor: accentColor + '40' }]}>
           <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }}>Assign</Text>
@@ -3112,6 +3147,45 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         ))}
       </ScrollView>
 
+      {/* Filter bar */}
+      {showFilterBar ? (
+        <View style={{
+          flexDirection: 'row', alignItems: 'center', gap: 8,
+          paddingHorizontal: 12, paddingVertical: 8,
+          backgroundColor: '#0a0e1a',
+          borderBottomWidth: 1, borderBottomColor: '#1a1a28',
+        }}>
+          <TextInput
+            style={[s.msgInput, { paddingVertical: 6, fontSize: 12, flex: 1 }]}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="Search messages..."
+            placeholderTextColor="#555"
+            autoCapitalize="none"
+          />
+          <Pressable onPress={() => setPinnedOnly((v) => !v)}
+            style={{
+              paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999,
+              borderWidth: 1,
+              borderColor: pinnedOnly ? accentColor : '#1f2937',
+              backgroundColor: pinnedOnly ? accentColor + '14' : '#0d1320',
+            }}>
+            <Text style={{ color: pinnedOnly ? accentColor : '#94a3b8', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: MONO }}>
+              ★ PINNED ({pinnedCount})
+            </Text>
+          </Pressable>
+          {(searchQuery || pinnedOnly) && (
+            <Pressable onPress={() => { setSearchQuery(''); setPinnedOnly(false); }}
+              style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, backgroundColor: '#1f2937' }}>
+              <Text style={{ color: '#cbd5e1', fontSize: 10, fontWeight: '800' }}>Clear</Text>
+            </Pressable>
+          )}
+          <Text style={{ color: '#475569', fontSize: 10, fontFamily: MONO }}>
+            {visibleMessages.length}/{messages.length}
+          </Text>
+        </View>
+      ) : null}
+
       {/* Branched-context banner */}
       {contextCutoffId ? (
         <View style={{
@@ -3150,7 +3224,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         ref={scrollRef}
         style={s.msgList}
         contentContainerStyle={{ padding: 10 }}
-        data={messages}
+        data={visibleMessages}
         keyExtractor={(m) => m.id}
         ItemSeparatorComponent={() => <View style={{ height: 6 }} />}
         // 20 messages off-screen is plenty of scroll buffer; beyond that the
@@ -3160,8 +3234,9 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         windowSize={10}
         maxToRenderPerBatch={20}
         removeClippedSubviews
-        renderItem={({ item: m, index }) => {
-          const dimmed = cutoffIndex !== -1 && index > cutoffIndex;
+        renderItem={({ item: m }) => {
+          const fullIndex = messageIndexById.get(m.id) ?? -1;
+          const dimmed = cutoffIndex !== -1 && fullIndex > cutoffIndex;
           const isCutoff = m.id === contextCutoffId;
           return (
             <MsgBubble
