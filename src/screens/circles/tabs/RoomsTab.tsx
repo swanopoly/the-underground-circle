@@ -2268,7 +2268,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         filter: `room_id=eq.${roomId}`,
       }, payload => {
         setMessages(prev => [...prev, payload.new as RoomMessage]);
-        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
+        if (pinnedToBottomRef.current) {
+          setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
+        } else {
+          setPendingNewMessages((n) => n + 1);
+        }
       })
       .subscribe();
     return () => { supabase.removeChannel(ch); };
@@ -2353,6 +2357,12 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // file over the chat panel. Released onto the panel triggers the
   // same handler the clipboard paste path uses.
   const [dragActive, setDragActive] = useState(false);
+  // Scroll-to-bottom indicator — when a new message arrives while the
+  // user has scrolled up, surface a floating pill they can tap to
+  // jump back. Standard chat UX; without it long rooms feel like the
+  // AI is shouting into empty air.
+  const [pendingNewMessages, setPendingNewMessages] = useState(0);
+  const pinnedToBottomRef = useRef(true);
   // Rolling room_usage stats so the chat header surfaces token + USD
   // spend without the user needing to open the Usage panel.
   const [usageStats, setUsageStats] = useState<{ tokens: number; cost: number; runs: number }>({ tokens: 0, cost: 0, runs: 0 });
@@ -3636,6 +3646,14 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         contentContainerStyle={{ padding: 10 }}
         data={visibleMessages}
         keyExtractor={(m) => m.id}
+        onScroll={(e) => {
+          const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+          const distanceFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
+          const atBottom = distanceFromBottom < 80; // tolerance for inertia
+          pinnedToBottomRef.current = atBottom;
+          if (atBottom && pendingNewMessages > 0) setPendingNewMessages(0);
+        }}
+        scrollEventThrottle={120}
         ItemSeparatorComponent={() => <View style={{ height: 6 }} />}
         // 20 messages off-screen is plenty of scroll buffer; beyond that the
         // row is unmounted and its subtree memory reclaimed. 200 is the
@@ -3674,6 +3692,32 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         }}
         ListEmptyComponent={<Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginTop: 20, fontStyle: 'italic' }}>No messages yet</Text>}
       />
+
+      {pendingNewMessages > 0 ? (
+        <View style={{
+          position: 'absolute', alignSelf: 'center',
+          bottom: 110, zIndex: 40,
+        }}>
+          <Pressable
+            onPress={() => {
+              scrollRef.current?.scrollToEnd({ animated: true });
+              pinnedToBottomRef.current = true;
+              setPendingNewMessages(0);
+            }}
+            style={{
+              flexDirection: 'row', alignItems: 'center', gap: 8,
+              paddingHorizontal: 14, paddingVertical: 8,
+              borderRadius: 999, backgroundColor: accentColor,
+              ...(Platform.OS === 'web'
+                ? { boxShadow: `0 8px 24px ${accentColor}44`, cursor: 'pointer' } as any
+                : { elevation: 6 }),
+            }}>
+            <Text style={{ color: '#0b1220', fontSize: 11, fontWeight: '900', letterSpacing: 0.6 }}>
+              ↓ {pendingNewMessages} NEW
+            </Text>
+          </Pressable>
+        </View>
+      ) : null}
 
       {/* Active file chip */}
       {activeFile && (
