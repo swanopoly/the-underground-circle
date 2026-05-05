@@ -29,6 +29,8 @@ import {
   type PlatformConnectionResult,
   updateSiteCredentialVaultControls,
 } from '../../lib/siteAutomation';
+import { supabase } from '../../lib/supabase';
+import { useAuth } from '../../hooks/useAuth';
 
 interface Props {
   circleId: string;
@@ -409,9 +411,52 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   }, [entries]);
 
+  const { user } = useAuth();
+  const currentUserId = user?.id || null;
+  const [members, setMembers] = useState<Array<{ user_id: string; display_name: string; username: string }>>([]);
+  const loadMembers = useCallback(async () => {
+    const { data } = await supabase
+      .from('circle_members')
+      .select('user_id, profiles!user_id(display_name, username)')
+      .eq('circle_id', circleId);
+    if (Array.isArray(data)) {
+      setMembers(
+        data.map((row: any) => ({
+          user_id: row.user_id,
+          display_name: row.profiles?.display_name || row.profiles?.username || 'Member',
+          username: row.profiles?.username || '',
+        })),
+      );
+    }
+  }, [circleId]);
+  useEffect(() => {
+    loadMembers();
+  }, [loadMembers]);
+
+  const allowedMemberIds = (entry: SiteCredentialVaultEntry): string[] => {
+    const meta = (entry.metadata || {}) as Record<string, unknown>;
+    const raw = meta.allowedMemberIds;
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((value): value is string => typeof value === 'string');
+  };
+
+  const isRestricted = (entry: SiteCredentialVaultEntry): boolean => allowedMemberIds(entry).length > 0;
+
+  const isVisibleToCurrentUser = (entry: SiteCredentialVaultEntry): boolean => {
+    const list = allowedMemberIds(entry);
+    if (list.length === 0) return true;
+    if (!currentUserId) return false;
+    if (entry.createdBy === currentUserId) return true;
+    return list.includes(currentUserId);
+  };
+
   const visibleEntries = useMemo(() => {
     const q = query.trim().toLowerCase();
     return entries.filter((entry) => {
+      // Per-member sharing: hide credentials I'm not on the share list for.
+      // (RLS enforces this server-side once the migration runs; this is the
+      // client-side mirror so the panel stays consistent.)
+      if (!isVisibleToCurrentUser(entry)) return false;
       const readiness = automationReadiness(entry);
       if (rotationOnly && !isRotationDue(entry)) return false;
       if (riskFilter === 'ready' && readiness.label !== 'Ready') return false;
@@ -431,7 +476,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
         entryTags(entry).join(' '),
       ].some((value) => value.toLowerCase().includes(q));
     });
-  }, [entries, query, riskFilter, rotationOnly, tagFilter]);
+  }, [entries, query, riskFilter, rotationOnly, tagFilter, currentUserId]);
 
   const loadVault = useCallback(async () => {
     setLoading(true);
@@ -1670,6 +1715,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                       {rotationDue ? <Text style={styles.rotationBadge}>Rotation due</Text> : null}
                       {!entry.isActive ? <Text style={styles.inactiveBadge}>Inactive</Text> : null}
                       {isHighTrust(entry) ? <Text style={styles.highTrustBadge}>HIGH-TRUST</Text> : null}
+                      {isRestricted(entry) ? <Text style={styles.restrictedBadge}>RESTRICTED</Text> : null}
                       {entryTags(entry).slice(0, 4).map((tag) => (
                         <Text key={tag} style={[styles.tagBadge, { color: accentColor, borderColor: accentColor + '55' }]}>{tag}</Text>
                       ))}
@@ -1759,6 +1805,60 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                       })}
                     </View>
                     <Text style={styles.helperText}>Allowed origins: {origins.join(', ') || 'not set'}</Text>
+                  </View>
+
+                  <View style={styles.sectionBox}>
+                    <Text style={styles.sectionTitle}>Sharing</Text>
+                    <Text style={styles.helperText}>
+                      {allowedMemberIds(entry).length === 0
+                        ? 'Visible to every circle member. Pick specific people to restrict access.'
+                        : `Restricted to ${allowedMemberIds(entry).length} member${allowedMemberIds(entry).length === 1 ? '' : 's'} plus the credential creator.`}
+                    </Text>
+                    <View style={styles.kindRow}>
+                      {members.map((member) => {
+                        const list = allowedMemberIds(entry);
+                        const active = list.includes(member.user_id);
+                        const isCreator = entry.createdBy === member.user_id;
+                        return (
+                          <Pressable
+                            key={member.user_id}
+                            onPress={() => {
+                              if (isCreator) return;
+                              const next = active ? list.filter((id) => id !== member.user_id) : [...list, member.user_id];
+                              updateEntryControls(entry, {
+                                metadata: { ...entry.metadata, allowedMemberIds: next },
+                              }, active ? `Removed ${member.display_name} from sharing.` : `Shared with ${member.display_name}.`);
+                            }}
+                            disabled={!!updating[entry.id] || isCreator}
+                            style={[
+                              styles.kindChip,
+                              active && { borderColor: accentColor + '88', backgroundColor: accentColor + '18' },
+                              isCreator && { borderColor: '#22c55e55', backgroundColor: '#22c55e14' },
+                              webCursor(isCreator ? 'default' : updating[entry.id] ? 'wait' : 'pointer'),
+                            ]}
+                          >
+                            <Text style={[
+                              styles.kindText,
+                              active && { color: accentColor },
+                              isCreator && { color: '#22c55e' },
+                            ]}>
+                              {isCreator ? `${member.display_name} · creator` : member.display_name}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                    {allowedMemberIds(entry).length > 0 ? (
+                      <Pressable
+                        onPress={() => updateEntryControls(entry, {
+                          metadata: { ...entry.metadata, allowedMemberIds: [] },
+                        }, 'Restored open sharing.')}
+                        disabled={!!updating[entry.id]}
+                        style={[styles.secondaryBtn, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
+                      >
+                        <Text style={styles.secondaryText}>Open to everyone</Text>
+                      </Pressable>
+                    ) : null}
                   </View>
 
                   <View style={styles.sectionBox}>
@@ -2182,6 +2282,19 @@ const styles = StyleSheet.create({
     borderColor: '#f59e0b66',
     color: '#f59e0b',
     backgroundColor: '#f59e0b18',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  restrictedBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#a855f766',
+    color: '#a855f7',
+    backgroundColor: '#a855f718',
     fontSize: 9,
     fontWeight: '900',
     letterSpacing: 0.6,
