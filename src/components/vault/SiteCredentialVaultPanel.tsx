@@ -433,6 +433,21 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   const [globalAuditError, setGlobalAuditError] = useState<string>('');
   const [globalAuditEntries, setGlobalAuditEntries] = useState<SiteCredentialAuditEntry[]>([]);
 
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const toggleSelected = (id: string) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const clearSelection = () => setSelectedIds(new Set());
+  const selectVisible = () => {
+    setSelectedIds(new Set(visibleEntries.map((entry) => entry.id)));
+  };
+
   const loadGlobalAudit = useCallback(async () => {
     setGlobalAuditLoading(true);
     setGlobalAuditError('');
@@ -790,6 +805,71 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
       return next;
     });
     setStatus('Credential removed.');
+  };
+
+  const runBulk = async (
+    label: string,
+    operate: (entry: SiteCredentialVaultEntry) => Promise<{ ok: boolean; reason?: string }>,
+  ) => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    setBulkBusy(true);
+    setStatus('');
+    let successes = 0;
+    const failures: string[] = [];
+    for (const id of ids) {
+      const entry = entries.find((item) => item.id === id);
+      if (!entry) continue;
+      try {
+        const result = await operate(entry);
+        if (result.ok) successes++;
+        else failures.push(`${entry.platform}/${entry.label}: ${result.reason || 'failed'}`);
+      } catch (err: any) {
+        failures.push(`${entry.platform}/${entry.label}: ${err?.message || 'unknown error'}`);
+      }
+    }
+    await loadVault();
+    clearSelection();
+    setBulkBusy(false);
+    if (failures.length === 0) {
+      setStatus(`${label} succeeded for ${successes} credential${successes === 1 ? '' : 's'}.`);
+    } else {
+      setStatus(`${label} done. ${successes} succeeded, ${failures.length} failed: ${failures.slice(0, 3).join('; ')}${failures.length > 3 ? '…' : ''}`);
+    }
+  };
+
+  const handleBulkDisable = () =>
+    runBulk('Disable', async (entry) => {
+      if (!entry.isActive) return { ok: true };
+      const result = await updateSiteCredentialVaultControls({ credentialId: entry.id, isActive: false });
+      return { ok: !result.error, reason: result.error };
+    });
+
+  const handleBulkEnable = () =>
+    runBulk('Enable', async (entry) => {
+      if (entry.isActive) return { ok: true };
+      const result = await updateSiteCredentialVaultControls({ credentialId: entry.id, isActive: true });
+      return { ok: !result.error, reason: result.error };
+    });
+
+  const handleBulkMarkRotation = () =>
+    runBulk('Mark rotation due', async (entry) => {
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const result = await updateSiteCredentialVaultControls({ credentialId: entry.id, rotationDueAt: yesterday });
+      return { ok: !result.error, reason: result.error };
+    });
+
+  const handleBulkDelete = async () => {
+    const count = selectedIds.size;
+    if (count === 0) return;
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      const ok = window.confirm(`Permanently remove ${count} credential${count === 1 ? '' : 's'} from the vault?`);
+      if (!ok) return;
+    }
+    await runBulk('Delete', async (entry) => {
+      const result = await deleteSiteCredentialVault(entry.id);
+      return { ok: result.success, reason: result.error };
+    });
   };
 
   return (
@@ -1164,6 +1244,33 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           </View>
         ) : null}
 
+        {selectedIds.size > 0 ? (
+          <View style={[styles.bulkBar, { borderColor: accentColor + '55' }]}>
+            <Text style={styles.bulkLabel}>{selectedIds.size} selected</Text>
+            <View style={styles.bulkActionRow}>
+              <Pressable disabled={bulkBusy} onPress={handleBulkDisable} style={[styles.secondaryBtn, webCursor(bulkBusy ? 'wait' : 'pointer')]}>
+                <Text style={styles.secondaryText}>Disable</Text>
+              </Pressable>
+              <Pressable disabled={bulkBusy} onPress={handleBulkEnable} style={[styles.secondaryBtn, webCursor(bulkBusy ? 'wait' : 'pointer')]}>
+                <Text style={styles.secondaryText}>Enable</Text>
+              </Pressable>
+              <Pressable disabled={bulkBusy} onPress={handleBulkMarkRotation} style={[styles.secondaryBtn, webCursor(bulkBusy ? 'wait' : 'pointer')]}>
+                <Text style={styles.secondaryText}>Mark rotation due</Text>
+              </Pressable>
+              <Pressable disabled={bulkBusy} onPress={handleBulkDelete} style={[styles.secondaryBtn, { borderColor: '#ef444466' }, webCursor(bulkBusy ? 'wait' : 'pointer')]}>
+                <Text style={[styles.secondaryText, { color: '#fca5a5' }]}>Delete</Text>
+              </Pressable>
+              <Pressable disabled={bulkBusy} onPress={selectVisible} style={[styles.secondaryBtn, webCursor(bulkBusy ? 'wait' : 'pointer')]}>
+                <Text style={styles.secondaryText}>Select all</Text>
+              </Pressable>
+              <Pressable disabled={bulkBusy} onPress={clearSelection} style={[styles.secondaryBtn, webCursor(bulkBusy ? 'wait' : 'pointer')]}>
+                <Text style={styles.secondaryText}>Clear</Text>
+              </Pressable>
+            </View>
+            {bulkBusy ? <ActivityIndicator size="small" color={accentColor} /> : null}
+          </View>
+        ) : null}
+
         {visibleEntries.map((entry) => {
           const expanded = expandedId === entry.id;
           const reveal = revealed[entry.id];
@@ -1173,20 +1280,31 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           const actions = entryAllowedActions(entry);
           const origins = entryAllowedOrigins(entry);
           const isBusy = !!updating[entry.id] || !!testing[entry.id];
+          const isSelected = selectedIds.has(entry.id);
           return (
             <View key={entry.id} style={styles.card}>
-              <Pressable onPress={() => setExpandedId(expanded ? null : entry.id)} style={[styles.cardHeader, webCursor()]}>
-                <View style={styles.cardHeaderText}>
-                  <View style={styles.cardTitleRow}>
-                    <Text style={styles.cardTitle}>{entry.platform} / {entry.label}</Text>
-                    <Text style={[styles.readinessBadge, { color: readiness.color, borderColor: readiness.color + '55' }]}>{readiness.label}</Text>
-                    {rotationDue ? <Text style={styles.rotationBadge}>Rotation due</Text> : null}
-                    {!entry.isActive ? <Text style={styles.inactiveBadge}>Inactive</Text> : null}
+              <View style={[styles.cardHeader, isSelected && { backgroundColor: accentColor + '0c' }]}>
+                <Pressable
+                  onPress={() => toggleSelected(entry.id)}
+                  style={[styles.bulkCheckbox, isSelected && { backgroundColor: accentColor, borderColor: accentColor }, webCursor()]}
+                  hitSlop={8}
+                />
+                <Pressable
+                  onPress={() => setExpandedId(expanded ? null : entry.id)}
+                  style={[styles.cardHeaderTouch, webCursor()]}
+                >
+                  <View style={styles.cardHeaderText}>
+                    <View style={styles.cardTitleRow}>
+                      <Text style={styles.cardTitle}>{entry.platform} / {entry.label}</Text>
+                      <Text style={[styles.readinessBadge, { color: readiness.color, borderColor: readiness.color + '55' }]}>{readiness.label}</Text>
+                      {rotationDue ? <Text style={styles.rotationBadge}>Rotation due</Text> : null}
+                      {!entry.isActive ? <Text style={styles.inactiveBadge}>Inactive</Text> : null}
+                    </View>
+                    <Text style={styles.cardMeta}>{entry.siteUrl || 'No site URL'} {entry.username ? `- ${entry.username}` : ''}</Text>
                   </View>
-                  <Text style={styles.cardMeta}>{entry.siteUrl || 'No site URL'} {entry.username ? `- ${entry.username}` : ''}</Text>
-                </View>
-                <Text style={[styles.chevron, { color: accentColor }]}>{expanded ? '-' : '+'}</Text>
-              </Pressable>
+                  <Text style={[styles.chevron, { color: accentColor }]}>{expanded ? '-' : '+'}</Text>
+                </Pressable>
+              </View>
 
               {expanded ? (
                 <View style={styles.entryBody}>
@@ -1495,8 +1613,42 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 12,
   },
+  cardHeaderTouch: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
   cardHeaderText: {
     flex: 1,
+  },
+  bulkCheckbox: {
+    width: 18,
+    height: 18,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: '#ffffff35',
+    backgroundColor: '#050914',
+  },
+  bulkBar: {
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    backgroundColor: '#0b1220',
+    gap: 10,
+  },
+  bulkLabel: {
+    color: '#e2e8f0',
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
+  bulkActionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
   },
   cardTitleRow: {
     flexDirection: 'row',
