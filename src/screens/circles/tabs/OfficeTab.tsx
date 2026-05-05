@@ -153,6 +153,7 @@ import StreakFlame from '../../../components/rpg/StreakFlame';
 import GitHubWallFeed from '../../../components/office/GitHubWallFeed';
 import WorldClockBar from '../../../components/office/WorldClockBar';
 import SoundMixer from '../../../components/office/SoundMixer';
+import SiteCredentialVaultPanel from '../../../components/vault/SiteCredentialVaultPanel';
 
 const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
 const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
@@ -168,6 +169,17 @@ const publishCtaDismissedKey = (circleId: string) => `@office_publish_cta_dismis
 let _profileHasOfficeLayout = true;
 let _profileHasAgentAppearance = true;
 let _profileHasOfficePreferences = true;
+
+function isMissingProfileColumnError(error: any): boolean {
+  const code = String(error?.code || '');
+  const message = String(error?.message || '').toLowerCase();
+  return (
+    code === 'PGRST204'
+    || code === '42703'
+    || message.includes('column')
+    || message.includes('schema cache')
+  );
+}
 
 export interface AgentStats {
   agentCount: number;
@@ -317,6 +329,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // so the save useEffect doesn't fire on the initial load.
   const budgetLoadedRef = useRef(false);
   const idleLoadedRef = useRef(false);
+  const remoteBudgetAppliedRef = useRef(false);
+  const remoteIdleAppliedRef = useRef(false);
   const [activeCatalogCat, setActiveCatalogCat] = useState<string>('connected');
   const catalogScrollRef = useRef<ScrollView>(null);
   const [whiteboardNotes, setWhiteboardNotes] = useState<string[]>([]);
@@ -351,6 +365,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     showConnectAgent, setShowConnectAgent,
     showGitHubFeed, setShowGitHubFeed,
     showSoundMixer, setShowSoundMixer,
+    showVault, setShowVault,
     showPublishModal, setShowPublishModal,
     editMode, setEditMode,
     placingType, setPlacingType,
@@ -400,10 +415,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   }, [circleId, editMode, placingType, selectedFurnitureId]);
 
   useEffect(() => {
-    if (showGitHubFeed || showSoundMixer) {
+    if (showGitHubFeed || showSoundMixer || showVault) {
       recordOfficeActivity(circleId, 'intelligence').catch(() => {});
     }
-  }, [circleId, showGitHubFeed, showSoundMixer]);
+  }, [circleId, showGitHubFeed, showSoundMixer, showVault]);
 
   useEffect(() => {
     if (terminalSize !== 'closed') {
@@ -1176,7 +1191,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           .select('office_preferences').eq('id', user.id).single();
         // Only disable sync for schema-missing errors (column doesn't exist), not transient ones
         if (error) {
-          if (error.code === 'PGRST204' || error.message?.includes('column')) {
+          if (isMissingProfileColumnError(error)) {
             _profileHasOfficePreferences = false;
           }
           return;
@@ -1185,7 +1200,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         const merged = { ...current, ...partial, updatedAt: Date.now() };
         const { error: e2 } = await supabase.from('profiles')
           .update({ office_preferences: merged }).eq('id', user.id);
-        if (e2 && (e2.code === 'PGRST204' || e2.message?.includes('column'))) {
+        if (e2 && isMissingProfileColumnError(e2)) {
           _profileHasOfficePreferences = false;
         }
       } catch {}
@@ -1247,10 +1262,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // picks up the already-connected state and subscribes for updates.
 
   const floorsInitializedRef = useRef(false);
-  const initRef = useRef(false);
+  const initRef = useRef<string | null>(null);
   useEffect(() => {
-    if (initRef.current) return;
-    initRef.current = true;
+    if (initRef.current === circleId) return;
+    initRef.current = circleId;
+    appearancesLoadedRef.current = false;
+    prefsLoadedRef.current = false;
+    floorsInitializedRef.current = false;
+    budgetLoadedRef.current = false;
+    idleLoadedRef.current = false;
+    remoteBudgetAppliedRef.current = false;
+    remoteIdleAppliedRef.current = false;
 
     // Tell the auto-connect service which circle we're in (for DB publishing)
     setAutoConnectCircleId(circleId);
@@ -1377,12 +1399,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       const [namesRaw, tgRaw, floorsRaw, tsRaw, currentFloorRaw, appearancesRaw, notesRaw] = await storagePromise;
 
       // Apply local-only state immediately (agent names, telegram, whiteboard)
-      if (namesRaw) try { setAgentNames(JSON.parse(namesRaw)); } catch {}
+      const localAgentNames = namesRaw ? (() => { try { return JSON.parse(namesRaw) as Record<string, string>; } catch { return {}; } })() : {};
+      const localTelegramConfig = tgRaw ? (() => { try { return JSON.parse(tgRaw) as { botToken?: string; chatId?: string }; } catch { return null; } })() : null;
+      const localWhiteboardNotes = notesRaw ? (() => { try { return JSON.parse(notesRaw) as string[]; } catch { return []; } })() : [];
+      if (Object.keys(localAgentNames).length > 0) setAgentNames(localAgentNames);
       if (tgRaw) try {
-        const tg = JSON.parse(tgRaw);
+        const tg = localTelegramConfig || {};
         if (tg.botToken || tg.chatId) setTelegramConfig({ botToken: tg.botToken || '', chatId: tg.chatId || '' });
       } catch {}
-      if (notesRaw) try { setWhiteboardNotes(JSON.parse(notesRaw)); } catch {}
+      if (localWhiteboardNotes.length > 0) setWhiteboardNotes(localWhiteboardNotes);
 
       // Parse local floors
       let localFloors: OfficeFloor[] = [];
@@ -1400,16 +1425,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       // Apply local state immediately so the Office shell can paint from the
       // fast path while remote profile merges continue in the background.
       setAppearances(localAppearances);
-      appearancesLoadedRef.current = true;
-      prefsLoadedRef.current = true;
       if (localFloors.length > 0) setFloors(localFloors);
       if (localCurrentFloorId) setCurrentFloorId(localCurrentFloorId);
-      floorsInitializedRef.current = true;
       markOfficeReady();
 
       // ── Single getUser() call + parallel Supabase profile queries ──
       let bestFloors = localFloors;
       let bestFloorId = localCurrentFloorId;
+      let remotePrefsRecord: Record<string, unknown> | null = null;
       try {
         const { data: { user: authUser } } = await supabase.auth.getUser();
         if (authUser) {
@@ -1428,7 +1451,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
           // Merge floors
           if (layoutRes.error) {
-            _profileHasOfficeLayout = false;
+            if (isMissingProfileColumnError(layoutRes.error)) _profileHasOfficeLayout = false;
           } else if (layoutRes.data?.office_layout) {
             const remote = layoutRes.data.office_layout as { floors?: OfficeFloor[]; currentFloorId?: string; updatedAt?: number };
             if (remote?.floors && remote.floors.length > 0) {
@@ -1451,7 +1474,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           // Merge appearances — always call setAppearances so downstream
           // auto-assignment logic can populate missing agents
           if (appearanceRes.error) {
-            _profileHasAgentAppearance = false;
+            if (isMissingProfileColumnError(appearanceRes.error)) _profileHasAgentAppearance = false;
           } else {
             const remoteApp = appearanceRes.data?.agent_appearance || {};
             setAppearances({ ...localAppearances, ...remoteApp });
@@ -1459,8 +1482,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
           // Merge office preferences (agent names, telegram, whiteboard)
           if (prefsRes.error) {
-            _profileHasOfficePreferences = false;
+            if (isMissingProfileColumnError(prefsRes.error)) _profileHasOfficePreferences = false;
           } else if (prefsRes.data?.office_preferences) {
+            remotePrefsRecord = prefsRes.data.office_preferences as Record<string, unknown>;
             const remote = prefsRes.data.office_preferences as {
               agentNames?: Record<string, string>;
               telegramConfig?: { botToken?: string; chatId?: string };
@@ -1489,11 +1513,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             // BEFORE setBudgetConfig so the save useEffect doesn't fire
             // and re-write what we just loaded.
             if (remote.budgetConfig && typeof remote.budgetConfig === 'object') {
+              remoteBudgetAppliedRef.current = true;
               budgetLoadedRef.current = true;
               setBudgetConfig(remote.budgetConfig);
             }
             // Remote idle behavior config — same load-then-flag dance.
             if (remote.idleConfig && typeof remote.idleConfig === 'object') {
+              remoteIdleAppliedRef.current = true;
               idleLoadedRef.current = true;
               setIdleConfig(remote.idleConfig);
               idleConfigRef.current = remote.idleConfig;
@@ -1523,7 +1549,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               supabase.from('profiles')
                 .update({ office_layout: validation.sanitizedLayout })
                 .eq('id', authUser.id)
-                .then(({ error }) => { if (error) _profileHasOfficeLayout = false; });
+                .then(({ error }) => { if (error && isMissingProfileColumnError(error)) _profileHasOfficeLayout = false; });
             }
           }
           const serverApp = appearanceRes.data?.agent_appearance as Record<string, unknown> | null | undefined;
@@ -1533,7 +1559,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             supabase.from('profiles')
               .update({ agent_appearance: localAppearances })
               .eq('id', authUser.id)
-              .then(({ error }) => { if (error) _profileHasAgentAppearance = false; });
+              .then(({ error }) => { if (error && isMissingProfileColumnError(error)) _profileHasAgentAppearance = false; });
           }
 
           // Seed agent_identities table from localStorage if the table
@@ -1542,6 +1568,29 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           seedIdentitiesIfServerEmpty().catch(() => {});
         }
       } catch {}
+
+      appearancesLoadedRef.current = true;
+      prefsLoadedRef.current = true;
+      floorsInitializedRef.current = true;
+      if (_profileHasOfficePreferences) {
+        const seedPrefs: Record<string, unknown> = {};
+        if (!remotePrefsRecord?.agentNames && Object.keys(localAgentNames).length > 0) {
+          seedPrefs.agentNames = localAgentNames;
+        }
+        if (!remotePrefsRecord?.telegramConfig && (localTelegramConfig?.botToken || localTelegramConfig?.chatId)) {
+          seedPrefs.telegramConfig = {
+            botToken: localTelegramConfig.botToken || '',
+            chatId: localTelegramConfig.chatId || '',
+          };
+        }
+        if (!remotePrefsRecord?.whiteboardNotes && localWhiteboardNotes.length > 0) {
+          seedPrefs.whiteboardNotes = localWhiteboardNotes;
+        }
+        if (!remotePrefsRecord?.agentFilterMode && agentFilterMode !== 'all') {
+          seedPrefs.agentFilterMode = agentFilterMode;
+        }
+        if (Object.keys(seedPrefs).length > 0) pushOfficePreferences(seedPrefs);
+      }
 
       // Apply floors
       if (bestFloors.length > 0) setFloors(bestFloors);
@@ -1559,12 +1608,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         }).catch(() => {});
 
         loadBudgetConfig().then(cfg => {
-          setBudgetConfig(cfg);
+          if (!remoteBudgetAppliedRef.current) setBudgetConfig(cfg);
           budgetLoadedRef.current = true;
         }).catch(() => { budgetLoadedRef.current = true; });
         loadIdleConfig().then(cfg => {
-          setIdleConfig(cfg);
-          idleConfigRef.current = cfg;
+          if (!remoteIdleAppliedRef.current) {
+            setIdleConfig(cfg);
+            idleConfigRef.current = cfg;
+          }
           idleLoadedRef.current = true;
         }).catch(() => { idleLoadedRef.current = true; });
       }, 350);
@@ -1576,7 +1627,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       (initRef as any)._cancelDeferredEnrichment?.();
       (initRef as any)._unsub?.();
     };
-  }, [connectOne, circleId, markOfficeReady]);
+    // This boot path owns long-lived subscriptions/pollers. Re-running it
+    // for callback identity churn tears down the office runtime, so only
+    // restart when the actual circle changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [circleId]);
 
   // Cleanup pollers on unmount
   useEffect(() => {
@@ -1615,8 +1670,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             supabase.from('profiles').update({
               office_layout: validation.sanitizedLayout
             }).eq('id', user.id).then(
-              ({ error }) => { if (error) _profileHasOfficeLayout = false; },
-              () => { _profileHasOfficeLayout = false; },
+              ({ error }) => { if (error && isMissingProfileColumnError(error)) _profileHasOfficeLayout = false; },
+              () => {},
             );
           }
         }).catch(() => {});
@@ -2192,8 +2247,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       supabase.auth.getUser().then(({ data: { user } }) => {
         if (user) {
           supabase.from('profiles').update({ agent_appearance: appearances }).eq('id', user.id).then(
-            ({ error }) => { if (error) _profileHasAgentAppearance = false; },
-            () => { _profileHasAgentAppearance = false; },
+            ({ error }) => { if (error && isMissingProfileColumnError(error)) _profileHasAgentAppearance = false; },
+            () => {},
           );
         }
       }).catch(() => {});
@@ -3642,6 +3697,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         showMcpHub={showMcpHub}
         showGitHubFeed={showGitHubFeed}
         showSoundMixer={showSoundMixer}
+        showVault={showVault}
         onSwitchFloor={handleSwitchFloor}
         onDeleteFloor={handleDeleteFloor}
         onAddFloor={handleAddFloor}
@@ -3654,6 +3710,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         onToggleMcpHub={() => setShowMcpHub(v => !v)}
         onToggleGitHubFeed={() => setShowGitHubFeed(!showGitHubFeed)}
         onToggleSoundMixer={() => setShowSoundMixer(!showSoundMixer)}
+        onToggleVault={() => setShowVault(v => !v)}
         onCancelPlacing={() => setPlacingType(null)}
         onClearFloorFurniture={() => setFloors(prev => prev.map(f => f.id === currentFloorId ? { ...f, furniture: [] } : f))}
         setPlacingType={setPlacingType}
@@ -3668,11 +3725,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         viewMode={viewMode}
         showGitHubFeed={showGitHubFeed}
         showSoundMixer={showSoundMixer}
+        showVault={showVault}
         circleId={circleId}
         accentColor={accentColor}
         styles={styles}
         GitHubWallFeed={GitHubWallFeed}
         SoundMixer={SoundMixer}
+        SiteCredentialVaultPanel={SiteCredentialVaultPanel}
       />
 
 
@@ -4030,15 +4089,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                     {/* Floor effects overlay */}
                     {floorEffects.map(eff => {
                       const removeEffect = () => setFloorEffects(prev => prev.filter(e => e.id !== eff.id));
-                      const props = { key: eff.id, x: eff.x, y: eff.y, onComplete: removeEffect };
+                      // React 19 enforces "key must be passed directly,
+                      // not via spread" — so the key stays on the JSX
+                      // element and the rest of the props ride the spread.
+                      const props = { x: eff.x, y: eff.y, onComplete: removeEffect };
                       switch (eff.type) {
-                        case 'ripple': return <RippleEffect {...props} />;
-                        case 'confetti': return <ConfettiEffect {...props} />;
-                        case 'rocket': return <RocketEffect {...props} />;
-                        case 'dice': return <DiceEffect {...props} />;
-                        case 'pulse': return <PulseEffect {...props} />;
-                        case 'shake': return <ShakeEffect {...props} />;
-                        case 'fireworks': return <FireworksEffect {...props} />;
+                        case 'ripple': return <RippleEffect key={eff.id} {...props} />;
+                        case 'confetti': return <ConfettiEffect key={eff.id} {...props} />;
+                        case 'rocket': return <RocketEffect key={eff.id} {...props} />;
+                        case 'dice': return <DiceEffect key={eff.id} {...props} />;
+                        case 'pulse': return <PulseEffect key={eff.id} {...props} />;
+                        case 'shake': return <ShakeEffect key={eff.id} {...props} />;
+                        case 'fireworks': return <FireworksEffect key={eff.id} {...props} />;
                         default: return null;
                       }
                     })}
