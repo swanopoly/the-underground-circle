@@ -2353,6 +2353,12 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   const [searchQuery, setSearchQuery] = useState('');
   const [pinnedOnly, setPinnedOnly] = useState(false);
   const [showFilterBar, setShowFilterBar] = useState(false);
+  // Plan / Act — when planMode is on, the user's prompt is wrapped with
+  // an instruction that the agent should describe what it would do
+  // without calling any file-mutation tools. Real backend gating
+  // would also require the tool runtime to honor the flag; this layer
+  // is the prompt-prefix half.
+  const [planMode, setPlanMode] = useState(false);
 
   const handleSessionProfileSelect = useCallback(async (nextProfile: SessionCodingProfile) => {
     setSessionProfile(nextProfile);
@@ -2678,6 +2684,9 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
 
     if (!isAtMentioningSomeoneElse) {
       const cleanContent = content.replace(/@(agent|blackswan|swanbot|swan)\s*/gi, '').trim() || content;
+      const planPromptPrefix = planMode
+        ? '[PLAN-ONLY MODE — Do not call any file-mutation, terminal, or browser tools. Describe what you would change, list the affected files, and lay out the ordered steps you would take. End your reply with the line "Awaiting confirmation to execute." so the team can review and re-prompt without PLAN-ONLY to run.]'
+        : undefined;
       setBotTyping(true);
       startCodingWorkbench(cleanContent);
       try {
@@ -2692,6 +2701,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           availableFiles: roomFiles,
           profile: sessionProfile,
           extraMetadata: imagesPayload ? { images: imagesPayload } : undefined,
+          promptPrefix: planPromptPrefix,
           onStageChange: (_stage, label) => setCurrentRunStep(label),
         });
       } catch {
@@ -2986,6 +2996,17 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             FIND{pinnedOnly || searchQuery ? ' ●' : ''}
           </Text>
         </Pressable>
+        <Pressable onPress={() => setPlanMode((v) => !v)}
+          style={[
+            s.panelBtn,
+            planMode
+              ? { backgroundColor: '#f59e0b15', borderColor: '#f59e0b66' }
+              : { backgroundColor: '#0f172a', borderColor: '#1f2937' },
+          ]}>
+          <Text style={{ color: planMode ? '#f59e0b' : '#94a3b8', fontSize: 11, fontWeight: '700' }}>
+            {planMode ? '◷ PLAN' : 'PLAN'}
+          </Text>
+        </Pressable>
         <Pressable onPress={() => { setShowAssign(p => !p); if (showSpawnAgent) setShowSpawnAgent(false); }}
           style={[s.panelBtn, { backgroundColor: accentColor + '15', borderColor: accentColor + '40' }]}>
           <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }}>Assign</Text>
@@ -3183,6 +3204,27 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           <Text style={{ color: '#475569', fontSize: 10, fontFamily: MONO }}>
             {visibleMessages.length}/{messages.length}
           </Text>
+        </View>
+      ) : null}
+
+      {/* Plan-mode banner */}
+      {planMode ? (
+        <View style={{
+          flexDirection: 'row', alignItems: 'center', gap: 8,
+          paddingHorizontal: 12, paddingVertical: 6,
+          backgroundColor: '#f59e0b14',
+          borderTopWidth: 1, borderTopColor: '#f59e0b44',
+          borderBottomWidth: 1, borderBottomColor: '#f59e0b22',
+        }}>
+          <Text style={{ color: '#f59e0b', fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: MONO }}>
+            ◷ PLAN-ONLY
+          </Text>
+          <Text style={{ color: '#cbd5e1', fontSize: 11, flex: 1 }}>
+            Agent describes the change without touching files. Toggle PLAN off to execute.
+          </Text>
+          <Pressable onPress={() => setPlanMode(false)} style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, backgroundColor: '#1f2937' }}>
+            <Text style={{ color: '#cbd5e1', fontSize: 10, fontWeight: '800' }}>Switch to ACT</Text>
+          </Pressable>
         </View>
       ) : null}
 

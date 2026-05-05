@@ -32,6 +32,13 @@ type SendRoomChatArgs = {
    * they land in room_messages alongside the prompt.
    */
   extraMetadata?: Record<string, unknown>;
+  /**
+   * Optional system-style instruction prepended to the AI prompt only —
+   * the user-visible chat row stays clean. ChatPanel uses this for
+   * Plan-mode wrapping ("describe, don't execute") so reviewers see
+   * the original ask in the room without the wrapper noise.
+   */
+  promptPrefix?: string;
 } & OpenSwanRunCallbacks;
 
 const REVIEW_RE = /review|audit|check.*files|look.*files|scan|analyze.*code|all.*files|code.*quality/i;
@@ -100,6 +107,7 @@ export async function sendRoomStructuredChatMessage({
   profile,
   onStageChange,
   extraMetadata,
+  promptPrefix,
 }: SendRoomChatArgs): Promise<{ response: string; artifacts: SwanBotStructuredArtifact[] }> {
   const attachedMetadata: Record<string, unknown> = {
     ...(activeFile ? { attached_file: activeFile.name } : {}),
@@ -108,6 +116,7 @@ export async function sendRoomStructuredChatMessage({
   await sendMessage(roomId, userId, content, 'chat', attachedMetadata);
 
   const cleanContent = content.replace(/@(agent|blackswan|swanbot|swan)\s*/gi, '').trim() || content;
+  const callerPrefix = promptPrefix ? `${promptPrefix.trim()}\n\n` : '';
   const recentContext = recentMessages
     .slice(-8)
     .map(message => `${message.metadata?.bot ? 'Agent' : 'User'}: ${(message.content || '').slice(0, 200)}`)
@@ -118,7 +127,7 @@ export async function sendRoomStructuredChatMessage({
     : '';
   const specialContext = await buildSpecialContext(roomId, cleanContent, availableFiles);
   const structured = await runOpenSwanSessionTurn({
-    message: `${buildPromptPrefix(cleanContent)}${cleanContent}`,
+    message: `${callerPrefix}${buildPromptPrefix(cleanContent)}${cleanContent}`,
     context: {
       userId,
       circleId,
