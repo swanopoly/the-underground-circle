@@ -2366,6 +2366,9 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // AI is shouting into empty air.
   const [pendingNewMessages, setPendingNewMessages] = useState(0);
   const pinnedToBottomRef = useRef(true);
+  // File-peek overlay — when user taps an @filename in a past message,
+  // we lazy-fetch its content and render in an inline overlay.
+  const [peekFile, setPeekFile] = useState<{ name: string; content: string | null; loading: boolean } | null>(null);
   // Rolling room_usage stats so the chat header surfaces token + USD
   // spend without the user needing to open the Usage panel.
   const [usageStats, setUsageStats] = useState<{ tokens: number; cost: number; runs: number }>({ tokens: 0, cost: 0, runs: 0 });
@@ -2719,6 +2722,32 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // Apply an AI-proposed file change. Looks up the room_files row by
   // name; if missing, creates a new file. Posts an edit_event so the
   // team sees what was applied even if they were scrolled up.
+  // Set of known room file names — used to recognize @filename tokens in
+  // past message text and render them as clickable peek triggers.
+  const roomFileNameSet = useMemo(() => {
+    const set = new Set<string>();
+    for (const f of roomFiles) set.add(f.name);
+    return set;
+  }, [roomFiles]);
+
+  const handlePeekFile = useCallback(async (fileName: string) => {
+    setPeekFile({ name: fileName, content: null, loading: true });
+    const target = roomFiles.find((f) => f.name === fileName);
+    if (!target) {
+      setPeekFile({ name: fileName, content: null, loading: false });
+      return;
+    }
+    const cached = fileContentCacheRef.current.get(fileName);
+    if (typeof cached === 'string') {
+      setPeekFile({ name: fileName, content: cached, loading: false });
+      return;
+    }
+    const { data } = await supabase.from('room_files').select('content').eq('id', target.id).maybeSingle();
+    const content = (data as any)?.content ?? null;
+    if (typeof content === 'string') fileContentCacheRef.current.set(fileName, content);
+    setPeekFile({ name: fileName, content, loading: false });
+  }, [roomFiles]);
+
   // Cache existing file content so proposal cards can show a real diff
   // against what's currently in the room. Lazy-fetched: a card asks via
   // getFileContentForDiff(name) and we hit Supabase only on first ask
@@ -3725,6 +3754,8 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
               onApplyProposal={handleApplyProposal}
               onRejectProposal={handleRejectProposal}
               getFileContentForDiff={getFileContentForDiff}
+              onPeekFile={handlePeekFile}
+              knownFileNames={roomFileNameSet}
               busy={botTyping}
               dimmed={dimmed}
               isCutoff={isCutoff}
@@ -3911,6 +3942,53 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           <Text style={[s.inputHintText, contextSummary ? null : { marginLeft: 'auto' as any }]}>{input.length}/2000</Text>
         </View>
       </View>
+
+      {peekFile && (
+        <View style={{
+          position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: '#000000d8', zIndex: 80, padding: 16,
+          justifyContent: 'center', alignItems: 'center',
+        }} nativeID="section-peek-file">
+          <View style={{
+            width: '100%', maxWidth: 640,
+            backgroundColor: '#0a0e1a', borderWidth: 1, borderColor: accentColor + '55',
+            borderRadius: 12, overflow: 'hidden',
+            ...(Platform.OS === 'web' ? { boxShadow: `0 24px 64px ${accentColor}33` } as any : {}),
+          }}>
+            <View style={{
+              flexDirection: 'row', alignItems: 'center', gap: 8,
+              paddingHorizontal: 14, paddingVertical: 10,
+              borderBottomWidth: 1, borderBottomColor: '#1a1a28',
+              backgroundColor: '#0d1320',
+            }}>
+              <Text style={{ color: accentColor, fontSize: 9, fontWeight: '900', letterSpacing: 1.4, fontFamily: MONO }}>
+                FILE
+              </Text>
+              <Text style={{ color: '#e2e8f0', fontSize: 13, fontWeight: '800', fontFamily: MONO, flex: 1 }} numberOfLines={1}>
+                {peekFile.name}
+              </Text>
+              <Pressable
+                onPress={() => setPeekFile(null)}
+                style={{ paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, backgroundColor: '#1f2937' }}>
+                <Text style={{ color: '#cbd5e1', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 }}>CLOSE</Text>
+              </Pressable>
+            </View>
+            <ScrollView style={{ maxHeight: 460 }} contentContainerStyle={{ padding: 12 }}>
+              {peekFile.loading ? (
+                <Text style={{ color: '#475569', fontSize: 12, textAlign: 'center', padding: 24 }}>Loading…</Text>
+              ) : peekFile.content === null ? (
+                <Text style={{ color: '#94a3b8', fontSize: 12, textAlign: 'center', padding: 24 }}>
+                  File not found in this room.
+                </Text>
+              ) : (
+                <Text selectable style={{ color: '#e2e8f0', fontSize: 11, lineHeight: 17, fontFamily: MONO }}>
+                  {peekFile.content}
+                </Text>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      )}
 
       {/* ── Spawn Agent — full overlay within chat panel ── */}
       {showSpawnAgent && (
@@ -4127,6 +4205,52 @@ function parseChatSegments(source: string): ChatSegment[] {
   return segments;
 }
 
+// Renders message text with @filename tokens (matching known room files)
+// turned into accent-colored Pressable spans that fire onPeek. Falls back
+// to plain Text when no tokens hit.
+function MentionText({ text, baseStyle, accentColor, knownFileNames, onPeek }: {
+  text: string;
+  baseStyle: any;
+  accentColor: string;
+  knownFileNames?: Set<string>;
+  onPeek?: (name: string) => void;
+}) {
+  if (!knownFileNames || knownFileNames.size === 0 || !text.includes('@')) {
+    return <Text style={baseStyle}>{text}</Text>;
+  }
+  const regex = /(@[\w./_-]+)/g;
+  const out: Array<{ kind: 'text' | 'mention'; content: string }> = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(text)) !== null) {
+    const name = m[1].slice(1);
+    if (!knownFileNames.has(name)) continue;
+    if (m.index > last) out.push({ kind: 'text', content: text.slice(last, m.index) });
+    out.push({ kind: 'mention', content: name });
+    last = m.index + m[0].length;
+  }
+  if (out.length === 0) return <Text style={baseStyle}>{text}</Text>;
+  if (last < text.length) out.push({ kind: 'text', content: text.slice(last) });
+  return (
+    <Text style={baseStyle}>
+      {out.map((seg, idx) => seg.kind === 'mention'
+        ? (
+          <Text
+            key={idx}
+            onPress={() => onPeek && onPeek(seg.content)}
+            style={{
+              color: accentColor, fontWeight: '700', fontFamily: MONO,
+              ...(Platform.OS === 'web' ? { cursor: 'pointer', textDecorationLine: 'underline' } as any : { textDecorationLine: 'underline' }),
+            }}>
+            @{seg.content}
+          </Text>
+        )
+        : <Text key={idx}>{seg.content}</Text>
+      )}
+    </Text>
+  );
+}
+
 function ChatCodeBlock({ content, lang, accentColor }: { content: string; lang?: string; accentColor: string }) {
   const [copied, setCopied] = useState(false);
   const lineCount = content.split('\n').length;
@@ -4328,7 +4452,7 @@ function FileProposalCard({ proposal, lineCount, accentColor, applied, rejected,
   );
 }
 
-const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, onContinue, onRerun, onApplyProposal, onRejectProposal, getFileContentForDiff, busy, dimmed, isCutoff }: {
+const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, onContinue, onRerun, onApplyProposal, onRejectProposal, getFileContentForDiff, onPeekFile, knownFileNames, busy, dimmed, isCutoff }: {
   msg: RoomMessage;
   accentColor: string;
   circleId: string;
@@ -4346,6 +4470,8 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
   onApplyProposal?: (msgId: string, proposal: AiFileProposal) => void;
   onRejectProposal?: (msgId: string, proposal: AiFileProposal) => void;
   getFileContentForDiff?: (fileName: string) => Promise<string | null>;
+  onPeekFile?: (fileName: string) => void;
+  knownFileNames?: Set<string>;
   busy?: boolean;
   dimmed?: boolean;
   isCutoff?: boolean;
@@ -4430,7 +4556,14 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
           parseChatSegments(visibleContent || msg.content).map((seg, idx) => (
             seg.type === 'code'
               ? <ChatCodeBlock key={`code-${idx}`} content={seg.content} lang={seg.lang} accentColor={accentColor} />
-              : <Text key={`text-${idx}`} style={{color:'#ccc',fontSize:12,lineHeight:18}}>{seg.content.trim()}</Text>
+              : <MentionText
+                  key={`text-${idx}`}
+                  text={seg.content.trim()}
+                  baseStyle={{color:'#ccc',fontSize:12,lineHeight:18}}
+                  accentColor={accentColor}
+                  knownFileNames={knownFileNames}
+                  onPeek={onPeekFile}
+                />
           ))
         )}
         {proposals.length > 0 && (
@@ -4567,7 +4700,14 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
         {parseChatSegments(msg.content || '').map((seg, idx) => (
           seg.type === 'code'
             ? <ChatCodeBlock key={`mc-${idx}`} content={seg.content} lang={seg.lang} accentColor={accentColor} />
-            : <Text key={`mt-${idx}`} style={{color:'#e6e6e6',fontSize:13,lineHeight:19}}>{seg.content.trim()}</Text>
+            : <MentionText
+                key={`mt-${idx}`}
+                text={seg.content.trim()}
+                baseStyle={{color:'#e6e6e6',fontSize:13,lineHeight:19}}
+                accentColor={accentColor}
+                knownFileNames={knownFileNames}
+                onPeek={onPeekFile}
+              />
         ))}
       </View>
       {images.length > 0 && (
