@@ -274,7 +274,11 @@ export async function saveSessionToMemory(circleId: string, userId: string): Pro
   // 1. Upsert session summary — replace the previous one instead of stacking duplicates
   try {
     const sessionTitle = `Session ${new Date().toLocaleDateString()}`;
-    // Try to update the most recent session summary for today
+    // Try to update the most recent session summary for today.
+    // .maybeSingle() returns null instead of 406 when zero rows match
+    // — the previous .single() was throwing 406 every first-of-day
+    // when no session row existed yet, which polluted the network
+    // panel for every signed-in user.
     const { data: existing } = await supabase
       .from('memory_entries')
       .select('id')
@@ -285,7 +289,7 @@ export async function saveSessionToMemory(circleId: string, userId: string): Pro
       .ilike('title', `Session ${new Date().toLocaleDateString()}%`)
       .order('created_at', { ascending: false })
       .limit(1)
-      .single();
+      .maybeSingle();
 
     if (existing) {
       // Update existing session summary for today
@@ -1782,7 +1786,9 @@ type CircleContextData = {
 };
 
 async function getUserProfile(userId: string) {
-  const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
+  // .maybeSingle so a user who signed up but hasn't been profile-
+  // backfilled yet doesn't 406. We just want null in that case.
+  const { data } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
   return data;
 }
 
