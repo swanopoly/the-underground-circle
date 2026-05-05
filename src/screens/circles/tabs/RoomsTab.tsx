@@ -2349,6 +2349,10 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // persisted into room_messages.metadata.images so the team and any
   // vision-capable model see it.
   const [pastedImage, setPastedImage] = useState<string | null>(null);
+  // Drag-and-drop overlay state — shown while a user is dragging a
+  // file over the chat panel. Released onto the panel triggers the
+  // same handler the clipboard paste path uses.
+  const [dragActive, setDragActive] = useState(false);
   // Rolling room_usage stats so the chat header surfaces token + USD
   // spend without the user needing to open the Usage panel.
   const [usageStats, setUsageStats] = useState<{ tokens: number; cost: number; runs: number }>({ tokens: 0, cost: 0, runs: 0 });
@@ -2544,6 +2548,41 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // underlying <textarea>. We capture only image clipboard items, convert to
   // a data URL, and stash for the next send. preventDefault keeps the binary
   // garbage out of the textarea.
+  const dragCounterRef = useRef(0);
+  const TEXT_FILE_RE = /\.(md|markdown|txt|json|yaml|yml|toml|csv|tsv|js|jsx|ts|tsx|py|rb|go|rs|java|kt|swift|c|h|cpp|hpp|cc|cs|php|sh|bash|zsh|fish|ps1|html|htm|css|scss|sass|less|styl|sql|xml|svg|env|gitignore|dockerfile|conf|cfg|ini)$/i;
+
+  const handleFileDrop = useCallback(async (file: File) => {
+    if (!file) return;
+    if (file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = () => setPastedImage(reader.result as string);
+      reader.readAsDataURL(file);
+      return;
+    }
+    if (!file.type.startsWith('text/') && !TEXT_FILE_RE.test(file.name)) {
+      return; // unsupported type — silent ignore for now
+    }
+    try {
+      const text = await file.text();
+      const { data: { user } } = await supabase.auth.getUser();
+      const existing = roomFiles.find((f) => f.name === file.name);
+      if (existing) {
+        await supabase.from('room_files').update({ content: text, updated_at: new Date().toISOString() }).eq('id', existing.id);
+      } else {
+        const { data } = await supabase.from('room_files').insert({
+          room_id: roomId,
+          name: file.name,
+          content: text,
+          created_by: user?.id || null,
+        }).select('id, name').single();
+        if (data) setRoomFiles((prev) => [...prev, data as { id: string; name: string }]);
+      }
+      setInput((prev) => `${prev}${prev.endsWith(' ') || !prev ? '' : ' '}@${file.name} `);
+    } catch (err: any) {
+      console.warn('[room-chat] dropped file failed:', err?.message);
+    }
+  }, [roomFiles, roomId]);
+
   const handleClipboardPaste = useCallback((e: any) => {
     if (Platform.OS !== 'web') return;
     const items = e?.clipboardData?.items as DataTransferItemList | undefined;
@@ -3135,7 +3174,52 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   const STATUS_COLOR: Record<string, string> = { active: '#22c55e', idle: '#f59e0b', error: '#ef4444', offline: '#6f6f6f' };
 
   return (
-    <View style={s.panel}>
+    <View
+      style={s.panel}
+      {...(Platform.OS === 'web'
+        ? ({
+            onDragEnter: (e: any) => {
+              if (!e?.dataTransfer?.types?.includes('Files')) return;
+              if (typeof e.preventDefault === 'function') e.preventDefault();
+              dragCounterRef.current += 1;
+              setDragActive(true);
+            },
+            onDragOver: (e: any) => {
+              if (!e?.dataTransfer?.types?.includes('Files')) return;
+              if (typeof e.preventDefault === 'function') e.preventDefault();
+            },
+            onDragLeave: (e: any) => {
+              if (typeof e.preventDefault === 'function') e.preventDefault();
+              dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
+              if (dragCounterRef.current === 0) setDragActive(false);
+            },
+            onDrop: (e: any) => {
+              if (typeof e.preventDefault === 'function') e.preventDefault();
+              dragCounterRef.current = 0;
+              setDragActive(false);
+              const files: File[] = Array.from(e?.dataTransfer?.files || []);
+              for (const file of files.slice(0, 4)) {
+                void handleFileDrop(file);
+              }
+            },
+          } as any)
+        : {})}
+    >
+      {dragActive && Platform.OS === 'web' ? (
+        <View pointerEvents="none" style={{
+          position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: '#020409e8', zIndex: 200,
+          justifyContent: 'center', alignItems: 'center', gap: 8,
+          borderWidth: 2, borderColor: accentColor, borderStyle: 'dashed', borderRadius: 12,
+        }}>
+          <Text style={{ color: accentColor, fontSize: 20, fontWeight: '900', letterSpacing: 1, fontFamily: MONO }}>
+            ↓ DROP TO ATTACH
+          </Text>
+          <Text style={{ color: '#94a3b8', fontSize: 12, textAlign: 'center', maxWidth: 360 }}>
+            Image attaches inline. Text file uploads to the room and inserts an @mention.
+          </Text>
+        </View>
+      ) : null}
       <View style={s.panelHeader}>
         <Text style={[s.panelTitle, { paddingHorizontal: 0, paddingTop: 0, paddingBottom: 0 }]}>Chat</Text>
         {botTyping && (
