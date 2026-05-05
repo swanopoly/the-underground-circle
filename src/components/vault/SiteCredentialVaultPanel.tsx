@@ -137,6 +137,21 @@ function formatDate(value?: string | null): string {
   return date.toLocaleString();
 }
 
+function formatAuditTime(value?: string | null): string {
+  if (!value) return '—';
+  const then = Date.parse(value);
+  if (!Number.isFinite(then)) return '—';
+  const minutes = Math.max(0, Math.floor((Date.now() - then) / 60000));
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  return `${months}mo ago`;
+}
+
 async function copyText(value: string): Promise<boolean> {
   if (!value) return false;
   if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
@@ -412,6 +427,32 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     }
     setAuditLoading((current) => ({ ...current, [credentialId]: false }));
   }, [circleId]);
+
+  const [globalAuditOpen, setGlobalAuditOpen] = useState(false);
+  const [globalAuditLoading, setGlobalAuditLoading] = useState(false);
+  const [globalAuditError, setGlobalAuditError] = useState<string>('');
+  const [globalAuditEntries, setGlobalAuditEntries] = useState<SiteCredentialAuditEntry[]>([]);
+
+  const loadGlobalAudit = useCallback(async () => {
+    setGlobalAuditLoading(true);
+    setGlobalAuditError('');
+    const result = await listSiteCredentialVaultAudit(circleId, null, 50);
+    if (result.error) {
+      setGlobalAuditError(
+        result.vaultMissing
+          ? 'Audit RPC is missing. Run the latest vault migration.'
+          : result.error,
+      );
+      setGlobalAuditEntries([]);
+    } else {
+      setGlobalAuditEntries(result.entries);
+    }
+    setGlobalAuditLoading(false);
+  }, [circleId]);
+
+  useEffect(() => {
+    if (globalAuditOpen) loadGlobalAudit();
+  }, [globalAuditOpen, loadGlobalAudit]);
 
   useEffect(() => {
     loadVault();
@@ -1057,6 +1098,58 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           </View>
         ) : null}
 
+        <View style={styles.card}>
+          <Pressable
+            onPress={() => setGlobalAuditOpen((value) => !value)}
+            style={[styles.cardHeader, webCursor()]}
+          >
+            <View style={styles.cardHeaderText}>
+              <Text style={styles.cardTitle}>Recent activity</Text>
+              <Text style={styles.cardMeta}>Last 50 vault events across every credential. Use this for audits and incident review.</Text>
+            </View>
+            <Text style={[styles.chevron, { color: accentColor }]}>{globalAuditOpen ? '-' : '+'}</Text>
+          </Pressable>
+          {globalAuditOpen ? (
+            <View style={styles.form}>
+              {globalAuditLoading ? (
+                <ActivityIndicator size="small" color={accentColor} />
+              ) : globalAuditError ? (
+                <Text style={styles.helperText}>{globalAuditError}</Text>
+              ) : globalAuditEntries.length === 0 ? (
+                <Text style={styles.helperText}>No vault events recorded yet.</Text>
+              ) : (
+                <View style={styles.globalAuditList}>
+                  {globalAuditEntries.map((entry) => {
+                    const credential = entries.find((c) => c.id === entry.credentialId);
+                    const tag = credential ? `${credential.platform}/${credential.label}` : entry.credentialId ? 'deleted credential' : '—';
+                    return (
+                      <View key={entry.id} style={[styles.globalAuditRow, !entry.success && styles.globalAuditRowFailed]}>
+                        <View style={styles.globalAuditRowHead}>
+                          <Text style={[styles.globalAuditAction, !entry.success && { color: '#ef4444' }]}>
+                            {entry.action.toUpperCase()}{entry.success ? '' : ' · FAILED'}
+                          </Text>
+                          <Text style={styles.globalAuditTime}>{formatAuditTime(entry.createdAt)}</Text>
+                        </View>
+                        <Text style={styles.globalAuditTarget}>{tag}</Text>
+                        {entry.purpose ? <Text style={styles.globalAuditPurpose}>{entry.purpose}</Text> : null}
+                      </View>
+                    );
+                  })}
+                </View>
+              )}
+              <Pressable
+                onPress={loadGlobalAudit}
+                disabled={globalAuditLoading}
+                style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, webCursor(globalAuditLoading ? 'wait' : 'pointer')]}
+              >
+                <Text style={[styles.secondaryText, { color: accentColor }]}>
+                  {globalAuditLoading ? 'Loading...' : 'Refresh activity'}
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
+        </View>
+
         {entries.length === 0 && !loading ? (
           <View style={styles.emptyCard}>
             <Text style={styles.emptyTitle}>No saved site credentials yet.</Text>
@@ -1691,6 +1784,49 @@ const styles = StyleSheet.create({
     color: '#8793a3',
     fontSize: 12,
     lineHeight: 18,
+  },
+  globalAuditList: {
+    gap: 6,
+  },
+  globalAuditRow: {
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#ffffff10',
+    backgroundColor: '#050914',
+    gap: 3,
+  },
+  globalAuditRowFailed: {
+    borderColor: '#ef444433',
+    backgroundColor: '#7f1d1d10',
+  },
+  globalAuditRowHead: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  globalAuditAction: {
+    color: '#cbd5e1',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  globalAuditTime: {
+    color: '#64748b',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  globalAuditTarget: {
+    color: '#e2e8f0',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  globalAuditPurpose: {
+    color: '#94a3b8',
+    fontSize: 11,
+    lineHeight: 15,
   },
   entryBody: {
     borderTopWidth: 1,
