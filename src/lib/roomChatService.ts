@@ -39,6 +39,12 @@ type SendRoomChatArgs = {
    * the original ask in the room without the wrapper noise.
    */
   promptPrefix?: string;
+  /**
+   * Explicit model pick the user has chosen for this turn. Falls back
+   * to the soul/intent-based resolver in serviceProfileSouls when not
+   * provided (or when set to 'auto').
+   */
+  modelOverride?: string | null;
 } & OpenSwanRunCallbacks;
 
 const REVIEW_RE = /review|audit|check.*files|look.*files|scan|analyze.*code|all.*files|code.*quality/i;
@@ -108,6 +114,7 @@ export async function sendRoomStructuredChatMessage({
   onStageChange,
   extraMetadata,
   promptPrefix,
+  modelOverride,
 }: SendRoomChatArgs): Promise<{ response: string; artifacts: SwanBotStructuredArtifact[] }> {
   const attachedMetadata: Record<string, unknown> = {
     ...(activeFile ? { attached_file: activeFile.name } : {}),
@@ -132,6 +139,7 @@ export async function sendRoomStructuredChatMessage({
       userId,
       circleId,
       chatHistory: recentContext + fileContext + specialContext,
+      ...(modelOverride && modelOverride !== 'auto' ? { model: modelOverride } : {}),
     },
     surface: 'room_chat',
     roomId,

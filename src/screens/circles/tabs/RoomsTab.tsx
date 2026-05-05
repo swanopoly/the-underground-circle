@@ -2371,6 +2371,10 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // would also require the tool runtime to honor the flag; this layer
   // is the prompt-prefix half.
   const [planMode, setPlanMode] = useState(false);
+  // Manual model override. 'auto' delegates to the soul/intent
+  // resolver in serviceProfileSouls; the explicit picks force one of
+  // Anthropic's three tiers via context.model on runOpenSwanSessionTurn.
+  const [modelOverride, setModelOverride] = useState<'auto' | 'claude-haiku-4-5' | 'claude-sonnet-4-6' | 'claude-opus-4-7'>('auto');
 
   const handleSessionProfileSelect = useCallback(async (nextProfile: SessionCodingProfile) => {
     setSessionProfile(nextProfile);
@@ -2784,6 +2788,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         availableFiles: roomFiles,
         profile: sessionProfile,
         promptPrefix: opts.promptPrefix,
+        modelOverride,
         onStageChange: (_stage, label) => setCurrentRunStep(label),
       });
     } catch {
@@ -2796,7 +2801,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       setBotTyping(false);
       stopCodingWorkbenchAfter(isCodingGenerationRequest(promptText, sessionProfile) ? 2600 : 0);
     }
-  }, [activeFile, circleId, messages, roomFiles, roomId, sessionProfile, startCodingWorkbench, stopCodingWorkbenchAfter]);
+  }, [activeFile, circleId, messages, modelOverride, roomFiles, roomId, sessionProfile, startCodingWorkbench, stopCodingWorkbenchAfter]);
 
   const handleContinueFromMessage = useCallback(async (aiMessageId: string) => {
     if (botTyping) return;
@@ -2940,6 +2945,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           profile: sessionProfile,
           extraMetadata: imagesPayload ? { images: imagesPayload } : undefined,
           promptPrefix: planPromptPrefix,
+          modelOverride,
           onStageChange: (_stage, label) => setCurrentRunStep(label),
         });
       } catch {
@@ -3288,6 +3294,31 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           ]}>
           <Text style={{ color: planMode ? '#f59e0b' : '#94a3b8', fontSize: 11, fontWeight: '700' }}>
             {planMode ? '◷ PLAN' : 'PLAN'}
+          </Text>
+        </Pressable>
+        <Pressable onPress={() => {
+          // Cycle: auto → haiku → sonnet → opus → auto
+          setModelOverride((m) => {
+            if (m === 'auto') return 'claude-haiku-4-5';
+            if (m === 'claude-haiku-4-5') return 'claude-sonnet-4-6';
+            if (m === 'claude-sonnet-4-6') return 'claude-opus-4-7';
+            return 'auto';
+          });
+        }}
+          style={[
+            s.panelBtn,
+            modelOverride !== 'auto'
+              ? { backgroundColor: accentColor + '15', borderColor: accentColor + '40' }
+              : { backgroundColor: '#0f172a', borderColor: '#1f2937' },
+          ]}>
+          <Text style={{
+            color: modelOverride !== 'auto' ? accentColor : '#94a3b8',
+            fontSize: 11, fontWeight: '700', fontFamily: MONO, letterSpacing: 0.4,
+          }}>
+            {modelOverride === 'auto' ? 'MODEL: AUTO'
+              : modelOverride === 'claude-haiku-4-5' ? 'HAIKU 4.5'
+              : modelOverride === 'claude-sonnet-4-6' ? 'SONNET 4.6'
+              : 'OPUS 4.7'}
           </Text>
         </Pressable>
         <Pressable onPress={() => { setShowAssign(p => !p); if (showSpawnAgent) setShowSpawnAgent(false); }}
