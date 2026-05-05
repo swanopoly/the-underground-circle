@@ -2352,10 +2352,12 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const inputRef = useRef<TextInput>(null);
   const inputSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
-  // Pasted image (web only). Held client-side until the next send, then
-  // persisted into room_messages.metadata.images so the team and any
-  // vision-capable model see it.
-  const [pastedImage, setPastedImage] = useState<string | null>(null);
+  // Pasted/dropped images (web only). Held client-side until the next
+  // send, then persisted into room_messages.metadata.images so the team
+  // and any vision-capable model see them. Cap at MAX_STAGED_IMAGES so
+  // the room_messages metadata blob doesn't balloon.
+  const [pastedImages, setPastedImages] = useState<string[]>([]);
+  const MAX_STAGED_IMAGES = 4;
   // Drag-and-drop overlay state — shown while a user is dragging a
   // file over the chat panel. Released onto the panel triggers the
   // same handler the clipboard paste path uses.
@@ -2546,11 +2548,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     if (activeFile?.name) parts.push(`active ${activeFile.name}`);
     const mentions = (input.match(/@(\S+)/g) || []).filter((m) => !/^@(agent|blackswan|swanbot|swan)$/i.test(m));
     if (mentions.length > 0) parts.push(`${mentions.length} @ref${mentions.length === 1 ? '' : 's'}`);
-    if (pastedImage) parts.push('1 image');
+    if (pastedImages.length > 0) parts.push(`${pastedImages.length} image${pastedImages.length === 1 ? '' : 's'}`);
     if (planMode) parts.push('plan-only');
     if (contextCutoffId) parts.push('branched');
     return parts.join(' · ');
-  }, [messages, contextCutoffId, activeFile, input, pastedImage, planMode]);
+  }, [messages, contextCutoffId, activeFile, input, pastedImages, planMode]);
 
   // Reset cursor whenever the palette opens or filter shrinks below it.
   useEffect(() => {
@@ -2624,7 +2626,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     if (!file) return;
     if (file.type.startsWith('image/')) {
       const reader = new FileReader();
-      reader.onload = () => setPastedImage(reader.result as string);
+      reader.onload = () => setPastedImages((prev) => prev.length >= MAX_STAGED_IMAGES ? prev : [...prev, reader.result as string]);
       reader.readAsDataURL(file);
       return;
     }
@@ -2710,7 +2712,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         if (!file) continue;
         if (typeof e.preventDefault === 'function') e.preventDefault();
         const reader = new FileReader();
-        reader.onload = () => setPastedImage(reader.result as string);
+        reader.onload = () => setPastedImages((prev) => prev.length >= MAX_STAGED_IMAGES ? prev : [...prev, reader.result as string]);
         reader.readAsDataURL(file);
         return;
       }
@@ -3048,8 +3050,8 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
 
     // ─── Smart command detection — special prompts that load extra context ──
     const isAtMentioningSomeoneElse = /^@(?!agent|blackswan|swanbot|swan\b)\w/i.test(content.trim());
-    const imagesPayload = pastedImage ? [pastedImage] : null;
-    if (imagesPayload) setPastedImage(null);
+    const imagesPayload = pastedImages.length > 0 ? pastedImages.slice() : null;
+    if (imagesPayload) setPastedImages([]);
 
     if (isAtMentioningSomeoneElse) {
       await supabase.from('room_messages').insert({
@@ -3923,20 +3925,37 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           </View>
         )}
 
-        {pastedImage && (
+        {pastedImages.length > 0 && (
           <View style={s.pastedImageRow}>
-            <Image source={{ uri: pastedImage }} style={s.pastedImageThumb} resizeMode="cover" />
-            <View style={{ flex: 1, gap: 2 }}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+              {pastedImages.map((src, idx) => (
+                <View key={idx} style={{ position: 'relative' }}>
+                  <Image source={{ uri: src }} style={s.pastedImageThumb} resizeMode="cover" />
+                  <Pressable
+                    onPress={() => setPastedImages((prev) => prev.filter((_, i) => i !== idx))}
+                    hitSlop={6}
+                    style={{
+                      position: 'absolute', top: -4, right: -4,
+                      width: 16, height: 16, borderRadius: 8,
+                      backgroundColor: '#0a0e1a', borderWidth: 1, borderColor: '#1f2937',
+                      justifyContent: 'center', alignItems: 'center',
+                    }}>
+                    <Text style={{ color: '#fca5a5', fontSize: 10, fontWeight: '900' }}>×</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </ScrollView>
+            <View style={{ flex: 1, gap: 2, marginLeft: 8 }}>
               <Text style={{ color: accentColor, fontSize: 10, fontFamily: MONO, letterSpacing: 1, fontWeight: '900' }}>
-                IMAGE ATTACHED
+                {pastedImages.length} IMAGE{pastedImages.length === 1 ? '' : 'S'} ATTACHED
               </Text>
               <Text style={{ color: '#94a3b8', fontSize: 11 }}>
-                Sends with your next message. Pasted from clipboard.
+                Sends with your next message. {pastedImages.length < MAX_STAGED_IMAGES ? `Up to ${MAX_STAGED_IMAGES - pastedImages.length} more.` : `Limit reached (${MAX_STAGED_IMAGES}).`}
               </Text>
             </View>
-            <Pressable onPress={() => setPastedImage(null)} hitSlop={6}
+            <Pressable onPress={() => setPastedImages([])} hitSlop={6}
               style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, backgroundColor: '#1f2937' }}>
-              <Text style={{ color: '#cbd5e1', fontSize: 11, fontWeight: '800' }}>Remove</Text>
+              <Text style={{ color: '#cbd5e1', fontSize: 11, fontWeight: '800' }}>Clear</Text>
             </Pressable>
           </View>
         )}
