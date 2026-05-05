@@ -91,3 +91,66 @@ export function describeProposalDelta(prev: string | null | undefined, next: str
 
 export const FILE_PROPOSAL_FORMAT_HINT =
   'When you would change a file, also emit the proposed final content as a fenced code block in this exact format:\n```edit:path/to/file.ext\n<full content of the file after your changes>\n```\nThe team will review each proposal and apply or reject it. Use the same path the user referenced (or the file you would create). Do not omit unchanged sections — emit the entire file content each time so apply is unambiguous.';
+
+export type DiffLine =
+  | { kind: 'context'; oldNum: number; newNum: number; text: string }
+  | { kind: 'add'; newNum: number; text: string }
+  | { kind: 'remove'; oldNum: number; text: string };
+
+/**
+ * Line-level LCS diff between two strings. Returns the lines in
+ * source order with kind = 'context' | 'add' | 'remove' so the UI
+ * can render them inline. O(n*m) — fine for typical room files
+ * (a few hundred to a few thousand lines).
+ */
+export function lineDiff(oldText: string, newText: string): DiffLine[] {
+  const oldLines = (oldText || '').split('\n');
+  const newLines = (newText || '').split('\n');
+  const m = oldLines.length;
+  const n = newLines.length;
+  // LCS DP table
+  const lcs: number[][] = [];
+  for (let i = 0; i <= m; i++) {
+    lcs.push(new Array(n + 1).fill(0));
+  }
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (oldLines[i - 1] === newLines[j - 1]) {
+        lcs[i][j] = lcs[i - 1][j - 1] + 1;
+      } else {
+        lcs[i][j] = Math.max(lcs[i - 1][j], lcs[i][j - 1]);
+      }
+    }
+  }
+  // Backtrack to produce diff
+  const out: DiffLine[] = [];
+  let i = m;
+  let j = n;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
+      out.unshift({ kind: 'context', oldNum: i, newNum: j, text: oldLines[i - 1] });
+      i--; j--;
+    } else if (j > 0 && (i === 0 || lcs[i][j - 1] >= lcs[i - 1][j])) {
+      out.unshift({ kind: 'add', newNum: j, text: newLines[j - 1] });
+      j--;
+    } else if (i > 0) {
+      out.unshift({ kind: 'remove', oldNum: i, text: oldLines[i - 1] });
+      i--;
+    } else {
+      break;
+    }
+  }
+  return out;
+}
+
+export function diffStats(diff: DiffLine[]): { added: number; removed: number; same: number } {
+  let added = 0;
+  let removed = 0;
+  let same = 0;
+  for (const line of diff) {
+    if (line.kind === 'add') added++;
+    else if (line.kind === 'remove') removed++;
+    else same++;
+  }
+  return { added, removed, same };
+}

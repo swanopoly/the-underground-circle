@@ -37,7 +37,10 @@ import {
   parseAiFileProposals,
   stripAiFileProposals,
   FILE_PROPOSAL_FORMAT_HINT,
+  lineDiff,
+  diffStats,
   type AiFileProposal,
+  type DiffLine,
 } from '../../../lib/aiFileProposal';
 import { ROOM_WORKSPACE_FOCUS_FILE_EVENT, ROOM_WORKSPACE_OPEN_EVENT } from '../../../lib/roomWorkspaceLauncher';
 import { SESSION_PROFILE_OPTIONS, getSessionProfileMeta, loadRoomSessionProfile, saveRoomSessionProfile, type SessionCodingProfile } from '../../../lib/chatSessionProfile';
@@ -2716,6 +2719,26 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // Apply an AI-proposed file change. Looks up the room_files row by
   // name; if missing, creates a new file. Posts an edit_event so the
   // team sees what was applied even if they were scrolled up.
+  // Cache existing file content so proposal cards can show a real diff
+  // against what's currently in the room. Lazy-fetched: a card asks via
+  // getFileContentForDiff(name) and we hit Supabase only on first ask
+  // per file. After an Apply we invalidate the cached entry.
+  const fileContentCacheRef = useRef<Map<string, string | null>>(new Map());
+  const getFileContentForDiff = useCallback(async (fileName: string): Promise<string | null> => {
+    if (fileContentCacheRef.current.has(fileName)) {
+      return fileContentCacheRef.current.get(fileName) ?? null;
+    }
+    const target = roomFiles.find((f) => f.name === fileName);
+    if (!target) {
+      fileContentCacheRef.current.set(fileName, null);
+      return null;
+    }
+    const { data } = await supabase.from('room_files').select('content').eq('id', target.id).maybeSingle();
+    const content = (data as any)?.content ?? null;
+    fileContentCacheRef.current.set(fileName, content);
+    return content;
+  }, [roomFiles]);
+
   const handleApplyProposal = useCallback(async (msgId: string, proposal: AiFileProposal) => {
     const { data: { user } } = await supabase.auth.getUser();
     const target = roomFiles.find((f) => f.name === proposal.filePath);
@@ -2725,6 +2748,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           .update({ content: proposal.content, updated_at: new Date().toISOString() })
           .eq('id', target.id);
         if (error) throw error;
+        fileContentCacheRef.current.set(proposal.filePath, proposal.content);
       } else {
         const { error } = await supabase.from('room_files').insert({
           room_id: roomId,
@@ -2733,6 +2757,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           created_by: user?.id || null,
         });
         if (error) throw error;
+        fileContentCacheRef.current.set(proposal.filePath, proposal.content);
         // Refresh the file list so subsequent applies hit the right row.
         const { data } = await supabase.from('room_files')
           .select('id, name').eq('room_id', roomId).eq('is_deleted', false);
@@ -3699,6 +3724,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
               onRerun={handleRerunFromMessage}
               onApplyProposal={handleApplyProposal}
               onRejectProposal={handleRejectProposal}
+              getFileContentForDiff={getFileContentForDiff}
               busy={botTyping}
               dimmed={dimmed}
               isCutoff={isCutoff}
@@ -4148,7 +4174,7 @@ function ChatCodeBlock({ content, lang, accentColor }: { content: string; lang?:
   );
 }
 
-function FileProposalCard({ proposal, lineCount, accentColor, applied, rejected, onApply, onReject }: {
+function FileProposalCard({ proposal, lineCount, accentColor, applied, rejected, onApply, onReject, getFileContentForDiff }: {
   proposal: AiFileProposal;
   lineCount: number;
   accentColor: string;
@@ -4156,9 +4182,37 @@ function FileProposalCard({ proposal, lineCount, accentColor, applied, rejected,
   rejected: boolean;
   onApply: () => void;
   onReject: () => void;
+  getFileContentForDiff?: (fileName: string) => Promise<string | null>;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [previousContent, setPreviousContent] = useState<string | null | undefined>(undefined); // undefined = not loaded
+  const [loadingPrevious, setLoadingPrevious] = useState(false);
   const settled = applied || rejected;
+
+  // Fetch the existing file content lazily so the diff can be computed.
+  // undefined → never asked; null → asked, doesn't exist (creating new); string → loaded.
+  useEffect(() => {
+    if (!getFileContentForDiff) return;
+    let cancelled = false;
+    setLoadingPrevious(true);
+    getFileContentForDiff(proposal.filePath)
+      .then((content) => {
+        if (cancelled) return;
+        setPreviousContent(content);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingPrevious(false);
+      });
+    return () => { cancelled = true; };
+  }, [getFileContentForDiff, proposal.filePath]);
+
+  const diff = useMemo<DiffLine[] | null>(() => {
+    if (previousContent === undefined) return null;
+    return lineDiff(previousContent || '', proposal.content);
+  }, [previousContent, proposal.content]);
+  const stats = useMemo(() => (diff ? diffStats(diff) : null), [diff]);
+  const isNew = previousContent === null;
+
   return (
     <View style={{
       borderWidth: 1,
@@ -4177,36 +4231,74 @@ function FileProposalCard({ proposal, lineCount, accentColor, applied, rejected,
             color: applied ? '#22c55e' : rejected ? '#ef4444' : accentColor,
             fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: MONO,
           }}>
-            {applied ? 'APPLIED' : rejected ? 'REJECTED' : 'PROPOSED'}
+            {applied ? 'APPLIED' : rejected ? 'REJECTED' : isNew ? 'NEW FILE' : 'PROPOSED'}
           </Text>
         </View>
         <Text style={{ color: '#e2e8f0', fontSize: 12, fontWeight: '800', fontFamily: MONO, flex: 1 }} numberOfLines={1}>
           {proposal.filePath}
         </Text>
-        <Text style={{ color: '#64748b', fontSize: 10, fontFamily: MONO }}>
-          {lineCount} line{lineCount === 1 ? '' : 's'}
-        </Text>
+        {stats ? (
+          <Text style={{ fontSize: 10, fontFamily: MONO }}>
+            <Text style={{ color: '#22c55e' }}>+{stats.added}</Text>
+            <Text style={{ color: '#475569' }}> · </Text>
+            <Text style={{ color: '#ef4444' }}>-{stats.removed}</Text>
+          </Text>
+        ) : (
+          <Text style={{ color: '#64748b', fontSize: 10, fontFamily: MONO }}>
+            {loadingPrevious ? '…' : `${lineCount} line${lineCount === 1 ? '' : 's'}`}
+          </Text>
+        )}
       </View>
-      <Pressable onPress={() => setExpanded((v) => !v)}
-        {...(Platform.OS === 'web' ? { onHoverIn: () => {}, } : {})}
-        style={{ paddingHorizontal: 4 }}>
+      <Pressable onPress={() => setExpanded((v) => !v)} style={{ paddingHorizontal: 4 }}>
         <Text style={{ color: '#94a3b8', fontSize: 10, fontWeight: '700' }}>
-          {expanded ? '▾ Hide preview' : '▸ Show preview'}
+          {expanded ? '▾ Hide diff' : (stats && (stats.added > 0 || stats.removed > 0)) ? '▸ Show diff' : '▸ Show preview'}
         </Text>
       </Pressable>
       {expanded && (
         <View style={{
           backgroundColor: '#020409',
           borderWidth: 1, borderColor: '#1f2937',
-          borderRadius: 8, padding: 8, maxHeight: 320,
+          borderRadius: 8, paddingVertical: 4, maxHeight: 360,
         }}>
-          <ScrollView style={{ maxHeight: 304 }}>
-            <Text style={{
-              color: '#e2e8f0', fontSize: 11, lineHeight: 17,
-              fontFamily: MONO,
-            }} selectable>
-              {proposal.content}
-            </Text>
+          <ScrollView style={{ maxHeight: 352 }}>
+            {diff && diff.length > 0 ? (
+              diff.map((line, idx) => {
+                const isAdd = line.kind === 'add';
+                const isRemove = line.kind === 'remove';
+                const sign = isAdd ? '+' : isRemove ? '-' : ' ';
+                const lineNum = isAdd ? (line as any).newNum : isRemove ? (line as any).oldNum : (line as any).newNum;
+                return (
+                  <View key={idx} style={{
+                    flexDirection: 'row',
+                    backgroundColor: isAdd ? '#22c55e0d' : isRemove ? '#ef44440d' : 'transparent',
+                  }}>
+                    <Text style={{
+                      width: 38, paddingHorizontal: 6,
+                      color: '#475569', fontSize: 10, fontFamily: MONO,
+                      textAlign: 'right', lineHeight: 17,
+                    }}>{lineNum}</Text>
+                    <Text style={{
+                      width: 14, paddingHorizontal: 4,
+                      color: isAdd ? '#22c55e' : isRemove ? '#ef4444' : '#475569',
+                      fontSize: 11, fontFamily: MONO, fontWeight: '900',
+                      textAlign: 'center', lineHeight: 17,
+                    }}>{sign}</Text>
+                    <Text selectable style={{
+                      flex: 1, paddingRight: 8,
+                      color: isAdd ? '#86efac' : isRemove ? '#fca5a5' : '#cbd5e1',
+                      fontSize: 11, fontFamily: MONO, lineHeight: 17,
+                    }}>{line.text || ' '}</Text>
+                  </View>
+                );
+              })
+            ) : (
+              <Text selectable style={{
+                paddingHorizontal: 8, paddingVertical: 4,
+                color: '#e2e8f0', fontSize: 11, lineHeight: 17, fontFamily: MONO,
+              }}>
+                {proposal.content}
+              </Text>
+            )}
           </ScrollView>
         </View>
       )}
@@ -4236,7 +4328,7 @@ function FileProposalCard({ proposal, lineCount, accentColor, applied, rejected,
   );
 }
 
-const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, onContinue, onRerun, onApplyProposal, onRejectProposal, busy, dimmed, isCutoff }: {
+const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, onContinue, onRerun, onApplyProposal, onRejectProposal, getFileContentForDiff, busy, dimmed, isCutoff }: {
   msg: RoomMessage;
   accentColor: string;
   circleId: string;
@@ -4253,6 +4345,7 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
   onRerun?: (id: string) => void;
   onApplyProposal?: (msgId: string, proposal: AiFileProposal) => void;
   onRejectProposal?: (msgId: string, proposal: AiFileProposal) => void;
+  getFileContentForDiff?: (fileName: string) => Promise<string | null>;
   busy?: boolean;
   dimmed?: boolean;
   isCutoff?: boolean;
@@ -4356,6 +4449,7 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
                   rejected={rejected}
                   onApply={() => onApplyProposal && onApplyProposal(msg.id, p)}
                   onReject={() => onRejectProposal && onRejectProposal(msg.id, p)}
+                  getFileContentForDiff={getFileContentForDiff}
                 />
               );
             })}
