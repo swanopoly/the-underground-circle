@@ -373,14 +373,22 @@ export default function OpenSwanConsole({
     const outputTokens = OUTPUT_TOKEN_BUDGET_BY_MODE[mode] || 1200;
     const cost = estimateCost(modelKey, inputTokens, outputTokens);
     const rate = resolveModelRate(modelKey);
+    // Projected 24h total = what's already spent today + this run's
+    // estimate. Better signal than "this run alone vs cap" since
+    // multi-run sessions can blow through caps without any single
+    // run being expensive.
+    const spentToday = spend?.totalCost || 0;
+    const projected24h = spentToday + cost;
     return {
       cost,
       inputTokens,
       outputTokens,
       modelLabel: isAutoModel ? `${rate.label} auto baseline` : rate.label,
-      overBudget: budgetCap !== null && cost > budgetCap,
+      overBudget: budgetCap !== null && projected24h > budgetCap,
+      spentToday,
+      projected24h,
     };
-  }, [budgetCap, currentModel, mode, subagentPlan.specs.length, task.length, taskPlan]);
+  }, [budgetCap, currentModel, mode, subagentPlan.specs.length, task.length, taskPlan, spend?.totalCost]);
 
   // Memory count probe — counts active memory_entries for this circle so
   // the user sees how much context the agent will scan. Cheap query, runs
@@ -925,6 +933,22 @@ export default function OpenSwanConsole({
                     {(planCostPreview.inputTokens / 1000).toFixed(1)}K in · {(planCostPreview.outputTokens / 1000).toFixed(1)}K out
                     {' · '}
                     {planCostPreview.modelLabel}
+                  </Text>
+                </View>
+              ) : null}
+              {/* Budget warning — fires when running this turn would
+                  push the 24h projected total past the umbrella cap.
+                  More useful than "this run alone exceeds cap" because
+                  multi-run sessions can blow through caps without any
+                  single run being expensive on its own. */}
+              {planCostPreview?.overBudget && budgetCap !== null ? (
+                <View style={styles.budgetWarning}>
+                  <Text style={styles.budgetWarningKicker}>⚠ OVER 24H CAP</Text>
+                  <Text style={styles.budgetWarningBody}>
+                    Projected ${planCostPreview.projected24h.toFixed(2)} (already spent ${planCostPreview.spentToday.toFixed(2)} + ${planCostPreview.cost.toFixed(2)} this run) vs ${budgetCap.toFixed(2)} cap.
+                  </Text>
+                  <Text style={styles.budgetWarningHint}>
+                    Raise the cap in Settings or pick a smaller model before launching.
                   </Text>
                 </View>
               ) : null}
@@ -1753,6 +1777,32 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
     flex: 1,
+  },
+  budgetWarning: {
+    marginTop: 4,
+    padding: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#ef444455',
+    backgroundColor: '#7f1d1d18',
+    gap: 3,
+  },
+  budgetWarningKicker: {
+    color: '#fca5a5',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 1,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  budgetWarningBody: {
+    color: '#fecaca',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  budgetWarningHint: {
+    color: '#f87171',
+    fontSize: 10,
+    fontStyle: 'italic',
   },
   toolCatalogBody: {
     gap: 6,
