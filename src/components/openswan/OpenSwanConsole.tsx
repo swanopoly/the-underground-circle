@@ -164,6 +164,11 @@ export default function OpenSwanConsole({
   const [recentRunsExpanded, setRecentRunsExpanded] = useState(false);
   const [showAvailableTools, setShowAvailableTools] = useState(false);
   const [toolFilter, setToolFilter] = useState('');
+  // Saved (task, mode) templates — power-user shortcuts. Stored in
+  // localStorage per (userId, circleId) so they don't bleed across
+  // contexts. Schema: { id, label, task, mode, createdAt }.
+  type Template = { id: string; label: string; task: string; mode: string; createdAt: number };
+  const [templates, setTemplates] = useState<Template[]>([]);
 
   // Live 24h Claude spend for this circle — the umbrella cap across
   // every agent. Control Panel shows this so the user knows whether a
@@ -178,6 +183,81 @@ export default function OpenSwanConsole({
       setMode(currentMode as OpenSwanChatMode);
     }
   }, [visible, initialTask, currentMode]);
+
+  // Load saved templates for this user+circle. localStorage is the
+  // source of truth — no DB round-trip for the cold path. Templates
+  // are tiny (a few hundred bytes each) so synchronous read is fine.
+  const templatesKey = useMemo(
+    () => userId && circleId ? `uc_openswan_templates_v1_${userId}_${circleId}` : null,
+    [userId, circleId],
+  );
+  useEffect(() => {
+    if (!visible || !templatesKey) return;
+    try {
+      const raw = (typeof window !== 'undefined' && window.localStorage)
+        ? window.localStorage.getItem(templatesKey)
+        : null;
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          // Defensive — only keep rows that have the expected shape.
+          const valid = parsed.filter((t) =>
+            t && typeof t.id === 'string' && typeof t.task === 'string' && typeof t.mode === 'string',
+          );
+          setTemplates(valid);
+          return;
+        }
+      }
+      setTemplates([]);
+    } catch {
+      setTemplates([]);
+    }
+  }, [visible, templatesKey]);
+
+  const persistTemplates = useCallback((next: Template[]) => {
+    setTemplates(next);
+    if (!templatesKey) return;
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem(templatesKey, JSON.stringify(next));
+      }
+    } catch {
+      // Quota errors are silent — the in-memory list keeps working.
+    }
+  }, [templatesKey]);
+
+  const saveCurrentAsTemplate = useCallback(() => {
+    const trimmed = task.trim();
+    if (!trimmed) {
+      setPruneMessage('Type a task before saving as template.');
+      return;
+    }
+    // Cap label at 36 chars; user can refine later.
+    const label = trimmed.length > 36 ? trimmed.slice(0, 33) + '…' : trimmed;
+    const next: Template = {
+      id: `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      label,
+      task: trimmed,
+      mode,
+      createdAt: Date.now(),
+    };
+    // Dedupe — if an existing template has the same task+mode, don't
+    // create a duplicate (just bump it to the front).
+    const existing = templates.find((t) => t.task === trimmed && t.mode === mode);
+    const filtered = existing ? templates.filter((t) => t.id !== existing.id) : templates;
+    persistTemplates([next, ...filtered].slice(0, 12));
+  }, [task, mode, templates, persistTemplates]);
+
+  const deleteTemplate = useCallback((id: string) => {
+    persistTemplates(templates.filter((t) => t.id !== id));
+  }, [templates, persistTemplates]);
+
+  const applyTemplate = useCallback((tpl: Template) => {
+    setTask(tpl.task);
+    if ((MODE_KEYS as string[]).includes(tpl.mode)) {
+      setMode(tpl.mode as OpenSwanChatMode);
+    }
+  }, []);
 
   // Load the last few runs the user kicked off in this circle. Surfaced
   // as a row of pills under the MODE selector so the user can re-launch
@@ -554,6 +634,76 @@ export default function OpenSwanConsole({
                 ))}
               </View>
             ) : null}
+          </View>
+
+          {/* ── Templates — saved (task, mode) shortcuts ────────────── */}
+          <View style={styles.section}>
+            <View style={styles.recentRunsHeader}>
+              <Text style={styles.label}>
+                TEMPLATES{templates.length > 0 ? ` · ${templates.length}` : ''}
+              </Text>
+              <Pressable
+                onPress={saveCurrentAsTemplate}
+                disabled={!task.trim()}
+                style={({ hovered, pressed }: any) => [
+                  styles.templateSaveBtn,
+                  { borderColor: accentColor + '55' },
+                  hovered && { backgroundColor: accentColor + '12' },
+                  pressed && { transform: [{ scale: 0.985 }] },
+                  !task.trim() && { opacity: 0.4 },
+                ]}
+                accessibilityLabel="Save current task and mode as a template"
+              >
+                <Text style={[styles.templateSaveText, { color: accentColor }]}>
+                  + SAVE CURRENT
+                </Text>
+              </Pressable>
+            </View>
+            {templates.length === 0 ? (
+              <Text style={styles.recentRunsHint}>
+                Type a task above and tap SAVE CURRENT to keep it as a one-tap launcher.
+              </Text>
+            ) : (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={{ gap: 6, paddingVertical: 2 }}
+              >
+                {templates.map((tpl) => (
+                  <View key={tpl.id} style={styles.templateChipWrap}>
+                    <Pressable
+                      onPress={() => applyTemplate(tpl)}
+                      style={({ hovered, pressed }: any) => [
+                        styles.templateChip,
+                        { borderColor: accentColor + '40' },
+                        hovered && { borderColor: accentColor + '80', backgroundColor: accentColor + '14' },
+                        pressed && { transform: [{ scale: 0.985 }] },
+                      ]}
+                      accessibilityLabel={`Apply template: ${tpl.label}`}
+                    >
+                      <View style={styles.templateChipMode}>
+                        <Text style={[styles.templateChipModeText, { color: accentColor }]}>
+                          {tpl.mode.toUpperCase()}
+                        </Text>
+                      </View>
+                      <Text style={styles.templateChipLabel} numberOfLines={1}>
+                        {tpl.label}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => deleteTemplate(tpl.id)}
+                      style={({ pressed }: any) => [
+                        styles.templateChipDelete,
+                        pressed && { backgroundColor: '#ef444420' },
+                      ]}
+                      accessibilityLabel={`Delete template: ${tpl.label}`}
+                    >
+                      <Text style={styles.templateChipDeleteText}>×</Text>
+                    </Pressable>
+                  </View>
+                ))}
+              </ScrollView>
+            )}
           </View>
 
           {/* ── Recent runs ─────────────────────────────────────────── */}
@@ -1234,6 +1384,66 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontStyle: 'italic',
     marginTop: 2,
+  },
+  templateSaveBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  templateSaveText: {
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 1,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  templateChipWrap: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    backgroundColor: FIELD_BG,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    overflow: 'hidden',
+  },
+  templateChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRightWidth: 1,
+    borderRightColor: CARD_BORDER,
+    maxWidth: 280,
+  },
+  templateChipMode: {
+    backgroundColor: '#020617',
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  templateChipModeText: {
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  templateChipLabel: {
+    color: TEXT,
+    fontSize: 11,
+    fontWeight: '600',
+    flexShrink: 1,
+  },
+  templateChipDelete: {
+    paddingHorizontal: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  templateChipDeleteText: {
+    color: MUTED,
+    fontSize: 14,
+    fontWeight: '900',
+    lineHeight: 14,
   },
   recentRunRow: {
     flexDirection: 'row',
