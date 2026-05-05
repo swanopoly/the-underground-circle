@@ -34,21 +34,6 @@ const SECRET_KINDS: Array<{ value: SiteCredentialSecretKind; label: string }> = 
   { value: 'session_cookie', label: 'Session cookie' },
 ];
 
-const PLATFORM_PRESETS: Array<{
-  platform: string;
-  label: string;
-  secretKind: SiteCredentialSecretKind;
-  loginPath?: string;
-  hint: string;
-}> = [
-  { platform: 'wordpress', label: 'default', secretKind: 'application_password', loginPath: '/wp-login.php', hint: 'posts + pages' },
-  { platform: 'shopify', label: 'admin', secretKind: 'password', loginPath: '/admin', hint: 'store admin' },
-  { platform: 'webflow', label: 'workspace', secretKind: 'password', hint: 'designer' },
-  { platform: 'cpanel', label: 'hosting', secretKind: 'password', hint: 'hosting panel' },
-  { platform: 'github', label: 'automation', secretKind: 'api_token', hint: 'repo tasks' },
-  { platform: 'stripe', label: 'restricted', secretKind: 'api_token', hint: 'payments' },
-];
-
 const PASSWORD_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*_-+=?';
 
 function formatDate(value?: string | null): string {
@@ -242,18 +227,6 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     }
   };
 
-  const handlePreset = (preset: typeof PLATFORM_PRESETS[number]) => {
-    setPlatform(preset.platform);
-    setLabel(preset.label);
-    setSecretKind(preset.secretKind);
-    if (siteUrl.trim() && preset.loginPath) {
-      setLoginUrl(`${normalizeBaseUrl(siteUrl)}${preset.loginPath}`);
-    } else if (preset.platform === 'webflow') {
-      setLoginUrl('https://webflow.com/dashboard');
-    }
-    setExpandedId('new');
-  };
-
   const handleInferLoginUrl = () => {
     const next = inferLoginUrl(platform, siteUrl);
     if (!next) {
@@ -429,25 +402,6 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
 
           {expandedId === 'new' ? (
             <View style={styles.form}>
-              <View style={styles.presetGrid}>
-                {PLATFORM_PRESETS.map((preset) => (
-                  <Pressable
-                    key={preset.platform}
-                    onPress={() => handlePreset(preset)}
-                    style={[
-                      styles.presetChip,
-                      platform === preset.platform && { borderColor: accentColor + '88', backgroundColor: accentColor + '14' },
-                      Platform.OS === 'web' && { cursor: 'pointer' } as any,
-                    ]}
-                  >
-                    <Text style={[styles.presetName, platform === preset.platform && { color: accentColor }]}>
-                      {preset.platform}
-                    </Text>
-                    <Text style={styles.presetHint}>{preset.hint}</Text>
-                  </Pressable>
-                ))}
-              </View>
-
               <View style={styles.row}>
                 <View style={styles.field}>
                   <Text style={styles.label}>PLATFORM</Text>
@@ -829,32 +783,6 @@ const styles = StyleSheet.create({
     borderTopColor: '#ffffff10',
     padding: 14,
     gap: 12,
-  },
-  presetGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  presetChip: {
-    minWidth: 118,
-    paddingHorizontal: 11,
-    paddingVertical: 9,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#ffffff16',
-    backgroundColor: '#050914',
-  },
-  presetName: {
-    color: '#d7e1ee',
-    fontSize: 11,
-    fontWeight: '900',
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-  },
-  presetHint: {
-    marginTop: 3,
-    color: '#7c8798',
-    fontSize: 10,
   },
   row: {
     flexDirection: 'row',
