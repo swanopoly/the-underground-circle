@@ -2588,6 +2588,66 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     [messages],
   );
 
+  const dispatchAiPrompt = useCallback(async (
+    promptText: string,
+    opts: { recentMessages?: RoomMessage[]; promptPrefix?: string } = {},
+  ) => {
+    const { data: { user } } = await supabase.auth.getUser();
+    setBotTyping(true);
+    startCodingWorkbench(promptText);
+    try {
+      await sendRoomStructuredChatMessage({
+        roomId,
+        circleId: circleId || '',
+        userId: user?.id || 'anonymous',
+        content: promptText,
+        activeFile,
+        recentMessages: opts.recentMessages || messages,
+        availableFiles: roomFiles,
+        profile: sessionProfile,
+        promptPrefix: opts.promptPrefix,
+        onStageChange: (_stage, label) => setCurrentRunStep(label),
+      });
+    } catch {
+      await supabase.from('room_messages').insert({
+        room_id: roomId, user_id: null, agent_name: 'Agent',
+        content: 'Something went wrong. Try again.',
+        message_type: 'agent_output', metadata: { bot: true, bot_name: 'Agent' },
+      });
+    } finally {
+      setBotTyping(false);
+      stopCodingWorkbenchAfter(isCodingGenerationRequest(promptText, sessionProfile) ? 2600 : 0);
+    }
+  }, [activeFile, circleId, messages, roomFiles, roomId, sessionProfile, startCodingWorkbench, stopCodingWorkbenchAfter]);
+
+  const handleContinueFromMessage = useCallback(async (aiMessageId: string) => {
+    if (botTyping) return;
+    const aiIndex = messages.findIndex((m) => m.id === aiMessageId);
+    if (aiIndex === -1) return;
+    const recent = messages.slice(0, aiIndex + 1);
+    await dispatchAiPrompt(
+      'Continue from where you left off — same task, expand or refine your previous response.',
+      { recentMessages: recent },
+    );
+  }, [botTyping, dispatchAiPrompt, messages]);
+
+  const handleRerunFromMessage = useCallback(async (aiMessageId: string) => {
+    if (botTyping) return;
+    const aiIndex = messages.findIndex((m) => m.id === aiMessageId);
+    if (aiIndex === -1) return;
+    let priorUser: RoomMessage | null = null;
+    for (let i = aiIndex - 1; i >= 0; i--) {
+      const candidate = messages[i];
+      if (candidate.message_type === 'chat' && candidate.user_id) {
+        priorUser = candidate;
+        break;
+      }
+    }
+    if (!priorUser) return;
+    const recent = messages.slice(0, aiIndex);
+    await dispatchAiPrompt(priorUser.content || '', { recentMessages: recent });
+  }, [botTyping, dispatchAiPrompt, messages]);
+
   // Toggle the pinned flag on a message. Optimistic update, reverts on error.
   const handleTogglePin = useCallback(async (msgId: string) => {
     const target = messages.find((m) => m.id === msgId);
@@ -3294,6 +3354,9 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
               onTogglePin={handleTogglePin}
               onBranch={handleBranchFromMessage}
               onCopy={handleCopyMessage}
+              onContinue={handleContinueFromMessage}
+              onRerun={handleRerunFromMessage}
+              busy={botTyping}
               dimmed={dimmed}
               isCutoff={isCutoff}
             />
@@ -3597,7 +3660,7 @@ function AgentThinkingLoader() {
   );
 }
 
-const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, dimmed, isCutoff }: {
+const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, onContinue, onRerun, busy, dimmed, isCutoff }: {
   msg: RoomMessage;
   accentColor: string;
   circleId: string;
@@ -3610,6 +3673,9 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
   onTogglePin?: (id: string) => void;
   onBranch?: (id: string) => void;
   onCopy?: (text: string) => void;
+  onContinue?: (id: string) => void;
+  onRerun?: (id: string) => void;
+  busy?: boolean;
   dimmed?: boolean;
   isCutoff?: boolean;
 }) {
@@ -3717,6 +3783,40 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
           <Text style={{color:'#ef4444',fontSize:10,marginTop:4,fontStyle:'italic'}}>
             → Failed. Check your agent connection in the Office tab.
           </Text>
+        )}
+        {(onContinue || onRerun) && !isTask && (
+          <View style={{ flexDirection: 'row', gap: 6, marginTop: 8 }}>
+            {onContinue && (
+              <Pressable
+                onPress={() => onContinue(msg.id)}
+                disabled={busy}
+                style={{
+                  paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999,
+                  borderWidth: 1, borderColor: accentColor + '44',
+                  backgroundColor: accentColor + '0c',
+                  opacity: busy ? 0.4 : 1,
+                  ...(Platform.OS === 'web' ? { cursor: busy ? 'wait' : 'pointer' } as any : {}),
+                }}
+              >
+                <Text style={{ color: accentColor, fontSize: 10, fontWeight: '900', letterSpacing: 0.5 }}>→ CONTINUE</Text>
+              </Pressable>
+            )}
+            {onRerun && (
+              <Pressable
+                onPress={() => onRerun(msg.id)}
+                disabled={busy}
+                style={{
+                  paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999,
+                  borderWidth: 1, borderColor: '#1f2937',
+                  backgroundColor: '#0d1320',
+                  opacity: busy ? 0.4 : 1,
+                  ...(Platform.OS === 'web' ? { cursor: busy ? 'wait' : 'pointer' } as any : {}),
+                }}
+              >
+                <Text style={{ color: '#94a3b8', fontSize: 10, fontWeight: '900', letterSpacing: 0.5 }}>↻ RETRY</Text>
+              </Pressable>
+            )}
+          </View>
         )}
       </View>
     );
