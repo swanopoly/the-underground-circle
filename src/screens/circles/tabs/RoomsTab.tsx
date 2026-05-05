@@ -32,6 +32,7 @@ import {
   type GitHubUser, type GitHubRepo, type GitHubTreeEntry,
 } from '../../../lib/github';
 import { sendRoomStructuredChatMessage } from '../../../lib/roomChatService';
+import { getMatchingChatSlashCommands, type ChatSlashCommand } from '../../../lib/chatSlashCommands';
 import { ROOM_WORKSPACE_FOCUS_FILE_EVENT, ROOM_WORKSPACE_OPEN_EVENT } from '../../../lib/roomWorkspaceLauncher';
 import { SESSION_PROFILE_OPTIONS, getSessionProfileMeta, loadRoomSessionProfile, saveRoomSessionProfile, type SessionCodingProfile } from '../../../lib/chatSessionProfile';
 import { isCodingGenerationRequest } from '../../../lib/codingWorkbench';
@@ -2308,6 +2309,19 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   const [currentRunStep, setCurrentRunStep] = useState('');
   const currentProfileMeta = getSessionProfileMeta(sessionProfile);
 
+  // ─── Phase 1 chat UX state ──────────────────────────────────────────────
+  // Cancel — sendRoomStructuredChatMessage doesn't yet accept an AbortSignal,
+  // so the STOP button dismisses the spinner + writes a "cancelled" marker
+  // for the team to see, and a ref guards any in-flight follow-up.
+  const cancelRequestedRef = useRef(false);
+  // Mention / slash autocomplete — populated as the user types
+  const [mentionPaletteOpen, setMentionPaletteOpen] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [slashPaletteOpen, setSlashPaletteOpen] = useState(false);
+  const [slashQuery, setSlashQuery] = useState('');
+  const inputRef = useRef<TextInput>(null);
+  const inputSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
+
   const handleSessionProfileSelect = useCallback(async (nextProfile: SessionCodingProfile) => {
     setSessionProfile(nextProfile);
     try {
@@ -2358,12 +2372,91 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     return () => clearInterval(id);
   }, [botTyping, codingWorkbenchPrompt]);
 
+  const handleCancelStream = useCallback(async () => {
+    cancelRequestedRef.current = true;
+    setBotTyping(false);
+    stopCodingWorkbench();
+    try {
+      await supabase.from('room_messages').insert({
+        room_id: roomId, user_id: null, agent_name: 'Agent',
+        content: '[run cancelled]',
+        message_type: 'agent_output',
+        metadata: { bot: true, bot_name: 'Agent', cancelled: true },
+      });
+    } catch {}
+  }, [roomId, stopCodingWorkbench]);
+
+  // Detect @-mention or /-command palette triggers as the user types.
+  // Mention: scan from the cursor backward for the most recent @, only show
+  // when it's a fresh non-whitespace token and not one of the agent aliases
+  // already handled by the send pipeline.
+  const detectPalettes = useCallback((text: string, cursor: number) => {
+    if (text.startsWith('/')) {
+      const space = text.indexOf(' ');
+      const stem = space === -1 ? text : text.slice(0, space);
+      setSlashPaletteOpen(true);
+      setSlashQuery(stem);
+      setMentionPaletteOpen(false);
+      return;
+    }
+    setSlashPaletteOpen(false);
+    const before = text.slice(0, cursor);
+    const atIdx = before.lastIndexOf('@');
+    if (atIdx === -1) {
+      setMentionPaletteOpen(false);
+      return;
+    }
+    const tail = before.slice(atIdx + 1);
+    if (/\s/.test(tail) || /^(agent|blackswan|swanbot|swan)$/i.test(tail)) {
+      setMentionPaletteOpen(false);
+      return;
+    }
+    setMentionPaletteOpen(true);
+    setMentionQuery(tail.toLowerCase());
+  }, []);
+
+  const insertMention = useCallback((fileName: string) => {
+    const cursor = inputSelectionRef.current.start;
+    const before = input.slice(0, cursor);
+    const after = input.slice(cursor);
+    const atIdx = before.lastIndexOf('@');
+    const newBefore = atIdx === -1 ? before : before.slice(0, atIdx);
+    const next = `${newBefore}@${fileName} ${after}`;
+    setInput(next);
+    setMentionPaletteOpen(false);
+    setMentionQuery('');
+    setTimeout(() => inputRef.current?.focus(), 50);
+  }, [input]);
+
+  const insertSlashCommand = useCallback((insertText: string) => {
+    setInput(insertText);
+    setSlashPaletteOpen(false);
+    setSlashQuery('');
+    setTimeout(() => inputRef.current?.focus(), 50);
+  }, []);
+
+  const filteredMentionFiles = useMemo(() => {
+    if (!mentionPaletteOpen) return [];
+    const q = mentionQuery;
+    return roomFiles
+      .filter((f) => !q || f.name.toLowerCase().includes(q))
+      .slice(0, 8);
+  }, [mentionPaletteOpen, mentionQuery, roomFiles]);
+
+  const filteredSlashCommands = useMemo<ChatSlashCommand[]>(() => {
+    if (!slashPaletteOpen) return [];
+    return getMatchingChatSlashCommands(slashQuery).slice(0, 8);
+  }, [slashPaletteOpen, slashQuery]);
+
   const send = async () => {
     if (!input.trim()) return;
     const { data: { user } } = await supabase.auth.getUser();
     const content = input.trim();
     const lowerContent = content.toLowerCase();
     setInput('');
+    setMentionPaletteOpen(false);
+    setSlashPaletteOpen(false);
+    cancelRequestedRef.current = false;
 
     // ─── /room commands ─────────────────────────────────────────────────
     if (lowerContent.startsWith('/room ') || lowerContent === '/room') {
@@ -2931,14 +3024,81 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       )}
 
       {/* Input */}
-      <View style={s.msgInputRow}>
-        <TextInput style={s.msgInput} value={input} onChangeText={setInput}
-          placeholder="Ask Agent anything..." placeholderTextColor="#555"
-          onSubmitEditing={send} returnKeyType="send" multiline maxLength={2000} />
-        <Pressable onPress={send} disabled={!input.trim()}
-          style={[s.sendBtn, { backgroundColor: accentColor, opacity: input.trim() ? 1 : 0.4 }]}>
-          <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>→</Text>
-        </Pressable>
+      <View style={{ position: 'relative' }}>
+        {mentionPaletteOpen && filteredMentionFiles.length > 0 && (
+          <View style={[s.chatPalette, { borderColor: accentColor + '66' }]}>
+            <Text style={s.chatPaletteHeader}>FILES{mentionQuery ? ` · ${mentionQuery}` : ''}</Text>
+            {filteredMentionFiles.map((f) => (
+              <Pressable
+                key={f.id}
+                onPress={() => insertMention(f.name)}
+                style={({ hovered }: any) => [
+                  s.chatPaletteItem,
+                  hovered && { backgroundColor: accentColor + '14' },
+                ]}
+              >
+                <Text style={[s.chatPaletteTitle, { color: accentColor }]}>@{f.name}</Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+
+        {slashPaletteOpen && filteredSlashCommands.length > 0 && (
+          <View style={[s.chatPalette, { borderColor: accentColor + '66' }]}>
+            <Text style={s.chatPaletteHeader}>COMMANDS{slashQuery && slashQuery !== '/' ? ` · ${slashQuery}` : ''}</Text>
+            {filteredSlashCommands.map((cmd) => (
+              <Pressable
+                key={cmd.id}
+                onPress={() => insertSlashCommand(cmd.insertText)}
+                style={({ hovered }: any) => [
+                  s.chatPaletteItem,
+                  hovered && { backgroundColor: accentColor + '14' },
+                ]}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                  <Text style={[s.chatPaletteTitle, { color: accentColor }]}>{cmd.command}</Text>
+                  <Text style={s.chatPaletteDesc} numberOfLines={1}>{cmd.description}</Text>
+                </View>
+              </Pressable>
+            ))}
+          </View>
+        )}
+
+        <View style={s.msgInputRow}>
+          <TextInput
+            ref={inputRef}
+            style={s.msgInput}
+            value={input}
+            onChangeText={(text) => {
+              setInput(text);
+              detectPalettes(text, inputSelectionRef.current.start);
+            }}
+            onSelectionChange={(e) => {
+              inputSelectionRef.current = e.nativeEvent.selection;
+              detectPalettes(input, e.nativeEvent.selection.start);
+            }}
+            placeholder={botTyping ? 'Streaming...' : 'Ask Agent anything — type @ for files, / for commands'}
+            placeholderTextColor="#555"
+            onSubmitEditing={send}
+            returnKeyType="send"
+            multiline
+            maxLength={2000}
+            editable={!botTyping}
+          />
+          {botTyping ? (
+            <Pressable onPress={handleCancelStream} style={[s.sendBtn, { backgroundColor: '#ef4444' }]}>
+              <Text style={{ color: '#fff', fontSize: 10, fontWeight: '900', letterSpacing: 1 }}>STOP</Text>
+            </Pressable>
+          ) : (
+            <Pressable
+              onPress={send}
+              disabled={!input.trim()}
+              style={[s.sendBtn, { backgroundColor: accentColor, opacity: input.trim() ? 1 : 0.4 }]}
+            >
+              <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>→</Text>
+            </Pressable>
+          )}
+        </View>
       </View>
 
       {/* ── Spawn Agent — full overlay within chat panel ── */}
@@ -5382,6 +5542,49 @@ const s = StyleSheet.create({
   msgInputRow: { flexDirection:'row', alignItems:'center', padding:12, gap:8, borderTopWidth:1, borderTopColor:'#000000' },
   msgInput: { flex:1, backgroundColor:'#111', borderWidth:1, borderColor:'#222', borderRadius:12, paddingHorizontal:12, paddingVertical:8, color:'#fff', fontSize:13 },
   sendBtn: { width:36, height:36, borderRadius:18, justifyContent:'center', alignItems:'center', ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
+  chatPalette: {
+    position: 'absolute',
+    bottom: '100%',
+    left: 12,
+    right: 12,
+    marginBottom: 8,
+    backgroundColor: '#0a0e1a',
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingVertical: 6,
+    paddingHorizontal: 6,
+    gap: 2,
+    maxHeight: 280,
+    zIndex: 30,
+    ...(Platform.OS === 'web'
+      ? { boxShadow: '0 12px 32px rgba(0,0,0,0.6)' } as any
+      : { shadowColor: '#000', shadowOpacity: 0.6, shadowRadius: 12, elevation: 8 }),
+  },
+  chatPaletteHeader: {
+    color: '#475569',
+    fontSize: 9,
+    letterSpacing: 1.4,
+    fontWeight: '900',
+    fontFamily: MONO,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  chatPaletteItem: {
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+    borderRadius: 8,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background-color 0.12s ease' } as any : {}),
+  },
+  chatPaletteTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    fontFamily: MONO,
+  },
+  chatPaletteDesc: {
+    color: '#94a3b8',
+    fontSize: 11,
+    flexShrink: 1,
+  },
 
   // APIs
   apiTab: { paddingHorizontal:10, paddingVertical:5, borderRadius:12, borderWidth:1, borderColor:'#222', marginRight:6, ...(Platform.OS==='web'?{cursor:'pointer'} as any:{}) },
