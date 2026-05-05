@@ -2293,6 +2293,22 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       .then(({ data }) => setRoomFiles(data || []));
   }, [roomId]);
 
+  // Token + cost rollup, realtime
+  useEffect(() => {
+    const load = async () => {
+      const { data } = await supabase.from('room_usage').select('tokens, cost_usd').eq('room_id', roomId).limit(500);
+      if (!data) return;
+      const tokens = data.reduce((s: number, u: any) => s + (Number(u.tokens) || 0), 0);
+      const cost = data.reduce((s: number, u: any) => s + (parseFloat(u.cost_usd) || 0), 0);
+      setUsageStats({ tokens, cost, runs: data.length });
+    };
+    load();
+    const ch = supabase.channel(`usage_${roomId}`)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'room_usage', filter: `room_id=eq.${roomId}` }, load)
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [roomId]);
+
   useEffect(() => {
     let cancelled = false;
     loadRoomSessionProfile(roomId).then((profile) => {
@@ -2325,6 +2341,13 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // persisted into room_messages.metadata.images so the team and any
   // vision-capable model see it.
   const [pastedImage, setPastedImage] = useState<string | null>(null);
+  // Rolling room_usage stats so the chat header surfaces token + USD
+  // spend without the user needing to open the Usage panel.
+  const [usageStats, setUsageStats] = useState<{ tokens: number; cost: number; runs: number }>({ tokens: 0, cost: 0, runs: 0 });
+  // Context cutoff — the user can pick any past message and say "treat
+  // the chat as if it ended here". Messages after the cutoff are dimmed
+  // and not sent to the AI as recent context.
+  const [contextCutoffId, setContextCutoffId] = useState<string | null>(null);
 
   const handleSessionProfileSelect = useCallback(async (nextProfile: SessionCodingProfile) => {
     setSessionProfile(nextProfile);
@@ -2515,6 +2538,24 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     URL.revokeObjectURL(url);
   }, [messages]);
 
+  // Branch from a past message — clamp the AI's recent-message context
+  // to messages up to and including the chosen one.
+  const handleBranchFromMessage = useCallback((msgId: string) => {
+    setContextCutoffId((prev) => (prev === msgId ? null : msgId));
+  }, []);
+
+  const handleCopyMessage = useCallback(async (text: string) => {
+    if (Platform.OS !== 'web' || typeof navigator === 'undefined') return;
+    try {
+      await navigator.clipboard?.writeText(text);
+    } catch {}
+  }, []);
+
+  const cutoffIndex = useMemo(() => {
+    if (!contextCutoffId) return -1;
+    return messages.findIndex((m) => m.id === contextCutoffId);
+  }, [contextCutoffId, messages]);
+
   // Toggle the pinned flag on a message. Optimistic update, reverts on error.
   const handleTogglePin = useCallback(async (msgId: string) => {
     const target = messages.find((m) => m.id === msgId);
@@ -2614,13 +2655,14 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       setBotTyping(true);
       startCodingWorkbench(cleanContent);
       try {
+        const recentForAI = cutoffIndex === -1 ? messages : messages.slice(0, cutoffIndex + 1);
         await sendRoomStructuredChatMessage({
           roomId,
           circleId: circleId || '',
           userId: user?.id || 'anonymous',
           content: cleanContent,
           activeFile,
-          recentMessages: messages,
+          recentMessages: recentForAI,
           availableFiles: roomFiles,
           profile: sessionProfile,
           extraMetadata: imagesPayload ? { images: imagesPayload } : undefined,
@@ -2888,6 +2930,13 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             <Text style={{ color: '#f59e0b', fontSize: 10, fontWeight: '600' }}>{currentRunStep || 'thinking...'}</Text>
           </View>
         )}
+        {usageStats.tokens > 0 && (
+          <View style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: accentColor + '14', borderWidth: 1, borderColor: accentColor + '33' }}>
+            <Text style={{ color: accentColor, fontSize: 9, fontFamily: MONO, fontWeight: '900', letterSpacing: 0.6 }}>
+              {usageStats.tokens.toLocaleString()} TOK · ${usageStats.cost.toFixed(4)}
+            </Text>
+          </View>
+        )}
         <Pressable onPress={() => { setShowSpawnAgent(p => !p); if (showAssign) setShowAssign(false); }}
           style={[chatSt.assignToggle, showSpawnAgent && { backgroundColor: '#22c55e15', borderColor: '#22c55e50' }]}>
           <Text style={[chatSt.assignToggleText, showSpawnAgent && { color: '#22c55e' }]}>+ Spawn</Text>
@@ -3063,6 +3112,27 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         ))}
       </ScrollView>
 
+      {/* Branched-context banner */}
+      {contextCutoffId ? (
+        <View style={{
+          flexDirection: 'row', alignItems: 'center', gap: 8,
+          paddingHorizontal: 12, paddingVertical: 6,
+          backgroundColor: accentColor + '12',
+          borderTopWidth: 1, borderTopColor: accentColor + '33',
+          borderBottomWidth: 1, borderBottomColor: accentColor + '22',
+        }}>
+          <Text style={{ color: accentColor, fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: MONO }}>
+            ↻ BRANCHED
+          </Text>
+          <Text style={{ color: '#cbd5e1', fontSize: 11, flex: 1 }}>
+            Agent only sees messages up to the cutoff. Newer messages stay in the room but are skipped.
+          </Text>
+          <Pressable onPress={() => setContextCutoffId(null)} style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, backgroundColor: '#1f2937' }}>
+            <Text style={{ color: '#cbd5e1', fontSize: 10, fontWeight: '800' }}>Reset</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
       {/* Messages */}
       {codingWorkbenchPrompt && (
         <View style={{ paddingHorizontal: 10, paddingTop: 8 }}>
@@ -3090,20 +3160,28 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         windowSize={10}
         maxToRenderPerBatch={20}
         removeClippedSubviews
-        renderItem={({ item: m }) => (
-          <MsgBubble
-            msg={m}
-            accentColor={accentColor}
-            circleId={circleId || ''}
-            roomId={roomId}
-            sessionProfile={sessionProfile}
-            onRunLedgerUpdate={handleRunLedgerUpdate}
-            onRetryCheck={handleRetryVerificationCheck}
-            retryingCheckId={retryingLedgerCheck?.messageId === m.id ? retryingLedgerCheck.checkId : null}
-            onDelete={handleDeleteMessage}
-            onTogglePin={handleTogglePin}
-          />
-        )}
+        renderItem={({ item: m, index }) => {
+          const dimmed = cutoffIndex !== -1 && index > cutoffIndex;
+          const isCutoff = m.id === contextCutoffId;
+          return (
+            <MsgBubble
+              msg={m}
+              accentColor={accentColor}
+              circleId={circleId || ''}
+              roomId={roomId}
+              sessionProfile={sessionProfile}
+              onRunLedgerUpdate={handleRunLedgerUpdate}
+              onRetryCheck={handleRetryVerificationCheck}
+              retryingCheckId={retryingLedgerCheck?.messageId === m.id ? retryingLedgerCheck.checkId : null}
+              onDelete={handleDeleteMessage}
+              onTogglePin={handleTogglePin}
+              onBranch={handleBranchFromMessage}
+              onCopy={handleCopyMessage}
+              dimmed={dimmed}
+              isCutoff={isCutoff}
+            />
+          );
+        }}
         ListEmptyComponent={<Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginTop: 20, fontStyle: 'italic' }}>No messages yet</Text>}
       />
 
@@ -3402,7 +3480,7 @@ function AgentThinkingLoader() {
   );
 }
 
-const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin }: {
+const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, dimmed, isCutoff }: {
   msg: RoomMessage;
   accentColor: string;
   circleId: string;
@@ -3413,6 +3491,10 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
   retryingCheckId?: string | null;
   onDelete?: (id: string) => void;
   onTogglePin?: (id: string) => void;
+  onBranch?: (id: string) => void;
+  onCopy?: (text: string) => void;
+  dimmed?: boolean;
+  isCutoff?: boolean;
 }) {
   const time = new Date(msg.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
   const artifacts = Array.isArray(msg.metadata?.artifacts) ? msg.metadata.artifacts : [];
@@ -3420,6 +3502,7 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
     ? (msg.metadata as any).images.filter((src: any) => typeof src === 'string')
     : [];
   const pinned = !!(msg.metadata as any)?.pinned;
+  const dimStyle = dimmed ? { opacity: 0.45 } : null;
   if (msg.message_type==='edit_event')
     return <View style={{alignItems:'center',flexDirection:'row',justifyContent:'center',gap:6}}><Text style={{color:'#555',fontSize:11,fontStyle:'italic'}}>✏️ {msg.content} · {time}</Text>{onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{opacity:0.4}}><Text style={{color:'#f85149',fontSize:10}}>×</Text></Pressable>}</View>;
   if (msg.message_type==='system')
@@ -3435,14 +3518,15 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
     const runMetadataSummary = buildRunMetadataSummaryProps(msg.metadata);
     const browserPlanEvents = readRunBrowserPlanEvents(msg.metadata);
     return (
-      <View style={{
+      <View style={[{
         borderLeftWidth:3,
         borderLeftColor: pinned ? accentColor : (isTask?'#6366f1':'#3b82f6'),
         paddingLeft:10, paddingVertical:7,
         backgroundColor: pinned ? accentColor + '10' : (isTask?'#6366f108':'#3b82f608'),
         borderRadius:12,
         ...(pinned ? { borderWidth: 1, borderColor: accentColor + '44' } : {}),
-      }}>
+        ...(isCutoff ? { borderRightWidth: 3, borderRightColor: accentColor } : {}),
+      }, dimStyle]}>
         <View style={{flexDirection:'row',gap:8,marginBottom:3,flexWrap:'wrap',alignItems:'center'}}>
           <Text style={{color:isTask?'#6366f1':'#3b82f6',fontSize:11,fontWeight:'700'}}>{msg.agent_name||'Agent'}</Text>
           {isTask && <View style={{backgroundColor:'#6366f115',paddingHorizontal:5,paddingVertical:2,borderRadius:12,borderWidth:1,borderColor:'#6366f130'}}>
@@ -3463,6 +3547,18 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
             <Pressable onPress={() => onTogglePin(msg.id)} hitSlop={6}
               style={{ marginLeft: status ? 0 : 'auto' as any, opacity: pinned ? 1 : 0.5, paddingHorizontal: 4 } as any}>
               <Text style={{color: pinned ? accentColor : '#94a3b8', fontSize: 12, fontWeight: '900'}}>{pinned ? '★' : '☆'}</Text>
+            </Pressable>
+          )}
+          {onCopy && msg.content && (
+            <Pressable onPress={() => onCopy(msg.content)} hitSlop={6}
+              style={{ opacity: 0.5, paddingHorizontal: 4 } as any}>
+              <Text style={{color: '#94a3b8', fontSize: 11, fontWeight: '700'}}>⧉</Text>
+            </Pressable>
+          )}
+          {onBranch && (
+            <Pressable onPress={() => onBranch(msg.id)} hitSlop={6}
+              style={{ opacity: isCutoff ? 1 : 0.5, paddingHorizontal: 4 } as any}>
+              <Text style={{color: isCutoff ? accentColor : '#94a3b8', fontSize: 11, fontWeight: '900'}}>↻</Text>
             </Pressable>
           )}
           {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
@@ -3512,6 +3608,8 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
     <View style={[
       { paddingVertical: 4, paddingHorizontal: 6, borderRadius: 10 },
       pinned && { backgroundColor: accentColor + '10', borderWidth: 1, borderColor: accentColor + '44' },
+      isCutoff && { borderRightWidth: 3, borderRightColor: accentColor },
+      dimStyle,
     ]}>
       <View style={{flexDirection:'row',gap:8,marginBottom:3,alignItems:'center'}}>
         <View style={{width:20,height:20,borderRadius:10,backgroundColor:accentColor+'30',alignItems:'center',justifyContent:'center'}}>
@@ -3524,6 +3622,18 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
           <Pressable onPress={() => onTogglePin(msg.id)} hitSlop={6}
             style={{ marginLeft: 'auto' as any, opacity: pinned ? 1 : 0.5, paddingHorizontal: 4 } as any}>
             <Text style={{color: pinned ? accentColor : '#94a3b8', fontSize: 12, fontWeight: '900'}}>{pinned ? '★' : '☆'}</Text>
+          </Pressable>
+        )}
+        {onCopy && msg.content && (
+          <Pressable onPress={() => onCopy(msg.content)} hitSlop={6}
+            style={{ opacity: 0.5, paddingHorizontal: 4 } as any}>
+            <Text style={{color: '#94a3b8', fontSize: 11, fontWeight: '700'}}>⧉</Text>
+          </Pressable>
+        )}
+        {onBranch && (
+          <Pressable onPress={() => onBranch(msg.id)} hitSlop={6}
+            style={{ opacity: isCutoff ? 1 : 0.5, paddingHorizontal: 4 } as any}>
+            <Text style={{color: isCutoff ? accentColor : '#94a3b8', fontSize: 11, fontWeight: '900'}}>↻</Text>
           </Pressable>
         )}
         {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
