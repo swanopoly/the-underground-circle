@@ -2489,12 +2489,20 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     setTimeout(() => inputRef.current?.focus(), 50);
   }, []);
 
-  const filteredMentionFiles = useMemo(() => {
+  const filteredMentionFiles = useMemo<Array<{ id: string; name: string; meta?: boolean; description?: string }>>(() => {
     if (!mentionPaletteOpen) return [];
     const q = mentionQuery;
-    return roomFiles
-      .filter((f) => !q || f.name.toLowerCase().includes(q))
-      .slice(0, 8);
+    const items: Array<{ id: string; name: string; meta?: boolean; description?: string }> = [];
+    // Meta-mention: @codebase injects the full room file list into the
+    // prompt as context (see send()). Show it first when the query is
+    // empty or matches "codebase" / "all" / "files".
+    const wantsCodebase = !q || 'codebase'.startsWith(q) || 'all'.startsWith(q) || 'files'.startsWith(q);
+    if (wantsCodebase) {
+      items.push({ id: '__codebase__', name: 'codebase', meta: true, description: `Inject all ${roomFiles.length} room file${roomFiles.length === 1 ? '' : 's'} as context` });
+    }
+    const fileMatches = roomFiles.filter((f) => !q || f.name.toLowerCase().includes(q));
+    for (const f of fileMatches.slice(0, wantsCodebase ? 7 : 8)) items.push(f);
+    return items;
   }, [mentionPaletteOpen, mentionQuery, roomFiles]);
 
   const filteredSlashCommands = useMemo<ChatSlashCommand[]>(() => {
@@ -2927,9 +2935,15 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
 
     if (!isAtMentioningSomeoneElse) {
       const cleanContent = content.replace(/@(agent|blackswan|swanbot|swan)\s*/gi, '').trim() || content;
-      const planPromptPrefix = planMode
-        ? `[PLAN-ONLY MODE — Do not call any file-mutation, terminal, or browser tools. Describe what you would change, list the affected files, and lay out the ordered steps you would take. ${FILE_PROPOSAL_FORMAT_HINT} End your reply with the line "Awaiting confirmation to execute." so the team can review each apply card.]`
-        : undefined;
+      const prefixParts: string[] = [];
+      if (planMode) {
+        prefixParts.push(`[PLAN-ONLY MODE — Do not call any file-mutation, terminal, or browser tools. Describe what you would change, list the affected files, and lay out the ordered steps you would take. ${FILE_PROPOSAL_FORMAT_HINT} End your reply with the line "Awaiting confirmation to execute." so the team can review each apply card.]`);
+      }
+      if (/\B@codebase\b/i.test(cleanContent) && roomFiles.length > 0) {
+        const fileList = roomFiles.map((f) => `- ${f.name}`).join('\n');
+        prefixParts.push(`[Codebase context — files in this room (${roomFiles.length} total):\n${fileList}\nThe user can also mention specific files with @filename to surface their content.]`);
+      }
+      const planPromptPrefix = prefixParts.length > 0 ? prefixParts.join('\n\n') : undefined;
       setBotTyping(true);
       startCodingWorkbench(cleanContent);
       try {
@@ -3676,7 +3690,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         {mentionPaletteOpen && filteredMentionFiles.length > 0 && (
           <View style={[s.chatPalette, { borderColor: accentColor + '66' }]}>
             <View style={s.chatPaletteHeaderRow}>
-              <Text style={s.chatPaletteHeader}>FILES{mentionQuery ? ` · ${mentionQuery}` : ''}</Text>
+              <Text style={s.chatPaletteHeader}>CONTEXT{mentionQuery ? ` · ${mentionQuery}` : ''}</Text>
               <Text style={s.chatPaletteHint}>↑↓ ⏎ ⎋</Text>
             </View>
             {filteredMentionFiles.map((f, idx) => {
@@ -3691,7 +3705,12 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
                     (hovered || active) && { backgroundColor: accentColor + (active ? '22' : '14') },
                   ]}
                 >
-                  <Text style={[s.chatPaletteTitle, { color: accentColor }]}>@{f.name}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                    <Text style={[s.chatPaletteTitle, { color: accentColor }]}>@{f.name}</Text>
+                    {f.meta && f.description ? (
+                      <Text style={s.chatPaletteDesc} numberOfLines={1}>{f.description}</Text>
+                    ) : null}
+                  </View>
                 </Pressable>
               );
             })}
