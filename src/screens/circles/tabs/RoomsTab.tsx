@@ -2498,6 +2498,27 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     return getMatchingChatSlashCommands(slashQuery).slice(0, 8);
   }, [slashPaletteOpen, slashQuery]);
 
+  // Plain-language summary of what the AI will see on the next send. Used
+  // by the hint-line under the input so users can verify before sending
+  // (and notice when their cutoff or plan toggles are still active).
+  const contextSummary = useMemo(() => {
+    const parts: string[] = [];
+    const inContext = (() => {
+      // cutoffIndex check happens later; recompute the slice size here
+      // so this memo is independent of the rendering pass.
+      const cIdx = contextCutoffId ? messages.findIndex((m) => m.id === contextCutoffId) : -1;
+      return cIdx === -1 ? messages.length : cIdx + 1;
+    })();
+    if (inContext > 0) parts.push(`${inContext} msg${inContext === 1 ? '' : 's'}`);
+    if (activeFile?.name) parts.push(`active ${activeFile.name}`);
+    const mentions = (input.match(/@(\S+)/g) || []).filter((m) => !/^@(agent|blackswan|swanbot|swan)$/i.test(m));
+    if (mentions.length > 0) parts.push(`${mentions.length} @ref${mentions.length === 1 ? '' : 's'}`);
+    if (pastedImage) parts.push('1 image');
+    if (planMode) parts.push('plan-only');
+    if (contextCutoffId) parts.push('branched');
+    return parts.join(' · ');
+  }, [messages, contextCutoffId, activeFile, input, pastedImage, planMode]);
+
   // Reset cursor whenever the palette opens or filter shrinks below it.
   useEffect(() => {
     setPaletteIndex(0);
@@ -3738,7 +3759,12 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             {'   '}
             <Text style={s.inputHintKey}>⇧↵</Text> newline
           </Text>
-          <Text style={[s.inputHintText, { marginLeft: 'auto' as any }]}>{input.length}/2000</Text>
+          {contextSummary ? (
+            <Text style={[s.inputHintText, { marginLeft: 'auto' as any, color: accentColor + 'dd' }]} numberOfLines={1}>
+              {contextSummary}
+            </Text>
+          ) : null}
+          <Text style={[s.inputHintText, contextSummary ? null : { marginLeft: 'auto' as any }]}>{input.length}/2000</Text>
         </View>
       </View>
 
