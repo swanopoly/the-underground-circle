@@ -33,6 +33,12 @@ import {
 } from '../../../lib/github';
 import { sendRoomStructuredChatMessage } from '../../../lib/roomChatService';
 import { getMatchingChatSlashCommands, type ChatSlashCommand } from '../../../lib/chatSlashCommands';
+import {
+  parseAiFileProposals,
+  stripAiFileProposals,
+  FILE_PROPOSAL_FORMAT_HINT,
+  type AiFileProposal,
+} from '../../../lib/aiFileProposal';
 import { ROOM_WORKSPACE_FOCUS_FILE_EVENT, ROOM_WORKSPACE_OPEN_EVENT } from '../../../lib/roomWorkspaceLauncher';
 import { SESSION_PROFILE_OPTIONS, getSessionProfileMeta, loadRoomSessionProfile, saveRoomSessionProfile, type SessionCodingProfile } from '../../../lib/chatSessionProfile';
 import { isCodingGenerationRequest } from '../../../lib/codingWorkbench';
@@ -2562,6 +2568,70 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     } catch {}
   }, []);
 
+  // Apply an AI-proposed file change. Looks up the room_files row by
+  // name; if missing, creates a new file. Posts an edit_event so the
+  // team sees what was applied even if they were scrolled up.
+  const handleApplyProposal = useCallback(async (msgId: string, proposal: AiFileProposal) => {
+    const { data: { user } } = await supabase.auth.getUser();
+    const target = roomFiles.find((f) => f.name === proposal.filePath);
+    try {
+      if (target) {
+        const { error } = await supabase.from('room_files')
+          .update({ content: proposal.content, updated_at: new Date().toISOString() })
+          .eq('id', target.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('room_files').insert({
+          room_id: roomId,
+          name: proposal.filePath,
+          content: proposal.content,
+          created_by: user?.id || null,
+        });
+        if (error) throw error;
+        // Refresh the file list so subsequent applies hit the right row.
+        const { data } = await supabase.from('room_files')
+          .select('id, name').eq('room_id', roomId).eq('is_deleted', false);
+        if (data) setRoomFiles(data);
+      }
+      // Mark this proposal applied in the source AI message metadata so
+      // the apply card flips to "applied" for everyone in the room.
+      setMessages((prev) => prev.map((m) => {
+        if (m.id !== msgId) return m;
+        const meta = (m.metadata as any) || {};
+        const applied: string[] = Array.isArray(meta.appliedProposals) ? meta.appliedProposals.slice() : [];
+        if (!applied.includes(proposal.filePath)) applied.push(proposal.filePath);
+        const nextMeta = { ...meta, appliedProposals: applied };
+        supabase.from('room_messages').update({ metadata: nextMeta }).eq('id', m.id).then(() => {});
+        return { ...m, metadata: nextMeta };
+      }));
+      await supabase.from('room_messages').insert({
+        room_id: roomId,
+        user_id: user?.id || null,
+        content: `Applied proposed changes to ${proposal.filePath}`,
+        message_type: 'edit_event',
+        metadata: { applied_path: proposal.filePath },
+      });
+    } catch (err: any) {
+      await supabase.from('room_messages').insert({
+        room_id: roomId, user_id: null, agent_name: 'System',
+        content: `Could not apply ${proposal.filePath}: ${err?.message || 'unknown error'}`,
+        message_type: 'system',
+      });
+    }
+  }, [roomFiles, roomId]);
+
+  const handleRejectProposal = useCallback(async (msgId: string, proposal: AiFileProposal) => {
+    setMessages((prev) => prev.map((m) => {
+      if (m.id !== msgId) return m;
+      const meta = (m.metadata as any) || {};
+      const rejected: string[] = Array.isArray(meta.rejectedProposals) ? meta.rejectedProposals.slice() : [];
+      if (!rejected.includes(proposal.filePath)) rejected.push(proposal.filePath);
+      const nextMeta = { ...meta, rejectedProposals: rejected };
+      supabase.from('room_messages').update({ metadata: nextMeta }).eq('id', m.id).then(() => {});
+      return { ...m, metadata: nextMeta };
+    }));
+  }, []);
+
   const cutoffIndex = useMemo(() => {
     if (!contextCutoffId) return -1;
     return messages.findIndex((m) => m.id === contextCutoffId);
@@ -2745,7 +2815,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     if (!isAtMentioningSomeoneElse) {
       const cleanContent = content.replace(/@(agent|blackswan|swanbot|swan)\s*/gi, '').trim() || content;
       const planPromptPrefix = planMode
-        ? '[PLAN-ONLY MODE — Do not call any file-mutation, terminal, or browser tools. Describe what you would change, list the affected files, and lay out the ordered steps you would take. End your reply with the line "Awaiting confirmation to execute." so the team can review and re-prompt without PLAN-ONLY to run.]'
+        ? `[PLAN-ONLY MODE — Do not call any file-mutation, terminal, or browser tools. Describe what you would change, list the affected files, and lay out the ordered steps you would take. ${FILE_PROPOSAL_FORMAT_HINT} End your reply with the line "Awaiting confirmation to execute." so the team can review each apply card.]`
         : undefined;
       setBotTyping(true);
       startCodingWorkbench(cleanContent);
@@ -3356,6 +3426,8 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
               onCopy={handleCopyMessage}
               onContinue={handleContinueFromMessage}
               onRerun={handleRerunFromMessage}
+              onApplyProposal={handleApplyProposal}
+              onRejectProposal={handleRejectProposal}
               busy={botTyping}
               dimmed={dimmed}
               isCutoff={isCutoff}
@@ -3660,7 +3732,95 @@ function AgentThinkingLoader() {
   );
 }
 
-const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, onContinue, onRerun, busy, dimmed, isCutoff }: {
+function FileProposalCard({ proposal, lineCount, accentColor, applied, rejected, onApply, onReject }: {
+  proposal: AiFileProposal;
+  lineCount: number;
+  accentColor: string;
+  applied: boolean;
+  rejected: boolean;
+  onApply: () => void;
+  onReject: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const settled = applied || rejected;
+  return (
+    <View style={{
+      borderWidth: 1,
+      borderColor: applied ? '#22c55e55' : rejected ? '#ef444455' : accentColor + '55',
+      backgroundColor: applied ? '#0a1f1a' : rejected ? '#1f0a0a' : '#0a0e1a',
+      borderRadius: 12,
+      padding: 10,
+      gap: 6,
+    }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        <View style={{
+          paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6,
+          backgroundColor: applied ? '#22c55e22' : rejected ? '#ef444422' : accentColor + '22',
+        }}>
+          <Text style={{
+            color: applied ? '#22c55e' : rejected ? '#ef4444' : accentColor,
+            fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: MONO,
+          }}>
+            {applied ? 'APPLIED' : rejected ? 'REJECTED' : 'PROPOSED'}
+          </Text>
+        </View>
+        <Text style={{ color: '#e2e8f0', fontSize: 12, fontWeight: '800', fontFamily: MONO, flex: 1 }} numberOfLines={1}>
+          {proposal.filePath}
+        </Text>
+        <Text style={{ color: '#64748b', fontSize: 10, fontFamily: MONO }}>
+          {lineCount} line{lineCount === 1 ? '' : 's'}
+        </Text>
+      </View>
+      <Pressable onPress={() => setExpanded((v) => !v)}
+        {...(Platform.OS === 'web' ? { onHoverIn: () => {}, } : {})}
+        style={{ paddingHorizontal: 4 }}>
+        <Text style={{ color: '#94a3b8', fontSize: 10, fontWeight: '700' }}>
+          {expanded ? '▾ Hide preview' : '▸ Show preview'}
+        </Text>
+      </Pressable>
+      {expanded && (
+        <View style={{
+          backgroundColor: '#020409',
+          borderWidth: 1, borderColor: '#1f2937',
+          borderRadius: 8, padding: 8, maxHeight: 320,
+        }}>
+          <ScrollView style={{ maxHeight: 304 }}>
+            <Text style={{
+              color: '#e2e8f0', fontSize: 11, lineHeight: 17,
+              fontFamily: MONO,
+            }} selectable>
+              {proposal.content}
+            </Text>
+          </ScrollView>
+        </View>
+      )}
+      {!settled && (
+        <View style={{ flexDirection: 'row', gap: 6, marginTop: 2 }}>
+          <Pressable onPress={onApply}
+            style={{
+              flex: 1,
+              paddingVertical: 6, borderRadius: 8,
+              backgroundColor: accentColor, alignItems: 'center',
+              ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+            }}>
+            <Text style={{ color: '#0b1220', fontSize: 11, fontWeight: '900', letterSpacing: 0.5 }}>✓ APPLY</Text>
+          </Pressable>
+          <Pressable onPress={onReject}
+            style={{
+              flex: 1,
+              paddingVertical: 6, borderRadius: 8,
+              borderWidth: 1, borderColor: '#1f2937', backgroundColor: '#0d1320', alignItems: 'center',
+              ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+            }}>
+            <Text style={{ color: '#94a3b8', fontSize: 11, fontWeight: '900', letterSpacing: 0.5 }}>✕ REJECT</Text>
+          </Pressable>
+        </View>
+      )}
+    </View>
+  );
+}
+
+const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, onContinue, onRerun, onApplyProposal, onRejectProposal, busy, dimmed, isCutoff }: {
   msg: RoomMessage;
   accentColor: string;
   circleId: string;
@@ -3675,6 +3835,8 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
   onCopy?: (text: string) => void;
   onContinue?: (id: string) => void;
   onRerun?: (id: string) => void;
+  onApplyProposal?: (msgId: string, proposal: AiFileProposal) => void;
+  onRejectProposal?: (msgId: string, proposal: AiFileProposal) => void;
   busy?: boolean;
   dimmed?: boolean;
   isCutoff?: boolean;
@@ -3686,6 +3848,13 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
     : [];
   const pinned = !!(msg.metadata as any)?.pinned;
   const dimStyle = dimmed ? { opacity: 0.45 } : null;
+  // Parse any ```edit:filename``` proposals out of agent responses so we can
+  // surface Apply / Reject cards. Strip them from the visible text below
+  // (the cards carry the path + content already).
+  const proposals = msg.message_type === 'agent_output' ? parseAiFileProposals(msg.content || '') : [];
+  const visibleContent = proposals.length > 0 ? stripAiFileProposals(msg.content || '') : (msg.content || '');
+  const appliedSet = new Set<string>(Array.isArray((msg.metadata as any)?.appliedProposals) ? (msg.metadata as any).appliedProposals : []);
+  const rejectedSet = new Set<string>(Array.isArray((msg.metadata as any)?.rejectedProposals) ? (msg.metadata as any).rejectedProposals : []);
   if (msg.message_type==='edit_event')
     return <View style={{alignItems:'center',flexDirection:'row',justifyContent:'center',gap:6}}><Text style={{color:'#555',fontSize:11,fontStyle:'italic'}}>✏️ {msg.content} · {time}</Text>{onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{opacity:0.4}}><Text style={{color:'#f85149',fontSize:10}}>×</Text></Pressable>}</View>;
   if (msg.message_type==='system')
@@ -3746,7 +3915,28 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
           )}
           {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
         </View>
-        <Text style={{color:'#ccc',fontSize:12,lineHeight:18}}>{isTask ? msg.metadata?.prompt || msg.content : msg.content}</Text>
+        <Text style={{color:'#ccc',fontSize:12,lineHeight:18}}>{isTask ? msg.metadata?.prompt || msg.content : (visibleContent || msg.content)}</Text>
+        {proposals.length > 0 && (
+          <View style={{ marginTop: 10, gap: 8 }}>
+            {proposals.map((p) => {
+              const applied = appliedSet.has(p.filePath);
+              const rejected = rejectedSet.has(p.filePath);
+              const lineCount = (p.content.match(/\n/g)?.length || 0) + 1;
+              return (
+                <FileProposalCard
+                  key={`${p.filePath}-${p.index}`}
+                  proposal={p}
+                  lineCount={lineCount}
+                  accentColor={accentColor}
+                  applied={applied}
+                  rejected={rejected}
+                  onApply={() => onApplyProposal && onApplyProposal(msg.id, p)}
+                  onReject={() => onRejectProposal && onRejectProposal(msg.id, p)}
+                />
+              );
+            })}
+          </View>
+        )}
         {images.length > 0 && (
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
             {images.map((src, idx) => (
