@@ -50,7 +50,7 @@ import { analyzeMessageRouting } from '../../lib/messageRouting';
 import { rageForget } from '../../lib/memoryActions';
 import { supabase } from '../../lib/supabase';
 import { useClaudeSpendBreakdown } from '../../lib/circleCostTelemetry';
-import { listRuns, type AgentRun } from '../../lib/agentRunSystem';
+import { listRuns, updateRunStatus, type AgentRun } from '../../lib/agentRunSystem';
 import { estimateCost, resolveModelRate } from '../../lib/modelPricing';
 import QuickActionDock from '../../screens/circles/tabs/chat/QuickActionDock';
 
@@ -203,6 +203,7 @@ export default function OpenSwanConsole({
   const [budgetCap, setBudgetCap] = useState<number | null>(null);
   const [recentRuns, setRecentRuns] = useState<AgentRun[]>([]);
   const [recentRunsExpanded, setRecentRunsExpanded] = useState(false);
+  const [cancellingRunIds, setCancellingRunIds] = useState<Set<string>>(() => new Set());
   const [showAvailableTools, setShowAvailableTools] = useState(false);
   const [toolFilter, setToolFilter] = useState('');
   // Saved (task, mode) templates — power-user shortcuts. Stored in
@@ -1008,7 +1009,64 @@ export default function OpenSwanConsole({
                             ) : ''}
                           </Text>
                         </View>
-                        <Text style={styles.recentRunArrow}>{isLive ? '◉' : '↺'}</Text>
+                        {isLive ? (
+                          <Pressable
+                            onPress={async (e: any) => {
+                              // Stop event from bubbling — without this,
+                              // tapping STOP would also fire the row's
+                              // "reuse" action and refill the task.
+                              e?.stopPropagation?.();
+                              if (cancellingRunIds.has(r.id)) return;
+                              setCancellingRunIds((prev) => new Set(prev).add(r.id));
+                              // Optimistic — flip status locally so the
+                              // dot stops pulsing immediately.
+                              setRecentRuns((prev) =>
+                                prev.map((row) =>
+                                  row.id === r.id ? { ...row, status: 'cancelled' } : row,
+                                ),
+                              );
+                              try {
+                                await updateRunStatus(r.id, 'cancelled', {
+                                  metadata: {
+                                    ...(r.metadata || {}),
+                                    cancelled_by: 'user',
+                                    cancelled_at: new Date().toISOString(),
+                                    cancelled_from: 'recent_runs_panel',
+                                  },
+                                });
+                              } catch {
+                                // Revert if write failed; realtime sub
+                                // will eventually correct either way.
+                                setRecentRuns((prev) =>
+                                  prev.map((row) =>
+                                    row.id === r.id && row.status === 'cancelled'
+                                      ? { ...row, status: 'running' }
+                                      : row,
+                                  ),
+                                );
+                              } finally {
+                                setCancellingRunIds((prev) => {
+                                  const next = new Set(prev);
+                                  next.delete(r.id);
+                                  return next;
+                                });
+                              }
+                            }}
+                            disabled={cancellingRunIds.has(r.id)}
+                            style={({ pressed }: any) => [
+                              styles.recentRunStopBtn,
+                              pressed && { backgroundColor: '#ef444420' },
+                              cancellingRunIds.has(r.id) && { opacity: 0.5 },
+                            ]}
+                            accessibilityLabel={`Stop run: ${r.title}`}
+                          >
+                            <Text style={styles.recentRunStopText}>
+                              {cancellingRunIds.has(r.id) ? '…' : '■'}
+                            </Text>
+                          </Pressable>
+                        ) : (
+                          <Text style={styles.recentRunArrow}>↺</Text>
+                        )}
                       </Pressable>
                     );
                   })}
@@ -1709,6 +1767,22 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontWeight: '900',
     letterSpacing: 0.8,
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  recentRunStopBtn: {
+    width: 26,
+    height: 26,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#ef444460',
+    backgroundColor: '#7f1d1d10',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  recentRunStopText: {
+    color: '#fca5a5',
+    fontSize: 11,
+    fontWeight: '900',
     fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
   },
   recentRunsChevron: {
