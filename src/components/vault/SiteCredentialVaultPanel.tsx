@@ -133,6 +133,68 @@ function webCursor(cursor: string = 'pointer') {
   return Platform.OS === 'web' ? ({ cursor } as any) : null;
 }
 
+function webTransition(properties: string = 'background-color, box-shadow, transform') {
+  return Platform.OS === 'web' ? ({ transition: `${properties} 0.18s ease` } as any) : null;
+}
+
+function accordionHoverStyle(accent: string) {
+  return Platform.select({
+    web: {
+      backgroundColor: '#121a2c',
+      boxShadow: `inset 0 0 0 1px ${accent}66, 0 8px 24px ${accent}1f`,
+    } as any,
+    default: { backgroundColor: '#121a2c' },
+  });
+}
+
+function accordionPressedStyle(accent: string) {
+  return Platform.select({
+    web: {
+      backgroundColor: '#0a1322',
+      boxShadow: `inset 0 0 0 1px ${accent}aa`,
+      transform: [{ scale: 0.997 }],
+    } as any,
+    default: { backgroundColor: '#0a1322' },
+  });
+}
+
+function accordionExpandedStyle(accent: string) {
+  return Platform.select({
+    web: {
+      backgroundColor: '#101828',
+      boxShadow: `inset 0 -1px 0 ${accent}33`,
+    } as any,
+    default: { backgroundColor: '#101828' },
+  });
+}
+
+function AccordionChevron({ open, accent }: { open: boolean; accent: string }) {
+  return (
+    <View
+      style={[
+        accordionChevronWrapStyle,
+        webTransition('transform, color'),
+        { transform: [{ rotate: open ? '90deg' : '0deg' }] },
+      ]}
+    >
+      <Text style={[accordionChevronTextStyle, { color: accent }]}>›</Text>
+    </View>
+  );
+}
+
+const accordionChevronWrapStyle = {
+  width: 24,
+  height: 24,
+  alignItems: 'center' as const,
+  justifyContent: 'center' as const,
+};
+
+const accordionChevronTextStyle = {
+  fontSize: 22,
+  fontWeight: '900' as const,
+  lineHeight: 22,
+};
+
 function formatDate(value?: string | null): string {
   if (!value) return 'Never';
   const date = new Date(value);
@@ -1163,16 +1225,23 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           <MetricCard label="Rotation Due" value={String(readinessStats.rotationDue)} color="#f97316" />
         </View>
 
-        <View style={styles.card}>
+        <View style={[styles.card, importOpen && styles.cardExpanded]}>
           <Pressable
             onPress={() => setImportOpen((value) => !value)}
-            style={[styles.cardHeader, webCursor()]}
+            style={({ hovered, pressed }: any) => [
+              styles.cardHeader,
+              webTransition(),
+              importOpen && accordionExpandedStyle(accentColor),
+              hovered && accordionHoverStyle(accentColor),
+              pressed && accordionPressedStyle(accentColor),
+              webCursor(),
+            ]}
           >
             <View style={styles.cardHeaderText}>
               <Text style={styles.cardTitle}>Import from CSV</Text>
               <Text style={styles.cardMeta}>1Password, Bitwarden, or LastPass exports. Auto-detects format.</Text>
             </View>
-            <Text style={[styles.chevron, { color: accentColor }]}>{importOpen ? '-' : '+'}</Text>
+            <AccordionChevron open={importOpen} accent={accentColor} />
           </Pressable>
           {importOpen ? (
             <View style={styles.form}>
@@ -1261,16 +1330,23 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           ) : null}
         </View>
 
-        <View style={styles.card}>
+        <View style={[styles.card, expandedId === 'new' && styles.cardExpanded]}>
           <Pressable
             onPress={() => setExpandedId(expandedId === 'new' ? null : 'new')}
-            style={[styles.cardHeader, webCursor()]}
+            style={({ hovered, pressed }: any) => [
+              styles.cardHeader,
+              webTransition(),
+              expandedId === 'new' && accordionExpandedStyle(accentColor),
+              hovered && accordionHoverStyle(accentColor),
+              pressed && accordionPressedStyle(accentColor),
+              webCursor(),
+            ]}
           >
             <View style={styles.cardHeaderText}>
               <Text style={styles.cardTitle}>Add or Change Credentials</Text>
               <Text style={styles.cardMeta}>Encrypted at rest. Existing platform + label rotates the secret.</Text>
             </View>
-            <Text style={[styles.chevron, { color: accentColor }]}>{expandedId === 'new' ? '-' : '+'}</Text>
+            <AccordionChevron open={expandedId === 'new'} accent={accentColor} />
           </Pressable>
 
           {expandedId === 'new' ? (
@@ -1593,16 +1669,27 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           </View>
         ) : null}
 
-        <View style={styles.card}>
+        <View style={[styles.card, globalAuditOpen && styles.cardExpanded]}>
           <Pressable
             onPress={() => setGlobalAuditOpen((value) => !value)}
-            style={[styles.cardHeader, webCursor()]}
+            style={({ hovered, pressed }: any) => [
+              styles.cardHeader,
+              webTransition(),
+              globalAuditOpen && accordionExpandedStyle(accentColor),
+              hovered && accordionHoverStyle(accentColor),
+              pressed && accordionPressedStyle(accentColor),
+              webCursor(),
+            ]}
           >
             <View style={styles.cardHeaderText}>
               <Text style={styles.cardTitle}>Recent activity</Text>
-              <Text style={styles.cardMeta}>Last 50 vault events across every credential. Use this for audits and incident review.</Text>
+              <Text style={styles.cardMeta}>
+                {globalAuditEntries.length > 0
+                  ? `Last ${globalAuditEntries.length} vault events across every credential.`
+                  : 'Last 50 vault events across every credential. Use this for audits and incident review.'}
+              </Text>
             </View>
-            <Text style={[styles.chevron, { color: accentColor }]}>{globalAuditOpen ? '-' : '+'}</Text>
+            <AccordionChevron open={globalAuditOpen} accent={accentColor} />
           </Pressable>
           {globalAuditOpen ? (
             <View style={styles.form}>
@@ -1696,8 +1783,21 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           const origins = entryAllowedOrigins(entry);
           const isBusy = !!updating[entry.id] || !!testing[entry.id];
           const isSelected = selectedIds.has(entry.id);
+          const lastTestedAt = entryMetadataString(entry, 'lastTestedAt');
+          const lastTestSuccess = entryMetadataBoolean(entry, 'lastTestSuccess');
+          const lastTestPill: { label: string; color: string } | null = lastTestedAt
+            ? lastTestSuccess === false
+              ? { label: `TEST FAIL · ${formatAuditTime(lastTestedAt)}`, color: '#f87171' }
+              : { label: `TEST OK · ${formatAuditTime(lastTestedAt)}`, color: '#34d399' }
+            : null;
+          const lastUsedRelative = entry.lastUsedAt ? formatAuditTime(entry.lastUsedAt) : null;
+          const cardMetaBits = [
+            entry.siteUrl || 'No site URL',
+            entry.username || null,
+            lastUsedRelative ? `last used ${lastUsedRelative}` : null,
+          ].filter(Boolean) as string[];
           return (
-            <View key={entry.id} style={styles.card}>
+            <View key={entry.id} style={[styles.card, expanded && styles.cardExpanded, isSelected && { borderColor: accentColor + '66' }]}>
               <View style={[styles.cardHeader, isSelected && { backgroundColor: accentColor + '0c' }]}>
                 <Pressable
                   onPress={() => toggleSelected(entry.id)}
@@ -1706,12 +1806,22 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                 />
                 <Pressable
                   onPress={() => setExpandedId(expanded ? null : entry.id)}
-                  style={[styles.cardHeaderTouch, webCursor()]}
+                  style={({ hovered, pressed }: any) => [
+                    styles.cardHeaderTouch,
+                    webTransition(),
+                    expanded && accordionExpandedStyle(accentColor),
+                    hovered && accordionHoverStyle(accentColor),
+                    pressed && accordionPressedStyle(accentColor),
+                    webCursor(),
+                  ]}
                 >
                   <View style={styles.cardHeaderText}>
                     <View style={styles.cardTitleRow}>
                       <Text style={styles.cardTitle}>{entry.platform} / {entry.label}</Text>
                       <Text style={[styles.readinessBadge, { color: readiness.color, borderColor: readiness.color + '55' }]}>{readiness.label}</Text>
+                      {lastTestPill ? (
+                        <Text style={[styles.testPill, { color: lastTestPill.color, borderColor: lastTestPill.color + '55' }]}>{lastTestPill.label}</Text>
+                      ) : null}
                       {rotationDue ? <Text style={styles.rotationBadge}>Rotation due</Text> : null}
                       {!entry.isActive ? <Text style={styles.inactiveBadge}>Inactive</Text> : null}
                       {isHighTrust(entry) ? <Text style={styles.highTrustBadge}>HIGH-TRUST</Text> : null}
@@ -1720,9 +1830,9 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                         <Text key={tag} style={[styles.tagBadge, { color: accentColor, borderColor: accentColor + '55' }]}>{tag}</Text>
                       ))}
                     </View>
-                    <Text style={styles.cardMeta}>{entry.siteUrl || 'No site URL'} {entry.username ? `- ${entry.username}` : ''}</Text>
+                    <Text style={styles.cardMeta}>{cardMetaBits.join(' · ')}</Text>
                   </View>
-                  <Text style={[styles.chevron, { color: accentColor }]}>{expanded ? '-' : '+'}</Text>
+                  <AccordionChevron open={expanded} accent={accentColor} />
                 </Pressable>
               </View>
 
@@ -1744,7 +1854,6 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                     <Text style={styles.sectionTitle}>Service details</Text>
                     <InfoLine label="Login URL" value={entry.loginUrl || entry.siteUrl || 'Not set'} />
                     <InfoLine label="Secret type" value={entry.secretKind.replace(/_/g, ' ')} />
-                    <InfoLine label="Username" value={entry.username || 'Not set'} />
                     <InfoLine label="Updated" value={formatDate(entry.updatedAt)} />
                     <InfoLine label="Last used" value={formatDate(entry.lastUsedAt)} />
                     <InfoLine label="Last tested" value={formatDate(entryMetadataString(entry, 'lastTestedAt'))} />
@@ -2134,6 +2243,22 @@ const styles = StyleSheet.create({
     borderColor: '#ffffff14',
     backgroundColor: '#0d1320',
     overflow: 'hidden',
+    ...Platform.select({
+      web: {
+        boxShadow: '0 1px 0 rgba(255,255,255,0.04) inset, 0 4px 14px rgba(0,0,0,0.35)',
+        transition: 'border-color 0.18s ease, box-shadow 0.18s ease',
+      },
+      default: {},
+    }) as any,
+  },
+  cardExpanded: {
+    borderColor: '#ffffff22',
+    ...Platform.select({
+      web: {
+        boxShadow: '0 1px 0 rgba(255,255,255,0.06) inset, 0 8px 28px rgba(0,0,0,0.5)',
+      },
+      default: {},
+    }) as any,
   },
   cardHeader: {
     minHeight: 62,
@@ -2366,6 +2491,18 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     textTransform: 'uppercase',
     letterSpacing: 0.7,
+  },
+  testPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    overflow: 'hidden',
+    borderWidth: 1,
+    fontSize: 9,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
   },
   cardMeta: {
     marginTop: 3,
