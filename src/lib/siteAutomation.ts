@@ -7,20 +7,28 @@ export interface SiteCredential {
   id: string;
   platform: string;
   siteUrl: string | null;
+  loginUrl?: string | null;
   username: string | null;
   label: string;
   isActive: boolean;
   metadata: Record<string, unknown>;
+  secretKind?: string;
+  updatedAt?: string | null;
+  lastUsedAt?: string | null;
 }
 
 interface CredentialRow {
   id: string;
   platform: string;
   site_url: string | null;
+  login_url?: string | null;
   username: string | null;
   label: string;
   is_active: boolean;
   metadata?: Record<string, unknown>;
+  secret_kind?: string;
+  updated_at?: string | null;
+  last_used_at?: string | null;
 }
 
 interface StoredCredentialRow {
@@ -31,6 +39,79 @@ interface StoredCredentialRow {
   credential_encrypted?: string | null;
   user_id?: string | null;
   circle_id?: string | null;
+}
+
+export type SiteCredentialSecretKind =
+  | 'password'
+  | 'application_password'
+  | 'api_token'
+  | 'oauth_token'
+  | 'session_cookie';
+
+export interface SiteCredentialVaultEntry {
+  id: string;
+  circleId: string;
+  platform: string;
+  siteUrl: string | null;
+  loginUrl: string | null;
+  username: string | null;
+  label: string;
+  secretKind: SiteCredentialSecretKind;
+  metadata: Record<string, unknown>;
+  accessPolicy: Record<string, unknown>;
+  isActive: boolean;
+  createdBy?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  lastUsedAt?: string | null;
+  lastUsedBy?: string | null;
+  expiresAt?: string | null;
+  rotationDueAt?: string | null;
+}
+
+export interface SiteCredentialAuditEntry {
+  id: string;
+  credentialId: string | null;
+  circleId: string;
+  actorId: string | null;
+  action: 'store' | 'list' | 'reveal' | 'delete' | 'use' | 'rotate' | 'update' | 'test';
+  purpose: string | null;
+  success: boolean;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface StoreSiteCredentialVaultInput {
+  circleId: string;
+  platform: string;
+  siteUrl?: string | null;
+  loginUrl?: string | null;
+  username?: string | null;
+  secret: string;
+  label?: string;
+  secretKind?: SiteCredentialSecretKind;
+  metadata?: Record<string, unknown>;
+  accessPolicy?: Record<string, unknown>;
+  expiresAt?: string | null;
+  rotationDueAt?: string | null;
+}
+
+export interface UpdateSiteCredentialVaultControlsInput {
+  credentialId: string;
+  siteUrl?: string | null;
+  loginUrl?: string | null;
+  username?: string | null;
+  label?: string | null;
+  metadata?: Record<string, unknown> | null;
+  accessPolicy?: Record<string, unknown> | null;
+  expiresAt?: string | null;
+  rotationDueAt?: string | null;
+  isActive?: boolean | null;
+}
+
+export interface RevealSiteCredentialSecretResult {
+  entry: SiteCredentialVaultEntry;
+  secret: string;
 }
 
 export type WordPressPostStatus = 'publish' | 'draft' | 'pending' | 'future' | 'private';
@@ -113,6 +194,22 @@ export interface WordPressTag {
 
 let userSiteCredentialsUnavailable = false;
 
+function toSiteCredential(row: CredentialRow): SiteCredential {
+  return {
+    id: row.id,
+    platform: row.platform,
+    siteUrl: row.site_url,
+    loginUrl: row.login_url || null,
+    username: row.username,
+    label: row.label,
+    isActive: row.is_active,
+    metadata: row.metadata || {},
+    secretKind: row.secret_kind,
+    updatedAt: row.updated_at || null,
+    lastUsedAt: row.last_used_at || null,
+  };
+}
+
 function isMissingRelationError(error: any, relation: string): boolean {
   if (!error) return false;
   const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.toLowerCase();
@@ -120,6 +217,231 @@ function isMissingRelationError(error: any, relation: string): boolean {
     || error?.status === 404
     || message.includes(`'public.${relation.toLowerCase()}'`)
     || message.includes(relation.toLowerCase());
+}
+
+export function isSiteCredentialVaultMissing(error: any): boolean {
+  const code = String(error?.code || '');
+  const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.toLowerCase();
+  return code === 'PGRST202'
+    || code === 'PGRST204'
+    || code === '42883'
+    || message.includes('list_circle_site_credentials')
+    || message.includes('store_circle_site_credential')
+    || message.includes('get_circle_site_credential_secret')
+    || message.includes('delete_circle_site_credential')
+    || message.includes('list_circle_site_credential_access_log')
+    || message.includes('update_circle_site_credential_controls')
+    || message.includes('record_circle_site_credential_test_result')
+    || message.includes('could not find the function');
+}
+
+function normalizeRpcPayload(data: unknown): any {
+  if (typeof data === 'string') {
+    try {
+      return JSON.parse(data);
+    } catch {
+      return data;
+    }
+  }
+  return data;
+}
+
+function normalizeVaultEntry(row: any): SiteCredentialVaultEntry {
+  return {
+    id: String(row.id),
+    circleId: String(row.circleId || row.circle_id),
+    platform: String(row.platform || '').toLowerCase(),
+    siteUrl: row.siteUrl ?? row.site_url ?? null,
+    loginUrl: row.loginUrl ?? row.login_url ?? null,
+    username: row.username ?? null,
+    label: row.label || 'default',
+    secretKind: (row.secretKind || row.secret_kind || 'password') as SiteCredentialSecretKind,
+    metadata: (row.metadata || {}) as Record<string, unknown>,
+    accessPolicy: (row.accessPolicy || row.access_policy || {}) as Record<string, unknown>,
+    isActive: row.isActive ?? row.is_active ?? true,
+    createdBy: row.createdBy ?? row.created_by ?? null,
+    createdAt: row.createdAt ?? row.created_at ?? null,
+    updatedAt: row.updatedAt ?? row.updated_at ?? null,
+    lastUsedAt: row.lastUsedAt ?? row.last_used_at ?? null,
+    lastUsedBy: row.lastUsedBy ?? row.last_used_by ?? null,
+    expiresAt: row.expiresAt ?? row.expires_at ?? null,
+    rotationDueAt: row.rotationDueAt ?? row.rotation_due_at ?? null,
+  };
+}
+
+function normalizeVaultAuditEntry(row: any): SiteCredentialAuditEntry {
+  return {
+    id: String(row.id),
+    credentialId: row.credentialId ?? row.credential_id ?? null,
+    circleId: String(row.circleId || row.circle_id),
+    actorId: row.actorId ?? row.actor_id ?? null,
+    action: (row.action || 'use') as SiteCredentialAuditEntry['action'],
+    purpose: row.purpose ?? null,
+    success: row.success !== false,
+    metadata: (row.metadata || {}) as Record<string, unknown>,
+    createdAt: row.createdAt || row.created_at || new Date().toISOString(),
+  };
+}
+
+export async function listSiteCredentialVault(
+  circleId: string,
+  platform?: string,
+): Promise<{ entries: SiteCredentialVaultEntry[]; error?: string; vaultMissing?: boolean }> {
+  const { data, error } = await supabase.rpc('list_circle_site_credentials', {
+    p_circle_id: circleId,
+    p_platform: platform || null,
+  });
+
+  if (error) {
+    return { entries: [], error: error.message, vaultMissing: isSiteCredentialVaultMissing(error) };
+  }
+
+  const payload = normalizeRpcPayload(data);
+  const rows = Array.isArray(payload) ? payload : [];
+  return { entries: rows.map(normalizeVaultEntry) };
+}
+
+export async function storeSiteCredentialVault(
+  input: StoreSiteCredentialVaultInput,
+): Promise<{ entry?: SiteCredentialVaultEntry; error?: string; vaultMissing?: boolean }> {
+  const { data, error } = await supabase.rpc('store_circle_site_credential', {
+    p_circle_id: input.circleId,
+    p_platform: input.platform.trim().toLowerCase(),
+    p_site_url: input.siteUrl?.trim() || null,
+    p_username: input.username?.trim() || null,
+    p_secret: input.secret,
+    p_label: input.label?.trim() || 'default',
+    p_metadata: input.metadata || {},
+    p_secret_kind: input.secretKind || 'password',
+    p_login_url: input.loginUrl?.trim() || null,
+    p_access_policy: input.accessPolicy || { require_approval: true },
+    p_expires_at: input.expiresAt || null,
+    p_rotation_due_at: input.rotationDueAt || null,
+  });
+
+  if (error) {
+    return { error: error.message, vaultMissing: isSiteCredentialVaultMissing(error) };
+  }
+
+  return { entry: normalizeVaultEntry(normalizeRpcPayload(data)) };
+}
+
+export async function revealSiteCredentialSecret(
+  credentialId: string,
+  purpose: string = 'manual_reveal',
+): Promise<{ result?: RevealSiteCredentialSecretResult; error?: string; vaultMissing?: boolean }> {
+  const { data, error } = await supabase.rpc('get_circle_site_credential_secret', {
+    p_credential_id: credentialId,
+    p_purpose: purpose,
+  });
+
+  if (error) {
+    return { error: error.message, vaultMissing: isSiteCredentialVaultMissing(error) };
+  }
+
+  const payload = normalizeRpcPayload(data);
+  return {
+    result: {
+      entry: normalizeVaultEntry(payload),
+      secret: typeof payload?.secret === 'string' ? payload.secret : '',
+    },
+  };
+}
+
+export async function deleteSiteCredentialVault(
+  credentialId: string,
+): Promise<{ success: boolean; error?: string; vaultMissing?: boolean }> {
+  const { data, error } = await supabase.rpc('delete_circle_site_credential', {
+    p_credential_id: credentialId,
+  });
+
+  if (error) {
+    return { success: false, error: error.message, vaultMissing: isSiteCredentialVaultMissing(error) };
+  }
+
+  return { success: data !== false };
+}
+
+// Session-level kill switch for the audit-log RPC — when this RPC
+// isn't deployed (404 / PGRST202), every panel open re-fires it and
+// supabase-js logs the failure even though our code handles it.
+// First failure flips this and subsequent calls skip the network
+// hop. Reset on full page reload.
+let _auditLogRpcDisabled = false;
+
+export async function listSiteCredentialVaultAudit(
+  circleId: string,
+  credentialId?: string | null,
+  limit: number = 25,
+): Promise<{ entries: SiteCredentialAuditEntry[]; error?: string; vaultMissing?: boolean }> {
+  if (_auditLogRpcDisabled) {
+    return { entries: [], vaultMissing: true };
+  }
+  const { data, error } = await supabase.rpc('list_circle_site_credential_access_log', {
+    p_circle_id: circleId,
+    p_credential_id: credentialId || null,
+    p_limit: limit,
+  });
+
+  if (error) {
+    const missing = isSiteCredentialVaultMissing(error);
+    if (missing) _auditLogRpcDisabled = true;
+    return { entries: [], error: error.message, vaultMissing: missing };
+  }
+
+  const payload = normalizeRpcPayload(data);
+  const rows = Array.isArray(payload) ? payload : [];
+  return { entries: rows.map(normalizeVaultAuditEntry) };
+}
+
+export async function updateSiteCredentialVaultControls(
+  input: UpdateSiteCredentialVaultControlsInput,
+): Promise<{ entry?: SiteCredentialVaultEntry; error?: string; vaultMissing?: boolean }> {
+  const { data, error } = await supabase.rpc('update_circle_site_credential_controls', {
+    p_credential_id: input.credentialId,
+    p_site_url: input.siteUrl === undefined ? null : input.siteUrl,
+    p_login_url: input.loginUrl === undefined ? null : input.loginUrl,
+    p_username: input.username === undefined ? null : input.username,
+    p_label: input.label === undefined ? null : input.label,
+    p_metadata: input.metadata ?? null,
+    p_access_policy: input.accessPolicy ?? null,
+    p_expires_at: input.expiresAt === undefined ? null : input.expiresAt,
+    p_rotation_due_at: input.rotationDueAt === undefined ? null : input.rotationDueAt,
+    p_is_active: input.isActive ?? null,
+    p_set_site_url: input.siteUrl !== undefined,
+    p_set_login_url: input.loginUrl !== undefined,
+    p_set_username: input.username !== undefined,
+    p_set_label: input.label !== undefined,
+    p_set_expires_at: input.expiresAt !== undefined,
+    p_set_rotation_due_at: input.rotationDueAt !== undefined,
+    p_set_is_active: input.isActive !== undefined,
+  });
+
+  if (error) {
+    return { error: error.message, vaultMissing: isSiteCredentialVaultMissing(error) };
+  }
+
+  return { entry: normalizeVaultEntry(normalizeRpcPayload(data)) };
+}
+
+export async function recordSiteCredentialVaultTestResult(
+  credentialId: string,
+  success: boolean,
+  message?: string | null,
+  metadata?: Record<string, unknown>,
+): Promise<{ entry?: SiteCredentialVaultEntry; error?: string; vaultMissing?: boolean }> {
+  const { data, error } = await supabase.rpc('record_circle_site_credential_test_result', {
+    p_credential_id: credentialId,
+    p_success: success,
+    p_message: message || null,
+    p_metadata: metadata || {},
+  });
+
+  if (error) {
+    return { error: error.message, vaultMissing: isSiteCredentialVaultMissing(error) };
+  }
+
+  return { entry: normalizeVaultEntry(normalizeRpcPayload(data)) };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -312,6 +634,36 @@ export async function storeCircleSiteCredential(
       return { success: false, error: 'Not authenticated' };
     }
 
+    const vaultResult = await storeSiteCredentialVault({
+      circleId,
+      platform,
+      siteUrl,
+      loginUrl: platform === 'wordpress' && siteUrl ? `${normalizeSiteUrl(siteUrl)}/wp-login.php` : siteUrl,
+      username,
+      secret: credential,
+      label,
+      secretKind: platform === 'wordpress' ? 'application_password' : 'password',
+      metadata: {
+        ...metadata,
+        circleId,
+        source: 'siteAutomation',
+      },
+      accessPolicy: {
+        require_approval: true,
+        allowed_origins: siteUrl ? [siteUrl] : [],
+        allowed_actions: ['login', 'post', 'edit'],
+      },
+    });
+
+    if (vaultResult.entry) {
+      return { success: true };
+    }
+
+    if (vaultResult.error && !vaultResult.vaultMissing) {
+      console.error('[SiteAutomation] Store circle vault credential error:', vaultResult.error);
+      return { success: false, error: vaultResult.error };
+    }
+
     const secretId = circleSiteSecretId(circleId, platform, label);
     await writeLocalSecret('circle_site_credential', secretId, credential);
     const { error } = await supabase.from('circle_site_credentials').upsert(
@@ -379,15 +731,7 @@ export async function loadSiteCredentials(
       return [];
     }
 
-    return (data || []).map((row: CredentialRow) => ({
-      id: row.id,
-      platform: row.platform,
-      siteUrl: row.site_url,
-      username: row.username,
-      label: row.label,
-      isActive: row.is_active,
-      metadata: row.metadata || {},
-    }));
+    return (data || []).map((row: CredentialRow) => toSiteCredential(row));
   } catch (err) {
     console.error('[SiteAutomation] Load credentials exception:', err);
     return [];
@@ -399,6 +743,28 @@ export async function loadCircleSiteCredentials(
   platform?: string,
 ): Promise<SiteCredential[]> {
   try {
+    const vaultResult = await listSiteCredentialVault(circleId, platform);
+    if (!vaultResult.error) {
+      return vaultResult.entries.map((entry) => ({
+        id: entry.id,
+        platform: entry.platform,
+        siteUrl: entry.siteUrl,
+        loginUrl: entry.loginUrl,
+        username: entry.username,
+        label: entry.label,
+        isActive: entry.isActive,
+        metadata: entry.metadata,
+        secretKind: entry.secretKind,
+        updatedAt: entry.updatedAt || null,
+        lastUsedAt: entry.lastUsedAt || null,
+      }));
+    }
+
+    if (!vaultResult.vaultMissing) {
+      console.error('[SiteAutomation] Load circle vault credentials error:', vaultResult.error);
+      return [];
+    }
+
     let query = supabase
       .from('circle_site_credentials')
       .select('id, platform, site_url, username, label, is_active, metadata')
@@ -416,15 +782,7 @@ export async function loadCircleSiteCredentials(
       return [];
     }
 
-    return (data || []).map((row: CredentialRow) => ({
-      id: row.id,
-      platform: row.platform,
-      siteUrl: row.site_url,
-      username: row.username,
-      label: row.label,
-      isActive: row.is_active,
-      metadata: row.metadata || {},
-    }));
+    return (data || []).map((row: CredentialRow) => toSiteCredential(row));
   } catch (err) {
     console.error('[SiteAutomation] Load circle credentials exception:', err);
     return [];
@@ -707,6 +1065,11 @@ export async function getDecryptedCredential(
   credentialId: string,
 ): Promise<string | null> {
   try {
+    const vaultResult = await revealSiteCredentialSecret(credentialId, 'site_automation_use');
+    if (vaultResult.result?.secret) {
+      return vaultResult.result.secret;
+    }
+
     const { data, error } = await supabase
       .from('circle_site_credentials')
       .select('id, circle_id, platform, label, metadata, credential_encrypted')
@@ -992,6 +1355,19 @@ export async function getActiveWordPressCredentials(circleId?: string): Promise<
     if (!userData?.user) return null;
 
     if (circleId) {
+      const vaultResult = await listSiteCredentialVault(circleId, 'wordpress');
+      if (!vaultResult.error && vaultResult.entries.length > 0) {
+        const primary = vaultResult.entries.find(cred => cred.isActive) || vaultResult.entries[0];
+        const reveal = await revealSiteCredentialSecret(primary.id, 'wordpress_chat_command');
+        if (reveal.result?.secret && primary.siteUrl && primary.username) {
+          return {
+            siteUrl: primary.siteUrl,
+            username: primary.username,
+            appPassword: reveal.result.secret,
+          };
+        }
+      }
+
       const { data: circleData, error: circleError } = await supabase
         .from('circle_site_credentials')
         .select('id, circle_id, site_url, username, platform, label, metadata, credential_encrypted')
