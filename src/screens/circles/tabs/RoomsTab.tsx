@@ -2341,6 +2341,8 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   const [mentionQuery, setMentionQuery] = useState('');
   const [slashPaletteOpen, setSlashPaletteOpen] = useState(false);
   const [slashQuery, setSlashQuery] = useState('');
+  // Palette cursor — driven by ↑ / ↓; ⏎ or ⇥ commits, Esc closes.
+  const [paletteIndex, setPaletteIndex] = useState(0);
   const inputRef = useRef<TextInput>(null);
   const inputSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
   // Pasted image (web only). Held client-side until the next send, then
@@ -2491,6 +2493,52 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     if (!slashPaletteOpen) return [];
     return getMatchingChatSlashCommands(slashQuery).slice(0, 8);
   }, [slashPaletteOpen, slashQuery]);
+
+  // Reset cursor whenever the palette opens or filter shrinks below it.
+  useEffect(() => {
+    setPaletteIndex(0);
+  }, [mentionPaletteOpen, slashPaletteOpen, mentionQuery, slashQuery]);
+
+  // Keyboard nav for the palettes — Up/Down moves, Enter or Tab commits,
+  // Esc closes. Web only; on native we just rely on tap.
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    if (!mentionPaletteOpen && !slashPaletteOpen) return;
+    const handler = (e: KeyboardEvent) => {
+      const navKeys = ['ArrowDown', 'ArrowUp', 'Enter', 'Escape', 'Tab'];
+      if (!navKeys.includes(e.key)) return;
+      const list: any[] = mentionPaletteOpen ? filteredMentionFiles : filteredSlashCommands;
+      const max = Math.max(0, list.length - 1);
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setMentionPaletteOpen(false);
+        setSlashPaletteOpen(false);
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setPaletteIndex((idx) => (idx >= max ? 0 : idx + 1));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setPaletteIndex((idx) => (idx <= 0 ? max : idx - 1));
+        return;
+      }
+      if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+        if (list.length === 0) return;
+        e.preventDefault();
+        const item = list[Math.min(paletteIndex, max)];
+        if (mentionPaletteOpen && item?.name) {
+          insertMention(item.name);
+        } else if (slashPaletteOpen && item?.insertText) {
+          insertSlashCommand(item.insertText);
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [mentionPaletteOpen, slashPaletteOpen, filteredMentionFiles, filteredSlashCommands, paletteIndex, insertMention, insertSlashCommand]);
 
   // Pasted image handler — RN Web's TextInput passes onPaste through to the
   // underlying <textarea>. We capture only image clipboard items, convert to
@@ -3491,40 +3539,54 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       <View style={{ position: 'relative' }}>
         {mentionPaletteOpen && filteredMentionFiles.length > 0 && (
           <View style={[s.chatPalette, { borderColor: accentColor + '66' }]}>
-            <Text style={s.chatPaletteHeader}>FILES{mentionQuery ? ` · ${mentionQuery}` : ''}</Text>
-            {filteredMentionFiles.map((f) => (
-              <Pressable
-                key={f.id}
-                onPress={() => insertMention(f.name)}
-                style={({ hovered }: any) => [
-                  s.chatPaletteItem,
-                  hovered && { backgroundColor: accentColor + '14' },
-                ]}
-              >
-                <Text style={[s.chatPaletteTitle, { color: accentColor }]}>@{f.name}</Text>
-              </Pressable>
-            ))}
+            <View style={s.chatPaletteHeaderRow}>
+              <Text style={s.chatPaletteHeader}>FILES{mentionQuery ? ` · ${mentionQuery}` : ''}</Text>
+              <Text style={s.chatPaletteHint}>↑↓ ⏎ ⎋</Text>
+            </View>
+            {filteredMentionFiles.map((f, idx) => {
+              const active = idx === paletteIndex;
+              return (
+                <Pressable
+                  key={f.id}
+                  onPress={() => insertMention(f.name)}
+                  onHoverIn={() => setPaletteIndex(idx)}
+                  style={({ hovered }: any) => [
+                    s.chatPaletteItem,
+                    (hovered || active) && { backgroundColor: accentColor + (active ? '22' : '14') },
+                  ]}
+                >
+                  <Text style={[s.chatPaletteTitle, { color: accentColor }]}>@{f.name}</Text>
+                </Pressable>
+              );
+            })}
           </View>
         )}
 
         {slashPaletteOpen && filteredSlashCommands.length > 0 && (
           <View style={[s.chatPalette, { borderColor: accentColor + '66' }]}>
-            <Text style={s.chatPaletteHeader}>COMMANDS{slashQuery && slashQuery !== '/' ? ` · ${slashQuery}` : ''}</Text>
-            {filteredSlashCommands.map((cmd) => (
-              <Pressable
-                key={cmd.id}
-                onPress={() => insertSlashCommand(cmd.insertText)}
-                style={({ hovered }: any) => [
-                  s.chatPaletteItem,
-                  hovered && { backgroundColor: accentColor + '14' },
-                ]}
-              >
-                <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-                  <Text style={[s.chatPaletteTitle, { color: accentColor }]}>{cmd.command}</Text>
-                  <Text style={s.chatPaletteDesc} numberOfLines={1}>{cmd.description}</Text>
-                </View>
-              </Pressable>
-            ))}
+            <View style={s.chatPaletteHeaderRow}>
+              <Text style={s.chatPaletteHeader}>COMMANDS{slashQuery && slashQuery !== '/' ? ` · ${slashQuery}` : ''}</Text>
+              <Text style={s.chatPaletteHint}>↑↓ ⏎ ⎋</Text>
+            </View>
+            {filteredSlashCommands.map((cmd, idx) => {
+              const active = idx === paletteIndex;
+              return (
+                <Pressable
+                  key={cmd.id}
+                  onPress={() => insertSlashCommand(cmd.insertText)}
+                  onHoverIn={() => setPaletteIndex(idx)}
+                  style={({ hovered }: any) => [
+                    s.chatPaletteItem,
+                    (hovered || active) && { backgroundColor: accentColor + (active ? '22' : '14') },
+                  ]}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                    <Text style={[s.chatPaletteTitle, { color: accentColor }]}>{cmd.command}</Text>
+                    <Text style={s.chatPaletteDesc} numberOfLines={1}>{cmd.description}</Text>
+                  </View>
+                </Pressable>
+              );
+            })}
           </View>
         )}
 
@@ -6293,6 +6355,18 @@ const s = StyleSheet.create({
     fontFamily: MONO,
     paddingHorizontal: 8,
     paddingVertical: 4,
+  },
+  chatPaletteHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  chatPaletteHint: {
+    color: '#334155',
+    fontSize: 9,
+    fontFamily: MONO,
+    paddingHorizontal: 8,
+    letterSpacing: 0.6,
   },
   chatPaletteItem: {
     paddingHorizontal: 8,
