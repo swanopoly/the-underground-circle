@@ -3392,6 +3392,46 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         </View>
       )}
 
+      {messages.length === 0 ? (
+        <View style={{ padding: 18, gap: 14 }}>
+          <View style={{
+            borderWidth: 1, borderColor: accentColor + '33',
+            backgroundColor: accentColor + '0c',
+            borderRadius: 14, padding: 16, gap: 10,
+          }}>
+            <Text style={{ color: accentColor, fontSize: 10, letterSpacing: 1.4, fontWeight: '900', fontFamily: MONO }}>
+              ▲ ROOM CHAT — READY
+            </Text>
+            <Text style={{ color: '#e2e8f0', fontSize: 16, fontWeight: '800' }}>
+              Pair-program with the team's shared agent.
+            </Text>
+            <Text style={{ color: '#94a3b8', fontSize: 12, lineHeight: 18 }}>
+              Pull files into context, propose changes everyone reviews, and ship together. Plan-only mode previews changes; Apply lands them in the room files for the whole team.
+            </Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+              {[
+                { label: 'Type @', tip: 'pull a file into context' },
+                { label: 'Type /', tip: 'open the command palette' },
+                { label: 'PLAN', tip: 'preview changes before apply' },
+                { label: '★', tip: 'pin a turn for the team' },
+                { label: '↻', tip: 'branch context from a past message' },
+              ].map((hint) => (
+                <View key={hint.label} style={{
+                  flexDirection: 'row', alignItems: 'center', gap: 6,
+                  paddingHorizontal: 9, paddingVertical: 5, borderRadius: 999,
+                  borderWidth: 1, borderColor: '#1f2937', backgroundColor: '#0d1320',
+                }}>
+                  <Text style={{ color: accentColor, fontSize: 10, fontWeight: '900', fontFamily: MONO }}>
+                    {hint.label}
+                  </Text>
+                  <Text style={{ color: '#94a3b8', fontSize: 11 }}>{hint.tip}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+        </View>
+      ) : null}
+
       <FlatList
         ref={scrollRef}
         style={s.msgList}
@@ -3541,6 +3581,18 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
               <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>→</Text>
             </Pressable>
           )}
+        </View>
+        <View style={s.inputHints}>
+          <Text style={s.inputHintText}>
+            <Text style={s.inputHintKey}>@</Text> file
+            {'   '}
+            <Text style={s.inputHintKey}>/</Text> command
+            {'   '}
+            <Text style={s.inputHintKey}>↵</Text> send
+            {'   '}
+            <Text style={s.inputHintKey}>⇧↵</Text> newline
+          </Text>
+          <Text style={[s.inputHintText, { marginLeft: 'auto' as any }]}>{input.length}/2000</Text>
         </View>
       </View>
 
@@ -6275,6 +6327,24 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#1f2937',
     backgroundColor: '#000',
+  },
+  inputHints: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 14,
+    paddingBottom: 8,
+    paddingTop: 0,
+  },
+  inputHintText: {
+    color: '#475569',
+    fontSize: 10,
+    fontFamily: MONO,
+    letterSpacing: 0.4,
+  },
+  inputHintKey: {
+    color: '#94a3b8',
+    fontWeight: '900',
   },
 
   // APIs
