@@ -27,6 +27,7 @@ const CATEGORY_ORDER: ChatSlashCommandCategory[] = [
   'github',
   'wordpress',
   'ai_tools',
+  'vault',
   'governance',
 ];
 
@@ -39,6 +40,7 @@ const CATEGORY_ACCENT: Record<ChatSlashCommandCategory, string> = {
   github:     '#22c55e',
   wordpress:  '#0ea5e9',
   ai_tools:   '#ec4899',
+  vault:      '#facc15',
   governance: '#ef4444',
 };
 

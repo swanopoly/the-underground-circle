@@ -3963,6 +3963,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
 
+    // ─── Vault commands — intercept /vault requests ─────────────────────────
+    // Read-only surface over the Site Credential Vault. Supports list, find,
+    // status, rotation, and help. Never reveals secret values — that path
+    // stays in the Vault panel where access duration + audit logging apply.
+    if (lowerContent.startsWith('/vault ') || lowerContent === '/vault') {
+      (async () => {
+        setBotTyping(true);
+        try {
+          const { executeVaultCommand } = await import('../../../lib/vaultChatCommands');
+          const result = await executeVaultCommand(content, {
+            circleId,
+            userId: currentUserId || '',
+          });
+          addBotMessage(result.message || 'No response.', undefined, { localOnly: true });
+        } catch (e: any) {
+          addBotMessage(`Vault error: ${e.message || 'Unknown error'}`, undefined, { localOnly: true });
+        } finally {
+          setBotTyping(false);
+        }
+      })();
+      return;
+    }
+
     // ─── Lightweight local SwanBot commands — short-circuit before OpenSwan ─
     try {
       const localCommandResponse = await tryHandleLocalSwanBotCommand(content, {

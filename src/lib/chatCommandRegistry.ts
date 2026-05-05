@@ -7,6 +7,7 @@ export type ChatSlashCommandCategory =
   | 'wordpress'
   | 'ai_tools'
   | 'governance'
+  | 'vault'
   | 'knowledge';
 
 export type ChatCommandRouteId =
@@ -23,6 +24,7 @@ export type ChatCommandRouteId =
   | 'local_knowledge'
   | 'memory'
   | 'governance'
+  | 'vault'
   | 'search';
 
 export type ChatCommandDecisionSource =
@@ -67,6 +69,7 @@ const CATEGORY_LABELS: Record<ChatSlashCommandCategory, string> = {
   wordpress: 'WordPress',
   ai_tools: 'AI Tools',
   governance: 'Governance',
+  vault: 'Vault',
   knowledge: 'Knowledge',
 };
 
@@ -79,6 +82,7 @@ const HELP_CATEGORY_ORDER: ChatSlashCommandCategory[] = [
   'github',
   'wordpress',
   'ai_tools',
+  'vault',
   'governance',
 ];
 
@@ -143,6 +147,12 @@ export const CHAT_COMMAND_REGISTRY: ChatCommandDefinition[] = [
   { id: 'wp-categories', routeId: 'wordpress', command: '/wp categories', insertText: '/wp categories', title: 'List Categories', description: 'List WordPress categories.', category: 'wordpress', keywords: ['taxonomy', 'content'] },
   { id: 'wp-tags', routeId: 'wordpress', command: '/wp tags', insertText: '/wp tags', title: 'List Tags', description: 'List WordPress tags.', category: 'wordpress', keywords: ['taxonomy', 'content'] },
   { id: 'wp-help', routeId: 'wordpress', command: '/wp help', insertText: '/wp help', title: 'WordPress Help', description: 'Show WordPress command help.', category: 'wordpress', keywords: ['docs', 'guide'] },
+  { id: 'vault', routeId: 'vault', command: '/vault', insertText: '/vault', title: 'Vault Status', description: 'Show vault readiness summary.', category: 'vault', keywords: ['credentials', 'secrets', 'passwords'] },
+  { id: 'vault-list', routeId: 'vault', command: '/vault list', insertText: '/vault list', title: 'List Vault', description: 'List every credential in the circle vault.', category: 'vault', aliases: ['/vault ls'], keywords: ['credentials', 'list', 'all'] },
+  { id: 'vault-find', routeId: 'vault', command: '/vault find', insertText: '/vault find ', title: 'Find Credential', description: 'Search the vault by platform / label / username / URL.', category: 'vault', aliases: ['/vault search'], keywords: ['search', 'lookup', 'credential'] },
+  { id: 'vault-status', routeId: 'vault', command: '/vault status', insertText: '/vault status', title: 'Vault Readiness', description: 'Show readiness counts (ready / needs test / rotation due).', category: 'vault', keywords: ['readiness', 'audit', 'health'] },
+  { id: 'vault-rotation', routeId: 'vault', command: '/vault rotation', insertText: '/vault rotation', title: 'Rotation Due', description: 'List credentials whose rotation is overdue.', category: 'vault', aliases: ['/vault due'], keywords: ['expired', 'overdue', 'rotation'] },
+  { id: 'vault-help', routeId: 'vault', command: '/vault help', insertText: '/vault help', title: 'Vault Help', description: 'Show vault command help.', category: 'vault', keywords: ['docs', 'guide'] },
   { id: 'browser', routeId: 'browser', command: '/browser', insertText: '/browser plan ', title: 'Computer Task', description: 'Plan and launch a computer task.', category: 'ai_tools', keywords: ['browser', 'computer', 'website', 'web', 'open', 'navigate'] },
   { id: 'browser-plan', routeId: 'browser', command: '/browser plan', insertText: '/browser plan ', title: 'Plan Computer Task', description: 'Plan a computer task from chat.', category: 'ai_tools', keywords: ['browser', 'computer', 'plan', 'website'] },
   { id: 'browser-open', routeId: 'browser', command: '/browser open', insertText: '/browser open ', title: 'Open In Browser', description: 'Open a site or page in the browser.', category: 'ai_tools', keywords: ['open', 'website', 'url', 'browse'] },
