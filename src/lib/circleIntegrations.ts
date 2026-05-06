@@ -2,6 +2,17 @@ import { supabase } from './supabase';
 
 export type CircleIntegrationProvider =
   | 'browserbase'
+  | 'stagehand'
+  | 'playwright_mcp'
+  | 'browserless'
+  | 'browserstack'
+  | 'firecrawl'
+  | 'apify'
+  | 'steel'
+  | 'hyperbrowser'
+  | 'airtop'
+  | 'skyvern'
+  | 'browser_use'
   | 'aws'
   | 'braintrust'
   | 'cloudflare'
@@ -35,7 +46,31 @@ export type CircleIntegrationProvider =
   | 'pinecone'
   | 'resend'
   | 'sentry'
-  | 'posthog';
+  | 'posthog'
+  // ── Wave 1 expansion ──
+  | 'docker'
+  | 'kubernetes'
+  | 'fly_io'
+  | 'railway'
+  | 'render'
+  | 'digitalocean'
+  | 'supabase'
+  | 'neon'
+  | 'mongodb_atlas'
+  | 'upstash'
+  | 'hugging_face'
+  | 'replicate'
+  | 'modal'
+  | 'openrouter'
+  | 'linear'
+  | 'jira'
+  | 'snyk'
+  | 'clerk'
+  | 'postmark'
+  | 'cloudflare_r2'
+  | 'qdrant'
+  | 'ngrok'
+  | 'trigger_dev';
 
 export interface CircleIntegrationRecord {
   id: string;
@@ -66,6 +101,7 @@ export interface IntegrationDefinition {
     key: string;
     label: string;
     placeholder?: string;
+    required?: boolean;
   }>;
   validationHints?: string[];
 }
@@ -79,9 +115,150 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key', 'project_id'],
     optionalSecretKeys: ['session_region'],
     metadataFields: [
-      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Main Browserbase Workspace' },
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Main Browserbase Workspace', required: false },
     ],
     validationHints: ['Use a project-scoped API key.', 'Add a default region if browser latency matters for automations.'],
+  },
+  stagehand: {
+    provider: 'stagehand',
+    label: 'Stagehand',
+    description: 'AI browser-agent framework for natural-language actions, self-healing Playwright flows, and reusable web task recipes.',
+    capabilityFlags: ['ai_browser_actions', 'self_healing_browser_flows', 'browser_workflow_recipes'],
+    requiredSecretKeys: [],
+    optionalSecretKeys: ['llm_api_key'],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Browser Agent Workflows' },
+      { key: 'defaultModelProvider', label: 'Default Model Provider', placeholder: 'openai or anthropic' },
+    ],
+    validationHints: ['Pair with Browserbase for durable cloud sessions.', 'Use for dynamic websites where deterministic selectors break often.'],
+  },
+  playwright_mcp: {
+    provider: 'playwright_mcp',
+    label: 'Playwright MCP',
+    description: 'MCP-backed browser automation with DOM snapshots, screenshots, browser actions, and deterministic QA/test generation.',
+    capabilityFlags: ['deterministic_browser_control', 'browser_dom_snapshots', 'browser_screenshots', 'generate_browser_tests'],
+    requiredSecretKeys: [],
+    optionalSecretKeys: ['mcp_server_url', 'server_command'],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Local Playwright MCP' },
+      { key: 'defaultBrowser', label: 'Default Browser', placeholder: 'chromium' },
+    ],
+    validationHints: ['Use local MCP for precise QA and DOM inspection.', 'Prefer scoped test flows to avoid large browser snapshots on every agent turn.'],
+  },
+  browserless: {
+    provider: 'browserless',
+    label: 'Browserless',
+    description: 'Headless browser API for screenshots, PDFs, scraping, scripted browser functions, and live browser debugging.',
+    capabilityFlags: ['headless_browser_api', 'capture_screenshots', 'generate_pdfs', 'scrape_web_pages'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: ['endpoint_url'],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Browserless Production' },
+      { key: 'defaultRegion', label: 'Default Region', placeholder: 'sfo' },
+    ],
+    validationHints: ['Use for repeatable screenshots, PDFs, and lower-cost scrape jobs that do not need a full AI browser session.'],
+  },
+  browserstack: {
+    provider: 'browserstack',
+    label: 'BrowserStack',
+    description: 'Real-browser and real-device testing for cross-browser QA, session recordings, screenshots, and release validation.',
+    capabilityFlags: ['cross_browser_qa', 'real_device_testing', 'browser_session_recordings', 'visual_regression_checks'],
+    requiredSecretKeys: ['username', 'access_key'],
+    optionalSecretKeys: ['project_name'],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'QA Device Cloud' },
+      { key: 'defaultBrowserMatrix', label: 'Default Browser Matrix', placeholder: 'Chrome latest, Safari iOS, Edge latest' },
+    ],
+    validationHints: ['Use for release checks across real browsers and mobile devices.', 'Keep a default browser matrix so agents know what to validate.'],
+  },
+  firecrawl: {
+    provider: 'firecrawl',
+    label: 'Firecrawl',
+    description: 'Web scrape, crawl, search, and extract APIs that turn pages into clean markdown or structured data for agents.',
+    capabilityFlags: ['web_scrape_markdown', 'site_crawl', 'web_search', 'structured_web_extract'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: ['api_url'],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Research Web Data' },
+    ],
+    validationHints: ['Use for research and RAG ingestion where clean markdown is cheaper than full browser control.'],
+  },
+  apify: {
+    provider: 'apify',
+    label: 'Apify',
+    description: 'Cloud Actors for scraping, browser automation, datasets, scheduled crawls, and production web-data workflows.',
+    capabilityFlags: ['run_web_actors', 'web_scraping_datasets', 'scheduled_crawls', 'browser_automation_jobs'],
+    requiredSecretKeys: ['api_token'],
+    optionalSecretKeys: ['default_actor_id'],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Web Data Actors' },
+      { key: 'defaultDatasetName', label: 'Default Dataset Name', placeholder: 'circle-web-research' },
+    ],
+    validationHints: ['Use for repeatable scraping workflows, scheduled data pulls, and structured datasets.'],
+  },
+  steel: {
+    provider: 'steel',
+    label: 'Steel',
+    description: 'Open-source browser API for cloud browser fleets, autonomous web agents, scraping jobs, and browser session control.',
+    capabilityFlags: ['cloud_browser_sessions', 'browser_agent_api', 'browser_fleet_control'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: ['base_url'],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Open Browser Fleet' },
+    ],
+    validationHints: ['Use as an open browser-agent backend option when you want more control over browser infrastructure.'],
+  },
+  hyperbrowser: {
+    provider: 'hyperbrowser',
+    label: 'Hyperbrowser',
+    description: 'Browser-as-a-service infrastructure for AI agents, cloud browser sessions, scraping, and Browser Use execution.',
+    capabilityFlags: ['cloud_browser_sessions', 'browser_agent_api', 'browser_use_tasks', 'web_scraping_jobs'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: ['base_url'],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Hyperbrowser Agent Cloud' },
+      { key: 'defaultProfile', label: 'Default Profile', placeholder: 'production-browser-profile' },
+    ],
+    validationHints: ['Use for scalable cloud browser runs when local Playwright sessions are too brittle or resource-heavy.'],
+  },
+  airtop: {
+    provider: 'airtop',
+    label: 'Airtop',
+    description: 'Cloud browser platform for AI agents that need managed sessions, natural-language browser control, and web automation APIs.',
+    capabilityFlags: ['cloud_browser_sessions', 'natural_language_browser_control', 'managed_browser_profiles', 'browser_agent_api'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: ['profile_id'],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Airtop Browser Agents' },
+      { key: 'defaultProfile', label: 'Default Profile', placeholder: 'logged-in-workflow-profile' },
+    ],
+    validationHints: ['Use for AI-controlled browsing where a managed cloud browser and natural-language actions reduce custom script work.'],
+  },
+  skyvern: {
+    provider: 'skyvern',
+    label: 'Skyvern',
+    description: 'LLM and computer-vision browser workflow automation for forms, dashboards, authenticated sites, and repeatable operations.',
+    capabilityFlags: ['vision_guided_browser_workflows', 'authenticated_site_automation', 'workflow_run_api', 'browser_task_recording'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: ['base_url', 'organization_id'],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Skyvern Web Ops' },
+      { key: 'defaultWorkflowId', label: 'Default Workflow ID', placeholder: 'workflow_xxx' },
+    ],
+    validationHints: ['Use for structured browser workflows that need vision fallback and repeatable dashboard/form actions.'],
+  },
+  browser_use: {
+    provider: 'browser_use',
+    label: 'Browser Use',
+    description: 'Open-source browser agent framework for navigating, interpreting, and manipulating web content with LLM-driven tasks.',
+    capabilityFlags: ['open_source_browser_agent', 'llm_browser_navigation', 'web_task_execution', 'self_hosted_browser_runner'],
+    requiredSecretKeys: [],
+    optionalSecretKeys: ['api_key', 'runner_url'],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Browser Use Runner' },
+      { key: 'defaultModelProvider', label: 'Default Model Provider', placeholder: 'openai or local' },
+    ],
+    validationHints: ['Use as a self-hostable browser agent layer when you want more control over execution cost and model choice.'],
   },
   aws: {
     provider: 'aws',
@@ -419,6 +596,288 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     ],
     validationHints: ['Use an Admin API access token from a custom app.'],
   },
+  // ── Wave 1 expansion (DevOps, AI infra, data, project mgmt, etc.) ──
+  docker: {
+    provider: 'docker',
+    label: 'Docker',
+    description: 'Container builds, registry pushes, image runs, and Docker Hub workflows for the team.',
+    capabilityFlags: ['build_containers', 'push_registry', 'run_containers', 'image_inspection'],
+    requiredSecretKeys: ['hub_token'],
+    optionalSecretKeys: ['hub_username', 'registry_url'],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Team Docker Hub' },
+      { key: 'defaultNamespace', label: 'Default Namespace', placeholder: 'orgname' },
+    ],
+    validationHints: ['Use a Personal Access Token from Docker Hub with read/write scope.', 'Set defaultNamespace so agents push to the right org.'],
+  },
+  kubernetes: {
+    provider: 'kubernetes',
+    label: 'Kubernetes',
+    description: 'Cluster control via kubeconfig — inspect pods, roll restarts, apply manifests with plan-then-apply guards.',
+    capabilityFlags: ['inspect_cluster', 'roll_workloads', 'apply_manifests_guarded', 'fetch_logs'],
+    requiredSecretKeys: ['kubeconfig'],
+    optionalSecretKeys: ['service_account_token'],
+    metadataFields: [
+      { key: 'clusterName', label: 'Cluster Name', placeholder: 'production-eu-west' },
+      { key: 'defaultNamespace', label: 'Default Namespace', placeholder: 'default' },
+    ],
+    validationHints: ['Paste a base64 kubeconfig OR use a service account token.', 'Default to plan-then-apply for safety; only auto-apply for non-prod namespaces.'],
+  },
+  fly_io: {
+    provider: 'fly_io',
+    label: 'Fly.io',
+    description: 'Edge VMs, Fly Postgres, and branch previews. Deploy a branch, scale machines, stream logs.',
+    capabilityFlags: ['deploy_branch_preview', 'manage_machines', 'manage_postgres', 'stream_logs'],
+    requiredSecretKeys: ['api_token'],
+    optionalSecretKeys: ['default_org', 'default_app'],
+    metadataFields: [
+      { key: 'orgSlug', label: 'Org Slug', placeholder: 'personal' },
+    ],
+    validationHints: ['Run `fly auth token` to get a token.', 'Pin a default org so agents do not deploy across orgs.'],
+  },
+  railway: {
+    provider: 'railway',
+    label: 'Railway',
+    description: 'Git-push PaaS with managed databases — provision Postgres + Redis and wire env vars in one shot.',
+    capabilityFlags: ['provision_services', 'manage_env_vars', 'deploy_branches', 'manage_databases'],
+    requiredSecretKeys: ['project_token'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'projectName', label: 'Project Name', placeholder: 'side-project' },
+      { key: 'environmentName', label: 'Environment Name', placeholder: 'production' },
+    ],
+    validationHints: ['Use a project token (not a personal token) so the agent stays scoped.'],
+  },
+  render: {
+    provider: 'render',
+    label: 'Render',
+    description: 'Web services, cron jobs, and managed databases. Trigger deploys, tail logs, and manage cron from chat.',
+    capabilityFlags: ['trigger_deploys', 'manage_services', 'tail_logs', 'manage_cron_jobs'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: ['default_owner_id'],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Render Workspace' },
+    ],
+    validationHints: ['API key with full scope; restrict to specific services in production.'],
+  },
+  digitalocean: {
+    provider: 'digitalocean',
+    label: 'DigitalOcean',
+    description: 'Droplets, App Platform, Managed DBs, and Spaces object storage for cost-conscious side projects.',
+    capabilityFlags: ['manage_droplets', 'manage_app_platform', 'manage_managed_dbs', 'manage_spaces_storage'],
+    requiredSecretKeys: ['api_token'],
+    optionalSecretKeys: ['spaces_access_key', 'spaces_secret_key'],
+    metadataFields: [
+      { key: 'defaultRegion', label: 'Default Region', placeholder: 'nyc3' },
+      { key: 'spacesEndpoint', label: 'Spaces Endpoint', placeholder: 'nyc3.digitaloceanspaces.com' },
+    ],
+    validationHints: ['Personal Access Token with read+write scope.', 'Spaces keys are optional — only needed if storing artifacts there.'],
+  },
+  supabase: {
+    provider: 'supabase',
+    label: 'Supabase',
+    description: 'Postgres + auth + storage + realtime. Run SQL, manage RLS, read storage, query realtime channels.',
+    capabilityFlags: ['run_sql', 'manage_rls_policies', 'manage_storage_buckets', 'read_realtime_channels', 'manage_auth_users'],
+    requiredSecretKeys: ['project_url', 'service_role_key'],
+    optionalSecretKeys: ['anon_key'],
+    metadataFields: [
+      { key: 'projectRef', label: 'Project Ref', placeholder: 'abcdefghijk' },
+    ],
+    validationHints: ['Service role key bypasses RLS — only paste it if you trust agents to mutate this DB.', 'Use the anon key for read-only mirroring.'],
+  },
+  neon: {
+    provider: 'neon',
+    label: 'Neon',
+    description: 'Serverless Postgres with branching. Branch the prod DB for a PR, run migrations, drop on merge.',
+    capabilityFlags: ['branch_database', 'run_migrations', 'manage_branches', 'manage_compute_endpoints'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: ['project_id'],
+    metadataFields: [
+      { key: 'defaultBranch', label: 'Default Branch', placeholder: 'main' },
+    ],
+    validationHints: ['Pin the project_id so agents only branch the intended DB.', 'Auto-drop branches on PR close to keep cost flat.'],
+  },
+  mongodb_atlas: {
+    provider: 'mongodb_atlas',
+    label: 'MongoDB Atlas',
+    description: 'Managed MongoDB. Query collections, check index health, and run aggregations on demand.',
+    capabilityFlags: ['query_collections', 'manage_indexes', 'run_aggregations', 'manage_clusters'],
+    requiredSecretKeys: ['public_api_key', 'private_api_key'],
+    optionalSecretKeys: ['org_id', 'project_id'],
+    metadataFields: [
+      { key: 'clusterName', label: 'Cluster Name', placeholder: 'production-cluster' },
+    ],
+    validationHints: ['Use Atlas Admin API key pair from Programmatic API Keys.'],
+  },
+  upstash: {
+    provider: 'upstash',
+    label: 'Upstash',
+    description: 'Serverless Redis, Kafka, and Vector. Read/write cache, inspect queue depth, run vector queries.',
+    capabilityFlags: ['redis_cache_ops', 'kafka_topic_ops', 'vector_queries', 'pubsub_ops'],
+    requiredSecretKeys: ['rest_url', 'rest_token'],
+    optionalSecretKeys: ['kafka_url', 'kafka_token'],
+    metadataFields: [
+      { key: 'defaultDatabase', label: 'Default Database', placeholder: 'cache-prod' },
+    ],
+    validationHints: ['REST URL + token from the Upstash console — supports Redis, Kafka, and Vector with one credential format.'],
+  },
+  hugging_face: {
+    provider: 'hugging_face',
+    label: 'Hugging Face',
+    description: 'Models, datasets, Spaces, Inference Endpoints. Pull a model card and deploy it as an endpoint.',
+    capabilityFlags: ['model_search', 'dataset_access', 'inference_endpoint', 'spaces_management'],
+    requiredSecretKeys: ['api_token'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultOrg', label: 'Default Org', placeholder: 'your-org' },
+    ],
+    validationHints: ['Use a User Access Token with read scope; bump to write only if deploying endpoints from chat.'],
+  },
+  replicate: {
+    provider: 'replicate',
+    label: 'Replicate',
+    description: 'Hosted model inference, especially generative. Run image / video / audio models from prompts.',
+    capabilityFlags: ['run_models', 'image_generation', 'video_generation', 'model_versioning'],
+    requiredSecretKeys: ['api_token'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'black-forest-labs/flux-schnell' },
+    ],
+    validationHints: ['API tokens scope per-account. Pin a default model so agents converge fast.'],
+  },
+  modal: {
+    provider: 'modal',
+    label: 'Modal',
+    description: 'Serverless Python on GPU/CPU. Ship a function and call it from agent runs without managing infra.',
+    capabilityFlags: ['serverless_python', 'gpu_jobs', 'scheduled_functions', 'web_endpoints'],
+    requiredSecretKeys: ['token_id', 'token_secret'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'agent-jobs' },
+    ],
+    validationHints: ['Get token_id + token_secret from `modal token new`.'],
+  },
+  openrouter: {
+    provider: 'openrouter',
+    label: 'OpenRouter',
+    description: '100+ LLMs through one API. A/B prompts across Claude, GPT, Gemini, and OSS models in one call.',
+    capabilityFlags: ['unified_llm_router', 'multi_model_ab', 'fallback_routing', 'cost_routing'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'anthropic/claude-sonnet-4' },
+    ],
+    validationHints: ['Set a default_model so the agent has a safe fallback when route resolution is ambiguous.'],
+  },
+  linear: {
+    provider: 'linear',
+    label: 'Linear',
+    description: 'Issue tracker for modern dev teams. Create issues from chat and update status when a PR merges.',
+    capabilityFlags: ['create_issues', 'update_issues', 'query_cycles', 'manage_projects'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'teamKey', label: 'Default Team Key', placeholder: 'ENG' },
+    ],
+    validationHints: ['Personal API key from Linear Settings → API. Pin teamKey so issues land in the right team.'],
+  },
+  jira: {
+    provider: 'jira',
+    label: 'Jira',
+    description: 'Sprint and issue management for larger teams. Pull sprint state and surface blockers in chat.',
+    capabilityFlags: ['create_issues', 'update_issues', 'query_sprints', 'manage_boards'],
+    requiredSecretKeys: ['api_token', 'email', 'site_url'],
+    optionalSecretKeys: ['default_project_key'],
+    metadataFields: [
+      { key: 'defaultProjectKey', label: 'Default Project Key', placeholder: 'PROJ' },
+    ],
+    validationHints: ['Generate api_token from id.atlassian.com/manage-profile/security/api-tokens.', 'site_url like https://yourorg.atlassian.net.'],
+  },
+  snyk: {
+    provider: 'snyk',
+    label: 'Snyk',
+    description: 'Vulnerability scanning for code, deps, containers, and IaC. Triage CVEs and open fix PRs.',
+    capabilityFlags: ['scan_dependencies', 'scan_containers', 'scan_iac', 'open_fix_prs'],
+    requiredSecretKeys: ['api_token'],
+    optionalSecretKeys: ['org_id'],
+    metadataFields: [
+      { key: 'defaultOrgSlug', label: 'Default Org Slug', placeholder: 'your-team' },
+    ],
+    validationHints: ['Get api_token from Snyk Account Settings → General.'],
+  },
+  clerk: {
+    provider: 'clerk',
+    label: 'Clerk',
+    description: 'Drop-in auth UI. Provision test users with specific roles for E2E tests; read session state.',
+    capabilityFlags: ['provision_users', 'read_sessions', 'manage_organizations', 'audit_users'],
+    requiredSecretKeys: ['secret_key'],
+    optionalSecretKeys: ['publishable_key', 'frontend_api_url'],
+    metadataFields: [
+      { key: 'instanceName', label: 'Instance Name', placeholder: 'production' },
+    ],
+    validationHints: ['Use the Backend API Secret Key (sk_live_… or sk_test_…).'],
+  },
+  postmark: {
+    provider: 'postmark',
+    label: 'Postmark',
+    description: 'Transactional email known for deliverability. Send tests and inspect bounce reasons from agent runs.',
+    capabilityFlags: ['send_transactional_email', 'inspect_bounces', 'manage_templates', 'manage_servers'],
+    requiredSecretKeys: ['server_token'],
+    optionalSecretKeys: ['account_token'],
+    metadataFields: [
+      { key: 'fromAddress', label: 'Default From Address', placeholder: 'team@yourdomain.com' },
+    ],
+    validationHints: ['Server tokens are per-server; account tokens are for cross-server admin.'],
+  },
+  cloudflare_r2: {
+    provider: 'cloudflare_r2',
+    label: 'Cloudflare R2',
+    description: 'S3-compatible object storage with no egress fees. Store agent artifacts cheaply, serve via Workers.',
+    capabilityFlags: ['object_storage', 'presign_urls', 'list_objects', 'lifecycle_rules'],
+    requiredSecretKeys: ['account_id', 'access_key_id', 'secret_access_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultBucket', label: 'Default Bucket', placeholder: 'circle-artifacts' },
+      { key: 'publicEndpoint', label: 'Public Endpoint', placeholder: 'https://artifacts.example.com' },
+    ],
+    validationHints: ['Create R2 API tokens from Cloudflare dashboard → R2 → Manage API Tokens.'],
+  },
+  qdrant: {
+    provider: 'qdrant',
+    label: 'Qdrant',
+    description: 'Rust-based vector DB with strong filter performance. Store agent memories with rich metadata filters.',
+    capabilityFlags: ['vector_store', 'metadata_filters', 'collection_management', 'hybrid_search'],
+    requiredSecretKeys: ['api_key', 'cluster_url'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultCollection', label: 'Default Collection', placeholder: 'circle-memory' },
+    ],
+    validationHints: ['Use Qdrant Cloud API key + cluster URL, or self-hosted URL with no key.'],
+  },
+  ngrok: {
+    provider: 'ngrok',
+    label: 'ngrok',
+    description: 'Public tunnels for local dev and webhooks. Expose a local agent endpoint to receive a webhook.',
+    capabilityFlags: ['public_tunnels', 'webhook_intake', 'tcp_tunnels', 'reserved_domains'],
+    requiredSecretKeys: ['authtoken'],
+    optionalSecretKeys: ['reserved_domain'],
+    metadataFields: [
+      { key: 'defaultRegion', label: 'Default Region', placeholder: 'us' },
+    ],
+    validationHints: ['Get authtoken from ngrok dashboard → Auth → Your Authtoken.'],
+  },
+  trigger_dev: {
+    provider: 'trigger_dev',
+    label: 'Trigger.dev',
+    description: 'Background jobs purpose-built for AI workflows. Enqueue durable agent jobs that survive restarts.',
+    capabilityFlags: ['durable_jobs', 'webhooks', 'scheduled_jobs', 'job_chains'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'projectRef', label: 'Project Ref', placeholder: 'proj_abcdef' },
+    ],
+    validationHints: ['Trigger.dev v3 API key — use the personal access token for full project scope.'],
+  },
 };
 
 function encodeSecret(value: string): string {
@@ -630,6 +1089,21 @@ const CONNECTOR_PROVIDER_ALIASES: Record<string, CircleIntegrationProvider[]> = 
   vercel: ['vercel'],
   netlify: ['netlify'],
   browserbase: ['browserbase'],
+  stagehand: ['stagehand'],
+  playwright: ['playwright_mcp'],
+  playwright_mcp: ['playwright_mcp'],
+  'playwright-mcp': ['playwright_mcp'],
+  browserless: ['browserless'],
+  browserstack: ['browserstack'],
+  firecrawl: ['firecrawl'],
+  apify: ['apify'],
+  steel: ['steel'],
+  hyperbrowser: ['hyperbrowser'],
+  airtop: ['airtop'],
+  skyvern: ['skyvern'],
+  browser_use: ['browser_use'],
+  'browser-use': ['browser_use'],
+  browseruse: ['browser_use'],
   braintrust: ['braintrust'],
   descope: ['descope'],
   launchdarkly: ['launchdarkly'],
@@ -771,6 +1245,7 @@ export async function validateCircleIntegrationSetup(
   const metadata = integration.metadata || {};
   const missingSecretKeys = definition.requiredSecretKeys.filter(key => !secretSet.has(key));
   const missingMetadataFields = (definition.metadataFields || [])
+    .filter(field => field.required !== false)
     .map(field => field.key)
     .filter(key => !String(metadata[key] || '').trim());
   const providerWarnings = getProviderSpecificIntegrationWarnings(integration);
@@ -834,9 +1309,40 @@ export function getProviderSpecificIntegrationWarnings(
       break;
     }
     case 'browserbase': {
+      // Browserbase only needs api_key + project_id for the live computer-use
+      // path. workspaceName is a dashboard label, not a functional blocker.
+      break;
+    }
+    case 'stagehand': {
       const workspaceName = read('workspaceName');
       if (!workspaceName) {
-        warnings.push('Set a workspace name so browser automation can target the right project context.');
+        warnings.push('Set a workspace name so browser-agent recipes stay tied to the right project context.');
+      }
+      break;
+    }
+    case 'playwright_mcp': {
+      const workspaceName = read('workspaceName');
+      const defaultBrowser = read('defaultBrowser');
+      if (!workspaceName) {
+        warnings.push('Set a workspace name so local MCP browser control is identifiable.');
+      }
+      if (defaultBrowser && !/^(chromium|chrome|firefox|webkit|msedge)$/i.test(defaultBrowser)) {
+        warnings.push('Default browser should be chromium, chrome, firefox, webkit, or msedge.');
+      }
+      break;
+    }
+    case 'browserless':
+    case 'browserstack':
+    case 'firecrawl':
+    case 'apify':
+    case 'steel':
+    case 'hyperbrowser':
+    case 'airtop':
+    case 'skyvern':
+    case 'browser_use': {
+      const workspaceName = read('workspaceName');
+      if (!workspaceName) {
+        warnings.push('Set a workspace name so browser and web-data actions target the correct account context.');
       }
       break;
     }
@@ -957,6 +1463,55 @@ export function inferTaskIntegrationRequirements(task: {
   if (/deploy|hosting|s3|cloudfront|route 53|ses|aws|migration|cutover/i.test(text)) {
     requiredConnectors.add('aws');
     requiredCapabilities.add('manage_infra');
+  }
+  if (/browser automation|browser session|web automation|computer use|website task|login flow|form fill|click|navigate|qa flow|ui test/i.test(text)) {
+    requiredConnectors.add('browserbase');
+    requiredCapabilities.add('web_automation');
+    requiredCapabilities.add('remote_browser_sessions');
+  }
+  if (/stagehand|self-healing browser|self healing browser|browser-agent recipe|browser agent recipe|natural language browser action/i.test(text)) {
+    requiredConnectors.add('stagehand');
+    requiredCapabilities.add('ai_browser_actions');
+  }
+  if (/playwright|mcp|dom snapshot|selector|browser test|ui regression|end-to-end|e2e/i.test(text)) {
+    requiredConnectors.add('playwright_mcp');
+    requiredCapabilities.add('deterministic_browser_control');
+  }
+  if (/screenshot|pdf|headless browser|puppeteer|browserless|page capture/i.test(text)) {
+    requiredConnectors.add('browserless');
+    requiredCapabilities.add('headless_browser_api');
+  }
+  if (/cross-browser|cross browser|real device|mobile browser|browserstack|safari ios|device qa/i.test(text)) {
+    requiredConnectors.add('browserstack');
+    requiredCapabilities.add('cross_browser_qa');
+  }
+  if (/scrape|crawl|web data|extract data|markdown|firecrawl|rag ingestion/i.test(text)) {
+    requiredConnectors.add('firecrawl');
+    requiredCapabilities.add('web_scrape_markdown');
+  }
+  if (/apify|actor|dataset|scheduled crawl|web scraper|scraping workflow/i.test(text)) {
+    requiredConnectors.add('apify');
+    requiredCapabilities.add('run_web_actors');
+  }
+  if (/steel|browser fleet|cloud browser fleet|open browser api/i.test(text)) {
+    requiredConnectors.add('steel');
+    requiredCapabilities.add('cloud_browser_sessions');
+  }
+  if (/hyperbrowser|browser-as-a-service|browser as a service|scalable browser|browser use task/i.test(text)) {
+    requiredConnectors.add('hyperbrowser');
+    requiredCapabilities.add('cloud_browser_sessions');
+  }
+  if (/airtop|natural language browser|ai browser api|managed browser profile/i.test(text)) {
+    requiredConnectors.add('airtop');
+    requiredCapabilities.add('natural_language_browser_control');
+  }
+  if (/skyvern|vision guided|vision-guided|workflow automation|authenticated site|dashboard automation/i.test(text)) {
+    requiredConnectors.add('skyvern');
+    requiredCapabilities.add('vision_guided_browser_workflows');
+  }
+  if (/browser use|browser-use|browseruse|self hosted browser|open-source browser agent|open source browser agent/i.test(text)) {
+    requiredConnectors.add('browser_use');
+    requiredCapabilities.add('open_source_browser_agent');
   }
 
   return {
