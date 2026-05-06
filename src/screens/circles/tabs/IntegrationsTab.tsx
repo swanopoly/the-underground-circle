@@ -807,12 +807,20 @@ export default function MarketplaceTab({
     ),
     [statuses],
   );
-  // Provider keys that show up under the "Models" quick filter — LLM
-  // marketplaces the chat picker actually routes through. Kept narrow on
+  // Provider keys that show up under the "Models" quick filter — every
+  // LLM provider the chat picker can route through. Marketplaces (top
+  // row) plus native BYOK providers (second row). Kept narrow on
   // purpose: the broader 'ai_agents_services' group also includes
   // browser/automation tools and observability shims that aren't models.
   const MODEL_PROVIDER_KEYS: ReadonlySet<string> = useMemo(
-    () => new Set(['openrouter', 'hugging_face', 'replicate', 'modal']),
+    () => new Set([
+      // Marketplaces
+      'openrouter', 'hugging_face', 'replicate', 'modal',
+      // Native BYOK
+      'anthropic', 'openai', 'google_ai', 'groq', 'mistral_ai',
+      'cohere', 'perplexity', 'together_ai', 'fireworks_ai',
+      'deepseek', 'z_ai', 'minimax', 'ollama',
+    ]),
     [],
   );
 

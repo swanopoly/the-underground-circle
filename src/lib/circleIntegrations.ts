@@ -70,7 +70,21 @@ export type CircleIntegrationProvider =
   | 'cloudflare_r2'
   | 'qdrant'
   | 'ngrok'
-  | 'trigger_dev';
+  | 'trigger_dev'
+  // ── Wave 2: native LLM providers (BYOK) ──
+  | 'anthropic'
+  | 'openai'
+  | 'google_ai'
+  | 'groq'
+  | 'mistral_ai'
+  | 'cohere'
+  | 'perplexity'
+  | 'together_ai'
+  | 'fireworks_ai'
+  | 'deepseek'
+  | 'z_ai'
+  | 'minimax'
+  | 'ollama';
 
 export interface CircleIntegrationRecord {
   id: string;
@@ -877,6 +891,164 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
       { key: 'projectRef', label: 'Project Ref', placeholder: 'proj_abcdef' },
     ],
     validationHints: ['Trigger.dev v3 API key — use the personal access token for full project scope.'],
+  },
+  // ── Wave 2: native LLM providers (BYOK) ──
+  anthropic: {
+    provider: 'anthropic',
+    label: 'Anthropic',
+    description: 'Claude Opus / Sonnet / Haiku direct from Anthropic. Use your own key to bill against your Anthropic account instead of the platform.',
+    capabilityFlags: ['claude_chat', 'tool_use', 'extended_thinking', 'prompt_caching'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'claude-sonnet-4-6' },
+    ],
+    validationHints: ['Get the key from https://console.anthropic.com/settings/keys. Scope: full account.'],
+  },
+  openai: {
+    provider: 'openai',
+    label: 'OpenAI',
+    description: 'GPT-5 / GPT-4o / o-series reasoning models direct from OpenAI. BYOK so requests bill against your OpenAI account.',
+    capabilityFlags: ['gpt_chat', 'function_calling', 'vision', 'reasoning_models'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: ['organization_id'],
+    metadataFields: [
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'gpt-5' },
+    ],
+    validationHints: ['Get the key from https://platform.openai.com/api-keys. Set organization_id if you belong to multiple orgs.'],
+  },
+  google_ai: {
+    provider: 'google_ai',
+    label: 'Google AI',
+    description: 'Gemini 2.5 Pro / Flash via Google AI Studio. Long-context and multimodal directly from Google.',
+    capabilityFlags: ['gemini_chat', 'multimodal', 'long_context', 'function_calling'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'gemini-2.5-pro' },
+    ],
+    validationHints: ['Generate an API key at https://aistudio.google.com/apikey. No project setup needed.'],
+  },
+  groq: {
+    provider: 'groq',
+    label: 'Groq',
+    description: 'Ultra-fast Llama / Mixtral inference on LPU hardware. Sub-second latency for chat-heavy workloads.',
+    capabilityFlags: ['llama_chat', 'mixtral_chat', 'fast_inference', 'function_calling'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'llama-3.3-70b-versatile' },
+    ],
+    validationHints: ['Create a key at https://console.groq.com/keys. Free tier covers light usage.'],
+  },
+  mistral_ai: {
+    provider: 'mistral_ai',
+    label: 'Mistral AI',
+    description: 'Mistral Large / Codestral / Pixtral direct from Mistral. Strong Europe-hosted alternative for code + chat.',
+    capabilityFlags: ['mistral_chat', 'codestral', 'pixtral_vision', 'function_calling'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'mistral-large-latest' },
+    ],
+    validationHints: ['Get a key at https://console.mistral.ai/api-keys. Pay-as-you-go billing.'],
+  },
+  cohere: {
+    provider: 'cohere',
+    label: 'Cohere',
+    description: 'Command R+ chat + Embed v3 + Rerank. Strong for retrieval-augmented agents and enterprise use cases.',
+    capabilityFlags: ['command_chat', 'embeddings', 'rerank', 'function_calling'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'command-r-plus' },
+    ],
+    validationHints: ['Generate a key at https://dashboard.cohere.com/api-keys. Production keys are separate from trial keys.'],
+  },
+  perplexity: {
+    provider: 'perplexity',
+    label: 'Perplexity',
+    description: 'Sonar models with built-in web search. Citations come back inline so chat can ground answers in live sources.',
+    capabilityFlags: ['sonar_chat', 'web_search', 'citations', 'real_time_data'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'sonar-pro' },
+    ],
+    validationHints: ['Get a key at https://www.perplexity.ai/settings/api. $5 free credit on signup.'],
+  },
+  together_ai: {
+    provider: 'together_ai',
+    label: 'Together AI',
+    description: 'OSS frontier models (Llama, Qwen, DeepSeek) on managed inference. Cheap and fast for high-volume chat.',
+    capabilityFlags: ['llama_chat', 'qwen_chat', 'deepseek_chat', 'oss_hosting'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'meta-llama/Llama-3.3-70B-Instruct-Turbo' },
+    ],
+    validationHints: ['Generate a key at https://api.together.xyz/settings/api-keys.'],
+  },
+  fireworks_ai: {
+    provider: 'fireworks_ai',
+    label: 'Fireworks AI',
+    description: 'Production OSS inference with FireFunction tool calling. Optimised for low-latency function-call agents.',
+    capabilityFlags: ['firefunction', 'oss_hosting', 'tool_calling', 'fast_inference'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'accounts/fireworks/models/firefunction-v2' },
+    ],
+    validationHints: ['Create a key at https://fireworks.ai/account/api-keys.'],
+  },
+  deepseek: {
+    provider: 'deepseek',
+    label: 'DeepSeek',
+    description: 'DeepSeek R1 reasoning + V3 chat. Strong reasoning at OSS prices, ideal for code review and planning.',
+    capabilityFlags: ['deepseek_chat', 'deepseek_reasoner', 'function_calling', 'long_context'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'deepseek-chat' },
+    ],
+    validationHints: ['Get a key at https://platform.deepseek.com/api_keys.'],
+  },
+  z_ai: {
+    provider: 'z_ai',
+    label: 'Z.AI / GLM',
+    description: 'GLM-4 / GLM-4.5 chat from Zhipu / Z.AI. Multilingual coverage and strong on reasoning benchmarks.',
+    capabilityFlags: ['glm_chat', 'multilingual', 'function_calling', 'long_context'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'glm-4-plus' },
+    ],
+    validationHints: ['Generate a key at https://open.bigmodel.cn/usercenter/apikeys.'],
+  },
+  minimax: {
+    provider: 'minimax',
+    label: 'MiniMax',
+    description: 'MiniMax-Text + Speech 2.5. Long-context chat with strong Chinese / multilingual coverage.',
+    capabilityFlags: ['minimax_chat', 'speech', 'multilingual', 'long_context'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'MiniMax-Text-01' },
+    ],
+    validationHints: ['Get a key at https://www.minimaxi.com/platform/account/keys.'],
+  },
+  ollama: {
+    provider: 'ollama',
+    label: 'Ollama (Local)',
+    description: 'Run open models locally — Llama, Qwen, DeepSeek. Point at the Ollama URL on your machine; no cloud API key required.',
+    capabilityFlags: ['local_models', 'oss_hosting', 'no_cloud'],
+    requiredSecretKeys: [],
+    optionalSecretKeys: ['api_key'],
+    metadataFields: [
+      { key: 'baseUrl', label: 'Base URL', placeholder: 'http://localhost:11434' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'llama3.3' },
+    ],
+    validationHints: ['Run `ollama serve` on the same network. The chat will hit baseUrl + /v1/chat/completions (Ollama exposes an OpenAI-compatible endpoint).'],
   },
 };
 
