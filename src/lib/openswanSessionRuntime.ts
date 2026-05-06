@@ -3,7 +3,7 @@ import { addArtifact, addStep, createRun, mergeRunMetadata, type ArtifactKind, t
 import { buildOpenSwanExecutionStream, type OpenSwanExecutionContract } from './openswanExecution';
 import { buildOpenSwanMemoryRecommendations, captureOpenSwanOutcomeMemory, recordArchiveDerivedMemorySuccess, recordArchiveDerivedMemoryWeakSignal, type OpenSwanMemoryRecommendation, type PromptMemoryReference } from './memoryService';
 import { buildOpenSwanObservedEvalSummary } from './openswanObservedEvals';
-import { extractBrowserPlansFromToolActions, runOpenSwanRuntimeToolLoop } from './openswanRuntimeToolLoop';
+import { extractBrowserPlansFromToolActions } from './openswanRuntimeToolLoop';
 import { buildOpenSwanTaskPlan, type OpenSwanTaskPlan } from './openswanTaskPlanner';
 import {
   buildOpenSwanToolBrief,
@@ -32,6 +32,13 @@ export type OpenSwanRunStage =
 export type OpenSwanRunCallbacks = {
   onStageChange?: (stage: OpenSwanRunStage, label: string) => void;
   onDelegationPlan?: (subagents: OpenSwanDelegatedAgentDescriptor[]) => void;
+  /**
+   * Pre-execution gate fired before every Anthropic tool_use dispatch.
+   * Resolves to 'approve' or 'reject'. Rejection feeds a decline tool_result
+   * back to the model so it can adjust. ChatPanel uses this to surface
+   * an inline approval prompt when the user has flipped on review mode.
+   */
+  onToolApproval?: (call: { name: string; input: any }) => Promise<'approve' | 'reject'>;
 };
 
 export type OpenSwanDelegatedAgentDescriptor = {
@@ -142,6 +149,42 @@ function getOpenSwanReasoningSettings(
     thinkingLevel: complexity === 'complex' ? 'balanced' : 'fast',
     maxTokens: complexity === 'complex' ? 6144 : 4096,
   };
+}
+
+function selectRuntimeToolNames(
+  taskPlan: OpenSwanTaskPlan,
+  mode?: string | null,
+): string[] {
+  const codeRelevantKinds = new Set(['build', 'debug', 'review', 'architect']);
+  const isCodeRelevant = codeRelevantKinds.has(taskPlan.kind);
+  const names = taskPlan.recommendedTools
+    .filter((item) => item.tool !== 'code.inspect' || isCodeRelevant)
+    .map((item) => item.tool);
+  const unique = Array.from(new Set(names));
+
+  // A default-only "inspect" recommendation should not force an extra
+  // model/tool round for plain talk or support. Concrete tools (vault,
+  // browser, desktop, rooms, tasks, etc.) still run.
+  if (unique.length === 0) return [];
+
+  const modeKey = mode || 'talk';
+  const cap =
+    modeKey === 'execute' ? 10 :
+    modeKey === 'build' || modeKey === 'plan' ? 8 :
+    modeKey === 'research' ? 6 :
+    modeKey === 'review' || modeKey === 'support' ? 5 :
+    4;
+  return unique.slice(0, cap);
+}
+
+function getToolRoundBudget(taskPlan: OpenSwanTaskPlan, mode?: string | null): number {
+  const modeKey = mode || 'talk';
+  if (modeKey === 'execute') return taskPlan.kind === 'automation' ? 5 : 4;
+  if (modeKey === 'build') return 4;
+  if (modeKey === 'plan') return 3;
+  if (modeKey === 'research') return 3;
+  if (modeKey === 'review' || modeKey === 'support') return 2;
+  return 2;
 }
 
 function emitStage(callbacks: OpenSwanRunCallbacks, stage: OpenSwanRunStage, label: string) {
@@ -367,6 +410,8 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   ].filter(Boolean).join('\n\n');
   const runSurface = opts.runSurface || opts.surface;
   const taskPlan = buildOpenSwanTaskPlan(cleanMessage, profile, entities);
+  const runtimeToolNames = selectRuntimeToolNames(taskPlan, opts.mode || null);
+  const toolRoundBudget = getToolRoundBudget(taskPlan, opts.mode || null);
   const { resolveModelForProfile } = await import('./serviceProfileSouls');
   const resolvedModel = resolveModelForProfile(
     profile as any,
@@ -432,6 +477,8 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
           modeOutcome: modePolicy.outcome,
           modeResponseContract: modePolicy.responseContract || null,
           taskKind: taskPlan.kind,
+          runtimeToolNames,
+          toolRoundBudget,
           activeSkills: skillResolution.skills.map((skill) => ({
             name: skill.name,
             displayName: skill.displayName,
@@ -754,6 +801,8 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         hiddenToolNames: hiddenTools.map((t) => t.name),
         subagentsPlanned: delegationSpecs.length,
         subagentRoles: delegationSpecs.map((s) => s.subagent.role),
+        runtimeToolNames,
+        toolRoundBudget,
       },
     });
   }
@@ -771,73 +820,97 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   let browserPlanEvents: BrowserPlanEvent[] = [];
   let executionStream = buildOpenSwanExecutionStream({ toolEvents: [], verificationResults: [] });
 
+  const runTextOnlyResponse = async () => getSwanBotStructuredResponse(prompt, {
+    ...opts.context,
+    model: resolvedModel,
+    thinkingLevel: opts.context.thinkingLevel || reasoningSettings.thinkingLevel,
+    maxTokens: opts.context.maxTokens || reasoningSettings.maxTokens,
+    modeKey: opts.mode || 'talk',
+    taskKind: taskPlan.kind,
+    sessionProfile: taskPlan.profile,
+    resolvedSkills: skillResolution.skills,
+    resolvedSkillsPromptBlock: skillResolution.promptBlock,
+    memoryContext: memoryBundle.combined,
+    memoryStores: memoryBundle,
+    memoryRefs: memoryBundle.references,
+    chatHistory: [
+      opts.context.chatHistory || '',
+      delegationSummary ? `## Specialist Sub-Agent Results\n${delegationSummary}` : '',
+    ].filter(Boolean).join('\n\n'),
+  });
+
   try {
-    emitStage(opts, 'reasoning', 'Reasoning with tools');
+    emitStage(
+      opts,
+      'reasoning',
+      runtimeToolNames.length > 0 ? 'Reasoning with tools' : 'Reasoning without tool loop',
+    );
 
-    // Build the full system prompt (Blocks A-E: SOUL, wisdom, memory, attachments, skills)
-    const systemPrompt = await buildStreamableSystemPrompt({
-      circleId: opts.context.circleId!,
-      userId: opts.context.userId,
-      currentMessage: prompt,
-      model: opts.context.model,
-      userName: opts.context.userName,
-      modeKey: opts.mode || 'talk',
-      taskKind: taskPlan.kind,
-      sessionProfile: taskPlan.profile,
-      resolvedSkills: skillResolution.skills,
-      resolvedSkillsPromptBlock: skillResolution.promptBlock,
-      chatHistory: [
-        opts.context.chatHistory || '',
-        delegationSummary ? `## Specialist Sub-Agent Results\n${delegationSummary}` : '',
-        memoryBundle.combined ? `## Memory Context\n${memoryBundle.combined}` : '',
-      ].filter(Boolean).join('\n\n'),
-    });
+    if (runtimeToolNames.length === 0) {
+      structured = await runTextOnlyResponse();
+    } else {
 
-    // Preferred tools from the task planner — pass as allowedToolNames to scope
-    // the tool set. If empty, all surface-appropriate tools are available.
-    const preferredToolNames = taskPlan.recommendedTools.length > 0
-      ? taskPlan.recommendedTools.map((t) => t.tool)
-      : undefined;
+      // Build the full system prompt (Blocks A-E: SOUL, wisdom, memory, attachments, skills)
+      const systemPrompt = await buildStreamableSystemPrompt({
+        circleId: opts.context.circleId!,
+        userId: opts.context.userId,
+        currentMessage: prompt,
+        model: opts.context.model,
+        userName: opts.context.userName,
+        modeKey: opts.mode || 'talk',
+        taskKind: taskPlan.kind,
+        sessionProfile: taskPlan.profile,
+        resolvedSkills: skillResolution.skills,
+        resolvedSkillsPromptBlock: skillResolution.promptBlock,
+        chatHistory: [
+          opts.context.chatHistory || '',
+          delegationSummary ? `## Specialist Sub-Agent Results\n${delegationSummary}` : '',
+          memoryBundle.combined ? `## Memory Context\n${memoryBundle.combined}` : '',
+        ].filter(Boolean).join('\n\n'),
+      });
 
-    const toolLoopResult = await executeToolUseLoop({
-      systemPrompt,
-      userMessage: prompt,
-      model: resolvedModel || 'claude-sonnet-4-6',
-      circleId: opts.context.circleId!,
-      userId: opts.context.userId,
-      threadId: opts.chatSessionId || undefined,
-      runId: run?.id,
-      activeSoulKey,
-      activePluginIds: opts.activePluginIds,
-      allowedToolNames: preferredToolNames,
-      surface: surfaceForTools,
-      mode: opts.mode || null,
-    });
+      const toolLoopResult = await executeToolUseLoop({
+        systemPrompt,
+        userMessage: prompt,
+        model: resolvedModel || 'claude-sonnet-4-6',
+        circleId: opts.context.circleId!,
+        userId: opts.context.userId,
+        threadId: opts.chatSessionId || undefined,
+        runId: run?.id,
+        activeSoulKey,
+        activePluginIds: opts.activePluginIds,
+        allowedToolNames: runtimeToolNames,
+        surface: surfaceForTools,
+        mode: opts.mode || null,
+        maxToolRounds: toolRoundBudget,
+        toolApprovalGate: opts.onToolApproval,
+      });
 
-    // Map tool events to the SwanBotStructuredToolAction shape expected downstream
-    runtimeToolActions = toolLoopResult.toolEvents.map((evt) => {
-      const status: 'completed' | 'failed' | 'manual_required' | 'blocked' =
-        evt.status === 'passed' ? 'completed' : evt.status === 'manual_required' ? 'manual_required' : evt.status === 'blocked' ? 'blocked' : 'failed';
-      return {
-        kind: 'tool' as const,
-        tool_name: evt.tool,
-        title: evt.tool.replace(/_/g, ' ').replace(/\./g, ' > '),
-        status,
-        input_preview: typeof evt.input === 'string' ? evt.input.slice(0, 500) : JSON.stringify(evt.input).slice(0, 500),
-        output_preview: typeof evt.result === 'string' ? evt.result.slice(0, 1200) : '',
-        metadata: evt.metadata || {},
+      // Map tool events to the SwanBotStructuredToolAction shape expected downstream
+      runtimeToolActions = toolLoopResult.toolEvents.map((evt) => {
+        const status: 'completed' | 'failed' | 'manual_required' | 'blocked' =
+          evt.status === 'passed' ? 'completed' : evt.status === 'manual_required' ? 'manual_required' : evt.status === 'blocked' ? 'blocked' : 'failed';
+        return {
+          kind: 'tool' as const,
+          tool_name: evt.tool,
+          title: evt.tool.replace(/_/g, ' ').replace(/\./g, ' > '),
+          status,
+          input_preview: typeof evt.input === 'string' ? evt.input.slice(0, 500) : JSON.stringify(evt.input).slice(0, 500),
+          output_preview: typeof evt.result === 'string' ? evt.result.slice(0, 1200) : '',
+          metadata: evt.metadata || {},
+        };
+      });
+
+      browserPlans = extractBrowserPlansFromToolActions(runtimeToolActions);
+      browserPlanEvents = buildInitialBrowserPlanEvents(browserPlans);
+
+      structured = {
+        response: toolLoopResult.response,
+        tool_actions: runtimeToolActions,
+        artifacts: [],
+        usage: {},
       };
-    });
-
-    browserPlans = extractBrowserPlansFromToolActions(runtimeToolActions);
-    browserPlanEvents = buildInitialBrowserPlanEvents(browserPlans);
-
-    structured = {
-      response: toolLoopResult.response,
-      tool_actions: runtimeToolActions,
-      artifacts: [],
-      usage: {},
-    };
+    }
 
     // Log tool activity to transcript
     if (runtimeToolActions.length > 0) {
@@ -888,24 +961,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   } catch (toolErr) {
     console.warn('[OpenSwanRuntime] Tool-use loop failed, falling back to text-only:', toolErr);
     // Fallback: use the old text-only path if the tool loop fails
-    structured = await getSwanBotStructuredResponse(prompt, {
-      ...opts.context,
-      model: resolvedModel,
-      thinkingLevel: opts.context.thinkingLevel || reasoningSettings.thinkingLevel,
-      maxTokens: opts.context.maxTokens || reasoningSettings.maxTokens,
-      modeKey: opts.mode || 'talk',
-      taskKind: taskPlan.kind,
-      sessionProfile: taskPlan.profile,
-      resolvedSkills: skillResolution.skills,
-      resolvedSkillsPromptBlock: skillResolution.promptBlock,
-      memoryContext: memoryBundle.combined,
-      memoryStores: memoryBundle,
-      memoryRefs: memoryBundle.references,
-      chatHistory: [
-        opts.context.chatHistory || '',
-        delegationSummary ? `## Specialist Sub-Agent Results\n${delegationSummary}` : '',
-      ].filter(Boolean).join('\n\n'),
-    });
+    structured = await runTextOnlyResponse();
     runtimeToolActions = structured.tool_actions || [];
   }
 

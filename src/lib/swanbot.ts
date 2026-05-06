@@ -2333,6 +2333,15 @@ export async function executeToolUseLoop(opts: {
    * (e.g. `review` mode hides write tools).
    */
   mode?: string | null;
+  /** Optional tighter cap for cost-sensitive OpenSwan surfaces. */
+  maxToolRounds?: number;
+  /**
+   * Optional gate fired before every tool dispatch. Resolves to 'approve'
+   * or 'reject'. Rejected tool calls feed a "User declined this action"
+   * tool_result back to the model so it can try a different approach.
+   * Used by the room chat's per-step review mode (Plan → Approve flow).
+   */
+  toolApprovalGate?: (call: { name: string; input: any }) => Promise<'approve' | 'reject'>;
 }): Promise<{ response: string; toolEvents: Array<{ tool: string; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }> }> {
   if (shouldBlockExternalAiProvider('anthropic')) {
     return { response: getStrictLocalAiModeMessage('anthropic'), toolEvents: [] };
@@ -2365,7 +2374,9 @@ export async function executeToolUseLoop(opts: {
 
   const toolEvents: Array<{ tool: string; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }> = [];
 
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+  const maxRounds = Math.max(1, Math.min(MAX_TOOL_ROUNDS, opts.maxToolRounds ?? MAX_TOOL_ROUNDS));
+
+  for (let round = 0; round < maxRounds; round++) {
     // Call supabase edge fn or direct API. Refresh the JWT per-round so long
     // tool-use loops don't starve across an expiry boundary.
     const accessToken = await getFreshAccessToken();
@@ -2403,9 +2414,36 @@ export async function executeToolUseLoop(opts: {
       };
     }
 
-    // Dispatch each tool call
+    // Dispatch each tool call (with optional approval gate)
     const toolResults: Array<{ type: string; tool_use_id: string; content: string }> = [];
     for (const block of toolUseBlocks) {
+      // Per-step review gate. The room chat's review mode renders an
+      // approval prompt and resolves with the user's decision; YOLO/auto
+      // mode just doesn't pass a gate so the loop runs as before.
+      if (opts.toolApprovalGate) {
+        let decision: 'approve' | 'reject';
+        try {
+          decision = await opts.toolApprovalGate({ name: block.name, input: block.input });
+        } catch {
+          decision = 'reject';
+        }
+        if (decision === 'reject') {
+          const rejectionText = 'User declined this tool call. Try a different approach or ask the user how to proceed.';
+          toolEvents.push({
+            tool: block.name,
+            input: block.input,
+            result: rejectionText,
+            status: 'blocked' as OpenSwanExecutionStatus,
+            metadata: { rejected_by_user: true },
+          });
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: rejectionText,
+          });
+          continue;
+        }
+      }
       const dispatched = await dispatchToolDetailed(block.name, block.input || {}, toolCtx);
       toolEvents.push({ tool: block.name, input: block.input, result: dispatched.text, status: dispatched.status, metadata: dispatched.metadata });
       toolResults.push({

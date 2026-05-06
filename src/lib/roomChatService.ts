@@ -112,6 +112,7 @@ export async function sendRoomStructuredChatMessage({
   availableFiles = [],
   profile,
   onStageChange,
+  onToolApproval,
   extraMetadata,
   promptPrefix,
   modelOverride,
@@ -152,6 +153,7 @@ export async function sendRoomStructuredChatMessage({
       activeFileName: activeFile?.name || null,
     },
     onStageChange,
+    onToolApproval,
   });
 
   const artifacts = structured.artifacts || [];

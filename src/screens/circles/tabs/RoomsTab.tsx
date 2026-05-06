@@ -2464,6 +2464,15 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // resolver in serviceProfileSouls; the explicit picks force one of
   // Anthropic's three tiers via context.model on runOpenSwanSessionTurn.
   const [modelOverride, setModelOverride] = useState<'auto' | 'claude-haiku-4-5' | 'claude-sonnet-4-6' | 'claude-opus-4-7'>('auto');
+  // Tool approval mode — 'yolo' (default) auto-approves every tool the
+  // model asks to call; 'review' surfaces an inline Approve/Reject
+  // prompt before the runtime dispatches each one.
+  const [toolApprovalMode, setToolApprovalMode] = useState<'yolo' | 'review'>('yolo');
+  const [pendingApproval, setPendingApproval] = useState<{
+    tool: string;
+    input: any;
+    resolve: (decision: 'approve' | 'reject') => void;
+  } | null>(null);
 
   const handleSessionProfileSelect = useCallback(async (nextProfile: SessionCodingProfile) => {
     setSessionProfile(nextProfile);
@@ -2781,6 +2790,16 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
 
   // Stop the voice listener when the panel unmounts so we don't leak it.
   useEffect(() => () => stopVoiceInput(), [stopVoiceInput]);
+
+  // Tool approval gate. In yolo mode this short-circuits to 'approve';
+  // in review mode it parks a Promise resolver in pendingApproval and
+  // waits for the user to tap Approve / Reject in the inline card.
+  const buildToolApprovalGate = useCallback(() => {
+    if (toolApprovalMode === 'yolo') return undefined;
+    return (call: { name: string; input: any }) => new Promise<'approve' | 'reject'>((resolve) => {
+      setPendingApproval({ tool: call.name, input: call.input, resolve });
+    });
+  }, [toolApprovalMode]);
 
   const handleClipboardPaste = useCallback((e: any) => {
     if (Platform.OS !== 'web') return;
@@ -3103,6 +3122,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         promptPrefix: opts.promptPrefix,
         modelOverride,
         onStageChange: (_stage, label) => setCurrentRunStep(label),
+        onToolApproval: buildToolApprovalGate(),
       });
     } catch {
       await supabase.from('room_messages').insert({
@@ -3114,7 +3134,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       setBotTyping(false);
       stopCodingWorkbenchAfter(isCodingGenerationRequest(promptText, sessionProfile) ? 2600 : 0);
     }
-  }, [activeFile, circleId, messages, modelOverride, roomFiles, roomId, sessionProfile, startCodingWorkbench, stopCodingWorkbenchAfter]);
+  }, [activeFile, buildToolApprovalGate, circleId, messages, modelOverride, roomFiles, roomId, sessionProfile, startCodingWorkbench, stopCodingWorkbenchAfter]);
 
   const handleContinueFromMessage = useCallback(async (aiMessageId: string) => {
     if (botTyping) return;
@@ -3275,6 +3295,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           promptPrefix: planPromptPrefix,
           modelOverride,
           onStageChange: (_stage, label) => setCurrentRunStep(label),
+          onToolApproval: buildToolApprovalGate(),
         });
       } catch {
         await supabase.from('room_messages').insert({
@@ -3622,6 +3643,20 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           ]}>
           <Text style={{ color: planMode ? '#f59e0b' : '#94a3b8', fontSize: 11, fontWeight: '700' }}>
             {planMode ? '◷ PLAN' : 'PLAN'}
+          </Text>
+        </Pressable>
+        <Pressable onPress={() => setToolApprovalMode((m) => m === 'yolo' ? 'review' : 'yolo')}
+          style={[
+            s.panelBtn,
+            toolApprovalMode === 'review'
+              ? { backgroundColor: '#22c55e15', borderColor: '#22c55e66' }
+              : { backgroundColor: '#0f172a', borderColor: '#1f2937' },
+          ]}>
+          <Text style={{
+            color: toolApprovalMode === 'review' ? '#22c55e' : '#94a3b8',
+            fontSize: 11, fontWeight: '700', fontFamily: MONO, letterSpacing: 0.4,
+          }}>
+            {toolApprovalMode === 'review' ? '⏸ REVIEW' : '⚡ YOLO'}
           </Text>
         </Pressable>
         <Pressable onPress={() => {
@@ -4138,6 +4173,55 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             })}
           </View>
         )}
+
+        {pendingApproval ? (
+          <View style={{
+            paddingHorizontal: 12, paddingVertical: 10,
+            backgroundColor: '#22c55e10',
+            borderTopWidth: 1, borderTopColor: '#22c55e44',
+            gap: 8,
+          }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={{ color: '#22c55e', fontSize: 9, fontWeight: '900', letterSpacing: 1.2, fontFamily: MONO }}>
+                ⏸ TOOL APPROVAL
+              </Text>
+              <Text style={{ color: '#cbd5e1', fontSize: 12, fontFamily: MONO, fontWeight: '800', flex: 1 }} numberOfLines={1}>
+                {pendingApproval.tool}
+              </Text>
+            </View>
+            <Text selectable style={{
+              color: '#94a3b8', fontSize: 11, fontFamily: MONO, lineHeight: 17,
+              backgroundColor: '#020409', padding: 8, borderRadius: 8,
+              borderWidth: 1, borderColor: '#1f2937', maxHeight: 120,
+            }} numberOfLines={6}>
+              {(() => {
+                try {
+                  return JSON.stringify(pendingApproval.input, null, 2);
+                } catch {
+                  return String(pendingApproval.input);
+                }
+              })()}
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 6 }}>
+              <Pressable
+                onPress={() => {
+                  pendingApproval.resolve('approve');
+                  setPendingApproval(null);
+                }}
+                style={{ flex: 1, paddingVertical: 8, borderRadius: 8, backgroundColor: '#22c55e', alignItems: 'center', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
+                <Text style={{ color: '#0b1220', fontSize: 11, fontWeight: '900', letterSpacing: 0.5 }}>✓ APPROVE</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  pendingApproval.resolve('reject');
+                  setPendingApproval(null);
+                }}
+                style={{ flex: 1, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#1f2937', backgroundColor: '#0d1320', alignItems: 'center', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
+                <Text style={{ color: '#94a3b8', fontSize: 11, fontWeight: '900', letterSpacing: 0.5 }}>✕ REJECT</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
 
         {replyingTo ? (
           <View style={{
