@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -11,14 +11,23 @@ import {
 import { supabase } from '../../lib/supabase';
 import { showAlert } from '../../lib/alert';
 import { validateUsername, validateEmail, validatePassword, sanitizeString, LENGTH_LIMITS } from '../../lib/validation';
-import { signInWithGoogle } from '../../lib/googleCreds';
+import { signInWithGoogle, readOAuthErrorFromUrl } from '../../lib/googleCreds';
 
 export default function SignUpScreen({ navigation }: any) {
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
   const [error, setError] = useState('');
+
+  // Surface OAuth errors that Google / Supabase left in the URL after
+  // a failed redirect. Without this users bounce back to a clean form
+  // with no idea what went wrong.
+  useEffect(() => {
+    const oauthError = readOAuthErrorFromUrl();
+    if (oauthError) setError(oauthError);
+  }, []);
 
   const handleSignUp = async () => {
     setError('');
@@ -123,20 +132,33 @@ export default function SignUpScreen({ navigation }: any) {
           </Text>
         </TouchableOpacity>
 
-        {/* Sign up with Google — identity via Supabase Auth + asks for
-            the full Workspace scope set so the user's agents can
-            immediately read their Gmail / Calendar / Drive. They can
-            still pick the email+password path above if they'd rather
-            connect Google later from Settings. */}
+        {/* Continue with Google — handles BOTH sign-in and sign-up.
+            Supabase auto-creates a user row on first OAuth callback so
+            new users land here, click once, and are signed in.
+            Identity scopes only at sign-up time; Workspace scopes
+            (Gmail/Calendar/Drive) get prompted later in Settings to
+            avoid the giant first-touch consent sheet that drove drop-
+            off. */}
         <TouchableOpacity
-          style={[styles.googleButton, loading && styles.buttonDisabled]}
-          disabled={loading}
+          style={[styles.googleButton, (loading || googleLoading) && styles.buttonDisabled]}
+          disabled={loading || googleLoading}
           onPress={async () => {
-            const { ok, reason } = await signInWithGoogle({ withWorkspaceScopes: true });
-            if (!ok && reason) setError(reason);
+            if (googleLoading) return;
+            setError('');
+            setGoogleLoading(true);
+            const { ok, reason } = await signInWithGoogle();
+            if (!ok) {
+              setGoogleLoading(false);
+              if (reason) setError(reason);
+            }
+            // If ok, Supabase has already triggered the redirect to
+            // Google. Leave googleLoading on so the button stays
+            // disabled until navigation completes.
           }}
         >
-          <Text style={styles.googleButtonText}>Continue with Google</Text>
+          <Text style={styles.googleButtonText}>
+            {googleLoading ? 'Redirecting to Google…' : 'Continue with Google'}
+          </Text>
         </TouchableOpacity>
 
         <TouchableOpacity onPress={() => navigation.navigate('Login')}>

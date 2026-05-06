@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { signInWithSSO } from '../../lib/sso';
-import { signInWithGoogle } from '../../lib/googleCreds';
+import { signInWithGoogle, readOAuthErrorFromUrl } from '../../lib/googleCreds';
 
 // LoginBackground3D pulls in three, @react-three/fiber, @react-three/postprocessing
 // (~1-2MB of JS). It only renders on the web login screen, so code-split it out
@@ -135,11 +135,22 @@ export default function LoginScreen({ navigation }: any) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  // Separate flag so the Google button gets its own disabled / spinner
+  // state without freezing the email/password form during the redirect.
+  const [googleLoading, setGoogleLoading] = useState(false);
   const [error, setError] = useState('');
   const [showSSO, setShowSSO] = useState(false);
   const [ssoDomain, setSsoDomain] = useState('');
   const [focusedField, setFocusedField] = useState<FocusField>(null);
   const [hoveredAction, setHoveredAction] = useState<HoverAction>(null);
+
+  // Surface OAuth errors that Google / Supabase left in the URL after a
+  // failed redirect. Without this the user bounces back to a clean
+  // login form with no idea what went wrong.
+  useEffect(() => {
+    const oauthError = readOAuthErrorFromUrl();
+    if (oauthError) setError(oauthError);
+  }, []);
 
   // Portal suck-in transition — zooms INTO the portal like being pulled in
   const [portalTransition, setPortalTransition] = useState(false);
@@ -488,21 +499,40 @@ export default function LoginScreen({ navigation }: any) {
                       <Text style={styles.secondaryButtonText}>Use company SSO</Text>
                     </Pressable>
 
-                    {/* Sign in with Google — hands identity over to
-                        Supabase Auth's built-in provider. We ask for the
-                        full Google Workspace scope set so users who pick
-                        this path land fully wired for Gmail / Calendar
-                        / Drive tools right after their first sign-in. */}
+                    {/* Continue with Google — handles BOTH sign-in and
+                        sign-up via Supabase Auth's built-in provider.
+                        First-time users get an account auto-created on
+                        the first OAuth callback (no separate signup
+                        step needed). We deliberately ask for identity
+                        scopes only here — Gmail / Calendar / Drive
+                        consent moves to a later "Connect Workspace"
+                        prompt in Settings, otherwise the giant scope
+                        sheet on first click scares users off. */}
                     <Pressable
-                      style={[styles.secondaryButton, hoveredAction === 'googleSignin' && styles.secondaryButtonHovered]}
+                      style={[
+                        styles.secondaryButton,
+                        hoveredAction === 'googleSignin' && styles.secondaryButtonHovered,
+                        googleLoading && styles.buttonDisabled,
+                      ]}
+                      disabled={googleLoading}
                       onHoverIn={() => setHoveredAction('googleSignin')}
                       onHoverOut={() => setHoveredAction((current) => (current === 'googleSignin' ? null : current))}
                       onPress={async () => {
-                        const { ok, reason } = await signInWithGoogle({ withWorkspaceScopes: true });
-                        if (!ok && reason) setError(reason);
+                        if (googleLoading) return;
+                        setError('');
+                        setGoogleLoading(true);
+                        const { ok, reason } = await signInWithGoogle();
+                        if (!ok) {
+                          setGoogleLoading(false);
+                          if (reason) setError(reason);
+                        }
+                        // If ok, Supabase has already triggered the
+                        // window-level redirect to Google. Leave
+                        // googleLoading on so the button stays disabled
+                        // until the navigation completes.
                       }}
                     >
-                      {Platform.OS === 'web' && hoveredAction === 'googleSignin' && (
+                      {Platform.OS === 'web' && hoveredAction === 'googleSignin' && !googleLoading && (
                         <div style={{
                           position: 'absolute', top: 0, left: '-100%', width: '50%', height: '100%',
                           background: 'linear-gradient(90deg, transparent, rgba(66,133,244,0.12), transparent)',
@@ -510,7 +540,9 @@ export default function LoginScreen({ navigation }: any) {
                           pointerEvents: 'none',
                         }} />
                       )}
-                      <Text style={styles.secondaryButtonText}>Sign in with Google</Text>
+                      <Text style={styles.secondaryButtonText}>
+                        {googleLoading ? 'Redirecting to Google…' : 'Continue with Google'}
+                      </Text>
                     </Pressable>
                   </>
                 )}

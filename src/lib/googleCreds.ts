@@ -106,21 +106,34 @@ export async function revokeGoogleWorkspace(): Promise<boolean> {
 }
 
 /**
- * Sign in with Google via Supabase Auth. Distinct from the Workspace
- * OAuth above — this is for identity only (email + profile scopes).
+ * Sign in with Google via Supabase Auth. Acts as both sign-in AND
+ * sign-up — Supabase auto-creates a user row on first OAuth callback
+ * when "Enable Sign Ups" is on in the dashboard, so a user with no
+ * existing account is created and signed in in the same click.
  *
- * If the caller passes `withWorkspaceScopes=true`, we request the full
- * Gmail/Calendar/Drive/Sheets/Docs/Contacts scope set at sign-in time,
- * so a fresh user lands with everything wired up after one click.
- * Supabase stores the provider_refresh_token in the session; our
- * edge function reads it on first workspace call to bootstrap
- * `user_google_credentials` without a second OAuth round-trip.
+ * Defaults are deliberately minimal:
+ *   - `openid email profile` only. No Gmail / Drive scope ask on first
+ *     sign-in (that consent screen scared users away). When the user
+ *     later wants Gmail / Calendar agents, Settings prompts for the
+ *     workspace scopes via `startGoogleWorkspaceOAuth`.
+ *   - `redirectTo` defaults to `window.location.origin` so the live
+ *     site at app.chrisswanson.xyz lands the user back at app.chrisswanson.xyz
+ *     instead of whatever the Supabase dashboard "Site URL" was set to.
+ *     Make sure the same origin is whitelisted in the Google Cloud
+ *     Console OAuth client and Supabase Dashboard → Auth → URL
+ *     Configuration → Redirect URLs.
+ *
+ * Pass `withWorkspaceScopes=true` to request the full Gmail / Calendar
+ * / Drive / Sheets / Docs / Contacts set at sign-in. Only do this from
+ * an explicit "connect Google Workspace" CTA — never as the default
+ * sign-in path.
  */
 export async function signInWithGoogle(options?: {
   withWorkspaceScopes?: boolean;
   redirectTo?: string;
 }): Promise<{ ok: boolean; reason?: string }> {
-  const scopes = options?.withWorkspaceScopes
+  const wantsWorkspace = !!options?.withWorkspaceScopes;
+  const scopes = wantsWorkspace
     ? [
         'openid', 'email', 'profile',
         'https://www.googleapis.com/auth/gmail.modify',
@@ -132,22 +145,70 @@ export async function signInWithGoogle(options?: {
       ].join(' ')
     : 'openid email profile';
 
+  // Default the redirect to the current origin. Without this Supabase
+  // falls back to the dashboard "Site URL" — that mismatch is the
+  // most common cause of `redirect_uri_mismatch` from Google in prod.
+  const redirectTo =
+    options?.redirectTo ??
+    (typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : undefined);
+
+  // `access_type=offline` + `prompt=consent` are only useful when we
+  // need a refresh_token (workspace scopes). For pure identity sign-in
+  // they just force the consent dialog every login — annoying for
+  // returning users.
+  const queryParams: Record<string, string> = wantsWorkspace
+    ? { access_type: 'offline', prompt: 'consent' }
+    : {};
+
   const { error } = await supabase.auth.signInWithOAuth({
     provider: 'google',
     options: {
-      redirectTo: options?.redirectTo,
+      redirectTo,
       scopes,
-      queryParams: {
-        // These two together guarantee Google returns a refresh_token.
-        // Without them, the user gets a new access_token only, which
-        // expires in ~1 hour with no way to refresh.
-        access_type: 'offline',
-        prompt: 'consent',
-      },
+      queryParams,
     },
   });
   if (error) return { ok: false, reason: error.message };
   return { ok: true };
+}
+
+/** Read OAuth error params Supabase / Google leaves on the URL after a
+ *  failed redirect (e.g. `?error=access_denied&error_description=...`).
+ *  Returns null when the URL is clean. Auth screens call this on mount
+ *  so the user actually sees what went wrong instead of bouncing back
+ *  to a clean login form.
+ *
+ *  Side effect: when an error is found, the params are stripped from
+ *  the URL (history.replaceState) so a refresh doesn't re-show the
+ *  same banner.
+ */
+export function readOAuthErrorFromUrl(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const url = new URL(window.location.href);
+    const queryError = url.searchParams.get('error_description') || url.searchParams.get('error');
+    // Supabase sometimes returns errors in the hash (#error=...&error_description=...)
+    // because the OAuth response_type is `token` for some flows.
+    let hashError: string | null = null;
+    if (url.hash && url.hash.length > 1) {
+      const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+      hashError = hashParams.get('error_description') || hashParams.get('error');
+    }
+    const found = queryError || hashError;
+    if (!found) return null;
+
+    // Clean the URL so a refresh doesn't replay the error banner.
+    url.searchParams.delete('error');
+    url.searchParams.delete('error_description');
+    url.searchParams.delete('error_code');
+    url.hash = '';
+    window.history.replaceState(null, '', url.toString());
+    return decodeURIComponent(found);
+  } catch {
+    return null;
+  }
 }
 
 /** React hook — status + live refresh on window focus. Used by
