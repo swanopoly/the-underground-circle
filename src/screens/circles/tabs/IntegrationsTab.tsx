@@ -1075,9 +1075,14 @@ export default function MarketplaceTab({
           {/* Sort row — applies to whatever the filters above produced.
               Default is `popular` (curated rank) so anthropic / openai
               / openrouter sit up front and replicate falls to the
-              bottom. */}
-          <View style={[styles.filterRow, { paddingHorizontal: 0, paddingTop: 4, alignItems: 'center', gap: 8 }]}>
-            <Text style={{ color: '#475569', fontSize: 9, fontWeight: '900', letterSpacing: 1.2 }}>SORT</Text>
+              bottom. Horizontal ScrollView matches the other filter
+              rows so the chips render side-by-side, left-aligned. */}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={[styles.filterRow, { alignItems: 'center', paddingTop: 4 }]}
+          >
+            <Text style={{ color: '#475569', fontSize: 9, fontWeight: '900', letterSpacing: 1.2, marginRight: 4 }}>SORT</Text>
             {([
               { key: 'popular', label: 'Popular' },
               { key: 'alphabetical', label: 'A–Z' },
@@ -1094,7 +1099,7 @@ export default function MarketplaceTab({
                 </Pressable>
               );
             })}
-          </View>
+          </ScrollView>
         </View>
 
         {!loading && (
