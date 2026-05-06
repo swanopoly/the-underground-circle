@@ -3187,6 +3187,67 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     setSlashPaletteOpen(false);
     cancelRequestedRef.current = false;
 
+    // ─── /run <cmd> — execute a shell command via the Claude Code bridge ─
+    if (lowerContent.startsWith('/run ') || lowerContent === '/run') {
+      const cmd = content.replace(/^\/run\s*/i, '').trim();
+      if (!cmd) {
+        await supabase.from('room_messages').insert({
+          room_id: roomId, user_id: null, agent_name: 'Bridge',
+          content: 'Usage: `/run <command>` — runs through the Claude Code bridge (port 7778) and posts stdout/stderr here.',
+          message_type: 'agent_output', metadata: { bot: true, bot_name: 'Bridge' },
+        });
+        return;
+      }
+      await supabase.from('room_messages').insert({
+        room_id: roomId, user_id: user?.id || null, content, message_type: 'chat',
+      });
+      setBotTyping(true);
+      setCurrentRunStep(`$ ${cmd.slice(0, 40)}`);
+      try {
+        const { detectClaudeCodeBridge, execBridgeCommand } = await import('../../../lib/claudeCodeDetector');
+        const ok = await detectClaudeCodeBridge();
+        if (!ok) {
+          await supabase.from('room_messages').insert({
+            room_id: roomId, user_id: null, agent_name: 'Bridge',
+            content: 'Claude Code bridge offline. Start `npm run bridge` (port 7778) on your machine to use `/run`.',
+            message_type: 'agent_output',
+            metadata: { bot: true, bot_name: 'Bridge', error: true },
+          });
+          return;
+        }
+        const result = await execBridgeCommand(cmd);
+        const parts: string[] = [];
+        parts.push('```bash\n$ ' + cmd + '\n```');
+        if (result.stdout) {
+          const out = result.stdout.length > 4000 ? result.stdout.slice(0, 4000) + '\n…[truncated]' : result.stdout;
+          parts.push('```\n' + out + '\n```');
+        }
+        if (result.stderr) {
+          const err = result.stderr.length > 2000 ? result.stderr.slice(0, 2000) + '\n…[truncated]' : result.stderr;
+          parts.push('```\n[stderr]\n' + err + '\n```');
+        }
+        if (!result.ok && result.error) parts.push('Error: ' + result.error);
+        parts.push(result.ok ? '✓ exit 0' : '✕ failed');
+        await supabase.from('room_messages').insert({
+          room_id: roomId, user_id: null, agent_name: 'Bridge',
+          content: parts.join('\n\n'),
+          message_type: 'agent_output',
+          metadata: { bot: true, bot_name: 'Bridge', tool: 'run', cmd, ok: result.ok, exit: result.ok ? 0 : 1 },
+        });
+      } catch (e: any) {
+        await supabase.from('room_messages').insert({
+          room_id: roomId, user_id: null, agent_name: 'Bridge',
+          content: '/run failed: ' + (e?.message || 'unknown error'),
+          message_type: 'agent_output',
+          metadata: { bot: true, bot_name: 'Bridge', error: true },
+        });
+      } finally {
+        setBotTyping(false);
+        setCurrentRunStep('');
+      }
+      return;
+    }
+
     // ─── /room commands ─────────────────────────────────────────────────
     if (lowerContent.startsWith('/room ') || lowerContent === '/room') {
       await supabase.from('room_messages').insert({
