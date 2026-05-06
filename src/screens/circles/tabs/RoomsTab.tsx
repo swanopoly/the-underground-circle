@@ -2461,9 +2461,30 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // is the prompt-prefix half.
   const [planMode, setPlanMode] = useState(false);
   // Manual model override. 'auto' delegates to the soul/intent
-  // resolver in serviceProfileSouls; the explicit picks force one of
-  // Anthropic's three tiers via context.model on runOpenSwanSessionTurn.
-  const [modelOverride, setModelOverride] = useState<'auto' | 'claude-haiku-4-5' | 'claude-sonnet-4-6' | 'claude-opus-4-7'>('auto');
+  // resolver in serviceProfileSouls. Anthropic short ids ("claude-...")
+  // route through the existing platform path. Provider-prefixed ids
+  // ("openrouter/...", "huggingface/...") route through the marketplace
+  // integration credentials in the edge function (see swanbot-ai).
+  const [modelOverride, setModelOverride] = useState<string>('auto');
+  const [modelGroups, setModelGroups] = useState<Array<import('../../../lib/integrations/modelProviderRegistry').ModelGroup>>([]);
+  // Pull the dynamic model list whenever the circle changes — connected
+  // marketplace integrations (OpenRouter / HF / Replicate / Modal) light
+  // up extra model groups in the picker.
+  useEffect(() => {
+    let cancelled = false;
+    if (!circleId) {
+      setModelGroups([]);
+      return;
+    }
+    (async () => {
+      try {
+        const { loadModelGroups } = await import('../../../lib/integrations/modelProviderRegistry');
+        const groups = await loadModelGroups(circleId, { includeDisconnected: true });
+        if (!cancelled) setModelGroups(groups);
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [circleId]);
   // Tool approval mode — 'yolo' (default) auto-approves every tool the
   // model asks to call; 'review' surfaces an inline Approve/Reject
   // prompt before the runtime dispatches each one.
@@ -3691,7 +3712,14 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         {modelOverride !== 'auto' ? (
           <Pressable onPress={() => setModelOverride('auto')} style={s.modeChip}>
             <Text style={[s.modeChipText, { color: accentColor }]}>
-              {modelOverride === 'claude-haiku-4-5' ? 'HAIKU' : modelOverride === 'claude-sonnet-4-6' ? 'SONNET' : 'OPUS'}
+              {(() => {
+                if (modelOverride === 'claude-haiku-4-5') return 'HAIKU';
+                if (modelOverride === 'claude-sonnet-4-6') return 'SONNET';
+                if (modelOverride === 'claude-opus-4-7') return 'OPUS';
+                // Provider-routed model — show last segment of the id.
+                const tail = modelOverride.split('/').pop() || modelOverride;
+                return tail.toUpperCase().slice(0, 16);
+              })()}
             </Text>
           </Pressable>
         ) : null}
@@ -3747,19 +3775,57 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
 
             <View style={s.moreMenuSection}>
               <Text style={s.moreMenuLabel}>MODEL</Text>
-              {([
-                { id: 'auto', label: 'Auto (smart route)' },
-                { id: 'claude-haiku-4-5', label: 'Haiku 4.5 — fast' },
-                { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6 — balanced' },
-                { id: 'claude-opus-4-7', label: 'Opus 4.7 — deep reasoning' },
-              ] as Array<{ id: typeof modelOverride; label: string }>).map((opt) => (
-                <Pressable
-                  key={opt.id}
-                  onPress={() => setModelOverride(opt.id)}
-                  style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
-                  <View style={{ width: 12, height: 12, borderRadius: 999, borderWidth: 1, borderColor: modelOverride === opt.id ? accentColor : '#1f2937', backgroundColor: modelOverride === opt.id ? accentColor : 'transparent' }} />
-                  <Text style={[s.moreMenuItemText, modelOverride === opt.id && { color: accentColor, fontWeight: '900' }]}>{opt.label}</Text>
-                </Pressable>
+
+              {/* Auto entry — always first. Delegates to the soul/intent
+                  resolver in serviceProfileSouls. */}
+              <Pressable
+                onPress={() => setModelOverride('auto')}
+                style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                <View style={{ width: 12, height: 12, borderRadius: 999, borderWidth: 1, borderColor: modelOverride === 'auto' ? accentColor : '#1f2937', backgroundColor: modelOverride === 'auto' ? accentColor : 'transparent' }} />
+                <Text style={[s.moreMenuItemText, modelOverride === 'auto' && { color: accentColor, fontWeight: '900' }]}>Auto (smart route)</Text>
+              </Pressable>
+
+              {modelGroups.map((group) => (
+                <View key={group.provider} style={{ marginTop: 4 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 8, paddingVertical: 4 }}>
+                    <Text style={{ color: '#475569', fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: MONO }}>
+                      {group.label.toUpperCase()}
+                    </Text>
+                    {!group.connected ? (
+                      <Text style={{ color: '#475569', fontSize: 9, fontStyle: 'italic' }}>not connected</Text>
+                    ) : null}
+                  </View>
+                  {group.models.map((opt) => {
+                    const active = modelOverride === opt.id;
+                    return (
+                      <Pressable
+                        key={opt.id}
+                        onPress={() => {
+                          if (!opt.ready) return;
+                          setModelOverride(opt.id);
+                        }}
+                        disabled={!opt.ready}
+                        style={({ hovered }: any) => [
+                          s.moreMenuItem,
+                          hovered && opt.ready && { backgroundColor: '#1f2937' },
+                          !opt.ready && { opacity: 0.4 },
+                        ]}>
+                        <View style={{ width: 12, height: 12, borderRadius: 999, borderWidth: 1, borderColor: active ? accentColor : '#1f2937', backgroundColor: active ? accentColor : 'transparent' }} />
+                        <Text style={[s.moreMenuItemText, active && { color: accentColor, fontWeight: '900' }]} numberOfLines={1}>
+                          {opt.label}
+                        </Text>
+                        {opt.description ? (
+                          <Text style={s.moreMenuItemHint} numberOfLines={1}>{opt.description}</Text>
+                        ) : null}
+                      </Pressable>
+                    );
+                  })}
+                  {!group.connected && group.hint ? (
+                    <Text style={{ color: '#475569', fontSize: 10, paddingHorizontal: 8, paddingVertical: 4, lineHeight: 14 }}>
+                      {group.hint}
+                    </Text>
+                  ) : null}
+                </View>
               ))}
             </View>
 

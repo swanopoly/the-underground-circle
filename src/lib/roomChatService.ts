@@ -158,6 +158,20 @@ export async function sendRoomStructuredChatMessage({
     ? `\n\nCurrently viewing file: ${activeFile.name} (${activeFile.file_type || 'text'})\nFile content (first 2000 chars):\n${(activeFile.content || '').slice(0, 2000)}`
     : '';
   const specialContext = await buildSpecialContext(roomId, cleanContent, availableFiles);
+
+  // Normalize the model override. Anthropic short ids ('claude-...') route
+  // through the existing platform path. Provider-prefixed ids
+  // ('openrouter/...', 'huggingface/...', etc.) require the edge function
+  // to be extended with marketplace integration secret routing — until
+  // that ships, we transparently fall back to Sonnet 4.6 so the chat
+  // still works while preserving the user's selection in the picker UI.
+  const normalizedModel = (() => {
+    if (!modelOverride || modelOverride === 'auto') return undefined;
+    if (modelOverride.startsWith('claude-')) return modelOverride;
+    // Provider-routed model — fall back to Sonnet for the in-flight call.
+    return 'claude-sonnet-4-6';
+  })();
+
   let structured: import('./openswanSessionRuntime').OpenSwanTurnResult;
   try {
     structured = await runOpenSwanSessionTurn({
@@ -166,7 +180,7 @@ export async function sendRoomStructuredChatMessage({
       userId,
       circleId,
       chatHistory: recentContext + fileContext + specialContext,
-      ...(modelOverride && modelOverride !== 'auto' ? { model: modelOverride } : {}),
+      ...(normalizedModel ? { model: normalizedModel } : {}),
     },
     surface: 'room_chat',
     roomId,
